@@ -217,15 +217,3 @@ function optionalString(input: unknown): string | undefined {
   const value = String(input ?? '').trim()
   return value || undefined
 }
-
-// approvalJustification returns the sentence an approval has to show when the
-// runtime supplied one. The question is not always "may this write happen?": a
-// protected path, a plan-mode command whose effect could not be proven
-// read-only, and an escalation the sandbox already refused each carry their own
-// reason, and that reason is the only thing on the row the user can act on - an
-// action id tells them nothing. What is tested is whether a reason is present,
-// not which tag accompanies it: matching on one known tag means the next reason
-// the runtime adds silently renders as a bare action id.
-export function approvalJustification(payload: Record<string, unknown> | null | undefined): string {
-  return String(payload?.justification ?? '').trim()
-}

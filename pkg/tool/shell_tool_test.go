@@ -19,7 +19,7 @@ import (
 )
 
 func TestSandboxDenialReasonFallsBackToExecutionError(t *testing.T) {
-	reason := sandboxDenialReason(safety.CommandResult{}, errors.New("permission denied"))
+	reason := sandboxDenialReason(safety.SandboxDecision{UseSandbox: true}, safety.CommandResult{}, errors.New("permission denied"))
 	if reason != "permission denied" {
 		t.Fatalf("fallback denial reason = %q", reason)
 	}
@@ -28,7 +28,7 @@ func TestSandboxDenialReasonFallsBackToExecutionError(t *testing.T) {
 func TestSandboxDenialReasonUsesConcreteDeniedOutputLine(t *testing.T) {
 	res := safety.CommandResult{Stderr: "--- FAIL: TestOAuth\nlistener_test.go:28: listen tcp 127.0.0.1:0: bind: operation not permitted\nFAIL"}
 	want := "listener_test.go:28: listen tcp 127.0.0.1:0: bind: operation not permitted"
-	if got := sandboxDenialReason(res, nil); got != want {
+	if got := sandboxDenialReason(safety.SandboxDecision{UseSandbox: true}, res, nil); got != want {
 		t.Fatalf("sandboxDenialReason() = %q, want %q", got, want)
 	}
 	reason := sandboxRetryApprovalReason(want)
@@ -1340,5 +1340,49 @@ func TestShellSandboxProfilePinsBuiltInTypes(t *testing.T) {
 				t.Fatalf("profile = %v, want %v", profile, tt.want)
 			}
 		})
+	}
+}
+
+// The whole point of classifying a network failure as a sandbox denial is that
+// the person is asked whether the command may run outside the sandbox. This is
+// the real path, end to end: a live sandbox with no network, the shell tool's
+// own decision, and the approval request the conversation renders as a card.
+func TestShellToolAsksToLeaveTheSandboxWhenTheNetworkIsBlocked(t *testing.T) {
+	if os.Getenv("FOREBRAIN_SANDBOXRT_INTEGRATION") != "1" {
+		t.Skip("set FOREBRAIN_SANDBOXRT_INTEGRATION=1 to run the live sandbox check")
+	}
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}
+	cfg.SandboxWorkspaceWrite.NetworkAccess = appcfg.BoolPtr(false)
+	if st := safety.NewManager().Status(cfg); !st.EffectiveEnabled {
+		t.Skipf("no sandbox backend on this machine: %s", st.UnavailableReason)
+	}
+	home := t.TempDir()
+	state := NewState(home)
+	var asked map[string]any
+	state.SetActionHook(func(_ context.Context, kind string, payload any) (string, bool, error) {
+		if kind != "shell" {
+			t.Fatalf("action kind = %q, want shell", kind)
+		}
+		asked, _ = payload.(map[string]any)
+		// pending: the run parks on the question, which is the card.
+		return "act-network-retry", true, nil
+	})
+	shellTool, err := NewShellTool(state, &AgentToolRuntime{Home: home, Cfg: cfg})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	// The shape the model writes: the shell chain absorbs the exit status.
+	command := "curl -sS -m 4 -o /dev/null https://example.com || echo NETFAIL"
+	_, err = shellTool.Handle(context.Background(), `{"command":`+mustJSON(t, command)+`}`)
+	var rae *RequiresActionError
+	if !errors.As(err, &rae) {
+		t.Fatalf("expected an approval request for the blocked network, got %T %v", err, err)
+	}
+	if asked == nil {
+		t.Fatal("no approval payload was raised")
+	}
+	reason, _ := asked["sandbox_denial_reason"].(string)
+	if !strings.Contains(reason, "Could not resolve host") {
+		t.Fatalf("approval reason = %q, want the resolver failure line", reason)
 	}
 }

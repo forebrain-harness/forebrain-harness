@@ -446,9 +446,10 @@ func TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint(t *testing.T) {
 	}
 }
 
-// A user_interaction card names every question it asks, in full — the same
-// words the web's card header uses — rather than nothing at all.
-func TestUserInteractionCardHeaderNamesItsQuestions(t *testing.T) {
+// A user_interaction card's header says only that the user was asked: what it
+// asked is the body's business, so the target stays empty however long the
+// questions are.
+func TestUserInteractionCardHeaderCarriesOnlyTheVerb(t *testing.T) {
 	meta := tool.ToolMeta{Status: "completed", Input: map[string]any{"questions": []any{
 		map[string]any{"header": "Triggers"},
 		map[string]any{"question": "What should the greeting look like when the user says hi first thing in the morning?"},
@@ -457,8 +458,8 @@ func TestUserInteractionCardHeaderNamesItsQuestions(t *testing.T) {
 	if action != "Asked user" {
 		t.Fatalf("action = %q", action)
 	}
-	if target != "Triggers · What should the greeting look like when the user says hi first thing in the morning?" {
-		t.Fatalf("target = %q, want every question named in full", target)
+	if target != "" {
+		t.Fatalf("target = %q, want the questions kept out of the header", target)
 	}
 }
 

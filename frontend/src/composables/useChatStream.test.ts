@@ -228,6 +228,37 @@ describe('useChatStream helpers', () => {
       total: 3,
       items: [{ id: '1', content: 'Ship', status: 'pending', active: 'Shipping' }],
     })
+
+    // The engine's canonical "Updated Plan" is a name, not copy: a Chinese
+    // interface shows 更新待办, an unknown engine title shows itself.
+    setLocale('zh')
+    try {
+      const zh = applyAssistantRunEventMetadata(base, {
+        type: 'plan_updated',
+        payload: {
+          title: 'Updated Plan',
+          explanation: 'Writing tests',
+          completed: 1,
+          total: 2,
+          items: [{ content: 'Write tests', status: 'in_progress' }],
+        },
+      })
+      expect(zh.planUpdates?.[0]?.title).toBe('更新待办')
+
+      const named = applyAssistantRunEventMetadata(base, {
+        type: 'plan_updated',
+        payload: {
+          title: 'Migration plan',
+          explanation: 'Writing tests',
+          completed: 1,
+          total: 2,
+          items: [{ content: 'Write tests', status: 'in_progress' }],
+        },
+      })
+      expect(named.planUpdates?.[0]?.title).toBe('Migration plan')
+    } finally {
+      setLocale('en')
+    }
   })
 
   it('computes worked duration from run event timestamps', () => {

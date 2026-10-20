@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatDateTime, formatMonthDayTime } from './time'
+import { formatClock, formatDateTime, formatMonthDayTime } from './time'
 
 describe('formatDateTime', () => {
   it('draws the local date and time to the minute', () => {
@@ -35,5 +35,23 @@ describe('formatMonthDayTime', () => {
   it('draws an em dash for a value the row does not have', () => {
     expect(formatMonthDayTime(undefined)).toBe('—')
     expect(formatMonthDayTime(0)).toBe('—')
+  })
+})
+
+describe('formatClock', () => {
+  it('draws the local time alone, to the minute', () => {
+    // Built from a local date, so the expectation holds in every time zone.
+    const stamp = Math.floor(new Date(2026, 0, 5, 9, 7, 42).getTime() / 1000)
+    expect(formatClock(stamp)).toBe('09:07')
+  })
+
+  it('pads both parts to two digits', () => {
+    const stamp = Math.floor(new Date(2026, 10, 3, 4, 5).getTime() / 1000)
+    expect(formatClock(stamp)).toBe('04:05')
+  })
+
+  it('draws an em dash for a value the row does not have', () => {
+    expect(formatClock(undefined)).toBe('—')
+    expect(formatClock(0)).toBe('—')
   })
 })

@@ -43,7 +43,9 @@ async function mountPage(): Promise<VueWrapper> {
       { path: '/projects/:id', component: { template: '<div />' } },
     ],
   })
-  const wrapper = mount(ProjectsView, { global: { plugins: [router], directives: { tip } } })
+  const wrapper = mount(ProjectsView, {
+    global: { plugins: [router], directives: { tip }, stubs: { teleport: true } },
+  })
   await flushPromises()
   return wrapper
 }

@@ -567,6 +567,7 @@ func executeSubagent(ctx context.Context, fac Factory, record agent.HistoryEntry
 		SessionID:       sessionID,
 		WorkerSessionID: workerSessionID,
 		SubagentType:    subagentType,
+		Model:           strings.TrimSpace(record.Model),
 		OnUserTurn:      subagentUserTurnFromContext(ctx),
 	})
 }
@@ -1291,11 +1292,14 @@ func forkOutcomeResult(outcome *RunOutcome) *agent.Result {
 	return outcome.Result
 }
 
-// forkAgentModel names the model a fork ran on. A fork has no provider chain
-// of its own and takes no dispatch-time override, so it is the conversation's
-// model — resolved here through the same function the primary session's rows
-// use.
+// forkAgentModel names the model a fork ran on: the model this execution was
+// pinned to at dispatch, which for a fork is the conversation's model as it
+// stood then. A record with no model — a dispatch that resolved none — falls
+// back to resolving it the way the primary session's rows do.
 func forkAgentModel(own *Runner, prep preparedSubagent) string {
+	if model := strings.TrimSpace(prep.entry.Model); model != "" {
+		return model
+	}
 	if own == nil {
 		return ""
 	}
@@ -1453,23 +1457,37 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 		Continuable:      continuable,
 		DefSource:        defSource,
 	}
-	// The model this run is pinned to is a property of the execution: recorded
-	// with the entry, so its spawned event and every surface reading that event
-	// name the model the run actually uses instead of deriving one from the
-	// agent's type. A dispatch-time choice (plan review) comes first — the user
+	// The model this run is pinned to is a property of the execution, decided
+	// once, here: recorded with the entry, so its spawned event and every
+	// surface reading that event name the model the run actually uses, and
+	// pinned on the execution's context, so its requests go to that model and
+	// nowhere else. A dispatch-time choice (plan review) comes first — the user
 	// picked it — then the model this primary agent configures for the type,
-	// then the type's global chain and the conversation, which the routing
-	// wrappers below resolve. A configured model also has to be pinned on the
-	// execution's context: that is what the routing wrapper reads.
+	// then the model the agent runs on otherwise: the type's own chain, or the
+	// conversation's. Resolving any of it again further down is how a run gets
+	// announced as one model and served by another.
+	pin := SubagentModelOverride{}
 	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok {
-		entry.ModelProvider = override.Provider
-		entry.Model = override.Model
-		entry.ReasoningEffort = override.Effort
+		pin = override
 	} else if provider, model, effort, ok := cat.Model(agentType); ok {
-		entry.ModelProvider = provider
-		entry.Model = model
-		entry.ReasoningEffort = effort
-		cctx = WithSubagentModelOverride(cctx, SubagentModelOverride{Provider: provider, Model: model, Effort: effort})
+		pin = SubagentModelOverride{Provider: provider, Model: model, Effort: effort}
+	} else if provider, model, effort := AgentModel(own, sid, &agent.HistoryEntry{
+		AgentType: agentType, AgentKind: agentKind,
+	}); strings.TrimSpace(model) != "" {
+		// The effort is part of the model a run is pinned to, and this is the
+		// one its requests ran at before they were pinned: the conversation's
+		// own, when this dispatch carries its selection.
+		if sel, ok := SessionModelSelectionFromContext(baseCtx); ok &&
+			strings.TrimSpace(sel.Model) == strings.TrimSpace(model) && strings.TrimSpace(sel.Effort) != "" {
+			effort = strings.TrimSpace(sel.Effort)
+		}
+		pin = SubagentModelOverride{Provider: provider, Model: model, Effort: effort}
+	}
+	if pin.valid() {
+		entry.ModelProvider = strings.TrimSpace(pin.Provider)
+		entry.Model = strings.TrimSpace(pin.Model)
+		entry.ReasoningEffort = strings.TrimSpace(pin.Effort)
+		cctx = WithSubagentModelOverride(cctx, pin)
 	}
 	// The worker session is born before anything can reference it. Its row is
 	// what turns "a string in the ledger" into a session: every message row
@@ -1611,15 +1629,10 @@ func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, 
 			// unchanged and the caller decides how to suspend.
 			approve := tool.SubagentApprovalHookFromContext(runCtx, factoryToolsState(fac))
 			label := "subagent " + strings.TrimSpace(prep.entry.AgentType)
-			// The exec context carries this execution's channel runtime; the
-			// wrapper below installs it in place of the parent's.
-			execCtx := typedSubagentExecContext(prep)
-			if prep.agentKind == "fork" {
-				// The fork path reads the parent's runtime snapshot from the
-				// dispatching context, so it starts from runCtx rather than
-				// prep.ctx.
-				execCtx = tool.WithHookAgentID(runCtx, subagentRosterKey(prep.entry))
-			}
+			// The exec context carries this execution's channel runtime and the
+			// model it was announced with; the wrapper below installs it in
+			// place of the parent's.
+			execCtx := subagentExecContext(prep)
 			return runSubagentExecution(execCtx, fac, prep.entry, false, Input{}, func(execCtx context.Context) (string, error) {
 				if prep.agentKind == "fork" {
 					return runAcrossApprovals(execCtx, approve, prep.superviseRunID, label,
@@ -1677,13 +1690,7 @@ func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, s
 		}()
 		// The caller has already returned, so the run builds from prep.ctx —
 		// the context that outlives this call — never from the dispatching one.
-		hostCtx := prep.ctx
-		if prep.agentKind == "fork" {
-			hostCtx = tool.WithForkChild(hostCtx, true)
-			hostCtx = tool.WithHookAgentID(hostCtx, subagentRosterKey(prep.entry))
-		} else {
-			hostCtx = typedSubagentExecContext(prep)
-		}
+		hostCtx := subagentExecContext(prep)
 		approve := tool.SubagentApprovalHookFromContext(hostCtx, factoryToolsState(fac))
 		label := "subagent " + strings.TrimSpace(prep.entry.AgentType)
 		outText, runErr := runSubagentExecution(hostCtx, fac, prep.entry, false, Input{}, func(execCtx context.Context) (string, error) {
@@ -3167,13 +3174,38 @@ func subagentDispatchBlocksFileWrites(cat SubagentCatalog, subagentType string) 
 	return tool.TypedSubagentBlocksFileWrites(subagentType)
 }
 
-// typedSubagentExecContext tags a prepared subagent's context the way every
-// typed run needs it: the subtype and its definition source drive the system
-// prompt and tool policy, and the roster key routes the run's frames into that
-// agent's own view.
-func typedSubagentExecContext(prep preparedSubagent) context.Context {
-	hostCtx := tool.WithSubagentType(prep.ctx, prep.agentType)
-	hostCtx = tool.WithSubagentDefinitionSource(hostCtx, prep.defSource)
+// subagentExecContext builds the context one subagent execution runs under: the
+// prepared context — which carries the model this execution was pinned to at
+// dispatch, and for a fork the dispatching runtime's snapshot — tagged with
+// everything that shapes the child's own view, system prompt and tool policy: a
+// typed run's subtype and definition source, and the roster key that routes its
+// frames into its own view. Every dispatch path builds it here, because a path
+// that reassembled the context from the dispatching one dropped the pin and ran
+// on a model nobody announced.
+func subagentExecContext(prep preparedSubagent) context.Context {
+	hostCtx := prep.ctx
+	switch prep.agentKind {
+	case "fork":
+		// A fork child is a fork child on every dispatch path: the marker is
+		// what refuses a nested dispatch from inside it, what keeps plan
+		// mode's reminder addressed to a child rather than the plan's owner,
+		// and what tags its tool cards. Like the model pin below, it is
+		// derived from the prepared dispatch itself, because a path that had
+		// to remember it separately is a path that could forget.
+		hostCtx = tool.WithForkChild(hostCtx, true)
+	default:
+		hostCtx = tool.WithSubagentType(hostCtx, prep.agentType)
+		hostCtx = tool.WithSubagentDefinitionSource(hostCtx, prep.defSource)
+	}
+	// The record, not a fresh resolution, names the model: one decision at
+	// dispatch, read by everything downstream. A record with no model — a
+	// dispatch whose configuration leaves nothing to resolve — pins nothing,
+	// and the routing wrappers answer as they did before.
+	hostCtx = WithSubagentModelOverride(hostCtx, SubagentModelOverride{
+		Provider: prep.entry.ModelProvider,
+		Model:    prep.entry.Model,
+		Effort:   prep.entry.ReasoningEffort,
+	})
 	return tool.WithHookAgentID(hostCtx, subagentRosterKey(prep.entry))
 }
 
@@ -3377,6 +3409,11 @@ type SubagentExecRequest struct {
 	SessionID       string
 	WorkerSessionID string
 	SubagentType    string
+	// Model is the model this execution was pinned to at dispatch, as its
+	// record states it. The worker records its transcript under this value
+	// instead of resolving a model again: an execution announced with one
+	// model must not be written under another.
+	Model string
 	// OnUserTurn, when set, receives the row id of the user message this
 	// execution wrote to its worker session, as soon as it is written. It is
 	// how a user-driven execution tells its channel which row to withdraw
@@ -3512,7 +3549,7 @@ func (r *Runner) RunPlanReviewSubagent(
 		// sees, so it resolves against every built-in rather than the public set.
 		resolve: agent.ResolveSubtype,
 		run: func(_ context.Context, fac Factory, prep preparedSubagent) (string, error) {
-			return r.runPlanReviewAcrossApprovals(typedSubagentExecContext(prep), fac, prep, approve)
+			return r.runPlanReviewAcrossApprovals(subagentExecContext(prep), fac, prep, approve)
 		},
 	})
 	if err != nil {
@@ -3539,7 +3576,7 @@ func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID
 		resolve: agent.ResolveSubtype,
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			approve := tool.SubagentApprovalHookFromContext(runCtx, factoryToolsState(fac))
-			return runSubagentExecution(typedSubagentExecContext(prep), fac, prep.entry, false, Input{}, func(execCtx context.Context) (string, error) {
+			return runSubagentExecution(subagentExecContext(prep), fac, prep.entry, false, Input{}, func(execCtx context.Context) (string, error) {
 				return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "goal check",
 					func(attemptCtx context.Context, superviseRunID string) (string, error) {
 						return executeSubagent(

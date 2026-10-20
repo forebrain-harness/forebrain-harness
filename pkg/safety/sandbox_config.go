@@ -103,6 +103,14 @@ type SandboxDecision struct {
 	SandboxType        SandboxType
 	UnavailableReason  string
 	RequiresPermission bool
+	// NetworkBlocked reports that this sandboxed command ran with no network
+	// path at all: neither the host network nor the managed proxy. It is a fact
+	// read off the request the run was started with, never inferred from a
+	// command's output — which is what lets a failure be attributed to the
+	// sandbox rather than to a host that happens to be offline, and what says
+	// whether running the same command outside the sandbox could reach the
+	// network at all.
+	NetworkBlocked bool
 }
 
 func (d SandboxDecision) ModeString() string {

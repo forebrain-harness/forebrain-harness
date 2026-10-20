@@ -26,24 +26,34 @@ describe('PendingActionsPanel', () => {
 
   it('decides a parked approval in place and reads the set again', async () => {
     const list = vi.spyOn(forebrainApi, 'actionsList')
-      .mockResolvedValueOnce([action('a1', 'write_file', { justification: 'write the skill file' })])
+      .mockResolvedValueOnce([action('a1', 'write_file', { file_path: 'SKILL.md', content: 'a\n', justification: 'write the skill file' }, {
+        permissionSuggestion: {
+          permissionToolName: 'write_file',
+          availableDecisions: ['accept', 'accept_for_session', 'cancel'],
+        },
+      })])
       .mockResolvedValueOnce([])
     const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
     const wrapper = mount(PendingActionsPanel, { props: { sessionId: 's1', version: 0 } })
     await flushPromises()
 
     expect(list).toHaveBeenCalledWith('pending', 's1')
-    expect(wrapper.find('[data-testid="pending-approval"]').text()).toContain('write the skill file')
-    await wrapper.find('[data-testid="pending-approve"]').trigger('click')
+    const card = wrapper.find('[data-testid="pending-approval"]')
+    // The card asks its family's own question and shows the fact that decides
+    // it; the model's justification is not on the card.
+    expect(card.text()).toContain('Create this file?')
+    expect(card.find('[data-testid="approval-gate-fact"]').text()).toBe('1 lines')
+    expect(card.text()).not.toContain('write the skill file')
+    await wrapper.find('[data-testid="pending-decision-accept"]').trigger('click')
     await flushPromises()
 
-    expect(approve).toHaveBeenCalledWith('a1', {})
+    expect(approve).toHaveBeenCalledWith('a1', { reason: 'web:accept', decision: 'accept' })
     expect(list).toHaveBeenCalledTimes(2)
     expect(wrapper.find('[data-testid="pending-actions"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('answers a question with the options picked', async () => {
+  it('answers a question with the option picked', async () => {
     vi.spyOn(forebrainApi, 'actionsList')
       .mockResolvedValueOnce([action('q1', 'user_interaction', {
         questions: [{ id: 'scope', prompt: 'Which layer?', options: [{ id: 'agent', label: 'Agent' }, { id: 'shared', label: 'Shared' }] }],
@@ -53,8 +63,12 @@ describe('PendingActionsPanel', () => {
     const wrapper = mount(PendingActionsPanel, { props: { sessionId: 's1', version: 0 } })
     await flushPromises()
 
-    await wrapper.find('input[value="shared"]').setValue(true)
-    await wrapper.find('[data-testid="pending-question"] button').trigger('click')
+    // The tabbed card asks one question per screen; a single-select pick is
+    // the answer and the submission, so one click sends the same payload the
+    // flat form sent.
+    const shared = wrapper.findAll('[data-testid="ask-option"]').find((row) => row.text().includes('Shared'))
+    expect(shared).toBeDefined()
+    await shared!.trigger('click')
     await flushPromises()
 
     expect(answer).toHaveBeenCalledWith('q1', { answers: [{ questionId: 'scope', optionIds: ['shared'] }] })
@@ -64,7 +78,12 @@ describe('PendingActionsPanel', () => {
   it('reads the set again when the stream says it changed, and forgets it with the session', async () => {
     const list = vi.spyOn(forebrainApi, 'actionsList')
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([action('a2', 'shell', { justification: 'run the tests' })])
+      .mockResolvedValueOnce([action('a2', 'shell', { command: 'go test ./...', justification: 'run the tests' }, {
+        permissionSuggestion: {
+          permissionToolName: 'Bash',
+          availableDecisions: ['accept', 'cancel'],
+        },
+      })])
       .mockResolvedValueOnce([])
     const wrapper = mount(PendingActionsPanel, { props: { sessionId: 's1', version: 0 } })
     await flushPromises()
@@ -72,7 +91,12 @@ describe('PendingActionsPanel', () => {
 
     await wrapper.setProps({ version: 1 })
     await flushPromises()
-    expect(wrapper.find('[data-testid="pending-approval"]').text()).toContain('run the tests')
+    const card = wrapper.find('[data-testid="pending-approval"]')
+    // A command with no rule to quote shows the question alone — the shell
+    // family's fact line carries only a rule's sentence, never a justification.
+    expect(card.text()).toContain('Run this command?')
+    expect(card.findAll('[data-testid="approval-gate-fact"]')).toHaveLength(0)
+    expect(card.text()).not.toContain('run the tests')
 
     await wrapper.setProps({ sessionId: 's2' })
     await flushPromises()

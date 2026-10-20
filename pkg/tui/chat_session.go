@@ -911,6 +911,35 @@ func (s *ChatSession) SetViewingSession(sessionID string) {
 	s.tuiMu.Unlock()
 }
 
+// currentSessionID is the conversation this surface is painting: the one its
+// footer, its /status and the rows it writes describe.
+func (s *ChatSession) currentSessionID() string {
+	if s == nil {
+		return ""
+	}
+	s.tuiMu.Lock()
+	defer s.tuiMu.Unlock()
+	return strings.TrimSpace(s.uiSessionID)
+}
+
+// sessionModelState is what one conversation runs on, resolved the way its
+// next request resolves it: its own stored choice against the live config,
+// else the runner's published selection. A surface that answered this from
+// the runner alone named a model the conversation's requests never go to.
+func (s *ChatSession) sessionModelState(sessionID string) run.PrimaryModelState {
+	if s == nil || s.runner() == nil {
+		return run.PrimaryModelState{}
+	}
+	return run.PrimaryModelStateForSession(s.runner(), s.sessStore(), sessionID)
+}
+
+// currentModelNames is the provider/model pair this conversation's requests go
+// to — what the footer and /model print.
+func (s *ChatSession) currentModelNames() (string, string) {
+	st := s.sessionModelState(s.currentSessionID())
+	return st.Provider, st.Model
+}
+
 // notifyUI appends a foreground-visible notification to ChatSession's
 // serialized, nonblocking UI dispatcher. Producers never invoke the surface
 // callback directly, so a slow UI sink cannot stall tool execution. FIFO order
@@ -1799,7 +1828,7 @@ func (s *ChatSession) persistRequiresActionSnapshot(sessionID, runID string, sna
 		sessionID,
 		runID,
 		snapshot,
-		cliResultModel(s),
+		cliResultModel(s, sessionID),
 		"",
 	)
 }
@@ -1846,7 +1875,7 @@ func (s *ChatSession) persistReplayResults(sessionID, runID string, capture *too
 		sessionID,
 		runID,
 		msgs,
-		cliResultModel(s),
+		cliResultModel(s, sessionID),
 		"",
 	)
 }
@@ -1889,7 +1918,7 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, compl
 		Captured:         captured,
 		PartialText:      partialText,
 		PartialReasoning: partialReasoning,
-		Model:            cliResultModel(s),
+		Model:            cliResultModel(s, sessionID),
 		End:              completion.runEnd(),
 		OnRepairError: func(err error) {
 			if s.chatLog != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -851,5 +852,60 @@ func TestContextBudgetUsesEachAgentsOwnModel(t *testing.T) {
 	explore, ok := ContextBudget(rl, "conversation-1", &agent.HistoryEntry{TaskID: "task-explore", AgentKind: "typed", AgentType: "explore"}, 28800)
 	if !ok || explore.AutoCompactThreshold != 50000 || explore.PercentLeft != 42 {
 		t.Fatalf("explore budget under the configured limit = %+v, want threshold 50000 and 42%% left", explore)
+	}
+}
+
+// A conversation's model is one answer, and it is the conversation's own: the
+// row a surface wrote, resolved against the live config the way turn entry
+// resolves it. The runner's published snapshot answers only for a conversation
+// that has no row — or a row the config no longer offers, the same ordinary
+// reload that rewrites it — because a surface reading the snapshot instead
+// names a model the conversation's requests never go to.
+func TestPrimaryModelStateForSessionPrefersTheConversationsRow(t *testing.T) {
+	runner, store := newSessionRoutingRunner(t, nil)
+	ctx := context.Background()
+	for _, sid := range []string{"conv-pinned", "conv-bare", "conv-gone"} {
+		if err := store.Ensure(ctx, sid, "conversation"); err != nil {
+			t.Fatalf("Ensure %q: %v", sid, err)
+		}
+	}
+	snapshot := PrimaryModelSelection(runner)
+	if !snapshot.Set || snapshot.Provider != "openai" || snapshot.Model != "gpt-a" {
+		t.Fatalf("the runner's published selection = %+v, want the first configured entry", snapshot)
+	}
+	save := func(sid, provider, model, effort string) {
+		t.Helper()
+		if _, err := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
+			Provider: provider, Model: model, Effort: effort,
+		}); err != nil {
+			t.Fatalf("SaveSessionModelSelection %q: %v", sid, err)
+		}
+	}
+
+	// The row wins, effort included: what the requests carry is what the
+	// surface draws.
+	save("conv-pinned", "openai", "gpt-b", "high")
+	if got := PrimaryModelStateForSession(runner, store, "conv-pinned"); got.Provider != "openai" || got.Model != "gpt-b" || got.Effort != "high" || !got.Set {
+		t.Fatalf("state for a pinned conversation = %+v, want openai/gpt-b effort high", got)
+	}
+	if provider, model := PrimaryModelForSession(runner, store, "conv-pinned"); provider != "openai" || model != "gpt-b" {
+		t.Fatalf("name for a pinned conversation = %q/%q, want openai/gpt-b", provider, model)
+	}
+
+	// An empty effort in the row means the requests carry none — not "the
+	// model's configured effort", which the wire would have to add.
+	save("conv-bare", "openai", "gpt-b", "")
+	if got := PrimaryModelStateForSession(runner, store, "conv-bare"); got.Model != "gpt-b" || got.Effort != "" {
+		t.Fatalf("state for a conversation pinned without effort = %+v, want openai/gpt-b and no effort", got)
+	}
+
+	// A row the config no longer offers falls back to the published selection,
+	// as the wire does; so does a conversation that never pinned one, and an
+	// empty id.
+	save("conv-gone", "openai", "gpt-gone", "")
+	for _, sid := range []string{"conv-gone", "conv-never-pinned", ""} {
+		if got := PrimaryModelStateForSession(runner, store, sid); got != snapshot {
+			t.Fatalf("state for %q = %+v, want the published selection %+v", sid, got, snapshot)
+		}
 	}
 }

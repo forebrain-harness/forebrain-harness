@@ -448,11 +448,12 @@ func (s *ChatSession) approvalGate() *turn.PendingApprovalGate {
 			return s.stateRoot(), runnerProjectKey(s.runner())
 		},
 		// The models a review may be handed to come from the active agent's
-		// configured provider chain, with the model in force marked current.
-		ReviewModels: func() []turn.PlanReviewModelOption {
-			currentProvider, currentModel := run.PrimaryModel(s.runner())
+		// configured provider chain, with the model in force for the
+		// conversation under review marked current.
+		ReviewModels: func(sessionID string) []turn.PlanReviewModelOption {
+			sel := s.sessionModelState(sessionID)
 			return turn.PlanReviewModelOptions(
-				modelConfigFromChatSession(s), chatSessionActiveAgentName(s), currentProvider, currentModel,
+				modelConfigFromChatSession(s), chatSessionActiveAgentName(s), sel.Provider, sel.Model,
 			)
 		},
 	}

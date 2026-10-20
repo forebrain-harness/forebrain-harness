@@ -21,6 +21,18 @@ export function formatDateTime(unixSeconds?: number): string {
  * next fire is read for which day and when, never for the year, so the year is
  * left out to keep the column narrow.
  */
+/**
+ * How a history row in the workbench draws a moment: the local time alone, to
+ * the minute, because the row already sits in one conversation's day and what
+ * the reader is ordering is which of today's asks or plans came when.
+ */
+export function formatClock(unixSeconds?: number): string {
+  if (!unixSeconds) return '—'
+  const date = new Date(unixSeconds * 1000)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 export function formatMonthDayTime(unixSeconds?: number): string {
   if (!unixSeconds) return '—'
   const date = new Date(unixSeconds * 1000)

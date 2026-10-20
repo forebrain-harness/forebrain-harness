@@ -3,6 +3,7 @@ import { config, mount } from '@vue/test-utils'
 
 import tip from '@/directives/tip'
 import { setLocale } from '@/locales'
+import type { PlanTab } from '@/composables/useSessionPlans'
 import type { SubagentTranscript } from '@/composables/useChatStream'
 import SubagentDrawer from './SubagentDrawer.vue'
 
@@ -119,5 +120,46 @@ describe('SubagentDrawer', () => {
   it('carries the overlay treatment on a narrow screen', () => {
     expect(mountDrawer().get('[data-testid="subagent-drawer"]').classes()).not.toContain('subagent-drawer--overlay')
     expect(mountDrawer({ overlay: true }).get('[data-testid="subagent-drawer"]').classes()).toContain('subagent-drawer--overlay')
+  })
+
+  // A plan document opened from the workbench is a tab in this same drawer, so
+  // a reader keeps one place for everything the conversation opened. It draws
+  // after the subagents and carries no unread dot: a document does not say
+  // anything new.
+  function planTab(id: string, label: string): PlanTab {
+    return { id, label, path: `plans/proj/s1/${id.replace('plan:', '')}`, at: '10:31', done: 1, total: 3, markdown: '# Plan' }
+  }
+
+  it('draws the open plan documents after the subagent tabs, without an unread dot', () => {
+    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan · Add auth'), planTab('plan:b.md', 'Plan · Add logs')] })
+    const tabEls = wrapper.findAll('[role="tab"]')
+    expect(tabEls.map((tab) => tab.text())).toEqual([
+      'general-purpose · task task-1',
+      'general-purpose · task task-2',
+      'Plan · Add auth',
+      'Plan · Add logs',
+    ])
+    // None of them is in front: a subagent tab is.
+    expect(tabEls.map((tab) => tab.attributes('aria-selected'))).toEqual(['true', 'false', 'false', 'false'])
+    expect(wrapper.get('[data-testid="plan-tab-plan:a.md"]').find('[aria-label="New activity"]').exists()).toBe(false)
+  })
+
+  it('selects and closes a plan tab the way a subagent tab is selected and closed', async () => {
+    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan · Add auth')], activePlan: 'plan:a.md' })
+    const planTabEl = wrapper.get('[data-testid="plan-tab-plan:a.md"]')
+    // In front: it reads as selected and carries the open treatment.
+    expect(planTabEl.get('[role="tab"]').attributes('aria-selected')).toBe('true')
+    expect(planTabEl.classes()).toContain('is-on')
+    // The subagent tab lost the front, and the drawer still lists it.
+    expect(wrapper.get('[data-testid="subagent-tab-task-1"]').get('[role="tab"]').attributes('aria-selected')).toBe('false')
+
+    await planTabEl.get('[role="tab"]').trigger('click')
+    expect(wrapper.emitted('select-plan')).toEqual([['plan:a.md']])
+
+    await wrapper.get('[data-testid="plan-tab-close-plan:a.md"]').trigger('click')
+    expect(wrapper.emitted('close-plan')).toEqual([['plan:a.md']])
+    expect(wrapper.get('[data-testid="plan-tab-close-plan:a.md"]').attributes('aria-label')).toBe('Close Plan · Add auth')
+    // Closing the plan tab asks for nothing from the subagent tabs.
+    expect(wrapper.emitted('close-tab')).toBeUndefined()
   })
 })

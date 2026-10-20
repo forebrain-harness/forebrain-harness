@@ -2798,9 +2798,8 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 		} else {
 			action = "Asked user"
 		}
-		// What the call asks, named in full: the same words the web's card
-		// header names it with.
-		target = tool.UserInteractionQuestionsLabel(meta.Input)
+		// The header carries the verb alone; what was asked is the body's
+		// business (the engine pairs each question with its answer).
 
 	// --- MCP ---
 	case strings.HasPrefix(lower, "mcp__"):

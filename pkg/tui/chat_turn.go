@@ -571,7 +571,7 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 		SessionID: sessionID,
 		RunID:     runID,
 		Result:    res,
-		Model:     cliResultModel(s),
+		Model:     cliResultModel(s, sessionID),
 		End:       completion.runEnd(),
 		OnSequenceError: func(err error) {
 			if s.chatLog != nil {
@@ -621,12 +621,14 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 	}
 }
 
-func cliResultModel(s *ChatSession) string {
+// cliResultModel names the model a row written for sessionID is recorded
+// against: the model that conversation's requests go to, which is what the
+// row's model column has always meant.
+func cliResultModel(s *ChatSession, sessionID string) string {
 	if s == nil || s.runner() == nil {
 		return ""
 	}
-	_, model := run.PrimaryModel(s.runner())
-	return model
+	return s.sessionModelState(sessionID).Model
 }
 
 func (s *ChatSession) emitPartialAssistantFromRAE(rae *tool.RequiresActionError, alreadyStreamed bool) {
@@ -814,7 +816,7 @@ func (s *ChatSession) resumeAgentContext(
 				context.Background(),
 				p.SessionID,
 				resumeSnapshot,
-				cliResultModel(s),
+				cliResultModel(s, p.SessionID),
 				"",
 			)
 		}
@@ -1204,7 +1206,7 @@ func (s *ChatSession) abortPendingApproval(sessionID, actionID string) bool {
 	// Only the conversation's own gate: a subagent's parked call lives in that
 	// child's transcript, not in the session this record names.
 	if p != nil && !scopedToSubagent && s.sessStore() != nil {
-		turn.AnswerAbandonedToolCalls(context.Background(), s.sessStore(), p.SessionID, cliResultModel(s))
+		turn.AnswerAbandonedToolCalls(context.Background(), s.sessStore(), p.SessionID, cliResultModel(s, p.SessionID))
 	}
 	s.clearPendingApproval()
 	if !scopedToSubagent {

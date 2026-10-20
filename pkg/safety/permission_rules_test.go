@@ -2913,7 +2913,7 @@ func TestIsLikelySandboxDeniedUsesDenialMarkers(t *testing.T) {
 func TestSandboxDenialDetailReturnsConcreteFailureLine(t *testing.T) {
 	result := CommandResult{Stderr: "--- FAIL: TestOAuth\nlistener_test.go:28: listen tcp 127.0.0.1:0: bind: operation not permitted\nFAIL"}
 	want := "listener_test.go:28: listen tcp 127.0.0.1:0: bind: operation not permitted"
-	if got := SandboxDenialDetail(result); got != want {
+	if got := SandboxDenialDetail(SandboxDecision{UseSandbox: true}, result); got != want {
 		t.Fatalf("SandboxDenialDetail() = %q, want %q", got, want)
 	}
 }
@@ -3199,6 +3199,87 @@ func TestBuildApprovalDecisionOptionsOffersDeclineForMemoryTools(t *testing.T) {
 		options := BuildApprovalDecisionOptions(tool.name, tool.name, tool.input)
 		if len(options) != 2 || options[0].Decision != DecisionAccept || options[1].Decision != DecisionDecline {
 			t.Fatalf("%s decisions = %#v", tool.name, options)
+		}
+	}
+}
+
+// A command with no network path inside the sandbox cannot have failed to reach
+// a host for any other reason: the sandbox removed the network. The wording is
+// the one each tool actually prints — measured against a live seatbelt sandbox
+// with network_access: false — because the kernel's EPERM never survives curl's,
+// git's or the Go toolchain's own error message.
+func TestNetworkBlockedClassifiesToolNetworkFailures(t *testing.T) {
+	sandboxed := SandboxDecision{UseSandbox: true, NetworkBlocked: true}
+	cases := []struct {
+		name   string
+		result CommandResult
+		want   string
+	}{
+		{"curl dns", CommandResult{ExitCode: 6, AggregatedOutput: "curl: (6) Could not resolve host: example.com\n"},
+			"curl: (6) Could not resolve host: example.com"},
+		{"curl connect", CommandResult{ExitCode: 7, AggregatedOutput: "curl: (7) Failed to connect to 1.1.1.1 port 443 after 0 ms: Couldn't connect to server\n"},
+			"curl: (7) Failed to connect to 1.1.1.1 port 443 after 0 ms: Couldn't connect to server"},
+		{"git clone", CommandResult{ExitCode: 128, AggregatedOutput: "Cloning into '/tmp/clone'...\nfatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com\n"},
+			"fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com"},
+		{"go list", CommandResult{ExitCode: 1, AggregatedOutput: "go: module golang.org/x/text: Get \"https://goproxy.cn/golang.org/x/text/@v/list\": dial tcp: lookup goproxy.cn: no such host\n"},
+			"go: module golang.org/x/text: Get \"https://goproxy.cn/golang.org/x/text/@v/list\": dial tcp: lookup goproxy.cn: no such host"},
+		{"linux no route", CommandResult{ExitCode: 1, Stderr: "curl: (7) Failed to connect to 1.1.1.1 port 443: Network is unreachable"},
+			"curl: (7) Failed to connect to 1.1.1.1 port 443: Network is unreachable"},
+		// A shell chain the model wrote itself hands back 0 after the failure it
+		// just absorbed. That is the shape this classification exists for.
+		{"curl behind ||", CommandResult{ExitCode: 0, AggregatedOutput: "curl: (6) Could not resolve host: example.com\nNETFAIL\n"},
+			"curl: (6) Could not resolve host: example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !IsLikelySandboxDenied(sandboxed, tc.result) {
+				t.Fatalf("network failure inside a network-less sandbox was not classified as a denial: %+v", tc.result)
+			}
+			if got := SandboxDenialDetail(sandboxed, tc.result); got != tc.want {
+				t.Fatalf("SandboxDenialDetail() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The same output off a host with no network path is not a sandbox denial: the
+// decision never said the sandbox removed the network, so nothing may be blamed
+// on it. This is what keeps an offline machine from producing approval prompts.
+func TestNetworkFailureWithoutTheSandboxFactIsNotADenial(t *testing.T) {
+	withNetwork := SandboxDecision{UseSandbox: true}
+	result := CommandResult{ExitCode: 6, AggregatedOutput: "curl: (6) Could not resolve host: example.com\n"}
+	if IsLikelySandboxDenied(withNetwork, result) {
+		t.Fatal("a host-side network failure was misclassified as a sandbox denial")
+	}
+	if got := SandboxDenialDetail(withNetwork, result); got != "" {
+		t.Fatalf("SandboxDenialDetail() = %q, want no denial detail", got)
+	}
+}
+
+// A blocked network does not make every failure a network failure.
+func TestNetworkBlockedLeavesUnrelatedFailuresAlone(t *testing.T) {
+	sandboxed := SandboxDecision{UseSandbox: true, NetworkBlocked: true}
+	for _, result := range []CommandResult{
+		{ExitCode: 1, Stderr: "--- FAIL: TestOAuth (0.00s)"},
+		{ExitCode: 1, Stderr: "compilation failed: undefined: foo"},
+		{ExitCode: 2, Stderr: "usage: git clone <repo>"},
+	} {
+		if IsLikelySandboxDenied(sandboxed, result) {
+			t.Fatalf("ordinary failure was misclassified as a network denial: %+v", result)
+		}
+	}
+}
+
+// "connection refused" means something was listening and said no, and a timeout
+// means the host was slow: neither is evidence that the sandbox blocked a path.
+func TestNetworkBlockedIgnoresAmbiguousConnectErrors(t *testing.T) {
+	sandboxed := SandboxDecision{UseSandbox: true, NetworkBlocked: true}
+	for _, output := range []string{
+		"curl: (7) Failed to connect to 127.0.0.1 port 6060: Connection refused",
+		"curl: (28) Connection timed out after 4002 milliseconds",
+	} {
+		if IsLikelySandboxDenied(sandboxed, CommandResult{ExitCode: 7, AggregatedOutput: output}) {
+			t.Fatalf("ambiguous connect error was misclassified as a denial: %q", output)
 		}
 	}
 }

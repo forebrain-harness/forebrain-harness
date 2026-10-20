@@ -1584,9 +1584,10 @@ type PendingApprovalGate struct {
 	// without a plan scope wants.
 	PlanScope func(ctx context.Context, sessionID string) (stateRoot, projectKey string)
 	// ReviewModels lists the models a pending exit-plan approval may be handed
-	// to. Nil, or returning nothing, leaves the request without the review
-	// row — a surface with no configured model to ask has no choice to offer.
-	ReviewModels func() []PlanReviewModelOption
+	// to, marked current against the conversation the gate names. Nil, or
+	// returning nothing, leaves the request without the review row — a surface
+	// with no configured model to ask has no choice to offer.
+	ReviewModels func(sessionID string) []PlanReviewModelOption
 }
 
 // Waiting reports whether the session is parked on a tool approval.
@@ -1679,7 +1680,7 @@ func (g *PendingApprovalGate) Pending(ctx context.Context, sessionID string) (*T
 	}
 	if strings.EqualFold(toolName, "exit_plan_mode") {
 		if g.ReviewModels != nil {
-			req.PlanReviewModels = g.ReviewModels()
+			req.PlanReviewModels = g.ReviewModels(sessionID)
 		}
 		results, err := PlanReviewsForAction(ctx, g.Runs, sessionID, actionID)
 		if err == nil {

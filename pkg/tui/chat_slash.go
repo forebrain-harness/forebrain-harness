@@ -75,9 +75,9 @@ func (s *ChatSession) HandleContextSlash(ctx context.Context, sessionID, channel
 	if runs := s.runSvc(); runs != nil {
 		src.Compactions = runs
 	}
-	provider, model := run.PrimaryModel(s.runner())
+	sessionModel := s.sessionModelState(sid)
 	used, _ := run.ContextOccupancy(ctx, s.sessStore(), sid)
-	src.Gauge = turn.ContextGaugeOf(provider, model, used, s.compactExplicitLimit())
+	src.Gauge = turn.ContextGaugeOf(sessionModel.Provider, sessionModel.Model, used, s.compactExplicitLimit())
 	return turn.ContextReport(ctx, src, sid), true
 }
 
@@ -96,8 +96,12 @@ func (s *ChatSession) HandleStatusSlash(sessionID, channel string, side bool) (s
 // the two cannot disagree. The caller has checked the runner.
 func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool) turn.StatusSource {
 	r := s.runner()
-	provider, model := run.PrimaryModel(r)
 	sid := strings.TrimSpace(sessionID)
+	// The model /status names is the one this conversation's requests go to,
+	// not the runner's default: the two differ whenever the conversation
+	// picked a model of its own.
+	sessionModel := s.sessionModelState(sid)
+	provider, model := sessionModel.Provider, sessionModel.Model
 	sessionName := ""
 	if store := s.sessStore(); store != nil {
 		sessionName, _ = store.SessionTitle(context.Background(), sid)
@@ -187,7 +191,7 @@ func (s *ChatSession) ModelSummaryString() string {
 	if s == nil {
 		return ""
 	}
-	provider, model := run.PrimaryModel(s.runner())
+	provider, model := s.currentModelNames()
 	if strings.TrimSpace(provider) == "" && strings.TrimSpace(model) == "" {
 		return "model: unavailable"
 	}
@@ -227,11 +231,11 @@ func (s *ChatSession) SkillListString() string {
 }
 
 func (s *ChatSession) CurrentModelOption() string {
-	return llm.FormatProviderModel(run.PrimaryModel(s.runner()))
+	return llm.FormatProviderModel(s.currentModelNames())
 }
 
 func (s *ChatSession) CurrentModelReasoningEffort() string {
-	return run.PrimaryReasoningEffort(s.runner())
+	return s.sessionModelState(s.currentSessionID()).Effort
 }
 
 func (s *ChatSession) AvailableSkillOptions() []string {
@@ -622,14 +626,15 @@ func (s *ChatSession) SwitchPrimaryAgent(ctx context.Context, id string) (turn.P
 }
 
 // ModelSettings is what /model works from in the terminal: the live config,
-// the agent whose models it offers, and the selection the runner is actually
-// running — never config order alone.
-func (s *ChatSession) ModelSettings(string) (turn.ModelSettings, error) {
+// the agent whose models it offers, and the selection the session named on the
+// surface is actually running — never config order alone, and never the
+// runner's default for a conversation that picked its own.
+func (s *ChatSession) ModelSettings(sessionID string) (turn.ModelSettings, error) {
 	path, err := home.ResolveConfigPath(strings.TrimSpace(s.home()))
 	if err != nil {
 		return turn.ModelSettings{}, err
 	}
-	sel := run.PrimaryModelSelection(s.runner())
+	sel := s.sessionModelState(sessionID)
 	return turn.ModelSettings{
 		Config:     modelConfigFromChatSession(s),
 		AgentName:  chatSessionActiveAgentName(s),

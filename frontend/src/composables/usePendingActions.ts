@@ -1,13 +1,11 @@
 import { computed, ref, watch, type Ref } from 'vue'
-import { parseJsonCamelCase } from '@/lib/case'
 import { GatewayHttpError, getErrorMessage, forebrainApi, type PlanReviewModelOption, type PlanReviewNote, type SessionApprovalRequest } from '@/lib/api'
-import { useI18n, type I18nKey } from '@/locales'
+import { approvalFacts, approvalFamily, approvalQuestion, parseApprovalPayload, type ApprovalFacts } from '@/lib/approvalGates'
+import { useI18n } from '@/locales'
 import {
   approvalDecisions,
-  approvalJustification,
   permissionSuggestionFromAction,
   type ApprovalDecisionOption,
-  type CommandApprovalScope,
   type PermissionSuggestionRecord,
 } from '@/lib/approvalSuggestions'
 
@@ -49,6 +47,9 @@ export type AskAction = {
     title?: string
     questions: {
       id: string
+      /** The short tab label the engine keys answers by; a payload whose id is
+       *  an opaque key carries none and the card falls back to the prompt. */
+      header?: string
       prompt: string
       options: { id: string; label: string; description?: string; preview?: string; recommended?: boolean }[]
       allowMultiple?: boolean
@@ -78,6 +79,12 @@ export function usePendingActions(options: {
   const exitPlans = ref<Record<string, SessionApprovalRequest | null>>({})
   /** Whether a card's review-model picker is open, by action id. */
   const modelPicking = ref<Record<string, boolean>>({})
+  /** Whether an exit-plan card's feedback field is open, by action id. The
+   *  field appears only after「继续规划」is chosen, the way the terminal's
+   *  overlay asks for feedback after the verdict, and folds away again on any
+   *  other decision. Both surfaces share this state, so a field opened in the
+   *  thread is open above the composer too. */
+  const planFeedbackOpen = ref<Record<string, boolean>>({})
   const loading = ref(false)
   const loadError = ref<string | null>(null)
   let generation = 0
@@ -165,13 +172,17 @@ export function usePendingActions(options: {
     denyFeedback.value = {}
     exitPlans.value = {}
     modelPicking.value = {}
+    planFeedbackOpen.value = {}
     loadError.value = null
   }
 
   /**
    * An ask's form as the questions the card draws, or null when the payload is
    * not that shape. The card reads each question through these fields alone,
-   * the way the lsp recommendation parser reads its own whitelist.
+   * the way the lsp recommendation parser reads its own whitelist. The stored
+   * payload is snake_case ("allow_multiple"); the card's fields are the
+   * camelCase ones here, and the engine's question header travels as the
+   * question id, so the parser is where both become what the card reads.
    */
   function parseAskForm(raw: unknown): AskAction['form'] | null {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
@@ -182,7 +193,14 @@ export function usePendingActions(options: {
       if (!q || typeof q !== 'object') return null
       const question = q as Record<string, unknown>
       if (typeof question.id !== 'string' || typeof question.prompt !== 'string' || !Array.isArray(question.options)) return null
-      questions.push(question as AskAction['form']['questions'][number])
+      questions.push({
+        id: question.id,
+        header: String(question.header ?? question.id ?? '').trim(),
+        prompt: question.prompt,
+        options: question.options as AskAction['form']['questions'][number]['options'],
+        allowMultiple: question.allow_multiple === true || question.allowMultiple === true,
+        allowOther: question.allow_other === true || question.allowOther === true,
+      })
     }
     return { questions }
   }
@@ -284,8 +302,18 @@ export function usePendingActions(options: {
     await submitAction(actionId, () => forebrainApi.actionsAnswer(actionId, { answers: payload }))
   }
 
-  async function approveAction(id: string) {
-    await submitAction(id, () => forebrainApi.actionsApprove(id, {}))
+  /** One question's answer, written by whichever surface is asking it — the
+   *  tabbed card and any other presentation of the same action share this
+   *  store, so an answer made in one place is answered in the other too. */
+  function setAskAnswer(actionId: string, questionId: string, value: string | string[]) {
+    if (!answers.value[actionId]) answers.value[actionId] = {}
+    answers.value[actionId][questionId] = value
+  }
+
+  /** One question's「其他」text, the twin of setAskAnswer. */
+  function setAskOther(actionId: string, questionId: string, value: string) {
+    if (!others.value[actionId]) others.value[actionId] = {}
+    others.value[actionId][questionId] = value
   }
 
   async function submitApprovalDecision(action: ActionRow, option: ApprovalDecisionOption) {
@@ -297,13 +325,11 @@ export function usePendingActions(options: {
     }))
   }
 
-  async function denyAction(id: string) {
-    const reason = String(denyFeedback.value[id] ?? '').trim()
-    await submitAction(id, () => forebrainApi.actionsDeny(id, reason ? { reason } : {}))
-  }
-
-  /** The exit-plan card's two approvals: with and without clearing context. */
+  /** The exit-plan card's two approvals: with and without clearing context.
+   *  Either one is a decision, so the feedback field folds away with its
+   *  draft. */
   async function approveExitPlan(a: ActionRow, clearContext: boolean) {
+    closePlanFeedback(a)
     await submitAction(a.id, () => forebrainApi.actionsApprove(a.id, clearContext ? { clearContext: true } : {}))
   }
 
@@ -312,6 +338,19 @@ export function usePendingActions(options: {
   async function keepPlanning(a: ActionRow) {
     const reason = String(denyFeedback.value[a.id] ?? '').trim()
     await submitAction(a.id, () => forebrainApi.actionsDeny(a.id, reason ? { reason } : {}))
+  }
+
+  /** The feedback field opens on the「继续规划」verdict and closes on any other
+   *  decision or its own cancel, taking the unfinished draft with it. */
+  function openPlanFeedback(a: ActionRow) {
+    planFeedbackOpen.value = { ...planFeedbackOpen.value, [a.id]: true }
+  }
+
+  function closePlanFeedback(a: ActionRow) {
+    planFeedbackOpen.value = { ...planFeedbackOpen.value, [a.id]: false }
+    if (String(denyFeedback.value[a.id] ?? '') !== '') {
+      denyFeedback.value = { ...denyFeedback.value, [a.id]: '' }
+    }
   }
 
   function toggleModelPicker(a: ActionRow) {
@@ -334,33 +373,20 @@ export function usePendingActions(options: {
     await submitAction(a.id, () => forebrainApi.subagentCancel(agentId))
   }
 
-  function approvalSuggestion(action: ActionRow): PermissionSuggestionRecord | null {
-    return permissionSuggestionFromAction(action)
-  }
-
   function approvalDecisionOptions(action: ActionRow): ApprovalDecisionOption[] {
     return approvalDecisions(permissionSuggestionFromAction(action))
   }
 
-  // commandScopeLabel says what remembering a shell command covers. The server
-  // decides the scope; this only puts it into the reader's language, so the web
-  // and the terminal never disagree about what a row grants.
-  function commandScopeLabel(scope: CommandApprovalScope | undefined, fallback: I18nKey): string {
-    if (!scope) return t(fallback)
-    const prefixes = scope.prefixes ?? []
-    switch (scope.kind) {
-      case 'prefix':
-        return prefixes.length ? t('chat.approveCommandPrefix', { prefix: prefixes[0] }) : t(fallback)
-      case 'command_with_variants':
-        // Past a few prefixes the list outgrows the row, and naming some of them
-        // would describe less than what is granted.
-        if (!prefixes.length || prefixes.length > 3) return t('chat.approveCommandAnyVariant')
-        return t('chat.approveCommandVariants', { prefixes: prefixes.join('、') })
-      default:
-        // The command is shown in full above the choices and the rules
-        // authorize it alone, so the button says that once.
-        return t('chat.approveCommandOnly')
-    }
+  // One gate's family, facts, and question, read from the action the card
+  // holds: the payload is the engine's own record of what it wants, and the
+  // suggestion carries the network approval the payload alone cannot name.
+  // Both surfaces ask through here, so a gate reads identically in the thread
+  // and above the workshop's composer.
+  function approvalGate(a: ActionRow): { facts: ApprovalFacts; question: string } {
+    const payload = parseApprovalPayload(a.payloadJson)
+    const suggestion = permissionSuggestionFromAction(a)
+    const family = approvalFamily(a.kind, payload, suggestion)
+    return { facts: approvalFacts(family, payload, suggestion), question: approvalQuestion(family, a.kind, payload) }
   }
 
   // A fetch gate is about one page on the public web, and the engine already
@@ -383,46 +409,63 @@ export function usePendingActions(options: {
     return rule.toLowerCase().startsWith('domain:') ? rule.slice('domain:'.length) : ''
   }
 
-  function approvalDecisionLabel(option: ApprovalDecisionOption, action?: ActionRow): string {
+  // A decision button says what it does in its own family's verb — write,
+  // run, call — and every scope button says how far the yes reaches. The
+  // fetch gate keeps its shipped copy; every other family reads the table the
+  // approval cards were designed against, so the verb cannot drift between
+  // the thread's card and the workbench's panel.
+  function approvalDecisionLabel(option: ApprovalDecisionOption, action?: ActionRow, facts?: ApprovalFacts | null): string {
+    const gate = facts ?? (action ? approvalGate(action).facts : null)
+    const family = gate?.family ?? 'fallback'
+    if (family === 'web_fetch') {
+      if (option.decision === 'accept') return t('chat.webFetchAccept')
+      if (option.decision === 'cancel') return t('chat.webFetchDecline')
+      if (option.decision === 'accept_and_remember') {
+        const host = action ? webFetchHost(action) : ''
+        if (host) return t('chat.webFetchRemember', { host })
+      }
+    }
     switch (option.decision) {
       case 'accept':
-        return action && isWebFetchAction(action) ? t('chat.webFetchAccept') : t('chat.approveOnce')
-      case 'accept_for_session': return t('chat.approveSession')
-      case 'accept_and_remember':
-        // A fetch remembers the host, and the engine says which one in
-        // prefix_rule_content, so the button names its own scope instead of
-        // leaving the card to explain it a second time.
-        if (action && isWebFetchAction(action)) {
-          const host = webFetchHost(action)
-          if (host) return t('chat.webFetchRemember', { host })
+        switch (family) {
+          case 'file_write': return (gate?.removed ?? 0) > 0 ? t('chat.approvalYesOverwrite') : t('chat.approvalYesWrite')
+          case 'file_edit': return t('chat.approvalYesEdit')
+          case 'apply_patch': return t('chat.approvalYesApply')
+          case 'shell': return t('chat.approvalYesRun')
+          case 'shell_outside_sandbox': return t('chat.approvalYesRunOutside')
+          case 'enter_plan_mode': return t('chat.approvalYesEnterPlan')
+          case 'mcp_tool': return t('chat.approvalYesCall')
+          case 'protected_read': return t('chat.approvalYesRead')
+          case 'web_search': return t('chat.approvalSearchYes')
+          case 'memory_note': return t('chat.approvalMemoryYes')
+          default: return t('chat.approvalYesAllow')
         }
-        return commandScopeLabel(option.commandScope, 'chat.approveRemember')
-      case 'accept_with_execpolicy_amendment': return commandScopeLabel(option.commandScope, 'chat.approveCommandRule')
-      case 'apply_network_policy_amendment': return option.networkPolicyAmendment?.action === 'deny'
-        ? t('chat.denyHostRemember')
-        : t('chat.allowHostRemember')
-      case 'grant_for_turn': return t('chat.grantTurn')
-      case 'grant_for_turn_with_strict_auto_review': return t('chat.grantTurnStrict')
-      case 'grant_for_session': return t('chat.grantSession')
-      case 'decline': return t('chat.deny')
+      case 'accept_for_session':
+        return family === 'network_host' ? t('chat.approvalScopeSessionAll')
+          : family === 'shell' || family === 'shell_outside_sandbox' ? t('chat.approvalScopeThisCommand')
+            : t('chat.approvalScopeThisSession')
+      case 'accept_and_remember': return t('chat.approvalScopeAlways')
+      case 'accept_with_execpolicy_amendment': return t('chat.approvalScopeThisCommand')
+      case 'apply_network_policy_amendment': return t('chat.approvalScopeAlwaysAllow')
+      case 'grant_for_turn': return t('chat.approvalYesGrantTurn')
+      case 'grant_for_turn_with_strict_auto_review': return t('chat.approvalYesGrantTurnReviewed')
+      case 'grant_for_session': return t('chat.approvalYesGrantSession')
+      case 'decline': return family === 'memory_note' ? t('chat.approvalMemoryNo') : t('chat.approvalNoGrant')
       case 'cancel':
-        return action && isWebFetchAction(action) ? t('chat.webFetchDecline') : t('chat.cancelRun')
+        switch (family) {
+          case 'file_write': return t('chat.approvalNoWrite')
+          case 'file_edit': return t('chat.approvalNoEdit')
+          case 'apply_patch': return t('chat.approvalNoApply')
+          case 'shell':
+          case 'shell_outside_sandbox': return t('chat.approvalNoRun')
+          case 'network_host': return t('chat.approvalNoAccess')
+          case 'mcp_tool': return t('chat.approvalNoCall')
+          case 'protected_read': return t('chat.approvalNoRead')
+          case 'enter_plan_mode': return t('chat.approvalNoEnter')
+          case 'web_search': return t('chat.approvalSearchNo')
+          default: return t('chat.approvalNo')
+        }
     }
-  }
-
-  function approvalSuggestionLabel(action: ActionRow): string {
-    const suggestion = permissionSuggestionFromAction(action)
-    if (!suggestion) return ''
-    const input = suggestion.permissionInput ? ` · ${suggestion.permissionInput}` : ''
-    const reason = suggestion.permissionReason ? ` · ${suggestion.permissionReason}` : ''
-    return `${suggestion.permissionToolName ?? ''}${input}${reason}`
-  }
-
-  function approvalKindLabel(kind: string): string {
-    const k = String(kind ?? '').trim().toLowerCase()
-    if (k === 'enter_plan_mode') return t('chat.enterPlanMode')
-    if (k === 'exit_plan_mode') return t('chat.exitPlanMode')
-    return kind
   }
 
   // A subagent's request names the worker that is blocked. The primary agent's
@@ -432,26 +475,6 @@ export function usePendingActions(options: {
     if (type) return t('chat.approvalRequestedBy', { type })
     if (String(a.agentId ?? '').trim()) return t('chat.approvalRequestedBySubagent')
     return ''
-  }
-
-  function approvalHint(a: ActionRow): string {
-    const k = String(a.kind).trim().toLowerCase()
-    let payload: Record<string, unknown> | null = null
-    try {
-      payload = parseJsonCamelCase<Record<string, unknown>>(a.payloadJson)
-    } catch {
-      payload = null
-    }
-    if (k === 'enter_plan_mode') {
-      const action = String(payload?.action ?? 'enter').trim().toLowerCase()
-      if (action === 'exit') return t('chat.exitPlanAfterApproval')
-      return t('chat.enterPlanAfterApproval')
-    }
-    // The reason the runtime raised this approval is what the row has to say -
-    // an action id tells the user nothing they can act on.
-    const reason = approvalJustification(payload)
-    if (reason) return reason
-    return a.id
   }
 
   watch(() => [options.sessionId.value, options.version.value] as const, () => {
@@ -467,6 +490,7 @@ export function usePendingActions(options: {
     errors,
     denyFeedback,
     modelPicking,
+    planFeedbackOpen,
     loading,
     loadError,
     load,
@@ -477,22 +501,21 @@ export function usePendingActions(options: {
     activeReviewLabel,
     clearContextLabel,
     submitAsk,
-    approveAction,
+    setAskAnswer,
+    setAskOther,
     submitApprovalDecision,
-    denyAction,
     approveExitPlan,
     keepPlanning,
+    openPlanFeedback,
+    closePlanFeedback,
     toggleModelPicker,
     requestReview,
     stopReview,
-    approvalSuggestion,
     approvalDecisionOptions,
     approvalDecisionLabel,
+    approvalGate,
     isWebFetchAction,
     webFetchPage,
-    approvalSuggestionLabel,
-    approvalKindLabel,
     requesterLabel,
-    approvalHint,
   }
 }

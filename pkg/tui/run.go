@@ -2447,7 +2447,7 @@ func sendSubagentViewSubmission(ctx context.Context, session Session, renderer *
 		renderComposerWithState(renderer, state)
 		return
 	}
-	state.resetComposerForActiveRunDraft()
+	state.resetComposerAfterQueue()
 	renderComposerWithState(renderer, state)
 }
 
@@ -3087,6 +3087,10 @@ func inputAttachmentsEqual(a, b []InputAttachment) bool {
 	return true
 }
 
+// resetComposerForActiveRunDraft puts the composer back to an empty draft.
+// It does not touch the raw reader's line buffer: a path whose text has left the
+// composer without the reader emptying itself must reseed it — see
+// resetComposerAfterQueue.
 func (s *streamState) resetComposerForActiveRunDraft() {
 	if s == nil {
 		return
@@ -3100,6 +3104,22 @@ func (s *streamState) resetComposerForActiveRunDraft() {
 	s.holdComposer = false
 	s.clearHistoryBrowse()
 	s.clearRestoredQueuedSubmission()
+}
+
+// resetComposerAfterQueue clears the composer once its text has left for a
+// queue, and reseeds the raw reader with the empty draft in the same breath.
+// The reader owns the other half of the composer text: a submitted line (Enter)
+// is emptied by the reader itself, but the queue key (Tab) only publishes the
+// hotkey and keeps its buffer, so a queue path that reset the surface state
+// alone left the queued text in the reader — the next caret request (a click on
+// the composer) or keystroke then republished it as a draft, and the queued
+// message reappeared in the composer while still queued.
+func (s *streamState) resetComposerAfterQueue() {
+	if s == nil {
+		return
+	}
+	s.resetComposerForActiveRunDraft()
+	s.seedReader("", 0)
 }
 
 // renumberImagePlaceholders shifts a submission's "[Image #N]" markers by offset
@@ -3600,6 +3620,12 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 	if state != nil {
 		renderComposerWithState(renderer, state)
 	}
+	// The footer names the model this turn runs on, and a turn is exactly when
+	// that answer can have moved without this surface seeing it: another
+	// surface's /model wrote the conversation's row. Repaint it here, from the
+	// same resolution the request below will carry, so the line the user reads
+	// while the turn runs cannot name a model the turn does not go to.
+	refreshSessionFooter(renderer, session, sessionID)
 	stopStatus := renderer.StartTimedTransientStatus(transientSourceWorking, workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun))
 	// Animate the terminal window/tab title for the duration of the turn,
 	// mirroring the transient "Working" line. On exit, settle back to the
@@ -4475,7 +4501,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				submission.Parts = []llm.ContentPart{llm.Text(submission.Text)}
 			}
 			state.sessionQueue().FollowUp(queueInput(submission))
-			state.resetComposerForActiveRunDraft()
+			state.resetComposerAfterQueue()
 			return
 		}
 		if ev.hotkey == hotkeyEditLastQueued {

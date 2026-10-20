@@ -779,11 +779,16 @@ func NormalizeWebSearchLimit(limit int) int {
 	return limit
 }
 
-func WebSearchPermissionPayload(query string) map[string]any {
+// The card promises a size, and the tool already normalizes one: an absent limit
+// is 5 and anything above 10 is capped. Putting the normalized number in the
+// payload is what lets the approval card say "up to 5 results" instead of
+// guessing or dropping the promise.
+func WebSearchPermissionPayload(query string, limit int) map[string]any {
 	q := strings.TrimSpace(query)
 	return map[string]any{
-		"query":        q,
-		"rule_content": "query:" + q,
+		"query":         q,
+		"rule_content":  "query:" + q,
+		"results_limit": NormalizeWebSearchLimit(limit),
 	}
 }
 
@@ -989,7 +994,7 @@ func NewWebSearchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			}
 			if hook := st.ActionHook(); hook != nil {
 				if ApprovedActionIDFromContext(ctx) == "" && !PolicyApprovedFromContext(ctx) {
-					id, ok, err := hook(ctx, "web_search", WebSearchPermissionPayload(q))
+					id, ok, err := hook(ctx, "web_search", WebSearchPermissionPayload(q, in.Limit))
 					if err != nil {
 						return "", err
 					}
