@@ -24,104 +24,82 @@
     <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
       {{ t('cron.empty') }}
     </div>
-    <div v-else class="forebrain-table-wrap">
-      <table class="forebrain-table forebrain-table--fixed">
-        <colgroup>
-          <col />
-          <col style="width: 140px" />
-          <col style="width: 200px" />
-          <col style="width: 110px" />
-          <col style="width: 96px" />
-          <col style="width: 64px" />
-          <col style="width: 56px" />
-          <col style="width: 140px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>{{ t('cron.colName') }}</th>
-            <th>{{ t('cron.colSchedule') }}</th>
-            <th>{{ t('cron.colDeliver') }}</th>
-            <th>{{ t('cron.colNext') }}</th>
-            <th>{{ t('cron.colLast') }}</th>
-            <th class="text-right">{{ t('cron.colRuns') }}</th>
-            <th>{{ t('cron.colEnabled') }}</th>
-            <th class="text-center">{{ t('projects.colActions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="job in rows" :key="job.id" :data-cron-job="job.name || job.id">
-            <td>
-              <span class="forebrain-cell-1 font-medium" v-tip:top.trunc="nameOf(job)">{{ nameOf(job) }}</span>
-            </td>
-            <td>
-              <span class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]" v-tip:top.trunc="job.schedule">{{ job.schedule }}</span>
-            </td>
-            <td>
-              <span
-                v-if="job.deliver"
-                class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]"
-                v-tip:top.trunc="job.deliver"
-              >{{ job.deliver }}</span>
-              <span v-else class="text-[var(--forebrain-muted-text)]">{{ t('cron.recordOnlyShort') }}</span>
-            </td>
-            <td class="forebrain-num">
-              <BadgeComponent v-if="!job.enabled" variant="warning">{{ t('cron.paused') }}</BadgeComponent>
-              <span v-else class="text-[var(--forebrain-text-2)]">{{ formatMonthDayTime(job.nextRunAt) }}</span>
-            </td>
-            <td>
-              <BadgeComponent
-                v-if="job.lastStatus"
-                :variant="lastStateOf(job).variant"
-                v-tip:top="jobErrorText(job)"
-              >{{ lastStateOf(job).label }}</BadgeComponent>
-              <span v-else class="text-[var(--forebrain-text-2)]">—</span>
-            </td>
-            <td class="forebrain-num text-right">{{ t('cron.times', { count: job.runCount ?? 0 }) }}</td>
-            <td>
-              <SwitchComponent
-                :model-value="job.enabled"
-                :aria-label="t('cron.switchLabel', { name: nameOf(job) })"
-                :data-testid="`cron-toggle-${job.id}`"
-                @update:model-value="togglePause(job)"
-              />
-            </td>
-            <td class="text-right">
-              <RowActions>
-                <RowAction
-                  :icon="Play"
-                  :label="t('cron.runNow')"
-                  :name="nameOf(job)"
-                  :data-testid="`cron-run-${job.id}`"
-                  @click="runNow(job)"
-                />
-                <RowAction
-                  :icon="Pencil"
-                  :label="t('common.edit')"
-                  :name="nameOf(job)"
-                  :data-testid="`cron-edit-${job.id}`"
-                  @click="openEditor(job)"
-                />
-                <RowAction
-                  :icon="History"
-                  :label="t('cron.history')"
-                  :name="nameOf(job)"
-                  :data-testid="`cron-history-${job.id}`"
-                  @click="openRuns(job)"
-                />
-                <RowAction
-                  :icon="Trash2"
-                  :label="t('common.delete')"
-                  :name="nameOf(job)"
-                  tone="danger"
-                  :data-testid="`cron-delete-${job.id}`"
-                  @click="remove(job)"
-                />
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      v-else
+      :columns="columns"
+      :rows="rows"
+      :row-key="(row) => row.id"
+      :row-attrs="(row) => ({ 'data-cron-job': row.name || row.id })"
+    >
+      <template #cell-name="{ row }">
+        <span class="forebrain-cell-1 font-medium" v-tip:top.trunc="nameOf(row)">{{ nameOf(row) }}</span>
+      </template>
+      <template #cell-schedule="{ row }">
+        <span class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]" v-tip:top.trunc="row.schedule">{{ row.schedule }}</span>
+      </template>
+      <template #cell-deliver="{ row }">
+        <span
+          v-if="row.deliver"
+          class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]"
+          v-tip:top.trunc="row.deliver"
+        >{{ row.deliver }}</span>
+        <span v-else class="text-[var(--forebrain-muted-text)]">{{ t('cron.recordOnlyShort') }}</span>
+      </template>
+      <template #cell-next="{ row }">
+        <BadgeComponent v-if="!row.enabled" variant="warning">{{ t('cron.paused') }}</BadgeComponent>
+        <span v-else class="text-[var(--forebrain-text-2)]">{{ formatMonthDayTime(row.nextRunAt) }}</span>
+      </template>
+      <template #cell-last="{ row }">
+        <BadgeComponent
+          v-if="row.lastStatus"
+          :variant="lastStateOf(row).variant"
+          v-tip:top="jobErrorText(row)"
+        >{{ lastStateOf(row).label }}</BadgeComponent>
+        <span v-else class="text-[var(--forebrain-text-2)]">—</span>
+      </template>
+      <template #cell-runs="{ row }">{{ t('cron.times', { count: row.runCount ?? 0 }) }}</template>
+      <template #cell-enabled="{ row }">
+        <SwitchComponent
+          :model-value="row.enabled"
+          :aria-label="t('cron.switchLabel', { name: nameOf(row) })"
+          :data-testid="`cron-toggle-${row.id}`"
+          @update:model-value="togglePause(row)"
+        />
+      </template>
+      <template #cell-actions="{ row }">
+        <RowActions>
+          <RowAction
+            :icon="Play"
+            :label="t('cron.runNow')"
+            :name="nameOf(row)"
+            :data-testid="`cron-run-${row.id}`"
+            @click="runNow(row)"
+          />
+          <RowAction
+            :icon="Pencil"
+            :label="t('common.edit')"
+            :name="nameOf(row)"
+            :data-testid="`cron-edit-${row.id}`"
+            @click="openEditor(row)"
+          />
+          <RowAction
+            :icon="History"
+            :label="t('cron.history')"
+            :name="nameOf(row)"
+            :data-testid="`cron-history-${row.id}`"
+            @click="openRuns(row)"
+          />
+          <RowAction
+            :icon="Trash2"
+            :label="t('common.delete')"
+            :name="nameOf(row)"
+            tone="danger"
+            :data-testid="`cron-delete-${row.id}`"
+            @click="remove(row)"
+          />
+        </RowActions>
+      </template>
+    </DataTable>
 
     <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
     <ListNote>{{ t('cron.projectNote') }}</ListNote>
@@ -210,6 +188,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { History, Pencil, Play, Plus, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
@@ -232,6 +211,21 @@ const { rows, total, page, pageSize, q, loading, error: listError, reload } = us
   (query) => forebrainApi.cronJobsPage(props.projectId, query),
   { pageSize: 10 },
 )
+
+/**
+ * The table's columns, at the design's widths: the name takes the room the
+ * others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'name', header: t('cron.colName') },
+  { id: 'schedule', header: t('cron.colSchedule'), size: 140 },
+  { id: 'deliver', header: t('cron.colDeliver'), size: 200 },
+  { id: 'next', header: t('cron.colNext'), size: 110, cellClass: 'forebrain-num' },
+  { id: 'last', header: t('cron.colLast'), size: 96 },
+  { id: 'runs', header: t('cron.colRuns'), size: 64, headerClass: 'text-right', cellClass: 'forebrain-num text-right' },
+  { id: 'enabled', header: t('cron.colEnabled'), size: 56 },
+  { id: 'actions', header: t('projects.colActions'), size: 140, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 const writeError = ref('')
 const error = computed(() => listError.value || writeError.value)

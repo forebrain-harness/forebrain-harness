@@ -28,109 +28,93 @@
     >
       {{ t('lsp.empty') }}
     </div>
-    <div v-else class="forebrain-table-wrap">
-      <table class="forebrain-table forebrain-table--fixed">
-        <colgroup>
-          <col />
-          <col style="width: 84px" />
-          <col style="width: 120px" />
-          <col />
-          <col style="width: 112px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>{{ t('lsp.colServer') }}</th>
-            <th>{{ t('lsp.colScope') }}</th>
-            <th>{{ t('lsp.colState') }}</th>
-            <th>{{ t('lsp.colProgram') }}</th>
-            <th class="text-center">{{ t('lsp.colActions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="server in rows" :key="server.id" :data-server="server.id">
-            <td>
-              <div class="flex min-w-0 flex-col">
-                <span class="font-mono text-[12.5px] text-[var(--forebrain-text)]">{{ server.id }}</span>
-                <span v-if="server.languages?.length" class="text-[11px] text-[var(--forebrain-muted-text)]">{{ server.languages.join(', ') }}</span>
-              </div>
-            </td>
-            <td>
-              <ScopeBadge :type="scopeType(server.scope)" :label="scopeLabel(server.scope)" />
-            </td>
-            <td>
-              <!-- One badge per server: what it is doing now, and one hover
-                   away the problems and the last error it hit. -->
-              <BadgeComponent
-                :variant="stateVariant(server)"
-                :data-state="server.installing ? 'installing' : server.state"
-                v-tip:top="statusTip(server)"
-              >
-                {{ stateLabel(server) }}
-              </BadgeComponent>
-            </td>
-            <td>
-              <span
-                v-if="server.binaryPath"
-                class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]"
-                v-tip:top.trunc="programText(server)"
-              >
-                {{ programText(server) }}
-              </span>
-              <span v-else class="text-[var(--forebrain-muted-text)]">—</span>
-            </td>
-            <td class="text-right">
-              <RowActions>
-                <RowAction
-                  v-if="!server.enabled && server.state !== 'blocked'"
-                  :icon="Power"
-                  :label="t('lsp.enable')"
-                  :name="server.id"
-                  :disabled="busy === server.id"
-                  :data-enable="server.id"
-                  @click="enable(server)"
-                />
-                <RowAction
-                  v-else-if="server.enabled"
-                  :icon="PowerOff"
-                  :label="t('lsp.disable')"
-                  :name="server.id"
-                  :disabled="busy === server.id"
-                  :data-disable="server.id"
-                  @click="disable(server)"
-                />
-                <RowActionSlot v-else />
-                <RowAction
-                  v-if="server.enabled && restartable.includes(server.state)"
-                  :icon="RotateCw"
-                  :label="t('lsp.restart')"
-                  :name="server.id"
-                  :disabled="busy === server.id"
-                  :data-restart="server.id"
-                  @click="restart(server)"
-                />
-                <RowActionSlot v-else />
-                <RowAction
-                  v-if="server.state === 'not_installed' && server.installCommand && !server.installing"
-                  :icon="Download"
-                  :label="t('lsp.install')"
-                  :name="server.id"
-                  :data-install="server.id"
-                  @click="confirming = server"
-                />
-                <RowActionSlot v-else />
-                <RowAction
-                  :icon="Eye"
-                  :label="t('lsp.details')"
-                  :name="server.id"
-                  :data-detail="server.id"
-                  @click="detailId = server.id"
-                />
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      v-else
+      :columns="columns"
+      :rows="rows"
+      :row-key="(row) => row.id"
+      :row-attrs="(row) => ({ 'data-server': row.id })"
+    >
+      <template #cell-id="{ row }">
+        <div class="flex min-w-0 flex-col">
+          <span class="font-mono text-[12.5px] text-[var(--forebrain-text)]">{{ row.id }}</span>
+          <span v-if="row.languages?.length" class="text-[11px] text-[var(--forebrain-muted-text)]">{{ row.languages.join(', ') }}</span>
+        </div>
+      </template>
+      <template #cell-scope="{ row }">
+        <ScopeBadge :type="scopeType(row.scope)" :label="scopeLabel(row.scope)" />
+      </template>
+      <!-- One badge per server: what it is doing now, and one hover
+           away the problems and the last error it hit. -->
+      <template #cell-state="{ row }">
+        <BadgeComponent
+          :variant="stateVariant(row)"
+          :data-state="row.installing ? 'installing' : row.state"
+          v-tip:top="statusTip(row)"
+        >
+          {{ stateLabel(row) }}
+        </BadgeComponent>
+      </template>
+      <template #cell-program="{ row }">
+        <span
+          v-if="row.binaryPath"
+          class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]"
+          v-tip:top.trunc="programText(row)"
+        >
+          {{ programText(row) }}
+        </span>
+        <span v-else class="text-[var(--forebrain-muted-text)]">—</span>
+      </template>
+      <template #cell-actions="{ row }">
+        <RowActions>
+          <RowAction
+            v-if="!row.enabled && row.state !== 'blocked'"
+            :icon="Power"
+            :label="t('lsp.enable')"
+            :name="row.id"
+            :disabled="busy === row.id"
+            :data-enable="row.id"
+            @click="enable(row)"
+          />
+          <RowAction
+            v-else-if="row.enabled"
+            :icon="PowerOff"
+            :label="t('lsp.disable')"
+            :name="row.id"
+            :disabled="busy === row.id"
+            :data-disable="row.id"
+            @click="disable(row)"
+          />
+          <RowActionSlot v-else />
+          <RowAction
+            v-if="row.enabled && restartable.includes(row.state)"
+            :icon="RotateCw"
+            :label="t('lsp.restart')"
+            :name="row.id"
+            :disabled="busy === row.id"
+            :data-restart="row.id"
+            @click="restart(row)"
+          />
+          <RowActionSlot v-else />
+          <RowAction
+            v-if="row.state === 'not_installed' && row.installCommand && !row.installing"
+            :icon="Download"
+            :label="t('lsp.install')"
+            :name="row.id"
+            :data-install="row.id"
+            @click="confirming = row"
+          />
+          <RowActionSlot v-else />
+          <RowAction
+            :icon="Eye"
+            :label="t('lsp.details')"
+            :name="row.id"
+            :data-detail="row.id"
+            @click="detailId = row.id"
+          />
+        </RowActions>
+      </template>
+    </DataTable>
 
     <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
 
@@ -229,6 +213,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Download, Eye, Power, PowerOff, RotateCw } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import ListNote from '@/components/common/ListNote.vue'
@@ -290,6 +275,18 @@ const {
   error: listError,
   reload,
 } = useServerList<LspServerStatus>(fetchServers, { pageSize: 10 })
+
+/**
+ * The table's columns, at the design's widths: the server and its program share
+ * what the fixed ones leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'id', header: t('lsp.colServer') },
+  { id: 'scope', header: t('lsp.colScope'), size: 84 },
+  { id: 'state', header: t('lsp.colState'), size: 120 },
+  { id: 'program', header: t('lsp.colProgram') },
+  { id: 'actions', header: t('lsp.colActions'), size: 112, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 const actionError = ref('')
 const error = computed(() => listError.value || actionError.value)

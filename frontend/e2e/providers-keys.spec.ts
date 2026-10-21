@@ -29,7 +29,8 @@ test('a new service with chips and a masked key saves', async ({ page }) => {
   await page.goto('/providers', { waitUntil: 'networkidle' })
   await page.click('[data-testid="providers-add"]')
 
-  await page.fill('[data-testid="provider-name"]', 'arcee-ai')
+  // The provider is a choice, never typed (owner 2026-10-21).
+  await page.selectOption('[data-testid="provider-name"]', 'arcee-ai')
   await page.fill('[data-testid="provider-key-input"]', 'sk-e2e-secret-9931')
 
   // The key input is a password field: what the page shows is masked.
@@ -75,6 +76,21 @@ test('editing models without touching the key keeps .env unchanged', async ({ pa
   await page.goto('/providers', { waitUntil: 'networkidle' })
   const { index } = await rowOf(page, 'arcee-ai')
   await page.click(`[data-testid="provider-edit-${index}"]`)
+  // The stored key reads as the masked tail alone: whether it is saved is the
+  // green badge's job, not a word in the value (owner 2026-10-21).
+  await expect(page.locator('[data-testid="provider-key-saved"]')).toHaveText('••••9931')
+  // The saved key and its 更换 button fill the field width, like every other
+  // field in the form: the box stands where the input would be and the button
+  // sits on the row's trailing edge (owner 2026-10-21).
+  const savedKey = await page.locator('[data-testid="provider-key-saved"]').boundingBox()
+  const changeKey = await page.locator('[data-testid="provider-key-change"]').boundingBox()
+  const apiFormat = await page.locator('[data-testid="provider-api-format"]').boundingBox()
+  expect(savedKey!.x).toBeCloseTo(apiFormat!.x, 0)
+  // Both boxes are 36px tall, so the row reads as one control beside the rest.
+  expect(savedKey!.height).toBeCloseTo(apiFormat!.height, 0)
+  // The box, the 8px gap and the button end where the other fields end.
+  expect(savedKey!.width + 8 + changeKey!.width).toBeCloseTo(apiFormat!.width, 0)
+  await shot(page, 'providers-form-key-saved')
   const chipsInput = page.locator('[data-testid="model-chips-input"]')
   await chipsInput.fill('e2e-model-c,')
   await chipsInput.blur()
@@ -103,7 +119,7 @@ test('row order is the fallback order and persists', async ({ page }) => {
   await signIn(page)
   await page.goto('/providers', { waitUntil: 'networkidle' })
   await page.click('[data-testid="providers-add"]')
-  await page.fill('[data-testid="provider-name"]', 'moonshotai')
+  await page.selectOption('[data-testid="provider-name"]', 'moonshotai')
   // It becomes the primary below, and a primary must be complete — the
   // server refuses one that would keep the gateway from starting again.
   await page.fill('[data-testid="provider-base-url"]', 'http://127.0.0.1:8762')
@@ -131,4 +147,126 @@ test('row order is the fallback order and persists', async ({ page }) => {
   await page.click('[data-testid="provider-remove-0"]')
   await page.click('[data-testid="confirm-ok"]')
   await expect(page.locator('[data-provider-row="moonshotai"]')).toHaveCount(0, { timeout: 15_000 })
+})
+
+test('the format is picked from a list and the params are edited as JSON', async ({ page }) => {
+  test.skip(!home, 'E2E_HOME missing')
+  await signIn(page)
+  await page.goto('/providers', { waitUntil: 'networkidle' })
+  await page.click('[data-testid="providers-add"]')
+
+  // No 高级 fold any more: the format and the params are fields of the form.
+  await expect(page.locator('.forebrain-modal details')).toHaveCount(0)
+  const format = page.locator('[data-testid="provider-api-format"]')
+  await expect(format).toHaveJSProperty('tagName', 'SELECT')
+  await expect(format.locator('option')).toHaveText([
+    'Anthropic Messages (/v1/messages)',
+    'Chat Completions (/chat/completions)',
+    'Responses (/responses)',
+  ])
+
+  // Each field on its own row: the endpoint is never squeezed next to the
+  // provider dropdown (owner 2026-10-21).
+  const providerBox = await page.locator('[data-testid="provider-name"]').boundingBox()
+  const baseUrlBox = await page.locator('[data-testid="provider-base-url"]').boundingBox()
+  expect(baseUrlBox!.y).toBeGreaterThan(providerBox!.y + providerBox!.height - 1)
+
+  // A provider the model catalog knows: the server refuses a name it cannot
+  // build a client for, and the row that proved order above is already gone.
+  await page.selectOption('[data-testid="provider-name"]', 'moonshotai')
+  // Picking the provider fills in the endpoint it is served at; the suite's
+  // own gateway stands in for the real one, so the field is then overwritten.
+  await expect(page.locator('[data-testid="provider-base-url"]')).toHaveValue('https://api.moonshot.ai/v1')
+  await page.fill('[data-testid="provider-base-url"]', 'http://127.0.0.1:8762')
+  const chipsInput = page.locator('[data-testid="model-chips-input"]')
+  await chipsInput.fill('kimi-e2e-format,')
+  await chipsInput.blur()
+  await page.fill('[data-testid="provider-key-input"]', 'sk-e2e-format-3311')
+
+  await format.selectOption('/v1/messages')
+  // The params field is a JSON code editor: the text is typed into its content.
+  const params = page.locator('[data-testid="provider-params-editor"] .cm-content')
+  await params.click()
+  await page.keyboard.type('{"temperature":0.3}')
+  await expect(page.locator('[data-testid="provider-params-editor"]')).toContainText('temperature')
+  await expect(page.locator('[data-testid="provider-params-error"]')).toHaveCount(0)
+  await shot(page, 'providers-form-format')
+  await page.click('[data-testid="provider-save"]')
+  await expect(page.locator('[data-provider-row="moonshotai"]')).toHaveCount(1, { timeout: 15_000 })
+
+  // The two answers land where the engine reads them.
+  const config = readFileSync(configPath, 'utf8')
+  expect(config).toContain('api_path: /v1/messages')
+  expect(config).toContain('temperature')
+
+  // Leave the suite's providers as they were for the specs that follow.
+  const { index } = await rowOf(page, 'moonshotai')
+  await page.click(`[data-testid="provider-remove-${index}"]`)
+  await page.click('[data-testid="confirm-ok"]')
+  await expect(page.locator('[data-provider-row="moonshotai"]')).toHaveCount(0, { timeout: 15_000 })
+})
+
+/**
+ * A column's width belongs to the person at the screen (plan 084, owner
+ * 2026-10-21): the header's trailing edge is a handle — drag it to widen the
+ * column, double-click it to fit the column to its content — and both are
+ * forgotten on a reload, because widths live for the session only.
+ *
+ * These are the only honest assertions about the feature: jsdom has no layout,
+ * so the pixels can only be checked in a real browser.
+ */
+test('a column widens on a drag, fits its content on a double-click and is forgotten on reload', async ({ page }) => {
+  await signIn(page)
+  await page.goto('/providers', { waitUntil: 'networkidle' })
+
+  const wrap = page.locator('.forebrain-table-wrap')
+  const heads = page.locator('.forebrain-table thead th')
+  // 顺序 / 服务商 / 模型 / Base URL / API Key / 操作.
+  const models = heads.nth(2)
+  const baseUrl = heads.nth(3)
+  const handle = models.locator('[data-col-resizer]')
+  const widthOf = async (locator: typeof models): Promise<number> => {
+    const box = await locator.boundingBox()
+    if (!box) throw new Error('the column has no box')
+    return box.width
+  }
+
+  await expect(wrap).toHaveCount(1)
+  expect(await page.locator('[data-provider-row]').count()).toBeGreaterThan(0)
+
+  const startModels = await widthOf(models)
+  const startBaseUrl = await widthOf(baseUrl)
+  // The design fills the box: nothing to scroll for yet.
+  expect(await wrap.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
+
+  // Drag the handle 80px to the right; the column follows the pointer and the
+  // column after it keeps its width.
+  const grip = await handle.boundingBox()
+  if (!grip) throw new Error('the width handle has no box')
+  const gripX = grip.x + grip.width / 2
+  const gripY = grip.y + grip.height / 2
+  await page.mouse.move(gripX, gripY)
+  await page.mouse.down()
+  await page.mouse.move(gripX + 80, gripY, { steps: 10 })
+  await page.mouse.up()
+
+  const draggedModels = await widthOf(models)
+  expect(Math.abs(draggedModels - (startModels + 80))).toBeLessThanOrEqual(2)
+  expect(Math.abs((await widthOf(baseUrl)) - startBaseUrl)).toBeLessThanOrEqual(1)
+  // Wider than the box now, so the box scrolls instead of squeezing the cells.
+  expect(await wrap.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true)
+  await handle.hover()
+  await shot(page, 'providers-column-dragged')
+
+  // A double-click on the same handle fits the column to its content: narrower
+  // than what the drag left, and never below the column minimum.
+  await handle.dblclick()
+  const fitted = await widthOf(models)
+  expect(fitted).toBeLessThan(draggedModels - 20)
+  expect(fitted).toBeGreaterThanOrEqual(56)
+  await shot(page, 'providers-column-fitted')
+
+  // The widths are the session's, not the user's: a reload is the design again.
+  await page.reload({ waitUntil: 'networkidle' })
+  expect(Math.abs((await widthOf(page.locator('.forebrain-table thead th').nth(2))) - startModels)).toBeLessThanOrEqual(2)
 })

@@ -27,49 +27,35 @@
 
       <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('rules.empty') }}</div>
-      <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table forebrain-table--fixed">
-          <colgroup>
-            <col />
-            <col />
-            <col />
-            <col style="width: 64px" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>{{ t('rules.colFile') }}</th>
-              <th>{{ t('rules.colPurpose') }}</th>
-              <th>{{ t('rules.colUpdated') }}</th>
-              <th class="text-center">{{ t('rules.colActions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="file in rows" :key="file.name" data-testid="rule-file-row" :data-rule-file="file.name">
-              <td>
-                <div class="flex min-w-0 items-center gap-1.5">
-                  <span class="min-w-0 truncate font-mono">{{ file.name }}</span>
-                  <BadgeComponent v-if="!file.exists" variant="gray" class="shrink-0">{{ t('rules.notCreated') }}</BadgeComponent>
-                </div>
-              </td>
-              <td class="text-[var(--forebrain-text-2)]">
-                <span class="forebrain-cell-1" v-tip:top.trunc="purposeFor(file.name)">{{ purposeFor(file.name) }}</span>
-              </td>
-              <td class="font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(file.updatedAt) }}</td>
-              <td class="text-right">
-                <RowActions>
-                  <RowAction
-                    :icon="Pencil"
-                    :label="t('rules.editFile')"
-                    :name="file.name"
-                    :data-testid="`rule-edit-${file.name}`"
-                    @click="openEdit(file.name)"
-                  />
-                </RowActions>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        v-else
+        :columns="columns"
+        :rows="rows"
+        :row-key="(row) => row.name"
+        :row-attrs="(row) => ({ 'data-testid': 'rule-file-row', 'data-rule-file': row.name })"
+      >
+        <template #cell-name="{ row }">
+          <div class="flex min-w-0 items-center gap-1.5">
+            <span class="min-w-0 truncate font-mono">{{ row.name }}</span>
+            <BadgeComponent v-if="!row.exists" variant="gray" class="shrink-0">{{ t('rules.notCreated') }}</BadgeComponent>
+          </div>
+        </template>
+        <template #cell-purpose="{ row }">
+          <span class="forebrain-cell-1" v-tip:top.trunc="purposeFor(row.name)">{{ purposeFor(row.name) }}</span>
+        </template>
+        <template #cell-updated="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
+        <template #cell-actions="{ row }">
+          <RowActions>
+            <RowAction
+              :icon="Pencil"
+              :label="t('rules.editFile')"
+              :name="row.name"
+              :data-testid="`rule-edit-${row.name}`"
+              @click="openEdit(row.name)"
+            />
+          </RowActions>
+        </template>
+      </DataTable>
 
       <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
       <ListNote>{{ t('rules.note') }}</ListNote>
@@ -110,6 +96,7 @@
 import { defineAsyncComponent, onMounted, ref } from 'vue'
 import { Pencil, Plus, RotateCw } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
@@ -140,6 +127,18 @@ const { rows, total, page, pageSize, q, loading, error, reload } = useServerList
   forebrainApi.agentRuleFilesPage,
   { pageSize: 10 },
 )
+
+/**
+ * The table's columns: the name, what the file is for and when it changed share
+ * the width, the actions keep their 64px. Nothing sorts — the list endpoint
+ * ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'name', header: t('rules.colFile') },
+  { id: 'purpose', header: t('rules.colPurpose'), cellClass: 'text-[var(--forebrain-text-2)]' },
+  { id: 'updated', header: t('rules.colUpdated'), cellClass: 'font-mono text-[var(--forebrain-text-2)]' },
+  { id: 'actions', header: t('rules.colActions'), size: 64, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 const notice = ref('')
 const creating = ref(false)

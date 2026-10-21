@@ -209,6 +209,8 @@ export interface ModelProviderStatus {
 export interface ModelCatalogListing {
   records: ModelRecord[]
   status?: ModelProviderStatus[]
+  /** The endpoint each provider defaults to, keyed by provider id. */
+  providerBaseUrls?: Record<string, string>
 }
 
 export interface TaskBoardCard {
@@ -2803,10 +2805,22 @@ export const forebrainApi = {
   },
 
   async getModels(params?: { q?: string; provider?: string; limit?: number }): Promise<ModelCatalogListing> {
-    const res = await api.get<{ records?: ModelRecord[]; status?: ModelProviderStatus[] }>('/models', { params })
+    const res = await api.get<{
+      records?: ModelRecord[]
+      status?: ModelProviderStatus[]
+      providerBaseUrls?: Array<{ provider?: string; baseUrl?: string }>
+    }>('/models', { params })
+    // The listing carries one row per provider; the pages read it as a lookup.
+    const providerBaseUrls: Record<string, string> = {}
+    for (const row of res.data?.providerBaseUrls ?? []) {
+      const provider = String(row?.provider ?? '').trim()
+      const baseUrl = String(row?.baseUrl ?? '').trim()
+      if (provider && baseUrl) providerBaseUrls[provider] = baseUrl
+    }
     return {
       records: Array.isArray(res.data?.records) ? res.data.records : [],
       status: Array.isArray(res.data?.status) ? res.data.status : [],
+      providerBaseUrls,
     }
   },
 

@@ -41,58 +41,38 @@
       <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
         {{ t('settings.noRules') }}
       </div>
-      <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table forebrain-table--fixed">
-          <colgroup>
-            <col style="width: 88px" />
-            <col style="width: 200px" />
-            <col />
-            <col style="width: 88px" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>{{ t('permissions.behavior') }}</th>
-              <th>{{ t('permissions.tool') }}</th>
-              <th>{{ t('permissions.rulesTitle') }}</th>
-              <th class="text-center">{{ t('permissions.colActions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="rule in rows" :key="`${rule.behavior}-${rule.toolName}-${rule.ruleContent}`" data-testid="project-rule">
-              <td>
-                <BadgeComponent :variant="behaviorVariant(rule.behavior)">{{ behaviorLabel(rule.behavior) }}</BadgeComponent>
-              </td>
-              <td>
-                <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="rule.toolName || '*'">{{ rule.toolName || '*' }}</span>
-              </td>
-              <td class="text-[var(--forebrain-text-2)]">
-                <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="rule.ruleContent ?? ''">{{ rule.ruleContent }}</span>
-              </td>
-              <td class="text-right">
-                <RowActions>
-                  <RowAction
-                    :icon="Pencil"
-                    :label="t('permissions.editRule')"
-                    :name="rule.ruleContent ?? ''"
-                    :disabled="busy"
-                    data-testid="edit-rule"
-                    @click="openEdit(rule)"
-                  />
-                  <RowAction
-                    :icon="Trash2"
-                    :label="t('common.delete')"
-                    :name="rule.ruleContent ?? ''"
-                    tone="danger"
-                    :disabled="busy"
-                    data-testid="remove-rule"
-                    @click="askRemove(rule)"
-                  />
-                </RowActions>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <DataTable v-else :columns="columns" :rows="rows" :row-key="ruleKey" :row-attrs="() => ({ 'data-testid': 'project-rule' })">
+        <template #cell-behavior="{ row }">
+          <BadgeComponent :variant="behaviorVariant(row.behavior)">{{ behaviorLabel(row.behavior) }}</BadgeComponent>
+        </template>
+        <template #cell-toolName="{ row }">
+          <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.toolName || '*'">{{ row.toolName || '*' }}</span>
+        </template>
+        <template #cell-ruleContent="{ row }">
+          <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.ruleContent ?? ''">{{ row.ruleContent }}</span>
+        </template>
+        <template #cell-actions="{ row }">
+          <RowActions>
+            <RowAction
+              :icon="Pencil"
+              :label="t('permissions.editRule')"
+              :name="row.ruleContent ?? ''"
+              :disabled="busy"
+              data-testid="edit-rule"
+              @click="openEdit(row)"
+            />
+            <RowAction
+              :icon="Trash2"
+              :label="t('common.delete')"
+              :name="row.ruleContent ?? ''"
+              tone="danger"
+              :disabled="busy"
+              data-testid="remove-rule"
+              @click="askRemove(row)"
+            />
+          </RowActions>
+        </template>
+      </DataTable>
 
       <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
       <ListNote>{{ noteParts[0] }}<span class="font-mono">.forebrain/safety.json</span>{{ noteParts[1] }}</ListNote>
@@ -174,6 +154,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { Pencil, Plus, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
@@ -233,6 +214,22 @@ const { rows, total, page, pageSize, q, loading, error: listError, reload } = us
   fetchRules,
   { pageSize: 10 },
 )
+
+/**
+ * The table's columns, at the design's widths: the rule text takes the room the
+ * others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'behavior', header: t('permissions.behavior'), size: 88 },
+  { id: 'toolName', header: t('permissions.tool'), size: 200 },
+  { id: 'ruleContent', header: t('permissions.rulesTitle'), cellClass: 'text-[var(--forebrain-text-2)]' },
+  { id: 'actions', header: t('permissions.colActions'), size: 88, headerClass: 'text-center', cellClass: 'text-right' },
+]
+
+/** A rule's identity across a reload: the three fields that make it. */
+function ruleKey(rule: ProjectPermissionRuleRow): string {
+  return [rule.behavior, rule.toolName, rule.ruleContent].join('\u0000')
+}
 
 const error = computed(() => listError.value || writeError.value)
 

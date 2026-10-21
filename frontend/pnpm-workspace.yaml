@@ -23,6 +23,7 @@ catalog:
   '@codemirror/legacy-modes': 6.5.5
   '@lezer/highlight': 1.2.5
   '@milkdown/crepe': 7.22.3
+  '@tanstack/vue-table': ^8.21.3
   '@vue/test-utils': ^2.5.1
   '@vueuse/core': ^14.1.0
   ai: ^6.0.49

@@ -122,9 +122,7 @@ test('signing in to OpenCode shows the device code, then the catalog it unlocks'
   await page.goto('/providers', { waitUntil: 'networkidle' })
 
   await page.click('[data-testid="providers-connect-opencode"]')
-  // Both ways in are offered before anything starts a flow.
-  await expect(page.locator('[data-testid="provider-login-free"]')).toBeVisible()
-  await page.click('[data-testid="provider-login-start"]')
+  // One way in: the Go device flow starts with the modal.
 
   const code = page.locator('[data-testid="provider-login-code"]')
   await expect(code).toHaveText('ABCD-1234', { timeout: 15_000 })
@@ -182,29 +180,4 @@ test('signing in to ChatGPT shows the authorization link, then its account catal
   await expect(row).toContainText('gpt-5.6')
   // The endpoint comes from the login's own completion answer.
   await expect(row).toContainText('https://chatgpt.com/backend-api/codex')
-})
-
-test('the OpenCode free tier needs no login at all', async ({ page }) => {
-  test.skip(!home, 'E2E_HOME missing')
-  await stubLogin(page, 'opencode', [pending()])
-  await stubCatalog(page, 'opencode', [
-    { id: 'big-pickle', name: 'big-pickle', free: true },
-    { id: 'glm-5.3-flash-free', name: 'glm-5.3-flash-free', free: true },
-  ])
-  await signIn(page)
-  await page.goto('/providers', { waitUntil: 'networkidle' })
-
-  await page.click('[data-testid="providers-connect-opencode"]')
-  await page.click('[data-testid="provider-login-free"]')
-
-  const model = page.locator('[data-testid="provider-login-model-big-pickle"]')
-  await expect(model).toBeVisible({ timeout: 15_000 })
-  // The catalog says which of these work before signing in.
-  await expect(model).toContainText('(free)')
-  await page.click('[data-testid="provider-login-save"]')
-
-  const row = page.locator('[data-provider-row="opencode"]')
-  await expect(row).toBeVisible({ timeout: 15_000 })
-  await expect(row).toContainText('big-pickle')
-  await expect(row).toContainText('https://opencode.ai/inference')
 })

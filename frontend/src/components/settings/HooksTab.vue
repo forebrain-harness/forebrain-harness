@@ -32,56 +32,44 @@
     >
       {{ t('hooks.empty') }}
     </div>
-    <div v-else class="forebrain-table-wrap">
-      <table class="forebrain-table forebrain-table--fixed">
-        <colgroup>
-          <col style="width: 160px" />
-          <col style="width: 160px" />
-          <col />
-          <col style="width: 88px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>{{ t('hooks.eventLabel') }}</th>
-            <th>{{ t('hooks.matcherLabel') }}</th>
-            <th>{{ t('hooks.commandLabel') }}</th>
-            <th class="text-center">{{ t('hooks.colActions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in rows" :key="`${row.event}-${row.matcherIdx}-${row.commandIdx}`" data-testid="hook-row">
-            <td class="font-mono">{{ row.event }}</td>
-            <!-- A hook that matches every tool says so in words; a matcher is
-                 a tool name and reads as one. -->
-            <td :class="row.matcher ? 'font-mono' : ''">{{ row.matcher || t('hooks.matcherAllTools') }}</td>
-            <td>
-              <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.command">{{ row.command }}</span>
-            </td>
-            <td class="text-right">
-              <RowActions>
-                <RowAction
-                  :icon="Pencil"
-                  :label="t('hooks.edit')"
-                  :name="row.event"
-                  :disabled="saving"
-                  data-testid="hook-edit"
-                  @click="openEdit(row)"
-                />
-                <RowAction
-                  :icon="Trash2"
-                  :label="t('common.delete')"
-                  :name="row.event"
-                  tone="danger"
-                  :disabled="saving"
-                  data-testid="hook-remove"
-                  @click="removeRow = row"
-                />
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      v-else
+      :columns="columns"
+      :rows="rows"
+      :row-key="(row) => `${row.event}-${row.matcherIdx}-${row.commandIdx}`"
+      :row-attrs="() => ({ 'data-testid': 'hook-row' })"
+    >
+      <template #cell-event="{ row }"><span class="font-mono">{{ row.event }}</span></template>
+      <!-- A hook that matches every tool says so in words; a matcher is
+           a tool name and reads as one. -->
+      <template #cell-matcher="{ row }">
+        <span :class="row.matcher ? 'font-mono' : ''">{{ row.matcher || t('hooks.matcherAllTools') }}</span>
+      </template>
+      <template #cell-command="{ row }">
+        <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.command">{{ row.command }}</span>
+      </template>
+      <template #cell-actions="{ row }">
+        <RowActions>
+          <RowAction
+            :icon="Pencil"
+            :label="t('hooks.edit')"
+            :name="row.event"
+            :disabled="saving"
+            data-testid="hook-edit"
+            @click="openEdit(row)"
+          />
+          <RowAction
+            :icon="Trash2"
+            :label="t('common.delete')"
+            :name="row.event"
+            tone="danger"
+            :disabled="saving"
+            data-testid="hook-remove"
+            @click="removeRow = row"
+          />
+        </RowActions>
+      </template>
+    </DataTable>
 
     <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
     <ListNote data-testid="hooks-note">{{ t('hooks.description') }}</ListNote>
@@ -148,6 +136,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
@@ -191,6 +180,17 @@ const {
   error: listError,
   reload,
 } = useServerList<HookRowRecord>(fetchHooks, { pageSize: 10 })
+
+/**
+ * The table's columns, at the design's widths: the command takes the room the
+ * others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'event', header: t('hooks.eventLabel'), size: 160 },
+  { id: 'matcher', header: t('hooks.matcherLabel'), size: 160 },
+  { id: 'command', header: t('hooks.commandLabel') },
+  { id: 'actions', header: t('hooks.colActions'), size: 88, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 const error = computed(() => listError.value || actionError.value)
 

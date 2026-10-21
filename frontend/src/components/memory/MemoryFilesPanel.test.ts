@@ -63,14 +63,18 @@ describe('MemoryFilesPanel', () => {
 
     expect(wrapper.find('table.forebrain-table--fixed').exists()).toBe(true)
     expect(wrapper.findAll('thead th').map((th) => th.text())).toEqual(['', '记忆文件', '内容', '创建时间', '更新时间', '操作'])
-    expect(wrapper.findAll('colgroup col').map((col) => col.attributes('style'))).toEqual([
+    // The design's declared widths; the content column takes what they leave, so
+    // its number is the layout's to set (150px is the table's own default when
+    // there is no layout to measure, as in this DOM).
+    const widths = wrapper.findAll('colgroup col').map((col) => col.attributes('style') ?? '')
+    expect(widths.filter((_, index) => index !== 2)).toEqual([
       'width: 40px;',
       'width: 300px;',
-      undefined,
       'width: 150px;',
       'width: 150px;',
       'width: 88px;',
     ])
+    expect(widths[2]).toMatch(/^width: \d+px;$/)
     expect(wrapper.findAll('[data-memory-file]')).toHaveLength(2)
 
     // No toolbar of its own: no search box, no sort dropdown, no text button.

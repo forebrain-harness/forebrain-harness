@@ -217,7 +217,17 @@
   .tb th { text-align: left; font-weight: 600; color: var(--text-2); background: var(--subtle); padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
   .tb td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
   .tb tr:last-child td { border-bottom: 0; }
-  .tb-wrap { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .tb-wrap { border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; overflow-y: hidden; }
+  /* 2026-10-21: a column's width is the person's to set. The handle sits on the
+     header's trailing edge — drag it wider, double-click it to fit the column to
+     its content — and the width lives for the session only (a reload is the
+     design's width again). Shown here on one table; every migrated list gets it. */
+  .tb.rz-tb { table-layout: fixed; }
+  .tb.rz-tb > thead > tr > th, .tb.rz-tb > tbody > tr > td { vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tb.rz-tb > thead > tr > th { position: relative; }
+  .tb.rz-tb > thead > tr > th::after { content: ""; position: absolute; top: 0; right: 0; width: 2px; height: 100%; background: var(--line); }
+  .tb.rz-tb > thead > tr > th:hover::after { background: var(--brand); }
+  .tb.rz-tb > thead > tr > th::before { content: ""; position: absolute; top: 0; right: 0; z-index: 1; width: 9px; height: 100%; cursor: col-resize; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; font-size: 12.5px; }
   .kv dt { color: var(--muted); } .kv dd { margin: 0; }
   .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
@@ -1245,8 +1255,15 @@
   </header>
 
   <section class="iter" aria-label="本轮迭代">
-    <h2>本轮迭代（2026-10-21）：模型服务也可以登录进来——OpenCode 与 ChatGPT</h2>
+    <h2>本轮迭代（2026-10-21）：表格列宽可以拖、双击按内容自适应；分页换成 shadcn-vue；模型服务也可以登录进来</h2>
     <ul>
+      <li><b>表格的列宽由你决定（owner 2026-10-21）</b>：鼠标放到表头右边缘会出现一条 2px 竖线、光标变成左右箭头，拖动就加宽这一列，右侧的列跟着让位；同一个位置双击，这一列按内容自适应——最长的那一格正好放得下，不截断也不撑满整屏。示意见“模型服务”：那个表的表头右侧就是手柄。</li>
+      <li><b>列宽只在本次会话有效</b>：刷新页面就回到设计稿的宽度，不写 localStorage，也不存到服务端。表宽于容器时横向滚动，不再压缩单元格。</li>
+      <li>这次只做“模型服务”一张表，其余十八张下一轮一起换；换表只为拿到列宽与自适应，<b>不新增排序</b>——今天能排序的仍然只有项目、项目会话、记忆文件三处（它们的接口本来就认 sort），其余列表端点会忽略 sort。</li>
+      <li><b>所有表都换成同一个组件（owner 2026-10-21）</b>：模型服务、工具、权限、规则、技能、MCP、子代理、定时任务（含历史）、记忆文件、项目、项目会话、项目规则/权限/通道/LSP、设置里的钩子/LSP、工坊评测——二十张表现在都走 shadcn-vue 的 table 原语加同一份列宽/自适应/排序状态机。稿面看不出差别（宽度、字号、行高、省略号、图标按钮都还是原样），换掉的是底下的实现：列宽可拖、双击按内容自适应、表头分隔线与 hover 一致；其中能排序的仍然只有项目、项目会话、记忆文件三处，其余表头没有排序箭头。</li>
+      <li><b>分页用 shadcn-vue 的 pagination（owner 2026-10-21）</b>：表下方的 共 N 条 / 每页条数 / 上一页 / 页码 / 下一页 里，页码那一段是库组件（reka-ui 在底下），页数多少、当前页两侧各留一个、首尾与省略号怎么排、上一页下一页什么时候禁用，都由它算——七页以内全列出；超过时列出首页、当前页左右各一页、末页，中间的跳跃用 …。外观没变（26px 控件、当前页品牌色实心），只是这份稿里的页码规则同步成了同一个算法。</li>
+      <li><b>已保存的 API Key 占满整行（owner 2026-10-21）</b>：填充模型服务的弹窗里，这一行不再是一枚小徽标加一个小按钮——密钥放进与其它字段同宽同高的框里，更换按钮贴在行的右边缘，整行与上面的 Base URL、下面的 API 格式左右对齐。</li>
+      <li><b>模型服务表不排序</b>（owner 2026-10-21）：这张表的行序就是回退优先级，「主用 / 回退 N」必须与真实链路位置一致，所以表头没有排序箭头，也不会有。</li>
       <li>模型服务页的工具栏在“添加模型服务”右边多了两个登录入口：“连接 OpenCode”“连接 ChatGPT”（新增“模型服务 · 连接 OpenCode（选择）”“连接 OpenCode（授权码）”“连接 OpenCode（选模型）”“连接 ChatGPT（授权页）”“模型服务 · 登录失败”五页）。</li>
       <li>登录会把那条模型服务替你建好，不用填 API Key，也不用自己敲模型 ID；写进表里的顺序与手动添加的一样，第一条主用，其余回退。</li>
       <li>流程跑在 gateway 里，网页上的弹窗只是一直看着它：OpenCode 先给授权码，登录完成后给它的模型目录；ChatGPT 给授权页。弹窗每一步都可以退出，退出没有副作用。</li>
@@ -2889,7 +2906,7 @@
     skills: ['技能 · 主代理', ['本主代理能用的全部技能：本主代理的 + 共享 + 内置。页面只有一层：标题行（说明文案在“技能”右侧，按钮依次是离线安装、在线安装、发现并安装、新建技能、刷新）、搜索行、列表。', '列表上方：离线安装、在线安装（弹窗）、发现并安装、新建技能；本主代理的技能可启停、删除，点“查看”（眼睛图标）进技能工坊改进。状态列显示当前版本号；草稿不能启用；已发布但有改动的标“有未发布的修改”，上游有新版本的标“有更新”。（本轮改动）', '设置里的共享技能库没有工坊，只有离线安装与在线安装。']],
     subagents: ['子代理 · 主代理', ['当前主代理的子代理配置（owner 2026-10-18）：harness 内置的 10 个 + 你给它自定义的；不再是运行中的子代理列表（运行中的看对话里的卡片、右侧抽屉与工作台概览）。', '表格上方右侧、“新建子代理”左边是当前主代理的“子代理功能”开关：没改过时跟随全局设置（设置 → 子代理），在这里切换只对这个主代理生效。它只和各行的启用开关联动：关闭时把所有子代理的启用改为禁用，开启时全部改为启用；单独打开某一行会把开关打开，最后一行被关掉时开关随之关闭。表格本身不变灰。', '表格：子代理（名称、说明，提示词改写过的标“已改写”）、类型（内置 / 自定义 / 系统）、模型（跟随主代理或指定的模型 · 思考强度）、工具（只读 / 可编辑 / 指定 N 个）、操作（启用开关在最前，然后是编辑 / 删除或查看；没有状态列）。顺序：自定义 → 内置 → 系统（owner 2026-10-18）。', '自定义：新建 / 编辑在右侧抽屉里（与 MCP 一样），删除用确认框；抽屉里填名称、模型、思考强度、运行方式（可继续对话 / 完成即结束）、说明（主代理靠它决定何时派发）、工具权限三档（只读 / 可编辑 / 指定工具）、系统提示词。保存在 forebrain.yaml 的主代理下。', '内置（可派发）：不能删；可以为当前主代理指定模型与思考强度、停用、改写提示词（标“已改写”，可恢复默认）；工具权限固定。提示词框里是内置提示词的完整原文（与代码里的一字不差），改写过的显示改写后的内容。', '系统：计划审阅、/goal 目标检查、自动审批、caveman 技能的 3 个，只能查看（右侧抽屉，标“只读”），提示词显示完整原文。']],
     mcp: ['MCP · 主代理', ['三层，每页只增删改自己那一层：设置 · MCP 只看、只改全局；本页先列本主代理的、再列全局的，只增删改主代理的，不列项目 MCP；项目空间的 MCP 标签依次列出项目、主代理、全局的，只增删改项目的。不同名叠加，同名高层整条覆盖（项目 > 主代理 > 全局），不做字段级混合。', '与技能页同一套界面：标题行（说明 + 添加 MCP 服务 + 刷新）、搜索行、表格（MCP 服务 / 来源 / 命令或地址 / 类型 / 状态 / 操作）。主代理的行可启停、编辑、删除；全局行只读，操作列跳到“设置 → MCP”。被主代理覆盖的全局条目不在本页出现，在设置 · MCP 里标“未运行 · 被主代理 … 覆盖”。', '表格固定列宽、每格一行，下方是分页。状态列只放徽标：已连接 · N 个工具 / 已允许 · N 个工具 / 待确认 / 已禁用（界面，下个会话起）/ 配置里已禁用 / 连接失败 / 未运行 · 被覆盖；失败原文与 enabled: false 在悬停提示和抽屉里。启用开关在操作列最前面，只对能改的行出现（其他行留出同样宽度，图标对齐）。', '编辑、添加都在右侧抽屉里，表单含全部字段：名称、类型、命令或地址、必需、启用、连接超时、请求超时（都按秒；connectionTimeoutMs 这类外来拼写不做别名，也不读）。高级按类型给请求头或环境变量、OAuth、SSE、SHA256 校验、默认工具审批模式。表单底部“测试连接”用当前表单值试连，不写配置、不关抽屉；保存失败（400/409）的原文显示在抽屉里；抽屉底部是“取消 / 保存”。', '只能查看的行操作栏只有“查看”：同一个抽屉以只读表单展示全部字段（含来源、状态与失败原文），底部只有“取消”，表单下方有一个跳到能改它的页面的链接。', '生效列表在新会话启动时冻结，任何改动都是“新会话生效”。']],
-    providers: ['模型服务 · 主代理', ['按顺序尝试的模型服务：第一条主用，其余回退。列表上方“添加模型服务”，每行“编辑”都在弹窗里。', '模型框可以填多个模型 ID：输入英文逗号即生成一个标签，也可以点下方该服务商的模型快速加入。', 'API Key 可以直接输入或粘贴，每输入一个字符立即显示为圆点；已保存的只显示后四位，点“更换”重新输入。', '“添加模型服务”右边是两个登录入口：“连接 OpenCode”“连接 ChatGPT”。登录会把模型服务替你建好，不用填 API Key：OpenCode 的免费模型不登录也能用，Go 订阅要先登录（在打开的页面里填弹窗给的授权码，回来再选一个模型，点“保存并启用”就写进这张表）；ChatGPT 的授权页要在这台运行 gateway 的电脑上打开。登录失败（比如授权码过期）时弹窗给出“重新发起登录”。']],
+    providers: ['模型服务 · 主代理', ['按顺序尝试的模型服务：第一条主用，其余回退。列表上方“添加模型服务”，每行“编辑”都在弹窗里。', '模型框可以填多个模型 ID：输入英文逗号即生成一个标签，也可以点下方该服务商的模型快速加入。', 'API Key 可以直接输入或粘贴，每输入一个字符立即显示为圆点；已保存的只显示后四位，点“更换”重新输入。', '弹窗是一层表单，每个字段各占一行，没有“高级”折叠：服务商、Base URL、模型、API Key 之后就是 API 格式（下拉选 Anthropic Messages、Chat Completions 或 Responses，不用手敲路径）和参数（JSON，代码编辑器；不是 JSON 对象时“保存”不可用）。', '服务商从下拉框里选，基地址不用记：选中后 Base URL 自动填成该服务商的默认地址（要连自己的镜像再改）。', '“添加模型服务”右边是两个登录入口：“连接 OpenCode”“连接 ChatGPT”。登录会把模型服务替你建好，不用填 API Key：OpenCode 的免费模型不登录也能用，Go 订阅要先登录（在打开的页面里填弹窗给的授权码，回来再选一个模型，点“保存并启用”就写进这张表）；ChatGPT 的授权页要在这台运行 gateway 的电脑上打开。登录失败（比如授权码过期）时弹窗给出“重新发起登录”。']],
     tools: ['工具 · 主代理', ['本主代理运行时实际暴露给模型的工具，表格列出名称、说明、分类、只读 / 有副作用，可筛选、分页；操作栏的图标按钮“查看入参”在该行下方展开入参表，再点“收起”。']],
     permissions: ['权限 · 主代理', ['本主代理已记住的授权规则（保存在主代理工作区）。', '列表上方两个按钮：“判定验证”和“添加规则”，都在弹窗里；每行可编辑、删除。动作、工具是选择框，只有规则内容需要输入。项目空间的权限标签同一套。', '全局默认审批模式在“设置 → 审批默认”，项目规则在项目空间，会话内的临时切换在对话输入框旁。']],
     memories: ['记忆 · 主代理', ['本主代理的记忆文件分页列表：按内容关键词搜索；点“创建时间”“更新时间”列头排序——当前排序列的箭头高亮，再点切换新→旧 / 旧→新，默认按更新时间新→旧。', '每个文件点“编辑”在弹窗里打开（本轮改动），可以单个删除或多选批量删除，也可以重置全部。核心文件 MEMORY.md、memory_summary.md 只能编辑或清空，不能删除。', '项目空间的“记忆”标签是同一套界面，只列本项目的记忆文件。']],
@@ -5037,13 +5054,29 @@
     size = S.pgSize[key] || size || 10;
     var pages = Math.max(1, Math.ceil(total / size)), cur = Math.min(S.pg[key] || 1, pages), sizes = [10, 20, 50], nums = [];
     if (sizes.indexOf(size) < 0) { sizes.push(size); sizes.sort(function (a, b) { return a - b; }); }
+    // 2026-10-21: the range is reka-ui's, which is what the app draws now
+    // (shadcn-vue pagination, siblingCount 1, showEdges): up to seven pages are
+    // listed whole, otherwise first / gap / the current page and one neighbour
+    // each side / gap / last, with the slots filled from the near end.
     if (pages <= 7) { for (var i = 1; i <= pages; i++) nums.push(i); }
     else {
-      nums.push(1);
-      if (cur > 3) nums.push(0);
-      for (var j = Math.max(2, cur - 1); j <= Math.min(pages - 1, cur + 1); j++) nums.push(j);
-      if (cur < pages - 2) nums.push(0);
-      nums.push(pages);
+      var left = Math.max(cur - 1, 1), right = Math.min(cur + 1, pages);
+      var itemCount = Math.min(2 * 1 + 5, pages) - 2;
+      var showLeft = left > 3 && Math.abs(pages - itemCount) > 2 && Math.abs(left - 1) > 2;
+      var showRight = right < pages - 2 && Math.abs(pages - itemCount) > 2 && Math.abs(pages - right) > 2;
+      if (!showLeft && showRight) {
+        for (var a = 1; a <= itemCount; a++) nums.push(a);
+        nums.push(0, pages);
+      } else if (showLeft && !showRight) {
+        nums.push(1, 0);
+        for (var b = pages - itemCount + 1; b <= pages; b++) nums.push(b);
+      } else if (showLeft && showRight) {
+        nums.push(1, 0);
+        for (var c = left; c <= right; c++) nums.push(c);
+        nums.push(0, pages);
+      } else {
+        for (var d = 1; d <= pages; d++) nums.push(d);
+      }
     }
     return '<div class="row pager" role="navigation" aria-label="分页"><span class="hint">共 ' + total + ' 条</span><span style="flex:1"></span>' +
       '<span class="pager-size"><select data-pgsize="' + key + '" aria-label="每页条数">' + sizes.map(function (n) { return '<option value="' + n + '"' + (n === size ? ' selected' : '') + '>每页 ' + n + ' 条</option>'; }).join('') + '</select>' + ic('chevron-down') + '</span>' +
@@ -5301,9 +5334,17 @@
       var cat = { deepseek: ['deepseek-v4', 'deepseek-v4-flash', 'deepseek-reasoner'], openai: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'], anthropic: ['claude-opus-5-5', 'claude-sonnet-5'] }[prov] || [];
       var url = { deepseek: 'https://api.deepseek.com', openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com' }[prov];
       title = k === 'provnew' ? '添加模型服务' : '编辑模型服务 · ' + (pi === 0 ? '主用' : '回退 ' + pi); wide = true; ok = k === 'provnew' ? '添加' : '保存';
-      body = '<div class="grid2"><label class="lb">服务商' + sel(['deepseek', 'openai', 'anthropic', 'zhipu', 'moonshot', 'dashscope'], prov) + '</label><label class="lb">Base URL<input class="field mono" id="pv-url" value="' + url + '"></label></div>' + modelsField(pi, cat) +
-        '<label class="lb">API Key' + (pi === 0 && !S.keyEdit ? '<div class="row"><span class="badge ok">已保存 ••••3f9a</span><button type="button" class="btn sm" data-act="keyedit">更换</button></div>' : '<input class="field mono" type="password" id="pv-key" autocomplete="new-password" placeholder="输入或粘贴 API Key">') + '</label>' +
-        '<span class="hint">API Key 保存到 ~/.forebrain/.env，配置文件里只写引用。</span>';
+      // 每个字段各占一行：Base URL 不跟服务商并排（owner 2026-10-21）
+      body = '<label class="lb">服务商' + sel(['deepseek', 'openai', 'anthropic', 'zhipu', 'moonshot', 'dashscope'], prov) + '</label>' +
+        '<label class="lb">Base URL<input class="field mono" id="pv-url" value="' + url + '"></label>' + modelsField(pi, cat) +
+        // 已保存的密钥占满整行，和它替换掉的那个输入框同宽同高；更换按钮贴在右边缘（owner 2026-10-21）
+        '<label class="lb">API Key' + (pi === 0 && !S.keyEdit
+          ? '<div class="row" style="width:100%;gap:8px"><span class="field mono" style="flex:1;min-width:0;height:34px;display:flex;align-items:center;color:var(--text-2)">••••3f9a</span><button type="button" class="btn" style="height:34px" data-act="keyedit">更换</button></div>'
+          : '<input class="field mono" type="password" id="pv-key" autocomplete="new-password" placeholder="输入或粘贴 API Key">') + '</label>' +
+        // 单层表单：API 格式是下拉框，参数是 JSON 代码编辑器（owner 2026-10-21）
+        '<label class="lb">API 格式' + sel(['Anthropic Messages（/v1/messages）', 'Chat Completions（/chat/completions）', 'Responses（/responses）'], 'Chat Completions（/chat/completions）') + '</label>' +
+        '<label class="lb">参数（JSON）</label><div class="code" style="min-height:96px"><span class="k">"temperature"</span>: <span class="v">0.2</span></div>' +
+        '<span class="hint">按 JSON 对象写，原样发给服务商；不是对象时“保存”不可用。</span>';
     } else if (k === 'ruleadd' || k === 'ruleedit2') {
       var rr = k === 'ruleedit2' ? (f.a === 'project' ? projRules : agentRules)[Number(f.b)] : ['允许', 'shell', ''];
       title = k === 'ruleadd' ? '添加规则' : '编辑规则'; ok = k === 'ruleadd' ? '添加' : '保存';
@@ -5877,12 +5918,12 @@
     },
     providers: function () {
       var p = tenants[S.tenant].provider;
-      var rows = [['主用', p[0], S.models[0].join('、'), p[0] === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1', '<span class="badge ok">已保存 ••••3f9a</span>'], ['回退 1', 'openai', S.models[1].join('、'), 'https://api.openai.com/v1', '<span class="badge warn">未设置</span>']];
+      var rows = [['主用', p[0], S.models[0].join('、'), p[0] === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1', '<span class="badge ok">••••3f9a</span>'], ['回退 1', 'openai', S.models[1].join('、'), 'https://api.openai.com/v1', '<span class="badge warn">未设置</span>']];
       return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索服务商或模型">', '<button type="button" class="btn sm pri" data-fm="provnew">' + ic('plus') + '添加模型服务</button>' +
         // two services are signed in to rather than typed in; they sit next to 添加模型服务 and ahead of 刷新 (owner 2026-10-21)
         '<button type="button" class="btn sm" data-fm="provconnect">' + ic('log-in') + '连接 OpenCode</button>' + '<button type="button" class="btn sm" data-fm="provchatgpt">' + ic('log-in') + '连接 ChatGPT</button>' +
         '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
-        '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:70px">顺序</th><th>服务商</th><th>模型</th><th>Base URL</th><th>API Key</th><th class="c" style="width:110px">操作</th></tr></thead><tbody>' +
+        '<div class="tb-wrap"><table class="tb rz-tb"><thead><tr><th style="width:70px">顺序</th><th style="width:140px">服务商</th><th>模型</th><th style="width:220px">Base URL</th><th style="width:150px">API Key</th><th class="c" style="width:110px">操作</th></tr></thead><tbody>' +
         rows.map(function (r, i) { return '<tr><td><span class="badge' + (i ? ' gray' : '') + '">' + r[0] + '</span></td><td>' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="mono hint">' + r[3] + '</td><td>' + r[4] + '</td><td class="r">' + rowActs([i ? act('arrow-up', '上移', '', '', r[1]) : actSlot(), act('pencil', '编辑', 'data-fm="provedit:' + i + '"', '', r[1]), act('trash-2', '删除', '', 'dgr', r[1])]) + '</td></tr>'; }).join('') +
         '</tbody></table></div>' + pager(rows.length, 10, 'providers') + tabNote('按顺序尝试：第一条主用，其余回退。') + '</div>';
     },

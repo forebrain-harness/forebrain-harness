@@ -1,5 +1,5 @@
 <template>
-  <div class="forebrain-pager" role="navigation" :aria-label="t('list.pagerAria')" data-testid="table-pager">
+  <div class="forebrain-pager" data-testid="table-pager">
     <span class="forebrain-list-note" data-testid="pager-total">{{ t('list.total', { total }) }}</span>
     <span class="flex-1" />
     <span class="forebrain-pager-size">
@@ -13,49 +13,53 @@
       </select>
       <ChevronDown aria-hidden="true" />
     </span>
-    <button
-      type="button"
-      class="forebrain-btn forebrain-btn--outline forebrain-btn--sm"
-      data-testid="pager-prev"
-      :disabled="current === 1"
-      @click="go(current - 1)"
+    <Pagination
+      :page="current"
+      :items-per-page="pageSize"
+      :total="total"
+      :sibling-count="1"
+      show-edges
+      :aria-label="t('list.pagerAria')"
+      class="forebrain-pagination"
+      @update:page="go"
     >
-      <ChevronLeft class="size-3.5" aria-hidden="true" />{{ t('list.prev') }}
-    </button>
-    <template v-for="(number, index) in numbers" :key="`${number}-${index}`">
-      <span v-if="number === 0" class="forebrain-pg-gap">…</span>
-      <button
-        v-else
-        type="button"
-        class="forebrain-pg-num"
-        :class="{ 'is-on': number === current }"
-        :aria-current="number === current ? 'page' : undefined"
-        :aria-label="t('list.pageAria', { n: number })"
-        :data-testid="`pager-page-${number}`"
-        :disabled="number === current"
-        @click="go(number)"
-      >
-        {{ number }}
-      </button>
-    </template>
-    <button
-      type="button"
-      class="forebrain-btn forebrain-btn--outline forebrain-btn--sm"
-      data-testid="pager-next"
-      :disabled="current === pages"
-      @click="go(current + 1)"
-    >
-      {{ t('list.next') }}<ChevronRight class="size-3.5" aria-hidden="true" />
-    </button>
+      <PaginationContent v-slot="{ items }" class="forebrain-pagination-content">
+        <PaginationPrevious class="forebrain-pg-step" data-testid="pager-prev" :aria-label="t('list.prev')">
+          <ChevronLeft class="size-3.5" aria-hidden="true" />{{ t('list.prev') }}
+        </PaginationPrevious>
+        <template v-for="(item, index) in items as PageItem[]" :key="`${item.type}-${index}`">
+          <PaginationEllipsis v-if="item.type === 'ellipsis'" class="forebrain-pg-gap">…</PaginationEllipsis>
+          <PaginationItem
+            v-else
+            :value="item.value"
+            :is-active="item.value === current"
+            class="forebrain-pg-num"
+            :class="{ 'is-on': item.value === current }"
+            :data-testid="`pager-page-${item.value}`"
+            :aria-label="t('list.pageAria', { n: item.value })"
+          >
+            {{ item.value }}
+          </PaginationItem>
+        </template>
+        <PaginationNext class="forebrain-pg-step" data-testid="pager-next" :aria-label="t('list.next')">
+          {{ t('list.next') }}<ChevronRight class="size-3.5" aria-hidden="true" />
+        </PaginationNext>
+      </PaginationContent>
+    </Pagination>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
  * The pager under every table (plan 071): 共 N 条 on the left, then the page
- * size and the page numbers on the right, all 26px tall. The prototype's page
- * list: every page when there are seven or fewer, otherwise the first, the
- * last, the current one and its neighbours, with … for the stretches left out.
+ * size and the page numbers on the right, all 26px tall.
+ *
+ * The pagination itself is shadcn-vue's (reka-ui underneath): the page range —
+ * every page when there are seven or fewer, otherwise the first, the last, the
+ * current one and one neighbour each side with … for the stretches left out —
+ * and the two step buttons' disabled states are the component's, not this
+ * file's. What is ours is the wording, the 26px look from the design and the
+ * page-size select beside it.
  *
  * A single page still renders a pager — the row also says how many items there
  * are — and a page size outside 10/20/50 joins the options rather than leaving
@@ -63,8 +67,19 @@
  */
 import { computed } from 'vue'
 import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-vue-next'
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationNext,
+  PaginationPrevious,
+} from '@repo/shadcn-vue/components/ui/pagination'
 
 import { useI18n } from '@/locales'
+
+/** One entry of the page range: a page number, or the gap between two runs. */
+type PageItem = { type: 'page'; value: number } | { type: 'ellipsis' }
 
 const props = defineProps<{
   total: number
@@ -81,22 +96,9 @@ const { t } = useI18n()
 
 const PAGE_SIZES = [10, 20, 50]
 
-/** 0 in the page list stands for the … between two stretches of pages. */
-const GAP = 0
-
-const pages = computed(() => Math.max(1, Math.ceil(props.total / Math.max(1, props.pageSize))))
-const current = computed(() => Math.min(Math.max(1, props.page), pages.value))
-
-const numbers = computed<number[]>(() => {
-  const total = pages.value
-  const here = current.value
-  if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1)
-  const list = [1]
-  if (here > 3) list.push(GAP)
-  for (let number = Math.max(2, here - 1); number <= Math.min(total - 1, here + 1); number++) list.push(number)
-  if (here < total - 2) list.push(GAP)
-  list.push(total)
-  return list
+const current = computed(() => {
+  const pages = Math.max(1, Math.ceil(props.total / Math.max(1, props.pageSize)))
+  return Math.min(Math.max(1, props.page), pages)
 })
 
 const sizeOptions = computed(() =>
@@ -106,7 +108,7 @@ const sizeOptions = computed(() =>
 )
 
 function go(page: number): void {
-  if (page < 1 || page > pages.value || page === current.value) return
+  if (page < 1 || page === current.value) return
   emit('update:page', page)
 }
 

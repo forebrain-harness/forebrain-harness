@@ -1,0 +1,1 @@
+const a={keyword:"#00a8c8",namespace:"#f92672",name:"#111111",green:"#75af00",tag:"#f92672",literal:"#ae81ff",string:"#d88200",escape:"#8045ff",operator:"#f92672",punctuation:"#111111",comment:"#75715e",error:"#960050",background:"#fafafa"};export{a as m};

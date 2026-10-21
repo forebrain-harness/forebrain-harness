@@ -421,6 +421,7 @@
 | [092-image-heal-on-the-compaction-chain](092-image-heal-on-the-compaction-chain.md) | 图像自愈没装在压缩/总结链上 ⇒ 含被拒图片的会话压不动、历史涨到撞窗口；头解析失败的坏图被原样上送（注释说"后面的 decode 会报"但那条路径没有 decode）；末档重编码把缩放系数硬报成 8 | Bug Fix | DONE | P2 | M | MED |
 | [093-dead-code-from-this-batch](093-dead-code-from-this-batch.md) | 删掉从不挂载的 `PendingActionsPanel`（与 `ApprovalCard` 重复 ~200 行、已漂移、还带 6 条绿测试）、无人读的 `ApprovalFacts.path`、无人 inject 的 `FileTreeFolderKey`、从不 emit 的 `activate`、3 对零引用文案键与 `reviewModelLabel`；顺带修中文界面里的 `暂无 live agents`、硬编码英文 aria-label、TUI 空数组参数只印标签 | Tech Debt / i18n | DONE | P3 | S | LOW |
 | [094-remember-image-refusal-per-session-and-model](094-remember-image-refusal-per-session-and-model.md) | provider 拒图不再静默也不再白送：**当场**发一条 `image_rejected` run event（两端各一行，live 与回放逐字相同，固定 id `image-rejected:<run>` 保证一轮只一条），并把这次拒绝记进会话（owner 2026-10-21 裁决：**粗档 provider+model**、**落库**，schema v15→v16 新增 `fb_session_image_refusals`），既有 `ImageTurnRefusal` 在"请求确实会带图"时提前拦下并返回 `ImageRejectedCode`；web 一个提示块按 `unsupported`/`rejected`/`remembered` 三种措辞。终止永久 2× 请求 | Bug Fix / Cost | DONE | **P1** | M–L | MED |
+| [095-modelsdev-reasoning-options](095-modelsdev-reasoning-options.md) | `models.json` **按上游最新数据整体刷新**（362→**732** 条：canonical 568 + 注入的 opencode 131 / opencode-go 33；文件 500KB→941KB；`scripts/update-models-asset.sh` 唯一入口，键排序后每次 diff 只落变化条目）；**TUI 与 web 的推理强度只取它的 `reasoning_options`**（308 条带 options；删 `ReasoningEffortLevels` 四档兜底与 opencode 的 50 条手抄表；`anthropic-sdk-go v1.80` 已支持 `xhigh` 故不裁；toggle/budget 或上游无数据的不出页）；解析上游 `type`，把 **63 条非 chat**（whisper / gpt-image / veo…）从选择器投影里滤掉（今天已漏 30 条），provider 推断跳过登录型 provider；**home 的 `models.json`：缺失时 `Install` 写一份完整副本、已存在时一个字节都不碰**，载入时它按字段覆盖 shipped 基底 （用户改的永远赢；老副本没有的 `type`/`reasoning_options` 自动由 shipped 补上，所以新能力到达存量安装而无需改写用户文件）。ChatGPT 保留账号后端返回的档位 | Feature / Data | TODO | **P1** | L | MED–HIGH |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 
@@ -884,8 +885,11 @@ owner 2026-10-14 裁决「**Out of scope 里的必须加入本期计划**」，�
 
 ## 下一步
 
-0. **可执行队列只剩一份**：`010-plan-write-guard-real-paths`（P2，S）——2026-10-21 `review-plan` 已重写并在 HEAD 上验证
-   过"四红 → 四绿"，可直接派发；执行时按计划顶部的 drift check（基线 `7742bde`）先核。其余计划表里没有 TODO / IN_PROGRESS / BLOCKED。
+0. **可执行队列**：`010-plan-write-guard-real-paths`（P2，S）与 `095-modelsdev-reasoning-options`（P1，M）。
+   `010`：2026-10-21 `review-plan` 已重写并在 HEAD 上验证过"四红 → 四绿"，可直接派发；执行时按计划顶部的
+   drift check（基线 `7742bde`）先核。
+   `095`：2026-10-21 起草、未执行；补 models.dev `reasoning_options` 这一列（派生资产 + 唯一访问器），与 010 无依赖。
+   其余计划表里没有 TODO / IN_PROGRESS / BLOCKED。
 1. **已收口的批次**（不要再派发）：051 / 048 / 049 / 050 / 052 的 schema 迁移性能批次；071–094 的 web 与审批卡批次
    （已落 `dev`，见顶部）；001-frontend（REJECTED）、086（REJECTED）。
 2. **待 owner 给方向的**：本文「已审核但未计划的发现」里的条目（2026-10-21 分支审计两条性能项 + 2026-10-19 的 INV-01 与三条方向建议，

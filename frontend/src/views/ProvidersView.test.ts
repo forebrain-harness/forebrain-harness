@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { defineComponent, h } from 'vue'
 
 import tip from '@/directives/tip'
 import { forebrainApi, type ModelRecord, type ProviderLoginStatus, type ProviderRecord } from '@/lib/api'
@@ -70,7 +71,7 @@ describe('ProvidersView', () => {
     expect(primary.find('.forebrain-badge').text()).toBe('主用')
     expect(primary.text()).toContain('deepseek-v4')
     expect(primary.text()).toContain('https://api.deepseek.com')
-    expect(primary.find('[data-testid="provider-key-saved-0"]').text()).toBe('已保存 ••••3f9a')
+    expect(primary.find('[data-testid="provider-key-saved-0"]').text()).toBe('••••3f9a')
 
     const fallback = wrapper.find('[data-provider-row="openai"]')
     expect(fallback.text()).toContain('回退 1')
@@ -136,6 +137,219 @@ describe('ProvidersView', () => {
 
     // Two clicks: gamma passes beta and then alpha.
     expect(order).toEqual(['gamma', 'alpha', 'beta'])
+  })
+})
+
+/**
+ * The add/edit form: the API format and the provider's request params sit in the
+ * form itself, the format is picked from a list instead of typed, and the params
+ * are a JSON editor whose text has to be an object before the modal can save —
+ * the server refuses anything else, and by then the modal would be gone.
+ *
+ * CodeMirror cannot lay out in jsdom, so the editor is replaced with a textarea
+ * carrying the same v-model; what it renders is the e2e suite's business.
+ */
+vi.mock('@/components/providers/ParamsJsonField.vue', () => ({
+  // `__esModule` is what the async loader looks at before it unwraps `default`;
+  // without it the module namespace itself is handed to Vue as the component.
+  __esModule: true,
+  default: defineComponent({
+    name: 'ParamsJsonField',
+    props: {
+      modelValue: { type: String, default: '' },
+      invalid: { type: Boolean, default: false },
+      ariaLabel: { type: String, default: '' },
+    },
+    emits: ['update:modelValue'],
+    setup(props, { emit }) {
+      return () =>
+        h('textarea', {
+          'data-testid': 'provider-params-editor',
+          value: props.modelValue,
+          onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLTextAreaElement).value),
+        })
+    },
+  }),
+}))
+
+async function mountModalPage(): Promise<VueWrapper> {
+  // Attached to the body: the modal teleports there, so its fields are only in
+  // the document when the page itself is.
+  const wrapper = mount(ProvidersView, { global: { directives: { tip } }, attachTo: document.body })
+  await flushPromises()
+  return wrapper
+}
+
+/** The modal teleports to the body, so its fields are read from the document. */
+function field<T extends HTMLElement>(testid: string): T {
+  const el = document.querySelector<T>(`[data-testid="${testid}"]`)
+  if (!el) throw new Error(`no [data-testid="${testid}"] in the document`)
+  return el
+}
+
+async function click(testid: string): Promise<void> {
+  field(testid).click()
+  await flushPromises()
+}
+
+async function type(testid: string, value: string): Promise<void> {
+  const el = field<HTMLInputElement | HTMLTextAreaElement>(testid)
+  el.value = value
+  el.dispatchEvent(new Event('input'))
+  await flushPromises()
+}
+
+async function pick(testid: string, value: string): Promise<void> {
+  const el = field<HTMLSelectElement>(testid)
+  el.value = value
+  el.dispatchEvent(new Event('change'))
+  await flushPromises()
+}
+
+describe('ProvidersView add/edit form', () => {
+  beforeAll(() => setLocale('zh'))
+
+  beforeEach(() => {
+    vi.spyOn(forebrainApi, 'providersPage').mockResolvedValue({ rows: [provider()], total: 1, page: 1, pageSize: 10 })
+    vi.spyOn(forebrainApi, 'providers').mockResolvedValue([provider()])
+    vi.spyOn(forebrainApi, 'saveProviders').mockResolvedValue({ applied: true })
+    vi.spyOn(forebrainApi, 'getModels').mockResolvedValue({
+      records: [loginModel('moonshotai', 'kimi-k3'), loginModel('anthropic', 'claude-sonnet-5')],
+      status: [],
+      providerBaseUrls: { moonshotai: 'https://api.moonshot.ai/v1' },
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    document.body.innerHTML = ''
+  })
+
+  it('flattens the format and the params into the form, with no 高级 fold left', async () => {
+    await mountModalPage()
+    await click('providers-add')
+
+    expect(document.querySelector('.forebrain-modal details')).toBeNull()
+    // The key's storage is the gateway's business, not a line in the form.
+    expect(document.body.textContent).not.toContain('配置文件里只写引用')
+    const format = field<HTMLSelectElement>('provider-api-format')
+    expect(format.tagName).toBe('SELECT')
+    expect([...format.options].map((option) => option.text)).toEqual([
+      'Anthropic Messages（/v1/messages）',
+      'Chat Completions（/chat/completions）',
+      'Responses（/responses）',
+    ])
+    expect(field('provider-params-editor')).toBeTruthy()
+  })
+
+  it('picks the provider from a list and fills the endpoint it is served at', async () => {
+    await mountModalPage()
+    await click('providers-add')
+
+    const providerSelect = field<HTMLSelectElement>('provider-name')
+    expect(providerSelect.tagName).toBe('SELECT')
+    expect(providerSelect.value).toBe('')
+    expect([...providerSelect.options].map((option) => option.text)).toContain('moonshotai')
+
+    await pick('provider-name', 'moonshotai')
+    expect(field<HTMLInputElement>('provider-base-url').value).toBe('https://api.moonshot.ai/v1')
+    // A Chat Completions service starts on the empty path that names it.
+    expect(field<HTMLSelectElement>('provider-api-format').value).toBe('')
+  })
+
+  it('says Anthropic Messages for the providers that speak it', async () => {
+    // The engine builds the Messages client from the provider name whatever
+    // api_path holds, so the form must not claim Chat Completions for it.
+    vi.mocked(forebrainApi.providersPage).mockResolvedValue({
+      rows: [provider({ provider: 'anthropic' })],
+      total: 1,
+      page: 1,
+      pageSize: 10,
+    })
+    await mountModalPage()
+    await click('provider-edit-0')
+
+    expect(field<HTMLSelectElement>('provider-api-format').value).toBe('/v1/messages')
+
+    // Picking one back also selects it, so switching providers cannot leave a
+    // format behind that the new provider does not speak.
+    await pick('provider-name', 'moonshotai')
+    expect(field<HTMLSelectElement>('provider-api-format').value).toBe('')
+    await pick('provider-name', 'anthropic')
+    expect(field<HTMLSelectElement>('provider-api-format').value).toBe('/v1/messages')
+  })
+
+  it('keeps a provider the catalog no longer lists when a row is edited', async () => {
+    vi.mocked(forebrainApi.providersPage).mockResolvedValue({
+      rows: [provider({ provider: 'arcee-ai' })],
+      total: 1,
+      page: 1,
+      pageSize: 10,
+    })
+    await mountModalPage()
+    await click('provider-edit-0')
+
+    const providerSelect = field<HTMLSelectElement>('provider-name')
+    expect(providerSelect.value).toBe('arcee-ai')
+    expect([...providerSelect.options].map((option) => option.text)).toContain('arcee-ai')
+  })
+
+  it('saves the picked format as the row api_path', async () => {
+    await mountModalPage()
+    await click('providers-add')
+
+    await pick('provider-name', 'moonshotai')
+    await type('provider-base-url', 'https://api.openai.com/v1')
+    await type('model-chips-input', 'gpt-5')
+    field('model-chips-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await flushPromises()
+    await pick('provider-api-format', '/responses')
+    await click('provider-save')
+
+    const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
+    expect(saved.map((entry) => entry.provider)).toEqual(['deepseek', 'moonshotai'])
+    expect(saved[1].api_path).toBe('/responses')
+  })
+
+  it('keeps a path the list does not know instead of dropping it on the next edit', async () => {
+    // A compatible endpoint serving its chat API under a path of its own: the
+    // dropdown has no name for it, but losing it would change the row's
+    // behaviour without anyone asking.
+    vi.mocked(forebrainApi.providersPage).mockResolvedValue({
+      rows: [provider({ apiPath: '/v1/chat/completions' })],
+      total: 1,
+      page: 1,
+      pageSize: 10,
+    })
+    vi.mocked(forebrainApi.providers).mockResolvedValue([provider({ apiPath: '/v1/chat/completions' })])
+    await mountModalPage()
+    await click('provider-edit-0')
+
+    const format = field<HTMLSelectElement>('provider-api-format')
+    expect(format.value).toBe('/v1/chat/completions')
+    expect([...format.options].map((option) => option.text)).toContain('自定义（/v1/chat/completions）')
+
+    await type('provider-base-url', 'https://compatible.example.test/v1')
+    await click('provider-save')
+
+    const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
+    expect(saved[0].api_path).toBe('/v1/chat/completions')
+  })
+
+  it('refuses params that are not a JSON object, and says why', async () => {
+    await mountModalPage()
+    await click('providers-add')
+
+    await type('provider-params-editor', '{"temperature":')
+    expect(field('provider-params-error').textContent?.trim()).toBe('JSON 格式有误')
+    expect(field<HTMLButtonElement>('provider-save').disabled).toBe(true)
+
+    await type('provider-params-editor', '[]')
+    expect(field('provider-params-error').textContent?.trim()).toBe('参数必须是 JSON 对象')
+
+    await type('provider-params-editor', '{"temperature":0.2}')
+    expect(document.querySelector('[data-testid="provider-params-error"]')).toBeNull()
+    expect(field<HTMLButtonElement>('provider-save').disabled).toBe(false)
   })
 })
 
@@ -221,12 +435,8 @@ describe('ProvidersView sign-in', () => {
     await wrapper.find('[data-testid="providers-connect-opencode"]').trigger('click')
     await flushPromises()
 
-    // The free tier comes before anything starts a login.
-    expect(wrapper.find('[data-testid="provider-login-free"]').exists()).toBe(true)
-    expect(forebrainApi.startProviderLogin).not.toHaveBeenCalled()
-
-    await wrapper.find('[data-testid="provider-login-start"]').trigger('click')
-    await flushPromises()
+    // One way in: the Go device flow starts with the modal, with no choice of
+    // plans in front of it.
     expect(forebrainApi.startProviderLogin).toHaveBeenCalledWith('opencode')
 
     // The first poll is a moment after the start, before the code exists.
@@ -281,7 +491,6 @@ describe('ProvidersView sign-in', () => {
 
     // One way in, so the flow starts with the modal.
     expect(forebrainApi.startProviderLogin).toHaveBeenCalledWith('chatgpt')
-    expect(wrapper.find('[data-testid="provider-login-free"]').exists()).toBe(false)
 
     await tick()
     expect(wrapper.find('[data-testid="provider-login-open"]').attributes('disabled')).toBeUndefined()
@@ -296,32 +505,6 @@ describe('ProvidersView sign-in', () => {
       provider: 'chatgpt',
       models: ['gpt-5.6'],
       base_url: 'https://chatgpt.com/backend-api/codex',
-    })
-  })
-
-  it('takes the free tier without a login', async () => {
-    vi.mocked(forebrainApi.getModels).mockResolvedValue({
-      records: [loginModel('opencode', 'big-pickle', { modelName: 'big-pickle (free)', isDefault: true })],
-      status: [],
-    })
-
-    const wrapper = await mountConnectPage()
-    await wrapper.find('[data-testid="providers-connect-opencode"]').trigger('click')
-    await flushPromises()
-    await wrapper.find('[data-testid="provider-login-free"]').trigger('click')
-    await flushPromises()
-
-    expect(forebrainApi.startProviderLogin).not.toHaveBeenCalled()
-    expect(forebrainApi.getModels).toHaveBeenCalledWith({ provider: 'opencode' })
-
-    await wrapper.find('[data-testid="provider-login-save"]').trigger('click')
-    await flushPromises()
-
-    const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
-    expect(saved[1]).toMatchObject({
-      provider: 'opencode',
-      models: ['big-pickle'],
-      base_url: 'https://opencode.ai/inference',
     })
   })
 

@@ -4,96 +4,66 @@
     {{ t('memories.emptyFiles') }}
   </div>
   <template v-else>
-    <div class="forebrain-table-wrap">
-      <table class="forebrain-table forebrain-table--fixed">
-        <colgroup>
-          <col style="width: 40px" />
-          <col style="width: 300px" />
-          <col />
-          <col style="width: 150px" />
-          <col style="width: 150px" />
-          <col style="width: 88px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>
-              <input
-                type="checkbox"
-                :checked="allSelected"
-                :aria-label="t('memories.selectAll')"
-                data-testid="memories-select-all"
-                @change="toggleAll(($event.target as HTMLInputElement).checked)"
-              />
-            </th>
-            <th>{{ t('memories.colFile') }}</th>
-            <th>{{ t('memories.colContent') }}</th>
-            <SortHeader
-              :label="t('memories.colCreated')"
-              sort-key="created"
-              :active="sort === 'created'"
-              :order="order"
-              first="desc"
-              @sort="sortBy"
-            />
-            <SortHeader
-              :label="t('memories.colUpdated')"
-              sort-key="updated"
-              :active="sort === 'updated'"
-              :order="order"
-              first="desc"
-              @sort="sortBy"
-            />
-            <th class="text-center">{{ t('memories.colActions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="file in rows" :key="file.path" :data-memory-file="file.path">
-            <td>
-              <input
-                type="checkbox"
-                :checked="selected.has(file.path)"
-                :aria-label="t('memories.selectFile', { path: file.path })"
-                @change="toggleSelect(file.path, ($event.target as HTMLInputElement).checked)"
-              />
-            </td>
-            <td>
-              <div class="flex min-w-0 items-center gap-1.5">
-                <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="file.path">{{ file.path }}</span>
-                <BadgeComponent v-if="file.core" variant="gray" class="shrink-0" v-tip:top="t('memories.coreFileHint')">
-                  {{ t('memories.coreBadge') }}
-                </BadgeComponent>
-              </div>
-            </td>
-            <td class="text-[var(--forebrain-text-2)]">
-              <span class="forebrain-cell-1" v-tip:top.trunc="previewOf(file)">{{ previewOf(file) }}</span>
-            </td>
-            <td class="forebrain-num font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(file.createdAt) }}</td>
-            <td class="forebrain-num font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(file.updatedAt) }}</td>
-            <td class="text-right">
-              <RowActions>
-                <RowAction
-                  :icon="Pencil"
-                  :label="t('common.edit')"
-                  :name="file.path"
-                  :data-testid="`memories-edit-${file.path}`"
-                  @click="openEditor(file)"
-                />
-                <RowAction
-                  v-if="!file.core"
-                  :icon="Trash2"
-                  :label="t('common.delete')"
-                  :name="file.path"
-                  tone="danger"
-                  :data-testid="`memories-delete-${file.path}`"
-                  @click="deleteOne(file)"
-                />
-                <RowActionSlot v-else />
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      :columns="columns"
+      :rows="rows"
+      :row-key="(row) => row.path"
+      :row-attrs="(row) => ({ 'data-memory-file': row.path })"
+      :sorting="{ key: sort, order }"
+      @update:sorting="sortBy($event.key, $event.order)"
+    >
+      <template #header-select>
+        <input
+          type="checkbox"
+          :checked="allSelected"
+          :aria-label="t('memories.selectAll')"
+          data-testid="memories-select-all"
+          @change="toggleAll(($event.target as HTMLInputElement).checked)"
+        />
+      </template>
+      <template #cell-select="{ row }">
+        <input
+          type="checkbox"
+          :checked="selected.has(row.path)"
+          :aria-label="t('memories.selectFile', { path: row.path })"
+          @change="toggleSelect(row.path, ($event.target as HTMLInputElement).checked)"
+        />
+      </template>
+      <template #cell-path="{ row }">
+        <div class="flex min-w-0 items-center gap-1.5">
+          <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.path">{{ row.path }}</span>
+          <BadgeComponent v-if="row.core" variant="gray" class="shrink-0" v-tip:top="t('memories.coreFileHint')">
+            {{ t('memories.coreBadge') }}
+          </BadgeComponent>
+        </div>
+      </template>
+      <template #cell-preview="{ row }">
+        <span class="forebrain-cell-1" v-tip:top.trunc="previewOf(row)">{{ previewOf(row) }}</span>
+      </template>
+      <template #cell-created="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+      <template #cell-updated="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
+      <template #cell-actions="{ row }">
+        <RowActions>
+          <RowAction
+            :icon="Pencil"
+            :label="t('common.edit')"
+            :name="row.path"
+            :data-testid="`memories-edit-${row.path}`"
+            @click="openEditor(row)"
+          />
+          <RowAction
+            v-if="!row.core"
+            :icon="Trash2"
+            :label="t('common.delete')"
+            :name="row.path"
+            tone="danger"
+            :data-testid="`memories-delete-${row.path}`"
+            @click="deleteOne(row)"
+          />
+          <RowActionSlot v-else />
+        </RowActions>
+      </template>
+    </DataTable>
 
     <!-- Editor -->
     <ForebrainModal :open="editing !== null" size="xl" @close="closeEditor">
@@ -134,11 +104,11 @@
 import { computed, defineAsyncComponent, ref } from 'vue'
 import { Pencil, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
 import RowActionSlot from '@/components/common/RowActionSlot.vue'
-import SortHeader from '@/components/common/SortHeader.vue'
 import forebrainApi, { getErrorMessage, type MemoryFileRecord } from '@/lib/api'
 import { formatDateTime } from '@/lib/time'
 import { useI18n } from '@/locales'
@@ -197,6 +167,34 @@ const dirty = ref(false)
 const editorKey = ref(0)
 
 const allSelected = computed(() => props.rows.length > 0 && props.rows.every((file) => props.selected.has(file.path)))
+
+/**
+ * The table's columns, at the design's widths: the content line takes the room
+ * the others leave. Created and updated sort, because the memory listing is one
+ * of the three endpoints that read `sort` — the newest first on the first click.
+ */
+const columns: DataColumn[] = [
+  { id: 'select', header: '', size: 40, minSize: 40 },
+  { id: 'path', header: t('memories.colFile'), size: 300 },
+  { id: 'preview', header: t('memories.colContent'), cellClass: 'text-[var(--forebrain-text-2)]' },
+  {
+    id: 'created',
+    header: t('memories.colCreated'),
+    size: 150,
+    enableSorting: true,
+    sortDescFirst: true,
+    cellClass: 'forebrain-num font-mono text-[var(--forebrain-text-2)]',
+  },
+  {
+    id: 'updated',
+    header: t('memories.colUpdated'),
+    size: 150,
+    enableSorting: true,
+    sortDescFirst: true,
+    cellClass: 'forebrain-num font-mono text-[var(--forebrain-text-2)]',
+  },
+  { id: 'actions', header: t('memories.colActions'), size: 88, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 /**
  * The grey 内容 line: the listing answers each file's first non-empty line

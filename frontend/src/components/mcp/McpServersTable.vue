@@ -51,138 +51,117 @@
     >
       {{ t('mcp.noRows') }}
     </div>
-    <div v-else class="forebrain-table-wrap">
-      <table class="forebrain-table forebrain-table--fixed mcp-table">
-        <colgroup>
-          <col style="width: 168px" />
-          <col v-if="multiLayer" style="width: 84px" />
-          <col />
-          <col style="width: 108px" />
-          <col style="width: 148px" />
-          <col style="width: 132px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>{{ t('mcp.colServer') }}</th>
-            <th v-if="multiLayer">{{ t('mcp.colSource') }}</th>
-            <th>{{ t('mcp.colTarget') }}</th>
-            <th>{{ t('mcp.colType') }}</th>
-            <th>{{ t('mcp.colStatus') }}</th>
-            <th class="text-center">{{ t('mcp.colActions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <!-- One row per entry, keyed by its identity — the layer and the
-               name — never by its place in the page: re-sorted or re-paged, a
-               click still lands on the entry it was drawn for. -->
-          <tr v-for="entry in tableRows" :key="entry.key" :data-mcp-row="entry.key">
-            <td>
-              <div class="mcp-name">
-                <span class="forebrain-cell-1 min-w-0 font-mono" v-tip:top.trunc="entry.row.name">{{ entry.row.name }}</span>
-                <BadgeComponent v-if="entry.row.required" variant="gray" class="shrink-0">{{ t('mcp.required') }}</BadgeComponent>
-              </div>
-            </td>
-            <td v-if="multiLayer">
-              <ScopeBadge :type="entry.row.scope" :label="layerName(entry.row.scope)" />
-            </td>
-            <td>
-              <span class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]" v-tip:top.trunc="entry.row.target">{{ entry.row.target }}</span>
-            </td>
-            <td>
-              <span class="mcp-ty font-mono">{{ entry.type }}</span>
-            </td>
-            <!-- One badge, and the words behind it — a failure in its own
-                 text, why an entry is off, which layer overrides it, or how a
-                 declined one is taken back — one hover away. -->
-            <td>
-              <BadgeComponent :variant="statusVariant(entry.status.tone)" v-tip:top="entry.status.tip">{{ entry.status.label }}</BadgeComponent>
-            </td>
-            <td class="text-right">
-              <RowActions>
-                <!-- The switch that writes the next session's list opens the
-                     action column, where the prototype puts it (`mcpSwCell`):
-                     a row awaiting a decision has nothing to switch yet — the
-                     buttons after it are the decision — and a declined row has
-                     no switch either, it does not load until 允许 takes the
-                     decision back. -->
-                <SwitchComponent
-                  v-if="entry.own && !entry.pending && !entry.declined"
-                  :model-value="enabledNow(entry.row)"
-                  :disabled="entry.row.disabledByConfig === true"
-                  :aria-label="t('mcp.enableAria', { name: entry.row.name })"
-                  v-tip:top="entry.row.disabledByConfig ? t('mcp.enabledByConfigTip') : ''"
-                  :data-testid="`mcp-enable-${entry.key}`"
-                  @update:model-value="toggleEnabled(entry.row, $event)"
-                />
-                <!-- A row with no switch keeps its width, so the icons line up
-                     down the column: a row this page does not own is not its to
-                     switch. -->
-                <RowActionSlot v-else class="mcp-sw-slot" />
-                <template v-if="entry.pending">
-                  <RowAction
-                    :icon="Check"
-                    :label="t('projects.mcpAllow')"
-                    :name="entry.row.name"
-                    tone="ok"
-                    :disabled="busy === entry.key"
-                    :data-testid="`mcp-allow-${entry.key}`"
-                    @click="decide(entry.row, true)"
-                  />
-                  <RowAction
-                    :icon="X"
-                    :label="t('projects.mcpDecline')"
-                    :name="entry.row.name"
-                    tone="danger"
-                    :disabled="busy === entry.key"
-                    :data-testid="`mcp-decline-${entry.key}`"
-                    @click="decide(entry.row, false)"
-                  />
-                </template>
-                <template v-else-if="entry.declined">
-                  <RowAction
-                    :icon="Check"
-                    :label="t('projects.mcpAllow')"
-                    :name="entry.row.name"
-                    tone="ok"
-                    :disabled="busy === entry.key"
-                    :data-testid="`mcp-undecline-${entry.key}`"
-                    @click="decide(entry.row, true)"
-                  />
-                  <RowActionSlot />
-                </template>
-                <template v-else-if="entry.own">
-                  <RowAction
-                    :icon="Pencil"
-                    :label="t('common.edit')"
-                    :name="entry.row.name"
-                    :data-testid="`mcp-edit-${entry.key}`"
-                    @click="openRow('edit', entry.row)"
-                  />
-                  <RowAction
-                    :icon="Trash2"
-                    :label="t('common.delete')"
-                    :name="entry.row.name"
-                    tone="danger"
-                    :data-testid="`mcp-delete-${entry.key}`"
-                    @click="askDelete(entry)"
-                  />
-                </template>
-                <template v-else>
-                  <RowAction
-                    :icon="Eye"
-                    :label="t('common.view')"
-                    :name="entry.row.name"
-                    :data-testid="`mcp-view-${entry.key}`"
-                    @click="openRow('view', entry.row)"
-                  />
-                  <RowActionSlot />
-                </template>
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      v-else
+      :columns="columns"
+      :rows="tableRows"
+      :row-key="(row) => row.key"
+      :row-attrs="(row) => ({ 'data-mcp-row': row.key })"
+    >
+      <template #cell-name="{ row }">
+        <div class="mcp-name">
+          <span class="forebrain-cell-1 min-w-0 font-mono" v-tip:top.trunc="row.row.name">{{ row.row.name }}</span>
+          <BadgeComponent v-if="row.row.required" variant="gray" class="shrink-0">{{ t('mcp.required') }}</BadgeComponent>
+        </div>
+      </template>
+      <template #cell-scope="{ row }">
+        <ScopeBadge :type="row.row.scope" :label="layerName(row.row.scope)" />
+      </template>
+      <template #cell-target="{ row }">
+        <span class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]" v-tip:top.trunc="row.row.target">{{ row.row.target }}</span>
+      </template>
+      <template #cell-type="{ row }">
+        <span class="mcp-ty font-mono">{{ row.type }}</span>
+      </template>
+      <!-- One badge, and the words behind it — a failure in its own
+           text, why an entry is off, which layer overrides it, or how a
+           declined one is taken back — one hover away. -->
+      <template #cell-status="{ row }">
+        <BadgeComponent :variant="statusVariant(row.status.tone)" v-tip:top="row.status.tip">{{ row.status.label }}</BadgeComponent>
+      </template>
+      <template #cell-actions="{ row }">
+        <RowActions>
+          <!-- The switch that writes the next session's list opens the
+               action column, where the prototype puts it (`mcpSwCell`):
+               a row awaiting a decision has nothing to switch yet — the
+               buttons after it are the decision — and a declined row has
+               no switch either, it does not load until 允许 takes the
+               decision back. -->
+          <SwitchComponent
+            v-if="row.own && !row.pending && !row.declined"
+            :model-value="enabledNow(row.row)"
+            :disabled="row.row.disabledByConfig === true"
+            :aria-label="t('mcp.enableAria', { name: row.row.name })"
+            v-tip:top="row.row.disabledByConfig ? t('mcp.enabledByConfigTip') : ''"
+            :data-testid="`mcp-enable-${row.key}`"
+            @update:model-value="toggleEnabled(row.row, $event)"
+          />
+          <!-- A row with no switch keeps its width, so the icons line up
+               down the column: a row this page does not own is not its to
+               switch. -->
+          <RowActionSlot v-else class="mcp-sw-slot" />
+          <template v-if="row.pending">
+            <RowAction
+              :icon="Check"
+              :label="t('projects.mcpAllow')"
+              :name="row.row.name"
+              tone="ok"
+              :disabled="busy === row.key"
+              :data-testid="`mcp-allow-${row.key}`"
+              @click="decide(row.row, true)"
+            />
+            <RowAction
+              :icon="X"
+              :label="t('projects.mcpDecline')"
+              :name="row.row.name"
+              tone="danger"
+              :disabled="busy === row.key"
+              :data-testid="`mcp-decline-${row.key}`"
+              @click="decide(row.row, false)"
+            />
+          </template>
+          <template v-else-if="row.declined">
+            <RowAction
+              :icon="Check"
+              :label="t('projects.mcpAllow')"
+              :name="row.row.name"
+              tone="ok"
+              :disabled="busy === row.key"
+              :data-testid="`mcp-undecline-${row.key}`"
+              @click="decide(row.row, true)"
+            />
+            <RowActionSlot />
+          </template>
+          <template v-else-if="row.own">
+            <RowAction
+              :icon="Pencil"
+              :label="t('common.edit')"
+              :name="row.row.name"
+              :data-testid="`mcp-edit-${row.key}`"
+              @click="openRow('edit', row.row)"
+            />
+            <RowAction
+              :icon="Trash2"
+              :label="t('common.delete')"
+              :name="row.row.name"
+              tone="danger"
+              :data-testid="`mcp-delete-${row.key}`"
+              @click="askDelete(row)"
+            />
+          </template>
+          <template v-else>
+            <RowAction
+              :icon="Eye"
+              :label="t('common.view')"
+              :name="row.row.name"
+              :data-testid="`mcp-view-${row.key}`"
+              @click="openRow('view', row.row)"
+            />
+            <RowActionSlot />
+          </template>
+        </RowActions>
+      </template>
+    </DataTable>
 
     <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
     <p v-if="notApplied.length" class="forebrain-list-note" data-testid="mcp-not-applied">
@@ -247,6 +226,7 @@ import type { AxiosError } from 'axios'
 
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
 import RowActionSlot from '@/components/common/RowActionSlot.vue'
@@ -370,6 +350,20 @@ const tableRows = computed<TableRow[]>(() =>
 function rowKey(row: McpServerRow): string {
   return `${row.scope}:${row.name}`
 }
+
+/**
+ * The table's columns, at the design's widths: the target takes the room the
+ * others leave, and the layer column exists only on a page that lists more than
+ * one — the global page has nothing to say there. Nothing sorts.
+ */
+const columns = computed<DataColumn[]>(() => [
+  { id: 'name', header: t('mcp.colServer'), size: 168 },
+  ...(multiLayer.value ? [{ id: 'scope', header: t('mcp.colSource'), size: 84 }] : []),
+  { id: 'target', header: t('mcp.colTarget') },
+  { id: 'type', header: t('mcp.colType'), size: 108 },
+  { id: 'status', header: t('mcp.colStatus'), size: 148 },
+  { id: 'actions', header: t('mcp.colActions'), size: 132, headerClass: 'text-center', cellClass: 'text-right' },
+])
 
 /** A project entry with no recorded decision: the one state whose action set is
  * the decision itself. The rule is `mcpStatus`'s first branch, spelled out here

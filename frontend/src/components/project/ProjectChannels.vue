@@ -25,76 +25,60 @@
     <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
       {{ t('common.empty') }}
     </div>
-    <div v-else class="forebrain-table-wrap">
-      <table class="forebrain-table forebrain-table--fixed">
-        <colgroup>
-          <col style="width: 130px" />
-          <col style="width: 230px" />
-          <col />
-          <col style="width: 56px" />
-          <col style="width: 56px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>{{ t('channels.colChannel') }}</th>
-            <th>{{ t('channels.colIdentity') }}</th>
-            <th>{{ t('channels.colConfig') }}</th>
-            <th>{{ t('channels.enabled') }}</th>
-            <th class="text-center">{{ t('projects.colActions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in rows" :key="row.kind" :data-channel-row="row.kind">
-            <td>
-              <span class="forebrain-cell-1 font-medium" v-tip:top.trunc="channelLabel(row.kind)">{{ channelLabel(row.kind) }}</span>
-            </td>
-            <!-- The identity a scheduled task delivers to is the channel kind
-                 itself; a channel nobody filled in has none yet. -->
-            <td>
-              <span
-                v-if="row.configured"
-                class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]"
-                v-tip:top.trunc="row.kind"
-              >{{ row.kind }}</span>
-              <span v-else class="text-[var(--forebrain-muted-text)]">—</span>
-            </td>
-            <td>
-              <span v-if="!row.configured" class="text-[var(--forebrain-muted-text)]">{{ t('channels.unconfigured') }}</span>
-              <span v-else class="forebrain-cell-1">
-                <template v-for="(part, index) in summaryOf(row)" :key="part.key">
-                  <span v-if="index" class="text-[var(--forebrain-muted-text)]"> · </span>{{ part.key }}
-                  <span class="font-mono text-[var(--forebrain-text-2)]">{{ part.value }}</span>
-                </template>
-              </span>
-            </td>
-            <td>
-              <!-- A channel that holds no configuration cannot be switched on:
-                 there is nothing behind the switch yet. -->
-              <span :data-testid="`channel-switch-${row.kind}`" v-tip:top="row.configured ? '' : t('channels.configureFirst')" class="inline-flex">
-                <SwitchComponent
-                  :model-value="row.enabled"
-                  :disabled="!row.configured || busy"
-                  :aria-label="t('channels.switchLabel', { name: channelLabel(row.kind) })"
-                  :data-testid="`channel-toggle-${row.kind}`"
-                  @update:model-value="setEnabled(row, $event)"
-                />
-              </span>
-            </td>
-            <td class="text-right">
-              <RowActions>
-                <RowAction
-                  :icon="Pencil"
-                  :label="t('common.edit')"
-                  :name="channelLabel(row.kind)"
-                  :data-testid="`channel-edit-${row.kind}`"
-                  @click="editing = row"
-                />
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      v-else
+      :columns="columns"
+      :rows="rows"
+      :row-key="(row) => row.kind"
+      :row-attrs="(row) => ({ 'data-channel-row': row.kind })"
+    >
+      <template #cell-kind="{ row }">
+        <span class="forebrain-cell-1 font-medium" v-tip:top.trunc="channelLabel(row.kind)">{{ channelLabel(row.kind) }}</span>
+      </template>
+      <!-- The identity a scheduled task delivers to is the channel kind
+           itself; a channel nobody filled in has none yet. -->
+      <template #cell-identity="{ row }">
+        <span
+          v-if="row.configured"
+          class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]"
+          v-tip:top.trunc="row.kind"
+        >{{ row.kind }}</span>
+        <span v-else class="text-[var(--forebrain-muted-text)]">—</span>
+      </template>
+      <template #cell-config="{ row }">
+        <span v-if="!row.configured" class="text-[var(--forebrain-muted-text)]">{{ t('channels.unconfigured') }}</span>
+        <span v-else class="forebrain-cell-1">
+          <template v-for="(part, index) in summaryOf(row)" :key="part.key">
+            <span v-if="index" class="text-[var(--forebrain-muted-text)]"> · </span>{{ part.key }}
+            <span class="font-mono text-[var(--forebrain-text-2)]">{{ part.value }}</span>
+          </template>
+        </span>
+      </template>
+      <template #cell-enabled="{ row }">
+        <!-- A channel that holds no configuration cannot be switched on:
+             there is nothing behind the switch yet. -->
+        <span :data-testid="`channel-switch-${row.kind}`" v-tip:top="row.configured ? '' : t('channels.configureFirst')" class="inline-flex">
+          <SwitchComponent
+            :model-value="row.enabled"
+            :disabled="!row.configured || busy"
+            :aria-label="t('channels.switchLabel', { name: channelLabel(row.kind) })"
+            :data-testid="`channel-toggle-${row.kind}`"
+            @update:model-value="setEnabled(row, $event)"
+          />
+        </span>
+      </template>
+      <template #cell-actions="{ row }">
+        <RowActions>
+          <RowAction
+            :icon="Pencil"
+            :label="t('common.edit')"
+            :name="channelLabel(row.kind)"
+            :data-testid="`channel-edit-${row.kind}`"
+            @click="editing = row"
+          />
+        </RowActions>
+      </template>
+    </DataTable>
 
     <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
     <ListNote>{{ t('channels.projectNote') }}</ListNote>
@@ -124,6 +108,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { Pencil, RotateCw } from 'lucide-vue-next'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
@@ -144,6 +129,18 @@ const { rows, total, page, pageSize, q, loading, error: listError, reload } = us
   (query) => forebrainApi.projectChannelsPage(props.projectId, query),
   { pageSize: 10 },
 )
+
+/**
+ * The table's columns, at the design's widths: the config summary takes the room
+ * the others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'kind', header: t('channels.colChannel'), size: 130 },
+  { id: 'identity', header: t('channels.colIdentity'), size: 230 },
+  { id: 'config', header: t('channels.colConfig') },
+  { id: 'enabled', header: t('channels.enabled'), size: 56 },
+  { id: 'actions', header: t('projects.colActions'), size: 56, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 const writeError = ref('')
 const error = computed(() => listError.value || writeError.value)

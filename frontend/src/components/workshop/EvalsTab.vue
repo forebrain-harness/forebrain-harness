@@ -29,36 +29,35 @@
         <BadgeComponent variant="success">{{ t('workshop.evalWithBadge', { passed: withPassed, total: caseCount }) }}</BadgeComponent>
         <BadgeComponent variant="gray">{{ t('workshop.evalWithoutBadge', { passed: withoutPassed, total: caseCount }) }}</BadgeComponent>
       </div>
-      <table class="forebrain-table w-full">
-        <thead>
-          <tr>
-            <th>{{ t('workshop.evalColCase') }}</th>
-            <th>{{ t('workshop.evalWithSkill') }}</th>
-            <th>{{ t('workshop.evalWithoutSkill') }}</th>
-            <th>{{ t('workshop.evalColFeedback') }}</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="(item, index) in currentCases" :key="item.id">
-            <td>{{ index + 1 }}</td>
-            <td><BadgeComponent :variant="passed(item, 'with_skill') ? 'success' : 'error'">{{ passed(item, 'with_skill') ? t('workshop.evalPass') : t('workshop.evalFail') }}</BadgeComponent></td>
-            <td><BadgeComponent :variant="passed(item, 'without_skill') ? 'success' : 'error'">{{ passed(item, 'without_skill') ? t('workshop.evalPass') : t('workshop.evalFail') }}</BadgeComponent></td>
-            <td><MessageSquareText v-if="item.feedback" class="h-3.5 w-3.5 text-[var(--forebrain-brand-1)]" aria-hidden="true" /><span v-else class="text-[var(--forebrain-muted-text)]">—</span></td>
-            <td class="text-right">
-              <RowActions>
-                <RowAction
-                  :icon="Eye"
-                  :label="t('workshop.view')"
-                  :name="`${t('workshop.evalColCase')} ${index + 1}`"
-                  :data-testid="`workshop-eval-view-${index}`"
-                  @click="open(index)"
-                />
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <DataTable
+        :columns="columns"
+        :rows="currentCases"
+        :row-key="(row) => row.id"
+        class="w-full"
+      >
+        <template #cell-case="{ rowIndex }">{{ rowIndex + 1 }}</template>
+        <template #cell-withSkill="{ row }">
+          <BadgeComponent :variant="passed(row, 'with_skill') ? 'success' : 'error'">{{ passed(row, 'with_skill') ? t('workshop.evalPass') : t('workshop.evalFail') }}</BadgeComponent>
+        </template>
+        <template #cell-withoutSkill="{ row }">
+          <BadgeComponent :variant="passed(row, 'without_skill') ? 'success' : 'error'">{{ passed(row, 'without_skill') ? t('workshop.evalPass') : t('workshop.evalFail') }}</BadgeComponent>
+        </template>
+        <template #cell-feedback="{ row }">
+          <MessageSquareText v-if="row.feedback" class="h-3.5 w-3.5 text-[var(--forebrain-brand-1)]" aria-hidden="true" />
+          <span v-else class="text-[var(--forebrain-muted-text)]">—</span>
+        </template>
+        <template #cell-actions="{ rowIndex }">
+          <RowActions>
+            <RowAction
+              :icon="Eye"
+              :label="t('workshop.view')"
+              :name="`${t('workshop.evalColCase')} ${rowIndex + 1}`"
+              :data-testid="`workshop-eval-view-${rowIndex}`"
+              @click="open(rowIndex)"
+            />
+          </RowActions>
+        </template>
+      </DataTable>
       <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="workshop-eval-refix" @click="emit('fill', t('workshop.refixMessage', { n: roundNumber }))">
         {{ t('workshop.refix') }}
       </button>
@@ -84,6 +83,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { Eye, MessageSquareText } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
 import EvalCaseDialog from './EvalCaseDialog.vue'
@@ -112,6 +112,18 @@ const error = ref('')
 
 const currentIteration = computed(() => iterations.value.find((iter) => iter.name === selected.value) ?? null)
 const currentCases = computed<WorkshopEvalCase[]>(() => currentIteration.value?.cases ?? [])
+
+/**
+ * The table's columns. No widths: every column shares the width, which is how
+ * this comparison reads — the two results sit side by side. Nothing sorts.
+ */
+const columns: DataColumn[] = [
+  { id: 'case', header: t('workshop.evalColCase') },
+  { id: 'withSkill', header: t('workshop.evalWithSkill') },
+  { id: 'withoutSkill', header: t('workshop.evalWithoutSkill') },
+  { id: 'feedback', header: t('workshop.evalColFeedback') },
+  { id: 'actions', header: '', cellClass: 'text-right' },
+]
 const caseCount = computed(() => {
   // The number of cases is the round's own; before a round exists it is the
   // test cases the skill declares, so "运行评测" is live as soon as there is

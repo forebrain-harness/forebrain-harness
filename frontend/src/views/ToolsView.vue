@@ -32,88 +32,64 @@
 
       <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.empty') }}</div>
-      <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table forebrain-table--fixed">
-          <colgroup>
-            <col style="width: 280px" />
-            <col />
-            <col style="width: 136px" />
-            <col style="width: 150px" />
-            <col style="width: 56px" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>{{ t('tools.colTool') }}</th>
-              <th>{{ t('tools.colDesc') }}</th>
-              <th>{{ t('tools.colCategory') }}</th>
-              <th>{{ t('tools.colType') }}</th>
-              <th class="text-center">{{ t('tools.colActions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template v-for="tool in rows" :key="tool.name">
-              <tr :class="{ 'tool-row--open': openTool === tool.name }" :data-tool-row="tool.name">
-                <td>
-                  <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="tool.name">{{ tool.name }}</span>
-                </td>
-                <td>
-                  <span class="forebrain-cell-1" v-tip:top.trunc="tool.description ?? ''">{{ tool.description }}</span>
-                </td>
-                <td>{{ categoryLabel(tool.category ?? '') }}</td>
-                <td>
-                  <span class="inline-flex items-center gap-1.5">
-                    <BadgeComponent :variant="tool.readOnly ? 'success' : 'warning'">
-                      {{ tool.readOnly ? t('tools.type.readonly') : t('tools.type.write') }}
-                    </BadgeComponent>
-                    <BadgeComponent v-if="tool.destructive" variant="error">{{ t('tools.destructive') }}</BadgeComponent>
-                  </span>
-                </td>
-                <td class="text-right">
-                  <RowActions>
-                    <RowAction
-                      :icon="openTool === tool.name ? ChevronUp : ChevronDown"
-                      :label="openTool === tool.name ? t('tools.hideSchema') : t('tools.showSchema')"
-                      :name="tool.name"
-                      :aria-expanded="openTool === tool.name"
-                      :data-testid="`tool-inputs-${tool.name}`"
-                      @click="toggleParams(tool.name)"
-                    />
-                  </RowActions>
-                </td>
-              </tr>
-              <tr v-if="openTool === tool.name" class="tool-sub" :data-testid="`tool-params-${tool.name}`">
-                <td colspan="5">
-                  <table v-if="paramsOf(tool).length" class="forebrain-table tool-params">
-                    <colgroup>
-                      <col style="width: 180px" />
-                      <col style="width: 96px" />
-                      <col style="width: 60px" />
-                      <col />
-                    </colgroup>
-                    <thead>
-                      <tr>
-                        <th>{{ t('tools.colParam') }}</th>
-                        <th>{{ t('tools.colType') }}</th>
-                        <th>{{ t('tools.colRequired') }}</th>
-                        <th>{{ t('tools.colDesc') }}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="param in paramsOf(tool)" :key="param.name" :data-tool-param="param.name">
-                        <td class="font-mono">{{ param.name }}</td>
-                        <td class="font-mono">{{ param.type }}</td>
-                        <td>{{ param.required ? t('common.yes') : t('common.no') }}</td>
-                        <td>{{ param.description }}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                  <span v-else class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('tools.noParams') }}</span>
-                </td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        v-else
+        :columns="columns"
+        :rows="rows"
+        :row-key="(row) => row.name"
+        :row-attrs="(row) => ({ 'data-tool-row': row.name })"
+        :row-class="(row) => ({ 'tool-row--open': openTool === row.name })"
+        :sub-row="(row) => openTool === row.name"
+      >
+        <template #cell-name="{ row }">
+          <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.name">{{ row.name }}</span>
+        </template>
+        <template #cell-description="{ row }">
+          <span class="forebrain-cell-1" v-tip:top.trunc="row.description ?? ''">{{ row.description }}</span>
+        </template>
+        <template #cell-category="{ row }">{{ categoryLabel(row.category ?? '') }}</template>
+        <template #cell-readOnly="{ row }">
+          <span class="inline-flex items-center gap-1.5">
+            <BadgeComponent :variant="row.readOnly ? 'success' : 'warning'">
+              {{ row.readOnly ? t('tools.type.readonly') : t('tools.type.write') }}
+            </BadgeComponent>
+            <BadgeComponent v-if="row.destructive" variant="error">{{ t('tools.destructive') }}</BadgeComponent>
+          </span>
+        </template>
+        <template #cell-actions="{ row }">
+          <RowActions>
+            <RowAction
+              :icon="openTool === row.name ? ChevronUp : ChevronDown"
+              :label="openTool === row.name ? t('tools.hideSchema') : t('tools.showSchema')"
+              :name="row.name"
+              :aria-expanded="openTool === row.name"
+              :data-testid="`tool-inputs-${row.name}`"
+              @click="toggleParams(row.name)"
+            />
+          </RowActions>
+        </template>
+        <template #sub-row="{ row }">
+          <div :data-testid="`tool-params-${row.name}`">
+            <!-- The tool's inputs, drawn by the same table as everything else:
+                 a compact page of them inside the row it belongs to. -->
+            <DataTable
+              v-if="paramsOf(row).length"
+              class="tool-params"
+              container-class="forebrain-table-wrap"
+              :columns="paramColumns"
+              :rows="paramsOf(row)"
+              :row-key="(param) => param.name"
+              :row-attrs="(param) => ({ 'data-tool-param': param.name })"
+            >
+              <template #cell-param="{ row: param }"><span class="font-mono">{{ param.name }}</span></template>
+              <template #cell-paramType="{ row: param }"><span class="font-mono">{{ param.type }}</span></template>
+              <template #cell-required="{ row: param }">{{ param.required ? t('common.yes') : t('common.no') }}</template>
+              <template #cell-paramDesc="{ row: param }">{{ param.description }}</template>
+            </DataTable>
+            <span v-else class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('tools.noParams') }}</span>
+          </div>
+        </template>
+      </DataTable>
 
       <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
       <ListNote>{{ t('tools.note') }}</ListNote>
@@ -137,6 +113,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ChevronDown, ChevronUp, RotateCw } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
@@ -169,6 +146,26 @@ const {
   error,
   reload,
 } = useServerList<ToolMetaRecord>(fetchTools, { pageSize: 10, filters: { category: '', type: '' } })
+
+/**
+ * The table's columns, at the design's widths: the description takes the room
+ * the others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'name', header: t('tools.colTool'), size: 280 },
+  { id: 'description', header: t('tools.colDesc') },
+  { id: 'category', header: t('tools.colCategory'), size: 136 },
+  { id: 'readOnly', header: t('tools.colType'), size: 150 },
+  { id: 'actions', header: t('tools.colActions'), size: 56, headerClass: 'text-center', cellClass: 'text-right' },
+]
+
+/** The inputs table a row opens: the same table, a narrower set of columns. */
+const paramColumns: DataColumn[] = [
+  { id: 'param', header: t('tools.colParam'), size: 180 },
+  { id: 'paramType', header: t('tools.colType'), size: 96 },
+  { id: 'required', header: t('tools.colRequired'), size: 60 },
+  { id: 'paramDesc', header: t('tools.colDesc') },
+]
 
 /** The two filters, read and written through the list's own filters. */
 const category = computed({
@@ -226,31 +223,25 @@ onMounted(() => {
 
 <style scoped>
 /* The open row and its inputs share the alt fill, so the pair reads as one
-   block inside the table (plan 073). */
-.tool-row--open > td {
+   block inside the table (plan 073). Both rows are drawn by the shared table,
+   so the rules reach into it: the class and the hook are what the page names,
+   the elements are the table's own. */
+:deep(tr.tool-row--open) > td {
   background: var(--forebrain-bg-alt);
   border-bottom-color: transparent;
 }
-.tool-sub > td {
+:deep(tr[data-sub-row]) > td {
   padding: 0 10px 12px;
   background: var(--forebrain-bg-alt);
   white-space: normal;
 }
-/* The nested inputs table: the page's own fill on the alt row, its own edge. */
-.tool-params {
-  table-layout: fixed;
-  background: var(--forebrain-bg);
-  border: 1px solid var(--forebrain-divider);
-  border-collapse: separate;
-  border-spacing: 0;
-  border-radius: 6px;
-  overflow: hidden;
-}
-.tool-params th {
+/* The nested inputs table: the page's own fill on the alt row, its own edge,
+   and the tighter cell padding a table inside a row wants. */
+.tool-params :deep(th) {
   background: var(--forebrain-bg);
   padding: 6px 10px;
 }
-.tool-params td {
+.tool-params :deep(td) {
   padding: 6px 10px;
   white-space: normal;
   vertical-align: top;

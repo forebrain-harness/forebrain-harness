@@ -3,116 +3,96 @@
   <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
     {{ t('skills.empty') }}
   </div>
-  <div v-else class="forebrain-table-wrap">
-    <table class="forebrain-table forebrain-table--fixed">
-      <colgroup>
-        <col style="width: 30px" />
-        <col />
-        <col style="width: 110px" />
-        <col style="width: 190px" />
-        <col style="width: 110px" />
-      </colgroup>
-      <thead>
-        <tr>
-          <th>
-            <input
-              type="checkbox"
-              :checked="allSelected"
-              :aria-label="t('skills.selectAll')"
-              data-testid="skills-select-all"
-              @change="toggleAll(($event.target as HTMLInputElement).checked)"
-            />
-          </th>
-          <th>{{ t('skills.colSkill') }}</th>
-          <th>{{ t('skills.colSource') }}</th>
-          <th class="text-right">{{ t('skills.colStatus') }}</th>
-          <th class="text-center">{{ t('skills.colActions') }}</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr
-          v-for="row in rows"
-          :key="row.rootPath || row.name"
-          :data-skill-row="row.name"
-          :data-skill-origin="row.origin"
-        >
-          <td>
-            <input
-              type="checkbox"
-              :checked="selected.has(row.name)"
-              :aria-label="t('skills.selectForDownload', { name: row.name })"
-              @change="toggleSelect(row, ($event.target as HTMLInputElement).checked)"
-            />
-          </td>
-          <td>
-            <div class="flex min-w-0 items-center gap-1.5">
-              <span class="min-w-0 truncate font-mono text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.name }}</span>
-              <BadgeComponent v-if="row.state === 'pending'" variant="warning" class="shrink-0">{{ t('skills.unpublished') }}</BadgeComponent>
-              <BadgeComponent v-if="row.update" class="shrink-0">{{ t('skills.hasUpdate') }}</BadgeComponent>
-            </div>
-            <div class="mt-0.5 text-[12px] text-[var(--forebrain-text-2)]">
-              <span class="forebrain-cell-1" v-tip:top.trunc="descriptionLine(row)">{{ descriptionLine(row) }}</span>
-            </div>
-          </td>
-          <td>
-            <BadgeComponent variant="gray">{{ originLabel(row.origin) }}</BadgeComponent>
-          </td>
-          <td class="text-right">
-            <span class="inline-flex items-center gap-2">
-              <BadgeComponent v-if="row.state === 'draft'" variant="warning">{{ t('skills.draft') }}</BadgeComponent>
-              <BadgeComponent v-else-if="row.version" variant="gray" class="font-mono">{{ `v${row.version}` }}</BadgeComponent>
-              <SwitchComponent
-                v-if="isOwned(row) && !isDraft(row)"
-                :model-value="row.enabled"
-                :disabled="saving"
-                :data-testid="`skill-toggle-${row.name}`"
-                :aria-label="t('skills.toggleHint')"
-                @update:model-value="emit('toggle', row, $event)"
-              />
-              <template v-else-if="!isOwned(row)">
-                <BadgeComponent :variant="row.enabled ? 'success' : 'gray'">
-                  {{ row.enabled ? t('skills.enabled') : t('skills.disabled') }}
-                </BadgeComponent>
-                <LockIcon class="size-3.5 text-[var(--forebrain-muted-text)]" v-tip:top="t('skills.inheritedReadOnly')" :aria-label="t('skills.inheritedReadOnly')" />
-              </template>
-            </span>
-          </td>
-          <td class="text-right">
-            <RowActions>
-              <RowAction
-                v-if="showsView(row)"
-                :icon="Eye"
-                :label="t('skills.view')"
-                :name="row.name"
-                :data-testid="`skill-detail-${row.name}`"
-                @click="emit('detail', row)"
-              />
-              <RowActionSlot v-else />
-              <RowAction
-                v-if="row.downloadUrl"
-                :icon="Download"
-                :label="t('skills.downloadZip')"
-                :name="row.name"
-                :data-testid="`skill-download-${row.name}`"
-                @click="emit('download', row)"
-              />
-              <RowActionSlot v-else />
-              <RowAction
-                v-if="isOwned(row) && row.origin !== 'builtin'"
-                :icon="Trash2"
-                :label="t('common.delete')"
-                :name="row.name"
-                tone="danger"
-                :data-testid="`skill-delete-${row.name}`"
-                @click="emit('delete', row)"
-              />
-              <RowActionSlot v-else />
-            </RowActions>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+  <DataTable
+    v-else
+    :columns="columns"
+    :rows="rows"
+    :row-key="(row) => row.rootPath || row.name"
+    :row-attrs="(row) => ({ 'data-skill-row': row.name, 'data-skill-origin': row.origin })"
+  >
+    <template #header-select>
+      <input
+        type="checkbox"
+        :checked="allSelected"
+        :aria-label="t('skills.selectAll')"
+        data-testid="skills-select-all"
+        @change="toggleAll(($event.target as HTMLInputElement).checked)"
+      />
+    </template>
+    <template #cell-select="{ row }">
+      <input
+        type="checkbox"
+        :checked="selected.has(row.name)"
+        :aria-label="t('skills.selectForDownload', { name: row.name })"
+        @change="toggleSelect(row, ($event.target as HTMLInputElement).checked)"
+      />
+    </template>
+    <template #cell-name="{ row }">
+      <div class="flex min-w-0 items-center gap-1.5">
+        <span class="min-w-0 truncate font-mono text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.name }}</span>
+        <BadgeComponent v-if="row.state === 'pending'" variant="warning" class="shrink-0">{{ t('skills.unpublished') }}</BadgeComponent>
+        <BadgeComponent v-if="row.update" class="shrink-0">{{ t('skills.hasUpdate') }}</BadgeComponent>
+      </div>
+      <div class="mt-0.5 text-[12px] text-[var(--forebrain-text-2)]">
+        <span class="forebrain-cell-1" v-tip:top.trunc="descriptionLine(row)">{{ descriptionLine(row) }}</span>
+      </div>
+    </template>
+    <template #cell-origin="{ row }">
+      <BadgeComponent variant="gray">{{ originLabel(row.origin) }}</BadgeComponent>
+    </template>
+    <template #cell-status="{ row }">
+      <span class="inline-flex items-center gap-2">
+        <BadgeComponent v-if="row.state === 'draft'" variant="warning">{{ t('skills.draft') }}</BadgeComponent>
+        <BadgeComponent v-else-if="row.version" variant="gray" class="font-mono">{{ `v${row.version}` }}</BadgeComponent>
+        <SwitchComponent
+          v-if="isOwned(row) && !isDraft(row)"
+          :model-value="row.enabled"
+          :disabled="saving"
+          :data-testid="`skill-toggle-${row.name}`"
+          :aria-label="t('skills.toggleHint')"
+          @update:model-value="emit('toggle', row, $event)"
+        />
+        <template v-else-if="!isOwned(row)">
+          <BadgeComponent :variant="row.enabled ? 'success' : 'gray'">
+            {{ row.enabled ? t('skills.enabled') : t('skills.disabled') }}
+          </BadgeComponent>
+          <LockIcon class="size-3.5 text-[var(--forebrain-muted-text)]" v-tip:top="t('skills.inheritedReadOnly')" :aria-label="t('skills.inheritedReadOnly')" />
+        </template>
+      </span>
+    </template>
+    <template #cell-actions="{ row }">
+      <RowActions>
+        <RowAction
+          v-if="showsView(row)"
+          :icon="Eye"
+          :label="t('skills.view')"
+          :name="row.name"
+          :data-testid="`skill-detail-${row.name}`"
+          @click="emit('detail', row)"
+        />
+        <RowActionSlot v-else />
+        <RowAction
+          v-if="row.downloadUrl"
+          :icon="Download"
+          :label="t('skills.downloadZip')"
+          :name="row.name"
+          :data-testid="`skill-download-${row.name}`"
+          @click="emit('download', row)"
+        />
+        <RowActionSlot v-else />
+        <RowAction
+          v-if="isOwned(row) && row.origin !== 'builtin'"
+          :icon="Trash2"
+          :label="t('common.delete')"
+          :name="row.name"
+          tone="danger"
+          :data-testid="`skill-delete-${row.name}`"
+          @click="emit('delete', row)"
+        />
+        <RowActionSlot v-else />
+      </RowActions>
+    </template>
+  </DataTable>
 </template>
 
 <script setup lang="ts">
@@ -131,6 +111,7 @@
 import { computed } from 'vue'
 import { Download, Eye, Lock as LockIcon, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
 import RowActionSlot from '@/components/common/RowActionSlot.vue'
@@ -159,6 +140,18 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const allSelected = computed(() => props.rows.length > 0 && props.rows.every((row) => props.selected.has(row.name)))
+
+/**
+ * The table's columns, at the design's widths: the name takes the room the
+ * others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'select', header: '', size: 30, minSize: 30 },
+  { id: 'name', header: t('skills.colSkill') },
+  { id: 'origin', header: t('skills.colSource'), size: 110 },
+  { id: 'status', header: t('skills.colStatus'), size: 190, headerClass: 'text-right', cellClass: 'text-right' },
+  { id: 'actions', header: t('skills.colActions'), size: 110, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 // Inherited rows carry no controls at all (decision D9): a skill is toggled
 // and deleted only in the layer that owns it.

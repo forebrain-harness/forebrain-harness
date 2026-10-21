@@ -26,90 +26,60 @@
 
       <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('projects.empty') }}</div>
-      <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table forebrain-table--fixed">
-          <colgroup>
-            <col style="width: 210px" />
-            <col />
-            <col style="width: 200px" />
-            <col style="width: 64px" />
-            <col style="width: 150px" />
-            <col style="width: 112px" />
-          </colgroup>
-          <thead>
-            <tr>
-              <SortHeader
-                :label="t('projects.colName')"
-                sort-key="name"
-                :active="sort === 'name'"
-                :order="order"
-                first="asc"
-                @sort="sortBy"
-              />
-              <th>{{ t('projects.colRoot') }}</th>
-              <th>{{ t('projects.colDesc') }}</th>
-              <th class="text-right">{{ t('projects.colSessions') }}</th>
-              <SortHeader
-                :label="t('projects.colUpdated')"
-                sort-key="updated"
-                :active="sort === 'updated'"
-                :order="order"
-                first="desc"
-                @sort="sortBy"
-              />
-              <th class="text-center">{{ t('projects.colActions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="project in rows" :key="project.id" :data-project-row="project.name">
-              <td>
-                <div class="flex min-w-0 items-center gap-1.5">
-                  <span v-if="project.icon" class="shrink-0 text-[15px]">{{ project.icon }}</span>
-                  <button
-                    type="button"
-                    class="min-w-0 truncate text-[var(--forebrain-brand-1)] hover:underline"
-                    :data-testid="`project-open-${project.name}`"
-                    @click="openDetail(project.id)"
-                  >
-                    {{ project.name }}
-                  </button>
-                  <BadgeComponent v-if="project.pinned" class="shrink-0">{{ t('projects.pinned') }}</BadgeComponent>
-                  <BadgeComponent v-if="project.trustLevel !== 'trusted'" variant="gray" class="shrink-0">{{ t('projects.untrusted') }}</BadgeComponent>
-                  <BadgeComponent v-if="project.missing" variant="error" class="shrink-0">{{ t('projects.dirMissing') }}</BadgeComponent>
-                  <BadgeComponent v-if="project.memoryScope === 'project_only'" variant="gray" class="shrink-0">{{ t('projects.memoryProjectOnlyBadge') }}</BadgeComponent>
-                </div>
-              </td>
-              <td class="font-mono text-[var(--forebrain-text-2)]">
-                <span class="forebrain-cell-1" v-tip:top.trunc="project.root">{{ project.root }}</span>
-              </td>
-              <td>
-                <span class="forebrain-cell-1" v-tip:top.trunc="project.description">{{ project.description }}</span>
-              </td>
-              <td class="forebrain-num text-right">{{ project.sessionCount ?? 0 }}</td>
-              <td class="text-[var(--forebrain-text-2)]">{{ formatDateTime(project.updatedAt) }}</td>
-              <td class="text-right">
-                <RowActions>
-                  <RowAction :icon="FolderOpen" :label="t('projects.openSpace')" :name="project.name" @click="openDetail(project.id)" />
-                  <RowAction
-                    :icon="project.pinned ? PinOff : Pin"
-                    :label="project.pinned ? t('projects.unpin') : t('projects.pin')"
-                    :name="project.name"
-                    @click="togglePin(project)"
-                  />
-                  <RowAction
-                    :icon="Trash2"
-                    :label="t('common.delete')"
-                    :name="project.name"
-                    tone="danger"
-                    :data-testid="`project-delete-${project.name}`"
-                    @click="askDelete(project)"
-                  />
-                </RowActions>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        v-else
+        :columns="columns"
+        :rows="rows"
+        :row-key="(row) => row.id"
+        :row-attrs="(row) => ({ 'data-project-row': row.name })"
+        :sorting="{ key: sort, order }"
+        @update:sorting="sortBy($event.key, $event.order)"
+      >
+        <template #cell-name="{ row }">
+          <div class="flex min-w-0 items-center gap-1.5">
+            <span v-if="row.icon" class="shrink-0 text-[15px]">{{ row.icon }}</span>
+            <button
+              type="button"
+              class="min-w-0 truncate text-[var(--forebrain-brand-1)] hover:underline"
+              :data-testid="`project-open-${row.name}`"
+              @click="openDetail(row.id)"
+            >
+              {{ row.name }}
+            </button>
+            <BadgeComponent v-if="row.pinned" class="shrink-0">{{ t('projects.pinned') }}</BadgeComponent>
+            <BadgeComponent v-if="row.trustLevel !== 'trusted'" variant="gray" class="shrink-0">{{ t('projects.untrusted') }}</BadgeComponent>
+            <BadgeComponent v-if="row.missing" variant="error" class="shrink-0">{{ t('projects.dirMissing') }}</BadgeComponent>
+            <BadgeComponent v-if="row.memoryScope === 'project_only'" variant="gray" class="shrink-0">{{ t('projects.memoryProjectOnlyBadge') }}</BadgeComponent>
+          </div>
+        </template>
+        <template #cell-root="{ row }">
+          <span class="forebrain-cell-1" v-tip:top.trunc="row.root">{{ row.root }}</span>
+        </template>
+        <template #cell-description="{ row }">
+          <span class="forebrain-cell-1" v-tip:top.trunc="row.description">{{ row.description }}</span>
+        </template>
+        <template #cell-sessions="{ row }">{{ row.sessionCount ?? 0 }}</template>
+        <template #cell-updated="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
+        <template #cell-actions="{ row }">
+          <RowActions>
+            <RowAction :icon="FolderOpen" :label="t('projects.openSpace')" :name="row.name" @click="openDetail(row.id)" />
+            <RowAction
+              :icon="row.pinned ? PinOff : Pin"
+              :label="row.pinned ? t('projects.unpin') : t('projects.pin')"
+              :name="row.name"
+              @click="togglePin(row)"
+            />
+            <RowAction
+              :icon="Trash2"
+              :label="t('common.delete')"
+              :name="row.name"
+              tone="danger"
+              :data-testid="`project-delete-${row.name}`"
+              @click="askDelete(row)"
+            />
+          </RowActions>
+        </template>
+      </DataTable>
 
       <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
       <ListNote>{{ t('projects.description') }}</ListNote>
@@ -170,12 +140,12 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { FolderOpen, Pin, PinOff, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
-import SortHeader from '@/components/common/SortHeader.vue'
 import TablePager from '@/components/common/TablePager.vue'
 import FolderDialog from '@/components/chat/FolderDialog.vue'
 import ProjectDeleteDialog from '@/components/project/ProjectDeleteDialog.vue'
@@ -194,6 +164,27 @@ const { rows, total, page, pageSize, q, sort, order, loading, error: listError, 
 
 const writeError = ref('')
 const error = computed(() => listError.value || writeError.value)
+
+/**
+ * The table's columns, at the design's widths: the root and the description
+ * share the room the others leave. Name and 更新时间 sort — the projects listing
+ * is one of the three endpoints that read `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'name', header: t('projects.colName'), size: 210, enableSorting: true },
+  { id: 'root', header: t('projects.colRoot'), cellClass: 'font-mono text-[var(--forebrain-text-2)]' },
+  { id: 'description', header: t('projects.colDesc'), size: 200 },
+  { id: 'sessions', header: t('projects.colSessions'), size: 64, headerClass: 'text-right', cellClass: 'forebrain-num text-right' },
+  {
+    id: 'updated',
+    header: t('projects.colUpdated'),
+    size: 150,
+    enableSorting: true,
+    sortDescFirst: true,
+    cellClass: 'text-[var(--forebrain-text-2)]',
+  },
+  { id: 'actions', header: t('projects.colActions'), size: 112, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 const submitting = ref(false)
 const folderOpen = ref(false)

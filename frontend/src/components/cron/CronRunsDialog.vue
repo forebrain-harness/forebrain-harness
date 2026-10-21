@@ -6,75 +6,58 @@
     <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-6 text-center text-[12px] text-[var(--forebrain-muted-text)]">
       {{ t('cron.noRuns') }}
     </div>
-    <div v-else class="forebrain-table-wrap">
-      <table class="forebrain-table forebrain-table--fixed">
-        <colgroup>
-          <col style="width: 84px" />
-          <col style="width: 132px" />
-          <col />
-          <col style="width: 120px" />
-          <col style="width: 80px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>{{ t('cron.colStatus') }}</th>
-            <th>{{ t('cron.colStarted') }}</th>
-            <th>{{ t('cron.colTrigger') }}</th>
-            <th>{{ t('cron.colDeliver') }}</th>
-            <th class="text-center">{{ t('projects.colActions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <template v-for="run in rows" :key="run.id">
-            <tr :data-cron-run="run.id">
-              <td>
-                <BadgeComponent :variant="stateOf(run.status).variant">{{ stateOf(run.status).label }}</BadgeComponent>
-              </td>
-              <td class="forebrain-num font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(run.startedAt) }}</td>
-              <td class="text-[var(--forebrain-text-2)]">
-                <span class="forebrain-cell-1" v-tip:top.trunc="run.trigger ?? ''">{{ run.trigger || '—' }}</span>
-              </td>
-              <td class="text-[var(--forebrain-text-2)]">
-                <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="run.deliveredTo ?? ''">{{ run.deliveredTo || '—' }}</span>
-              </td>
-              <td class="text-right">
-                <RowActions>
-                  <!-- A fire is a conversation of its own; only a record whose
-                       session holds a transcript has one to open. -->
-                  <RowAction
-                    v-if="openable(run)"
-                    :icon="MessageSquare"
-                    :label="t('cron.openConversation')"
-                    :name="startedName(run)"
-                    data-testid="cron-run-open"
-                    @click="openConversation(run)"
-                  />
-                  <RowActionSlot v-else />
-                  <RowAction
-                    :icon="expanded === run.id ? ChevronUp : ChevronDown"
-                    :label="expanded === run.id ? t('cron.hideOutput') : t('cron.viewOutput')"
-                    :name="startedName(run)"
-                    :data-testid="`cron-run-output-${run.id}`"
-                    @click="toggleOutput(run)"
-                  />
-                </RowActions>
-              </td>
-            </tr>
-            <tr v-if="expanded === run.id" :data-cron-run-output="run.id">
-              <td colspan="5" class="!whitespace-normal">
-                <p v-if="run.output" class="whitespace-pre-wrap text-[12px] text-[var(--forebrain-text-2)]" data-testid="cron-run-output-text">{{ run.output }}</p>
-                <p
-                  v-if="run.error"
-                  class="mt-1 whitespace-pre-wrap text-[11px] text-[var(--forebrain-danger)]"
-                  data-testid="cron-run-error"
-                >{{ runErrorText(run) }}</p>
-                <p v-if="!run.output && !run.error" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('common.empty') }}</p>
-              </td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      v-else
+      :columns="columns"
+      :rows="rows"
+      :row-key="(row) => String(row.id)"
+      :row-attrs="(row) => ({ 'data-cron-run': String(row.id) })"
+      :sub-row="(row) => expanded === row.id"
+    >
+      <template #cell-status="{ row }">
+        <BadgeComponent :variant="stateOf(row.status).variant">{{ stateOf(row.status).label }}</BadgeComponent>
+      </template>
+      <template #cell-startedAt="{ row }">{{ formatDateTime(row.startedAt) }}</template>
+      <template #cell-trigger="{ row }">
+        <span class="forebrain-cell-1" v-tip:top.trunc="row.trigger ?? ''">{{ row.trigger || '—' }}</span>
+      </template>
+      <template #cell-deliveredTo="{ row }">
+        <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.deliveredTo ?? ''">{{ row.deliveredTo || '—' }}</span>
+      </template>
+      <template #cell-actions="{ row }">
+        <RowActions>
+          <!-- A fire is a conversation of its own; only a record whose
+               session holds a transcript has one to open. -->
+          <RowAction
+            v-if="openable(row)"
+            :icon="MessageSquare"
+            :label="t('cron.openConversation')"
+            :name="startedName(row)"
+            data-testid="cron-run-open"
+            @click="openConversation(row)"
+          />
+          <RowActionSlot v-else />
+          <RowAction
+            :icon="expanded === row.id ? ChevronUp : ChevronDown"
+            :label="expanded === row.id ? t('cron.hideOutput') : t('cron.viewOutput')"
+            :name="startedName(row)"
+            :data-testid="`cron-run-output-${row.id}`"
+            @click="toggleOutput(row)"
+          />
+        </RowActions>
+      </template>
+      <template #sub-row="{ row }">
+        <div :data-cron-run-output="String(row.id)" class="whitespace-normal">
+          <p v-if="row.output" class="whitespace-pre-wrap text-[12px] text-[var(--forebrain-text-2)]" data-testid="cron-run-output-text">{{ row.output }}</p>
+          <p
+            v-if="row.error"
+            class="mt-1 whitespace-pre-wrap text-[11px] text-[var(--forebrain-danger)]"
+            data-testid="cron-run-error"
+          >{{ runErrorText(row) }}</p>
+          <p v-if="!row.output && !row.error" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('common.empty') }}</p>
+        </div>
+      </template>
+    </DataTable>
 
     <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
   </ForebrainModal>
@@ -91,6 +74,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ChevronDown, ChevronUp, MessageSquare } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActionSlot from '@/components/common/RowActionSlot.vue'
@@ -112,6 +96,18 @@ const { rows, total, page, pageSize, loading, error, reload } = useServerList<Cr
   (query) => forebrainApi.cronRunsPage(props.projectId, props.job.id, query),
   { pageSize: 10 },
 )
+
+/**
+ * The table's columns, at the design's widths: the trigger takes the room the
+ * others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'status', header: t('cron.colStatus'), size: 84 },
+  { id: 'startedAt', header: t('cron.colStarted'), size: 132, cellClass: 'forebrain-num font-mono text-[var(--forebrain-text-2)]' },
+  { id: 'trigger', header: t('cron.colTrigger'), cellClass: 'text-[var(--forebrain-text-2)]' },
+  { id: 'deliveredTo', header: t('cron.colDeliver'), size: 120, cellClass: 'text-[var(--forebrain-text-2)]' },
+  { id: 'actions', header: t('projects.colActions'), size: 80, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 /** The fire whose output is open under its own row; an id, never a position. */
 const expanded = ref<number | null>(null)
