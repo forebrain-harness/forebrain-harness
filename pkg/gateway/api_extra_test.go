@@ -4735,9 +4735,10 @@ func TestGatewayApproveCancelsAnInFlightPlanReview(t *testing.T) {
 			Status: agent.StatusCancelled, UpdatedAt: time.Now().Unix(),
 		})
 	})
-	// Retire the parked run's wait row so the resume the approve dispatches
-	// exits on its first lookup: a goroutine writing the mode switch or run
-	// status would race this test's temp dir cleanup.
+	// Retire the parked run's wait row: a run nothing is parked on has no
+	// continuation to dispatch, so the approve answers without leaving a
+	// resume goroutine behind to write the mode switch or run status into a
+	// temp dir this test is already tearing down.
 	fenceRunID, _, findErr := runs.FindRunByAction(ctx, actionID)
 	require.NoError(t, findErr)
 	require.NotEmpty(t, fenceRunID)
@@ -4804,8 +4805,9 @@ func TestGatewayIdempotentApproveStillCancelsAnInFlightPlanReview(t *testing.T) 
 	// The decision commits first; the HTTP call below is its exact retry.
 	_, err = actions.Approve(ctx, actionID, "approved")
 	require.NoError(t, err)
-	// Retire the parked run's wait row so the retry's resume goroutine exits
-	// on its first lookup and cannot race this test's temp dir cleanup.
+	// Retire the parked run's wait row so the retry has no continuation to
+	// dispatch and cannot leave a resume goroutine racing this test's temp
+	// dir cleanup.
 	fenceRunID, _, findErr := runs.FindRunByAction(ctx, actionID)
 	require.NoError(t, findErr)
 	require.NotEmpty(t, fenceRunID)

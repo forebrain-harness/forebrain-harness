@@ -3996,7 +3996,7 @@ func (s *Server) resolveGatewayApproval(ctx context.Context, actionID string, re
 		if result.Cancelled {
 			s.abortGatewayRunForAction(result.Action)
 		} else {
-			go s.resumeGatewayRun(actionID, turn.ActionClearedContext(result.Action))
+			s.resumeGatewayRunIfParked(ctx, actionID, turn.ActionClearedContext(result.Action))
 		}
 		return nil
 	}
@@ -4027,7 +4027,7 @@ func (s *Server) resolveGatewayApproval(ctx context.Context, actionID string, re
 		s.abortGatewayRunForAction(result.Action)
 		return nil
 	}
-	go s.resumeGatewayRun(actionID, turn.ActionClearedContext(result.Action))
+	s.resumeGatewayRunIfParked(ctx, actionID, turn.ActionClearedContext(result.Action))
 	return nil
 }
 
@@ -4043,6 +4043,24 @@ func gatewayResumeState(resume turn.ApprovalResume) *tool.ToolApprovalResumeStat
 		DenyFeedback:    resume.Feedback,
 		DeliveredReview: resume.DeliveredReview,
 	}
+}
+
+// resumeGatewayRunIfParked dispatches the continuation for an answered action,
+// but only while a wait row still parks a run on it. A run with no wait row has
+// nothing to continue: resumeGatewayRun looks one up, finds none and returns. A
+// goroutine dispatched anyway would outlive the response that started it and
+// reach the stores after the surface may already be shutting them down, so the
+// decision to dispatch is taken here, while the request is still open, and the
+// resume keeps its own check for the row being retired in between.
+func (s *Server) resumeGatewayRunIfParked(ctx context.Context, actionID string, clearedContext bool) {
+	if s == nil || s.RunRT == nil {
+		return
+	}
+	_, w, err := s.RunRT.FindRunByAction(ctx, actionID)
+	if err != nil || w == nil {
+		return
+	}
+	go s.resumeGatewayRun(actionID, clearedContext)
 }
 
 // resumeGatewayRun resumes the paused run for actionID. When
