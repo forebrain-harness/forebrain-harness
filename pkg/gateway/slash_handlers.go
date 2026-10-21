@@ -216,16 +216,15 @@ func (s *Server) HandleSandboxSlash(sessionID, channel string, args []string) (s
 }
 
 // ModelSettings is what /model works from on the web: the live config, the
-// session's agent, and the config file the providers page writes too. The
-// marker is the session's own resolved choice — its stored row validated
-// against the exact runner serving sessionID — falling back to that runner's
-// published selection when the session never chose. The catalog comes from
+// session's agent, and the selection that session actually runs. The marker
+// is the session's own resolved choice — its stored row validated against the
+// exact runner serving sessionID — falling back to that runner's published
+// selection when the session never chose. The catalog comes from
 // s.liveCfg(); a config reload propagates to every live pooled runner, so the
 // catalog and every marker describe the same provider set.
 func (s *Server) ModelSettings(sessionID string) (turn.ModelSettings, error) {
 	cfg := s.liveCfg()
-	path := s.configPath()
-	if cfg == nil || path == "" {
+	if cfg == nil {
 		return turn.ModelSettings{}, fmt.Errorf("no configuration is bound")
 	}
 	agentName := "main"
@@ -237,7 +236,7 @@ func (s *Server) ModelSettings(sessionID string) (turn.ModelSettings, error) {
 		state := s.sessionModelSelection(r, sessionID)
 		sel = turn.ModelSelectionState{Provider: state.Provider, Model: state.Model, Effort: state.Effort, Set: state.Set}
 	}
-	return turn.ModelSettings{Config: cfg, AgentName: agentName, ConfigPath: path, Selection: sel}, nil
+	return turn.ModelSettings{Config: cfg, AgentName: agentName, Selection: sel}, nil
 }
 
 // sessionModelSelection resolves one web session's effective model: its
@@ -253,11 +252,12 @@ func (s *Server) sessionModelSelection(r *run.Runner, sessionID string) run.Prim
 }
 
 // SelectModel records choice as sessionID's own model choice. The runner's
-// published selection is the process default and deliberately untouched: the
-// session's next turn resolves this row into its run context and routes on
-// it, so web sessions sharing a runner keep independent selections. A choice
-// that no longer resolves on the session's runner is refused here, before
-// anything is written.
+// published selection is the process default and deliberately untouched, and
+// no configuration file is written: the session's next turn resolves this row
+// into its run context and routes on it, so sessions sharing a runner keep
+// independent selections and no other process is retargeted. A choice that no
+// longer resolves on the session's runner is refused here, before anything is
+// written.
 func (s *Server) SelectModel(ctx context.Context, sessionID string, choice turn.ModelChoice, effort *string) error {
 	r := s.runnerFor(ctx, sessionID)
 	if r == nil {
@@ -288,17 +288,6 @@ func (s *Server) SelectModel(ctx context.Context, sessionID string, choice turn.
 		return fmt.Errorf("the model choice could not be recorded for session %s", sid)
 	}
 	return nil
-}
-
-// ReloadModelCatalog takes a choice /model wrote into the shared
-// catalog/default and the base runner, without selecting config index zero
-// as any runner's live model. The reload propagates to every live pooled
-// runner, so the whole process serves one catalog.
-func (s *Server) ReloadModelCatalog(context.Context, string) error {
-	if s.Env == nil {
-		return nil
-	}
-	return s.Env.ReloadConfig()
 }
 
 // PrimaryAgents lists the primary agents /agent offers.

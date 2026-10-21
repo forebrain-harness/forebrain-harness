@@ -6,7 +6,7 @@
   <div ref="rootRef">
     <button
       type="button"
-      class="forebrain-chip-btn !h-7 !w-7 !justify-center !px-0"
+      class="forebrain-chip-btn composer-icon-btn !h-7 !w-7 !justify-center !border-0 !bg-transparent !px-0"
       :class="{ 'forebrain-chip-btn--pressed': open }"
       :disabled="disabled"
       v-tip:top="t('chat.plusAdd')"

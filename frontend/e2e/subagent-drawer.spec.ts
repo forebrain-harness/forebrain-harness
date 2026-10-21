@@ -177,7 +177,7 @@ test('a dispatched subagent opens beside the conversation, not in place of it', 
   // overflows, its send button is on screen, and the approval chip names its
   // preset alone.
   expect(await mainInput.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
-  const send = await page.locator('.chat-shell main button[aria-label="Submit"]').boundingBox()
+  const send = await page.locator('.chat-shell main button[aria-label="Send"]').boundingBox()
   expect(send).not.toBeNull()
   expect(Math.round((send?.x ?? 0) + (send?.width ?? 0))).toBeLessThanOrEqual(1280)
   // The approval chip names its preset alone: the preset is picked first so

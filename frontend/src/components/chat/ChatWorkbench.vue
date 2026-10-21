@@ -135,7 +135,9 @@ const props = withDefaults(defineProps<{
   rootPath?: string
   /** Extra page-specific tabs, rendered after the base four. */
   extraTabs?: WorkbenchExtraTab[]
-}>(), { scope: () => ({}), rootPath: '', extraTabs: () => [] })
+  /** A tab something outside the panel asked to land on. */
+  requestedTab?: string | null
+}>(), { scope: () => ({}), rootPath: '', extraTabs: () => [], requestedTab: null })
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -144,6 +146,9 @@ const emit = defineEmits<{
   (e: 'cancel-all'): void
   (e: 'insert-ref', path: string): void
   (e: 'open-plan', plan: SessionPlan): void
+  /** The tab a control outside the panel asked for is on screen: the caller may
+   *  forget the request now, so asking for the same tab again is a new ask. */
+  (e: 'requested-tab-shown'): void
 }>()
 
 const { t } = useI18n()
@@ -301,8 +306,22 @@ onUpdated(measure)
 onMounted(() => window.addEventListener('resize', measure))
 onBeforeUnmount(() => window.removeEventListener('resize', measure))
 
-watch(scopeKey, () => {
-  active.value = readStored()
+// One initialiser, so the order cannot flip: the tab the conversation last read
+// is the default, and a control that is *about* one tab overrides it — the
+// context ring lands on the context, whatever this conversation last read
+// (prototype :4346). A request is reported the moment it is shown, and the
+// parent answers by clearing `requestedTab`; that clearing arrives here as
+// `tab === null` and is *not* a reason to re-read storage — the tab on screen is
+// the one the request asked for, and the watcher below has already written it
+// down. Only a change of scope re-reads what this conversation last read.
+watch([scopeKey, () => props.requestedTab], ([key, tab], previous) => {
+  if (tab) {
+    active.value = tabEnabled(tab) ? tab : readStored()
+    revealActive()
+    emit('requested-tab-shown')
+    return
+  }
+  if (!previous || previous[0] !== key) active.value = readStored()
 }, { immediate: true })
 
 // An extra tab may become disabled (no skill yet) while it is the active one;
@@ -373,6 +392,7 @@ watch(active, (tab) => {
   height: 44px;
   flex: none;
   padding: 0 8px 0 16px;
+  border-bottom: 1px solid var(--forebrain-divider);
 }
 .chat-workbench-title {
   font-size: 13px;

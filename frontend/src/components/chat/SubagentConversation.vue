@@ -37,17 +37,9 @@
           </Avatar>
         </Message>
 
-        <details
-          v-else-if="block.kind === 'thinking'"
-          class="rounded-lg border border-[var(--forebrain-divider)] px-3 py-2"
-          :open="foldOpen(blockFoldId(block, idx), false)"
-          @toggle="updateNativeFold(blockFoldId(block, idx), $event)"
-        >
-          <summary class="cursor-pointer text-[11px] text-[var(--forebrain-muted-text)]">
-            {{ thinkingBlockLabel(block, t) }}
-          </summary>
-          <p class="mt-2 whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ block.text }}</p>
-        </details>
+        <!-- The same thinking card the conversation and the workshop draw: one
+             caption that folds the prose away, closed by default. -->
+        <ThinkingCard v-else-if="block.kind === 'thinking'" :block="block" />
 
         <ToolCallCard
           v-else-if="block.kind === 'tool' && !block.step.subagentCall"
@@ -156,6 +148,7 @@ import { Message, MessageContent, MessageResponse } from '@repo/elements/message
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
+import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
@@ -163,7 +156,7 @@ import ToolCallCard from '@/components/chat/ToolCallCard.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
-import { formatWorkedDurationLabel, thinkingBlockLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
+import { formatWorkedDurationLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { subagentPhase } from '@/lib/subagentStatus'
 import { blockVisibleIn } from '@/lib/viewMode'
 import type { ViewMode } from '@/composables/useViewMode'
@@ -221,10 +214,6 @@ function foldOpen(id: string, fallback: boolean): boolean {
 
 function updateFold(id: string, open: boolean) {
   emit('fold-change', { id, open })
-}
-
-function updateNativeFold(id: string, event: Event) {
-  updateFold(id, Boolean((event.currentTarget as HTMLDetailsElement | null)?.open))
 }
 
 /** The task card starts collapsed — its frame is what matters, not the whole brief. */

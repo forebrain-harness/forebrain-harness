@@ -68,6 +68,13 @@ const (
 	// RunEventHeartbeatFired announces a heartbeat starting a turn in its
 	// own conversation, so a page watching the run can draw its prompt.
 	RunEventHeartbeatFired = "heartbeat_fired"
+	// RunEventImageRejected reports that the provider refused an image this run
+	// carried: the request was retried with the image degraded to a text note
+	// and the turn continued. It is a run event and not a transcript row because
+	// the conversation keeps its images — after /model the same pictures are
+	// sent to a model that can see them. The refusal names no image: the
+	// provider's own sentence never does.
+	RunEventImageRejected = "image_rejected"
 )
 
 // IsPushOnlyStreamEvent reports a fragment of a run as it happens — answer and
@@ -570,4 +577,15 @@ type GoalCompletedPayload struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	// CheckAgentID is the roster key of the last check, when one ran.
 	CheckAgentID string `json:"check_agent_id,omitempty"`
+}
+
+// ImageRejectedPayload is one provider refusal of an image this run carried.
+// Code is the stable wire code (see run.ImageRejectedCode for the turn refusal
+// that follows such a record); Reason is the provider's own sentence, already
+// flattened to one line and bounded by pkg/llm, so a surface may quote it.
+type ImageRejectedPayload struct {
+	Code     string `json:"code,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }

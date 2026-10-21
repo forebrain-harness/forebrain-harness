@@ -50,7 +50,9 @@ describe('SubagentConversation', () => {
     })
     const worked = wrapper.getComponent(RunWorkedLine)
     expect(worked.text()).toContain('2/5')
-    expect(worked.text()).toContain('Fix the reducer')
+    // The task in flight is the running line's business: the closing line
+    // prints the tally alone, the way the prototype's .worked does.
+    expect(worked.text()).not.toContain('Fix the reducer')
     expect(worked.text()).toContain('Worked for 1m 00s')
   })
 

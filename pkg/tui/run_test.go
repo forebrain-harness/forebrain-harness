@@ -1608,9 +1608,7 @@ func TestStreamStateAppendPasteFoldsLargeContentAndExpansionRestoresBody(t *test
 
 func TestHistoryRecallSubmissionRestoresImageAndLargePaste(t *testing.T) {
 	imagePath := filepath.Join(t.TempDir(), "clip.png")
-	if err := os.WriteFile(imagePath, []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
-		t.Fatalf("write image: %v", err)
-	}
+	writeTinyPNG(t, imagePath)
 	placeholder := "[Pasted Content 1200 chars]"
 	pasted := strings.Repeat("payload", 200)
 	line := "inspect [Image #1] " + placeholder
@@ -2259,9 +2257,7 @@ func TestRestoreWithdrawnWorkRenumbersImagesAcrossTheMerge(t *testing.T) {
 	imageA := filepath.Join(dir, "a.png")
 	imageB := filepath.Join(dir, "b.png")
 	for _, path := range []string{imageA, imageB} {
-		if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeTinyPNG(t, path)
 	}
 	withImage := func(text, path string) ComposerSubmission {
 		submission, ok := buildComposerSubmission(text, text+" "+imageAttachmentPlaceholder(0),
@@ -5434,9 +5430,7 @@ func TestTildePath(t *testing.T) {
 // adopts the TUI rule.
 func TestQueueSemantics_Q1_ImageBearingSteerWaitsInPendingMirror(t *testing.T) {
 	imagePath := filepath.Join(t.TempDir(), "shot.png")
-	if err := os.WriteFile(imagePath, []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
-		t.Fatalf("write image: %v", err)
-	}
+	writeTinyPNG(t, imagePath)
 	session := &fakeSession{steerAccepted: true}
 	state := &streamState{sessionID: "s1", session: session}
 	state.composer.Attachments = []InputAttachment{{Path: imagePath, MIMEType: "image/png", Label: "shot.png"}}

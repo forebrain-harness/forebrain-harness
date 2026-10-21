@@ -1034,6 +1034,13 @@ func shellAssessmentApprovalPayload(cmd string, in *ShellInput, assessment safet
 	if assessment.Dangerous != nil {
 		payload["force_tool_approval"] = true
 		payload["approval_reason"] = "dangerous_shell_syntax"
+		// The rule the engine matched, by name. A surface cannot restate this
+		// conclusion — nor re-derive it, since only this parser decides what
+		// counts as dangerous — so the name travels with the payload and the
+		// reader's own sentence for that rule is the whole of the fact.
+		if rule := strings.TrimSpace(assessment.Dangerous.Rule); rule != "" {
+			payload["dangerous_rule"] = rule
+		}
 	} else if assessment.UsedComplexParsing {
 		payload["force_tool_approval"] = true
 		payload["approval_reason"] = "dangerous_shell_syntax"

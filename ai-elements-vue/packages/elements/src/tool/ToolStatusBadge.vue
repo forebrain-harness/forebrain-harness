@@ -1,65 +1,66 @@
-<!-- StatusBadge.vue -->
+<!-- A call's state, as the prototype draws it beside the header's title
+     (app-preview.html :250-254): one coloured word, no capsule, no per-state
+     icon — and a spinner for as long as the call runs. The word itself comes
+     from the surface, because the word is the reader's language. -->
 <script setup lang="ts">
-import type { DynamicToolUIPart, ToolUIPart } from 'ai'
-import type { Component } from 'vue'
-import { Badge } from '@repo/shadcn-vue/components/ui/badge'
-import {
-  CheckCircleIcon,
-  CircleIcon,
-  ClockIcon,
-  XCircleIcon,
-} from 'lucide-vue-next'
-import { computed } from 'vue'
-
-export type ToolPart = ToolUIPart | DynamicToolUIPart
+import LoaderIcon from '../loader/LoaderIcon.vue'
 
 const props = defineProps<{
-  state: ToolPart['state']
+  status: 'running' | 'awaiting' | 'done' | 'denied' | 'error'
+  label: string
 }>()
-
-const label = computed(() => {
-  const labels: Record<ToolPart['state'], string> = {
-    'input-streaming': 'Pending',
-    'input-available': 'Running',
-    'approval-requested': 'Awaiting Approval',
-    'approval-responded': 'Responded',
-    'output-available': 'Completed',
-    'output-error': 'Error',
-    'output-denied': 'Denied',
-  }
-  return labels[props.state]
-})
-
-const icon = computed<Component>(() => {
-  const icons: Record<ToolPart['state'], Component> = {
-    'input-streaming': CircleIcon,
-    'input-available': ClockIcon,
-    'approval-requested': ClockIcon,
-    'approval-responded': CheckCircleIcon,
-    'output-available': CheckCircleIcon,
-    'output-error': XCircleIcon,
-    'output-denied': XCircleIcon,
-  }
-  return icons[props.state]
-})
-
-const iconClass = computed(() => {
-  const classes: Record<ToolPart['state'], string> = {
-    'input-streaming': 'size-4',
-    'input-available': 'size-4 animate-pulse',
-    'approval-requested': 'size-4 text-yellow-600',
-    'approval-responded': 'size-4 text-blue-600',
-    'output-available': 'size-4 text-green-600',
-    'output-error': 'size-4 text-red-600',
-    'output-denied': 'size-4 text-orange-600',
-  }
-  return classes[props.state]
-})
 </script>
 
 <template>
-  <Badge class="gap-1.5 rounded-full text-xs" variant="secondary">
-    <component :is="icon" :class="iconClass" />
-    <span>{{ label }}</span>
-  </Badge>
+  <span class="tool-status" :class="`tool-status--${props.status}`">
+    <LoaderIcon
+      v-if="props.status === 'running'"
+      :size="12"
+      class="tool-status-spinner"
+      aria-hidden="true"
+    />
+    <span>{{ props.label }}</span>
+  </span>
 </template>
+
+<style scoped>
+.tool-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.tool-status--done {
+  color: var(--forebrain-success);
+}
+
+.tool-status--error,
+.tool-status--denied {
+  color: var(--forebrain-danger);
+}
+
+.tool-status--running,
+.tool-status--awaiting {
+  color: var(--forebrain-brand-1);
+}
+
+.tool-status-spinner {
+  flex: none;
+  animation: tool-status-spin 1s linear infinite;
+}
+
+@keyframes tool-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-status-spinner {
+    animation: none;
+  }
+}
+</style>

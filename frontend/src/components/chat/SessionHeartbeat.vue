@@ -300,10 +300,10 @@ onUnmounted(() => {
 <style scoped>
 .heartbeat-trigger {
   display: inline-flex;
-  height: 28px;
+  height: 30px;
   align-items: center;
   gap: 6px;
-  border-radius: 8px;
+  border-radius: 6px;
   border: 1px solid var(--forebrain-divider);
   padding: 0 10px;
   font-size: 12px;

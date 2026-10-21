@@ -1,11 +1,22 @@
 # Plan 001: 前端通用组件样式规范对齐
 
-**Status**: TODO  
-**Priority**: HIGH  
-**Effort**: M (Medium, 4-6 hours)  
-**Risk**: MEDIUM (requires architectural decision on naming convention)  
+**Status**: REJECTED（owner 2026-10-21 裁决，基线 `8d3322c`）  
+**Priority**: —  
+**Effort**: —  
+**Risk**: —  
 **Created**: 2026-10-08  
 **Base commit**: eafaf46
+
+> **REJECTED：前提已被 071–079 的落地方案取代，不要再按本文件实施。**
+>
+> 本计划的前提是"把实现迁到设计稿的短类名（`.btn` / `.field` / `.badge` / `.sw` / `.card`）"。核实结果：
+> `frontend/src/assets/main.css` 里这些短类名**一个都不存在**，而 `.forebrain-btn` 有 12 处引用；
+> 071–079（web 列表底座、壳与对话 chrome、主代理页表格、项目空间、设置页、子代理抽屉、子代理配置）已经把
+> 整个 web 面在 `.forebrain-*` 命名上重做完毕，并通过了设计稿 1:1 复核。
+> 也就是说：现在改名不是"对齐设计稿"，而是**为改名而改名的全站大改**（CSS + 组件 + e2e 断言全动），
+> 换不来任何用户可见的改善，且会与 087–094 在途改动大面积冲突。
+> 设计意图（值、间距、组件形态）已由上述批次按设计稿落地，命名前缀的差异属可接受偏差。
+> 本文件保留作记录，**不要**据此再派发。
 
 ## Problem
 

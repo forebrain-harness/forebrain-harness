@@ -16,7 +16,9 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  ariaLabel: 'Conversation',
+  // No English fallback: the surface names its own transcript, in the language
+  // the reader is reading (the app passes chat.threadAria).
+  ariaLabel: undefined,
   initial: true,
   damping: 0.7,
   stiffness: 0.05,

@@ -1,6 +1,7 @@
 package turn
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -301,7 +302,7 @@ func (f *modelSelectionFixture) modelSettings(_ string) (ModelSettings, error) {
 	if err != nil {
 		return ModelSettings{}, err
 	}
-	return ModelSettings{Config: &cfg, AgentName: "main", ConfigPath: f.cfgPath, Selection: f.handler.selection}, nil
+	return ModelSettings{Config: &cfg, AgentName: "main", Selection: f.handler.selection}, nil
 }
 
 // choiceLabel names a configured model the way /model's picker does.
@@ -344,19 +345,24 @@ func TestExecModelMarksCurrentByLiveSelection(t *testing.T) {
 	require.True(t, strings.Contains(res.Picker.Items[current].Value, "deepseek"), "current item = %s", res.Picker.Items[current].Value)
 }
 
-func TestChooseModelAppliesLiveSelectionBeforeDefault(t *testing.T) {
+// TestChooseModelAppliesLiveSelectionWithoutWritingTheConfigFile pins the
+// cross-process contract: a model picked in one conversation is applied to
+// that conversation's runtime and recorded on its row, and the shared
+// configuration file — which every process on the machine watches and every
+// new runner loads — keeps its exact bytes.
+func TestChooseModelAppliesLiveSelectionWithoutWritingTheConfigFile(t *testing.T) {
 	f := newModelSelectionFixture(t, ModelSelectionState{})
+	before, err := os.ReadFile(f.cfgPath)
+	require.NoError(t, err)
 	label := f.choiceLabel(t, "deepseek", "deepseek-chat")
 	res := Choose(f.ctx, SlashChoice{Command: "model", Value: label})
 	require.True(t, res.Handled)
 	require.Equal(t, "Switched to deepseek / deepseek-chat.", res.Reply)
-	// Live apply first, then the default write, then the catalog reload.
-	selectAt := slices.Index(f.calls(), "select(s1,deepseek/deepseek-chat)")
-	require.NotEqual(t, -1, selectAt, "SelectModel was not called: %v", f.calls())
-	cfg, err := appcfg.LoadPersisted(f.cfgPath)
+	require.NotEqual(t, -1, slices.Index(f.calls(), "select(s1,deepseek/deepseek-chat)"), "SelectModel was not called: %v", f.calls())
+	after, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
-	require.Equal(t, "deepseek-chat", cfg.Agents.Definitions["main"].LLMProviders[0].Model, "default file was not promoted")
-	require.NotEqual(t, -1, slices.Index(f.calls(), "reload-catalog(s1,)"), "ReloadModelCatalog was not called")
+	require.True(t, bytes.Equal(before, after), "the shared config file changed:\nbefore:\n%s\nafter:\n%s", before, after)
+	require.Equal(t, "gpt-5", f.reloadConfig(t).Agents.Definitions["main"].LLMProviders[0].Model, "config order was rewritten")
 }
 
 func TestChooseModelSameSelectionIsNoOp(t *testing.T) {
@@ -366,29 +372,6 @@ func TestChooseModelSameSelectionIsNoOp(t *testing.T) {
 	require.True(t, res.Handled)
 	require.Equal(t, -1, slices.Index(f.calls(), "select("), "a repeat selection applied a live switch: %v", f.calls())
 	require.Equal(t, "Still using deepseek / deepseek-chat.", res.Reply)
-}
-
-func TestChooseModelReportsPartialDefaultSaveFailure(t *testing.T) {
-	f := newModelSelectionFixture(t, ModelSelectionState{})
-	label := f.choiceLabel(t, "deepseek", "deepseek-chat")
-	// A read-only config file fails the default write only: reads still
-	// work, so the live apply succeeds and only the file save is reported
-	// failed. The directory must be read-only as well: the atomic save
-	// writes a sibling temp file and renames it over the target, which
-	// ignores the target's read-only bit. With the directory read-only the
-	// temp file cannot be created and the in-place fallback is refused by
-	// the read-only file. Defers restore the directory first so both
-	// chmods can succeed (LIFO: registered last, runs first).
-	dir := filepath.Dir(f.cfgPath)
-	require.NoError(t, os.Chmod(f.cfgPath, 0o400))
-	defer func() { _ = os.Chmod(f.cfgPath, 0o600) }()
-	require.NoError(t, os.Chmod(dir, 0o500))
-	defer func() { _ = os.Chmod(dir, 0o700) }()
-	res := Choose(f.ctx, SlashChoice{Command: "model", Value: label})
-	require.True(t, res.Handled)
-	require.Contains(t, res.Reply, "Switched to deepseek / deepseek-chat.")
-	require.Contains(t, res.Reply, "The default for new sessions was not saved")
-	require.NotEqual(t, -1, slices.Index(f.calls(), "select(s1,deepseek/deepseek-chat)"), "live apply did not run")
 }
 
 func TestChooseModelClassifiesSelectionOutcomes(t *testing.T) {
@@ -454,18 +437,57 @@ func TestChooseModelEffortPickerMarksLiveEffort(t *testing.T) {
 	require.Equal(t, "medium", res.Picker.Items[current].Label, "effort marker did not read the live selection")
 }
 
-func TestChooseReasoningEffortAppliesLiveThenDefault(t *testing.T) {
+// TestChooseReasoningEffortDoesNotWriteTheConfigFile pins the same contract for
+// the effort half: the effort lands on this conversation's runtime and row,
+// and the configured default entry keeps the effort the file already had.
+func TestChooseReasoningEffortDoesNotWriteTheConfigFile(t *testing.T) {
 	m := reasoningCapableModel(t)
 	f := newModelSelectionFixture(t, ModelSelectionState{Provider: "openai", Model: m.APIModel, Effort: "low", Set: true})
 	f.addConfigEntry(t, "openai", m.APIModel)
+	before, err := os.ReadFile(f.cfgPath)
+	require.NoError(t, err)
 	value := encodeEffortChoice(f.choiceLabel(t, "openai", m.APIModel), "high", false)
 	res := Choose(f.ctx, SlashChoice{Command: "model-effort", Value: value})
 	require.True(t, res.Handled)
 	require.Equal(t, "Reasoning effort set to high.", res.Reply)
 	require.NotEqual(t, -1, slices.Index(f.calls(), "select-effort(s1,high)"), "explicit effort pointer not passed: %v", f.calls())
-	cfg, err := appcfg.LoadPersisted(f.cfgPath)
+	after, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
-	require.Equal(t, "high", appcfg.ReasoningEffort(cfg.Agents.Definitions["main"].LLMProviders[0].Params))
+	require.True(t, bytes.Equal(before, after), "the shared config file changed:\nbefore:\n%s\nafter:\n%s", before, after)
+}
+
+// TestNewConversationInheritsTheCurrentModel pins owner's ruling that /new
+// opens on the model the conversation it was typed in runs on. The carry-over
+// is a copy of that conversation's own row — never a write to the shared
+// configuration file, which is what used to make the choice cross-process.
+func TestNewConversationInheritsTheCurrentModel(t *testing.T) {
+	f := newModelSelectionFixture(t, ModelSelectionState{Provider: "deepseek", Model: "deepseek-chat", Effort: "high", Set: true})
+	before, err := os.ReadFile(f.cfgPath)
+	require.NoError(t, err)
+	res := Execute(f.ctx, "/new")
+	require.True(t, res.Handled)
+	require.True(t, res.SessionSwitched, "the surface must switch to the new conversation")
+	require.True(t, res.SessionChanged)
+	require.NotEmpty(t, res.SessionID)
+	require.Equal(t, "s1", f.store.copiedModelFrom)
+	require.Equal(t, res.SessionID, f.store.copiedModelTo)
+	after, err := os.ReadFile(f.cfgPath)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(before, after), "the shared config file changed")
+}
+
+// TestNewConversationReportsAModelThatCouldNotBeCarriedOver pins that a failed
+// copy is not fatal: the conversation exists, the surface switches to it, and
+// the reply says what did not carry over.
+func TestNewConversationReportsAModelThatCouldNotBeCarriedOver(t *testing.T) {
+	f := newModelSelectionFixture(t, ModelSelectionState{})
+	f.store.copiedModelErr = errors.New("row store is gone")
+	res := Execute(f.ctx, "/new")
+	require.True(t, res.Handled)
+	require.True(t, res.SessionSwitched)
+	require.NotEmpty(t, res.SessionID)
+	require.Contains(t, res.Reply, "could not be carried over")
+	require.Contains(t, res.Reply, "row store is gone")
 }
 
 func TestForkCopiesMaterializedModelSelection(t *testing.T) {

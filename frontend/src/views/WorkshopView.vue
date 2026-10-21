@@ -11,6 +11,7 @@
         <Conversation
           v-else
           class="chat-scrollbar relative h-full overflow-y-scroll overscroll-contain"
+          :aria-label="t('chat.threadAria')"
         >
           <ConversationContent>
             <div v-if="!stream.messages.value.length && !stream.isStreaming.value" class="py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
@@ -22,10 +23,7 @@
                 class="max-w-[85%] rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-2.5 text-[13px] leading-relaxed text-[var(--forebrain-text)]"
               >
                 <template v-for="(block, blockIdx) in message.blocks" :key="`${message.id}-block-${blockIdx}`">
-                  <div v-if="block.kind === 'thinking'" class="mb-2">
-                    <div class="text-[11px] text-[var(--forebrain-muted-text)]">{{ thinkingBlockLabel(block, t) }}</div>
-                    <div class="whitespace-pre-wrap break-words text-[12px] text-[var(--forebrain-muted-text)]">{{ block.text }}</div>
-                  </div>
+                  <ThinkingCard v-if="block.kind === 'thinking'" :block="block" />
                   <template v-else-if="block.kind === 'assistant'">
                     <MessageResponse :content="candidateText(block.text)" />
                     <CandidateCards
@@ -60,7 +58,7 @@
             />
             <p v-if="stream.error.value" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-error">{{ stream.error.value }}</p>
           </ConversationContent>
-          <ConversationScrollButton />
+          <ConversationScrollButton :label="t('chat.scrollToLatest')" />
         </Conversation>
 
         <!-- The chat page's composer, reused. -->
@@ -88,7 +86,7 @@
                   <ApprovalPresetPicker :session-id="activeSessionId || null" />
                 </div>
                 <div class="flex items-center gap-1">
-                  <ContextRing v-if="contextUsedPercent != null" :percent="contextUsedPercent" @open="workbench.toggle()" />
+                  <ContextRing v-if="contextUsedPercent != null" :percent="contextUsedPercent" @open="workbench.openOn('context')" />
                   <ModelChip
                     v-if="sessionModelData"
                     :session-id="activeSessionId"
@@ -133,6 +131,8 @@
         :overlay="workbenchOverlay"
         :scope="workbenchScope"
         :extra-tabs="extraTabs"
+        :requested-tab="workbench.requested.value"
+        @requested-tab-shown="workbench.consumed()"
         @close="workbench.close()"
       >
         <template #changes>
@@ -223,6 +223,7 @@ import ModelChip from '@/components/chat/ModelChip.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import ToolCallCard from '@/components/chat/ToolCallCard.vue'
+import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import WorkshopTopbar from '@/components/workshop/WorkshopTopbar.vue'
 import CasesTab from '@/components/workshop/CasesTab.vue'
 import ChangesTab from '@/components/workshop/ChangesTab.vue'
@@ -233,7 +234,7 @@ import CandidateCards from '@/components/workshop/CandidateCards.vue'
 import PublishDialog from '@/components/workshop/PublishDialog.vue'
 import CompareDialog from '@/components/workshop/CompareDialog.vue'
 import { useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, hasVisibleBlocks, thinkingBlockLabel } from '@/composables/useChatStream'
+import { useChatStream, hasVisibleBlocks } from '@/composables/useChatStream'
 import { useTopbar } from '@/composables/useTopbar'
 import { useWorkbench } from '@/composables/useWorkbench'
 import forebrainApi, {

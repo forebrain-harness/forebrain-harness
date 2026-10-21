@@ -87,7 +87,7 @@
         <button
           type="button"
           class="forebrain-rail-link"
-          :class="{ 'forebrain-rail-link--active': isActive('/') }"
+          :class="{ 'forebrain-rail-link--active': isActive('/'), 'forebrain-rail-link--open': chatDrawerOpen }"
           :aria-label="L.chat"
           v-tip:right="railCollapsed ? L.chat : ''"
           @click="toggleChatDrawer"
@@ -104,6 +104,7 @@
           :class="{ 'forebrain-rail-link--active': isActive(item.to) }"
           :aria-label="item.label"
           v-tip:right="railCollapsed ? item.label : ''"
+          @click="chatDrawerOpen = false"
         >
           <component :is="item.icon" class="forebrain-rail-ic" aria-hidden="true" />
           <span>{{ item.label }}</span>
@@ -117,6 +118,7 @@
           :class="{ 'forebrain-rail-link--active': isActive('/settings') }"
           :aria-label="L.settings"
           v-tip:right="railCollapsed ? L.settings : ''"
+          @click="chatDrawerOpen = false"
         >
           <Settings class="forebrain-rail-ic" aria-hidden="true" />
           <span>{{ L.settings }}</span>
@@ -501,10 +503,21 @@ const L = computed(() => navLabels())
 
 const navAria = computed(() => navLabels().aria)
 
+// The pages the rail lists, then the two the top bar reaches on its own: every
+// destination names itself here, so no page ever falls back to the chat title
+// (the prototype's titles table, app-preview.html :2829).
+const extraTitles: { to: string; title: () => string }[] = [
+  { to: '/workshop', title: () => L.value.workshop },
+  { to: '/settings', title: () => L.value.settings },
+]
+
 const pageTitle = computed(() => {
   if (isActive('/')) return L.value.chat
   for (const item of navItems.value) {
     if (isActive(item.to)) return item.label
+  }
+  for (const item of extraTitles) {
+    if (isActive(item.to)) return item.title()
   }
   return L.value.chat
 })
@@ -567,8 +580,23 @@ function isActive(path: string) {
   return route.path === path || route.path.startsWith(path + '/')
 }
 
+// A narrow window has no room for the rail's names, so the rail is collapsed —
+// and it is *collapsed*, one state with one truth: the flag the toggle and
+// `aria-expanded` read, not a stylesheet that hides the words behind its back.
+// Widening the window gives the rail back.
+let railMq: MediaQueryList | null = null
+
+function syncRailToWidth() {
+  if (!railMq) return
+  if (railMq.matches) collapseRail()
+  else expandRail()
+}
+
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown)
+  railMq = window.matchMedia('(max-width: 900px)')
+  syncRailToWidth()
+  railMq.addEventListener('change', syncRailToWidth)
 })
 
 // The shell loads its agents when it is actually shown: the bare sign-in page
@@ -579,6 +607,7 @@ watch(() => route.meta.bare, (bare) => {
 
 onUnmounted(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
+  railMq?.removeEventListener('change', syncRailToWidth)
 })
 
 watch(selectedLocale, () => {

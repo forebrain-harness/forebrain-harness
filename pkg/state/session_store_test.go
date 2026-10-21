@@ -1388,6 +1388,159 @@ func TestSessionModelSelectionSaveNeedsASessionRow(t *testing.T) {
 	}
 }
 
+// TestImageRefusalRoundTripAndModelScope pins the record that stops a
+// conversation from paying for the same provider refusal on every turn: it
+// reads back for the exact model that produced it, reads as nothing for any
+// other model (a switch is the recovery the refusal sentence points at), and a
+// second refusal on the same model refreshes the reason instead of adding a row.
+func TestImageRefusalRoundTripAndModelScope(t *testing.T) {
+	ctx := context.Background()
+	store := NewSessionStore(openStateDB(t), "owner")
+	if err := store.Ensure(ctx, "s", "s"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing recorded yet: the answer is "no record", not an error.
+	if reason, ok, err := store.ImageRefusal(ctx, "s", "deepseek", "deepseek-v4-pro"); err != nil || ok {
+		t.Fatalf("fresh session: ok=%v reason=%q err=%v", ok, reason, err)
+	}
+
+	if err := store.RecordImageRefusal(ctx, "s", "deepseek", "deepseek-v4-pro", "unsupported image"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	reason, ok, err := store.ImageRefusal(ctx, "s", "deepseek", "deepseek-v4-pro")
+	if err != nil || !ok {
+		t.Fatalf("read back: ok=%v err=%v", ok, err)
+	}
+	if reason != "unsupported image" {
+		t.Fatalf("reason = %q", reason)
+	}
+
+	// Another model of the same provider, and the same model under another
+	// provider, are different questions.
+	for _, other := range [][2]string{{"deepseek", "deepseek-chat"}, {"zhipuai", "deepseek-v4-pro"}} {
+		if _, ok, err := store.ImageRefusal(ctx, "s", other[0], other[1]); err != nil || ok {
+			t.Fatalf("%v: ok=%v err=%v — a record must not follow another model", other, ok, err)
+		}
+	}
+
+	// A second refusal on the same model is the same row: the reason is
+	// refreshed and the count does not grow.
+	if err := store.RecordImageRefusal(ctx, "s", "deepseek", "deepseek-v4-pro", "image format not supported"); err != nil {
+		t.Fatalf("record again: %v", err)
+	}
+	reason, ok, err = store.ImageRefusal(ctx, "s", "deepseek", "deepseek-v4-pro")
+	if err != nil || !ok {
+		t.Fatalf("read after second refusal: ok=%v err=%v", ok, err)
+	}
+	if reason != "image format not supported" {
+		t.Fatalf("reason after refresh = %q, want the latest sentence", reason)
+	}
+	var rows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_image_refusals WHERE session_id='s'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("rows = %d, want one row per (session, provider, model)", rows)
+	}
+
+	// A reason is folded to one line before it is stored: it rides in a sentence
+	// a surface shows, so a multi-line provider error must not become a
+	// paragraph.
+	if err := store.RecordImageRefusal(ctx, "s", "acme", "m", "  first line\n\nsecond   line  "); err != nil {
+		t.Fatal(err)
+	}
+	if reason, _, err = store.ImageRefusal(ctx, "s", "acme", "m"); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "first line second line" {
+		t.Fatalf("stored reason = %q, want one flattened line", reason)
+	}
+}
+
+// TestImageRefusalNeedsAnIdentityAndFollowsTheSession pins the two boundaries of
+// the record: a write with no session, provider or model files nothing (it is an
+// optimization, never an error), and the row is released when its session is.
+func TestImageRefusalNeedsAnIdentityAndFollowsTheSession(t *testing.T) {
+	ctx := context.Background()
+	store := NewSessionStore(openStateDB(t), "owner")
+	if err := store.Ensure(ctx, "s", "s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordImageRefusal(ctx, "", "deepseek", "m", "reason"); err != nil {
+		t.Fatalf("an empty session must be a no-op, got %v", err)
+	}
+	if err := store.RecordImageRefusal(ctx, "s", " ", "m", "reason"); err != nil {
+		t.Fatalf("an empty provider must be a no-op, got %v", err)
+	}
+	if err := store.RecordImageRefusal(ctx, "s", "deepseek", "", "reason"); err != nil {
+		t.Fatalf("an empty model must be a no-op, got %v", err)
+	}
+	var rows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_image_refusals`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("rows = %d, want none without an identity", rows)
+	}
+
+	// A session that does not exist files nothing: the insert's guard finds no
+	// row to attach to, and the answer is still not an error.
+	if err := store.RecordImageRefusal(ctx, "ghost", "deepseek", "m", "reason"); err != nil {
+		t.Fatalf("record for a session that does not exist: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_image_refusals`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("rows = %d, want none for a session that does not exist", rows)
+	}
+
+	if err := store.RecordImageRefusal(ctx, "s", "deepseek", "m", "reason"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.ImageRefusal(ctx, "s", "deepseek", "m"); err != nil || !ok {
+		t.Fatalf("record before delete: ok=%v err=%v", ok, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM fb_sessions WHERE id='s'`); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_image_refusals WHERE session_id='s'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("rows after deleting the session = %d, want the record released with it", rows)
+	}
+}
+
+// TestImageRefusalIsTenantData pins the agent scope: a record filed by one
+// primary agent's store is not readable through another's, and asking about a
+// session that belongs to someone else is refused the way the model-selection
+// read refuses it.
+func TestImageRefusalIsTenantData(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	ours := NewSessionStore(db, "owner")
+	theirs := NewSessionStore(db, "other")
+	if err := ours.Ensure(ctx, "s", "s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ours.RecordImageRefusal(ctx, "s", "deepseek", "m", "reason"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := theirs.ImageRefusal(ctx, "s", "deepseek", "m"); !errors.Is(err, ErrSessionNotOwned) || ok {
+		t.Fatalf("another agent's read: ok=%v err=%v, want the ownership refusal", ok, err)
+	}
+	// Their own session never inherits ours: the record is keyed by the session
+	// it was observed in.
+	if err := theirs.Ensure(ctx, "their-session", "their-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := theirs.ImageRefusal(ctx, "their-session", "deepseek", "m"); err != nil || ok {
+		t.Fatalf("their own session: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestSessionModelSelectionIsTenantData(t *testing.T) {
 	ctx := context.Background()
 	db := openStateDB(t)

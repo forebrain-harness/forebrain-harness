@@ -55,9 +55,11 @@
           @toggle="open.evicted = !open.evicted"
         >
           <template v-if="evicted.length">
+            <!-- What left the context is a saving, not a size: it reads with the
+                 minus the prototype prints (:4220). -->
             <div v-for="(item, idx) in evicted" :key="`${item.sourceId ?? 'e'}-${idx}`" class="bench-kvs">
               <span class="k">{{ item.sourceId || t('common.none') }}</span>
-              <span class="v">{{ compact(item.estimatedTokens) }}</span>
+              <span class="v">−{{ compact(item.estimatedTokens) }}</span>
             </div>
           </template>
           <p v-else class="bench-hint">{{ t('chat.benchContextEmpty') }}</p>
@@ -72,8 +74,8 @@
         >
           <template v-if="recovery.length">
             <div v-for="(item, idx) in recovery" :key="`r-${idx}`" class="bench-kvs">
-              <span class="k">{{ item.trigger }}</span>
-              <span class="v">{{ item.replacedItems ?? 0 }}</span>
+              <span class="k">{{ item.trigger }} {{ t('chat.benchContextReplaced', { n: item.replacedItems ?? 0 }) }}</span>
+              <span class="v">−{{ compact(Math.max((item.tokensBefore ?? 0) - (item.tokensAfter ?? 0), 0)) }}</span>
             </div>
           </template>
           <p v-else class="bench-hint">{{ t('chat.benchContextEmpty') }}</p>

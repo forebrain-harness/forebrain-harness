@@ -1,19 +1,21 @@
 <template>
-  <div class="plan-doc" data-testid="plan-doc">
-    <!-- The strip names the file, when that version was written and how far its
-         list got: the three facts the workbench row carried, so opening the
-         document never loses the context of which version this is. -->
-    <div class="plan-doc-meta">
+  <!-- The document is the library's plan card, flattened into the drawer tab it
+       is read in: the strip names the file, when that version was written and
+       how far its list got — the three facts the workbench row carried, so
+       opening the document never loses the context of which version this is —
+       and the body is the plan file itself, rendered. -->
+  <Plan class="plan-doc" data-testid="plan-doc" default-open>
+    <PlanHeader class="plan-doc-meta">
       <span class="mono plan-doc-path">{{ path }}</span>
       <span>{{ at }}</span>
       <span class="plan-doc-progress">
         <SquareCheck aria-hidden="true" />{{ done }}/{{ total }}
       </span>
-    </div>
-    <div class="plan-doc-body">
+    </PlanHeader>
+    <PlanContent class="plan-doc-body">
       <MessageResponse :content="markdown" />
-    </div>
-  </div>
+    </PlanContent>
+  </Plan>
 </template>
 
 <script setup lang="ts">
@@ -25,6 +27,7 @@
  * cards use.
  */
 import { MessageResponse } from '@repo/elements/message'
+import { Plan, PlanContent, PlanHeader } from '@repo/elements/plan'
 import { SquareCheck } from 'lucide-vue-next'
 
 defineProps<{
@@ -44,7 +47,15 @@ defineProps<{
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 0;
   overflow-y: auto;
+  /* The drawer is the frame; the card's own border and surface would double
+     it. */
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 .plan-doc-meta {
   display: flex;

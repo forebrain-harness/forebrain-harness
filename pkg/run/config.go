@@ -1770,6 +1770,28 @@ func (r *Runner) sessionClientFor(ctx context.Context) llm.LLM {
 	return r.effectivePrimaryClient()
 }
 
+// ConfiguredDefaultSelection is the model a fresh Load would adopt from the
+// live configuration right now: the agent's first resolved provider entry
+// with its configured effort. It reads, and only reads — no snapshot is
+// published, no runtime is rebuilt. A surface whose runner was loaded before
+// the file last changed (the terminal's base runner, built at startup) answers
+// "what would a runner built now run on" with this, not with its own pin.
+func ConfiguredDefaultSelection(r *Runner) (PrimaryModelState, error) {
+	if r == nil || r.AppCfg == nil {
+		return PrimaryModelState{}, fmt.Errorf("resolve the configured default: runner has no configuration")
+	}
+	entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{})
+	if err != nil {
+		return PrimaryModelState{}, err
+	}
+	return PrimaryModelState{
+		Provider: strings.TrimSpace(entry.Provider),
+		Model:    strings.TrimSpace(entry.Model),
+		Effort:   appcfg.ReasoningEffort(entry.Params),
+		Set:      true,
+	}, nil
+}
+
 // PrimaryModelStateForSession is the full answer to "what does this
 // conversation run on": the model and the reasoning effort. A stored choice
 // resolves against the runner's live config exactly as a turn's context
@@ -1780,6 +1802,17 @@ func (r *Runner) sessionClientFor(ctx context.Context) llm.LLM {
 // surface that resolved its own could name a model the conversation's
 // requests never go to.
 func PrimaryModelStateForSession(r *Runner, store *state.SessionStore, sessionID string) PrimaryModelState {
+	return PrimaryModelStateForSessionOn(r, store, sessionID, PrimaryModelSelection(r))
+}
+
+// PrimaryModelStateForSessionOn is PrimaryModelStateForSession with an
+// explicit fallback for a conversation that never chose — and for one whose
+// row the config no longer resolves. A surface passes the model that
+// conversation's next turn will actually run on, which is not always this
+// runner's published selection.
+func PrimaryModelStateForSessionOn(
+	r *Runner, store *state.SessionStore, sessionID string, fallback PrimaryModelState,
+) PrimaryModelState {
 	if r != nil && store != nil {
 		if sid := strings.TrimSpace(sessionID); sid != "" {
 			if row, hasRow, err := store.SessionModelSelection(context.Background(), sid); err == nil && hasRow {
@@ -1790,7 +1823,7 @@ func PrimaryModelStateForSession(r *Runner, store *state.SessionStore, sessionID
 			}
 		}
 	}
-	return PrimaryModelSelection(r)
+	return fallback
 }
 
 // PrimaryModelForSession names the model one conversation runs on, resolving

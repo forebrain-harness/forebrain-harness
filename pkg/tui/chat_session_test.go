@@ -1621,10 +1621,12 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	require.Equal(t, "Switched to openai / gpt-new.", reply)
 
 	// The model change landed as this session's own persisted selection and
-	// the preset is still the session's sandbox.
+	// the preset is still the session's sandbox. The configured default —
+	// which every other process and every conversation that has not chosen
+	// reads — is untouched.
 	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
-	require.Equal(t, "gpt-new", appcfg.PrimaryLLM(s.cfg().Agents.Definitions["main"]).Model)
+	require.Equal(t, "gpt-old", appcfg.PrimaryLLM(s.cfg().Agents.Definitions["main"]).Model, "the shared config file was rewritten")
 	require.Same(t, s.cfg(), s.runner().AppCfg)
 	sel, hasRow, selErr := s.sessStore().SessionModelSelection(context.Background(), "s1")
 	require.NoError(t, selErr)
@@ -1919,7 +1921,11 @@ func TestConversationModelAnswersFollowTheSessionsOwnRow(t *testing.T) {
 	require.Equal(t, "gpt-a", cliResultModel(s, "s1"))
 }
 
-func TestApplyModelReasoningSelectionPreservesExistingParams(t *testing.T) {
+// TestChooseModelEffortLeavesTheConfigFileAlone pins the effort half of the
+// same contract: the picked effort lands on this conversation's row and its
+// runtime, while the provider record in the shared configuration file — its
+// endpoint, API path and configured effort — keeps exactly what it had.
+func TestChooseModelEffortLeavesTheConfigFileAlone(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
 	model := codeModelID("5.3")
@@ -1961,15 +1967,27 @@ func TestApplyModelReasoningSelectionPreservesExistingParams(t *testing.T) {
 	}
 	require.Equal(t, "Reasoning effort set to xhigh.", chooseInSession(t, s, "model-effort", xhigh).Reply)
 
+	// The effort is this conversation's, so its row carries it.
+	sel := s.sessionModelState("s1")
+	require.True(t, sel.Set)
+	require.Equal(t, model, sel.Model)
+	require.Equal(t, "xhigh", sel.Effort)
+
 	saved, err := appcfg.Load(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
 	got := saved.Agents.Definitions["main"].LLMProviders[0]
 	require.Equal(t, "https://fast.example/v1", got.BaseURL)
 	require.Equal(t, "/responses", got.APIPath)
-	require.JSONEq(t, `{"stream":true,"reasoning":{"effort":"xhigh"}}`, string(got.Params))
+	require.JSONEq(t, `{"stream":true,"reasoning":{"effort":"medium"}}`, string(got.Params), "the shared config file was rewritten")
 }
 
-func TestApplyModelSelectionPromotesMatchingProviderAndPreservesRuntimeConfig(t *testing.T) {
+// TestChooseModelInTheTerminalLeavesTheConfigFileAlone pins the terminal half
+// of the cross-process contract: /model applies the picked entry — its
+// credentials, endpoint, API path and configured effort — to this
+// conversation's runtime and records it on the session's row, and the shared
+// configuration file keeps both its bytes and its provider order. Rewriting
+// it is what used to retarget other processes and their conversations.
+func TestChooseModelInTheTerminalLeavesTheConfigFileAlone(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
 	cfg := appcfg.Root{
@@ -2006,17 +2024,32 @@ func TestApplyModelSelectionPromotesMatchingProviderAndPreservesRuntimeConfig(t 
 
 	require.Equal(t, "Switched to openai / gpt-4o-mini.", chooseInSession(t, s, "model", modelLabel(t, s, "openai / gpt-4o-mini")).Reply)
 
+	// The choice is this conversation's, resolved against the picked entry:
+	// model and its configured effort, which is what its next request carries.
+	sel := s.sessionModelState("s1")
+	require.True(t, sel.Set)
+	require.Equal(t, "gpt-4o-mini", sel.Model)
+	require.Equal(t, "high", sel.Effort)
+
+	// It is durable for this conversation, and nowhere else.
+	row, ok, err := s.sessStore().SessionModelSelection(context.Background(), "s1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "gpt-4o-mini", row.Model)
+	require.Equal(t, "high", row.Effort)
+
 	saved, err := appcfg.Load(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
 	got := saved.Agents.Definitions["main"].LLMProviders[0]
-	require.Equal(t, "openai", got.Provider)
-	require.Equal(t, "gpt-4o-mini", got.Model)
-	require.Equal(t, "https://fast.example/v1", got.BaseURL)
-	require.Equal(t, "/responses", got.APIPath)
-	require.JSONEq(t, `{"stream":true,"reasoning":{"effort":"high"}}`, string(got.Params))
+	require.Equal(t, "gpt-4o", got.Model, "the shared config file was rewritten")
+	require.Empty(t, got.BaseURL)
 }
 
-func TestApplyModelSelectionUsesActiveAgentNotMain(t *testing.T) {
+// TestChooseModelResolvesAgainstTheActiveAgent pins that /model offers and
+// applies the active agent's providers, not main's: the pick lands on this
+// conversation's row with that agent's provider record, and neither agent's
+// entry moves in the shared file.
+func TestChooseModelResolvesAgainstTheActiveAgent(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
 	cfg := appcfg.Root{
@@ -2058,13 +2091,18 @@ func TestApplyModelSelectionUsesActiveAgentNotMain(t *testing.T) {
 
 	require.Equal(t, "Switched to openai / gpt-4o-mini.", chooseInSession(t, s, "model", modelLabel(t, s, "openai / gpt-4o-mini")).Reply)
 
+	// The pick resolved against writer's entry, not main's: the reason the
+	// row names gpt-4o-mini while main only offers gpt-4o.
+	sel := s.sessionModelState("s1")
+	require.True(t, sel.Set)
+	require.Equal(t, "gpt-4o-mini", sel.Model)
+
 	saved, err := appcfg.Load(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
 	require.Equal(t, "gpt-4o", saved.Agents.Definitions["main"].LLMProviders[0].Model)
 	got := saved.Agents.Definitions["writer"].LLMProviders[0]
-	require.Equal(t, "gpt-4o-mini", got.Model)
-	require.Equal(t, "https://writer.example/v1", got.BaseURL)
-	require.JSONEq(t, `{"stream":true}`, string(got.Params))
+	require.Equal(t, "gpt-4o", got.Model, "the shared config file was rewritten")
+	require.Empty(t, got.BaseURL)
 }
 
 func TestChatSessionProjectContextAddendumUsesLaunchRootNotGitAncestor(t *testing.T) {
@@ -12626,6 +12664,28 @@ func TestEditDeliveredPendingSteerLeavesSteerUntouched(t *testing.T) {
 	}
 }
 
+// tinyPNG is a real, decodable 1×1 PNG, for fixtures that need an image a turn
+// will actually carry. The image ladder reads a file's header before it may send
+// its bytes verbatim (pkg/llm.ImagePartWithin), so a signature-only stub — the
+// shape these fixtures used to write — is now refused as a truncated file, and
+// the attachment degrades to a text note, which changes what the test is about.
+func tinyPNG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatalf("encode the PNG fixture: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// writeTinyPNG writes tinyPNG at path, for the fixtures that need a file.
+func writeTinyPNG(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, tinyPNG(t), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+}
+
 // End-to-end through the real composer: a steer carrying an image and a folded
 // large paste must reach the transcript in its composer form. The model-facing
 // text has the image placeholder stripped and the paste expanded, so rendering
@@ -12633,9 +12693,7 @@ func TestEditDeliveredPendingSteerLeavesSteerUntouched(t *testing.T) {
 // nothing at all) and dump the whole paste into history.
 func TestDeliveredSteerTranscriptKeepsImageAndPastePlaceholders(t *testing.T) {
 	imagePath := filepath.Join(t.TempDir(), "clip.png")
-	if err := os.WriteFile(imagePath, []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
-		t.Fatalf("write image: %v", err)
-	}
+	writeTinyPNG(t, imagePath)
 	session := newRTSession()
 	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
@@ -12676,9 +12734,7 @@ func TestDeliveredSteerTranscriptKeepsImageAndPastePlaceholders(t *testing.T) {
 // user could only conclude the message had been dropped.
 func TestDeliveredImageOnlySteerReachesTranscript(t *testing.T) {
 	imagePath := filepath.Join(t.TempDir(), "clip.png")
-	if err := os.WriteFile(imagePath, []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
-		t.Fatalf("write image: %v", err)
-	}
+	writeTinyPNG(t, imagePath)
 	session := newRTSession()
 	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
@@ -15370,9 +15426,7 @@ func TestQuestionOverlaySubmitViewRendering(t *testing.T) {
 func auditImageAttachment(t *testing.T, name string) InputAttachment {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
-		t.Fatalf("write image: %v", err)
-	}
+	writeTinyPNG(t, path)
 	return InputAttachment{Path: path, MIMEType: "image/png", Label: name}
 }
 
@@ -30320,7 +30374,11 @@ func TestInteractiveResumeRestoresSessionModelSelection(t *testing.T) {
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 }
 
-func TestNewSessionResetsModelToConfigDefault(t *testing.T) {
+// TestNewSessionKeepsTheCurrentModel pins owner's ruling: /new opens on the
+// model the conversation it was typed in runs on. The carry-over is a copy of
+// that conversation's own row — the choice belongs to the conversation, never
+// to the shared configuration file.
+func TestNewSessionKeepsTheCurrentModel(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
@@ -30329,28 +30387,26 @@ func TestNewSessionResetsModelToConfigDefault(t *testing.T) {
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	state := newSwitchState(s, "sess-a")
-	// /new creates a row and switches to it; the row has no model state, so
-	// the runner resets to the latest file default.
 	res, ok := s.ExecuteSurfaceSlash(ctx, "sess-a", "/new")
 	require.True(t, ok)
 	require.True(t, res.SessionSwitched)
+	require.Equal(t, "gpt-other", s.storedSelection(t, res.SessionID).Model)
+	require.Equal(t, "high", s.storedSelection(t, res.SessionID).Effort)
+
 	switched, _, err := switchStreamSession(ctx, state, renderer, nil, res.SessionID)
 	require.NoError(t, err)
 	require.True(t, switched)
-	requireRunnerModel(t, s, "openai", "gpt-main", "")
+	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 }
 
-// TestNewSessionFooterFollowsTheResetModel pins what the composer footer says
-// after /new: the model and effort the new session's next request carries —
-// the file's default entry — never the ones the outgoing session ran on.
+// TestNewConversationInheritsTheCurrentModelAndFooterNamesIt pins both halves
+// of owner's ruling: /new opens on the model of the conversation it was typed
+// in, and the composer footer names exactly that model.
 //
-// The two only differ while the live runtime and the file's default have
-// drifted apart, which is the state this test builds: sess-a chose the second
-// provider, and the file's llm_providers[0] is the first one again. The live
-// runtime survives that reordering (a pinned reload keeps a selection the file
-// still lists), so the footer has to change here even though the runtime does
-// not move until /new resets it.
-func TestNewSessionFooterFollowsTheResetModel(t *testing.T) {
+// The carry-over is a copy of the source conversation's own row, so it keeps
+// working after the user edits the configured default: the third conversation
+// inherits the second one's model, not whatever llm_providers[0] says now.
+func TestNewConversationInheritsTheCurrentModelAndFooterNamesIt(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
 
@@ -30367,46 +30423,59 @@ func TestNewSessionFooterFollowsTheResetModel(t *testing.T) {
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 
-	// /model promotes the chosen entry to llm_providers[0] and writes it.
-	main = s.cfg().Agents.Definitions["main"]
-	require.Equal(t, "gpt-main", main.LLMProviders[0].Model)
-	main.LLMProviders[0], main.LLMProviders[1] = main.LLMProviders[1], main.LLMProviders[0]
-	s.cfg().Agents.Definitions["main"] = main
-	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
-	require.NoError(t, s.reloadConfigFromDisk())
+	// setConfiguredDefault is the user's own action on the file — the one
+	// thing that may change the configured default.
+	setConfiguredDefault := func(model string) {
+		providers := s.cfg().Agents.Definitions["main"]
+		at := -1
+		for i := range providers.LLMProviders {
+			if providers.LLMProviders[i].Model == model {
+				at = i
+			}
+		}
+		require.NotEqual(t, -1, at, "model %s is not configured", model)
+		providers.LLMProviders[0], providers.LLMProviders[at] = providers.LLMProviders[at], providers.LLMProviders[0]
+		s.cfg().Agents.Definitions["main"] = providers
+		require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
+		require.NoError(t, s.reloadConfigFromDisk())
+	}
+	setConfiguredDefault("gpt-other")
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
-
-	// The file's default then moved back to the first entry — the drift the
-	// owner's file had — and the reload must leave this session on its own
-	// model all the same.
-	main = s.cfg().Agents.Definitions["main"]
-	require.Equal(t, "gpt-other", main.LLMProviders[0].Model)
-	main.LLMProviders[0], main.LLMProviders[1] = main.LLMProviders[1], main.LLMProviders[0]
-	s.cfg().Agents.Definitions["main"] = main
-	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
-	require.NoError(t, s.reloadConfigFromDisk())
-	requireRunnerModel(t, s, "openai", "gpt-other", "high")
-	require.Equal(t, "gpt-main", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
 
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	state := newSwitchState(s, "sess-a")
 
+	// The second conversation opens on this one's model, and the footer says so.
 	res, ok := s.ExecuteSurfaceSlash(ctx, "sess-a", "/new")
 	require.True(t, ok)
 	require.True(t, res.SessionSwitched)
-	switched, _, err := switchStreamSession(ctx, state, renderer, nil, res.SessionID)
+	second := res.SessionID
+	switched, _, err := switchStreamSession(ctx, state, renderer, nil, second)
 	require.NoError(t, err)
 	require.True(t, switched)
+	require.Equal(t, "gpt-other", s.storedSelection(t, second).Model)
+	require.Equal(t, "high", s.storedSelection(t, second).Effort)
+	require.Equal(t, "openai/gpt-other", renderer.footer.Model)
+	require.Equal(t, "high", renderer.footer.ReasoningEffort)
 
-	// The reset selection is what both the runtime and the footer name.
-	sel := run.PrimaryModelSelection(s.runner())
-	require.True(t, sel.Set)
-	require.Equal(t, "openai", sel.Provider)
-	require.Equal(t, "gpt-main", sel.Model)
-	require.Equal(t, "low", sel.Effort)
-	require.Equal(t, "openai/gpt-main", renderer.footer.Model)
-	require.Equal(t, "low", renderer.footer.ReasoningEffort)
+	// The user then moves the configured default away from it.
+	setConfiguredDefault("gpt-main")
+	require.Equal(t, "gpt-main", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
+
+	// A third conversation, opened from the second, still inherits the
+	// second's model — and both existing conversations keep their own.
+	res, ok = s.ExecuteSurfaceSlash(ctx, second, "/new")
+	require.True(t, ok)
+	require.True(t, res.SessionSwitched)
+	third := res.SessionID
+	switched, _, err = switchStreamSession(ctx, state, renderer, nil, third)
+	require.NoError(t, err)
+	require.True(t, switched)
+	require.Equal(t, "gpt-other", s.storedSelection(t, third).Model)
+	require.Equal(t, "openai/gpt-other", renderer.footer.Model)
+	require.Equal(t, "gpt-other", s.storedSelection(t, second).Model)
+	require.Equal(t, "gpt-other", s.storedSelection(t, "sess-a").Model)
 }
 
 func TestForkCopiesSessionModelSelection(t *testing.T) {
@@ -30440,6 +30509,36 @@ func TestForkCopiesSessionModelSelection(t *testing.T) {
 	require.True(t, res.SessionSwitched)
 	require.Equal(t, "gpt-other", s.storedSelection(t, res.SessionID).Model)
 	require.Equal(t, "high", s.storedSelection(t, res.SessionID).Effort)
+}
+
+// TestFooterNamesTheConfiguredDefaultBeforeAnyProjectRunner pins the second
+// half of the footer fix. A conversation bound to a project runs its turns on
+// the project runner, which the pool builds from the live configuration on the
+// first turn. Before that happens there is no runner to read, and the terminal
+// used to answer from its base runner — loaded at process start, so it could
+// name a model no request of this conversation ever carried. The answer is the
+// configured default instead, i.e. what the project runner will adopt.
+func TestFooterNamesTheConfiguredDefaultBeforeAnyProjectRunner(t *testing.T) {
+	s := newModelSelectionTestSession(t)
+	ctx := context.Background()
+
+	// The base runner is moved to the non-default entry, so reading it here
+	// would answer gpt-other.
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	requireRunnerModel(t, s, "openai", "gpt-other", "high")
+
+	// The same agent scope the environment's pool resolves projects under.
+	s.Env.Deps.AgentName = "main"
+	projects := state.NewProjectStore(s.Env.SQL, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "footer-default", Root: s.home()})
+	require.NoError(t, err)
+	require.NoError(t, projects.BindSession(ctx, "sess-b", project.ID))
+
+	bound := s.sessionModelState("sess-b")
+	require.True(t, bound.Set)
+	require.Equal(t, "gpt-main", bound.Model, "the footer must name the model the project runner will adopt")
+	s.SetViewingSession("sess-b")
+	require.Equal(t, "openai/gpt-main", summarizeComposerModel(s))
 }
 
 func TestResumeMissingStoredModelFallsBackWithWarning(t *testing.T) {
@@ -30605,8 +30704,10 @@ func requireModel(t *testing.T, s *ChatSession, provider, model, effort string) 
 }
 
 // TestModelChoiceDoesNotLeakToSecondProcess is the headline bug: process A
-// switching models and reordering the shared file cannot move process B's
-// pinned provider, model, or concrete effort when B reloads.
+// switching models must not move process B, any other conversation, or the
+// shared configuration file. The choice is a conversation fact — it lives on
+// A's session row — so the file stays byte-identical, and B only follows a
+// default the user edited into the file itself.
 func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 	f := newCrossProcessFixture(t)
 	ctx := context.Background()
@@ -30615,8 +30716,15 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 	requireModel(t, f.a, "openai", "gpt-m1", "")
 	requireModel(t, f.b, "openai", "gpt-m1", "")
 
-	// A switches m1 → m2 through the real /model flow: live apply, shared
-	// default write, synchronous catalog reload.
+	// B's conversation picks its own model, effort included.
+	high := "high"
+	require.NoError(t, f.b.SelectModel(ctx, "sess-b", turn.ModelChoice{Provider: "openai", Model: "gpt-m1"}, &high))
+	requireModel(t, f.b, "openai", "gpt-m1", "high")
+
+	before, err := os.ReadFile(f.cfgPath)
+	require.NoError(t, err)
+
+	// A switches m1 → m2 through the real /model flow.
 	require.Equal(t, "Switched to openai / gpt-m2.",
 		f.a.ChooseSurfaceSlash(ctx, "sess-a", turn.SlashChoice{Command: "model", Value: "openai / gpt-m2"}).Reply)
 	requireModel(t, f.a, "openai", "gpt-m2", "")
@@ -30626,42 +30734,33 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "gpt-m2", sel.Model)
 
-	// The shared file now leads with m2 — the old bug moved B with it.
+	// The shared file is byte-identical: this is the channel that used to
+	// carry A's pick into every other process, every fresh runner, and every
+	// conversation that had not chosen yet.
+	after, err := os.ReadFile(f.cfgPath)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(before, after), "A's /model rewrote the shared config file:\nbefore:\n%s\nafter:\n%s", before, after)
+	requireModel(t, f.b, "openai", "gpt-m1", "high")
+
+	// The user then edits the file itself — the one action that may change a
+	// configured default. B's own conversation keeps its row; a conversation
+	// in B that never chose follows B's edited default, which is neither A's
+	// pick nor B's pinned model.
 	key := "${FOREBRAIN_CROSS_PROCESS_TEST_KEY}"
-	reordered := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+	edited := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "openai", Model: "gpt-m3", APIKey: key, BaseURL: "http://m3.test/v1"},
 			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"},
 			{Provider: "openai", Model: "gpt-m1", APIKey: key, BaseURL: "http://m1.test/v1"},
 		}},
 	}}}
-	f.reloadFileIn(t, f.b, reordered)
-	requireModel(t, f.b, "openai", "gpt-m1", "")
-
-	// A concrete effort is pinned the same way: an empty pin stays empty and
-	// a non-empty pin survives a later file change on the same pair.
-	high := "high"
-	require.NoError(t, f.b.SelectModel(ctx, "sess-b", turn.ModelChoice{Provider: "openai", Model: "gpt-m1"}, &high))
-	requireModel(t, f.b, "openai", "gpt-m1", "high")
-	withEffort := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1",
-				Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"low"}}`)},
-			{Provider: "openai", Model: "gpt-m1", APIKey: key, BaseURL: "http://m1.test/v1"},
-		}},
-	}}}
-	f.reloadFileIn(t, f.b, withEffort)
+	f.reloadFileIn(t, f.b, edited)
 	requireModel(t, f.b, "openai", "gpt-m1", "high")
 
-	// A session with no stored choice adopts the shared file default, which
-	// now carries m2/low.
 	fresh := f.loadRuntime(t, "sess-fresh")
 	require.NoError(t, func() error { _, err := fresh.ActivateSessionModel(ctx, "sess-fresh"); return err }())
-	requireModel(t, fresh, "openai", "gpt-m2", "low")
-
-	// Resuming A's pinned session restores its stored selection even after
-	// the file default moved again.
-	require.NoError(t, func() error { _, err := f.a.ActivateSessionModel(ctx, "sess-a"); return err }())
-	requireModel(t, f.a, "openai", "gpt-m2", "")
+	requireModel(t, fresh, "openai", "gpt-m3", "")
+	require.Equal(t, "gpt-m3", fresh.sessionModelState("sess-fresh").Model, "the footer of a conversation that never chose")
 }
 
 // TestCrossProcessProviderDetailsStillRefresh pins the other half of the
@@ -31190,3 +31289,83 @@ func TestInstallWatchQuietFirstFrameKeepsWaiting(t *testing.T) {
 func (h *fakeSubagentExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn)            {}
 func (h *fakeSubagentExecutor) SubagentExecutionStarting(context.Context, string)                {}
 func (h *fakeSubagentExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {}
+
+// TestImageRejectedEventDrawsOneLineAndReplaysTheSame pins the two surfaces of a
+// provider image refusal: live, the run event becomes one system line; a second
+// observation of the same event (same id) draws nothing, because the store has
+// already recorded it; and a resumed session replays exactly that line, since
+// live and replay share one sentence builder.
+func TestImageRejectedEventDrawsOneLineAndReplaysTheSame(t *testing.T) {
+	s := newCharacterizationSession(t, nil)
+	const sid = "char-image-rejected"
+	if err := s.Env.Deps.SessionStore.Ensure(context.Background(), sid, sid); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	rec := &notifiedRecorder{}
+	s.PrependUINotify(rec.record)
+	// The event row names its run, so the run must exist: one turn's row, the
+	// way the surface creates it before a run starts.
+	runRecord, err := s.Env.Deps.RunRT.CreateRun(context.Background(), sid, "look at this")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	payload := event.ImageRejectedPayload{
+		Code: "image_rejected_by_provider", Provider: "acme", Model: "vision-model", Reason: "unsupported image",
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evt := event.RunEvent{
+		ID: "image-rejected:" + runRecord.ID, RunID: runRecord.ID, SessionID: sid,
+		Type: event.RunEventImageRejected, Payload: raw, CreatedAt: time.Now().UTC(),
+	}
+	if err := s.publishRunEvent(context.Background(), evt); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	// The same fact observed again — a reconnected surface, a repeated tool-loop
+	// refusal — is not a second occurrence.
+	if err := s.publishRunEvent(context.Background(), evt); err != nil {
+		t.Fatalf("publish again: %v", err)
+	}
+
+	var lines []Message
+	for _, n := range rec.awaitStable(t) {
+		if m, ok := n.(NewMessageMsg); ok && m.Msg.Kind == MsgKindSystem {
+			lines = append(lines, m.Msg)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("%d system lines, want exactly one: %+v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0].Content, "rejected") || !strings.Contains(lines[0].Content, "acme/vision-model") {
+		t.Fatalf("line = %q, want it to name what refused", lines[0].Content)
+	}
+	if !strings.Contains(lines[0].Content, "unsupported image") || !strings.Contains(lines[0].Content, "/model") {
+		t.Fatalf("line = %q, want the provider's reason and the way out", lines[0].Content)
+	}
+	if strings.Contains(lines[0].Content, "[image omitted") {
+		t.Fatalf("line = %q: the note that replaced the image belongs to the request, not the UI", lines[0].Content)
+	}
+	if lines[0].RunID != runRecord.ID {
+		t.Fatalf("line run = %q, want the run it belongs to", lines[0].RunID)
+	}
+
+	// Replay produces the same message, word for word: one sentence builder.
+	replayed, ok := imageRejectedMessage(evt)
+	if !ok {
+		t.Fatal("the event did not rebuild into a replay message")
+	}
+	msg, isMsg := replayed.(NewMessageMsg)
+	if !isMsg {
+		t.Fatalf("replay produced %T, want the same NewMessageMsg the live path drew", replayed)
+	}
+	if msg.Msg.Kind != lines[0].Kind || msg.Msg.Content != lines[0].Content || msg.Msg.RunID != lines[0].RunID {
+		t.Fatalf("replay = %+v\nlive   = %+v", msg.Msg, lines[0])
+	}
+	// An unrelated event does not become this line: the type is the gate.
+	if _, ok := imageRejectedMessage(event.RunEvent{Type: event.RunEventToolCompleted, Payload: raw}); ok {
+		t.Fatal("an unrelated event decoded into an image-rejected line")
+	}
+}

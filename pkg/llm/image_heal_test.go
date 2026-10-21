@@ -157,3 +157,77 @@ func TestNewImageHealRetriesOnceWithDegradedImages(t *testing.T) {
 		t.Fatalf("images per call = %v want [1 0]", inner.images)
 	}
 }
+
+// TestImageHealReportsTheRefusalOnce pins the observer: a caller that knows the
+// provider and model (pkg/run) learns the refusal exactly once, with the
+// provider's sentence flattened to one line, and the retry itself is unchanged —
+// the observer only reports.
+func TestImageHealReportsTheRefusalOnce(t *testing.T) {
+	t.Parallel()
+	inner := &imageRejectingLLM{}
+	healed := Use(inner, NewImageHeal())
+
+	var reasons []string
+	ctx := WithImageRefusalObserver(context.Background(), func(reason string) { reasons = append(reasons, reason) })
+	messages := []Message{
+		{Role: RoleUser, Parts: []ContentPart{Text("what is this?"), ImageBase64("image/png", strings.Repeat("A", 4096))}},
+	}
+	if _, err := healed.Execute(ctx, messages, nil); err != nil {
+		t.Fatalf("the healed request failed: %v", err)
+	}
+	if len(reasons) != 1 {
+		t.Fatalf("observer ran %d times, want once per refusal: %v", len(reasons), reasons)
+	}
+	if !strings.Contains(reasons[0], "unsupported image") || strings.ContainsAny(reasons[0], "\n\r") {
+		t.Fatalf("reason = %q, want the provider's sentence on one line", reasons[0])
+	}
+	// Reporting is not deciding: the retry still happened, degraded.
+	if inner.calls != 2 || inner.images[1] != 0 {
+		t.Fatalf("calls=%d images=%v, want the same retry an unobserved heal makes", inner.calls, inner.images)
+	}
+
+	// A request the provider accepts reports nothing.
+	reasons = nil
+	clean := []Message{{Role: RoleUser, Parts: []ContentPart{Text("no pictures here")}}}
+	if _, err := healed.Execute(ctx, clean, nil); err != nil {
+		t.Fatalf("the second request failed: %v", err)
+	}
+	if len(reasons) != 0 {
+		t.Fatalf("observer ran %d times on a request with no image", len(reasons))
+	}
+}
+
+// TestImageHealWithoutAnObserverIsUnchanged pins the two shapes of "nobody
+// asked": no observer at all, and a nil one. Neither may change the heal, and a
+// nil may not panic.
+func TestImageHealWithoutAnObserverIsUnchanged(t *testing.T) {
+	t.Parallel()
+	messages := []Message{
+		{Role: RoleUser, Parts: []ContentPart{Text("what is this?"), ImageBase64("image/png", strings.Repeat("A", 4096))}},
+	}
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "no observer", ctx: context.Background()},
+		{name: "nil observer", ctx: WithImageRefusalObserver(context.Background(), nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inner := &imageRejectingLLM{}
+			res, err := Use(inner, NewImageHeal()).Execute(tc.ctx, messages, nil)
+			if err != nil {
+				t.Fatalf("the healed request failed: %v", err)
+			}
+			if res == nil || res.Message == nil {
+				t.Fatalf("res = %+v want the assistant message", res)
+			}
+			if inner.calls != 2 || inner.images[0] != 1 || inner.images[1] != 0 {
+				t.Fatalf("calls=%d images=%v, want the ordinary heal", inner.calls, inner.images)
+			}
+			if ImageRefusalObserverFromContext(tc.ctx) != nil {
+				t.Fatal("a nil observer must not be installed")
+			}
+		})
+	}
+}

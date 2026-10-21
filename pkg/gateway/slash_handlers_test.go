@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -168,8 +169,10 @@ func TestHandleMCPServersV1MarksOfficialRegistryURLs(t *testing.T) {
 }
 
 // /model on the web offers the agent's configured models as a picker, the one
-// in force marked, and a pick is written to the config and taken live — the
-// same engine choice the terminal makes.
+// in force marked, and a pick becomes this session's own durable selection —
+// the same engine choice the terminal makes. The shared configuration file is
+// not rewritten: a pick there would retarget every other process and every
+// conversation that has not chosen yet.
 func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
@@ -208,7 +211,7 @@ func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 	require.Equal(t, "Switched to deepseek / deepseek-chat.", chosen.Reply)
 	saved, err := appcfg.LoadPersisted(cfgPath)
 	require.NoError(t, err)
-	require.Equal(t, "deepseek-chat", saved.Agents.Definitions["main"].LLMProviders[0].Model)
+	require.Equal(t, "gpt-4o", saved.Agents.Definitions["main"].LLMProviders[0].Model, "the shared config file was rewritten")
 	// The pick is the session's own durable selection; the runner's published
 	// default is what the next session without a row starts from.
 	row, hasRow, rowErr := sess.SessionModelSelection(context.Background(), "s1")
@@ -584,12 +587,11 @@ func TestGatewayProjectRunnerSelectionIsolated(t *testing.T) {
 	requireGatewaySelection(t, s, "any-session", "openai", "gpt-a", "")
 }
 
-// TestGatewayCatalogAgreesAfterPropagatedReload pins the fix for the boundary
-// this test used to document: a pooled runner's config no longer lags behind
-// the live config. ReloadModelCatalog routes through Environment.ReloadConfig,
-// which propagates the reloaded config to every live pool entry, so the
-// picker catalog (liveCfg) and the runner's snapshot marker describe the same
-// provider set.
+// TestGatewayCatalogAgreesAfterPropagatedReload pins the boundary this test
+// used to document: a pooled runner's config no longer lags behind the live
+// config. Environment.ReloadConfig propagates the reloaded config to every
+// live pool entry, so the picker catalog (liveCfg) and the runner's snapshot
+// marker describe the same provider set.
 func TestGatewayCatalogAgreesAfterPropagatedReload(t *testing.T) {
 	s := gatewayModelServer(t)
 	// A project runner built through the environment's own pool, the way a
@@ -633,7 +635,7 @@ func TestGatewayCatalogAgreesAfterPropagatedReload(t *testing.T) {
 		"          base_url: http://a.test/v1\n"
 	require.NoError(t, os.WriteFile(s.Env.ConfigPath, []byte(body), 0o600))
 
-	require.NoError(t, s.ReloadModelCatalog(context.Background(), sid))
+	require.NoError(t, s.Env.ReloadConfig())
 
 	// The pooled runner re-derived its own effective config from the reloaded
 	// file (its sandbox follows its own trust decision, not the base runner's)
@@ -655,12 +657,25 @@ func TestGatewayCatalogAgreesAfterPropagatedReload(t *testing.T) {
 	}
 }
 
-func TestGatewayReloadModelCatalogReloadsEnvironment(t *testing.T) {
+// TestGatewaySelectModelWritesOnlyTheSessionRow pins the gateway half of the
+// cross-process contract: a web selection is recorded on the session's row so
+// its next turn routes on it, and neither the process's runtime selection nor
+// the shared configuration file moves — another process must never be
+// retargeted by a choice made here.
+func TestGatewaySelectModelWritesOnlyTheSessionRow(t *testing.T) {
 	s := gatewayModelServer(t)
-	require.NoError(t, s.SelectModel(context.Background(), "s1", turn.ModelChoice{Provider: "openai", Model: "gpt-b"}, nil))
-	// A catalog reload refreshes the base runner's provider details while
-	// retaining its pin; it does not select config index zero.
-	require.NoError(t, s.ReloadModelCatalog(context.Background(), "s1"))
+	ctx := context.Background()
+	require.NoError(t, s.Sessions.Ensure(ctx, "s1", "s1"))
+	before, err := os.ReadFile(s.Env.ConfigPath)
+	require.NoError(t, err)
+	baseBefore := run.PrimaryModelSelection(s.Runner)
+
+	require.NoError(t, s.SelectModel(ctx, "s1", turn.ModelChoice{Provider: "openai", Model: "gpt-b"}, nil))
+
+	require.Equal(t, baseBefore, run.PrimaryModelSelection(s.Runner), "the process runtime selection moved")
+	after, err := os.ReadFile(s.Env.ConfigPath)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(before, after), "the shared config file changed")
 	requireGatewaySelection(t, s, "s1", "openai", "gpt-b", "high")
 }
 

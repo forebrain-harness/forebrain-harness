@@ -18,7 +18,7 @@ defineOptions({ inheritAttrs: false })
 
 <template>
   <Collapsible
-    :class="cn('group not-prose mb-4 w-full rounded-md border', props.class)"
+    :class="cn('group not-prose w-full overflow-hidden rounded-lg border border-[var(--forebrain-divider)]', props.class)"
     v-bind="{ ...delegatedProps, ...$attrs }"
   >
     <slot />

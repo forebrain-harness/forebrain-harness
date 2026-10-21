@@ -4,6 +4,42 @@
 
 ## 最新审核信息
 
+- **2026-10-21 087–094 执行完毕（8/8 DONE，评审 APPROVE，未提交）**：按 owner 指定顺序 **090 → 087 → 088 → 092 → 094 → 089 → 091 → 093**
+  在当前工作区按序实施，不建分支/工作树、不 commit，改动全部留在工作区等审阅。
+  - 评审侧独立复跑（非执行者自报）：`pkg/event`/`pkg/state`/`pkg/llm`/`pkg/run`/`pkg/tool`/`pkg/tui`/`pkg/gateway`/`pkg/config` 全 `ok`；
+    全量 `FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./... -count=1` 无 FAIL；`go vet`（六包）无输出；
+    前端 **135 文件 / 939 用例**全绿（093 按计划少一个文件，即删掉的 `PendingActionsPanel`）、`vue-tsc` exit 0；
+    库 `ai-elements-vue/packages/elements` 16 例全绿；e2e 按计划分组（`web-fetch-approval` / `approval-families` /
+    `message-cards` / `chat-composer` / `workspace-tree`）全部 `web e2e: PASS`。
+  - 变异验证（评审亲手做过，证明用例真能抓）：090 摘掉路由判定 → 私网用例红；087 `entryLocation` 退回字符串读 → 权限条目用例红；
+    088 `diff` 只用 `editDiff` → 编辑卡用例红；092 摘掉 summaryChain 的 `withImageHeal`、恢复 `withinSideLimit` 旧实现 → 两条用例各自红；
+    094 关掉前端 `image_rejected` 分支 → 用例红；089 注释 `emit('cancel')` → Esc 用例红；091 `expandedSet` 改回"受控也留副本" → 5 条用例红。
+    每次变异后都改回并复跑绿。
+  - 094 真机迁移取样：用当前源码构建的二进制，在 `mktemp -d` 的 home 上启动一个 **v15** 库 ⇒ `PRAGMA user_version=16`、
+    `fb_session_image_refusals` 存在且 5 列、gateway 正常监听（真实 `~/.forebrain` 全程未触碰）。
+  - 执行期偏离（评审逐条复核后接受）：090 的路由判定放在门禁**之前**（不问用户一件注定失败的抓取）；
+    088 复用 `patchHunk(text, maxRows)`（`apply_patch` 仍 8 行、`edit_file` 40 行），并连带更新两处断言旧文案的单测与
+    `web-fetch-approval.spec.ts` 里 083 遗留的陈旧搜索卡断言（原断言钉住已被替换的旧卡，且断言了 owner 禁止的工具内部名）；
+    094 的 `pkg/tui` 用共享 `imageRejectedMessage`（live 与回放同源）、网关读 `detail.Code()`（而非字面常量）；
+    091 的 watcher 在"请求被消费（`requestedTab` 清空）"时不重读 storage，只按 scope 变化重读。
+  - 仍保留 / 待 owner 处置：`FileTreeFolderKey` 留在库的 `context.ts`（`ai-elements-vue` 文档站公开用法引用它，
+    删掉等于给共享库做破坏性 API 变更；093 只删了组件内无人消费的 `provide`）；
+    `pkg/architecture/testdata/graph.json` 被 `scripts/package-graph.sh` 刷新为 loc 数字（无增删边）——落地前若还有代码进来需再生成一次。
+  - 执行中注意到但按"不许顺手"留着的：终端 `pkg/tui/overlays.go` 的 web_fetch overlay 首句仍写 "from the public web"（090 只改了 Explain 折行）；
+    沙箱提权（`profile_elevation`）的事实行在 web 端仍无渲染点；`ApprovalFacts` 的 `path` 已在 093 删除，其余数值字段在 web 端无读取者。
+- **2026-10-21 branch 审计（087–093 待执行）**：`improve branch` 审的是 `dev` 的在途改动——工作区 67 改 + 4 新，
+  加上 `dev` 领先 `origin/dev` 的 4 个提交（`8d3322c` 审批卡按族渲染 / `cd11539` 审批建议与图像自愈 / `b5f3fd6` DeepSeek 搜索与抓取 /
+  `09277a1` url-only 抓取与审批卡改写），共 118 个非产物文件。逐条复核后确认 22 条缺陷、驳回 5 条
+  （含一条已被 083 执行记录裁决掉的 `commandScope`）。产出 7 份计划：
+  087 审批卡事实对齐引擎载荷（前端 + `shell_tool` 一个载荷字段）→ 088 `edit_file` 真 diff（`pkg/event` + 载荷 + 前端）→
+  089 提问卡与队列卡的操作兑现（Esc/←→/聊一聊、滚动、取回、删掉设计稿里没有的 3/2 进度）→
+  090 `web_fetch` 路由红线（内网 URL 不外发、大页面可解释、卡片不再假承诺）→ 091 文件树单一所有者 + 上下文环落位 →
+  092 图像自愈覆盖压缩链（+ 坏图与缩放系数）→ 093 本轮死代码清理。
+  补 **094**（由 owner 2026-10-21 对"provider 拒图静默"的裁决产出：粗档 `provider`+`model`、落库；schema v15→v16）。
+  - 未审计：`dev` 相对 `main` 的其余 22 个提交（PDF/图片读取、tokenizer 资产、migrate、会话分页等已落地工作）；
+    设计稿 1:1 还原度未做像素级对照。
+  - 悬而未决（**已全部收口**）：provider 拒图曾是"两层静默 + 永久 2× 请求"，owner 2026-10-21 裁决（粗档记忆 + 落库）后
+    整族由 **094** 覆盖（当场一行提示 + 下一次不再发）。两条被否决的实现路径记在本文末「已审核但未计划的发现」里。
 - **2026-10-20 083–085 执行完毕（DONE，评审 APPROVE，未提交）；086 当日撤回（REJECTED）**：三份有效计划在当前
   工作区按序实施（083 → 084 → 085），不建分支/工作树、不 commit，改动全部留在工作区等 owner 审阅。评审侧独立复跑
   每份的完成条件：083 `ok pkg/tool` + `ok pkg/gateway`、`vue-tsc` 0、131 文件 / 883 用例、
@@ -257,7 +293,7 @@
 | # | 标题 | 类别 | 状态 | 优先级 | 工作量 | 风险 |
 |---|------|------|------|--------|--------|------|
 | [001-fix-message-recall-after-detach](001-fix-message-recall-after-detach.md) | 修复 runtime detach 后消息无法撤回 | Bug Fix | DONE | **HIGH** | S | LOW |
-| [001-frontend-component-design-spec-alignment](001-frontend-component-design-spec-alignment.md) | 前端通用组件样式规范对齐 | Design System | TODO | HIGH | M (4-6h) | MEDIUM |
+| [001-frontend-component-design-spec-alignment](001-frontend-component-design-spec-alignment.md) | 前端通用组件样式规范对齐（迁到设计稿短类名 `.btn`/`.field`/…） | Design System | **REJECTED**（owner 2026-10-21）：前提已被 071–079 取代——短类名一个都不存在、`.forebrain-btn` 12 处引用，整个 web 面已在 `.forebrain-*` 命名上重做并通过设计稿 1:1 复核；现在改名是为改名而改名的全站大改，零用户可见收益 | — | — | — |
 | [002-subagent-view-input-freeze-ledger-read](002-subagent-view-input-freeze-ledger-read.md) | subagent 视图的 composer 重绘不再整读 subagent 账本（修复快速滚轮后输入卡死） | Bug Fix / Perf | DONE | **P1** | S | LOW |
 | [003-recall-in-flight-steer](003-recall-in-flight-steer.md) | 队列里显示的 steer 在模型开始回答前随时能撤回、清空时一并撤走，web/gateway 与 TUI 一致 | Bug Fix | DONE | **P1** | L | MED |
 | [004-session-scoped-plan-files](004-session-scoped-plan-files.md) | 计划文件按会话隔离：多个 TUI / 会话同时在 plan 模式时 exit_plan_mode 审批不再显示别人的计划 | Bug Fix | DONE | **P1** | M | MED |
@@ -341,6 +377,14 @@
 | [084-message-cards-tool-head-and-ask-tabs](084-message-cards-tool-head-and-ask-tabs.md) | 对话消息卡：工具卡头永远一行、放不下的调用原样搬进正文；`session_todo` 卡在中文界面说「更新待办」；web 提问卡改成终端的标签页形状（☐/✔/提交、一题一屏、编号选项 + 推荐 + 预览 + 其他、多选复核）；新增「默认 / 简洁」视图模式（两个输入框各一枚，简洁只留助手回答）；**TUI 的 `Asked user` 之后不再跟问题名**，正文保持「问题原文 → 回答原文」 | Direction / UX | DONE | **P1** | L | MED |
 | [085-workbench-history-and-plan-tab](085-workbench-history-and-plan-tab.md) | 工作台与抽屉：问答与计划都变成「一张卡 + 一串历史」（工作台今天连问答卡都没有）；计划原文从弹窗里的裸 `<pre>` 改成抽屉标签页里渲染的 Markdown（新增 `GET /chat/sessions/:id/plans`，无需迁移）；工作台头栏换成抽屉的 `PanelRightClose` 并共用一段入场动画 | Direction / UX | DONE | **P1** | M–L | MED |
 | [086-project-kind-seeds-forebrain-md](086-project-kind-seeds-forebrain-md.md) | ~~新建项目的「项目类型」（办公创作 / 创意编程）：`fb_projects.kind`（schema v15→v16，ADD COLUMN）+ 弹窗下拉 + 只读展示；owner 裁决是**一次性种子、只写项目根的 `FOREBRAIN.md`**，不动审批画像与工具集，已存在同名文件时一字不覆盖~~ **owner 2026-10-20 撤回**：「创建项目时默认自动生成 FOREBRAIN.md 文件的语义和代码都删掉，不需要了」。实现已整体删除（含 `kind` 与 v16 迁移，schema 回到 v15） | Feature | REJECTED | P2 | M | MED |
+| [087-approval-card-facts-read-the-wire](087-approval-card-facts-read-the-wire.md) | 审批卡的事实行重新对齐引擎载荷：文件权限路径（现在是 `[object Object]`）、联网授权（现在一个字都不提）、受保护读的理由与 `lsp` 族（现在退化成兜底卡）、`forced_rm`（现在凭空编造"删完要重新编译"）、沙箱拒因（现在说反）、MCP 参数（原始字段名 + 原值）；引擎补 `dangerous_rule` 字段；测试 fixture 换成引擎真实 payload | Bug Fix / UX | DONE | **P1** | M | MED |
+| [088-file-edit-approval-shows-a-real-diff](088-file-edit-approval-shows-a-real-diff.md) | `edit_file` 审批卡的"diff"其实是旧文全部 + 新文全部、行数按两段文本算；改为引擎侧 `event.Build` 出首个 hunk + 真实增删行数写进载荷，前端优先读它（历史 action 退回旧形态），终端与 web 同源 | Bug Fix | DONE | **P1** | M | MED |
+| [089-ask-and-queue-affordances-are-real](089-ask-and-queue-affordances-are-real.md) | 提问卡印着不存在的键（Esc 取消 / ←→ 切题 / 和它聊聊），web 上根本没有取消提问的路径；队列卡 42vh 裁剪且无滚动条（违反"长内容滚动不截断"），行内「取回这条消息」永远取回最后一条；删掉设计稿里没有的 `3/2` 头部进度 | Bug Fix / UX | DONE | **P1** | M | LOW–MED |
+| [090-web-fetch-routing-and-promises](090-web-fetch-routing-and-promises.md) | `allow_private_ip` + `provider: deepseek` 时内网 URL 被 POST 给第三方（含 query 里的凭据）；>2 MiB 页面变成 `unexpected end of JSON input`；审批卡的"跳转只在同 host""私网一定失败"两句在路由/放开私网时都不成立，且 `allow_private_ip` 无任何显示点 | Security / Bug Fix | DONE | **P1** | M | MED |
+| [091-tree-and-workbench-single-owner](091-tree-and-workbench-single-owner.md) | 文件树展开状态有两份所有者 ⇒ 鼠标点过一次后 Enter/←/→ 静默失效（子项建好却被关在关着的面板里）；上下文环永远打不开「上下文」（`requested` 被挂载顺序覆盖，`consumed()` 零调用）；受控组件不再留副本；e2e 键盘用例改为断言子项可见 | Bug Fix | DONE | P2 | M | MED |
+| [092-image-heal-on-the-compaction-chain](092-image-heal-on-the-compaction-chain.md) | 图像自愈没装在压缩/总结链上 ⇒ 含被拒图片的会话压不动、历史涨到撞窗口；头解析失败的坏图被原样上送（注释说"后面的 decode 会报"但那条路径没有 decode）；末档重编码把缩放系数硬报成 8 | Bug Fix | DONE | P2 | M | MED |
+| [093-dead-code-from-this-batch](093-dead-code-from-this-batch.md) | 删掉从不挂载的 `PendingActionsPanel`（与 `ApprovalCard` 重复 ~200 行、已漂移、还带 6 条绿测试）、无人读的 `ApprovalFacts.path`、无人 inject 的 `FileTreeFolderKey`、从不 emit 的 `activate`、3 对零引用文案键与 `reviewModelLabel`；顺带修中文界面里的 `暂无 live agents`、硬编码英文 aria-label、TUI 空数组参数只印标签 | Tech Debt / i18n | DONE | P3 | S | LOW |
+| [094-remember-image-refusal-per-session-and-model](094-remember-image-refusal-per-session-and-model.md) | provider 拒图不再静默也不再白送：**当场**发一条 `image_rejected` run event（两端各一行，live 与回放逐字相同，固定 id `image-rejected:<run>` 保证一轮只一条），并把这次拒绝记进会话（owner 2026-10-21 裁决：**粗档 provider+model**、**落库**，schema v15→v16 新增 `fb_session_image_refusals`），既有 `ImageTurnRefusal` 在"请求确实会带图"时提前拦下并返回 `ImageRejectedCode`；web 一个提示块按 `unsupported`/`rejected`/`remembered` 三种措辞。终止永久 2× 请求 | Bug Fix / Cost | DONE | **P1** | M–L | MED |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 
@@ -577,10 +621,27 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
 3. **组件缺失**：`.badge`、`.sw`、`.card` 及部分变体完全缺失
 
 **计划**：见 `001-frontend-component-design-spec-alignment.md`（需用户确认命名策略）
+→ **2026-10-21 已 REJECTED**（前提被 071–079 的落地取代，见计划列表那一行与文件开头的裁决块）
 
 ---
 
 ## 已审核但未计划的发现
+
+### 2026-10-21 分支审计
+
+- **provider 拒图（已由 094 全部覆盖，本轮不再有未计划项）**：094 同时做"当场一行提示"（`image_rejected` run event）
+  与"下一次不再白送"（粗档 `provider`+`model` 落库，schema v16）。两条已否决的路记在这里以免重新讨论：
+  ①把 `llm.UnsendableImageNote` 写进消息文本——`llm.DegradeImages` 降级的是**所有** image part，而 provider 的拒绝措辞
+  不指向具体哪一张（`pkg/llm/errors.go:305-313`），写进 transcript 等于永久删掉可能还有效的其他图，并与
+  `pkg/tui/chat_session.go:2103-2108` 的"换模型后继续就能看到每张图"冲突；②往 `fb_messages` 写 `role='system'` 行——
+  `pkg/state/session_store.go:2434-2445` 写明没有 boundary part 的 system 行会被下一次请求当普通 system 消息重放。
+- **审批浮层每帧无上限地展开参数（pre-existing，被 09277a1 放大，值不高）**：`pkg/tui/overlays.go` 现在每个参数一行、
+  每个字符串值按自己的换行拆行，`writeLine` 没有行数上限；但浮层本身有滚动（`keepOptionsInView`），
+  触发条件是"某个工具参数是几 MB 的字符串"，属没人会踩的边角。要收紧就在 `approvalOverlayVisualLines` 加行预算。
+- **`/chat/sessions/:id/plans` 一次返回全部计划全文（性能，P3）**：`pkg/gateway/api_extra.go:2338-2360` 逐条塞 `Markdown`，
+  只有"单文件 1 MiB"这一道上限（`pkg/state/plan.go:155`），没有总量预算。真实场景是"一次对话反复重规划几十次"，
+  届时打开工作台会传几十 MB JSON。修法是把列表降级成元数据 + 首段预览（正文走 `plan-md` 按需取）。没立计划是因为它需要
+  前端同步改消费方（`useSessionPlans.ts`），且当前没有任何现场证据表明会话会攒到那个量级。
 
 ### 2026-10-19 分支审计（`fa4af8a..HEAD` + 未提交 079）
 
@@ -629,6 +690,21 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
     state 库在 home 级，导入旧 jsonl 只能在运行期做，不能放进纯 SQL 的 schema 迁移）。
 
 ## 已考虑并拒绝的发现
+
+### 2026-10-21 分支审计（`dev` 在途改动：工作区 + `origin/dev..HEAD`）
+
+- **`commandScope` 被丢掉、记住档统一成「这类命令不再问」**：这是 owner 在 083 执行期做过的裁决
+  （见本文顶部 083 执行记录"逐字替换旧键的裁决"），不是缺陷。不要再"恢复"逐前缀文案。
+- **`/chat/sessions/:id/plans` 在单个计划 > 1 MiB 时正文给空串**：085 执行记录已把"跳过 vs 给空串"的矛盾裁决为给空串，
+  属既定行为（本批只保留"总量无上限"那一条性能项，若日后要做按预算裁剪再立计划）。
+- **App.vue 新增的 window/媒体查询监听、`mask-image: linear-gradient` 的渐变、`ChatDrawer` 不是模态且无 Esc**、
+  **停止按钮同时发出 pending steers**、**退出计划模式闸门里不再画评审正文**：逐条核过——监听在 `onUnmounted` 成对移除；
+  渐变与设计稿 `app-preview.html:263,293,1162` 逐字一致；设计稿 `.drawer` 明写"不是模态"；停止=终端 Esc 同一语义；
+  评审改为 plan-reviewer 子代理卡（设计稿明写）。
+- **`ApprovalFacts.path` 是否该显示文件名**：设计稿 `app-preview.html:3566-3567` 明确"文件路径在上面那行调用里"，
+  所以 web 卡片不印路径是设计决定；本批只把它当死字段清掉（093）。
+- **本次审计范围内未发现问题的类别**：新增/改动的 diff 内无任何凭据或密钥；`App.vue`、`ChatDrawer`、`Subagent*`
+  的新增监听/定时器均成对清理；未发现新的 `v-html`/动态执行 sink；未发现仓库内容中的提示注入。
 
 ### 2026-10-19 分支审计（看过、核实后不立计划，避免下次重复审）
 
@@ -751,7 +827,8 @@ owner 2026-10-14 裁决「**Out of scope 里的必须加入本期计划**」，�
 0. **schema / 迁移性能批次已收口，无待执行项**：051 已并回主工作区（未提交）；048 撤回，049 / 050 / 052 驳回（依据见顶部复评与「已考虑并拒绝的发现」）。不要派发这四份。
 1. **owner 确认**：本轮写完的计划（022、024 改写版，025–030、033、035–037；web 015–020）。035 的通道凭据存储已定（方案 A）。
 2. 确认后按"执行顺序"里的分组派发：先 025，再 026 → 027，然后 028 / 029 并行；web 先 015、019。
-3. 仍为 TODO 的早期计划（001 设计规范、007/008 系列之外的 014–021、032、034）照旧可独立执行，与上面不冲突的可穿插。
+3. 早期计划多数已 DONE；001 设计规范已于 2026-10-21 **REJECTED**（前提被 071–079 取代），不要再派发。
+   当前唯一在途的一批是 **087–094**，顺序见本文顶部「最新审核信息」。
 
 ---
 

@@ -4,7 +4,7 @@
   <div class="chat-shell flex h-full min-h-0 w-full flex-1 overflow-hidden">
     <div class="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden bg-[var(--forebrain-surface)]">
       <main
-        class="mx-auto flex h-full min-h-0 w-full max-w-[880px] flex-1 flex-col overflow-hidden px-3 sm:px-5"
+        class="flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden"
         :class="{ 'chat-col--fresh': isFreshChat }"
       >
         <div class="min-h-0 flex-1 overflow-hidden">
@@ -20,10 +20,11 @@
           <Conversation
             v-else
             ref="conversationRef"
-            class="chat-scrollbar relative h-full overflow-y-scroll overscroll-contain"
+            class="relative h-full overscroll-contain"
+            :aria-label="t('chat.threadAria')"
             @scroll.passive="recordCurrentBrowseState"
           >
-            <ConversationContent>
+            <ConversationContent class="chat-thread-col gap-4 px-0 pt-6 pb-2">
             <!-- A new conversation whose first message created its project
                  says so once, at the top of the thread. -->
             <div v-if="createdLine" class="sys-line" data-testid="created-project-line">
@@ -70,13 +71,8 @@
               </div>
             </div>
             <McpNotice :failures="mcpFailures" />
-            <ConversationEmptyState v-if="!messages.length && !isStreaming" :title="t('chat.emptyTitle')">
-              <template #icon>
-                <MessageSquare class="size-12 text-muted-foreground" />
-              </template>
-            </ConversationEmptyState>
-            <template v-else>
-              <div class="space-y-6">
+            <template v-if="messages.length || isStreaming">
+              <div class="space-y-4">
                 <template v-for="(msg, idx) in messages" :key="msg.id ?? idx">
                   <!-- A message the session model could not take: it stays in
                        the thread and only the request was withheld, so the
@@ -87,10 +83,11 @@
                     class="forebrain-err-block"
                     role="alert"
                     data-testid="image-refused-notice"
+                    :data-image-refusal-kind="imageRefusalKind(msg)"
                   >
                     <ImageOff class="size-3.5" aria-hidden="true" />
                     <div>
-                      <b>{{ msg.imageRefusal.model || sessionModelData?.model || '' }}</b> {{ t('chat.imageRefusedLine') }}
+                      <b>{{ msg.imageRefusal.model || sessionModelData?.model || '' }}</b> {{ t(imageRefusalSentence(msg)) }}
                       <span class="forebrain-err-s">
                         {{ t('chat.imageRefusedRecover') }}
                         <button type="button" class="rewind-undo" data-testid="image-refused-switch" @click="modelChipRef?.openMenu()">{{ t('chat.imageRefusedSwitch') }}</button>
@@ -151,52 +148,27 @@
                     </div>
                   </template>
                   </template>
-                  <Message v-if="msg.role !== 'notice' && messageHasBubble(msg)" :from="messageBubbleRole(msg.role)" :class="messageClass(msg.role)">
-                    <Avatar v-if="msg.role === 'assistant'" class="size-8 shrink-0 ring-1 ring-border">
-                      <AvatarFallback class="bg-muted">
-                        <Bot class="size-4 text-muted-foreground" />
-                      </AvatarFallback>
-                    </Avatar>
+                  <Message v-if="msg.role !== 'notice' && messageHasBubble(msg)" :from="messageBubbleRole(msg.role)" class="max-w-full overflow-visible">
                     <MessageContent :class="messageContentClass(msg.role)">
+                      <!-- One checklist card per turn, holding what the list looks
+                           like now: the earlier updates are history, and history
+                           is the workbench's business (prototype :1272). -->
                       <div
-                        v-if="msg.role === 'assistant' && msg.planUpdates?.length && viewMode === 'default'"
-                        class="mb-3 space-y-3"
+                        v-if="msg.role === 'assistant' && latestPlanUpdate(msg) && viewMode === 'default'"
                       >
-                        <PlanUpdateCard
-                          v-for="(pu, puIdx) in msg.planUpdates"
-                          :key="`${msg.id ?? idx}-plan-update-${puIdx}`"
-                          :plan="pu"
-                        />
-                      </div>
-                      <div v-if="msg.role === 'assistant' && isStreaming && !msg.blocks?.length && !String(msg.content ?? '').trim()"
-                        class="inline-flex items-center rounded-lg bg-muted px-4 py-3">
-                        <span class="sr-only">{{ t('chat.thinking') }}</span>
-                        <span class="typing-dots" aria-hidden="true">
-                          <span class="typing-dot" />
-                          <span class="typing-dot" />
-                          <span class="typing-dot" />
-                        </span>
+                        <PlanUpdateCard :plan="latestPlanUpdate(msg)!" />
                       </div>
                       <!-- What the turn said and did, in the order it happened:
                            prose, thinking, the calls it made and the gates it was
                            stopped at. A live turn and a reloaded one build this
                            same list, so a refresh shows the conversation the user
                            was just watching. -->
-                      <template v-else-if="hasVisibleBlocks(msg.blocks) && drawnBlocks(msg.blocks).length">
+                      <div v-if="hasVisibleBlocks(msg.blocks) && drawnBlocks(msg.blocks).length" class="msg-blocks">
                         <template v-for="(block, blockIdx) in drawnBlocks(msg.blocks)" :key="`${msg.id ?? idx}-block-${blockIdx}`">
-                          <!-- A thinking block reads as the prototype's .think:
-                               small, muted, no border of its own. The label
-                               above the text names the block and how long the
-                               model thought — the same label the subagent view
-                               shows, so a block reads the same in both. -->
-                          <div v-if="block.kind === 'thinking'" class="mb-2">
-                            <div class="text-[11px] text-[var(--forebrain-muted-text)]">
-                              {{ thinkingBlockLabel(block, t) }}
-                            </div>
-                            <div class="think-block whitespace-pre-wrap break-words">
-                              {{ reasoningDisplayText(block.text) }}
-                            </div>
-                          </div>
+                          <!-- The prototype's .think, folded to one line: the
+                               same card the subagent tab and the workshop draw,
+                               so a block reads the same wherever it is shown. -->
+                          <ThinkingCard v-if="block.kind === 'thinking'" :block="block" />
                           <MessageResponse
                             v-else-if="block.kind === 'assistant'"
                             :key="`${msg.id ?? idx}-said-${blockIdx}`"
@@ -204,7 +176,6 @@
                           />
                           <ToolCallCard
                             v-else-if="block.kind === 'tool' && !block.step.subagentCall"
-                            class="my-2"
                             :step="block.step"
                             :scope="workbenchScope"
                             :default-open="false"
@@ -215,7 +186,6 @@
                                result JSON stay out of the conversation. -->
                           <SubagentCallCard
                             v-else-if="block.kind === 'tool'"
-                            class="my-2"
                             :step="block.step"
                             :live="subagentCallTasks.get(block.step.stepId)"
                             :now="subagentNow"
@@ -227,7 +197,6 @@
                                same card, keyed by its execution. -->
                           <SubagentCallCard
                             v-else-if="block.kind === 'subagent'"
-                            class="my-2"
                             :step="block.step"
                             :live="subagentCallTasks.get(block.stepId)"
                             :now="subagentNow"
@@ -236,36 +205,36 @@
                           />
                           <ApprovalCard
                             v-else-if="block.kind === 'approval'"
-                            class="my-2"
                             :block="block"
                           />
                           <CompactionCard
                             v-else-if="block.kind === 'compaction'"
-                            class="my-2"
                             :data="block.compaction"
                           />
                           <GoalLine
                             v-else-if="block.kind === 'goal'"
-                            class="my-2"
                             :goal="block.goal"
                             @open-check="openSubagentTab"
                           />
                           <RunErrorBlock
                             v-else-if="block.kind === 'error'"
-                            class="my-2"
                             :text="block.text"
                             :detail="block.detail"
                           />
                         </template>
-                      </template>
+                      </div>
                       <!-- What the user sent reads exactly as they wrote it, the way
                            the terminal shows it: never reinterpreted as Markdown.
                            A message the runtime sent on their behalf says who
                            sent it, above the words. -->
                       <div v-else-if="msg.role === 'user' && (String(msg.content ?? '').trim() || msg.attachments?.length)" class="u-wrap">
+                        <!-- Who sent it, when it was not the reader: the engine's
+                             heartbeat or a schedule. It sits beside the bubble,
+                             not inside it — the bubble holds the words alone
+                             (prototype :3016). -->
+                        <p v-if="originLabel(msg.origin)" data-testid="message-origin"
+                          class="u-origin">{{ originLabel(msg.origin) }}</p>
                         <div class="u">
-                          <p v-if="originLabel(msg.origin)" data-testid="message-origin"
-                            class="mb-1 text-[11px] font-medium text-[var(--forebrain-muted-text)]">{{ originLabel(msg.origin) }}</p>
                           <div v-if="String(msg.content ?? '').trim()" class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
                           <!-- The prototype's .u-atts: what the message attached sits in
                                the bubble, under the words, as the terminal shows it. -->
@@ -273,7 +242,7 @@
                             <li v-for="(attachment, index) in msg.attachments" :key="attachment.fileId ?? attachment.path ?? index">
                               <component :is="attachment.fileId ? 'a' : 'span'"
                                 v-bind="attachment.fileId ? { href: attachmentUrl(attachment.fileId), target: '_blank', rel: 'noopener noreferrer' } : {}"
-                                class="inline-flex min-h-[26px] max-w-[260px] items-center gap-1.5 rounded-md border border-border bg-background px-1.5 py-0.5 text-[11.5px] font-medium text-foreground"
+                                class="inline-flex min-h-[26px] items-center gap-1.5 rounded-md border border-border bg-background px-1.5 py-0.5 font-mono text-[11.5px] text-foreground"
                                 :class="attachment.fileId ? 'group hover:bg-accent hover:text-accent-foreground' : ''"
                                 v-tip:top="attachment.path ?? attachment.name">
                                 <ImageIcon v-if="isImageAttachment(attachment)" class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
@@ -322,11 +291,6 @@
                       </div>
                       <RunWorkedLine :line="workedLineOf(msg, t)" />
                     </MessageContent>
-                    <Avatar v-if="msg.role === 'user'" class="size-8 shrink-0 ring-1 ring-border">
-                      <AvatarFallback class="bg-muted">
-                        <User class="size-4 text-muted-foreground" />
-                      </AvatarFallback>
-                    </Avatar>
                   </Message>
                 </template>
               </div>
@@ -357,6 +321,7 @@
               :context-used-percent="contextUsedPercent"
               can-open-agent
               @open-agent="openSubagentTab"
+              @focus-composer="focusComposer"
             />
             <!-- A send the runtime refused because this conversation is
                  already running somewhere else: the words wait in the
@@ -369,27 +334,12 @@
               </div>
             </div>
             </ConversationContent>
-            <ConversationScrollButton />
+            <ConversationScrollButton :label="t('chat.scrollToLatest')" />
           </Conversation>
         </div>
 
 
-        <div
-          class="z-10 shrink-0 bg-[var(--forebrain-surface)]"
-          :class="isFreshChat ? 'chat-composer-fresh' : 'border-t border-[var(--forebrain-divider)] px-3 py-4 sm:px-5'"
-        >
-          <!-- The new-conversation composer: the project pill sits at its
-               top-left, naming (and choosing) where the conversation runs. -->
-          <div v-if="isFreshChat" class="ctop">
-            <ProjectPill
-              ref="pillRef"
-              :projects="projects"
-              :selected="target"
-              :invalid="pillInvalid"
-              @select="pickTarget"
-              @browse="openFolderDialog"
-            />
-          </div>
+        <div class="chat-composer z-10 shrink-0 bg-[var(--forebrain-surface)]">
           <!-- The run's own state, where the terminal draws it: above the
                queue preview and the composer, gone the moment the run ends. -->
           <RunStatusLine
@@ -421,13 +371,27 @@
                 @edit-last-queued="restoreLastQueuedMessage"
                 @interrupt-run="interruptAndSendPendingSteers"
               />
+              <!-- The prototype's .composer (:500): a 12px corner, one hairline,
+                   no shadow — and the project pill drawn inside it, at the top,
+                   the way .ctop is drawn inside the box. -->
               <PromptInput
                 multiple
                 global-drop
-                class="w-full [&_[data-slot=input-group]]:border-[var(--forebrain-divider)] [&_[data-slot=input-group]]:bg-[var(--forebrain-surface)] [&_[data-slot=input-group]]:ring-0 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:border-[var(--forebrain-focus-border)] [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:border-[var(--forebrain-focus-border)] [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:ring-0 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:ring-0"
+                class="w-full [&_[data-slot=input-group]]:rounded-xl [&_[data-slot=input-group]]:border-[var(--forebrain-divider-strong)] [&_[data-slot=input-group]]:bg-[var(--forebrain-surface)] [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:ring-0 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:border-[var(--forebrain-brand-1)] [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:border-[var(--forebrain-brand-1)] [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:ring-2 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:ring-2 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:ring-[var(--forebrain-brand-1)]/20 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:ring-[var(--forebrain-brand-1)]/20"
+                :class="composerLocked ? 'composer-locked' : ''"
               >
+                <PromptInputHeader v-if="isFreshChat" class="composer-ctop">
+                  <ProjectPill
+                    ref="pillRef"
+                    :projects="projects"
+                    :selected="target"
+                    :invalid="pillInvalid"
+                    @select="pickTarget"
+                    @browse="openFolderDialog"
+                  />
+                </PromptInputHeader>
                 <PromptInputBody>
-                  <ForebrainPromptTextarea ref="promptRef" :placeholder="t('chat.placeholder')" :bots="availableBots"
+                  <ForebrainPromptTextarea ref="promptRef" :placeholder="composerPlaceholder" :bots="availableBots"
                     :bots-fetch-done="botsFetchDone" :during-run="isStreaming" :queue-visible="composerQueueVisible"
                     :disabled="composerLocked" :scope="workbenchScope" attach-save
                     @files-picked="onFilesPicked"
@@ -437,41 +401,46 @@
                     @typed="cancelAutoContinue('')"
                     @escape="cancelAutoContinue('')" />
                 </PromptInputBody>
-                <PromptInputFooter>
-                  <!-- The composer's own bar, in the prototype's order: on the
-                       left the "+", the mode and the approval preset; on the
-                       right the context ring, the model, the reasoning effort,
-                       then send. -->
-                  <div class="flex min-w-0 flex-1 items-center gap-1">
+                <PromptInputFooter class="!px-2 !pb-2">
+                  <!-- The composer's own bar, in the prototype's order (:503,
+                       gap 8px): on the left the "+", the mode and the approval
+                       preset; on the right the context ring, the model, the
+                       reasoning effort, then send. Every chip is drawn whether
+                       or not its data has landed yet, so the bar keeps its
+                       shape from the first frame. -->
+                  <div class="flex min-w-0 flex-1 items-center gap-2">
                     <ComposerPlusMenu :disabled="composerLocked" @insert="insertPlusCommand" />
                     <ModeChip :mode="mode" :disabled="isStreaming || composerLocked" @select="selectMode" />
                     <ApprovalPresetPicker :session-id="sessionId" />
                     <ViewModeChip v-model="viewMode" />
                   </div>
-                  <div class="flex items-center gap-1">
+                  <div class="flex items-center gap-2">
                     <ContextRing
                       v-if="contextUsedPercent != null"
                       :percent="contextUsedPercent"
-                      @open="workbench.toggle()"
+                      @open="workbench.openOn('context')"
                     />
                     <ModelChip
                       ref="modelChipRef"
-                      v-if="sessionModelData"
                       :session-id="sessionId ?? ''"
                       :selection="sessionModelData"
-                      :options="sessionModelData.options"
-                      :disabled="composerLocked"
+                      :options="sessionModelData?.options ?? []"
+                      :disabled="composerLocked || !sessionModelData"
                       :compact="drawerVisible"
                       @saved="loadSessionModel(sessionId ?? '')"
                     />
                     <EffortChip
-                      v-if="sessionModelData && sessionEfforts.length"
-                      :effort="sessionModelData.effort"
+                      :effort="sessionModelData?.effort ?? ''"
                       :efforts="sessionEfforts"
-                      :disabled="composerLocked"
+                      :disabled="composerLocked || !sessionModelData"
                       @select="selectEffort"
                     />
-                    <PromptInputSubmit :status="submitStatus" :disabled="composerLocked" />
+                    <PromptInputSubmit
+                      :status="submitStatus"
+                      :disabled="composerLocked"
+                      :label="submitLabel"
+                      @stop="interruptAndSendPendingSteers"
+                    />
                   </div>
                 </PromptInputFooter>
               </PromptInput>
@@ -507,6 +476,7 @@
         :now="subagentNow"
         :plan-tabs="planTabs"
         :active-plan="planActive"
+        :order="drawerTabOrder"
         @select="selectSubagentTab"
         @close-tab="closeSubagentTab"
         @open="openSubagentTab"
@@ -566,6 +536,8 @@
         :overlay="workbenchOverlay"
         :scope="workbenchScope"
         :root-path="sessionProject?.root ?? ''"
+        :requested-tab="workbench.requested.value"
+        @requested-tab-shown="workbench.consumed()"
         @close="workbench.close()"
         @view="viewRoster"
         @cancel="cancelRoster"
@@ -610,9 +582,8 @@
 <script setup lang="ts">
 import { h, ref, computed, nextTick, onMounted, onUnmounted, watch, withDirectives } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, ImageOff, Paperclip, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
+import { CheckCircle, CircleAlert, Bot, Image as ImageIcon, ImageOff, Paperclip, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
-import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import ProjectPill from '@/components/chat/ProjectPill.vue'
 import FolderDialog from '@/components/chat/FolderDialog.vue'
 import RewindDialog from '@/components/chat/RewindDialog.vue'
@@ -625,6 +596,7 @@ import RunStatusLine from '@/components/chat/RunStatusLine.vue'
 import SlashPickerCard from '@/components/chat/SlashPickerCard.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
 import ToolCallCard from '@/components/chat/ToolCallCard.vue'
+import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import McpNotice from '@/components/chat/McpNotice.vue'
 import ComposerPlusMenu from '@/components/chat/ComposerPlusMenu.vue'
@@ -635,7 +607,6 @@ import ContextRing from '@/components/chat/ContextRing.vue'
 import {
   Conversation,
   ConversationContent,
-  ConversationEmptyState,
   ConversationScrollButton,
 } from '@repo/elements/conversation'
 import {
@@ -660,6 +631,7 @@ import {
   PromptInput,
   PromptInputBody,
   PromptInputFooter,
+  PromptInputHeader,
   PromptInputProvider,
   PromptInputSubmit,
 } from '@repo/elements/prompt-input'
@@ -677,7 +649,7 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, thinkingBlockLabel, formatFirstTokenDuration, formatRuntimeStatusLabel, type ChatMessage, type PlanBlock, type SubagentTranscript } from '@/composables/useChatStream'
+import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, formatFirstTokenDuration, formatRuntimeStatusLabel, type ChatMessage, type PlanBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { subagentPhase } from '@/lib/subagentStatus'
 import { blockVisibleIn } from '@/lib/viewMode'
 import { useViewMode } from '@/composables/useViewMode'
@@ -753,9 +725,12 @@ const { set: setTopbar } = useTopbar()
  * while the notice names why nothing went. The code is kept, so the sentence
  * follows the viewer's language for as long as it is on screen.
  */
-const busyNotice = ref(false)
+// The code the runtime sent, not a guessed one: the same refusal has two
+// sentences — running here, running on another surface — and only the runtime
+// knows which one happened (prototype :3854).
+const busyNotice = ref('')
 const busyNoticeText = computed(() => busyNotice.value
-  ? (formatProviderError({ code: 'session_running' }, locale.value) ?? '')
+  ? (formatProviderError({ code: busyNotice.value }, locale.value) ?? '')
   : '')
 
 // The factories run inside the shell's render, so the row tracks this
@@ -850,6 +825,7 @@ const attachRows = computed<AttachFileRow[]>(() =>
  */
 const isFreshChat = computed(() =>
   !sessionId.value && !messages.value.length && !isStreaming.value)
+
 
 const projects = ref<ProjectRecord[]>([])
 const target = ref<ProjectTarget | null>(null)
@@ -1227,6 +1203,12 @@ function markNextSubmissionAsQueued() {
   nextSubmissionDisposition.value = 'queue'
 }
 
+/** The caret goes where the reader's next words belong: an ask card's
+ *  「和它聊聊」drops the question and hands the turn back to the composer. */
+function focusComposer() {
+  void nextTick(() => promptRef.value?.focus())
+}
+
 /** The conversation's own queue: taking the newest queued message back into
  *  the composer. A subagent's queue is its tab's, handled in that tab. */
 async function restoreLastQueuedMessage() {
@@ -1352,6 +1334,33 @@ function drawnBlocks(blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['b
 const sessionModelData = ref<SessionModelResponse | null>(null)
 /** The composer's model chip, so a refusal in the thread can open its menu. */
 const modelChipRef = ref<InstanceType<typeof ModelChip> | null>(null)
+
+/**
+ * Which of the three image notices a message carries. A refusal recorded before
+ * the kinds existed reads as `unsupported`, which is the sentence it was drawn
+ * with then.
+ */
+function imageRefusalKind(msg: { imageRefusal?: { kind?: 'unsupported' | 'rejected' | 'remembered' } }): 'unsupported' | 'rejected' | 'remembered' {
+  return msg.imageRefusal?.kind ?? 'unsupported'
+}
+
+/**
+ * The sentence that goes with that kind: the model's catalog entry says it takes
+ * no images, the provider refused one and the turn went on without it, or this
+ * conversation already paid for that refusal and the turn was withheld. Three
+ * facts, three sentences, one block — and one way out of all three, /model.
+ */
+function imageRefusalSentence(msg: { imageRefusal?: { kind?: 'unsupported' | 'rejected' | 'remembered' } }): 'chat.imageRefusedLine' | 'chat.imageRejectedNow' | 'chat.imageRejectedRemembered' {
+  switch (imageRefusalKind(msg)) {
+    case 'rejected':
+      return 'chat.imageRejectedNow'
+    case 'remembered':
+      return 'chat.imageRejectedRemembered'
+    default:
+      return 'chat.imageRefusedLine'
+  }
+}
+
 let sessionModelGeneration = 0
 
 async function loadSessionModel(sid: string | null) {
@@ -1427,6 +1436,33 @@ const drawerRecords = computed(() => drawerTabs.value
 // while a subagent's tab is.
 const planTabs = ref<PlanTab[]>([])
 const planActive = ref('')
+// The order the tabs were opened in, across both kinds. The drawer is one
+// surface: a plan document opened between two subagents sits between them, the
+// way the prototype's single tab array does (:4740). The list only records
+// opens — what is actually drawn is derived below, so a stale entry can never
+// hide a live tab.
+const drawerOrder = ref<string[]>([])
+const drawerTabOrder = computed(() => {
+  const alive = new Set<string>([
+    ...drawerTabs.value,
+    ...planTabs.value.map((tab) => tab.id),
+  ])
+  const ordered = drawerOrder.value.filter((key) => alive.has(key))
+  const known = new Set(ordered)
+  for (const id of drawerTabs.value) {
+    if (!known.has(id)) {
+      known.add(id)
+      ordered.push(id)
+    }
+  }
+  for (const tab of planTabs.value) {
+    if (!known.has(tab.id)) {
+      known.add(tab.id)
+      ordered.push(tab.id)
+    }
+  }
+  return ordered
+})
 const drawerVisible = computed(() => drawerOpen.value
   && (drawerRecords.value.length > 0 || planTabs.value.length > 0)
   && !isFreshChat.value)
@@ -1675,6 +1711,7 @@ async function openSubagentTab(agentId: string) {
   const id = String(agentId ?? '').trim()
   if (!id) return
   if (!drawerTabs.value.includes(id)) drawerTabs.value = [...drawerTabs.value, id]
+  if (!drawerOrder.value.includes(id)) drawerOrder.value = [...drawerOrder.value, id]
   drawerActive.value = id
   planActive.value = ''
   drawerOpen.value = true
@@ -1724,6 +1761,7 @@ function openPlanTab(plan: SessionPlan) {
       markdown: plan.markdown,
     }]
   }
+  if (!drawerOrder.value.includes(id)) drawerOrder.value = [...drawerOrder.value, id]
   planActive.value = id
   drawerOpen.value = true
   workbench.close()
@@ -1749,6 +1787,7 @@ function closePlanTab(id: string) {
   if (index < 0) return
   const rest = open.filter((tab) => tab.id !== id)
   planTabs.value = rest
+  drawerOrder.value = drawerOrder.value.filter((key) => key !== id)
   if (planActive.value === id) planActive.value = rest[rest.length - 1]?.id ?? ''
   if (!rest.length && !drawerRecords.value.length) drawerOpen.value = false
   scheduleBrowsePersist()
@@ -1766,8 +1805,15 @@ function closeSubagentTab(agentId: string) {
   if (index < 0) return
   const rest = open.filter((tab) => tab !== id)
   drawerTabs.value = rest
+  drawerOrder.value = drawerOrder.value.filter((key) => key !== id)
   if (drawerActive.value === id) drawerActive.value = rest[index] ?? rest[index - 1] ?? ''
-  if (!rest.length) drawerOpen.value = false
+  // The drawer is one surface with two kinds of tab: closing the last subagent
+  // while a plan document is still open puts the plan in front instead of
+  // hiding what the reader was reading (prototype :4745).
+  if (!rest.length) {
+    if (!planTabs.value.length) drawerOpen.value = false
+    else if (!planActive.value) planActive.value = planTabs.value[planTabs.value.length - 1]?.id ?? ''
+  }
   scheduleBrowsePersist()
 }
 
@@ -1820,6 +1866,7 @@ watch(sessionId, (sid, previousSid) => {
   viewBrowseStates.value = restored.views
   const drawer = restored.drawer ?? emptyDrawerState()
   drawerTabs.value = drawer.tabs
+  drawerOrder.value = [...drawer.tabs]
   drawerActive.value = drawer.active
   drawerOpen.value = drawer.open
   // A plan document belongs to the conversation whose plans it came from, so
@@ -1911,6 +1958,19 @@ watch(sessionId, () => {
 
 const submitStatus = computed(() => (isStreaming.value ? 'streaming' : 'ready'))
 
+// The prototype writes the composer's own words (:3081): what it takes, the
+// two characters that reach a command and a file — and, when the conversation's
+// directory is gone, the only thing it can say, because it can take nothing.
+const composerPlaceholder = computed(() => (
+  composerLocked.value ? t('chat.placeholderLocked') : t('chat.placeholder')
+))
+
+// One button, two jobs: it submits a turn, or it stops the one running — so its
+// name has to say which of the two it is about to do.
+const submitLabel = computed(() => (
+  isStreaming.value ? t('chat.stopAria') : t('chat.sendAria')
+))
+
 /**
  * The run's own line above the composer, in the terminal's order: the state,
  * then the checklist, then the wait for the model's first token. Nothing is
@@ -1992,6 +2052,13 @@ function getPlanBlocks(msg: { plan?: { question?: string; steps?: unknown[] } | 
   return []
 }
 
+/** The checklist a turn carries now: the last update it made, because the
+ *  earlier ones are the same list earlier in the run. */
+function latestPlanUpdate(msg: ChatMessage) {
+  const updates = msg.planUpdates
+  return updates && updates.length ? updates[updates.length - 1] : null
+}
+
 function messageBubbleRole(role: string): 'user' | 'assistant' {
   return role === 'user' ? 'user' : 'assistant'
 }
@@ -2015,10 +2082,6 @@ function messageHasBubble(msg: ChatMessage): boolean {
   return Boolean(msg.turnDiffs?.length || workedLineOf(msg, t).label)
 }
 
-function messageClass(role: string): string | undefined {
-  return role === 'user' ? undefined : 'max-w-full overflow-visible'
-}
-
 function messageContentClass(role: string): string | undefined {
   if (role === 'user') {
     // The design draws the user's bubble as `.u`, inside a `.u-wrap` that also
@@ -2028,14 +2091,8 @@ function messageContentClass(role: string): string | undefined {
     // and every bubble reads looser than the design.
     return 'gap-0 group-[.is-user]:rounded-none group-[.is-user]:bg-transparent group-[.is-user]:px-0 group-[.is-user]:py-0'
   }
-  return 'w-full min-w-0 max-w-full overflow-visible break-words [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto'
-}
-
-/** The thinking block's body, as the prototype's .think draws it: plain,
- *  small, muted — the duration label arrives with the transcript change that
- *  records it (plans/016), not invented here. */
-function reasoningDisplayText(content: string): string {
-  return String(content ?? '').trim()
+  // The prototype's .a: 13px at 1.55, its parts 10px apart (.a { gap: 10px }).
+  return 'w-full min-w-0 max-w-full overflow-visible break-words gap-[10px] text-[13px] leading-[1.55] [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto'
 }
 
 /** An attachment the model was shown as an image: an image upload, or an image picked from the workspace. */
@@ -2151,7 +2208,7 @@ async function handleSubmit(message: { text: string; files?: { url?: string; fil
   rewindLine.value = null
   // A send that goes through retires the busy notice: whatever ran on the
   // other end has ended, and this turn is the conversation's again.
-  busyNotice.value = false
+  busyNotice.value = ''
   if (text === '/memories' && files.length === 0 && !attachedByComposer && !isStreaming.value) {
     await router.push({ name: 'memories' })
     return
@@ -2207,8 +2264,8 @@ watch(returnedDraft, () => {
   // somewhere else, and the block under its last message names why nothing
   // went while the words wait in the composer. Every other refusal stays the
   // composer's own notice.
-  if (noticeCode === 'session_running') {
-    busyNotice.value = true
+  if (noticeCode === 'session_running' || noticeCode === 'session_running_elsewhere') {
+    busyNotice.value = noticeCode
     return
   }
   if (notice) composerNotice.value = { title: t('chat.messageNotSent'), detail: notice, ...(noticeCode ? { detailCode: noticeCode } : {}) }
@@ -2276,7 +2333,7 @@ watch(() => route.query.session, (value) => {
   // notice: both belong to the thread that was just opened.
   if (sid !== String(sessionId.value ?? '').trim()) {
     createdLine.value = null
-    busyNotice.value = false
+    busyNotice.value = ''
   }
   // A new conversation is the page itself: the workbench column belongs to a
   // conversation, so asking for one closes it rather than leaving it behind —
@@ -2347,74 +2404,19 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.typing-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+/* The prototype's .col (chat column) and .thread padding: the scroll container
+   spans the pane so the scrollbar sits at its right edge, while the column —
+   width and breathers — is what the reader reads. */
+.chat-thread-col {
+  width: min(760px, 100% - 48px);
+  margin-inline: auto;
 }
 
-.typing-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 9999px;
-  background: var(--forebrain-brand-1);
-  opacity: 0.35;
-  animation: typing-bounce 1.1s infinite ease-in-out;
-  
-}
-
-.typing-dot:nth-child(2) {
-  animation-delay: 0.15s;
-}
-
-.typing-dot:nth-child(3) {
-  animation-delay: 0.3s;
-}
-
-@keyframes typing-bounce {
-  0%,
-  60%,
-  100% {
-    transform: translateY(0);
-    opacity: 0.35;
-  }
-  30% {
-    transform: translateY(-4px);
-    opacity: 0.9;
-  }
-}
-
-.chat-scrollbar {
-  overflow: hidden;
-}
-
-:deep(.chat-scrollbar > div > div) {
-  overflow-y: scroll !important;
-  scrollbar-width: thin;
-  scrollbar-color: var(--forebrain-brand-scrollbar) transparent;
-}
-
-:deep(.chat-scrollbar > div > div::-webkit-scrollbar) {
-  width: 10px;
-}
-
-:deep(.chat-scrollbar > div > div::-webkit-scrollbar-thumb) {
-  background: var(--forebrain-brand-scrollbar-thumb);
-  border-radius: 999px;
-  border: 2px solid transparent;
-  background-clip: content-box;
-}
-
-:deep(.chat-scrollbar > div > div::-webkit-scrollbar-track) {
-  background: transparent;
-}
-
-/* A thinking block, as the prototype's .think: small, muted, no border of
-   its own — a paragraph of the turn's own reasoning, not a panel. */
-.think-block {
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--forebrain-muted-text);
+/* The prototype's .a: the parts of one answer sit 10px apart, and a card's own
+   margins never add to that. */
+.msg-blocks {
+  display: grid;
+  gap: 10px;
 }
 
 /* New-conversation page (plan 029): the greeting above the composer, the
@@ -2441,20 +2443,37 @@ onUnmounted(() => {
   flex: none;
 }
 
-.chat-composer-fresh {
-  width: min(760px, 100%);
+/* The prototype's .composer: the same width as the column above it, with the
+   pane's bottom breather carried by its own margin. */
+.chat-composer {
+  flex: none;
+  width: min(760px, 100% - 48px);
+  margin: 0 auto 16px;
+}
+
+.chat-col--fresh .chat-composer {
+  margin-bottom: 0;
 }
 
 .chat-col--fresh .starters {
   padding-top: 22px;
 }
 
-.ctop {
+/* The prototype's .composer .ctop (:875): the project pill inside the box's
+   top edge, 8px down and 10px in from it. */
+.ctop,
+.composer-ctop {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 2px 8px;
+  padding: 8px 10px 0;
   position: relative;
+}
+
+/* A conversation whose directory is gone can take nothing: the box says so by
+   its surface alone (prototype .composer.locked). */
+.composer-locked :deep([data-slot='input-group']) {
+  background: var(--forebrain-bg-alt);
 }
 
 .starters {
@@ -2484,13 +2503,24 @@ onUnmounted(() => {
   color: var(--forebrain-text);
 }
 
+/* The prototype's .sys-line: a muted 12px line centred in the column, with the
+   green kept for its icon alone (prototype :776-777). */
 .sys-line {
-  display: inline-flex;
+  justify-self: center;
+  display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12.5px;
-  color: var(--forebrain-success);
+  width: 100%;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
   padding: 4px 0;
+}
+
+.sys-line svg.lucide {
+  width: 14px;
+  height: 14px;
+  color: var(--forebrain-success);
 }
 
 /* The prototype's .u-wrap / .u / .u-acts (plan 033): the user's own words are
@@ -2503,11 +2533,17 @@ onUnmounted(() => {
 }
 .u {
   justify-self: end;
-  /* No width of its own: the grid sizes the bubble to the words and wraps them
-     at the row's cap, so a long message stays inside the row. */
+  /* The prototype's .u: no width of its own — the bubble is sized to the words
+     and capped at 80% of the column — so a long message stays inside the row. */
+  max-width: 80%;
   background: var(--forebrain-brand-soft);
   border-radius: 10px;
   padding: 9px 13px;
+}
+.u-origin {
+  justify-self: end;
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
 }
 .u-atts {
   display: flex;
@@ -2529,8 +2565,8 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
   color: var(--forebrain-muted-text);
 }

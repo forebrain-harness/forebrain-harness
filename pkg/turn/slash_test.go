@@ -129,10 +129,6 @@ func (r *recordingSlashHandlers) SelectModel(_ context.Context, sessionID string
 	}
 	return r.selectErr
 }
-func (r *recordingSlashHandlers) ReloadModelCatalog(_ context.Context, sessionID string) error {
-	r.record("reload-catalog", sessionID, nil)
-	return nil
-}
 func (r *recordingSlashHandlers) PrimaryAgents() ([]PrimaryAgent, error) {
 	r.record("agents", "", nil)
 	return []PrimaryAgent{{ID: "main", WorkspaceRoot: "/w/main", Active: true}, {ID: "ops", WorkspaceRoot: "/w/ops"}}, nil

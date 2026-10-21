@@ -216,6 +216,139 @@ func headerOnlyPNG(w, h uint32, total int) []byte {
 	return buf.Bytes()
 }
 
+// TestImagePartWithinRefusesAnUnreadableHeader pins the branch that used to
+// pass silently: a file under the byte budget whose header does not parse got
+// dimensions of (0,0), the per-side check read "0 <= 8000, 0 <= 8000" as a
+// pass, and the bytes went to the provider verbatim — which then refused the
+// whole request as an unsupported image. The reader now says what is wrong
+// here, in terms the person holding the file can act on.
+func TestImagePartWithinRefusesAnUnreadableHeader(t *testing.T) {
+	t.Parallel()
+	full := pngBytes(t, 16, 16)
+	if len(full) < 40 {
+		t.Fatalf("fixture too small to truncate: %d bytes", len(full))
+	}
+	// A PNG cut inside its IHDR: the signature survives (so the file still
+	// sniffs as image/png) but no dimensions can be read from it. png.Encode
+	// writes a 33-byte signature+IHDR header, so 20 bytes is unambiguously cut
+	// mid-header.
+	truncated := full[:20]
+	if w, h := DecodeImageConfig(truncated); w != 0 || h != 0 {
+		t.Fatalf("fixture premise broken: the cut header parsed as %dx%d", w, h)
+	}
+	part, res, err := ImagePartWithin("shot.png", "image/png", truncated, 1<<20)
+	if err == nil {
+		t.Fatalf("a %d-byte file with no readable header was accepted: res=%+v", len(truncated), res)
+	}
+	if part.ImageBase64 != "" || part.Type != "" {
+		t.Fatalf("a refused image must not come back as a part: %+v", part)
+	}
+	// Actionable: it says the file is broken, not that a downscale failed.
+	for _, want := range []string{"truncated or corrupt", "header"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%v want it to contain %q", err, want)
+		}
+	}
+	if !strings.Contains(err.Error(), "resave") && !strings.Contains(err.Error(), "re-save") {
+		t.Fatalf("err=%v want it to tell the reader what to do with the file", err)
+	}
+	if res.Scale != 0 || res.SentBytes != 0 {
+		t.Fatalf("a refused image reports nothing sent: %+v", res)
+	}
+
+	// The same cut on a webp takes the other branch (this build cannot decode
+	// one), and it must not report "0x0" as if the picture were empty.
+	webp := []byte("RIFF\x00\x00\x00\x00WEBP")
+	part, _, err = ImagePartWithin("shot.webp", "image/webp", webp, 1<<20)
+	if err == nil {
+		t.Fatalf("a %d-byte webp with no readable header was accepted: %+v", len(webp), part)
+	}
+	if strings.Contains(err.Error(), "0x0") {
+		t.Fatalf("err=%v reports empty dimensions instead of an unreadable header", err)
+	}
+	if !strings.Contains(err.Error(), "truncated or corrupt") {
+		t.Fatalf("err=%v want it to say the file is broken", err)
+	}
+}
+
+// TestImagePartWithinKeepsTheVerbatimPathForGoodImages is the other half of the
+// same condition: requiring readable dimensions must not cost a valid image its
+// verbatim send — no re-encode, no byte change, no scale.
+func TestImagePartWithinKeepsTheVerbatimPathForGoodImages(t *testing.T) {
+	t.Parallel()
+	data := pngBytes(t, 32, 24)
+	part, res, err := ImagePartWithin("shot.png", "image/png", data, 1<<20)
+	if err != nil {
+		t.Fatalf("ImagePartWithin: %v", err)
+	}
+	if res.Scale != 1 || res.Scaled {
+		t.Fatalf("a good small image must go verbatim: scaled=%v scale=%d", res.Scaled, res.Scale)
+	}
+	if res.SentBytes != len(data) || res.SourceBytes != len(data) {
+		t.Fatalf("bytes sent=%d source=%d want both %d", res.SentBytes, res.SourceBytes, len(data))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(part.ImageBase64)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	if !bytes.Equal(decoded, data) {
+		t.Fatal("the verbatim path changed the image's bytes")
+	}
+	if res.Width != 32 || res.Height != 24 {
+		t.Fatalf("reported %dx%d want 32x24", res.Width, res.Height)
+	}
+}
+
+// TestImagePartWithinReportsTheScaleItActuallyUsed pins what a reported scale
+// means: the image that comes back is the source reduced by that factor, so a
+// caller (read_file's diagnostic line, a compaction note) can describe what
+// happened without decoding the picture again. The last rung re-encodes an
+// image it did not build itself, which is exactly where a constant would lie
+// the moment the ladder stops at a different rung.
+func TestImagePartWithinReportsTheScaleItActuallyUsed(t *testing.T) {
+	t.Parallel()
+	data := noisePNGBytes(t, 1200, 1200)
+	// A sweep rather than one budget: which rung fits, and whether the final
+	// JPEG re-encode is what fits, depends on how well the noise compresses.
+	// Every answer that does come back has to describe itself consistently.
+	lastDitch := 0
+	accepted := 0
+	for _, budget := range []int{120 << 10, 90 << 10, 70 << 10, 55 << 10, 40 << 10, 28 << 10, 20 << 10, 14 << 10} {
+		part, res, err := ImagePartWithin("noise.png", "image/png", data, budget)
+		if err != nil {
+			continue // this budget cannot be met; the next one asks a different question
+		}
+		accepted++
+		if part.ImageBase64 == "" {
+			t.Fatalf("budget %d: reported success with no part", budget)
+		}
+		if res.SentBytes <= 0 || res.SentBytes > budget {
+			t.Fatalf("budget %d: sent %d bytes, want (0, %d]", budget, res.SentBytes, budget)
+		}
+		if res.Scale < 1 {
+			t.Fatalf("budget %d: scale=%d, want the factor that produced this image", budget, res.Scale)
+		}
+		// The invariant a constant cannot satisfy: the dimensions sent are the
+		// source dimensions divided by the reported factor, rounded up (the
+		// ladder's block average), for both sides.
+		wantW := (res.SourceWidth + res.Scale - 1) / res.Scale
+		wantH := (res.SourceHeight + res.Scale - 1) / res.Scale
+		if res.Width != wantW || res.Height != wantH {
+			t.Fatalf("budget %d: reported %dx%d at scale %d, but %dx%d divided by that factor is %dx%d",
+				budget, res.Width, res.Height, res.Scale, res.SourceWidth, res.SourceHeight, wantW, wantH)
+		}
+		if res.MIMEType == "image/jpeg" {
+			lastDitch++
+		}
+	}
+	if accepted == 0 {
+		t.Fatal("no budget in the sweep produced an image; the fixture no longer exercises the ladder")
+	}
+	if lastDitch == 0 {
+		t.Fatalf("no budget reached the final JPEG re-encode; the sweep no longer covers the branch under test (accepted=%d)", accepted)
+	}
+}
+
 // TestImagePartWithinRejectsPixelBomb pins the pre-decode pixel ceiling: a
 // 3.5 MiB PNG whose IHDR claims 60000×60000 would allocate ~14 GB inside
 // image.Decode (the header is paid for before any pixel is validated), so it

@@ -93,13 +93,13 @@ test('a subagent view talks to its own subagent', async ({ page }) => {
   // request leaves the page. The slash menu owns Enter while it is open (it
   // picks a command), so a slash line is submitted with the submit button.
   await tabInput.fill('/new')
-  await drawer.locator('button[aria-label="Submit"]').click()
+  await drawer.locator('button[aria-label="Send"]').click()
   await expect(drawer).toContainText('Run this from the main view')
   await shot(page, 'subagent-conversation-hidden-command')
 
   // /compact acts on the subagent, and its own card is drawn in its tab.
   await tabInput.fill('/compact')
-  await drawer.locator('button[aria-label="Submit"]').click()
+  await drawer.locator('button[aria-label="Send"]').click()
   await expect(drawer.locator('.compaction-card').first()).toBeVisible({ timeout: 90_000 })
   await shot(page, 'subagent-conversation-compacted')
 

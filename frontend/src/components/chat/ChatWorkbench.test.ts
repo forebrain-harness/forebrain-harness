@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { config, mount, type VueWrapper } from '@vue/test-utils'
+import { defineComponent, ref } from 'vue'
 import tip from '@/directives/tip'
 
 import ChatWorkbench from './ChatWorkbench.vue'
@@ -273,6 +274,108 @@ describe('ChatWorkbench', () => {
     const wrapper = mountWorkshopBench()
     await flush()
     expect(wrapper.classes()).not.toContain('chat-workbench--wide')
+  })
+
+  // A control that is *about* one tab opens the panel on it, whatever this
+  // conversation last read (prototype :4346) — the context ring lands on the
+  // context even when 工作目录 was the tab last used. One initialiser decides, so
+  // the two sources cannot overwrite each other in whatever order they run.
+  it('opens on the tab a control asked for, over the tab last read', async () => {
+    localStorage.setItem('forebrain.workbench.tab.s:1', 'tree')
+    const wrapper = mount(ChatWorkbench, {
+      props: {
+        records: [], loading: false, error: '', overlay: false, scope: { sessionId: '1' },
+        requestedTab: 'context',
+      },
+      global: { stubs: { teleport: true } },
+    })
+    await flush()
+    expect(wrapper.find('[data-testid="bench-tab-context"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-testid="bench-tab-tree"]').attributes('aria-selected')).toBe('false')
+  })
+
+  it('opens on the tab last read when nothing was asked for', async () => {
+    localStorage.setItem('forebrain.workbench.tab.s:1', 'tree')
+    const wrapper = mount(ChatWorkbench, {
+      props: { records: [], loading: false, error: '', overlay: false, scope: { sessionId: '1' } },
+      global: { stubs: { teleport: true } },
+    })
+    await flush()
+    expect(wrapper.find('[data-testid="bench-tab-tree"]').attributes('aria-selected')).toBe('true')
+  })
+
+  // The request is a single-shot errand: the panel says the tab is on screen and
+  // the page forgets it. This is the shape ChatView really has, so what the ring
+  // produces on the real page is what is asserted here — including the second
+  // half, that being forgotten does not send the panel back to the old tab.
+  it('reports the requested tab as shown, and stays on it once the page forgets it', async () => {
+    localStorage.setItem('forebrain.workbench.tab.s:1', 'tree')
+    const Host = defineComponent({
+      components: { ChatWorkbench },
+      setup() {
+        const requested = ref<string | null>('context')
+        return { requested }
+      },
+      template: `<ChatWorkbench
+        :records="[]" :loading="false" :error="''" :overlay="false"
+        :scope="{ sessionId: '1' }"
+        :requested-tab="requested"
+        @requested-tab-shown="requested = null"
+      />`,
+    })
+    const wrapper = mount(Host, { global: { stubs: { teleport: true } } })
+    await flush()
+    await flush()
+    const child = wrapper.findComponent(ChatWorkbench)
+    expect(child.emitted('requested-tab-shown')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="bench-tab-context"]').attributes('aria-selected')).toBe('true')
+  })
+
+  it('asks for the same tab again after the page forgot the first request', async () => {
+    localStorage.setItem('forebrain.workbench.tab.s:1', 'tree')
+    const Host = defineComponent({
+      components: { ChatWorkbench },
+      setup() {
+        const requested = ref<string | null>('context')
+        const ask = (tab: string) => { requested.value = tab }
+        return { requested, ask }
+      },
+      template: `<div>
+        <button type="button" data-testid="ring" @click="ask('context')">ring</button>
+        <ChatWorkbench
+          :records="[]" :loading="false" :error="''" :overlay="false"
+          :scope="{ sessionId: '1' }"
+          :requested-tab="requested"
+          @requested-tab-shown="requested = null"
+        />
+      </div>`,
+    })
+    const wrapper = mount(Host, { global: { stubs: { teleport: true } } })
+    await flush()
+    // Read another tab by hand, then click the ring again: it is a new request,
+    // not a value that was already sitting there.
+    await wrapper.find('[data-testid="bench-tab-overview"]').trigger('click')
+    await flush()
+    expect(wrapper.find('[data-testid="bench-tab-overview"]').attributes('aria-selected')).toBe('true')
+
+    await wrapper.find('[data-testid="ring"]').trigger('click')
+    await flush()
+    expect(wrapper.find('[data-testid="bench-tab-context"]').attributes('aria-selected')).toBe('true')
+  })
+
+  it('falls back to the tab last read when the request names a disabled tab', async () => {
+    localStorage.setItem('forebrain.workbench.tab.s:1', 'tree')
+    const wrapper = mount(ChatWorkbench, {
+      props: {
+        records: [], loading: false, error: '', overlay: false, scope: { sessionId: '1' },
+        extraTabs: [{ key: 'cases', label: 'workshop.tabCases', disabled: true }],
+        requestedTab: 'cases',
+      },
+      global: { stubs: { teleport: true } },
+    })
+    await flush()
+    expect(wrapper.find('[data-testid="bench-tab-tree"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-testid="bench-tab-cases"]').attributes('aria-selected')).toBe('false')
   })
 
   // The workbench shares the right-hand column with the subagent drawer, so it

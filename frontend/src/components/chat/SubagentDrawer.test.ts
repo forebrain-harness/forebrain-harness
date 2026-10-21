@@ -123,9 +123,9 @@ describe('SubagentDrawer', () => {
   })
 
   // A plan document opened from the workbench is a tab in this same drawer, so
-  // a reader keeps one place for everything the conversation opened. It draws
-  // after the subagents and carries no unread dot: a document does not say
-  // anything new.
+  // a reader keeps one place for everything the conversation opened. Without an
+  // order it draws after the subagents; with one it sits where it was opened,
+  // and it never carries an unread dot: a document does not say anything new.
   function planTab(id: string, label: string): PlanTab {
     return { id, label, path: `plans/proj/s1/${id.replace('plan:', '')}`, at: '10:31', done: 1, total: 3, markdown: '# Plan' }
   }
@@ -142,6 +142,32 @@ describe('SubagentDrawer', () => {
     // None of them is in front: a subagent tab is.
     expect(tabEls.map((tab) => tab.attributes('aria-selected'))).toEqual(['true', 'false', 'false', 'false'])
     expect(wrapper.get('[data-testid="plan-tab-plan:a.md"]').find('[aria-label="New activity"]').exists()).toBe(false)
+  })
+
+  it('places a plan tab where it was opened, among the subagent tabs', () => {
+    // Opened between the two subagents: the tab bar is one list, so it sits
+    // between them rather than being pushed to the end (prototype :4740).
+    const wrapper = mountDrawer({
+      planTabs: [planTab('plan:a.md', 'Plan · Add auth')],
+      order: ['task-1', 'plan:a.md', 'task-2'],
+    })
+    const tabEls = wrapper.findAll('[role="tab"]')
+    expect(tabEls.map((tab) => tab.text())).toEqual([
+      'general-purpose · task task-1',
+      'Plan · Add auth',
+      'general-purpose · task task-2',
+    ])
+  })
+
+  it('draws every open tab even when the order has lost one', () => {
+    // The order is bookkeeping, never the source of what is open: a stale list
+    // cannot hide a live tab.
+    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan · Add auth')], order: [] })
+    expect(wrapper.findAll('[role="tab"]').map((tab) => tab.text())).toEqual([
+      'general-purpose · task task-1',
+      'general-purpose · task task-2',
+      'Plan · Add auth',
+    ])
   })
 
   it('selects and closes a plan tab the way a subagent tab is selected and closed', async () => {

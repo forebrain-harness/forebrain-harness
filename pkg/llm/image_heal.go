@@ -136,9 +136,53 @@ func (h *imageHealLLM) Execute(ctx context.Context, messages []Message, tools []
 		// retrying would ask the provider the same question twice.
 		return result, err
 	}
+	// Before the retry, tell whoever asked: this package cannot name the
+	// provider or model, but its caller can, and the refusal is a fact that
+	// costs a wasted request every turn it goes unremembered.
+	reportImageRefusal(ctx, oneLineReason(err.Error()))
 	slog.Warn("provider rejected an image; retrying with the image degraded",
 		"replaced", replaced, "err", err)
 	return h.inner.Execute(ctx, degraded, tools)
+}
+
+// imageRefusalObserverKey is the context key the observer rides on. A private
+// type keeps the key from colliding with any other package's.
+type imageRefusalObserverKey struct{}
+
+// WithImageRefusalObserver runs fn once per provider image refusal this call
+// meets, before the degraded retry. It is how a caller that does know the
+// provider and model learns a fact this package cannot name itself: the heal
+// answers "what do I do about the refusal", the observer answers "who should be
+// told".
+//
+// The observer is a report, not a decision: it cannot change the request or the
+// result, and it runs on the request's own goroutine before the retry. It must
+// return quickly — a caller that has to write something does so on a context of
+// its own, without blocking the retry.
+func WithImageRefusalObserver(ctx context.Context, fn func(reason string)) context.Context {
+	if ctx == nil || fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, imageRefusalObserverKey{}, fn)
+}
+
+// ImageRefusalObserverFromContext returns the observer installed by
+// WithImageRefusalObserver, or nil when nobody asked to be told.
+func ImageRefusalObserverFromContext(ctx context.Context) func(reason string) {
+	if ctx == nil {
+		return nil
+	}
+	fn, _ := ctx.Value(imageRefusalObserverKey{}).(func(reason string))
+	return fn
+}
+
+// reportImageRefusal hands one refusal to the installed observer. A nil observer
+// is the ordinary case — nothing installed, nothing to do — and the call is the
+// only thing between the refusal and the retry.
+func reportImageRefusal(ctx context.Context, reason string) {
+	if fn := ImageRefusalObserverFromContext(ctx); fn != nil {
+		fn(reason)
+	}
 }
 
 // oneLineReason makes a provider or ladder reason safe to embed in a prompt:

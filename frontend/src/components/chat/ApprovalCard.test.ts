@@ -76,7 +76,7 @@ describe('ApprovalCard', () => {
 
     const gate = wrapper.find('[data-testid="web-fetch-approval"]')
     expect(gate.exists()).toBe(true)
-    expect(gate.text()).toContain('Fetch this page from the public web?')
+    expect(gate.text()).toContain('Fetch this page?')
     expect(wrapper.find('[data-testid="web-fetch-page"]').text()).toBe('https://example.com/pricing')
     // Every answer says what it does, and the one that remembers names its scope.
     expect(gate.findAll('button').map((b) => b.text())).toEqual([
@@ -90,6 +90,50 @@ describe('ApprovalCard', () => {
     expect(gate.text()).not.toContain('act-fetch')
     expect(gate.text()).not.toContain('Permission memory')
     wrapper.unmount()
+  })
+
+  // The two routing facts the engine writes into the payload are the only
+  // place the card can learn them: a plain fetch says nothing extra, and a
+  // routed one says who fetches and whether private space was opened.
+  it('draws the fetch gate\'s routing facts only when the payload carries them', async () => {
+    const mountFetch = async (payload: Record<string, unknown>) => {
+      vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
+        {
+          id: 'act-fetch',
+          kind: 'web_fetch',
+          status: 'pending',
+          payloadJson: JSON.stringify(payload),
+          createdAt: 1,
+          updatedAt: 1,
+          permissionSuggestion: {
+            permissionToolName: 'WebFetch',
+            permissionInput: 'https://example.com/pricing',
+            prefixRuleContent: 'domain:example.com',
+            availableDecisions: ['accept', 'accept_and_remember', 'cancel'],
+          },
+        } as ActionRecord,
+      ])
+      const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+      await flushPromises()
+      return wrapper
+    }
+
+    const routed = await mountFetch({
+      url: 'https://example.com/pricing',
+      rule_content: 'domain:example.com',
+      routed_provider: 'deepseek',
+      allow_private_ip: true,
+    })
+    expect(routed.findAll('[data-testid="web-fetch-fact"]').map((row) => row.text())).toEqual([
+      'Fetched server-side by deepseek',
+      'Private addresses are allowed',
+    ])
+    routed.unmount()
+
+    // A plain fetch is the card it always was: no fact row at all.
+    const plain = await mountFetch({ url: 'https://example.com/pricing', rule_content: 'domain:example.com' })
+    expect(plain.findAll('[data-testid="web-fetch-fact"]')).toHaveLength(0)
+    plain.unmount()
   })
 
   // One row per family the engine can park a run on, in the shapes its
@@ -125,13 +169,13 @@ describe('ApprovalCard', () => {
       id: 'act-patch', kind: 'apply_patch',
       payload: { apply_patch: true, resolved_paths: ['/w/a.go', '/w/b.go'], patch: '*** Begin Patch\n*** Update File: a.go\n@@\n-old\n+new\n' },
       decisions: ['accept', 'accept_for_session', 'cancel'],
-      question: '要应用这个补丁吗？', facts: ['2 个文件', '+1 −1'], buttons: ['应用', '本会话不再问', '不要应用'],
+      question: '要应用这个补丁吗？', facts: ['2 个文件 · +1 −1'], buttons: ['应用', '本会话不再问', '不要应用'],
     },
     {
       id: 'act-shell-danger', kind: 'shell',
-      payload: { command: 'rm -rf build/ && go build ./...', approval_reason: 'dangerous_shell_syntax', force_tool_approval: true },
+      payload: { command: 'rm -rf build/ && go build ./...', approval_reason: 'dangerous_shell_syntax', force_tool_approval: true, dangerous_rule: 'forced_rm' },
       decisions: ['accept', 'accept_and_remember', 'cancel'],
-      question: '要运行这条命令吗？', facts: ['会强制删掉 build/ 目录下的文件'], buttons: ['运行', '以后都不再问', '不要运行'],
+      question: '要运行这条命令吗？', facts: ['强制删除文件（rm -f），引擎把这类命令列为危险命令'], buttons: ['运行', '以后都不再问', '不要运行'],
     },
     {
       id: 'act-shell-unknown', kind: 'shell',
@@ -141,13 +185,22 @@ describe('ApprovalCard', () => {
     },
     {
       id: 'act-sandbox', kind: 'shell',
-      payload: { command: 'cp bin/forebrain ~/.local/bin/', sandbox_permissions: 'require_escalated', approval_reason: 'sandbox_denied', sandbox_denial_reason: 'write outside roots' },
+      payload: {
+        command: 'cp bin/forebrain ~/.local/bin/', sandbox_permissions: 'require_escalated', approval_reason: 'sandbox_denied',
+        sandbox_denial_reason: 'write outside project roots', force_tool_approval: true,
+        justification: 'The sandbox blocked this command: write outside project roots. Allow it to run outside the sandbox?',
+      },
       decisions: ['accept', 'accept_for_session', 'cancel'],
-      question: '沙箱拦下了这条命令，要在沙箱外运行吗？', facts: ['沙箱只允许改这个项目里的文件'], buttons: ['在沙箱外运行', '这类命令不再问', '不要运行'],
+      question: '沙箱拦下了这条命令，要在沙箱外运行吗？', facts: ['沙箱拦下了这条命令', 'write outside project roots'], buttons: ['在沙箱外运行', '这类命令不再问', '不要运行'],
     },
     {
       id: 'act-sandbox-scoped', kind: 'shell',
-      payload: { command: 'cp bin/forebrain /tmp/out', approval_reason: 'sandbox_denied', scoped_sandbox_retry: true, additional_permissions: { file_system: { entries: [{ path: '/tmp/out', access: 'write' }] } } },
+      payload: {
+        command: 'cp bin/forebrain /tmp/out', approval_reason: 'sandbox_denied', scoped_sandbox_retry: true,
+        sandbox_denial_reason: 'write outside project roots',
+        additional_permissions: { file_system: { entries: [{ path: { type: 'path', path: '/tmp/out' }, access: 'write' }] } },
+        justification: 'The sandbox blocked writing to /tmp/out. Allow this command to write only there?',
+      },
       decisions: ['accept', 'accept_for_session', 'cancel'],
       question: '沙箱拦下了这条命令，要在沙箱外运行吗？', facts: ['可写 /tmp/out'], buttons: ['在沙箱外运行', '这类命令不再问', '不要运行'],
     },
@@ -161,9 +214,21 @@ describe('ApprovalCard', () => {
     },
     {
       id: 'act-permissions', kind: 'request_permissions',
-      payload: { request_permissions: true, permissions: { file_system: { entries: [{ path: '~/notes', access: 'read' }, { path: '/tmp/out', access: 'write' }] }, network: { hosts: ['api.example.com'] } } },
+      payload: {
+        request_permissions: true,
+        permissions: {
+          file_system: {
+            entries: [
+              { path: { type: 'path', path: '~/notes' }, access: 'read' },
+              { path: { type: 'path', path: '/tmp/out' }, access: 'write' },
+            ],
+            glob_scan_max_depth: 4,
+          },
+          network: { enabled: true },
+        },
+      },
       decisions: ['grant_for_turn', 'grant_for_turn_with_strict_auto_review', 'grant_for_session', 'decline'],
-      question: '要给它这些权限吗？', facts: ['可读 ~/notes', '可写 /tmp/out', '可连 api.example.com'],
+      question: '要给它这些权限吗？', facts: ['可读 ~/notes', '可写 /tmp/out', '可访问网络'],
       buttons: ['本轮允许', '本轮允许，自动审查', '本会话允许', '不授予'],
     },
     {
@@ -172,15 +237,23 @@ describe('ApprovalCard', () => {
       question: '要进入计划模式吗？', facts: ['改动跨三个包，先写计划再动手'], buttons: ['进入', '不要进入'],
     },
     {
-      id: 'act-mcp', kind: 'mcp__github__create_issue', payload: { repo: 'unionj-cloud/forebrain-harness', title: 'cookie login still 401' },
+      id: 'act-mcp', kind: 'mcp__github__create_issue',
+      payload: { repo: 'unionj-cloud/forebrain-harness', title: 'cookie login still 401' },
       decisions: ['accept', 'accept_for_session', 'accept_and_remember', 'cancel'],
-      question: '要调用 github 的 create_issue 吗？', facts: ['repo unionj-cloud/forebrain-harness', 'title cookie login still 401'],
+      question: '要调用 github 的 create_issue 吗？', facts: ['Repo: unionj-cloud/forebrain-harness', 'Title: cookie login still 401'],
       buttons: ['调用', '本会话不再问', '以后都不再问', '不要调用'],
     },
     {
-      id: 'act-protected-read', kind: 'read_file', payload: { file_path: 'forebrain.yaml', resolved_file_path: '~/.forebrain/forebrain.yaml', force_tool_approval: true, justification: 'reading config' },
+      id: 'act-protected-read', kind: 'read_file',
+      payload: {
+        file_path: 'forebrain.yaml', resolved_file_path: '~/.forebrain/forebrain.yaml',
+        force_tool_approval: true, approval_reason: 'protected_path',
+        justification: 'Reading ~/.forebrain/forebrain.yaml is inside Forebrain\'s own home.',
+      },
       decisions: ['accept', 'accept_for_session', 'cancel'],
-      question: '这是 Forebrain 自己的配置文件，要读吗？', facts: ['~/.forebrain/forebrain.yaml'], buttons: ['读取', '本会话不再问', '不要读'],
+      question: '这是 Forebrain 自己的配置文件，要读吗？',
+      facts: ['Reading ~/.forebrain/forebrain.yaml is inside Forebrain\'s own home.', '~/.forebrain/forebrain.yaml'],
+      buttons: ['读取', '本会话不再问', '不要读'],
     },
     {
       id: 'act-search', kind: 'web_search', payload: { query: 'forebrain harness', results_limit: 5 },
@@ -193,9 +266,11 @@ describe('ApprovalCard', () => {
       question: '要我把这条记进长期记忆吗？', facts: ['note.md · 项目记忆'], buttons: ['记住这条', '不要记'],
     },
     {
-      id: 'act-fallback', kind: 'lsp', payload: { operation: 'workspace_symbols', query: 'Gateway', justification: 'you asked' },
+      // A call no family claimed still leads with the engine's reason: it is
+      // the only grounded thing that card has to say.
+      id: 'act-fallback', kind: 'lsp', payload: { operation: 'workspace_symbols', query: 'Gateway', justification: 'The runtime asked for this read.' },
       decisions: ['accept', 'cancel'],
-      question: '要允许这次调用吗？', facts: [], buttons: ['允许', '不要'],
+      question: '要允许这次调用吗？', facts: ['The runtime asked for this read.'], buttons: ['允许', '不要'],
     },
   ]
 
@@ -225,21 +300,81 @@ describe('ApprovalCard', () => {
       expect(factRows.map((r) => r.text()), row.id).toEqual(row.facts)
       const labels = card.findAll('[data-testid^="pending-decision-"]').map((b) => b.text())
       expect(labels, row.id).toEqual(row.buttons)
-      // The card never says the tool's internal name, an action id, or a
-      // justification the new copy has retired.
+      // The card never says the tool's internal name or an action id.
       expect(card.text(), row.id).not.toContain(row.kind)
       expect(card.text(), row.id).not.toContain(row.id)
-      if (row.id !== 'act-protected-read') {
-        expect(card.text(), row.id).not.toContain('you asked')
-      }
     }
 
-    // The memory note carries its own body, scrollable and uncut.
+    // The memory note carries its own body, rendered as the Markdown it is and
+    // scrollable rather than cut. The renderer types its content out, so the
+    // heading arrives a tick after the mount.
     const body = wrapper.find('[data-action-id="act-memory"] [data-testid="approval-gate-body"]')
     expect(body.exists()).toBe(true)
-    expect(body.text()).toContain('# 一条要记的话')
+    await vi.waitFor(() => expect(body.text()).toContain('一条要记的话'), { timeout: 2000 })
     wrapper.unmount()
     setLocale('en')
+  })
+
+  // The ask card's footer prints Esc and「和它聊聊」; both are real here. Esc sends
+  // the engine the cancel decision — the same verdict the terminal's overlay
+  // returns — and「和它聊聊」drops the question and hands the caret back to the
+  // composer.
+  it('cancels an asked question with the decision the engine understands', async () => {
+    vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
+      {
+        id: 'act-ask',
+        kind: 'user_interaction',
+        status: 'pending',
+        payloadJson: JSON.stringify({
+          questions: [
+            { id: 'scope', prompt: '要动哪些范围？', options: [{ id: 'tui', label: 'TUI' }, { id: 'web', label: 'Web' }], allow_other: true },
+            { id: 'how', prompt: '这次怎么交付？', options: [{ id: 'pr', label: 'PR' }], allow_other: true },
+          ],
+        }),
+        createdAt: 1,
+        updatedAt: 1,
+      } as ActionRecord,
+    ])
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+    await flushPromises()
+
+    const card = wrapper.find('[data-testid="ask-card"]')
+    expect(card.exists()).toBe(true)
+    // No progress count in the head: the design has none, and it used to print
+    // one past its own total on the review screen.
+    expect(wrapper.find('[data-testid="pending-question"]').text()).not.toMatch(/\d+\/\d+/)
+
+    await card.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(approve).toHaveBeenCalledWith('act-ask', { decision: 'cancel' })
+    wrapper.unmount()
+  })
+
+  it('hands the composer the turn when「和它聊聊」is picked', async () => {
+    vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
+      {
+        id: 'act-ask',
+        kind: 'user_interaction',
+        status: 'pending',
+        payloadJson: JSON.stringify({
+          questions: [{ id: 'scope', prompt: '要动哪些范围？', options: [{ id: 'tui', label: 'TUI' }], allow_other: true }],
+        }),
+        createdAt: 1,
+        updatedAt: 1,
+      } as ActionRecord,
+    ])
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="ask-chat-about"]').trigger('click')
+    await flushPromises()
+    // One gesture, both halves: the question is dropped and the caller is told
+    // to put the caret in the composer.
+    expect(approve).toHaveBeenCalledWith('act-ask', { decision: 'cancel' })
+    expect(wrapper.emitted('focus-composer')).toHaveLength(1)
+    wrapper.unmount()
   })
 
   it('keeps the exit-plan approval its own card', async () => {

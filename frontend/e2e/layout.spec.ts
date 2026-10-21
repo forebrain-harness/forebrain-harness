@@ -34,6 +34,9 @@ test('workbench opens as the third column and closes again', async ({ page }) =>
   await page.waitForSelector('[data-testid="workbench-toggle"]')
   await page.click('[data-testid="workbench-toggle"]')
   await expect(page.locator('[data-testid="chat-workbench"]')).toBeVisible({ timeout: 10_000 })
+  // The column slides in from its edge; measure it where it lands, not where
+  // the animation happens to be.
+  await expect(page.locator('[data-testid="chat-workbench"]')).toHaveCSS('transform', 'none')
   const viewport = page.viewportSize()
   const rail = await page.locator('.forebrain-rail').boundingBox()
   const main = await page.locator('.chat-shell main').boundingBox()
@@ -174,14 +177,18 @@ test('heartbeat lives in the conversation header, not the rail or the workbench'
   await expect(page.locator('[data-testid="heartbeat-status"]')).toHaveCount(0)
 })
 
-test('empty live agents card is hidden', async ({ page }) => {
+test('empty live agents card says it is empty instead of vanishing', async ({ page }) => {
   await signIn(page)
   const session = await seedProjectSession(page, 'layout-bench-empty')
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await page.click('[data-testid="workbench-toggle"]')
-  const benchText = await page.locator('[data-testid="chat-workbench"]').innerText()
-  expect(benchText).not.toContain('运行中的代理')
-  expect(benchText).not.toContain('Live agents')
+  const bench = page.locator('[data-testid="chat-workbench"]')
+  // A card that disappears leaves the reader wondering whether the panel
+  // failed to load, so the card is always drawn and says what it holds.
+  await expect(bench).toContainText(/运行中的代理|Live agents/)
+  // The empty line stays in the interface's own language: it used to read
+  // "暂无 live agents", English words inside a Chinese sentence.
+  await expect(bench).toContainText(/暂无运行中的代理|No live agents/)
 })
 
 test('rail collapses to icons and starts expanded', async ({ page }) => {

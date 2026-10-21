@@ -127,6 +127,39 @@ describe('ToolCallCard', () => {
     expect(alt).not.toContain('0×0')
   })
 
+  it('draws an answered question as its question and its answers, opened', () => {
+    // The runtime's settled body: one line per question, each answer on its
+    // own line behind an arrow (pkg/tool/format.go FormatUserInteractionResult).
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        step: stepOf({
+          toolName: 'user_interaction',
+          summary: 'asked user',
+          status: 'completed',
+          output: '这次改动怎么交付？\n  → 设计方案并开发实施\n要动哪些范围？\n  → TUI\n  → 网关',
+        }),
+      },
+    })
+    const done = wrapper.get('[data-testid="ask-done"]')
+    expect(done.findAll('.q').map((q) => q.text())).toEqual(['这次改动怎么交付？', '要动哪些范围？'])
+    expect(done.findAll('.ans').map((a) => a.text())).toEqual([
+      '→ 设计方案并开发实施',
+      '→ TUI',
+      '→ 网关',
+    ])
+    // A settled ask is drawn open: the answer is the point of the card.
+    expect(wrapper.get('[data-slot="collapsible-trigger"]').attributes('aria-expanded')).toBe('true')
+  })
+
+  it('keeps a question that is still waiting as an ordinary call', () => {
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        step: stepOf({ toolName: 'user_interaction', summary: 'asked user', status: 'awaiting approval', output: '这次改动怎么交付？\n  → 设计方案并开发实施' }),
+      },
+    })
+    expect(wrapper.find('[data-testid="ask-done"]').exists()).toBe(false)
+  })
+
   it('keeps a short summary out of the body: no cmd-full block', () => {
     const wrapper = mount(ToolCallCard, {
       props: { open: true, scope: { sessionId: 's1' }, step: stepOf() },

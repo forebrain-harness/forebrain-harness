@@ -50,5 +50,6 @@ provide(FileTreeFileKey, {
       </FileTreeIcon>
       <FileTreeName>{{ props.name }}</FileTreeName>
     </slot>
+    <slot name="actions" />
   </div>
 </template>

@@ -1,4 +1,4 @@
-import { t } from '@/locales'
+import { t, type I18nKey } from '@/locales'
 import type { PermissionSuggestionRecord } from '@/lib/approvalSuggestions'
 
 /**
@@ -32,8 +32,6 @@ export interface ApprovalFacts {
   diff?: ['' | '+' | '-', string][]
   /** The one or two facts this decision turns on, as plain lines in order. */
   facts: string[]
-  /** The file family's path; the thread's call line already names it. */
-  path?: string
   /** Lines added / removed, when the engine can count them. */
   added?: number
   removed?: number
@@ -43,7 +41,11 @@ export interface ApprovalFacts {
   port?: number
   /** The entries a permission request is asking for. */
   permissions?: { access: 'read' | 'write'; path: string }[]
-  networkHosts?: string[]
+  /** Whether a permission request would open the network. The engine's profile
+   * carries no host list, so this is the only thing the wire can say. */
+  network?: boolean
+  /** The engine's own sentence for this decision, already first in `facts`. */
+  rationale?: string
   /** The memory note's own body, shown scrollable and never truncated. */
   bodyMarkdown?: string
 }
@@ -82,9 +84,16 @@ export function approvalFamily(kind: string, payload: Record<string, unknown>, s
   if (k === 'apply_patch') return 'apply_patch'
   if (k === 'write_file') return 'file_write'
   if (k === 'edit_file') return 'file_edit'
-  // A read_file that asks is the protected-path read; an ordinary read never
-  // parks the run, so anything else here is not a read approval.
-  if (k === 'read_file' && payload.force_tool_approval === true) return 'protected_read'
+  // A read that asks is the protected-path read, and the engine says so in the
+  // payload: markProtectedApproval (pkg/tool/permissions.go) tags every
+  // authorizeRead caller — read_file, lsp, and whatever reads through them —
+  // with the protected_path reason. Reading the tag rather than the tool name is
+  // what keeps an lsp read from falling through to the two-choice card. A forced
+  // approval that names a resolved file is the same shape without the tag.
+  if (payload.approval_reason === 'protected_path' ||
+    (payload.force_tool_approval === true && String(payload.resolved_file_path ?? '').trim() !== '')) {
+    return 'protected_read'
+  }
   if (k === 'web_search') return 'web_search'
   if (k === 'memories_add_ad_hoc_note') return 'memory_note'
   if (k.startsWith('mcp__')) return 'mcp_tool'
@@ -100,6 +109,14 @@ function textLines(text: string): number {
   return text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
 }
 
+/** A line count the engine wrote into the payload, or null when it wrote none.
+ * The distinction matters: an absent field means "this payload predates the
+ * field" and the caller must fall back, while a written 0 is the engine saying
+ * nothing changed — 0 and 0 is a fact, not a missing value. */
+function engineLineCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
 /** The diff rows of a full-content write: every line is an added line. */
 function writeDiff(content: string): ['+' | '-', string][] {
   if (content === '') return []
@@ -109,8 +126,9 @@ function writeDiff(content: string): ['+' | '-', string][] {
 }
 
 /** The diff rows of a replacement with no unified diff to hand: all the old
- * lines, then all the new ones — the same shape the terminal's overlay falls
- * back to. */
+ * lines, then all the new ones — the shape the terminal's overlay falls back to
+ * when its own diff build fails. Only a historical action reaches this: one
+ * recorded before the engine put its hunk in the payload. */
 function editDiff(oldText: string, newText: string): ['+' | '-', string][] {
   const rows: ['+' | '-', string][] = []
   for (const text of [oldText, newText]) {
@@ -122,17 +140,30 @@ function editDiff(oldText: string, newText: string): ['+' | '-', string][] {
   return rows
 }
 
-/** The first hunk of a patch, verbatim: its @@ header plus that hunk's lines,
- * at most eight body rows — one representative place, not the whole patch. */
-function patchHunk(patch: string): ['' | '+' | '-', string][] {
-  const lines = patch.split('\n')
+/** The body rows an edit card draws, matching the card's own forty-row box
+ * (ApprovalGateCard.vue): the payload carries exactly what can be shown. */
+const editHunkBodyRows = 40
+
+/** The body rows a patch card draws: one representative place in the patch,
+ * not the whole patch. */
+const patchHunkBodyRows = 8
+
+/** The first hunk of a unified diff or patch, verbatim: its @@ header plus at
+ * most maxBodyRows body rows. The bound is the caller's because the two cards
+ * read different amounts; everything else about the shape is the same, which is
+ * why there is one reader and not two. */
+function patchHunk(text: string, maxBodyRows: number): ['' | '+' | '-', string][] {
+  const lines = text.split('\n')
   const start = lines.findIndex((line) => line.startsWith('@@'))
   if (start < 0) return []
   const rows: ['' | '+' | '-', string][] = [['', lines[start]]]
-  for (const line of lines.slice(start + 1, start + 9)) {
+  for (const line of lines.slice(start + 1)) {
     if (line.startsWith('***') || line.startsWith('@@')) break
+    if (rows.length - 1 >= maxBodyRows) break
     // The sign lives in the row's own slot; the text is the line without it,
-    // the same shape a write's or an edit's diff rows carry.
+    // the same shape a write's diff rows carry. A `+++`/`---` file header is
+    // never reached here — the scan starts at the hunk header, which comes after
+    // them — so a header can never be read as a body row.
     if (line.startsWith('+')) rows.push(['+', line.slice(1)])
     else if (line.startsWith('-')) rows.push(['-', line.slice(1)])
     else rows.push(['', line])
@@ -152,67 +183,79 @@ function patchDelta(patch: string): { added: number; removed: number } {
   return { added, removed }
 }
 
-// The engine has exactly one dangerous-command rule — `rm` carrying a force
-// flag (pkg/safety/shell.go, Rule "forced_rm") — and this is the sentence that
-// rule reads as. No second rule may be invented here: when the engine grows
-// one, its sentence grows with it. The path is the rm's first operand that is
-// not a flag; when the command names none, the sentence says only what it can.
-function forcedRmFact(command: string): string | null {
-  const segments = String(command ?? '').split(/&&|\|\||;|\|/g)
-  for (const segment of segments) {
-    const sentence = forcedRmSegmentFact(segment)
-    if (sentence) return sentence
-  }
-  return null
+// The engine names the dangerous rule it matched (pkg/safety/shell.go,
+// `forced_rm` for an rm carrying a force flag) and pkg/tool/shell_tool.go puts
+// that name in the payload. This table is the sentence each name reads as — the
+// engine's conclusion, said once. A rule this table has no sentence for shows
+// no fact line: a tokenizer of our own could decide an `rm -f *.log` was
+// dangerous when the engine's own parser had given up on the command, and then
+// the card would assert something the engine never concluded.
+const dangerousRuleFacts: Record<string, I18nKey> = {
+  forced_rm: 'chat.approvalFactsForcedRm',
 }
 
-function forcedRmSegmentFact(segment: string): string | null {
-  const tokens = segment.trim().split(/\s+/).filter(Boolean)
-  const base = (token: string) => token.slice(token.lastIndexOf('/') + 1).toLowerCase()
-  let i = 0
-  // Unwrap the wrappers the engine's rule recurses into: sudo and env hand the
-  // command on, and `sh -c` holds it in the next operand.
-  while (i < tokens.length) {
-    const name = base(tokens[i])
-    if (name === 'sudo' || name === 'env') {
-      i++
-      continue
-    }
-    if (name === 'sh' || name === 'bash' || name === 'zsh' || name === 'dash' || name === 'ksh') {
-      if (tokens[i + 1] === '-c' && tokens[i + 2]) return forcedRmSegmentFact(tokens[i + 2])
-      i++
-      continue
-    }
-    break
-  }
-  if (i >= tokens.length || base(tokens[i]) !== 'rm') return null
-  let forced = false
-  let path = ''
-  for (let j = i + 1; j < tokens.length; j++) {
-    const arg = tokens[j]
-    if (arg === '--') break
-    if (arg.startsWith('--')) {
-      if (arg === '--force') forced = true
-      continue
-    }
-    if (arg.startsWith('-')) {
-      if (arg.slice(1).includes('f')) forced = true
-      continue
-    }
-    if (!path) path = arg.replace(/^['"]|['"]$/g, '')
-  }
-  if (!forced) return null
-  return path ? t('chat.approvalFactsForcedRm', { path }) : t('chat.approvalFactsForcedRmNoPath')
+function dangerousRuleFact(rule: string): string {
+  const key = dangerousRuleFacts[rule]
+  return key ? t(key) : ''
+}
+
+/** A payload key as a label: underscores read as spaces, the first letter
+ * capitalised — the rule the terminal's approval block applies
+ * (pkg/tui/overlays.go approvalFieldLabel). */
+function mcpFieldLabel(key: string): string {
+  const label = String(key ?? '').replace(/_/g, ' ').split(/\s+/).filter(Boolean).join(' ')
+  if (!label) return 'Value'
+  return label.charAt(0).toUpperCase() + label.slice(1)
+}
+
+/** A payload value on one line, cut at 160 characters. A multi-line value is
+ * its first line only: a diff or a document body belongs to the tool card that
+ * runs it, not to the line naming what this call sends. */
+function mcpFieldValue(value: string | number | boolean): string {
+  const text = String(value)
+  const firstLine = text.includes('\n') ? text.slice(0, text.indexOf('\n')) : text
+  const single = firstLine.replace(/\s+/g, ' ').trim()
+  return single.length > 160 ? `${single.slice(0, 160)}…` : single
 }
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
 
+/**
+ * One permission entry's location as a sentence, in the shapes
+ * pkg/safety/permission_types.go marshals: `path` carries the filesystem path,
+ * `pattern` carries a glob, and `value` carries a named location (kind plus an
+ * optional subpath). A bare string is the legacy shape the same profile still
+ * writes when every entry is a plain path, and it stays readable here so an
+ * older row keeps its line.
+ *
+ * This is the only place the three shapes are told apart: reading the entry's
+ * path object as a string is what printed a stringified object where a path
+ * belongs.
+ */
+function entryLocation(raw: unknown): string {
+  if (typeof raw === 'string') return raw.trim()
+  if (!raw || typeof raw !== 'object') return ''
+  const entry = raw as Record<string, unknown>
+  const type = String(entry.type ?? '').trim()
+  if (type === 'glob_pattern') return String(entry.pattern ?? '').trim()
+  if (type === 'special') {
+    const value = entry.value && typeof entry.value === 'object' ? entry.value as Record<string, unknown> : {}
+    const kind = String(value.kind ?? '').trim()
+    const subpath = String(value.subpath ?? '').trim()
+    if (!kind) return ''
+    return subpath ? `${kind}/${subpath}` : kind
+  }
+  // An untyped entry with a path is the normalised `path` shape.
+  return String(entry.path ?? '').trim()
+}
+
 /** One permissions profile's entries, in the wire's two shapes: the entries
  * list, or the legacy read/write path arrays the same profile still marshals
- * to. Only read and access writes are asked about; a deny entry grants
- * nothing, so it has no line. */
+ * to. Only read and writes are asked about; a deny entry grants nothing, so it
+ * has no line, and an entry whose location cannot be read drops out rather
+ * than printing an empty line. */
 function permissionEntries(permissions: unknown): { access: 'read' | 'write'; path: string }[] {
   const profile = permissions && typeof permissions === 'object' ? permissions as Record<string, unknown> : null
   const fileSystem = profile?.file_system && typeof profile.file_system === 'object' ? profile.file_system as Record<string, unknown> : null
@@ -221,7 +264,7 @@ function permissionEntries(permissions: unknown): { access: 'read' | 'write'; pa
     for (const raw of fileSystem.entries) {
       if (!raw || typeof raw !== 'object') continue
       const entry = raw as Record<string, unknown>
-      const path = String(entry.path ?? '').trim()
+      const path = entryLocation(entry.path)
       const access = String(entry.access ?? '').trim().toLowerCase()
       if (!path || (access !== 'read' && access !== 'write')) continue
       entries.push({ access, path })
@@ -234,10 +277,14 @@ function permissionEntries(permissions: unknown): { access: 'read' | 'write'; pa
   return entries
 }
 
-function permissionNetworkHosts(permissions: unknown): string[] {
+/** Whether a permissions profile asks for network access at all. The engine's
+ * profile has no host list (pkg/safety/permission_types.go
+ * NetworkPermissionProfile is `enabled` alone), so a "reach <host>" line could
+ * only ever be invented here; the fact is that the grant opens the network. */
+function permissionNetworkEnabled(permissions: unknown): boolean {
   const profile = permissions && typeof permissions === 'object' ? permissions as Record<string, unknown> : null
   const network = profile?.network && typeof profile.network === 'object' ? profile.network as Record<string, unknown> : null
-  return stringList(network?.hosts)
+  return network?.enabled === true
 }
 
 /**
@@ -245,8 +292,33 @@ function permissionNetworkHosts(permissions: unknown): string[] {
  * already settled. Nothing here invents a sentence the engine did not ground:
  * a family with no rule to quote (an unknown command, a fallback, an
  * enter-plan with no reason) shows no fact line at all.
+ *
+ * The engine's own sentence for the decision leads every family. The payload's
+ * `justification` is written by the runtime — a protected path's reason, a
+ * plan-mode command that could not be proven read-only, the model's own words
+ * for an escalation — and it is the one line on the card the reader can act on.
+ * The test is whether the payload carries one, not which reason tag accompanies
+ * it, for the reason pkg/tui/overlays.go:1842-1848 records: enumerating tags
+ * means every new reason silently renders as a bare question.
  */
 export function approvalFacts(family: ApprovalFamily, payload: Record<string, unknown>, suggestion: PermissionSuggestionRecord | null): ApprovalFacts {
+  return withRationale(familyFacts(family, payload, suggestion), payload)
+}
+
+/** The engine's sentence, once. The sandbox branch already renders the denial
+ * reason the engine gave, so the sentence wrapping that same reason is skipped
+ * there — the reader gets it once, not twice. A shell escalation the engine
+ * never refused has no denial reason, and its sentence is the only thing saying
+ * what is being asked, so it stays. */
+function withRationale(facts: ApprovalFacts, payload: Record<string, unknown>): ApprovalFacts {
+  const rationale = String(payload.justification ?? '').trim()
+  if (!rationale) return facts
+  if (facts.facts.includes(rationale)) return facts
+  if (facts.family === 'shell_outside_sandbox' && String(payload.sandbox_denial_reason ?? '').trim() !== '') return facts
+  return { ...facts, rationale, facts: [rationale, ...facts.facts] }
+}
+
+function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>, suggestion: PermissionSuggestionRecord | null): ApprovalFacts {
   switch (family) {
     case 'file_write': {
       const content = String(payload.content ?? '')
@@ -254,7 +326,6 @@ export function approvalFacts(family: ApprovalFamily, payload: Record<string, un
       const removed = Number(payload.existing_lines ?? 0) || 0
       return {
         family,
-        path: String(payload.resolved_file_path ?? payload.file_path ?? ''),
         added,
         removed,
         facts: [removed > 0 ? t('chat.approvalFactsLines', { added, removed }) : t('chat.approvalFactsNewLines', { added })],
@@ -264,13 +335,24 @@ export function approvalFacts(family: ApprovalFamily, payload: Record<string, un
     case 'file_edit': {
       const oldText = String(payload.old_string ?? '')
       const newText = String(payload.new_string ?? '')
+      // The engine (pkg/event.Build) counted the lines it changes and shipped
+      // the first hunk of its own unified diff, so this card draws the same
+      // summary the terminal does. Only an action recorded before those fields
+      // existed falls back to reading the two texts, which is what produced
+      // "all the old lines, then all the new ones" — a card that called a
+      // thousand-row wall a diff.
+      const added = engineLineCount(payload.added_lines)
+      const removed = engineLineCount(payload.removed_lines)
+      const hunk = patchHunk(String(payload.unified_diff ?? ''), editHunkBodyRows)
       return {
         family,
-        path: String(payload.resolved_file_path ?? payload.file_path ?? ''),
-        added: textLines(newText),
-        removed: textLines(oldText),
-        facts: [t('chat.approvalFactsLines', { added: textLines(newText), removed: textLines(oldText) })],
-        diff: editDiff(oldText, newText),
+        added: added ?? textLines(newText),
+        removed: removed ?? textLines(oldText),
+        facts: [t('chat.approvalFactsLines', {
+          added: added ?? textLines(newText),
+          removed: removed ?? textLines(oldText),
+        })],
+        diff: hunk.length ? hunk : editDiff(oldText, newText),
       }
     }
     case 'apply_patch': {
@@ -281,30 +363,42 @@ export function approvalFacts(family: ApprovalFamily, payload: Record<string, un
         family,
         added: delta.added,
         removed: delta.removed,
-        facts: [
-          ...(paths.length ? [t('chat.approvalFactsFiles', { count: paths.length })] : []),
+        // One line of facts, as the prototype prints it (:3503): how many
+        // files and how much the patch moves, separated by the same dot every
+        // other fact row uses.
+        facts: [[
+          paths.length ? t('chat.approvalFactsFiles', { count: paths.length }) : '',
           `+${delta.added} −${delta.removed}`,
-        ],
-        diff: patchHunk(patch),
+        ].filter(Boolean).join(' · ')],
+        diff: patchHunk(patch, patchHunkBodyRows),
       }
     }
     case 'shell': {
-      const sentence = forcedRmFact(String(payload.command ?? ''))
+      // The engine's own conclusion, by the name it wrote into the payload; a
+      // command it found nothing dangerous in has no line here.
+      const sentence = dangerousRuleFact(String(payload.dangerous_rule ?? '').trim().toLowerCase())
       return { family, facts: sentence ? [sentence] : [] }
     }
     case 'shell_outside_sandbox': {
       // A scoped retry is about the scope it would gain, not the sandbox it
-      // left; everything else is the sandbox's own boundary, said once.
+      // left; everything else is the sandbox's own boundary, plus the reason it
+      // gave, verbatim: the denial can be about the network as readily as about
+      // the filesystem, so a sentence naming files would be a claim the engine
+      // never made. The engine writes it in English and the terminal shows it
+      // the same way; translating it here would be inventing a second wording.
       if (payload.scoped_sandbox_retry === true) {
         const facts = permissionEntries(payload.additional_permissions)
           .filter((entry) => entry.access === 'write')
           .map((entry) => t('chat.approvalFactsWrite', { path: entry.path }))
         return { family, facts }
       }
-      const facts = [String(payload.sandbox_denial_reason ?? '').trim()
-        ? t('chat.approvalFactsSandboxOnlyProject')
-        : t('chat.approvalFactsSandboxBlocked')]
-      return { family, facts }
+      const denial = String(payload.sandbox_denial_reason ?? '').trim()
+      return {
+        family,
+        facts: denial
+          ? [t('chat.approvalFactsSandboxBlocked'), denial]
+          : [t('chat.approvalFactsSandboxBlocked')],
+      }
     }
     case 'network_host': {
       const context = suggestion?.networkApprovalContext
@@ -321,16 +415,16 @@ export function approvalFacts(family: ApprovalFamily, payload: Record<string, un
     }
     case 'request_permissions': {
       const permissions = permissionEntries(payload.permissions)
-      const networkHosts = permissionNetworkHosts(payload.permissions)
+      const network = permissionNetworkEnabled(payload.permissions)
       return {
         family,
         permissions,
-        networkHosts,
+        ...(network ? { network } : {}),
         facts: [
           ...permissions.map((entry) => entry.access === 'read'
             ? t('chat.approvalFactsRead', { path: entry.path })
             : t('chat.approvalFactsWrite', { path: entry.path })),
-          ...networkHosts.map((host) => t('chat.approvalFactsReach', { host })),
+          ...(network ? [t('chat.approvalFactsNetwork')] : []),
         ],
       }
     }
@@ -340,20 +434,27 @@ export function approvalFacts(family: ApprovalFamily, payload: Record<string, un
       return { family, facts: reason ? [reason] : [] }
     }
     case 'mcp_tool': {
-      // The first few scalar inputs, named the way the model named them.
+      // The first few scalar inputs under the labels their own keys read as, in
+      // key order so the same call always shows the same lines. A key is not a
+      // sentence: `repo` is "Repo", and a body collapsed into a 500-line wall is
+      // not a fact — the card states what is being sent, in the fewest words
+      // that say it (pkg/tui/overlays.go:1780-1788 does the same labelling for
+      // the terminal's block).
       const facts: string[] = []
-      for (const [key, value] of Object.entries(payload)) {
+      for (const key of Object.keys(payload).sort()) {
         if (facts.length >= 3) break
-        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-          facts.push(`${key} ${String(value)}`)
-        }
+        const value = payload[key]
+        if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') continue
+        facts.push(`${mcpFieldLabel(key)}: ${mcpFieldValue(value)}`)
       }
       return { family, facts }
     }
     case 'web_search': {
       const query = String(payload.query ?? '').trim()
       const rawLimit = Number(payload.results_limit)
-      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 5
+      // The tool's own ceiling, so the card never promises more results than
+      // one call can ask for (prototype :3418, Math.min(limit, 10)).
+      const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 5, 10)
       return { family, facts: [t('chat.approvalSearchFacts', { query, n: limit })] }
     }
     case 'memory_note': {
@@ -370,10 +471,21 @@ export function approvalFacts(family: ApprovalFamily, payload: Record<string, un
     case 'protected_read': {
       return { family, facts: [String(payload.resolved_file_path ?? payload.file_path ?? '')] }
     }
+    case 'web_fetch': {
+      // The card's own question is drawn by the fetch gate; these are the two
+      // facts the engine's payload adds on top, and each appears only when the
+      // payload says it: a routed provider fetches server-side, and an opened
+      // private space changes what "private URLs fail" means.
+      const provider = String(payload.routed_provider ?? '').trim()
+      const facts: string[] = []
+      if (provider) facts.push(t('chat.webFetchRoutedFact', { provider }))
+      if (payload.allow_private_ip === true) facts.push(t('chat.webFetchPrivateFact'))
+      return { family, facts }
+    }
     default:
-      // exit_plan_mode and web_fetch draw their own cards; fallback carries no
-      // fact, because the only thing it truly knows is the question.
-      return { family: family === 'exit_plan_mode' || family === 'web_fetch' ? family : 'fallback', facts: [] }
+      // exit_plan_mode draws its own card; fallback carries no fact, because
+      // the only thing it truly knows is the question.
+      return { family: family === 'exit_plan_mode' ? family : 'fallback', facts: [] }
   }
 }
 

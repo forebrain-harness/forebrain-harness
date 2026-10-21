@@ -75,12 +75,14 @@ describe('ApprovalGateCard', () => {
     expect(rows[1]?.text()).toBe('+new')
   })
 
-  it('shows a memory note\'s body scrollable and uncut', () => {
+  it('shows a memory note\'s body rendered, scrollable and uncut', async () => {
     const note = gateRecord({ filename: 'n.md', note: '# 标题\n\n正文很长', scope: 'project' }, { kind: 'memories_add_ad_hoc_note' })
     const { wrapper } = mountCard(note, ['accept', 'decline'])
     const body = wrapper.find('[data-testid="approval-gate-body"]')
     expect(body.exists()).toBe(true)
-    expect(body.text()).toContain('# 标题')
+    // A note is Markdown, so its heading is drawn rather than printed, and the
+    // renderer types it out over a tick.
+    await vi.waitFor(() => expect(body.text()).toContain('标题'), { timeout: 2000 })
     expect(body.classes()).toContain('overflow-y-auto')
   })
 

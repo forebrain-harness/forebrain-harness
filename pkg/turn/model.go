@@ -244,18 +244,14 @@ type SandboxSlashHandler interface {
 	HandleSandboxSlash(sessionID, channel string, args []string) (reply string, handled bool)
 }
 
-// ModelSlashHandler is where /model reads a session's model settings, applies
-// a live selection to the session's runtime, and refreshes the in-memory
-// catalog after a default-file write.
+// ModelSlashHandler is where /model reads a session's model settings and
+// applies a live selection to the session's runtime.
 type ModelSlashHandler interface {
 	ModelSettings(sessionID string) (ModelSettings, error)
 	// SelectModel applies choice as this session's live model. effort is nil
 	// to derive the model's configured effort once, or an explicit pointer —
 	// including "" — to pin that exact effort.
 	SelectModel(ctx context.Context, sessionID string, choice ModelChoice, effort *string) error
-	// ReloadModelCatalog synchronizes a successful default-file write into
-	// this surface without selecting config index zero as the live model.
-	ReloadModelCatalog(ctx context.Context, sessionID string) error
 }
 
 // ModelSelectionState is the live runtime selection a surface reports: the
@@ -269,13 +265,11 @@ type ModelSelectionState struct {
 }
 
 // ModelSettings is what /model works from: the live config, the agent whose
-// models it offers, the config file a choice is written to, and the
-// selection the runtime is actually running.
+// models it offers, and the selection the runtime is actually running.
 type ModelSettings struct {
-	Config     *appcfg.Root
-	AgentName  string
-	ConfigPath string
-	Selection  ModelSelectionState
+	Config    *appcfg.Root
+	AgentName string
+	Selection ModelSelectionState
 }
 
 // ModelApplyOutcome classifies how far a model selection got. A plain nil

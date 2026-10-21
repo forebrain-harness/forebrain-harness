@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 15
+const stateSchemaVersion = 16
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -54,6 +54,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 13, apply: migrateStateV12ToV13},
 	{version: 14, apply: migrateStateV13ToV14},
 	{version: 15, apply: migrateStateV14ToV15},
+	{version: 16, apply: migrateStateV15ToV16},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -715,6 +716,26 @@ CREATE TABLE IF NOT EXISTS fb_migration_units (
   PRIMARY KEY(agent_id, target_id)
 ) STRICT`); err != nil {
 		return fmt.Errorf("create fb_migration_units: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV15ToV16 adds fb_session_image_refusals: the per-session memory of
+// a provider refusing an image, which is what stops a conversation carrying one
+// from paying for the same refusal on every later turn. Pure addition, so a
+// database already at v16 or a fixture built from the current schema.sql is
+// untouched (CREATE TABLE IF NOT EXISTS), and nothing existing is rewritten.
+func migrateStateV15ToV16(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_session_image_refusals (
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  observed_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, provider, model)
+) STRICT, WITHOUT ROWID`); err != nil {
+		return fmt.Errorf("create fb_session_image_refusals: %w", err)
 	}
 	return nil
 }

@@ -186,7 +186,7 @@ test('an empty list is a card that says it listed nothing', async ({ page }) => 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await page.waitForSelector('[data-testid="subagent-call-card"]')
   const main = page.locator('.chat-shell main')
-  await expect(main).toContainText('已列出 0 个任务')
+  await expect(main).toContainText('本对话 0 个任务')
   await expect(main).toContainText('（无输出）')
   const text = await main.innerText()
   expect(text).not.toContain('{"')
@@ -238,9 +238,9 @@ test('the five lifecycle verbs each draw their own card, none with raw material'
   const main = page.locator('.chat-shell main')
   await expect(main).toContainText('已在后台运行 1 个 general-purpose 任务')
   await expect(main).toContainText('已查看 1 个 general-purpose 任务')
-  await expect(main).toContainText('已等待 1 个 general-purpose 任务')
-  await expect(main).toContainText('已停止 1 个 general-purpose 任务')
-  await expect(main).toContainText('已列出 1 个任务')
+  await expect(main).toContainText('等到 1 个 general-purpose 任务结束')
+  await expect(main).toContainText('停掉 1 个 general-purpose 任务')
+  await expect(main).toContainText('本对话 1 个任务')
   // A wait that timed out says the agent was still running, and a close that
   // asked a running agent to stop says so.
   await expect(main).toContainText('等待结束时仍在运行')

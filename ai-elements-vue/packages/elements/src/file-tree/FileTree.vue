@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { HTMLAttributes } from 'vue'
 import { cn } from '@repo/shadcn-vue/lib/utils'
-import { provide, ref, watch } from 'vue'
+import { computed, provide, ref, watch } from 'vue'
 import { FileTreeKey } from './context'
 
 interface Props extends /* @vue-ignore */ HTMLAttributes {
@@ -20,18 +20,16 @@ const emit = defineEmits<{
   (e: 'expandedChange', expanded: Set<string>): void
 }>()
 
-const internalExpanded = ref(new Set(props.defaultExpanded))
-const internalSelectedPath = ref(props.selectedPath)
+// Controlled when `expanded` is given: the caller's set is the state, and this
+// component only reports the toggle. Uncontrolled otherwise (`defaultExpanded`,
+// or no set at all). Keeping a copy in controlled mode is what let the caller's
+// own expand state and this component's fold drift apart after the first click:
+// the copy was reassigned on that click and never heard about the caller's
+// later changes, so the fold stayed shut while the rows were already open.
+const uncontrolledExpanded = ref(new Set(props.defaultExpanded))
+const expandedSet = computed<Set<string>>(() => props.expanded ?? uncontrolledExpanded.value)
 
-watch(
-  () => props.expanded,
-  (newVal) => {
-    if (newVal) {
-      internalExpanded.value = newVal
-    }
-  },
-  { immediate: true },
-)
+const internalSelectedPath = ref(props.selectedPath)
 
 watch(
   () => props.selectedPath,
@@ -41,15 +39,19 @@ watch(
 )
 
 function togglePath(path: string) {
-  const newExpanded = new Set(internalExpanded.value)
-  if (newExpanded.has(path)) {
-    newExpanded.delete(path)
+  const next = new Set(expandedSet.value)
+  if (next.has(path)) {
+    next.delete(path)
   }
   else {
-    newExpanded.add(path)
+    next.add(path)
   }
-  internalExpanded.value = newExpanded
-  emit('expandedChange', newExpanded)
+  // In controlled mode the caller owns the set: report the new value and leave
+  // the state alone, so there is exactly one owner of what is open.
+  if (!props.expanded) {
+    uncontrolledExpanded.value = next
+  }
+  emit('expandedChange', next)
 }
 
 function onSelect(path: string) {
@@ -58,7 +60,7 @@ function onSelect(path: string) {
 }
 
 provide(FileTreeKey, {
-  expandedPaths: internalExpanded,
+  expandedPaths: expandedSet,
   togglePath,
   selectedPath: internalSelectedPath,
   onSelect,

@@ -4,23 +4,35 @@
        every button says its verb and how far the yes reaches. No tool name, no
        action id, no permission-memory box — the button that remembers already
        names what it remembers. -->
-  <div :data-testid="`approval-gate-${gate.facts.family}`">
-    <div class="flex items-center justify-between gap-3">
-      <div class="min-w-0 text-sm font-medium text-[var(--forebrain-text)]">{{ gate.question }}</div>
-      <div class="flex shrink-0 flex-wrap items-center justify-end gap-2">
-        <button
-          v-for="(option, index) in options"
-          :key="`${action.id}-${option.decision}-${index}`"
-          :class="isPrimary(option, index) ? 'forebrain-btn forebrain-btn-primary text-xs' : 'forebrain-btn forebrain-btn-ghost text-xs'"
-          type="button"
-          :disabled="submitting"
-          :data-testid="`pending-decision-${option.decision}`"
-          @click="submit(option)"
-        >
-          {{ decisionLabel(option) }}
-        </button>
-      </div>
-    </div>
+  <!-- The card's shape is the library's confirmation: it decides *when* the
+       request is on screen (`ConfirmationRequest` renders it only while the
+       decision is outstanding), and it draws the title and the verdict row.
+       This card supplies the question, the facts and the engine's own decision
+       options. -->
+  <Confirmation
+    :state="'approval-requested'"
+    :approval="{ id: action.id }"
+    :class="['approval-gate', '!gap-0', '!rounded-lg', '!px-3', '!py-2']"
+    :data-testid="`approval-gate-${gate.facts.family}`"
+  >
+    <ConfirmationRequest>
+      <ConfirmationActions class="!mt-0 !w-full !justify-between !self-stretch !gap-3">
+        <ConfirmationTitle class="min-w-0 !text-sm !font-medium !text-[var(--forebrain-text)]">
+          {{ gate.question }}
+        </ConfirmationTitle>
+        <div class="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <ConfirmationAction
+            v-for="(option, index) in options"
+            :key="`${action.id}-${option.decision}-${index}`"
+            :class="isPrimary(option, index) ? 'forebrain-btn forebrain-btn-primary text-xs' : 'forebrain-btn forebrain-btn-ghost text-xs'"
+            :disabled="submitting"
+            :data-testid="`pending-decision-${option.decision}`"
+            @click="submit(option)"
+          >
+            {{ decisionLabel(option) }}
+          </ConfirmationAction>
+        </div>
+      </ConfirmationActions>
     <button
       v-if="requester && canOpenAgent"
       type="button"
@@ -35,11 +47,13 @@
       class="mt-1 break-words pl-4 text-[12px] text-[var(--forebrain-text-2)]"
       data-testid="approval-gate-fact"
     >{{ fact }}</div>
+    <!-- The note's own body, rendered (prototype .memo, :490): a memory note is
+         Markdown, so its marks are drawn rather than printed. -->
     <div
       v-if="gate.facts.bodyMarkdown"
-      class="mt-2 max-h-[132px] overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] px-3 py-2 pl-4 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]"
+      class="mt-2 max-h-[132px] overflow-y-auto break-words rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] px-3 py-2 pl-4 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]"
       data-testid="approval-gate-body"
-    >{{ gate.facts.bodyMarkdown }}</div>
+    ><MessageResponse :content="gate.facts.bodyMarkdown" /></div>
     <div
       v-if="diffRows.length"
       class="gate-diff mt-2 max-h-64 overflow-auto rounded-lg border border-[var(--forebrain-divider)] font-mono text-[12px] leading-relaxed"
@@ -52,18 +66,23 @@
       >{{ row[1] === '' ? ' ' : row[0] + row[1] }}</div>
     </div>
     <div v-if="error" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ error }}</div>
-  </div>
+    </ConfirmationRequest>
+  </Confirmation>
 </template>
 
 <script setup lang="ts">
 /**
- * The card every approval family shares: the thread's ApprovalCard and the
- * workshop's PendingActionsPanel hand it the same action and the same
- * decision plumbing, so a gate is asked identically wherever it is read. The
- * family's facts and question come from approvalGates; the buttons are the
- * engine's own decision options in its own order, each labelled by the
- * shared composable, and exactly one of them is primary.
+ * The card every approval family shares: the thread's ApprovalCard hands it
+ * the action and the decision plumbing, so a gate is asked the same way
+ * wherever it is read. The family's facts and question come from
+ * approvalGates; the buttons are the engine's own decision options in its own
+ * order, each labelled by the shared composable, and exactly one of them is
+ * primary.
  */
+import { MessageResponse } from '@repo/elements/message'
+import {
+  Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequest, ConfirmationTitle,
+} from '@repo/elements/confirmation'
 import { computed } from 'vue'
 import { approvalFacts, approvalFamily, approvalQuestion, parseApprovalPayload } from '@/lib/approvalGates'
 import { permissionSuggestionFromAction, type ApprovalDecisionOption } from '@/lib/approvalSuggestions'

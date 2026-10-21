@@ -70,6 +70,13 @@ class FakeChatWebSocket {
   }
 }
 
+/** A moment today at the given wall clock, so a same-day stamp is asserted
+ *  without freezing time: the stamp only grows a date once the day differs. */
+function todayAt(hours: number, minutes: number): Date {
+  const now = new Date()
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0)
+}
+
 describe('useChatStream helpers', () => {
   beforeAll(() => setLocale('en'))
   afterAll(() => setLocale('en'))
@@ -275,12 +282,16 @@ describe('useChatStream helpers', () => {
     expect(workedLineText(formatWorkedDurationLabel(61999))).toBe('Worked for 1m 01s')
     expect(workedLineText(formatWorkedDurationLabel(3723000))).toBe('Worked for 1h 02m 03s')
     expect(workedLineText(formatWorkedDurationLabel(undefined))).toBe('')
-    const finished = new Date(2026, 8, 25, 15, 4, 0)
+    const finished = todayAt(15, 4)
     expect(workedLineText(formatWorkedDurationLabel(1200, undefined, finished.toISOString()))).toBe('Worked for 1s · 15:04')
+    // A run that ended another day says which day: a bare clock would read as
+    // today's (prototype :3840 "9月18日 23:12").
+    const older = new Date(2026, 8, 25, 15, 4, 0)
+    expect(workedLineText(formatWorkedDurationLabel(1200, undefined, older.toISOString()))).toBe('Worked for 1s · Sep 25 15:04')
   })
 
   it('carries the checklist progress the engine reported, and drops empty checklists', () => {
-    const finished = new Date(2026, 8, 25, 15, 4, 0)
+    const finished = todayAt(15, 4)
     const withPlan = formatWorkedDurationLabel(72_000, undefined, finished.toISOString(), { done: 3, total: 5, active: 'short task' })
     expect(withPlan).toEqual({ label: 'Worked for 1m 12s', plan: { done: 3, total: 5, active: 'short task' }, time: '15:04' })
     expect(workedLineText(withPlan)).toBe('Worked for 1m 12s · 3/5 · short task · 15:04')
@@ -289,7 +300,7 @@ describe('useChatStream helpers', () => {
   })
 
   it('names the first-token wait right after the worked duration', () => {
-    const finished = new Date(2026, 8, 25, 15, 4, 0)
+    const finished = todayAt(15, 4)
     expect(workedLineText(formatWorkedDurationLabel(12_000, undefined, finished.toISOString(), undefined, 1200)))
       .toBe('Worked for 12s · first token 1.2s · 15:04')
     // The reloaded message carries the wait; the worked line derives it the
@@ -776,6 +787,66 @@ describe('useChatStream helpers', () => {
       // Nothing went back to the composer: the message is in the thread.
       expect(stream.takeReturnedDraft()).toBeNull()
       expect(stream.isStreaming.value).toBe(false)
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('puts the provider-refused image notice before the answer it explains', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('what is on this screen?')
+      const socket = FakeChatWebSocket.instances[0]!
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as { request_id: string }
+      socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 's-rejected' })
+
+      const report = (createdAt: string) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: {
+          id: 'image-rejected:run-9',
+          type: 'image_rejected',
+          run_id: 'run-9',
+          session_id: 's-rejected',
+          created_at: createdAt,
+          payload: { code: 'image_rejected_by_provider', provider: 'acme', model: 'vision-model', reason: 'unsupported image' },
+        },
+      })
+      // The provider refused the picture and the request went on without it:
+      // the answer below cannot see the image, so the notice is drawn first.
+      // A second report of the same refusal is the same notice, not a second one.
+      report('2026-06-14T00:00:00.000Z')
+      report('2026-06-14T00:00:01.000Z')
+      socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: {
+          id: 'delta-1',
+          type: 'assistant_delta',
+          run_id: 'run-9',
+          session_id: 's-rejected',
+          created_at: '2026-06-14T00:00:02.000Z',
+          payload: { text: 'It is a terminal window.' },
+        },
+      })
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pendingSend
+
+      const notices = stream.messages.value.filter((message) => message.imageRefusal)
+      expect(notices).toHaveLength(1)
+      expect(notices[0]).toMatchObject({
+        role: 'notice',
+        imageRefusal: { provider: 'acme', model: 'vision-model', kind: 'rejected' },
+      })
+      // The order is what the reader meets: the notice, then the answer.
+      const noticeIndex = stream.messages.value.findIndex((message) => message.imageRefusal)
+      const answerIndex = stream.messages.value.findIndex((message) => String(message.content ?? '').includes('terminal window'))
+      expect(noticeIndex).toBeGreaterThanOrEqual(0)
+      expect(answerIndex).toBeGreaterThan(noticeIndex)
     } finally {
       Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
     }

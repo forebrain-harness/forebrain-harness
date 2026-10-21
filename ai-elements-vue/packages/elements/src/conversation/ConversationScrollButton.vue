@@ -8,6 +8,8 @@ import { useStickToBottomContext } from 'vue-stick-to-bottom'
 
 interface Props {
   class?: HTMLAttributes['class']
+  /** What the button does, in the reader's language. */
+  label?: string
 }
 
 const props = defineProps<Props>()
@@ -23,10 +25,11 @@ function handleClick() {
   <Button
     v-if="showScrollButton"
     :class="cn(
-      'absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted',
+      // The prototype's .sa-down (:1190): a 30px circle on the pop shadow.
+      'absolute bottom-4 left-[50%] size-[30px] translate-x-[-50%] rounded-full shadow-[var(--forebrain-shadow-pop)] dark:bg-background dark:hover:bg-muted',
       props.class,
     )"
-    aria-label="Scroll to bottom"
+    :aria-label="props.label"
     size="icon"
     type="button"
     variant="outline"

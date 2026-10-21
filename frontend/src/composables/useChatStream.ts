@@ -117,10 +117,13 @@ export interface ChatMessage {
   picker?: SlashPicker
   /** The value picked from it; a picked notice offers nothing more. */
   picked?: string
-  /** A message the session model could not take: the notice under it says
-   * which model refused it. Live only — a reload draws the message alone,
-   * the way the terminal does (the refusal is not stored). */
-  imageRefusal?: { provider: string; model: string }
+  /** A turn whose request carried an image the model would not take, and what
+   * happened to it. Three kinds, three sentences, one block: the model's
+   * catalog entry says it takes no images (`unsupported`), the provider refused
+   * one this turn and the request went on without it (`rejected`), or this
+   * conversation already paid for that refusal on this model and the turn was
+   * withheld (`remembered`). All three end at /model. */
+  imageRefusal?: { provider: string; model: string; kind?: 'unsupported' | 'rejected' | 'remembered' }
 }
 
 /**
@@ -445,6 +448,49 @@ export function toolCallTarget(toolName: string, argsJSON: string): string {
     if (value) return value
   }
   return ''
+}
+
+/**
+ * One question the agent asked and the answers it got, as the settled card in
+ * the thread reads: the question in its own words, then each answer.
+ */
+export type AnsweredAskEntry = { question: string; answers: string[] }
+
+/**
+ * answeredAskEntries reads a question call's settled display body back into the
+ * shape the card draws.
+ *
+ * The body is the runtime's own formatting of the same structured answer the
+ * actions table keeps (pkg/tool/format.go FormatUserInteractionResult): one
+ * line per question, each answer on its own line prefixed with an arrow, and a
+ * continuation of a long answer indented under it. Reading it here keeps the
+ * thread and the terminal saying the same thing — the alternative is a second
+ * formatting of the same answer, which is the drift this card exists to stop.
+ */
+export function answeredAskEntries(content: string): AnsweredAskEntry[] {
+  const entries: AnsweredAskEntry[] = []
+  let current: AnsweredAskEntry | null = null
+  for (const raw of String(content ?? '').replace(/\r/g, '').split('\n')) {
+    if (!raw.trim()) continue
+    const indented = raw.startsWith('    ')
+    const answer = raw.match(/^\s*→\s?(.*)$/)
+    if (answer) {
+      if (!current) {
+        current = { question: '', answers: [] }
+        entries.push(current)
+      }
+      current.answers.push(answer[1] ?? '')
+      continue
+    }
+    // A deeper line under an answer is that answer still being written.
+    if (indented && current && current.answers.length) {
+      current.answers[current.answers.length - 1] += `\n${raw.trim()}`
+      continue
+    }
+    current = { question: raw.trim(), answers: [] }
+    entries.push(current)
+  }
+  return entries.filter((entry) => entry.question || entry.answers.length)
 }
 
 /**
@@ -1362,7 +1408,7 @@ export function emptyContextRuntimeSignals(): ContextRuntimeSignals {
 import { getErrorMessage, forebrainApi, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse, type SessionContextDebug } from '@/lib/api'
 import { persistLastSessionId } from '@/composables/useLastSession'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
-import { t as translate, type I18nKey } from '@/locales'
+import { currentLocale, t as translate, type I18nKey } from '@/locales'
 import { AUTO_CONTINUE_EVENT_TYPES, parseAutoContinue, type AutoContinueEntry, type AutoContinueState } from '@/lib/autoContinue'
 import { LSP_RECOMMENDATION_EVENT_TYPE, parseLspRecommendation, type LspRecommendation } from '@/lib/lspRecommendation'
 import {
@@ -1729,9 +1775,7 @@ export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn =
       ? `${minutes}m ${String(seconds).padStart(2, '0')}s`
       : `${seconds}s`
   const finished = finishedAt ? new Date(finishedAt) : null
-  const time = finished && !Number.isNaN(finished.getTime())
-    ? `${String(finished.getHours()).padStart(2, '0')}:${String(finished.getMinutes()).padStart(2, '0')}`
-    : undefined
+  const time = finished && !Number.isNaN(finished.getTime()) ? workedStamp(finished) : undefined
   const firstTokenDuration = formatFirstTokenDuration(firstTokenMs)
   return {
     label: tr('chat.workedFor', { duration }),
@@ -1739,6 +1783,25 @@ export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn =
     plan: plan && plan.total > 0 ? plan : undefined,
     time,
   }
+}
+
+/**
+ * workedStamp is a finished run's moment: the clock alone while the run ended
+ * today, and the day in front of it once it did not — the prototype writes
+ * "9月18日 23:12" (English "Sep 18 23:12") rather than a bare clock a reader
+ * would take for today's.
+ */
+function workedStamp(date: Date, now: Date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate()
+  if (sameDay) return clock
+  const day = currentLocale.value === 'zh'
+    ? `${date.getMonth() + 1}月${date.getDate()}日`
+    : `${date.toLocaleDateString('en-US', { month: 'short' })} ${date.getDate()}`
+  return `${day} ${clock}`
 }
 
 /**
@@ -3831,6 +3894,33 @@ export function useChatStream() {
   }
 
   /**
+   * insertImageRejectedNotice puts the "the provider refused your picture"
+   * notice immediately before the answer the run is streaming, so the reader
+   * meets it before the answer that cannot see the picture. The id is derived
+   * from the event's own, which is fixed per run: a repeated report — the same
+   * refusal met twice in one tool loop — is the same notice, not a second one.
+   */
+  function insertImageRejectedNotice(evt: ForebrainRunEvent, assistantMessageId: string, payload: Record<string, unknown>) {
+    const id = `image-rejected:${String(evt.id ?? '').trim() || String(evt.runId ?? '').trim()}`
+    if (messages.value.some((message) => message.id === id)) return
+    const notice: ChatMessage = {
+      id,
+      role: 'notice',
+      content: '',
+      imageRefusal: {
+        provider: String(payload.provider ?? '').trim(),
+        model: String(payload.model ?? '').trim(),
+        kind: 'rejected',
+      },
+    }
+    const list = messages.value
+    const at = list.findIndex((message) => message.id === assistantMessageId)
+    messages.value = at < 0
+      ? [...list, notice]
+      : [...list.slice(0, at), notice, ...list.slice(at)]
+  }
+
+  /**
    * findGateAnchor names the message holding a card-less gate's anchor.
    */
   function findGateAnchor(stepId: string, actionId: string): string | null {
@@ -3991,6 +4081,15 @@ export function useChatStream() {
     // review with its choices again. Both facts live in these events.
     if (evt.type === 'plan_review_started' || evt.type === 'plan_reviewed') {
       pendingActionsVersion.value += 1
+    }
+    if (evt.type === 'image_rejected') {
+      // The provider refused an image this turn carried and the request went on
+      // with a text note in its place: the answer below cannot see the picture,
+      // so the notice says so before it, where the reader meets it first. It is
+      // not a transcript row — the conversation keeps its images, and /model
+      // sends them again — so the event is its only record.
+      insertImageRejectedNotice(evt, assistantMessageId, payload)
+      return
     }
     // A subagent's spawn opens its transcript with the prompt it was given, and
     // its end closes it. Everything in between that carries its roster key is
@@ -4809,7 +4908,11 @@ export function useChatStream() {
           // only the request was withheld: the message stays in the
           // conversation (it is stored) and the placeholder becomes the notice
           // saying which model refused it. Nothing goes back to the composer.
+          // Two reasons reach here, and the page says which: the model's own
+          // entry in the catalog, or a refusal this conversation already paid
+          // for on this model.
           const data = payload.data && typeof payload.data === 'object' ? payload.data as Record<string, unknown> : {}
+          const code = String(data.code ?? '').trim()
           updateMessageById(assistantMessageId, () => ({
             id: assistantMessageId,
             role: 'notice' as const,
@@ -4817,6 +4920,7 @@ export function useChatStream() {
             imageRefusal: {
               provider: String(data.provider ?? '').trim(),
               model: String(data.model ?? '').trim(),
+              ...(code === 'image_rejected_by_provider' ? { kind: 'remembered' as const } : {}),
             },
           }))
           eventState.completedNormally = true

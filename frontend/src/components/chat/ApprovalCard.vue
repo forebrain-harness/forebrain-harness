@@ -37,28 +37,24 @@
     <div v-for="a in pendingApprovals" :key="a.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2" data-testid="pending-approval" :data-action-id="a.id">
       <template v-if="isExitPlan(a)">
         <div data-testid="exit-plan-approval">
-          <div class="flex items-center justify-between gap-3">
-            <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.exitPlanMode') }}</div>
-            <div class="text-xs text-[var(--forebrain-muted-text)]">{{ t('chat.exitPlanWaiting') }}</div>
+          <!-- The prototype's gate head (:1267): the gate's own name on the
+               left in the tool card's header shape, and the state — that it is
+               waiting on the reader — on the right. Nothing else: the reviews
+               are their own subagent cards in the thread. -->
+          <div class="xp-head">
+            <ClipboardCheck class="xp-head-icon" aria-hidden="true" />
+            <span class="xp-head-title">{{ t('chat.exitPlanMode') }}</span>
+            <span class="tool-status tool-status--awaiting">{{ t('chat.toolStatusAwaiting') }}</span>
           </div>
+          <div class="xp">
           <div
             v-if="exitPlanRequest(a)?.planText?.trim()"
-            class="mt-2 max-h-56 overflow-y-auto rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] px-3 py-2 text-[13px] leading-relaxed"
+            class="xp-doc"
             data-testid="exit-plan-text"
           >
             <MessageResponse :content="exitPlanRequest(a)!.planText!.trim()" />
           </div>
-          <div
-            v-for="review in exitPlanRequest(a)?.planReviews ?? []"
-            :key="`${a.id}-review-${review.model}`"
-            class="mt-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2"
-          >
-            <div class="text-xs text-[var(--forebrain-muted-text)]">
-              {{ t('chat.exitPlanReviewBy', { model: reviewModelLabel(review), duration: formatToolDuration(review.durationMs ?? 0) }) }}
-            </div>
-            <div class="mt-1 text-[13px] leading-relaxed"><MessageResponse :content="review.text" /></div>
-          </div>
-          <div class="mt-2">
+          <div>
             <div v-if="exitPlanRequest(a)?.planReviewActive" class="space-y-1">
               <div class="flex items-center gap-2 text-[13px] text-[var(--forebrain-text)]">
                 <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--forebrand-1,var(--forebrain-brand-1))]" />
@@ -124,7 +120,7 @@
                   type="button"
                   :disabled="submitting[a.id]"
                   @click="keepPlanning(a)"
-                >{{ t('chat.exitPlanKeepPlanning') }}</button>
+                >{{ t('chat.exitPlanSendFeedback') }}</button>
                 <button
                   class="forebrain-btn forebrain-btn-ghost text-xs"
                   type="button"
@@ -136,6 +132,7 @@
                 v-if="modelPicking[a.id]"
                 class="overflow-hidden rounded-lg border border-[var(--forebrain-divider)]"
               >
+                <div class="forebrain-chip-menu-cap">{{ t('chat.exitPlanReviewChoose') }}</div>
                 <button
                   v-for="model in exitPlanRequest(a)?.planReviewModels ?? []"
                   :key="`${a.id}-model-${model.provider}-${model.model}`"
@@ -151,7 +148,8 @@
               </div>
             </div>
           </div>
-          <div v-if="errors[a.id]" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
+          <div v-if="errors[a.id]" class="text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
+          </div>
         </div>
       </template>
       <template v-else-if="isWebFetchAction(a)">
@@ -161,22 +159,32 @@
              button that remembers this approval already names the host it
              remembers. -->
         <div data-testid="web-fetch-approval">
-          <div class="flex items-center justify-between gap-3">
-            <div class="min-w-0 text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.webFetchQuestion') }}</div>
-            <div class="flex shrink-0 items-center gap-2">
-              <button
-                v-for="(option, index) in approvalDecisionOptions(a)"
-                :key="`${a.id}-${option.decision}-${index}`"
-                :class="option.decision === 'accept' ? 'forebrain-btn forebrain-btn-primary text-xs' : 'forebrain-btn forebrain-btn-ghost text-xs'"
-                type="button"
-                :disabled="submitting[a.id]"
-                :data-testid="`pending-decision-${option.decision}`"
-                @click="submitApprovalDecision(a, option)"
-              >
-                {{ approvalDecisionLabel(option, a) }}
-              </button>
-            </div>
-          </div>
+          <!-- The shell is the library's confirmation, as on every other gate:
+               it decides when the request is on screen and draws the title and
+               the verdict row; the question and the three answers are ours. -->
+          <Confirmation
+            :state="'approval-requested'"
+            :approval="{ id: a.id }"
+            class="!gap-0 !rounded-lg !p-0"
+          >
+            <ConfirmationRequest>
+              <ConfirmationActions class="!mt-0 !w-full !justify-between !self-stretch !gap-3">
+                <ConfirmationTitle class="min-w-0 !text-sm !font-medium !text-[var(--forebrain-text)]">
+                  {{ t('chat.webFetchQuestion') }}
+                </ConfirmationTitle>
+                <div class="flex shrink-0 items-center gap-2">
+                  <ConfirmationAction
+                    v-for="(option, index) in approvalDecisionOptions(a)"
+                    :key="`${a.id}-${option.decision}-${index}`"
+                    :class="option.decision === 'accept' ? 'forebrain-btn forebrain-btn-primary text-xs' : 'forebrain-btn forebrain-btn-ghost text-xs'"
+                    :disabled="submitting[a.id]"
+                    :data-testid="`pending-decision-${option.decision}`"
+                    @click="submitApprovalDecision(a, option)"
+                  >
+                    {{ approvalDecisionLabel(option, a) }}
+                  </ConfirmationAction>
+                </div>
+              </ConfirmationActions>
           <button
             v-if="requesterLabel(a) && canOpenAgent"
             type="button"
@@ -186,6 +194,18 @@
           >{{ requesterLabel(a) }}</button>
           <div v-else-if="requesterLabel(a)" class="mt-1 truncate text-xs text-[var(--forebrain-text-2)]">{{ requesterLabel(a) }}</div>
           <div class="mt-2 break-all pl-4 font-mono text-[12px] text-[var(--forebrain-text-2)]" data-testid="web-fetch-page">{{ webFetchPage(a) }}</div>
+          <!-- The engine's own routing facts, drawn in the shared gate's fact
+               row (ApprovalGateCard.vue:44-49): which provider fetches the page
+               and whether private addresses were opened. The list is empty for
+               a plain fetch, so this card looks exactly as it did. -->
+          <div
+            v-for="(fact, index) in approvalGate(a).facts.facts"
+            :key="`${a.id}-fact-${index}`"
+            class="mt-1 break-words pl-4 text-[12px] text-[var(--forebrain-text-2)]"
+            data-testid="web-fetch-fact"
+          >{{ fact }}</div>
+            </ConfirmationRequest>
+          </Confirmation>
         </div>
       </template>
       <template v-else>
@@ -209,6 +229,15 @@
       <div v-if="errors[a.id] && isWebFetchAction(a)" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
     </div>
     <div v-for="qa in pendingAsk" :key="qa.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 space-y-2" data-testid="pending-question" :data-action-id="qa.id">
+      <!-- The ask card's head (:3299, :1270⑤): what the card is doing. The
+           questions themselves are the tab row's business, one line below, and
+           the head prints no count of them — the design has none either, and a
+           count that ran past its own total (the review screen sits past the
+           last question) said nothing true. -->
+      <div class="xp-head">
+        <MessageSquareText class="xp-head-icon" aria-hidden="true" />
+        <span class="xp-head-title">{{ t('chat.askRunning') }}</span>
+      </div>
       <button
         v-if="requesterLabel(qa) && canOpenAgent"
         type="button"
@@ -228,6 +257,8 @@
         @set-answer="(questionId, value) => setAskAnswer(qa.id, questionId, value)"
         @set-other="(questionId, value) => setAskOther(qa.id, questionId, value)"
         @submit="submitAsk(qa.id)"
+        @cancel="cancelAsk(qa.id)"
+        @chat-about="chatAboutQuestion(qa.id)"
       />
       <div v-if="errors[qa.id]" class="text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[qa.id] }}</div>
     </div>
@@ -248,10 +279,13 @@
  *   panel uses.
  */
 import { computed, nextTick, ref } from 'vue'
-import { CircleAlert } from 'lucide-vue-next'
+import { CircleAlert, ClipboardCheck, MessageSquareText } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { MessageResponse } from '@repo/elements/message'
-import { normalizeApprovalDecision, formatToolDuration } from '@/composables/useChatStream'
+import {
+  Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequest, ConfirmationTitle,
+} from '@repo/elements/confirmation'
+import { normalizeApprovalDecision } from '@/composables/useChatStream'
 import { usePendingActions, type ActionRow } from '@/composables/usePendingActions'
 import { useI18n } from '@/locales'
 import ApprovalGateCard from './ApprovalGateCard.vue'
@@ -279,7 +313,12 @@ const props = withDefaults(defineProps<{
   contextUsedPercent?: number | null
 }>(), { block: undefined, sessionId: null, version: 0, canOpenAgent: false, contextUsedPercent: null })
 
-const emit = defineEmits<{ (e: 'open-agent', agentId: string): void }>()
+const emit = defineEmits<{
+  (e: 'open-agent', agentId: string): void
+  /** 「和它聊聊」was picked: the question is dropped and the composer is the
+   *  place to say it in the reader's own words. */
+  (e: 'focus-composer'): void
+}>()
 
 const { t } = useI18n()
 
@@ -313,11 +352,11 @@ const {
   load,
   exitPlanRequest,
   isExitPlan,
-  reviewModelLabel,
   modelLabel,
   activeReviewLabel,
   clearContextLabel,
   submitAsk,
+  cancelAsk,
   setAskAnswer,
   setAskOther,
   submitApprovalDecision,
@@ -344,6 +383,14 @@ const {
  *  the verdict that opens it lands. */
 const feedbackInputs = ref<Record<string, HTMLInputElement | null>>({})
 
+/** 「和它聊聊」: the question is withdrawn, and the composer takes the turn. One
+ *  gesture, two halves — the run must stop waiting before the reader can say
+ *  anything, so the cancel goes out first and the caret follows it. */
+function chatAboutQuestion(actionId: string) {
+  void cancelAsk(actionId)
+  emit('focus-composer')
+}
+
 function setFeedbackInput(actionId: string, el: unknown) {
   feedbackInputs.value[actionId] = (el as HTMLInputElement | null) ?? null
 }
@@ -364,3 +411,55 @@ function askReviewChosen(a: ActionRow) {
   toggleModelPicker(a)
 }
 </script>
+
+<style scoped>
+/* The gate's head, in the tool card's shape (prototype :1276): the card's name
+   on the alt surface, its state on the right, one hairline under it. */
+.xp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  margin: -8px -12px 0;
+  background: var(--forebrain-bg-alt);
+  border-bottom: 1px solid var(--forebrain-divider);
+  font-size: 12px;
+}
+
+.xp-head-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--forebrain-muted-text);
+}
+
+.xp-head-title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--forebrain-mono-font);
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+}
+
+/* The gate's own column: the plan, then the verdicts, 10px apart. */
+.xp {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+/* A plan is long and read in place, so it scrolls inside its own box and the
+   bottom edge fades (prototype .xp-doc, :292). */
+.xp-doc {
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 8px;
+  background: var(--forebrain-bg-alt);
+  padding: 9px 12px;
+  max-height: 216px;
+  overflow: auto;
+  mask-image: linear-gradient(#000 calc(100% - 20px), transparent);
+  font-size: 13px;
+  line-height: 1.6;
+}
+</style>
+

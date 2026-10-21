@@ -6,7 +6,11 @@
        multi-select one. A single-select click answers and moves on, the way
        the overlay's Enter does; a multi-select click only toggles, and the
        answers are reviewed before they are sent. -->
-  <div class="space-y-2">
+  <!-- The card answers the keyboard its footer prints: Esc cancels the question
+       (the terminal overlay's Esc), ←/→ move between questions. The handler sits
+       on the card's own root, so it fires only while the card holds focus — the
+       composer's Esc keeps meaning what it means there (interrupt the run). -->
+  <div ref="rootEl" class="space-y-2 outline-none" tabindex="-1" data-testid="ask-card" @keydown="onKeydown">
     <div class="flex flex-wrap items-center gap-1 text-xs" role="tablist" data-testid="ask-tabs-nav">
       <span
         v-if="showSubmit"
@@ -62,8 +66,11 @@
             data-testid="ask-option"
             @click="choose(opt)"
           >
+            <!-- One prefix per row, never both (prototype :3246-3247): a
+                 multi-select question numbers its boxes, a single-select one
+                 numbers the ways to answer. -->
             <span v-if="currentQuestion.allowMultiple" class="font-mono text-[var(--forebrain-muted-text)]">[{{ isSelected(opt) ? 'x' : ' ' }}]</span>
-            <span class="font-mono text-[var(--forebrain-muted-text)]">{{ i + 1 }}.</span>
+            <span v-else class="font-mono text-[var(--forebrain-muted-text)]">{{ i + 1 }}.</span>
             <span class="min-w-0 break-words">{{ opt.label }}<span v-if="opt.recommended" class="text-[var(--forebrain-muted-text)]">{{ t('chat.askRecommended') }}</span><span v-if="!currentQuestion.allowMultiple && isSelected(opt)" class="text-[var(--forebrain-success)]"> ✓</span></span>
           </button>
           <div v-if="opt.description" class="pl-8 text-xs text-[var(--forebrain-muted-text)]">{{ opt.description }}</div>
@@ -87,7 +94,7 @@
             @click="openOther"
           >
             <span v-if="currentQuestion.allowMultiple" class="font-mono text-[var(--forebrain-muted-text)]">[{{ hasOther ? 'x' : ' ' }}]</span>
-            <span class="font-mono text-[var(--forebrain-muted-text)]">{{ currentQuestion.options.length + 1 }}.</span>
+            <span v-else class="font-mono text-[var(--forebrain-muted-text)]">{{ currentQuestion.options.length + 1 }}.</span>
             <span>{{ t('chat.otherOptional') }}</span>
           </button>
           <input
@@ -102,24 +109,16 @@
         </div>
       </div>
 
-      <!-- A multi-select question only toggles, so it gets its own way
-           forward; a single question with no submit tab (single-select) needs
-           one only for an「其他」answer, which no option click submits. -->
-      <div v-if="currentQuestion.allowMultiple" class="flex justify-end gap-2">
-        <button
-          type="button"
-          class="forebrain-btn forebrain-btn-ghost text-xs"
-          :disabled="submitting || current === questions.length - 1"
-          data-testid="ask-next"
-          @click="current += 1"
-        >{{ t('chat.askNext') }}</button>
+      <!-- A multi-select question only toggles, so it gets one way forward:
+           the last question submits, the others move on (prototype :3272). -->
+      <div v-if="currentQuestion.allowMultiple" class="flex justify-end">
         <button
           type="button"
           class="forebrain-btn forebrain-btn-primary text-xs"
           :disabled="submitting"
-          data-testid="ask-review-open"
-          @click="current = questions.length"
-        >{{ t('common.submit') }}</button>
+          :data-testid="isLastQuestion ? 'ask-review-open' : 'ask-next'"
+          @click="current += 1"
+        >{{ isLastQuestion ? t('common.submit') : t('chat.askNext') }}</button>
       </div>
       <div v-else-if="!showSubmit && otherOpen[currentQuestion.id]" class="flex justify-end">
         <button
@@ -136,14 +135,16 @@
          one decision that sends it. -->
     <div v-else data-testid="ask-review">
       <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.askReviewTitle') }}</div>
-      <div v-if="!allAnswered" class="mt-1 text-xs text-[var(--forebrain-danger)]">{{ t('chat.askIncomplete') }}</div>
+      <div v-if="!allAnswered" class="mt-1 text-xs text-[var(--forebrain-warning)]">{{ t('chat.askIncomplete') }}</div>
       <div class="mt-1 space-y-1">
         <div v-for="q in questions" :key="q.id">
           <div class="text-[13px] text-[var(--forebrain-text)]">• {{ q.prompt }}</div>
-          <div v-if="answerSummary(q)" class="pl-4 text-[13px] text-[var(--forebrain-success)]">→ {{ answerSummary(q) }}</div>
-          <div v-else class="pl-4 text-[13px] text-[var(--forebrain-muted-text)]">→ {{ t('chat.askNoAnswer') }}</div>
+          <div v-if="answerSummary(q)" class="pl-3 text-[12.5px] text-[var(--forebrain-success)]">→ {{ answerSummary(q) }}</div>
+          <div v-else class="pl-3 text-[12.5px] text-[var(--forebrain-muted-text)]">{{ t('chat.askNoAnswer') }}</div>
         </div>
       </div>
+      <!-- The prototype's last question before the verdict (:3284). -->
+      <p class="mt-2 text-[13px] text-[var(--forebrain-text)]">{{ t('chat.askReviewConfirm') }}</p>
       <div class="mt-2 flex justify-end gap-2">
         <button
           type="button"
@@ -158,8 +159,26 @@
           :disabled="submitting"
           data-testid="ask-submit"
           @click="emit('submit')"
-        >{{ t('common.submit') }}</button>
+        >{{ t('chat.askSubmitAnswers') }}</button>
       </div>
+    </div>
+
+    <!-- The prototype's .ask-foot (:3319): the number「其他」would take, the way
+         into a conversation about the question, and the keyboard the overlay
+         answers with. It sits in every state, so the card never changes height
+         when the tab does. -->
+    <div class="ask-foot">
+      <span class="ask-foot-num">{{ onReview ? '' : `${(currentQuestion?.options.length ?? 0) + 2}.` }}</span>
+      <button
+        type="button"
+        class="ask-foot-chat"
+        data-testid="ask-chat-about"
+        @click="emit('chat-about')"
+      >{{ t('chat.askChatAboutIt') }}</button>
+      <span class="ask-foot-grow" />
+      <span class="ask-foot-cap">
+        {{ questions.length > 1 ? t('chat.askFootKeysMany') : t('chat.askFootKeysOne') }}
+      </span>
     </div>
   </div>
 </template>
@@ -173,7 +192,7 @@
  * shared pending-actions store, so both surfaces that show one action answer
  * it identically.
  */
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useI18n } from '@/locales'
 import type { AskAction } from '@/composables/usePendingActions'
 
@@ -193,9 +212,17 @@ const emit = defineEmits<{
   (e: 'set-answer', questionId: string, value: string | string[]): void
   (e: 'set-other', questionId: string, value: string): void
   (e: 'submit'): void
+  /** Esc: stop waiting for this question. The caller sends the engine the
+   *  `cancel` decision, which is what the terminal's overlay returns for Esc. */
+  (e: 'cancel'): void
+  /** 「和它聊聊」: the question is dropped and the composer takes over, so the
+   *  reader can say what they want in their own words instead. */
+  (e: 'chat-about'): void
 }>()
 
 const { t } = useI18n()
+
+const rootEl = ref<HTMLElement | null>(null)
 
 /** The tab the card is on: a question's index, or past the last one for the
  * review screen. */
@@ -208,8 +235,13 @@ const otherOpen = ref<Record<string, boolean>>({})
 const otherInput = ref<HTMLInputElement | null>(null)
 
 /** The Submit tab — and with it the arrows — shows for exactly the forms the
- * terminal shows it for: several questions, or a multi-select one. */
-const showSubmit = computed(() => !(props.questions.length === 1 && !props.questions[0].allowMultiple))
+ * terminal shows it for: as soon as any question is a multi-select one
+ * (prototype :3240), because only a multi-select form needs a verdict of its
+ * own; a form of single-select questions answers itself as it is answered. */
+const showSubmit = computed(() => props.questions.some((q) => q.allowMultiple))
+
+/** Whether the question on screen is the last one — its forward button submits. */
+const isLastQuestion = computed(() => current.value === props.questions.length - 1)
 
 const onReview = computed(() => current.value === props.questions.length)
 
@@ -225,6 +257,52 @@ const otherText = computed({
     if (q) emit('set-other', q.id, value)
   },
 })
+
+// The head above the card prints only its own verb, so the tab the reader is on
+// stays this card's business: the questions and the arrows that move through
+// them live here.
+
+/** Take the keyboard when the card appears, so the footer's Esc and ←/→ work
+ *  straight away — but never out of a field the reader is typing in, where a
+ *  caret and the composer's own Esc belong to them. */
+onMounted(() => {
+  if (typeof document === 'undefined') return
+  const active = document.activeElement
+  if (active && active !== document.body && active !== rootEl.value) return
+  rootEl.value?.focus()
+})
+
+/**
+ * Move to a question by index, clamped to the questions on screen. The review is
+ * not a question: it is reached from the Submit tab, so the arrows neither enter
+ * it nor carry the reader back out of it.
+ */
+function goto(index: number) {
+  if (props.questions.length === 0 || onReview.value) return
+  current.value = Math.min(Math.max(index, 0), props.questions.length - 1)
+}
+
+function isTextEntry(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el) return false
+  const tag = String(el.tagName ?? '').toUpperCase()
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable === true
+}
+
+/** The keys the footer prints, in one place: Esc cancels, ←/→ move a question. */
+function onKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    emit('cancel')
+    return
+  }
+  if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
+  // A left arrow inside the「其他」field belongs to the caret, not to the card.
+  if (isTextEntry(event.target)) return
+  event.preventDefault()
+  goto(current.value + (event.key === 'ArrowRight' ? 1 : -1))
+}
 
 function chipLabel(q: AskAction['form']['questions'][number]): string {
   return (q.header || '').trim() || q.prompt
@@ -293,3 +371,47 @@ function answerSummary(q: AskAction['form']['questions'][number]): string {
   return parts.join(', ')
 }
 </script>
+
+<style scoped>
+/* The prototype's .ask-foot (:375): a hairline above, the「其他」number on the
+   left, and the keyboard hint pinned to the right. */
+.ask-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--forebrain-divider);
+  font-size: 12.5px;
+  color: var(--forebrain-text-2);
+}
+
+.ask-foot-num {
+  font-family: var(--forebrain-mono-font);
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
+}
+
+.ask-foot-grow {
+  flex: 1;
+}
+
+/* 「和它聊聊」is a real control now, drawn as the plain footer text it reads as:
+   the same size and colour as the line it sits in, underlined only on hover so
+   the row does not look like a button bar. */
+.ask-foot-chat {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: var(--forebrain-brand-1);
+  cursor: pointer;
+}
+
+.ask-foot-chat:hover {
+  text-decoration: underline;
+}
+
+.ask-foot-cap {
+  color: var(--forebrain-muted-text);
+}
+</style>
