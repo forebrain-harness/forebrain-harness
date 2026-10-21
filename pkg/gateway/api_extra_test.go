@@ -1791,6 +1791,25 @@ func TestHandleModelsListWithoutSourceReportsUnconfigured(t *testing.T) {
 	require.Empty(t, out.Records)
 	require.Len(t, out.Status, 1)
 	require.NotEmpty(t, out.Status[0].Error)
+
+	// The listing also carries the endpoint each provider defaults to: the
+	// model-service form fills a base URL in from here. A list, so a client
+	// that camel-cases keys cannot rewrite a provider id.
+	var defaults struct {
+		ProviderBaseURLs []struct {
+			Provider string `json:"provider"`
+			BaseURL  string `json:"base_url"`
+		} `json:"provider_base_urls"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &defaults))
+	require.NotEmpty(t, defaults.ProviderBaseURLs)
+	for _, row := range defaults.ProviderBaseURLs {
+		if row.Provider == "deepseek" {
+			require.Equal(t, "https://api.deepseek.com", row.BaseURL)
+			return
+		}
+	}
+	t.Fatalf("deepseek missing from %+v", defaults.ProviderBaseURLs)
 }
 
 // TestChatMessagesReportsWhoWroteEachUserRow pins the history contract for
@@ -5317,6 +5336,24 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	row, _, err = sess.SessionModelSelection(context.Background(), "s1")
 	require.NoError(t, err)
 	require.Equal(t, "", row.Effort)
+}
+
+// The web chip's levels come from the same capability question /model asks, so
+// an OpenCode model carries its own levels even though models.json — the
+// listing this server falls back to — has no row for the provider.
+func TestSessionModelOptionsCarryOpenCodeEfforts(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+			Provider: "opencode-go",
+			Model:    "glm-5.3",
+			Models:   appcfg.StringList{"glm-5.3", "minimax-m3", "qwen3.8-max"},
+		}}},
+	}}}
+	options := (&Server{}).sessionModelOptions(cfg, "main")
+	require.Len(t, options, 3)
+	require.Equal(t, []string{"low", "high", "max"}, options[0].Efforts)
+	require.Empty(t, options[1].Efforts, "a toggle-only model has no level to pick")
+	require.Equal(t, []string{"low", "medium"}, options[2].Efforts, "the Anthropic client cannot send xhigh")
 }
 
 // TestRewindRoutes pins the plan-033 HTTP surface: the six new routes answer,

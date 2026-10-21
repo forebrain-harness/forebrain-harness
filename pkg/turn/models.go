@@ -146,22 +146,6 @@ func DiscoverOpenCodeModels(ctx context.Context, src OpenCodeModelsSource, goSub
 	return records, nil
 }
 
-// OpenCodeFreeRecords projects the free family offline, for a machine that
-// cannot reach the live catalog: those models need no credential, so they are
-// still usable when discovery fails. They carry no source and no fetch time
-// because nothing was fetched.
-func OpenCodeFreeRecords() []ModelRecord {
-	models := opencode.FreeConsoleModels()
-	records := make([]ModelRecord, 0, len(models))
-	for _, meta := range models {
-		records = append(records, openCodeModelRecord(opencodeProvider, meta.ID, meta))
-	}
-	if len(records) > 0 {
-		records[0].IsDefault = true
-	}
-	return records
-}
-
 // openCodeModelRecord projects one catalog id onto this package's record shape.
 // The free suffix is the only capability the picker needs to show in the name:
 // it tells a user which models work before logging in.
@@ -177,8 +161,39 @@ func openCodeModelRecord(provider, id string, meta opencode.ModelMeta) ModelReco
 		APIModel:            id,
 		ContextWindow:       meta.ContextWindow,
 		CanReason:           meta.Reasoning,
+		ReasoningEfforts:    openCodeEfforts(provider, id, meta),
 		SupportsAttachments: meta.Attachments,
 	}
+}
+
+// openCodeEfforts trims the levels the table records for a model down to the
+// ones this build can actually send on the protocol the model speaks. It is the
+// one place that decides which levels reach a picker, so a level the client
+// would silently drop never gets offered.
+func openCodeEfforts(provider, id string, meta opencode.ModelMeta) []string {
+	if len(meta.Efforts) == 0 {
+		return nil
+	}
+	protocol, err := opencode.ProtocolFor(provider, id)
+	if err != nil {
+		return nil
+	}
+	return opencode.EffortsForProtocol(protocol, meta.Efforts)
+}
+
+// ModelReasoningEfforts names the thinking levels a model offers, empty levels
+// meaning the surface cannot pick one. It is the capability question every
+// surface asks — the setup flow, /model and the gateway — so a model whose
+// levels live in this repository's tables and one whose levels live in
+// models.json answer through the same call.
+func ModelReasoningEfforts(provider, model string) []string {
+	if meta, ok := opencode.LookupModelMeta(provider, model); ok {
+		return openCodeEfforts(provider, model, meta)
+	}
+	if hit, ok := llm.Lookup(provider, model); ok && hit.CanReason {
+		return append([]string(nil), ReasoningEffortLevels...)
+	}
+	return nil
 }
 
 // DiscoverChatGPTModels returns the account's picker-visible subscription
@@ -317,17 +332,17 @@ func listModelCatalogLive(ctx context.Context, sources modelSources, q ModelCata
 		listing.Status = append(listing.Status, status)
 	}
 	if sources.opencode != nil && (provider == "" || provider == opencodeProvider) {
-		// The Console catalog wants the literal "public" bearer, which the
-		// free family accepts with no login at all — so this block runs for
-		// every machine and, when the fetch fails, still answers with the free
-		// family instead of an empty block.
+		// The Console catalog needs a Console credential: the free family is
+		// not reachable from a third-party client any more (the gateway
+		// rejects every request without OpenCode's own client identity), so a
+		// failed fetch is reported as status rather than answered with an
+		// offline list of models that would 403 on the first message.
 		records, err := DiscoverOpenCodeModels(ctx, sources.opencode, false)
 		status := ModelCatalogStatus{Provider: opencodeProvider, Source: ModelSourceOpenCodeAccount}
 		switch {
 		case err != nil:
 			status.Source = ""
 			status.Error = err.Error()
-			records = OpenCodeFreeRecords()
 		case len(records) > 0:
 			fetched := records[0].FetchedAt
 			status.FetchedAt = &fetched
@@ -519,8 +534,11 @@ type ModelChoice struct {
 	Provider string
 	Model    string
 	// Name is the catalog's display name for the model, "" when it has none.
-	Name      string
-	CanReason bool
+	Name string
+	// ReasoningEfforts are the thinking levels this model offers that this
+	// build can send; empty means the picker has nothing to ask, either
+	// because the model does not reason or because it has no discrete level.
+	ReasoningEfforts []string
 	// SupportsImages reports that the catalog knows this model accepts image
 	// input. Unknown models report false: a picker marks only what it knows.
 	SupportsImages bool
@@ -557,9 +575,9 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 				choice.Name = name
 				choice.Label += " - " + name
 			}
-			choice.CanReason = hit.CanReason
 			choice.SupportsImages = hit.SupportsAttachments
 		}
+		choice.ReasoningEfforts = ModelReasoningEfforts(provider, model)
 		out = append(out, choice)
 	}
 	return out

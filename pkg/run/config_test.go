@@ -1031,6 +1031,53 @@ func TestNewLLMFromYAMLOpenCodeRoutesByProtocol(t *testing.T) {
 	}
 }
 
+// TestNewLLMFromYAMLAPIPathNamesTheProtocol pins the third format a model
+// service can carry: a stored "/v1/messages" asks for the Anthropic Messages
+// client, on a provider that is not itself an Anthropic one. The path is a
+// protocol marker, not a URL — the Messages client appends the endpoint to the
+// base URL — so the request must reach the base URL's own /v1/messages with
+// Anthropic's headers, not a Chat Completions body rewritten onto that path.
+func TestNewLLMFromYAMLAPIPathNamesTheProtocol(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		apiPath     string
+		wantPath    string
+		wantAnthrop bool
+	}{
+		{name: "messages path speaks anthropic", apiPath: "/v1/messages", wantPath: "/v1/messages", wantAnthrop: true},
+		{name: "messages path tolerates a trailing slash", apiPath: "/v1/messages/", wantPath: "/v1/messages", wantAnthrop: true},
+		{name: "chat path stays chat completions", apiPath: "/chat/completions", wantPath: "/chat/completions", wantAnthrop: false},
+		{name: "responses path stays responses", apiPath: "/responses", wantPath: "/responses", wantAnthrop: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A server per case: a client retries a failed stream, and the
+			// question here is what the first request looked like.
+			srv, calls := openCodeGateway(t)
+			runOpenCodeClient(t, &LLMProviderYAML{
+				Provider: "deepseek",
+				Model:    "deepseek-chat",
+				APIKey:   "sk-test",
+				BaseURL:  srv.URL,
+				APIPath:  tc.apiPath,
+			})
+
+			got := calls()
+			if len(got) == 0 {
+				t.Fatal("no request reached the server")
+			}
+			if got[0].Path != tc.wantPath {
+				t.Fatalf("request path = %q, want %q", got[0].Path, tc.wantPath)
+			}
+			// The two clients authenticate differently, which is what tells
+			// them apart on a path both would otherwise produce.
+			isAnthropic := got[0].Header.Get("anthropic-version") != ""
+			if isAnthropic != tc.wantAnthrop {
+				t.Fatalf("anthropic-version = %q, want anthropic client: %v", got[0].Header.Get("anthropic-version"), tc.wantAnthrop)
+			}
+		})
+	}
+}
+
 // TestNewLLMFromYAMLOpenCodeCredentialChain pins the order a credential is
 // taken in, because three different login surfaces write different things: an
 // api_key (possibly an ${ENV} reference), OPENCODE_API_KEY, the opencode.json

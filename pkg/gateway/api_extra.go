@@ -522,7 +522,37 @@ func (s *Server) handleModelsList(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"records": listing.Records,
 		"status":  listing.Status,
+		// The endpoint each provider defaults to. It rides with the catalog
+		// because it is catalog metadata, not a per-provider setting: a form
+		// offering the providers fills the base URL in from here instead of
+		// keeping its own copy of the table.
+		"provider_base_urls": providerBaseURLDefaults(),
 	})
+}
+
+// providerBaseURLDefault is one provider's default endpoint, as the listing
+// reports it.
+type providerBaseURLDefault struct {
+	Provider string `json:"provider"`
+	BaseURL  string `json:"base_url"`
+}
+
+// providerBaseURLDefaults lists the table in provider order. A list rather
+// than an object: a client that camel-cases response keys would rewrite an
+// object's keys, and a provider id is data — arcee-ai must not arrive as
+// arceeAi.
+func providerBaseURLDefaults() []providerBaseURLDefault {
+	table := config.ProviderDefaultBaseURLTable()
+	providers := make([]string, 0, len(table))
+	for provider := range table {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	out := make([]providerBaseURLDefault, 0, len(providers))
+	for _, provider := range providers {
+		out = append(out, providerBaseURLDefault{Provider: provider, BaseURL: table[provider]})
+	}
+	return out
 }
 
 func (s *Server) handleSlashCommands(w http.ResponseWriter, r *http.Request) {
@@ -1648,10 +1678,12 @@ type sessionModelOption struct {
 
 // sessionModelEfforts names the reasoning levels one model offers: the
 // levels the shared model catalog — the same listing /api/models serves —
-// reported for it when it reported any, else the level list /model itself
-// offers for a model the catalog knows can reason, and none at all for one it
-// knows cannot. The catalog is the single source: no list is invented here.
-func sessionModelEfforts(records []turn.ModelRecord, canReason bool, provider, model string) []string {
+// reported for it when it reported any, else the levels the configured
+// choice itself carries (turn.ModelReasoningEfforts, which reads both the
+// catalog and this repository's OpenCode tables), and none at all for a model
+// with nothing to pick. The catalog is the single source: no list is invented
+// here.
+func sessionModelEfforts(records []turn.ModelRecord, fallback []string, provider, model string) []string {
 	model = strings.TrimSpace(model)
 	for _, rec := range records {
 		if strings.EqualFold(strings.TrimSpace(rec.Provider), strings.TrimSpace(provider)) && strings.TrimSpace(rec.APIModel) == model {
@@ -1666,10 +1698,10 @@ func sessionModelEfforts(records []turn.ModelRecord, canReason bool, provider, m
 			}
 		}
 	}
-	if canReason {
-		return turn.ReasoningEffortLevels
+	if len(fallback) == 0 {
+		return nil
 	}
-	return nil
+	return append([]string(nil), fallback...)
 }
 
 // sessionModelSupportsImages reports whether one configured option accepts
@@ -1700,7 +1732,7 @@ func (s *Server) sessionModelOptions(cfg *config.Root, agentName string) []sessi
 			Provider:       choice.Provider,
 			Model:          choice.Model,
 			Label:          choice.Label,
-			Efforts:        sessionModelEfforts(records, choice.CanReason, choice.Provider, choice.Model),
+			Efforts:        sessionModelEfforts(records, choice.ReasoningEfforts, choice.Provider, choice.Model),
 			SupportsImages: sessionModelSupportsImages(records, choice),
 		})
 	}

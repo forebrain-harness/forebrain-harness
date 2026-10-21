@@ -275,26 +275,23 @@ type providerChoice struct {
 	SupportsAPIPath bool
 	APIKeyLabel     string
 	ChatGPTOAuth    bool
-	// OpenCodeFree and OpenCodeDevice are the two ways into the OpenCode
-	// gateway: its free model family, which needs no credential at all, or the
-	// Go subscription behind a device-code login. Neither asks for an API key,
-	// so both skip the key page.
-	OpenCodeFree   bool
+	// OpenCodeDevice is the way into the OpenCode gateway: the Go
+	// subscription behind a device-code login. It asks for no API key, so it
+	// skips the key page. The Console surface keeps no entry here: its free
+	// family only answers OpenCode's own client, and a paid Console key is
+	// configured from the web app or the config file.
 	OpenCodeDevice bool
 }
 
 // discoveredModels reports whether this choice's models are the ones the setup
 // fetched for an account, rather than the shared catalog's list for a provider.
 func (c providerChoice) discoveredModels() bool {
-	return c.ChatGPTOAuth || c.OpenCodeFree || c.OpenCodeDevice
+	return c.ChatGPTOAuth || c.OpenCodeDevice
 }
 
 type providerGroup struct {
-	Label string
-	Hint  string
-	// Blurb describes a group whose options are not plans by region and
-	// billing. Empty falls back to the count of options.
-	Blurb   string
+	Label   string
+	Hint    string
 	Options []providerChoice
 }
 
@@ -314,9 +311,10 @@ var openCodeLogin = func(ctx context.Context, path string, out io.Writer, onStar
 
 // discoverOpenCodeModels is a package var for the same reason as
 // discoverChatGPTModels: tests stub it, production reads the gateway's catalog
-// through the source every surface uses.
-var discoverOpenCodeModels = func(ctx context.Context, home string, goSubscription bool) ([]turn.ModelRecord, error) {
-	return turn.DiscoverOpenCodeModels(ctx, process.NewOpenCodeModelsSource(home), goSubscription)
+// through the source every surface uses. The only surface the setup offers is
+// the Go subscription, whose catalog is the one that needs its token.
+var discoverOpenCodeModels = func(ctx context.Context, home string) ([]turn.ModelRecord, error) {
+	return turn.DiscoverOpenCodeModels(ctx, process.NewOpenCodeModelsSource(home), true)
 }
 
 // modelsDiscoveryTimeout bounds one account model fetch. The browser and device
@@ -336,20 +334,12 @@ var providerGroups = []providerGroup{
 	},
 	{
 		Label: "OpenCode",
-		Hint:  "Free models or Go subscription",
-		Blurb: "Free models, or a Go subscription",
-		Options: []providerChoice{
-			{
-				Group: "OpenCode", Label: "Free models (no login)",
-				Hint:     "OpenCode free tier — big-pickle, glm/deepseek/minimax flash, …",
-				Provider: "opencode", DefaultBaseURL: opencode.ProviderBaseURL("opencode"), OpenCodeFree: true,
-			},
-			{
-				Group: "OpenCode", Label: "Sign in with OpenCode (Go subscription)",
-				Hint:     "Device-code login; use your Go/Go Plus quota",
-				Provider: "opencode-go", DefaultBaseURL: opencode.ProviderBaseURL("opencode-go"), OpenCodeDevice: true,
-			},
-		},
+		Hint:  "Go subscription",
+		Options: []providerChoice{{
+			Group: "OpenCode", Label: "Sign in with OpenCode (Go subscription)",
+			Hint:     "Device-code login; use your Go/Go Plus quota",
+			Provider: "opencode-go", DefaultBaseURL: opencode.ProviderBaseURL("opencode-go"), OpenCodeDevice: true,
+		}},
 	},
 	{
 		Label: "OpenAI",
@@ -738,11 +728,11 @@ func (s *llmSetup) pickProvider() (bool, error) {
 }
 
 // hasSubscriptionSignIn reports whether a group is reached by signing in to a
-// subscription — ChatGPT's browser OAuth, or OpenCode's free tier and its
-// device-code Go login — rather than by pasting an API key.
+// subscription — ChatGPT's browser OAuth or OpenCode's device-code Go login —
+// rather than by pasting an API key.
 func hasSubscriptionSignIn(group providerGroup) bool {
 	for _, option := range group.Options {
-		if option.ChatGPTOAuth || option.OpenCodeFree || option.OpenCodeDevice {
+		if option.ChatGPTOAuth || option.OpenCodeDevice {
 			return true
 		}
 	}
@@ -750,13 +740,10 @@ func hasSubscriptionSignIn(group providerGroup) bool {
 }
 
 // providerGroupBlurb is what a provider's row says about it: its one way in,
-// its own description, or how many plans it offers.
+// or how many plans it offers.
 func providerGroupBlurb(group providerGroup) string {
 	if len(group.Options) == 1 {
 		return group.Options[0].Hint
-	}
-	if blurb := strings.TrimSpace(group.Blurb); blurb != "" {
-		return blurb
 	}
 	return fmt.Sprintf("%d plans by region and billing", len(group.Options))
 }
@@ -769,9 +756,6 @@ func (s *llmSetup) credentials() (bool, error) {
 	}
 	if s.choice.OpenCodeDevice {
 		return s.signInOpenCode()
-	}
-	if s.choice.OpenCodeFree {
-		return s.useOpenCodeFreeModels()
 	}
 	label := s.choice.APIKeyLabel + "\n" + s.apiKeyNote()
 	for {
@@ -848,38 +832,8 @@ func (s *llmSetup) signInOpenCode() (bool, error) {
 		return false, err
 	}
 	return s.fetchSignedInModels(status, func(fetchCtx context.Context) ([]turn.ModelRecord, error) {
-		return discoverOpenCodeModels(fetchCtx, s.cfg.Home, true)
+		return discoverOpenCodeModels(fetchCtx, s.cfg.Home)
 	})
-}
-
-// useOpenCodeFreeModels opens OpenCode's free family, which needs no credential
-// at all. The catalog is read live so the picker offers what the gateway serves
-// today; when it cannot be read, or comes back empty, the free models this
-// build knows stand in — they are exactly the ones that still work, so a failed
-// fetch must not end the setup. The note on the page says which list is shown.
-func (s *llmSetup) useOpenCodeFreeModels() (bool, error) {
-	status := s.statusOutput("Connect OpenCode")
-	fetchCtx, cancel := context.WithTimeout(s.ctx(), modelsDiscoveryTimeout)
-	if status != nil {
-		fmt.Fprintln(status, "Fetching OpenCode's free models…")
-	}
-	records, err := discoverOpenCodeModels(fetchCtx, s.cfg.Home, false)
-	cancel()
-	if err != nil || len(records) == 0 {
-		fallback := turn.OpenCodeFreeRecords()
-		logPromptChoice(s.cfg, "llmsetup.opencode.free_models_fallback", s.choice, map[string]any{
-			"error": errString(err), "count": len(fallback),
-		})
-		if status != nil {
-			fmt.Fprintf(status, "Could not read the live OpenCode catalog (%s); offering the %d free models this build knows.\n",
-				firstNonEmpty(errString(err), "no models returned"), len(fallback))
-		}
-		records = fallback
-	} else {
-		logPromptChoice(s.cfg, "llmsetup.opencode.models_fetched", s.choice, map[string]any{"count": len(records)})
-	}
-	s.records = records
-	return true, nil
 }
 
 // fetchSignedInModels fetches the models a provider the setup just signed in to
@@ -1417,14 +1371,9 @@ func (c *commandController) handleConnect(ctx context.Context, sessionID string)
 	// file default: apply and persist it for the conversation the user is in.
 	if strings.TrimSpace(rep.Provider) != "" && strings.TrimSpace(rep.Model) != "" {
 		selectErr := c.session.SelectModel(ctx, sessionID, turn.ModelChoice{
-			Provider: rep.Provider,
-			Model:    rep.Model,
-			CanReason: func() bool {
-				if hit, ok := llm.Lookup(rep.Provider, rep.Model); ok {
-					return hit.CanReason
-				}
-				return false
-			}(),
+			Provider:         rep.Provider,
+			Model:            rep.Model,
+			ReasoningEfforts: turn.ModelReasoningEfforts(rep.Provider, rep.Model),
 		}, nil)
 		if selectErr != nil {
 			switch turn.SelectionApplyOutcome(selectErr) {
