@@ -26,7 +26,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/config",
-      "loc": 6191,
+      "loc": 6233,
       "fan_in": 15,
       "fan_out": 1
     },
@@ -38,7 +38,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
-      "loc": 23324,
+      "loc": 23356,
       "fan_in": 0,
       "fan_out": 20
     },
@@ -56,14 +56,14 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm",
-      "loc": 13432,
+      "loc": 13802,
       "fan_in": 20,
       "fan_out": 1
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic",
-      "loc": 624,
-      "fan_in": 1,
+      "loc": 665,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
@@ -86,7 +86,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode",
-      "loc": 1190,
+      "loc": 1210,
       "fan_in": 5,
       "fan_out": 1
     },
@@ -122,13 +122,13 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/process",
-      "loc": 5287,
+      "loc": 5294,
       "fan_in": 2,
       "fan_out": 21
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/run",
-      "loc": 19548,
+      "loc": 19573,
       "fan_in": 3,
       "fan_out": 18
     },
@@ -176,15 +176,15 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
-      "loc": 49220,
+      "loc": 49163,
       "fan_in": 0,
       "fan_out": 21
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
-      "loc": 11604,
+      "loc": 11674,
       "fan_in": 3,
-      "fan_out": 12
+      "fan_out": 13
     }
   ],
   "edges": [
@@ -799,6 +799,10 @@
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic"
     },
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",

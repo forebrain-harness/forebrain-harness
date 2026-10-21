@@ -5299,21 +5299,24 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	require.Equal(t, "zhipuai", got.Provider)
 	require.Equal(t, "glm-5.3-flash", got.Model)
 	require.Len(t, got.Options, 3)
-	require.Equal(t, []string{"low", "medium", "high", "xhigh"}, got.Options[0].Efforts)
-	require.Empty(t, got.Options[1].Efforts)
-	// The chip marks the models the catalog knows take images: glm-5.3-flash
-	// and deepseek-chat do, deepseek-v4-pro does not.
-	require.Equal(t, []bool{true, true, false},
+	require.Equal(t, []string{"low", "high", "max"}, got.Options[0].Efforts)
+	require.Empty(t, got.Options[1].Efforts, "deepseek-chat does not reason, so it has no levels")
+	// The chip marks the models the catalog knows take images: only
+	// glm-5.3-flash does; deepseek-chat and deepseek-v4-pro are text-only.
+	require.Equal(t, []bool{true, false, false},
 		[]bool{got.Options[0].SupportsImages, got.Options[1].SupportsImages, got.Options[2].SupportsImages})
-	require.Equal(t, []string{"low", "medium", "high", "xhigh"}, got.Options[2].Efforts)
+	require.Equal(t, []string{"low", "high", "max"}, got.Options[2].Efforts)
 	publishedBefore := run.PrimaryModelSelection(runner)
 
 	// A pair the agent is not configured with is refused before any write.
 	rec = modelCall(http.MethodPut, map[string]any{"provider": "openai", "model": "gpt-9"})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 
-	// An effort the model does not offer is refused the same way.
+	// An effort the model does not offer is refused the same way — including a
+	// level that exists in the catalog's vocabulary but not in this model's row.
 	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash", "effort": "ultra"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash", "effort": "xhigh"})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	_, hasRow, err := sess.SessionModelSelection(context.Background(), "s1")
 	require.NoError(t, err)
@@ -5338,9 +5341,9 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	require.Equal(t, "", row.Effort)
 }
 
-// The web chip's levels come from the same capability question /model asks, so
-// an OpenCode model carries its own levels even though models.json — the
-// listing this server falls back to — has no row for the provider.
+// The web chip's levels come from the same capability question /model asks: an
+// OpenCode model carries the levels models.json records for its own surface,
+// trimmed to what the protocol's client can send.
 func TestSessionModelOptionsCarryOpenCodeEfforts(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
@@ -5353,7 +5356,7 @@ func TestSessionModelOptionsCarryOpenCodeEfforts(t *testing.T) {
 	require.Len(t, options, 3)
 	require.Equal(t, []string{"low", "high", "max"}, options[0].Efforts)
 	require.Empty(t, options[1].Efforts, "a toggle-only model has no level to pick")
-	require.Equal(t, []string{"low", "medium"}, options[2].Efforts, "the Anthropic client cannot send xhigh")
+	require.Equal(t, []string{"low", "medium", "xhigh"}, options[2].Efforts, "the Anthropic client can send xhigh")
 }
 
 // TestRewindRoutes pins the plan-033 HTTP surface: the six new routes answer,

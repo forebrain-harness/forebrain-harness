@@ -251,6 +251,13 @@ func ProviderForAgentModel(cfg *appcfg.Root, agentType, model string) string {
 		if !strings.EqualFold(strings.TrimSpace(candidate.APIModel), model) {
 			continue
 		}
+		// The login-backed providers' catalog rows are reference data: their
+		// real model sets come from the account. Counting them here would make
+		// every shared id (glm-5.3, kimi-k3, gpt-5.5 …) ambiguous and answer
+		// nothing, where the static row's provider answers today.
+		if llm.LoginBackedProvider(candidate.Provider) {
+			continue
+		}
 		if matchedProvider != "" && !strings.EqualFold(matchedProvider, candidate.Provider) {
 			return ""
 		}

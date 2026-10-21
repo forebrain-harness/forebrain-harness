@@ -1212,3 +1212,37 @@ func TestRuntimeWarningPayloadIncludesYOLOFields(t *testing.T) {
 		t.Fatalf("unexpected sandbox mode payload: %#v", data)
 	}
 }
+
+// TestHandleModelsListSkipsNonChatModels pins the reference-data/chat-list
+// split on the HTTP surface: models.json records image, speech, transcription,
+// embedding and decision models for reference, and none of them may be offered
+// as a chat model by /api/models.
+func TestHandleModelsListSkipsNonChatModels(t *testing.T) {
+	s := &Server{Core: turn.New()}
+	req := httptest.NewRequest(http.MethodGet, "/api/models?provider=openai", nil)
+	rr := httptest.NewRecorder()
+	s.handleModelsList(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var out struct {
+		Records []turn.ModelRecord `json:"records"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.NotEmpty(t, out.Records)
+	ids := make(map[string]bool, len(out.Records))
+	for _, rec := range out.Records {
+		ids[rec.ModelID] = true
+	}
+	require.Contains(t, ids, "openai/gpt-5")
+	require.NotContains(t, ids, "openai/whisper-large-v3", "a transcription model is not a chat model")
+	require.NotContains(t, ids, "openai/gpt-image-1", "an image model is not a chat model")
+
+	// The login-backed providers' reference rows are not a list either.
+	rr = httptest.NewRecorder()
+	s.handleModelsList(rr, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	for _, rec := range out.Records {
+		require.False(t, llm.LoginBackedProvider(rec.Provider), "%s came from a login-backed provider", rec.ModelID)
+	}
+}

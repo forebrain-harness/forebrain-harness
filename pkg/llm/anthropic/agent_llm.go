@@ -85,9 +85,8 @@ func newAgentLLM(apiKey, baseURL, model string, maxTokens int64, transport http.
 		c.maxTokens = maxTokens
 	}
 	if len(effort) > 0 {
-		switch strings.ToLower(strings.TrimSpace(effort[0])) {
-		case "low", "medium", "high", "max":
-			c.effort = anthropicapi.OutputConfigEffort(strings.ToLower(strings.TrimSpace(effort[0])))
+		if level := normalizeEffort(effort[0]); AcceptsEffort(level) {
+			c.effort = anthropicapi.OutputConfigEffort(level)
 		}
 	}
 	clientOpts := []option.RequestOption{}
@@ -101,6 +100,48 @@ func newAgentLLM(apiKey, baseURL, model string, maxTokens int64, transport http.
 	c.client = anthropicapi.NewClient(clientOpts...)
 	return c
 }
+
+// anthropicEffortLevels is every level the API accepts in
+// output_config.effort, spelled by the SDK's own constants and ordered from
+// least to most thinking. anthropic-sdk-go v1.80.0 names all five — including
+// xhigh, which an older assumption in this repository used to hide from every
+// picker — so this list is the client's capability, not a policy.
+var anthropicEffortLevels = []anthropicapi.OutputConfigEffort{
+	anthropicapi.OutputConfigEffortLow,
+	anthropicapi.OutputConfigEffortMedium,
+	anthropicapi.OutputConfigEffortHigh,
+	anthropicapi.OutputConfigEffortXhigh,
+	anthropicapi.OutputConfigEffortMax,
+}
+
+// AcceptsEffort reports whether this client can send level: a level outside
+// the API's set would be dropped from the request body, so a surface must not
+// offer it. It is the one place that answers the question for the Anthropic
+// protocol and for the OpenCode models that ride it.
+func AcceptsEffort(level string) bool {
+	level = normalizeEffort(level)
+	if level == "" {
+		return false
+	}
+	for _, candidate := range anthropicEffortLevels {
+		if string(candidate) == level {
+			return true
+		}
+	}
+	return false
+}
+
+// EffortLevels lists the levels AcceptsEffort accepts, ascending. It returns a
+// copy: a caller trimming or reordering the list must not reach the source.
+func EffortLevels() []string {
+	out := make([]string, 0, len(anthropicEffortLevels))
+	for _, level := range anthropicEffortLevels {
+		out = append(out, string(level))
+	}
+	return out
+}
+
+func normalizeEffort(level string) string { return strings.ToLower(strings.TrimSpace(level)) }
 
 // newAgentHTTPClient is the client every Anthropic call runs through: the
 // shared one (no timeout, streaming-safe) unless a transport is injected.

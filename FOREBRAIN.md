@@ -31,6 +31,8 @@ cd frontend && pnpm install && pnpm build
 
 Packaging flows (only when touching the npm layer): `npm/scripts/build-platform-packages.sh` builds the host triple by default; override with `FOREBRAIN_BUILD_TARGETS="darwin/arm64 linux/amd64"`. `cd npm && npm link` to test the launcher flow.
 
+Model reference data: `scripts/update-models-asset.sh` regenerates `assets/models.json` from `https://models.dev/catalog.json?type=all` (the canonical `models` table, the `opencode`/`opencode-go` rows injected from the providers tree, and `reasoning_options` lifted out of it). Its `OVERRIDES` table is the only place a local correction may differ from upstream — each entry carries a dated reason and a golden test. Rerun it, read the diff, commit.
+
 ## Architecture
 
 Two runtime surfaces share one core:
@@ -53,6 +55,31 @@ Integrations:
 
 - `pkg/channel` — per-integration adapters (telegram, discord, slack, feishu, weixin, …). `silk_cgo.go` requires CGO.
 - `pkg/config` — YAML config contracts (agents, sandbox, hooks, memory, gateway, channels, permission profiles).
+
+## Model data
+
+`assets/models.json` beside the binary is the catalog (refreshed with the build).
+`$FOREBRAIN_HOME/models.json` is an overlay you own: write only the keys and fields
+you want to change, and they win over the shipped row — a field you leave out falls
+back to it. `null` removes a model. A named value replaces the whole value, so
+arrays and nested objects (`reasoning_options`, `limit`, `modalities.input`) are
+never merged element-wise — write the one you want, not a patch of one.
+
+    {"zhipuai/glm-5.3-flash": {"reasoning_options": [{"type": "effort", "values": ["high"]}]}}
+    {"openai/gpt-4": null}
+
+Two consequences worth knowing. The home file is written for you once, as a full
+copy, the first time it is missing — and after that it is never touched again: no
+upgrade, no rewrite, no backup. Values your copy already carries stay yours; a
+column it predates (`type`, `reasoning_options`) still arrives from the shipped
+catalog, because the two are merged per field at load. Deleting the file (or just
+the keys you pinned) is how you return to the shipped values.
+
+Reasoning-effort levels have exactly one source: the merged catalog's
+`reasoning_options`, trimmed to what the build can send on that model's protocol.
+A model with no level there is not offered a picker. The two OpenCode surfaces and
+ChatGPT are exceptions only in where their models come from — an account login —
+so their rows are reference data and a model listing skips them.
 
 ## Project-level MCP and projects
 

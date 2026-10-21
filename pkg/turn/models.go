@@ -11,6 +11,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -99,9 +100,9 @@ type OpenCodeModelsSource interface {
 // fresh listing preselects.
 //
 // The catalogs carry nothing but ids, so the rest of each record comes from
-// opencode's own model table; an id that table has never seen falls back to
-// its conservative defaults rather than being hidden, because the endpoint is
-// the newer source.
+// models.json — which now carries a row for every id these surfaces serve —
+// and falls back to opencode's own table for an id the catalog has never seen
+// (the endpoint is the newer source).
 func DiscoverOpenCodeModels(ctx context.Context, src OpenCodeModelsSource, goSubscription bool) ([]ModelRecord, error) {
 	if src == nil {
 		return nil, fmt.Errorf("opencode model discovery is not configured")
@@ -149,51 +150,96 @@ func DiscoverOpenCodeModels(ctx context.Context, src OpenCodeModelsSource, goSub
 // openCodeModelRecord projects one catalog id onto this package's record shape.
 // The free suffix is the only capability the picker needs to show in the name:
 // it tells a user which models work before logging in.
+//
+// Capabilities come from models.json first — it carries every id these surfaces
+// serve, with the upstream window, image support and reasoning flag — and from
+// opencode's own table only for an id the catalog has no row for.
 func openCodeModelRecord(provider, id string, meta opencode.ModelMeta) ModelRecord {
 	name := id
 	if meta.Free {
 		name = id + " (free)"
 	}
-	return ModelRecord{
+	record := ModelRecord{
 		ModelID:             provider + "/" + id,
 		ModelName:           name,
 		Provider:            provider,
 		APIModel:            id,
 		ContextWindow:       meta.ContextWindow,
 		CanReason:           meta.Reasoning,
-		ReasoningEfforts:    openCodeEfforts(provider, id, meta),
 		SupportsAttachments: meta.Attachments,
 	}
-}
-
-// openCodeEfforts trims the levels the table records for a model down to the
-// ones this build can actually send on the protocol the model speaks. It is the
-// one place that decides which levels reach a picker, so a level the client
-// would silently drop never gets offered.
-func openCodeEfforts(provider, id string, meta opencode.ModelMeta) []string {
-	if len(meta.Efforts) == 0 {
-		return nil
+	if hit, ok := llm.Lookup(provider, id); ok && strings.EqualFold(hit.CatalogID, provider+"/"+id) {
+		// Only this surface's own row counts: llm.Lookup falls back to an
+		// unambiguous short name across providers, and the same id can be
+		// served on both surfaces with a different window.
+		if hit.ContextWindow > 0 {
+			record.ContextWindow = hit.ContextWindow
+		}
+		record.CanReason = hit.CanReason
+		record.SupportsAttachments = hit.SupportsAttachments
 	}
-	protocol, err := opencode.ProtocolFor(provider, id)
-	if err != nil {
-		return nil
-	}
-	return opencode.EffortsForProtocol(protocol, meta.Efforts)
+	record.ReasoningEfforts = ModelReasoningEfforts(provider, id)
+	return record
 }
 
 // ModelReasoningEfforts names the thinking levels a model offers, empty levels
-// meaning the surface cannot pick one. It is the capability question every
-// surface asks — the setup flow, /model and the gateway — so a model whose
-// levels live in this repository's tables and one whose levels live in
-// models.json answer through the same call.
+// meaning the surface cannot pick one. models.json is the only source: its
+// reasoning_options, shipped base and home overlay merged, trimmed to the
+// levels this build can actually send on the protocol the model speaks. A model
+// the file says nothing about has no levels — the picker asks nothing rather
+// than offering a scale the model does not have — and a model whose data names
+// only a toggle or a token budget has none either. ChatGPT's account data is
+// the one exception and does not come through here.
 func ModelReasoningEfforts(provider, model string) []string {
-	if meta, ok := opencode.LookupModelMeta(provider, model); ok {
-		return openCodeEfforts(provider, model, meta)
+	levels, known := llm.ReasoningEfforts(provider, model)
+	if !known {
+		return nil
 	}
-	if hit, ok := llm.Lookup(provider, model); ok && hit.CanReason {
-		return append([]string(nil), ReasoningEffortLevels...)
+	return trimToSendable(provider, model, levels)
+}
+
+// trimToSendable keeps the levels this build can put on the wire for a model.
+//
+// The deciding fact is which client pkg/run will build the request with, not
+// which provider the model belongs to: that dispatch is by protocol, and an
+// OpenCode model on the Anthropic path goes through the same client as the
+// anthropic provider — a client that drops a level it rejects and sends no
+// effort at all. Offering such a level would be exactly the fake option this
+// catalog exists to remove, so the protocol decides here too. The Google
+// generateContent client carries no effort parameter at all; the
+// OpenAI-compatible and Responses clients pass the parameter through, so they
+// send whatever the catalog names.
+func trimToSendable(provider, model string, levels []string) []string {
+	protocol, err := opencode.ProtocolFor(provider, model)
+	sendsThroughAnthropic := anthropicClientProvider(provider) || (err == nil && protocol == opencode.ProtocolAnthropic)
+	if sendsThroughAnthropic {
+		out := make([]string, 0, len(levels))
+		for _, level := range levels {
+			if anthropic.AcceptsEffort(level) {
+				out = append(out, level)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
 	}
-	return nil
+	if err == nil && protocol == opencode.ProtocolGoogle {
+		// The generateContent client carries no effort parameter.
+		return nil
+	}
+	return append([]string(nil), levels...)
+}
+
+// anthropicClientProvider reports whether provider's models are served by this
+// build's Anthropic client on the strength of the provider name alone (the
+// protocol check in trimToSendable covers the rest).
+func anthropicClientProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "anthropic", "minimax":
+		return true
+	}
+	return false
 }
 
 // DiscoverChatGPTModels returns the account's picker-visible subscription
@@ -415,6 +461,15 @@ func ListModelCatalog(q ModelCatalogQuery) []ModelRecord {
 	models := llm.AllModels()
 	out := make([]ModelRecord, 0, len(models))
 	for _, m := range models {
+		// This is the chat projection, not the reference data: a non-chat
+		// entry (image, speech, embedding, decision, …) is not a model anyone
+		// can talk to, and the login-backed providers' real model sets come
+		// from their account catalogs, not from the reference rows. Filtering
+		// here is what keeps every surface — the TUI model page, /api/models
+		// and the web picker — in agreement.
+		if !m.Chat() || llm.LoginBackedProvider(m.Provider) {
+			continue
+		}
 		rec := modelRecordFromCatalog(m)
 		if provider != "" && strings.ToLower(rec.Provider) != provider {
 			continue
@@ -543,10 +598,6 @@ type ModelChoice struct {
 	// input. Unknown models report false: a picker marks only what it knows.
 	SupportsImages bool
 }
-
-// ReasoningEffortLevels are the reasoning efforts /model offers for a model
-// that reasons.
-var ReasoningEffortLevels = []string{"low", "medium", "high", "xhigh"}
 
 // agentDefinition is the configured definition of agentName, falling back to
 // main the way the runtime does.

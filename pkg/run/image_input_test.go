@@ -162,7 +162,11 @@ func TestImageTurnRefusalJudgesTheSessionsOwnModel(t *testing.T) {
 		}
 	}
 	cfg := newPrimaryModelRoot(
-		primaryModelEntry("deepseek", "deepseek-chat", "k", "http://api.deepseek.test/v1", nil),
+		// The runner default has to be a model the catalog knows takes images:
+		// deepseek-v4-flash is that family's multimodal member (the shipped
+		// override pins it, owner 2026-10-14), while deepseek-chat and
+		// deepseek-v4-pro are text-only since the 2026-10 upstream correction.
+		primaryModelEntry("deepseek", "deepseek-v4-flash", "k", "http://api.deepseek.test/v1", nil),
 		primaryModelEntry("deepseek", "deepseek-v4-pro", "k", "http://api.deepseek.test/v1", nil),
 	)
 	r := &Runner{Deps: &Deps{AppCfg: cfg, AgentName: "main", SessionStore: sess}, FileResolver: PathResolver{}}

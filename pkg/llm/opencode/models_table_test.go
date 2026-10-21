@@ -61,127 +61,6 @@ func TestTableIDsAreUnique(t *testing.T) {
 	}
 }
 
-// The reasoning columns are a transcription of the official catalog
-// (models.dev, 2026-10-21). Re-transcribing is the maintenance operation, so
-// every row is pinned here: a model whose levels drift silently would hand the
-// picker a level the model does not have.
-func TestModelTableEffortsMatchTheOfficialCatalog(t *testing.T) {
-	type want struct {
-		id        string
-		reasoning bool
-		efforts   []string
-	}
-	for _, tc := range []struct {
-		provider string
-		models   []want
-	}{
-		{provider: "opencode", models: []want{
-			{id: "big-pickle", reasoning: true},
-			{id: "beam-free", reasoning: true, efforts: []string{"low", "medium", "high", "xhigh", "max"}},
-			{id: "glm-5.3-flash-free", reasoning: true, efforts: []string{"low", "high", "max"}},
-			{id: "deepseek-v4.1-flash-free", reasoning: true, efforts: []string{"low", "high", "max"}},
-			{id: "minimax-m3.1-flash-free", reasoning: true, efforts: []string{"low", "medium", "high", "xhigh", "max"}},
-			{id: "ll-alpha-free", reasoning: true, efforts: []string{"low", "medium", "high", "xhigh", "max"}},
-			{id: "longcat-2.5-preview-free", reasoning: true},
-			{id: "exo-free", reasoning: true, efforts: []string{"high"}},
-			{id: "mimo-v2.6-flash-free", reasoning: true},
-			{id: "mimo-v2.5-free", reasoning: true},
-			{id: "nemotron-3-ultra-free", reasoning: true},
-			{id: "nemotron-3.5-lightning-free", reasoning: true},
-			{id: "nemotron-3.5-super-vl-free", reasoning: true, efforts: []string{"none", "minimal", "low", "medium", "high", "xhigh"}},
-			{id: "qwen3.8-max", reasoning: true},
-			{id: "qwen3.8-flash", reasoning: true, efforts: []string{"low", "medium", "xhigh"}},
-			// The catalog has no row for these two, so the table claims
-			// nothing: no reason to promise thinking output.
-			{id: "qwen3.7-max", reasoning: false},
-			{id: "qwen3.7-plus", reasoning: false},
-			{id: "qwen3.6-plus", reasoning: true},
-			{id: "qwen3.5-plus", reasoning: true},
-			{id: "mistral-large-4", reasoning: true, efforts: []string{"none", "high"}},
-			{id: "grok-build-0.1", reasoning: true},
-		}},
-		{provider: "opencode-go", models: []want{
-			{id: "grok-4.7", reasoning: true, efforts: []string{"low", "medium", "high", "xhigh"}},
-			{id: "gpt-6-luna", reasoning: true, efforts: []string{"none", "low", "medium", "high", "xhigh", "max"}},
-			{id: "gpt-5.6-luna", reasoning: true, efforts: []string{"none", "low", "medium", "high", "xhigh", "max"}},
-			{id: "muse-spark-1.3-contributor", reasoning: true, efforts: []string{"minimal", "low", "medium", "high", "xhigh"}},
-			{id: "muse-spark-1.2-contributor", reasoning: true, efforts: []string{"minimal", "low", "medium", "high", "xhigh"}},
-			{id: "claude-haiku-5-5", reasoning: true, efforts: []string{"low", "medium", "high", "xhigh", "max"}},
-			{id: "qwen3.8-max", reasoning: true, efforts: []string{"low", "medium", "xhigh"}},
-			{id: "qwen3.8-flash", reasoning: true, efforts: []string{"low", "medium", "xhigh"}},
-			{id: "qwen3.7-plus", reasoning: true},
-			{id: "minimax-m3", reasoning: true},
-			// The table carries the levels the catalog names even though the
-			// Google client cannot send one; the protocol trims them.
-			{id: "gemini-4-argon-contributor", reasoning: true, efforts: []string{"low", "medium", "high"}},
-			{id: "glm-5.3-flash", reasoning: true, efforts: []string{"low", "high", "max"}},
-			{id: "glm-5.3", reasoning: true, efforts: []string{"low", "high", "max"}},
-			{id: "glm-5.2", reasoning: true, efforts: []string{"high", "max"}},
-			{id: "kimi-k3", reasoning: true, efforts: []string{"max"}},
-			{id: "kimi-k2.7-code", reasoning: true},
-			{id: "longcat-2.0", reasoning: true},
-			{id: "deepseek-v4.1-flash", reasoning: true, efforts: []string{"low", "high", "max"}},
-			{id: "deepseek-v4-pro", reasoning: true, efforts: []string{"high", "max"}},
-			{id: "mimo-v2.6-flash", reasoning: true},
-			{id: "mimo-v2.6-pro", reasoning: true},
-			{id: "mimo-v2.5", reasoning: true},
-			{id: "mimo-v2.5-pro", reasoning: true},
-			{id: "hy4-preview", reasoning: true, efforts: []string{"none", "high"}},
-			{id: "hy3", reasoning: true, efforts: []string{"none", "low", "high"}},
-			{id: "step-5-preview", reasoning: true, efforts: []string{"low", "medium", "high"}},
-			{id: "minimax-m3.1-flash-free", reasoning: true, efforts: []string{"low", "medium", "high", "xhigh", "max"}},
-			{id: "longcat-2.5-preview-free", reasoning: true},
-			{id: "beam-free", reasoning: true, efforts: []string{"low", "medium", "high", "xhigh", "max"}},
-		}},
-	} {
-		for _, w := range tc.models {
-			meta, ok := LookupModelMeta(tc.provider, w.id)
-			if !ok {
-				t.Errorf("%s table is missing %q", tc.provider, w.id)
-				continue
-			}
-			if meta.Reasoning != w.reasoning {
-				t.Errorf("%s %q Reasoning = %v, want %v", tc.provider, w.id, meta.Reasoning, w.reasoning)
-			}
-			if !reflect.DeepEqual(meta.Efforts, w.efforts) {
-				t.Errorf("%s %q Efforts = %v, want %v", tc.provider, w.id, meta.Efforts, w.efforts)
-			}
-		}
-	}
-}
-
-// The columns have to stay coherent table-wide: a level on a model that does
-// not reason, an upper-case level or a repeated one would each reach a picker
-// as a broken choice.
-func TestTableEffortsAreLowercaseAndBackedByReasoning(t *testing.T) {
-	for _, tc := range []struct {
-		provider string
-		models   []ModelMeta
-	}{
-		{provider: "opencode", models: ConsoleModels},
-		{provider: "opencode-go", models: GoModels},
-	} {
-		for _, m := range tc.models {
-			if len(m.Efforts) == 0 {
-				continue
-			}
-			if !m.Reasoning {
-				t.Errorf("%s %q lists efforts but does not reason", tc.provider, m.ID)
-			}
-			seen := map[string]bool{}
-			for _, e := range m.Efforts {
-				if e != strings.ToLower(strings.TrimSpace(e)) || e == "" {
-					t.Errorf("%s %q has a malformed level %q", tc.provider, m.ID, e)
-				}
-				if seen[e] {
-					t.Errorf("%s %q lists %q twice", tc.provider, m.ID, e)
-				}
-				seen[e] = true
-			}
-		}
-	}
-}
-
 func TestEffortsForProtocol(t *testing.T) {
 	all := []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 	for _, tc := range []struct {
@@ -192,10 +71,8 @@ func TestEffortsForProtocol(t *testing.T) {
 	}{
 		{name: "chat completions passes everything through", protocol: ProtocolChatCompletions, efforts: all, want: all},
 		{name: "responses passes everything through", protocol: ProtocolResponses, efforts: all, want: all},
-		{name: "anthropic keeps its four levels", protocol: ProtocolAnthropic, efforts: all, want: []string{"low", "medium", "high", "max"}},
 		{name: "google carries no effort parameter", protocol: ProtocolGoogle, efforts: all, want: nil},
 		{name: "empty stays empty", protocol: ProtocolChatCompletions, efforts: nil, want: nil},
-		{name: "a protocol with nothing sendable reports none", protocol: ProtocolAnthropic, efforts: []string{"none", "xhigh"}, want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := EffortsForProtocol(tc.protocol, tc.efforts); !reflect.DeepEqual(got, tc.want) {
@@ -204,26 +81,30 @@ func TestEffortsForProtocol(t *testing.T) {
 		})
 	}
 
-	// The result is a copy: a caller editing it must not reach the table.
-	meta, ok := LookupModelMeta("opencode-go", "glm-5.3")
-	if !ok {
-		t.Fatal("Go table is missing glm-5.3")
-	}
-	got := EffortsForProtocol(meta.Protocol, meta.Efforts)
+	// The result is a copy: a caller editing it must not reach the input.
+	efforts := []string{"low", "high"}
+	got := EffortsForProtocol(ProtocolChatCompletions, efforts)
 	got[0] = "mutated"
-	if meta.Efforts[0] != "low" {
-		t.Fatal("EffortsForProtocol handed back the table's backing array")
+	if efforts[0] != "low" {
+		t.Fatal("EffortsForProtocol handed back the caller's backing array")
 	}
 }
 
-// TestEffortsForProtocolMatchesTheAnthropicClient locks the two places that
-// decide which levels reach the wire: the whitelist here and the switch in
-// pkg/llm/anthropic. It drives the real client and reads the request body, so
-// editing one without the other turns this red.
-func TestEffortsForProtocolMatchesTheAnthropicClient(t *testing.T) {
+// TestTheAnthropicClientSendsTheLevelsItAccepts locks the one place that
+// decides which levels an Anthropic call can carry (pkg/llm/anthropic
+// AcceptsEffort) to what that client actually puts on the wire. It drives the
+// real client and reads the request body, so a level the capability set names
+// but the client drops — or the other way round — turns this red.
+func TestTheAnthropicClientSendsTheLevelsItAccepts(t *testing.T) {
 	for _, level := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
-		if sent := anthropicClientSendsEffort(t, level); sent != (len(EffortsForProtocol(ProtocolAnthropic, []string{level})) > 0) {
-			t.Errorf("level %q: anthropic client sends = %v, EffortsForProtocol keeps = %v", level, sent, len(EffortsForProtocol(ProtocolAnthropic, []string{level})) > 0)
+		if sent := anthropicClientSendsEffort(t, level); sent != anthropic.AcceptsEffort(level) {
+			t.Errorf("level %q: client sends = %v, Anthropic AcceptsEffort = %v", level, sent, anthropic.AcceptsEffort(level))
+		}
+	}
+	// Every level the client claims has to reach output_config.effort.
+	for _, level := range anthropic.EffortLevels() {
+		if !anthropicClientSendsEffort(t, level) {
+			t.Errorf("EffortLevels names %q but the client did not send it", level)
 		}
 	}
 }

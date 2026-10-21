@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -124,6 +125,20 @@ func useStaticCatalog(t *testing.T) {
 			t.Cleanup(func() { llm.SetGlobalCatalogForTest(embedded) })
 		}
 	}
+}
+
+// installRepoCatalog installs the repository's own assets/models.json as the
+// global catalog and puts it back afterwards. A test that asserts real
+// capability values uses this instead of its own fixture: the asset is the data
+// every surface reads, so the assertion is about shipped behaviour.
+func installRepoCatalog(t *testing.T) {
+	t.Helper()
+	data, err := llm.RepoModelsJSONForTest()
+	require.NoError(t, err)
+	cat, err := llm.Parse(data)
+	require.NoError(t, err)
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() { llm.SetGlobalCatalogForTest(cat) })
 }
 
 // A chatgpt-scoped query must not drag other providers' static records in.
@@ -274,9 +289,12 @@ func TestDiscoverOpenCodeModelsProjectsConsoleCatalog(t *testing.T) {
 	for _, rec := range records {
 		byID[rec.APIModel] = rec
 	}
+	// Capabilities come from models.json's row for this surface: qwen3.8-flash
+	// has a 1M window there, and the free family's own rows carry theirs
+	// instead of one conservative default.
 	qwen := byID["qwen3.8-flash"]
-	require.Equal(t, int64(128000), qwen.ContextWindow)
-	require.True(t, qwen.CanReason, "the table records qwen3.8's reasoning output")
+	require.Equal(t, int64(1000000), qwen.ContextWindow)
+	require.True(t, qwen.CanReason, "the catalog records qwen3.8's reasoning output")
 	require.False(t, qwen.IsDefault)
 
 	unseen := byID["gpt-7-unseen"]
@@ -432,10 +450,10 @@ func TestDiscoverOpenCodeModelsCarriesReasoningEfforts(t *testing.T) {
 	require.Empty(t, console[0].ReasoningEfforts)
 }
 
-// The same capability question answers for a configured model whichever source
-// its levels live in: this repository's OpenCode tables or models.json.
+// The same capability question answers for a configured model: the levels are
+// models.json's, trimmed to what the protocol's client can send.
 func TestModelChoicesReasoningEffortsForOpenCode(t *testing.T) {
-	useStaticCatalog(t)
+	installRepoCatalog(t)
 	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
 			{Provider: "opencode-go", Model: "glm-5.3", Models: appcfg.StringList{
@@ -449,24 +467,143 @@ func TestModelChoicesReasoningEffortsForOpenCode(t *testing.T) {
 	}
 	require.Equal(t, []string{"low", "high", "max"}, byModel["glm-5.3"])
 	require.Empty(t, byModel["minimax-m3"], "a toggle-only model has no level to pick")
-	// Anthropic protocol: the client drops xhigh, so the picker never offers it.
-	require.Equal(t, []string{"low", "medium"}, byModel["qwen3.8-max"])
-	require.Empty(t, byModel["gemini-4-argon-contributor"])
-	require.Empty(t, byModel["qwen3.7-plus"])
+	// Anthropic protocol: the levels are the model's own, and the client can
+	// send every one of them (xhigh included).
+	require.Equal(t, []string{"low", "medium", "xhigh"}, byModel["qwen3.8-max"])
+	require.Empty(t, byModel["gemini-4-argon-contributor"], "the Google client has no effort parameter")
+	require.Empty(t, byModel["qwen3.7-plus"], "models.json has no row for it, so nothing is claimed")
 }
 
-// A catalog model that reasons keeps the four levels /model has always offered.
+// Historical name kept for the behaviour it pins: a catalog model offers the
+// levels its own catalog row names, not a scale invented here.
 func TestModelChoicesKeepCatalogEffortLevels(t *testing.T) {
-	useStaticCatalog(t)
+	installRepoCatalog(t)
 	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-static"}}},
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5"}}},
 	}}}
 	choices := ModelChoices(&cfg, "main")
 	require.Len(t, choices, 1)
-	hit, ok := llm.Lookup("openai", "gpt-static")
+	hit, ok := llm.Lookup("openai", "gpt-5")
 	require.True(t, ok)
 	require.True(t, hit.CanReason)
-	require.Equal(t, ReasoningEffortLevels, choices[0].ReasoningEfforts)
+	require.Equal(t, []string{"minimal", "low", "medium", "high"}, choices[0].ReasoningEfforts)
+}
+
+// The levels a surface offers are the model's own, row by row: this is the
+// table every surface reads (the TUI model page, /model, the setup flow and
+// the gateway's model chip).
+func TestModelReasoningEffortsFromTheCatalog(t *testing.T) {
+	installRepoCatalog(t)
+	for _, tc := range []struct {
+		provider string
+		model    string
+		want     []string
+		why      string
+	}{
+		{provider: "openai", model: "gpt-5", want: []string{"minimal", "low", "medium", "high"}},
+		{provider: "openai", model: "gpt-5.5", want: []string{"none", "low", "medium", "high", "xhigh"}},
+		{provider: "xai", model: "grok-4.3", want: []string{"none", "low", "medium", "high", "xhigh"}},
+		{provider: "zhipuai", model: "glm-5.3-flash", want: []string{"low", "high", "max"}},
+		{provider: "zhipuai", model: "glm-4.5", want: nil, why: "a toggle, no discrete level"},
+		{provider: "deepseek", model: "deepseek-chat", want: nil, why: "the model does not reason"},
+		{provider: "anthropic", model: "claude-sonnet-5", want: []string{"low", "medium", "high", "xhigh", "max"}},
+		{provider: "anthropic", model: "claude-haiku-4-5", want: nil, why: "a token budget, no discrete level"},
+		{provider: "alibaba", model: "qwen3.8-max", want: []string{"low", "medium", "xhigh"}},
+		{provider: "opencode-go", model: "glm-5.3", want: []string{"low", "high", "max"}},
+		{provider: "opencode-go", model: "gemini-4-argon-contributor", want: nil, why: "google protocol sends no effort"},
+		{provider: "opencode", model: "claude-sonnet-4-5", want: nil, why: "a token budget, no discrete level"},
+		{provider: "tencent", model: "hy3", want: nil, why: "the catalog has no level for it"},
+		{provider: "openai", model: "not-a-model", want: nil, why: "unknown model"},
+	} {
+		got := ModelReasoningEfforts(tc.provider, tc.model)
+		if tc.want == nil {
+			require.Empty(t, got, "%s/%s: %s", tc.provider, tc.model, tc.why)
+			continue
+		}
+		require.Equal(t, tc.want, got, "%s/%s", tc.provider, tc.model)
+	}
+}
+
+// The client that will build the request decides which levels may be offered,
+// for every model that rides it: an OpenCode model on the Anthropic path goes
+// through the same client as the anthropic provider, and that client drops a
+// level AcceptsEffort rejects (sending no effort at all). A level such a row
+// names must never reach a picker — that is the fake option this catalog exists
+// to remove, and it must not depend on today's rows happening to be sendable.
+func TestAnthropicProtocolModelsOfferOnlySendableLevels(t *testing.T) {
+	data, err := llm.RepoModelsJSONForTest()
+	require.NoError(t, err)
+	repoCatalog, err := llm.Parse(data)
+	require.NoError(t, err)
+	cat, err := llm.Parse([]byte(`{
+		"opencode-go/qwen3.8-max": {"id": "opencode-go/qwen3.8-max", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["none", "minimal", "low", "medium", "xhigh"]}]},
+		"opencode/qwen3.8-flash": {"id": "opencode/qwen3.8-flash", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["none", "minimal", "low", "max"]}]},
+		"anthropic/claude-test-tier": {"id": "anthropic/claude-test-tier", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["none", "minimal", "low", "high", "max"]}]},
+		"openai/gpt-test-tier": {"id": "openai/gpt-test-tier", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["none", "minimal", "low"]}]}
+	}`))
+	require.NoError(t, err)
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() { llm.SetGlobalCatalogForTest(repoCatalog) })
+
+	// The fixture has to actually ride the Anthropic path, or it proves
+	// nothing: both OpenCode ids route to the Anthropic client.
+	for _, tc := range []struct{ provider, model string }{
+		{provider: "opencode-go", model: "qwen3.8-max"},
+		{provider: "opencode", model: "qwen3.8-flash"},
+	} {
+		protocol, err := opencode.ProtocolFor(tc.provider, tc.model)
+		require.NoError(t, err)
+		require.Equal(t, opencode.ProtocolAnthropic, protocol, "%s/%s must ride the Anthropic client", tc.provider, tc.model)
+	}
+
+	// none/minimal are outside the client's set, so they are never offered —
+	// on the OpenCode surfaces just as much as on the provider itself.
+	require.Equal(t, []string{"low", "medium", "xhigh"}, ModelReasoningEfforts("opencode-go", "qwen3.8-max"))
+	require.Equal(t, []string{"low", "max"}, ModelReasoningEfforts("opencode", "qwen3.8-flash"))
+	require.Equal(t, []string{"low", "high", "max"}, ModelReasoningEfforts("anthropic", "claude-test-tier"))
+
+	// The OpenAI-compatible client passes the parameter through, so there the
+	// catalog's own values are what a picker offers.
+	require.Equal(t, []string{"none", "minimal", "low"}, ModelReasoningEfforts("openai", "gpt-test-tier"))
+
+	// A row that names nothing this client can send yields no effort page at
+	// all rather than an empty one.
+	only, err := llm.Parse([]byte(`{"opencode-go/qwen3.8-max": {"id": "opencode-go/qwen3.8-max", "reasoning": true,
+		"reasoning_options": [{"type": "effort", "values": ["none", "minimal"]}]}}`))
+	require.NoError(t, err)
+	llm.SetGlobalCatalogForTest(only)
+	require.Empty(t, ModelReasoningEfforts("opencode-go", "qwen3.8-max"))
+}
+
+// The static catalog is the reference data, not the chat list: non-chat entries
+// and the login-backed providers' reference rows never reach a picker.
+func TestListModelCatalogSkipsNonChatAndLoginProviders(t *testing.T) {
+	installRepoCatalog(t)
+
+	openai := ListModelCatalog(ModelCatalogQuery{Provider: "openai"})
+	byID := make(map[string]ModelRecord, len(openai))
+	for _, rec := range openai {
+		byID[rec.ModelID] = rec
+	}
+	require.Contains(t, byID, "openai/gpt-5")
+	require.NotContains(t, byID, "openai/whisper-large-v3", "a transcription model is not a chat model")
+	require.NotContains(t, byID, "openai/gpt-image-1", "an image model is not a chat model")
+
+	all := ListModelCatalog(ModelCatalogQuery{})
+	entries := make(map[string]llm.Model, len(all))
+	for _, m := range llm.AllModels() {
+		entries[strings.ToLower(m.ID)] = m
+	}
+	for _, rec := range all {
+		require.False(t, llm.LoginBackedProvider(rec.Provider), "%s came from a login-backed provider", rec.ModelID)
+		m, ok := entries[strings.ToLower(rec.ModelID)]
+		require.True(t, ok)
+		require.True(t, m.Chat(), "%s is not a chat model", rec.ModelID)
+	}
 }
 
 // An unfiltered listing runs every installed source once, in a stable order:
