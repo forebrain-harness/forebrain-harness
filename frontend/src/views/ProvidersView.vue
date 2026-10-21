@@ -18,6 +18,24 @@
           <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" :disabled="saving" data-testid="providers-add" @click="openAdd">
             <Plus class="size-3.5" aria-hidden="true" />{{ t('providers.add') }}
           </button>
+          <button
+            type="button"
+            class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs"
+            :disabled="saving"
+            data-testid="providers-connect-opencode"
+            @click="openConnect('opencode')"
+          >
+            <LogIn class="size-3.5" aria-hidden="true" />{{ t('providers.connectOpenCode') }}
+          </button>
+          <button
+            type="button"
+            class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs"
+            :disabled="saving"
+            data-testid="providers-connect-chatgpt"
+            @click="openConnect('chatgpt')"
+          >
+            <LogIn class="size-3.5" aria-hidden="true" />{{ t('providers.connectChatGPT') }}
+          </button>
           <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
             <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
           </button>
@@ -171,6 +189,105 @@
       </template>
     </ForebrainModal>
 
+    <ForebrainModal :open="connectProvider !== null" size="md" :title="connectTitle" @close="closeConnect">
+      <!-- The free tier first: it needs no account, so it is offered before
+           anything starts a login. -->
+      <template v-if="connectStep === 'start'">
+        <p class="text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.connectStartHint') }}</p>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" class="forebrain-btn forebrain-btn-primary h-9 px-3 text-xs" data-testid="provider-login-start" @click="beginConnectLogin('opencode')">
+            {{ t('providers.connectSignIn') }}
+          </button>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" data-testid="provider-login-free" @click="chooseFreeModels">
+            {{ t('providers.connectFreeOnly') }}
+          </button>
+        </div>
+      </template>
+
+      <template v-else-if="connectStep === 'auth'">
+        <p class="text-[12px] text-[var(--forebrain-text-2)]">{{ connectAuthHint }}</p>
+        <div v-if="connectProvider === 'opencode'" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] px-4 py-3">
+          <span class="block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('providers.connectCodeLabel') }}</span>
+          <span class="font-mono text-2xl tracking-[0.2em] text-[var(--forebrain-text)]" data-testid="provider-login-code">
+            {{ connectCode || t('providers.connectCodePending') }}
+          </span>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            class="forebrain-btn forebrain-btn-primary h-9 px-3 text-xs"
+            :disabled="!connectUrl"
+            data-testid="provider-login-open"
+            @click="openAuthorizePage"
+          >
+            {{ t('providers.connectOpenPage') }}
+          </button>
+          <Loader :size="14" class="text-[var(--forebrain-muted-text)]" data-testid="provider-login-spinner" />
+          <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('providers.connectWaiting') }}</span>
+        </div>
+        <p v-if="connectProvider === 'chatgpt'" class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('providers.connectChatGPTLocal') }}</p>
+      </template>
+
+      <!-- The catalog the finished login belongs to: the free tier after the
+           no-login choice, the Go subscription after signing in, ChatGPT's
+           account after its callback. -->
+      <template v-else-if="connectStep === 'choose'">
+        <p class="text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.connectChooseHint') }}</p>
+        <Command class="rounded-lg border border-[var(--forebrain-divider)]" data-testid="provider-login-models">
+          <CommandInput :placeholder="t('providers.connectSearchModels')" data-testid="provider-login-model-search" />
+          <CommandList>
+            <CommandEmpty>{{ t('providers.connectNoModels') }}</CommandEmpty>
+            <CommandGroup>
+              <CommandItem
+                v-for="record in connectModels"
+                :key="record.modelId"
+                :value="record.modelName ?? record.apiModel"
+                :data-testid="`provider-login-model-${modelIdOf(record)}`"
+                @select="connectChoice = modelIdOf(record)"
+              >
+                <span class="flex-1 truncate text-left">{{ record.modelName }}</span>
+                <Check v-if="connectChoice === modelIdOf(record)" class="size-3.5" aria-hidden="true" />
+              </CommandItem>
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </template>
+
+      <template v-else>
+        <p class="text-[13px] text-[var(--forebrain-danger)]" data-testid="provider-login-error">
+          {{ connectStep === 'lost' ? t('providers.connectLost') : connectError }}
+        </p>
+        <p class="text-[12px] text-[var(--forebrain-text-2)]" data-testid="provider-login-hint">
+          {{ connectStep === 'lost' ? t('providers.connectLostHint') : t('providers.connectRetryHint') }}
+        </p>
+      </template>
+
+      <template #footer>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="provider-login-cancel" @click="closeConnect">
+          {{ connectStep === 'auth' ? t('providers.cancelLogin') : t('common.close') }}
+        </button>
+        <button
+          v-if="connectStep === 'failed' || connectStep === 'lost'"
+          type="button"
+          class="forebrain-btn forebrain-btn-primary text-xs"
+          data-testid="provider-login-retry"
+          @click="restartConnect"
+        >
+          {{ t('providers.connectRetry') }}
+        </button>
+        <button
+          v-else-if="connectStep === 'choose'"
+          type="button"
+          class="forebrain-btn forebrain-btn-primary text-xs"
+          :disabled="!connectChoice || saving"
+          data-testid="provider-login-save"
+          @click="saveConnectModel"
+        >
+          {{ saving ? t('common.loading') : t('providers.connectSave') }}
+        </button>
+      </template>
+    </ForebrainModal>
+
     <ConfirmDialog
       :open="removeKey !== null"
       :title="t('providers.deleteTitle')"
@@ -196,9 +313,25 @@
  * the whole fallback order, so each row carries its position in that order and
  * 上移 swaps with the row before it there — never with the row above it on the
  * page. A write therefore reads the whole list back, changes it, and saves it.
+ *
+ * Two of those services are signed in to rather than typed in. The flows run in
+ * the gateway (a page cannot print a status line or open a window on the machine
+ * the gateway sits on), so the modal is a poll view: it shows the device flow's
+ * code or ChatGPT's authorization link, then the catalog the finished login
+ * unlocks, and writes the chosen model back into the ordered list like any other
+ * row. OpenCode's free tier skips all of it — no account, one catalog listing.
  */
-import { onMounted, reactive, ref } from 'vue'
-import { ArrowUp, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { ArrowUp, Check, LogIn, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@repo/shadcn-vue/components/ui/command'
+import { Loader } from '@repo/elements/loader'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
@@ -210,8 +343,38 @@ import RowActionSlot from '@/components/common/RowActionSlot.vue'
 import TablePager from '@/components/common/TablePager.vue'
 import ModelChipsInput from '@/components/providers/ModelChipsInput.vue'
 import { useServerList } from '@/composables/useServerList'
-import { forebrainApi, getErrorMessage, type ProviderRecord } from '@/lib/api'
+import {
+  forebrainApi,
+  GatewayHttpError,
+  getErrorMessage,
+  type ModelRecord,
+  type ProviderLoginProvider,
+  type ProviderRecord,
+} from '@/lib/api'
 import { useI18n } from '@/locales'
+
+// The inference root OpenCode's free "no account" entry writes: the Console's,
+// which serves the free family. It mirrors the backend's
+// opencode.ProviderBaseURL("opencode") — Complete() requires a base URL, so a
+// row with none would be refused. The signed-in entry needs no copy here: the
+// Go subscription's root comes from the login's own completion answer, which is
+// the one place that decides it.
+const OPENCODE_BASE_URL = 'https://opencode.ai/inference'
+
+// The poll period on the gateway's own status endpoint. It is unrelated to the
+// device flow's own token interval (5s inside the gateway): this one only asks a
+// local process what it has learned so far.
+const CONNECT_POLL_MS = 1000
+
+/** What one sign-in unlocks, and what the row it writes carries. */
+type ConnectTarget = {
+  /** The provider id the row gets. */
+  provider: string
+  /** The catalog listing asked for the models. */
+  catalog: string
+  /** The inference root that catalog is served from. */
+  baseUrl: string
+}
 
 const { t } = useI18n()
 
@@ -410,8 +573,235 @@ function confirmRemove() {
   })
 }
 
+/* ---- signing in to a service -------------------------------------------- */
+
+/** Which sign-in the modal is running; null is the modal being closed. */
+const connectProvider = ref<ProviderLoginProvider | null>(null)
+/** The modal's step: the OpenCode choice, a running flow, the catalog it
+ * unlocked, or how the flow ended. */
+const connectStep = ref<'start' | 'auth' | 'choose' | 'failed' | 'lost'>('start')
+const connectLoginId = ref('')
+const connectUrl = ref('')
+const connectCode = ref('')
+const connectError = ref('')
+const connectModels = ref<ModelRecord[]>([])
+const connectChoice = ref('')
+const connectTarget = ref<ConnectTarget | null>(null)
+
+const connectTitle = computed(() =>
+  t('providers.connectTitle', { name: connectProvider.value === 'chatgpt' ? 'ChatGPT' : 'OpenCode' }),
+)
+
+const connectAuthHint = computed(() =>
+  connectProvider.value === 'chatgpt' ? t('providers.connectChatGPTHint') : t('providers.connectOpenCodeHint'),
+)
+
+let connectTimer: ReturnType<typeof setTimeout> | null = null
+
+function modelIdOf(record: ModelRecord): string {
+  return String(record.apiModel ?? record.modelId ?? '').trim()
+}
+
+function stopConnectPoll() {
+  if (connectTimer) {
+    clearTimeout(connectTimer)
+    connectTimer = null
+  }
+}
+
+/** Clears everything a previous sign-in left on screen, so reopening the modal
+ * never shows the last one's code or error. */
+function resetConnect() {
+  stopConnectPoll()
+  connectLoginId.value = ''
+  connectUrl.value = ''
+  connectCode.value = ''
+  connectError.value = ''
+  connectModels.value = []
+  connectChoice.value = ''
+  connectTarget.value = null
+}
+
+function openConnect(provider: ProviderLoginProvider) {
+  resetConnect()
+  connectProvider.value = provider
+  if (provider === 'opencode') {
+    // Two ways in, and the free one needs no account: the choice comes before
+    // anything starts a flow.
+    connectStep.value = 'start'
+    return
+  }
+  connectStep.value = 'auth'
+  void beginConnectLogin(provider)
+}
+
+async function beginConnectLogin(provider: ProviderLoginProvider) {
+  stopConnectPoll()
+  connectStep.value = 'auth'
+  connectLoginId.value = ''
+  connectUrl.value = ''
+  connectCode.value = ''
+  connectError.value = ''
+  try {
+    const started = await forebrainApi.startProviderLogin(provider)
+    if (connectProvider.value !== provider) return
+    connectLoginId.value = started.loginId
+    pollConnect(provider, started.loginId)
+  } catch (cause) {
+    connectError.value =
+      cause instanceof GatewayHttpError && cause.status === 409 ? t('providers.connectBusy') : t('providers.connectFailed')
+    connectStep.value = 'failed'
+  }
+}
+
+function pollConnect(provider: ProviderLoginProvider, loginId: string) {
+  stopConnectPoll()
+  connectTimer = setTimeout(() => {
+    connectTimer = null
+    void pollConnectOnce(provider, loginId)
+  }, CONNECT_POLL_MS)
+}
+
+async function pollConnectOnce(provider: ProviderLoginProvider, loginId: string) {
+  if (connectLoginId.value !== loginId) return
+  let status: Awaited<ReturnType<typeof forebrainApi.providerLoginStatus>>
+  try {
+    status = await forebrainApi.providerLoginStatus(provider, loginId)
+  } catch (cause) {
+    if (connectLoginId.value !== loginId) return
+    connectError.value = getErrorMessage(cause)
+    connectStep.value = 'failed'
+    return
+  }
+  // A closed modal, or a login started over the top of this one, owns the
+  // screen now — this answer is about a flow nobody is watching.
+  if (connectLoginId.value !== loginId) return
+  if (status === null) {
+    // The gateway forgot the id: it restarted, or the ended login was pruned.
+    // Polling it again can only answer the same, so the page offers a restart.
+    connectStep.value = 'lost'
+    return
+  }
+  if (status.url) connectUrl.value = status.url
+  if (status.userCode) connectCode.value = status.userCode
+  if (status.status === 'failed') {
+    connectError.value = connectFailureText(status.error)
+    connectStep.value = 'failed'
+    return
+  }
+  if (status.status === 'complete') {
+    await chooseCatalog(connectTargetFor(provider, status.baseUrl))
+    return
+  }
+  pollConnect(provider, loginId)
+}
+
+/** The sentence a failure reason becomes. The reasons are the OAuth vocabulary
+ * the flows report ("denied", "expired", "canceled"); anything else says only
+ * that it did not finish, because the raw message names internals. */
+function connectFailureText(reason: string): string {
+  switch (String(reason).trim().toLowerCase()) {
+    case 'canceled':
+      return t('providers.connectCanceled')
+    case 'denied':
+      return t('providers.connectDenied')
+    case 'expired':
+      return t('providers.connectExpired')
+    default:
+      return t('providers.connectFailed')
+  }
+}
+
+/** The row a finished sign-in writes. The OpenCode login runs against the
+ * Console but unlocks the Go subscription's catalog, which is served under /go
+ * and nowhere else, so the row is "opencode-go". Its base URL is the one the
+ * login's completion answer named: the gateway decides that value (the Console
+ * root would name a surface those models do not answer on), and a copy here
+ * could only drift from it. ChatGPT's row is its own service either way. */
+function connectTargetFor(provider: ProviderLoginProvider, baseUrl: string): ConnectTarget {
+  if (provider === 'chatgpt') return { provider: 'chatgpt', catalog: 'chatgpt', baseUrl }
+  return { provider: 'opencode-go', catalog: 'opencode-go', baseUrl }
+}
+
+async function chooseCatalog(target: ConnectTarget) {
+  connectTarget.value = target
+  connectStep.value = 'choose'
+  try {
+    const listing = await forebrainApi.getModels({ provider: target.catalog })
+    const records = listing.records.filter((record) => String(record.provider ?? '').trim() === target.catalog)
+    connectModels.value = records
+    const preset = records.find((record) => record.isDefault) ?? records[0]
+    connectChoice.value = preset ? modelIdOf(preset) : ''
+  } catch (cause) {
+    connectError.value = getErrorMessage(cause)
+    connectStep.value = 'failed'
+  }
+}
+
+/** OpenCode's free tier: no account, no flow, the Console catalog directly. */
+function chooseFreeModels() {
+  void chooseCatalog({ provider: 'opencode', catalog: 'opencode', baseUrl: OPENCODE_BASE_URL })
+}
+
+function openAuthorizePage() {
+  if (!connectUrl.value) return
+  window.open(connectUrl.value, '_blank', 'noopener')
+}
+
+function restartConnect() {
+  const provider = connectProvider.value
+  if (!provider) return
+  if (provider === 'opencode') {
+    // The choice is offered again: a retry may well be the free tier, and a
+    // login the user did not want should not be started on their behalf.
+    resetConnect()
+    connectStep.value = 'start'
+    return
+  }
+  void beginConnectLogin(provider)
+}
+
+function closeConnect() {
+  const provider = connectProvider.value
+  const loginId = connectLoginId.value
+  const running = connectStep.value === 'auth'
+  resetConnect()
+  connectProvider.value = null
+  // The gateway keeps the flow alive until it times out on its own; a page that
+  // walked away says so, so the flow stops holding a device code or a loopback
+  // port for the next sign-in.
+  if (provider && loginId && running) void forebrainApi.cancelProviderLogin(provider, loginId).catch(() => undefined)
+}
+
+async function saveConnectModel() {
+  const target = connectTarget.value
+  const model = connectChoice.value
+  if (!target || !model) return
+  const { provider, baseUrl } = target
+  closeConnect()
+  await writeWholeOrder((all) => {
+    const at = all.findIndex((candidate) => String(candidate.provider ?? '').trim() === provider)
+    if (at >= 0) {
+      // Re-signing in to a service keeps the models already on its row; the one
+      // just chosen becomes the model it leads with.
+      const models = [...(all[at].models ?? [])].filter((known) => known !== model)
+      all[at] = { ...all[at], models: [model, ...models], baseUrl }
+      return
+    }
+    all.push({ provider, models: [model], baseUrl, apiPath: '', params: '', apiKeyPlain: '' })
+  })
+}
+
 onMounted(() => {
   void reload()
   void loadCatalog()
+})
+
+onBeforeUnmount(() => {
+  const provider = connectProvider.value
+  const loginId = connectLoginId.value
+  const running = connectStep.value === 'auth'
+  resetConnect()
+  if (provider && loginId && running) void forebrainApi.cancelProviderLogin(provider, loginId).catch(() => undefined)
 })
 </script>

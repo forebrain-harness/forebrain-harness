@@ -14096,6 +14096,8 @@ func TestPlanReviewShowsInTheAgentRosterAndCanBeStoppedFromIt(t *testing.T) {
 func TestSupportedProvidersMatchMainstreamSet(t *testing.T) {
 	want := []string{
 		"chatgpt",
+		"opencode",
+		"opencode-go",
 		"openai",
 		"anthropic",
 		"alibaba",

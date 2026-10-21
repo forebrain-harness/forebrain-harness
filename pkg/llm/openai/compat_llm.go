@@ -57,6 +57,24 @@ type openAICompatLLM struct {
 }
 
 func NewCompatLLMWithPromptCaching(apiKey, baseURL, model string, temperature float32, maxTokens int, apiPath string, paramsJSON []byte, promptCaching bool) llm.LLM {
+	return newCompatLLM(apiKey, baseURL, model, temperature, maxTokens, apiPath, paramsJSON, promptCaching, nil)
+}
+
+// NewCompatLLMWithTransport is NewCompatLLMWithPromptCaching with prompt
+// caching off and a caller-supplied transport injected outermost, which is
+// where a provider that authenticates outside the apiKey argument (OpenCode's
+// gateway) stamps its bearer token, client identity and session header.
+//
+// extra must accept this client's own wrapper chain through SetBase, the way
+// openai.Transport does; a transport without that method is used on its own,
+// dropping the reasoning-normalizing and usage-accounting wrappers this client
+// installs. The key handed to the client itself is never the real credential
+// on that path — the transport overwrites the Authorization header.
+func NewCompatLLMWithTransport(apiKey, baseURL, model string, temperature float32, maxTokens int, apiPath string, paramsJSON []byte, extra http.RoundTripper) llm.LLM {
+	return newCompatLLM(apiKey, baseURL, model, temperature, maxTokens, apiPath, paramsJSON, false, extra)
+}
+
+func newCompatLLM(apiKey, baseURL, model string, temperature float32, maxTokens int, apiPath string, paramsJSON []byte, promptCaching bool, extra http.RoundTripper) llm.LLM {
 	if maxTokens <= 0 {
 		maxTokens = DefaultMaxCompletionTokens
 	}
@@ -82,6 +100,9 @@ func NewCompatLLMWithPromptCaching(apiKey, baseURL, model string, temperature fl
 			hc.Transport = &openAIPromptCacheKeyRoundTripper{inner: hc.Transport}
 		}
 		hc.Transport = &llm.CacheUsageTransport{Next: hc.Transport}
+		if extra != nil {
+			hc.Transport = roundTripperWithBase(extra, hc.Transport)
+		}
 	}
 	return &openAICompatLLM{
 		client:      openaiclient.NewClientWithConfig(cfg),

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -20,7 +21,9 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/google"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"gopkg.in/yaml.v3"
@@ -380,6 +383,9 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 			"oauth", openai.CodexBaseURL, model, maxTokens, cfg.Params.Bytes(), "live", transport,
 		)), nil
 	}
+	if prov == "opencode" || prov == "opencode-go" {
+		return newOpenCodeLLM(prov, model, apiKey, baseURL, cfg)
+	}
 	if apiKey == "" {
 		return nil, fmt.Errorf("llm api_key is required for provider %s", prov)
 	}
@@ -421,6 +427,130 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 
 func openAIPromptCaching(provider string) bool {
 	return strings.EqualFold(strings.TrimSpace(provider), "openai")
+}
+
+// openCodePlaceholderKey is the key handed to a client whose real credential
+// is injected by the transport instead. Anthropic's endpoint accepts both
+// x-api-key and Authorization: Bearer and the gateway judges by the bearer, so
+// the placeholder never decides anything; the ChatGPT path already works this
+// way with "oauth".
+const openCodePlaceholderKey = "oauth-forebrain"
+
+// openCodeAuthTransport adapts *opencode.Transport to the transport-injecting
+// client constructors, which look for a SetBase method to wire their own
+// wrapper chain (streaming frame filter, content-type fixer, usage accounting)
+// into the transport they are handed. opencode.Transport carries a Base field
+// but no setter — pkg/llm/opencode must not import this layer's interface — so
+// the adapter supplies it here.
+type openCodeAuthTransport struct {
+	inner *opencode.Transport
+}
+
+func (t *openCodeAuthTransport) SetBase(base http.RoundTripper) {
+	if t != nil && t.inner != nil {
+		t.inner.Base = base
+	}
+}
+
+func (t *openCodeAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.inner.RoundTrip(req)
+}
+
+// OwnsUserAgent forwards the inner transport's claim. The responses client
+// blanks the User-Agent by default, because the ChatGPT/Codex backend expects
+// none; OpenCode's Go subscription works the other way round, admitting a
+// third-party client by the agent it announces. Without this forwarding the
+// claim would stop at the adapter and the opencode responses family would
+// reach the gateway anonymous.
+func (t *openCodeAuthTransport) OwnsUserAgent() bool {
+	return t != nil && t.inner != nil && t.inner.OwnsUserAgent()
+}
+
+// newOpenCodeLLM builds a client for one of the OpenCode surfaces.
+//
+// The credential is resolved in the order the login flows write it: an
+// api_key in configuration (which may be an ${ENV} reference), then
+// OPENCODE_API_KEY, then the opencode.json that /connect and the web login
+// write, and finally the literal "public" bearer — which only the free model
+// family accepts, so it is offered only for a model the table marks free.
+//
+// The model decides the wire protocol, and the protocol decides which client
+// the request goes to; each client gets the base URL whose path suffix it
+// appends to. Because two models speak different protocols on the two
+// surfaces, the provider is part of that decision too.
+func newOpenCodeLLM(prov, model, apiKey, baseURL string, cfg *LLMProviderYAML) (llm.LLM, error) {
+	// pkg/llm is Layer 0 and cannot read pkg/home, so the version the
+	// User-Agent announces is installed here, at the composition root that
+	// already knows it. OpenCode's Go subscription admits third-party clients
+	// by that User-Agent.
+	opencode.SetClientVersion(home.Version)
+
+	goSubscription := strings.EqualFold(prov, "opencode-go")
+	meta, known := opencode.LookupModelMeta(prov, model)
+
+	key := strings.TrimSpace(apiKey)
+	if key == "" {
+		key = strings.TrimSpace(os.Getenv(opencode.APIKeyEnv))
+	}
+	auth := &opencode.Transport{}
+	if key == "" {
+		if homeRoot, err := home.Root(); err == nil {
+			path := opencode.DefaultPath(homeRoot)
+			if _, err := opencode.Load(path); err == nil {
+				auth.Path = path
+			}
+		}
+	}
+	if auth.Path == "" && key == "" && known && meta.Free {
+		key = opencode.PublicBearer
+	}
+	if auth.Path == "" && key == "" {
+		return nil, fmt.Errorf("OpenCode login or %s is required for provider %s; run /connect", opencode.APIKeyEnv, prov)
+	}
+	if auth.Path == "" {
+		auth = opencode.NewKeyTransport(key)
+	}
+	// Requests the clients below do not wrap any other way still carry the
+	// installed HTTP wrapper, the same chain every other provider runs through.
+	if auth.Base == nil {
+		auth.Base = llm.WrapHTTPTransport(nil)
+	}
+
+	protocol, err := opencode.ProtocolFor(prov, model)
+	if err != nil {
+		return nil, err
+	}
+	inferenceRoot := strings.TrimSpace(baseURL)
+	if inferenceRoot == "" {
+		inferenceRoot = opencode.ProviderBaseURL(prov)
+	}
+	clientBase := opencode.ClientBaseURL(protocol, goSubscription, inferenceRoot)
+	// The output cap is the default rather than a catalog lookup: the OpenCode
+	// model table documents context windows, not per-model output limits, and
+	// llm.Lookup reads <FOREBRAIN_HOME>/models.json, which is installed once
+	// and never overwritten — on an existing machine its copy predates every
+	// model listed here.
+	maxTokens := openai.DefaultMaxCompletionTokens
+	transport := &openCodeAuthTransport{inner: auth}
+
+	switch protocol {
+	case opencode.ProtocolResponses:
+		return wrapUsageAccountingLLM(openai.NewResponsesLLMWithWebSearchCache(
+			openCodePlaceholderKey, clientBase, model, maxTokens, cfg.Params.Bytes(), "", transport, false,
+		)), nil
+	case opencode.ProtocolAnthropic:
+		return wrapUsageAccountingLLM(anthropic.NewAgentLLMWithTransport(
+			openCodePlaceholderKey, clientBase, model, int64(maxTokens), transport, requestReasoningEffort(cfg.Params),
+		)), nil
+	case opencode.ProtocolGoogle:
+		return wrapUsageAccountingLLM(google.NewAgentLLM(
+			openCodePlaceholderKey, clientBase, model, int64(maxTokens), transport,
+		)), nil
+	default:
+		return wrapUsageAccountingLLM(openai.NewCompatLLMWithTransport(
+			openCodePlaceholderKey, clientBase, model, 0, maxTokens, "", cfg.Params.Bytes(), transport,
+		)), nil
+	}
 }
 
 func requestReasoningEffort(params appcfg.LLMRequestParams) string {

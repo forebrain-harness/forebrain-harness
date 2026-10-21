@@ -48,6 +48,13 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	rules.Get("/project/:projectId/file", s.handleProjectRuleFile)
 	rules.Put("/project/:projectId/file", s.handleProjectRuleFile)
 	api.Get("/auth/session", s.handleWebSessionProbe)
+	// Web sign-in for the providers the models page can log in to: start a
+	// flow and get an id back, poll that id for the authorization URL and the
+	// ending, and cancel a login the page walked away from.
+	auth := api.Group("/auth")
+	auth.Post("/login/:provider", s.handleAuthLoginStart)
+	auth.Get("/login/:provider/:loginId", s.handleAuthLoginStatus)
+	auth.Post("/login/:provider/:loginId/cancel", s.handleAuthLoginCancel)
 	api.Get("/tools", s.handleToolsList)
 	api.Get("/models", s.handleModelsList)
 

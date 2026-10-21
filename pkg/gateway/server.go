@@ -75,6 +75,13 @@ type Server struct {
 	mcpOAuthPKCEMu sync.Mutex
 	mcpOAuthPKCE   map[string]gatewayMcpPKCE
 
+	// authLoginMu guards authLogins, the web sign-ins this server is running or
+	// has just finished. It is per-server state like the MCP PKCE map above: a
+	// login belongs to the process serving the page that started it, and the
+	// map dies with the server instead of outliving it.
+	authLoginMu sync.Mutex
+	authLogins  map[string]*gatewayAuthLogin
+
 	runEventsOnce sync.Once
 	runEvents     *runEventBus
 

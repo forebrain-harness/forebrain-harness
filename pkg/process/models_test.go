@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
@@ -145,4 +146,128 @@ func TestNewChatGPTModelsSourceUsesTheResolvedCredentialsPath(t *testing.T) {
 	require.Equal(t, filepath.Join(dir, "auth.json"), src.path)
 	require.Equal(t, openai.CodexBaseURL, src.baseURL)
 	require.NotNil(t, src.resolveVersion, "the default source resolves the version live")
+}
+
+// capturedOpenCodeFetch is what one catalog call resolved: which surface, which
+// bearer, and through which transport.
+type capturedOpenCodeFetch struct {
+	goSubscription bool
+	token          string
+	transport      http.RoundTripper
+}
+
+func stubOpenCodeFetch(t *testing.T, captured *capturedOpenCodeFetch, ids ...string) func(context.Context, http.RoundTripper, bool, string) ([]opencode.ModelInfo, error) {
+	t.Helper()
+	return func(_ context.Context, base http.RoundTripper, goSubscription bool, token string) ([]opencode.ModelInfo, error) {
+		*captured = capturedOpenCodeFetch{goSubscription: goSubscription, token: token, transport: base}
+		models := make([]opencode.ModelInfo, 0, len(ids))
+		for _, id := range ids {
+			models = append(models, opencode.ModelInfo{ID: id})
+		}
+		return models, nil
+	}
+}
+
+// The Console catalog is readable without an account — the free family is
+// served to the literal public bearer — so discovery sends exactly that, on the
+// transport a login-less turn would use.
+func TestOpenCodeModelsSourceReadsTheConsoleCatalogWithThePublicBearer(t *testing.T) {
+	src := newOpenCodeModelsSource(filepath.Join(t.TempDir(), opencode.CredentialsFile))
+	var got capturedOpenCodeFetch
+	src.fetch = stubOpenCodeFetch(t, &got, "big-pickle")
+
+	models, err := src.OpenCodeModels(context.Background(), false)
+	require.NoError(t, err)
+	require.Len(t, models, 1)
+	require.Equal(t, "big-pickle", models[0].ID)
+	require.False(t, got.goSubscription)
+	require.Equal(t, opencode.PublicBearer, got.token)
+	transport, ok := got.transport.(*opencode.Transport)
+	require.True(t, ok, "the Console catalog is read through the provider transport")
+	require.Empty(t, transport.Path, "the public bearer reads no login file")
+}
+
+// The Go catalog needs the real subscription credential, and reading it through
+// the login-file transport is what keeps a nearly expired token refreshed.
+func TestOpenCodeModelsSourceReadsTheGoCatalogThroughTheLogin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), opencode.CredentialsFile)
+	require.NoError(t, opencode.Save(path, opencode.Credentials{
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}))
+	src := newOpenCodeModelsSource(path)
+	var got capturedOpenCodeFetch
+	src.fetch = stubOpenCodeFetch(t, &got, "glm-5.3")
+
+	_, err := src.OpenCodeModels(context.Background(), true)
+	require.NoError(t, err)
+	require.True(t, got.goSubscription)
+	require.Equal(t, "access-1", got.token)
+	transport, ok := got.transport.(*opencode.Transport)
+	require.True(t, ok)
+	require.Equal(t, path, transport.Path)
+}
+
+// A machine with no login file can still read the Go catalog with an exported
+// API key.
+func TestOpenCodeModelsSourceFallsBackToTheAPIKeyEnvironment(t *testing.T) {
+	t.Setenv(opencode.APIKeyEnv, "sk-env")
+	src := newOpenCodeModelsSource(filepath.Join(t.TempDir(), opencode.CredentialsFile))
+	var got capturedOpenCodeFetch
+	src.fetch = stubOpenCodeFetch(t, &got, "glm-5.3")
+
+	_, err := src.OpenCodeModels(context.Background(), true)
+	require.NoError(t, err)
+	require.True(t, got.goSubscription)
+	require.Equal(t, "sk-env", got.token)
+	transport, ok := got.transport.(*opencode.Transport)
+	require.True(t, ok)
+	require.Empty(t, transport.Path, "a static key reads no login file")
+}
+
+func TestOpenCodeModelsSourceReportsWhetherThisMachineIsSignedIn(t *testing.T) {
+	t.Setenv(opencode.APIKeyEnv, "")
+	path := filepath.Join(t.TempDir(), opencode.CredentialsFile)
+	require.False(t, newOpenCodeModelsSource(path).OpenCodeSignedIn(),
+		"neither a login file nor a key means no Go catalog is asked for")
+
+	require.NoError(t, opencode.Save(path, opencode.Credentials{
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}))
+	require.True(t, newOpenCodeModelsSource(path).OpenCodeSignedIn())
+
+	require.NoError(t, os.Remove(path))
+	t.Setenv(opencode.APIKeyEnv, "sk-env")
+	require.True(t, newOpenCodeModelsSource(path).OpenCodeSignedIn())
+}
+
+// Asking for Go models with no credential at all is an error naming the login
+// requirement, and it costs no request.
+func TestOpenCodeModelsSourceNamesTheLoginWhenTheGoSurfaceHasNoCredential(t *testing.T) {
+	t.Setenv(opencode.APIKeyEnv, "")
+	src := newOpenCodeModelsSource(filepath.Join(t.TempDir(), opencode.CredentialsFile))
+	called := false
+	src.fetch = func(context.Context, http.RoundTripper, bool, string) ([]opencode.ModelInfo, error) {
+		called = true
+		return nil, nil
+	}
+
+	_, err := src.OpenCodeModels(context.Background(), true)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "/connect")
+	require.ErrorContains(t, err, opencode.APIKeyEnv)
+	require.False(t, called, "no request may leave without a credential")
+}
+
+// The public constructor resolves the login file inside the home the gateway
+// runs on, which is the same file /connect and the web login write.
+func TestNewOpenCodeModelsSourceUsesTheLoginFileInHome(t *testing.T) {
+	home := t.TempDir()
+	src, ok := NewOpenCodeModelsSource(home).(openCodeModelsSource)
+	require.True(t, ok)
+	require.Equal(t, filepath.Join(home, opencode.CredentialsFile), src.path)
+	require.NotNil(t, src.fetch, "the default source fetches the live catalog")
 }

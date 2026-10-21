@@ -4,8 +4,42 @@
 
 ## 最新审核信息
 
-- **2026-10-21 087–094 执行完毕（8/8 DONE，评审 APPROVE，未提交）**：按 owner 指定顺序 **090 → 087 → 088 → 092 → 094 → 089 → 091 → 093**
-  在当前工作区按序实施，不建分支/工作树、不 commit，改动全部留在工作区等审阅。
+- **2026-10-21 `review-plan` 处理 `010`（结论：仍有价值，已重写；未改源码）**：在 HEAD `7742bde` 上把计划**重新取证**了一遍，
+  不是只对行号。四条判据都是实测的（`go test -overlay` 把测试文件塞进未改动的包，工作树为零改动）：
+  - **两处危害都仍在**：plan 模式下换写法写计划文件 → `plan mode: write blocked …`；`exit_plan_mode` 批准后写实施记录
+    （非 plan 模式）→ 弹出 `Writing …/plans/proj/sid/p.md changes forebrain's own settings…`。后者是原计划没写的第二重成本。
+  - **原计划的三个 blocker 会让执行者必停**：① drift check 基线还是 `9656051`，五个文件早已改动（README 2026-10-10 那条
+    "需评审方先刷新 010 的 drift check" 一直没做）；② Step 3 的真实路径分支里那条等值兜底，`cleanAllowed` 是目录时右边
+    恰等于该目录，会把**计划目录本身**判为可写（Step 1 第三组断言必红）；③ Step 2 的 `NewState(t.TempDir())` 给的是无关允许根，
+    测试先撞 `path not allowed`，命中计划自己的 STOP 2。
+  - **修法已验证**：删掉等值兜底（真实路径分支只留 `isWithinDir`）后，四个新测试全绿，`pkg/tool` / `pkg/run` 全套 `ok`，
+    既有五条相关测试不受影响；提醒那半（四处字面量 + 6 个子测试）也实测通过。
+  - 顺带补进计划的新回归：批准后写实施记录的审批不得出现（`TestPlanWriteGuardDoesNotAskAboutTheImplementationRecord`）。
+
+- **2026-10-21 `reconcile`（只动索引与计划文件的状态，未改源码）**：`HEAD 7742bde`，`git status --porcelain` 为空。
+  - **083–094 已全部落 `dev`**：`8d3322c`（083–085 审批卡按族 / 消息卡 / 工作台与抽屉）与 `7742bde`（086 撤回后的
+    087–094：审批卡事实、`edit_file` 真 diff、提问/队列卡、`web_fetch` 路由、文件树单一所有者、图像自愈、死代码、拒图记忆）。
+    下面各块写的「改动全部留在工作区等审阅 / 未提交」是**当时的记录**，现已过期。
+  - **DONE 抽检（评审侧亲跑，非执行者自报）**：`go build ./...` 通过；`ok pkg/tool`（含 `TestShellDangerousRuleInPayload`）、
+    `ok pkg/state`（`ImageRefus*`）、`ok pkg/event`；逐条复跑 087/088/089/090/091/092/093/094 的**可机检**完成条件：
+    `dangerous_rule` 两侧命中（`pkg/tool/shell_tool.go:1042`、`approvalGates.ts:379`）；`FirstHunk`（`pkg/event/turndiff.go:49`）与
+    `unified_diff`（`pkg/tool/file_tools.go:1062`、`approvalGates.ts:346`）两侧命中；`queue-item-edit|queueEditItem|xp-head-progress` 无输出；
+    `webFetchRoutableTarget` 定义 + 调用、`routed_provider` 三处（`web_tools.go:253`、`overlays.go:1521`、`approvalGates.ts:479`）；
+    `requested-tab-shown` 的 emit（`ChatWorkbench.vue:321`）与两个消费点（`ChatView.vue:540`、`WorkshopView.vue:135`）；
+    `summaryChain := withImageHeal`（`runner.go:994`）在，`candidate.Scale = 8` 已消失；`stateSchemaVersion = 16` +
+    `fb_session_image_refusals` 三处 + `RunEventImageRejected` 四处 + `ImageRejectedCode` 两处；093 的六条「无输出」全部成立。
+  - **两处已知偏差仍然成立**（不是新问题）：① 093 的 `FileTreeFolderKey` 留在库的 `ai-elements-vue/…/file-tree/context.ts:27`
+    （执行记录已裁决：文档站公开用法，删掉等于给共享库做破坏性 API 变更）；② 087 那条「`frontend/src` 不含 `[object Object]`」
+    的 grep 唯一命中是**断言它不出现**的用例本身（`approvalGates.test.ts:210`）。
+  - **索引补齐 9 份从未入表的历史计划**：两份编号计划已补进表格 —— **`010-plan-write-guard-real-paths` 仍未实现，是当前唯一可执行项**
+    （`pkg/tool/state.go:1060-1068` 的计划区写入判断仍是字面比较、`pkg/run/config.go:933-971` 的提醒仍缺"目录由第一次 write_file 创建"那句）；
+    `043` 已落地。七份命名计划的取证见文末「未入表的历史计划文件」。
+  - **未重新核对的**：下面「2026-10-20 083–085」块里「既有缺陷（非本轮引入，未修）」那条 `pkg/gateway` 的
+    `TestGatewayIdempotentApproveStillCancelsAnInFlightPlanReview` 偶发 `TempDir` 清理竞态仍按原样记录，本次未复现、未修；
+    各批的**真机**验收（Terminal.app 像素 / 真实 provider）没有重跑，本次只有单测与 grep 级取证。
+
+- **2026-10-21 087–094 执行完毕（8/8 DONE，评审 APPROVE，已随 `8d3322c` + `7742bde` 落 `dev`）**：按 owner 指定顺序 **090 → 087 → 088 → 092 → 094 → 089 → 091 → 093**
+  在当时的工作区按序实施（不建分支/工作树、不 commit，改动当时留在工作区等审阅；现均已提交，见上一条）。
   - 评审侧独立复跑（非执行者自报）：`pkg/event`/`pkg/state`/`pkg/llm`/`pkg/run`/`pkg/tool`/`pkg/tui`/`pkg/gateway`/`pkg/config` 全 `ok`；
     全量 `FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./... -count=1` 无 FAIL；`go vet`（六包）无输出；
     前端 **135 文件 / 939 用例**全绿（093 按计划少一个文件，即删掉的 `PendingActionsPanel`）、`vue-tsc` exit 0；
@@ -40,7 +74,7 @@
     设计稿 1:1 还原度未做像素级对照。
   - 悬而未决（**已全部收口**）：provider 拒图曾是"两层静默 + 永久 2× 请求"，owner 2026-10-21 裁决（粗档记忆 + 落库）后
     整族由 **094** 覆盖（当场一行提示 + 下一次不再发）。两条被否决的实现路径记在本文末「已审核但未计划的发现」里。
-- **2026-10-20 083–085 执行完毕（DONE，评审 APPROVE，未提交）；086 当日撤回（REJECTED）**：三份有效计划在当前
+- **2026-10-20 083–085 执行完毕（DONE，评审 APPROVE，已随 `8d3322c` 落 `dev`）；086 当日撤回（REJECTED）**：三份有效计划在当前
   工作区按序实施（083 → 084 → 085），不建分支/工作树、不 commit，改动全部留在工作区等 owner 审阅。评审侧独立复跑
   每份的完成条件：083 `ok pkg/tool` + `ok pkg/gateway`、`vue-tsc` 0、131 文件 / 883 用例、
   `approval-families.spec.ts` PASS；084 `ok pkg/tool` + `ok pkg/tui`、全量 `pnpm test` 全绿、
@@ -238,7 +272,7 @@
 - **011 执行（2026-10-10，worktree `../forebrain-harness-008`，叠加在 008 上）**：评审 **APPROVE**。评审侧独立复跑：`./pkg/gateway`、`./pkg/turn`、`./pkg/architecture` ok，vet/gofmt 无输出，前端 40 文件 327 用例全绿，vue-tsc 无输出；diff 7 个 in-scope 文件逐条对照计划（`turn.ApprovalToolStepID`、`withApprovalToolStepID` 定义 1 + 调用 2、wsevents 转换 1 行、3 个新测试）。执行者做了反证：去掉 `tool_step_id` 后新前端用例失败，review 卡掉到重载末尾，与探针一致。一处申报偏差接受：完成标准里 `grep withApprovalToolStepID` 实得 4 行而非 3 行——计划自己给的 doc 注释含该标识符，属计划笔误。未提交、HEAD 仍为 `9656051`。
 - **012 执行（2026-10-10，同一 worktree，叠加在 008+011 上）**：评审 **APPROVE**，无申报偏差。源码 diff 逐条对照计划：`StepEvent.Denied/DenyFeedback`、`DeniedToolStep`、状态/正文/summary 三处、`:denied` 事件边界、拒绝注入循环；delivered 分支只改成提前 `continue`，Body 和 meta 的构造逐字节不变；TUI 主 agent 分支只落库不画。6 个新测试逐条读过，断言都打在关键行为上（只发一条、落库与步骤同源、delivered 不发、ID 不撞、TUI 有哨兵证明 UI 通道是通的、gateway 两条完成事件都在库里）。评审侧复跑：`pkg/tool`、`run`、`gateway`、`turn`、`event`、`architecture` 均 ok；`pkg/tui` 只有 `TestCharacterizationNetworkApproval` 失败，原因是 curl 访问 example.com 超时（走批准后真实执行的路径，与拒绝无关），单跑三次都通过；vet/gofmt 无输出，前端 328 个全绿。**评审侧独立 driver 真机复跑**（隔离目录 `$TMPDIR/fb-012r`，端口 8813）：live 和回放都是 `calling exit_plan_mode` → `✗ You did not approve` → 唯一一张 `◆ Kept planning └ 先拆分里程碑`；库里同一调用 `call_fake_1` 同时有 `…:tool_call_completed` 与 `…:tool_call_completed:denied` 两条，证实 `:denied` 边界防住了被吞。临时目录已删。未提交，HEAD 仍为 `9656051`。
 - **013 执行（2026-10-10，同一 worktree，叠加在 008+011+012 上）**：评审 **APPROVE**。diff：`hasVisibleBlocks` 判断 + doc、`ChatView.vue:184` 一处条件、008 用例补 3 条断言、`ChatView.test.ts` mock 暴露 `messages` 并新增用例。评审侧复跑：前端 40 文件 329 用例全绿，vue-tsc 无输出，`msg.blocks?.length` 只剩打字点那一处；**评审侧在 scratchpad 副本里独立做了反证**：把 `:184` 改回原样，新用例就失败在 `toContain('Request cancelled')`。dist 在最后一次源码改动之后重建（16:51:31）。两处申报偏差接受：① 用 `vi.waitFor` 代替计划样例的 `nextTick`——Markdown 组件逐步打字输出，仓库已有同样写法的先例（`ToolOutput.test.ts`）；② `mountView` 与共用的 `beforeAll` 提到文件顶层（计划允许"提升或照抄"二选一）。未提交，HEAD 仍为 `9656051`。**011–013 全部完成**，连同 008 留在 worktree `../forebrain-harness-008` 待 owner 并回。
-- **008 系列并回主树（2026-10-10，owner 指令"008 系列并回主树"）**：从 worktree `../forebrain-harness-008` 导出 `git diff 9656051 -- . ':!pkg/gateway/dist'`（20 个源码/测试文件），其中 18 个 `git apply` 到主树工作区时干净应用；`WorkshopView.vue` 与 `ChatView.test.ts` 按 README 并回须知手工合并：前者保留主树的 `rounded-lg`、取 `hasVisibleBlocks`，后者取 worktree 版本并把主树的 `SessionHeartbeat: true` 补进顶层 `mountView` 的 stubs。合并后逐一核对：两个手工合并的文件都保留了双方的改动。dist 按仓库约定用 `make ui` 重建（先清空再构建，196 个资源换了哈希，`index.html` 引用的文件都在，`.gitkeep` 保留），嵌入新 dist 的二进制编译通过。主树验证：`go build ./...` 通过；`pkg/tool`、`run`、`gateway`、`turn`、`event`、`state`、`architecture`、`tui` 全部 ok（含 007/009 的 TUI 改动一起跑）；vet/gofmt 无输出；前端 40 个文件 339 个用例全绿，vue-tsc 无输出。**未提交、未动暂存区**，HEAD 仍为 `005c1a8`。跨端对照已做，结果写在 008 末尾"验收记录"：F 拒绝带反馈、E review 失败后批准两段真实 TUI 会话，TUI 回放与 web 重载逐行一致。**影响 plan 010**：010 的 drift check 要求 `pkg/tool/state.go` 相对 9656051 无改动；012 在 `StepEvent` 末尾加了两个字段（与 010 要改的区域无关），010 的执行者会在 drift check 停下，需评审方先刷新 010 的 drift check。worktree `../forebrain-harness-008` 仍保留（改动已全部进入主树工作区），是否删除由 owner 决定。**worktree 已于同日按 owner 指令删除**（删除前逐文件核对：18 个文件与主树一致；另 3 个文件的差异全部来自主树 `005c1a8` 的 owner 改动，其中 `ChatView.test.ts` 仅缩进不同；worktree 为 detached HEAD、无额外提交）。
+- **008 系列并回主树（2026-10-10，owner 指令"008 系列并回主树"）**：从 worktree `../forebrain-harness-008` 导出 `git diff 9656051 -- . ':!pkg/gateway/dist'`（20 个源码/测试文件），其中 18 个 `git apply` 到主树工作区时干净应用；`WorkshopView.vue` 与 `ChatView.test.ts` 按 README 并回须知手工合并：前者保留主树的 `rounded-lg`、取 `hasVisibleBlocks`，后者取 worktree 版本并把主树的 `SessionHeartbeat: true` 补进顶层 `mountView` 的 stubs。合并后逐一核对：两个手工合并的文件都保留了双方的改动。dist 按仓库约定用 `make ui` 重建（先清空再构建，196 个资源换了哈希，`index.html` 引用的文件都在，`.gitkeep` 保留），嵌入新 dist 的二进制编译通过。主树验证：`go build ./...` 通过；`pkg/tool`、`run`、`gateway`、`turn`、`event`、`state`、`architecture`、`tui` 全部 ok（含 007/009 的 TUI 改动一起跑）；vet/gofmt 无输出；前端 40 个文件 339 个用例全绿，vue-tsc 无输出。**未提交、未动暂存区**，HEAD 仍为 `005c1a8`。跨端对照已做，结果写在 008 末尾"验收记录"：F 拒绝带反馈、E review 失败后批准两段真实 TUI 会话，TUI 回放与 web 重载逐行一致。**影响 plan 010**：010 的 drift check 要求 `pkg/tool/state.go` 相对 9656051 无改动；012 在 `StepEvent` 末尾加了两个字段（与 010 要改的区域无关），010 的执行者会在 drift check 停下，需评审方先刷新 010 的 drift check。（**2026-10-21 已刷新**：基线改为 `7742bde`，见顶部 `review-plan` 条。）worktree `../forebrain-harness-008` 仍保留（改动已全部进入主树工作区），是否删除由 owner 决定。**worktree 已于同日按 owner 指令删除**（删除前逐文件核对：18 个文件与主树一致；另 3 个文件的差异全部来自主树 `005c1a8` 的 owner 改动，其中 `ChatView.test.ts` 仅缩进不同；worktree 为 detached HEAD、无额外提交）。
 - **"本机 web 与 TUI 同源"一轮（2026-10-10，owner 连续裁决，立计划 014–024）**：起因是 owner 追问"TUI 会话不落主 agent 文字增量是否是 bug"。现状核实：TUI 主 agent 只落工具步骤/审批/plan review/压缩/`plan_updated`/`turn_error`/`turn_cancelled`；没有 `turn_started`/`turn_completed`、文字增量、diff、预算、队列、模式事件；gateway 的事件总线只转发本进程发布的事件，`bind_session` 只在绑定时补快照，不读其他进程写入的数据；subagent 的逐 token 增量已有约 450 万行（每行约 4 个字符），与 transcript 重复存储；web 工作台文件树、`@` 补全、`@` 图片以 primary agent workspace 为根，不是会话实际目录（owner 截图）；非项目会话的工具一律在进程启动目录执行。**Owner 裁决**：① 两端所有会话数据落库、同源；② 流式文字只存 transcript（文字块结束时写入，不按空行切；增量不再落库，主 agent 与 subagent 本期一并改；旧增量迁移清理，迁移前备份）；③ 首 token 延迟一轮一值、只存 `fb_runs.first_token_ms`（不写 `usage_json`），web 与 TUI 都在 Worked 行显示，live 首 token 到达即显示；④ 两端会话互相可见、可续聊；⑤ **不做**跨端实时推送（刷新/重新进入看到最新即可；owner 先要求实时观看，后撤回）；⑥ 一端在跑时另一端拒绝并提示"正在另一端运行"；⑦ 续聊时工具在会话出生目录执行，目录不存在则拒绝；web 工作台跟随会话目录；⑧ 文件型会话数据（`state/modes`、hook transcript、intermediate、输入历史）入库**暂不做**。期间被否决的方案见"已考虑并拒绝的发现"。数据核实（本机只读）：238 次 subagent 执行引用 222 个 worker 会话，库里只剩 70 个；约 150 次执行的文字只存在于增量中——迁移不能直接删除（019 对这部分改为合并）；cron 调度读取 `turn_completed.Text` 作为定时任务的输出（018 先改读者，再去掉 Text）。
 - **同日追加裁决（2026-10-10）**：① 工具输出增量（`tool_output_delta`）本期也只推不存——018 纳入（含在途工具输出由 gateway 内存补发），019 迁移一并清理（有完成事件的删除、没有的按步骤合并；本机 19,394 行、15,425 个步骤，只有 6 个步骤没有完成事件）；判定函数改名 `event.IsPushOnlyStreamEvent`。② 迁移后**不**自动 VACUUM，也不加压缩入口。③ 023 的方案先出、owner 拍板后再实施：评审方已直接完成调研并写出 `docs/plan/SESSION_BIRTH_DIR_CONTINUATION_DESIGN.md`。关键发现：工具执行目录完全由进程当前目录决定（全仓库无 `os.Chdir`），gateway 一个进程跑多个会话，必须引入每轮的"会话工作目录"上下文并按目录建 runner；TUI 推荐"在出生目录重新打开"。附带发现一个**已有缺陷**：gateway 已注册项目会话的 shell 在 gateway 启动目录执行、沙箱/审批取 gateway 启动目录的信任。4 个待决问题（信任、TUI 方案、渠道会话范围、项目会话是否同修）等 owner 回答。
 - **项目模型裁决（2026-10-10～11，owner 多轮）**：设计文档已改写为定稿（`docs/plan/SESSION_BIRTH_DIR_CONTINUATION_DESIGN.md` 第 0 节 R1–R10）。要点：每个会话都属于项目，出生目录 = 项目根 = 工作目录；TUI 启动目录即项目根（不找 git 根），自动登记进 `fb_projects`；web 对话前必须选项目或文件夹（文件夹自己没有项目就自动建以它为根的项目，与 TUI 同口径），项目根按用户所选原样；FOREBRAIN_HOME 内不能做项目根/启动 TUI；gateway 启动目录无任何业务语义；信任按项目根自己的；项目级配置去掉"受版本控制"门槛；TUI `/resume` 只列当前项目；渠道/定时任务必选项目；附件上传选目录保存在项目里；老会话迁移归入项目，确定不了的删除。**已执行**：本机 63 个 cwd 被旧版本错写成 agent workspace 的会话按 owner 指示直接在本机真实库删除（2026-10-11，未备份，owner 明确要求）。影响：022、024 需改写；新实现计划 025–031 待写。补充裁决（R11）：去掉项目"归档"，删除项目连同它的对话一起删（目录文件不动）。补充裁决（Q1–Q4，已定）：迁移时目录不存在也照样建项目，只删 cwd 为空的；FOREBRAIN_HOME 内出生的会话只本机有，迁移不写分支；工作坊会话也必须选项目；TUI 粘贴的截图存 `<项目根>/attachments/`。
@@ -302,6 +336,7 @@
 | [007-exit-gate-live-card-and-cardless-anchoring](007-exit-gate-live-card-and-cardless-anchoring.md) | exit_plan_mode 审批期间不再画假 "Exited plan mode" 卡、取消后不再多 "Canceled" 卡；无卡 gate 的确认行与 review 卡按真实顺序落位（live 与回放一致） | Bug Fix | DONE | **P1** | M | MED |
 | [008-web-cardless-exit-gate-anchoring](008-web-cardless-exit-gate-anchoring.md) | web 端 exit gate 的决定行逐条显示、按真实顺序落在 gate 调用处，review 卡跟在请求它的行之后；live 与重载一致（对齐 007 后的 TUI） | Bug Fix | DONE | P2 | M | MED |
 | [009-replay-seals-response-before-cardless-gate](009-replay-seals-response-before-cardless-gate.md) | 回放在发出无卡 exit gate 调用的行之后补喂 running 步骤、封存那段回答（修 review 交付流程回放文本重复 / 粘连）；收紧 007 test 8；勘误段放回原位 | Bug Fix | DONE | **P1** | S | LOW |
+| [010-plan-write-guard-real-paths](010-plan-write-guard-real-paths.md) | plan 模式的计划写入按"文件实际会被创建在哪个目录"判断（同一个目录换一种写法——如 macOS 上 `/var` 与 `/private/var`——不再被拦），plan 模式提醒补一句"计划目录可能还不存在、由第一次 write_file 创建，不要用 shell 建" | Bug Fix | **TODO（2026-10-21 `review-plan` 重写后可直接执行）**：缺陷在 HEAD 上实测仍在（`pkg/tool/state.go:1060-1068` 仍是字面比较；`pkg/run/config.go` 四处提醒仍无那句）；本轮修好原计划的三个 blocker——drift check 基线由 `9656051` 改为 `7742bde`、Step 3 的等值兜底会把**计划目录本身**放行（已删，并用测试钉死）、Step 2 的测试因 `NewState(t.TempDir())` 走了 `path not allowed` 而到不了守卫（改为生产那套允许根）；另补一条新危害与回归测试（批准后写实施记录会弹"改 forebrain 设置"）。四个测试在 HEAD 上**未修时全红、用计划给的实现后全绿**，均已实测 | P2 | S | LOW |
 | [011-gateway-approval-request-names-gated-call](011-gateway-approval-request-names-gated-call.md) | gateway 的 `approval_requested` 带上被审批调用的 `tool_step_id`（与 TUI 同一推导 `turn.ApprovalToolStepID`），web 发起的会话重载后 review 卡不再落到整轮末尾 | Bug Fix | DONE | P2 | S | LOW |
 | [012-engine-emits-settled-step-for-refused-calls](012-engine-emits-settled-step-for-refused-calls.md) | 用户拒绝的调用由运行时发出 settled "denied" 步骤（`:denied` 事件边界防吞），落库显示与之同源；web live 补上 "Kept planning"/denied 卡，TUI 只落库不重复画 | Bug Fix | DONE | P2 | M | MED |
 | [013-chatview-blocks-that-draw-nothing-yield-to-content](013-chatview-blocks-that-draw-nothing-yield-to-content.md) | ChatView 只在有可见块时走块分支；`hasVisibleBlocks` 不再把锚点与无确认行的审批块算作可见（修空气泡） | Bug Fix | DONE | P3 | S | LOW |
@@ -333,6 +368,7 @@
 | [040-link-hf-tokenizers-library](040-link-hf-tokenizers-library.md) | 所有平台强制链接 daulet/tokenizers v1.27.0（`fetch-libtokenizers.sh`，Windows 用 Rust 现编），建 `pkg/llm/hftok` 包装 | Dependency / Build | DONE（2026-10-13 执行完毕，未提交）| **P1** | L | HIGH |
 | [041-tokenizer-assets-and-per-model-estimator](041-tokenizer-assets-and-per-model-estimator.md) | 10 个家族的分词器文件随包分发、缓存优先、缺失按 HF→ModelScope 下载；按模型选分词器；删除 `hftokenizer.go` 与 tiktoken-go | Feature / Tech Debt | DONE（2026-10-13 执行完毕，未提交）| **P1** | L | MED |
 | [042-compaction-estimates-with-session-model-tokenizer](042-compaction-estimates-with-session-model-tokenizer.md) | 轮前 / 轮中压缩判定与用量观测按本次调用所用模型的分词器估算（同口径）；glm-5.3 真机验收 | Bug Fix | DONE（2026-10-13 执行完毕）| P2 | M | MED |
+| [043-session-project-key-and-cron-binding](043-session-project-key-and-cron-binding.md) | 项目键跟随会话自己的项目（修 027 之后 gateway 计划文件 / 审批 / 记忆 / cron 会话拿到空项目键的分叉），cron 建任务时带上项目 | Bug Fix / Correctness | DONE（2026-10-21 reconcile 取证：`Environment.SessionProjectKey` 已在 `pkg/process`，`run_executor_test.go:130-153` 钉住"有项目取项目键 / 无项目取空"两路；原计划记录的 4 条 e2e 红例已随之消失） | **P1** | M | MED |
 | [044-fork-continuation-owns-its-run](044-fork-continuation-owns-its-run.md) | fork 续跑（`subagent_continue`）在自己的 run 身份下发请求：补上首跑已有、续跑漏掉的 run ID，压缩 guard / 审批队列 / 等待行不再落到派发者的 run 上（006 闸门后的修复之一） | Bug Fix | DONE（2026-10-14 执行完毕，未提交；主线程独立复验：五包 ok + 新回归 PASS） | P2 | S | LOW |
 | [045-compaction-guard-per-history](045-compaction-guard-per-history.md) | 压缩 guard 按 (run ID, worker 会话) 多槽：一段历史的 checkpoint 只属于它自己（探针 A 的跨历史拼接、`body_after_prefix` 基线互相清空） | Bug Fix | DONE（2026-10-14 执行完毕，未提交；主线程独立复验） | P2 | S | MED |
 | [046-unseparable-provisional-tail](046-unseparable-provisional-tail.md) | 分不清暂定尾巴的调用不压缩（fail-closed），且尾巴归属按历史判定（子代理继承父调用尾巴时照常压缩）；依赖 045 | Bug Fix | DONE（2026-10-14 执行完毕，未提交。**执行者通道不可用（`subagent_run` 从本轮工具集中消失），改由评审方在主线程按计划实施**；证据：新回归修复前 FAIL（`compaction 0 folded the provisional steer into its checkpoint`）→ 修复后 PASS，护栏测试前后均 PASS，`grep -c "compaction skipped: provisional"` = 1，`pkg/run -race` ok，gofmt/vet 干净） | P2 | S | LOW |
@@ -513,6 +549,26 @@ web 015 → 019 → 016 → 017（另需 022、033、036）→ 018（另需 025�
 - **BLOCKED**：被阻塞（等待决策或依赖）
 - **DONE**：已完成
 - **REJECTED**：已拒绝（说明原因）
+- 状态列里「工作区未提交」「改动留在工作区」是**当时的记录**：2026-10-21 reconcile 复核时 `git status --porcelain` 为空，
+  071–094 的改动已随 `dev` 上的落地提交（`f890b0e` / `3096298` / `124162f` / `8d3322c` / `7742bde`）进入 HEAD，
+  `070` 更早已随 `4888d76` 落库；不要因为旧措辞以为还有待并回的改动。
+
+---
+
+## 未入表的历史计划文件（2026-10-21 reconcile 补齐）
+
+早期有 9 份计划文件从没进过上面的表格（两份是编号计划 `010` / `043`，七份是编号制之前的命名计划）。
+`010`、`043` 已补进表格；这七份的取证与结论记在这里，避免下次重新审一遍：
+
+| 文件 | 主题 | 2026-10-21 取证（HEAD `7742bde`） | 状态 |
+|---|---|---|---|
+| [`APPROVE_RETRY_REVIEW_CANCEL_PLAN.md`](APPROVE_RETRY_REVIEW_CANCEL_PLAN.md) | 批准的重试路径也取消在途评审（副作用题） | 两个 surface 的 `Idempotent` 分支都已补取消（`pkg/tui/chat_surface.go:541,579`、`pkg/gateway/api_extra.go:3955,3971`） | DONE |
+| [`GATEWAY_DELIVERY_OBSERVABILITY_PLAN.md`](GATEWAY_DELIVERY_OBSERVABILITY_PLAN.md) | 评审回传失败的日志 + `gatewayResumeState` 纯函数抽取 | 日志在 `pkg/gateway/api_extra.go:3819`，纯函数在 `:3999`，用例 `api_extra_test.go:5041` | DONE |
+| [`GATEWAY_DISPLAY_HOST_DEDUP_PLAN.md`](GATEWAY_DISPLAY_HOST_DEDUP_PLAN.md) | 显示 host 映射去重（`displayHost` 单一来源） | `pkg/gateway/serve_run.go:237` 是唯一映射点，`http_server_test.go:378` 的断言钉住"URL 必须与它一致" | DONE |
+| [`GATEWAY_PROBE_TEST_PORT_RACE_PLAN.md`](GATEWAY_PROBE_TEST_PORT_RACE_PLAN.md) | `refusedAddr` 端口竞态（只动测试辅助函数） | `pkg/gateway/http_server_test.go:189-195` 的 `refusedAddr` 已带"验证过确实拒绝连接"的实现 | DONE |
+| [`PLAN_REVIEW_DELIVERY_STATUS_BACKFILL_PLAN.md`](PLAN_REVIEW_DELIVERY_STATUS_BACKFILL_PLAN.md) | 回填 `docs/plan/PLAN_REVIEW_DELIVERY_PLAN.md` 的实施状态 | 该文档 `:219` 起有「Implementation Status（answer-stamp 判别回填，2026-10-08）」整段 | DONE（纯文档） |
+| [`PLAN_REVIEW_MARKER_COLLISION_PLAN.md`](PLAN_REVIEW_MARKER_COLLISION_PLAN.md) | 回传 marker 与用户原话碰撞加固（双读数） | `state.ActionService.DenyWithAnswer`（`pkg/state/action_service.go:298`）+ `planReviewDeliveredAnswer` stamp（`pkg/turn/approval.go:1102`）+ 双条件谓词 `ActionIsReviewDelivered`（`:1104`） | DONE |
+| [`REVISED_PLAN_DIFF_VIEW_PLAN.md`](REVISED_PLAN_DIFF_VIEW_PLAN.md) | 修订版计划差异视图 spike（只读 + 原型，不改生产代码） | 交付物 `docs/plan/REVISED_PLAN_DIFF_DESIGN.md` 已在（Q1–Q4 裁决 + 降级矩阵 + 实施拆解） | DONE（spike 交付）→ **实施尚未立计划**，需要时按该设计文档另立一份 |
 
 ---
 
@@ -628,6 +684,10 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
 ## 已审核但未计划的发现
 
 ### 2026-10-21 分支审计
+
+> 2026-10-21 `reconcile` 在 `7742bde` 上复核：本节三条**仍然全部成立**，没有被 087–094 顺手修掉——正文内联点现为
+> `pkg/gateway/api_extra.go:2349-2358`（仍是逐条塞 `Markdown`、只靠单文件 1 MiB 上限）；TUI 审批浮层的逐行展开仍未加行预算
+> （`pkg/tui/overlays.go` 的 `approvalOverlayVisualLines`）；provider 拒图的两条否决路径与 094 的落地方案都没变。
 
 - **provider 拒图（已由 094 全部覆盖，本轮不再有未计划项）**：094 同时做"当场一行提示"（`image_rejected` run event）
   与"下一次不再白送"（粗档 `provider`+`model` 落库，schema v16）。两条已否决的路记在这里以免重新讨论：
@@ -824,13 +884,16 @@ owner 2026-10-14 裁决「**Out of scope 里的必须加入本期计划**」，�
 
 ## 下一步
 
-0. **schema / 迁移性能批次已收口，无待执行项**：051 已并回主工作区（未提交）；048 撤回，049 / 050 / 052 驳回（依据见顶部复评与「已考虑并拒绝的发现」）。不要派发这四份。
-1. **owner 确认**：本轮写完的计划（022、024 改写版，025–030、033、035–037；web 015–020）。035 的通道凭据存储已定（方案 A）。
-2. 确认后按"执行顺序"里的分组派发：先 025，再 026 → 027，然后 028 / 029 并行；web 先 015、019。
+0. **可执行队列只剩一份**：`010-plan-write-guard-real-paths`（P2，S）——2026-10-21 `review-plan` 已重写并在 HEAD 上验证
+   过"四红 → 四绿"，可直接派发；执行时按计划顶部的 drift check（基线 `7742bde`）先核。其余计划表里没有 TODO / IN_PROGRESS / BLOCKED。
+1. **已收口的批次**（不要再派发）：051 / 048 / 049 / 050 / 052 的 schema 迁移性能批次；071–094 的 web 与审批卡批次
+   （已落 `dev`，见顶部）；001-frontend（REJECTED）、086（REJECTED）。
+2. **待 owner 给方向的**：本文「已审核但未计划的发现」里的条目（2026-10-21 分支审计两条性能项 + 2026-10-19 的 INV-01 与三条方向建议，
+   本次 reconcile 复核后仍全部成立），以及 `docs/plan/REVISED_PLAN_DIFF_DESIGN.md` 那份设计对应的**实施计划**（尚未立）。
+   要推进就跑 `improve plan <描述>`，不要再从旧批次里捡活。
 3. 早期计划多数已 DONE；001 设计规范已于 2026-10-21 **REJECTED**（前提被 071–079 取代），不要再派发。
-   当前唯一在途的一批是 **087–094**，顺序见本文顶部「最新审核信息」。
 
 ---
 
-**索引更新时间**：2026-10-14（新增 048–051 与本次 schema/迁移性能审计记录）
+**索引更新时间**：2026-10-21（`reconcile`：083–094 落库复核、索引补齐 9 份历史计划、010 标记为唯一可执行项）
 **Improve Skill 版本**：按 improve skill 模板生成

@@ -509,11 +509,24 @@ func ValidateAgentLLMConfigured(root *Root, agentName string) MainAgentLLMValida
 	return out
 }
 
+// credentialsBackedProvider reports whether a provider is authenticated from a
+// file this machine holds instead of an api_key in configuration: the ChatGPT
+// subscription (auth.json, or credentials.chatgpt) and the OpenCode surfaces
+// (opencode.json from the device-code login, or OPENCODE_API_KEY). The client
+// refuses to run without that credential, so an empty api_key is not a
+// missing field here. Everything else still needs one.
+func credentialsBackedProvider(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	return strings.EqualFold(provider, "chatgpt") ||
+		strings.EqualFold(provider, "opencode") ||
+		strings.EqualFold(provider, "opencode-go")
+}
+
 func (v MainAgentLLMValidation) Complete() bool {
 	if v.Provider == "" || v.Model == "" || v.BaseURL == "" {
 		return false
 	}
-	if strings.EqualFold(v.Provider, "chatgpt") {
+	if credentialsBackedProvider(v.Provider) {
 		return true
 	}
 	return v.APIKey != ""
@@ -527,7 +540,7 @@ func (v MainAgentLLMValidation) MissingFields() []string {
 	if v.Model == "" {
 		out = append(out, "model")
 	}
-	if v.APIKey == "" && !strings.EqualFold(v.Provider, "chatgpt") {
+	if v.APIKey == "" && !credentialsBackedProvider(v.Provider) {
 		out = append(out, "api_key")
 	}
 	if v.BaseURL == "" {

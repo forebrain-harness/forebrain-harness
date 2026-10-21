@@ -75,3 +75,32 @@ func TestProviderKeyEnvMapUsesUniformProviderVariables(t *testing.T) {
 		}
 	}
 }
+
+// TestVerifyProviderAllowsCredentialBackedProviders pins the three providers
+// that carry no models.json entry but are configured by a login file
+// (opencode.json / auth.json). Without the explicit allowlist an existing
+// install — whose models.json is installed once and never overwritten — could
+// never save them from the web or the terminal.
+func TestVerifyProviderAllowsCredentialBackedProviders(t *testing.T) {
+	loadTestCatalog(t)
+	cases := []struct {
+		provider string
+		wantOK   bool
+	}{
+		{provider: "chatgpt", wantOK: true},
+		{provider: "opencode", wantOK: true},
+		{provider: "opencode-go", wantOK: true},
+		{provider: " OpenCode ", wantOK: true},
+		{provider: "opencode2", wantOK: false},
+		{provider: "opencode-go-free", wantOK: false},
+	}
+	for _, tc := range cases {
+		err := VerifyProvider(tc.provider)
+		if tc.wantOK && err != nil {
+			t.Fatalf("VerifyProvider(%q) error = %v, want nil", tc.provider, err)
+		}
+		if !tc.wantOK && err == nil {
+			t.Fatalf("VerifyProvider(%q) error = nil, want unsupported", tc.provider)
+		}
+	}
+}

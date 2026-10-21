@@ -1245,7 +1245,19 @@
   </header>
 
   <section class="iter" aria-label="本轮迭代">
-    <h2>本轮迭代（2026-10-20）：对话里的每一种消息卡重画——卡头永远一行，长命令进正文，思考卡可折叠</h2>
+    <h2>本轮迭代（2026-10-21）：模型服务也可以登录进来——OpenCode 与 ChatGPT</h2>
+    <ul>
+      <li>模型服务页的工具栏在“添加模型服务”右边多了两个登录入口：“连接 OpenCode”“连接 ChatGPT”（新增“模型服务 · 连接 OpenCode（选择）”“连接 OpenCode（授权码）”“连接 OpenCode（选模型）”“连接 ChatGPT（授权页）”“模型服务 · 登录失败”五页）。</li>
+      <li>登录会把那条模型服务替你建好，不用填 API Key，也不用自己敲模型 ID；写进表里的顺序与手动添加的一样，第一条主用，其余回退。</li>
+      <li>流程跑在 gateway 里，网页上的弹窗只是一直看着它：OpenCode 先给授权码，登录完成后给它的模型目录；ChatGPT 给授权页。弹窗每一步都可以退出，退出没有副作用。</li>
+      <li>OpenCode 的免费模型不需要账号，所以“仅用免费模型”就排在“登录 OpenCode 账号”旁边，不用先登录；免费那一档的名字带“ (free)”，一眼看出登录之前哪些能用。选模型这一步列的是后端真实的目录，长了就滚动，不截断。</li>
+      <li>ChatGPT 的授权页必须在这台运行 gateway 的电脑上打开（已知限制：不做远程中继，远程部署时按弹窗里的那一行提示，改走本机或 API Key）。</li>
+      <li>登录失败（比如授权码过期）不再是一句原始错误：弹窗说清发生了什么，并给“重新发起登录”。</li>
+    </ul>
+  </section>
+
+  <section class="iter" aria-label="上一轮迭代">
+    <h2>上一轮迭代（2026-10-20）：对话里的每一种消息卡重画——卡头永远一行，长命令进正文，思考卡可折叠</h2>
     <ul>
       <li>“本轮新增”里高亮的<b>对话 · 全部消息卡</b>是这次的总览：一次真实的排障里，把主代理会话能出现的每一种卡片都画出来，开合与状态各给一张——思考卡、内置工具调用卡、session 类（清单 / 计划模式 / 中间笔记）、提问、权限申请、记忆类、八种 subagent_* 调用、外部 MCP 工具，以及失败 / 被拒 / 运行中三种状态。</li>
       <li>卡头永远一行：图标 + 调用摘要（与终端同一句话）+ 状态 + 折叠箭头。摘要用省略号收尾，<b>不再换行</b>——2 KB 的多行命令也不会把卡头撑高，状态徽标不再悬在右侧半空；悬停看完整那一行。</li>
@@ -1279,8 +1291,8 @@
     </ul>
   </section>
 
-  <section class="iter" aria-label="上一轮迭代">
-    <h2>上一轮迭代（2026-10-19）：web_fetch 只剩一个参数</h2>
+  <section class="iter" aria-label="更早的迭代">
+    <h2>更早的迭代（2026-10-19）：web_fetch 只剩一个参数</h2>
     <ul>
       <li>web_fetch 只剩“地址”一个参数，说明改为它现在做的事：抓取指定公开 URL 的内容，HTML 转成正文 Markdown。原来的“按要求提炼”和“处理要求”“最多下载字节”两个参数都不存在了。</li>
     </ul>
@@ -2814,7 +2826,7 @@
   var S = {
     tenant: 'main', page: 'chat', session: 0, projectSession: '', brand: 'navy', rail: 'dark', lang: 'zh', drawer: false, tmenu: false,
     bench: false, hb: false, preset: 'default', presetMenu: false, view: 'default', viewMenu: false, saView: 'default', savMenu: false, settingsTab: 'appearance', projTab: 'overview',
-    tree: {}, treeLoading: {}, ref: '', toolOpen: '', projectForm: false, rc: false, sel: {}, cronCustom: false, cronMode: 'weekly', wdays: { 1: true }, memEdit: '', models: [['deepseek-v4', 'deepseek-v4-flash'], ['gpt-5.4']], wsTask: 0, evalRun: false, trigApplied: false, mdeMode: {}, mdeDoc: {}, mdePath: {}, keyEdit: false,
+    tree: {}, treeLoading: {}, ref: '', toolOpen: '', projectForm: false, rc: false, sel: {}, cronCustom: false, cronMode: 'weekly', wdays: { 1: true }, memEdit: '', models: [['deepseek-v4', 'deepseek-v4-flash'], ['gpt-5.4']], wsTask: 0, evalRun: false, trigApplied: false, mdeMode: {}, mdeDoc: {}, mdePath: {}, keyEdit: false, provModel: '',
     sa: { open: false, tabs: [], active: '', menu: false, task: {}, seen: {}, at: false, ref: '', plus: false, draft: '', info: false },
     thinks: {}, pick: { mode: 'project', proj: 'forebrain-harness', folder: '' }, newProj: '', newCreated: false, fb: false, fbFor: 'chat', fbPath: '~/workspace', fbNew: false, trust: false, trustFor: null,
     attach: false, attachShot: false, attachDir: 'attachments', lastAttachDir: 'attachments', attNew: false, atree: {}, atts: [], demo: 'normal', dproj: '全部项目', projRoot: '',
@@ -2877,7 +2889,7 @@
     skills: ['技能 · 主代理', ['本主代理能用的全部技能：本主代理的 + 共享 + 内置。页面只有一层：标题行（说明文案在“技能”右侧，按钮依次是离线安装、在线安装、发现并安装、新建技能、刷新）、搜索行、列表。', '列表上方：离线安装、在线安装（弹窗）、发现并安装、新建技能；本主代理的技能可启停、删除，点“查看”（眼睛图标）进技能工坊改进。状态列显示当前版本号；草稿不能启用；已发布但有改动的标“有未发布的修改”，上游有新版本的标“有更新”。（本轮改动）', '设置里的共享技能库没有工坊，只有离线安装与在线安装。']],
     subagents: ['子代理 · 主代理', ['当前主代理的子代理配置（owner 2026-10-18）：harness 内置的 10 个 + 你给它自定义的；不再是运行中的子代理列表（运行中的看对话里的卡片、右侧抽屉与工作台概览）。', '表格上方右侧、“新建子代理”左边是当前主代理的“子代理功能”开关：没改过时跟随全局设置（设置 → 子代理），在这里切换只对这个主代理生效。它只和各行的启用开关联动：关闭时把所有子代理的启用改为禁用，开启时全部改为启用；单独打开某一行会把开关打开，最后一行被关掉时开关随之关闭。表格本身不变灰。', '表格：子代理（名称、说明，提示词改写过的标“已改写”）、类型（内置 / 自定义 / 系统）、模型（跟随主代理或指定的模型 · 思考强度）、工具（只读 / 可编辑 / 指定 N 个）、操作（启用开关在最前，然后是编辑 / 删除或查看；没有状态列）。顺序：自定义 → 内置 → 系统（owner 2026-10-18）。', '自定义：新建 / 编辑在右侧抽屉里（与 MCP 一样），删除用确认框；抽屉里填名称、模型、思考强度、运行方式（可继续对话 / 完成即结束）、说明（主代理靠它决定何时派发）、工具权限三档（只读 / 可编辑 / 指定工具）、系统提示词。保存在 forebrain.yaml 的主代理下。', '内置（可派发）：不能删；可以为当前主代理指定模型与思考强度、停用、改写提示词（标“已改写”，可恢复默认）；工具权限固定。提示词框里是内置提示词的完整原文（与代码里的一字不差），改写过的显示改写后的内容。', '系统：计划审阅、/goal 目标检查、自动审批、caveman 技能的 3 个，只能查看（右侧抽屉，标“只读”），提示词显示完整原文。']],
     mcp: ['MCP · 主代理', ['三层，每页只增删改自己那一层：设置 · MCP 只看、只改全局；本页先列本主代理的、再列全局的，只增删改主代理的，不列项目 MCP；项目空间的 MCP 标签依次列出项目、主代理、全局的，只增删改项目的。不同名叠加，同名高层整条覆盖（项目 > 主代理 > 全局），不做字段级混合。', '与技能页同一套界面：标题行（说明 + 添加 MCP 服务 + 刷新）、搜索行、表格（MCP 服务 / 来源 / 命令或地址 / 类型 / 状态 / 操作）。主代理的行可启停、编辑、删除；全局行只读，操作列跳到“设置 → MCP”。被主代理覆盖的全局条目不在本页出现，在设置 · MCP 里标“未运行 · 被主代理 … 覆盖”。', '表格固定列宽、每格一行，下方是分页。状态列只放徽标：已连接 · N 个工具 / 已允许 · N 个工具 / 待确认 / 已禁用（界面，下个会话起）/ 配置里已禁用 / 连接失败 / 未运行 · 被覆盖；失败原文与 enabled: false 在悬停提示和抽屉里。启用开关在操作列最前面，只对能改的行出现（其他行留出同样宽度，图标对齐）。', '编辑、添加都在右侧抽屉里，表单含全部字段：名称、类型、命令或地址、必需、启用、连接超时、请求超时（都按秒；connectionTimeoutMs 这类外来拼写不做别名，也不读）。高级按类型给请求头或环境变量、OAuth、SSE、SHA256 校验、默认工具审批模式。表单底部“测试连接”用当前表单值试连，不写配置、不关抽屉；保存失败（400/409）的原文显示在抽屉里；抽屉底部是“取消 / 保存”。', '只能查看的行操作栏只有“查看”：同一个抽屉以只读表单展示全部字段（含来源、状态与失败原文），底部只有“取消”，表单下方有一个跳到能改它的页面的链接。', '生效列表在新会话启动时冻结，任何改动都是“新会话生效”。']],
-    providers: ['模型服务 · 主代理', ['按顺序尝试的模型服务：第一条主用，其余回退。列表上方“添加模型服务”，每行“编辑”都在弹窗里。', '模型框可以填多个模型 ID：输入英文逗号即生成一个标签，也可以点下方该服务商的模型快速加入。', 'API Key 可以直接输入或粘贴，每输入一个字符立即显示为圆点；已保存的只显示后四位，点“更换”重新输入。']],
+    providers: ['模型服务 · 主代理', ['按顺序尝试的模型服务：第一条主用，其余回退。列表上方“添加模型服务”，每行“编辑”都在弹窗里。', '模型框可以填多个模型 ID：输入英文逗号即生成一个标签，也可以点下方该服务商的模型快速加入。', 'API Key 可以直接输入或粘贴，每输入一个字符立即显示为圆点；已保存的只显示后四位，点“更换”重新输入。', '“添加模型服务”右边是两个登录入口：“连接 OpenCode”“连接 ChatGPT”。登录会把模型服务替你建好，不用填 API Key：OpenCode 的免费模型不登录也能用，Go 订阅要先登录（在打开的页面里填弹窗给的授权码，回来再选一个模型，点“保存并启用”就写进这张表）；ChatGPT 的授权页要在这台运行 gateway 的电脑上打开。登录失败（比如授权码过期）时弹窗给出“重新发起登录”。']],
     tools: ['工具 · 主代理', ['本主代理运行时实际暴露给模型的工具，表格列出名称、说明、分类、只读 / 有副作用，可筛选、分页；操作栏的图标按钮“查看入参”在该行下方展开入参表，再点“收起”。']],
     permissions: ['权限 · 主代理', ['本主代理已记住的授权规则（保存在主代理工作区）。', '列表上方两个按钮：“判定验证”和“添加规则”，都在弹窗里；每行可编辑、删除。动作、工具是选择框，只有规则内容需要输入。项目空间的权限标签同一套。', '全局默认审批模式在“设置 → 审批默认”，项目规则在项目空间，会话内的临时切换在对话输入框旁。']],
     memories: ['记忆 · 主代理', ['本主代理的记忆文件分页列表：按内容关键词搜索；点“创建时间”“更新时间”列头排序——当前排序列的箭头高亮，再点切换新→旧 / 旧→新，默认按更新时间新→旧。', '每个文件点“编辑”在弹窗里打开（本轮改动），可以单个删除或多选批量删除，也可以重置全部。核心文件 MEMORY.md、memory_summary.md 只能编辑或清空，不能删除。', '项目空间的“记忆”标签是同一套界面，只列本项目的记忆文件。']],
@@ -4217,7 +4229,7 @@
   var iterJumps = [['home', '登录后首页（新对话）'], ['newproj', '新对话 · 选项目弹层'], ['newfolder', '新对话 · 选了新文件夹'], ['browser', '浏览文件夹'], ['trust', '信任提示'], ['attach', '附件 · 保存到'], ['paste', '粘贴截图'],
     ['thread', '思考耗时 · 首 token'], ['cards', '对话 · 全部消息卡（工具 / 思考 / 子代理）', 1], ['cardsbrief', '对话 · 简洁模式（只看回答）', 1], ['asks', '对话 · 提问卡（全部表单类型）', 1], ['exitplan', '对话 · 退出计划模式审批', 1], ['subview', '子代理 · 视图模式下拉', 1], ['mainrun', '对话 · 运行中（状态行）'], ['wfetch', '对话 · 抓取审批'], ['wsearch', '对话 · 搜索审批', 1], ['wnote', '对话 · 记忆写入审批', 1], ['gates', '对话 · 审批卡（全部工具）', 1], ['subcfg', '子代理 · 配置列表'], ['subcfgoff', '子代理 · 功能关闭'], ['setsub', '设置 · 子代理（全局开关）'], ['subcfgnew', '子代理 · 新建'], ['subcfgpick', '子代理 · 指定工具'], ['subcfgbuiltin', '子代理 · 编辑内置'], ['subcfgsys', '子代理 · 查看系统'], ['longtitle', '对话 · 超长标题'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
     ['plus', '加号菜单'], ['mode', 'Agent / 计划'], ['effort', '推理强度'], ['rewind', '回到这里'], ['rewound', '恢复之后'], ['bench', '工作台 · 概览'], ['benchctx', '工作台 · 上下文'], ['benchtree', '工作台 · 工作目录'], ['benchchg', '工作台 · 变更文件'], ['treeedit', '工作目录 · 编辑文件'], ['treedeldir', '工作目录 · 删除目录'], ['chgrevert', '变更文件 · 撤销变更'], ['benchwarn', '上下文接近上限'], ['sublive', '子代理 · 实时（右侧抽屉）'], ['subreplay', '子代理 · 回放'], ['submenu', '子代理 · 打开其他子代理'], ['subat', '子代理 · @ 引用文件'], ['subplus', '子代理 · 加号菜单'], ['subinfo', '子代理 · 模型与上下文'], ['subinfowarn', '子代理 · 上下文快满'],
-    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['pchanedit', '项目 · 编辑通道（弹窗）'], ['psessions', '项目 · 会话'], ['poverview', '项目 · 项目设置'], ['projectsp', '项目页'], ['projform', '新建项目（弹窗）', 1], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpdecline', '项目 · MCP 已拒绝可撤回'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
+    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['pchanedit', '项目 · 编辑通道（弹窗）'], ['psessions', '项目 · 会话'], ['poverview', '项目 · 项目设置'], ['projectsp', '项目页'], ['projform', '新建项目（弹窗）', 1], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['provconnect', '模型服务 · 连接 OpenCode（选择）'], ['provcode', '模型服务 · 连接 OpenCode（授权码）'], ['provmodels', '模型服务 · 连接 OpenCode（选模型）'], ['provchatgpt', '模型服务 · 连接 ChatGPT（授权页）'], ['provfail', '模型服务 · 登录失败'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpdecline', '项目 · MCP 已拒绝可撤回'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
   function iterJump(k) {
     resetModal(); S.tenant = 'main'; S.bench = false; S.sa = { open: false, tabs: [], active: '', menu: false, task: {}, seen: {}, at: false, ref: '', plus: false, draft: '', info: false };
     var chat0 = function () { S.page = 'chat'; S.projectSession = ''; S.session = 0; };
@@ -4305,6 +4317,7 @@
     else if (k === 'ruleedit') { S.page = 'rules'; S.fm = { kind: 'ruleedit', a: 'agent', b: 'AGENTS.md' }; }
     else if (k === 'provp') S.page = 'providers';
     else if (k === 'provedit') { S.page = 'providers'; S.fm = { kind: 'provedit', a: '0', b: '' }; }
+    else if (provLoginKinds[k]) { S.page = 'providers'; S.provModel = ''; S.fm = { kind: k, a: '', b: '' }; }
     else if (k === 'permp') S.page = 'permissions';
     else if (k === 'verifym') { S.page = 'permissions'; S.fm = { kind: 'verify', a: 'agent', b: '' }; S.fmResult = true; }
     else if (k === 'agentnew') { S.fm = { kind: 'agentnew', a: '', b: '' }; }
@@ -4347,7 +4360,8 @@
     if (d.act === 'plus') { var pp = !S.plusPop; closePops(); S.plusPop = pp; return true; }
     if (d.plus) { S.plusPop = false; if (d.plus === 'attach') { S.attach = true; S.attachShot = false; S.attachDir = S.lastAttachDir; S.attNew = false; } else S.draft = d.plus; return true; }
     if (d.mdemode) { var mp = d.mdemode.split(':'), lv = window.__mdeLive && window.__mdeLive[mp[0]]; if (lv) S.mdeDoc[mp[0]] = lv.get(); S.mdeMode[mp[0]] = mp[1]; return true; }
-    if (d.fm) { var fp = d.fm.split(':'); S.fm = { kind: fp[0], a: fp[1] || '', b: fp.slice(2).join(':') }; S.fmResult = false; return true; }
+    if (d.fm) { var fp = d.fm.split(':'); S.fm = { kind: fp[0], a: fp[1] || '', b: fp.slice(2).join(':') }; S.fmResult = false; if (provLoginKinds[fp[0]]) S.provModel = ''; return true; }
+    if (d.provmodel) { S.provModel = d.provmodel; return true; }
     if (d.mdw) { var mw = d.mdw.split(':'); mcpOpen(mw[0], mw[1], mw.slice(2).join(':')); return true; }
     if (d.act === 'mdwclose') { S.mdw = null; return true; }
     if (d.pg) { var pq = d.pg.split(':'); S.pg[pq[0]] = Number(pq[1]); return true; }
@@ -5218,9 +5232,56 @@
     return '<span class="mcp-test">' + h + '</span>';
   }
   var hookRows = [['PreToolUse', 'shell', 'scripts/guard-shell.sh'], ['PostToolUse', '匹配全部工具', 'gofmt -l ./pkg']];
+  // 2026-10-21: OpenCode 与 ChatGPT 是登录进来的，不是填进来的。流程跑在 gateway 里（网页既不能
+  // 在那台机器上打状态行，也不能替它开窗口），所以弹窗是一个轮询视图：OpenCode 先给授权码，
+  // 登录完成后给它的模型目录；ChatGPT 给授权页。OpenCode 的免费模型这一档不需要账号，所以排在
+  // 发起登录之前（frontend/src/views/ProvidersView.vue）。
+  var provLoginKinds = { provconnect: 1, provcode: 1, provmodels: 1, provchatgpt: 1, provfail: 1 };
+  var provFreeModels = ['big-pickle', 'beam-free', 'glm-5.3-flash-free', 'deepseek-v4.1-flash-free', 'minimax-m3.1-flash-free', 'll-alpha-free', 'longcat-2.5-preview-free', 'exo-free'];
+  var provGoModels = ['grok-4.7', 'gpt-6-luna', 'claude-haiku-5-5', 'qwen3.8-max', 'glm-5.3', 'kimi-k3', 'deepseek-v4-pro', 'gemini-4-argon-contributor'];
+  function provModelNames() {
+    // the free family carries its " (free)" suffix in the name, the way the picker shows it: it is the
+    // only capability worth naming, because it says what works before logging in
+    return provFreeModels.map(function (id) { return id + ' (free)'; }).concat(provGoModels);
+  }
+  function provLoginModal(k) {
+    var title = k === 'provchatgpt' ? '连接 ChatGPT' : '连接 OpenCode';
+    var wait = '<div class="row"><button type="button" class="btn pri">打开授权页</button>' + ic('loader-circle', 'spin') + '<span class="hint">等待授权…</span></div>';
+    var body = '', foot = '';
+    if (k === 'provconnect') {
+      body = '<p style="font-size:12px;color:var(--text-2)">免费模型不用登录也能用；Go 订阅需要登录 OpenCode 账号。</p>' +
+        '<div class="row"><button type="button" class="btn pri" data-fm="provcode">登录 OpenCode 账号</button><button type="button" class="btn" data-fm="provmodels">仅用免费模型</button></div>';
+      foot = '<button type="button" class="btn" data-act="fmclose">关闭</button>';
+    } else if (k === 'provcode') {
+      body = '<p style="font-size:12px;color:var(--text-2)">在打开的页面里输入下面的授权码，完成后这里会自动继续。</p>' +
+        '<div style="border:1px solid var(--line);border-radius:8px;background:var(--subtle);padding:10px 12px">' +
+        '<span class="hint" style="display:block">授权码</span><span class="mono" style="font-size:22px;letter-spacing:.2em;color:var(--text)">ABCD-1234</span></div>' + wait;
+      foot = '<button type="button" class="btn" data-act="fmclose">取消登录</button>';
+    } else if (k === 'provchatgpt') {
+      body = '<p style="font-size:12px;color:var(--text-2)">打开授权页并完成授权，完成后这里会自动继续。</p>' + wait +
+        '<p class="hint" style="font-size:11px">需要在这台运行 gateway 的电脑上完成授权。</p>';
+      foot = '<button type="button" class="btn" data-act="fmclose">取消登录</button>';
+    } else if (k === 'provmodels') {
+      var names = provModelNames(), pick = S.provModel || names[0];
+      // the catalog rarely fits: it scrolls, it is never cut off
+      body = '<p style="font-size:12px;color:var(--text-2)">选一个模型，保存后这个服务就能用了。</p>' +
+        '<input class="field" placeholder="搜索模型" aria-label="搜索模型">' +
+        '<div class="plist" role="listbox" aria-label="模型">' + names.map(function (n) {
+          return '<button type="button" class="popt" role="option" aria-checked="' + (n === pick) + '" data-provmodel="' + n + '"><span class="main"><b>' + n + '</b></span>' + (n === pick ? ic('check') : '') + '</button>';
+        }).join('') + '</div>';
+      foot = '<button type="button" class="btn" data-act="fmclose">关闭</button><button type="button" class="btn pri">保存并启用</button>';
+    } else {
+      body = '<p style="font-size:13px;color:var(--danger)">授权码已过期，请重新登录。</p><p style="font-size:12px;color:var(--text-2)">可以重新发起一次登录。</p>';
+      foot = '<button type="button" class="btn" data-act="fmclose">关闭</button><button type="button" class="btn pri" data-fm="provconnect">重新发起登录</button>';
+    }
+    return '<div class="mask"><div class="modal" role="dialog" aria-label="' + title + '"><div class="modal-h"><b>' + title + '</b><button type="button" class="icon-btn" data-act="fmclose" aria-label="关闭">' + ic('x') + '</button></div>' +
+      '<div class="modal-b">' + body + '</div><div class="modal-f"><span style="flex:1"></span>' + foot + '</div></div></div>';
+  }
   function fmModal() {
     var f = S.fm, k = f.kind, title = '', body = '', ok = '保存', wide = false, xl = false, danger = false, okAct = 'fmok';
     var hookEvents = ['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'SessionStart', 'SubagentStop', 'PreCompact', 'PostCompact'];
+    // the sign-in modal steps through start / auth / choose / failed in place, so its footer is its own
+    if (provLoginKinds[k]) return provLoginModal(k);
     if (k === 'chanedit') {
       var ch = projChannels[Number(f.a)], hasSecret = ch[3].some(function (x) { return x[3] && x[2]; });
       title = '编辑通道 · ' + ch[0];
@@ -5817,7 +5878,10 @@
     providers: function () {
       var p = tenants[S.tenant].provider;
       var rows = [['主用', p[0], S.models[0].join('、'), p[0] === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1', '<span class="badge ok">已保存 ••••3f9a</span>'], ['回退 1', 'openai', S.models[1].join('、'), 'https://api.openai.com/v1', '<span class="badge warn">未设置</span>']];
-      return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索服务商或模型">', '<button type="button" class="btn sm pri" data-fm="provnew">' + ic('plus') + '添加模型服务</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
+      return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索服务商或模型">', '<button type="button" class="btn sm pri" data-fm="provnew">' + ic('plus') + '添加模型服务</button>' +
+        // two services are signed in to rather than typed in; they sit next to 添加模型服务 and ahead of 刷新 (owner 2026-10-21)
+        '<button type="button" class="btn sm" data-fm="provconnect">' + ic('log-in') + '连接 OpenCode</button>' + '<button type="button" class="btn sm" data-fm="provchatgpt">' + ic('log-in') + '连接 ChatGPT</button>' +
+        '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
         '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:70px">顺序</th><th>服务商</th><th>模型</th><th>Base URL</th><th>API Key</th><th class="c" style="width:110px">操作</th></tr></thead><tbody>' +
         rows.map(function (r, i) { return '<tr><td><span class="badge' + (i ? ' gray' : '') + '">' + r[0] + '</span></td><td>' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="mono hint">' + r[3] + '</td><td>' + r[4] + '</td><td class="r">' + rowActs([i ? act('arrow-up', '上移', '', '', r[1]) : actSlot(), act('pencil', '编辑', 'data-fm="provedit:' + i + '"', '', r[1]), act('trash-2', '删除', '', 'dgr', r[1])]) + '</td></tr>'; }).join('') +
         '</tbody></table></div>' + pager(rows.length, 10, 'providers') + tabNote('按顺序尝试：第一条主用，其余回退。') + '</div>';

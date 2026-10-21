@@ -7,6 +7,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/stretchr/testify/require"
 )
 
@@ -211,4 +212,239 @@ func TestDiscoverChatGPTModelsHasNoCrossSourceState(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "gpt-first", one[0].APIModel)
 	require.Equal(t, "gpt-second", two[0].APIModel)
+}
+
+// stubOpenCodeSource stands in for the live OpenCode catalog. It records which
+// surface was asked so a listing that should not spend a request can be
+// caught doing it.
+type stubOpenCodeSource struct {
+	console      []opencode.ModelInfo
+	goCatalog    []opencode.ModelInfo
+	err          error
+	signedIn     bool
+	consoleCalls int
+	goCalls      int
+}
+
+func (s *stubOpenCodeSource) OpenCodeModels(ctx context.Context, goSubscription bool) ([]opencode.ModelInfo, error) {
+	if goSubscription {
+		s.goCalls++
+	} else {
+		s.consoleCalls++
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	if goSubscription {
+		return s.goCatalog, nil
+	}
+	return s.console, nil
+}
+
+func (s *stubOpenCodeSource) OpenCodeSignedIn() bool { return s.signedIn }
+
+// The OpenCode projection drops the systemone ids (not chat models), keeps the
+// free family first because those run with no login, names them so a picker
+// shows why they work, and marks the first as the preselected entry. Metadata
+// the live catalog never reports comes from the package's own table, with the
+// conservative default for an id the table has not seen.
+func TestDiscoverOpenCodeModelsProjectsConsoleCatalog(t *testing.T) {
+	src := &stubOpenCodeSource{console: []opencode.ModelInfo{
+		{ID: "jev-decision"},
+		{ID: "deepseek-v4-pro"},
+		{ID: "qwen3.8-flash"},
+		{ID: "glm-5.3-flash-free"},
+		{ID: "gpt-7-unseen"},
+	}}
+
+	records, err := DiscoverOpenCodeModels(context.Background(), src, false)
+	require.NoError(t, err)
+	require.Len(t, records, 4, "the systemone id is not a chat model")
+
+	require.Equal(t, "glm-5.3-flash-free", records[0].APIModel, "the free family is listed first")
+	require.True(t, records[0].IsDefault)
+	require.Equal(t, "opencode/glm-5.3-flash-free", records[0].ModelID)
+	require.Equal(t, "opencode", records[0].Provider)
+	require.Equal(t, "glm-5.3-flash-free (free)", records[0].ModelName)
+	require.Equal(t, ModelSourceOpenCodeAccount, records[0].Source)
+	require.False(t, records[0].FetchedAt.IsZero())
+
+	byID := make(map[string]ModelRecord, len(records))
+	for _, rec := range records {
+		byID[rec.APIModel] = rec
+	}
+	qwen := byID["qwen3.8-flash"]
+	require.Equal(t, int64(128000), qwen.ContextWindow)
+	require.True(t, qwen.CanReason, "the table records qwen3.8's reasoning output")
+	require.False(t, qwen.IsDefault)
+
+	unseen := byID["gpt-7-unseen"]
+	require.Equal(t, int64(128000), unseen.ContextWindow, "an unknown id gets the conservative window")
+	require.Equal(t, "gpt-7-unseen", unseen.ModelName, "no free suffix outside the free family")
+	require.Equal(t, "opencode/gpt-7-unseen", unseen.ModelID)
+
+	require.Equal(t, 1, src.consoleCalls)
+	require.Zero(t, src.goCalls)
+}
+
+// The Go subscription reads its own table: the same id can carry a different
+// window there, and the provider prefix keeps the two surfaces apart.
+func TestDiscoverOpenCodeModelsUsesTheGoTable(t *testing.T) {
+	src := &stubOpenCodeSource{goCatalog: []opencode.ModelInfo{
+		{ID: "qwen3.8-max"},
+		{ID: "glm-5.3"},
+	}}
+	records, err := DiscoverOpenCodeModels(context.Background(), src, true)
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	require.Equal(t, "opencode-go/qwen3.8-max", records[0].ModelID)
+	require.Equal(t, "opencode-go", records[0].Provider)
+	require.True(t, records[0].CanReason)
+	require.True(t, records[0].IsDefault)
+	require.False(t, records[1].IsDefault, "only the first entry is preselectable")
+	require.Equal(t, 1, src.goCalls)
+	require.Zero(t, src.consoleCalls)
+}
+
+func TestDiscoverOpenCodeModelsRequiresASource(t *testing.T) {
+	_, err := DiscoverOpenCodeModels(context.Background(), nil, false)
+	require.Error(t, err)
+}
+
+func TestDiscoverOpenCodeModelsPropagatesFailure(t *testing.T) {
+	src := &stubOpenCodeSource{err: errors.New("fetch OpenCode models: http 401")}
+	_, err := DiscoverOpenCodeModels(context.Background(), src, false)
+	require.ErrorContains(t, err, "401")
+}
+
+// A console-scoped query answers from the live catalog alone: no static
+// records leak in, and the ChatGPT source is not asked.
+func TestListModelCatalogLiveOpenCodeConsoleScope(t *testing.T) {
+	useStaticCatalog(t)
+	chatgptSrc := &stubChatGPTSource{}
+	opencodeSrc := &stubOpenCodeSource{console: []opencode.ModelInfo{{ID: "big-pickle"}, {ID: "deepseek-v4-pro"}}}
+	listing := listModelCatalogLive(context.Background(),
+		modelSources{chatgpt: chatgptSrc, opencode: opencodeSrc},
+		ModelCatalogQuery{Provider: "opencode"})
+
+	require.Len(t, listing.Records, 2)
+	for _, rec := range listing.Records {
+		require.Equal(t, "opencode", rec.Provider)
+	}
+	require.Len(t, listing.Status, 1)
+	require.Equal(t, "opencode", listing.Status[0].Provider)
+	require.Equal(t, ModelSourceOpenCodeAccount, listing.Status[0].Source)
+	require.NotNil(t, listing.Status[0].FetchedAt)
+	require.Empty(t, listing.Status[0].Error)
+	require.Zero(t, chatgptSrc.calls, "an opencode-scoped query must not pay for ChatGPT discovery")
+	require.Zero(t, opencodeSrc.goCalls)
+}
+
+// The Go catalog needs the subscription token: without a login the listing
+// reports it instead of spending a request to learn the same thing from a 401.
+func TestListModelCatalogLiveSkipsGoCatalogWithoutLogin(t *testing.T) {
+	useStaticCatalog(t)
+	opencodeSrc := &stubOpenCodeSource{signedIn: false, goCatalog: []opencode.ModelInfo{{ID: "glm-5.3"}}}
+	listing := listModelCatalogLive(context.Background(),
+		modelSources{opencode: opencodeSrc},
+		ModelCatalogQuery{Provider: "opencode-go"})
+
+	require.Empty(t, listing.Records)
+	require.Len(t, listing.Status, 1)
+	require.Equal(t, "opencode-go", listing.Status[0].Provider)
+	require.Empty(t, listing.Status[0].Source)
+	require.Equal(t, "not signed in", listing.Status[0].Error)
+	require.Zero(t, opencodeSrc.goCalls, "no credential means no request")
+}
+
+// A signed-in Go listing answers from the subscription's catalog.
+func TestListModelCatalogLiveQueriesGoCatalogWhenSignedIn(t *testing.T) {
+	useStaticCatalog(t)
+	opencodeSrc := &stubOpenCodeSource{signedIn: true, goCatalog: []opencode.ModelInfo{{ID: "glm-5.3"}, {ID: "kimi-k3"}}}
+	listing := listModelCatalogLive(context.Background(),
+		modelSources{opencode: opencodeSrc},
+		ModelCatalogQuery{Provider: "opencode-go"})
+
+	require.Len(t, listing.Records, 2)
+	require.Equal(t, "opencode-go/glm-5.3", listing.Records[0].ModelID)
+	require.Len(t, listing.Status, 1)
+	require.Equal(t, ModelSourceOpenCodeAccount, listing.Status[0].Source)
+	require.NotNil(t, listing.Status[0].FetchedAt)
+	require.Equal(t, 1, opencodeSrc.goCalls)
+}
+
+// A failed Console fetch still answers with the free family — those models
+// need no credential, so an offline machine keeps the one thing it can use —
+// and the failure is named instead of being swallowed.
+func TestListModelCatalogLiveFallsBackToFreeFamily(t *testing.T) {
+	useStaticCatalog(t)
+	opencodeSrc := &stubOpenCodeSource{err: errors.New("fetch OpenCode models: http 503")}
+	listing := listModelCatalogLive(context.Background(),
+		modelSources{opencode: opencodeSrc},
+		ModelCatalogQuery{Provider: "opencode"})
+
+	free := opencode.FreeConsoleModels()
+	require.Len(t, listing.Records, len(free))
+	require.Equal(t, free[0].ID+" (free)", listing.Records[0].ModelName)
+	require.True(t, listing.Records[0].IsDefault)
+	require.Empty(t, listing.Records[0].Source, "nothing was fetched, so nothing is sourced live")
+	require.True(t, listing.Records[0].FetchedAt.IsZero())
+	require.Len(t, listing.Status, 1)
+	require.Contains(t, listing.Status[0].Error, "503")
+	require.Nil(t, listing.Status[0].FetchedAt)
+}
+
+// An unfiltered listing runs every installed source once, in a stable order:
+// static, ChatGPT, Console, Go. The needle applies inside each block.
+func TestListModelCatalogLiveOpenCodeBlocksFollowEachOther(t *testing.T) {
+	useStaticCatalog(t)
+	chatgptSrc := &stubChatGPTSource{models: []openai.ModelInfo{
+		{Slug: "gpt-live", DisplayName: "GPT Live", Visibility: "list", Priority: 1},
+	}}
+	opencodeSrc := &stubOpenCodeSource{
+		signedIn:  true,
+		console:   []opencode.ModelInfo{{ID: "big-pickle"}},
+		goCatalog: []opencode.ModelInfo{{ID: "glm-5.3"}},
+	}
+	listing := listModelCatalogLive(context.Background(),
+		modelSources{chatgpt: chatgptSrc, opencode: opencodeSrc},
+		ModelCatalogQuery{})
+
+	providers := make([]string, 0, len(listing.Records))
+	for _, rec := range listing.Records {
+		providers = append(providers, rec.Provider)
+	}
+	require.Equal(t, []string{"openai", "chatgpt", "opencode", "opencode-go"}, providers)
+	require.Len(t, listing.Status, 3)
+	require.Equal(t, []string{"chatgpt", "opencode", "opencode-go"}, []string{
+		listing.Status[0].Provider, listing.Status[1].Provider, listing.Status[2].Provider,
+	})
+
+	filtered := listModelCatalogLive(context.Background(),
+		modelSources{opencode: &stubOpenCodeSource{signedIn: true, goCatalog: []opencode.ModelInfo{{ID: "glm-5.3"}, {ID: "kimi-k3"}}}},
+		ModelCatalogQuery{Provider: "opencode-go", Query: "kimi"})
+	require.Len(t, filtered.Records, 1)
+	require.Equal(t, "kimi-k3", filtered.Records[0].APIModel)
+}
+
+// The service answers through the source installed on it, which is how the
+// gateway's /api/models reaches the OpenCode catalogs.
+func TestServiceListModelCatalogLiveUsesInstalledOpenCodeSource(t *testing.T) {
+	useStaticCatalog(t)
+	src := &stubOpenCodeSource{signedIn: true, console: []opencode.ModelInfo{{ID: "big-pickle"}}}
+	svc := New(nil, WithOpenCodeModels(src))
+	listing := svc.ListModelCatalogLive(context.Background(), ModelCatalogQuery{Provider: "opencode"})
+	require.Len(t, listing.Records, 1)
+	require.Equal(t, "opencode/big-pickle", listing.Records[0].ModelID)
+	require.Equal(t, 1, src.consoleCalls)
+}
+
+// Without an installed OpenCode source no OpenCode block is queried: the
+// static catalog has nothing to answer with for those providers, and reporting
+// them as "unconfigured" would read as a broken login on every listing.
+func TestListModelCatalogLiveWithoutOpenCodeSourceReportsNothing(t *testing.T) {
+	useStaticCatalog(t)
+	listing := listModelCatalogLive(context.Background(), modelSources{}, ModelCatalogQuery{Provider: "opencode"})
+	require.Empty(t, listing.Records)
+	require.Empty(t, listing.Status)
 }

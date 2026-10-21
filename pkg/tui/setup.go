@@ -16,6 +16,7 @@ import (
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -274,11 +275,26 @@ type providerChoice struct {
 	SupportsAPIPath bool
 	APIKeyLabel     string
 	ChatGPTOAuth    bool
+	// OpenCodeFree and OpenCodeDevice are the two ways into the OpenCode
+	// gateway: its free model family, which needs no credential at all, or the
+	// Go subscription behind a device-code login. Neither asks for an API key,
+	// so both skip the key page.
+	OpenCodeFree   bool
+	OpenCodeDevice bool
+}
+
+// discoveredModels reports whether this choice's models are the ones the setup
+// fetched for an account, rather than the shared catalog's list for a provider.
+func (c providerChoice) discoveredModels() bool {
+	return c.ChatGPTOAuth || c.OpenCodeFree || c.OpenCodeDevice
 }
 
 type providerGroup struct {
-	Label   string
-	Hint    string
+	Label string
+	Hint  string
+	// Blurb describes a group whose options are not plans by region and
+	// billing. Empty falls back to the count of options.
+	Blurb   string
 	Options []providerChoice
 }
 
@@ -289,10 +305,25 @@ var chatGPTLogin = openai.Login
 // shared projection every surface uses.
 var discoverChatGPTModels = process.DiscoverChatGPTModels
 
-// chatGPTModelsTimeout bounds one account model fetch. The browser login has
-// its own long budget because a human is typing in another window; the fetch
-// is one HTTP call and must not hold the input loop for nearly as long.
-const chatGPTModelsTimeout = 10 * time.Second
+// openCodeLogin runs the OpenCode device-code login. It is a package var so a
+// test can drive the flow without a browser; the TUI runs on the machine with
+// the browser, which is what the flow's own opener is for.
+var openCodeLogin = func(ctx context.Context, path string, out io.Writer, onStart func(opencode.LoginInfo)) (opencode.Credentials, error) {
+	return opencode.LoginDeviceFlow(ctx, path, out, nil, onStart)
+}
+
+// discoverOpenCodeModels is a package var for the same reason as
+// discoverChatGPTModels: tests stub it, production reads the gateway's catalog
+// through the source every surface uses.
+var discoverOpenCodeModels = func(ctx context.Context, home string, goSubscription bool) ([]turn.ModelRecord, error) {
+	return turn.DiscoverOpenCodeModels(ctx, process.NewOpenCodeModelsSource(home), goSubscription)
+}
+
+// modelsDiscoveryTimeout bounds one account model fetch. The browser and device
+// logins have their own long budget because a human is typing in another
+// window; the fetch is one HTTP call and must not hold the input loop for
+// nearly as long.
+const modelsDiscoveryTimeout = 10 * time.Second
 
 var providerGroups = []providerGroup{
 	{
@@ -302,6 +333,23 @@ var providerGroups = []providerGroup{
 			Group: "ChatGPT", Label: "Sign in with ChatGPT", Hint: "Use Codex included with your ChatGPT plan",
 			Provider: "chatgpt", DefaultBaseURL: openai.CodexBaseURL, ChatGPTOAuth: true,
 		}},
+	},
+	{
+		Label: "OpenCode",
+		Hint:  "Free models or Go subscription",
+		Blurb: "Free models, or a Go subscription",
+		Options: []providerChoice{
+			{
+				Group: "OpenCode", Label: "Free models (no login)",
+				Hint:     "OpenCode free tier — big-pickle, glm/deepseek/minimax flash, …",
+				Provider: "opencode", DefaultBaseURL: opencode.ProviderBaseURL("opencode"), OpenCodeFree: true,
+			},
+			{
+				Group: "OpenCode", Label: "Sign in with OpenCode (Go subscription)",
+				Hint:     "Device-code login; use your Go/Go Plus quota",
+				Provider: "opencode-go", DefaultBaseURL: opencode.ProviderBaseURL("opencode-go"), OpenCodeDevice: true,
+			},
+		},
 	},
 	{
 		Label: "OpenAI",
@@ -537,9 +585,9 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 	defer setSetupPage(s.cfg.Selector, 0, 0)
 	logPromptEvent(s.cfg, "llmsetup.prompt.start", nil)
 	for {
-		// A ChatGPT account already signed in during this setup is not asked
-		// to sign in again on the way back.
-		if s.back && s.page == setupPageCredentials && s.choice.ChatGPTOAuth && s.records != nil {
+		// A provider already signed in — or whose models were already fetched —
+		// during this setup is not asked again on the way back.
+		if s.back && s.page == setupPageCredentials && s.choice.discoveredModels() && s.records != nil {
 			s.page--
 		}
 		setSetupPage(s.cfg.Selector, s.page, s.cfg.Pages)
@@ -650,7 +698,7 @@ func (s *llmSetup) pickProvider() (bool, error) {
 	chosen := -1 // the provider picked before, when the user came back here
 	for i, group := range providerGroups {
 		category := providerAPIKeyCategory
-		if hasChatGPTOAuth(group) {
+		if hasSubscriptionSignIn(group) {
 			category = providerSignInCategory
 		}
 		items = append(items, SelectItem{Label: group.Label, Description: providerGroupBlurb(group), Category: category})
@@ -689,9 +737,12 @@ func (s *llmSetup) pickProvider() (bool, error) {
 	}
 }
 
-func hasChatGPTOAuth(group providerGroup) bool {
+// hasSubscriptionSignIn reports whether a group is reached by signing in to a
+// subscription — ChatGPT's browser OAuth, or OpenCode's free tier and its
+// device-code Go login — rather than by pasting an API key.
+func hasSubscriptionSignIn(group providerGroup) bool {
 	for _, option := range group.Options {
-		if option.ChatGPTOAuth {
+		if option.ChatGPTOAuth || option.OpenCodeFree || option.OpenCodeDevice {
 			return true
 		}
 	}
@@ -699,18 +750,28 @@ func hasChatGPTOAuth(group providerGroup) bool {
 }
 
 // providerGroupBlurb is what a provider's row says about it: its one way in,
-// or how many it offers.
+// its own description, or how many plans it offers.
 func providerGroupBlurb(group providerGroup) string {
 	if len(group.Options) == 1 {
 		return group.Options[0].Hint
 	}
+	if blurb := strings.TrimSpace(group.Blurb); blurb != "" {
+		return blurb
+	}
 	return fmt.Sprintf("%d plans by region and billing", len(group.Options))
 }
 
-// credentials asks for the provider's API key, or signs in to ChatGPT.
+// credentials asks for the provider's API key, or signs in to the subscription
+// the choice runs on.
 func (s *llmSetup) credentials() (bool, error) {
 	if s.choice.ChatGPTOAuth {
 		return s.signInChatGPT()
+	}
+	if s.choice.OpenCodeDevice {
+		return s.signInOpenCode()
+	}
+	if s.choice.OpenCodeFree {
+		return s.useOpenCodeFreeModels()
 	}
 	label := s.choice.APIKeyLabel + "\n" + s.apiKeyNote()
 	for {
@@ -748,10 +809,6 @@ func displayHomePath(path string) string {
 // signInChatGPT signs in through the browser and fetches the models the
 // account may run.
 func (s *llmSetup) signInChatGPT() (bool, error) {
-	ctx := s.cfg.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	// Browser OAuth is the only provider option with an irreversible,
 	// out-of-band side effect (it opens a browser and then blocks waiting for
 	// the callback), so require an explicit opt-in first. Every other provider
@@ -763,35 +820,106 @@ func (s *llmSetup) signInChatGPT() (bool, error) {
 		return false, err
 	}
 	status := s.statusOutput("Sign in with ChatGPT")
-	if _, err := chatGPTLogin(ctx, openai.CredentialsPath(s.cfg.Home), status); err != nil {
+	if _, err := chatGPTLogin(s.ctx(), openai.CredentialsPath(s.cfg.Home), status); err != nil {
 		return false, err
 	}
-	// The login is valid but the account's models are not: fetch them now, on
-	// the same credentials, so the picker offers what this account may
-	// actually run — never a baked-in list. A failed fetch can be retried
-	// here without going through the browser login again.
+	return s.fetchSignedInModels(status, func(fetchCtx context.Context) ([]turn.ModelRecord, error) {
+		return discoverChatGPTModels(fetchCtx, s.cfg.Home)
+	})
+}
+
+// signInOpenCode runs the device-code login of the OpenCode Go subscription and
+// then fetches the models that subscription serves.
+func (s *llmSetup) signInOpenCode() (bool, error) {
+	ctx := s.ctx()
+	// The device flow also has an out-of-band side effect — it opens a browser
+	// and then blocks while the user confirms a code there — so it asks first,
+	// exactly as the ChatGPT login does.
+	start, ok, err := s.cfg.Selector.Confirm("Sign in with OpenCode\nForebrain Harness shows a code and opens opencode.ai to confirm it, then offers the models your OpenCode Go subscription includes.", false)
+	if err != nil || !ok || !start {
+		logPromptChoice(s.cfg, "llmsetup.opencode.login_declined", s.choice, map[string]any{"error": errString(err)})
+		return false, err
+	}
+	status := s.statusOutput("Sign in with OpenCode")
+	// The flow prints the verification URL and the code to status itself, which
+	// is the whole of what this page has to say; the structured callback exists
+	// for a surface that shows the two facts from data instead of text.
+	if _, err := openCodeLogin(ctx, opencode.DefaultPath(s.cfg.Home), status, nil); err != nil {
+		return false, err
+	}
+	return s.fetchSignedInModels(status, func(fetchCtx context.Context) ([]turn.ModelRecord, error) {
+		return discoverOpenCodeModels(fetchCtx, s.cfg.Home, true)
+	})
+}
+
+// useOpenCodeFreeModels opens OpenCode's free family, which needs no credential
+// at all. The catalog is read live so the picker offers what the gateway serves
+// today; when it cannot be read, or comes back empty, the free models this
+// build knows stand in — they are exactly the ones that still work, so a failed
+// fetch must not end the setup. The note on the page says which list is shown.
+func (s *llmSetup) useOpenCodeFreeModels() (bool, error) {
+	status := s.statusOutput("Connect OpenCode")
+	fetchCtx, cancel := context.WithTimeout(s.ctx(), modelsDiscoveryTimeout)
+	if status != nil {
+		fmt.Fprintln(status, "Fetching OpenCode's free models…")
+	}
+	records, err := discoverOpenCodeModels(fetchCtx, s.cfg.Home, false)
+	cancel()
+	if err != nil || len(records) == 0 {
+		fallback := turn.OpenCodeFreeRecords()
+		logPromptChoice(s.cfg, "llmsetup.opencode.free_models_fallback", s.choice, map[string]any{
+			"error": errString(err), "count": len(fallback),
+		})
+		if status != nil {
+			fmt.Fprintf(status, "Could not read the live OpenCode catalog (%s); offering the %d free models this build knows.\n",
+				firstNonEmpty(errString(err), "no models returned"), len(fallback))
+		}
+		records = fallback
+	} else {
+		logPromptChoice(s.cfg, "llmsetup.opencode.models_fetched", s.choice, map[string]any{"count": len(records)})
+	}
+	s.records = records
+	return true, nil
+}
+
+// fetchSignedInModels fetches the models a provider the setup just signed in to
+// offers, and is where a failed catalog call is handled: the login stands, so
+// the offered retry reuses it instead of repeating the browser or device flow,
+// and declining aborts with an actionable error — a half-configured provider is
+// never written.
+func (s *llmSetup) fetchSignedInModels(status io.Writer, discover func(context.Context) ([]turn.ModelRecord, error)) (bool, error) {
+	ctx := s.ctx()
 	for {
-		fetchCtx, cancel := context.WithTimeout(ctx, chatGPTModelsTimeout)
+		fetchCtx, cancel := context.WithTimeout(ctx, modelsDiscoveryTimeout)
 		if status != nil {
 			fmt.Fprintln(status, "Fetching this account's available models…")
 		}
-		records, err := discoverChatGPTModels(fetchCtx, s.cfg.Home)
+		records, err := discover(fetchCtx)
 		cancel()
 		if err == nil {
 			s.records = records
 			if s.records == nil {
 				s.records = []turn.ModelRecord{}
 			}
-			logPromptChoice(s.cfg, "llmsetup.chatgpt.models_fetched", s.choice, map[string]any{"count": len(records)})
+			logPromptChoice(s.cfg, "llmsetup.models_fetched", s.choice, map[string]any{"count": len(records)})
 			return true, nil
 		}
-		logPromptChoice(s.cfg, "llmsetup.chatgpt.models_failed", s.choice, map[string]any{"error": errString(err)})
+		logPromptChoice(s.cfg, "llmsetup.models_failed", s.choice, map[string]any{"error": errString(err)})
 		retry, ok, confirmErr := s.cfg.Selector.Confirm("Fetching this account's models failed\nRetry without signing in again?", true)
 		if confirmErr != nil || !ok || !retry {
 			return false, fmt.Errorf(
 				"login saved, but the account's models could not be fetched: %w\nNo provider configuration was written; run /connect again later, or choose another provider", err)
 		}
 	}
+}
+
+// ctx is the setup's context, never nil: a login or a fetch must be cancellable
+// even when the caller passed none.
+func (s *llmSetup) ctx() context.Context {
+	if s.cfg.Context != nil {
+		return s.cfg.Context
+	}
+	return context.Background()
 }
 
 // statusOutput is where the setup reports what it does without the user: a
@@ -810,7 +938,7 @@ func (s *llmSetup) statusOutput(title string) io.Writer {
 func (s *llmSetup) pickModel() (bool, error) {
 	options := catalogModelOptions(s.choice.Provider)
 	note := ""
-	if s.choice.ChatGPTOAuth {
+	if s.choice.discoveredModels() {
 		options = discoveredModelOptions(s.records)
 		if len(options) == 0 {
 			note = "This account returned no selectable models; enter a model ID."
@@ -825,7 +953,7 @@ func (s *llmSetup) pickModel() (bool, error) {
 			return false, err
 		}
 		var record *turn.ModelRecord
-		if s.choice.ChatGPTOAuth {
+		if s.choice.discoveredModels() {
 			record = discoveredRecord(s.records, model)
 		}
 		params, ok, err := promptReasoningEffort(s.cfg, s.choice, model, record, s.effortAnswer())

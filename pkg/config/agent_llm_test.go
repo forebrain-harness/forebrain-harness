@@ -301,3 +301,65 @@ func TestPromoteMatchingLLMProviderExpandsModelsList(t *testing.T) {
 		t.Fatalf("missing pair changed the provider list")
 	}
 }
+
+// TestCredentialBackedProvidersSkipAPIKey pins the three providers whose
+// credential is a file this machine holds rather than an api_key in
+// configuration. They must validate with no api_key, and every other provider
+// must still require one — the exemption exists so an OpenCode login, not a
+// mounted secret, is what makes those rows complete.
+func TestCredentialBackedProvidersSkipAPIKey(t *testing.T) {
+	t.Parallel()
+	const baseURL = "https://opencode.ai/inference"
+	cases := []struct {
+		name      string
+		provider  string
+		baseURL   string
+		apiKey    string
+		wantOK    bool
+		wantField string
+	}{
+		{name: "opencode without key", provider: "opencode", baseURL: baseURL, wantOK: true},
+		{name: "opencode-go without key", provider: "opencode-go", baseURL: baseURL + "/go", wantOK: true},
+		{name: "opencode still needs base_url", provider: "opencode", baseURL: "", wantField: "base_url"},
+		{name: "opencode-go still needs base_url", provider: "opencode-go", wantField: "base_url"},
+		{name: "chatgpt unchanged", provider: "chatgpt", baseURL: "https://chatgpt.com/backend-api/codex", wantOK: true},
+		{name: "unknown provider still needs key", provider: "openai", baseURL: baseURL, wantField: "api_key"},
+		{name: "known provider with key", provider: "openai", baseURL: baseURL, apiKey: "sk-test", wantOK: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := MainAgentLLMValidation{Provider: tc.provider, Model: "some-model", BaseURL: tc.baseURL, APIKey: tc.apiKey}
+			if got := v.Complete(); got != tc.wantOK {
+				t.Fatalf("Complete() = %v, want %v (missing=%v)", got, tc.wantOK, v.MissingFields())
+			}
+			missing := v.MissingFields()
+			if tc.wantOK {
+				if len(missing) != 0 {
+					t.Fatalf("MissingFields() = %v, want none", missing)
+				}
+				return
+			}
+			if len(missing) != 1 || missing[0] != tc.wantField {
+				t.Fatalf("MissingFields() = %v, want [%s]", missing, tc.wantField)
+			}
+		})
+	}
+}
+
+// TestCredentialBackedProviderMatchingIsCaseInsensitive guards the two call
+// sites that read a hand-written config: the exemption must not depend on how
+// the provider name was typed.
+func TestCredentialBackedProviderMatchingIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"opencode", "OpenCode", " OPENCODE-GO ", "opencode-go", "ChatGPT"} {
+		if !credentialsBackedProvider(provider) {
+			t.Fatalf("credentialsBackedProvider(%q) = false, want true", provider)
+		}
+	}
+	for _, provider := range []string{"", "openai", "opencode-go-", "opencode2"} {
+		if credentialsBackedProvider(provider) {
+			t.Fatalf("credentialsBackedProvider(%q) = true, want false", provider)
+		}
+	}
+}

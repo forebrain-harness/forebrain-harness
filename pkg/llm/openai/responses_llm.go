@@ -81,7 +81,9 @@ func NewResponsesLLMWithWebSearchCache(apiKey, baseURL, model string, maxTokens 
 	transport = &responsesSSEFrameFilter{next: transport}
 	transport = &responsesContentTypeFixer{next: transport}
 	transport = llm.WrapHTTPTransport(transport)
-	transport = &suppressUserAgentRoundTripper{next: transport}
+	if !ownsUserAgent(authTransport) {
+		transport = &suppressUserAgentRoundTripper{next: transport}
+	}
 	if authTransport != nil {
 		transport = roundTripperWithBase(authTransport, transport)
 	}
@@ -240,6 +242,24 @@ func (rt *nativeWebSearchRequestRewriter) RoundTrip(req *http.Request) (*http.Re
 
 type baseTransportSetter interface {
 	SetBase(http.RoundTripper)
+}
+
+// UserAgentOwner is implemented by an injected auth transport that installs its
+// own User-Agent. The responses chain blanks the agent by default — the
+// ChatGPT/Codex backend expects no UA — but a gateway that admits clients by
+// the agent they announce loses that admission when the header is blanked, so a
+// transport that owns the header keeps it.
+type UserAgentOwner interface {
+	OwnsUserAgent() bool
+}
+
+// ownsUserAgent reports whether an injected auth transport installs the
+// User-Agent itself and must therefore be left visible on the wire. A nil
+// transport, or one that says nothing about the header, keeps the Codex
+// default of sending none.
+func ownsUserAgent(authTransport http.RoundTripper) bool {
+	owner, ok := authTransport.(UserAgentOwner)
+	return ok && owner.OwnsUserAgent()
 }
 
 func roundTripperWithBase(auth, base http.RoundTripper) http.RoundTripper {
