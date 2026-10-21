@@ -375,23 +375,142 @@ func restoreSecretValues(dst, src reflect.Value) {
 }
 
 // restoreSliceSecretsWithIdentity matches dst slice elements to src by
-// structural identity (equal non-secret fields), falling back to positional
-// index. This prevents secret swaps when llm_providers are reordered.
+// structural identity (equal non-secret fields), falling back to the element in
+// the same position only when the two name the same secret owner. This prevents
+// secret swaps when llm_providers are reordered, stops an entry that landed in
+// another provider's slot from being handed that provider's key, keeps a
+// login-backed entry keyless once a write cleared it, and drops a reference the
+// configuration itself attributes to another provider.
 func restoreSliceSecretsWithIdentity(dst, src reflect.Value) {
 	for i := 0; i < dst.Len(); i++ {
 		dstItem := dst.Index(i)
 		// Try to find a src element with matching non-secret identity
 		srcItem := findMatchingSourceItem(dstItem, src)
+		if !srcItem.IsValid() && i < src.Len() && sameSecretOwner(dstItem, src.Index(i)) {
+			// Fall back to positional only for the same credential owner
+			srcItem = src.Index(i)
+		}
+		if keyClearedByWrite(dstItem) || foreignProviderKey(dstItem, srcItem, src) {
+			// The key must go: either the write path removed it on purpose, or
+			// it names another provider's key. restoreSecretValues leaves a
+			// value that is already a ${ENV} reference in place, which is
+			// right for a key the user keeps and wrong for one that must go,
+			// so the field is emptied here rather than left to the restore.
+			clearProviderAPIKey(dstItem)
+			srcItem = reflect.Zero(dstItem.Type())
+		}
 		if !srcItem.IsValid() {
-			// Fall back to positional if no match found
-			if i < src.Len() {
-				srcItem = src.Index(i)
-			} else {
-				srcItem = reflect.Zero(dstItem.Type())
-			}
+			srcItem = reflect.Zero(dstItem.Type())
 		}
 		restoreSecretValues(dstItem, srcItem)
 	}
+}
+
+// sameSecretOwner reports whether the positional pair names the same credential
+// owner, so restoring a secret between them cannot hand one provider's key to
+// another. The provider name is the owner: an entry whose model or base_url
+// changed in place still owns the key it had, while a provider inserted at (or
+// shifted into) a slot that used to hold a different provider owns nothing there
+// and must start without a key. Elements of any other type have no owner this
+// function can name, so they are never paired positionally.
+func sameSecretOwner(dst, src reflect.Value) bool {
+	d, ok := providerEntryOf(dst)
+	if !ok {
+		return false
+	}
+	s, ok := providerEntryOf(src)
+	if !ok {
+		return false
+	}
+	dp, sp := strings.TrimSpace(d.Provider), strings.TrimSpace(s.Provider)
+	return dp != "" && sp != "" && strings.EqualFold(dp, sp)
+}
+
+// providerEntryOf reads a slice element as an AgentLLMProviderConfig and
+// reports false for every other element type: the secret-bearing slices this
+// package restores are not all provider lists, and only a provider entry has an
+// owner or a key that can be attributed.
+func providerEntryOf(v reflect.Value) (AgentLLMProviderConfig, bool) {
+	if !v.IsValid() || !v.CanInterface() {
+		return AgentLLMProviderConfig{}, false
+	}
+	c, ok := v.Interface().(AgentLLMProviderConfig)
+	return c, ok
+}
+
+// clearProviderAPIKey empties the entry's api_key so a key the write path
+// dropped stays dropped.
+func clearProviderAPIKey(v reflect.Value) {
+	f := v.FieldByName("APIKey")
+	if f.IsValid() && f.CanSet() && f.Kind() == reflect.String {
+		f.SetString("")
+	}
+}
+
+// keyClearedByWrite reports whether the entry's key was removed on purpose by
+// the write that produced this configuration — /connect configuring the
+// provider from a login. An empty api_key alone cannot say that: it is also
+// what an entry looks like when its ${ENV} reference on disk resolved to
+// nothing, and that reference must survive the save.
+func keyClearedByWrite(v reflect.Value) bool {
+	c, ok := providerEntryOf(v)
+	return ok && c.APIKeyCleared
+}
+
+// providerKeyEnvName is the variable name the write paths give a provider's
+// key: UPPERCASE(provider) with dashes as underscores, then _API_KEY. It
+// mirrors pkg/process.ProviderKeyEnvMap, which is what actually names the
+// variable when a key is stored; pkg/config cannot import it (pkg/process
+// imports this package), so the two spellings have to be kept in step here.
+func providerKeyEnvName(provider string) string {
+	p := strings.ReplaceAll(strings.ToUpper(strings.TrimSpace(provider)), "-", "_")
+	return p + "_API_KEY"
+}
+
+// foreignProviderKey reports whether the key this save would write for a
+// login-backed entry is a ${ENV} reference another provider in the same list
+// declares as its own: that provider's row carries the same reference, and the
+// name is the variable the write path gives that provider. Such a reference is
+// a secret lent across providers — how /connect used to hand a displaced
+// provider's key to a new entry — and a login-backed entry must never keep one,
+// because for OpenCode a configured key outranks the login file in the client's
+// resolution order, which is what produced the 401. Nothing else is touched: a
+// custom name, a token two providers share under a name neither owns, and a
+// reference nobody claims all stay, so the check removes only what the
+// configuration itself attributes to another provider.
+func foreignProviderKey(dstItem, srcItem, src reflect.Value) bool {
+	dst, ok := providerEntryOf(dstItem)
+	if !ok || !CredentialsBackedProvider(dst.Provider) {
+		return false
+	}
+	srcEntry, ok := providerEntryOf(srcItem)
+	if !ok {
+		return false
+	}
+	ref := strings.TrimSpace(srcEntry.APIKey)
+	name := envNameOfReference(ref)
+	if name == "" || name == providerKeyEnvName(dst.Provider) {
+		return false
+	}
+	for j := 0; j < src.Len(); j++ {
+		other, ok := providerEntryOf(src.Index(j))
+		if !ok || strings.EqualFold(strings.TrimSpace(other.Provider), strings.TrimSpace(dst.Provider)) {
+			continue
+		}
+		if strings.TrimSpace(other.APIKey) == ref && providerKeyEnvName(other.Provider) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// envNameOfReference returns the variable a ${NAME} reference names, or "" for
+// anything else.
+func envNameOfReference(ref string) string {
+	if !isSingleEnvReference(ref) {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(ref), "${"), "}")
 }
 
 // findMatchingSourceItem searches src slice for an element whose non-secret

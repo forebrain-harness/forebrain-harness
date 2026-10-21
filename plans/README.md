@@ -4,6 +4,39 @@
 
 ## 最新审核信息
 
+- **2026-10-21 新增 `096`（web 表单 / 弹窗 / 抽屉全量迁到 shadcn-vue，未开始执行）**：由 owner 当日三条裁决产出 ——
+  「所有的表单组件都必须使用 shadcn-vue 的原生表单组件，必须全部替换」（同轮选「连按钮也换」）、
+  「所有抽屉和弹窗必须改成 shadcn-vue 原生组件」、「子代理抽屉和工作台抽屉必须新增拖拽左侧边框上的把手自定义伸缩抽屉宽度」。
+  基线 `ca8ce5b` 的工作区。实测面（2026-10-21 复核后的数字）：**132** 处原生控件（composer 除外）、
+  **385** 处 `forebrain-btn` 落在非 `Button` 标签上（**60** 个文件；其中 377 处是原生 `<button>`、8 处是库里已有的
+  `ConfirmationAction`，后者不是缺陷、门禁豁免）、**24** 个文件用 `ForebrainModal`、**4** 个用 `ForebrainDrawer`、
+  **10** 份 e2e 共 **22** 处真调用 `selectOption`（另 1 处是注释里那个词）、**8** 处单测断言 `HTMLSelectElement`、
+  **5** 处 `v-model.number`、**73** 处 `<label>` 包裹控件。分 12 批（**没有批次 9**，切分留下的空号），
+  推荐序 **10 → 0 → 1…8 → 11 → 12**（先换弹窗外壳，风险最高、此刻表单还没动；拖宽度最后；收尾门禁永远最后，
+  批次 12 是唯一一次全量 e2e）。
+  - **两个已实测的地基事实**写进了计划：① 构建产物里 `@layer` 出现 0 次（Tailwind 3.4 展开），`.forebrain-field`(62117)
+    与 `.forebrain-btn`(46261) 都排在 `.h-9`(15373) 之后 —— 所以设计类能压过**普通**工具类；
+    ② 库的 class 按 v4 写、项目编译 3.4，`max-h-(--var)` / `outline-hidden` / `*:` 在 3.4 下**不产出任何 CSS**
+    —— `SelectContent` 的 `max-h` 就是这样让下拉长到 68×32px、真机上完全点不到（已在上一轮修复）。
+  - **2026-10-21 `review-plan` 冷读复核后的三处收紧**（源码未改，只改计划文本）：
+    ① 「设计类排在后面就赢」**只对普通工具类成立**——`SelectTrigger` 的 `data-[size=default]:h-9` 是 0,2,0
+    （产物偏移 90470）、`Button` 默认 variant 塞 `bg-primary h-9` 且 `.forebrain-btn` 不写 height/background，
+    所以 34px 下拉写 `!h-[34px]`、普通按钮写 `h-auto` + 配色抵消；焦点态接受库的 3px ring（登记为裁决例外）；
+    ② 批次 10 的「类名一个都不许改名 / 测试一条都不许改」**只对 `.forebrain-modal`/`.forebrain-drawer` 成立**：
+    `.forebrain-modal-mask` 在库结构里无处安放（`DialogContent` 裸渲染 `DialogOverlay`，遮罩与内容成兄弟），
+    因此明确允许改 3 行单测取 DOM 的方式 + `e2e/radius.spec.ts:32` 的排除选择器 1 行，并给出
+    `@escape-key-down`/`@interact-outside` 两个 `preventDefault`（否则一次 Escape emit 两次 close）；
+    ③ 补齐 7 个「无页面归属」控件（`skills/SkillsTable`、`skills/InstallDialogs`、`memory/MemoryFilesPanel`、
+    `editor/FrontmatterFields`）到批次 12，并按真实引用关系补全各批 e2e 清单（批次 6 漏的 4 份审批/消息卡 spec、
+    批次 11 漏的 6 份 `chat-workbench` spec 等）。
+  - **owner 已裁定的两处形态**：遮罩型弹窗/抽屉换成库的 `Dialog`/`Sheet`，但**外壳组件保留**（24+4 个调用点不改，
+    栈规则与焦点回还由 `modalStack` 统一）；工作台(340px)与子代理面板(440px) **保持内嵌、只加左缘把手**，
+    宽度**本会话有效**（刷新回设计值，与表格列宽同一套规则）。
+  - **一处与设计稿的有意偏离**（已记录、不许修回去）：设计稿的复选框是原生 15px，owner 的裁决覆盖它，
+    库的 `Checkbox` 是 16px 方框；其余控件迁移后必须与今天逐像素一致（除上面登记的两条例外：
+    焦点由库的 ring 提供、库默认尺寸类必须用 `!`/`h-auto` 抵消）。
+  - 尚未执行（计划已冷读复核并收紧，等 owner 批准开跑）；状态见下表。
+
 - **2026-10-21 `review-plan` 处理 `010`（结论：仍有价值，已重写；未改源码）**：在 HEAD `7742bde` 上把计划**重新取证**了一遍，
   不是只对行号。四条判据都是实测的（`go test -overlay` 把测试文件塞进未改动的包，工作树为零改动）：
   - **两处危害都仍在**：plan 模式下换写法写计划文件 → `plan mode: write blocked …`；`exit_plan_mode` 批准后写实施记录
@@ -421,7 +454,8 @@
 | [092-image-heal-on-the-compaction-chain](092-image-heal-on-the-compaction-chain.md) | 图像自愈没装在压缩/总结链上 ⇒ 含被拒图片的会话压不动、历史涨到撞窗口；头解析失败的坏图被原样上送（注释说"后面的 decode 会报"但那条路径没有 decode）；末档重编码把缩放系数硬报成 8 | Bug Fix | DONE | P2 | M | MED |
 | [093-dead-code-from-this-batch](093-dead-code-from-this-batch.md) | 删掉从不挂载的 `PendingActionsPanel`（与 `ApprovalCard` 重复 ~200 行、已漂移、还带 6 条绿测试）、无人读的 `ApprovalFacts.path`、无人 inject 的 `FileTreeFolderKey`、从不 emit 的 `activate`、3 对零引用文案键与 `reviewModelLabel`；顺带修中文界面里的 `暂无 live agents`、硬编码英文 aria-label、TUI 空数组参数只印标签 | Tech Debt / i18n | DONE | P3 | S | LOW |
 | [094-remember-image-refusal-per-session-and-model](094-remember-image-refusal-per-session-and-model.md) | provider 拒图不再静默也不再白送：**当场**发一条 `image_rejected` run event（两端各一行，live 与回放逐字相同，固定 id `image-rejected:<run>` 保证一轮只一条），并把这次拒绝记进会话（owner 2026-10-21 裁决：**粗档 provider+model**、**落库**，schema v15→v16 新增 `fb_session_image_refusals`），既有 `ImageTurnRefusal` 在"请求确实会带图"时提前拦下并返回 `ImageRejectedCode`；web 一个提示块按 `unsupported`/`rejected`/`remembered` 三种措辞。终止永久 2× 请求 | Bug Fix / Cost | DONE | **P1** | M–L | MED |
-| [095-modelsdev-reasoning-options](095-modelsdev-reasoning-options.md) | `models.json` **按上游最新数据整体刷新**（362→**732** 条：canonical 568 + 注入的 opencode 131 / opencode-go 33；文件 500KB→941KB；`scripts/update-models-asset.sh` 唯一入口，键排序后每次 diff 只落变化条目）；**TUI 与 web 的推理强度只取它的 `reasoning_options`**（308 条带 options；删 `ReasoningEffortLevels` 四档兜底与 opencode 的 50 条手抄表；`anthropic-sdk-go v1.80` 已支持 `xhigh` 故不裁；toggle/budget 或上游无数据的不出页）；解析上游 `type`，把 **63 条非 chat**（whisper / gpt-image / veo…）从选择器投影里滤掉（今天已漏 30 条），provider 推断跳过登录型 provider；**home 的 `models.json`：缺失时 `Install` 写一份完整副本、已存在时一个字节都不碰**，载入时它按字段覆盖 shipped 基底 （用户改的永远赢；老副本没有的 `type`/`reasoning_options` 自动由 shipped 补上，所以新能力到达存量安装而无需改写用户文件）。ChatGPT 保留账号后端返回的档位 | Feature / Data | TODO | **P1** | L | MED–HIGH |
+| [095-modelsdev-reasoning-options](095-modelsdev-reasoning-options.md) | `models.json` **按上游最新数据整体刷新**（362→**732** 条：canonical 568 + 注入的 opencode 131 / opencode-go 33；文件 500KB→941KB；`scripts/update-models-asset.sh` 唯一入口，键排序后每次 diff 只落变化条目）；**TUI 与 web 的推理强度只取它的 `reasoning_options`**（308 条带 options；删 `ReasoningEffortLevels` 四档兜底与 opencode 的 50 条手抄表；`anthropic-sdk-go v1.80` 已支持 `xhigh` 故不裁；toggle/budget 或上游无数据的不出页）；解析上游 `type`，把 **63 条非 chat**（whisper / gpt-image / veo…）从选择器投影里滤掉（今天已漏 30 条），provider 推断跳过登录型 provider；**home 的 `models.json`：缺失时 `Install` 写一份完整副本、已存在时一个字节都不碰**，载入时它按字段覆盖 shipped 基底 （用户改的永远赢；老副本没有的 `type`/`reasoning_options` 自动由 shipped 补上，所以新能力到达存量安装而无需改写用户文件）。ChatGPT 保留账号后端返回的档位 | Feature / Data | DONE | **P1** | L | MED–HIGH |
+| [096-web-form-controls-shadcn-vue](096-web-form-controls-shadcn-vue.md) | **web 端表单控件、遮罩弹窗、遮罩抽屉全量改用 shadcn-vue 原生组件**（owner 2026-10-21 三条裁决）：132 处原生 `<input>`/`<select>`/`<textarea>` + 385 处非 `Button` 标签上的 `forebrain-btn`（60 文件；其中 8 处是库里已有的 `ConfirmationAction` → 门禁起步 **377 处 / 59 文件**）→ 库的 `Input/Select/Textarea/Checkbox/Switch/RadioGroup/Button`；`ForebrainModal`→`Dialog`、`ForebrainDrawer`→`Sheet`（**外壳保留**，24+4 个调用点、栈规则、焦点回还不变；`.forebrain-modal-mask` 在库结构里无处安放，明确允许改 1 行 `radius.spec` 排除选择器 + 3 行单测取 DOM 的方式）；**新增**工作台(340px)/子代理面板(440px) 左缘把手拖宽度（本会话有效，双击复位，方向键 ±16px）。12 批（**没有批次 9**），推荐序 **10→0→1…8→11→12**；地基是实测过的「设计类排在**普通**工具类之后」（`forebrain-field` 62117 > `.h-9` 15373；但 `SelectTrigger` 的 `data-[size=default]:h-9` 是 0,2,0 → 34px 下拉写 `!h-[34px]`，`Button` 默认 variant 塞 `bg-primary h-9` → 普通按钮要 `h-auto` + 配色抵消）、reka 的空串哨兵、Tailwind v4-only 语法；`selectValue.ts`/`usePanelWidth.ts` 各带自测，批次 12 是唯一一次全量 e2e | Migration / UI | TODO（**计划已冷读复核并收紧，未执行**；`plans/096-…md`） | **P2** | L | MED–HIGH |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 
@@ -449,6 +483,12 @@
 推荐按以下顺序执行：
 
 ```
+--- 2026-10-21 web 表单 / 弹窗 / 抽屉迁到 shadcn-vue（096，一份计划 12 批，不提交、不建 worktree）---
+096-web-form-controls-shadcn-vue (按计划内的批次序 10→0→1…8→11→12 执行；批次 10 先做——它换的是每个弹窗的外壳，
+  风险最高且此刻表单还没迁，出回归只能是它；批次 0 是全部表单批次的前置；批次 11 排在 8 之后，与批次 6 共用 spec；
+  批次 12 的收尾门禁永远最后。每批自带 verify 只跑与本批改动有引用关系的那几份 spec（清单已按实测引用关系补全），
+  只有批次 12 跑全量 e2e；批次 10 有一条 STOP 例外线：允许改 1 行 radius.spec 的排除选择器 + 3 行单测取 DOM 的方式
+  —— 除此之外测试断言一条不许动；批次 10 动手前先跑一次 providers-keys 存基线截图，供人眼对照)
 --- 2026-10-19 分支审计（均在工作区里叠加，不提交、不建 worktree）---
 080-gone-custom-subagent-fails-closed (独立；改 pkg/run 与 pkg/tool；依赖工作区里未提交的 079；最好赶在 079 提交前)
 081-project-consent-binds-to-the-shown-entry (独立；079 落地后再做——同改 frontend/src/lib/api.ts；改 pkg/process、pkg/lsp、pkg/gateway 与两个前端组件)

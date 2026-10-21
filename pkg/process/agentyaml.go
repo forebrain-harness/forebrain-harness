@@ -116,6 +116,18 @@ func applyAgentLLMFields(cfg *appcfg.Root, agentName, provider, model, apiKey, b
 	}
 	if k := strings.TrimSpace(apiKey); k != "" {
 		target.APIKey = k
+		target.APIKeyCleared = false
+	} else if appcfg.CredentialsBackedProvider(p) {
+		// These providers authenticate with the login on this machine
+		// (opencode.json, auth.json), not with a key in the yaml. A key already
+		// on the entry belongs to whatever provider used this slot before — the
+		// credential the flow just replaced — and for OpenCode it outranks the
+		// login in the client's resolution order, so the fresh login would never
+		// be sent. ChatGPT's client ignores a key outright, which leaves only
+		// misleading foreign data; both are cleared here. The marker tells Save
+		// this emptiness is a decision, so it does not restore what is on disk.
+		target.APIKey = ""
+		target.APIKeyCleared = true
 	}
 	if u := strings.TrimSpace(baseURL); u != "" {
 		target.BaseURL = u

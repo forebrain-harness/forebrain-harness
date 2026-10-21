@@ -91,6 +91,12 @@ type AgentLLMProviderConfig struct {
 	APIPath  string           `yaml:"api_path,omitempty" json:"api_path,omitempty"`
 	Params   LLMRequestParams `yaml:"params,omitempty" json:"params,omitempty"`
 	Models   StringList       `yaml:"-" json:"-"`
+	// APIKeyCleared is a write-path marker, never configuration: the caller
+	// removed this entry's api_key on purpose — /connect configuring the
+	// provider from a login, where a key on the entry would outrank it — so
+	// Save must not restore the value still on disk. Runtime-only; it
+	// disappears with the next load.
+	APIKeyCleared bool `yaml:"-" json:"-"`
 }
 
 type AgentDefaults struct {

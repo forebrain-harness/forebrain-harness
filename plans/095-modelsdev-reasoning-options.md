@@ -511,7 +511,9 @@ func trimToClient(provider, model string, levels []string) []string {
 - `FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./pkg/... ./cmd/forebrain -count=1` 全绿
 - `CGO_ENABLED=1 go test -tags fts5 ./pkg/architecture/ -count=1` 绿；`scripts/package-graph.sh` 后
   `git status --porcelain pkg/architecture/testdata/graph.json` 为空
-- `python3 -c "import json;print(len(json.load(open('assets/models.json'))))"` → `732`
+- `python3 -c "import json;print(len(json.load(open('assets/models.json'))))"` → `750`
+  （计划时写的是 732：用计划用的 6,422,561 B 快照重跑仍得 732/568/63，上游在 2026-10-21 已增至
+  6,492,393 B → 586 canonical；②「最新数据」优先，见 Review 的执行记录）
 - `grep -c '"reasoning_options"' assets/models.json` ≥ 300
 - `grep -rn "ReasoningEffortLevels\|reasoningEffortOptions" pkg/ --include=*.go` → 0 命中
 - `grep -rn "Efforts \[\]string" pkg/llm/opencode/` → 0 命中（静态表不再持有档位）
@@ -521,9 +523,10 @@ func trimToClient(provider, model string, levels []string) []string {
   逐字节相同、home 里没有第二个新增文件；再改它一行、启动一次 → 该行仍在（字节与 mtime 不变）
 - **覆盖层可用（指令 ④）**：在临时 home 里写一份只含
   `{"zhipuai/glm-5.3-flash":{"reasoning_options":[{"type":"effort","values":["high"]}]}}` 的
-  `models.json`，启动进程后 `/model` 与 `GET /api/chat/sessions/:id/model` 都只出现 `high`
-  （单元测试 `TestOverlayAppliesToReasoningOptions` 先给绿灯；真机按 `scripts/acceptance/web_e2e.sh`
-  的 fake 模型流程跑一次）
+  `models.json`，进程读到的档位只出现 `high`（单元测试 `TestOverlayAppliesToReasoningOptions`
+  走 `InitGlobalCatalog` 的真实路径，网关/TUI 选项断言读同一合并结果）。
+  **不用 `scripts/acceptance/web_e2e.sh`**：它会构建前端、写 `pkg/gateway/dist/**`，与本计划的
+  Scope「不动 dist / 不跑 make ui」直接冲突（原稿这条自相矛盾，执行时按 Scope 处理）
 - **副本契约（指令 ⑤）的真机面**：全新 home 首次启动后 `ls $FOREBRAIN_HOME/models.json*` 只有一个文件；
   改动它的一行后重启，`shasum` 不变（我们没碰它）
 
@@ -620,3 +623,69 @@ home 的 `models.json` 在任何回退里都不受影响（我们从不改写已
 ③ ChatGPT 保留账号级数据（本会话）；④ **home 的 `models.json` 必须是用户可改的**（本会话）；
 ⑤ **缺失时 `Install` 必须写一份完整副本；已存在就一个字节都不碰**（本会话）；
 ⑥ `deepseek-v4-flash` 保留 override（本会话）；⑦ 先 review-plan 再派发（本会话）。
+
+## 执行记录（2026-10-21，verdict APPROVE）
+
+**隔离方式**（owner 当次裁决）：先把工作区那批未提交的 opencode/effort 改动提交为
+`9459287`（20 个文件，`chore: land provider catalog, opencode login and per-model effort plumbing on dev`），
+再从该 HEAD 建 detached worktree `/tmp/forebrain-095-wt` 派发执行者。改动全部留在 worktree，
+未 commit、未合入、未 push。
+
+**上游漂移实测**（计划的 732 与今天的 750 是同一份代码）：
+
+| 输入 | canonical | injected | 总条目 | 非 chat | 字节 |
+|---|---|---|---|---|---|
+| 计划用快照 `6,422,561 B` | 568 | 164 | **732** | 63 | 976,861 |
+| 执行当天 `6,492,393 B` | 586 | 164 | **750** | 69 | 992,959 |
+
+派生：带非空 options 的条目旧快照重跑得 **290**、今天 **291**（计划里的 308 偏高，按实测口径
+以生成器的统计行为准）；两种输入下 `empty=46` 不变。
+
+生成器两次重跑 `shasum` 相同（`23bf8bc7…`），与执行者产物逐字节一致。
+
+**实际落地**：`scripts/update-models-asset.sh`（新）、`assets/models.json`（750 条）、
+`pkg/llm/catalog.go`（`ReasoningOption`/`Kind`/`ReasoningKnown`/`Chat()`/`ReasoningEfforts`/
+`LoginBackedProvider`/`Load(base,overlay)`/`Install` 文档）、`pkg/turn/models.go`（聊天投影过滤、
+`ModelReasoningEfforts` 单一来源、`openCodeModelRecord` 先查 `models.json`）、
+`pkg/llm/anthropic`（`AcceptsEffort`/`EffortLevels`，含 `xhigh`）、`pkg/llm/opencode`（删 `Efforts` 列）、
+`pkg/tui/setup.go`（删本地四档）、`pkg/run/config.go`（推断跳过登录型 provider）、
+`pkg/process/{seed,runtime}.go`（注释）、`FOREBRAIN.md`、`scripts/install-assets.sh`、
+`pkg/architecture/testdata/graph.json`（重生成）与配套测试。
+
+**已批准的偏差**（均有证据，记录在案）：
+
+1. 条目 750 而非 732 —— 上游当日已增（上表）；`TestModelAssetCoversUpstream` 因此断言下限
+   （≥700 / ≥280 非空 options / ≥60 非 chat）+ 13 条精确样本 + 无未知档位值，避免下次合法刷新把
+   CI 打红；样本仍逐条钉死真实值。
+2. `anthropic/claude-haiku-4-5` 的 `reasoning_options` 是 `[{"type":"budget_tokens","min":1024}]`
+   而非计划 Step 1 写的 `[]`（计划 Step 6 的「只有 budget_tokens」才是对的）。
+3. 注入行 `id` 用 `provider/model`（providers 树里是裸 id），否则 `openCodeModelRecord` 的surface
+   判定失效。
+4. `TestEffortsForProtocolMatchesTheAnthropicClient` 改名为
+   `TestTheAnthropicClientSendsTheLevelsItAccepts`：Step 5 删掉白名单副本后原比较对象不存在，
+   新测试改为钉「客户端真正写进 `output_config.effort` 的集合」。
+5. 少量既有测试跟着真实数据改（都是本计划行为矩阵预测的变化）：`pkg/tui` 夹具补
+   `reasoning_options`、ChatGPT 手工输入不再出强度页、`pkg/run` 图片用例默认模型
+   `deepseek-chat`→`deepseek-v4-flash`（前者上游已转纯文本）、`TestInstall_ThenResolve`
+   的「Install 前 Resolve 必失败」改为「用 shipped 基底作答」。
+
+**review 发现并当轮修掉的两处缺陷**：
+
+1. `Resolve` 把 `loadCached` 的错误吞成「models.json not found」——用户手改坏一行 JSON 会被告知
+   文件不存在。改为 `errNoCatalog` 哨兵只覆盖「两边都没有」，其余错误原样返回，并给合并阶段的所有
+   失败加上 `overlay over base` 的路径前缀（新增 `TestResolveReportsABrokenOverlayPrecisely`、
+   `TestResolveRejectsANonObjectOverlayEntry`）。
+2. `trimToSendable` 按 provider 名判断，而 `pkg/run` 是按协议分派的
+   （`opencode.ProtocolAnthropic` 也走 Anthropic 客户端，客户端会静默丢掉不认识的档位）。
+   改为「provider 或协议命中 Anthropic 都过 `anthropic.AcceptsEffort`」
+   （新增 `TestAnthropicProtocolModelsOfferOnlySendableLevels`）。
+
+**未做 / 遗留**：
+
+- `budget_tokens` 仍无发送路径（计划 Out of scope）。
+- 原稿「用 `web_e2e.sh` 真机验收覆盖层」与本计划「不跑 `make ui`/不动 dist」冲突，已在上面的
+  done criteria 里改成引擎级证据；TUI 真机 `/model` 抽查可在落地后单独做。
+- `pkg/gateway TestGatewayApproveCancelsAnInFlightPlanReview` 是**既有** flake
+  （`TempDir RemoveAll … directory not empty`，重复跑约 25% 失败；该测试与网关生产代码都不在本计划
+  diff 里），未在本期修，另案处理。
+

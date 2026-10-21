@@ -1148,6 +1148,82 @@ func TestNewLLMFromYAMLOpenCodeCredentialChain(t *testing.T) {
 	})
 }
 
+// TestOpenCodeLoginTokenIsWhatLeavesAfterConnect is the end-to-end shape of the
+// reported 401: an OpenCode entry saved with no api_key, next to a provider that
+// has one, must reach the wire with the opencode.json login — never with the
+// neighbour's key. The saved file is fed straight into NewLLMFromYAML, so both
+// halves are the production ones: config.Save's secret restore and the client's
+// credential resolution.
+func TestOpenCodeLoginTokenIsWhatLeavesAfterConnect(t *testing.T) {
+	homeRoot := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", homeRoot)
+	t.Setenv("OPENCODE_API_KEY", "")
+	t.Setenv("DEEPSEEK_API_KEY", "sk-deepseek-fixture")
+
+	path := filepath.Join(homeRoot, "forebrain.yaml")
+	seed := `agents:
+  definitions:
+    main:
+      llm_providers:
+      - provider: deepseek
+        model: deepseek-chat
+        api_key: ${DEEPSEEK_API_KEY}
+        base_url: https://api.deepseek.com
+`
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := opencode.Save(opencode.DefaultPath(homeRoot), opencode.Credentials{
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+	}); err != nil {
+		t.Fatalf("save OpenCode login: %v", err)
+	}
+
+	cfg, err := appcfg.LoadPersisted(path)
+	if err != nil {
+		t.Fatalf("LoadPersisted: %v", err)
+	}
+	// The write /connect performs (pkg/process.applyAgentLLMFields, which this
+	// package cannot import: pkg/process depends on pkg/run): the login
+	// provider's entry carries no key and is promoted to the primary slot.
+	def := cfg.Agents.Definitions["main"]
+	def.LLMProviders = append([]appcfg.AgentLLMProviderConfig{{
+		Provider: "opencode-go",
+		Model:    "minimax-m3.1-flash-free",
+		BaseURL:  "https://opencode.ai/inference/go",
+	}}, def.LLMProviders...)
+	cfg.Agents.Definitions["main"] = def
+	if err := appcfg.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	saved, err := appcfg.LoadPersisted(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	entry := saved.Agents.Definitions["main"].LLMProviders[0]
+	if !strings.EqualFold(entry.Provider, "opencode-go") {
+		t.Fatalf("primary entry = %q, want opencode-go", entry.Provider)
+	}
+
+	srv, calls := openCodeGateway(t)
+	runOpenCodeClient(t, &LLMProviderYAML{
+		Provider: entry.Provider,
+		Model:    entry.Model,
+		APIKey:   entry.APIKey,
+		BaseURL:  srv.URL,
+	})
+	got := calls()
+	if len(got) != 1 {
+		t.Fatalf("requests = %+v, want exactly 1", got)
+	}
+	if got[0].Auth != "Bearer access-token" {
+		t.Fatalf("Authorization = %q, want the OpenCode login token", got[0].Auth)
+	}
+}
+
 // TestNewLLMFromYAMLOpenCodeHonorsConfiguredRoot keeps the proxy-mirror case
 // working: a user who points base_url at their own gateway keeps that root,
 // with the protocol path appended under it.
