@@ -14,7 +14,7 @@
       <span class="max-w-44 truncate">{{ label }}</span>
       <ChevronDown class="forebrain-chip-caret" aria-hidden="true" />
     </button>
-    <div v-if="open" class="forebrain-chip-menu left-0 w-72" role="listbox" :aria-label="t('chat.modelChipTitle')">
+    <div v-if="open" class="forebrain-chip-menu right-0 w-[260px] max-w-[calc(100vw-2rem)]" role="listbox" :aria-label="t('chat.modelChipTitle')">
       <div class="forebrain-chip-menu-cap">{{ t('chat.modelMenuTitle') }}</div>
       <button
         v-for="option in options"

@@ -1,8 +1,9 @@
 <template>
   <div class="bench-tab">
-    <!-- 1. Running agents: the card appears only while something is running. -->
+    <!-- 1. Running agents: the card is always drawn — an empty one says so,
+         because a card that vanishes leaves the reader wondering whether the
+         panel failed to load (prototype :4196). -->
     <AgentRosterPanel
-      v-if="records.length > 0 || error"
       :title="t('agents.liveTitle')"
       :records="records"
       :loading="loading"
@@ -262,7 +263,12 @@ function mcpLabel(server: McpServerRecord): string {
   const status = String(server.connStatus ?? '').toLowerCase()
   if (status === 'connected') return t('chat.benchMcpConnected', { count: server.toolCount ?? 0 })
   if (status === 'connecting') return t('chat.benchMcpConnecting')
-  if (status === 'error' || status === 'cancelled') return t('chat.benchMcpTimeout')
+  // Three different things, three different sentences: a server that never
+  // answered in time, one that failed to start, and one whose start was
+  // cancelled.
+  if (status === 'timeout') return t('chat.benchMcpTimeout')
+  if (status === 'error') return t('chat.benchMcpError')
+  if (status === 'cancelled' || status === 'canceled') return t('chat.benchMcpCancelled')
   return t('chat.benchMcpUnknown')
 }
 function compact(value?: number) {

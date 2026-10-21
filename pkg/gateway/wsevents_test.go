@@ -1505,6 +1505,52 @@ func TestHandleChatWSKeepsAMessageTheModelCannotTakeAndRefusesIt(t *testing.T) {
 	require.Len(t, rows, 2, "a resent request id must not store the message twice")
 }
 
+// TestHandleChatWSRefusalNamesTheRememberedRejection pins the second code: when
+// the catalog says nothing about the model, but this conversation already paid
+// for it refusing an image, the reply says that instead — and carries the
+// provider's own sentence, which is the part the reader can act on. The recovery
+// is the same one the catalog refusal points at.
+func TestHandleChatWSRefusalNamesTheRememberedRejection(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
+	seedWebImageConversation(t, ctx, sessions, "session-ws")
+	// A model the catalog does not know: nothing but the record can refuse it.
+	require.NoError(t, sessions.RecordImageRefusal(ctx, "session-ws", "acme", "vision-model", "unsupported image"))
+
+	cfg := appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
+		Primary:      true,
+		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "acme", Model: "vision-model", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
+	}}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sessions}, FileResolver: run.PathResolver{}}
+	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+
+	refused := refuseWebTurn(t, conn, "req-remembered", "continue")
+	require.Equal(t, "turn_refused", refused.Op)
+	data, ok := refused.Data.(map[string]any)
+	require.True(t, ok, "the refusal carries its facts: %+v", refused.Data)
+	require.Equal(t, "image_rejected_by_provider", data["code"])
+	require.Equal(t, "acme", data["provider"])
+	require.Equal(t, "vision-model", data["model"])
+	require.Equal(t, "unsupported image", data["reason"])
+	require.Contains(t, refused.Error, "already refused an image")
+	require.Contains(t, refused.Error, "provider said: unsupported image")
+	require.Contains(t, refused.Error, "/model")
+}
+
 // TestHandleChatWSRefusedImageMessageInABusySessionIsWithdrawn pins that a
 // refused message still cannot land in a conversation another surface is
 // running: the keep-without-a-run path asks the store first, and withdraws the

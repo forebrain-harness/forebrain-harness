@@ -254,6 +254,26 @@ func (g *compactRunGuard) prefill(key string, current func() int) int {
 	return entry.prefillTokens
 }
 
+// withImageHeal attaches the one retry a refused image gets: when the provider
+// rejects a request because of an image, the request is re-sent once with every
+// image degraded to a line of text.
+//
+// Both chains need it. The main chain is obvious; the summary chain is the one
+// that turns "a conversation with one unsendable image" into a dead end — a
+// compaction whose request is refused has no second way to ask, so the history
+// keeps growing until nothing fits and every later turn fails too.
+//
+// It is safe to attach to the summary chain because it changes nothing on the
+// success path: the wrapper calls inner with exactly the messages and tools it
+// was given, and only a rejected call is retried, with the degraded copy
+// belonging to that call alone. The stored conversation keeps its images.
+func withImageHeal(inner llm.LLM) llm.LLM {
+	if inner == nil {
+		return nil
+	}
+	return llm.Use(inner, llm.NewImageHeal())
+}
+
 func WrapRecoverableLLM(
 	inner llm.LLM,
 	snapshot func(context.Context) (json.RawMessage, bool),
@@ -266,7 +286,7 @@ func WrapRecoverableLLM(
 	// builds Result.Session): a provider that refuses an image gets one retry
 	// with that image degraded to text, and the degraded request is this call
 	// only — the transcript keeps its images.
-	inner = llm.Use(inner, llm.NewImageHeal())
+	inner = withImageHeal(inner)
 	inner = wrapBlankOutputRetryLLM(inner)
 	return recoverableLLM{
 		inner:       inner,

@@ -43,32 +43,22 @@ const formattedOutput = computed(() => {
 </script>
 
 <template>
+  <!-- The prototype's .tool-b: the call's own result, one column, the card's
+       own padding, never a second frame around the content. A failed call is
+       told apart by its header's state word and by the text's colour — a
+       "Result"/"Error" heading would only repeat what the header says. -->
   <div
     v-if="showOutput"
-    :class="cn('space-y-2 p-4', props.class)"
+    :class="cn('tool-body', props.class)"
     v-bind="$attrs"
   >
-    <h4
-      class="font-medium text-muted-foreground text-xs uppercase tracking-wide"
-    >
-      {{ props.errorText ? "Error" : "Result" }}
-    </h4>
-    <div
-      :class="
-        cn(
-          'overflow-x-auto rounded-md text-xs [&_table]:w-full',
-          props.errorText
-            ? 'bg-destructive/10 text-destructive'
-            : 'bg-muted/50 text-foreground',
-        )
-      "
-    >
-      <!-- Error text -->
-      <div v-if="errorText">
-        {{ props.errorText }}
-      </div>
+    <!-- Error text -->
+    <div v-if="errorText" class="tool-body-error">
+      {{ props.errorText }}
+    </div>
 
-      <!-- Output rendering based on type -->
+    <!-- Output rendering based on type -->
+    <template v-else>
       <CodeBlock
         v-if="isObjectOutput"
         :code="formattedOutput"
@@ -77,11 +67,46 @@ const formattedOutput = computed(() => {
       <MessageResponse
         v-else-if="isStringOutput"
         :content="formattedOutput"
-        class="px-3 py-2"
       />
       <div v-else>
         {{ props.output }}
       </div>
-    </div>
+    </template>
   </div>
 </template>
+
+<style scoped>
+.tool-body {
+  padding: 9px 11px;
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--forebrain-text);
+  /* A long result is read in place: bounded, and scrolled rather than cut. */
+  max-height: 208px;
+  overflow: auto;
+}
+
+.tool-body :deep(> :first-child) {
+  margin-top: 0;
+}
+
+.tool-body :deep(> :last-child) {
+  margin-bottom: 0;
+}
+
+.tool-body :deep(p) {
+  margin: 0;
+}
+
+.tool-body :deep(pre) {
+  border-radius: 6px;
+  max-height: 208px;
+  overflow: auto;
+}
+
+.tool-body-error {
+  color: var(--forebrain-danger);
+}
+</style>

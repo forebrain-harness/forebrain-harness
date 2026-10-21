@@ -2174,9 +2174,7 @@ func TestReaderEchoesEmptyDraftAfterPlainSubmit(t *testing.T) {
 // stale empty buffer would clear the attachment here instead.
 func TestOverlayAcceptKeepsComposerAttachmentThroughSeedEcho(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "small.png"), []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
-		t.Fatalf("write image: %v", err)
-	}
+	writeTinyPNG(t, filepath.Join(root, "small.png"))
 	setMentionRoot(root)
 	t.Cleanup(func() {
 		setMentionRoot("")

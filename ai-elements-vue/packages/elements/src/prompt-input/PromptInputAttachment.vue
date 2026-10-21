@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import type { HTMLAttributes } from 'vue'
 import type { AttachmentFile } from './types'
-import { Button } from '@repo/shadcn-vue/components/ui/button'
 import {
   HoverCard,
   HoverCardContent,
@@ -15,6 +14,9 @@ import { usePromptInput } from './context'
 const props = defineProps<{
   file: AttachmentFile
   class?: HTMLAttributes['class']
+  /** What the remove button says before the file's name, in the app's own
+   *  language ("Remove readme.md"); English when the caller says nothing. */
+  removeLabel?: string
 }>()
 
 const { removeFile } = usePromptInput()
@@ -34,38 +36,35 @@ function handleRemove(e: Event) {
 <template>
   <HoverCard :open-delay="0" :close-delay="0">
     <HoverCardTrigger as-child>
+      <!-- The prototype's .att (:755): one 26px chip, mono 11.5px on the alt
+           surface, its remove button always there — a control the reader looks
+           for does not appear only once the pointer finds it. -->
       <div
         :class="cn(
-          'group relative flex h-8 cursor-pointer select-none items-center gap-1.5 rounded-md border border-border px-1.5 font-medium text-sm transition-all hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50',
+          'group relative flex h-[26px] cursor-pointer select-none items-center gap-1.5 rounded-md border border-border bg-[var(--forebrain-bg-alt)] py-0 pl-2 pr-1 font-mono text-[11.5px] text-[var(--forebrain-text-2)] transition-colors hover:border-[var(--forebrain-divider-strong)] hover:text-[var(--forebrain-text)]',
           props.class,
         )"
       >
-        <div class="relative size-5 shrink-0">
-          <div class="absolute inset-0 flex size-5 items-center justify-center overflow-hidden rounded bg-background transition-opacity group-hover:opacity-0">
-            <img
-              v-if="isImage"
-              :src="file.url"
-              :alt="label"
-              class="size-5 object-cover"
-            >
-            <div v-else class="flex size-5 items-center justify-center text-muted-foreground">
-              <PaperclipIcon class="size-3" />
-            </div>
-          </div>
-
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            class="absolute inset-0 size-5 cursor-pointer rounded p-0 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 [&>svg]:size-2.5"
-            @click="handleRemove"
+        <div class="relative flex size-[13px] shrink-0 items-center justify-center overflow-hidden rounded-sm">
+          <img
+            v-if="isImage"
+            :src="file.url"
+            :alt="label"
+            class="size-[13px] object-cover"
           >
-            <XIcon />
-            <span class="sr-only">Remove</span>
-          </Button>
+          <PaperclipIcon v-else class="size-[13px] text-muted-foreground" />
         </div>
 
-        <span class="flex-1 truncate max-w-[150px]">{{ label }}</span>
+        <span class="max-w-[150px] truncate">{{ label }}</span>
+
+        <button
+          type="button"
+          class="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded border-0 bg-transparent p-0 text-muted-foreground hover:text-[var(--forebrain-text)]"
+          :aria-label="props.removeLabel ? `${props.removeLabel} ${label}` : `Remove ${label}`"
+          @click="handleRemove"
+        >
+          <XIcon class="size-3" />
+        </button>
       </div>
     </HoverCardTrigger>
 

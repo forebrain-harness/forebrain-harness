@@ -1,17 +1,14 @@
 <template>
   <Teleport to="body">
-    <div
-      v-if="open"
-      class="chat-drawer-backdrop"
-      @click="emit('close')"
-      @keydown.escape="emit('close')"
-    />
+    <!-- The drawer is a panel beside the rail, not a modal (prototype .drawer,
+         :660): no backdrop covers the menu bar, so the next page is one click
+         away and the menu bar keeps working while the list is open. -->
     <aside
       v-if="open"
       ref="drawerRef"
       class="chat-drawer"
       data-testid="chat-drawer"
-      role="dialog"
+      role="complementary"
       :aria-label="t('chatDrawer.title')"
       :style="{ left: `${railWidth}px` }"
       tabindex="-1"
@@ -19,7 +16,7 @@
     >
       <header class="chat-drawer-head">
         <span class="chat-drawer-title">{{ t('chatDrawer.title') }}</span>
-        <button type="button" class="chat-drawer-close" :aria-label="t('common.close')" @click="emit('close')">
+        <button type="button" class="chat-drawer-close" :aria-label="t('chatDrawer.collapse')" v-tip:bottom="t('chatDrawer.collapse')" @click="emit('close')">
           <X class="size-4" aria-hidden="true" />
         </button>
       </header>
@@ -29,13 +26,17 @@
         {{ t('chatDrawer.newChat') }}
       </button>
 
-      <input
-        v-model="query"
-        class="forebrain-field chat-drawer-search"
-        type="search"
-        :placeholder="t('chatDrawer.searchPlaceholder')"
-        :aria-label="t('chatDrawer.searchPlaceholder')"
-      />
+      <!-- The search is a field with its mark (prototype .d-search, :668). -->
+      <label class="chat-drawer-search">
+        <Search class="chat-drawer-search-icon" aria-hidden="true" />
+        <input
+          v-model="query"
+          class="chat-drawer-search-input"
+          type="search"
+          :placeholder="t('chatDrawer.searchPlaceholder')"
+          :aria-label="t('chatDrawer.searchPlaceholder')"
+        />
+      </label>
 
       <div class="chat-drawer-section">{{ t('chatDrawer.sessions') }}</div>
       <div class="chat-drawer-list">
@@ -80,13 +81,16 @@
           </button>
         </template>
       </div>
+      <!-- The one thing the list cannot say for itself (prototype .d-foot,
+           :4579): where these conversations come from. -->
+      <div class="chat-drawer-foot" data-testid="chat-drawer-foot">{{ t('chatDrawer.foot') }}</div>
     </aside>
   </Teleport>
 </template>
 
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
-import { Activity, Plus, X } from 'lucide-vue-next'
+import { Activity, Plus, Search, X } from 'lucide-vue-next'
 import { useChatSessions } from '@/composables/useChatSessions'
 import { useHeartbeats } from '@/composables/useHeartbeats'
 import { useI18n } from '@/locales'
@@ -161,12 +165,6 @@ watch(() => props.open, async (open) => {
 </script>
 
 <style scoped>
-.chat-drawer-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 45;
-  background: transparent;
-}
 .chat-drawer {
   position: fixed;
   z-index: 46;
@@ -187,9 +185,11 @@ watch(() => props.open, async (open) => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding: 12px 12px 8px 16px;
+  margin: -12px -12px 0;
 }
 .chat-drawer-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--forebrain-text);
   overflow: hidden;
@@ -230,8 +230,41 @@ watch(() => props.open, async (open) => {
   opacity: 0.6;
   cursor: default;
 }
+/* The prototype's .d-search (:668): one hairline around the field and its
+   mark, 8px corner, 6px by 9px of padding, 12.5px of text. */
 .chat-drawer-search {
-  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--forebrain-divider-strong);
+  border-radius: 8px;
+  padding: 6px 9px;
+  color: var(--forebrain-muted-text);
+  background: var(--forebrain-surface);
+}
+
+.chat-drawer-search-icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+.chat-drawer-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-size: 12.5px;
+  color: var(--forebrain-text);
+}
+
+.chat-drawer-foot {
+  flex: none;
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
+  border-top: 1px solid var(--forebrain-divider);
+  padding-top: 8px;
 }
 .chat-drawer-section {
   font-size: 11px;

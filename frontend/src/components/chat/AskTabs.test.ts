@@ -173,6 +173,101 @@ describe('AskTabs', () => {
     expect(wrapper.emitted('set-other')).toEqual([['范围', '只动 pkg/tui']])
   })
 
+  it('answers Esc with a cancel, which is the only thing the footer promises', async () => {
+    // Attached to the document, because the card takes the keyboard when it
+    // appears: that is what makes the footer's keys real without a click first.
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const wrapper = mount(AskTabs, {
+      attachTo: host,
+      props: {
+        questions: [
+          question({ id: '范围', prompt: '要动哪些范围？', header: '范围' }),
+          question({ id: '交付', prompt: '这次怎么交付？', header: '交付' }),
+        ],
+        answers: {},
+        others: {},
+        submitting: false,
+      },
+    })
+    await flushPromises()
+    const card = wrapper.find('[data-testid="ask-card"]')
+    expect(card.exists()).toBe(true)
+    expect(document.activeElement).toBe(card.element)
+
+    await card.trigger('keydown', { key: 'Escape' })
+    expect(wrapper.emitted('cancel') ?? []).toHaveLength(1)
+    // Cancel is not submit: the question is dropped, nothing is answered.
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    expect(wrapper.emitted('set-answer')).toBeUndefined()
+    wrapper.unmount()
+    host.remove()
+  })
+
+  it('moves between questions with the arrows the footer prints', async () => {
+    const { wrapper } = mountAsk([
+      question({ id: '范围', prompt: '要动哪些范围？', header: '范围' }),
+      question({ id: '交付', prompt: '这次怎么交付？', header: '交付' }),
+    ])
+    const card = wrapper.find('[data-testid="ask-card"]')
+    expect(wrapper.text()).toContain('要动哪些范围？')
+
+    await card.trigger('keydown', { key: 'ArrowRight' })
+    expect(wrapper.text()).toContain('这次怎么交付？')
+    expect(wrapper.find('[data-testid="ask-tab-1"]').attributes('aria-selected')).toBe('true')
+
+    await card.trigger('keydown', { key: 'ArrowLeft' })
+    expect(wrapper.text()).toContain('要动哪些范围？')
+
+    // The ends hold: one more either way stays on the question on screen.
+    await card.trigger('keydown', { key: 'ArrowLeft' })
+    expect(wrapper.text()).toContain('要动哪些范围？')
+    await card.trigger('keydown', { key: 'ArrowRight' })
+    await card.trigger('keydown', { key: 'ArrowRight' })
+    expect(wrapper.text()).toContain('这次怎么交付？')
+  })
+
+  it('leaves the arrows inside the「其他」field to the caret', async () => {
+    const { wrapper } = mountAsk([
+      question({ id: '范围', prompt: '要动哪些范围？', header: '范围' }),
+      question({ id: '交付', prompt: '这次怎么交付？', header: '交付' }),
+    ])
+    await wrapper.find('[data-testid="ask-other"]').trigger('click')
+    const input = wrapper.find('[data-testid="ask-other-input"]')
+    await input.setValue('只动 pkg/tui')
+
+    // Typing in the field: a left arrow belongs to the text, so the card stays
+    // on its own question.
+    await input.trigger('keydown', { key: 'ArrowLeft' })
+    await input.trigger('keydown', { key: 'ArrowRight' })
+    expect(wrapper.text()).toContain('要动哪些范围？')
+    expect(wrapper.text()).not.toContain('这次怎么交付？')
+  })
+
+  it('hands「和它聊聊」to the caller instead of printing it as text', async () => {
+    const { wrapper } = mountAsk([question({ id: '范围', prompt: '要动哪些范围？', header: '范围' })])
+    const chat = wrapper.find('[data-testid="ask-chat-about"]')
+    // It is a real control now, not a span the reader can only look at.
+    expect(chat.element.tagName).toBe('BUTTON')
+    expect(chat.text()).toBe('和它聊聊')
+    await chat.trigger('click')
+    expect(wrapper.emitted('chat-about')).toHaveLength(1)
+  })
+
+  it('prints no progress count on the review screen, where there is none', async () => {
+    const { wrapper } = mountAsk([
+      question({ id: '补充', prompt: '还要补充什么？', header: '补充', allowMultiple: true }),
+    ])
+    expect(wrapper.text()).not.toContain('/1')
+    await wrapper.find('[data-testid="ask-tab-submit"]').trigger('click')
+    expect(wrapper.find('[data-testid="ask-review"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('/')
+    // The review is reached from the Submit tab only: the arrows do not carry
+    // the reader out of it.
+    await wrapper.trigger('keydown', { key: 'ArrowLeft' })
+    expect(wrapper.find('[data-testid="ask-review"]').exists()).toBe(true)
+  })
+
   it('sends the engine the same payload the flat form sent, through the real composable', async () => {
     const answered: { actionId: string; body: unknown }[] = []
     vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([

@@ -156,6 +156,27 @@ func (env *Environment) RunnerForSession(ctx context.Context, sessionID string) 
 	return env.pool.RunnerForSession(ctx, sessionID)
 }
 
+// BoundRunnerForSession answers what RunnerForTurn would pick for this
+// session without building anything: the pooled project runner once the first
+// turn has created it, the base Runner for a conversation with no project.
+// ok is false while the conversation's project runner does not exist yet, so
+// a read can resolve the model from the configuration instead of guessing.
+func (env *Environment) BoundRunnerForSession(ctx context.Context, sessionID string) (*run.Runner, bool) {
+	if env == nil {
+		return nil, false
+	}
+	if env.SQL == nil || env.Deps.SessionStore == nil {
+		return env.Runner, env.Runner != nil
+	}
+	env.poolOnce.Do(func() {
+		env.pool = NewRunnerPool(env, 0)
+	})
+	if env.pool == nil {
+		return env.Runner, env.Runner != nil
+	}
+	return env.pool.BoundRunnerForSession(ctx, sessionID)
+}
+
 // ErrSessionHasNoProject reports a turn that cannot start: its conversation
 // belongs to no project, and this process has none of its own to run it on.
 var ErrSessionHasNoProject = errors.New("session has no project")
@@ -562,6 +583,41 @@ func (p *RunnerPool) RunnerForSession(ctx context.Context, sessionID string) *ru
 		return base
 	}
 	return entry.runner
+}
+
+// BoundRunnerForSession reports the Runner this session's next turn will use
+// without creating one: the pooled entry of the session's project when that
+// entry already exists, the base runner for a conversation with no project —
+// the same runner RunnerForTurn returns for it in a process that serves its
+// own launch project. ok is false when the conversation has a project whose
+// runner the first turn will build, so a caller that must answer now has to
+// resolve the model from the configuration instead.
+//
+// It exists so a read ("what model does this conversation run on") can answer
+// with the runner the turn actually uses, instead of the base runner's
+// startup pin. It deliberately does not touch the LRU, the session bindings or
+// the entry bookkeeping: a read must not change what the pool holds.
+func (p *RunnerPool) BoundRunnerForSession(ctx context.Context, sessionID string) (*run.Runner, bool) {
+	if p == nil || p.env == nil {
+		return nil, false
+	}
+	base := p.env.Runner
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || p.projects == nil {
+		return base, base != nil
+	}
+	project, ok, err := p.projects.ProjectForSession(ctx, sessionID)
+	if err != nil || !ok {
+		return base, base != nil
+	}
+	key := poolKey(p.env.Deps.AgentName, project)
+	p.mu.Lock()
+	entry := p.entries[key]
+	p.mu.Unlock()
+	if entry == nil || entry.runner == nil {
+		return nil, false
+	}
+	return entry.runner, true
 }
 
 // RunnerForTurn resolves the Runner one conversation's turn must run on,

@@ -72,11 +72,16 @@ function mountTab() {
 describe('OverviewTab', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('draws no running-agents card when nothing is running', async () => {
+  it('draws the running-agents card even when nothing is running', async () => {
     stubApi()
     const wrapper = mountTab()
     await flush()
-    expect(wrapper.text()).not.toContain('运行中的代理')
+    // The card says it is empty rather than disappearing: a card that vanishes
+    // leaves the reader wondering whether the panel failed to load.
+    expect(wrapper.text()).toContain('运行中的代理')
+    // The empty line is Chinese in a Chinese interface; it used to read
+    // "暂无 live agents", English words inside a Chinese sentence.
+    expect(wrapper.text()).toContain('暂无运行中的代理')
     // The summary cards that always have something to say are there.
     expect(wrapper.text()).toContain('用量')
   })

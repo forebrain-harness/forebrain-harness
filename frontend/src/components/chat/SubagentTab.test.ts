@@ -4,7 +4,7 @@ import { nextTick } from 'vue'
 
 import tip from '@/directives/tip'
 import { forebrainApi, type SlashCommandRecord } from '@/lib/api'
-import { setLocale } from '@/locales'
+import { setLocale, t } from '@/locales'
 import type { SubagentTranscript } from '@/composables/useChatStream'
 import ForebrainPromptTextarea from '@/components/ForebrainPromptTextarea.vue'
 import SubagentRunPill from './SubagentRunPill.vue'
@@ -83,7 +83,8 @@ describe('SubagentTab', () => {
     // The bar carries the "+", the model and context pill, and send.
     expect(wrapper.find('[data-testid="composer-plus"]').exists()).toBe(true)
     expect(wrapper.findComponent(SubagentRunPill).exists()).toBe(true)
-    expect(wrapper.find('button[aria-label="Submit"]').exists()).toBe(true)
+    // The send control says what it does in the reader's language, not "Submit".
+    expect(wrapper.find(`button[aria-label="${t('chat.sendAria')}"]`).exists()).toBe(true)
   })
 
   it('leaves the goal out of the tab’s "+" menu and inserts a picked skill', async () => {

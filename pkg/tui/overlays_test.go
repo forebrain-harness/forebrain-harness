@@ -1413,6 +1413,53 @@ func TestApprovalOverlayShowsAPlanModeReason(t *testing.T) {
 	}
 }
 
+// The Explain fold is where a fetch approval states what the fetch will and
+// will not do. Two of those lines used to be unconditional promises — redirects
+// never leave the host, private URLs always fail — and neither survives a
+// server-side fetch or allow_private_ip, so they now follow the payload the
+// gate wrote.
+func TestWebFetchExplainStatesTheRoute(t *testing.T) {
+	explain := func(payload string) string {
+		t.Helper()
+		overlay := newApprovalOverlay(context.Background(), io.Discard, nil, turn.ToolApprovalRequest{
+			ToolName:      "web_fetch",
+			ToolInputJSON: payload,
+		}, nil)
+		overlay.showExplain = true
+		lines, _ := overlay.buildApprovalContent(100)
+		return stripANSI(strings.Join(lines, "\n"))
+	}
+
+	direct := explain(`{"url":"https://example.org/page","rule_content":"domain:example.org"}`)
+	if !strings.Contains(direct, "Redirects: only to the same host") {
+		t.Fatalf("a direct fetch must state its redirect bound:\n%s", direct)
+	}
+	if strings.Contains(direct, "Fetched by:") {
+		t.Fatalf("a direct fetch must not name a provider:\n%s", direct)
+	}
+	if !strings.Contains(direct, "Fails: authenticated and private URLs") {
+		t.Fatalf("a direct fetch with private space closed says so:\n%s", direct)
+	}
+
+	routed := explain(`{"url":"https://example.org/page","routed_provider":"deepseek"}`)
+	if strings.Contains(routed, "Redirects: only to the same host") {
+		t.Fatalf("a server-side fetch cannot promise same-host redirects:\n%s", routed)
+	}
+	if !strings.Contains(routed, "Fetched by: deepseek") || !strings.Contains(routed, "not controlled locally") {
+		t.Fatalf("a routed fetch must name the provider and its limits:\n%s", routed)
+	}
+
+	private := explain(`{"url":"http://127.0.0.1:3000/","allow_private_ip":true}`)
+	if strings.Contains(private, "authenticated and private URLs") {
+		t.Fatalf("allow_private_ip must not claim private URLs always fail:\n%s", private)
+	}
+	// The line wraps at 100 columns, so the fragment asserted stops short of
+	// the setting's full path.
+	if !strings.Contains(private, "private addresses are allowed by") {
+		t.Fatalf("the opened private space must be attributed to its setting:\n%s", private)
+	}
+}
+
 // A picker shows every option whole: a row too long for the terminal wraps
 // under its own text instead of being cut, the panel keeps its height while
 // the filter narrows, and the body scrolls just far enough to show the
@@ -2627,5 +2674,52 @@ func TestApprovalFeedbackForwardDeleteDeletesAtTheCaret(t *testing.T) {
 	}
 	if o.feedbackCursor != 7 {
 		t.Fatalf("the caret must land at the start of the selection, got %d", o.feedbackCursor)
+	}
+}
+
+// TestApprovalFieldLinesCoversEmptyCollections covers the two shapes an empty
+// collection takes in a tool call's arguments. Both must say "(none)": a label
+// with nothing after it reads as a value the overlay failed to draw, and an
+// empty list is exactly as empty as an empty object.
+func TestApprovalFieldLinesCoversEmptyCollections(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"empty list", `{"paths": []}`, []string{"Paths: (none)"}},
+		{"empty object", `{"options": {}}`, []string{"Options: (none)"}},
+		{
+			// A list with values in it still reads as one comma line.
+			"list with values",
+			`{"paths": ["a.go", "b.go"]}`,
+			[]string{"Paths: a.go, b.go"},
+		},
+		{
+			// An empty list nested inside an object is the same case one level
+			// down, and an empty list of objects is not a scalar list.
+			"nested empty list",
+			`{"patch": {"files": []}}`,
+			[]string{"Patch:", "  Files: (none)"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := approvalInputLines(tc.raw)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("approvalInputLines(%s) = %q, want %q", tc.raw, got, tc.want)
+			}
+			// The defect this pins: a label on its own, with nothing under it. A
+			// label ending in ":" is legitimate only when an indented block
+			// follows it — that is how a nested value renders.
+			for i, line := range got {
+				if !strings.HasSuffix(line, ":") {
+					continue
+				}
+				if i+1 >= len(got) || strings.TrimSpace(got[i+1]) == "" {
+					t.Fatalf("approvalInputLines(%s) printed a label with no value: %q", tc.raw, line)
+				}
+			}
+		})
 	}
 }

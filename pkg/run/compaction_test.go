@@ -2,8 +2,10 @@ package run
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -330,6 +332,143 @@ func TestConversationSummaryRequestStartsLikeTheConversation(t *testing.T) {
 	}
 	if strings.Join(toolNames(turnTools), ",") != strings.Join(toolNames(summaryTools), ",") || len(summaryTools) == 0 {
 		t.Fatalf("summary tools %v differ from the turn's %v", toolNames(summaryTools), toolNames(turnTools))
+	}
+}
+
+// refusingImageSummaryLLM is a provider that will not take an image: every
+// request carrying one is refused with the field error a real provider sent
+// (pkg/llm/image_heal_test.go records it verbatim), and every image-free
+// request answers with text. It keeps what each call carried so a test can say
+// which attempt saw the picture.
+type refusingImageSummaryLLM struct {
+	mu       sync.Mutex
+	requests [][]llm.Message
+	images   []int
+	omitted  []bool
+}
+
+// summaryImageRejection is the provider's answer to an image it will not take.
+// The wording matters: pkg/llm.IsImageRejection recognizes it by these phrases.
+const summaryImageRejection = ".messages[3].image[0]: You have uploaded an unsupported image. " +
+	"Please make sure your image is valid and has one of the following formats: webp, png, jpeg, and gif."
+
+func (m *refusingImageSummaryLLM) Execute(_ context.Context, msgs []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	images := 0
+	omitted := false
+	for _, msg := range msgs {
+		for _, part := range msg.Parts {
+			switch part.Type {
+			case llm.ContentTypeImageURL, llm.ContentTypeImageBase64:
+				images++
+			}
+			if strings.Contains(part.Text, "[image omitted") {
+				omitted = true
+			}
+		}
+	}
+	m.mu.Lock()
+	m.requests = append(m.requests, append([]llm.Message(nil), msgs...))
+	m.images = append(m.images, images)
+	m.omitted = append(m.omitted, omitted)
+	m.mu.Unlock()
+	if images > 0 {
+		return nil, &llm.APIError{StatusCode: 400, Message: summaryImageRejection}
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("the conversation's summary")})
+	return &llm.Result{Message: &msg}, nil
+}
+
+func (m *refusingImageSummaryLLM) calls() (images []int, omitted []bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]int(nil), m.images...), append([]bool(nil), m.omitted...)
+}
+
+// TestSummaryChainHealsRefusedImage pins the dead end the compaction chain used
+// to walk into: a conversation carrying one image its provider refuses could
+// never be summarized, so its history kept growing until nothing fit. The
+// summary request goes through the same heal as a conversation's own request —
+// refused once with the image, retried once with it degraded — while the stored
+// row keeps its image.
+//
+// Its twin is TestConversationSummaryRequestStartsLikeTheConversation, which
+// pins the other half of the same contract: a summary request that succeeds is
+// byte for byte the request the chain would have built without the heal.
+func TestSummaryChainHealsRefusedImage(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	const sid = "cli-summary-refused-image"
+	if err := sessions.Ensure(ctx, sid, sid); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+
+	// A user row that carries a real image, stored the way a surface stores an
+	// attachment: the pixels live in the file the row references, and every
+	// later request rehydrates them from there.
+	img := filepath.Join(t.TempDir(), "shot.png")
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatalf("decode png fixture: %v", err)
+	}
+	if err := os.WriteFile(img, data, 0o600); err != nil {
+		t.Fatalf("write png fixture: %v", err)
+	}
+	text := "what is this\n[Image #1]"
+	parts := state.MessagePartsJSON(llm.UserMessage(llm.Text(text)), text)
+	parts = state.AppendRawPartJSON(parts, state.FileReferencePartJSON(img, "shot.png", "image/png"))
+	if _, err := sessions.AppendStructuredMessage(ctx, sid, "user", text, "", parts, "", "", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatalf("append user row: %v", err)
+	}
+
+	provider := &refusingImageSummaryLLM{}
+	restore := SetLLMOverrideForTest(provider)
+	defer restore()
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+	}}}
+	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}, FileResolver: PathResolver{}}
+	if err := r.Load(); err != nil {
+		t.Fatalf("load runner: %v", err)
+	}
+
+	summarize := CompactionService(r, sessions).ConversationSummary(sid)
+	if summarize == nil {
+		t.Fatal("a loaded runner has no conversation summarizer")
+	}
+	result, err := summarize(ctx, llm.UserMessage(llm.Text("summarize this conversation")))
+	if err != nil {
+		t.Fatalf("the compaction's summary request failed on an image the provider refuses: %v", err)
+	}
+	if result == nil || result.Message == nil || result.Message.TextContent() == "" {
+		t.Fatalf("result = %+v, want the summary text", result)
+	}
+
+	images, omitted := provider.calls()
+	if len(images) != 2 {
+		t.Fatalf("provider was called %d times, want 2 (one refused, one degraded): images per call %v", len(images), images)
+	}
+	if images[0] == 0 {
+		t.Fatal("the first summary request carried no image, so nothing was healed; the transcript did not rehydrate it")
+	}
+	if images[1] != 0 {
+		t.Fatalf("the retried summary request still carried %d images, want 0", images[1])
+	}
+	if !omitted[1] {
+		t.Fatal("the retried request must say which image was dropped, not silently lose it")
+	}
+	// The transcript keeps its image: the degraded copy belongs to that call.
+	rows, err := sessions.ListTranscriptMessages(ctx, sid, 50)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if len(rows) == 0 || !strings.Contains(rows[0].Parts[0].Text, "[Image #1]") {
+		t.Fatalf("the stored row lost the image reference: %+v", rows)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/pdf"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -1047,6 +1048,19 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 						"old_string":         in.OldString,
 						"new_string":         in.NewString,
 						"replace_all":        in.ReplaceAll,
+					}
+					// The card shows one hunk and the engine's own line counts,
+					// so no surface has to invent a diff from the two texts —
+					// the terminal draws this same summary (pkg/tui/overlays.go)
+					// and the two must not describe one edit differently. Only
+					// the first hunk travels: a payload is stored verbatim in
+					// fb_actions.payload_json, and a card draws forty rows.
+					if summary, derr := event.Build(filepath.Base(abs), []byte(in.OldString), []byte(in.NewString)); derr == nil {
+						payload["added_lines"] = summary.Added
+						payload["removed_lines"] = summary.Deleted
+						if hunk := event.FirstHunk(summary.UnifiedDiff, 40); hunk != "" {
+							payload["unified_diff"] = hunk
+						}
 					}
 					markProtectedApproval(payload, protected)
 					id, ok, err := hook(ctx, "edit_file", payload)

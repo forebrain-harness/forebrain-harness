@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,9 +20,22 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
-// pngTestHeader is the full 8-byte PNG signature. Mention classification
-// sniffs content, so a stub shorter than this is not recognized as an image.
-var pngTestHeader = []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+// pngTestImage is a real, decodable 1×1 PNG. Mention classification sniffs
+// content, so the fixture must begin with the PNG signature — and since the
+// image ladder now reads a file's header before it may send the bytes verbatim
+// (pkg/llm.ImagePartWithin, plan 092), a signature-only stub is refused as a
+// truncated file and the mention degrades to a text note instead of becoming an
+// image part. These tests are about classification and paths, so they carry the
+// smallest image that survives the ladder.
+var pngTestImage = mustDecodePNG("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+
+func mustDecodePNG(encoded string) []byte {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		panic("decode the PNG test fixture: " + err.Error())
+	}
+	return data
+}
 
 func newMentionWorkspace(t *testing.T) (home string, workspace string) {
 	t.Helper()
@@ -37,9 +51,9 @@ func newMentionWorkspace(t *testing.T) (home string, workspace string) {
 	}
 	write("main.go", []byte("package main\n"))
 	write(filepath.Join("docs", "note.txt"), []byte("workspace note"))
-	write(filepath.Join("docs", "shot.png"), pngTestHeader)
+	write(filepath.Join("docs", "shot.png"), pngTestImage)
 	// Sits outside the workspace and must never be reachable.
-	if err := os.WriteFile(filepath.Join(home, "secret.png"), pngTestHeader, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "secret.png"), pngTestImage, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return home, workspace
@@ -297,7 +311,7 @@ func TestWebTurnInputIsTheMessageItStores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	photo, err := files.CreateFromReader(ctx, "s1", "photo.png", bytes.NewReader(pngTestHeader), int64(len(pngTestHeader)), "image/png")
+	photo, err := files.CreateFromReader(ctx, "s1", "photo.png", bytes.NewReader(pngTestImage), int64(len(pngTestImage)), "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +407,7 @@ func TestWebImageUploadUsesFileReferencePart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	photo, err := files.CreateFromReader(ctx, "s1", "photo.png", bytes.NewReader(pngTestHeader), int64(len(pngTestHeader)), "image/png")
+	photo, err := files.CreateFromReader(ctx, "s1", "photo.png", bytes.NewReader(pngTestImage), int64(len(pngTestImage)), "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +467,7 @@ func TestWebImageGateRefusesTheTurnNotTheAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	photo, err := files.CreateFromReader(ctx, "s1", "photo.png", bytes.NewReader(pngTestHeader), int64(len(pngTestHeader)), "image/png")
+	photo, err := files.CreateFromReader(ctx, "s1", "photo.png", bytes.NewReader(pngTestImage), int64(len(pngTestImage)), "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}

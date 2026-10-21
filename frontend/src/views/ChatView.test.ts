@@ -148,7 +148,6 @@ async function mountView(extraStubs: Record<string, unknown> = {}, router = make
         ConversationEmptyState: true,
         SubagentTab: true,
         ChatWorkbench: true,
-        PendingActionsPanel: true,
         ContextDebugPanel: true,
         ApprovalPresetPicker: true,
         SessionHeartbeat: true,
@@ -642,8 +641,13 @@ describe('ChatView conversation bubbles', () => {
     const wrapper = await mountView()
     await vi.waitFor(() => {
       expect(wrapper.text()).toContain('Thought for 12s')   // the same label the subagent view shows
-      expect(wrapper.text()).toContain('weighing the options')
     })
+    // Folded by default (the prototype's .think): the reasoning is one click
+    // away, not poured into the thread.
+    expect(wrapper.find('[data-testid="thinking-card"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('weighing the options')
+    await wrapper.get('[data-testid="thinking-card"] [data-slot="collapsible-trigger"]').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('weighing the options'))
     wrapper.unmount()
   })
 
@@ -717,6 +721,77 @@ describe('ChatView conversation bubbles', () => {
       sessionModel.mockRestore()
     }
   })
+
+  // The three image facts are three sentences, and no one of them may stand in
+  // for another: the catalog's "cannot take pictures", the provider's "refused
+  // this one, the turn went on without it", and the record's "already refused
+  // here, this turn was not sent". Each case asserts its own sentence and that
+  // the other two are absent, because a card that said the wrong one would
+  // describe something that did not happen.
+  const imageRefusalSentences = [
+    {
+      kind: undefined as 'unsupported' | 'rejected' | 'remembered' | undefined,
+      want: 'does not accept images. The message is kept and was not sent.',
+      others: [
+        'rejected an image in this turn. It was sent as a text note',
+        'already refused an image here, so this turn was not sent.',
+      ],
+    },
+    {
+      kind: 'rejected' as const,
+      want: 'rejected an image in this turn. It was sent as a text note, so the answer cannot see it.',
+      others: [
+        'does not accept images. The message is kept and was not sent.',
+        'already refused an image here, so this turn was not sent.',
+      ],
+    },
+    {
+      kind: 'remembered' as const,
+      want: 'already refused an image here, so this turn was not sent.',
+      others: [
+        'does not accept images. The message is kept and was not sent.',
+        'rejected an image in this turn. It was sent as a text note',
+      ],
+    },
+  ]
+  for (const row of imageRefusalSentences) {
+    it(`says the ${row.kind ?? 'unsupported'} image notice in its own words`, async () => {
+      setLocale('en')
+      const sessionModel = vi.spyOn(forebrainApi, 'sessionModel').mockResolvedValue({
+        provider: 'acme',
+        model: 'vision-model',
+        effort: '',
+        options: [],
+      })
+      try {
+        ;(fake as { messages: { value: unknown[] } }).messages.value = [
+          { id: 'u1', role: 'user', content: 'look\n[Image #1]' },
+          {
+            id: 'n1',
+            role: 'notice',
+            content: '',
+            imageRefusal: { provider: 'acme', model: 'vision-model', ...(row.kind ? { kind: row.kind } : {}) },
+          },
+        ]
+        const wrapper = await mountView()
+        await flushPromises()
+
+        const notice = wrapper.find('[data-testid="image-refused-notice"]')
+        expect(notice.exists()).toBe(true)
+        expect(notice.attributes('data-image-refusal-kind')).toBe(row.kind ?? 'unsupported')
+        expect(notice.text()).toContain(row.want)
+        for (const other of row.others) {
+          expect(notice.text()).not.toContain(other)
+        }
+        // Every kind keeps the same way out.
+        expect(notice.text()).toContain('Switch to a model that accepts images, then continue.')
+        expect(wrapper.find('[data-testid="image-refused-switch"]').exists()).toBe(true)
+        wrapper.unmount()
+      } finally {
+        sessionModel.mockRestore()
+      }
+    })
+  }
 })
 
 /**
@@ -1142,7 +1217,10 @@ describe('ChatView view mode', () => {
       expect(wrapper.text()).toContain('the listing is empty')
     })
     expect(decidedGates(wrapper).length).toBe(1)
-    expect(wrapper.text()).toContain('weighing the options')
+    // The thinking card is drawn (its caption is), folded: the run's reasoning
+    // is behind it, not sprayed into the answer.
+    expect(wrapper.text()).toContain('Thought for 12s')
+    expect(wrapper.text()).not.toContain('weighing the options')
     expect(wrapper.find('[data-testid="view-mode-chip"]').text()).toContain('Default')
     await flushPromises()
     wrapper.unmount()

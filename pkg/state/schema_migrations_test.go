@@ -494,6 +494,81 @@ SELECT storage_key, storage_bucket, parse_error FROM fb_files WHERE id='f-s3'`).
 // version adds. A database that predates them — modelled by dropping them from
 // the current schema and lowering the version — gains them with their default
 // when it is opened again, and its version moves forward.
+// TestStateV15UpgradesToV16AddsImageRefusals pins the table this version adds.
+// A database that predates it — modelled by dropping it from the current schema
+// and lowering the version — gains it when it is opened again, with the five
+// columns the record needs. Nothing else is rewritten: the sessions and their
+// model state survive, because the addition carries no rewrite.
+func TestStateV15UpgradesToV16AddsImageRefusals(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s','main','s',10,10,'/repo/s')`,
+		`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at) VALUES('s','deepseek','deepseek-v4-pro','',10)`,
+		`DROP TABLE fb_session_image_refusals`,
+		`PRAGMA user_version = 15`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v15 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	want := map[string]bool{"session_id": true, "provider": true, "model": true, "reason": true, "observed_at": true}
+	rows, err := migrated.QueryContext(ctx, `SELECT name FROM pragma_table_info('fb_session_image_refusals')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		got[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if len(got) != len(want) {
+		t.Fatalf("fb_session_image_refusals has %d columns %v, want %d %v", len(got), got, len(want), want)
+	}
+	for name := range want {
+		if !got[name] {
+			t.Fatalf("fb_session_image_refusals is missing column %q (has %v)", name, got)
+		}
+	}
+	// The rows that were already there are untouched.
+	var model string
+	if err := migrated.QueryRowContext(ctx, `SELECT model FROM fb_session_model_state WHERE session_id='s'`).Scan(&model); err != nil {
+		t.Fatalf("model state did not survive the addition: %v", err)
+	}
+	if model != "deepseek-v4-pro" {
+		t.Fatalf("model state = %q, want the row that was there", model)
+	}
+}
+
 func TestStateV11UpgradesToV12AddsProjectFileColumns(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")

@@ -2881,6 +2881,95 @@ func (s *SessionStore) SessionModelSelection(
 	return sel, true, nil
 }
 
+// RecordImageRefusal remembers that this session's model refused an image, so
+// the next request that would carry one is withheld instead of sent to be
+// refused again. Coarse on purpose: the provider's refusal never says which
+// image it meant, so the fact recorded is "this conversation, this
+// provider+model, cannot take pictures".
+//
+// An empty session, provider or model is not an error: there is no identity to
+// file it under, and this record only ever saves a wasted request — it is never
+// the reason a turn is refused (the request's own content decides that). The
+// write is last-write-wins on (session_id, provider, model), so a second refusal
+// on the same model refreshes the reason rather than growing the table.
+func (s *SessionStore) RecordImageRefusal(ctx context.Context, sessionID, provider, model, reason string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if sessionID == "" || provider == "" || model == "" {
+		return nil
+	}
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO fb_session_image_refusals(session_id, provider, model, reason, observed_at)
+		SELECT ?, ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		ON CONFLICT(session_id, provider, model) DO UPDATE SET
+			reason=excluded.reason, observed_at=excluded.observed_at`,
+		sessionID, provider, model, imageRefusalReason(reason), time.Now().Unix(), sessionID, s.AgentID(),
+	)
+	return err
+}
+
+// ImageRefusal returns the recorded reason for this session on this exact
+// provider+model, and false when there is none. A session that belongs to
+// another primary agent is an error, exactly as the model-selection read
+// reports it — the record is that tenant's. The lookup is keyed by the model in
+// force, so switching model is the recovery: nothing is deleted, the refusal
+// simply does not apply to the new model.
+func (s *SessionStore) ImageRefusal(
+	ctx context.Context, sessionID, provider, model string,
+) (string, bool, error) {
+	if s == nil || s.db == nil {
+		return "", false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if sessionID == "" || provider == "" || model == "" {
+		return "", false, nil
+	}
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return "", false, err
+	}
+	var reason string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT r.reason
+		FROM fb_session_image_refusals r
+		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=?
+		WHERE r.session_id=? AND r.provider=? AND r.model=?`,
+		s.AgentID(), sessionID, provider, model,
+	).Scan(&reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return reason, true, nil
+}
+
+// imageRefusalReason folds a provider's sentence into the one line the record
+// keeps: whitespace collapsed, and cut at the same 200 characters pkg/llm
+// bounds it to, so a stored reason is safe to embed in a prompt-adjacent
+// sentence on any surface.
+func imageRefusalReason(reason string) string {
+	flat := strings.Join(strings.Fields(reason), " ")
+	if len(flat) <= 200 {
+		return flat
+	}
+	cut := 200
+	for cut > 0 && flat[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return strings.TrimSpace(flat[:cut]) + "…"
+}
+
 // CopySessionModelSelection copies the source session's stored model choice
 // onto the target session, overwriting whatever the target held. Both sides
 // must belong to this primary agent: the source is checked by ownership, the

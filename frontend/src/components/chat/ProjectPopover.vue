@@ -106,9 +106,10 @@ onMounted(() => {
 .pj-pop {
   position: absolute;
   left: 0;
-  /* It opens downwards (prototype .pj-pop): the new-chat pill sits in the
-     middle of the pane now, so the room it has is below it, not above. */
-  top: calc(100% + 6px);
+  /* It opens upwards (prototype .pj-pop, the later of its two rules): the pill
+     sits inside the composer's top edge, so the room it has is above it. */
+  top: auto;
+  bottom: calc(100% + 6px);
   width: 400px;
   background: var(--forebrain-surface);
   border: 1px solid var(--forebrain-divider);

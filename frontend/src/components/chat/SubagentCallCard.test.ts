@@ -142,7 +142,7 @@ describe('SubagentCallCard', () => {
     const wrapper = mount(SubagentCallCard, {
       props: { step: stepOf({ subagentCall: { verb: 'list', tasks: [] } }) },
     })
-    expect(wrapper.text()).toContain('Listed 0 tasks')
+    expect(wrapper.text()).toContain('0 tasks in this conversation')
     expect(wrapper.text()).toContain('(no output)')
   })
 

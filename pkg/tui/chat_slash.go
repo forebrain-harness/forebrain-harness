@@ -630,15 +630,10 @@ func (s *ChatSession) SwitchPrimaryAgent(ctx context.Context, id string) (turn.P
 // surface is actually running — never config order alone, and never the
 // runner's default for a conversation that picked its own.
 func (s *ChatSession) ModelSettings(sessionID string) (turn.ModelSettings, error) {
-	path, err := home.ResolveConfigPath(strings.TrimSpace(s.home()))
-	if err != nil {
-		return turn.ModelSettings{}, err
-	}
 	sel := s.sessionModelState(sessionID)
 	return turn.ModelSettings{
-		Config:     modelConfigFromChatSession(s),
-		AgentName:  chatSessionActiveAgentName(s),
-		ConfigPath: path,
+		Config:    modelConfigFromChatSession(s),
+		AgentName: chatSessionActiveAgentName(s),
 		Selection: turn.ModelSelectionState{
 			Provider: sel.Provider,
 			Model:    sel.Model,
@@ -646,14 +641,6 @@ func (s *ChatSession) ModelSettings(sessionID string) (turn.ModelSettings, error
 			Set:      sel.Set,
 		},
 	}, nil
-}
-
-// ReloadModelCatalog takes a default-file write /model made into the live
-// session without selecting config index zero as the live model: the reload
-// refreshes the catalog and provider details while the ordinary pinned
-// reload keeps the session's effective selection.
-func (s *ChatSession) ReloadModelCatalog(context.Context, string) error {
-	return s.reloadConfigFromDisk()
 }
 
 // SelectModel applies choice as the live model for sessionID and persists it

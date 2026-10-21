@@ -1893,7 +1893,19 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			refused := wsServerMsg{Op: "turn_refused", RequestID: m.RequestID, SessionID: sid, Error: imageRefusal.Error()}
 			var detail *run.ImageInputRefusedError
 			if errors.As(imageRefusal, &detail) {
-				refused.Data = map[string]any{"code": run.ImageInputRefusedCode, "provider": detail.Provider, "model": detail.Model}
+				// Two facts, two codes: the catalog says the model cannot take
+				// images, or this conversation already paid for that model
+				// refusing one. The page says whichever it was, in the viewer's
+				// language, and both point at /model.
+				data := map[string]any{
+					"code":     detail.Code(),
+					"provider": detail.Provider,
+					"model":    detail.Model,
+				}
+				if reason := strings.TrimSpace(detail.Reason); reason != "" {
+					data["reason"] = reason
+				}
+				refused.Data = data
 			}
 			writeMsg(refused)
 			wsRequestCacheSet(requestCache, m.RequestID, refused, 2*time.Minute, time.Now())

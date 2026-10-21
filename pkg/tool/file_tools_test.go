@@ -1062,6 +1062,128 @@ func TestEditFileToleratesTabsVsSpaces(t *testing.T) {
 	}
 }
 
+// An edit approval carries the diff the engine computed, not the two texts a
+// card would have to guess from: the line counts are the engine's, and the one
+// hunk it ships is bounded so a stored payload stays small. The card that draws
+// it (frontend/src/lib/approvalGates.ts) shows these rows verbatim.
+func TestEditFileApprovalPayloadCarriesEngineDiff(t *testing.T) {
+	tests := []struct {
+		name        string
+		fileContent string
+		oldString   string
+		newString   string
+		wantAdded   int
+		wantRemoved int
+		// bodyRows is the number of hunk body lines the payload may carry.
+		wantMaxBodyRows int
+		wantDiffLines   []string
+	}{
+		{
+			name:            "one line replaced, context around it",
+			fileContent:     "a\nb\nc\n",
+			oldString:       "a\nb\nc",
+			newString:       "a\nB\nc",
+			wantAdded:       1,
+			wantRemoved:     1,
+			wantMaxBodyRows: 40,
+			wantDiffLines:   []string{"-b", "+B"},
+		},
+		{
+			name:            "twenty new lines are twenty added lines",
+			fileContent:     "x\n",
+			oldString:       "x",
+			newString:       strings.TrimSuffix(strings.Repeat("fresh-line\n", 20), "\n"),
+			wantAdded:       20,
+			wantRemoved:     1,
+			wantMaxBodyRows: 40,
+			wantDiffLines:   []string{"-x", "+fresh-line"},
+		},
+		{
+			// The counts describe the whole edit even when the payload can only
+			// carry the head of it: that is what the bound is for.
+			name:            "a large replacement keeps full counts and a bounded hunk",
+			fileContent:     "x\n",
+			oldString:       "x",
+			newString:       strings.TrimSuffix(strings.Repeat("wide-line\n", 100), "\n"),
+			wantAdded:       100,
+			wantRemoved:     1,
+			wantMaxBodyRows: 40,
+			wantDiffLines:   []string{"-x", "+wide-line"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			path := filepath.Join(workspace, "note.txt")
+			if err := os.WriteFile(path, []byte(tt.fileContent), 0o644); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			fi, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat fixture: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			st := NewState(workspace)
+			st.RememberRead(path, fi.ModTime(), fi.Size(), raw)
+			var payload map[string]any
+			st.SetActionHook(func(_ context.Context, kind string, body any) (string, bool, error) {
+				if kind != "edit_file" {
+					t.Fatalf("unexpected action kind %q", kind)
+				}
+				payload, _ = body.(map[string]any)
+				return "act-edit", true, nil
+			})
+			editTool, err := NewFileEditTool(st)
+			if err != nil {
+				t.Fatalf("NewFileEditTool: %v", err)
+			}
+			args, _ := json.Marshal(FileEditInput{FilePath: path, OldString: tt.oldString, NewString: tt.newString})
+			_, err = editTool.Handle(context.Background(), string(args))
+			var required *RequiresActionError
+			if !errors.As(err, &required) {
+				t.Fatalf("expected the gate to ask for this edit, got %v", err)
+			}
+			if payload == nil {
+				t.Fatal("approval hook captured no payload")
+			}
+			if got := payload["added_lines"]; got != tt.wantAdded {
+				t.Fatalf("added_lines = %v, want %d", got, tt.wantAdded)
+			}
+			if got := payload["removed_lines"]; got != tt.wantRemoved {
+				t.Fatalf("removed_lines = %v, want %d", got, tt.wantRemoved)
+			}
+			// The tools' own inputs stay verbatim: they are what the edit runs.
+			if payload["old_string"] != tt.oldString || payload["new_string"] != tt.newString {
+				t.Fatalf("the edit's own inputs must not be rewritten: %#v", payload)
+			}
+			diff, _ := payload["unified_diff"].(string)
+			if !strings.HasPrefix(diff, "@@") {
+				t.Fatalf("unified_diff must start at a hunk header, got %q", diff)
+			}
+			for _, want := range tt.wantDiffLines {
+				if !strings.Contains(diff, "\n"+want) {
+					t.Fatalf("unified_diff missing %q:\n%s", want, diff)
+				}
+			}
+			// The context line after the change stays a context line: the
+			// card's rows are told apart by the sign in their own slot.
+			if tt.name == "one line replaced, context around it" && !strings.Contains(diff, "\n c") {
+				t.Fatalf("the trailing context line is missing:\n%s", diff)
+			}
+			rows := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+			if len(rows)-1 > tt.wantMaxBodyRows {
+				t.Fatalf("hunk carries %d body rows, want at most %d", len(rows)-1, tt.wantMaxBodyRows)
+			}
+			if len(diff) > 6<<10 {
+				t.Fatalf("the hunk is %d bytes; a stored payload must stay small", len(diff))
+			}
+		})
+	}
+}
+
 // editDiagStub records the code-intelligence calls the edit tools make and
 // answers DidWrite with a canned delta. It embeds nopCodeIntel for the rest of
 // the port.

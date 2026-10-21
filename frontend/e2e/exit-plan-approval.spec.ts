@@ -108,7 +108,9 @@ test('a parked exit-plan approval shows its plan and choices, not raw ids', asyn
   // The card names itself and carries the plan itself — never the tool name,
   // an action id, or a path.
   await expect(card).toContainText('退出计划模式')
-  await expect(card).toContainText('等待你的决定')
+  // That it is waiting on the reader is the head's status word, not a second
+  // sentence beside the name.
+  await expect(card).toContainText('等待批准')
   await expect(page.locator('[data-testid="exit-plan-text"]')).toContainText('再对照计划逐条检查')
   const text = await main.innerText()
   expect(text).not.toContain('exit_plan_mode')
@@ -121,7 +123,7 @@ test('a parked exit-plan approval shows its plan and choices, not raw ids', asyn
   await expect(page.locator('[data-testid="exit-plan-ask-review"]')).toBeVisible()
   await expect(card.locator('[data-testid="exit-plan-feedback"]')).toHaveCount(0)
   await page.locator('[data-testid="exit-plan-keep-planning"]').click()
-  await expect(card.locator('[data-testid="exit-plan-feedback"] input')).toHaveAttribute('placeholder', '继续规划时告诉规划模型要改什么（可选）')
+  await expect(card.locator('[data-testid="exit-plan-feedback"] input')).toHaveAttribute('placeholder', '告诉规划模型要改什么')
   await shot(page, 'exit-plan-approval-card')
 })
 

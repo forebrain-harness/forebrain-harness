@@ -405,6 +405,9 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 		if goal, isGoal := goalEventMessage(evt); isGoal {
 			msg, ok = goal, true
 		}
+		if rejected, isRejected := imageRejectedMessage(evt); isRejected {
+			msg, ok = rejected, true
+		}
 		frames := replayApprovalEventFrames(evt)
 		if migrationFrames := replayMigrationEventFrames(evt); len(migrationFrames) > 0 {
 			frames = append(frames, migrationFrames...)

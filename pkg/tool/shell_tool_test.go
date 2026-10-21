@@ -95,6 +95,34 @@ func TestSandboxRetryApprovalPreservesAttemptAndConcreteReason(t *testing.T) {
 	}
 }
 
+// The engine's dangerous-command conclusion travels by name. A surface cannot
+// restate it — "rm -f" is the rule, not "deletes the whole directory, then you
+// have to rebuild" — and it cannot re-derive it either: only this parser
+// decides what counts as dangerous, so a name it did not write means nothing
+// was found.
+func TestShellDangerousRuleInPayload(t *testing.T) {
+	payload := shellAssessmentApprovalPayload("rm -f /tmp/x", &ShellInput{}, safety.AssessShellCommand("rm -f /tmp/x"))
+	if payload["dangerous_rule"] != "forced_rm" {
+		t.Fatalf("dangerous_rule = %v, want forced_rm", payload["dangerous_rule"])
+	}
+	if payload["approval_reason"] != "dangerous_shell_syntax" {
+		t.Fatalf("approval_reason = %v, want dangerous_shell_syntax", payload["approval_reason"])
+	}
+
+	// Complex parsing without a dangerous rule names no rule: the flag alone is
+	// what forces the prompt there, and there is nothing for the card to quote.
+	for _, command := range []string{"echo $(date)", "mvn clean verify"} {
+		assessment := safety.AssessShellCommand(command)
+		if assessment.Dangerous != nil {
+			t.Fatalf("%q: test premise broken, the engine found %q", command, assessment.Dangerous.Rule)
+		}
+		payload := shellAssessmentApprovalPayload(command, &ShellInput{}, assessment)
+		if rule, ok := payload["dangerous_rule"]; ok {
+			t.Fatalf("%q: complex-but-not-dangerous must not name a rule, got %v", command, rule)
+		}
+	}
+}
+
 func TestAdditionalPermissionsPreapprovedWithSessionSnapshotOnly(t *testing.T) {
 	snapshot := safety.Snapshot{NetworkGrants: []safety.NetworkPermissionGrant{{
 		Enabled: true, Scope: safety.GrantScopeSession, SessionID: "session-1",

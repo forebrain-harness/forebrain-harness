@@ -1,9 +1,15 @@
 <template>
-  <div
-    role="alert"
-    class="whitespace-pre-wrap break-words rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-surface)] px-3 py-2 text-[13px] leading-relaxed text-[var(--forebrain-danger)]"
-    data-testid="run-error"
-  >{{ shown }}</div>
+  <!-- The prototype's .err-block (:771): a left red rule, the mark, and the two
+       sentences — the runtime's, then the classified one in the muted second
+       line. The body keeps the reader's own text colour: a paragraph of red is
+       harder to read than the error it reports. -->
+  <div class="forebrain-err-block" role="alert" data-testid="run-error">
+    <CircleAlert aria-hidden="true" />
+    <div>
+      {{ text }}
+      <span v-if="shown" class="forebrain-err-s">{{ shown }}</span>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -14,11 +20,14 @@
  * while the error is on screen; the runtime's sentence covers the rest.
  */
 import { computed } from 'vue'
+import { CircleAlert } from 'lucide-vue-next'
 import { formatProviderError, type ProviderErrorDetail } from '@/lib/providerError'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{ text: string; detail?: ProviderErrorDetail }>()
 
 const { locale } = useI18n()
-const shown = computed(() => (props.detail ? formatProviderError(props.detail, locale.value) : null) || props.text)
+// The classified fact is a second line under the runtime's own sentence, not a
+// replacement for it: the reader gets both what happened and what it means.
+const shown = computed(() => (props.detail ? formatProviderError(props.detail, locale.value) : null) || '')
 </script>

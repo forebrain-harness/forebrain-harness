@@ -180,6 +180,7 @@ type fakeNewSessionStore struct {
 	ensuredID       string
 	ensuredTitle    string
 	copiedModel     bool
+	copiedModelErr  error
 	copiedModelFrom string
 	copiedModelTo   string
 }
@@ -217,6 +218,9 @@ func (f *fakeNewSessionStore) SetParentSessionID(ctx context.Context, id string,
 func (f *fakeNewSessionStore) CopySessionModelSelection(ctx context.Context, source, target string) (bool, error) {
 	f.copiedModelFrom = source
 	f.copiedModelTo = target
+	if f.copiedModelErr != nil {
+		return false, f.copiedModelErr
+	}
 	return f.copiedModel, nil
 }
 

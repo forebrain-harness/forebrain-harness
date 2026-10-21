@@ -315,6 +315,26 @@ func execNew(ctx Context) Result {
 		return Result{Handled: true, Reply: "Could not start a new conversation: " + err.Error()}
 	}
 	title := "New Session"
+	// The new conversation opens on the model this one runs on: the choice is
+	// the user's and belongs to the conversation, so it must not travel
+	// through the shared configuration file — that is what used to make /model
+	// a cross-process switch. A source with no stored choice copies nothing:
+	// the new conversation then follows the configured default like any fresh
+	// one.
+	if src := strings.TrimSpace(ctx.SessionID); src != "" && src != sessionID {
+		if _, err := ctx.Sessions.CopySessionModelSelection(createCtx, src, sessionID); err != nil {
+			// Fatal to the inheritance, not to the conversation: it exists,
+			// and the reply says which part did not carry over.
+			return Result{
+				Handled:         true,
+				Reply:           "Started a new conversation, but the model of the conversation you left could not be carried over: " + err.Error(),
+				SessionChanged:  true,
+				SessionSwitched: true,
+				SessionID:       sessionID,
+				SessionTitle:    title,
+			}
+		}
+	}
 	return Result{
 		Handled:         true,
 		Reply:           "Started a new conversation.",
@@ -834,8 +854,10 @@ func modelSelectionFailureReply(name string, err error) string {
 
 // chooseModel applies a model picked from /model. A model already in force is
 // not written again; one that reasons is followed by its reasoning effort.
-// The live selection is applied before the shared file default is written, so
-// a failed default write cannot masquerade as a failed switch.
+// The choice belongs to this conversation: SelectModel applies it to the live
+// runtime and records it as this session's own row. Nothing is written to the
+// shared configuration file, which every process on the machine watches — a
+// selection written there would silently retarget other processes' sessions.
 func chooseModel(ctx Context, label string) Result {
 	if ctx.Model == nil {
 		return Result{Handled: true, Reply: "The model cannot be changed here."}
@@ -867,12 +889,8 @@ func chooseModel(ctx Context, label string) Result {
 			return Result{Handled: true, Reply: modelSelectionFailureReply(name, err)}
 		}
 		reply = "Switched to " + name + "."
-		if err := ChooseModel(settings.ConfigPath, settings.AgentName, chosen); err != nil {
-			return Result{Handled: true, Reply: reply + "\nThe default for new sessions was not saved: " + err.Error()}
-		}
-		if err := ctx.Model.ReloadModelCatalog(ctx.commandContext(), ctx.SessionID); err != nil {
-			return Result{Handled: true, Reply: reply + "\nThe default was saved, but this process could not refresh its model catalog: " + err.Error()}
-		}
+		// Re-read so the effort picker marks the effort the switch actually
+		// pinned, not the outgoing model's.
 		if settings, err = ctx.Model.ModelSettings(ctx.SessionID); err != nil {
 			return Result{Handled: true, Reply: reply}
 		}
@@ -893,9 +911,10 @@ func chooseModel(ctx Context, label string) Result {
 	return Result{Handled: true, Reply: reply, Picker: &Picker{Command: "model-effort", Title: "Reasoning effort", Hint: "How long " + name + " thinks before it answers", Items: items}}
 }
 
-// chooseReasoningEffort applies an effort picked after /model. The live
-// selection carries it first; the shared file default follows as an
-// independent write, and each partial outcome is reported truthfully.
+// chooseReasoningEffort applies an effort picked after /model. The effort is
+// part of the conversation's own choice, so it travels with the same single
+// write /model makes — the session's live runtime and its row — and never
+// reaches the shared configuration file.
 func chooseReasoningEffort(ctx Context, value string) Result {
 	label, effort, modelChanged := decodeEffortChoice(value)
 	if ctx.Model == nil {
@@ -920,12 +939,6 @@ func chooseReasoningEffort(ctx Context, value string) Result {
 	}
 	if err := ctx.Model.SelectModel(ctx.commandContext(), ctx.SessionID, chosen, &effort); err != nil {
 		return Result{Handled: true, Reply: modelSelectionFailureReply(llm.FormatProviderModel(chosen.Provider, chosen.Model), err)}
-	}
-	if err := ChooseReasoningEffort(settings.ConfigPath, settings.AgentName, chosen, effort); err != nil {
-		return Result{Handled: true, Reply: "Reasoning effort set to " + effort + " for this session, but the default for new sessions was not saved: " + err.Error()}
-	}
-	if err := ctx.Model.ReloadModelCatalog(ctx.commandContext(), ctx.SessionID); err != nil {
-		return Result{Handled: true, Reply: "Reasoning effort set to " + effort + ". The default was saved, but this process could not refresh its model catalog: " + err.Error()}
 	}
 	return Result{Handled: true, Reply: "Reasoning effort set to " + effort + "."}
 }

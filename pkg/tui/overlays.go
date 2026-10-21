@@ -674,9 +674,21 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 			writeLine("Access: Public web")
 		} else if isApprovalWebFetch(o.req) {
 			writeLine("  %s", approvalWebFetchURL(o.req))
-			writeLine("Access: Public web")
-			writeLine("Redirects: only to the same host; another host stops the fetch and asks again")
-			writeLine("Fails: authenticated and private URLs")
+			routed, private := approvalWebFetchRoute(o.req)
+			if routed != "" {
+				// A server-side fetch is a different promise from a local one:
+				// nothing here sees the hops the provider takes, and the
+				// provider cannot reach this machine's private space at all.
+				writeLine("Fetched by: %s (server-side; redirects and private addresses are not controlled locally)", routed)
+			} else {
+				writeLine("Access: Public web")
+				writeLine("Redirects: only to the same host; another host stops the fetch and asks again")
+			}
+			if private {
+				writeLine("Fails: authenticated URLs (private addresses are allowed by agents.defaults.web_fetch.allow_private_ip)")
+			} else {
+				writeLine("Fails: authenticated and private URLs")
+			}
 		} else if isApprovalRetrieveOutput(o.req) {
 			for _, detail := range retrieveOutputApprovalDetails(o.req) {
 				writeLine("%s", detail)
@@ -1498,6 +1510,21 @@ func approvalWebFetchURL(req turn.ToolApprovalRequest) string {
 	return strings.TrimSpace(input.URL)
 }
 
+// approvalWebFetchRoute reads the two routing facts the fetch gate writes into
+// its payload: which provider performs the fetch, and whether private addresses
+// were opened for it. A server-side fetch changes what this surface can
+// promise — it sees none of the provider's hops, and the provider cannot reach
+// this machine's private space — so the overlay states what the payload says
+// instead of assuming the direct fetcher.
+func approvalWebFetchRoute(req turn.ToolApprovalRequest) (routed string, private bool) {
+	var input struct {
+		RoutedProvider string `json:"routed_provider"`
+		AllowPrivateIP bool   `json:"allow_private_ip"`
+	}
+	_ = json.Unmarshal([]byte(strings.TrimSpace(req.ToolInputJSON)), &input)
+	return strings.TrimSpace(input.RoutedProvider), input.AllowPrivateIP
+}
+
 func isApprovalRetrieveOutput(req turn.ToolApprovalRequest) bool {
 	return strings.EqualFold(strings.TrimSpace(approvalToolName(req)), "retrieve_output")
 }
@@ -1724,6 +1751,12 @@ func approvalFieldLines(label string, value any, indent string) []string {
 		}
 		return append([]string{indent + label + ":"}, approvalValueLines(v, indent+"  ")...)
 	case []any:
+		// An empty list says the same thing an empty object does: there is
+		// nothing in it. Without this the label printed with no value at all,
+		// which reads as a value the overlay failed to draw.
+		if len(v) == 0 {
+			return []string{indent + label + ": (none)"}
+		}
 		if scalars, ok := approvalScalarList(v); ok {
 			return []string{indent + label + ": " + strings.Join(scalars, ", ")}
 		}

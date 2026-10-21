@@ -14,8 +14,9 @@ import { seedSessionInRoot, signIn, shot } from './support'
  * (permission_input, prefix_rule_content, available_decisions) are derived by
  * the gateway from those rows, exactly as they are for a live gate.
  *
- * A web_search gate is parked beside it in the same conversation: this plan
- * changed the fetch card alone, so the older card must still be the older card.
+ * A web_search gate is parked beside it in the same conversation: search rides
+ * the shared approval card now, so it is asserted as that card draws it — the
+ * semantic question, the fact line, and never the tool's internal name.
  */
 
 /** The gateway's state database, by name under E2E_HOME. */
@@ -48,7 +49,7 @@ function parkAction(session: string, kind: string, actionId: string, payload: un
   return actionId
 }
 
-test('a fetch gate asks about the page, and a search gate keeps its older card', async ({ page }) => {
+test('a fetch gate asks about the page, and a search gate asks its own question', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
@@ -62,8 +63,10 @@ test('a fetch gate asks about the page, and a search gate keeps its older card',
 
   const gate = page.locator('[data-testid="web-fetch-approval"]')
   await expect(gate).toBeVisible()
-  // The question, then the page itself on its own line, unshortened.
-  await expect(gate).toContainText('要我向公开网络取这个页面吗？')
+  // The question, then the page itself on its own line, unshortened. The
+  // question names no access route: a fetch may be served by a routed provider,
+  // so promising "the public web" here would be a claim the card cannot keep.
+  await expect(gate).toContainText('要我去取这个页面吗？')
   await expect(page.locator('[data-testid="web-fetch-page"]')).toHaveText(url)
   // The three answers, each saying what it does; the one that remembers names
   // the host it remembers, so the card never explains that a second time.
@@ -71,19 +74,59 @@ test('a fetch gate asks about the page, and a search gate keeps its older card',
   await expect(gate.locator('[data-testid="pending-decision-accept_and_remember"]')).toContainText('不再询问 example.com')
   await expect(gate.locator('[data-testid="pending-decision-cancel"]')).toContainText('不要取')
   await expect(gate).not.toContainText('权限记忆')
+  // A plain fetch carries neither routing fact in its payload, so the card
+  // draws no fact row at all: it is the card it always was.
+  await expect(gate.locator('[data-testid="web-fetch-fact"]')).toHaveCount(0)
 
   const main = page.locator('.chat-shell main')
   const text = await main.innerText()
   expect(text).not.toContain(fetchId)
   expect(text).not.toContain('web_fetch')
 
-  // The older cards are untouched by this change: a search gate is still its
-  // tool's name and the runtime's own reason, and it still owns the
-  // permission-memory box.
+  // A search gate is the shared approval card now (prototype :1275, :3418): the
+  // semantic question, the fact line naming the query and the cap, no
+  // permission-memory box, and never the tool's internal name.
   const searchCard = page.locator(`[data-testid="pending-approval"][data-action-id="${searchId}"]`)
   await expect(searchCard).toBeVisible()
-  await expect(searchCard).toContainText('web_search')
-  await expect(searchCard).toContainText('权限记忆')
+  await expect(searchCard).toContainText('要我搜一下公开网络吗？')
+  await expect(searchCard).toContainText('“gateway session cookie” · 最多 5 条')
+  await expect(searchCard).not.toContainText('权限记忆')
+  await expect(searchCard).not.toContainText('web_search')
 
   await shot(page, 'web-fetch-approval-card')
+})
+
+/**
+ * The routed fetch's two facts reach the screen. A run whose web_fetch was
+ * routed at a provider leaves a payload naming the route and — when the
+ * operator opened loopback space — the flag, which are the only two things the
+ * card cannot learn from the URL. Seeded the same way as the gate above: the
+ * payload is the row a live routed gate writes (pkg/tool/web_tools.go
+ * writes routed_provider / allow_private_ip into the gate payload).
+ */
+test('a routed fetch gate says who fetches it and that private space is open', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-web-fetch-routed')
+  const url = 'https://example.com/pricing'
+  parkAction(session, 'web_fetch', 'act-e2e-webfetch-routed', {
+    url,
+    rule_content: 'domain:example.com',
+    routed_provider: 'deepseek',
+    allow_private_ip: true,
+  })
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+
+  const gate = page.locator('[data-testid="web-fetch-approval"]')
+  await expect(gate).toBeVisible()
+  await expect(gate).toContainText('要我去取这个页面吗？')
+  await expect(gate.locator('[data-testid="web-fetch-fact"]')).toHaveText([
+    '由 deepseek 在服务端取回',
+    '私网地址已放开',
+  ])
+
+  await shot(page, 'web-fetch-approval-routed')
 })

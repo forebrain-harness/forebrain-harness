@@ -60,10 +60,13 @@ type ImageReadResult struct {
 }
 
 // withinSideLimit reports whether encoded dimensions are ones a provider
-// accepts. A header that does not parse (w or h 0) is not judged here: the
-// decode that follows reports it.
+// accepts. Dimensions that did not parse (w or h 0) are not judged here, but
+// they are also not a pass: the verbatim branch below is only taken for an
+// image whose header decoded, so a file whose header could not be read reaches
+// the decoder and is refused with an actionable error instead of being sent for
+// the provider to reject.
 func withinSideLimit(w, h int) bool {
-	return w <= MaxImageSidePixels && h <= MaxImageSidePixels
+	return w > 0 && h > 0 && w <= MaxImageSidePixels && h <= MaxImageSidePixels
 }
 
 // ImagePartWithin encodes data as an image ContentPart no larger than maxBytes.
@@ -118,6 +121,12 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 		if len(data) > budget {
 			return ContentPart{}, res, fmt.Errorf("image is %d MiB and webp cannot be downscaled here; convert it to png first", len(data)>>20)
 		}
+		if srcW <= 0 || srcH <= 0 {
+			// The container named no picture chunk this reader understands, so
+			// there are no dimensions to quote — reporting "0x0" would say the
+			// picture is empty rather than unreadable.
+			return ContentPart{}, res, fmt.Errorf("image is a webp whose header could not be read (truncated or corrupt), and webp cannot be downscaled here; re-save it or convert it to png first")
+		}
 		return ContentPart{}, res, fmt.Errorf("image is %dx%d and webp cannot be downscaled here; convert it to png first", srcW, srcH)
 	}
 
@@ -135,7 +144,16 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		if srcW > 0 && srcH > 0 && !withinSideLimit(srcW, srcH) {
+		if srcW <= 0 || srcH <= 0 {
+			// The header never parsed, so this is not an image that needs
+			// shrinking — it is one that could not be read at all. Saying
+			// "could not be decoded to downscale it" would describe a problem
+			// the reader does not have; a truncated or corrupt file is what
+			// this is, and re-saving it is what fixes it.
+			return ContentPart{}, res, fmt.Errorf(
+				"image is truncated or corrupt: its header could not be read, so it cannot be checked or shrunk before sending; re-save or convert it to png or jpeg first: %w", err)
+		}
+		if !withinSideLimit(srcW, srcH) {
 			return ContentPart{}, res, fmt.Errorf(
 				"image is %dx%d, past the %d-pixel per-side limit, and could not be decoded to downscale it; crop or resize it first: %w",
 				srcW, srcH, MaxImageSidePixels, err)
@@ -152,12 +170,18 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 	}
 
 	var lastImg image.Image
+	// lastScale is the factor that actually produced lastImg. The final
+	// re-encode below re-uses that image, so the factor it reports has to be
+	// this one: a hard-coded 8 would tell a caller the picture was reduced
+	// eightfold when the ladder stopped at another rung.
+	lastScale := 0
 	for _, s := range []int{2, 3, 4, 6, 8} {
 		dst := downscaleBlockAverage(src, s)
 		if !withinSideLimit(dst.Bounds().Dx(), dst.Bounds().Dy()) {
 			continue
 		}
 		lastImg = dst
+		lastScale = s
 		encoded, err := encodeImage(dst, scaleMime, 85)
 		if err != nil {
 			continue
@@ -181,7 +205,12 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 			candidate.MIMEType = "image/jpeg"
 			candidate.Width, candidate.Height = lastImg.Bounds().Dx(), lastImg.Bounds().Dy()
 			candidate.Scaled = true
-			candidate.Scale = 8
+			candidate.Scale = lastScale
+			if candidate.Scale <= 0 {
+				// Unreachable while lastImg is only set beside lastScale; a
+				// zero would divide by zero in every reader of the pair.
+				candidate.Scale = 1
+			}
 			candidate.SentBytes = len(encoded)
 			if len(encoded) <= budget {
 				return withSourcePath(ImageBase64("image/jpeg", base64.StdEncoding.EncodeToString(encoded)), path), candidate, nil

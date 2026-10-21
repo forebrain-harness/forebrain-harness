@@ -74,9 +74,18 @@ func resolveWebFetchDeepSeek(rt *AgentToolRuntime) (endpoint, key string, ok boo
 }
 
 const (
-	defaultWebFetchMaxBytes  = 2 << 20
-	webFetchMaxRedirects     = 10
-	webFetchMaxMarkdownBytes = 28000
+	defaultWebFetchMaxBytes = 2 << 20
+	// webFetchDeepSeekMaxBodyBytes bounds what a routed fetch reads off the
+	// provider. It is separate from defaultWebFetchMaxBytes because the two
+	// answer different questions: that one caps the page text handed on, this
+	// one distinguishes "the provider's answer is bigger than this client
+	// reads" from "the answer was not JSON". The provider's Markdown arrives
+	// JSON-escaped, which for a CJK page more than doubles its size, so a
+	// few-hundred-KB document was enough to cross the text cap and be reported
+	// as a syntax error.
+	webFetchDeepSeekMaxBodyBytes = 8 << 20
+	webFetchMaxRedirects         = 10
+	webFetchMaxMarkdownBytes     = 28000
 	// webFetchMinMarkdownBytes floors the shrinking in marshalWebFetchResult, so
 	// a page behind an absurdly long URL still comes back with some prose rather
 	// than metadata alone.
@@ -210,6 +219,26 @@ func NewWebFetchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			if err != nil {
 				return "", err
 			}
+			// Which path answers the fetch decides what the approval has to
+			// disclose, so the routing question is settled before the gate
+			// asks rather than after it: the resolver only reads config and
+			// validates the provider's own endpoint, and it has no side effect
+			// a second call would repeat.
+			endpoint, dkey, dok, derr := resolveWebFetchDeepSeek(rt)
+			if derr != nil {
+				return "", derr
+			}
+			if dok {
+				// A routed fetch POSTs the target URL to a third party, so the
+				// address that third party would have to reach is checked here:
+				// the dial guard that protects the direct path never runs for a
+				// server-side fetch. Refusing before the gate keeps the user
+				// from being asked about a fetch that cannot happen.
+				if rerr := webFetchRoutableTarget(u.Hostname()); rerr != nil {
+					return "", fmt.Errorf("web_fetch: provider %q cannot fetch %s: %w — use the built-in fetcher (agents.defaults.web_fetch.provider is unset) for private addresses",
+						"deepseek", u.Hostname(), rerr)
+				}
+			}
 			// Private space is never covered by the preapproved list: those
 			// entries vouch for a public documentation host, not for whatever
 			// address one might resolve to.
@@ -219,6 +248,9 @@ func NewWebFetchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 					payload := WebFetchPermissionPayload(u.String())
 					if allowPrivate {
 						payload["allow_private_ip"] = true
+					}
+					if dok {
+						payload["routed_provider"] = "deepseek"
 					}
 					id, ok, err := hook(ctx, "web_fetch", payload)
 					if err != nil {
@@ -230,17 +262,32 @@ func NewWebFetchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				}
 			}
 			maxB := defaultWebFetchMaxBytes
-			if endpoint, dkey, dok, derr := resolveWebFetchDeepSeek(rt); derr != nil {
-				return "", derr
-			} else if dok {
-				// Explicit provider routing: the permission gate and the SSRF
-				// checks above have already run for the target URL, and
-				// resolveWebFetchDeepSeek validated the DeepSeek endpoint the
-				// same way, so this path only replaces the direct download.
+			if dok {
+				// Explicit provider routing: the permission gate has already run
+				// for the target URL, the target was proven reachable from
+				// outside this machine, and resolveWebFetchDeepSeek validated the
+				// DeepSeek endpoint the same way — so this path only replaces the
+				// direct download.
 				client := &http.Client{Timeout: 30 * time.Second}
-				res, truncated, derr := webFetchDeepSeekPOST(ctx, client, endpoint, dkey, u.String(), maxB)
-				if derr != nil {
-					return "", derr
+				res, truncated, postErr := webFetchDeepSeekPOST(ctx, client, endpoint, dkey, u.String(), maxB)
+				if postErr != nil {
+					return "", postErr
+				}
+				if res.oversized {
+					// Not a tool error: the provider's answer outgrew what this
+					// client reads, so there is no page text to parse. Saying so
+					// in the model's terms beats surfacing "unexpected end of
+					// JSON input", which describes this client rather than the
+					// page and suggests no next step.
+					return marshalWebToolOutput(map[string]any{
+						"final_url": u.String(),
+						"status":    res.status,
+						"truncated": true,
+						"error":     "provider_response_too_large",
+						"body": fmt.Sprintf(
+							"The %s response for this page exceeded the %d MiB the client reads, so no page text could be parsed. Fetch a narrower URL (a section anchor or an alternate host) instead.",
+							"deepseek", webFetchDeepSeekMaxBodyBytes>>20),
+					}), nil
 				}
 				out := map[string]any{
 					"final_url":    u.String(),
@@ -349,19 +396,23 @@ func NewWebFetchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 }
 
 // deepSeekFetchResult carries a DeepSeek Fetch API response split by outcome:
-// content (with title) on HTTP 200, the raw error JSON otherwise.
+// content (with title) on HTTP 200, the raw error JSON otherwise, and the
+// oversized flag when the response itself outgrew what this client reads.
 type deepSeekFetchResult struct {
-	status  int
-	title   string
-	content string // Markdown body at HTTP 200
-	errBody []byte // raw error JSON at any other status
+	status    int
+	title     string
+	content   string // Markdown body at HTTP 200
+	errBody   []byte // raw error JSON at any other status
+	oversized bool   // the response passed webFetchDeepSeekMaxBodyBytes
 }
 
 // webFetchDeepSeekPOST calls DeepSeek's Fetch API (POST /v1/tools/fetch), which
 // renders the target page server-side and returns it as Markdown. The response
-// is read with a bounded reader — maxB plus JSON-escape headroom; anything that
-// fills it is oversized to the point where json.Unmarshal fails and surfaces as
-// an error instead.
+// is read with a bounded reader, and a response that fills it is reported as
+// oversized rather than parsed: reading a JSON document part-way and handing
+// the remainder to json.Unmarshal surfaces this client's read limit as the
+// page's syntax error. maxB still caps the page text, exactly as the direct
+// path does.
 func webFetchDeepSeekPOST(ctx context.Context, client *http.Client, endpoint, key, targetURL string, maxB int) (deepSeekFetchResult, bool, error) {
 	raw, err := json.Marshal(map[string]any{"url": targetURL})
 	if err != nil {
@@ -379,9 +430,12 @@ func webFetchDeepSeekPOST(ctx context.Context, client *http.Client, endpoint, ke
 		return deepSeekFetchResult{}, false, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(defaultWebFetchMaxBytes)+65536))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(webFetchDeepSeekMaxBodyBytes)+1))
 	if err != nil {
 		return deepSeekFetchResult{}, false, err
+	}
+	if len(body) > webFetchDeepSeekMaxBodyBytes {
+		return deepSeekFetchResult{status: resp.StatusCode, oversized: true}, true, nil
 	}
 	res := deepSeekFetchResult{status: resp.StatusCode}
 	if resp.StatusCode != http.StatusOK {
@@ -1897,6 +1951,45 @@ func webFetchHostAllowed(host string, allowPrivate bool) error {
 	}
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return fmt.Errorf("private or loopback hosts are not allowed")
+	}
+	return nil
+}
+
+// webFetchRoutableTarget refuses a target a server-side fetcher cannot reach,
+// or must not be told about: loopback, RFC1918, ULA and link-local addresses,
+// and names that resolve to them.
+//
+// allow_private_ip grants the local dialer, never a third party, so this check
+// ignores it on purpose: a routed fetch sends the URL itself off this machine,
+// and turning a local convenience into "tell a provider about 10.0.0.5" is not
+// what the switch says it does. The name case needs resolution because that is
+// the only form under which an internal address can hide from the URL.
+func webFetchRoutableTarget(host string) error {
+	h := strings.TrimSpace(strings.ToLower(host))
+	if h == "" {
+		return fmt.Errorf("invalid url")
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return webFetchIPAllowed(ip, false)
+	}
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return fmt.Errorf("private or loopback hosts are not allowed")
+	}
+	addrs, err := net.DefaultResolver.LookupHost(context.Background(), h)
+	if err != nil {
+		// Nothing to judge: the URL leaving is only a name, and a provider that
+		// could not resolve it reports that in its own answer. Refusing here
+		// would turn a DNS hiccup on this machine into a fetch that never runs.
+		return nil
+	}
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			continue
+		}
+		if err := webFetchIPAllowed(ip, false); err != nil {
+			return err
+		}
 	}
 	return nil
 }

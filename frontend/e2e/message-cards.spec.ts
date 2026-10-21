@@ -257,6 +257,65 @@ test('the agent’s questions come one screen at a time, behind tabs', async ({ 
   await shot(page, 'message-cards-ask-answered')
 })
 
+// The card's footer prints Esc; this is Esc, on the real page, through the real
+// gateway: the key sends the engine the `cancel` decision the terminal's overlay
+// returns (POST /api/actions/:id/approve with decision cancel), so a question
+// nobody will answer stops parking the run. The footer also prints ←/→ — those
+// are the same session's card, so the arrows are proven here too.
+test('Esc on a question card cancels the question the way the footer says it does', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const session = await seedProjectSession(page, 'message-cards-ask-esc')
+  const now = Math.floor(Date.now() / 1000)
+  const actionId = 'act-e2e-cards-ask-esc'
+  // Two questions, so the arrows have somewhere to go before the Esc.
+  sqlite(`
+    INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+      VALUES('${actionId}', '${session}', 'user_interaction', 'pending', '${sqlJson({
+        questions: [
+          {
+            id: '交付方式',
+            header: '交付方式',
+            prompt: '这次改动怎么交付？',
+            options: [{ id: 'design', label: '设计方案并开发实施' }, { id: 'direct', label: '直接改' }],
+            allow_multiple: false,
+            allow_other: true,
+          },
+          {
+            id: '修改范围',
+            header: '修改范围',
+            prompt: '要动哪些范围？',
+            options: [{ id: 'tui', label: 'TUI' }, { id: 'web', label: 'Web' }],
+            allow_multiple: false,
+            allow_other: true,
+          },
+        ],
+      })}', ${now - 60}, ${now - 60});
+  `)
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  const card = page.locator('[data-testid="ask-card"]')
+  await expect(card).toBeVisible()
+  await expect(card).toContainText('这次改动怎么交付？')
+
+  // ←/→ move a question, as the footer's "点标签或 ←/→ 切题" promises.
+  await card.press('ArrowRight')
+  await expect(card).toContainText('要动哪些范围？')
+  await card.press('ArrowLeft')
+  await expect(card).toContainText('这次改动怎么交付？')
+
+  // Esc cancels the question: the decision the engine understands, not a
+  // dismissed card the run would keep waiting on.
+  const cancelled = page.waitForRequest((req) =>
+    req.url().includes(`/api/actions/${actionId}/approve`) && req.method() === 'POST')
+  await card.press('Escape')
+  expect((await (await cancelled).postDataJSON())?.decision).toBe('cancel')
+  await expect(page.locator('[data-testid="pending-question"]')).toHaveCount(0, { timeout: 30_000 })
+  await shot(page, 'message-cards-ask-escaped')
+})
+
 test('an answered question card keeps the question and the answer, and its head says only that the user was asked', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
@@ -281,12 +340,15 @@ test('an answered question card keeps the question and the answer, and its head 
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await expect(headers(page)).toHaveCount(1)
-  // The head carries the verb alone — the questions are the body's business.
-  await expect(headers(page).first()).toContainText(/asked user/i)
+  // The head carries the verb alone, in the interface's own language — the
+  // questions are the body's business.
+  await expect(headers(page).first()).toContainText(/询问用户/)
   expect(await headers(page).first().innerText()).not.toContain('交付方式')
 
-  await headers(page).first().click()
+  // A settled question card is drawn open: the answer is the point of the
+  // card, so it is not hidden behind a click (prototype :3113).
   const main = page.locator('.chat-shell main')
+  await expect(page.locator('[data-testid="ask-done"]')).toBeVisible()
   await expect(main).toContainText('这次改动怎么交付？')
   await expect(main).toContainText('→ 设计方案并开发实施')
   await expect(main).toContainText('要动哪些范围？')

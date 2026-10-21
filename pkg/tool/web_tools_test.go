@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1353,6 +1354,216 @@ func TestResolveWebFetchDeepSeek(t *testing.T) {
 			t.Fatalf("endpoint=%q key=%q", endpoint, key)
 		}
 	})
+}
+
+// routingRuntime routes web_fetch at DeepSeek with a config key, so the tests
+// below never depend on DEEPSEEK_API_KEY being set in the environment.
+func routingRuntime(allowPrivate bool) *AgentToolRuntime {
+	cfg := &appcfg.Root{}
+	cfg.Agents.Defaults.WebFetch.Provider = "deepseek"
+	cfg.Agents.Defaults.WebFetch.AllowPrivateIP = allowPrivate
+	cfg.Agents.Defaults.WebFetch.DeepSeek = &appcfg.WebFetchDeepSeek{APIKey: "cfg-k"}
+	return &AgentToolRuntime{Cfg: cfg}
+}
+
+// routedFetchTransport stands in for the network on the routed path. The
+// provider's endpoint is a constant, so the only way to observe what leaves the
+// process is to replace the transport the tool's own client dials through.
+type routedFetchTransport struct {
+	mu       sync.Mutex
+	requests []string
+	bodies   []string
+	respond  func(*http.Request) *http.Response
+}
+
+func (rt *routedFetchTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body := ""
+	if req.Body != nil {
+		raw, _ := io.ReadAll(req.Body)
+		body = string(raw)
+	}
+	rt.mu.Lock()
+	rt.requests = append(rt.requests, req.Method+" "+req.URL.String())
+	rt.bodies = append(rt.bodies, body)
+	rt.mu.Unlock()
+	if rt.respond == nil {
+		return nil, errors.New("outbound request suppressed by the test transport")
+	}
+	resp := rt.respond(req)
+	resp.Request = req
+	return resp, nil
+}
+
+func (rt *routedFetchTransport) seen() []string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return append([]string(nil), rt.requests...)
+}
+
+func (rt *routedFetchTransport) postedBody(i int) string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if i < 0 || i >= len(rt.bodies) {
+		return ""
+	}
+	return rt.bodies[i]
+}
+
+func swapWebFetchTransport(t *testing.T, rt http.RoundTripper) {
+	t.Helper()
+	original := http.DefaultTransport
+	http.DefaultTransport = rt
+	t.Cleanup(func() { http.DefaultTransport = original })
+}
+
+// A routed fetch POSTs the URL itself to a third party, so targets only a local
+// dialer could reach must be refused before anything leaves the machine.
+// allow_private_ip opens the local dialer, never someone else's datacenter,
+// which is why this holds even with the flag on.
+func TestWebFetchDeepSeekRefusesPrivateTarget(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	transport := &routedFetchTransport{}
+	swapWebFetchTransport(t, transport)
+
+	webFetch, err := NewWebFetchTool(NewState(t.TempDir()), routingRuntime(true))
+	if err != nil {
+		t.Fatalf("NewWebFetchTool: %v", err)
+	}
+	for _, target := range []string{
+		"http://localhost:8080/x",
+		"http://127.0.0.1/x",
+		"http://10.1.2.3/x",
+		"http://[::1]/x",
+	} {
+		t.Run(target, func(t *testing.T) {
+			args, err := json.Marshal(WebFetchInput{URL: target})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			out, err := webFetch.Handle(context.Background(), string(args))
+			if err == nil || !strings.Contains(err.Error(), "cannot fetch") {
+				t.Fatalf("err=%v out=%v, want a refusal naming the provider", err, out)
+			}
+			if seen := transport.seen(); len(seen) != 0 {
+				t.Fatalf("the target reached the provider anyway: %v", seen)
+			}
+		})
+	}
+}
+
+// The other half of the check: a public literal is not what it refuses, so the
+// URL does go out.
+func TestWebFetchDeepSeekAllowsPublicTarget(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	transport := &routedFetchTransport{respond: func(*http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"title":"Example","content":"# Example"}`)),
+		}
+	}}
+	swapWebFetchTransport(t, transport)
+
+	webFetch, err := NewWebFetchTool(NewState(t.TempDir()), routingRuntime(true))
+	if err != nil {
+		t.Fatalf("NewWebFetchTool: %v", err)
+	}
+	args, _ := json.Marshal(WebFetchInput{URL: "http://198.51.100.7/x"})
+	if _, err := webFetch.Handle(context.Background(), string(args)); err != nil {
+		t.Fatalf("public target must be routable: %v", err)
+	}
+	seen := transport.seen()
+	if len(seen) != 1 || seen[0] != "POST "+deepSeekFetchURL {
+		t.Fatalf("requests=%v, want exactly one POST to %s", seen, deepSeekFetchURL)
+	}
+	if body := transport.postedBody(0); !strings.Contains(body, "http://198.51.100.7/x") {
+		t.Fatalf("posted body=%q, want the target URL", body)
+	}
+}
+
+// A provider answer past the reader's bound is a result the model can act on,
+// not a JSON syntax error attributed to the page.
+func TestWebFetchDeepSeekOversizedResponse(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	huge := `{"content":"` + strings.Repeat("a", webFetchDeepSeekMaxBodyBytes+1024)
+	transport := &routedFetchTransport{respond: func(*http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(huge)),
+		}
+	}}
+	swapWebFetchTransport(t, transport)
+
+	webFetch, err := NewWebFetchTool(NewState(t.TempDir()), routingRuntime(false))
+	if err != nil {
+		t.Fatalf("NewWebFetchTool: %v", err)
+	}
+	args, _ := json.Marshal(WebFetchInput{URL: "http://198.51.100.7/page"})
+	out, err := webFetch.Handle(context.Background(), string(args))
+	if err != nil {
+		t.Fatalf("an oversized provider response must not fail the tool: %v", err)
+	}
+	text, ok := out.(string)
+	if !ok {
+		t.Fatalf("web_fetch returned %T want string", out)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		t.Fatalf("oversized result is not JSON: %v: %.200s", err, text)
+	}
+	if decoded["error"] != "provider_response_too_large" {
+		t.Fatalf("error=%v want provider_response_too_large", decoded["error"])
+	}
+	if decoded["truncated"] != true {
+		t.Fatalf("truncated=%v want true", decoded["truncated"])
+	}
+	body, _ := decoded["body"].(string)
+	if !strings.Contains(body, "narrower URL") {
+		t.Fatalf("body must tell the model what to do next: %q", body)
+	}
+}
+
+// The approval card reads the payload, so the payload has to name the route and
+// the opened private space: neither is inferable from the URL.
+func TestWebFetchPayloadNamesRouting(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	capture := func(t *testing.T, rt *AgentToolRuntime) map[string]any {
+		t.Helper()
+		st := NewState(t.TempDir())
+		var captured map[string]any
+		st.SetActionHook(func(_ context.Context, _ string, payload any) (string, bool, error) {
+			captured, _ = payload.(map[string]any)
+			return "act-1", true, nil
+		})
+		webFetch, err := NewWebFetchTool(st, rt)
+		if err != nil {
+			t.Fatalf("NewWebFetchTool: %v", err)
+		}
+		args, _ := json.Marshal(WebFetchInput{URL: "http://198.51.100.7/page"})
+		_, err = webFetch.Handle(context.Background(), string(args))
+		var required *RequiresActionError
+		if !errors.As(err, &required) {
+			t.Fatalf("expected the gate to ask, got %v", err)
+		}
+		return captured
+	}
+
+	routed := capture(t, routingRuntime(true))
+	if routed["routed_provider"] != "deepseek" {
+		t.Fatalf("payload=%v, want routed_provider=deepseek", routed)
+	}
+	if routed["allow_private_ip"] != true {
+		t.Fatalf("payload=%v, want allow_private_ip=true", routed)
+	}
+
+	direct := capture(t, &AgentToolRuntime{Cfg: &appcfg.Root{}})
+	if _, ok := direct["routed_provider"]; ok {
+		t.Fatalf("payload=%v, a direct fetch must not claim a provider", direct)
+	}
+	if _, ok := direct["allow_private_ip"]; ok {
+		t.Fatalf("payload=%v, a direct fetch must not claim private access", direct)
+	}
 }
 
 // TestDeepSeekSearchFetchIntegration hits the real DeepSeek Search and Fetch

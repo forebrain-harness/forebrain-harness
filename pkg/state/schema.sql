@@ -186,6 +186,25 @@ CREATE TABLE fb_session_model_state (
   PRIMARY KEY (session_id)
 ) STRICT, WITHOUT ROWID;
 
+-- One session's observed image rejections, coarsely: a provider that refused an
+-- image for this conversation is remembered per provider+model, so the next
+-- request on that model is withheld instead of sent to be refused again. A
+-- model switch is the recovery the refusal sentence already points at, and it is
+-- free here because the lookup is keyed by the model in force. Only a turn whose
+-- request would actually carry an image consults this row.
+--
+-- It lives beside the session for the reason fb_session_model_state does: a
+-- resumed session should not pay the refusal twice, and the record is released
+-- when the session it belongs to is.
+CREATE TABLE fb_session_image_refusals (
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  observed_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, provider, model)
+) STRICT, WITHOUT ROWID;
+
 -- Prompt state frozen for the life of a session. Content injected ahead of the
 -- conversation (the skills catalog, the memory instruction) must stay
 -- byte-identical for every request of a session or the provider's cached prefix

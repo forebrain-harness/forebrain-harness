@@ -72,7 +72,7 @@ test('every approval family asks its own question, with its own facts and decisi
       payload: {
         command: 'rm -rf build/ && go build -o ./build/bin/forebrain ./cmd/forebrain',
         command_safety: { origin: 'shell', known_safe: false, used_complex_parsing: false },
-        approval_reason: 'dangerous_shell_syntax', force_tool_approval: true,
+        approval_reason: 'dangerous_shell_syntax', force_tool_approval: true, dangerous_rule: 'forced_rm',
       },
     },
     {
@@ -108,8 +108,14 @@ test('every approval family asks its own question, with its own facts and decisi
       payload: {
         request_permissions: true, reason: 'run the acceptance suite', cwd: '/w',
         permissions: {
-          file_system: { entries: [{ path: '~/notes', access: 'read' }, { path: '/tmp/out', access: 'write' }] },
-          network: { hosts: ['api.example.com'] },
+          file_system: {
+            entries: [
+              { path: { type: 'path', path: '~/notes' }, access: 'read' },
+              { path: { type: 'path', path: '/tmp/out' }, access: 'write' },
+            ],
+            glob_scan_max_depth: 4,
+          },
+          network: { enabled: true },
         },
       },
     },
@@ -132,10 +138,10 @@ test('every approval family asks its own question, with its own facts and decisi
   await expect(facts('act-e2e-write-new')).toHaveText(['96 行'])
   await expect(decisions('act-e2e-write-new').first()).toHaveText('写入')
 
-  // ② A dangerous command says what it does; an unknown one asks without a
-  // fact line, because no rule names what it does.
+  // ② A dangerous command says what the engine concluded about it; an unknown
+  // one asks without a fact line, because no rule names what it does.
   await expect(card('act-e2e-shell-danger')).toContainText('要运行这条命令吗？')
-  await expect(facts('act-e2e-shell-danger')).toHaveText(['会强制删掉 build/ 目录下的文件'])
+  await expect(facts('act-e2e-shell-danger')).toHaveText(['强制删除文件（rm -f），引擎把这类命令列为危险命令'])
   await expect(card('act-e2e-shell-unknown')).toContainText('要运行这条命令吗？')
   await expect(facts('act-e2e-shell-unknown')).toHaveCount(0)
 
@@ -144,28 +150,33 @@ test('every approval family asks its own question, with its own facts and decisi
   await expect(facts('act-e2e-network')).toHaveText(['api.github.com · HTTPS · 443'])
   await expect(decisions('act-e2e-network')).toHaveText(['允许', '本会话都允许', '以后都允许', '不要访问'])
 
-  // ④ The sandbox: its boundary in one line, and the scope a scoped retry
-  // would gain instead.
+  // ④ The sandbox: what it did, and the reason it gave in its own words — the
+  // denial can be about the network as readily as about files. A scoped retry
+  // says the scope it would gain instead.
   await expect(card('act-e2e-sandbox')).toContainText('沙箱拦下了这条命令，要在沙箱外运行吗？')
-  await expect(facts('act-e2e-sandbox')).toHaveText(['沙箱只允许改这个项目里的文件'])
+  await expect(facts('act-e2e-sandbox')).toHaveText(['沙箱拦下了这条命令', 'write outside project roots'])
   await expect(card('act-e2e-sandbox-scoped')).toContainText('沙箱拦下了这条命令，要在沙箱外运行吗？')
   await expect(facts('act-e2e-sandbox-scoped')).toHaveText(['可写 /tmp/out'])
 
-  // ⑤ A permission request lists what it asks for, one line each.
+  // ⑤ A permission request lists what it asks for, one line each, read out of
+  // the entry objects the engine marshals — never a stringified object, and the
+  // network grant stated as the one thing the wire carries.
   await expect(card('act-e2e-permissions')).toContainText('要给它这些权限吗？')
-  await expect(facts('act-e2e-permissions')).toHaveText(['可读 ~/notes', '可写 /tmp/out', '可连 api.example.com'])
+  await expect(facts('act-e2e-permissions')).toHaveText(['可读 ~/notes', '可写 /tmp/out', '可访问网络'])
   await expect(decisions('act-e2e-permissions')).toHaveText(['本轮允许', '本轮允许，自动审查', '本会话允许', '不授予'])
 
-  // ⑥ An MCP call names its server and tool, and shows what is being sent.
+  // ⑥ An MCP call names its server and tool, and shows what is being sent
+  // under labels rather than raw keys.
   await expect(card('act-e2e-mcp')).toContainText('要调用 github 的 create_issue 吗？')
-  await expect(facts('act-e2e-mcp').first()).toHaveText('repo unionj-cloud/forebrain-harness')
+  await expect(facts('act-e2e-mcp').first()).toHaveText('Repo: unionj-cloud/forebrain-harness')
   await expect(decisions('act-e2e-mcp')).toHaveText(['调用', '本会话不再问', '以后都不再问', '不要调用'])
 
-  // Nothing anywhere is the tool's internal name, an action id, or the
-  // engine-word buttons the old generic card printed.
+  // Nothing anywhere is the tool's internal name, an action id, the engine-word
+  // buttons the old generic card printed, or a stringified permission entry.
   const main = page.locator('.chat-shell main')
   await expect(main).not.toContainText('write_file')
   await expect(main).not.toContainText('mcp__github__create_issue')
+  await expect(main).not.toContainText('[object Object]')
   await expect(main).not.toContainText('批准一次')
   await expect(main).not.toContainText('拒绝并中断本轮')
   await shot(page, 'approval-families')

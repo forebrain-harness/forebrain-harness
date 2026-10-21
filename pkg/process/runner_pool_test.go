@@ -259,6 +259,52 @@ func TestRunnerPoolNoProjectSessionMatchesBase(t *testing.T) {
 	}
 }
 
+// TestBoundRunnerForSessionDoesNotCreateEntry pins the read side of the model
+// fix: answering "which runner will this conversation's next turn use" must
+// never build one. A read that created an entry would start a whole project
+// runner — MCP children included — from a footer repaint.
+func TestBoundRunnerForSessionDoesNotCreateEntry(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+
+	// No project row: the turn runs on the base runner, exactly as
+	// RunnerForTurn answers for it.
+	ensurePoolSessions(t, env, "sess-plain", "sess-bound")
+	if got, ok := pool.BoundRunnerForSession(ctx, "sess-plain"); !ok || got != env.Runner {
+		t.Fatalf("project-less session = %v/%v, want the base runner", got, ok)
+	}
+
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "bound", Root: "/tmp/pool-bound", ProjectKey: "-tmp-pool-bound"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "sess-bound", proj.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The first turn has not run yet: there is no entry to name, and the read
+	// must not make one.
+	before := len(pool.entries)
+	if got, ok := pool.BoundRunnerForSession(ctx, "sess-bound"); ok || got != nil {
+		t.Fatalf("unbuilt project runner = %v/%v, want no answer", got, ok)
+	}
+	if len(pool.entries) != before {
+		t.Fatalf("the read created an entry: %d → %d", before, len(pool.entries))
+	}
+	if _, ok := pool.sessions["sess-bound"]; ok {
+		t.Fatal("the read bound the session to an entry")
+	}
+
+	// Once the turn has built it, the read names that very runner.
+	built := pool.RunnerForSession(ctx, "sess-bound")
+	require.NotNil(t, built)
+	require.NotSame(t, env.Runner, built)
+	got, ok := pool.BoundRunnerForSession(ctx, "sess-bound")
+	require.True(t, ok)
+	require.Same(t, built, got)
+}
+
 func TestRunnerPoolProjectEditFreezesExistingSessions(t *testing.T) {
 	ctx := context.Background()
 	env, projects, _ := newPoolTestEnv(t)

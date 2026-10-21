@@ -924,13 +924,27 @@ func (s *ChatSession) currentSessionID() string {
 
 // sessionModelState is what one conversation runs on, resolved the way its
 // next request resolves it: its own stored choice against the live config,
-// else the runner's published selection. A surface that answered this from
-// the runner alone named a model the conversation's requests never go to.
+// else the runner that turn will run on. A surface that answered this from
+// the base runner alone named a model the conversation's requests never go to:
+// turns run on the project runner, which the pool builds from the live
+// configuration, while the base runner keeps whatever it pinned at startup.
 func (s *ChatSession) sessionModelState(sessionID string) run.PrimaryModelState {
-	if s == nil || s.runner() == nil {
+	if s == nil || s.Env == nil {
 		return run.PrimaryModelState{}
 	}
-	return run.PrimaryModelStateForSession(s.runner(), s.sessStore(), sessionID)
+	base := s.runner()
+	sid := strings.TrimSpace(sessionID)
+	if bound, ok := s.Env.BoundRunnerForSession(context.Background(), sid); ok {
+		return run.PrimaryModelStateForSession(bound, s.sessStore(), sid)
+	}
+	// No project runner exists yet: the first turn builds it from the live
+	// config, so the model it will adopt is the configured default — never
+	// this process's base-runner pin.
+	fallback, err := run.ConfiguredDefaultSelection(base)
+	if err != nil {
+		fallback = run.PrimaryModelSelection(base)
+	}
+	return run.PrimaryModelStateForSessionOn(base, s.sessStore(), sid, fallback)
 }
 
 // currentModelNames is the provider/model pair this conversation's requests go

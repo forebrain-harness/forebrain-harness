@@ -7,27 +7,58 @@
     @keydown.esc="onEsc"
   >
     <header class="subagent-drawer-head">
+      <!-- One tab array for both kinds, in the order they were opened: the
+           drawer is one surface, and a plan opened between two subagents sits
+           between them (prototype :4740/:4845). -->
       <div class="subagent-drawer-tabs" role="tablist" :aria-label="t('chat.subagentDrawer')">
+        <template v-for="entry in orderedTabs" :key="entry.key">
         <div
-          v-for="tab in tabs"
-          :key="tab.agentId"
+          v-if="entry.kind === 'plan'"
           class="subagent-drawer-tab"
-          :class="{ 'is-on': !activePlan && tab.agentId === active }"
-          :data-testid="`subagent-tab-${tab.agentId}`"
+          :class="{ 'is-on': entry.key === activePlan }"
+          :data-testid="`plan-tab-${entry.key}`"
         >
           <button
             type="button"
             role="tab"
             class="subagent-drawer-tab-main"
-            :aria-selected="!activePlan && tab.agentId === active"
-            @click="emit('select', tab.agentId)"
+            :aria-selected="entry.key === activePlan"
+            @click="emit('select-plan', entry.key)"
           >
-            <Loader2 v-if="phaseOf(tab) === 'active'" class="is-run" aria-hidden="true" />
-            <CheckCircle2 v-else-if="phaseOf(tab) === 'done'" class="is-ok" aria-hidden="true" />
+            <MapIcon class="is-plan" aria-hidden="true" />
+            <span class="subagent-drawer-tab-label" v-tip:bottom.trunc="entry.plan?.label">{{ entry.plan?.label }}</span>
+          </button>
+          <button
+            type="button"
+            class="subagent-drawer-tab-close"
+            :aria-label="t('chat.subagentTabCloseAria', { name: entry.plan?.label })"
+            v-tip:bottom="t('chat.subagentTabClose')"
+            :data-testid="`plan-tab-close-${entry.key}`"
+            @click="emit('close-plan', entry.key)"
+          >
+            <X aria-hidden="true" />
+          </button>
+        </div>
+        <div
+          v-else-if="entry.agent"
+          :key="entry.key"
+          class="subagent-drawer-tab"
+          :class="{ 'is-on': !activePlan && entry.key === active }"
+          :data-testid="`subagent-tab-${entry.key}`"
+        >
+          <button
+            type="button"
+            role="tab"
+            class="subagent-drawer-tab-main"
+            :aria-selected="!activePlan && entry.key === active"
+            @click="emit('select', entry.key)"
+          >
+            <Loader2 v-if="entry.agent && phaseOf(entry.agent) === 'active'" class="is-run" aria-hidden="true" />
+            <CheckCircle2 v-else-if="entry.agent && phaseOf(entry.agent) === 'done'" class="is-ok" aria-hidden="true" />
             <XCircle v-else class="is-bad" aria-hidden="true" />
-            <span class="subagent-drawer-tab-label" v-tip:bottom.trunc="tabLabel(tab)">{{ tabLabel(tab) }}</span>
+            <span class="subagent-drawer-tab-label" v-tip:bottom.trunc="entry.agent ? tabLabel(entry.agent) : ''">{{ entry.agent ? tabLabel(entry.agent) : '' }}</span>
             <span
-              v-if="unseen(tab)"
+              v-if="entry.agent && unseen(entry.agent)"
               class="subagent-drawer-tab-new"
               :aria-label="t('chat.subagentUnseen')"
             />
@@ -35,44 +66,15 @@
           <button
             type="button"
             class="subagent-drawer-tab-close"
-            :aria-label="t('chat.subagentTabCloseAria', { name: tabLabel(tab) })"
+            :aria-label="t('chat.subagentTabCloseAria', { name: entry.agent ? tabLabel(entry.agent) : '' })"
             v-tip:bottom="t('chat.subagentTabClose')"
-            :data-testid="`subagent-tab-close-${tab.agentId}`"
-            @click="emit('close-tab', tab.agentId)"
+            :data-testid="`subagent-tab-close-${entry.key}`"
+            @click="emit('close-tab', entry.key)"
           >
             <X aria-hidden="true" />
           </button>
         </div>
-        <!-- The plan documents open as tabs, after the subagents: a plan tab
-             has no unread state — a document does not say anything new. -->
-        <div
-          v-for="tab in planTabs"
-          :key="tab.id"
-          class="subagent-drawer-tab"
-          :class="{ 'is-on': tab.id === activePlan }"
-          :data-testid="`plan-tab-${tab.id}`"
-        >
-          <button
-            type="button"
-            role="tab"
-            class="subagent-drawer-tab-main"
-            :aria-selected="tab.id === activePlan"
-            @click="emit('select-plan', tab.id)"
-          >
-            <Map class="is-plan" aria-hidden="true" />
-            <span class="subagent-drawer-tab-label" v-tip:bottom.trunc="tab.label">{{ tab.label }}</span>
-          </button>
-          <button
-            type="button"
-            class="subagent-drawer-tab-close"
-            :aria-label="t('chat.subagentTabCloseAria', { name: tab.label })"
-            v-tip:bottom="t('chat.subagentTabClose')"
-            :data-testid="`plan-tab-close-${tab.id}`"
-            @click="emit('close-plan', tab.id)"
-          >
-            <X aria-hidden="true" />
-          </button>
-        </div>
+        </template>
       </div>
       <button
         type="button"
@@ -136,7 +138,7 @@
  * same way: a column on a wide screen, an overlay on a narrow one.
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { CheckCircle2, Loader2, Map, PanelRightClose, Plus, X, XCircle } from 'lucide-vue-next'
+import { CheckCircle2, Loader2, Map as MapIcon, PanelRightClose, Plus, X, XCircle } from 'lucide-vue-next'
 import { formatRuntimeDuration, type SubagentTranscript } from '@/composables/useChatStream'
 import type { PlanTab } from '@/composables/useSessionPlans'
 import { subagentPhase, subagentStatusLabel, subagentTabLabel } from '@/lib/subagentStatus'
@@ -154,14 +156,20 @@ const props = withDefaults(defineProps<{
   overlay: boolean
   /** The stream's shared clock, for a running row's elapsed. */
   now?: number
-  /** The plan documents open as tabs, drawn after the subagents'. */
+  /** The plan documents open as tabs, in the same drawer. */
   planTabs?: PlanTab[]
   /** The plan tab in front; empty while a subagent tab is. */
   activePlan?: string
+  /**
+   * The order the tabs were opened in, across both kinds. Absent (or naming
+   * nothing that is still open) falls back to the subagents, then the plans.
+   */
+  order?: string[]
 }>(), {
   now: undefined,
   planTabs: () => [],
   activePlan: '',
+  order: () => [],
 })
 
 const emit = defineEmits<{
@@ -179,6 +187,20 @@ const menuOpen = ref(false)
 
 const openIds = computed(() => props.tabs.map((tab) => tab.agentId))
 
+/** The tab bar, one entry per open tab, in the order they were opened. */
+const orderedTabs = computed(() => {
+  const plans = new globalThis.Map(props.planTabs.map((tab) => [tab.id, tab]))
+  const agents = new globalThis.Map(props.tabs.map((tab) => [tab.agentId, tab]))
+  const keys = props.order.filter((key) => plans.has(key) || agents.has(key))
+  for (const id of agents.keys()) if (!keys.includes(id)) keys.push(id)
+  for (const id of plans.keys()) if (!keys.includes(id)) keys.push(id)
+  return keys.map((key) => {
+    const plan = plans.get(key)
+    if (plan) return { key, kind: 'plan' as const, plan, agent: undefined }
+    return { key, kind: 'agent' as const, plan: undefined, agent: agents.get(key) }
+  })
+})
+
 function phaseOf(record: SubagentTranscript) {
   return subagentPhase(record.status)
 }
@@ -190,6 +212,10 @@ function tabLabel(record: SubagentTranscript): string {
 /** A tab the user is not reading says so when the subagent produced something since. */
 function unseen(tab: SubagentTranscript): boolean {
   if (tab.agentId === props.active) return false
+  // A tab whose agent is still working is not holding anything unread for the
+  // reader to come back to: the dot means "it said something while you were
+  // elsewhere", not "it is busy" (prototype :4845).
+  if (phaseOf(tab) === 'active') return false
   return tab.updatedSeq > (props.seen[tab.agentId] ?? 0)
 }
 

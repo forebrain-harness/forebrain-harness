@@ -1,5 +1,5 @@
 import { computed, ref, watch, type Ref } from 'vue'
-import { GatewayHttpError, getErrorMessage, forebrainApi, type PlanReviewModelOption, type PlanReviewNote, type SessionApprovalRequest } from '@/lib/api'
+import { GatewayHttpError, getErrorMessage, forebrainApi, type PlanReviewModelOption, type SessionApprovalRequest } from '@/lib/api'
 import { approvalFacts, approvalFamily, approvalQuestion, parseApprovalPayload, type ApprovalFacts } from '@/lib/approvalGates'
 import { useI18n } from '@/locales'
 import {
@@ -97,10 +97,6 @@ export function usePendingActions(options: {
 
   function isExitPlan(a: ActionRow): boolean {
     return String(a.kind ?? '').trim().toLowerCase() === 'exit_plan_mode'
-  }
-
-  function reviewModelLabel(review: PlanReviewNote): string {
-    return [review.provider, review.model].filter(Boolean).join('/')
   }
 
   function modelLabel(model: PlanReviewModelOption): string {
@@ -302,6 +298,14 @@ export function usePendingActions(options: {
     await submitAction(actionId, () => forebrainApi.actionsAnswer(actionId, { answers: payload }))
   }
 
+  /** The web's Esc: the same verdict the terminal's overlay returns for an asked
+   *  form (see decideAsk in pkg/turn/approval.go), so the run stops waiting
+   *  instead of hanging on a question nobody will answer. It drops this one
+   *  question — not the run. */
+  async function cancelAsk(actionId: string) {
+    await submitAction(actionId, () => forebrainApi.actionsApprove(actionId, { decision: 'cancel' }))
+  }
+
   /** One question's answer, written by whichever surface is asking it — the
    *  tabbed card and any other presentation of the same action share this
    *  store, so an answer made in one place is answered in the other too. */
@@ -496,11 +500,11 @@ export function usePendingActions(options: {
     load,
     exitPlanRequest,
     isExitPlan,
-    reviewModelLabel,
     modelLabel,
     activeReviewLabel,
     clearContextLabel,
     submitAsk,
+    cancelAsk,
     setAskAnswer,
     setAskOther,
     submitApprovalDecision,

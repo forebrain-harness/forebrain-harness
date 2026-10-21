@@ -11,14 +11,16 @@ import {
   FolderIcon,
   FolderOpenIcon,
 } from 'lucide-vue-next'
-import { computed, provide } from 'vue'
-import { FileTreeFolderKey, useFileTreeContext } from './context'
+import { computed } from 'vue'
+import { useFileTreeContext } from './context'
 import FileTreeIcon from './FileTreeIcon.vue'
 import FileTreeName from './FileTreeName.vue'
 
 interface Props extends /* @vue-ignore */ HTMLAttributes {
   path: string
   name: string
+  /** Extra classes for the row's own button (the caret, mark and label). */
+  buttonClass?: string
   class?: HTMLAttributes['class']
 }
 
@@ -28,12 +30,6 @@ const { expandedPaths, togglePath, selectedPath, onSelect } = useFileTreeContext
 
 const isExpanded = computed(() => expandedPaths.value.has(props.path))
 const isSelected = computed(() => selectedPath.value === props.path)
-
-provide(FileTreeFolderKey, {
-  path: props.path,
-  name: props.name,
-  isExpanded: isExpanded.value,
-})
 </script>
 
 <template>
@@ -44,32 +40,39 @@ provide(FileTreeFolderKey, {
       tabindex="0"
       v-bind="$attrs"
     >
-      <CollapsibleTrigger as-child>
-        <button
-          :class="
-            cn(
-              'flex w-full items-center gap-1 rounded px-2 py-1 text-left transition-colors hover:bg-muted/50',
-              isSelected && 'bg-muted',
-            )
-          "
-          type="button"
-          @click="() => onSelect(props.path)"
-        >
-          <ChevronRightIcon
+      <!-- The trigger and the caller's row controls are one line, but they are
+           siblings: a button inside a button is invalid, and a browser repairs
+           it by closing the outer one. -->
+      <div class="flex items-center gap-1">
+        <CollapsibleTrigger as-child>
+          <button
             :class="
               cn(
-                'size-4 shrink-0 text-muted-foreground transition-transform',
-                isExpanded && 'rotate-90',
+                'flex w-full items-center gap-1 rounded px-2 py-1 text-left transition-colors hover:bg-muted/50',
+                isSelected && 'bg-muted',
+                props.buttonClass,
               )
             "
-          />
-          <FileTreeIcon>
-            <FolderOpenIcon v-if="isExpanded" class="size-4 text-blue-500" />
-            <FolderIcon v-else class="size-4 text-blue-500" />
-          </FileTreeIcon>
-          <FileTreeName>{{ props.name }}</FileTreeName>
-        </button>
-      </CollapsibleTrigger>
+            type="button"
+            @click="() => onSelect(props.path)"
+          >
+            <ChevronRightIcon
+              :class="
+                cn(
+                  'size-4 shrink-0 text-muted-foreground transition-transform',
+                  isExpanded && 'rotate-90',
+                )
+              "
+            />
+            <FileTreeIcon>
+              <FolderOpenIcon v-if="isExpanded" class="size-4 text-blue-500" />
+              <FolderIcon v-else class="size-4 text-blue-500" />
+            </FileTreeIcon>
+            <FileTreeName>{{ props.name }}</FileTreeName>
+          </button>
+        </CollapsibleTrigger>
+        <slot name="actions" />
+      </div>
       <CollapsibleContent>
         <div class="ml-4 border-l pl-2">
           <slot />

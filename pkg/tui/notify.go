@@ -209,6 +209,47 @@ func goalEventMessage(evt event.RunEvent) (any, bool) {
 	}
 }
 
+// imageRejectedMessage is the one system line a provider's image refusal draws,
+// live and on replay alike: one function so both surfaces say the same words.
+// It names no image, because the provider's own sentence never does; it says
+// what was done with the picture and where to go if the sight of it matters.
+func imageRejectedMessage(evt event.RunEvent) (any, bool) {
+	if evt.Type != event.RunEventImageRejected {
+		// The type check is the gate, not the decode: every event payload is a
+		// JSON object, so an unguarded decode would answer for all of them.
+		return nil, false
+	}
+	var p event.ImageRejectedPayload
+	if json.Unmarshal(evt.Payload, &p) != nil {
+		return nil, false
+	}
+	return NewMessageMsg{Msg: Message{
+		Kind:      MsgKindSystem,
+		Content:   imageRejectedLine(p),
+		RunID:     evt.RunID,
+		Timestamp: evt.CreatedAt,
+	}}, true
+}
+
+// imageRejectedLine is that sentence: what happened to the picture, and the one
+// move that brings it back. Kept beside the message above so live and replay
+// cannot drift.
+func imageRejectedLine(p event.ImageRejectedPayload) string {
+	model := strings.TrimSpace(p.Model)
+	if provider := strings.TrimSpace(p.Provider); provider != "" && model != "" {
+		model = provider + "/" + model
+	}
+	sentence := "an image in this turn was rejected by the provider; it was sent as a text note instead"
+	if model != "" {
+		sentence = "an image in this turn was rejected by " + model + "; it was sent as a text note instead"
+	}
+	sentence += " — switch model with /model to send pictures again"
+	if reason := strings.TrimSpace(p.Reason); reason != "" {
+		sentence += " (provider said: " + reason + ")"
+	}
+	return sentence
+}
+
 type QuitRequestedMsg struct {
 	Reason string
 }
@@ -888,6 +929,15 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		}
 	case event.RunEventGoalStarted, event.RunEventGoalRoundStarted, event.RunEventGoalCompleted:
 		if msg, ok := goalEventMessage(evt); ok {
+			s.notifyUIForSession(evt.SessionID, msg)
+		}
+	// The provider refused an image this turn carried, and the request went on
+	// with a text note in its place: one system line says so, because the answer
+	// that follows cannot see the picture and nothing else would explain that.
+	// The same sentence is what a resumed session replays
+	// (pkg/tui/commands.go replayImageRejectedMessage).
+	case event.RunEventImageRejected:
+		if msg, ok := imageRejectedMessage(evt); ok {
 			s.notifyUIForSession(evt.SessionID, msg)
 		}
 	// A plan review's two events are its card: the request opens it, the

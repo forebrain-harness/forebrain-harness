@@ -252,7 +252,13 @@ function mentionImageLabel(path: string): string {
   return path.split('/').filter(Boolean).pop() ?? path
 }
 
-defineExpose({ insertWorkspacePath, takeAttached, hasAttached, restoreSubmission, addUploaded })
+/** Put the caret in the composer, for a caller that has just moved the reader's
+ *  attention there (an ask card's「和它聊聊」). */
+function focus() {
+  textareaRef.value?.focus()
+}
+
+defineExpose({ insertWorkspacePath, takeAttached, hasAttached, restoreSubmission, addUploaded, focus })
 
 const filteredBots = computed(() => {
   const list = props.bots ?? []
@@ -728,26 +734,26 @@ function onRootRowClick(e: MouseEvent) {
     <ul v-if="files.length || uploadedAttachments.length || mentionImages.length" class="flex flex-wrap items-center gap-2 px-3 pt-3"
       :aria-label="t('prompt.attached')">
       <li v-for="file in files" :key="file.id">
-        <PromptInputAttachment :file="file" />
+        <PromptInputAttachment :file="file" :remove-label="t('composer.removeAttachment')" />
       </li>
       <li v-for="attachment in uploadedAttachments" :key="attachment.fileId"
-        class="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-md border border-border pl-1.5 pr-1 text-sm font-medium">
+        class="inline-flex h-[26px] items-center gap-1.5 rounded-md border border-border bg-[var(--forebrain-bg-alt)] pl-2 pr-1 font-mono text-[11.5px] text-[var(--forebrain-text-2)]">
         <ImageIcon v-if="attachment.mediaType.startsWith('image/')" class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         <Paperclip v-else class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         <span class="min-w-0 truncate" v-tip:top.trunc="uploadedAttachmentLabel(attachment)">{{ uploadedAttachmentLabel(attachment) }}</span>
         <button type="button"
-          class="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          class="inline-flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           :aria-label="t('prompt.removeAttached', { name: uploadedAttachmentLabel(attachment) })"
           @click="removeUploadedAttachment(attachment.fileId)">
           <X class="size-3.5" aria-hidden="true" />
         </button>
       </li>
       <li v-for="path in mentionImages" :key="path"
-        class="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-md border border-border pl-1.5 pr-1 text-sm font-medium">
+        class="inline-flex h-[26px] items-center gap-1.5 rounded-md border border-border bg-[var(--forebrain-bg-alt)] pl-2 pr-1 font-mono text-[11.5px] text-[var(--forebrain-text-2)]">
         <ImageIcon class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         <span class="min-w-0 truncate" v-tip:top.trunc="path">{{ mentionImageLabel(path) }}</span>
         <button type="button"
-          class="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          class="inline-flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           :aria-label="t('prompt.removeAttached', { name: mentionImageLabel(path) })"
           @click="removeMentionImage(path)">
           <X class="size-3.5" aria-hidden="true" />
@@ -756,7 +762,7 @@ function onRootRowClick(e: MouseEvent) {
     </ul>
     <textarea ref="textareaRef" v-model="modelValue" data-slot="input-group-control" name="message"
       :placeholder="placeholder" :disabled="disabled" :class="cn(
-        'max-h-48 min-h-20 w-full min-w-0 flex-1 resize-none overflow-y-auto rounded-none border-0 bg-transparent px-3 py-3 align-top text-base leading-normal shadow-none !outline-none focus:!outline-none focus-visible:!outline-none focus:!ring-0 focus-visible:!ring-0 dark:bg-transparent md:min-h-[5.25rem] md:text-sm placeholder:text-muted-foreground [field-sizing:fixed]',
+        'max-h-48 min-h-11 w-full min-w-0 flex-1 resize-none overflow-y-auto rounded-none border-0 bg-transparent px-3 py-3 align-top text-base leading-normal shadow-none !outline-none focus:!outline-none focus-visible:!outline-none focus:!ring-0 focus-visible:!ring-0 dark:bg-transparent md:text-sm placeholder:text-muted-foreground [field-sizing:fixed]',
         props.class,
       )
         " @keydown="handleKeyDown" @input="onInput" @keyup="syncMentionState" @click="syncMentionState"

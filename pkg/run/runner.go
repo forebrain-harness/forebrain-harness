@@ -984,7 +984,14 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	// conversation's own requests and reuses their cached prefix; the wrappers
 	// below only add reminders at the end of a turn's request and recover a
 	// turn's call, and a summary wants neither.
-	summaryChain := llmClient
+	//
+	// The image heal is the one wrapper that is safe here and necessary here: it
+	// changes nothing on the success path (a summary that goes through is byte
+	// for byte the request this chain built), and without it a conversation
+	// carrying an image the provider refuses can never be compacted — the
+	// summary request would be refused the same way every time, and the history
+	// would keep growing until nothing fits.
+	summaryChain := withImageHeal(llmClient)
 	r.summaryLLM = summaryChain
 	// The reminder planModeLLM injects is not written here. It reaches the
 	// transcript through the run's own message sequence, which the orchestration
@@ -1427,6 +1434,13 @@ func (r *Runner) RunContent(ctx context.Context, parts []llm.ContentPart) (*agen
 				if rowID, err := r.SessionStore.LatestUserMessageRowID(ctx, sid); err == nil && rowID > 0 {
 					ctx = tool.WithTurnAnchorMessageID(ctx, rowID)
 				}
+				// A provider refusing an image is remembered for this
+				// conversation and the model in force, and reported once to the
+				// surfaces watching this run. Installed here, on the turn's own
+				// context, because both halves need the conversation and the run
+				// id — and because the heal that reports it sits on the request
+				// chains this turn drives.
+				ctx = withImageRefusalRecorder(ctx, r, sid)
 			}
 		}
 		r.foreground.enter()

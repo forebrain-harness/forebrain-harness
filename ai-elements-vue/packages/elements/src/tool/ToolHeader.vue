@@ -1,10 +1,8 @@
 <script setup lang="ts">
-import type { DynamicToolUIPart, ToolUIPart } from 'ai'
-import type { HTMLAttributes } from 'vue'
+import type { Component, HTMLAttributes } from 'vue'
 import { CollapsibleTrigger } from '@repo/shadcn-vue/components/ui/collapsible'
 import { cn } from '@repo/shadcn-vue/lib/utils'
 import { ChevronDownIcon, WrenchIcon } from 'lucide-vue-next'
-import { computed } from 'vue'
 import StatusBadge from './ToolStatusBadge.vue'
 
 type ToolHeaderProps = {
@@ -15,45 +13,74 @@ type ToolHeaderProps = {
    * Default false: existing callers keep the wrapping behaviour.
    */
   singleLine?: boolean
+  /** The call's own mark, matching the tool it invoked (prototype TOOL_ICON). */
+  icon?: Component
+  /** The call's state, in this surface's own vocabulary. */
+  status: 'running' | 'awaiting' | 'done' | 'denied' | 'error'
+  /** What that state is called in the reader's language. */
+  statusLabel: string
   class?: HTMLAttributes['class']
-} & (
-  | { type: ToolUIPart['type'], state: ToolUIPart['state'], toolName?: never }
-  | { type: DynamicToolUIPart['type'], state: DynamicToolUIPart['state'], toolName: string }
-)
+}
 
 const props = defineProps<ToolHeaderProps>()
-
-const derivedName = computed(() =>
-  props.type === 'dynamic-tool'
-    ? props.toolName
-    : props.type.split('-').slice(1).join('-'),
-)
 </script>
 
 <template>
-  <CollapsibleTrigger
-    :class="
-      cn(
-        'flex w-full items-center justify-between gap-4 p-3',
-        props.class,
-      )
-    "
-    v-bind="$attrs"
-  >
-    <div class="flex min-w-0 items-center gap-2">
-      <WrenchIcon class="size-4 shrink-0 text-muted-foreground" />
-      <!-- A trigger is a button, which centres its text; a title long enough
-           to wrap reads from the left like every other line of the card.
-           singleLine swaps the wrap for an ellipsis and carries the full text
-           in the native title attribute (a tooltip), not in the title prop. -->
-      <span
-        :class="cn('min-w-0 text-left font-medium text-sm', props.singleLine ? 'truncate whitespace-nowrap' : 'break-words')"
-        :title="props.singleLine ? props.title ?? derivedName : undefined"
-      >{{ props.title ?? derivedName }}</span>
-      <StatusBadge :state="props.state" />
-    </div>
-    <ChevronDownIcon
-      class="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180"
-    />
+  <!-- The prototype's .tool-h: one line, always — the tool's mark, the engine's
+       own summary of the call, the state and the fold. The padding, the alt
+       surface and the hairline under it belong to the header, so the card's
+       body reads as one column beneath it. -->
+  <CollapsibleTrigger :class="cn('tool-head', props.class)" v-bind="$attrs">
+    <component :is="props.icon ?? WrenchIcon" class="tool-head-icon" aria-hidden="true" />
+    <!-- A trigger is a button, which centres its text; the summary reads from
+         the left like every other line of the card. singleLine swaps the wrap
+         for an ellipsis and carries the full text in the native title
+         attribute (a tooltip), not in the title prop. -->
+    <span
+      class="tool-head-cmd"
+      :class="props.singleLine ? 'truncate' : 'break-words'"
+      :title="props.singleLine ? props.title : undefined"
+    >{{ props.title }}</span>
+    <StatusBadge :status="props.status" :label="props.statusLabel" />
+    <ChevronDownIcon class="tool-head-chev transition-transform group-data-[state=open]:rotate-180" aria-hidden="true" />
   </CollapsibleTrigger>
 </template>
+
+<style scoped>
+.tool-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  background: var(--forebrain-bg-alt);
+  border-bottom: 1px solid var(--forebrain-divider);
+  font-size: 12px;
+  text-align: left;
+}
+
+.tool-head-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--forebrain-muted-text);
+}
+
+.tool-head-cmd {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--forebrain-mono-font);
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-head-chev {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--forebrain-muted-text);
+}
+</style>

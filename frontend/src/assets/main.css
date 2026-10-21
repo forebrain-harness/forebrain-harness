@@ -725,10 +725,27 @@
   color: var(--forebrain-muted-text);
 }
 
-.forebrain-chip-btn--pressed {
+.forebrain-chip-btn--pressed,
+.forebrain-chip-btn[aria-pressed="true"] {
   border-color: var(--forebrain-brand-1);
   color: var(--forebrain-brand-1);
   background: var(--forebrain-brand-soft);
+}
+
+/* Keyboard focus is visible on every chip: 2px of the brand colour, offset so
+   the ring never eats the chip's own hairline. */
+.forebrain-chip-btn:focus-visible {
+  outline: 2px solid var(--forebrain-brand-1);
+  outline-offset: 1px;
+}
+
+/* The composer's bare icon button (prototype .icon-btn, :522): no border and no
+   surface of its own — it reads as a mark in the bar until it opens, and then
+   it takes the soft surface the prototype gives an open one. */
+.forebrain-chip-btn.composer-icon-btn.forebrain-chip-btn--pressed,
+.forebrain-chip-btn.composer-icon-btn[aria-pressed="true"] {
+  background: var(--forebrain-bg-alt);
+  color: var(--forebrain-text);
 }
 
 .forebrain-chip-btn--plan {
@@ -888,31 +905,9 @@
   border: 0;
 }
 
-@media (max-width: 900px) {
-  .forebrain-rail {
-    width: 64px;
-    flex-basis: 64px;
-    padding: 12px 8px;
-  }
+/* A narrow window collapses the rail through the rail's own state (App.vue's
+   matchMedia), so the flag, the width and aria-expanded can never disagree. */
 
-  .forebrain-rail-name,
-  .forebrain-rail-wordmark,
-  .forebrain-rail-version,
-  .forebrain-rail-group-label,
-  .forebrain-rail-link span,
-  .forebrain-tenant-label,
-  .forebrain-tenant-name,
-  .forebrain-tenant-caret,
-  .forebrain-tenant-scope,
-  .forebrain-language-text {
-    display: none;
-  }
-
-  .forebrain-rail-link,
-  .forebrain-tenant-trigger {
-    justify-content: center;
-  }
-}
 @layer utilities {
   .forebrain-focus {
     color: var(--forebrain-brand-1);
@@ -1037,6 +1032,12 @@ textarea.forebrain-field {
   flex: none;
   color: var(--rail-fg-2);
   transition: transform 140ms ease;
+}
+/* The prototype's .r-link.open (:659): an open entry takes the surface a
+   hovered one does, so the menu bar says which page's list is on screen. */
+.forebrain-rail-link--open {
+  background: var(--rail-hover);
+  color: var(--rail-fg);
 }
 .forebrain-rail-caret--open {
   transform: rotate(90deg);
@@ -1652,3 +1653,20 @@ textarea.forebrain-field {
   color: var(--forebrain-text-2);
 }
 
+/* Rendered Markdown, as the prototype draws it (app-preview.html :240-241):
+   a paragraph's own margin is nothing — the block that holds it decides the
+   rhythm — and inline code is a 12px mono chip on the alt surface with a
+   hairline around it. Both selectors out-specify the renderer's defaults, so
+   they win wherever they sit in the cascade. */
+.stream-markdown [data-stream-markdown][data-stream-markdown="paragraph"] {
+  margin-bottom: 0;
+}
+
+.stream-markdown [data-stream-markdown][data-stream-markdown="inline-code"] {
+  background-color: var(--forebrain-bg-alt);
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: inherit;
+}

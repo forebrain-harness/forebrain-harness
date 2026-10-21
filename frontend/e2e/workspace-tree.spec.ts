@@ -63,8 +63,27 @@ async function openWorkbench(page: Page) {
   await page.click('[data-testid="bench-tab-tree"]')
 }
 
+/**
+ * One row's label. A directory is the file tree's folder — a button inside the
+ * item, whose label sits beside its caret — and a file is the item itself, so
+ * the label matches on the item and the click target is what the component
+ * makes clickable.
+ */
 function rowByName(page: Page, name: string) {
-  return page.locator(`[role="treeitem"] button:has-text("${name}")`).first()
+  return page.locator(`[role="treeitem"]:has-text("${name}")`).first()
+}
+
+/**
+ * A directory's fold is its own trigger button — the row's label and caret are
+ * that button, and the item around it only groups them. A file row is the item
+ * itself, so its label is what a click targets.
+ */
+function folderToggle(page: Page, name: string) {
+  return page.locator(`[data-path="${name}"] .workspace-row`).first()
+}
+
+function fileRow(page: Page, name: string) {
+  return page.locator(`[role="treeitem"][data-path="${name}"]`).first()
 }
 
 test('no tree request until the workbench opens', async ({ page }) => {
@@ -97,7 +116,7 @@ test('expanding loads once and lazily', async ({ page }) => {
   await openConversation(page)
   await openWorkbench(page)
   await expect(rowByName(page, 'docs')).toBeVisible()
-  await rowByName(page, 'docs').click()
+  await folderToggle(page, 'docs').click()
   await expect(rowByName(page, 'readme.md')).toBeVisible()
   // Directories first, one level only.
   const bench = await page.locator('[data-testid="chat-workbench"]').innerText()
@@ -107,22 +126,24 @@ test('expanding loads once and lazily', async ({ page }) => {
   expect(bench).not.toContain('intro.md')
   expect(requests.filter((url) => url.includes('path=docs'))).toHaveLength(1)
 
-  // Collapse and expand again: no new request.
-  await rowByName(page, 'docs').click()
-  await rowByName(page, 'docs').click()
+  // Collapse and expand again: the fold is the tree's, the data is ours, and a
+  // directory that was already read is not asked for twice.
+  await folderToggle(page, 'docs').click()
+  await expect(rowByName(page, 'readme.md')).toHaveCount(0)
+  await folderToggle(page, 'docs').click()
   await expect(rowByName(page, 'readme.md')).toBeVisible()
   expect(requests.filter((url) => url.includes('path=docs'))).toHaveLength(1)
 
-  await rowByName(page, 'docs').click()
-  await expect(rowByName(page, 'guide')).toBeVisible()
-  await rowByName(page, 'guide').click()
+  // A second directory loads the same way, one level of its own.
+  await folderToggle(page, 'docs/guide').click()
   await expect(rowByName(page, 'intro.md')).toBeVisible()
+  expect(requests.filter((url) => url.includes('path=docs%2Fguide') || url.includes('path=docs/guide'))).toHaveLength(1)
 })
 
 test('file click inserts a reference', async ({ page }) => {
   await openConversation(page)
   await openWorkbench(page)
-  await rowByName(page, 'top.txt').click()
+  await fileRow(page, 'top.txt').click()
   await expect(page.locator('textarea')).toHaveValue(/top\.txt/)
 })
 
@@ -131,18 +152,29 @@ test('keyboard opens and closes directories', async ({ page }) => {
   await openWorkbench(page)
   const docs = rowByName(page, 'docs')
   await docs.waitFor({ state: 'visible' })
+
+  // A fold the mouse has already used is still the keyboard's: the expanded set
+  // has one owner, so the two gestures cannot drift apart. Opened and closed by
+  // mouse first — the sequence that used to leave the fold shut for good.
+  await folderToggle(page, 'docs').click()
+  await expect(rowByName(page, 'readme.md')).toBeVisible()
+  await folderToggle(page, 'docs').click()
+  await expect(rowByName(page, 'readme.md')).toHaveCount(0)
+
   await docs.focus()
   await docs.press('ArrowLeft')
   await expect(page.locator('[role="treeitem"][data-path="docs"]')).toHaveAttribute('aria-expanded', 'false')
   await docs.press('ArrowRight')
   await expect(page.locator('[role="treeitem"][data-path="docs"]')).toHaveAttribute('aria-expanded', 'true')
+  // The rows really are on screen — not just the attribute that promises them.
+  await expect(rowByName(page, 'readme.md')).toBeVisible()
 })
 
 test('state survives closing the workbench', async ({ page }) => {
   const requests = treeRequests(page)
   await openConversation(page)
   await openWorkbench(page)
-  await rowByName(page, 'docs').click()
+  await folderToggle(page, 'docs').click()
   await expect(rowByName(page, 'readme.md')).toBeVisible()
   await page.locator('[data-testid="chat-workbench"] .chat-workbench-close').click()
   const during = requests.length

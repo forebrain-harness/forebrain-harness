@@ -99,7 +99,7 @@ describe('SessionHeartbeat', () => {
     const others = wrapper.find('[data-testid="heartbeat-others"]')
     expect(others.text()).toContain('Heartbeats in other conversations · 2')
     expect(others.text()).toContain('Release watch')
-    expect(others.text()).toContain('Untitled session')
+    expect(others.text()).toContain('Untitled chat')
 
     await others.find('button[aria-label="Pause"]').trigger('click')
     await flushPromises()

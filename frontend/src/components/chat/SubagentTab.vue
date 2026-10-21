@@ -25,7 +25,8 @@
           @open-agent="(agentId) => emit('open-agent', agentId)"
         />
       </ConversationContent>
-      <ConversationScrollButton />
+      <!-- The drawer's own control sits above its composer, not over it. -->
+      <ConversationScrollButton class="!bottom-[128px]" :label="t('chat.scrollToLatest')" />
     </Conversation>
 
     <!-- The terminal's working line sits above the composer, never in the
@@ -36,6 +37,7 @@
       data-testid="subagent-working"
       :label="t('chat.subagentWorking', { duration })"
       :plan="record.plan && record.plan.total > 0 ? record.plan : undefined"
+      :tail="record.plan?.active ?? ''"
     />
 
     <div class="subagent-composer">
@@ -92,7 +94,7 @@
                 >
                   <Square aria-hidden="true" />
                 </button>
-                <PromptInputSubmit status="ready" />
+                <PromptInputSubmit status="ready" :label="t('chat.sendAria')" />
               </div>
             </PromptInputFooter>
           </PromptInput>
