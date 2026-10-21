@@ -36,82 +36,68 @@
       <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
         {{ t('common.empty') }}
       </div>
-      <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table forebrain-table--fixed">
-          <colgroup>
-            <col style="width: 260px" />
-            <col />
-            <col style="width: 100px" />
-            <col style="width: 88px" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>{{ t('projects.lspColServer') }}</th>
-              <th>{{ t('projects.lspColSummary') }}</th>
-              <th>{{ t('projects.lspColStatus') }}</th>
-              <th class="text-center">{{ t('projects.colActions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in rows" :key="row.id" :data-lsp-row="row.id">
-              <td>
-                <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.id">{{ row.id }}</span>
-              </td>
-              <td class="text-[var(--forebrain-text-2)]">
-                <span class="forebrain-cell-1" v-tip:top.trunc="row.summary">{{ row.summary || '—' }}</span>
-              </td>
-              <td>
-                <BadgeComponent
-                  :variant="statusVariant(row.status)"
-                  v-tip:top="row.status === 'denied' ? t('projects.lspDeniedTip') : ''"
-                >{{ statusLabel(row.status) }}</BadgeComponent>
-              </td>
-              <td class="text-right">
-                <RowActions v-if="row.status === 'pending'">
-                  <!-- Allow applies the entry from now on; decline records it so
-                       it stops asking. Each click decides this one entry. -->
-                  <RowAction
-                    :icon="Check"
-                    :label="t('projects.lspAllow')"
-                    :name="row.id"
-                    tone="ok"
-                    :disabled="consenting"
-                    :data-testid="`lsp-allow-${row.id}`"
-                    @click="consent(row, true)"
-                  />
-                  <RowAction
-                    :icon="X"
-                    :label="t('projects.lspDecline')"
-                    :name="row.id"
-                    tone="danger"
-                    :disabled="consenting"
-                    :data-testid="`lsp-decline-${row.id}`"
-                    @click="consent(row, false)"
-                  />
-                </RowActions>
-                <!-- A declined entry keeps its row and gets the way back: 允许
-                     records a new decision for it. -->
-                <RowActions v-else-if="row.status === 'denied'">
-                  <RowAction
-                    :icon="Check"
-                    :label="t('projects.lspAllow')"
-                    :name="row.id"
-                    tone="ok"
-                    :disabled="consenting"
-                    :data-testid="`lsp-undecline-${row.id}`"
-                    @click="consent(row, true)"
-                  />
-                  <RowActionSlot />
-                </RowActions>
-                <RowActions v-else>
-                  <RowActionSlot />
-                  <RowActionSlot />
-                </RowActions>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        v-else
+        :columns="columns"
+        :rows="rows"
+        :row-key="(row) => row.id"
+        :row-attrs="(row) => ({ 'data-lsp-row': row.id })"
+      >
+        <template #cell-id="{ row }">
+          <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.id">{{ row.id }}</span>
+        </template>
+        <template #cell-summary="{ row }">
+          <span class="forebrain-cell-1" v-tip:top.trunc="row.summary">{{ row.summary || '—' }}</span>
+        </template>
+        <template #cell-status="{ row }">
+          <BadgeComponent
+            :variant="statusVariant(row.status)"
+            v-tip:top="row.status === 'denied' ? t('projects.lspDeniedTip') : ''"
+          >{{ statusLabel(row.status) }}</BadgeComponent>
+        </template>
+        <template #cell-actions="{ row }">
+          <RowActions v-if="row.status === 'pending'">
+            <!-- Allow applies the entry from now on; decline records it so
+                 it stops asking. Each click decides this one entry. -->
+            <RowAction
+              :icon="Check"
+              :label="t('projects.lspAllow')"
+              :name="row.id"
+              tone="ok"
+              :disabled="consenting"
+              :data-testid="`lsp-allow-${row.id}`"
+              @click="consent(row, true)"
+            />
+            <RowAction
+              :icon="X"
+              :label="t('projects.lspDecline')"
+              :name="row.id"
+              tone="danger"
+              :disabled="consenting"
+              :data-testid="`lsp-decline-${row.id}`"
+              @click="consent(row, false)"
+            />
+          </RowActions>
+          <!-- A declined entry keeps its row and gets the way back: 允许
+               records a new decision for it. -->
+          <RowActions v-else-if="row.status === 'denied'">
+            <RowAction
+              :icon="Check"
+              :label="t('projects.lspAllow')"
+              :name="row.id"
+              tone="ok"
+              :disabled="consenting"
+              :data-testid="`lsp-undecline-${row.id}`"
+              @click="consent(row, true)"
+            />
+            <RowActionSlot />
+          </RowActions>
+          <RowActions v-else>
+            <RowActionSlot />
+            <RowActionSlot />
+          </RowActions>
+        </template>
+      </DataTable>
 
       <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
       <ListNote>{{ t('projects.lspDescription') }}</ListNote>
@@ -124,6 +110,7 @@ import { computed, ref, watch } from 'vue'
 import { Check, RotateCw, X } from 'lucide-vue-next'
 import type { AxiosError } from 'axios'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
@@ -158,6 +145,17 @@ const { rows, total, page, pageSize, q, loading, error: listError, reload } = us
   (query) => forebrainApi.projectLspPage(props.projectId, query),
   { pageSize: 10 },
 )
+
+/**
+ * The table's columns, at the design's widths: the summary takes the room the
+ * others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'id', header: t('projects.lspColServer'), size: 260 },
+  { id: 'summary', header: t('projects.lspColSummary'), cellClass: 'text-[var(--forebrain-text-2)]' },
+  { id: 'status', header: t('projects.lspColStatus'), size: 100 },
+  { id: 'actions', header: t('projects.colActions'), size: 88, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 const error = computed(() => listError.value || writeError.value)
 

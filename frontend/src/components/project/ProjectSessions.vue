@@ -24,81 +24,49 @@
     <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
       {{ t('projects.noSessions') }}
     </div>
-    <div v-else class="forebrain-table-wrap">
-      <table class="forebrain-table forebrain-table--fixed">
-        <colgroup>
-          <col />
-          <col style="width: 150px" />
-          <col style="width: 64px" />
-          <col style="width: 100px" />
-          <col style="width: 150px" />
-          <col style="width: 150px" />
-          <col style="width: 56px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>{{ t('projects.colSessionTitle') }}</th>
-            <th>{{ t('projects.colModel') }}</th>
-            <th class="text-right">{{ t('projects.colMessages') }}</th>
-            <th>{{ t('projects.colHeartbeat') }}</th>
-            <SortHeader
-              :label="t('projects.colCreated')"
-              sort-key="created"
-              :active="sort === 'created'"
-              :order="order"
-              first="desc"
-              @sort="sortBy"
-            />
-            <SortHeader
-              :label="t('projects.colUpdated')"
-              sort-key="updated"
-              :active="sort === 'updated'"
-              :order="order"
-              first="desc"
-              @sort="sortBy"
-            />
-            <th class="text-center">{{ t('projects.colActions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="session in rows" :key="session.id" :data-session-row="session.id">
-            <td>
-              <RouterLink
-                :to="{ path: '/', query: { session: session.id } }"
-                class="forebrain-cell-1 text-[var(--forebrain-brand-1)] hover:underline"
-                v-tip:top.trunc="titleOf(session)"
-              >
-                {{ titleOf(session) }}
-              </RouterLink>
-            </td>
-            <td class="font-mono text-[var(--forebrain-text-2)]">
-              <span class="forebrain-cell-1" v-tip:top.trunc="session.model">{{ session.model || '—' }}</span>
-            </td>
-            <td class="forebrain-num text-right">{{ session.messageCount ?? 0 }}</td>
-            <td>
-              <BadgeComponent v-if="session.heartbeat && !heartbeatPaused(session)">
-                {{ t('heartbeat.every', { minutes: heartbeatMinutes(session) }) }}
-              </BadgeComponent>
-              <BadgeComponent v-else-if="session.heartbeat" variant="gray">{{ t('heartbeat.paused') }}</BadgeComponent>
-              <span v-else class="text-[var(--forebrain-text-2)]">—</span>
-            </td>
-            <td class="forebrain-num font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(session.createdAt) }}</td>
-            <td class="forebrain-num font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(session.updatedAt) }}</td>
-            <td class="text-right">
-              <RowActions>
-                <RowAction
-                  :icon="MessageSquare"
-                  :label="t('projects.openSession')"
-                  :name="titleOf(session)"
-                  :data-testid="`project-session-open-${session.id}`"
-                  @click="openSession(session.id)"
-                />
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      v-else
+      :columns="columns"
+      :rows="rows"
+      :row-key="(row) => row.id"
+      :row-attrs="(row) => ({ 'data-session-row': row.id })"
+      :sorting="{ key: sort, order }"
+      @update:sorting="sortBy($event.key, $event.order)"
+    >
+      <template #cell-title="{ row }">
+        <RouterLink
+          :to="{ path: '/', query: { session: row.id } }"
+          class="forebrain-cell-1 text-[var(--forebrain-brand-1)] hover:underline"
+          v-tip:top.trunc="titleOf(row)"
+        >
+          {{ titleOf(row) }}
+        </RouterLink>
+      </template>
+      <template #cell-model="{ row }">
+        <span class="forebrain-cell-1" v-tip:top.trunc="row.model">{{ row.model || '—' }}</span>
+      </template>
+      <template #cell-messages="{ row }">{{ row.messageCount ?? 0 }}</template>
+      <template #cell-heartbeat="{ row }">
+        <BadgeComponent v-if="row.heartbeat && !heartbeatPaused(row)">
+          {{ t('heartbeat.every', { minutes: heartbeatMinutes(row) }) }}
+        </BadgeComponent>
+        <BadgeComponent v-else-if="row.heartbeat" variant="gray">{{ t('heartbeat.paused') }}</BadgeComponent>
+        <span v-else class="text-[var(--forebrain-text-2)]">—</span>
+      </template>
+      <template #cell-created="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+      <template #cell-updated="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
+      <template #cell-actions="{ row }">
+        <RowActions>
+          <RowAction
+            :icon="MessageSquare"
+            :label="t('projects.openSession')"
+            :name="titleOf(row)"
+            :data-testid="`project-session-open-${row.id}`"
+            @click="openSession(row.id)"
+          />
+        </RowActions>
+      </template>
+    </DataTable>
 
     <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
     <ListNote>{{ t('projects.projectSessionsNote') }}</ListNote>
@@ -110,11 +78,11 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { MessageSquare, Plus } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
-import SortHeader from '@/components/common/SortHeader.vue'
 import TablePager from '@/components/common/TablePager.vue'
 import { useServerList } from '@/composables/useServerList'
 import { getErrorMessage, forebrainApi, type ProjectSessionRow } from '@/lib/api'
@@ -140,6 +108,35 @@ const { rows, total, page, pageSize, q, sort, order, loading, error, reload } = 
   (query) => forebrainApi.projectSessionsPage(props.projectId, query),
   { pageSize: 10, sort: 'updated', order: 'desc' },
 )
+
+/**
+ * The table's columns, at the design's widths: the title takes the room the
+ * others leave. 创建时间 and 更新时间 sort — the sessions listing is one of the
+ * three endpoints that read `sort`, newest first on the first click.
+ */
+const columns: DataColumn[] = [
+  { id: 'title', header: t('projects.colSessionTitle') },
+  { id: 'model', header: t('projects.colModel'), size: 150, cellClass: 'font-mono text-[var(--forebrain-text-2)]' },
+  { id: 'messages', header: t('projects.colMessages'), size: 64, headerClass: 'text-right', cellClass: 'forebrain-num text-right' },
+  { id: 'heartbeat', header: t('projects.colHeartbeat'), size: 100 },
+  {
+    id: 'created',
+    header: t('projects.colCreated'),
+    size: 150,
+    enableSorting: true,
+    sortDescFirst: true,
+    cellClass: 'forebrain-num font-mono text-[var(--forebrain-text-2)]',
+  },
+  {
+    id: 'updated',
+    header: t('projects.colUpdated'),
+    size: 150,
+    enableSorting: true,
+    sortDescFirst: true,
+    cellClass: 'forebrain-num font-mono text-[var(--forebrain-text-2)]',
+  },
+  { id: 'actions', header: t('projects.colActions'), size: 56, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 const creating = ref(false)
 

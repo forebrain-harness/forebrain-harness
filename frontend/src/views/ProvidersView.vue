@@ -44,100 +44,92 @@
 
       <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('providers.empty') }}</div>
-      <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table forebrain-table--fixed">
-          <colgroup>
-            <col style="width: 70px" />
-            <col style="width: 140px" />
-            <col />
-            <col style="width: 220px" />
-            <col style="width: 150px" />
-            <col style="width: 110px" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>{{ t('providers.colOrder') }}</th>
-              <th>{{ t('providers.colProvider') }}</th>
-              <th>{{ t('providers.colModels') }}</th>
-              <th>{{ t('providers.colBaseUrl') }}</th>
-              <th>{{ t('providers.colKey') }}</th>
-              <th class="text-center">{{ t('providers.colActions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in rows" :key="entryKey(row)" :data-provider-row="row.provider || ''">
-              <td>
-                <BadgeComponent v-if="rowIndex(row) === 0">{{ t('providers.primary') }}</BadgeComponent>
-                <BadgeComponent v-else variant="gray">{{ t('providers.fallback', { n: rowIndex(row) }) }}</BadgeComponent>
-              </td>
-              <td>
-                <span class="forebrain-cell-1" v-tip:top.trunc="row.provider">{{ row.provider }}</span>
-              </td>
-              <td class="font-mono">
-                <span class="forebrain-cell-1" v-tip:top.trunc="row.models.join('、')">{{ row.models.join('、') }}</span>
-              </td>
-              <td class="font-mono text-[var(--forebrain-text-2)]">
-                <span class="forebrain-cell-1" v-tip:top.trunc="row.baseUrl || ''">{{ row.baseUrl }}</span>
-              </td>
-              <td>
-                <BadgeComponent v-if="row.apiKeySet" variant="success" :data-testid="`provider-key-saved-${rowIndex(row)}`">
-                  {{ t('providers.keySavedBadge', { hint: row.apiKeyHint ?? '' }) }}
-                </BadgeComponent>
-                <BadgeComponent v-else variant="warning" :data-testid="`provider-key-unset-${rowIndex(row)}`">{{ t('providers.unsetKey') }}</BadgeComponent>
-              </td>
-              <td class="text-right">
-                <RowActions>
-                  <RowActionSlot v-if="rowIndex(row) === 0" />
-                  <RowAction
-                    v-else
-                    :icon="ArrowUp"
-                    :label="t('providers.moveUp')"
-                    :name="row.provider"
-                    :disabled="saving"
-                    :data-testid="`provider-up-${rowIndex(row)}`"
-                    @click="moveUp(row)"
-                  />
-                  <RowAction
-                    :icon="Pencil"
-                    :label="t('providers.edit')"
-                    :name="row.provider"
-                    :disabled="saving"
-                    :data-testid="`provider-edit-${rowIndex(row)}`"
-                    @click="openEdit(row)"
-                  />
-                  <RowAction
-                    :icon="Trash2"
-                    :label="t('common.delete')"
-                    :name="row.provider"
-                    tone="danger"
-                    :disabled="saving"
-                    :data-testid="`provider-remove-${rowIndex(row)}`"
-                    @click="askRemove(row)"
-                  />
-                </RowActions>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        v-else
+        :columns="columns"
+        :rows="rows"
+        :row-key="entryKey"
+        :row-attrs="providerRowAttrs"
+      >
+        <template #cell-order="{ row }">
+          <BadgeComponent v-if="rowIndex(row) === 0">{{ t('providers.primary') }}</BadgeComponent>
+          <BadgeComponent v-else variant="gray">{{ t('providers.fallback', { n: rowIndex(row) }) }}</BadgeComponent>
+        </template>
+        <template #cell-provider="{ row }">
+          <span class="forebrain-cell-1" v-tip:top.trunc="row.provider">{{ row.provider }}</span>
+        </template>
+        <template #cell-models="{ row }">
+          <span class="forebrain-cell-1" v-tip:top.trunc="row.models.join('、')">{{ row.models.join('、') }}</span>
+        </template>
+        <template #cell-baseUrl="{ row }">
+          <span class="forebrain-cell-1" v-tip:top.trunc="row.baseUrl || ''">{{ row.baseUrl }}</span>
+        </template>
+        <template #cell-key="{ row }">
+          <BadgeComponent v-if="row.apiKeySet" variant="success" :data-testid="`provider-key-saved-${rowIndex(row)}`">
+            {{ t('providers.keySavedBadge', { hint: row.apiKeyHint ?? '' }) }}
+          </BadgeComponent>
+          <BadgeComponent v-else variant="warning" :data-testid="`provider-key-unset-${rowIndex(row)}`">{{ t('providers.unsetKey') }}</BadgeComponent>
+        </template>
+        <template #cell-actions="{ row }">
+          <RowActions>
+            <RowActionSlot v-if="rowIndex(row) === 0" />
+            <RowAction
+              v-else
+              :icon="ArrowUp"
+              :label="t('providers.moveUp')"
+              :name="row.provider"
+              :disabled="saving"
+              :data-testid="`provider-up-${rowIndex(row)}`"
+              @click="moveUp(row)"
+            />
+            <RowAction
+              :icon="Pencil"
+              :label="t('providers.edit')"
+              :name="row.provider"
+              :disabled="saving"
+              :data-testid="`provider-edit-${rowIndex(row)}`"
+              @click="openEdit(row)"
+            />
+            <RowAction
+              :icon="Trash2"
+              :label="t('common.delete')"
+              :name="row.provider"
+              tone="danger"
+              :disabled="saving"
+              :data-testid="`provider-remove-${rowIndex(row)}`"
+              @click="askRemove(row)"
+            />
+          </RowActions>
+        </template>
+      </DataTable>
 
       <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
       <ListNote>{{ t('providers.description') }}</ListNote>
     </div>
 
     <ForebrainModal :open="modalOpen" :size="'md'" :title="editingKey !== null ? t('providers.editModalTitle') : t('providers.addModalTitle')" @close="modalOpen = false">
-      <div class="grid gap-3 sm:grid-cols-2">
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.providerLabel') }}</span>
-          <input v-model="form.provider" list="provider-options" class="forebrain-field h-9" data-testid="provider-name" />
-          <datalist id="provider-options">
-            <option v-for="name in catalogProviders" :key="name" :value="name" />
-          </datalist>
-        </label>
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.baseUrlLabel') }}</span>
-          <input v-model="form.baseUrl" class="forebrain-field h-9 font-mono" data-testid="provider-base-url" />
-        </label>
+      <div>
+        <label class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]" for="provider-name">{{ t('providers.providerLabel') }}</label>
+        <select
+          id="provider-name"
+          v-model="form.provider"
+          class="forebrain-field h-9 w-full"
+          data-testid="provider-name"
+          @change="onProviderPicked"
+        >
+          <option v-if="!form.provider" value="">{{ t('providers.providerPlaceholder') }}</option>
+          <option v-for="name in providerOptions" :key="name" :value="name">{{ name }}</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]" for="provider-base-url">{{ t('providers.baseUrlLabel') }}</label>
+        <input
+          id="provider-base-url"
+          v-model="form.baseUrl"
+          class="forebrain-field h-9 w-full font-mono"
+          data-testid="provider-base-url"
+        />
       </div>
 
       <div>
@@ -147,8 +139,11 @@
 
       <div>
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.apiKeyLabel') }}</span>
-        <div v-if="form.apiKeySet && !form.keyEdit" class="flex flex-wrap items-center gap-2">
-          <span class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 font-mono text-[12px] text-[var(--forebrain-text-2)]" data-testid="provider-key-saved">
+        <div v-if="form.apiKeySet && !form.keyEdit" class="flex w-full items-center gap-2">
+          <span
+            class="flex h-9 min-w-0 flex-1 items-center rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 font-mono text-[12px] text-[var(--forebrain-text-2)]"
+            data-testid="provider-key-saved"
+          >
             {{ t('providers.keySaved', { hint: form.apiKeyHint ?? '' }) }}
           </span>
           <button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" data-testid="provider-key-change" @click="form.keyEdit = true">
@@ -164,47 +159,37 @@
           :placeholder="t('providers.apiKeyPlaceholder')"
           data-testid="provider-key-input"
         />
-        <p class="mt-1 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('providers.envHint') }}</p>
       </div>
 
-      <details>
-        <summary class="cursor-pointer text-[12px] text-[var(--forebrain-muted-text)]">{{ t('providers.advanced') }}</summary>
-        <div class="mt-2 grid gap-2 sm:grid-cols-2">
-          <label class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.apiPathLabel') }}</span>
-            <input v-model="form.apiPath" class="forebrain-field h-9 font-mono" data-testid="provider-api-path" />
-          </label>
-          <label class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.paramsLabel') }}</span>
-            <input v-model="form.paramsText" class="forebrain-field h-9 font-mono" placeholder='{"temperature":0.2}' data-testid="provider-params" />
-          </label>
-        </div>
-      </details>
+      <div>
+        <label class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]" for="provider-api-format">{{ t('providers.apiFormatLabel') }}</label>
+        <select id="provider-api-format" v-model="form.apiPath" class="forebrain-field h-9 w-full text-[13px]" data-testid="provider-api-format">
+          <option v-for="format in apiFormats" :key="format.value" :value="format.value">{{ format.label }}</option>
+        </select>
+      </div>
+
+      <div>
+        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.paramsLabel') }}</span>
+        <ParamsJsonField v-model="form.paramsText" :invalid="Boolean(paramsError)" :aria-label="t('providers.paramsLabel')" />
+        <p v-if="paramsError" class="mt-1 text-[11px] text-[var(--forebrain-danger)]" data-testid="provider-params-error">{{ paramsError }}</p>
+      </div>
 
       <template #footer>
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalOpen = false">{{ t('common.cancel') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving" data-testid="provider-save" @click="modalSave">
+        <button
+          type="button"
+          class="forebrain-btn forebrain-btn-primary text-xs"
+          :disabled="saving || Boolean(paramsError)"
+          data-testid="provider-save"
+          @click="modalSave"
+        >
           {{ saving ? t('common.loading') : t('common.save') }}
         </button>
       </template>
     </ForebrainModal>
 
     <ForebrainModal :open="connectProvider !== null" size="md" :title="connectTitle" @close="closeConnect">
-      <!-- The free tier first: it needs no account, so it is offered before
-           anything starts a login. -->
-      <template v-if="connectStep === 'start'">
-        <p class="text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.connectStartHint') }}</p>
-        <div class="flex flex-wrap gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-primary h-9 px-3 text-xs" data-testid="provider-login-start" @click="beginConnectLogin('opencode')">
-            {{ t('providers.connectSignIn') }}
-          </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" data-testid="provider-login-free" @click="chooseFreeModels">
-            {{ t('providers.connectFreeOnly') }}
-          </button>
-        </div>
-      </template>
-
-      <template v-else-if="connectStep === 'auth'">
+      <template v-if="connectStep === 'auth'">
         <p class="text-[12px] text-[var(--forebrain-text-2)]">{{ connectAuthHint }}</p>
         <div v-if="connectProvider === 'opencode'" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] px-4 py-3">
           <span class="block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('providers.connectCodeLabel') }}</span>
@@ -228,9 +213,8 @@
         <p v-if="connectProvider === 'chatgpt'" class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('providers.connectChatGPTLocal') }}</p>
       </template>
 
-      <!-- The catalog the finished login belongs to: the free tier after the
-           no-login choice, the Go subscription after signing in, ChatGPT's
-           account after its callback. -->
+      <!-- The catalog the finished login belongs to: the Go subscription after
+           signing in, ChatGPT's account after its callback. -->
       <template v-else-if="connectStep === 'choose'">
         <p class="text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.connectChooseHint') }}</p>
         <Command class="rounded-lg border border-[var(--forebrain-divider)]" data-testid="provider-login-models">
@@ -319,9 +303,9 @@
  * the gateway sits on), so the modal is a poll view: it shows the device flow's
  * code or ChatGPT's authorization link, then the catalog the finished login
  * unlocks, and writes the chosen model back into the ordered list like any other
- * row. OpenCode's free tier skips all of it — no account, one catalog listing.
+ * row.
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ArrowUp, Check, LogIn, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
 import {
   Command,
@@ -334,6 +318,7 @@ import {
 import { Loader } from '@repo/elements/loader'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
@@ -342,6 +327,9 @@ import RowActions from '@/components/common/RowActions.vue'
 import RowActionSlot from '@/components/common/RowActionSlot.vue'
 import TablePager from '@/components/common/TablePager.vue'
 import ModelChipsInput from '@/components/providers/ModelChipsInput.vue'
+// The params editor carries CodeMirror, which only the add/edit modal needs: the
+// chunk loads when the modal first opens instead of with the list.
+const ParamsJsonField = defineAsyncComponent(() => import('@/components/providers/ParamsJsonField.vue'))
 import { useServerList } from '@/composables/useServerList'
 import {
   forebrainApi,
@@ -352,14 +340,6 @@ import {
   type ProviderRecord,
 } from '@/lib/api'
 import { useI18n } from '@/locales'
-
-// The inference root OpenCode's free "no account" entry writes: the Console's,
-// which serves the free family. It mirrors the backend's
-// opencode.ProviderBaseURL("opencode") — Complete() requires a base URL, so a
-// row with none would be refused. The signed-in entry needs no copy here: the
-// Go subscription's root comes from the login's own completion answer, which is
-// the one place that decides it.
-const OPENCODE_BASE_URL = 'https://opencode.ai/inference'
 
 // The poll period on the gateway's own status endpoint. It is unrelated to the
 // device flow's own token interval (5s inside the gateway): this one only asks a
@@ -401,6 +381,8 @@ const { rows, total, page, pageSize, q, loading, error, reload } = useServerList
 const saving = ref(false)
 const catalogProviders = ref<string[]>([])
 const catalogModels = ref<Record<string, string[]>>({})
+/** The endpoint each provider is served at, as the model catalog reports it. */
+const providerBaseUrls = ref<Record<string, string>>({})
 
 const modalOpen = ref(false)
 // The entry a dialog acts on, named by what it is rather than by where it sat
@@ -409,8 +391,114 @@ const editingKey = ref<string | null>(null)
 const removeKey = ref<string | null>(null)
 const form = reactive<ProviderDraft>(blankDraft())
 
+/**
+ * The providers the form offers. Picking a provider must be a choice, not
+ * typing, so the list is everything the model catalog serves — the providers
+ * the gateway names a default endpoint for included — plus whatever the row
+ * already stores: a service the catalog no longer lists must not silently
+ * change just because its row was edited.
+ */
+const providerOptions = computed(() => {
+  const names = new Set<string>([...catalogProviders.value, ...Object.keys(providerBaseUrls.value)])
+  const current = form.provider.trim()
+  if (current) names.add(current)
+  return [...names].sort()
+})
+
+/** Picking a provider fills in what that provider's entry starts from. */
+function onProviderPicked() {
+  const baseUrl = providerBaseUrls.value[form.provider]
+  if (baseUrl) form.baseUrl = baseUrl
+  form.apiPath = defaultAPIPath(form.provider)
+}
+
+/**
+ * The API-format dropdown. The engine reads the stored path as the protocol to
+ * speak, not as a URL: empty is Chat Completions, `/responses` builds the
+ * Responses client, and `/v1/messages` builds the Anthropic Messages client
+ * (the client appends its own endpoint to the base URL). A row that already
+ * stores some other path — a compatible endpoint serving its chat API under a
+ * path of its own — keeps it as a fourth, already-selected entry: editing the
+ * row's other fields must not silently drop it.
+ */
+const DEFAULT_CHAT_PATH = '/chat/completions'
+const RESPONSES_PATH = '/responses'
+const MESSAGES_PATH = '/v1/messages'
+const apiFormats = computed(() => {
+  const options = [
+    { value: MESSAGES_PATH, label: t('providers.apiFormatAnthropic') },
+    { value: '', label: t('providers.apiFormatChat') },
+    { value: RESPONSES_PATH, label: t('providers.apiFormatResponses') },
+  ]
+  const current = form.apiPath.trim()
+  if (current && !options.some((option) => option.value === current)) {
+    options.push({ value: current, label: t('providers.apiFormatCustom', { path: current }) })
+  }
+  return options
+})
+
+/**
+ * The two providers that speak Messages without being told: the engine builds
+ * their client from the provider name whatever api_path says, so the form says
+ * so too instead of claiming Chat Completions. Every other provider starts on
+ * Chat Completions, its own default endpoint.
+ */
+const ANTHROPIC_PROVIDERS = new Set(['anthropic', 'minimax'])
+function defaultAPIPath(provider: string): string {
+  return ANTHROPIC_PROVIDERS.has(provider.trim().toLowerCase()) ? MESSAGES_PATH : ''
+}
+
+/** A stored "/chat/completions" is what the empty path already means. */
+function normalizeAPIPath(path: string | undefined, provider: string | undefined): string {
+  const trimmed = String(path ?? '').trim()
+  if (trimmed === DEFAULT_CHAT_PATH) return ''
+  // A Messages provider stores no path at all, and the engine gives it the
+  // Messages client regardless — showing that format is the honest reading.
+  if (!trimmed) return defaultAPIPath(String(provider ?? ''))
+  return trimmed
+}
+
+/**
+ * The params field is JSON the engine hands to the provider verbatim, so it has
+ * to parse as an object before it can be saved: the server refuses anything else
+ * and the modal would already be closed when it said so.
+ */
+const paramsError = computed(() => {
+  const text = form.paramsText.trim()
+  if (!text) return ''
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return t('providers.paramsInvalid')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return t('providers.paramsNotObject')
+  return ''
+})
+
 function blankDraft(): ProviderDraft {
   return { provider: '', baseUrl: '', apiPath: '', paramsText: '', models: [], apiKeySet: false, keyEdit: true, apiKeyPlain: '' }
+}
+
+/**
+ * The table's columns, at the widths the design declares. The models column has
+ * no width: it takes the room the others leave, which is what makes the list fit
+ * the page at any width. No column sorts — the order of the rows *is* the
+ * fallback order (owner 2026-10-21), so 主用 and 回退 N must always match the
+ * real chain.
+ */
+const columns = computed<DataColumn[]>(() => [
+  { id: 'order', header: t('providers.colOrder'), size: 70 },
+  { id: 'provider', header: t('providers.colProvider'), size: 140 },
+  { id: 'models', header: t('providers.colModels'), cellClass: 'font-mono' },
+  { id: 'baseUrl', header: t('providers.colBaseUrl'), size: 220, cellClass: 'font-mono text-[var(--forebrain-text-2)]' },
+  { id: 'key', header: t('providers.colKey'), size: 150 },
+  { id: 'actions', header: t('providers.colActions'), size: 110, headerClass: 'text-center', cellClass: 'text-right' },
+])
+
+/** A row's hook for the e2e suite and the tips: the service it is. */
+function providerRowAttrs(row: ProviderRecord): Record<string, string> {
+  return { 'data-provider-row': row.provider || '' }
 }
 
 /** A row's position in the whole order, as the list draws it (主用 / 回退 N). */
@@ -432,7 +520,7 @@ function toDraft(record: ProviderRecord): ProviderDraft {
   return {
     provider: record.provider ?? '',
     baseUrl: record.baseUrl ?? '',
-    apiPath: record.apiPath ?? '',
+    apiPath: normalizeAPIPath(record.apiPath, record.provider),
     paramsText: typeof record.params === 'string' ? record.params : record.params ? JSON.stringify(record.params) : '',
     models: [...(record.models ?? [])],
     apiKeySet: Boolean(record.apiKeySet),
@@ -508,10 +596,12 @@ async function loadCatalog() {
     }
     catalogProviders.value = Array.from(providers).sort()
     catalogModels.value = byProvider
+    providerBaseUrls.value = listing.providerBaseUrls ?? {}
   } catch {
     // The catalog is a convenience: without it the forms still work by hand.
     catalogProviders.value = []
     catalogModels.value = {}
+    providerBaseUrls.value = {}
   }
 }
 
@@ -577,9 +667,9 @@ function confirmRemove() {
 
 /** Which sign-in the modal is running; null is the modal being closed. */
 const connectProvider = ref<ProviderLoginProvider | null>(null)
-/** The modal's step: the OpenCode choice, a running flow, the catalog it
- * unlocked, or how the flow ended. */
-const connectStep = ref<'start' | 'auth' | 'choose' | 'failed' | 'lost'>('start')
+/** The modal's step: a running flow, the catalog it unlocked, or how the flow
+ * ended. */
+const connectStep = ref<'auth' | 'choose' | 'failed' | 'lost'>('auth')
 const connectLoginId = ref('')
 const connectUrl = ref('')
 const connectCode = ref('')
@@ -625,12 +715,6 @@ function resetConnect() {
 function openConnect(provider: ProviderLoginProvider) {
   resetConnect()
   connectProvider.value = provider
-  if (provider === 'opencode') {
-    // Two ways in, and the free one needs no account: the choice comes before
-    // anything starts a flow.
-    connectStep.value = 'start'
-    return
-  }
   connectStep.value = 'auth'
   void beginConnectLogin(provider)
 }
@@ -738,11 +822,6 @@ async function chooseCatalog(target: ConnectTarget) {
   }
 }
 
-/** OpenCode's free tier: no account, no flow, the Console catalog directly. */
-function chooseFreeModels() {
-  void chooseCatalog({ provider: 'opencode', catalog: 'opencode', baseUrl: OPENCODE_BASE_URL })
-}
-
 function openAuthorizePage() {
   if (!connectUrl.value) return
   window.open(connectUrl.value, '_blank', 'noopener')
@@ -751,13 +830,6 @@ function openAuthorizePage() {
 function restartConnect() {
   const provider = connectProvider.value
   if (!provider) return
-  if (provider === 'opencode') {
-    // The choice is offered again: a retry may well be the free tier, and a
-    // login the user did not want should not be started on their behalf.
-    resetConnect()
-    connectStep.value = 'start'
-    return
-  }
   void beginConnectLogin(provider)
 }
 

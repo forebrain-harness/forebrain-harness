@@ -1153,11 +1153,13 @@ textarea.forebrain-field {
   padding-top: 11px;
 }
 
-/* A boxed table: the container clips the header's fill to the rounded edge. */
+/* A boxed table: the container clips the header's fill to the rounded edge, and
+   scrolls sideways once a column has been dragged wider than the box. */
 .forebrain-table-wrap {
   border: 1px solid var(--forebrain-divider);
   border-radius: 8px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 .forebrain-table {
   width: 100%;
@@ -1196,9 +1198,13 @@ textarea.forebrain-field {
    (docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/app-preview.html). */
 
 /* A fixed-width table: the columns keep their width, every cell stays on one
-   line and ends in an ellipsis, and a numeric column lines its digits up. */
+   line and ends in an ellipsis, and a numeric column lines its digits up. The
+   header cell is the positioning context its width handle hangs from. */
 .forebrain-table--fixed {
   table-layout: fixed;
+}
+.forebrain-table--fixed > thead > tr > th {
+  position: relative;
 }
 .forebrain-table--fixed > thead > tr > th,
 .forebrain-table--fixed > tbody > tr > td {
@@ -1212,6 +1218,33 @@ textarea.forebrain-field {
 }
 .forebrain-table--fixed td.forebrain-num {
   font-variant-numeric: tabular-nums;
+}
+
+/* The width handle on a column's trailing edge: a hairline the pointer can grab,
+   dragged to widen the column and double-clicked to fit it to its content. The
+   hit area is wider than the line so the drag does not need pixel precision. */
+.forebrain-col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: flex-end;
+  width: 9px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.forebrain-col-resizer::after {
+  content: '';
+  width: 2px;
+  height: 100%;
+  background: var(--forebrain-divider);
+}
+.forebrain-col-resizer:hover::after,
+.forebrain-col-resizer.is-resizing::after {
+  background: var(--forebrain-brand-1);
 }
 
 /* A row that carries icon buttons is centered as a whole, so a button never
@@ -1340,6 +1373,55 @@ textarea.forebrain-field {
   color: var(--forebrain-muted-text);
   pointer-events: none;
 }
+/* The pager's page strip is shadcn-vue's pagination (reka-ui underneath), so
+   the three rules below undo what its own utilities want and its items wear the
+   26px controls above: the nav sits inline at the right instead of centring
+   itself and stretching, and its item utilities are a 36px square, not the
+   design's 26px minimum with 7px padding. */
+.forebrain-pagination {
+  width: auto;
+  margin: 0;
+}
+.forebrain-pagination-content {
+  gap: 6px;
+}
+.forebrain-pg-num,
+.forebrain-pg-gap {
+  width: auto;
+  height: 26px;
+}
+/* The two step buttons (上一页 / 下一页): the same 26px outline control as the
+   page numbers, one rule instead of shadcn's default button size. */
+.forebrain-pg-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--forebrain-divider-strong);
+  border-radius: 6px;
+  background: var(--forebrain-surface);
+  color: var(--forebrain-text);
+  font-family: var(--forebrain-ui-font);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.forebrain-pg-step:hover {
+  background: var(--forebrain-button-alt-bg);
+}
+.forebrain-pg-step:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.forebrain-pg-step > svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
 .forebrain-pg-num {
   min-width: 26px;
   height: 26px;
@@ -1367,26 +1449,6 @@ textarea.forebrain-field {
   text-align: center;
   color: var(--forebrain-muted-text);
   font-size: 12px;
-}
-/* The pager's own 26px buttons (上一页 / 下一页), smaller than the app-wide
-   .forebrain-btn and used nowhere else. */
-.forebrain-btn--sm {
-  height: 26px;
-  min-height: 26px;
-  padding: 0 9px;
-  font-size: 12px;
-}
-/* A button that is neither the brand fill nor the soft grey one: the
-   prototype's .btn — the surface with the strong divider, so it reads as a
-   control beside the page numbers rather than as a filled one. */
-.forebrain-btn--outline {
-  gap: 6px;
-  border-color: var(--forebrain-divider-strong);
-  background: var(--forebrain-surface);
-  color: var(--forebrain-text);
-}
-.forebrain-btn--outline:hover {
-  background: var(--forebrain-button-alt-bg);
 }
 /* A destructive button (the prototype's .btn.dgr): the plain surface shape
    with its rule and its label in the danger ink, so it reads as dangerous

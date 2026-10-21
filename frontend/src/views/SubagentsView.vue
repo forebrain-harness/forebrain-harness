@@ -60,120 +60,104 @@
       >
         {{ t('common.empty') }}
       </div>
-      <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table forebrain-table--fixed">
-          <colgroup>
-            <col />
-            <col style="width: 76px" />
-            <col style="width: 220px" />
-            <col style="width: 92px" />
-            <col style="width: 128px" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>{{ t('subagents.colName') }}</th>
-              <th>{{ t('subagents.colKind') }}</th>
-              <th>{{ t('subagents.colModel') }}</th>
-              <th>{{ t('subagents.colTools') }}</th>
-              <th class="text-center">{{ t('subagents.colActions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in rows" :key="row.name" :data-subagent-row="row.name">
-              <td>
-                <div class="sa-nm">
-                  <b class="forebrain-cell-1 min-w-0 font-mono">{{ row.name }}</b>
-                  <BadgeComponent
-                    v-if="row.promptOverridden"
-                    variant="warning"
-                    class="shrink-0"
-                    v-tip:top="t('subagents.promptOverriddenHint')"
-                    :data-testid="`subagent-overridden-${row.name}`"
-                  >
-                    {{ t('subagents.promptOverridden') }}
-                  </BadgeComponent>
-                </div>
-                <div class="sa-ds text-[var(--forebrain-muted-text)]" v-tip:top.trunc="descriptionOf(row)">{{ descriptionOf(row) }}</div>
-              </td>
-              <td>
-                <BadgeComponent :variant="kindVariant(row.kind)">{{ kindLabel(row.kind) }}</BadgeComponent>
-              </td>
-              <td>
-                <!-- A system subagent's model is the system's to choose when it
-                     calls it, so the page says what happens rather than a value. -->
-                <span v-if="row.kind === 'system'" class="text-[var(--forebrain-muted-text)]">{{ systemModel(row) }}</span>
-                <template v-else-if="row.model">
-                  <span
-                    class="font-mono"
-                    v-tip:top="row.modelSource === 'global' ? t('subagents.modelFromGlobal', { name: row.name }) : ''"
-                  >{{ providerModel(row) }}</span>
-                  <span v-if="row.reasoningEffort" class="text-[var(--forebrain-muted-text)]"> · {{ effortLevelLabel(row.reasoningEffort) }}</span>
-                </template>
-                <span v-else class="text-[var(--forebrain-muted-text)]">{{ t('subagents.followPrimary') }}</span>
-              </td>
-              <td>{{ toolsLabel(row) }}</td>
-              <td class="text-right">
-                <RowActions>
-                  <!-- The row switch comes first: switching one may move this
-                       agent's own switch in the toolbar, which is why every
-                       write reloads the list instead of predicting the answer. -->
-                  <span v-if="row.kind !== 'system'" class="sa-sw">
-                    <SwitchComponent
-                      :model-value="row.enabled === true"
-                      :disabled="saving"
-                      :aria-label="t('subagents.rowSwitch', { name: row.name })"
-                      v-tip:top="row.enabled === true ? t('subagents.rowOff') : t('subagents.rowOn')"
-                      :data-testid="`subagent-switch-${row.name}`"
-                      @update:model-value="toggleRow(row, $event)"
-                    />
-                  </span>
-                  <span v-else class="sa-sw sa-sw-slot" aria-hidden="true" />
-                  <template v-if="row.kind === 'custom'">
-                    <RowAction
-                      :icon="Pencil"
-                      :label="t('common.edit')"
-                      :name="row.name"
-                      :disabled="saving"
-                      :data-testid="`subagent-edit-${row.name}`"
-                      @click="openEdit(row)"
-                    />
-                    <RowAction
-                      :icon="Trash2"
-                      :label="t('common.delete')"
-                      :name="row.name"
-                      tone="danger"
-                      :disabled="saving"
-                      :data-testid="`subagent-delete-${row.name}`"
-                      @click="askDelete(row)"
-                    />
-                  </template>
-                  <template v-else-if="row.kind === 'builtin'">
-                    <RowAction
-                      :icon="Pencil"
-                      :label="t('common.edit')"
-                      :name="row.name"
-                      :disabled="saving"
-                      :data-testid="`subagent-edit-${row.name}`"
-                      @click="openEdit(row)"
-                    />
-                    <RowActionSlot />
-                  </template>
-                  <template v-else>
-                    <RowAction
-                      :icon="Eye"
-                      :label="t('common.view')"
-                      :name="row.name"
-                      :data-testid="`subagent-view-${row.name}`"
-                      @click="openView(row)"
-                    />
-                    <RowActionSlot />
-                  </template>
-                </RowActions>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        v-else
+        :columns="columns"
+        :rows="rows"
+        :row-key="(row) => row.name"
+        :row-attrs="(row) => ({ 'data-subagent-row': row.name })"
+      >
+        <template #cell-name="{ row }">
+          <div class="sa-nm">
+            <b class="forebrain-cell-1 min-w-0 font-mono">{{ row.name }}</b>
+            <BadgeComponent
+              v-if="row.promptOverridden"
+              variant="warning"
+              class="shrink-0"
+              v-tip:top="t('subagents.promptOverriddenHint')"
+              :data-testid="`subagent-overridden-${row.name}`"
+            >
+              {{ t('subagents.promptOverridden') }}
+            </BadgeComponent>
+          </div>
+          <div class="sa-ds text-[var(--forebrain-muted-text)]" v-tip:top.trunc="descriptionOf(row)">{{ descriptionOf(row) }}</div>
+        </template>
+        <template #cell-kind="{ row }">
+          <BadgeComponent :variant="kindVariant(row.kind)">{{ kindLabel(row.kind) }}</BadgeComponent>
+        </template>
+        <template #cell-model="{ row }">
+          <!-- A system subagent's model is the system's to choose when it
+               calls it, so the page says what happens rather than a value. -->
+          <span v-if="row.kind === 'system'" class="text-[var(--forebrain-muted-text)]">{{ systemModel(row) }}</span>
+          <template v-else-if="row.model">
+            <span
+              class="font-mono"
+              v-tip:top="row.modelSource === 'global' ? t('subagents.modelFromGlobal', { name: row.name }) : ''"
+            >{{ providerModel(row) }}</span>
+            <span v-if="row.reasoningEffort" class="text-[var(--forebrain-muted-text)]"> · {{ effortLevelLabel(row.reasoningEffort) }}</span>
+          </template>
+          <span v-else class="text-[var(--forebrain-muted-text)]">{{ t('subagents.followPrimary') }}</span>
+        </template>
+        <template #cell-tools="{ row }">{{ toolsLabel(row) }}</template>
+        <template #cell-actions="{ row }">
+          <RowActions>
+            <!-- The row switch comes first: switching one may move this
+                 agent's own switch in the toolbar, which is why every
+                 write reloads the list instead of predicting the answer. -->
+            <span v-if="row.kind !== 'system'" class="sa-sw">
+              <SwitchComponent
+                :model-value="row.enabled === true"
+                :disabled="saving"
+                :aria-label="t('subagents.rowSwitch', { name: row.name })"
+                v-tip:top="row.enabled === true ? t('subagents.rowOff') : t('subagents.rowOn')"
+                :data-testid="`subagent-switch-${row.name}`"
+                @update:model-value="toggleRow(row, $event)"
+              />
+            </span>
+            <span v-else class="sa-sw sa-sw-slot" aria-hidden="true" />
+            <template v-if="row.kind === 'custom'">
+              <RowAction
+                :icon="Pencil"
+                :label="t('common.edit')"
+                :name="row.name"
+                :disabled="saving"
+                :data-testid="`subagent-edit-${row.name}`"
+                @click="openEdit(row)"
+              />
+              <RowAction
+                :icon="Trash2"
+                :label="t('common.delete')"
+                :name="row.name"
+                tone="danger"
+                :disabled="saving"
+                :data-testid="`subagent-delete-${row.name}`"
+                @click="askDelete(row)"
+              />
+            </template>
+            <template v-else-if="row.kind === 'builtin'">
+              <RowAction
+                :icon="Pencil"
+                :label="t('common.edit')"
+                :name="row.name"
+                :disabled="saving"
+                :data-testid="`subagent-edit-${row.name}`"
+                @click="openEdit(row)"
+              />
+              <RowActionSlot />
+            </template>
+            <template v-else>
+              <RowAction
+                :icon="Eye"
+                :label="t('common.view')"
+                :name="row.name"
+                :data-testid="`subagent-view-${row.name}`"
+                @click="openView(row)"
+              />
+              <RowActionSlot />
+            </template>
+          </RowActions>
+        </template>
+      </DataTable>
 
       <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
       <ListNote>{{ t('subagents.note') }}</ListNote>
@@ -221,6 +205,7 @@ import { computed, ref, watch } from 'vue'
 import { Eye, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
@@ -262,6 +247,18 @@ const {
   error: listError,
   reload,
 } = useServerList<SubagentConfigRow>(fetchSubagents, { pageSize: 10, filters: { kind: '' } })
+
+/**
+ * The table's columns, at the design's widths: the name column takes the room
+ * the others leave. Nothing sorts — the list endpoint ignores `sort`.
+ */
+const columns: DataColumn[] = [
+  { id: 'name', header: t('subagents.colName') },
+  { id: 'kind', header: t('subagents.colKind'), size: 76 },
+  { id: 'model', header: t('subagents.colModel'), size: 220 },
+  { id: 'tools', header: t('subagents.colTools'), size: 92 },
+  { id: 'actions', header: t('subagents.colActions'), size: 128, headerClass: 'text-center', cellClass: 'text-right' },
+]
 
 /** The kind filter, read and written through the list's own filters, so a new
  * kind goes back to page 1 and reloads by itself. */

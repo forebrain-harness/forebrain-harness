@@ -118,47 +118,26 @@
         </template>
       </ListToolbar>
 
-      <table class="forebrain-table forebrain-table--fixed w-full">
-        <thead>
-          <tr>
-            <SortHeader
-              label="名称"
-              sort-key="name"
-              first="asc"
-              :active="sort === 'name'"
-              :order="order"
-              class="w-[38%]"
-              @sort="onSort"
-            />
-            <SortHeader
-              label="更新时间"
-              sort-key="updated"
-              first="desc"
-              :active="sort === 'updated'"
-              :order="order"
-              class="w-[30%]"
-              @sort="onSort"
-            />
-            <th class="text-right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in galleryRows" :key="row.name">
-            <td>
-              <span v-tip.trunc="row.name" class="forebrain-cell-1">{{ row.name }}</span>
-            </td>
-            <td class="forebrain-num">{{ row.updated }}</td>
-            <td>
-              <RowActions>
-                <RowAction :icon="Eye" label="查看" :name="row.name" @click="drawerOpen = true" />
-                <RowAction :icon="Pencil" label="编辑" :name="row.name" />
-                <RowAction v-if="row.removable" :icon="Trash2" label="删除" :name="row.name" tone="danger" />
-                <RowActionSlot v-else />
-              </RowActions>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <DataTable
+        :columns="galleryColumns"
+        :rows="galleryRows"
+        :row-key="(row) => row.name"
+        :sorting="{ key: sort, order }"
+        @update:sorting="onSort($event.key, $event.order)"
+      >
+        <template #cell-name="{ row }">
+          <span v-tip.trunc="row.name" class="forebrain-cell-1">{{ row.name }}</span>
+        </template>
+        <template #cell-updated="{ row }">{{ row.updated }}</template>
+        <template #cell-actions="{ row }">
+          <RowActions>
+            <RowAction :icon="Eye" label="查看" :name="row.name" @click="drawerOpen = true" />
+            <RowAction :icon="Pencil" label="编辑" :name="row.name" />
+            <RowAction v-if="row.removable" :icon="Trash2" label="删除" :name="row.name" tone="danger" />
+            <RowActionSlot v-else />
+          </RowActions>
+        </template>
+      </DataTable>
 
       <ListNote>共 3 条示例；翻页、排序与搜索都由服务端完成（q / sort / order / page / page_size）。</ListNote>
 
@@ -217,6 +196,7 @@ import { ref } from 'vue'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import CardComponent from '@/components/common/CardComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import ListNote from '@/components/common/ListNote.vue'
@@ -226,7 +206,6 @@ import RowAction from '@/components/common/RowAction.vue'
 import RowActionSlot from '@/components/common/RowActionSlot.vue'
 import RowActions from '@/components/common/RowActions.vue'
 import ScopeBadge from '@/components/common/ScopeBadge.vue'
-import SortHeader from '@/components/common/SortHeader.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import TablePager from '@/components/common/TablePager.vue'
 
@@ -256,6 +235,13 @@ const galleryRows = [
   { name: 'github', updated: '2026-10-18 09:12', removable: true },
   { name: 'playwright', updated: '2026-10-17 21:40', removable: true },
   { name: 'a very long server name that does not fit in its column and ends in an ellipsis', updated: '2026-10-16 08:03', removable: false },
+]
+
+/** The demo table's columns — the same component every page draws. */
+const galleryColumns: DataColumn[] = [
+  { id: 'name', header: '名称', enableSorting: true },
+  { id: 'updated', header: '更新时间', enableSorting: true, sortDescFirst: true, cellClass: 'forebrain-num' },
+  { id: 'actions', header: '操作', headerClass: 'text-right' },
 ]
 
 const densityOptions = [

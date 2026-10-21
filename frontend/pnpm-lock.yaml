@@ -39,6 +39,9 @@ catalogs:
     '@milkdown/crepe':
       specifier: 7.22.3
       version: 7.22.3
+    '@tanstack/vue-table':
+      specifier: ^8.21.3
+      version: 8.21.3
     '@vue/test-utils':
       specifier: ^2.5.1
       version: 2.5.1
@@ -122,6 +125,9 @@ importers:
       '@repo/shadcn-vue':
         specifier: workspace:*
         version: link:../ai-elements-vue/packages/shadcn-vue
+      '@tanstack/vue-table':
+        specifier: 'catalog:'
+        version: 8.21.3(vue@3.5.43(typescript@5.9.3))
       axios:
         specifier: 1.20.0
         version: 1.20.0
