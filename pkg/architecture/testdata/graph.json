@@ -38,7 +38,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
-      "loc": 23356,
+      "loc": 23374,
       "fan_in": 0,
       "fan_out": 20
     },
