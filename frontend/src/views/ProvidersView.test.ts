@@ -199,15 +199,49 @@ async function type(testid: string, value: string): Promise<void> {
   await flushPromises()
 }
 
-async function pick(testid: string, value: string): Promise<void> {
-  const el = field<HTMLSelectElement>(testid)
-  el.value = value
-  el.dispatchEvent(new Event('change'))
+/**
+ * A shadcn select is reka-ui's, so the browser's own `selectOption` is gone:
+ * the trigger opens on Enter, and the item commits on pointerup. A plain
+ * `.click()` reaches neither, which is why the tests drive it the way a
+ * keyboard user does.
+ */
+async function openSelect(testid: string): Promise<void> {
+  field<HTMLElement>(testid).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
   await flushPromises()
 }
 
+function optionTexts(): string[] {
+  return [...document.querySelectorAll<HTMLElement>('[role="option"]')].map((el) => (el.textContent ?? '').trim())
+}
+
+async function pick(testid: string, optionText: string): Promise<void> {
+  await openSelect(testid)
+  const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+    (el) => (el.textContent ?? '').trim() === optionText,
+  )
+  if (!option) throw new Error(`no option "${optionText}" in ${testid}; saw ${JSON.stringify(optionTexts())}`)
+  option.dispatchEvent(new Event('pointerup'))
+  await flushPromises()
+}
+
+/** What a select shows: the item it is on, read off its trigger. */
+function picked(testid: string): string {
+  return (field(testid).textContent ?? '').trim()
+}
+
 describe('ProvidersView add/edit form', () => {
-  beforeAll(() => setLocale('zh'))
+  beforeAll(() => {
+    setLocale('zh')
+    // The shadcn select measures its viewport with ResizeObserver, which jsdom
+    // does not have; the refusal block is scrolled into view, and jsdom does
+    // not implement that either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
+  })
 
   beforeEach(() => {
     vi.spyOn(forebrainApi, 'providersPage').mockResolvedValue({ rows: [provider()], total: 1, page: 1, pageSize: 10 })
@@ -232,9 +266,9 @@ describe('ProvidersView add/edit form', () => {
     expect(document.querySelector('.forebrain-modal details')).toBeNull()
     // The key's storage is the gateway's business, not a line in the form.
     expect(document.body.textContent).not.toContain('配置文件里只写引用')
-    const format = field<HTMLSelectElement>('provider-api-format')
-    expect(format.tagName).toBe('SELECT')
-    expect([...format.options].map((option) => option.text)).toEqual([
+    expect(picked('provider-api-format')).toBe('Chat Completions（/chat/completions）')
+    await openSelect('provider-api-format')
+    expect(optionTexts()).toEqual([
       'Anthropic Messages（/v1/messages）',
       'Chat Completions（/chat/completions）',
       'Responses（/responses）',
@@ -246,15 +280,16 @@ describe('ProvidersView add/edit form', () => {
     await mountModalPage()
     await click('providers-add')
 
-    const providerSelect = field<HTMLSelectElement>('provider-name')
-    expect(providerSelect.tagName).toBe('SELECT')
-    expect(providerSelect.value).toBe('')
-    expect([...providerSelect.options].map((option) => option.text)).toContain('moonshotai')
+    const providerSelect = field<HTMLElement>('provider-name')
+    expect(providerSelect.getAttribute('role')).toBe('combobox')
+    expect(picked('provider-name')).toBe('选择服务商')
+    await openSelect('provider-name')
+    expect(optionTexts()).toContain('moonshotai')
 
     await pick('provider-name', 'moonshotai')
     expect(field<HTMLInputElement>('provider-base-url').value).toBe('https://api.moonshot.ai/v1')
     // A Chat Completions service starts on the empty path that names it.
-    expect(field<HTMLSelectElement>('provider-api-format').value).toBe('')
+    expect(picked('provider-api-format')).toBe('Chat Completions（/chat/completions）')
   })
 
   it('says Anthropic Messages for the providers that speak it', async () => {
@@ -269,14 +304,14 @@ describe('ProvidersView add/edit form', () => {
     await mountModalPage()
     await click('provider-edit-0')
 
-    expect(field<HTMLSelectElement>('provider-api-format').value).toBe('/v1/messages')
+    expect(picked('provider-api-format')).toBe('Anthropic Messages（/v1/messages）')
 
     // Picking one back also selects it, so switching providers cannot leave a
     // format behind that the new provider does not speak.
     await pick('provider-name', 'moonshotai')
-    expect(field<HTMLSelectElement>('provider-api-format').value).toBe('')
+    expect(picked('provider-api-format')).toBe('Chat Completions（/chat/completions）')
     await pick('provider-name', 'anthropic')
-    expect(field<HTMLSelectElement>('provider-api-format').value).toBe('/v1/messages')
+    expect(picked('provider-api-format')).toBe('Anthropic Messages（/v1/messages）')
   })
 
   it('keeps a provider the catalog no longer lists when a row is edited', async () => {
@@ -289,9 +324,9 @@ describe('ProvidersView add/edit form', () => {
     await mountModalPage()
     await click('provider-edit-0')
 
-    const providerSelect = field<HTMLSelectElement>('provider-name')
-    expect(providerSelect.value).toBe('arcee-ai')
-    expect([...providerSelect.options].map((option) => option.text)).toContain('arcee-ai')
+    expect(picked('provider-name')).toBe('arcee-ai')
+    await openSelect('provider-name')
+    expect(optionTexts()).toContain('arcee-ai')
   })
 
   it('saves the picked format as the row api_path', async () => {
@@ -300,10 +335,12 @@ describe('ProvidersView add/edit form', () => {
 
     await pick('provider-name', 'moonshotai')
     await type('provider-base-url', 'https://api.openai.com/v1')
+    // A new key-mode row cannot be saved without its key (owner 2026-10-21).
+    await type('provider-key-input', 'sk-typed-1234')
     await type('model-chips-input', 'gpt-5')
     field('model-chips-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
     await flushPromises()
-    await pick('provider-api-format', '/responses')
+    await pick('provider-api-format', 'Responses（/responses）')
     await click('provider-save')
 
     const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
@@ -325,9 +362,11 @@ describe('ProvidersView add/edit form', () => {
     await mountModalPage()
     await click('provider-edit-0')
 
-    const format = field<HTMLSelectElement>('provider-api-format')
-    expect(format.value).toBe('/v1/chat/completions')
-    expect([...format.options].map((option) => option.text)).toContain('自定义（/v1/chat/completions）')
+    const format = field<HTMLElement>('provider-api-format')
+    expect(picked('provider-api-format')).toBe('自定义（/v1/chat/completions）')
+    await openSelect('provider-api-format')
+    expect(optionTexts()).toContain('自定义（/v1/chat/completions）')
+    expect(format.getAttribute('role')).toBe('combobox')
 
     await type('provider-base-url', 'https://compatible.example.test/v1')
     await click('provider-save')
@@ -350,6 +389,55 @@ describe('ProvidersView add/edit form', () => {
     await type('provider-params-editor', '{"temperature":0.2}')
     expect(document.querySelector('[data-testid="provider-params-error"]')).toBeNull()
     expect(field<HTMLButtonElement>('provider-save').disabled).toBe(false)
+  })
+
+  it('will not save a new key-mode service without an api key, and says why', async () => {
+    await mountModalPage()
+    await click('providers-add')
+    await pick('provider-name', 'moonshotai')
+
+    // A key-mode row with no stored key and nothing typed can never be
+    // accepted, so the form refuses to send it and names the field.
+    expect(field<HTMLButtonElement>('provider-save').disabled).toBe(true)
+    expect(field('provider-key-hint').textContent?.trim()).toBe('这个模型服务用 API Key 认证，必须填写')
+
+    await type('provider-key-input', 'sk-typed-1234')
+    expect(field<HTMLButtonElement>('provider-save').disabled).toBe(false)
+    expect(document.querySelector('[data-testid="provider-key-hint"]')).toBeNull()
+  })
+
+  it('does not ask for a key on the services that sign in instead', async () => {
+    vi.mocked(forebrainApi.getModels).mockResolvedValue({
+      records: [loginModel('chatgpt', 'gpt-5')],
+      status: [],
+    })
+    await mountModalPage()
+    await click('providers-add')
+    await pick('provider-name', 'chatgpt')
+
+    // The credential is the login file; an empty key is this row's normal
+    // shape, so the form saves it.
+    expect(field<HTMLButtonElement>('provider-save').disabled).toBe(false)
+    expect(document.querySelector('[data-testid="provider-key-hint"]')).toBeNull()
+  })
+
+  it('reports a refused save inside the dialog instead of behind the mask', async () => {
+    // A message belongs to the surface that raised it (owner 2026-10-21): the
+    // dialog stays open on a refusal, and its page banner sits under the mask
+    // the dialog itself paints — so the reason is painted by the dialog.
+    const sentence = 'moonshotai needs api_key: this model service authenticates with a key, not a login'
+    await mountModalPage()
+    await click('provider-edit-0')
+    await click('provider-key-change')
+    vi.mocked(forebrainApi.saveProviders).mockRejectedValue({ response: { status: 400, data: sentence } })
+
+    await click('provider-save')
+
+    expect(field('provider-save-error').textContent).toContain(sentence)
+    expect(document.querySelector('.forebrain-modal')).not.toBeNull()
+    // Exactly once: a second copy would be the page banner, which must no
+    // longer carry a refusal the dialog owns.
+    expect(document.body.textContent?.split(sentence)).toHaveLength(2)
   })
 })
 

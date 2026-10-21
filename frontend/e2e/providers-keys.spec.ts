@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -17,7 +17,17 @@ const envPath = home ? join(home, '.env') : ''
 
 test.describe.configure({ mode: 'serial' })
 
-async function rowOf(page: Parameters<typeof signIn>[0], name: string) {
+/**
+ * The provider and format dropdowns are shadcn-vue selects (reka-ui), so a
+ * value is picked the way a person picks it: open the trigger, click the item.
+ * There is no native <select> for Playwright's selectOption to drive.
+ */
+async function pickOption(page: Page, testid: string, label: string): Promise<void> {
+  await page.click(`[data-testid="${testid}"]`)
+  await page.getByRole('option', { name: label, exact: true }).click()
+}
+
+async function rowOf(page: Page, name: string) {
   const index = await page.locator('[data-provider-row]').evaluateAll(
     (rows, want) => rows.findIndex((row) => row.getAttribute('data-provider-row') === want), name)
   return { index, row: page.locator(`[data-provider-row="${name}"]`) }
@@ -30,7 +40,7 @@ test('a new service with chips and a masked key saves', async ({ page }) => {
   await page.click('[data-testid="providers-add"]')
 
   // The provider is a choice, never typed (owner 2026-10-21).
-  await page.selectOption('[data-testid="provider-name"]', 'arcee-ai')
+  await pickOption(page, 'provider-name', 'arcee-ai')
   await page.fill('[data-testid="provider-key-input"]', 'sk-e2e-secret-9931')
 
   // The key input is a password field: what the page shows is masked.
@@ -119,7 +129,7 @@ test('row order is the fallback order and persists', async ({ page }) => {
   await signIn(page)
   await page.goto('/providers', { waitUntil: 'networkidle' })
   await page.click('[data-testid="providers-add"]')
-  await page.selectOption('[data-testid="provider-name"]', 'moonshotai')
+  await pickOption(page, 'provider-name', 'moonshotai')
   // It becomes the primary below, and a primary must be complete — the
   // server refuses one that would keep the gateway from starting again.
   await page.fill('[data-testid="provider-base-url"]', 'http://127.0.0.1:8762')
@@ -158,12 +168,16 @@ test('the format is picked from a list and the params are edited as JSON', async
   // No 高级 fold any more: the format and the params are fields of the form.
   await expect(page.locator('.forebrain-modal details')).toHaveCount(0)
   const format = page.locator('[data-testid="provider-api-format"]')
-  await expect(format).toHaveJSProperty('tagName', 'SELECT')
-  await expect(format.locator('option')).toHaveText([
+  await expect(format).toHaveAttribute('role', 'combobox')
+  await format.click()
+  await expect(page.getByRole('option')).toHaveText([
     'Anthropic Messages (/v1/messages)',
     'Chat Completions (/chat/completions)',
     'Responses (/responses)',
   ])
+  // The list closes on the choice that is already in effect, so the form is
+  // left as it was before the assertion.
+  await page.getByRole('option', { name: 'Chat Completions (/chat/completions)', exact: true }).click()
 
   // Each field on its own row: the endpoint is never squeezed next to the
   // provider dropdown (owner 2026-10-21).
@@ -173,7 +187,7 @@ test('the format is picked from a list and the params are edited as JSON', async
 
   // A provider the model catalog knows: the server refuses a name it cannot
   // build a client for, and the row that proved order above is already gone.
-  await page.selectOption('[data-testid="provider-name"]', 'moonshotai')
+  await pickOption(page, 'provider-name', 'moonshotai')
   // Picking the provider fills in the endpoint it is served at; the suite's
   // own gateway stands in for the real one, so the field is then overwritten.
   await expect(page.locator('[data-testid="provider-base-url"]')).toHaveValue('https://api.moonshot.ai/v1')
@@ -183,7 +197,7 @@ test('the format is picked from a list and the params are edited as JSON', async
   await chipsInput.blur()
   await page.fill('[data-testid="provider-key-input"]', 'sk-e2e-format-3311')
 
-  await format.selectOption('/v1/messages')
+  await pickOption(page, 'provider-api-format', 'Anthropic Messages (/v1/messages)')
   // The params field is a JSON code editor: the text is typed into its content.
   const params = page.locator('[data-testid="provider-params-editor"] .cm-content')
   await params.click()
@@ -269,4 +283,59 @@ test('a column widens on a drag, fits its content on a double-click and is forgo
   // The widths are the session's, not the user's: a reload is the design again.
   await page.reload({ waitUntil: 'networkidle' })
   expect(Math.abs((await widthOf(page.locator('.forebrain-table thead th').nth(2))) - startModels)).toBeLessThanOrEqual(2)
+})
+
+/**
+ * Emptying the key field of a key-mode service is a clear, and a clear is
+ * refused (owner 2026-10-21): the row would save and then answer 401 the moment
+ * the chain fell back to it. The refusal is painted by the dialog that raised
+ * it — the page banner sits under the mask the dialog paints — and nothing is
+ * written.
+ */
+test('a refused key clear reports inside the dialog and writes nothing', async ({ page }) => {
+  test.skip(!home, 'E2E_HOME missing')
+  await signIn(page)
+  await page.goto('/providers', { waitUntil: 'networkidle' })
+
+  const beforeConfig = readFileSync(configPath, 'utf8')
+  const beforeEnv = readFileSync(envPath, 'utf8')
+
+  // Row 0 is the suite's primary: a key-mode service with a stored key.
+  await page.click('[data-testid="provider-edit-0"]')
+  await page.click('[data-testid="provider-key-change"]')
+  await expect(page.locator('[data-testid="provider-key-input"]')).toHaveValue('')
+  await page.click('[data-testid="provider-save"]')
+
+  const refusal = page.locator('[data-testid="provider-save-error"]')
+  await expect(refusal).toBeVisible({ timeout: 15_000 })
+  await expect(refusal).toContainText('needs api_key')
+  // The dialog stayed open — the user's edits are still there to fix.
+  await expect(page.locator('.forebrain-modal')).toBeVisible()
+
+  // The sentence is above the mask, not merely present in the DOM: hit-testing
+  // the block's own centre lands on the block. Under the mask it would land on
+  // the mask.
+  expect(
+    await refusal.evaluate((el) => {
+      const r = el.getBoundingClientRect()
+      return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('[data-testid="provider-save-error"]') !== null
+    }),
+  ).toBe(true)
+  // One copy only: a page-level banner carrying the same sentence would make
+  // this two.
+  await expect(page.getByText('needs api_key')).toHaveCount(1)
+  await shot(page, 'providers-save-refused')
+
+  // Cancel leaves the files exactly as they were: a refused clear is not a
+  // write.
+  await page.click('[data-testid="provider-cancel"]')
+  await expect(page.locator('.forebrain-modal')).toHaveCount(0)
+  expect(readFileSync(configPath, 'utf8')).toBe(beforeConfig)
+  expect(readFileSync(envPath, 'utf8')).toBe(beforeEnv)
+
+  // The row is still usable, and the refusal does not greet the next open.
+  await page.click('[data-testid="provider-edit-0"]')
+  await expect(page.locator('[data-testid="provider-key-saved"]')).toBeVisible()
+  await expect(page.locator('[data-testid="provider-save-error"]')).toHaveCount(0)
+  await page.click('[data-testid="provider-cancel"]')
 })

@@ -5423,14 +5423,20 @@ func providerRowMatches(row providerRowDTO, q string) bool {
 // own type, so anything but a JSON object is refused here rather than
 // written into a config the loader would then reject.
 type providerPutRow struct {
-	Provider    string                  `json:"provider"`
-	BaseURL     string                  `json:"base_url,omitempty"`
-	APIPath     string                  `json:"api_path,omitempty"`
-	Params      config.LLMRequestParams `json:"params,omitempty"`
-	Model       string                  `json:"model,omitempty"`
-	Models      []string                `json:"models,omitempty"`
-	APIKey      string                  `json:"api_key,omitempty"`
-	APIKeyPlain string                  `json:"api_key_plain,omitempty"`
+	Provider string                  `json:"provider"`
+	BaseURL  string                  `json:"base_url,omitempty"`
+	APIPath  string                  `json:"api_path,omitempty"`
+	Params   config.LLMRequestParams `json:"params,omitempty"`
+	Model    string                  `json:"model,omitempty"`
+	Models   []string                `json:"models,omitempty"`
+	// APIKey is the client *stating* the row's key, which is why the wire
+	// separates present from absent: absent means the user did not touch the
+	// field (the page never receives the stored value, so it must not send a
+	// guess back) and the stored key is kept; present and empty is the user
+	// having emptied the field, and that is the delete semantics — the row is
+	// written without any api_key. A ${ENV} reference is stored as written.
+	APIKey      *string `json:"api_key,omitempty"`
+	APIKeyPlain string  `json:"api_key_plain,omitempty"`
 }
 
 // providerSignature is what two adjacent entries must share to fold into one
@@ -5585,7 +5591,8 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			if len(models) == 0 {
 				models = []string{""}
 			}
-			apiKey := strings.TrimSpace(row.APIKey)
+			apiKey := ""
+			cleared := false
 			if plain := strings.TrimSpace(row.APIKeyPlain); plain != "" {
 				// A plaintext key never enters the config: it is stored in the
 				// home's .env and the yaml keeps only the ${ENV} reference.
@@ -5594,17 +5601,26 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "could not store the api key: "+err.Error(), http.StatusInternalServerError)
 					return
 				}
-			} else if apiKey == "" {
+			} else if row.APIKey != nil {
+				// Present on the wire means the client states the value: ""
+				// is the user having emptied the field, and that removes the
+				// key. The marker tells config.Save this emptiness is a
+				// decision — the row on disk still carries the ${ENV}
+				// reference, and Save would otherwise restore it.
+				apiKey = strings.TrimSpace(*row.APIKey)
+				cleared = apiKey == ""
+			} else {
 				apiKey = oldKeyByProvider[strings.TrimSpace(row.Provider)]
 			}
 			for _, model := range models {
 				entries = append(entries, config.AgentLLMProviderConfig{
-					Provider: strings.TrimSpace(row.Provider),
-					Model:    strings.TrimSpace(model),
-					APIKey:   apiKey,
-					BaseURL:  strings.TrimSpace(row.BaseURL),
-					APIPath:  strings.TrimSpace(row.APIPath),
-					Params:   row.Params,
+					Provider:      strings.TrimSpace(row.Provider),
+					Model:         strings.TrimSpace(model),
+					APIKey:        apiKey,
+					BaseURL:       strings.TrimSpace(row.BaseURL),
+					APIPath:       strings.TrimSpace(row.APIPath),
+					Params:        row.Params,
+					APIKeyCleared: cleared,
 				})
 			}
 		}
@@ -5615,6 +5631,19 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		// save fine and then keep the gateway from starting again.
 		if missing := config.ValidateAgentLLMConfigured(&cfg, active.ID).MissingFields(); len(missing) > 0 {
 			http.Error(w, "the first model service is the primary and needs "+strings.Join(missing, ", "), http.StatusBadRequest)
+			return
+		}
+		// Every key-mode row needs its own key, not only the primary: a
+		// keyless fallback saves fine and then answers 401 the moment the
+		// chain falls back to it. So emptying such a row's field is refused
+		// here, not written. The login-backed providers are the exception —
+		// their credential is the file the login writes, and an empty api_key
+		// is their normal shape.
+		for _, entry := range entries {
+			if config.CredentialsBackedProvider(entry.Provider) || strings.TrimSpace(entry.APIKey) != "" {
+				continue
+			}
+			http.Error(w, strings.TrimSpace(entry.Provider)+" needs api_key: this model service authenticates with a key, not a login", http.StatusBadRequest)
 			return
 		}
 		if err := s.saveAndReload(cfg); err != nil {

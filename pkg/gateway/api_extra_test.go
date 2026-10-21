@@ -3281,6 +3281,139 @@ func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
 	require.Equal(t, string(envBefore), string(envAfter))
 }
 
+// A key-mode fallback cannot lose its key either. The row would save and then
+// answer 401 the moment the chain fell back to it, so an empty api_key is
+// refused wherever the row sits, and nothing is written.
+func TestProvidersDTOKeyClearOnAFallbackIsRefused(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	seed := `agents:
+  definitions:
+    main:
+      primary: true
+      llm_providers:
+      - provider: deepseek
+        model: deepseek-chat
+        api_key: ${DEEPSEEK_API_KEY}
+        base_url: https://api.deepseek.com
+      - provider: arcee-ai
+        model: e2e-model
+        api_key: ${ARCEE_AI_API_KEY}
+        base_url: https://api.arcee.ai/v1
+`
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+	before, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+
+	cleared := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"]},
+		{"provider":"arcee-ai","base_url":"https://api.arcee.ai/v1","models":["e2e-model"],"api_key":""}
+	]}`)
+	require.Equal(t, http.StatusBadRequest, cleared.Code, cleared.Body.String())
+	require.Contains(t, cleared.Body.String(), "arcee-ai needs api_key")
+
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "a refused clear writes nothing")
+
+	// The untouched table still reads back with both keys.
+	rows := providersGet(t, s)
+	require.Len(t, rows, 2)
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, true, rows[1]["api_key_set"])
+}
+
+// The login-backed services are the one shape an empty key is correct for:
+// their credential is the file the login writes, so a keyless row of theirs is
+// saved rather than refused.
+func TestProvidersDTOLoginBackedFallbackMayStayKeyless(t *testing.T) {
+	s, home := providersDTOServer(t)
+	seed := `agents:
+  definitions:
+    main:
+      primary: true
+      llm_providers:
+      - provider: deepseek
+        model: deepseek-chat
+        api_key: ${DEEPSEEK_API_KEY}
+        base_url: https://api.deepseek.com
+      - provider: chatgpt
+        model: gpt-5
+        base_url: https://chatgpt.com/backend-api/codex
+`
+	require.NoError(t, os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(seed), 0o600))
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"]},
+		{"provider":"chatgpt","base_url":"https://chatgpt.com/backend-api/codex","models":["gpt-5"],"api_key":""}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	saved, err := appcfg.LoadPersisted(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	entries := saved.Agents.Definitions["main"].LLMProviders
+	require.Len(t, entries, 2)
+	require.Empty(t, entries[1].APIKey, "a login-backed row carries no key")
+	rows := providersGet(t, s)
+	require.Len(t, rows, 2)
+	require.Equal(t, false, rows[1]["api_key_set"])
+}
+
+// A key-mode provider cannot be left keyless when it is the primary: the
+// gateway would save and then refuse to start. The existing completeness rule
+// answers it — the page must not grow a copy of it — and the file stays as it
+// was.
+func TestProvidersDTOKeyClearOnThePrimaryIsRefused(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	seed := `agents:
+  definitions:
+    main:
+      primary: true
+      llm_providers:
+      - provider: deepseek
+        model: deepseek-chat
+        api_key: ${DEEPSEEK_API_KEY}
+        base_url: https://api.deepseek.com
+`
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+	before, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"],"api_key":""}
+	]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "needs api_key")
+
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "a refused clear writes nothing")
+}
+
+// A typed secret is the most explicit statement a client can make, so it wins
+// over an empty api_key travelling in the same row: the key is stored in .env
+// and the yaml keeps the reference. Nothing is cleared.
+func TestProvidersDTOTypedSecretWinsOverAnEmptyReference(t *testing.T) {
+	s, home := providersDTOServer(t)
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"","api_key_plain":"sk-typed-1234"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(cfgRaw), "${DEEPSEEK_API_KEY}")
+	require.NotContains(t, string(cfgRaw), "sk-typed-1234")
+	envRaw, err := os.ReadFile(filepath.Join(home, ".env"))
+	require.NoError(t, err)
+	require.Contains(t, string(envRaw), "sk-typed-1234")
+
+	rows := providersGet(t, s)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0]["api_key_set"])
+}
+
 func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
 	s, home := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
@@ -3317,6 +3450,55 @@ func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(cfgRaw), "${MY_CUSTOM_KEY}")
 	require.NoFileExists(t, filepath.Join(home, ".env"))
+}
+
+// The settings page never sees a stored key — it shows a hint and sends
+// api_key_plain only for a key the user just typed — so its rows carry no key
+// and the handler keeps the stored one per provider. For a login-backed row
+// that stored value is a credential lent by another provider (the /connect bug),
+// and keeping it alive would keep the login disabled: the save must drop it
+// while the provider that owns the reference keeps its own.
+func TestProvidersDTOHealsALoginRowCarryingAnotherProvidersKey(t *testing.T) {
+	s, home := providersDTOServer(t)
+	seed := `agents:
+  definitions:
+    main:
+      primary: true
+      llm_providers:
+      - provider: deepseek
+        model: deepseek-chat
+        api_key: ${DEEPSEEK_API_KEY}
+        base_url: https://api.deepseek.com
+      - provider: opencode-go
+        model: minimax-m3.1-flash-free
+        api_key: ${DEEPSEEK_API_KEY}
+        base_url: https://opencode.ai/inference/go
+`
+	require.NoError(t, os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(seed), 0o600))
+
+	// What the table sends for rows whose key the user did not touch.
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"]},
+		{"provider":"opencode-go","base_url":"https://opencode.ai/inference/go","models":["minimax-m3.1-flash-free"]}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	saved, err := appcfg.LoadPersisted(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	entries := saved.Agents.Definitions["main"].LLMProviders
+	require.Len(t, entries, 2)
+	require.Equal(t, "deepseek", entries[0].Provider)
+	require.Equal(t, "${DEEPSEEK_API_KEY}", entries[0].APIKey, "the owner keeps its own key")
+	require.Equal(t, "opencode-go", entries[1].Provider)
+	require.Empty(t, entries[1].APIKey, "the login row must not keep the lent key")
+	require.Contains(t, string(cfgRaw), "${DEEPSEEK_API_KEY}")
+	// The row still reports a key on disk? It must not: the hint follows the
+	// stored value, so a healed row reads as keyless to the next page load.
+	rows := providersGet(t, s)
+	require.Len(t, rows, 2)
+	require.Equal(t, false, rows[1]["api_key_set"])
 }
 
 // The expanded per-model entries the DTO writes are what the engine itself

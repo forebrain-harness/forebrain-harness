@@ -109,25 +109,27 @@
 
     <ForebrainModal :open="modalOpen" :size="'md'" :title="editingKey !== null ? t('providers.editModalTitle') : t('providers.addModalTitle')" @close="modalOpen = false">
       <div>
-        <label class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]" for="provider-name">{{ t('providers.providerLabel') }}</label>
-        <select
-          id="provider-name"
-          v-model="form.provider"
-          class="forebrain-field h-9 w-full"
-          data-testid="provider-name"
-          @change="onProviderPicked"
-        >
-          <option v-if="!form.provider" value="">{{ t('providers.providerPlaceholder') }}</option>
-          <option v-for="name in providerOptions" :key="name" :value="name">{{ name }}</option>
-        </select>
+        <Label class="mb-1 block text-[12px] font-normal text-[var(--forebrain-text-2)]" for="provider-name">{{ t('providers.providerLabel') }}</Label>
+        <Select :model-value="form.provider" @update:model-value="pickProvider">
+          <SelectTrigger
+            id="provider-name"
+            class="h-9 w-full rounded-md border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 text-[13px] text-[var(--forebrain-text)]"
+            data-testid="provider-name"
+          >
+            <SelectValue :placeholder="t('providers.providerPlaceholder')" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="name in providerOptions" :key="name" :value="name">{{ name }}</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div>
-        <label class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]" for="provider-base-url">{{ t('providers.baseUrlLabel') }}</label>
-        <input
+        <Label class="mb-1 block text-[12px] font-normal text-[var(--forebrain-text-2)]" for="provider-base-url">{{ t('providers.baseUrlLabel') }}</Label>
+        <Input
           id="provider-base-url"
           v-model="form.baseUrl"
-          class="forebrain-field h-9 w-full font-mono"
+          class="h-9 w-full rounded-md border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 font-mono text-[12px] text-[var(--forebrain-text)]"
           data-testid="provider-base-url"
         />
       </div>
@@ -138,7 +140,7 @@
       </div>
 
       <div>
-        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.apiKeyLabel') }}</span>
+        <Label class="mb-1 block text-[12px] font-normal text-[var(--forebrain-text-2)]" for="provider-key-input">{{ t('providers.apiKeyLabel') }}</Label>
         <div v-if="form.apiKeySet && !form.keyEdit" class="flex w-full items-center gap-2">
           <span
             class="flex h-9 min-w-0 flex-1 items-center rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 font-mono text-[12px] text-[var(--forebrain-text-2)]"
@@ -146,26 +148,44 @@
           >
             {{ t('providers.keySaved', { hint: form.apiKeyHint ?? '' }) }}
           </span>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" data-testid="provider-key-change" @click="form.keyEdit = true">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            class="h-9 px-3 text-xs"
+            data-testid="provider-key-change"
+            @click="form.keyEdit = true"
+          >
             {{ t('providers.changeKey') }}
-          </button>
+          </Button>
         </div>
-        <input
+        <Input
           v-else
+          id="provider-key-input"
           v-model="form.apiKeyPlain"
           type="password"
           autocomplete="new-password"
-          class="forebrain-field h-9 w-full font-mono"
+          class="h-9 w-full rounded-md border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 font-mono text-[12px] text-[var(--forebrain-text)]"
           :placeholder="t('providers.apiKeyPlaceholder')"
           data-testid="provider-key-input"
         />
+        <p v-if="keyHint" class="mt-1 text-[11px] text-[var(--forebrain-muted-text)]" data-testid="provider-key-hint">{{ keyHint }}</p>
       </div>
 
       <div>
-        <label class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]" for="provider-api-format">{{ t('providers.apiFormatLabel') }}</label>
-        <select id="provider-api-format" v-model="form.apiPath" class="forebrain-field h-9 w-full text-[13px]" data-testid="provider-api-format">
-          <option v-for="format in apiFormats" :key="format.value" :value="format.value">{{ format.label }}</option>
-        </select>
+        <Label class="mb-1 block text-[12px] font-normal text-[var(--forebrain-text-2)]" for="provider-api-format">{{ t('providers.apiFormatLabel') }}</Label>
+        <Select v-model="apiFormatChoice">
+          <SelectTrigger
+            id="provider-api-format"
+            class="h-9 w-full rounded-md border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 text-[13px] text-[var(--forebrain-text)]"
+            data-testid="provider-api-format"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="format in apiFormats" :key="format.value" :value="format.value">{{ format.label }}</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div>
@@ -174,17 +194,31 @@
         <p v-if="paramsError" class="mt-1 text-[11px] text-[var(--forebrain-danger)]" data-testid="provider-params-error">{{ paramsError }}</p>
       </div>
 
+      <!-- The server's own words, verbatim: a refusal names the row and the
+           field it could not take. Inside the dialog, because that is the
+           surface that raised it and the page banner sits under the mask. -->
+      <div v-if="modalError" ref="saveErrorRef" class="forebrain-err-block" role="alert" data-testid="provider-save-error">
+        <CircleAlert class="size-3.5" aria-hidden="true" />
+        <div>
+          <b>{{ t('mcp.saveFailed') }}</b>
+          <span class="forebrain-err-s">{{ modalError }}</span>
+        </div>
+      </div>
+
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalOpen = false">{{ t('common.cancel') }}</button>
-        <button
+        <Button type="button" variant="ghost" size="sm" class="text-xs" data-testid="provider-cancel" @click="modalOpen = false">
+          {{ t('common.cancel') }}
+        </Button>
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
-          :disabled="saving || Boolean(paramsError)"
+          size="sm"
+          class="text-xs"
+          :disabled="saving || Boolean(paramsError) || keyBlocked"
           data-testid="provider-save"
           @click="modalSave"
         >
           {{ saving ? t('common.loading') : t('common.save') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
 
@@ -305,8 +339,9 @@
  * unlocks, and writes the chosen model back into the ordered list like any other
  * row.
  */
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ArrowUp, Check, LogIn, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { ArrowUp, Check, CircleAlert, LogIn, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import {
   Command,
   CommandEmpty,
@@ -315,6 +350,9 @@ import {
   CommandItem,
   CommandList,
 } from '@repo/shadcn-vue/components/ui/command'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import { Loader } from '@repo/elements/loader'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -371,8 +409,14 @@ type ProviderDraft = {
   apiKeyPlain: string
 }
 
-/** One entry of the whole ordered list as this page writes it back. */
-type ProviderEntry = ProviderRecord & { apiKeyPlain?: string }
+/**
+ * One entry of the whole ordered list as this page writes it back. `apiKey` is
+ * the wire's own statement about the stored key: set to `''` when the user
+ * emptied the field (that is the clear), and left unset for a row they did not
+ * touch — the page never receives the stored value, so it must not send a guess
+ * back.
+ */
+type ProviderEntry = ProviderRecord & { apiKeyPlain?: string; apiKey?: string }
 
 const { rows, total, page, pageSize, q, loading, error, reload } = useServerList<ProviderRecord>(forebrainApi.providersPage, {
   pageSize: 10,
@@ -390,6 +434,52 @@ const modalOpen = ref(false)
 const editingKey = ref<string | null>(null)
 const removeKey = ref<string | null>(null)
 const form = reactive<ProviderDraft>(blankDraft())
+/**
+ * A refused save, in the dialog's own words. The page banner sits under the
+ * mask while a dialog is open, so the surface that raised the refusal is the
+ * one that has to show it; the block is also the element the dialog scrolls
+ * back into view.
+ */
+const modalError = ref('')
+const saveErrorRef = ref<HTMLElement | null>(null)
+
+/**
+ * The model services that authenticate with a login on this machine
+ * (opencode.json, auth.json) instead of an api_key in the table. Mirrors the
+ * engine's config.CredentialsBackedProvider: these rows are legitimately
+ * keyless, and every other row cannot be saved without a key.
+ */
+const LOGIN_PROVIDERS = new Set(['chatgpt', 'opencode', 'opencode-go'])
+function needsAPIKey(provider: string): boolean {
+  const name = provider.trim().toLowerCase()
+  return name !== '' && !LOGIN_PROVIDERS.has(name)
+}
+
+/** The stored key this dialog is keeping: shown as a chip, never typed again. */
+const keyKept = computed(() => form.apiKeySet && !form.keyEdit)
+/**
+ * The row still owes a key: a key-mode service with no stored key and nothing
+ * typed. No save can satisfy the server in that state, so the button is off and
+ * the field says why.
+ */
+const keyMissing = computed(() => needsAPIKey(form.provider) && !keyKept.value && !form.apiKeyPlain.trim())
+/**
+ * The user opened a stored key and emptied the field. That is the clear, and
+ * the key-mode services refuse it — the request goes out so the dialog can show
+ * the server's own sentence instead of a silent no-op.
+ */
+const keyClearAttempt = computed(() => form.apiKeySet && form.keyEdit && !form.apiKeyPlain.trim())
+
+/** The one state that makes Save impossible: no key, and none being cleared. */
+const keyBlocked = computed(() => keyMissing.value && !keyClearAttempt.value)
+
+/** What the API key field says when the row cannot be saved without one. */
+const keyHint = computed(() => {
+  if (!needsAPIKey(form.provider)) return ''
+  if (keyClearAttempt.value) return t('providers.apiKeyCannotClear')
+  if (keyMissing.value) return t('providers.apiKeyRequired')
+  return ''
+})
 
 /**
  * The providers the form offers. Picking a provider must be a choice, not
@@ -413,6 +503,15 @@ function onProviderPicked() {
 }
 
 /**
+ * The shadcn select's v-model, as one function: reka-ui hands back its own
+ * value union, and the draft stores the provider id as text.
+ */
+function pickProvider(value: unknown): void {
+  form.provider = String(value ?? '').trim()
+  onProviderPicked()
+}
+
+/**
  * The API-format dropdown. The engine reads the stored path as the protocol to
  * speak, not as a URL: empty is Chat Completions, `/responses` builds the
  * Responses client, and `/v1/messages` builds the Anthropic Messages client
@@ -424,10 +523,22 @@ function onProviderPicked() {
 const DEFAULT_CHAT_PATH = '/chat/completions'
 const RESPONSES_PATH = '/responses'
 const MESSAGES_PATH = '/v1/messages'
+/**
+ * The select item that stands for the empty path. A select cannot carry an
+ * empty item value (reka-ui refuses it), and the empty string is a real choice
+ * here — Chat Completions — so the item names itself and the draft converts.
+ */
+const CHAT_FORMAT_CHOICE = '@chat-completions'
+const apiFormatChoice = computed({
+  get: () => form.apiPath.trim() || CHAT_FORMAT_CHOICE,
+  set: (choice: string) => {
+    form.apiPath = choice === CHAT_FORMAT_CHOICE ? '' : choice
+  },
+})
 const apiFormats = computed(() => {
   const options = [
     { value: MESSAGES_PATH, label: t('providers.apiFormatAnthropic') },
-    { value: '', label: t('providers.apiFormatChat') },
+    { value: CHAT_FORMAT_CHOICE, label: t('providers.apiFormatChat') },
     { value: RESPONSES_PATH, label: t('providers.apiFormatResponses') },
   ]
   const current = form.apiPath.trim()
@@ -543,8 +654,14 @@ function toBody(entry: ProviderEntry): Record<string, unknown> {
   // The key travels only when the user typed one; an untouched key is the
   // server's to keep.
   if (entry.apiKeyPlain?.trim()) body.api_key_plain = entry.apiKeyPlain.trim()
+  // A row the user emptied states that on the wire: the empty string is the
+  // clear. Absent (never set here) means the same as an untouched key.
+  if (entry.apiKey !== undefined) body.api_key = entry.apiKey
   return body
 }
+
+let pendingWrites = 0
+let lastWrite: Promise<void> = Promise.resolve()
 
 /**
  * The list is whole-table on the wire, so a change reads the whole order back,
@@ -552,11 +669,12 @@ function toBody(entry: ProviderEntry): Record<string, unknown> {
  * row the page does not show. Writes run one after another — each reads the
  * order the previous one wrote — so two quick clicks move a row two places
  * instead of both working from the same stale snapshot and undoing each other.
+ *
+ * A caller that owns the surface the failure belongs to names it with `report`:
+ * a refused save then says so in the dialog that raised it, and the page banner
+ * — which that dialog covers — stays empty.
  */
-let pendingWrites = 0
-let lastWrite: Promise<void> = Promise.resolve()
-
-function writeWholeOrder(change: (all: ProviderEntry[]) => void): Promise<void> {
+function writeWholeOrder(change: (all: ProviderEntry[]) => void, report?: (message: string) => void): Promise<void> {
   pendingWrites += 1
   saving.value = true
   const write = lastWrite.then(async () => {
@@ -567,7 +685,9 @@ function writeWholeOrder(change: (all: ProviderEntry[]) => void): Promise<void> 
       await forebrainApi.saveProviders(all.map(toBody))
       await reload()
     } catch (cause) {
-      error.value = getErrorMessage(cause)
+      const message = getErrorMessage(cause)
+      if (report) report(message)
+      else error.value = message
     } finally {
       pendingWrites -= 1
       if (pendingWrites === 0) saving.value = false
@@ -612,12 +732,14 @@ function suggestionsFor(provider: string): string[] {
 function openAdd() {
   editingKey.value = null
   Object.assign(form, blankDraft())
+  modalError.value = ''
   modalOpen.value = true
 }
 
 function openEdit(row: ProviderRecord) {
   editingKey.value = entryKey(row)
   Object.assign(form, toDraft(row))
+  modalError.value = ''
   modalOpen.value = true
 }
 
@@ -631,12 +753,32 @@ async function modalSave() {
     models: [...form.models],
     apiKeyPlain: form.apiKeyPlain,
   }
+  // Emptying the field of a row that had a key *is* the clear: the page says so
+  // with an empty api_key. A typed key travels as api_key_plain instead, and a
+  // row whose key the user never opened sends neither.
+  if (form.apiKeySet && form.keyEdit && !form.apiKeyPlain.trim()) entry.apiKey = ''
+  modalError.value = ''
+  // The write can be refused (a model service that signs in with a key cannot
+  // lose it): keep the dialog open with the reason inside itself rather than
+  // discard the user's edits — and rather than paint it under the mask.
+  await writeWholeOrder(
+    (all) => {
+      const at = key === null ? -1 : all.findIndex((candidate) => entryKey(candidate) === key)
+      if (at >= 0) all[at] = { ...all[at], ...entry }
+      else all.push(entry)
+    },
+    (message) => {
+      modalError.value = message
+    },
+  )
+  if (modalError.value !== '') {
+    // The body scrolls: a refusal the user has to hunt for is the same bug in
+    // another form. The block is the last element, so the dialog scrolls to it.
+    await nextTick()
+    saveErrorRef.value?.scrollIntoView({ block: 'nearest' })
+    return
+  }
   modalOpen.value = false
-  await writeWholeOrder((all) => {
-    const at = key === null ? -1 : all.findIndex((candidate) => entryKey(candidate) === key)
-    if (at >= 0) all[at] = { ...all[at], ...entry }
-    else all.push(entry)
-  })
 }
 
 function moveUp(row: ProviderRecord) {
