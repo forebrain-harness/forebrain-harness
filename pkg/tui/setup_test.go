@@ -171,20 +171,28 @@ func TestNeedsFirstSetupTrueAfterHomeEnsureSeedsSkeleton(t *testing.T) {
 
 // useSetupTestCatalog pins the shared catalog to a small deterministic set so
 // provider-option assertions do not depend on the embedded asset's ordering.
+// The reasoning_options mirror each model's real shipped row: the levels a
+// picker offers are catalog data now, so a fixture without them would describe
+// a model with nothing to choose.
 func useSetupTestCatalog(t *testing.T) {
 	t.Helper()
 	cat, err := llm.Parse([]byte(`{
 		"anthropic/claude-sonnet-4-6": {"name": "Claude Sonnet 4.6", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["low", "medium", "high", "max"]}, {"type": "budget_tokens", "min": 1024}],
 			"limit": {"context": 200000, "output": 64000}},
 		"anthropic/claude-haiku-lite": {"name": "Claude Haiku Lite", "reasoning": false,
 			"limit": {"context": 200000, "output": 32000}},
 		"alibaba/qwen3.5-plus": {"name": "Qwen3.5 Plus", "reasoning": true,
+			"reasoning_options": [{"type": "toggle"}, {"type": "budget_tokens"}],
 			"limit": {"context": 131072, "output": 8192}},
 		"google/gemini-3.1-pro-preview": {"name": "Gemini 3.1 Pro Preview", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}],
 			"limit": {"context": 1000000, "output": 65536}},
 		"minimax/MiniMax-M2.7": {"name": "MiniMax M2.7", "reasoning": true,
+			"reasoning_options": [],
 			"limit": {"context": 204800, "output": 24576}},
 		"openai/gpt-5.5": {"name": "GPT-5.5", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["none", "low", "medium", "high", "xhigh"]}],
 			"limit": {"context": 272000, "output": 128000}}
 	}`))
 	if err != nil {
@@ -402,13 +410,14 @@ func TestConfigureChatGPTProviderFetchRetrySkipsRelogin(t *testing.T) {
 	}
 }
 
-// Manual input stays reachable and stores the typed id; with no verified
-// record the effort prompt defaults to unset instead of guessing a level.
+// Manual input stays reachable and stores the typed id; a model neither the
+// account nor the catalog knows gets no effort page at all, and therefore no
+// pinned level — the picker never invents a scale for it.
 func TestConfigureChatGPTProviderManualInputDefaultsEffortUnset(t *testing.T) {
 	stubChatGPTBrowserLogin(t)
 	stubChatGPTModels(t, discoveredFixture(), nil)
 	selector := &fakeSelector{
-		selects:  []string{manualModelInput, reasoningEffortUnset},
+		selects:  []string{manualModelInput},
 		inputs:   []string{"gpt-typed"},
 		confirms: []bool{true, true},
 	}
@@ -421,8 +430,10 @@ func TestConfigureChatGPTProviderManualInputDefaultsEffortUnset(t *testing.T) {
 	if opts.Model != "gpt-typed" {
 		t.Fatalf("model = %q", opts.Model)
 	}
-	if got := selector.selectDefaults[1]; got != reasoningEffortUnset {
-		t.Fatalf("effort default = %q, want unset for an unverified model", got)
+	for _, label := range selector.selectLabels {
+		if strings.HasPrefix(label, "Reasoning effort\n") {
+			t.Fatalf("an unverified model must not be asked for an effort: %#v", selector.selectLabels)
+		}
 	}
 	if opts.ParamsJSON != "" {
 		t.Fatalf("params = %q, want no pinned effort", opts.ParamsJSON)
@@ -821,5 +832,92 @@ func TestConfigureOpenCodeGoFetchRetrySkipsRelogin(t *testing.T) {
 	}
 	if opts.Model != "glm-5.3" {
 		t.Fatalf("model = %q", opts.Model)
+	}
+}
+
+// installRepoCatalog points the shared catalog at the repository's own
+// assets/models.json: the effort page a configured provider gets must be the
+// one /model and the gateway read, not a fixture's idea of it.
+func installRepoCatalog(t *testing.T) {
+	t.Helper()
+	data, err := llm.RepoModelsJSONForTest()
+	if err != nil {
+		t.Fatalf("read repo models.json: %v", err)
+	}
+	cat, err := llm.Parse(data)
+	if err != nil {
+		t.Fatalf("parse repo models.json: %v", err)
+	}
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() { llm.SetGlobalCatalogForTest(cat) })
+}
+
+// TestConfigureEffortPageUsesTheModelsLevels pins onboarding and /connect to
+// the same levels /model offers: the model's own catalog row, plus the
+// "Provider default" escape hatch — and no page at all for a model whose row
+// names no discrete level.
+func TestConfigureEffortPageUsesTheModelsLevels(t *testing.T) {
+	installRepoCatalog(t)
+	for _, tc := range []struct {
+		provider    string
+		model       string
+		want        []string
+		wantDefault string
+		selects     []string
+		wantJSON    string
+	}{
+		{
+			provider: "openai", model: "gpt-5",
+			want:        []string{"minimal", "low", "medium", "high", reasoningEffortUnset},
+			wantDefault: reasoningEffortProviderDefault,
+			selects:     []string{"medium"},
+			wantJSON:    `{"reasoning":{"effort":"medium"}}`,
+		},
+		{
+			// The page opens on "medium" only when the model offers it;
+			// otherwise it opens on the provider's own default.
+			provider: "zhipuai", model: "glm-5.3-flash",
+			want:        []string{"low", "high", "max", reasoningEffortUnset},
+			wantDefault: reasoningEffortUnset,
+			selects:     []string{"max"},
+			wantJSON:    `{"reasoning":{"effort":"max"}}`,
+		},
+		{
+			// A toggle-only model: nothing to choose, so no page and no level.
+			provider: "zhipuai", model: "glm-4.5",
+		},
+		{
+			// Not in the catalog at all: nothing to choose either.
+			provider: "openai", model: "not-a-model",
+		},
+	} {
+		t.Run(tc.provider+"/"+tc.model, func(t *testing.T) {
+			selector := &fakeSelector{selects: tc.selects}
+			got, ok, err := promptReasoningEffort(PromptConfig{Selector: selector}, providerChoice{Provider: tc.provider}, tc.model, nil, "")
+			if err != nil || !ok {
+				t.Fatalf("promptReasoningEffort ok=%t err=%v", ok, err)
+			}
+			if tc.want == nil {
+				if len(selector.selectOptions) != 0 {
+					t.Fatalf("selection pages = %#v, want no effort page", selector.selectOptions)
+				}
+				if got != "" {
+					t.Fatalf("params = %q, want no pinned effort", got)
+				}
+				return
+			}
+			if len(selector.selectOptions) != 1 {
+				t.Fatalf("selection pages = %#v, want one effort page", selector.selectOptions)
+			}
+			if !reflect.DeepEqual(selector.selectOptions[0], tc.want) {
+				t.Fatalf("effort options = %#v, want %#v", selector.selectOptions[0], tc.want)
+			}
+			if selector.selectDefaults[0] != tc.wantDefault {
+				t.Fatalf("effort default = %q, want %q", selector.selectDefaults[0], tc.wantDefault)
+			}
+			if got != tc.wantJSON {
+				t.Fatalf("params = %q, want %q", got, tc.wantJSON)
+			}
+		})
 	}
 }

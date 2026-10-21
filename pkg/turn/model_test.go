@@ -409,14 +409,19 @@ func (f *modelSelectionFixture) addConfigEntry(t *testing.T, provider, model str
 
 // reasoningCapableOpenAIModel picks a catalog model that reasons, so the
 // effort picker path runs.
+// reasoningCapableModel names the openai model these tests drive /model with.
+// It is pinned to one id instead of scanning for any reasoning-capable model:
+// the levels a model offers are its own catalog data now, and a scan would pick
+// whichever model a map walk yielded first — including rows that name a token
+// budget instead of discrete levels.
 func reasoningCapableModel(t *testing.T) llm.Model {
 	t.Helper()
 	for _, m := range llm.AllModels() {
-		if m.CanReason && strings.EqualFold(strings.TrimSpace(m.Provider), "openai") {
+		if strings.EqualFold(strings.TrimSpace(m.ID), "openai/gpt-5") {
 			return m
 		}
 	}
-	t.Fatal("no reasoning-capable openai model in the catalog")
+	t.Fatal("openai/gpt-5 is missing from the catalog")
 	return llm.Model{}
 }
 
@@ -439,8 +444,8 @@ func TestChooseModelEffortPickerMarksLiveEffort(t *testing.T) {
 
 // /model offers a model's own thinking levels rather than one global list: the
 // Go subscription's glm-5.3 has three, a model that reasons with no discrete
-// level gets no picker at all, and an Anthropic-protocol model loses the level
-// its client cannot send.
+// level gets no picker at all, and every level the protocol's client can send
+// is offered — xhigh included, now that the Anthropic client supports it.
 func TestChooseModelUsesTheModelsOwnEffortLevels(t *testing.T) {
 	f := newModelSelectionFixture(t, ModelSelectionState{})
 	f.addConfigEntry(t, "opencode-go", "glm-5.3")
@@ -453,9 +458,9 @@ func TestChooseModelUsesTheModelsOwnEffortLevels(t *testing.T) {
 	}{
 		{model: "glm-5.3", want: []string{"low", "high", "max"}},
 		{model: "minimax-m3"},
-		// Anthropic messages: the client accepts low/medium/high/max, so the
-		// table's xhigh is trimmed instead of being offered and dropped.
-		{model: "qwen3.8-max", want: []string{"low", "medium"}},
+		// Anthropic messages: the catalog's levels, all of which the client
+		// can send.
+		{model: "qwen3.8-max", want: []string{"low", "medium", "xhigh"}},
 	} {
 		res := Choose(f.ctx, SlashChoice{Command: "model", Value: f.choiceLabel(t, "opencode-go", tc.model)})
 		require.True(t, res.Handled)

@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
-	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -1146,13 +1145,8 @@ func promptModel(selector SetupSelector, options []modelOption, defaultValue str
 	}
 }
 
-// reasoningEffortOptions are the same levels /model offers, so a provider
-// configured through onboarding or /connect starts on the identical scale the
-// in-session switcher later shows.
-var reasoningEffortOptions = []string{"low", "medium", "high", "xhigh"}
-
 // reasoningEffortProviderDefault is used when neither the existing config nor
-// the catalog says otherwise.
+// the model's own levels say otherwise.
 const reasoningEffortProviderDefault = "medium"
 
 // reasoningEffortUnset lets the operator keep the provider's own default
@@ -1162,31 +1156,31 @@ const reasoningEffortUnset = "Provider default"
 // promptReasoningEffort asks for the reasoning effort of the model just chosen
 // and returns the params JSON to persist with the provider entry. The levels
 // come from the record when the model was discovered on this account — the
-// backend decides which a model supports, including levels a static list has
-// never heard of — and fall back to catalog knowledge, or to no question at
-// all for models known not to reason, so the request never carries a parameter
-// the provider would reject.
+// backend decides which a model supports — and otherwise from
+// turn.ModelReasoningEfforts, which is the same answer /model and the gateway
+// read (models.json's reasoning_options, trimmed to what this build can send).
+// A model with no levels gets no question at all, so the request never carries
+// a parameter the provider would reject.
 func promptReasoningEffort(cfg PromptConfig, choice providerChoice, model string, record *turn.ModelRecord, previous string) (string, bool, error) {
 	existing := currentProviderParamsJSON(cfg, choice)
+	var efforts []string
+	defaultEffort := ""
 	if record != nil {
-		if len(record.ReasoningEfforts) == 0 {
-			logPromptChoice(cfg, "llmsetup.reasoning_effort.not_supported", choice, map[string]any{"model": model})
-			return applyReasoningEffort(existing, ""), true, nil
+		efforts = record.ReasoningEfforts
+		defaultEffort = record.DefaultReasoningEffort
+	} else {
+		efforts = turn.ModelReasoningEfforts(choice.Provider, model)
+		// A model the catalog has levels for gets a sensible preselected one;
+		// unset lets the provider apply its own default otherwise.
+		if len(efforts) > 0 {
+			defaultEffort = reasoningEffortProviderDefault
 		}
-		return promptEffortChoice(cfg, choice, model, record.ReasoningEfforts, record.DefaultReasoningEffort, previous)
 	}
-	hit, found := llm.Lookup(choice.Provider, model)
-	if found && !hit.CanReason {
+	if len(efforts) == 0 {
 		logPromptChoice(cfg, "llmsetup.reasoning_effort.not_supported", choice, map[string]any{"model": model})
 		return applyReasoningEffort(existing, ""), true, nil
 	}
-	// A model neither the account nor the catalog verified gets no guessed
-	// default level — unset lets the provider apply its own.
-	providerDefault := ""
-	if found {
-		providerDefault = reasoningEffortProviderDefault
-	}
-	return promptEffortChoice(cfg, choice, model, reasoningEffortOptions, providerDefault, previous)
+	return promptEffortChoice(cfg, choice, model, efforts, defaultEffort, previous)
 }
 
 // promptEffortChoice runs the shared effort prompt. defaultEffort is the

@@ -209,9 +209,11 @@ func TestInstall_ThenResolve(t *testing.T) {
 	}
 	t.Setenv(AssetsDirEnv, assets)
 
-	// Before Install, Resolve should fail (no models.json).
-	if _, err := Resolve(tmp); err == nil {
-		t.Fatal("expected Resolve to fail before Install")
+	// Before Install the home has no copy, so Resolve answers from the shipped
+	// base alone; Install then makes the home a full copy (asserted in
+	// catalog_test.go) and Resolve keeps answering.
+	if cat, err := Resolve(tmp); err != nil || cat.Len() == 0 {
+		t.Fatalf("Resolve before Install = %v, %v; want the shipped base", cat.Len(), err)
 	}
 
 	if err := Install(tmp, "(devel)"); err != nil {

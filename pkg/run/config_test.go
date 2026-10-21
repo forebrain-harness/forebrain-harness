@@ -1165,3 +1165,49 @@ func TestNewLLMFromYAMLOpenCodeHonorsConfiguredRoot(t *testing.T) {
 		t.Fatalf("requests = %+v, want a call under the configured /mirror root", got)
 	}
 }
+
+// TestProviderInferenceIgnoresLoginBackedProviders pins the one thing the
+// reference rows for the login-backed surfaces must not break: a bare model id
+// whose name is shared (glm-5.3 is served by zhipuai and listed by both
+// OpenCode surfaces) still infers the static provider. Counting the account
+// catalog's rows would make every such id ambiguous and answer nothing.
+func TestProviderInferenceIgnoresLoginBackedProviders(t *testing.T) {
+	data, err := llm.RepoModelsJSONForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := llm.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() { llm.SetGlobalCatalogForTest(cat) })
+
+	// The ambiguity has to be real, or the test proves nothing.
+	owners := map[string]bool{}
+	for _, m := range llm.AllModels() {
+		if strings.EqualFold(strings.TrimSpace(m.APIModel), "glm-5.3") {
+			owners[m.Provider] = true
+		}
+	}
+	for _, provider := range []string{"zhipuai", "opencode", "opencode-go"} {
+		if !owners[provider] {
+			t.Fatalf("catalog no longer lists %s/glm-5.3 (owners=%v)", provider, owners)
+		}
+	}
+
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+		Definitions: map[string]appcfg.AgentDefinition{
+			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+				{Provider: "zhipuai", Model: "glm-5.3"},
+			}},
+		},
+	}}
+	if got := ProviderForAgentModel(cfg, "main", "glm-5.3"); got != "zhipuai" {
+		t.Fatalf("ProviderForAgentModel(glm-5.3) = %q, want zhipuai", got)
+	}
+	// A model only a login-backed surface carries cannot be inferred at all.
+	if got := ProviderForAgentModel(cfg, "main", "kimi-k3"); got != "" {
+		t.Fatalf("ProviderForAgentModel(kimi-k3) = %q, want empty (opencode-only id)", got)
+	}
+}
