@@ -895,17 +895,18 @@ func chooseModel(ctx Context, label string) Result {
 			return Result{Handled: true, Reply: reply}
 		}
 	}
-	if !chosen.CanReason {
+	if len(chosen.ReasoningEfforts) == 0 {
 		if !changed {
 			reply = "Still using " + name + "."
 		}
 		return Result{Handled: true, Reply: reply}
 	}
 	// The current marker reads the live selection's concrete effort, not
-	// config order.
+	// config order. The levels are the model's own: offering a global list
+	// would let the picker pin a level this model would reject.
 	current := settings.Selection.Effort
-	items := make([]PickerItem, len(ReasoningEffortLevels))
-	for i, effort := range ReasoningEffortLevels {
+	items := make([]PickerItem, len(chosen.ReasoningEfforts))
+	for i, effort := range chosen.ReasoningEfforts {
 		items[i] = PickerItem{Value: encodeEffortChoice(chosen.Label, effort, changed), Label: effort, Current: effort == current}
 	}
 	return Result{Handled: true, Reply: reply, Picker: &Picker{Command: "model-effort", Title: "Reasoning effort", Hint: "How long " + name + " thinks before it answers", Items: items}}
@@ -926,7 +927,7 @@ func chooseReasoningEffort(ctx Context, value string) Result {
 	}
 	choices := ModelChoices(settings.Config, settings.AgentName)
 	at := slices.IndexFunc(choices, func(c ModelChoice) bool { return c.Label == label })
-	if at < 0 || !slices.Contains(ReasoningEffortLevels, effort) {
+	if at < 0 || !slices.Contains(choices[at].ReasoningEfforts, effort) {
 		return Result{Handled: true, Reply: "That reasoning effort is no longer offered for this model."}
 	}
 	chosen := choices[at]

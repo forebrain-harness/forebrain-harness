@@ -404,6 +404,16 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 			return nil, fmt.Errorf("unsupported llm provider: %s (not found in models.json)", prov)
 		}
 		apiPath := strings.TrimSpace(cfg.APIPath)
+		// The path names the protocol, and the client it picks appends its own
+		// endpoint to the base URL — so "/v1/messages" here selects the Anthropic
+		// Messages client rather than a URL anything is sent to, exactly as
+		// "/responses" below selects the Responses client. A provider whose
+		// endpoint serves Messages under its own name (a proxy, or a mirror of a
+		// Claude service) reaches it this way; anthropic and minimax above speak
+		// it without being told.
+		if isAnthropicMessagesPath(apiPath) {
+			return wrapUsageAccountingLLM(anthropic.NewAgentLLM(apiKey, baseURL, model, int64(maxTokens), requestReasoningEffort(cfg.Params))), nil
+		}
 		if strings.Contains(apiPath, "/responses") {
 			return wrapUsageAccountingLLM(openai.NewResponsesLLMWithCache(apiKey, baseURL, model, maxTokens, cfg.Params.Bytes(), openAIPromptCaching(prov))), nil
 		}
@@ -427,6 +437,14 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 
 func openAIPromptCaching(provider string) bool {
 	return strings.EqualFold(strings.TrimSpace(provider), "openai")
+}
+
+// isAnthropicMessagesPath reports whether a provider entry asks for the
+// Anthropic Messages protocol. The Messages client appends "/v1/messages" to
+// the base URL itself, so a stored path only says which protocol to speak; a
+// trailing slash is tolerated because a mirror's root often carries one.
+func isAnthropicMessagesPath(path string) bool {
+	return strings.HasSuffix(strings.TrimSuffix(strings.TrimSpace(path), "/"), "/messages")
 }
 
 // openCodePlaceholderKey is the key handed to a client whose real credential

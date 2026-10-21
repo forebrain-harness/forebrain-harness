@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
@@ -373,25 +374,99 @@ func TestListModelCatalogLiveQueriesGoCatalogWhenSignedIn(t *testing.T) {
 	require.Equal(t, 1, opencodeSrc.goCalls)
 }
 
-// A failed Console fetch still answers with the free family — those models
-// need no credential, so an offline machine keeps the one thing it can use —
-// and the failure is named instead of being swallowed.
-func TestListModelCatalogLiveFallsBackToFreeFamily(t *testing.T) {
+// A failed Console fetch answers with nothing and says why. It used to answer
+// with the free family, which no third-party client can run any more: the
+// gateway rejects every request that does not come from OpenCode itself, so an
+// offline list would only lead the user into a 403.
+func TestListModelCatalogLiveReportsAFailedConsoleFetch(t *testing.T) {
 	useStaticCatalog(t)
 	opencodeSrc := &stubOpenCodeSource{err: errors.New("fetch OpenCode models: http 503")}
 	listing := listModelCatalogLive(context.Background(),
 		modelSources{opencode: opencodeSrc},
 		ModelCatalogQuery{Provider: "opencode"})
 
-	free := opencode.FreeConsoleModels()
-	require.Len(t, listing.Records, len(free))
-	require.Equal(t, free[0].ID+" (free)", listing.Records[0].ModelName)
-	require.True(t, listing.Records[0].IsDefault)
-	require.Empty(t, listing.Records[0].Source, "nothing was fetched, so nothing is sourced live")
-	require.True(t, listing.Records[0].FetchedAt.IsZero())
+	require.Empty(t, listing.Records)
 	require.Len(t, listing.Status, 1)
 	require.Contains(t, listing.Status[0].Error, "503")
+	require.Empty(t, listing.Status[0].Source)
 	require.Nil(t, listing.Status[0].FetchedAt)
+}
+
+// The OpenCode projection carries the model's thinking levels, trimmed to what
+// this build can send on the protocol the model speaks. A model the table has
+// evidence for and one it does not are both answered from the same place.
+func TestDiscoverOpenCodeModelsCarriesReasoningEfforts(t *testing.T) {
+	src := &stubOpenCodeSource{signedIn: true, goCatalog: []opencode.ModelInfo{
+		{ID: "glm-5.3"},
+		{ID: "minimax-m3"},
+		{ID: "gemini-4-argon-contributor"},
+	}}
+
+	records, err := DiscoverOpenCodeModels(context.Background(), src, true)
+	require.NoError(t, err)
+	byID := make(map[string]ModelRecord, len(records))
+	for _, rec := range records {
+		byID[rec.APIModel] = rec
+	}
+
+	glm := byID["glm-5.3"]
+	require.True(t, glm.CanReason)
+	require.Equal(t, []string{"low", "high", "max"}, glm.ReasoningEfforts)
+
+	minimax := byID["minimax-m3"]
+	require.True(t, minimax.CanReason, "the model reasons, it just has no level to pick")
+	require.Empty(t, minimax.ReasoningEfforts)
+
+	// The table carries Gemini's three levels, but the Google client sends no
+	// effort parameter at all, so the record must not offer one.
+	gemini := byID["gemini-4-argon-contributor"]
+	require.True(t, gemini.CanReason)
+	require.Empty(t, gemini.ReasoningEfforts)
+
+	console, err := DiscoverOpenCodeModels(context.Background(), &stubOpenCodeSource{
+		console: []opencode.ModelInfo{{ID: "qwen3.7-plus"}},
+	}, false)
+	require.NoError(t, err)
+	require.Len(t, console, 1)
+	require.False(t, console[0].CanReason, "the catalog has no row for it, so nothing is claimed")
+	require.Empty(t, console[0].ReasoningEfforts)
+}
+
+// The same capability question answers for a configured model whichever source
+// its levels live in: this repository's OpenCode tables or models.json.
+func TestModelChoicesReasoningEffortsForOpenCode(t *testing.T) {
+	useStaticCatalog(t)
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "opencode-go", Model: "glm-5.3", Models: appcfg.StringList{
+				"glm-5.3", "minimax-m3", "qwen3.8-max", "gemini-4-argon-contributor", "qwen3.7-plus",
+			}},
+		}},
+	}}}
+	byModel := map[string][]string{}
+	for _, choice := range ModelChoices(&cfg, "main") {
+		byModel[choice.Model] = choice.ReasoningEfforts
+	}
+	require.Equal(t, []string{"low", "high", "max"}, byModel["glm-5.3"])
+	require.Empty(t, byModel["minimax-m3"], "a toggle-only model has no level to pick")
+	// Anthropic protocol: the client drops xhigh, so the picker never offers it.
+	require.Equal(t, []string{"low", "medium"}, byModel["qwen3.8-max"])
+	require.Empty(t, byModel["gemini-4-argon-contributor"])
+	require.Empty(t, byModel["qwen3.7-plus"])
+}
+
+// A catalog model that reasons keeps the four levels /model has always offered.
+func TestModelChoicesKeepCatalogEffortLevels(t *testing.T) {
+	useStaticCatalog(t)
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-static"}}},
+	}}}
+	choices := ModelChoices(&cfg, "main")
+	require.Len(t, choices, 1)
+	hit, ok := llm.Lookup("openai", "gpt-static")
+	require.True(t, ok)
+	require.True(t, hit.CanReason)
+	require.Equal(t, ReasoningEffortLevels, choices[0].ReasoningEfforts)
 }
 
 // An unfiltered listing runs every installed source once, in a stable order:

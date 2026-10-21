@@ -353,13 +353,13 @@ func TestCredentialBackedProvidersSkipAPIKey(t *testing.T) {
 func TestCredentialBackedProviderMatchingIsCaseInsensitive(t *testing.T) {
 	t.Parallel()
 	for _, provider := range []string{"opencode", "OpenCode", " OPENCODE-GO ", "opencode-go", "ChatGPT"} {
-		if !credentialsBackedProvider(provider) {
-			t.Fatalf("credentialsBackedProvider(%q) = false, want true", provider)
+		if !CredentialsBackedProvider(provider) {
+			t.Fatalf("CredentialsBackedProvider(%q) = false, want true", provider)
 		}
 	}
 	for _, provider := range []string{"", "openai", "opencode-go-", "opencode2"} {
-		if credentialsBackedProvider(provider) {
-			t.Fatalf("credentialsBackedProvider(%q) = true, want false", provider)
+		if CredentialsBackedProvider(provider) {
+			t.Fatalf("CredentialsBackedProvider(%q) = true, want false", provider)
 		}
 	}
 }

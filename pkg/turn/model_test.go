@@ -437,6 +437,50 @@ func TestChooseModelEffortPickerMarksLiveEffort(t *testing.T) {
 	require.Equal(t, "medium", res.Picker.Items[current].Label, "effort marker did not read the live selection")
 }
 
+// /model offers a model's own thinking levels rather than one global list: the
+// Go subscription's glm-5.3 has three, a model that reasons with no discrete
+// level gets no picker at all, and an Anthropic-protocol model loses the level
+// its client cannot send.
+func TestChooseModelUsesTheModelsOwnEffortLevels(t *testing.T) {
+	f := newModelSelectionFixture(t, ModelSelectionState{})
+	f.addConfigEntry(t, "opencode-go", "glm-5.3")
+	f.addConfigEntry(t, "opencode-go", "minimax-m3")
+	f.addConfigEntry(t, "opencode-go", "qwen3.8-max")
+
+	for _, tc := range []struct {
+		model string
+		want  []string
+	}{
+		{model: "glm-5.3", want: []string{"low", "high", "max"}},
+		{model: "minimax-m3"},
+		// Anthropic messages: the client accepts low/medium/high/max, so the
+		// table's xhigh is trimmed instead of being offered and dropped.
+		{model: "qwen3.8-max", want: []string{"low", "medium"}},
+	} {
+		res := Choose(f.ctx, SlashChoice{Command: "model", Value: f.choiceLabel(t, "opencode-go", tc.model)})
+		require.True(t, res.Handled)
+		if len(tc.want) == 0 {
+			require.Nil(t, res.Picker, "%s: nothing to pick, so no effort page", tc.model)
+			require.Equal(t, "Switched to opencode-go / "+tc.model+".", res.Reply)
+			continue
+		}
+		require.NotNil(t, res.Picker, tc.model)
+		require.Equal(t, "model-effort", res.Picker.Command)
+		labels := make([]string, 0, len(res.Picker.Items))
+		for _, item := range res.Picker.Items {
+			labels = append(labels, item.Label)
+		}
+		require.Equal(t, tc.want, labels, tc.model)
+	}
+
+	// A level this model does not offer is refused rather than written.
+	stale := encodeEffortChoice(f.choiceLabel(t, "opencode-go", "glm-5.3"), "xhigh", false)
+	res := Choose(f.ctx, SlashChoice{Command: "model-effort", Value: stale})
+	require.True(t, res.Handled)
+	require.Equal(t, "That reasoning effort is no longer offered for this model.", res.Reply)
+	require.Equal(t, -1, slices.Index(f.calls(), "select-effort("), "a rejected effort still reached the runtime: %v", f.calls())
+}
+
 // TestChooseReasoningEffortDoesNotWriteTheConfigFile pins the same contract for
 // the effort half: the effort lands on this conversation's runtime and row,
 // and the configured default entry keeps the effort the file already had.

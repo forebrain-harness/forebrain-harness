@@ -49,7 +49,7 @@ func Execute(rt Context, opts Options) (Report, error) {
 		logSetupError(rt.Home, "setup.execute.validation_error", opts, "model required in non-interactive mode")
 		return rep, fmt.Errorf("model required in non-interactive mode")
 	}
-	if strings.TrimSpace(opts.APIKey) == "" && !strings.EqualFold(strings.TrimSpace(opts.Provider), "chatgpt") {
+	if strings.TrimSpace(opts.APIKey) == "" && !appcfg.CredentialsBackedProvider(opts.Provider) {
 		logSetupError(rt.Home, "setup.execute.validation_error", opts, "api_key required in non-interactive mode")
 		return rep, fmt.Errorf("api_key required in non-interactive mode")
 	}

@@ -14096,7 +14096,6 @@ func TestPlanReviewShowsInTheAgentRosterAndCanBeStoppedFromIt(t *testing.T) {
 func TestSupportedProvidersMatchMainstreamSet(t *testing.T) {
 	want := []string{
 		"chatgpt",
-		"opencode",
 		"opencode-go",
 		"openai",
 		"anthropic",
@@ -30346,7 +30345,7 @@ func TestInteractiveResumeRestoresSessionModelSelection(t *testing.T) {
 
 	// sess-a pins the second provider with its concrete effort; sess-b has
 	// no row and follows the file default.
-	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	require.Equal(t, "gpt-other", s.storedSelection(t, "sess-a").Model)
 
 	var out bytes.Buffer
@@ -30383,7 +30382,7 @@ func TestInteractiveResumeRestoresSessionModelSelection(t *testing.T) {
 func TestNewSessionKeepsTheCurrentModel(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
-	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 
 	var out bytes.Buffer
@@ -30422,7 +30421,7 @@ func TestNewConversationInheritsTheCurrentModelAndFooterNamesIt(t *testing.T) {
 	s.cfg().Agents.Definitions["main"] = main
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
 	require.NoError(t, s.reloadConfigFromDisk())
-	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 
 	// setConfiguredDefault is the user's own action on the file — the one
@@ -30505,7 +30504,7 @@ func TestForkCopiesSessionModelSelection(t *testing.T) {
 	requireRunnerModel(t, s, "openai", "gpt-main", "")
 
 	// A source with an explicit non-default selection passes it on.
-	require.NoError(t, s.SelectModel(ctx, "sess-b", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	require.NoError(t, s.SelectModel(ctx, "sess-b", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	res, ok = s.ExecuteSurfaceSlash(ctx, "sess-b", "/fork")
 	require.True(t, ok)
 	require.True(t, res.SessionSwitched)
@@ -30526,7 +30525,7 @@ func TestFooterNamesTheConfiguredDefaultBeforeAnyProjectRunner(t *testing.T) {
 
 	// The base runner is moved to the non-default entry, so reading it here
 	// would answer gpt-other.
-	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 
 	// The same agent scope the environment's pool resolves projects under.
@@ -30546,7 +30545,7 @@ func TestFooterNamesTheConfiguredDefaultBeforeAnyProjectRunner(t *testing.T) {
 func TestResumeMissingStoredModelFallsBackWithWarning(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
-	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 
 	// Remove the pinned pair from the config; the stored row is now stale.
 	main := s.cfg().Agents.Definitions["main"]
@@ -30581,7 +30580,7 @@ func TestModelPersistenceFailureRollsBackRunner(t *testing.T) {
 	db := s.sessStore().DB()
 	require.NoError(t, db.Close())
 
-	err := s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil)
+	err := s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil)
 	require.Error(t, err)
 	// The rollback succeeded, so the outcome is a plain failure — not
 	// uncertain, and the runner is back on the previous model.
@@ -30597,7 +30596,7 @@ func TestSwitchFailureKeepsQueuedInputAndSession(t *testing.T) {
 	ctx := context.Background()
 	// Pin the live runtime on the second provider first, so the target's
 	// stored choice is not already what the runner runs.
-	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	// sess-b's stored pair is the first provider's original model id.
 	_, err := s.sessStore().SaveSessionModelSelection(ctx, "sess-b", state.SessionModelSelection{
 		Provider: "openai", Model: "gpt-main", Effort: "",

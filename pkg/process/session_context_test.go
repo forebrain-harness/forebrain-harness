@@ -451,6 +451,25 @@ func TestExecuteRequiresModelAPIKeyAndBaseURL(t *testing.T) {
 			opts: Options{Provider: "openai", Model: "gpt-5", APIKey: "sk-live-secret", UpdateParams: true},
 			want: "base_url required in non-interactive mode",
 		},
+		{
+			// The OpenCode surfaces carry no api_key: the device-code login
+			// writes opencode.json, and the Console models read
+			// OPENCODE_API_KEY. Rejecting them here dropped the whole setup
+			// after the wizard had already walked the user through it.
+			name: "opencode go subscription without api key",
+			opts: Options{Provider: "opencode-go", Model: "glm-5.3", BaseURL: "https://opencode.ai/inference/go", UpdateParams: true},
+			want: "",
+		},
+		{
+			name: "opencode console without api key",
+			opts: Options{Provider: "opencode", Model: "big-pickle", BaseURL: "https://opencode.ai/inference", UpdateParams: true},
+			want: "",
+		},
+		{
+			name: "chatgpt without api key",
+			opts: Options{Provider: "chatgpt", Model: "gpt-5.5", BaseURL: "https://chatgpt.com/backend-api/codex", UpdateParams: true},
+			want: "",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Execute(rt, tc.opts)

@@ -515,18 +515,43 @@ func stubOpenCodeDeviceLogin(t *testing.T) *[]string {
 	return &paths
 }
 
-// stubOpenCodeModels replaces gateway catalog discovery with a fixed answer and
-// records which surface each call asked for.
-func stubOpenCodeModels(t *testing.T, records []turn.ModelRecord, discoverErr error) *[]bool {
+// stubOpenCodeModels replaces gateway catalog discovery with a fixed answer.
+func stubOpenCodeModels(t *testing.T, records []turn.ModelRecord, discoverErr error) {
 	t.Helper()
-	surfaces := []bool{}
 	previous := discoverOpenCodeModels
-	discoverOpenCodeModels = func(_ context.Context, _ string, goSubscription bool) ([]turn.ModelRecord, error) {
-		surfaces = append(surfaces, goSubscription)
+	discoverOpenCodeModels = func(_ context.Context, _ string) ([]turn.ModelRecord, error) {
 		return records, discoverErr
 	}
 	t.Cleanup(func() { discoverOpenCodeModels = previous })
-	return &surfaces
+}
+
+// tuiOpenCodeSource stands in for the gateway's Go catalog, so a test can build
+// its fixture through the real projection instead of hand-writing records that
+// the production path would never produce.
+type tuiOpenCodeSource struct {
+	models []opencode.ModelInfo
+}
+
+func (s tuiOpenCodeSource) OpenCodeModels(context.Context, bool) ([]opencode.ModelInfo, error) {
+	return s.models, nil
+}
+
+func (s tuiOpenCodeSource) OpenCodeSignedIn() bool { return true }
+
+// openCodeGoProjection projects ids through turn.DiscoverOpenCodeModels, the
+// same call production makes, so the effort levels in a fixture are the ones
+// the setup would really see.
+func openCodeGoProjection(t *testing.T, ids ...string) []turn.ModelRecord {
+	t.Helper()
+	models := make([]opencode.ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, opencode.ModelInfo{ID: id})
+	}
+	records, err := turn.DiscoverOpenCodeModels(context.Background(), tuiOpenCodeSource{models: models}, true)
+	if err != nil {
+		t.Fatalf("project the Go catalog: %v", err)
+	}
+	return records
 }
 
 // openCodeProviderChoice finds the OpenCode choice for a provider, so the tests
@@ -535,20 +560,13 @@ func openCodeProviderChoice(t *testing.T, provider string) providerChoice {
 	t.Helper()
 	for _, group := range providerGroups {
 		for _, option := range group.Options {
-			if option.Provider == provider && (option.OpenCodeFree || option.OpenCodeDevice) {
+			if option.Provider == provider && option.OpenCodeDevice {
 				return option
 			}
 		}
 	}
 	t.Fatalf("no OpenCode choice for provider %q", provider)
 	return providerChoice{}
-}
-
-func openCodeFreeFixture() []turn.ModelRecord {
-	return []turn.ModelRecord{
-		{ModelName: "big-pickle (free)", APIModel: "big-pickle", Provider: "opencode", IsDefault: true},
-		{ModelName: "glm-5.3-flash-free (free)", APIModel: "glm-5.3-flash-free", Provider: "opencode"},
-	}
 }
 
 func openCodeGoFixture() []turn.ModelRecord {
@@ -568,128 +586,63 @@ func runOpenCodeSetup(t *testing.T, cfg PromptConfig, provider string) (process.
 	return setup.run()
 }
 
-// The OpenCode group is a sign-in provider whose two ways in sit under one row
-// described by the group, not by a plan count. Both choices carry the canonical
-// base URL the saved configuration must have.
-func TestProviderGroupsOfferOpenCodeBothWays(t *testing.T) {
+// The OpenCode group has exactly one way in — the Go subscription's device-code
+// login. The Console free family is gone: the gateway only answers OpenCode's
+// own client, so offering it would end in a 403 on the first message.
+func TestProviderGroupsOfferOpenCodeGoOnly(t *testing.T) {
 	group := providerGroups[1]
 	if group.Label != "OpenCode" {
 		t.Fatalf("second group = %q, want OpenCode right after ChatGPT", group.Label)
 	}
-	if got := providerGroupBlurb(group); got != "Free models, or a Go subscription" {
-		t.Fatalf("blurb = %q", got)
+	if got := providerGroupBlurb(group); got != "Device-code login; use your Go/Go Plus quota" {
+		t.Fatalf("blurb = %q, want the Go login described on the row itself", got)
 	}
 	if !hasSubscriptionSignIn(group) {
 		t.Fatal("the OpenCode group belongs under the sign-in providers")
 	}
-	free := openCodeProviderChoice(t, "opencode")
-	if !free.OpenCodeFree || free.OpenCodeDevice {
-		t.Fatalf("free choice = %+v", free)
+	if len(group.Options) != 1 {
+		t.Fatalf("options = %+v, want only the Go subscription", group.Options)
 	}
-	if got := free.DefaultBaseURL; got != opencode.ProviderBaseURL("opencode") || got == "" {
-		t.Fatalf("free base_url = %q", got)
-	}
-	goChoice := openCodeProviderChoice(t, "opencode-go")
-	if !goChoice.OpenCodeDevice || goChoice.OpenCodeFree {
+	goChoice := group.Options[0]
+	if !goChoice.OpenCodeDevice {
 		t.Fatalf("Go choice = %+v", goChoice)
 	}
 	if got := goChoice.DefaultBaseURL; got != opencode.ProviderBaseURL("opencode-go") || got == "" {
 		t.Fatalf("Go base_url = %q", got)
 	}
+	// The Console provider must not be reachable from the provider page at all.
+	for _, group := range providerGroups {
+		for _, option := range group.Options {
+			if option.Provider == "opencode" {
+				t.Fatalf("provider page offers the OpenCode Console surface: %+v", option)
+			}
+		}
+	}
 }
 
-// Picking the OpenCode group from the provider page asks which way in, then
-// follows that option's own flow — no key page either way.
+// Picking the OpenCode group from the provider page goes straight into the Go
+// login — one page, no plan picker, no key page.
 func TestPromptMainLLMSetupReachesOpenCodeFromTheProviderPage(t *testing.T) {
 	loginPaths := stubOpenCodeDeviceLogin(t)
-	stubOpenCodeModels(t, openCodeFreeFixture(), nil)
-	selector := &fakeSelector{selects: []string{"OpenCode", "Free models (no login)"}}
+	stubOpenCodeModels(t, openCodeGoProjection(t, "glm-5.3", "kimi-k3"), nil)
+	selector := &fakeSelector{selects: []string{"OpenCode", "glm-5.3"}, confirms: []bool{true}}
 	opts, ok, err := PromptMainLLMSetup(PromptConfig{
 		Selector: selector, Output: io.Discard, Home: t.TempDir(),
 	})
 	if err != nil || !ok {
 		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
 	}
-	if len(*loginPaths) != 0 {
-		t.Fatalf("device logins = %d, want none on the free path", len(*loginPaths))
+	if len(*loginPaths) != 1 {
+		t.Fatalf("device logins = %d, want the Go login", len(*loginPaths))
 	}
-	if opts.Provider != "opencode" || opts.Model != "big-pickle" {
+	if got := selector.selectLabels; len(got) == 0 || strings.Contains(got[0], "Which plan") {
+		t.Fatalf("select labels = %v, want no plan page before the login", got)
+	}
+	if opts.Provider != "opencode-go" || opts.Model != "glm-5.3" {
 		t.Fatalf("options = %+v", opts)
 	}
-	if opts.BaseURL != opencode.ProviderBaseURL("opencode") || opts.APIKey != "" {
+	if opts.BaseURL != opencode.ProviderBaseURL("opencode-go") || opts.APIKey != "" {
 		t.Fatalf("options = %+v", opts)
-	}
-}
-
-// The free tier asks for nothing: no login, no key. Its picker lists what the
-// live Console catalog returned, and the saved configuration names the provider
-// and the canonical endpoint.
-func TestConfigureOpenCodeFreeOffersTheLiveCatalogWithoutLogin(t *testing.T) {
-	loginPaths := stubOpenCodeDeviceLogin(t)
-	surfaces := stubOpenCodeModels(t, openCodeFreeFixture(), nil)
-	selector := &fakeSelector{}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	}, "opencode")
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if len(*loginPaths) != 0 {
-		t.Fatalf("device logins = %d, want the free tier to sign in to nothing", len(*loginPaths))
-	}
-	if len(*surfaces) != 1 || (*surfaces)[0] {
-		t.Fatalf("surfaces = %v, want one Console catalog fetch", *surfaces)
-	}
-	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{
-		"big-pickle (free) · big-pickle", "glm-5.3-flash-free (free) · glm-5.3-flash-free", manualModelInput,
-	}) {
-		t.Fatalf("model options = %#v", got)
-	}
-	if opts.Provider != "opencode" || opts.Model != "big-pickle" {
-		t.Fatalf("options = %+v", opts)
-	}
-	if opts.BaseURL != opencode.ProviderBaseURL("opencode") {
-		t.Fatalf("base_url = %q, want the canonical OpenCode endpoint", opts.BaseURL)
-	}
-	if opts.APIKey != "" || opts.APIPath != "" {
-		t.Fatalf("options = %+v, want no key and no api path", opts)
-	}
-}
-
-// A gateway that cannot be read must not end the free setup: the free models
-// this build knows are exactly the ones that still work, and the status says
-// which list it is showing.
-func TestConfigureOpenCodeFreeFallsBackToTheStaticFreeModels(t *testing.T) {
-	loginPaths := stubOpenCodeDeviceLogin(t)
-	stubOpenCodeModels(t, nil, errors.New("fetch OpenCode models: http 502: bad gateway"))
-	out := &bytes.Buffer{}
-	selector := &fakeSelector{}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: out, Home: t.TempDir(),
-	}, "opencode")
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if len(*loginPaths) != 0 {
-		t.Fatalf("device logins = %d, want none", len(*loginPaths))
-	}
-	fallback := turn.OpenCodeFreeRecords()
-	if len(fallback) == 0 {
-		t.Fatal("the static free family is empty")
-	}
-	want := make([]string, 0, len(fallback)+1)
-	for _, rec := range fallback {
-		want = append(want, rec.ModelName+" · "+rec.APIModel)
-	}
-	want = append(want, manualModelInput)
-	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("model options = %#v, want the static free family", got)
-	}
-	if opts.Provider != "opencode" || opts.Model != fallback[0].APIModel {
-		t.Fatalf("options = %+v", opts)
-	}
-	if !strings.Contains(out.String(), "Could not read the live OpenCode catalog") {
-		t.Fatalf("status = %q, want the fallback named", out.String())
 	}
 }
 
@@ -697,7 +650,7 @@ func TestConfigureOpenCodeFreeFallsBackToTheStaticFreeModels(t *testing.T) {
 // every other surface reads it, and then offers the Go catalog.
 func TestConfigureOpenCodeGoSignsInAndOffersTheGoCatalog(t *testing.T) {
 	loginPaths := stubOpenCodeDeviceLogin(t)
-	surfaces := stubOpenCodeModels(t, openCodeGoFixture(), nil)
+	stubOpenCodeModels(t, openCodeGoFixture(), nil)
 	home := t.TempDir()
 	selector := &fakeSelector{confirms: []bool{true}}
 	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
@@ -708,9 +661,6 @@ func TestConfigureOpenCodeGoSignsInAndOffersTheGoCatalog(t *testing.T) {
 	}
 	if len(*loginPaths) != 1 || (*loginPaths)[0] != opencode.DefaultPath(home) {
 		t.Fatalf("login paths = %v, want the login file in home", *loginPaths)
-	}
-	if len(*surfaces) != 1 || !(*surfaces)[0] {
-		t.Fatalf("surfaces = %v, want one Go catalog fetch", *surfaces)
 	}
 	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{
 		"glm-5.3", "kimi-k3", manualModelInput,
@@ -727,6 +677,94 @@ func TestConfigureOpenCodeGoSignsInAndOffersTheGoCatalog(t *testing.T) {
 		if fact.Label == "Endpoint" && fact.Value != opencode.ProviderBaseURL("opencode-go") {
 			t.Fatalf("review endpoint = %q", fact.Value)
 		}
+	}
+}
+
+// A Go model that publishes thinking levels asks for one on its own scale — the
+// levels this build can send for that model, not a global list — and the flow
+// then saves. The save is the point: the wizard used to walk the whole OpenCode
+// login and be rejected at the last step because the provider carries no
+// api_key.
+func TestConfigureOpenCodeGoOffersPerModelEffortLevels(t *testing.T) {
+	stubOpenCodeDeviceLogin(t)
+	stubOpenCodeModels(t, openCodeGoProjection(t, "glm-5.3", "minimax-m3"), nil)
+	home := t.TempDir()
+	selector := &fakeSelector{
+		selects:  []string{"glm-5.3", "high"},
+		confirms: []bool{true},
+	}
+	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
+		Selector: selector, Output: io.Discard, Home: home,
+	}, "opencode-go")
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if len(selector.selectOptions) < 2 {
+		t.Fatalf("select pages = %#v, want a model page and an effort page", selector.selectOptions)
+	}
+	if got := selector.selectOptions[1]; !reflect.DeepEqual(got, []string{"low", "high", "max", reasoningEffortUnset}) {
+		t.Fatalf("effort options = %#v, want glm-5.3's own levels", got)
+	}
+	if got := selector.selectDefaults[1]; got != reasoningEffortUnset {
+		t.Fatalf("effort default = %q, want the provider default", got)
+	}
+	if opts.Model != "glm-5.3" || opts.ParamsJSON != `{"reasoning":{"effort":"high"}}` {
+		t.Fatalf("options = %+v", opts)
+	}
+	// The review shows the chosen level rather than "Provider default".
+	effortShown := false
+	for _, fact := range selector.reviewFacts[0] {
+		if fact.Label == "Reasoning" {
+			effortShown = fact.Value == "high"
+		}
+	}
+	if !effortShown {
+		t.Fatalf("review facts = %+v, want Reasoning high", selector.reviewFacts[0])
+	}
+
+	// And the answers save: the OpenCode provider writes no api_key, so the
+	// gate must not demand one.
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	rt := process.Context{Home: home, ConfigPath: cfgPath, Config: appcfg.Root{}}
+	if _, err := process.Execute(rt, opts); err != nil {
+		t.Fatalf("save the OpenCode Go setup: %v", err)
+	}
+	saved, err := appcfg.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load the saved config: %v", err)
+	}
+	validation := appcfg.ValidateAgentLLMConfigured(&saved, "main")
+	if validation.Provider != "opencode-go" || validation.Model != "glm-5.3" {
+		t.Fatalf("saved provider/model = %q/%q", validation.Provider, validation.Model)
+	}
+	if validation.BaseURL != opencode.ProviderBaseURL("opencode-go") {
+		t.Fatalf("saved base_url = %q", validation.BaseURL)
+	}
+	if validation.APIKey != "" {
+		t.Fatalf("saved api_key = %q, want none for a login-backed provider", validation.APIKey)
+	}
+	if !validation.Complete() {
+		t.Fatalf("saved configuration is incomplete: %+v", validation.MissingFields())
+	}
+}
+
+// A model that reasons with no discrete level (a toggle or a token budget) gets
+// no effort page: there is nothing to pick.
+func TestConfigureOpenCodeGoSkipsEffortForToggleOnlyModel(t *testing.T) {
+	stubOpenCodeDeviceLogin(t)
+	stubOpenCodeModels(t, openCodeGoProjection(t, "minimax-m3"), nil)
+	selector := &fakeSelector{selects: []string{"minimax-m3"}, confirms: []bool{true}}
+	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
+		Selector: selector, Output: io.Discard, Home: t.TempDir(),
+	}, "opencode-go")
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if len(selector.selectOptions) != 1 {
+		t.Fatalf("select pages = %#v, want only the model page", selector.selectOptions)
+	}
+	if opts.Model != "minimax-m3" || opts.ParamsJSON != "" {
+		t.Fatalf("options = %+v, want no effort written", opts)
 	}
 }
 
@@ -760,11 +798,8 @@ func TestConfigureOpenCodeGoFetchRetrySkipsRelogin(t *testing.T) {
 	loginPaths := stubOpenCodeDeviceLogin(t)
 	fetchCalls := 0
 	previous := discoverOpenCodeModels
-	discoverOpenCodeModels = func(_ context.Context, _ string, goSubscription bool) ([]turn.ModelRecord, error) {
+	discoverOpenCodeModels = func(_ context.Context, _ string) ([]turn.ModelRecord, error) {
 		fetchCalls++
-		if !goSubscription {
-			t.Errorf("fetch asked for the Console surface, want the Go one")
-		}
 		if fetchCalls == 1 {
 			return nil, errors.New("fetch OpenCode models: http 429: slow down")
 		}
