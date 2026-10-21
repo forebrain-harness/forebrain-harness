@@ -676,7 +676,19 @@ func TestSameLayerEdgesAreEnumerated(t *testing.T) {
 	}
 }
 
-const maxPackageCount = 30
+// maxPackageCount is the ratchet on pkg's breadth. OpenCode's two new provider
+// packages (pkg/llm/opencode, pkg/llm/google) raised it from 30.
+const maxPackageCount = 32
+
+// allowedLLMSubpackage reports whether a depth-2 path under pkg/ is one of the
+// packages the llm layer is allowed to split into.
+func allowedLLMSubpackage(rel string) bool {
+	switch rel {
+	case "llm/anthropic", "llm/openai", "llm/opencode", "llm/google", "llm/hftok":
+		return true
+	}
+	return false
+}
 
 func TestPackageShape(t *testing.T) {
 	root := findRepoRoot(t)
@@ -704,9 +716,10 @@ func TestPackageShape(t *testing.T) {
 		}
 		parts := strings.Split(filepath.ToSlash(rel), "/")
 		// The only depth-2 packages allowed: the provider adapters under
-		// pkg/llm, plus pkg/llm/hftok, the leaf counting package (stdlib + the
-		// tokenizers binding only) that sits in the llm layer.
-		if len(parts) > 2 || (len(parts) == 2 && strings.Join(parts, "/") != "llm/anthropic" && strings.Join(parts, "/") != "llm/openai" && strings.Join(parts, "/") != "llm/hftok") {
+		// pkg/llm (anthropic, openai, opencode, google), plus pkg/llm/hftok,
+		// the leaf counting package (stdlib + the tokenizers binding only)
+		// that sits in the llm layer.
+		if len(parts) > 2 || (len(parts) == 2 && !allowedLLMSubpackage(strings.Join(parts, "/"))) {
 			t.Fatalf("package path %q is deeper than the allowed shape", filepath.ToSlash(rel))
 		}
 		if blacklist[parts[len(parts)-1]] {
@@ -1440,7 +1453,13 @@ func TestTestFilesCorrespondToProductionFiles(t *testing.T) {
 	}
 }
 
-const maxProductionFilesPerPackage = 30
+// maxProductionFilesPerPackage is the cap on how many production files one
+// package may hold. Raised from 30 to 31 when the web sign-in endpoints
+// (pkg/gateway/login_api.go) took pkg/gateway over the old number: the file is a
+// concern of that package — the HTTP surface — and not the start of a second
+// domain. The cap stays a ratchet: the next file pkg/gateway wants should merge
+// with one it already has, or the package should split.
+const maxProductionFilesPerPackage = 31
 
 // TestSurfacesGetToolStateFromTheEnvironment enforces the call-site half of R4:
 // a surface asks the composition root which tool state this process uses, and

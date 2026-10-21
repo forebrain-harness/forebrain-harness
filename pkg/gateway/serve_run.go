@@ -77,6 +77,10 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		// The web /models listing discovers ChatGPT models on this node's own
 		// credentials, exactly like /connect does in the terminal.
 		turn.WithChatGPTModels(process.NewChatGPTModelsSource(root)),
+		// The same node-level discovery for OpenCode: the Console catalog needs
+		// no login, and the Go catalog uses whatever this machine is signed in
+		// to, so the web model picker shows what this node can actually run.
+		turn.WithOpenCodeModels(process.NewOpenCodeModelsSource(root)),
 		// The run executor is installed below, once gw exists: its options
 		// close over the Server for the goal evaluator.
 		// P5-4: refuse to start a turn against a session that is still parked

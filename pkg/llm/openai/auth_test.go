@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,5 +257,33 @@ func TestCredentialsPathUsesTheInstalledOverride(t *testing.T) {
 	SetCredentialsPath("")
 	if got, want := CredentialsPath(home), filepath.Join(home, "auth.json"); got != want {
 		t.Fatalf("after clearing CredentialsPath = %q, want the default %q", got, want)
+	}
+}
+
+// A web login hands the authorization URL to its own page instead of opening a
+// browser on whatever host the gateway runs on. The flow is otherwise the same
+// one Login runs; this proves the URL — with the PKCE parameters the callback
+// will be checked against — reaches the injected callback.
+func TestLoginWithBrowserHandsTheAuthorizationURLToTheCallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var got string
+	calls := 0
+	_, err := LoginWithBrowser(ctx, filepath.Join(t.TempDir(), "auth.json"), io.Discard, func(url string) error {
+		calls++
+		got = url
+		cancel()
+		return nil
+	})
+	if calls == 0 {
+		t.Skipf("the loopback login listener is unavailable on this machine: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the canceled flow", err)
+	}
+	for _, want := range []string{Issuer + "/oauth/authorize?", "client_id=" + ClientID, "code_challenge_method=S256"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("authorization URL %q is missing %q", got, want)
+		}
 	}
 }

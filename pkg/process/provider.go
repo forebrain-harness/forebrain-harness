@@ -21,12 +21,18 @@ func ProviderKeyEnvMap(provider string, key string) map[string]string {
 // VerifyProvider reports whether provider is a known LLM provider. The set of
 // known providers is derived entirely from models.json (each catalog key's
 // prefix before the first '/').
+//
+// chatgpt and the two OpenCode surfaces are allowed explicitly: models.json is
+// installed once and never overwritten, so a catalog entry added later would
+// leave every existing home unable to save these providers. Their model
+// metadata lives in their own packages instead (pkg/llm/opencode for
+// opencode/opencode-go), the same way the ChatGPT subscription's does.
 func VerifyProvider(provider string) error {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	if p == "" {
 		return fmt.Errorf("provider is required")
 	}
-	if p == "chatgpt" {
+	if p == "chatgpt" || p == "opencode" || p == "opencode-go" {
 		return nil
 	}
 	if llm.KnownProvider(p) {

@@ -229,6 +229,18 @@ func Save(path string, c Credentials) error {
 // always printed so the flow also works when the browser cannot be opened
 // automatically.
 func Login(ctx context.Context, path string, out io.Writer) (Credentials, error) {
+	return LoginWithBrowser(ctx, path, out, nil)
+}
+
+// LoginWithBrowser is Login with the browser-opening behaviour injected. A nil
+// openBrowser keeps the package default, which starts the system browser.
+//
+// A web surface passes its own closure instead: the gateway may be running on a
+// host nobody is sitting in front of, so starting a browser there would open a
+// window no one can see. The callback flow itself is unchanged — the loopback
+// listener still lives here, which is why a browser and the gateway have to be
+// on the same machine for this to complete.
+func LoginWithBrowser(ctx context.Context, path string, out io.Writer, openBrowser func(url string) error) (Credentials, error) {
 	ln, redirectURI, err := listenLoopback()
 	if err != nil {
 		return Credentials{}, err
@@ -260,7 +272,11 @@ func Login(ctx context.Context, path string, out io.Writer) (Credentials, error)
 	if out != nil {
 		fmt.Fprintf(out, "Open this URL to sign in with ChatGPT:\n%s\n\nWaiting for browser authentication…\n", authURL)
 	}
-	_ = openBrowser(authURL)
+	if openBrowser != nil {
+		_ = openBrowser(authURL)
+	} else {
+		_ = openSystemBrowser(authURL)
+	}
 
 	type result struct {
 		code string
@@ -457,7 +473,9 @@ func safeOAuthError(body []byte) string {
 	return "authentication failed"
 }
 
-func openBrowser(target string) error {
+// openSystemBrowser is the default browser opener: the one a terminal login
+// wants, and the one a web login must not use.
+func openSystemBrowser(target string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":

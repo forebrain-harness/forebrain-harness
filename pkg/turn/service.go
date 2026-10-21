@@ -56,6 +56,7 @@ type Service struct {
 	approval           ApprovalGate
 	commands           CommandService
 	chatgptModels      ChatGPTModelsSource
+	opencodeModels     OpenCodeModelsSource
 	autoContinue       *autoContinuer
 	firstTokens        FirstTokenStore
 }
@@ -111,6 +112,19 @@ func WithChatGPTModels(src ChatGPTModelsSource) Option {
 			return
 		}
 		s.chatgptModels = src
+	}
+}
+
+// WithOpenCodeModels installs the OpenCode model source used by live
+// model-catalog listings. Without it, no OpenCode block is queried at all: the
+// OpenAI-compatible surfaces have no entry in the static catalog, so there
+// would be nothing to answer with.
+func WithOpenCodeModels(src OpenCodeModelsSource) Option {
+	return func(s *Service) {
+		if s == nil {
+			return
+		}
+		s.opencodeModels = src
 	}
 }
 

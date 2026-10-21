@@ -1460,6 +1460,68 @@ func TestOpenAIResponsesLLMSuppressesUserAgent(t *testing.T) {
 	}
 }
 
+// authTransportInstallingUserAgent is an injected auth transport that builds
+// its own request, the way the OpenCode transport does: it attaches a token and
+// announces the client. owningUserAgent decides whether it also declares the
+// User-Agent as its own — the capability the responses chain asks about before
+// blanking the header.
+type authTransportInstallingUserAgent struct {
+	agent string
+	owns  bool
+	base  http.RoundTripper
+}
+
+func (t *authTransportInstallingUserAgent) SetBase(base http.RoundTripper) { t.base = base }
+
+func (t *authTransportInstallingUserAgent) OwnsUserAgent() bool { return t.owns }
+
+func (t *authTransportInstallingUserAgent) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	clone.Header.Set("Authorization", "Bearer test-token")
+	clone.Header.Set("User-Agent", t.agent)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(clone)
+}
+
+// A gateway that admits clients by the agent they announce cannot have that
+// header blanked. The Codex default stays exactly as it was for every
+// transport that does not claim the header, including the ChatGPT one.
+func TestOpenAIResponsesLLMUserAgentFollowsTheAuthTransport(t *testing.T) {
+	const agent = "forebrain-harness/test-1.2.3"
+	run := func(t *testing.T, auth *authTransportInstallingUserAgent) string {
+		t.Helper()
+		var sent string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sent = r.Header.Get("User-Agent")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, syncResponsesBody("ok"))
+		}))
+		t.Cleanup(srv.Close)
+		client := NewResponsesLLMWithWebSearchCache("sk-test", srv.URL+"/v1", "gpt-test", 16,
+			[]byte(`{"stream":false}`), "", auth, true)
+		if _, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+			t.Fatalf("Execute failed: %v", err)
+		}
+		return sent
+	}
+
+	t.Run("an owning transport keeps its User-Agent", func(t *testing.T) {
+		if sent := run(t, &authTransportInstallingUserAgent{agent: agent, owns: true}); sent != agent {
+			t.Fatalf("User-Agent on the wire = %q, want %q", sent, agent)
+		}
+	})
+
+	t.Run("a transport that does not claim it keeps the Codex default", func(t *testing.T) {
+		if sent := run(t, &authTransportInstallingUserAgent{agent: agent, owns: false}); sent != "" {
+			t.Fatalf("User-Agent on the wire = %q, want it blanked", sent)
+		}
+	})
+}
+
 func newTestOpenAIResponsesLLM(t *testing.T, fn func(*http.Request) (*http.Response, error)) llm.LLM {
 	t.Helper()
 	return newTestOpenAIResponsesLLMWithStream(t, true, fn)

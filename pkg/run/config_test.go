@@ -11,11 +11,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -907,5 +910,211 @@ func TestPrimaryModelStateForSessionPrefersTheConversationsRow(t *testing.T) {
 		if got := PrimaryModelStateForSession(runner, store, sid); got != snapshot {
 			t.Fatalf("state for %q = %+v, want the published selection %+v", sid, got, snapshot)
 		}
+	}
+}
+
+// openCodeCall is one request a client built by NewLLMFromYAML made to the
+// fake OpenCode gateway.
+type openCodeCall struct {
+	Path   string
+	Auth   string
+	Agent  string
+	Header http.Header
+}
+
+// openCodeGateway stands in for https://opencode.ai/inference. It records what
+// the client sent and answers with an empty event stream, which is enough for
+// every client to return: these tests assert on the request, not the answer.
+func openCodeGateway(t *testing.T) (*httptest.Server, func() []openCodeCall) {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		calls []openCodeCall
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, openCodeCall{
+			Path:   r.URL.Path,
+			Auth:   r.Header.Get("Authorization"),
+			Agent:  r.Header.Get("User-Agent"),
+			Header: r.Header.Clone(),
+		})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []openCodeCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]openCodeCall(nil), calls...)
+	}
+}
+
+// runOpenCodeClient builds the client and makes one call, which the gateway
+// records. Execute is expected to fail against the empty stream; the request it
+// produced is the point.
+func runOpenCodeClient(t *testing.T, cfg *LLMProviderYAML) {
+	t.Helper()
+	client, err := NewLLMFromYAML(cfg)
+	if err != nil {
+		t.Fatalf("NewLLMFromYAML(%s/%s) error = %v", cfg.Provider, cfg.Model, err)
+	}
+	if client == nil {
+		t.Fatalf("NewLLMFromYAML(%s/%s) returned no client", cfg.Provider, cfg.Model)
+	}
+	if _, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Logf("Execute(%s/%s) error (expected on an empty stream): %v", cfg.Provider, cfg.Model, err)
+	}
+}
+
+// TestNewLLMFromYAMLOpenCodeRoutesByProtocol pins the base-URL contract: the
+// model decides the protocol, the protocol decides the client, and each client
+// appends its own path suffix to the base URL it is given. The two models that
+// flip between surfaces (qwen3.8-max, minimax-m3) are the reason the provider
+// is part of the decision.
+func TestNewLLMFromYAMLOpenCodeRoutesByProtocol(t *testing.T) {
+	t.Setenv("OPENCODE_API_KEY", "")
+	for _, tc := range []struct {
+		name     string
+		provider string
+		model    string
+		apiKey   string
+		wantPath string
+	}{
+		{name: "free console model speaks chat completions", provider: "opencode", model: "big-pickle", wantPath: "/openai/v1/chat/completions"},
+		{name: "gpt family speaks responses", provider: "opencode", model: "gpt-5.6-luna", apiKey: "sk-test", wantPath: "/openai/v1/responses"},
+		{name: "grok family speaks responses", provider: "opencode", model: "grok-4.7", apiKey: "sk-test", wantPath: "/openai/v1/responses"},
+		{name: "claude family speaks anthropic", provider: "opencode", model: "claude-sonnet-5", apiKey: "sk-test", wantPath: "/anthropic/v1/messages"},
+		{name: "gemini family speaks google", provider: "opencode", model: "gemini-4-flash", apiKey: "sk-test", wantPath: "/google/v1beta/models/gemini-4-flash:generateContent"},
+		{name: "qwen3.8-max is chat completions on console", provider: "opencode", model: "qwen3.8-max", apiKey: "sk-test", wantPath: "/openai/v1/chat/completions"},
+		{name: "qwen3.8-max is anthropic on the go subscription", provider: "opencode-go", model: "qwen3.8-max", apiKey: "sk-test", wantPath: "/go/anthropic/v1/messages"},
+		{name: "minimax-m3 is chat completions on console", provider: "opencode", model: "minimax-m3", apiKey: "sk-test", wantPath: "/openai/v1/chat/completions"},
+		{name: "minimax-m3 is anthropic on the go subscription", provider: "opencode-go", model: "minimax-m3", apiKey: "sk-test", wantPath: "/go/anthropic/v1/messages"},
+		{name: "go chat completions carries the subscription segment", provider: "opencode-go", model: "glm-5.3", apiKey: "sk-test", wantPath: "/go/openai/v1/chat/completions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FOREBRAIN_HOME", t.TempDir())
+			srv, calls := openCodeGateway(t)
+			runOpenCodeClient(t, &LLMProviderYAML{
+				Provider: tc.provider,
+				Model:    tc.model,
+				APIKey:   tc.apiKey,
+				BaseURL:  srv.URL,
+			})
+			got := calls()
+			if len(got) != 1 {
+				t.Fatalf("requests = %d, want 1: %+v", len(got), got)
+			}
+			if got[0].Path != tc.wantPath {
+				t.Fatalf("request path = %q, want %q", got[0].Path, tc.wantPath)
+			}
+			// The transport is the only thing that stamps this identity, and
+			// OpenCode's Go subscription admits third-party clients by it — on
+			// every protocol, including responses.
+			//
+			// The responses client blanks the User-Agent by default (that is how
+			// the ChatGPT/Codex path keeps the SDK's identity off the wire), so
+			// this assertion is also the end-to-end proof that the OpenCode
+			// transport's claim survives the responses chain intact.
+			if got[0].Agent == "" || !strings.HasPrefix(got[0].Agent, "forebrain-harness/") {
+				t.Fatalf("User-Agent = %q, want forebrain-harness/<version>", got[0].Agent)
+			}
+			wantAuth := "Bearer " + tc.apiKey
+			if tc.apiKey == "" {
+				wantAuth = "Bearer public"
+			}
+			if got[0].Auth != wantAuth {
+				t.Fatalf("Authorization = %q, want %q", got[0].Auth, wantAuth)
+			}
+		})
+	}
+}
+
+// TestNewLLMFromYAMLOpenCodeCredentialChain pins the order a credential is
+// taken in, because three different login surfaces write different things: an
+// api_key (possibly an ${ENV} reference), OPENCODE_API_KEY, the opencode.json
+// the device-code login writes, and the literal "public" bearer that only the
+// free family accepts.
+func TestNewLLMFromYAMLOpenCodeCredentialChain(t *testing.T) {
+	const paidModel = "deepseek-v4-pro"
+	t.Run("paid model without any credential fails loudly", func(t *testing.T) {
+		t.Setenv("FOREBRAIN_HOME", t.TempDir())
+		t.Setenv("OPENCODE_API_KEY", "")
+		_, err := NewLLMFromYAML(&LLMProviderYAML{Provider: "opencode", Model: paidModel, BaseURL: "https://opencode.ai/inference"})
+		if err == nil {
+			t.Fatal("NewLLMFromYAML accepted a paid OpenCode model with no credential")
+		}
+		if !strings.Contains(err.Error(), "OPENCODE_API_KEY") || !strings.Contains(err.Error(), "/connect") {
+			t.Fatalf("error = %v, want it to name the credential and /connect", err)
+		}
+	})
+	t.Run("environment key", func(t *testing.T) {
+		t.Setenv("FOREBRAIN_HOME", t.TempDir())
+		t.Setenv("OPENCODE_API_KEY", "sk-env")
+		srv, calls := openCodeGateway(t)
+		runOpenCodeClient(t, &LLMProviderYAML{Provider: "opencode-go", Model: paidModel, BaseURL: srv.URL})
+		got := calls()
+		if len(got) != 1 || got[0].Auth != "Bearer sk-env" {
+			t.Fatalf("requests = %+v, want one with Bearer sk-env", got)
+		}
+	})
+	t.Run("config key wins over the environment", func(t *testing.T) {
+		t.Setenv("FOREBRAIN_HOME", t.TempDir())
+		t.Setenv("OPENCODE_API_KEY", "sk-env")
+		t.Setenv("OPENCODE_TEST_KEY", "sk-config")
+		srv, calls := openCodeGateway(t)
+		runOpenCodeClient(t, &LLMProviderYAML{Provider: "opencode", Model: paidModel, APIKey: "${OPENCODE_TEST_KEY}", BaseURL: srv.URL})
+		got := calls()
+		if len(got) != 1 || got[0].Auth != "Bearer sk-config" {
+			t.Fatalf("requests = %+v, want one with Bearer sk-config", got)
+		}
+	})
+	t.Run("login file", func(t *testing.T) {
+		homeRoot := t.TempDir()
+		t.Setenv("FOREBRAIN_HOME", homeRoot)
+		t.Setenv("OPENCODE_API_KEY", "")
+		path := opencode.DefaultPath(homeRoot)
+		if err := opencode.Save(path, opencode.Credentials{
+			AccessToken:  "access-token",
+			RefreshToken: "refresh-token",
+			ExpiresAt:    time.Now().Add(2 * time.Hour),
+		}); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		srv, calls := openCodeGateway(t)
+		runOpenCodeClient(t, &LLMProviderYAML{Provider: "opencode-go", Model: paidModel, BaseURL: srv.URL})
+		got := calls()
+		if len(got) != 1 || got[0].Auth != "Bearer access-token" {
+			t.Fatalf("requests = %+v, want one with the logged-in access token", got)
+		}
+	})
+	t.Run("public bearer is offered to the free family only", func(t *testing.T) {
+		t.Setenv("FOREBRAIN_HOME", t.TempDir())
+		t.Setenv("OPENCODE_API_KEY", "")
+		srv, calls := openCodeGateway(t)
+		runOpenCodeClient(t, &LLMProviderYAML{Provider: "opencode", Model: "glm-5.3-flash-free", BaseURL: srv.URL})
+		got := calls()
+		if len(got) != 1 || got[0].Auth != "Bearer public" {
+			t.Fatalf("requests = %+v, want one with Bearer public", got)
+		}
+	})
+}
+
+// TestNewLLMFromYAMLOpenCodeHonorsConfiguredRoot keeps the proxy-mirror case
+// working: a user who points base_url at their own gateway keeps that root,
+// with the protocol path appended under it.
+func TestNewLLMFromYAMLOpenCodeHonorsConfiguredRoot(t *testing.T) {
+	t.Setenv("FOREBRAIN_HOME", t.TempDir())
+	t.Setenv("OPENCODE_API_KEY", "sk-test")
+	srv, calls := openCodeGateway(t)
+	runOpenCodeClient(t, &LLMProviderYAML{
+		Provider: "opencode",
+		Model:    "deepseek-v4-pro",
+		BaseURL:  srv.URL + "/mirror",
+	})
+	got := calls()
+	if len(got) != 1 || got[0].Path != "/mirror/openai/v1/chat/completions" {
+		t.Fatalf("requests = %+v, want a call under the configured /mirror root", got)
 	}
 }

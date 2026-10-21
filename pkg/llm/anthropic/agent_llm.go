@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	anthropicapi "github.com/anthropics/anthropic-sdk-go"
@@ -59,6 +60,20 @@ type anthropicAgentLLM struct {
 // only produce request errors; behavior is steered through the prompt and the
 // effort level instead.
 func NewAgentLLM(apiKey, baseURL, model string, maxTokens int64, effort ...string) llm.LLM {
+	return newAgentLLM(apiKey, baseURL, model, maxTokens, nil, effort...)
+}
+
+// NewAgentLLMWithTransport is NewAgentLLM with the http client built on
+// transport instead of the shared one, which is where a provider that
+// authenticates outside the apiKey argument (OpenCode's gateway) stamps its
+// bearer token, client identity and session header. effort keeps its meaning.
+// A nil transport falls back to the shared client, so this is never a worse
+// call than NewAgentLLM.
+func NewAgentLLMWithTransport(apiKey, baseURL, model string, maxTokens int64, transport http.RoundTripper, effort ...string) llm.LLM {
+	return newAgentLLM(apiKey, baseURL, model, maxTokens, transport, effort...)
+}
+
+func newAgentLLM(apiKey, baseURL, model string, maxTokens int64, transport http.RoundTripper, effort ...string) llm.LLM {
 	c := &anthropicAgentLLM{
 		model:     strings.TrimSpace(model),
 		maxTokens: anthropicDefaultMaxTokens,
@@ -82,9 +97,18 @@ func NewAgentLLM(apiKey, baseURL, model string, maxTokens int64, effort ...strin
 	if strings.TrimSpace(baseURL) != "" {
 		clientOpts = append(clientOpts, option.WithBaseURL(strings.TrimSpace(baseURL)))
 	}
-	clientOpts = append(clientOpts, option.WithHTTPClient(llm.NewHTTPClient()))
+	clientOpts = append(clientOpts, option.WithHTTPClient(newAgentHTTPClient(transport)))
 	c.client = anthropicapi.NewClient(clientOpts...)
 	return c
+}
+
+// newAgentHTTPClient is the client every Anthropic call runs through: the
+// shared one (no timeout, streaming-safe) unless a transport is injected.
+func newAgentHTTPClient(transport http.RoundTripper) *http.Client {
+	if transport == nil {
+		return llm.NewHTTPClient()
+	}
+	return &http.Client{Transport: transport}
 }
 
 func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (outResult *llm.Result, outErr error) {

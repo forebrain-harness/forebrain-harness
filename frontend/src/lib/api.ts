@@ -1105,6 +1105,23 @@ export interface ProviderSaveRecord extends ProviderRecord {
   apiKeyPlain?: string
 }
 
+/** The two providers a browser can sign in to. The gateway runs the flow —
+ * the terminal's /connect cannot, because the browser is not on the machine
+ * the flow would print to or open a window on. */
+export type ProviderLoginProvider = 'opencode' | 'chatgpt'
+
+/** One poll of a running login. `status` only ever moves from pending to one of
+ * the two endings; url and userCode appear a beat after the start, and baseUrl
+ * arrives with the completion — it is the endpoint the signed-in catalog is
+ * served from, ready to write into the provider row. */
+export interface ProviderLoginStatus {
+  status: 'pending' | 'complete' | 'failed'
+  url: string
+  userCode: string
+  error: string
+  baseUrl: string
+}
+
 export interface PermissionUpdateBody {
   type: 'addRules' | 'replaceRules' | 'removeRules' | 'setMode'
   destination: string
@@ -3499,6 +3516,38 @@ export const forebrainApi = {
 
   saveProviders(providers: Array<Record<string, unknown>>) {
     return putRaw<{ applied: boolean }>('/providers', { providers })
+  },
+
+  /** Begins a browser sign-in for one provider and answers the id to poll. The
+   * flow runs in the gateway — a page cannot print a status line or open a
+   * window on the machine the gateway sits on — and it saves the credential the
+   * same way the terminal's /connect does, so one login serves both surfaces. */
+  async startProviderLogin(provider: ProviderLoginProvider) {
+    const res = await gatewayFetch(`${API_BASE}/auth/login/${provider}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
+    return toCamelCase(await res.json()) as { loginId: string; provider: string }
+  },
+
+  /** One poll of a running sign-in. `null` is the gateway no longer knowing
+   * the id: it restarted, or the finished login was pruned after its retention
+   * ran out. Either way polling it again can only ever answer the same. */
+  async providerLoginStatus(provider: ProviderLoginProvider, loginId: string) {
+    const res = await gatewayFetch(`${API_BASE}/auth/login/${provider}/${encodeURIComponent(loginId)}`)
+    if (res.status === 404) return null
+    if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
+    return toCamelCase(await res.json()) as ProviderLoginStatus
+  },
+
+  /** Ends a sign-in the page walked away from. An id the gateway already
+   * forgot is over either way, so its 404 is not a failure here. */
+  async cancelProviderLogin(provider: ProviderLoginProvider, loginId: string) {
+    const res = await gatewayFetch(`${API_BASE}/auth/login/${provider}/${encodeURIComponent(loginId)}/cancel`, {
+      method: 'POST',
+    })
+    if (!res.ok && res.status !== 404) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
   },
 
   hooks() {
