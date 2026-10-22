@@ -126,6 +126,23 @@ type LoginInfo struct {
 	UserCode        string
 }
 
+// LoginStage is what a login is doing at a moment. A surface that shows
+// progress needs to say which step is running, not only that something is.
+type LoginStage string
+
+const (
+	// LoginStageRequestingCode is the round trip that asks the console for
+	// a device code. It is the first thing the flow does and it can take
+	// seconds, so a caller waiting on it must have something to show.
+	LoginStageRequestingCode LoginStage = "requesting_code"
+	// LoginStageWaitingAuthorization is the wait for the user to confirm
+	// the code in the browser.
+	LoginStageWaitingAuthorization LoginStage = "waiting_authorization"
+	// LoginStageFinishing is the token exchange and the account lookup
+	// that come after the user confirms.
+	LoginStageFinishing LoginStage = "finishing"
+)
+
 // LoginDeviceFlow runs the OAuth 2.0 device authorization grant (RFC 8628)
 // end to end and stores the result at path.
 //
@@ -135,11 +152,18 @@ type LoginInfo struct {
 // `xdg-open`), and a server-side caller must pass an explicit no-op closure
 // because there is no browser to open there. onStart fires as soon as the
 // console has issued a code, which is the first moment the URL and code are
-// usable; a caller that only needs the final credentials passes nil.
+// usable; a caller that only needs the final credentials passes nil. onStage
+// reports what the flow is doing as it moves through its steps, so a surface
+// can show progress from the first moment — the engine names the stage, and
+// each surface words it its own way; a caller that shows none passes nil.
 //
 // Cancelling ctx aborts the flow and returns ctx.Err().
 func LoginDeviceFlow(ctx context.Context, path string, out io.Writer,
-	openBrowser func(url string) error, onStart func(LoginInfo)) (Credentials, error) {
+	openBrowser func(url string) error, onStart func(LoginInfo),
+	onStage func(LoginStage)) (Credentials, error) {
+	if onStage != nil {
+		onStage(LoginStageRequestingCode)
+	}
 	deviceCode, err := requestDeviceCode(ctx)
 	if err != nil {
 		return Credentials{}, err
@@ -156,6 +180,11 @@ func LoginDeviceFlow(ctx context.Context, path string, out io.Writer,
 		fmt.Fprintf(out, "To sign in to OpenCode, open:\n%s\nand confirm the code %s\n\nWaiting for authorization…\n",
 			info.VerificationURL, info.UserCode)
 	}
+	// The stage fires for every caller, not only one that reads out: what a
+	// login is doing does not depend on how the surface reports it.
+	if onStage != nil {
+		onStage(LoginStageWaitingAuthorization)
+	}
 	// Opening the browser is best effort: the URL is printed above, so a
 	// headless machine still completes the flow by hand.
 	if openBrowser != nil {
@@ -167,6 +196,9 @@ func LoginDeviceFlow(ctx context.Context, path string, out io.Writer,
 	tokens, err := pollDeviceToken(ctx, deviceCode)
 	if err != nil {
 		return Credentials{}, err
+	}
+	if onStage != nil {
+		onStage(LoginStageFinishing)
 	}
 	c := Credentials{
 		AccessToken:  tokens.AccessToken,

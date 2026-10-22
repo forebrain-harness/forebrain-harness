@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -304,8 +305,8 @@ var discoverChatGPTModels = process.DiscoverChatGPTModels
 // openCodeLogin runs the OpenCode device-code login. It is a package var so a
 // test can drive the flow without a browser; the TUI runs on the machine with
 // the browser, which is what the flow's own opener is for.
-var openCodeLogin = func(ctx context.Context, path string, out io.Writer, onStart func(opencode.LoginInfo)) (opencode.Credentials, error) {
-	return opencode.LoginDeviceFlow(ctx, path, out, nil, onStart)
+var openCodeLogin = func(ctx context.Context, path string, out io.Writer, onStart func(opencode.LoginInfo), onStage func(opencode.LoginStage)) (opencode.Credentials, error) {
+	return opencode.LoginDeviceFlow(ctx, path, out, nil, onStart, onStage)
 }
 
 // discoverOpenCodeModels is a package var for the same reason as
@@ -811,6 +812,58 @@ func (s *llmSetup) signInChatGPT() (bool, error) {
 	})
 }
 
+// connectStageText is what a sign-in stage reads to the user. The engine
+// names the stage; the wording is the TUI's, so the terminal keeps its own
+// voice and the web keeps its own.
+func connectStageText(stage opencode.LoginStage) string {
+	switch stage {
+	case opencode.LoginStageRequestingCode:
+		return "Requesting a sign-in code from OpenCode"
+	case opencode.LoginStageWaitingAuthorization:
+		return "Waiting for you to confirm the code in OpenCode"
+	case opencode.LoginStageFinishing:
+		return "Finishing sign-in"
+	}
+	return "Signing in to OpenCode"
+}
+
+// connectStage carries the sign-in's current stage between the login and
+// the renderer that draws it. The login writes it from its own goroutine
+// and the renderer reads it from the paint goroutine, so it is guarded.
+type connectStage struct {
+	mu    sync.Mutex
+	stage opencode.LoginStage
+}
+
+func (c *connectStage) set(stage opencode.LoginStage) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stage = stage
+}
+
+func (c *connectStage) text() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return connectStageText(c.stage)
+}
+
+// startConnectProgress installs the sign-in's live line when the
+// selector can show one. It returns nil when the selector has no such
+// capability.
+func (s *llmSetup) startConnectProgress(stage func() string) func() {
+	cps, ok := s.cfg.Selector.(ConnectProgressSelector)
+	if !ok {
+		return nil
+	}
+	return cps.ConnectProgress(stage)
+}
+
 // signInOpenCode runs the device-code login of the OpenCode Go subscription and
 // then fetches the models that subscription serves.
 func (s *llmSetup) signInOpenCode() (bool, error) {
@@ -824,10 +877,25 @@ func (s *llmSetup) signInOpenCode() (bool, error) {
 		return false, err
 	}
 	status := s.statusOutput("Sign in with OpenCode")
+
+	// The device-code request is a network round trip that happens before the
+	// flow prints anything, so without a live line the screen stands still
+	// and the user cannot tell a slow login from a hang. The line is
+	// installed after the confirmation panel closed: while that panel is
+	// open the viewport shows the panel instead of the composer, and the
+	// live line is drawn in the composer.
+	stage := &connectStage{stage: opencode.LoginStageRequestingCode}
+	end := s.startConnectProgress(stage.text)
+
 	// The flow prints the verification URL and the code to status itself, which
 	// is the whole of what this page has to say; the structured callback exists
 	// for a surface that shows the two facts from data instead of text.
-	if _, err := openCodeLogin(ctx, opencode.DefaultPath(s.cfg.Home), status, nil); err != nil {
+	_, err = openCodeLogin(ctx, opencode.DefaultPath(s.cfg.Home), status, nil,
+		func(st opencode.LoginStage) { stage.set(st) })
+	if end != nil {
+		end()
+	}
+	if err != nil {
 		return false, err
 	}
 	return s.fetchSignedInModels(status, func(fetchCtx context.Context) ([]turn.ModelRecord, error) {

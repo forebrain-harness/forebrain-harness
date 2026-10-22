@@ -111,7 +111,7 @@ func newOpenCodeLoginStub(t *testing.T) *openCodeLoginStub {
 	}
 	previous := openCodeLoginRun
 	openCodeLoginRun = func(ctx context.Context, path string, out io.Writer,
-		openBrowser func(url string) error, onStart func(opencode.LoginInfo)) (opencode.Credentials, error) {
+		openBrowser func(url string) error, onStart func(opencode.LoginInfo), onStage func(opencode.LoginStage)) (opencode.Credentials, error) {
 		stub.mu.Lock()
 		stub.path = path
 		stub.browser = openBrowser

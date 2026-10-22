@@ -281,6 +281,8 @@ func (s *Server) runAuthLogin(ctx context.Context, provider, id string) error {
 				login.userCode = info.UserCode
 			})
 		},
+		// The web has its own progress UI, so it asks for no stage reports.
+		nil,
 	)
 	return err
 }

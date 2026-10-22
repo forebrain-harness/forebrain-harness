@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -180,7 +181,8 @@ func TestLoginDeviceFlowCompletesAgainstFakeConsole(t *testing.T) {
 			opened = append(opened, url)
 			return nil
 		},
-		func(info LoginInfo) { started = append(started, info) })
+		func(info LoginInfo) { started = append(started, info) },
+		nil)
 	if err != nil {
 		t.Fatalf("LoginDeviceFlow: %v", err)
 	}
@@ -258,9 +260,132 @@ func TestLoginDeviceFlowReportsDenial(t *testing.T) {
 	stubConsole(t, server.URL)
 
 	_, err := LoginDeviceFlow(context.Background(), filepath.Join(t.TempDir(), "opencode.json"), nil,
-		func(string) error { return nil }, nil)
+		func(string) error { return nil }, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("error = %v, want a denial", err)
+	}
+}
+
+// writeRecorder notes whether the flow has written anything yet, so a test can
+// pin the first stage report to before the first output.
+type writeRecorder struct {
+	buf   bytes.Buffer
+	wrote bool
+}
+
+func (w *writeRecorder) Write(p []byte) (int, error) {
+	w.wrote = true
+	return w.buf.Write(p)
+}
+
+// The stages name what the flow is doing as it does it, and the first one —
+// the code request that can block for seconds — must fire before the flow has
+// printed anything: that silent gap is the whole reason the callback exists.
+func TestLoginDeviceFlowReportsEachStage(t *testing.T) {
+	stubPollFloor(t)
+	var polls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/device/code":
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"device_code":               "device-1",
+				"user_code":                 "ABCD-EFGH",
+				"verification_uri_complete": "/console/device?user_code=ABCD-EFGH",
+				"expires_in":                600,
+			})
+		case "/auth/device/token":
+			polls++
+			if polls == 1 {
+				writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "authorization_pending"})
+				return
+			}
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"access_token":  "access-1",
+				"refresh_token": "refresh-1",
+				"expires_in":    3600,
+			})
+		case "/api/user":
+			writeJSON(t, w, http.StatusOK, map[string]any{"id": "usr_1", "email": "dev@example.com"})
+		case "/api/orgs":
+			writeJSON(t, w, http.StatusOK, []map[string]any{{"id": "org_a", "name": "Alpha"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	stubConsole(t, server.URL)
+
+	var stages []LoginStage
+	var output writeRecorder
+	_, err := LoginDeviceFlow(context.Background(), filepath.Join(t.TempDir(), "opencode.json"), &output,
+		func(string) error { return nil }, nil,
+		func(stage LoginStage) {
+			// The first report is the guarantee a surface relies on: the
+			// code request runs before the flow says anything, so a
+			// progress line is the only thing that can be on screen then.
+			if len(stages) == 0 && output.wrote {
+				t.Error("the first stage fired after output was written")
+			}
+			stages = append(stages, stage)
+		})
+	if err != nil {
+		t.Fatalf("LoginDeviceFlow: %v", err)
+	}
+	want := []LoginStage{LoginStageRequestingCode, LoginStageWaitingAuthorization, LoginStageFinishing}
+	if len(stages) != len(want) {
+		t.Fatalf("stages = %v, want %v", stages, want)
+	}
+	for i := range want {
+		if stages[i] != want[i] {
+			t.Fatalf("stages = %v, want %v in order", stages, want)
+		}
+	}
+	if !strings.Contains(output.buf.String(), "To sign in to OpenCode") {
+		t.Fatalf("output = %q, want the sign-in instructions", output.buf.String())
+	}
+}
+
+// A caller that wants no stage reports passes nil, and the flow must work as
+// before: the callback is an optional observer, never a participant.
+func TestLoginDeviceFlowWithoutStageCallbackStillWorks(t *testing.T) {
+	stubPollFloor(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/device/code":
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"device_code":               "device-1",
+				"user_code":                 "ABCD-EFGH",
+				"verification_uri_complete": "/console/device?user_code=ABCD-EFGH",
+				"expires_in":                600,
+			})
+		case "/auth/device/token":
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"access_token":  "access-1",
+				"refresh_token": "refresh-1",
+				"expires_in":    3600,
+			})
+		case "/api/user":
+			writeJSON(t, w, http.StatusOK, map[string]any{"id": "usr_1", "email": "dev@example.com"})
+		case "/api/orgs":
+			writeJSON(t, w, http.StatusOK, []map[string]any{{"id": "org_a", "name": "Alpha"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	stubConsole(t, server.URL)
+
+	path := filepath.Join(t.TempDir(), "opencode.json")
+	creds, err := LoginDeviceFlow(context.Background(), path, nil,
+		func(string) error { return nil }, nil, nil)
+	if err != nil {
+		t.Fatalf("LoginDeviceFlow: %v", err)
+	}
+	if creds.AccessToken != "access-1" || creds.RefreshToken != "refresh-1" {
+		t.Fatalf("credentials = %+v", creds)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("credentials were not written: %v", err)
 	}
 }
 

@@ -883,6 +883,18 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // that skips the prune and the native-rollout stage-1 claims, so an import
 // pays for exactly the notes it wrote.
 //
+// 26 fields (was 25): mcpAttempt numbers this Runner's MCP reconcile
+// generations, so each one gets a generation id of its own and a failure is
+// attributed to the conversation that asked for it — the session-open
+// reconciliation that landed with it.
+//
+// 44 methods (was 41): OpenSession, LoadSession and ReconcileSessionMCP are
+// the session lifecycle's three loads — open a conversation with its own
+// model choice, take over a session another runtime served, and reconcile
+// the MCP half alone when the conversation kept everything else. They ride
+// the Runner because the load rebuild is the Runner's, and the landings
+// made session-open reconcile instead of replay MCP.
+//
 // 40 methods (was 39): the image-input gate (ImageInputRefusal) is the
 // session-model capability check read_file consults before handing the model
 // pixels — it belongs to the Runner because only the Runner knows the
@@ -895,8 +907,8 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // previously did by hand (and got wrong: a discarded rollback error left a
 // half-mutated runtime).
 const (
-	runnerFields  = 25
-	runnerMethods = 41
+	runnerFields  = 26
+	runnerMethods = 44
 )
 
 func TestRunnerOnlyShrinks(t *testing.T) {
