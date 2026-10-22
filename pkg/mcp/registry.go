@@ -484,6 +484,49 @@ func (r *Registry) ReleaseSessions() int {
 	return len(toRelease)
 }
 
+// Retire drops one server's record and closes the connection it owned. It is
+// how a generation stops serving a server the configuration no longer names:
+// the record disappears from every status view instead of lingering as a
+// server that is merely disconnected, and the child process is reclaimed.
+//
+// The teardown happens outside both locks — a stdio close waits out the spec's
+// terminate sequence — and subscribers are told after it.
+func (r *Registry) Retire(name string) {
+	if r == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	r.deliver.Lock()
+	defer r.deliver.Unlock()
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	rec, ok := r.servers[name]
+	if !ok || rec == nil {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.servers, name)
+	snapshot := r.snapshotLocked()
+	subs := r.subscribersLocked()
+	var sess *Session
+	if rec.session != nil {
+		sess = rec.session
+	}
+	r.mu.Unlock()
+	if sess != nil {
+		_ = sess.Close()
+	}
+	for _, sub := range subs {
+		sub.fn(snapshot)
+	}
+}
+
 // Subscribe registers fn for every subsequent status snapshot and immediately
 // hands it the current one.
 //

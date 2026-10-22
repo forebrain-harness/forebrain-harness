@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,8 +20,10 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/gorilla/websocket"
@@ -2071,3 +2075,187 @@ func TestSubagentEndingDoesNotSettleAFire(t *testing.T) {
 		return fireRunRecord(t, g, job.ID).Status != state.CronStatusRunning
 	}, 300*time.Millisecond, 20*time.Millisecond, "a subagent's end must not settle a fire")
 }
+
+// gatewayToolchainHome is the toolchain's home as it was before TestMain
+// moved HOME to a scratch directory. The fixture is built with it so the
+// build uses the developer's own module and build caches: with the scratch
+// home it would be a cold build that downloads every dependency again.
+var gatewayToolchainHome = func() string {
+	if home := os.Getenv("HOME"); home != "" {
+		return home
+	}
+	return os.TempDir()
+}()
+
+// buildGatewayMCPFixture builds a stdio MCP server the test can start as a
+// real process. The reconcile's "already connected" half can only be proven
+// against a server that actually answers.
+func buildGatewayMCPFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(mainPath, []byte(gatewayMCPFixtureSource), 0o600))
+	exe := filepath.Join(dir, "mcp-fixture")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", exe, mainPath)
+	cmd.Dir = repoRootForGatewayTest(t)
+	cmd.Env = append(os.Environ(), "HOME="+gatewayToolchainHome, "USERPROFILE="+gatewayToolchainHome)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "build fixture: %s", out)
+	return exe
+}
+
+// repoRootForGatewayTest finds the module the fixture is built in: the file
+// lives in a temp directory, but its import has to resolve against this
+// module's dependencies.
+func repoRootForGatewayTest(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found")
+		}
+		dir = parent
+	}
+}
+
+// TestBindSessionReconcilesTheSessionsRunner pins what a bind does to the MCP
+// half of the conversation it binds: the session's runner re-resolves its
+// server list, the server that was not connected is started, and a server that
+// is already connected keeps its connection when the client binds again.
+func TestBindSessionReconcilesTheSessionsRunner(t *testing.T) {
+	ctx := context.Background()
+	stub := appcfg.MCPServerConfig{Name: "stub", Transport: "stdio", Command: buildGatewayMCPFixture(t)}
+
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
+
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
+			Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
+		}}},
+	}}}
+	var resolves atomic.Int64
+	runner := &run.Runner{Deps: &run.Deps{
+		Home:         home,
+		AgentName:    "main",
+		AppCfg:       cfg,
+		SessionStore: sessions,
+		MCPResolve: func(string, string, safety.ProjectContext) (run.MCPServersResolution, error) {
+			resolves.Add(1)
+			return run.MCPServersResolution{Servers: []appcfg.MCPServerConfig{stub}}, nil
+		},
+	}}
+	require.NoError(t, runner.Load())
+	t.Cleanup(func() { _ = runner.Close() })
+	// The tool table the runner published before any bind: the MCP tool the
+	// reconcile brings is the one that grows it.
+	baseTools := len(runner.MCPStartup().PublishedTools())
+	require.Greater(t, baseTools, 0)
+
+	s := &Server{Home: home, Sessions: sessions, Runner: runner}
+	httpServer := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	t.Cleanup(httpServer.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	require.Equal(t, "connected", connected.Op)
+
+	bind := func(requestID string) {
+		t.Helper()
+		require.NoError(t, conn.WriteJSON(wsClientMsg{Op: "bind_session", RequestID: requestID, SessionID: "session-ws"}))
+		for {
+			var msg wsServerMsg
+			require.NoError(t, conn.ReadJSON(&msg))
+			if msg.Op == "session_bound" {
+				return
+			}
+		}
+	}
+
+	bind("bind-1")
+
+	// The bind reached the runner's MCP half: the effective list was resolved
+	// again instead of being replayed from the cache.
+	require.Eventually(t, func() bool { return resolves.Load() > 0 }, 5*time.Second, 10*time.Millisecond,
+		"binding a session must reconcile its MCP list")
+	// And the server that was not connected is started by that reconcile. The
+	// generation has to settle before the next bind: until it does, the
+	// runner's cached segment is still the previous one, which has no entry
+	// for this server.
+	require.Eventually(t, func() bool {
+		return len(runner.MCPStartup().PublishedTools()) > baseTools
+	}, 15*time.Second, 20*time.Millisecond, "the bind must start the server that was not connected")
+	var connectedAt *time.Time
+	require.Eventually(t, func() bool {
+		rec, ok := runner.MCPRegistry().StatusOf("stub")
+		if !ok || rec.ConnStatus != mcp.ConnStatusConnected || rec.ConnectedAt == nil {
+			return false
+		}
+		connectedAt = rec.ConnectedAt
+		return true
+	}, 15*time.Second, 20*time.Millisecond, "the bind must start the server that was not connected")
+	generation := runner.MCPStartup().Snapshot().Generation
+	require.NotEmpty(t, generation)
+
+	// Binding again must not start what is already connected. A reconcile that
+	// decides to work resolves the list twice (the peek plus the load it
+	// triggers), so a fourth resolution is the signal that the repeated bind
+	// went on to restart the server.
+	bind("bind-2")
+	require.Eventually(t, func() bool { return resolves.Load() > 2 }, 5*time.Second, 10*time.Millisecond,
+		"a repeated bind must reconcile the session's MCP list again")
+	require.Never(t, func() bool { return resolves.Load() > 3 }, 500*time.Millisecond, 20*time.Millisecond,
+		"a repeated bind must not restart the server that is already connected")
+
+	rec, ok := runner.MCPRegistry().StatusOf("stub")
+	require.True(t, ok)
+	require.Equal(t, mcp.ConnStatusConnected, rec.ConnStatus)
+	require.NotNil(t, rec.ConnectedAt)
+	require.Equal(t, connectedAt.UTC(), rec.ConnectedAt.UTC(), "the connected server must keep its connection")
+	require.Equal(t, generation, runner.MCPStartup().Snapshot().Generation,
+		"a repeated bind must not start a new MCP generation")
+}
+
+// gatewayMCPFixtureSource is a stdio MCP server that answers initialize and
+// tools/list, so a test can prove that a server really connected.
+const gatewayMCPFixtureSource = `package main
+
+import (
+	"context"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+type echoInput struct {
+	Text string ` + "`json:\"text\"`" + `
+}
+
+type echoOutput struct {
+	Text string ` + "`json:\"text\"`" + `
+}
+
+func main() {
+	server := mcp.NewServer(&mcp.Implementation{Name: "gateway-fixture", Version: "1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "echo text"}, func(ctx context.Context, req *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, echoOutput, error) {
+		return nil, echoOutput{Text: in.Text}, nil
+	})
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		panic(err)
+	}
+}
+`

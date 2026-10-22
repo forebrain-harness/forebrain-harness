@@ -79,11 +79,24 @@ type Deps struct {
 	// MCPDiagnostics reports the project-level MCP view for display: which
 	// global entries the project replaced, which project entries are not
 	// running and why, and whether the on-disk files drifted from the frozen
-	// list. It is a display hook only — the effective list itself is frozen
-	// for the session — installed by the composition root, which is the one
-	// place that knows the launch project and the consent store. Nil on a
-	// Runner assembled without one; readers then see an empty view.
-	MCPDiagnostics func() mcp.ProjectMCPScopeSummary
+	// list. It is a display hook only — installed by the composition root,
+	// which is the one place that knows the launch project and the consent
+	// store. Nil on a Runner assembled without one; readers then see an empty
+	// view.
+	//
+	// The frozen list travels in as an argument rather than being captured:
+	// a session open re-resolves the list, and a hook that closed over the
+	// list it was built with would keep reporting the one it froze at
+	// startup.
+	MCPDiagnostics func(frozen []appcfg.MCPServerConfig) mcp.ProjectMCPScopeSummary
+	// MCPResolve re-resolves this Runner's effective MCP list from the
+	// configuration and the project files on disk. Composition supplies it:
+	// pkg/process is the one place that knows the three scope layers, the
+	// per-entry consent store and the launch project's trust decision. A
+	// conversation that is beginning re-resolves through it, which is what
+	// makes "a configuration change lands in the next session" true; a Runner
+	// without the hook keeps the list it was built with.
+	MCPResolve func(agentName, agentWorkspace string, launch safety.ProjectContext) (MCPServersResolution, error)
 	// ProjectMemoryOnly reports the launch project's memory scope: when true,
 	// the session's memory recall and capture stay inside the project's own
 	// scope and never reach the cross-project global scope. Frozen with the
@@ -117,6 +130,14 @@ type Deps struct {
 	AppCfg           *appcfg.Root
 	SessionStore     *state.SessionStore
 	RunRT            *state.RunStore
+}
+
+// MCPServersResolution is one session-open re-resolution of the effective MCP
+// list: the servers to run and the configured ones the agent's disable store
+// keeps out (display only).
+type MCPServersResolution struct {
+	Servers  []appcfg.MCPServerConfig
+	Disabled []appcfg.MCPServerConfig
 }
 
 type Runner struct {
@@ -159,6 +180,10 @@ type Runner struct {
 	// observe an agent whose tool table is missing its MCP half (see
 	// startOrReplayMCPSegmentLocked).
 	mcpLoad *mcpLoad
+	// mcpAttempt numbers this Runner's reconcile generations, so each one
+	// gets a generation id of its own and a failure is attributed to the
+	// conversation that asked for it. Guarded by r.mu.load.
+	mcpAttempt int
 	// mcpHub fans this Runner's MCP status out to surfaces and survives a
 	// generation change, so a surface subscribes once per session rather than
 	// once per MCP restart.
@@ -359,7 +384,7 @@ func newMCPDelegatingTool(toolName, description string, inputSchema any, call fu
 
 func (r *Runner) Load() error {
 	r.mu.load.Lock()
-	err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil)
+	err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, false)
 	r.mu.load.Unlock()
 	if err != nil {
 		return err
@@ -864,7 +889,7 @@ func (r *Runner) approvedExitPlanAction(ctx context.Context, actionID string, pa
 // eviction) can classify the answer as "gone" instead of "failed".
 var errRunnerClosed = errors.New("runner is closed")
 
-func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
+func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpen bool) error {
 	if r.closed {
 		return errRunnerClosed
 	}
@@ -1258,7 +1283,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	// startOrReplayMCPSegmentLocked. Everything that reads a published agent
 	// through RunContent/LoadedTools waits on that barrier, so no fork or hook
 	// agent is ever handed a tool table that is missing its MCP tools.
-	pendingMCP := r.startOrReplayMCPSegmentLocked(a)
+	pendingMCP := r.startOrReplayMCPSegmentLocked(a, sessionOpen)
 	svc := skill.NewServiceForWorkspace(r.Home, r.workspaceRoot())
 	svc.ProjectRoot = r.launchProjectRoot()
 	if r.SkillCommands.Refresh != nil {
@@ -1472,7 +1497,7 @@ func (r *Runner) RunContent(ctx context.Context, parts []llm.ContentPart) (*agen
 	// here would rebuild the whole agent — skills, permissions, tool table — for
 	// a generation that is already on its way to publishing one.
 	if r.main == nil && r.mcpLoad == nil {
-		if err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil); err != nil {
+		if err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, false); err != nil {
 			r.mu.load.Unlock()
 			return nil, err
 		}
@@ -1829,6 +1854,9 @@ type mcpSegmentServer struct {
 	transport string
 	url       string
 	required  bool
+	// key is this server's configuration identity: the fields that have to
+	// change for its live connection to be replaced instead of kept.
+	key string
 	// connected reports whether this server's tools are in the segment.
 	connected bool
 	tools     []*llm.Tool
@@ -1855,6 +1883,22 @@ func (seg *mcpSegment) generationServers() []mcpGenerationServer {
 	return out
 }
 
+// mcpServerConfigKey is one server's identity inside a generation: the fields
+// that have to change for its live connection to be replaced instead of kept.
+//
+// It is the per-server half of mcpSegmentFingerprint: a session open compares
+// servers by this key, so a server whose command, credentials, startup
+// timeout or requirement changed is restarted while an untouched one keeps
+// its connection.
+func mcpServerConfigKey(srv appcfg.MCPServerConfig) string {
+	return strings.Join([]string{
+		strings.TrimSpace(srv.Name),
+		mcp.ServerFingerprint(srv),
+		strconv.FormatFloat(srv.StartupTimeout, 'g', -1, 64),
+		strconv.FormatBool(srv.Required),
+	}, "\x00")
+}
+
 // mcpSegmentFingerprint hashes the effective server list together with the
 // directory project-scope entries run from. Scope and credential stamps are
 // part of each entry's own fingerprint through ServerFingerprint.
@@ -1869,13 +1913,7 @@ func (seg *mcpSegment) generationServers() []mcpGenerationServer {
 func mcpSegmentFingerprint(servers []appcfg.MCPServerConfig, projectDir string) string {
 	h := sha256.New()
 	for _, srv := range servers {
-		_, _ = io.WriteString(h, strings.TrimSpace(srv.Name))
-		_, _ = io.WriteString(h, "\x00")
-		_, _ = io.WriteString(h, mcp.ServerFingerprint(srv))
-		_, _ = io.WriteString(h, "\x00")
-		_, _ = io.WriteString(h, strconv.FormatFloat(srv.StartupTimeout, 'g', -1, 64))
-		_, _ = io.WriteString(h, "\x00")
-		_, _ = io.WriteString(h, strconv.FormatBool(srv.Required))
+		_, _ = io.WriteString(h, mcpServerConfigKey(srv))
 		_, _ = io.WriteString(h, "\x00")
 	}
 	_, _ = io.WriteString(h, "dir="+strings.TrimSpace(projectDir))
@@ -2090,6 +2128,10 @@ type mcpLoadTask struct {
 	rawTools  []map[string]any
 	toolCount int
 	caps      mcp.ServerCapabilities
+	// adopted marks a server this generation did not start: it keeps the
+	// connection and the cached tool definitions of the previous generation,
+	// so nothing about it is contacted or rebuilt.
+	adopted *mcpSegmentServer
 }
 
 // mcpLoad is one MCP startup generation: the servers being started, their
@@ -2102,11 +2144,19 @@ type mcpLoad struct {
 	fingerprint string
 	generation  string
 	reg         *mcp.Registry
-	tasks       []*mcpLoadTask
-	ctx         context.Context
-	cancel      context.CancelFunc
-	done        chan struct{}
-	started     time.Time
+	// ownsRegistry marks this load as the owner of reg. A reconciliation
+	// generation reuses the Runner's registry, so its teardown closes only
+	// the sessions it started — never the registry the adopted servers live
+	// in.
+	ownsRegistry bool
+	// retire names the servers this generation removes from the registry: the
+	// configuration no longer names them.
+	retire  []string
+	tasks   []*mcpLoadTask
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan struct{}
+	started time.Time
 
 	mu    sync.Mutex
 	agent *agent.Agent
@@ -2248,7 +2298,16 @@ func (ld *mcpLoad) cancelOptional() bool {
 // agent immediately; otherwise r.main stays unpublished until the load settles,
 // so no observer — including LoadedTools, which fork and hook agents build
 // their tool tables from — can see an agent whose MCP tools are still coming.
-func (r *Runner) startOrReplayMCPSegmentLocked(a *agent.Agent) *mcpLoad {
+//
+// sessionOpen marks the load as the beginning of a conversation: the effective
+// server list is re-resolved and reconciled — the servers that are already
+// connected keep their connection, the ones that are not are started, and the
+// ones the configuration no longer names are retired. Every other load
+// replays the cached segment and contacts no server.
+func (r *Runner) startOrReplayMCPSegmentLocked(a *agent.Agent, sessionOpen bool) *mcpLoad {
+	if sessionOpen {
+		r.applySessionMCPResolutionLocked()
+	}
 	fp := mcpSegmentFingerprint(r.MCPServers, r.mcpProjectDir())
 	if ld := r.mcpLoad; ld != nil && ld.fingerprint == fp && !ld.published() {
 		// The same generation is already starting: point it at the agent this
@@ -2259,6 +2318,19 @@ func (r *Runner) startOrReplayMCPSegmentLocked(a *agent.Agent) *mcpLoad {
 		ld.attachAgent(a)
 		r.mcpHub.attach(ld.reg, ld.generationServers(), ld.generation, true, ld.started)
 		return ld
+	}
+	if sessionOpen && r.mcpLoad == nil {
+		// A session that is beginning is a reconciliation, not a restart: the
+		// servers that are already connected keep their connection and their
+		// cached tool definitions, the ones that are not are started here, and
+		// the ones the configuration no longer names are retired.
+		//
+		// A generation that is still starting owns the registry's records
+		// already, so reconciling against it would put two writers on one
+		// registry; that case falls through to the ordinary rebuild below.
+		if ld := r.startMCPReconcileLocked(a, r.planMCPReconcileLocked(r.MCPServers)); ld != nil {
+			return ld
+		}
 	}
 	if seg := r.mcpSeg; seg != nil && seg.fingerprint == fp {
 		r.replayMCPSegmentLocked(a, seg)
@@ -2298,15 +2370,16 @@ func (r *Runner) newMCPLoadLocked(a *agent.Agent) *mcpLoad {
 	ctx, cancel := context.WithCancel(context.Background())
 	reg := mcp.NewRegistry()
 	ld := &mcpLoad{
-		r:           r,
-		fingerprint: fp,
-		generation:  mcpGenerationID(fp),
-		reg:         reg,
-		ctx:         ctx,
-		cancel:      cancel,
-		done:        make(chan struct{}),
-		started:     time.Now(),
-		agent:       a,
+		r:            r,
+		fingerprint:  fp,
+		generation:   mcpGenerationID(fp),
+		reg:          reg,
+		ownsRegistry: true,
+		ctx:          ctx,
+		cancel:       cancel,
+		done:         make(chan struct{}),
+		started:      time.Now(),
+		agent:        a,
 	}
 	// Project-scope servers run from the session's project root. The process
 	// directory has no meaning for a gateway process serving many projects.
@@ -2371,13 +2444,264 @@ func (r *Runner) dropMCPSegmentLocked() {
 	go reg.Close()
 }
 
+// mcpReconcilePlan is what one session open decided to do with the MCP half:
+// the servers it keeps as they are, the ones it starts and the ones it
+// retires.
+type mcpReconcilePlan struct {
+	// adopted holds the cached entries of the servers that are already
+	// connected with the same configuration identity, keyed by lower-cased
+	// name.
+	adopted map[string]mcpSegmentServer
+	// start holds the servers to start, in configuration order.
+	start []appcfg.MCPServerConfig
+	// retire holds the names of the servers the configuration no longer
+	// names, in the registry's own spelling.
+	retire []string
+}
+
+// planMCPReconcileLocked decides what a session open has to do with the MCP
+// half: which servers keep their connection, which ones are started and which
+// ones are retired. Caller holds r.mu.load.
+//
+// A server is kept when its cached entry is connected, its configuration
+// identity did not change and the registry still holds a live connection for
+// it — that is the "already connected, leave it alone" case. Everything else
+// is started, and a server the configuration no longer names is retired.
+//
+// Without a cached segment there is nothing to reconcile against, so the plan
+// is empty and the ordinary "start a fresh generation" path takes over.
+func (r *Runner) planMCPReconcileLocked(servers []appcfg.MCPServerConfig) mcpReconcilePlan {
+	plan := mcpReconcilePlan{adopted: map[string]mcpSegmentServer{}}
+	if r.mcpSeg == nil {
+		return plan
+	}
+	live := map[string]mcp.ServerRecord{}
+	liveNames := map[string]string{}
+	if r.mcpReg != nil {
+		for _, rec := range r.mcpReg.ListStatus() {
+			key := strings.ToLower(strings.TrimSpace(rec.Name))
+			live[key] = rec
+			liveNames[key] = strings.TrimSpace(rec.Name)
+		}
+	}
+	prev := map[string]mcpSegmentServer{}
+	prevNames := map[string]string{}
+	for _, srv := range r.mcpSeg.servers {
+		key := strings.ToLower(strings.TrimSpace(srv.name))
+		prev[key] = srv
+		prevNames[key] = strings.TrimSpace(srv.name)
+	}
+	named := map[string]bool{}
+	for _, srv := range servers {
+		key := strings.ToLower(strings.TrimSpace(srv.Name))
+		if key == "" {
+			continue
+		}
+		named[key] = true
+		entry, ok := prev[key]
+		if ok && entry.connected && entry.key == mcpServerConfigKey(srv) &&
+			live[key].ConnStatus == mcp.ConnStatusConnected {
+			plan.adopted[key] = entry
+			continue
+		}
+		plan.start = append(plan.start, srv)
+	}
+	seen := map[string]bool{}
+	for key := range prev {
+		if named[key] || seen[key] {
+			continue
+		}
+		plan.retire = append(plan.retire, prevNames[key])
+		seen[key] = true
+	}
+	for key := range live {
+		if named[key] || seen[key] {
+			continue
+		}
+		plan.retire = append(plan.retire, liveNames[key])
+		seen[key] = true
+	}
+	sort.Strings(plan.retire)
+	return plan
+}
+
+// startMCPReconcileLocked starts the reconciliation generation: the servers
+// that are already connected keep their sessions and their cached tool
+// definitions, the ones that are not are started, and the ones the
+// configuration no longer names are retired. Caller holds r.mu.load.
+//
+// It returns nil when there is nothing to do: every configured server is
+// already connected with the same configuration identity, so the cached
+// segment is the whole answer and a generation would only move the generation
+// id for nothing.
+func (r *Runner) startMCPReconcileLocked(a *agent.Agent, plan mcpReconcilePlan) *mcpLoad {
+	if len(plan.start) == 0 && len(plan.retire) == 0 {
+		return nil
+	}
+	fp := mcpSegmentFingerprint(r.MCPServers, r.mcpProjectDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	ld := &mcpLoad{
+		r:           r,
+		fingerprint: fp,
+		// The generation id carries the reconcile's own number: a failure has
+		// to be attributed to the conversation that asked for the retry, not
+		// to the one that started the server.
+		generation:   mcpGenerationID(fp) + "." + strconv.Itoa(r.nextMCPAttemptLocked()),
+		reg:          r.mcpReg,
+		ownsRegistry: false,
+		retire:       plan.retire,
+		ctx:          ctx,
+		cancel:       cancel,
+		done:         make(chan struct{}),
+		started:      time.Now(),
+		agent:        a,
+	}
+	// Project-scope servers run from the session's project root. The process
+	// directory has no meaning for a gateway process serving many projects.
+	workspaceDir := strings.TrimSpace(r.ProjectRoot)
+	for _, entry := range r.MCPServers {
+		srv := entry
+		// Defense in depth for the assembly-time clamp: a project entry that
+		// reached this list unclamped still cannot run with widened approvals,
+		// nor decide how long this session waits for it.
+		if mcp.IsProjectScope(srv) {
+			mcp.ClampProjectRuntimePolicy(&srv)
+		}
+		name := strings.TrimSpace(srv.Name)
+		if name == "" {
+			continue
+		}
+		taskCtx, taskCancel := context.WithCancel(ctx)
+		if cached, ok := plan.adopted[strings.ToLower(name)]; ok {
+			// The server is already connected with the same configuration
+			// identity: its session stays where it is and its cached tool
+			// definitions are re-registered into the new agent.
+			adopted := cached
+			ld.tasks = append(ld.tasks, &mcpLoadTask{
+				index:     len(ld.tasks),
+				srv:       srv,
+				name:      name,
+				transport: srv.Transport,
+				url:       srv.URL,
+				dir:       r.mcpServerWorkingDir(srv, workspaceDir),
+				required:  srv.Required,
+				timeout:   mcp.StartupTimeoutFor(srv),
+				ctx:       taskCtx,
+				cancel:    taskCancel,
+				state:     mcp.ConnStatusConnected,
+				adopted:   &adopted,
+			})
+			continue
+		}
+		ld.tasks = append(ld.tasks, &mcpLoadTask{
+			index:     len(ld.tasks),
+			srv:       srv,
+			name:      name,
+			transport: srv.Transport,
+			url:       srv.URL,
+			dir:       r.mcpServerWorkingDir(srv, workspaceDir),
+			required:  srv.Required,
+			timeout:   mcp.StartupTimeoutFor(srv),
+			ctx:       taskCtx,
+			cancel:    taskCancel,
+			state:     mcp.ConnStatusConnecting,
+		})
+		ld.reg.MarkConnecting(mcp.StatusUpdate{
+			Name:       name,
+			Transport:  srv.Transport,
+			URL:        srv.URL,
+			Required:   srv.Required,
+			Generation: ld.generation,
+		})
+		ld.mirror(name)
+	}
+	r.mcpLoad = ld
+	r.mcpHub.attach(ld.reg, ld.generationServers(), ld.generation, true, ld.started)
+	// The barrier: r.main stays unpublished until the generation settles, so
+	// the first request of the new conversation waits for a complete tool
+	// table instead of one that is still being built.
+	r.main = nil
+	go ld.run()
+	return ld
+}
+
+// nextMCPAttemptLocked numbers this Runner's reconcile generations. Caller
+// holds r.mu.load.
+func (r *Runner) nextMCPAttemptLocked() int {
+	r.mcpAttempt++
+	return r.mcpAttempt
+}
+
+// applySessionMCPResolutionLocked re-resolves the effective MCP list through
+// the composition port and adopts it. Caller holds r.mu.load.
+//
+// A failed resolution keeps the list the Runner was built with: a conversation
+// must not fail to open because a configuration file could not be read.
+func (r *Runner) applySessionMCPResolutionLocked() bool {
+	if r == nil || r.Deps == nil || r.Deps.MCPResolve == nil {
+		return false
+	}
+	res, err := r.Deps.MCPResolve(r.AgentName, r.workspaceRoot(), r.LaunchProject)
+	if err != nil {
+		slog.Warn("mcp re-resolve failed; keeping the session's list", "err", err)
+		return false
+	}
+	changed := !sameMCPServerList(r.MCPServers, res.Servers) ||
+		!sameMCPServerList(r.MCPDisabled, res.Disabled)
+	r.MCPServers = res.Servers
+	r.MCPDisabled = res.Disabled
+	return changed
+}
+
+// peekSessionMCPLocked re-resolves the effective MCP list without adopting
+// it: it answers what the list would be, so a caller can decide whether
+// opening a session has anything to reconcile at all. It never changes the
+// Runner's list. Caller holds r.mu.load.
+func (r *Runner) peekSessionMCPLocked() ([]appcfg.MCPServerConfig, []appcfg.MCPServerConfig, bool) {
+	if r == nil || r.Deps == nil || r.Deps.MCPResolve == nil {
+		return nil, nil, false
+	}
+	res, err := r.Deps.MCPResolve(r.AgentName, r.workspaceRoot(), r.LaunchProject)
+	if err != nil {
+		slog.Warn("mcp re-resolve failed; keeping the session's list", "err", err)
+		return nil, nil, false
+	}
+	return res.Servers, res.Disabled, true
+}
+
+// sameMCPServerList reports whether two resolved MCP lists hold the same
+// servers in the same order, judged by each server's configuration identity.
+func sameMCPServerList(a, b []appcfg.MCPServerConfig) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if mcpServerConfigKey(a[i]) != mcpServerConfigKey(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // run starts one goroutine per server, then publishes. Completion order is not
 // registration order: results are held per server index and applied in
 // configuration order, so the tool table — and the prompt prefix derived from
 // it — does not depend on which server answered first.
 func (ld *mcpLoad) run() {
+	// The servers the configuration no longer names leave the registry first:
+	// their record and their connection go before the new generation reports.
+	for _, name := range ld.retire {
+		if ld.reg != nil {
+			ld.reg.Retire(name)
+		}
+	}
 	var wg sync.WaitGroup
 	for _, t := range ld.tasks {
+		if t.adopted != nil {
+			// An adopted server is already connected: this generation has
+			// nothing to start for it.
+			continue
+		}
 		wg.Add(1)
 		go func(t *mcpLoadTask) {
 			defer wg.Done()
@@ -2512,6 +2836,14 @@ func (ld *mcpLoad) settle() {
 	seg := &mcpSegment{fingerprint: ld.fingerprint, generation: ld.generation}
 	tools := 0
 	for _, t := range ld.tasks {
+		if t.adopted != nil {
+			// The server was already connected with the same configuration
+			// identity: its cached definitions are re-registered into this
+			// agent and its connection is left alone.
+			tools += r.registerMCPSegmentServer(reg, agent, *t.adopted)
+			seg.servers = append(seg.servers, *t.adopted)
+			continue
+		}
 		t.mu.Lock()
 		state, sess := t.state, t.session
 		t.mu.Unlock()
@@ -2549,6 +2881,10 @@ func (ld *mcpLoad) settle() {
 
 // closeSessions closes every connection this load opened and empties its
 // registry, which is the teardown for a generation that never served.
+//
+// The registry is closed only when this load owns it: a reconciliation
+// generation reuses the Runner's registry, and closing it would tear down the
+// connections of the servers it adopted.
 func (ld *mcpLoad) closeSessions() {
 	if ld == nil {
 		return
@@ -2562,7 +2898,7 @@ func (ld *mcpLoad) closeSessions() {
 			_ = sess.Close()
 		}
 	}
-	if ld.reg != nil {
+	if ld.reg != nil && ld.ownsRegistry {
 		ld.reg.Close()
 	}
 }
@@ -2576,6 +2912,7 @@ func (r *Runner) buildMCPSegmentServer(reg *mcp.Registry, a *agent.Agent, t *mcp
 		transport: t.transport,
 		url:       t.url,
 		required:  t.required,
+		key:       mcpServerConfigKey(t.srv),
 		connected: connected,
 		toolCount: t.toolCount,
 	}
@@ -2638,6 +2975,27 @@ func (r *Runner) buildMCPSegmentServer(reg *mcp.Registry, a *agent.Agent, t *mcp
 	return cached, registered
 }
 
+// registerMCPSegmentServer registers one cached entry's tools into a and
+// reports how many it added. A replay and a reconcile's adopted server both
+// come through here: the entry's tools were built against this same registry,
+// so their callers already reach the live connection.
+func (r *Runner) registerMCPSegmentServer(reg *mcp.Registry, a *agent.Agent, srv mcpSegmentServer) int {
+	if !srv.connected || a == nil {
+		return 0
+	}
+	n := 0
+	for _, tt := range srv.tools {
+		if r.tools.Register(a, tt) == nil {
+			n++
+		}
+	}
+	for _, meta := range srv.metas {
+		r.tools.RegisterToolMeta(meta)
+	}
+	n += registerMCPDiscoveryTools(a, r.tools, srv.name, srv.discovery, mcpDiscoveryCaller(reg, srv.name))
+	return n
+}
+
 // replayMCPSegmentLocked re-registers the cached MCP tool definitions into a
 // newly built agent without contacting any server. The sessions stay owned by
 // r.mcpReg exactly as they were.
@@ -2654,18 +3012,7 @@ func (r *Runner) replayMCPSegmentLocked(a *agent.Agent, seg *mcpSegment) int {
 	reg := r.mcpReg
 	n := 0
 	for _, srv := range seg.servers {
-		if !srv.connected {
-			continue
-		}
-		for _, tt := range srv.tools {
-			if r.tools.Register(a, tt) == nil {
-				n++
-			}
-		}
-		for _, meta := range srv.metas {
-			r.tools.RegisterToolMeta(meta)
-		}
-		n += registerMCPDiscoveryTools(a, r.tools, srv.name, srv.discovery, mcpDiscoveryCaller(reg, srv.name))
+		n += r.registerMCPSegmentServer(reg, a, srv)
 	}
 	// The process-wide view is refreshed from this generation's own records: it
 	// is shared with every other Runner, and another one may have overwritten
@@ -3167,11 +3514,18 @@ func (r *Runner) ProjectInstructionsFor(sessionID string) string {
 // MCPProjectStatus returns the project-level MCP view for display. See
 // Deps.MCPDiagnostics; a Runner without a hook reports nothing, which
 // renders as "no project view" rather than guessing.
+//
+// The list it reports on is the Runner's current one, not the one the hook
+// was built with: a session open re-resolves the list, and a view frozen at
+// startup would keep describing a list the session no longer runs.
 func (r *Runner) MCPProjectStatus() mcp.ProjectMCPScopeSummary {
 	if r == nil || r.Deps == nil || r.Deps.MCPDiagnostics == nil {
 		return mcp.ProjectMCPScopeSummary{}
 	}
-	return r.Deps.MCPDiagnostics()
+	r.mu.load.RLock()
+	frozen := append(append([]appcfg.MCPServerConfig(nil), r.MCPServers...), r.MCPDisabled...)
+	r.mu.load.RUnlock()
+	return r.Deps.MCPDiagnostics(frozen)
 }
 
 // LoadedTools returns the tools registered on the loaded agent.

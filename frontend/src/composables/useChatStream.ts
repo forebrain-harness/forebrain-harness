@@ -3002,6 +3002,26 @@ export function useChatStream() {
     return observerReady
   }
 
+  // rebindSessionObserver re-opens the observation socket for the open
+  // conversation. A bind is what makes the gateway reconcile the session's
+  // MCP half, so an answer given just now takes effect without waiting for a
+  // reload: the servers the user allowed are up in the session being entered.
+  //
+  // The old socket is closed first and the cursor travels with the new bind,
+  // so the conversation continues where it was: the events it already applied
+  // are not replayed, and the ones that arrive meanwhile are the same ones
+  // the closed socket would have carried.
+  function rebindSessionObserver(): void {
+    const sid = String(sessionId.value ?? '').trim()
+    if (sessionObserver) {
+      try { sessionObserver.close() } catch { /* noop */ }
+    }
+    sessionObserver = null
+    observerSessionId = ''
+    if (!sid) return
+    void startSessionObserver(sid)
+  }
+
   function applySessionReset(options: SessionResetOptions) {
     const sid = String(options.sid ?? '').trim()
     sessionId.value = sid || null
@@ -5560,6 +5580,7 @@ export function useChatStream() {
     loadMessages,
     switchToSession,
     resetForNewChat,
+    rebindSessionObserver,
     computeWorkedDurationMs,
     formatWorkedDurationLabel,
     formatRuntimeStatusLabel,

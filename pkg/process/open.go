@@ -344,14 +344,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// prefix derived from it.
 	mcpRes := ResolveSessionMCP(root, activeAgent.WorkspaceRoot, cfgRoot.Agents, activeAgent.ID, launchProject)
 	frozenMCP := mcpRes.Servers
-	// The whole frozen list, disabled entries included, is what the drift
-	// check compares against the disk: a disable toggle is not drift.
-	frozenAll := append(append([]appcfg.MCPServerConfig(nil), frozenMCP...), mcpRes.Disabled...)
 	frozenAgentWorkspace := activeAgent.WorkspaceRoot
-	// The replaced globals are not in the frozen list by definition, so the
-	// display hook cannot re-derive them from it; the resolution's own record
-	// of what this session overrode is carried alongside.
-	frozenOverridden := mcpRes.Summary.OverriddenGlobal
 
 	actionSvc := &state.ActionService{DB: sqlDB}
 	// The owner names this process to the shared database: the runs it creates
@@ -391,10 +384,20 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		// runners: project skill roots are session state, and a runtime
 		// without the frozen decision cannot resolve them at all.
 		LaunchProject: launchProject,
-		MCPDiagnostics: func() mcp.ProjectMCPScopeSummary {
-			summary := InspectProjectMCP(frozenAgentWorkspace, frozenAll, launchProject)
-			summary.OverriddenGlobal = frozenOverridden
-			return summary
+		// The display hook reads the list the Runner runs now, not the one it
+		// froze at startup: a session open re-resolves the list, and a hook
+		// that closed over the startup list would keep describing a list the
+		// session no longer runs.
+		MCPDiagnostics: func(frozen []appcfg.MCPServerConfig) mcp.ProjectMCPScopeSummary {
+			return InspectProjectMCP(frozenAgentWorkspace, frozen, launchProject)
+		},
+		// The re-resolution port: a conversation that is beginning asks for
+		// the three scope layers again, which is the only place that knows
+		// the consent store and the launch project's trust decision.
+		MCPResolve: func(agentName, agentWorkspace string, launch safety.ProjectContext) (run.MCPServersResolution, error) {
+			agents := env.Deps.AppCfg.Agents
+			res := ResolveSessionMCP(root, agentWorkspace, agents, agentName, launch)
+			return run.MCPServersResolution{Servers: res.Servers, Disabled: res.Disabled}, nil
 		},
 		// The language-server runtime is the same frozen shape: the pool is
 		// process-wide, this manager is the primary runner's view of it, and

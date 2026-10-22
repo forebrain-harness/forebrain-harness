@@ -1480,8 +1480,13 @@ func (r *Runner) resolvePrimaryModelCandidateLocked(
 // is joined into the returned error and marks the Runner unhealthy. Callers
 // hold r.mu.load (it is a non-reentrant RWMutex — never call the public Load
 // from here).
+//
+// sessionOpen marks the rebuild as the beginning of a conversation: the MCP
+// half is reconciled against the configuration as it stands now instead of
+// being replayed from the cache. Every other rebuild — a model switch, a
+// config reload, a rollback — passes false and keeps the replay.
 func (r *Runner) loadWithIntentLocked(
-	intent primaryModelIntent, provider, model string, effort *string,
+	intent primaryModelIntent, provider, model string, effort *string, sessionOpen bool,
 ) error {
 	// The closed gate must answer before any resolution or rollback work: a
 	// shut-down Runner that first fails candidate resolution would otherwise
@@ -1493,7 +1498,10 @@ func (r *Runner) loadWithIntentLocked(
 	name := r.activeAgentNameForModel()
 	snap := r.primaryState.snapshot.Load()
 	agentChanged := snap != nil && snap.agent != name
-	if intent == primaryModelExplicit && effort != nil && snap != nil && snap.agent == name {
+	// The no-op covers a repeated selection, not a conversation that is
+	// beginning: entering a session asks for the MCP half to be reconciled
+	// even when the model it runs on has not changed at all.
+	if !sessionOpen && intent == primaryModelExplicit && effort != nil && snap != nil && snap.agent == name {
 		// An exact repeat of the published selection (including effort) is a
 		// no-op: session activation and fork materialization both reach this
 		// path, and rebuilding would churn the load-owned runtime for
@@ -1517,7 +1525,7 @@ func (r *Runner) loadWithIntentLocked(
 		}
 		return err
 	}
-	if err := r.loadLocked(&candidate); err != nil {
+	if err := r.loadLocked(&candidate, sessionOpen); err != nil {
 		if agentChanged {
 			// Same rule as above: the old agent's snapshot must not be
 			// rebuilt on top of the new agent's tenant stores.
@@ -1541,11 +1549,14 @@ func (r *Runner) loadWithIntentLocked(
 // rebuildPreviousRuntimeLocked rebuilds the snapshot a failed switch was
 // rolling back to. With no previous snapshot the config's first resolved
 // entry is the previous effective runtime.
+//
+// A rollback is not a session opening: it restores the runtime that was in
+// force, so it must not reconcile the MCP half.
 func (r *Runner) rebuildPreviousRuntimeLocked(snap *primaryModelRuntime) error {
 	if snap != nil {
-		return r.loadLocked(&snap.provider)
+		return r.loadLocked(&snap.provider, false)
 	}
-	return r.loadLocked(nil)
+	return r.loadLocked(nil, false)
 }
 
 // SetPrimaryModel makes the exact provider+model pair this session's
@@ -1553,6 +1564,9 @@ func (r *Runner) rebuildPreviousRuntimeLocked(snap *primaryModelRuntime) error {
 // including "", is overlaid exactly, while nil derives the entry's configured
 // effort once. A failed switch does not publish candidate identity: the
 // previously effective runtime is rebuilt first.
+//
+// A model switch is not a session opening: the MCP half is replayed from the
+// cache and no server is contacted.
 func (r *Runner) SetPrimaryModel(provider, model string, effort *string) error {
 	provider = strings.TrimSpace(provider)
 	model = strings.TrimSpace(model)
@@ -1561,15 +1575,18 @@ func (r *Runner) SetPrimaryModel(provider, model string, effort *string) error {
 	}
 	r.mu.load.Lock()
 	defer r.mu.load.Unlock()
-	return r.loadWithIntentLocked(primaryModelExplicit, provider, model, effort)
+	return r.loadWithIntentLocked(primaryModelExplicit, provider, model, effort, false)
 }
 
 // ResetPrimaryModel intentionally adopts the config's first resolved entry as
 // the effective model — the state a session with no stored choice runs on.
+//
+// Like SetPrimaryModel, it is not a session opening: the MCP half is replayed
+// and no server is contacted.
 func (r *Runner) ResetPrimaryModel() error {
 	r.mu.load.Lock()
 	defer r.mu.load.Unlock()
-	return r.loadWithIntentLocked(primaryModelReset, "", "", nil)
+	return r.loadWithIntentLocked(primaryModelReset, "", "", nil, false)
 }
 
 // LoadConfig is the one config-pointer transaction: the pointer is swapped
@@ -1578,6 +1595,9 @@ func (r *Runner) ResetPrimaryModel() error {
 // effective runtime before returning. Callers never write Runner.AppCfg
 // first. Filesystem policy is refreshed only after unlocking, for the runtime
 // that ultimately won — RefreshFilesystemPolicy takes r.mu.load.RLock itself.
+//
+// A config reload is not a session opening: the MCP half is replayed, so a
+// reload mid-conversation never reconnects a server.
 func (r *Runner) LoadConfig(next *appcfg.Root) error {
 	if next == nil {
 		return fmt.Errorf("load config: nil root")
@@ -1586,7 +1606,7 @@ func (r *Runner) LoadConfig(next *appcfg.Root) error {
 	defer r.mu.load.Unlock()
 	prev := r.AppCfg
 	r.AppCfg = next
-	err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil)
+	err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, false)
 	if err == nil {
 		return nil
 	}
@@ -1595,11 +1615,71 @@ func (r *Runner) LoadConfig(next *appcfg.Root) error {
 	// under the restored pointer. Only its failure leaves the runner
 	// uncertain; when it succeeds, surfaces see the load error, not an
 	// uncertainty their own recovery already resolved.
-	if rollbackErr := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil); rollbackErr != nil {
+	if rollbackErr := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, false); rollbackErr != nil {
 		r.primaryState.unhealthy.Store(true)
 		return &runtimeUncertainError{original: primaryModelPlainError(err), rollback: rollbackErr}
 	}
 	return primaryModelPlainError(err)
+}
+
+// LoadSession is Load for a runtime that is taking over a session: the same
+// rebuild, with the MCP half reconciled instead of replayed. The model in
+// force is kept — this is the plain rebuild a surface needs when a runtime
+// starts serving another primary agent.
+func (r *Runner) LoadSession() error {
+	r.mu.load.Lock()
+	err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, true)
+	r.mu.load.Unlock()
+	if err != nil {
+		return err
+	}
+	// Resolve filesystem policy onto the in-process tools after releasing the
+	// load lock: RefreshFilesystemPolicy takes r.mu.load.RLock itself (to
+	// read r.tools) and Go's RWMutex is not reentrant.
+	r.RefreshFilesystemPolicy()
+	return nil
+}
+
+// OpenSession makes this Runner the runtime of a conversation that is
+// beginning: it takes the conversation's own model selection and reconciles
+// the MCP half in the same load. sel.Set false means the conversation never
+// chose, which runs on the configured default.
+func (r *Runner) OpenSession(sel PrimaryModelState) error {
+	r.mu.load.Lock()
+	var err error
+	if !sel.Set {
+		err = r.loadWithIntentLocked(primaryModelReset, "", "", nil, true)
+	} else {
+		effort := sel.Effort
+		err = r.loadWithIntentLocked(primaryModelExplicit, sel.Provider, sel.Model, &effort, true)
+	}
+	r.mu.load.Unlock()
+	if err != nil {
+		return err
+	}
+	r.RefreshFilesystemPolicy()
+	return nil
+}
+
+// ReconcileSessionMCP is the reconciliation for a surface with no
+// per-conversation model choice: the model in force is kept, and nothing is
+// rebuilt at all unless the resolved MCP list changed or some server is not
+// connected — a session switch with everything up must not pay for an agent
+// rebuild.
+func (r *Runner) ReconcileSessionMCP() error {
+	r.mu.load.Lock()
+	servers, _, ok := r.peekSessionMCPLocked()
+	if !ok {
+		r.mu.load.Unlock()
+		return nil
+	}
+	plan := r.planMCPReconcileLocked(servers)
+	needed := len(plan.start) > 0 || len(plan.retire) > 0
+	r.mu.load.Unlock()
+	if !needed {
+		return nil
+	}
+	return r.LoadSession()
 }
 
 // primaryModelPlainError unwraps an inner runtime-uncertain classification

@@ -38,6 +38,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	mcppkg "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -30477,6 +30478,107 @@ func TestNewConversationInheritsTheCurrentModelAndFooterNamesIt(t *testing.T) {
 	require.Equal(t, "openai/gpt-other", renderer.footer.Model)
 	require.Equal(t, "gpt-other", s.storedSelection(t, second).Model)
 	require.Equal(t, "gpt-other", s.storedSelection(t, "sess-a").Model)
+}
+
+// TestNewSessionOpensThroughTheSessionEntryPoint pins where the MCP list is
+// resolved again: entering a conversation re-resolves it, a model change in
+// the middle of a conversation does not.
+func TestNewSessionOpensThroughTheSessionEntryPoint(t *testing.T) {
+	s := newModelSelectionTestSession(t)
+	ctx := context.Background()
+	var resolves int
+	s.Env.Deps.MCPResolve = func(string, string, safety.ProjectContext) (run.MCPServersResolution, error) {
+		resolves++
+		return run.MCPServersResolution{}, nil
+	}
+
+	// /model is not a session opening: the MCP half is replayed from the
+	// cache, so no server list is resolved again.
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
+	require.Equal(t, 0, resolves, "a model switch must not re-resolve the MCP list")
+
+	res, ok := s.ExecuteSurfaceSlash(ctx, "sess-a", "/new")
+	require.True(t, ok)
+	require.True(t, res.SessionSwitched)
+	require.Equal(t, 0, resolves, "creating the conversation must not resolve the list by itself")
+
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	state := newSwitchState(s, "sess-a")
+	switched, _, err := switchStreamSession(ctx, state, renderer, nil, res.SessionID)
+	require.NoError(t, err)
+	require.True(t, switched)
+	require.Greater(t, resolves, 0, "entering a conversation must re-resolve the MCP list")
+}
+
+// consentSession is a session that offers the project MCP consent half: the
+// entries nobody decided about yet, the answers it was given, and the order in
+// which the surface asked and activated.
+type consentSession struct {
+	*fakeSession
+	pending    []mcppkg.PendingProjectConsent
+	decided    [][]string
+	reconciles int
+	order      []string
+}
+
+func (s *consentSession) PendingProjectMCPConsents() []mcppkg.PendingProjectConsent {
+	return s.pending
+}
+
+func (s *consentSession) DecideProjectMCPConsents(allowed []string) error {
+	s.decided = append(s.decided, append([]string(nil), allowed...))
+	s.order = append(s.order, "decide")
+	return nil
+}
+
+func (s *consentSession) ReconcileSessionMCP() error {
+	s.reconciles++
+	return nil
+}
+
+func (s *consentSession) ActivateSessionModel(ctx context.Context, sessionID string) (string, error) {
+	s.order = append(s.order, "activate")
+	return s.fakeSession.ActivateSessionModel(ctx, sessionID)
+}
+
+// TestNewSessionAsksForProjectMCPConsentBeforeSwitching pins the order of the
+// two halves: the project's MCP entries are asked about before the surface
+// enters the target conversation, so the answer is what that conversation's own
+// MCP reconcile reads and the allowed server is up in the session being
+// entered rather than one session later.
+func TestNewSessionAsksForProjectMCPConsentBeforeSwitching(t *testing.T) {
+	session := &consentSession{
+		fakeSession: &fakeSession{},
+		pending: []mcppkg.PendingProjectConsent{
+			{Name: "stub2", Summary: "run /tmp/mcpstub"},
+		},
+	}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	selector := &recordingSelector{selectSteps: []selectorStep{{value: "Allow it to run", ok: true}}}
+	cmds := newCommandController(session, renderer, selector, nil, t.TempDir())
+	state := &streamState{sessionID: "sess-a", session: session}
+
+	handled, _, _, _ := applySlashOutcome(context.Background(), cmds, renderer, nil, state, "/new", "/new", SlashOutcome{
+		Handled:         true,
+		Reply:           "Started a new conversation.",
+		SessionChanged:  true,
+		SessionSwitched: true,
+		SessionID:       "sess-b",
+	})
+	require.True(t, handled)
+	require.Len(t, selector.selects, 1, "the pending entry must be asked about exactly once")
+	require.Contains(t, selector.selects[0].label, "run /tmp/mcpstub",
+		"the question must say what the entry would run")
+	require.Equal(t, []string{"Allow it to run", "Keep it out"}, selector.selects[0].options,
+		"the question must offer the two answers the operator can give")
+	require.Len(t, session.decided, 1, "the pending entry must be decided exactly once")
+	require.Equal(t, []string{"stub2"}, session.decided[0], "the allowed entry must be recorded by name")
+	require.Equal(t, []string{"decide", "activate"}, session.order,
+		"the consent must be asked before the conversation is entered")
+	require.Equal(t, 0, session.reconciles,
+		"the answer is read by the switch's own re-resolution, so no extra reconcile is needed")
 }
 
 func TestForkCopiesSessionModelSelection(t *testing.T) {

@@ -398,6 +398,45 @@ func containsPath(list []string, want string) bool {
 	return false
 }
 
+// The primary agent's own MCP layer changes with the agent, so a switch has
+// to resolve the list again: replaying the previous agent's cache would keep
+// serving servers the new agent never declared.
+func TestAgentSwitchReResolvesTheMCPList(t *testing.T) {
+	home := t.TempDir()
+	cfg := twoPrimaryConfig()
+	var resolves int
+	var resolvedAgent string
+	runner := &run.Runner{Deps: &run.Deps{
+		Home:   home,
+		AppCfg: cfg,
+		MCPResolve: func(agentName, agentWorkspace string, launch safety.ProjectContext) (run.MCPServersResolution, error) {
+			resolves++
+			resolvedAgent = agentName
+			return run.MCPServersResolution{Servers: []appcfg.MCPServerConfig{{
+				Name:      agentName + "-only",
+				Transport: "stdio",
+				// A path that does not exist: the switch must not depend on a
+				// server that answers, only on the list it resolved.
+				Command: "/nonexistent/" + agentName + "-mcp",
+			}}}, nil
+		},
+	}}
+
+	if _, err := SwitchAgent(AgentDeps{Home: home, Cfg: cfg, Runner: runner}, "review"); err != nil {
+		t.Fatalf("switch: %v", err)
+	}
+
+	if resolves != 1 {
+		t.Fatalf("mcp resolve calls = %d, want 1 (the switch resolves the new agent's list once)", resolves)
+	}
+	if resolvedAgent != "review" {
+		t.Fatalf("resolved agent = %q, want the agent that was switched to", resolvedAgent)
+	}
+	if len(runner.MCPServers) != 1 || runner.MCPServers[0].Name != "review-only" {
+		t.Fatalf("runner MCP list = %+v, want the new primary agent's layer", runner.MCPServers)
+	}
+}
+
 // Persisted approvals belong to the agent that was granted them. Switching must
 // leave the previous agent's settings behind rather than evaluate them against
 // another agent's workspace.

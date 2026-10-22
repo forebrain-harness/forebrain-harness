@@ -558,6 +558,17 @@
         @confirm="confirmTrust"
         @cancel="cancelTrust"
       />
+      <!-- The project's MCP entries nobody has confirmed: a session re-resolves
+           the three layers, and an entry the project declares waits for an
+           answer before it can run. -->
+      <ProjectMcpConsentDialog
+        :open="projectMcpConsentOpen"
+        :pending="projectMcpPending"
+        :busy="projectMcpConsentBusy"
+        :error="projectMcpConsentError"
+        @decide="decideProjectMcpConsent"
+        @close="closeProjectMcpConsent"
+      />
       <RewindDialog
         v-if="rewindTarget"
         :message="rewindTarget.content"
@@ -589,6 +600,7 @@ import ProjectPill from '@/components/chat/ProjectPill.vue'
 import FolderDialog from '@/components/chat/FolderDialog.vue'
 import RewindDialog from '@/components/chat/RewindDialog.vue'
 import TrustDialog from '@/components/chat/TrustDialog.vue'
+import ProjectMcpConsentDialog from '@/components/chat/ProjectMcpConsentDialog.vue'
 import SessionHeartbeat from '@/components/chat/SessionHeartbeat.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import SubagentDrawer from '@/components/chat/SubagentDrawer.vue'
@@ -1293,6 +1305,7 @@ const {
   loadMessages,
   switchToSession,
   resetForNewChat,
+  rebindSessionObserver,
 } = useChatStream()
 
 /**
@@ -2349,6 +2362,105 @@ watch(() => route.query.session, (value) => {
 
 watch(sessionId, (sid) => {
   void loadSessionInfo(sid)
+}, { immediate: true })
+
+/**
+ * The project whose MCP entries this conversation would load: the open
+ * conversation's own project, or — before one is open — the project the
+ * composer has picked. A conversation that belongs to no project has no
+ * project scope, so there is nothing to ask about.
+ */
+const projectMcpScopeId = computed(() => {
+  const sid = String(sessionId.value ?? '').trim()
+  if (sid) return String(sessionProject.value?.id ?? '').trim()
+  return String(target.value?.projectId ?? '').trim()
+})
+
+/** The entries the project declares and nobody has confirmed yet. */
+const projectMcpPending = ref<Array<{ name: string; summary: string; fingerprint?: string }>>([])
+const projectMcpConsentOpen = ref(false)
+const projectMcpConsentBusy = ref(false)
+const projectMcpConsentError = ref('')
+let projectMcpGeneration = 0
+
+/**
+ * Read the project's entries that are waiting for an answer. The list is the
+ * project's own table of entries awaiting confirmation — the same rows the
+ * project page shows, each with the fingerprint its decision is bound to — so
+ * an answer is recorded against exactly the entry the reader was shown.
+ */
+async function loadProjectMcpConsent(projectId: string): Promise<void> {
+  const generation = ++projectMcpGeneration
+  try {
+    const answer = await forebrainApi.mcpPage('project', { projectId, page: 1, pageSize: 100 })
+    if (generation !== projectMcpGeneration) return
+    const pending = answer.rows
+      .filter((row) => row.pending === true)
+      .map((row) => ({
+        name: row.name,
+        summary: String(row.summary ?? ''),
+        fingerprint: String(row.fingerprint ?? ''),
+      }))
+    projectMcpPending.value = pending
+    projectMcpConsentOpen.value = pending.length > 0
+  } catch (cause) {
+    if (generation !== projectMcpGeneration) return
+    // A list that could not be read is not an empty list: the entries stay
+    // pending and the next session asks again.
+    projectMcpConsentError.value = getErrorMessage(cause)
+  }
+}
+
+/**
+ * Record one entry's answer. The name says which entry the click is about and
+ * the fingerprint says which version of it the reader was shown; every other
+ * entry keeps whatever decision it had.
+ */
+async function decideProjectMcpConsent(payload: { name: string; allow: boolean }): Promise<void> {
+  const projectId = projectMcpScopeId.value
+  if (!projectId || projectMcpConsentBusy.value) return
+  const row = projectMcpPending.value.find((entry) => entry.name === payload.name)
+  if (!row) return
+  projectMcpConsentBusy.value = true
+  projectMcpConsentError.value = ''
+  try {
+    await forebrainApi.projectMcpConsent(
+      projectId,
+      payload.allow ? [row.name] : [],
+      [row.name],
+      [{ name: row.name, fingerprint: row.fingerprint ?? '' }],
+    )
+    await loadProjectMcpConsent(projectId)
+    // The answer is what this session's own MCP reconcile will find, so the
+    // conversation is bound again: the gateway reconciles on every bind, and
+    // the entry the reader allowed is up in the session they are in.
+    rebindSessionObserver()
+  } catch (cause) {
+    projectMcpConsentError.value = getErrorMessage(cause)
+    // The list is read again, so an entry that changed under the page is
+    // shown again with its new fingerprint instead of the one that failed.
+    await loadProjectMcpConsent(projectId)
+  } finally {
+    projectMcpConsentBusy.value = false
+  }
+}
+
+/** Dismiss the dialog: the entries stay pending and the next session asks. */
+function closeProjectMcpConsent(): void {
+  projectMcpConsentOpen.value = false
+}
+
+// A conversation that opens re-resolves the three MCP layers, so the entries
+// awaiting an answer are read when the conversation changes and when the
+// project it belongs to changes.
+watch([sessionId, projectMcpScopeId], () => {
+  const projectId = projectMcpScopeId.value
+  if (!projectId) {
+    projectMcpPending.value = []
+    projectMcpConsentOpen.value = false
+    return
+  }
+  void loadProjectMcpConsent(projectId)
 }, { immediate: true })
 
 // Every refresh of the shared list (a turn's end, the drawer opening, a
