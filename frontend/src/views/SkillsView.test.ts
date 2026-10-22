@@ -5,6 +5,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import tip from '@/directives/tip'
 import { forebrainApi, type SkillRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect, pickOption } from '@/test-utils/formControls'
 import SkillsView from './SkillsView.vue'
 
 /**
@@ -40,6 +41,20 @@ async function mountPage(): Promise<VueWrapper> {
   mounted.push(wrapper)
   await flushPromises()
   return wrapper
+}
+
+/**
+ * The layer filter is the library's select: it measures its viewport with
+ * ResizeObserver, which jsdom does not have, and scrolling an item into view is
+ * not implemented either.
+ */
+function stubSelectMeasurement(): void {
+  ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  Element.prototype.scrollIntoView = () => undefined
 }
 
 describe('SkillsView', () => {
@@ -81,24 +96,40 @@ describe('SkillsView', () => {
   })
 
   it('offers the layers this page can hold, and no other', async () => {
+    // The dropdown needs the jsdom stubs above before it can open.
+    stubSelectMeasurement()
     const wrapper = await mountPage()
 
-    const options = wrapper.findAll('[data-testid="skills-source-filter"] option')
-    expect(options.map((option) => option.text())).toEqual(['全部来源', '主代理', '共享', '内置'])
-    expect(options.map((option) => (option.element as HTMLOptionElement).value)).toEqual(['', 'agent', 'shared', 'builtin'])
+    // The layer filter is the library's select: its items exist only while it
+    // is open, and reka renders them into a portal of its own.
+    await openSelect(wrapper.find('[data-testid="skills-source-filter"]').element as HTMLElement)
+    const list = document.querySelector('[role="listbox"][data-state="open"]')
+    expect([...(list?.querySelectorAll('[role="option"]') ?? [])].map((option) => (option.textContent ?? '').trim())).toEqual([
+      '全部来源',
+      '主代理',
+      '共享',
+      '内置',
+    ])
   })
 
   it('sends the layer filter to the server instead of filtering in the browser', async () => {
+    // The dropdown needs the jsdom stubs above before it can open.
+    stubSelectMeasurement()
     const wrapper = await mountPage()
     const page = vi.mocked(forebrainApi.skillsPage)
 
-    await wrapper.find('[data-testid="skills-source-filter"]').setValue('shared')
+    await pickOption(wrapper.find('[data-testid="skills-source-filter"]').element as HTMLElement, '共享')
     await flushPromises()
 
     expect(page).toHaveBeenCalledTimes(2)
     expect(page.mock.calls[1][0]).toMatchObject({ origin: 'shared', page: 1 })
     // The answer is drawn as it came: the page never hides a row of its own.
     expect(wrapper.findAll('[data-skill-row]')).toHaveLength(2)
+
+    // 全部来源 is the empty string on the wire: the sentinel maps back to it.
+    await pickOption(wrapper.find('[data-testid="skills-source-filter"]').element as HTMLElement, '全部来源')
+    await flushPromises()
+    expect(page.mock.calls[2][0]).toMatchObject({ origin: '', page: 1 })
   })
 
   it('keeps every action the page had, as icon buttons on the rows', async () => {
@@ -135,7 +166,7 @@ describe('SkillsView', () => {
     const wrapper = await mountPage()
 
     const own = wrapper.find('[data-skill-row="gateway-ops"]')
-    await own.find('input[type="checkbox"]').setValue(true)
+    await own.find('[role="checkbox"]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('已选 1 个')
 

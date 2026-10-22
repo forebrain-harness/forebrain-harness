@@ -8,34 +8,34 @@
 
       <ListToolbar>
         <template #left>
-          <input
+          <Input
             v-model="q"
             type="search"
             :placeholder="t('memories.searchPlaceholder')"
-            class="forebrain-field h-[34px]"
+            class="forebrain-field h-[34px] w-auto"
             style="max-width: 240px"
             data-testid="memories-search"
           />
         </template>
         <template #actions>
           <span v-if="selected.size" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('memories.selectedCount', { count: selected.size }) }}</span>
-          <button
+          <Button
             type="button"
-            class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs text-[var(--forebrain-danger)]"
+            class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs text-[var(--forebrain-danger)]"
             :disabled="!selected.size || deleting"
             data-testid="memories-delete-selected"
             @click="deleteSelected"
           >
             <Trash2 class="size-3.5" aria-hidden="true" />{{ t('memories.deleteSelected') }}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs text-[var(--forebrain-danger)]"
+            class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs text-[var(--forebrain-danger)]"
             data-testid="memories-reset-all"
             @click="confirmReset = true"
           >
             {{ t('memories.resetAll') }}
-          </button>
+          </Button>
         </template>
       </ListToolbar>
 
@@ -71,6 +71,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { Trash2 } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'

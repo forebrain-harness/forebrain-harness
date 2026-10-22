@@ -1,15 +1,36 @@
-import { beforeAll, describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 
 import { setLocale } from '@/locales'
+import { openSelect, optionTexts, pickOption } from '@/test-utils/formControls'
 import TablePager from './TablePager.vue'
+
+// The page-size select is the library's, so its options render in a portal on
+// the document rather than inside the wrapper. A wrapper left mounted would
+// keep them there for the next test's document-wide lookups.
+enableAutoUnmount(afterEach)
 
 /** The pager under every table: the totals, the page numbers and its own size select. */
 describe('TablePager', () => {
-  beforeAll(() => setLocale('en'))
+  beforeAll(() => {
+    setLocale('en')
+    // The select measures its viewport with ResizeObserver, which jsdom does
+    // not have; scrolling an item into view is not implemented either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
+  })
 
   function mountPager(props: Partial<{ total: number; page: number; pageSize: number }> = {}) {
     return mount(TablePager, { props: { total: 25, page: 1, pageSize: 10, ...props } })
+  }
+
+  /** The page-size trigger — the element the select is opened on. */
+  function sizeTrigger(wrapper: ReturnType<typeof mountPager>): HTMLElement {
+    return wrapper.find('[data-testid="pager-size"]').element as HTMLElement
   }
 
   /** The page buttons in the order they are drawn. */
@@ -47,25 +68,22 @@ describe('TablePager', () => {
     expect(wrapper.emitted('update:page')).toEqual([[11]])
   })
 
-  it('asks for the page size that was picked', async () => {
+  it('offers 10, 20 and 50 a page', async () => {
     const wrapper = mountPager({ total: 200, page: 10 })
-    await wrapper.find('[data-testid="pager-size"]').setValue('20')
-    expect(wrapper.emitted('update:pageSize')).toEqual([[20]])
-    expect(wrapper.findAll('[data-testid="pager-size"] option').map((option) => option.text())).toEqual([
-      '10 / page',
-      '20 / page',
-      '50 / page',
-    ])
+    await openSelect(sizeTrigger(wrapper))
+    expect(optionTexts()).toEqual(['10 / page', '20 / page', '50 / page'])
   })
 
-  it('keeps a page size the select does not offer', () => {
+  it('asks for the page size that was picked', async () => {
+    const wrapper = mountPager({ total: 200, page: 10 })
+    await pickOption(sizeTrigger(wrapper), '50 / page')
+    expect(wrapper.emitted('update:pageSize')).toEqual([[50]])
+  })
+
+  it('keeps a page size the select does not offer', async () => {
     const wrapper = mountPager({ total: 200, pageSize: 30 })
-    expect(wrapper.findAll('[data-testid="pager-size"] option').map((option) => option.text())).toEqual([
-      '10 / page',
-      '20 / page',
-      '30 / page',
-      '50 / page',
-    ])
+    await openSelect(sizeTrigger(wrapper))
+    expect(optionTexts()).toEqual(['10 / page', '20 / page', '30 / page', '50 / page'])
   })
 
   it('still renders one page for an empty list', () => {

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 
-import { seedProject, signIn } from './support'
+import { pickOption, seedProject, signIn } from './support'
 
 /**
  * The settings page as the design draws it (plan 076): a sub-navigation of
@@ -130,25 +130,25 @@ test('the appearance tab is standard radio groups that apply at once', async ({ 
   // Brand colour: one radio group, every option carrying its own colour chip.
   const brand = page.locator('[data-testid="appearance-brand"]')
   await expect(brand).toHaveAttribute('role', 'radiogroup')
-  await expect(brand.locator('input[type="radio"]')).toHaveCount(3)
+  await expect(brand.locator('[role="radio"]')).toHaveCount(3)
   await expect(brand.locator('.forebrain-radio-swatch')).toHaveCount(3)
   await expect(brand).toContainText('海军蓝（默认）')
   await expect(brand).toContainText('松石青')
   await expect(brand).toContainText('石墨黑')
   await expect(brand.locator('.forebrain-list-note')).toContainText('只保存在当前浏览器。')
 
-  await brand.locator('input[value="teal"]').check()
+  await brand.locator('[role="radio"][value="teal"]').click()
   await expect(page.locator('html')).toHaveAttribute('data-brand', 'teal')
 
   // Menu bar: the same control for the rail's one dark/light choice.
   const rail = page.locator('[data-testid="appearance-rail"]')
   await expect(rail).toHaveAttribute('role', 'radiogroup')
-  await rail.locator('input[value="light"]').check()
+  await rail.locator('[role="radio"][value="light"]').click()
   await expect(page.locator('html')).toHaveAttribute('data-rail-theme', 'light')
 
   // Language: the one setting the top bar's menu also writes, so its button
   // follows the choice made here.
-  await page.selectOption('[data-testid="appearance-language"]', 'en')
+  await pickOption(page, 'appearance-language', 'English')
   await expect(page.locator('html')).toHaveAttribute('lang', 'en')
   await expect(page.locator('.forebrain-language-text')).toHaveText('English')
   await expect(page.locator('[data-testid="appearance-brand"]')).toContainText('Stored in this browser only.')
@@ -160,7 +160,9 @@ test('the approval default is one vertical radio group saved from the bottom', a
 
   const group = page.locator('[data-testid="approval-default"]')
   await expect(group).toHaveAttribute('role', 'radiogroup')
-  const options = group.locator('label.forebrain-radio')
+  // An option row is `.forebrain-radio` around the library's `role="radio"`
+  // button and its `<label for>` words (plan 096).
+  const options = group.locator('.forebrain-radio')
   await expect(options).toHaveCount(3)
 
   // Vertical, one option per line, each naming both languages and explaining
@@ -185,7 +187,7 @@ test('the approval default is one vertical radio group saved from the bottom', a
   const saveBox = await save.boundingBox()
   expect(saveBox!.y).toBeGreaterThan(boxes[2]!.y + boxes[2]!.height - 1)
 
-  await group.locator('input[value="full-access"]').check()
+  await group.locator('[role="radio"][value="full-access"]').click()
   await expect(save).toBeEnabled()
   await save.click()
   await expect(page.getByText(/已保存为全局默认。|Saved as the global default\./).first()).toBeVisible({ timeout: 10_000 })
@@ -193,11 +195,14 @@ test('the approval default is one vertical radio group saved from the bottom', a
   // The write is in forebrain.yaml: a reload opens on the new choice, with the
   // save disabled again.
   await page.reload({ waitUntil: 'networkidle' })
-  await expect(page.locator('[data-testid="approval-default"] input[value="full-access"]')).toBeChecked()
+  await expect(page.locator('[data-testid="approval-default"] [role="radio"][value="full-access"]')).toHaveAttribute(
+    'aria-checked',
+    'true',
+  )
   await expect(page.locator('[data-testid="approval-save"]')).toBeDisabled()
 
   // Restore the safe default for the rest of the suite.
-  await page.locator('[data-testid="approval-default"] input[value="auto"]').check()
+  await page.locator('[data-testid="approval-default"] [role="radio"][value="auto"]').click()
   await page.locator('[data-testid="approval-save"]').click()
   await expect(page.getByText(/已保存为全局默认。|Saved as the global default\./).first()).toBeVisible({ timeout: 10_000 })
 })
@@ -399,8 +404,12 @@ test('no surface draws a heading, a table without a pager, or an untitled icon',
  * than all taken from the first one.
  */
 async function checkOneIconButton(page: Page, stride: number): Promise<string> {
+  // A form control names itself (its label plus its own state) and is not one
+  // of the icon-only action buttons this check is about, so the library's
+  // switch, checkbox and radio buttons — all `<button>`s — are out.
+  const controls = 'button:not([role="switch"]):not([role="checkbox"]):not([role="radio"])'
   const candidates = page.locator(
-    'main button:not([role="switch"]), .forebrain-topbar button:not([role="switch"]), .forebrain-rail button:not([role="switch"])',
+    `main ${controls}, .forebrain-topbar ${controls}, .forebrain-rail ${controls}`,
   )
   const usable: number[] = []
   for (let index = 0; index < (await candidates.count()); index++) {

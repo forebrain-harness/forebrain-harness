@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import tip from '@/directives/tip'
 import { forebrainApi, type ListQuery, type MemoryFileRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 import MemoriesView from './MemoriesView.vue'
 
 /**
@@ -32,7 +33,7 @@ function rows(): MemoryFileRecord[] {
 }
 
 async function mountPage(): Promise<VueWrapper> {
-  const wrapper = mount(MemoriesView, { global: { directives: { tip }, stubs: { teleport: true } } })
+  const wrapper = mount(MemoriesView, { global: { directives: { tip }, stubs: { teleport: InlineTeleport } } })
   mounted.push(wrapper)
   await flushPromises()
   return wrapper
@@ -102,7 +103,7 @@ describe('MemoriesView', () => {
     expect(button.attributes('disabled')).toBeDefined()
     expect(wrapper.find('.forebrain-list-toolbar').text()).not.toContain('已选')
 
-    await wrapper.find('[data-memory-file="notes/habit.md"] input[type="checkbox"]').setValue(true)
+    await wrapper.find('[data-memory-file="notes/habit.md"] [role="checkbox"]').trigger('click')
     expect(wrapper.find('.forebrain-list-toolbar').text()).toContain('已选 1 个')
     expect(wrapper.find('[data-testid="memories-delete-selected"]').attributes('disabled')).toBeUndefined()
 

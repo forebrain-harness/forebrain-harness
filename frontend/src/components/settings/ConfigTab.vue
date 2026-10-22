@@ -5,12 +5,12 @@
         <span class="font-mono text-[12px] text-[var(--forebrain-muted-text)]" data-testid="config-path">{{ path }}</span>
       </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving || !dirty" data-testid="config-apply" @click="save">
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="saving || !dirty" data-testid="config-apply" @click="save">
           {{ saving ? t('common.loading') : t('config.apply') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="config-refresh" @click="load">
+        </Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" data-testid="config-refresh" @click="load">
           <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-        </button>
+        </Button>
       </template>
     </ListToolbar>
 
@@ -35,6 +35,7 @@
  */
 import { defineAsyncComponent, onMounted, ref } from 'vue'
 import { RotateCw } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import { getErrorMessage, forebrainApi } from '@/lib/api'

@@ -939,6 +939,8 @@
     font-size: 0.78125rem;
     font-weight: 500;
     line-height: 1.2;
+    /* The library's Button carries `shadow-xs`; the design's buttons have none. */
+    box-shadow: none;
     transition:
       background-color 0.15s ease,
       border-color 0.15s ease,
@@ -965,9 +967,10 @@
 }
 
 /* One field style for the settings screens, so a form reads as one thing
-   rather than a collection of differently-shaped inputs. Focus is the
-   browser's own outline: the field does not suppress it, so a keyboard
-   visitor sees the ring the platform draws. */
+   rather than a collection of differently-shaped inputs. Focus is the library
+   component's own 3px ring (plan 096): the field suppresses the static shadow
+   that ships with those components, never the ring — an outline on top of it
+   would draw two focus borders. */
 .forebrain-field {
   border-radius: 6px;
   border: 1px solid var(--forebrain-divider);
@@ -976,6 +979,8 @@
   font-family: var(--forebrain-ui-font);
   font-size: 13px;
   color: var(--forebrain-text);
+  /* The library's inputs carry `shadow-xs`; the design's fields have no shadow. */
+  box-shadow: none;
 }
 
 /* A textarea is the one field that grows: the vertical padding the single-line
@@ -1350,8 +1355,11 @@ textarea.forebrain-field {
   position: relative;
   display: inline-flex;
 }
-.forebrain-pager-size select {
-  height: 26px;
+/* The page-size control is the library's Select now, so its 26px look lands on
+   the trigger's design class instead of the retired native select. The height
+   itself is `!h-[26px]` in the template: the library's `data-[size=default]:h-9`
+   is the same specificity and comes later in the sheet. */
+.forebrain-pager-size .forebrain-field {
   padding: 0 24px 0 9px;
   border: 1px solid var(--forebrain-divider-strong);
   border-radius: 6px;
@@ -1360,10 +1368,11 @@ textarea.forebrain-field {
   font-family: var(--forebrain-ui-font);
   font-size: 12px;
   font-weight: 500;
-  appearance: none;
   cursor: pointer;
 }
-.forebrain-pager-size > svg {
+/* The trigger draws its own chevron; it keeps the pager's 13px arrow at the
+   right edge instead of the library's inline icon. */
+.forebrain-pager-size [data-slot='select-trigger'] svg {
   position: absolute;
   right: 7px;
   top: 50%;
@@ -1487,48 +1496,10 @@ textarea.forebrain-field {
 .forebrain-radio.has-desc {
   align-items: flex-start;
 }
-.forebrain-radio.has-desc input {
+/* The dot is the library's RadioGroupItem (a 16px button) rather than an
+   `input`, so the description list's nudge is stated on it. */
+.forebrain-radio.has-desc [data-slot='radio-group-item'] {
   margin-top: 2px;
-}
-.forebrain-radio input {
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  flex: none;
-  border: 1px solid var(--forebrain-divider-strong);
-  border-radius: 50%;
-  background: var(--forebrain-surface);
-  display: grid;
-  place-content: center;
-  cursor: pointer;
-  transition: border-color 120ms;
-}
-.forebrain-radio input::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--forebrain-brand-1);
-  transform: scale(0);
-  transition: transform 120ms;
-}
-.forebrain-radio input:checked,
-.forebrain-radio:hover input {
-  border-color: var(--forebrain-brand-1);
-}
-.forebrain-radio input:checked::before {
-  transform: scale(1);
-}
-.forebrain-radio input:focus-visible {
-  outline: 2px solid var(--forebrain-brand-1);
-  outline-offset: 2px;
-}
-@media (prefers-reduced-motion: reduce) {
-  .forebrain-radio input,
-  .forebrain-radio input::before {
-    transition: none;
-  }
 }
 .forebrain-radio-desc {
   display: grid;
@@ -1551,24 +1522,118 @@ textarea.forebrain-field {
   display: block;
 }
 
-/* The right-hand drawer: the modal's overlay, its panel against the right
-   edge. Same layer as a modal (z-index 50), so a tip (70) stays visible over
-   it. */
-.forebrain-drawer-mask {
+/* The modal shell: the titled head with its close button, the scrolling body
+   and the footer row. The shell is the library's Dialog (plan 096), whose
+   content is portalled to the body, so these values live here rather than in
+   a scoped block the portal cannot reach. */
+.forebrain-modal {
+  width: 560px;
+  max-width: 100%;
+  max-height: 660px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 12px;
+  background: var(--forebrain-surface);
+  box-shadow: var(--forebrain-shadow-pop);
+  outline: none;
+  /* The library's DialogContent carries `p-6 gap-4`; the preview's panel has
+     neither — its three rows pad themselves. */
+  padding: 0;
+  gap: 0;
+}
+.forebrain-modal--sm {
+  width: 440px;
+}
+.forebrain-modal--xl {
+  width: 860px;
+  max-height: 780px;
+}
+.forebrain-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 10px;
+}
+.forebrain-modal-title {
+  font-family: var(--forebrain-ui-font);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--forebrain-text);
+}
+.forebrain-modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--forebrain-text-2);
+}
+.forebrain-modal-close:hover {
+  background: var(--forebrain-button-alt-hover-bg);
+  color: var(--forebrain-text);
+}
+.forebrain-modal-close-ic {
+  width: 16px;
+  height: 16px;
+}
+.forebrain-modal-body {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 16px 14px;
+}
+.forebrain-modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--forebrain-divider);
+}
+/* The close affordance belongs to the head, where the preview draws it; the
+   library's DialogContent/SheetContent add one of their own in the content's
+   top-right corner. It is the content's only direct child button — the head's
+   own one sits inside `.forebrain-modal-head` / `.forebrain-drawer-head`. */
+.forebrain-modal > button,
+.forebrain-drawer > button {
+  display: none;
+}
+/* A modal's scrim: the shell draws its own mask (its panel is not a modal for
+   the library, which would trap the page's keyboard — see ForebrainModal.vue),
+   and a drawer still gets the library's overlay. Both are the preview's 32%
+   scrim, on the modal/drawer layer (z-index 50), so a tip (70) stays visible
+   over them. */
+.forebrain-modal-mask,
+[data-slot='sheet-overlay'] {
   position: fixed;
   inset: 0;
   z-index: 50;
-  display: flex;
-  justify-content: flex-end;
-  align-items: stretch;
   background: color-mix(in srgb, var(--forebrain-text) 32%, transparent);
 }
+/* The mask is the shell's own, so it leaves in the same frame as the panel: the
+   library's exit animation would keep the panel fading over an undimmed page. */
+.forebrain-modal[data-state='closed'] {
+  animation: none;
+}
+
+/* The right-hand drawer: its panel against the right edge, over the library's
+   sheet overlay. Same layer as a modal (z-index 50), so a tip (70) stays
+   visible over it. */
 .forebrain-drawer {
   width: 560px;
   max-width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
+  /* The library's SheetContent carries `gap-4`; the drawer's three rows have
+     no gap between them. */
+  gap: 0;
   border-left: 1px solid var(--forebrain-divider);
   background: var(--forebrain-surface);
   box-shadow: -8px 0 24px rgba(16, 24, 40, 0.08);
@@ -1620,11 +1685,59 @@ textarea.forebrain-field {
   padding: 12px 16px;
   border-top: 1px solid var(--forebrain-divider);
 }
-/* A read-only field in a drawer reads as text, not as something to type in. */
+/* A read-only field in a drawer reads as text, not as something to type in.
+   A select trigger is the library's button, which reka marks `data-disabled`
+   rather than `disabled`. */
 .forebrain-drawer .forebrain-field[readonly],
-.forebrain-drawer select.forebrain-field:disabled {
+.forebrain-drawer .forebrain-field[data-disabled] {
   background: var(--forebrain-bg-alt);
   color: var(--forebrain-text-2);
+}
+
+/* The two right-hand panels of the conversation page are resized by the edge
+   they share with it (owner 2026-10-21): the workbench's column and the
+   subagent drawer each carry one 6px strip, out of the flow, so the page's
+   three-column layout and the panels' mutual exclusion are untouched. The
+   width itself is the panel's own inline style — see usePanelWidth.ts. */
+.panel-resizer {
+  position: absolute;
+  inset-block: 0;
+  left: -3px;
+  width: 6px;
+  z-index: 1;
+  cursor: col-resize;
+  /* A 6px strip is a target, not a line: it shows itself only while it is
+     being aimed at. */
+  background: transparent;
+}
+.panel-resizer:hover,
+.panel-resizer:active,
+.panel-resizer:focus-visible,
+.panel-resizing .panel-resizer {
+  background: color-mix(in srgb, var(--forebrain-brand-1) 32%, transparent);
+}
+.panel-resizer:focus-visible {
+  outline: 2px solid var(--forebrain-brand-1);
+  outline-offset: -2px;
+}
+/* While a panel is being dragged the whole page keeps the resize cursor and
+   stops selecting text, so a fast drag does not paint the conversation blue;
+   the class is added and removed by the composable, never as an inline
+   style. */
+.panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+/* Nothing to drag where the panel is not a column: as an overlay it is fixed
+   to the window's edge, and below lg the layout's own width rules. */
+.chat-workbench--overlay .panel-resizer,
+.subagent-drawer--overlay .panel-resizer {
+  display: none;
+}
+@media (max-width: 1023px) {
+  .panel-resizer {
+    display: none;
+  }
 }
 
 /* The one compact tip (about 20px tall): 12px text on #101828, an arrow

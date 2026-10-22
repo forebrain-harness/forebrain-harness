@@ -7,6 +7,8 @@ import tip from '@/directives/tip'
 import { forebrainApi, type CronJobRow, type CronRunRow } from '@/lib/api'
 import { formatMonthDayTime } from '@/lib/time'
 import { setLocale } from '@/locales'
+import { openSelect, selectedText } from '@/test-utils/formControls'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import CronView from './CronView.vue'
 
@@ -65,14 +67,24 @@ async function mountView(): Promise<VueWrapper> {
   })
   const wrapper = mount(CronView, {
     props: { projectId: 'p1' },
-    global: { plugins: [router], stubs: { teleport: true }, directives: { tip } },
+    global: { plugins: [router], stubs: { teleport: InlineTeleport }, directives: { tip } },
   })
   await flushPromises()
   return wrapper
 }
 
 describe('CronView', () => {
-  beforeAll(() => setLocale('zh'))
+  beforeAll(() => {
+    setLocale('zh')
+    // The delivery select measures its viewport with ResizeObserver, which jsdom
+    // does not have; scrolling an item into view is not implemented either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
+  })
 
   beforeEach(() => {
     hideTip()
@@ -177,9 +189,14 @@ describe('CronView', () => {
     expect((wrapper.find('[data-testid="cron-name"]').element as HTMLInputElement).value).toBe('Nightly')
     // The stored expression is shown as it is, never rebuilt from a mode's
     // defaults; the delivery list is the project's enabled channels, by kind.
-    expect((wrapper.find('[data-testid="schedule-mode"]').element as HTMLSelectElement).value).toBe('cron')
+    expect(selectedText(wrapper.find('[data-testid="schedule-mode"]').element as HTMLElement)).toBe('Cron 表达式')
     expect((wrapper.find('[data-testid="schedule-cron"]').element as HTMLInputElement).value).toBe('daily at 11pm')
-    expect(wrapper.findAll('[data-testid="cron-deliver"] option').map((option) => option.attributes('value'))).toEqual(['', 'feishu'])
+    // 只记录，不投递 is the empty string on the wire, which a select item may not
+    // carry; the sentinel stands in for it, and it is still the first choice.
+    const deliver = wrapper.find('[data-testid="cron-deliver"]')
+    await openSelect(deliver.element as HTMLElement)
+    const choices = wrapper.find('[role="listbox"][data-state="open"]')
+    expect(choices.findAll('[role="option"]').map((option) => option.text())).toEqual(['只记录，不投递', 'feishu'])
 
     // The builder's own preview is debounced; let it run while its answer is mocked.
     await new Promise((resolve) => setTimeout(resolve, 450))

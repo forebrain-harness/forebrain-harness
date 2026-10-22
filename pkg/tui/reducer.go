@@ -83,6 +83,13 @@ type Frame struct {
 	StepID               string
 	RunID                string
 	Final                bool
+	// EventID is the stable identity of the run event this frame was built
+	// from, when the event has one (an error event's derived id, for instance).
+	// Empty for everything a surface invents locally, and for transcript rows,
+	// which have no event. It is what lets a card painted live and the same card
+	// painted again by a replay be recognized as one card — see
+	// retainCardOnceLocked.
+	EventID string
 	// AgentID names the subagent this frame belongs to, and is empty for the
 	// conversation's own frames. It is the routing key: a frame that names an
 	// agent is retained in that agent's view, never in the conversation.
@@ -2108,6 +2115,7 @@ func (r *Reducer) buildFrame(kind FrameKind, title string, msg Message) Frame {
 		Duration:        msg.Duration,
 		StreamingOutput: msg.ToolOutputDelta,
 		RetainAsHistory: msg.RetainAsHistory,
+		EventID:         strings.TrimSpace(msg.EventID),
 	}
 	return f
 }
@@ -3781,8 +3789,10 @@ func (r *Renderer) EnableViewportMode() {
 	// Enter alt-screen and clear it. Leaving is handled in DisableViewportMode.
 	_, _ = fmt.Fprint(r.out, "\x1b[?1049h\x1b[2J\x1b[H")
 	// The screen we just cleared is blank, and nothing the painter remembers
-	// from a previous viewport session applies to it.
+	// from a previous viewport session applies to it — including which
+	// event-backed cards had already been drawn on it.
 	r.dropPaintShadowLocked()
+	r.screenCards = nil
 	r.paintViewportLocked()
 }
 
@@ -5234,6 +5244,9 @@ func (r *Renderer) withdrawSubmission(turn *foregroundTurn) {
 // yank the viewport back to the bottom — instead the frame is counted as an
 // unseen message so the floating control can announce it. Caller holds r.mu.
 func (r *Renderer) appendFrameViewportLocked(f Frame) {
+	if !r.retainCardOnceLocked(f) {
+		return
+	}
 	visible := r.activeVMLocked()
 	blocksBefore := len(visible.blocks)
 	repaint := r.retainFrameLocked(f)
@@ -5243,6 +5256,41 @@ func (r *Renderer) appendFrameViewportLocked(f Frame) {
 	if repaint {
 		r.paintViewportLocked()
 	}
+}
+
+// retainCardOnceLocked reports whether this frame may still be painted on the
+// current screen. Caller holds r.mu.
+//
+// Only an error frame carrying an event id participates. Those are the cards
+// whose duplicate is never legitimate — one run event is one card — while every
+// other kind either updates in place (a tool card is replaced by its completed
+// frame) or repeats on purpose (two approvals are two confirmations). A frame
+// with no event id, and every non-error frame, passes untouched.
+//
+// The set is cleared with the screen (ViewportResetSession, EnableViewportMode)
+// and that is the whole point: after a reset the cards on that screen are gone,
+// so a replay has to be able to draw them again. Within one screen, whoever asks
+// first — the live publisher or the replay — paints, and the other request is
+// recognized as the same card.
+//
+// The gate sits before retainFrameLocked, so the frames one RenderFrame call
+// produces are unaffected by each other: a terminal error is still retained in
+// the conversation and mirrored into the visible subagent view, exactly as
+// before. Only a second call for the same event is dropped.
+func (r *Renderer) retainCardOnceLocked(f Frame) bool {
+	id := strings.TrimSpace(f.EventID)
+	if id == "" || f.Kind != FrameError {
+		return true
+	}
+	key := id + "\x00" + strings.TrimSpace(f.AgentID)
+	if _, seen := r.screenCards[key]; seen {
+		return false
+	}
+	if r.screenCards == nil {
+		r.screenCards = make(map[string]struct{})
+	}
+	r.screenCards[key] = struct{}{}
+	return true
 }
 
 // countNewMessageLocked bumps the unseen-message counter when a frame added a
@@ -5864,6 +5912,11 @@ func (r *Renderer) ViewportResize() {
 // ViewportResetSession clears the retained transcript on a session switch and
 // repaints an empty viewport. Caller-facing analogue of the append path's
 // reliance on switchStreamSession to reset the screen.
+//
+// It also ends the current "screen generation": the cards that were painted on
+// the old screen are gone, so the record of what has already been drawn goes
+// with them and a replay may draw those cards again (see
+// retainCardOnceLocked).
 func (r *Renderer) ViewportResetSession() {
 	if r == nil {
 		return
@@ -5874,6 +5927,7 @@ func (r *Renderer) ViewportResetSession() {
 		return
 	}
 	r.vm.reset()
+	r.screenCards = nil
 	r.syncLiveBlockAnimationLocked()
 	r.perAgentVM = nil
 	r.assignActiveViewLocked("")
@@ -5886,6 +5940,25 @@ func (r *Renderer) ViewportResetSession() {
 	r.overlayScrollOffset = 0
 	r.selectClearLocked()
 	r.paintViewportLocked()
+}
+
+// ScreenShowsOnlyBanner reports whether the retained transcript holds nothing
+// but the welcome banner — the state a screen is in immediately after a reset.
+// It is how a caller that would reset again (a replay right after a session
+// switch) avoids a second full repaint of a screen that is already empty.
+func (r *Renderer) ScreenShowsOnlyBanner() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.viewportMode {
+		return false
+	}
+	if len(r.vm.blocks) != 1 {
+		return false
+	}
+	return r.vm.blocks[0].frame.Kind == FrameBannerInfo
 }
 
 func stripAnsi(s string) string {

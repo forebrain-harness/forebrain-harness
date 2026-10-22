@@ -3,15 +3,20 @@
     <span class="forebrain-list-note" data-testid="pager-total">{{ t('list.total', { total }) }}</span>
     <span class="flex-1" />
     <span class="forebrain-pager-size">
-      <select
-        :value="pageSize"
-        :aria-label="t('list.pageSizeAria')"
-        data-testid="pager-size"
-        @change="onPageSizeChange"
-      >
-        <option v-for="size in sizeOptions" :key="size" :value="size">{{ t('list.pageSize', { n: size }) }}</option>
-      </select>
-      <ChevronDown aria-hidden="true" />
+      <Select :model-value="String(pageSize)" @update:model-value="onPageSizeChange">
+        <SelectTrigger
+          class="forebrain-field !h-[26px]"
+          :aria-label="t('list.pageSizeAria')"
+          data-testid="pager-size"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem v-for="size in sizeOptions" :key="size" :value="String(size)">
+            {{ t('list.pageSize', { n: size }) }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
     </span>
     <Pagination
       :page="current"
@@ -59,14 +64,17 @@
  * current one and one neighbour each side with … for the stretches left out —
  * and the two step buttons' disabled states are the component's, not this
  * file's. What is ours is the wording, the 26px look from the design and the
- * page-size select beside it.
+ * page-size select beside it, which is the library's Select like every other
+ * dropdown in the app (plan 096).
  *
  * A single page still renders a pager — the row also says how many items there
  * are — and a page size outside 10/20/50 joins the options rather than leaving
- * a select with no matching entry.
+ * a select with no matching entry. The sizes are numbers and the component's
+ * values are strings, so `String` on the way in and `Number` on the way out —
+ * no sentinel needed, a size is never empty.
  */
 import { computed } from 'vue'
-import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight } from 'lucide-vue-next'
 import {
   Pagination,
   PaginationContent,
@@ -75,6 +83,7 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from '@repo/shadcn-vue/components/ui/pagination'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 
 import { useI18n } from '@/locales'
 
@@ -112,9 +121,9 @@ function go(page: number): void {
   emit('update:page', page)
 }
 
-function onPageSizeChange(event: Event): void {
-  const value = Number((event.target as HTMLSelectElement).value)
-  if (!Number.isFinite(value) || value === props.pageSize) return
-  emit('update:pageSize', value)
+function onPageSizeChange(value: unknown): void {
+  const size = Number(value)
+  if (!Number.isFinite(size) || size === props.pageSize) return
+  emit('update:pageSize', size)
 }
 </script>

@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import tip from '@/directives/tip'
 import { forebrainApi, type PermissionRuleRecord, type ToolMetaRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 import PermissionsView from './PermissionsView.vue'
 
 /**
@@ -30,7 +31,7 @@ function tool(name: string): ToolMetaRecord {
 }
 
 async function mountPage(): Promise<VueWrapper> {
-  const wrapper = mount(PermissionsView, { global: { directives: { tip }, stubs: { teleport: true } } })
+  const wrapper = mount(PermissionsView, { global: { directives: { tip }, stubs: { teleport: InlineTeleport } } })
   mounted.push(wrapper)
   await flushPromises()
   return wrapper

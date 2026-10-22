@@ -1,5 +1,26 @@
 <template>
-  <aside class="chat-workbench" :class="{ 'chat-workbench--overlay': overlay }" data-testid="chat-workbench">
+  <aside
+    class="chat-workbench"
+    :class="{ 'chat-workbench--overlay': overlay }"
+    :style="overlay ? undefined : { width: `${width}px` }"
+    data-testid="chat-workbench"
+  >
+    <!-- The column's width is dragged by the edge it shares with the
+         conversation, and is this session's alone (see usePanelWidth). -->
+    <div
+      class="panel-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      :aria-label="t('common.resizePanel')"
+      tabindex="0"
+      data-testid="chat-workbench-resizer"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerUp"
+      @dblclick="reset"
+      @keydown="onKeydown"
+    />
     <header class="chat-workbench-head">
       <span class="chat-workbench-title">{{ t('chat.workbench') }}</span>
       <button
@@ -116,6 +137,7 @@ import ContextTab from '@/components/workbench/ContextTab.vue'
 import ChangedFilesTab from '@/components/workbench/ChangedFilesTab.vue'
 import OverviewTab from '@/components/workbench/OverviewTab.vue'
 import WorkingDirTab from '@/components/workbench/WorkingDirTab.vue'
+import { usePanelWidth } from '@/composables/usePanelWidth'
 import type { SessionPlan } from '@/composables/useSessionPlans'
 import type { AgentRosterRow, WorkspaceScope } from '@/lib/api'
 import { useI18n, type I18nKey } from '@/locales'
@@ -152,6 +174,21 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+// The column's design width, and how far the window lets it be dragged: 340 is
+// where the four tabs and a card's title fit, and past 55% of the window the
+// conversation would be the one that lost its room (owner 2026-10-21). As an
+// overlay below lg the width is the layout's, not the handle's — main.css hides
+// the handle there and the panel is drawn without an inline width.
+const DESIGN_WIDTH = 340
+const MIN_WIDTH = 280
+const MAX_WIDTH = 720
+
+const { width, onPointerDown, onPointerMove, onPointerUp, onKeydown, reset } = usePanelWidth(
+  'chat-workbench',
+  DESIGN_WIDTH,
+  { min: MIN_WIDTH, max: () => Math.min(MAX_WIDTH, window.innerWidth * 0.55) },
+)
 
 const baseTabs = [
   { key: 'overview', label: 'chat.benchTabOverview' },
@@ -344,11 +381,15 @@ watch(active, (tab) => {
 
 <style scoped>
 .chat-workbench {
+  /* The drag handle is its left edge, so it is positioned against the panel
+     (`.panel-resizer` in main.css). */
+  position: relative;
   display: flex;
   min-height: 0;
   flex-direction: column;
   /* The chat page and the skills workshop are the same column (owner
-     2026-10-18): one width for both. */
+     2026-10-18): one width for both — the design's, until the handle says
+     otherwise for this session. */
   width: 340px;
   flex: none;
   border-left: 1px solid var(--forebrain-divider);

@@ -53,7 +53,8 @@ type ErrorExplanation struct {
 	// provider says which.
 	Plan string
 	// ProviderMessage is the provider's own sentence, already unwrapped from
-	// its JSON envelope and capped in length. Empty when it wrote none.
+	// its JSON envelope, stripped of the gateway prefix and capped in length.
+	// Empty when it wrote none.
 	ProviderMessage string
 	// ResetAt is when a spent allowance returns, zero when unknown.
 	ResetAt time.Time
@@ -82,7 +83,7 @@ func Explain(err error) (ErrorExplanation, bool) {
 		out.Plan = limit.Plan
 		out.ResetAt = limit.ResetAt
 		out.RetryAfter = limit.RetryAfter
-		if text := truncateProse(limit.Message); text != "" {
+		if text := providerSentence(limit.Message); text != "" {
 			out.ProviderMessage = text
 		}
 		return out, true
@@ -139,42 +140,32 @@ func ExplainError(err error) string {
 
 // English renders the explanation as the wording the terminal shows.
 //
-// Every code renders as exactly one sentence. A failed turn interrupts what
-// the reader was doing, so the wording says what happened and how it recovers
-// in a single line and stops there; the advice that used to follow it said
-// nothing the sentence did not already imply. The provider's own sentence,
-// when it is quoted at all, still gets a line of its own -- that is a
-// quotation, not part of the sentence forebrain writes.
+// A provider that wrote a sentence for a person gets that sentence, as it
+// wrote it, with the HTTP status appended: it is the only party that knows
+// what it objected to, so forebrain quotes it rather than paraphrasing it.
+// Only when the provider wrote nothing does forebrain write the sentence
+// itself, and then it states what happened and the status -- one line, no
+// guess at the cause and no advice.
 func (e ErrorExplanation) English() string {
+	if e.ProviderMessage != "" {
+		return e.ProviderMessage + " (" + httpLabel(e.Status) + ")"
+	}
 	switch e.Code {
 	case ExplainRateLimitQuota, ExplainRateLimitThrottle:
 		return e.englishRateLimit()
 	case ExplainContextWindow:
-		return "The conversation no longer fits in the model's context window — start a new session, or compact this one, to continue."
+		return "The conversation no longer fits in the model's context window."
 	case ExplainCredentials:
-		return withDetail(
-			"The provider rejected this request's credentials ("+httpLabel(e.Status)+") — the sign-in may have expired, or the API key may no longer be valid.",
-			e.ProviderMessage)
+		return "The provider rejected this request's credentials (" + httpLabel(e.Status) + ")."
 	case ExplainBilling:
-		return withDetail(
-			"The provider refused the request for billing reasons ("+httpLabel(e.Status)+") — check the account's balance or subscription.",
-			e.ProviderMessage)
+		return "The provider refused the request for billing reasons (" + httpLabel(e.Status) + ")."
 	case ExplainUnknownModel:
-		return withDetail(
-			"The provider does not recognize this agent's model or endpoint ("+httpLabel(e.Status)+") — check the model name and base URL.",
-			e.ProviderMessage)
+		return "The provider does not recognize this agent's model or endpoint (" + httpLabel(e.Status) + ")."
 	case ExplainTimeout:
-		return withDetail(
-			"The provider did not answer in time ("+httpLabel(e.Status)+") — the request can be retried.",
-			e.ProviderMessage)
+		return "The provider did not answer in time (" + httpLabel(e.Status) + ")."
 	case ExplainProviderDown:
-		return withDetail(
-			"The provider is having trouble on its side ("+httpLabel(e.Status)+") — it should be retried in a moment.",
-			e.ProviderMessage)
+		return "The provider is having trouble on its side (" + httpLabel(e.Status) + ")."
 	default:
-		if e.ProviderMessage != "" {
-			return e.ProviderMessage + " (" + httpLabel(e.Status) + ")"
-		}
 		return "The provider rejected the request (" + httpLabel(e.Status) + ")."
 	}
 }
@@ -184,13 +175,9 @@ func (e ErrorExplanation) English() string {
 // "how long do I sit here", the clock time answers "can I come back after
 // lunch".
 //
-// The provider's own sentence is quoted on a line of its own, never spliced
-// into this one: providers write in their own language, and a sentence that
-// starts in English and finishes in Chinese reads as one claim by the runtime
-// rather than as a quotation. It is quoted only for a throttle, where the
-// runtime has nothing more specific to say than the provider did; once the
-// allowance and its reset are known, the sentence states them outright and
-// repeating the original adds nothing.
+// It is reached only when the provider wrote no sentence of its own -- when it
+// did, English shows that sentence instead, and the reset is left to the
+// status line the runtime prints while it waits for the allowance to return.
 func (e ErrorExplanation) englishRateLimit() string {
 	quota := e.Code == ExplainRateLimitQuota
 	sentence := "The provider is rate-limiting this account"
@@ -210,10 +197,7 @@ func (e ErrorExplanation) englishRateLimit() string {
 		sentence += " — no reset time given."
 	}
 
-	if quota {
-		return sentence
-	}
-	return withDetail(sentence, e.ProviderMessage)
+	return sentence
 }
 
 // providerProse recovers the sentence a provider wrote for a human. The
@@ -229,18 +213,29 @@ func providerProse(apiErr *APIError) string {
 		return ""
 	}
 	if !looksLikeJSONDocument(raw) {
-		return truncateProse(raw)
+		return providerSentence(raw)
 	}
 	var fields rateLimitFields
 	collectRateLimitFields([]byte(raw), maxRateLimitPayloadDepth, &fields)
-	return truncateProse(fields.message)
+	return providerSentence(fields.message)
 }
 
-func withDetail(headline, detail string) string {
-	if detail == "" {
-		return headline
+// upstreamFailurePrefix is the hop some gateways name in front of every
+// refusal. It says where the request died, not what was wrong with it, so it
+// comes off before the provider's sentence is shown.
+const upstreamFailurePrefix = "upstream request failed:"
+
+// providerSentence is the sentence a provider wrote, ready to be shown: capped
+// in length, with the gateway's prefix dropped. A body that is nothing but
+// that prefix yields nothing, so the caller falls back to its own sentence
+// rather than showing a fragment.
+func providerSentence(text string) string {
+	text = truncateProse(text)
+	if len(text) >= len(upstreamFailurePrefix) &&
+		strings.EqualFold(text[:len(upstreamFailurePrefix)], upstreamFailurePrefix) {
+		return strings.TrimSpace(text[len(upstreamFailurePrefix):])
 	}
-	return headline + "\nThe provider said: " + detail
+	return text
 }
 
 func httpLabel(status int) string {

@@ -4,10 +4,10 @@
       <b>{{ t('chat.newFolderTitle') }}</b>
       <label class="lb">
         {{ t('chat.newFolderName') }}
-        <input
+        <Input
           ref="input"
           v-model="name"
-          class="field"
+          class="field h-[34px] w-full shadow-none"
           autocomplete="off"
           :aria-label="t('chat.newFolderName')"
           @keydown.enter.prevent="submit"
@@ -26,6 +26,7 @@
 
 <script setup lang="ts">
 import { nextTick, onMounted, ref } from 'vue'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { useI18n } from '@/locales'
 
 /** The small sheet the folder picker opens to make a new folder in place. */
@@ -41,7 +42,9 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const name = ref('')
-const input = ref<HTMLInputElement | null>(null)
+// The library's Input is a component: the template ref is the instance, and
+// the field it draws is the instance's root element.
+const input = ref<{ $el: unknown } | null>(null)
 
 function submit() {
   const trimmed = name.value.trim()
@@ -51,8 +54,9 @@ function submit() {
 
 onMounted(() => {
   void nextTick(() => {
-    input.value?.focus()
-    input.value?.select()
+    const field = input.value?.$el as HTMLInputElement | undefined
+    field?.focus()
+    field?.select()
   })
 })
 </script>

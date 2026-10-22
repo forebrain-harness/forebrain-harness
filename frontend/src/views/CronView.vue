@@ -4,19 +4,19 @@
 
     <ListToolbar>
       <template #left>
-        <input
+        <Input
           v-model="q"
           type="search"
           :placeholder="t('cron.searchPlaceholder')"
-          class="forebrain-field h-[34px]"
+          class="forebrain-field h-[34px] w-auto"
           style="max-width: 240px"
           data-testid="cron-search"
         />
       </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="cron-new" @click="openEditor()">
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" data-testid="cron-new" @click="openEditor()">
           <Plus class="size-3.5" aria-hidden="true" />{{ t('cron.new') }}
-        </button>
+        </Button>
       </template>
     </ListToolbar>
 
@@ -126,7 +126,7 @@
 
       <label class="mt-3 block">
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.namePlaceholder') }}</span>
-        <input v-model="editorName" type="text" class="forebrain-field h-9" data-testid="cron-name" />
+        <Input v-model="editorName" type="text" class="forebrain-field h-9" data-testid="cron-name" />
       </label>
 
       <div class="mt-3">
@@ -135,20 +135,36 @@
 
       <label class="mt-3 block">
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.promptPlaceholder') }}</span>
-        <textarea v-model="editorPrompt" rows="3" class="forebrain-field w-full" data-testid="cron-prompt" />
+        <Textarea v-model="editorPrompt" rows="3" class="forebrain-field min-h-0 w-full" data-testid="cron-prompt" />
       </label>
 
       <div class="mt-3 grid gap-3 sm:grid-cols-2">
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.deliverLabel') }}</span>
-          <select v-model="editorDeliver" class="forebrain-field h-9" data-testid="cron-deliver">
-            <option value="">{{ t('cron.recordOnly') }}</option>
-            <option v-for="channel in enabledChannels" :key="channel" :value="channel">{{ channel }}</option>
-          </select>
-        </label>
+        <!-- The label is its own element rather than a wrapper: the control is
+             the library's Select, a button. 只记录，不投递 is the empty string on
+             the wire, which a SelectItem may not carry: the sentinel stands in
+             for it on both sides. -->
+        <div class="block">
+          <Label for="cron-deliver" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('cron.deliverLabel') }}</Label>
+          <Select :model-value="toChoice(editorDeliver)" @update:model-value="(value) => (editorDeliver = fromChoice(value))">
+            <SelectTrigger id="cron-deliver" class="forebrain-field h-9" data-testid="cron-deliver">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="EMPTY_CHOICE">{{ t('cron.recordOnly') }}</SelectItem>
+              <SelectItem v-for="channel in enabledChannels" :key="channel" :value="channel">{{ channel }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
         <label class="block">
           <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.repeatLimitLabel') }}</span>
-          <input v-model.number="editorRepeatLimit" type="number" min="0" class="forebrain-field h-9" data-testid="cron-repeat-limit" />
+          <Input
+            :model-value="String(editorRepeatLimit)"
+            type="number"
+            min="0"
+            class="forebrain-field h-9"
+            data-testid="cron-repeat-limit"
+            @update:model-value="(value) => (editorRepeatLimit = Number(value) || 0)"
+          />
           <span class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('cron.repeatLimitHint') }}</span>
         </label>
       </div>
@@ -156,16 +172,16 @@
       <p v-if="editorError" class="mt-3 text-[12px] text-[var(--forebrain-danger)]">{{ editorError }}</p>
 
       <div class="mt-4 flex justify-end gap-2">
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeEditor">{{ t('common.cancel') }}</button>
-        <button
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeEditor">{{ t('common.cancel') }}</Button>
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
+          class="forebrain-btn forebrain-btn-primary h-auto text-xs"
           :disabled="saving || !scheduleValid || !editorPrompt.trim()"
           data-testid="cron-save"
           @click="save"
         >
           {{ saving ? t('common.loading') : t('common.save') }}
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -187,6 +203,12 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { History, Pencil, Play, Plus, Trash2 } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
+import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
+
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
@@ -200,6 +222,7 @@ import ScheduleBuilder from '@/components/cron/ScheduleBuilder.vue'
 import { useServerList } from '@/composables/useServerList'
 import { getErrorMessage, forebrainApi, type CronJobRow } from '@/lib/api'
 import { formatProviderError } from '@/lib/providerError'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { formatMonthDayTime } from '@/lib/time'
 import { useI18n } from '@/locales'
 

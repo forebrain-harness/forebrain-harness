@@ -2,13 +2,13 @@
   <div v-if="fields.length" class="mde-props">
     <template v-for="(line, index) in fields" :key="index">
       <span v-if="line.key" class="k">{{ line.key }}</span>
-      <input
+      <Input
         v-if="line.key"
         :class="['field', { mono: line.key === 'name' }]"
-        :value="line.value"
+        :model-value="line.value"
         :aria-label="line.key"
         :disabled="disabled"
-        @input="onInput(index, ($event.target as HTMLInputElement).value)"
+        @update:model-value="(value) => onInput(index, String(value))"
       />
       <span v-else class="k raw">{{ line.raw }}</span>
     </template>
@@ -17,12 +17,17 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 
 /**
  * The YAML front matter of a Markdown file (a SKILL.md's `name`/`description`,
  * say) shown as a row of fields above the WYSIWYG editor, the way the design
  * preview does it — the editor body only ever sees the prose, and the block is
  * stitched back on save.
+ *
+ * Each field is the library's Input (plan 096) keeping this block's own compact
+ * `.field` chrome; the text travels as the component's model rather than as a
+ * `value` attribute, so no re-render rewrites the box behind the user's cursor.
  *
  * Round-trip safety is the point: a line is re-serialised only when the user
  * actually edits it, so opening a file and touching nothing writes back the

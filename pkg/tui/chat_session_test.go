@@ -23452,9 +23452,9 @@ func TestFanoutContentAttributesEveryLineToItsTask(t *testing.T) {
 	}
 }
 
-// A failure can reach the user on more than one line — a provider refusal is
-// one sentence plus the provider's own words quoted beneath it — so the reason
-// a task carries arrives with its own line breaks. The fanout block is
+// A failure can reach the user on more than one line — an error carries its own
+// text, and a turn recorded under the older wording still holds two — so the
+// reason a task carries arrives with its own line breaks. The fanout block is
 // line-oriented — a row's role is read from its leading whitespace and its
 // owner is looked up by line number — so every line has to be its own indented
 // content line. Added as one line, the lines after the first reached the
@@ -23462,7 +23462,7 @@ func TestFanoutContentAttributesEveryLineToItsTask(t *testing.T) {
 // later row's owner by one.
 func TestFanoutErrorKeepsEverySentenceOnItsOwnContinuationLine(t *testing.T) {
 	const failure = "The provider is rate-limiting this account — available again in 1h 3m, at 2026-09-07 15:40 CST.\n" +
-		"The provider said: Number of requests has exceeded your rate limit."
+		"Number of requests has exceeded your rate limit."
 	content, lineAgents, _ := renderFanoutContent(&fanoutState{Tasks: []FanoutTaskState{
 		{
 			Title: "read-only investigation", AgentID: "task-a", Status: "failed",

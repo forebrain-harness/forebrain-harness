@@ -5,6 +5,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import tip from '@/directives/tip'
 import { forebrainApi, type CronJobRow, type CronRunRow } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import CronRunsDialog from './CronRunsDialog.vue'
 
@@ -33,7 +34,7 @@ async function mountDialog(rows: CronRunRow[], total = rows.length): Promise<Vue
   })
   const wrapper = mount(CronRunsDialog, {
     props: { projectId: 'p1', job: job() },
-    global: { plugins: [router], stubs: { teleport: true }, directives: { tip } },
+    global: { plugins: [router], stubs: { teleport: InlineTeleport }, directives: { tip } },
   })
   await flushPromises()
   return wrapper

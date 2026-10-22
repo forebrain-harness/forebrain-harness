@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 import { expect, test, type Page } from '@playwright/test'
 
-import { expectAssistantReply, signIn } from './support'
+import { expectAssistantReply, pickOption, signIn } from './support'
 
 /**
  * The menu bar's primary-agent pages as the design draws them (plan 073): no
@@ -37,6 +37,24 @@ const PAGES = [
   { path: '/permissions', name: 'permissions' },
   { path: '/memories', name: 'memories' },
 ]
+
+/**
+ * The words the tool table gives the runtime's categories. The category filter
+ * is a library select, whose items carry no value in the DOM, so the server's
+ * list is checked by the labels those same categories are drawn with — an
+ * unknown category keeps its own key, exactly as the page draws it.
+ */
+const TOOL_CATEGORY_LABELS: Record<string, string> = {
+  filesystem: '文件',
+  shell: '命令',
+  code: '代码',
+  web: '网络',
+  memory: '记忆',
+  session: '会话',
+  permissions: '权限',
+  skill: '技能',
+  mcp: 'MCP',
+}
 
 test.beforeEach(async ({ page }) => {
   // The pages' copy is the design's Chinese; pinning it keeps the assertions
@@ -240,14 +258,17 @@ test('the tool table filters on the server and opens its inputs in place', async
   expect(categories.length).toBeGreaterThan(0)
 
   await page.goto('/tools', { waitUntil: 'networkidle' })
-  const options = await page.locator('[data-testid="tools-category-filter"] option').evaluateAll((nodes) =>
-    nodes.map((node) => (node as HTMLOptionElement).value),
-  )
+  // The category dropdown is the library's select: its items exist only while
+  // it is open, and the wire value is no longer in the DOM — so the labels are
+  // read off the open listbox and mapped back through the page's own names.
+  await page.click('[data-testid="tools-category-filter"]')
+  const labels = (await page.getByRole('option').allInnerTexts()).map((label) => label.trim())
+  await page.keyboard.press('Escape')
   // The first option is 全部分类; the rest are the server's categories, in order.
-  expect(options.slice(1)).toEqual(categories)
+  expect(labels).toEqual(['全部分类', ...categories.map((name) => TOOL_CATEGORY_LABELS[name.toLowerCase()] ?? name)])
 
   // 只读 is a server filter: every row left is read-only.
-  await page.selectOption('[data-testid="tools-type-filter"]', 'readonly')
+  await pickOption(page, 'tools-type-filter', '只读')
   const rows = page.locator('[data-tool-row]')
   await expect(rows.first()).toBeVisible({ timeout: 15_000 })
   await expect(async () => {
@@ -387,12 +408,14 @@ test('the skill table offers only the layers this page can hold', async ({ page 
   await signIn(page)
 
   await page.goto('/skills', { waitUntil: 'networkidle' })
-  const sources = await page.locator('[data-testid="skills-source-filter"] option').evaluateAll((nodes) =>
-    nodes.map((node) => (node as HTMLOptionElement).value),
-  )
-  // The primary agent's page holds its own layer, the shared one and the
-  // built-ins — never a project's.
-  expect(sources).toEqual(['', 'agent', 'shared', 'builtin'])
+  // The layer filter is the library's select: its items exist only while it is
+  // open, so the offered layers are read off the open listbox. The primary
+  // agent's page holds its own layer, the shared one and the built-ins — never
+  // a project's.
+  await page.click('[data-testid="skills-source-filter"]')
+  const sources = (await page.getByRole('option').allInnerTexts()).map((label) => label.trim())
+  await page.keyboard.press('Escape')
+  expect(sources).toEqual(['全部来源', '主代理', '共享', '内置'])
 
   // 查看 is the eye icon, not a 详情 text button anywhere on the page.
   await expect(page.locator('main')).not.toContainText('详情')

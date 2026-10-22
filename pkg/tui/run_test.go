@@ -2560,6 +2560,18 @@ func TestDispatchStreamSlashInitSubmitsBuiltPrompt(t *testing.T) {
 	}
 }
 
+// TestResetStreamTranscriptPrintsNothingWithoutAViewport keeps piped runs clean:
+// there is no retained transcript to clear, and re-printing the banner into
+// redirected output would be noise.
+func TestResetStreamTranscriptPrintsNothingWithoutAViewport(t *testing.T) {
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	resetStreamTranscript(renderer, &streamState{sessionID: "s1"})
+	if out.Len() != 0 {
+		t.Fatalf("a non-viewport reset wrote %q", out.String())
+	}
+}
+
 func TestActiveRunBangShellExecutesImmediately(t *testing.T) {
 	session := &fakeSession{}
 	state := &streamState{sessionID: "s1", session: session}

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 
 import { expect, test, type Page, type Response } from '@playwright/test'
 
-import { seedProjectSession, shot, signIn } from './support'
+import { pickOption, seedProjectSession, shot, signIn } from './support'
 
 /**
  * The subagent configuration page (plan 079): the menu bar's 子代理 page is the
@@ -251,8 +251,8 @@ test('editing a built-in stores its model, effort and prompt, and the table says
 
     const reload = nextListLoad(page)
     await drawer.locator('[data-testid="subagent-prompt"]').fill(prompt)
-    await drawer.locator('[data-testid="subagent-model"]').selectOption(pinnable.key)
-    await drawer.locator('[data-testid="subagent-effort"]').selectOption(effort)
+    await pickOption(page, 'subagent-model', pinnable.key)
+    await pickOption(page, 'subagent-effort', label)
     await drawer.locator('[data-testid="subagent-save"]').click()
     await reload
     await expect(page.locator('.forebrain-drawer')).toHaveCount(0, { timeout: 20_000 })
@@ -348,17 +348,20 @@ test('a new custom subagent lands first, wearing the tools it was given', async 
     await drawer.locator('[data-testid="subagent-prompt"]').fill('E2E-079 custom prompt')
 
     // 指定工具 asks for a set: the picker lists what the runtime offers, minus
-    // the subagent_* family a subagent may neither call nor dispatch.
-    await drawer.locator('input[name="subagent-tools"][value="pick"]').check()
+    // the subagent_* family a subagent may neither call nor dispatch. A box is
+    // the library's Checkbox — a `role="checkbox"` button with the tool's name
+    // in the label beside it — so the names are read off the labels and the
+    // boxes are clicked in the same order.
+    await drawer.locator('[role="radio"][value="pick"]').click()
     const picker = drawer.locator('[data-testid="subagent-picker"]')
     await expect(picker).toBeVisible()
-    const boxes = picker.locator('input[type="checkbox"]')
+    const boxes = picker.getByRole('checkbox')
     await expect(boxes.first()).toBeVisible({ timeout: 30_000 })
-    const offered = await boxes.evaluateAll((nodes) => nodes.map((node) => (node as HTMLInputElement).value))
+    const offered = await picker.locator('label').evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? '').trim()))
     expect(offered.length).toBeGreaterThan(2)
     expect(offered.some((tool) => tool.startsWith('subagent_'))).toBe(false)
     const picks = offered.slice(0, 2)
-    for (const tool of picks) await picker.locator(`input[type="checkbox"][value="${tool}"]`).check()
+    for (const tool of picks) await boxes.nth(offered.indexOf(tool)).click()
     await expect(drawer.locator('[data-testid="subagent-pick-note"]')).toContainText('已选 2 个')
 
     const reload = nextListLoad(page)
@@ -516,12 +519,17 @@ test('the MCP tables keep the switch first in 操作 and name only the transport
     await page.mouse.move(2, 2)
     await shot(page, 'p079-mcp-action-column')
 
-    // The drawer's options speak the same two words.
+    // The drawer's options speak the same two words. 类型 is a shadcn select, so
+    // the options are only in the DOM while it is open — and picking the
+    // transport the form already holds closes it again rather than leaving the
+    // list over the button the case clicks next.
     await page.click('[data-testid="mcp-add"]')
     const drawer = page.locator('.forebrain-drawer')
     await expect(drawer).toBeVisible()
-    const transports = await drawer.locator('[data-testid="mcp-transport"] option').allInnerTexts()
+    await page.click('[data-testid="mcp-transport"]')
+    const transports = await page.getByRole('option').allInnerTexts()
     expect(transports.map((text) => text.trim())).toEqual(['stdio', 'http'])
+    await page.getByRole('option', { name: 'stdio', exact: true }).click()
     await shot(page, 'p079-mcp-drawer-transport')
     await drawer.locator('[data-testid="mcp-cancel"]').click()
     await expect(page.locator('.forebrain-drawer')).toHaveCount(0)

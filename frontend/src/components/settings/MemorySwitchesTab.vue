@@ -21,24 +21,24 @@
     <p class="forebrain-list-note">{{ t('memories.switchesDescription') }}</p>
 
     <div class="flex flex-wrap items-center gap-2">
-      <button
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="!changed || saving"
         data-testid="memory-switches-save"
         @click="saveSettings"
       >
         {{ saving ? t('common.loading') : t('common.save') }}
-      </button>
-      <button
+      </Button>
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn--danger text-xs"
+        class="forebrain-btn forebrain-btn--danger h-auto bg-transparent text-xs hover:bg-transparent"
         :disabled="resetting"
         data-testid="memory-switches-reset"
         @click="resetMemories"
       >
         {{ resetting ? t('common.loading') : t('memories.reset') }}
-      </button>
+      </Button>
     </div>
   </div>
 </template>
@@ -50,6 +50,7 @@
  * the memory file list.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import SwitchRow from '@/components/common/SwitchRow.vue'
 import forebrainApi, { type MemorySettings } from '@/lib/api'
 import { useI18n } from '@/locales'

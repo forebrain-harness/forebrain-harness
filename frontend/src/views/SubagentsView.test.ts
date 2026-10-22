@@ -4,6 +4,8 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import tip from '@/directives/tip'
 import { forebrainApi, type SubagentConfigRow } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect, pickOption } from '@/test-utils/formControls'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import SubagentsView from './SubagentsView.vue'
 
@@ -99,7 +101,13 @@ function system(overrides: Partial<SubagentConfigRow> = {}): SubagentConfigRow {
 }
 
 async function mountPage(): Promise<VueWrapper> {
-  const wrapper = mount(SubagentsView, { global: { stubs: { teleport: true }, directives: { tip } } })
+  const wrapper = mount(SubagentsView, {
+    // The toolbar's 类型 filter is the library's Select, whose items render
+    // through a portal: attached to the document, the shared helpers reach them
+    // the way a person's clicks would.
+    attachTo: document.body,
+    global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
+  })
   mounted.push(wrapper)
   await flushPromises()
   return wrapper
@@ -142,7 +150,13 @@ describe('SubagentsView', () => {
     expect(wrapper.find('p.forebrain-list-note').text()).toBe(
       '“内置”与“自定义”的子代理启用后由模型按说明派发；“系统”子代理在计划审阅、/goal、自动审批等场合由系统调用，只能查看。保存在 forebrain.yaml，新会话生效。',
     )
-    expect(wrapper.findAll('[data-testid="subagents-kind-filter"] option').map((option) => option.text())).toEqual([
+    // Scoped to the list this trigger opened rather than the document-wide
+    // `optionTexts()`: the pager draws a page-size select too, and both render
+    // their items inline here, so the document holds options of a select
+    // nobody opened.
+    await openSelect(wrapper.find('[data-testid="subagents-kind-filter"]').element as HTMLElement)
+    const list = wrapper.find('[role="listbox"][data-state="open"]')
+    expect(list.findAll('[role="option"]').map((option) => option.text())).toEqual([
       '全部类型',
       '内置',
       '自定义',
@@ -153,7 +167,7 @@ describe('SubagentsView', () => {
   it('narrows the list by kind on the server', async () => {
     const wrapper = await mountPage()
 
-    await wrapper.find('[data-testid="subagents-kind-filter"]').setValue('system')
+    await pickOption(wrapper.find('[data-testid="subagents-kind-filter"]').element as HTMLElement, '系统')
     await flushPromises()
 
     expect(vi.mocked(forebrainApi.subagentConfigPage).mock.calls[1][1]).toMatchObject({ kind: 'system', page: 1 })

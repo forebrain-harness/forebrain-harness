@@ -7,7 +7,7 @@
       <div class="sa-grid2">
         <label class="sa-field">
           <span class="sa-label">{{ t('subagents.fieldName') }}</span>
-          <input
+          <Input
             v-model="form.name"
             class="forebrain-field h-[34px] font-mono"
             :readonly="!creating"
@@ -19,68 +19,97 @@
             {{ t('subagents.nameInvalid') }}
           </span>
         </label>
-        <label class="sa-field">
-          <span class="sa-label">{{ t('subagents.fieldModel') }}</span>
+        <!-- The label is its own element rather than a wrapper: the control is
+             the library's Select, a button, and a button inside a `label` would
+             answer one click with two. -->
+        <div class="sa-field">
+          <Label for="subagent-model" class="sa-label block text-[12px] leading-[normal]">{{ t('subagents.fieldModel') }}</Label>
           <!-- The first entry is this agent's own default — the model a
                conversation runs on until it pins another — and the rest are the
-               entries the agent lists. -->
-          <select
-            v-model="form.model"
-            class="forebrain-field h-[34px]"
-            :disabled="readonly"
-            data-testid="subagent-model"
-            @change="onModelChange"
-          >
-            <option value="">{{ followLabel }}</option>
-            <option v-for="option in modelChoices" :key="modelKey(option)" :value="modelKey(option)">
-              {{ modelKey(option) }}
-            </option>
-          </select>
-        </label>
+               entries the agent lists. Following the primary agent is the empty
+               string on the wire, which a SelectItem may not carry: the sentinel
+               stands in for it on both sides. -->
+          <Select :model-value="toChoice(form.model)" @update:model-value="onModelChange">
+            <SelectTrigger
+              id="subagent-model"
+              class="forebrain-field !h-[34px] w-full"
+              :disabled="readonly"
+              data-testid="subagent-model"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="EMPTY_CHOICE">{{ followLabel }}</SelectItem>
+              <SelectItem v-for="option in modelChoices" :key="modelKey(option)" :value="modelKey(option)">
+                {{ modelKey(option) }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       <div class="sa-grid2">
-        <label class="sa-field">
-          <span class="sa-label">{{ t('subagents.fieldEffort') }}</span>
+        <div class="sa-field">
+          <Label for="subagent-effort" class="sa-label block text-[12px] leading-[normal]">{{ t('subagents.fieldEffort') }}</Label>
           <!-- An effort belongs to the model it was chosen for: while the model
-               follows the primary agent, so does the effort. -->
-          <select
-            v-model="form.reasoningEffort"
-            class="forebrain-field h-[34px]"
-            :disabled="readonly || !canPickEffort"
-            :aria-label="t('subagents.fieldEffort')"
-            v-tip:top="effortTip"
-            data-testid="subagent-effort"
+               follows the primary agent, so does the effort. An empty tier is
+               the empty string on the wire (the provider applies its own), hence
+               the sentinel. -->
+          <Select
+            :model-value="toChoice(form.reasoningEffort)"
+            @update:model-value="(value) => (form.reasoningEffort = fromChoice(value))"
           >
-            <option value="">{{ canPickEffort ? t('subagents.effortFollowModel') : t('subagents.followPrimary') }}</option>
-            <option v-for="effort in effortChoices" :key="effort" :value="effort">{{ effortLevelLabel(effort) }}</option>
-          </select>
-        </label>
-        <label class="sa-field">
-          <span class="sa-label">{{ t('subagents.fieldMode') }}</span>
-          <select
+            <SelectTrigger
+              id="subagent-effort"
+              class="forebrain-field !h-[34px] w-full"
+              :disabled="readonly || !canPickEffort"
+              :aria-label="t('subagents.fieldEffort')"
+              v-tip:top="effortTip"
+              data-testid="subagent-effort"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="EMPTY_CHOICE">{{
+                canPickEffort ? t('subagents.effortFollowModel') : t('subagents.followPrimary')
+              }}</SelectItem>
+              <SelectItem v-for="effort in effortChoices" :key="effort" :value="effort">{{ effortLevelLabel(effort) }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div class="sa-field">
+          <Label for="subagent-mode" class="sa-label block text-[12px] leading-[normal]">{{ t('subagents.fieldMode') }}</Label>
+          <!-- A SelectItem carries a string, and this field is a boolean on the
+               wire: the two words are its two values, converted back on the way
+               in, so the form field stays `true`/`false`. -->
+          <Select
             v-if="custom && !readonly"
-            v-model="form.continuable"
-            class="forebrain-field h-[34px]"
-            data-testid="subagent-mode"
+            :model-value="form.continuable ? 'on' : 'off'"
+            @update:model-value="(value) => (form.continuable = String(value) !== 'off')"
           >
-            <option :value="true">{{ t('subagents.contRun') }}</option>
-            <option :value="false">{{ t('subagents.contOneShot') }}</option>
-          </select>
+            <SelectTrigger id="subagent-mode" class="forebrain-field !h-[34px] w-full" data-testid="subagent-mode">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="on">{{ t('subagents.contRun') }}</SelectItem>
+              <SelectItem value="off">{{ t('subagents.contOneShot') }}</SelectItem>
+            </SelectContent>
+          </Select>
           <!-- A built-in's run mode is its type, not this agent's choice. -->
-          <input
+          <Input
             v-else
+            id="subagent-mode"
             class="forebrain-field h-[34px]"
-            :value="form.continuable ? t('subagents.contRun') : t('subagents.contOneShot')"
+            :model-value="form.continuable ? t('subagents.contRun') : t('subagents.contOneShot')"
             readonly
             data-testid="subagent-mode"
           />
-        </label>
+        </div>
       </div>
 
       <label class="sa-field">
         <span class="sa-label">{{ t('subagents.fieldDescription') }}</span>
-        <input
+        <Input
           v-if="custom"
           v-model="form.description"
           class="forebrain-field h-[34px]"
@@ -91,12 +120,12 @@
         />
         <!-- A built-in's and a system subagent's description is the harness's,
              said in the page's own words. -->
-        <input v-else class="forebrain-field h-[34px]" :value="describedText" readonly data-testid="subagent-description" />
+        <Input v-else class="forebrain-field h-[34px]" :model-value="describedText" readonly data-testid="subagent-description" />
       </label>
 
       <label v-if="kind === 'system'" class="sa-field">
         <span class="sa-label">{{ t('subagents.fieldWhen') }}</span>
-        <input class="forebrain-field h-[34px]" :value="whenText" readonly data-testid="subagent-when" />
+        <Input class="forebrain-field h-[34px]" :model-value="whenText" readonly data-testid="subagent-when" />
       </label>
 
       <template v-if="custom">
@@ -111,7 +140,7 @@
         <!-- The chosen set, once the tier asks for one: every tool the runtime
              offers except subagent_*, which no subagent may dispatch. -->
         <div v-if="form.tools === 'pick'" class="sa-pick" data-testid="subagent-picker">
-          <input
+          <Input
             v-model="toolQuery"
             class="forebrain-field h-[34px] sa-pick-search"
             :placeholder="t('subagents.pickSearch')"
@@ -119,23 +148,24 @@
             data-testid="subagent-pick-search"
           />
           <div class="sa-pick-grid">
-            <label v-for="name in pickableTools" :key="name" class="sa-chk">
-              <input
-                type="checkbox"
-                :checked="form.allowedTools.includes(name)"
+            <div v-for="name in pickableTools" :key="name" class="sa-chk">
+              <Checkbox
+                :id="`subagent-tool-${name}`"
+                :model-value="form.allowedTools.includes(name)"
                 :disabled="readonly"
-                :value="name"
-                @change="toggleTool(name)"
+                @update:model-value="toggleTool(name)"
               />
-              <span class="font-mono">{{ name }}</span>
-            </label>
+              <Label :for="`subagent-tool-${name}`" class="sa-chk-name font-normal text-[12.5px] leading-[normal]">
+                <span class="font-mono">{{ name }}</span>
+              </Label>
+            </div>
           </div>
           <span class="sa-hint" data-testid="subagent-pick-note">{{ t('subagents.pickNote', { n: form.allowedTools.length }) }}</span>
         </div>
       </template>
       <label v-else class="sa-field">
         <span class="sa-label">{{ t('subagents.fieldTools') }}</span>
-        <input class="forebrain-field h-[34px]" :value="fixedToolsText" readonly data-testid="subagent-tools-fixed" />
+        <Input class="forebrain-field h-[34px]" :model-value="fixedToolsText" readonly data-testid="subagent-tools-fixed" />
       </label>
 
       <div class="sa-field">
@@ -156,9 +186,9 @@
         </span>
         <!-- The text that will be injected, word for word: a built-in's own
              prompt, this agent's rewrite of it, or a custom subagent's own. -->
-        <textarea
+        <Textarea
           v-model="form.prompt"
-          class="forebrain-field font-mono sa-prompt"
+          class="forebrain-field min-h-0 font-mono sa-prompt"
           :readonly="readonly"
           :placeholder="custom ? t('subagents.promptPlaceholder') : ''"
           data-testid="subagent-prompt"
@@ -179,19 +209,19 @@
     </div>
 
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="subagent-cancel" @click="requestClose">
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" data-testid="subagent-cancel" @click="requestClose">
         {{ editable ? t('common.cancel') : t('common.close') }}
-      </button>
-      <button
+      </Button>
+      <Button
         v-if="editable"
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="saving || !loaded || (creating && !nameValid)"
         data-testid="subagent-save"
         @click="save"
       >
         {{ saving ? t('mcp.saving') : creating ? t('common.create') : t('common.save') }}
-      </button>
+      </Button>
     </template>
   </ForebrainDrawer>
 </template>
@@ -225,11 +255,18 @@
  */
 import { computed, reactive, ref, watch } from 'vue'
 import { CircleAlert } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Checkbox } from '@repo/shadcn-vue/components/ui/checkbox'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
+import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
 
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'
 import RadioField from '@/components/common/RadioField.vue'
 import { effortLevelLabel } from '@/lib/effortLabel'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import {
   forebrainApi,
   getErrorMessage,
@@ -423,9 +460,9 @@ function toggleTool(name: string) {
 /** An effort is a property of the model chosen beside it: switching to another
  * model drops one it does not take, and following the primary agent drops it
  * too. */
-function onModelChange(event: Event) {
-  const chosen = (event.target as HTMLSelectElement).value
-  const efforts = modelChoices.value.find((option) => modelKey(option) === chosen)?.efforts ?? []
+function onModelChange(choice: unknown) {
+  form.model = fromChoice(choice)
+  const efforts = modelChoices.value.find((option) => modelKey(option) === form.model)?.efforts ?? []
   if (form.reasoningEffort !== '' && !efforts.includes(form.reasoningEffort)) form.reasoningEffort = ''
 }
 
@@ -678,16 +715,17 @@ watch(
   color: var(--forebrain-text);
 }
 
+/* The name is a label of the box beside it, so the room the ellipsis needs is
+   the label's own: the box keeps its library size (16px, plan 096's recorded
+   departure from the prototype's 15px native one). */
+.sa-chk-name {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .sa-chk span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.sa-chk input {
-  width: 15px;
-  height: 15px;
-  flex: none;
-  accent-color: var(--forebrain-brand-1);
 }
 </style>

@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 import { expect, test, type Page } from '@playwright/test'
 
-import { expectAssistantReply, signIn } from './support'
+import { expectAssistantReply, pickOption, signIn } from './support'
 
 /**
  * Every fire of a scheduled job is a conversation of its own: the record it
@@ -20,6 +20,15 @@ import { expectAssistantReply, signIn } from './support'
 
 /** The fake provider answers in seconds; a real model needs its own budget. */
 const settleTimeout = process.env.E2E_REAL_LLM === '1' ? 150_000 : 30_000
+
+/**
+ * A job is created through the builder, whose selects are the library's: an
+ * option is picked by its visible label, so the run is pinned to the language
+ * those labels are written in — the browser's own would otherwise decide.
+ */
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('forebrain-locale', 'zh'))
+})
 
 /**
  * Register (or reuse) the project every job in this spec belongs to, and return
@@ -47,9 +56,9 @@ async function createOnceJob(page: Page, projectId: string, name: string, prompt
   await expect(page.locator('[data-testid="cron-editor"]')).toBeVisible()
   await page.fill('[data-testid="cron-name"]', name)
   await page.fill('[data-testid="cron-prompt"]', prompt)
-  await page.selectOption('[data-testid="schedule-mode"]', 'once-in')
+  await pickOption(page, 'schedule-mode', '一次 · 多久之后')
   await page.fill('[data-testid="schedule-in-count"]', '30')
-  await page.selectOption('[data-testid="schedule-in-unit"]', 'm')
+  await pickOption(page, 'schedule-in-unit', '分钟')
   await page.click('[data-testid="cron-save"]')
   await expect(page.locator(`[data-cron-job="${name}"]`)).toBeVisible({ timeout: 15_000 })
 }

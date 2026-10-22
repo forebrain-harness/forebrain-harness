@@ -40,9 +40,9 @@
     <span class="wd-hint font-mono">{{ newDir ? `${newDir}/` : t('chat.benchTabTree') + ' /' }}</span>
     <label class="wd-field">
       <span class="wd-label">{{ t('chat.treeNewName') }}</span>
-      <input
+      <Input
         v-model="newName"
-        class="forebrain-field font-mono"
+        class="forebrain-field h-auto font-mono"
         :placeholder="t('chat.treeNewPlaceholder')"
         autocomplete="off"
         data-testid="tree-new-name"
@@ -51,16 +51,16 @@
     </label>
     <p v-if="newError" class="wd-error">{{ newError }}</p>
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeNew">{{ t('common.cancel') }}</button>
-      <button
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeNew">{{ t('common.cancel') }}</Button>
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="busy || !newName.trim()"
         data-testid="tree-new-create"
         @click="createFile"
       >
         {{ t('chat.treeNewCreate') }}
-      </button>
+      </Button>
     </template>
   </ForebrainModal>
 
@@ -69,20 +69,20 @@
     <span class="wd-hint font-mono">{{ renameTarget?.path }}/</span>
     <label class="wd-field">
       <span class="wd-label">{{ t('chat.treeRenameName') }}</span>
-      <input v-model="renameName" class="forebrain-field font-mono" autocomplete="off" data-testid="tree-rename-name" />
+      <Input v-model="renameName" class="forebrain-field h-auto font-mono" autocomplete="off" data-testid="tree-rename-name" />
     </label>
     <p v-if="renameError" class="wd-error">{{ renameError }}</p>
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeRename">{{ t('common.cancel') }}</button>
-      <button
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeRename">{{ t('common.cancel') }}</Button>
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="busy || !renameName.trim()"
         data-testid="tree-rename-save"
         @click="saveRename"
       >
         {{ t('chat.treeRenameSave') }}
-      </button>
+      </Button>
     </template>
   </ForebrainModal>
 
@@ -113,6 +113,8 @@
 import { computed, ref, toRef } from 'vue'
 import { FilePlus, FolderTree, RotateCw } from 'lucide-vue-next'
 
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import WorkspaceTree, { type WorkspaceNodeHandle } from '@/components/chat/WorkspaceTree.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'

@@ -2,40 +2,50 @@
   <div class="pb-6">
     <ListToolbar>
       <template #left>
-        <input
+        <Input
           v-model="q"
           type="search"
           :placeholder="t('skills.searchPlaceholder')"
-          class="forebrain-field h-[34px]"
+          class="forebrain-field h-[34px] w-auto"
           style="max-width: 240px"
           data-testid="shared-skills-search"
         />
-        <select v-model="origin" class="forebrain-field h-[34px]" style="width: 110px" :aria-label="t('skills.colSource')" data-testid="shared-skills-source-filter">
-          <option value="shared,builtin">{{ t('skills.sourceAll') }}</option>
-          <option value="shared">{{ t('skills.originShared') }}</option>
-          <option value="builtin">{{ t('skills.originBuiltin') }}</option>
-        </select>
+        <Select :model-value="origin" @update:model-value="pickOrigin">
+          <SelectTrigger
+            class="forebrain-field !h-[34px]"
+            style="width: 110px"
+            :aria-label="t('skills.colSource')"
+            data-testid="shared-skills-source-filter"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="shared,builtin">{{ t('skills.sourceAll') }}</SelectItem>
+            <SelectItem value="shared">{{ t('skills.originShared') }}</SelectItem>
+            <SelectItem value="builtin">{{ t('skills.originBuiltin') }}</SelectItem>
+          </SelectContent>
+        </Select>
       </template>
       <template #actions>
         <span v-if="selected.size" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.selectedCount', { count: selected.size }) }}</span>
-        <button
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs"
+          class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs"
           :disabled="!selected.size || downloading"
           data-testid="shared-skills-batch-download"
           @click="batchDownload"
         >
           <Download class="size-3.5" aria-hidden="true" />{{ t('skills.batchDownload') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="shared-skills-online-install" @click="onlineOpen = true">
+        </Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" data-testid="shared-skills-online-install" @click="onlineOpen = true">
           <Globe class="size-3.5" aria-hidden="true" />{{ t('skills.onlineInstall') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" data-testid="shared-skills-offline-install" @click="offlineOpen = true">
+        </Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" data-testid="shared-skills-offline-install" @click="offlineOpen = true">
           <Upload class="size-3.5" aria-hidden="true" />{{ t('skills.offlineInstall') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+        </Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" @click="refresh">
           <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-        </button>
+        </Button>
       </template>
     </ListToolbar>
     <p class="mt-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.sharedDescription') }}</p>
@@ -76,10 +86,10 @@
         <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('skills.deleteTitle', { name: confirmDelete.name }) }}</div>
         <p class="mt-2 text-[12px] text-[var(--forebrain-text-2)]">{{ t('skills.deleteHint') }}</p>
         <div class="mt-4 flex justify-end gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="confirmDelete = null">{{ t('common.cancel') }}</button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving" @click="doDelete">
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="confirmDelete = null">{{ t('common.cancel') }}</Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="saving" @click="doDelete">
             {{ saving ? t('common.loading') : t('common.delete') }}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -90,6 +100,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Download, Globe, RotateCw, Upload } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import TablePager from '@/components/common/TablePager.vue'
@@ -142,6 +155,11 @@ const origin = computed({
     filters.value = { ...filters.value, origin: value }
   },
 })
+
+/** The layer the reader picked; the three the library select offers are words, the wire values. */
+function pickOrigin(value: unknown): void {
+  origin.value = String(value ?? '')
+}
 
 const saving = ref(false)
 const downloading = ref(false)

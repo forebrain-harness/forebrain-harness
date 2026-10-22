@@ -90,11 +90,11 @@ export function parseProviderErrorDetail(raw: unknown): ProviderErrorDetail | nu
  * an approval being the one this build codes — and those codes are written
  * here the same way, so every failed turn says its one sentence.
  *
- * Every code renders as exactly one sentence. A failed turn interrupts what the
- * reader was doing, so the wording says what happened and how it recovers in a
- * single line and stops there. The provider's own words, when they are quoted
- * at all, still get a line of their own -- that is a quotation, not part of the
- * sentence forebrain writes.
+ * A provider that wrote a sentence gets that sentence, as it wrote it, with
+ * the HTTP status appended: it is the only party that knows what it objected
+ * to. Only when the provider wrote nothing does the sentence come from this
+ * file, and then it states what happened and the status -- one line, no guess
+ * at the cause and no advice.
  *
  * It returns null for a code this build does not know, which is how a frontend
  * older than its gateway stays correct: the caller falls back to the sentence
@@ -107,9 +107,15 @@ export function formatProviderError(
 ): string | null {
   const tr: Translate = (key, params) => tIn(locale, key, params)
   if (detail.code === 'rate_limit_quota' || detail.code === 'rate_limit_throttle') {
+    if (detail.providerMessage) {
+      return withStatus(detail.providerMessage, detail, tr)
+    }
     return formatRateLimit(detail, tr, locale, now)
   }
   if (detail.code === 'context_window') {
+    if (detail.providerMessage) {
+      return withStatus(detail.providerMessage, detail, tr)
+    }
     return tr('providerError.contextWindow')
   }
   if (detail.code === 'session_awaiting_approval_elsewhere') {
@@ -135,11 +141,7 @@ export function formatProviderError(
   }
   const headline = HEADLINE_KEYS[detail.code]
   if (headline) {
-    const lines = [withStatus(tr(headline), detail, tr)]
-    if (detail.providerMessage) {
-      lines.push(tr('providerError.said', { message: detail.providerMessage }))
-    }
-    return lines.join('\n')
+    return withStatus(detail.providerMessage || tr(headline), detail, tr)
   }
   if (detail.code === 'rejected') {
     return withStatus(detail.providerMessage || tr('providerError.rejected'), detail, tr)
@@ -157,6 +159,10 @@ export function formatProviderError(
  * The subject and the clause are separate keys because the two languages join
  * them differently; the joining key owns the punctuation, so neither half has
  * to guess where it sits in the sentence.
+ *
+ * It is reached only when the provider wrote no sentence of its own; when it
+ * did, that sentence is what the reader gets, and the reset is left to the
+ * status line the runtime prints while it waits for the allowance to return.
  */
 function formatRateLimit(
   detail: ProviderErrorDetail,
@@ -190,15 +196,7 @@ function formatRateLimit(
     reset = tr('providerError.resetUnknown')
   }
 
-  const sentence = tr('providerError.sentence', { subject, reset })
-  // The provider's own sentence is quoted on a line of its own rather than
-  // spliced into that one: it is written in the provider's language, not the
-  // viewer's, and a sentence that changes language halfway reads as one claim
-  // by forebrain instead of as a quotation. It is quoted only for a throttle --
-  // once the allowance and its reset are known, the sentence above states them
-  // outright and repeating the original adds nothing.
-  if (quota || !detail.providerMessage) return sentence
-  return sentence + '\n' + tr('providerError.said', { message: detail.providerMessage })
+  return tr('providerError.sentence', { subject, reset })
 }
 
 function withStatus(text: string, detail: ProviderErrorDetail, tr: Translate): string {

@@ -31,10 +31,13 @@
           </div>
           <form class="lp-form" novalidate @submit.prevent="submit">
             <label class="lp-label" for="gateway-token">{{ t('login.tokenLabel') }}</label>
-            <input
+            <!-- The field's whole look is this page's own `.lp-input` (it carries
+                 its own tokens, outside the shell's design classes); `shadow-none`
+                 drops the shadow the library ships, which the page never had. -->
+            <Input
               id="gateway-token"
               v-model="token"
-              class="lp-input"
+              class="lp-input shadow-none"
               type="password"
               autocomplete="off"
               spellcheck="false"
@@ -70,6 +73,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import {
   markGatewaySessionOk,
   probeGatewaySession,

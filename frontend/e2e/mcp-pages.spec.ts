@@ -2,7 +2,7 @@ import { join } from 'node:path'
 
 import { expect, test, type Page } from '@playwright/test'
 
-import { seedProject, signIn } from './support'
+import { pickOption, seedProject, signIn } from './support'
 
 /**
  * MCP on the web surface (plan 074): three pages, one table. 设置 · MCP lists
@@ -382,7 +382,9 @@ test('a connection test against a dead address says the failure in its own words
     const drawer = page.locator('.forebrain-drawer')
     await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('添加 MCP 服务 · 项目')
     await drawer.locator('[data-testid="mcp-name"]').fill('e2e-dead')
-    await drawer.locator('[data-testid="mcp-transport"]').selectOption('streamable_http')
+    // 类型 is a shadcn select now, so the option is picked rather than
+    // selected: the visible label is what the trigger shows.
+    await pickOption(page, 'mcp-transport', 'http')
     // Port 1 answers nothing: the attempt is refused instead of hanging.
     await drawer.locator('[data-testid="mcp-target"]').fill('http://127.0.0.1:1/mcp')
     await drawer.locator('[data-testid="mcp-test-run"]').click()

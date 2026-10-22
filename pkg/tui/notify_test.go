@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"path/filepath"
@@ -352,6 +353,183 @@ func TestCancelledServerStartupIsNotAFailure(t *testing.T) {
 	if len(renderer.vm.blocks) != 0 {
 		t.Fatalf("a payload with no text drew %d blocks", len(renderer.vm.blocks))
 	}
+}
+
+// TestMCPFailureBelongsToTheConversationThatSawItsGenerationStart pins the
+// attribution rule: a generation belongs to the Runner, so the conversation that
+// saw it start owns its failures, and a conversation the user switches to
+// afterwards records nothing — while still seeing the state on the status line.
+// Without it a session switch replayed the standing failure into the new
+// conversation's log and painted it there, which is how one failure became two
+// cards under a resumed transcript.
+func TestMCPFailureBelongsToTheConversationThatSawItsGenerationStart(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+	runs := &state.RunStore{DB: db}
+	sessions := state.NewSessionStore(db, "main")
+	session := sessionEnv{Home: home, SQL: db, SessStore: sessions, RunSvc: runs}.session()
+	require.NoError(t, sessions.Ensure(ctx, "a", "a"))
+	require.NoError(t, sessions.Ensure(ctx, "b", "b"))
+
+	var shown []NewMessageMsg
+	session.PrependUINotify(func(m any) {
+		if msg, ok := m.(NewMessageMsg); ok && msg.Msg.Kind == MsgKindError {
+			shown = append(shown, msg)
+		}
+	})
+
+	failed := run.MCPSnapshot{
+		Generation: "gen-1",
+		Servers:    []mcp.ServerRecord{mcpFailureRecord("docs", "connection refused")},
+	}
+	// The conversation that saw the generation start owns it.
+	session.claimMCPGenerationOwner("a", "gen-1")
+	session.recordMCPStartupFailures("a", failed)
+	require.Eventually(t, func() bool {
+		page, listErr := runs.ListSessionEvents(ctx, "a", 0, 0, 50)
+		return listErr == nil && len(page.Events) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	// Switching away and being told the same standing failure records nothing:
+	// the fact belongs to "a", and "b"'s history may not claim it.
+	session.recordMCPStartupFailures("b", failed)
+	waitForQueuedNotifications(t, session)
+	foreign, err := runs.ListSessionEvents(ctx, "b", 0, 0, 50)
+	require.NoError(t, err)
+	require.Empty(t, foreign.Events, "a standing failure belongs to the conversation that saw it start")
+	require.Len(t, shown, 1, "the card is painted for its owner only")
+	require.Equal(t, "mcp docs", shown[0].Msg.Title)
+}
+
+// TestNewMCPGenerationBelongsToWhoeverSeesItStart covers the other half: a new
+// generation is a new fact about the Runner, so the conversation open when it
+// starts owns it, and the earlier generation's owner keeps what it already has.
+func TestNewMCPGenerationBelongsToWhoeverSeesItStart(t *testing.T) {
+	session := sessionEnv{Home: t.TempDir()}.session()
+	require.Equal(t, "a", session.claimMCPGenerationOwner("a", "gen-1"))
+	require.Equal(t, "b", session.claimMCPGenerationOwner("b", "gen-2"))
+	// A late delivery of the older generation does not take ownership back.
+	require.Equal(t, "a", session.claimMCPGenerationOwner("b", "gen-1"))
+}
+
+// TestOneErrorCardPerScreenWhenLiveAndReplayBothDrawIt pins the drawing rule: one
+// error event is one card per screen, whichever path asks for it first, and a
+// reset screen may draw it again (a replay must be able to rebuild the history
+// it owns).
+func TestOneErrorCardPerScreenWhenLiveAndReplayBothDrawIt(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	evt := event.RunEvent{
+		ID:       mcpFailureEventID("docs", "connection refused"),
+		Sequence: 1,
+		Type:     event.RunEventTurnError,
+		Payload:  json.RawMessage(`{"error":"connection refused","title":"mcp docs","source":"mcp"}`),
+	}
+
+	// The live path paints first.
+	renderer.RenderFrame(Frame{Kind: FrameError, Title: "mcp docs", Content: "connection refused", EventID: evt.ID, Final: true})
+	require.Len(t, renderer.vm.blocks, 1)
+
+	// The replay of the same event draws nothing more.
+	require.Equal(t, 1, replayTimelineWithWorkers(renderer, nil, []event.RunEvent{evt}, &Reducer{}, nil, nil))
+	require.Len(t, renderer.vm.blocks, 1, "the same card was painted twice on one screen")
+	require.Equal(t, "connection refused", renderer.vm.blocks[0].frame.Content)
+
+	// A fresh screen must be able to show it again, or a resumed conversation
+	// would lose the failures in its history.
+	renderer.ViewportResetSession()
+	require.Equal(t, 1, replayTimelineWithWorkers(renderer, nil, []event.RunEvent{evt}, &Reducer{}, nil, nil))
+	require.Len(t, renderer.vm.blocks, 1)
+	require.Equal(t, evt.ID, renderer.vm.blocks[0].frame.EventID)
+}
+
+// TestReplayStampsItsCardsWithTheEventIdentity guards the seam itself: every
+// card a replay rebuilds from an event carries that event's id, which is what
+// makes the live copy and the replayed copy recognizable as one card.
+func TestReplayStampsItsCardsWithTheEventIdentity(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	evt := event.RunEvent{
+		ID:       mcpFailureEventID("docs", "spawn npx: executable file not found in $PATH"),
+		Sequence: 1,
+		Type:     event.RunEventTurnError,
+		Payload:  json.RawMessage(`{"error":"spawn npx: executable file not found in $PATH","title":"mcp docs","source":"mcp"}`),
+	}
+	require.Equal(t, 1, replayTimelineWithWorkers(renderer, nil, []event.RunEvent{evt}, &Reducer{}, nil, nil))
+	require.Len(t, renderer.vm.blocks, 1)
+	require.Equal(t, evt.ID, renderer.vm.blocks[0].frame.EventID)
+}
+
+// TestReplayReplacesTheScreenInsteadOfAppendingToIt pins the replay contract:
+// what a replay draws is the whole screen, not an addition to it. /resume only
+// looked right because switchStreamSession cleared the screen first; /rewind has
+// no such caller, so it pasted the whole transcript on top of the one already
+// there.
+func TestReplayReplacesTheScreenInsteadOfAppendingToIt(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	runs := &state.RunStore{DB: db}
+	session := sessionEnv{Home: home, SQL: db, SessStore: sessions, RunSvc: runs}.session()
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	_, err = sessions.Append(ctx, "s1", "assistant", "an answer stored before the rewind")
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	renderer.viewportMode = true
+	renderer.RenderFrame(Frame{Kind: FrameTool, Title: "read_file", Content: "stale screen content", Final: true})
+
+	cmds := newCommandController(session, renderer, &stubSelector{}, nil, "")
+	resets := 0
+	cmds.resetScreen = func() {
+		resets++
+		renderer.ViewportResetSession()
+	}
+	cmds.replaySession("s1", nil)
+	require.Equal(t, 1, resets, "a replay must take over the screen")
+
+	for _, block := range renderer.vm.blocks {
+		require.NotContains(t, block.frame.Content, "stale screen content",
+			"the replay appended to the old screen instead of replacing it")
+	}
+	replayed := false
+	for _, block := range renderer.vm.blocks {
+		if strings.Contains(block.frame.Content, "an answer stored before the rewind") {
+			replayed = true
+		}
+	}
+	require.True(t, replayed, "the replay did not draw the stored conversation: %+v", renderer.vm.blocks)
+
+	// A second replay of the same session (the /rewind shape) must not double it.
+	before := len(renderer.vm.blocks)
+	cmds.replaySession("s1", nil)
+	require.Equal(t, before, len(renderer.vm.blocks), "a second replay appended a second copy")
+}
+
+// TestReplayToleratesAnUnwiredReset pins the non-terminal path: a controller
+// assembled without a screen to reset (tests, embeds) must still replay.
+func TestReplayToleratesAnUnwiredReset(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	session := sessionEnv{Home: home, SQL: db, SessStore: sessions, RunSvc: &state.RunStore{DB: db}}.session()
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	_, err = sessions.Append(ctx, "s1", "assistant", "an answer")
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	cmds := newCommandController(session, NewRenderer(&out, &out), &stubSelector{}, nil, "")
+	cmds.replaySession("s1", nil)
 }
 
 // TestMCPStartupStatusLineNamesTheServersAndOnlyPromisesWhatEscapeCanDo pins the

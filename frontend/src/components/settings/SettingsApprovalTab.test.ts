@@ -40,9 +40,9 @@ describe('SettingsApprovalTab', () => {
     const group = wrapper.find('[data-testid="approval-default"]')
     expect(group.attributes('role')).toBe('radiogroup')
     expect(group.find('.forebrain-radios').classes()).toContain('is-vertical')
-    const radios = group.findAll('input[type="radio"]')
+    const radios = group.findAll('[role="radio"]')
     expect(radios).toHaveLength(3)
-    expect(radios.map((radio) => (radio.element as HTMLInputElement).checked)).toEqual([false, true, false])
+    expect(radios.map((radio) => radio.attributes('aria-checked'))).toEqual(['false', 'true', 'false'])
 
     const labels = group.findAll('.forebrain-radio-desc b').map((label) => label.text())
     expect(labels).toEqual(['只读 · Read Only', '默认 · Default', '完全访问 · Full Access'])
@@ -62,13 +62,13 @@ describe('SettingsApprovalTab', () => {
     const wrapper = await mountTab()
     expect(saveButton(wrapper).attributes('disabled')).toBeDefined()
 
-    await wrapper.findAll('input[type="radio"]')[2].setValue(true)
+    await wrapper.findAll('[role="radio"]')[2].trigger('click')
     expect(saveButton(wrapper).attributes('disabled')).toBeUndefined()
   })
 
   it('saves the chosen preset and stays saved', async () => {
     const wrapper = await mountTab()
-    await wrapper.findAll('input[type="radio"]')[2].setValue(true)
+    await wrapper.findAll('[role="radio"]')[2].trigger('click')
     await saveButton(wrapper).trigger('click')
     await flushPromises()
 
@@ -81,6 +81,6 @@ describe('SettingsApprovalTab', () => {
     vi.mocked(forebrainApi.approvalDefault).mockResolvedValue({ current: null })
     const wrapper = await mountTab()
     expect(wrapper.text()).toContain('matches no preset')
-    expect(wrapper.findAll('input[type="radio"]').some((radio) => (radio.element as HTMLInputElement).checked)).toBe(false)
+    expect(wrapper.findAll('[role="radio"]').some((radio) => radio.attributes('aria-checked') === 'true')).toBe(false)
   })
 })

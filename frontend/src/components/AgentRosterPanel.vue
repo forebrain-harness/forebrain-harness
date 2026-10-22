@@ -5,14 +5,14 @@
         <div class="truncate text-sm font-semibold text-[var(--forebrain-text)]">{{ title }}</div>
         <div class="text-[11px] text-[var(--forebrain-muted-text)]">{{ agentCountLabel }}</div>
       </div>
-      <button
+      <Button
         v-if="hasRunningRows"
         class="forebrain-btn forebrain-btn-ghost h-8 shrink-0 px-2 text-xs"
         type="button"
         @click="$emit('cancel-all')"
       >
         {{ t('agents.stopAll') }}
-      </button>
+      </Button>
     </div>
     <div v-if="loading" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-3 py-5 text-center text-xs text-[var(--forebrain-muted-text)]">
       {{ t('common.loading') }}
@@ -55,14 +55,14 @@
         </button>
         <div class="mt-2 flex items-center justify-between gap-2 text-[11px] text-[var(--forebrain-muted-text)]">
           <span class="min-w-0 truncate">{{ metricsLabel(row) }}</span>
-          <button
+          <Button
             v-if="isRunning(row)"
             class="forebrain-btn forebrain-btn-ghost h-7 shrink-0 px-2 text-xs"
             type="button"
             @click="$emit('cancel', row)"
           >
             {{ t('agents.stop') }}
-          </button>
+          </Button>
         </div>
       </li>
     </ul>
@@ -71,6 +71,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import type { AgentRosterRow } from '@/lib/api'
 import { useI18n } from '@/locales'
 

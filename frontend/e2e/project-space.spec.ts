@@ -69,14 +69,14 @@ test('project settings persist scope and resource access', async ({ page }) => {
   // Only-this-project memory: the scope is a radio group in the settings form
   // now, and reading outside the project is one of its switches (plan 075).
   const scope = page.locator('[role="radiogroup"]')
-  const projectOnly = scope.locator('label', { hasText: /仅本项目|This project only/ }).locator('input')
-  await projectOnly.check()
+  const projectOnly = scope.locator('[role="radio"][value="project_only"]')
+  await projectOnly.click()
   const outside = page.getByRole('switch', { name: /项目目录之外|outside the project directory/i })
   await expect(outside).toHaveAttribute('aria-checked', 'true')
   await outside.click()
   await page.click('[data-testid="project-settings-save"]')
   await page.reload({ waitUntil: 'networkidle' })
-  await expect(projectOnly).toBeChecked()
+  await expect(projectOnly).toHaveAttribute('aria-checked', 'true')
   await expect(outside).toHaveAttribute('aria-checked', 'false')
 })
 

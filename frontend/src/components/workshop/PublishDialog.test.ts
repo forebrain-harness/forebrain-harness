@@ -4,6 +4,7 @@ import { mount } from '@vue/test-utils'
 import PublishDialog from './PublishDialog.vue'
 import { forebrainApi } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 
 setLocale('zh')
 
@@ -28,7 +29,7 @@ describe('PublishDialog', () => {
   it('names the next version, lists the changes and states the session rule', async () => {
     const wrapper = mount(PublishDialog, {
       props: { open: true, skillName: 'gateway-ops', currentVersion: 3 },
-      global: { stubs: { Teleport: true } },
+      global: { stubs: { Teleport: InlineTeleport } },
     })
     await flush()
     expect(wrapper.text()).toContain('发布 gateway-ops v4')
@@ -42,7 +43,7 @@ describe('PublishDialog', () => {
   it('says the first publish enables the skill for new sessions', async () => {
     const wrapper = mount(PublishDialog, {
       props: { open: true, skillName: 'gateway-5xx', currentVersion: 0 },
-      global: { stubs: { Teleport: true } },
+      global: { stubs: { Teleport: InlineTeleport } },
     })
     await flush()
     expect(wrapper.text()).toContain('发布 gateway-5xx v1')

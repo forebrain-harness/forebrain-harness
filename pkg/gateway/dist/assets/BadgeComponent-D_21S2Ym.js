@@ -1,0 +1,1 @@
+import{d as t,o as n,q as r,s as p,Q as c,e as d,ax as l}from"./index-B-mWx8QG.js";const f=t({__name:"BadgeComponent",props:{variant:{default:"default"}},setup(a){const e=a,o=d(()=>`forebrain-badge--${e.variant}`);return(s,i)=>(n(),r("span",{class:p(["forebrain-badge",o.value])},[c(s.$slots,"default",{},void 0,!0)],2))}}),u=l(f,[["__scopeId","data-v-bb153f7f"]]);export{u as B};

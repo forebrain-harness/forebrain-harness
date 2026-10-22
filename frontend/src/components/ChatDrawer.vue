@@ -26,12 +26,13 @@
         {{ t('chatDrawer.newChat') }}
       </button>
 
-      <!-- The search is a field with its mark (prototype .d-search, :668). -->
+      <!-- The search is a field with its mark (prototype .d-search, :668). The
+           row draws the box, so the field inside it keeps only its text. -->
       <label class="chat-drawer-search">
         <Search class="chat-drawer-search-icon" aria-hidden="true" />
-        <input
+        <Input
           v-model="query"
-          class="chat-drawer-search-input"
+          class="chat-drawer-search-input h-auto w-auto px-0 py-0 shadow-none"
           type="search"
           :placeholder="t('chatDrawer.searchPlaceholder')"
           :aria-label="t('chatDrawer.searchPlaceholder')"
@@ -91,6 +92,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 import { Activity, Plus, Search, X } from 'lucide-vue-next'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { useChatSessions } from '@/composables/useChatSessions'
 import { useHeartbeats } from '@/composables/useHeartbeats'
 import { useI18n } from '@/locales'

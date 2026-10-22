@@ -101,6 +101,16 @@ export async function seedProject(page: Page, name = 'e2e-proj'): Promise<string
   return String(((await res.json()) as { id: string }).id)
 }
 
+/**
+ * A shadcn-vue select (reka-ui): click the trigger, click the item. There is no
+ * native `<select>` for Playwright's selectOption to drive, and the item opens
+ * on the trigger's own click, so a person's two clicks are the whole protocol.
+ */
+export async function pickOption(page: Page, testid: string, label: string): Promise<void> {
+  await page.click(`[data-testid="${testid}"]`)
+  await page.getByRole('option', { name: label, exact: true }).click()
+}
+
 /** Sign the page in with E2E_TOKEN through the one-click sign-in link. */
 export async function signIn(page: Page): Promise<void> {
   const token = process.env.E2E_TOKEN

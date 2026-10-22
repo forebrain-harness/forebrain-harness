@@ -5,6 +5,7 @@ import { hideTip, useTooltipState } from '@/composables/useTooltip'
 import tip from '@/directives/tip'
 import { forebrainApi, type ProjectChannelRow } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import ProjectChannels from './ProjectChannels.vue'
 
@@ -51,7 +52,7 @@ async function mountTab(): Promise<VueWrapper> {
   })
   const wrapper = mount(ProjectChannels, {
     props: { project: {}, projectId: 'p1' },
-    global: { stubs: { teleport: true }, directives: { tip } },
+    global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
   })
   await flushPromises()
   return wrapper

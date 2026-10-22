@@ -132,10 +132,11 @@ test('delete refuses core files and removes the rest', async ({ page }) => {
 
   await signIn(page)
   await page.goto('/memories', { waitUntil: 'networkidle' })
-  // Batch: MEMORY.md is refused, the others go.
-  await page.locator('[data-memory-file="MEMORY.md"] input[type=checkbox]').check()
-  await page.locator('[data-memory-file="notes/one.md"] input[type=checkbox]').check()
-  await page.locator('[data-memory-file="notes/two.md"] input[type=checkbox]').check()
+  // Batch: MEMORY.md is refused, the others go. A row's box is the library's
+  // Checkbox — a `role="checkbox"` button, not an `input` (plan 096).
+  await page.locator('[data-memory-file="MEMORY.md"] [role="checkbox"]').check()
+  await page.locator('[data-memory-file="notes/one.md"] [role="checkbox"]').check()
+  await page.locator('[data-memory-file="notes/two.md"] [role="checkbox"]').check()
   await page.click('[data-testid="memories-delete-selected"]')
   await expect(page.locator('[data-memory-file="MEMORY.md"]')).toBeVisible({ timeout: 10_000 })
   await expect(page.locator('[data-memory-file="notes/one.md"]')).toHaveCount(0, { timeout: 10_000 })

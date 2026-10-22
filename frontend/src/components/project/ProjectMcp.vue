@@ -7,9 +7,9 @@
     <div v-if="!trusted" class="rounded-lg border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
       <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
       <p class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.trustHint') }}</p>
-      <button type="button" class="forebrain-btn forebrain-btn-primary mt-3 text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
+      <Button type="button" class="forebrain-btn forebrain-btn-primary mt-3 h-auto text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
         {{ trusting ? t('common.loading') : t('projects.trustLabel') }}
-      </button>
+      </Button>
     </div>
 
     <!-- Trusted: the three layers this project loads, in the order the merge
@@ -32,6 +32,7 @@
  * other, offering 允许 / 拒绝 rather than an edit.
  */
 import { ref, watch } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import McpServersTable from '@/components/mcp/McpServersTable.vue'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { forebrainApi, getErrorMessage, type ProjectRecord } from '@/lib/api'

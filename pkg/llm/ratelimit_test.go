@@ -127,11 +127,23 @@ func TestParseRateLimitRetryAfterHeaderOnly(t *testing.T) {
 		t.Errorf("reset at = %v, want %v", limit.ResetAt, want)
 	}
 	got := ExplainError(&APIError{StatusCode: http.StatusTooManyRequests, RateLimit: limit, Err: errors.New("raw")})
-	if !strings.Contains(got, "The provider said: Number of requests has exceeded your rate limit") {
-		t.Errorf("a throttle should quote the provider's own sentence as a quotation, got:\n%s", got)
+	want := "Number of requests has exceeded your rate limit (HTTP 429 Too Many Requests)"
+	if got != want {
+		t.Errorf("explanation =\n%s\nwant:\n%s", got, want)
 	}
+}
+
+// A throttle the provider explains no further still says how long to wait:
+// that sentence is the only place the wait appears.
+func TestParseRateLimitWithoutProviderWordsKeepsTheWait(t *testing.T) {
+	received := time.Unix(1788534136, 0)
+	limit := ParseRateLimit(http.StatusTooManyRequests, "", "30", received)
+	if limit == nil {
+		t.Fatal("expected a rate limit for a 429 response")
+	}
+	got := ExplainError(&APIError{StatusCode: http.StatusTooManyRequests, RateLimit: limit, Err: errors.New("raw")})
 	if !strings.Contains(got, "available again in 30s") {
-		t.Errorf("a throttle should say how long to wait, got:\n%s", got)
+		t.Errorf("a throttle with no provider sentence should say how long to wait, got:\n%s", got)
 	}
 }
 

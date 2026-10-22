@@ -216,6 +216,12 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		return opened
 	}
+	// A replay replaces the screen (plan 099): /resume, /rewind and a fork all
+	// draw the conversation from the store, and drawing it above what is already
+	// there doubled it.
+	cmds.resetScreen = func() {
+		resetStreamTranscript(renderer, &state)
+	}
 	opts.Session.SetToolApprovalSink(approvalSink)
 
 	tracker := NewTracker()
@@ -1710,6 +1716,27 @@ func (s *streamState) recordModeChange(st statepkg.State) {
 	}); ok {
 		recorder.recordModeChanged(sid, string(st.Mode), st.Phase)
 	}
+}
+
+// resetStreamTranscript clears everything the terminal is showing for the
+// conversation and re-seeds the chrome a fresh screen opens with: the banner and
+// the footer. It is what a session switch does to the screen, and what a replay
+// does to it before drawing the store: after it, nothing that was on screen
+// before survives.
+//
+// Only a viewport owns the screen: a non-TTY run has no retained transcript to
+// clear, and re-printing the banner into piped output would be noise, so the
+// helper is a no-op there. A screen that already holds nothing but the banner is
+// left alone as well — a replay right after a session switch would otherwise
+// repaint the whole screen twice inside one iteration.
+func resetStreamTranscript(renderer *Renderer, state *streamState) {
+	if renderer == nil || state == nil || !renderer.viewportMode || renderer.ScreenShowsOnlyBanner() {
+		return
+	}
+	renderer.FinishAllTransientStatus()
+	renderer.ViewportResetSession()
+	renderer.Banner(state.startupInfo)
+	refreshSessionFooter(renderer, state.session, state.sessionID)
 }
 
 // switchStreamSession activates the target session's own model selection and,

@@ -1,10 +1,12 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import tip from '@/directives/tip'
 import { forebrainApi, type McpServerRow, type McpTestResult } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { pickOption, selectedText } from '@/test-utils/formControls'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import McpServerDrawer from './McpServerDrawer.vue'
 import { MCP_REDACTED } from './mcpRows'
@@ -62,16 +64,39 @@ function routerOf() {
 }
 
 function mountDrawer(props: Record<string, unknown> = {}): VueWrapper {
+  // The drawer's selects are the library's, so their options render where the
+  // teleport stub puts them — inline, inside this wrapper. The wrapper is
+  // attached to the document so a pick can find them: the helpers look the
+  // options up on the document, and an inline portal in a detached node is
+  // invisible to them.
   return mount(McpServerDrawer, {
     props: { mode: 'edit', scope: 'global', agentId: 'primary-1', ...props },
-    global: { plugins: [routerOf()], stubs: { teleport: true }, directives: { tip } },
+    global: { plugins: [routerOf()], stubs: { teleport: InlineTeleport }, directives: { tip } },
+    attachTo: document.body,
   })
 }
+
+/** One of the drawer's selects, by the test id on its trigger. */
+function field(wrapper: VueWrapper, testid: string): HTMLElement {
+  return wrapper.find(`[data-testid="${testid}"]`).element as HTMLElement
+}
+
+// Each test mounts one or more drawers on the document; a wrapper left behind
+// would keep its inline options there for the next test's document-wide lookups.
+enableAutoUnmount(afterEach)
 
 describe('McpServerDrawer', () => {
   beforeAll(() => setLocale('zh'))
 
   beforeEach(() => {
+    // The selects measure their viewport with ResizeObserver, which jsdom does
+    // not have; scrolling an item into view is not implemented either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
     vi.spyOn(forebrainApi, 'mcpCreate').mockResolvedValue({
       ok: true,
       path: '/home/.forebrain/forebrain.yaml',
@@ -118,7 +143,7 @@ describe('McpServerDrawer', () => {
     const inputs = wrapper.findAll('input')
     expect(inputs.length).toBeGreaterThan(4)
     expect(inputs.every((input) => input.attributes('readonly') !== undefined)).toBe(true)
-    const selects = wrapper.findAll('select')
+    const selects = wrapper.findAll('[data-slot="select-trigger"]')
     expect(selects.length).toBeGreaterThan(1)
     expect(selects.every((select) => select.attributes('disabled') !== undefined)).toBe(true)
     const switches = wrapper.findAll('button[role="switch"]')
@@ -203,6 +228,29 @@ describe('McpServerDrawer', () => {
     expect(wrapper.emitted('saved')?.[0][0]).toMatchObject({ name: 'docs', target: '/bin/docs2' })
   })
 
+  it('picks 跟随全局 on the default approval mode and sends the empty string', async () => {
+    // The one option whose wire value is the empty string: reka refuses an
+    // empty SelectItem value, so the sentinel stands in for it and the form
+    // reads it back as `''`. Nothing tested this before the migration, and a
+    // sentinel that mapped to `'@empty'` would reach the gateway as a mode it
+    // does not know.
+    const wrapper = mountDrawer({ mode: 'edit', row: row({ defaultToolsApprovalMode: 'writes' }) })
+    await flushPromises()
+    expect(selectedText(field(wrapper, 'mcp-default-approval'))).toBe('writes（写操作询问）')
+
+    await pickOption(field(wrapper, 'mcp-default-approval'), '跟随全局（留空）')
+    expect(selectedText(field(wrapper, 'mcp-default-approval'))).toBe('跟随全局（留空）')
+
+    await wrapper.find('[data-testid="mcp-save"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.mcpUpdate).toHaveBeenCalledWith('global', '', 'docs', {
+      name: 'docs',
+      transport: 'stdio',
+      default_tools_approval_mode: '',
+    })
+  })
+
   it('creates in the layer it was opened for, sending the whole form', async () => {
     const wrapper = mountDrawer({ mode: 'new', scope: 'agent', agentId: 'primary-7' })
     expect(wrapper.find('[data-testid="mcp-state"]').exists()).toBe(false)
@@ -274,7 +322,7 @@ describe('McpServerDrawer', () => {
     expect(wrapper.find('[data-kv-add]').text()).toBe('添加环境变量')
     expect(wrapper.find('[data-testid="mcp-oauth-mode"]').exists()).toBe(false)
 
-    await wrapper.find('[data-testid="mcp-transport"]').setValue('streamable_http')
+    await pickOption(field(wrapper, 'mcp-transport'), 'http')
 
     const advanced = wrapper.find('[data-testid="mcp-advanced"]')
     expect(advanced.find('summary').text()).toContain('高级 · 请求头、SSE、OAuth、审批模式')

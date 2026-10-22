@@ -5,6 +5,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import tip from '@/directives/tip'
 import { forebrainApi, type ProjectRecord, type SkillRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect, pickOption } from '@/test-utils/formControls'
 import ProjectSkills from './ProjectSkills.vue'
 
 /**
@@ -63,6 +64,20 @@ async function mountTab(trusted = true) {
 describe('ProjectSkills', () => {
   beforeAll(() => setLocale('zh'))
 
+  /**
+   * The layer filter is the library's select: it measures its viewport with
+   * ResizeObserver, which jsdom does not have, and scrolling an item into view
+   * is not implemented either.
+   */
+  function stubSelectMeasurement(): void {
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
+  }
+
   beforeEach(() => {
     vi.spyOn(forebrainApi, 'projectSkillsPage').mockResolvedValue({
       rows: [skill(), skill({ name: 'gateway-ops', origin: 'agent', rootPath: '/s/gateway-ops' })],
@@ -92,17 +107,29 @@ describe('ProjectSkills', () => {
   })
 
   it('offers the four layers a project can hold', async () => {
+    stubSelectMeasurement()
     const wrapper = await mountTab()
 
-    const options = wrapper.findAll('[data-testid="project-skills-source-filter"] option')
-    expect(options.map((option) => option.text())).toEqual(['全部来源', '项目', '主代理', '共享', '内置'])
+    const filter = wrapper.find('[data-testid="project-skills-source-filter"]')
+    await openSelect(filter.element as HTMLElement)
+    // Scoped to the list this trigger opened: the page draws a page-size
+    // select too, and reka renders items into a portal of its own.
+    const list = document.querySelector('[role="listbox"][data-state="open"]')
+    expect([...(list?.querySelectorAll('[role="option"]') ?? [])].map((option) => (option.textContent ?? '').trim())).toEqual([
+      '全部来源',
+      '项目',
+      '主代理',
+      '共享',
+      '内置',
+    ])
   })
 
   it('sends the layer filter to the server', async () => {
+    stubSelectMeasurement()
     const wrapper = await mountTab()
     const page = vi.mocked(forebrainApi.projectSkillsPage)
 
-    await wrapper.find('[data-testid="project-skills-source-filter"]').setValue('project')
+    await pickOption(wrapper.find('[data-testid="project-skills-source-filter"]').element as HTMLElement, '项目')
     await flushPromises()
 
     expect(page).toHaveBeenCalledTimes(2)

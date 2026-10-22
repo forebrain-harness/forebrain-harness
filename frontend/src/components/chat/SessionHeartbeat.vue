@@ -38,37 +38,47 @@
 
       <label class="heartbeat-label" :for="minutesId">{{ t('heartbeat.interval') }}</label>
       <div class="flex items-center gap-2">
-        <input :id="minutesId" v-model.number="minutes" type="number" min="1" class="forebrain-field w-20" />
+        <!-- A number is a number: the library's Input does not implement
+             `v-model`'s `.number` modifier, so the conversion is here and an
+             emptied box falls back to the one-minute floor. -->
+        <Input
+          :id="minutesId"
+          :model-value="String(minutes)"
+          type="number"
+          min="1"
+          class="forebrain-field h-auto w-20"
+          @update:model-value="(value) => (minutes = Number(value) || 1)"
+        />
         <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('heartbeat.minutes') }}</span>
       </div>
       <label class="heartbeat-label" :for="promptId">{{ t('heartbeat.promptLabel') }}</label>
-      <textarea
+      <Textarea
         :id="promptId"
         ref="promptRef"
         v-model="prompt"
         rows="3"
         :placeholder="t('heartbeat.promptPlaceholder')"
-        class="forebrain-field w-full"
+        class="forebrain-field min-h-0 w-full"
       />
       <p v-if="error" class="mt-2 text-[11px] text-[var(--forebrain-danger)]" role="alert">{{ error }}</p>
 
       <div class="mt-3 flex items-center justify-between gap-2">
-        <button
+        <Button
           v-if="record"
           type="button"
           class="forebrain-btn forebrain-btn-ghost h-7 px-2.5 text-[12px] text-[var(--forebrain-danger)]"
           :disabled="busy"
           data-testid="heartbeat-clear"
           @click="remove"
-        >{{ t('heartbeat.clear') }}</button>
+        >{{ t('heartbeat.clear') }}</Button>
         <span v-else />
-        <button
+        <Button
           type="button"
           class="forebrain-btn forebrain-btn-primary h-7 px-3 text-[12px]"
           :disabled="busy || !canSave"
           data-testid="heartbeat-save"
           @click="submit"
-        >{{ record ? t('heartbeat.update') : t('heartbeat.start') }}</button>
+        >{{ record ? t('heartbeat.update') : t('heartbeat.start') }}</Button>
       </div>
 
       <!-- A heartbeat keeps asking while nobody looks: the others are listed
@@ -120,6 +130,9 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Activity, Pause, Play } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import { useHeartbeats } from '@/composables/useHeartbeats'
 import type { HeartbeatRecord } from '@/lib/api'
@@ -140,7 +153,9 @@ const busy = ref(false)
 const error = ref('')
 const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLButtonElement | null>(null)
-const promptRef = ref<HTMLTextAreaElement | null>(null)
+// The library's Textarea is a component: its template ref is the instance, and
+// the field itself is the instance's root element.
+const promptRef = ref<{ $el: unknown } | null>(null)
 const minutesId = `heartbeat-minutes-${Math.random().toString(36).slice(2, 8)}`
 const promptId = `heartbeat-prompt-${Math.random().toString(36).slice(2, 8)}`
 
@@ -210,7 +225,7 @@ async function toggle() {
   if (!open.value) return
   if (!busy.value && minutes.value === shown.minutes && prompt.value === shown.prompt) resetForm()
   await nextTick()
-  if (!record.value) promptRef.value?.focus()
+  if (!record.value) (promptRef.value?.$el as HTMLTextAreaElement | undefined)?.focus()
 }
 
 function close(returnFocus: boolean) {

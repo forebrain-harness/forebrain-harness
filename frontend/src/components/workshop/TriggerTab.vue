@@ -4,7 +4,7 @@
     <div class="rounded-lg border border-[var(--forebrain-divider)] p-3">
       <div class="flex flex-wrap items-center justify-between gap-y-1.5">
         <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.triggerDescTitle') }}</span>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!editable" data-testid="workshop-trigger-desc-edit" @click="openDescEdit">{{ t('common.edit') }}</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :disabled="!editable" data-testid="workshop-trigger-desc-edit" @click="openDescEdit">{{ t('common.edit') }}</Button>
       </div>
       <div class="mt-2 rounded-md bg-[var(--forebrain-input-bg)] p-2 text-[12px] text-[var(--forebrain-text)]">{{ description || '—' }}</div>
       <span class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('workshop.triggerDescHint') }}</span>
@@ -15,13 +15,13 @@
       <div class="flex flex-wrap items-center justify-between gap-2 gap-y-1.5">
         <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.triggerTestTitle') }}</span>
         <div class="flex shrink-0 gap-1">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!editable" data-testid="workshop-trigger-add" @click="openQueryAdd">{{ t('workshop.addQuery') }}</button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!skillName" data-testid="workshop-trigger-retest" @click="emit('send', t('workshop.retestMessage'))">{{ t('workshop.retest') }}</button>
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :disabled="!editable" data-testid="workshop-trigger-add" @click="openQueryAdd">{{ t('workshop.addQuery') }}</Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :disabled="!skillName" data-testid="workshop-trigger-retest" @click="emit('send', t('workshop.retestMessage'))">{{ t('workshop.retest') }}</Button>
         </div>
       </div>
       <template v-if="!results">
         <p class="mt-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('workshop.notTested') }}</p>
-        <button type="button" class="forebrain-btn forebrain-btn-primary mt-2 text-xs" :disabled="!skillName || !queries.length" data-testid="workshop-trigger-run" @click="emit('send', t('workshop.runTriggerTest'))">{{ t('workshop.runTriggerTest') }}</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary mt-2 h-auto text-xs" :disabled="!skillName || !queries.length" data-testid="workshop-trigger-run" @click="emit('send', t('workshop.runTriggerTest'))">{{ t('workshop.runTriggerTest') }}</Button>
       </template>
       <template v-else>
         <div class="mt-3 flex items-center gap-3">
@@ -53,38 +53,49 @@
     <div v-if="results && results.bestDescription && !applied" class="rounded-lg border border-[var(--forebrain-divider)] p-3" data-testid="workshop-trigger-suggest">
       <div class="flex flex-wrap items-center justify-between gap-y-1.5">
         <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.suggestedTitle') }}</span>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!skillName" @click="emit('send', t('workshop.regenerateMessage'))">{{ t('workshop.regenerate') }}</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :disabled="!skillName" @click="emit('send', t('workshop.regenerateMessage'))">{{ t('workshop.regenerate') }}</Button>
       </div>
       <div class="mt-2 rounded-md bg-[var(--forebrain-input-bg)] p-2 text-[12px] text-[var(--forebrain-text)]">{{ results.bestDescription }}</div>
-      <button type="button" class="forebrain-btn forebrain-btn-primary mt-2 text-xs" :disabled="!editable" data-testid="workshop-trigger-apply" @click="applyToDraft">{{ t('workshop.applyToDraft') }}</button>
+      <Button type="button" class="forebrain-btn forebrain-btn-primary mt-2 h-auto text-xs" :disabled="!editable" data-testid="workshop-trigger-apply" @click="applyToDraft">{{ t('workshop.applyToDraft') }}</Button>
     </div>
 
     <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
     <ForebrainModal :open="descEditOpen" size="md" :title="t('workshop.editTriggerDesc')" @close="descEditOpen = false">
-      <textarea v-model="descDraft" rows="4" class="forebrain-field w-full" data-testid="workshop-trigger-desc-input" />
+      <Textarea v-model="descDraft" rows="4" class="forebrain-field min-h-0 w-full" data-testid="workshop-trigger-desc-input" />
       <span class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('workshop.triggerDescEditHint') }}</span>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="descEditOpen = false">{{ t('common.cancel') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="workshop-trigger-desc-save" @click="saveDescription">{{ t('common.save') }}</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="descEditOpen = false">{{ t('common.cancel') }}</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" data-testid="workshop-trigger-desc-save" @click="saveDescription">{{ t('common.save') }}</Button>
       </template>
     </ForebrainModal>
 
     <ForebrainModal :open="queryAddOpen" size="sm" :title="t('workshop.addQuery')" @close="queryAddOpen = false">
       <label class="block">
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.queryLabel') }}</span>
-        <input v-model="newQuery" class="forebrain-field w-full" data-testid="workshop-trigger-query-input" />
+        <Input v-model="newQuery" class="forebrain-field h-auto w-full" data-testid="workshop-trigger-query-input" />
       </label>
-      <label class="block">
-        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.queryShould') }}</span>
-        <select v-model="newShouldTrigger" class="forebrain-field w-full" data-testid="workshop-trigger-query-should">
-          <option :value="true">{{ t('workshop.shouldTrigger') }}</option>
-          <option :value="false">{{ t('workshop.shouldNotTrigger') }}</option>
-        </select>
-      </label>
+      <!-- The label is its own element rather than a wrapper: the control is
+           the library's Select, a button, and a button inside a `label` would
+           answer one click with two. -->
+      <div>
+        <Label for="workshop-trigger-query-should" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('workshop.queryShould') }}</Label>
+        <!-- A SelectItem carries a string, and this field is a boolean on the
+             wire: the two words are its two values, converted back on the way
+             in, so the form field stays `true`/`false`. -->
+        <Select :model-value="newShouldTrigger ? 'on' : 'off'" @update:model-value="(value) => (newShouldTrigger = String(value) !== 'off')">
+          <SelectTrigger id="workshop-trigger-query-should" class="forebrain-field h-9 w-full" data-testid="workshop-trigger-query-should">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="on">{{ t('workshop.shouldTrigger') }}</SelectItem>
+            <SelectItem value="off">{{ t('workshop.shouldNotTrigger') }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="queryAddOpen = false">{{ t('common.cancel') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!newQuery.trim()" data-testid="workshop-trigger-query-save" @click="saveQuery">{{ t('workshop.addQuery') }}</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="queryAddOpen = false">{{ t('common.cancel') }}</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="!newQuery.trim()" data-testid="workshop-trigger-query-save" @click="saveQuery">{{ t('workshop.addQuery') }}</Button>
       </template>
     </ForebrainModal>
   </div>
@@ -98,6 +109,11 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ArrowRight, Check, X } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
+import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import forebrainApi, { getErrorMessage, type WorkshopTriggerQuery, type WorkshopTriggerResults } from '@/lib/api'

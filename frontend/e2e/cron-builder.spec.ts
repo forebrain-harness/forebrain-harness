@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-import { seedProject, shot, signIn } from './support'
+import { pickOption, seedProject, shot, signIn } from './support'
 
 /**
  * The schedule builder and the project cron tab: the schedule a user saves is
@@ -26,13 +26,26 @@ async function saveAndExpectRow(page: import('@playwright/test').Page, name: str
   await expect(page.locator(`[data-cron-job="${name}"] .font-mono`)).toHaveText(schedule)
 }
 
+/**
+ * The builder's selects are the library's, so an option is picked by its visible
+ * label. The browser's own language decides what those labels say, so the run is
+ * pinned to the one the labels (and the rest of this suite) are written in — the
+ * same choice the appearance tab offers a person.
+ */
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('forebrain-locale', 'zh'))
+})
+
 test('weekly multi-select builds a cron the engine previews', async ({ page }) => {
   await signIn(page)
   await openNewJob(page, 'weekly brief')
-  await page.selectOption('[data-testid="schedule-mode"]', 'weekly')
-  await page.locator('[data-testid="schedule-weekdays"] label').filter({ hasText: /周一|Mon/ }).locator('input').check()
-  await page.locator('[data-testid="schedule-weekdays"] label').filter({ hasText: /周三|Wed/ }).locator('input').check()
-  await page.locator('[data-testid="schedule-weekdays"] label').filter({ hasText: /周五|Fri/ }).locator('input').check()
+  await pickOption(page, 'schedule-mode', '每周（可多选）')
+  // A weekday chip is the library's Checkbox beside its own label: the day is
+  // picked on the box, and `check` keeps Monday — on by default — on.
+  const chip = (day: RegExp) => page.locator('[data-testid="schedule-weekdays"] div').filter({ hasText: day })
+  await chip(/周一|Mon/).getByRole('checkbox').check()
+  await chip(/周三|Wed/).getByRole('checkbox').check()
+  await chip(/周五|Fri/).getByRole('checkbox').check()
   await page.fill('[data-testid="schedule-time"]', '09:00')
 
   // The preview is the engine's parse of the generated cron.
@@ -53,9 +66,9 @@ test('weekly multi-select builds a cron the engine previews', async ({ page }) =
 test('relative one-shot saves as in 30m', async ({ page }) => {
   await signIn(page)
   await openNewJob(page, 'relative brief')
-  await page.selectOption('[data-testid="schedule-mode"]', 'once-in')
+  await pickOption(page, 'schedule-mode', '一次 · 多久之后')
   await page.fill('[data-testid="schedule-in-count"]', '30')
-  await page.selectOption('[data-testid="schedule-in-unit"]', 'm')
+  await pickOption(page, 'schedule-in-unit', '分钟')
   await expect(page.locator('[data-testid="schedule-preview"] code')).toHaveText('in 30m', { timeout: 10_000 })
   await saveAndExpectRow(page, 'relative brief', 'in 30m')
 })
@@ -63,12 +76,12 @@ test('relative one-shot saves as in 30m', async ({ page }) => {
 test('a schedule below the engine floor refuses to save', async ({ page }) => {
   await signIn(page)
   await openNewJob(page, 'floor brief')
-  await page.selectOption('[data-testid="schedule-mode"]', 'every')
+  await pickOption(page, 'schedule-mode', '按间隔重复')
   // Half a minute is below the engine's one-minute floor; the builder passes
   // it to the preview instead of silently correcting it, and the engine's own
   // message is what the user reads.
   await page.fill('[data-testid="schedule-every-count"]', '0.5')
-  await page.selectOption('[data-testid="schedule-every-unit"]', 'm')
+  await pickOption(page, 'schedule-every-unit', '分钟')
   await expect(page.locator('[data-testid="schedule-error"]')).toBeVisible({ timeout: 10_000 })
   await expect(page.locator('[data-testid="cron-save"]')).toBeDisabled()
 })
@@ -76,21 +89,23 @@ test('a schedule below the engine floor refuses to save', async ({ page }) => {
 test('edit switches delivery to record-only', async ({ page }) => {
   await signIn(page)
   await openNewJob(page, 'delivery brief')
-  await page.selectOption('[data-testid="schedule-mode"]', 'once-in')
+  await pickOption(page, 'schedule-mode', '一次 · 多久之后')
   await page.fill('[data-testid="schedule-in-count"]', '30')
-  await page.selectOption('[data-testid="cron-deliver"]', '')
+  await pickOption(page, 'cron-deliver', '只记录，不投递')
   await saveAndExpectRow(page, 'delivery brief', 'in 30m')
 
   await page.locator('[data-cron-job="delivery brief"]').getByRole('button', { name: /编辑|Edit/ }).click()
   await expect(page.locator('[data-testid="cron-editor"]')).toBeVisible()
-  await page.selectOption('[data-testid="cron-deliver"]', '')
+  await pickOption(page, 'cron-deliver', '只记录，不投递')
   // The editor opens on the stored schedule as it is; saving a change to
   // another field must not rebuild the schedule from the builder's defaults.
-  await expect(page.locator('[data-testid="schedule-mode"]')).toHaveValue('cron')
+  await expect(page.locator('[data-testid="schedule-mode"]')).toHaveText(/Cron (表达式|expression)/)
   await expect(page.locator('[data-testid="schedule-cron"]')).toHaveValue('in 30m')
   await page.click('[data-testid="cron-save"]')
   await expect(page.locator('[data-testid="cron-editor"]')).toHaveCount(0, { timeout: 15_000 })
-  await expect(page.locator('[data-cron-job="delivery brief"]')).toContainText(/只记录，不投递|Record only/, { timeout: 10_000 })
+  // The row's delivery cell says the short form (cron.recordOnlyShort) — the
+  // long form is the editor's own option label one screen up.
+  await expect(page.locator('[data-cron-job="delivery brief"]')).toContainText(/只记录|Record only/, { timeout: 10_000 })
   await expect(page.locator('[data-cron-job="delivery brief"] .font-mono')).toHaveText('in 30m')
 })
 
@@ -98,7 +113,7 @@ test('run now shows up in the run history', async ({ page }) => {
   test.info().setTimeout(120_000)
   await signIn(page)
   await openNewJob(page, 'runnow brief')
-  await page.selectOption('[data-testid="schedule-mode"]', 'once-in')
+  await pickOption(page, 'schedule-mode', '一次 · 多久之后')
   await page.fill('[data-testid="schedule-in-count"]', '30')
   await saveAndExpectRow(page, 'runnow brief', 'in 30m')
 
@@ -136,9 +151,9 @@ test('project cron jobs stay in their project tab', async ({ page }) => {
   await page.click('[data-testid="cron-new"]')
   await page.fill('[data-testid="cron-name"]', 'project brief')
   await page.fill('[data-testid="cron-prompt"]', 'project standing prompt')
-  await page.selectOption('[data-testid="schedule-mode"]', 'every')
+  await pickOption(page, 'schedule-mode', '按间隔重复')
   await page.fill('[data-testid="schedule-every-count"]', '2')
-  await page.locator('[data-testid="schedule-mode"]').selectOption('every')
+  await pickOption(page, 'schedule-mode', '按间隔重复')
   await expect(page.locator('[data-testid="schedule-preview"] code')).toHaveText('every 2h', { timeout: 10_000 })
   await page.click('[data-testid="cron-save"]')
   await expect(page.locator('[data-cron-job="project brief"]')).toBeVisible({ timeout: 15_000 })

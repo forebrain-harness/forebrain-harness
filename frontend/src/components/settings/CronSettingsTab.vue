@@ -12,8 +12,8 @@
     <div class="grid gap-1.5">
       <label class="forebrain-form-field w-32">
         <span>{{ t('cronSettings.retentionLabel') }}</span>
-        <input
-          v-model.number="draft"
+        <Input
+          :model-value="String(draft)"
           type="number"
           :min="settings?.minDays"
           :max="settings?.maxDays"
@@ -21,6 +21,7 @@
           class="forebrain-field h-[34px] w-full"
           data-testid="cron-retention-days"
           :disabled="loading || saving || resetting"
+          @update:model-value="typeDays"
         />
       </label>
       <p class="forebrain-list-note">{{ t('cronSettings.retentionDescription') }}</p>
@@ -30,30 +31,32 @@
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
-      <button
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         data-testid="cron-retention-save"
         :disabled="loading || saving || !changed"
         @click="save"
       >
         {{ saving ? t('common.loading') : t('common.save') }}
-      </button>
-      <button
+      </Button>
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-ghost text-xs"
+        class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
         data-testid="cron-retention-reset"
         :disabled="loading || resetting"
         @click="restoreDefault"
       >
         {{ resetting ? t('common.loading') : t('cronSettings.reset') }}
-      </button>
+      </Button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import forebrainApi, { type CronSettings, GatewayHttpError, getErrorMessage } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -74,6 +77,17 @@ const notice = ref('')
 
 /** The typed number, or null when the field holds nothing whole. */
 const draftDays = computed(() => (typeof draft.value === 'number' && Number.isInteger(draft.value) ? draft.value : null))
+
+/**
+ * The library's input does not implement `v-model`'s `.number` modifier, so the
+ * conversion happens here. A cleared field falls back to the smallest number the
+ * range allows rather than holding '' — the setting is a number, and the server
+ * takes nothing else (plan 096, rule 8).
+ */
+function typeDays(value: string | number): void {
+  const days = Number(value)
+  draft.value = value === '' || !Number.isFinite(days) ? (settings.value?.minDays ?? 1) : days
+}
 
 const outOfRange = computed(() => {
   if (!settings.value) return false

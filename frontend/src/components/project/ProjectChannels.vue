@@ -5,19 +5,19 @@
 
     <ListToolbar>
       <template #left>
-        <input
+        <Input
           v-model="q"
           type="search"
           :placeholder="t('channels.searchPlaceholder')"
-          class="forebrain-field h-[34px]"
+          class="forebrain-field h-[34px] w-auto"
           style="max-width: 240px"
           data-testid="channels-search"
         />
       </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="channels-refresh" @click="reload()">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" data-testid="channels-refresh" @click="reload()">
           <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-        </button>
+        </Button>
       </template>
     </ListToolbar>
 
@@ -108,6 +108,8 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { Pencil, RotateCw } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'

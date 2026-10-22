@@ -2,10 +2,27 @@
   <aside
     class="subagent-drawer"
     :class="{ 'subagent-drawer--overlay': overlay }"
+    :style="overlay ? undefined : { width: `${width}px` }"
     data-testid="subagent-drawer"
     :aria-label="t('chat.subagentDrawer')"
     @keydown.esc="onEsc"
   >
+    <!-- The drawer's width is dragged by the edge it shares with the
+         conversation, and is this session's alone (see usePanelWidth). -->
+    <div
+      class="panel-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      :aria-label="t('common.resizePanel')"
+      tabindex="0"
+      data-testid="subagent-drawer-resizer"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerUp"
+      @dblclick="reset"
+      @keydown="onKeydown"
+    />
     <header class="subagent-drawer-head">
       <!-- One tab array for both kinds, in the order they were opened: the
            drawer is one surface, and a plan opened between two subagents sits
@@ -139,6 +156,7 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { CheckCircle2, Loader2, Map as MapIcon, PanelRightClose, Plus, X, XCircle } from 'lucide-vue-next'
+import { usePanelWidth } from '@/composables/usePanelWidth'
 import { formatRuntimeDuration, type SubagentTranscript } from '@/composables/useChatStream'
 import type { PlanTab } from '@/composables/useSessionPlans'
 import { subagentPhase, subagentStatusLabel, subagentTabLabel } from '@/lib/subagentStatus'
@@ -184,6 +202,21 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const menuOpen = ref(false)
+
+// The drawer's design width, and how far the window lets it be dragged: 440 is
+// where a tab's transcript reads, and past 60% of the window the conversation
+// would be the one that lost its room (owner 2026-10-21). As an overlay below
+// lg the width is the layout's, not the handle's — main.css hides the handle
+// there and the drawer is drawn without an inline width.
+const DESIGN_WIDTH = 440
+const MIN_WIDTH = 320
+const MAX_WIDTH = 860
+
+const { width, onPointerDown, onPointerMove, onPointerUp, onKeydown, reset } = usePanelWidth(
+  'subagent-drawer',
+  DESIGN_WIDTH,
+  { min: MIN_WIDTH, max: () => Math.min(MAX_WIDTH, window.innerWidth * 0.6) },
+)
 
 const openIds = computed(() => props.tabs.map((tab) => tab.agentId))
 
@@ -274,6 +307,9 @@ onUnmounted(() => {
 
 <style scoped>
 .subagent-drawer {
+  /* The drag handle is its left edge, so it is positioned against the drawer
+     (`.panel-resizer` in main.css). */
+  position: relative;
   width: 440px;
   flex: none;
   display: flex;

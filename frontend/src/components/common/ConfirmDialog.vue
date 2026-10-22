@@ -2,22 +2,26 @@
   <ForebrainModal :open="open" size="sm" :title="title" @close="emit('cancel')">
     <p class="forebrain-confirm-message">{{ message }}</p>
     <label v-if="typedConfirm" class="forebrain-confirm-field">
-      <input v-model="typed" class="forebrain-field" :placeholder="typedConfirm" autocomplete="off" />
+      <Input v-model="typed" class="forebrain-field h-auto" :placeholder="typedConfirm" autocomplete="off" />
     </label>
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="emit('cancel')">
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="emit('cancel')">
         {{ t('common.cancel') }}
-      </button>
-      <button
+      </Button>
+      <!-- The library's Button would paint a brand hover over the danger fill:
+           the danger variant restates the fill and its hover in its own ink. -->
+      <Button
         type="button"
-        class="forebrain-btn text-xs"
-        :class="danger ? 'forebrain-confirm-danger' : 'forebrain-btn-primary'"
+        class="forebrain-btn h-auto text-xs"
+        :class="danger
+          ? 'forebrain-confirm-danger bg-[var(--forebrain-danger)] hover:bg-[var(--forebrain-danger)] text-[var(--forebrain-on-brand)]'
+          : 'forebrain-btn-primary'"
         :disabled="!canConfirm"
         data-testid="confirm-ok"
         @click="emit('confirm')"
       >
         {{ confirmLabel }}
-      </button>
+      </Button>
     </template>
   </ForebrainModal>
 </template>
@@ -29,6 +33,9 @@
  * it behind retyping an exact string, for the one action that deletes data.
  */
 import { computed, ref, watch } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+
 import { useI18n } from '@/locales'
 import ForebrainModal from './ForebrainModal.vue'
 

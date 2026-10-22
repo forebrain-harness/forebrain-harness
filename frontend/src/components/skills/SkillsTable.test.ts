@@ -102,12 +102,12 @@ describe('SkillsTable', () => {
   it('hands the ticked set back to the page, one box at a time or all of the page', async () => {
     const wrapper = mountTable()
 
-    const boxes = wrapper.findAll('[data-skill-row="gateway-ops"] input[type="checkbox"]')
-    await boxes[0].setValue(true)
+    const boxes = wrapper.findAll('[data-skill-row="gateway-ops"] [role="checkbox"]')
+    await boxes[0].trigger('click')
     expect(wrapper.emitted('update:selected')?.[0]?.[0]).toEqual(new Set(['gateway-ops']))
 
     // 全选 ticks the page on screen — a server-paged table has no other rows.
-    await wrapper.find('[data-testid="skills-select-all"]').setValue(true)
+    await wrapper.find('[data-testid="skills-select-all"]').trigger('click')
     const all = wrapper.emitted('update:selected')?.[1]?.[0] as Set<string>
     expect([...all].sort()).toEqual(['gateway-5xx', 'gateway-ops', 'golang-testing'])
   })

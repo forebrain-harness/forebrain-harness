@@ -392,4 +392,24 @@ describe('ChatWorkbench', () => {
     await button.trigger('click')
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
+
+  // The column's width is dragged by the edge it shares with the conversation
+  // (owner 2026-10-21), and starts at the design's 340px.
+  it('carries the handle on its left edge and the design width as its own', () => {
+    const wrapper = mountBench()
+    expect(wrapper.find('[data-testid="chat-workbench-resizer"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="chat-workbench-resizer"]').attributes('role')).toBe('separator')
+    expect(wrapper.get('[data-testid="chat-workbench"]').attributes('style')).toContain('width: 340px')
+  })
+
+  // As an overlay the width is the layout's, not the handle's: an inline width
+  // would beat the narrow-window rule that keeps the column on screen.
+  it('writes no width of its own while it is an overlay', () => {
+    const wrapper = mount(ChatWorkbench, {
+      props: { records: [], loading: false, error: '', overlay: true, scope: { sessionId: 's1' } },
+      global: { stubs: { teleport: true } },
+    })
+    expect(wrapper.get('[data-testid="chat-workbench"]').classes()).toContain('chat-workbench--overlay')
+    expect(wrapper.get('[data-testid="chat-workbench"]').attributes('style')).toBeUndefined()
+  })
 })

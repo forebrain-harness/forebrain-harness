@@ -2,9 +2,11 @@
   <div class="space-y-3" data-testid="workshop-versions">
     <div class="flex flex-wrap items-center justify-between gap-y-1.5">
       <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabVersions') }}</span>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!skillName" data-testid="workshop-version-download" @click="downloadCurrent">
-        <Download class="h-3.5 w-3.5" aria-hidden="true" /> {{ t('workshop.downloadZip') }}
-      </button>
+      <!-- The icon and the label are one run of text, as the native button had
+           them: the library's Button would space them with `gap-2`. -->
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-0 text-xs" :disabled="!skillName" data-testid="workshop-version-download" @click="downloadCurrent">
+        <Download class="size-3.5" aria-hidden="true" /> {{ t('workshop.downloadZip') }}
+      </Button>
     </div>
 
     <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-versions-error">{{ error }}</p>
@@ -12,15 +14,15 @@
     <template v-else>
       <div v-if="state?.update" class="flex items-center gap-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] p-2 text-[12px] text-[var(--forebrain-text-2)]" data-testid="workshop-version-update">
         <span class="min-w-0 flex-1">{{ t('workshop.upstreamUpdate', { rev: state.update.rev, date: state.update.date ?? '' }) }}</span>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!editable || busy" data-testid="workshop-version-pull" @click="pullUpdate">{{ t('workshop.pullToDraft') }}</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :disabled="!editable || busy" data-testid="workshop-version-pull" @click="pullUpdate">{{ t('workshop.pullToDraft') }}</Button>
       </div>
 
       <div v-if="state?.hasDraft" class="ver-draft rounded-lg border border-[var(--forebrain-border-strong,var(--forebrain-divider))] p-2.5" data-testid="workshop-version-draft">
         <div class="flex items-center justify-between">
           <span class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('workshop.draftRow') }}</span>
           <span class="flex gap-1">
-            <button v-if="state.draftBase" type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="workshop-draft-compare" @click="emit('compare', { from: `v${state.draftBase}`, to: 'draft' })">{{ t('workshop.compare') }}</button>
-            <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" :disabled="!editable || busy" data-testid="workshop-draft-discard" @click="confirmDiscard = true">{{ t('workshop.discard') }}</button>
+            <Button v-if="state.draftBase" type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" data-testid="workshop-draft-compare" @click="emit('compare', { from: `v${state.draftBase}`, to: 'draft' })">{{ t('workshop.compare') }}</Button>
+            <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs text-[var(--forebrain-danger)]" :disabled="!editable || busy" data-testid="workshop-draft-discard" @click="confirmDiscard = true">{{ t('workshop.discard') }}</Button>
           </span>
         </div>
         <div class="mt-0.5 text-[11px] text-[var(--forebrain-muted-text)]">{{ state.draftBase ? t('workshop.draftBasedOn', { v: state.draftBase }) : t('workshop.draftUnpublished') }}</div>
@@ -33,8 +35,8 @@
             <span class="font-mono text-[13px] text-[var(--forebrain-text)]">v{{ v.v }}</span>
             <span class="flex items-center gap-1">
               <BadgeComponent v-if="v.v === state.current" variant="success">{{ t('workshop.current') }}</BadgeComponent>
-              <button v-if="v.v > 1" type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="emit('compare', { from: `v${prev(v.v)}`, to: `v${v.v}` })">{{ t('workshop.compare') }}</button>
-              <button v-if="v.v !== state.current" type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!editable || busy" @click="askRestore(v.v)">{{ t('workshop.restoreAsDraft') }}</button>
+              <Button v-if="v.v > 1" type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="emit('compare', { from: `v${prev(v.v)}`, to: `v${v.v}` })">{{ t('workshop.compare') }}</Button>
+              <Button v-if="v.v !== state.current" type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :disabled="!editable || busy" @click="askRestore(v.v)">{{ t('workshop.restoreAsDraft') }}</Button>
               <button type="button" class="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]" v-tip:top="t('workshop.downloadVersion', { v: v.v })" @click="downloadVersion(v.v)">
                 <Download class="h-3.5 w-3.5" aria-hidden="true" />
               </button>
@@ -78,6 +80,7 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { Download } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import forebrainApi, { getErrorMessage, saveSkillDownload, type SkillVersionRecord, type SkillVersionState } from '@/lib/api'

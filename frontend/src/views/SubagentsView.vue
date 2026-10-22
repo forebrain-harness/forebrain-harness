@@ -7,7 +7,7 @@
 
       <ListToolbar>
         <template #left>
-          <input
+          <Input
             v-model="q"
             type="search"
             :placeholder="t('subagents.search')"
@@ -15,18 +15,24 @@
             style="max-width: 240px"
             data-testid="subagents-search"
           />
-          <select
-            v-model="kindFilter"
-            class="forebrain-field h-[34px]"
-            style="width: 120px"
-            :aria-label="t('subagents.colKind')"
-            data-testid="subagents-kind-filter"
-          >
-            <option value="">{{ t('subagents.filterAll') }}</option>
-            <option value="builtin">{{ t('subagents.kind.builtin') }}</option>
-            <option value="custom">{{ t('subagents.kind.custom') }}</option>
-            <option value="system">{{ t('subagents.kind.system') }}</option>
-          </select>
+          <!-- 全部类型 is the empty string the list filters by, which a SelectItem
+               may not carry: the sentinel stands in for it on both sides. -->
+          <Select :model-value="toChoice(kindFilter)" @update:model-value="(value) => (kindFilter = fromChoice(value))">
+            <SelectTrigger
+              class="forebrain-field !h-[34px]"
+              style="width: 120px"
+              :aria-label="t('subagents.colKind')"
+              data-testid="subagents-kind-filter"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="EMPTY_CHOICE">{{ t('subagents.filterAll') }}</SelectItem>
+              <SelectItem value="builtin">{{ t('subagents.kind.builtin') }}</SelectItem>
+              <SelectItem value="custom">{{ t('subagents.kind.custom') }}</SelectItem>
+              <SelectItem value="system">{{ t('subagents.kind.system') }}</SelectItem>
+            </SelectContent>
+          </Select>
         </template>
         <template #actions>
           <!-- This agent's own switch, left of 新建子代理: it follows the global
@@ -43,12 +49,12 @@
             />
             <b>{{ t('subagents.switchLabel') }}</b>
           </span>
-          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="subagents-new" @click="openNew">
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" data-testid="subagents-new" @click="openNew">
             <Plus class="size-3.5" aria-hidden="true" />{{ t('subagents.new') }}
-          </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+          </Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" @click="refresh">
             <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-          </button>
+          </Button>
         </template>
       </ListToolbar>
 
@@ -203,6 +209,9 @@
  */
 import { computed, ref, watch } from 'vue'
 import { Eye, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
@@ -218,6 +227,7 @@ import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { useServerList } from '@/composables/useServerList'
 import { forebrainApi, getErrorMessage, type ListQuery, type SubagentConfigRow, type SubagentKind } from '@/lib/api'
 import { effortLevelLabel } from '@/lib/effortLabel'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { useI18n, type I18nKey } from '@/locales'
 
 const { t } = useI18n()

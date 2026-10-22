@@ -10,6 +10,8 @@ import {
   type McpServerRow,
 } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect } from '@/test-utils/formControls'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import McpServersTable from './McpServersTable.vue'
 
@@ -86,7 +88,8 @@ async function mountTable(
   vi.mocked(forebrainApi.mcpPage).mockResolvedValue({ rows, total: rows.length, page: 1, pageSize: 10, notApplied })
   const wrapper = mount(McpServersTable, {
     props: { agentId: 'primary-1', ...props },
-    global: { plugins: [routerOf()], stubs: { teleport: true }, directives: { tip } },
+    global: { plugins: [routerOf()], stubs: { teleport: InlineTeleport }, directives: { tip } },
+    attachTo: document.body,
   })
   mounted.push(wrapper)
   await flushPromises()
@@ -116,6 +119,15 @@ describe('McpServersTable', () => {
   beforeAll(() => setLocale('zh'))
 
   beforeEach(() => {
+    // The layer filter is the library's select: it measures its viewport with
+    // ResizeObserver, which jsdom does not have, and scrolling an item into
+    // view is not implemented either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
     vi.spyOn(forebrainApi, 'mcpPage')
     vi.spyOn(forebrainApi, 'mcpDelete').mockResolvedValue({
       ok: true,
@@ -167,7 +179,13 @@ describe('McpServersTable', () => {
 
     expect(headers(wrapper)).toEqual(['MCP 服务', '来源', '命令或地址', '类型', '状态', '操作'])
     const filter = wrapper.find('[data-testid="mcp-source-filter"]')
-    expect(filter.findAll('option').map((option) => option.text())).toEqual(['全部来源', '主代理', '全局'])
+    await openSelect(filter.element as HTMLElement)
+    // Scoped to the list this trigger opened rather than the document-wide
+    // `optionTexts()`: the table draws a page-size select too, and both render
+    // their items inline here, so the document holds options of a select
+    // nobody opened.
+    const list = wrapper.find('[role="listbox"][data-state="open"]')
+    expect(list.findAll('[role="option"]').map((option) => option.text())).toEqual(['全部来源', '主代理', '全局'])
 
     expect(actions(wrapper, 'agent:b').element.firstElementChild?.getAttribute('data-testid')).toBe('mcp-enable-agent:b')
     expect(rowOf(wrapper, 'agent:b').find('[data-testid="mcp-edit-agent:b"]').exists()).toBe(true)

@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 import ConfirmDialog from './ConfirmDialog.vue'
 
 /** The confirmation dialog, including the retype-to-confirm gate. */
@@ -11,7 +12,7 @@ describe('ConfirmDialog', () => {
   function mountDialog(props: Record<string, unknown>) {
     return mount(ConfirmDialog, {
       props: { open: true, title: '删除主代理 docs？', message: '删除后不能恢复。', confirmLabel: 'Delete', ...props },
-      global: { stubs: { teleport: true } },
+      global: { stubs: { teleport: InlineTeleport } },
     })
   }
 

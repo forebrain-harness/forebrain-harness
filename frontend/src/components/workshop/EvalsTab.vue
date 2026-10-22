@@ -3,16 +3,24 @@
     <div class="flex flex-wrap items-center justify-between gap-2 gap-y-1.5">
       <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabEvals') }}</span>
       <div v-if="!running" class="flex shrink-0 items-center gap-1.5">
-        <select v-if="iterations.length" v-model="selected" class="forebrain-field h-7 w-[130px] text-[12px]" data-testid="workshop-eval-round">
-          <option v-for="iter in iterations" :key="iter.name" :value="iter.name">{{ roundLabel(iter) }}</option>
-        </select>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!skillName || !caseCount" data-testid="workshop-eval-run" @click="runEval">
+        <!-- The library's Select is a button, so its trigger carries the height
+             the native select had: 28px, which the library's own
+             `data-[size=default]:h-9` would otherwise win at 0,2,0. -->
+        <Select v-if="iterations.length" :model-value="selected" @update:model-value="(value) => (selected = String(value ?? ''))">
+          <SelectTrigger class="forebrain-field !h-7 w-[130px] text-[12px]" data-testid="workshop-eval-round">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="iter in iterations" :key="iter.name" :value="iter.name">{{ roundLabel(iter) }}</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="!skillName || !caseCount" data-testid="workshop-eval-run" @click="runEval">
           {{ t('workshop.runEval') }}
-        </button>
+        </Button>
       </div>
-      <button v-else type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="workshop-eval-stop" @click="emit('stop')">
+      <Button v-else type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" data-testid="workshop-eval-stop" @click="emit('stop')">
         {{ t('workshop.stop') }}
-      </button>
+      </Button>
     </div>
 
     <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-evals-error">{{ error }}</p>
@@ -58,9 +66,9 @@
           </RowActions>
         </template>
       </DataTable>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="workshop-eval-refix" @click="emit('fill', t('workshop.refixMessage', { n: roundNumber }))">
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" data-testid="workshop-eval-refix" @click="emit('fill', t('workshop.refixMessage', { n: roundNumber }))">
         {{ t('workshop.refix') }}
-      </button>
+      </Button>
     </template>
 
     <EvalCaseDialog
@@ -82,6 +90,8 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { Eye, MessageSquareText } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import RowAction from '@/components/common/RowAction.vue'

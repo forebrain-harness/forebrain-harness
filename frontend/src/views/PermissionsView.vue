@@ -7,22 +7,22 @@
 
       <ListToolbar>
         <template #left>
-          <input
+          <Input
             v-model="q"
             type="search"
             :placeholder="t('permissions.searchPlaceholder')"
-            class="forebrain-field h-[34px]"
+            class="forebrain-field h-[34px] w-auto"
             style="max-width: 240px"
             data-testid="permissions-search"
           />
         </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="permissions-verify" @click="openVerify">
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" data-testid="permissions-verify" @click="openVerify">
             {{ t('permissions.verifyTitle') }}
-          </button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" :disabled="!tools.length" data-testid="add-rule" @click="openAdd">
+          </Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" :disabled="!tools.length" data-testid="add-rule" @click="openAdd">
             <Plus class="size-3.5" aria-hidden="true" />{{ t('permissions.addRuleButton') }}
-          </button>
+          </Button>
         </template>
       </ListToolbar>
 
@@ -67,50 +67,72 @@
 
     <ForebrainModal :open="modalOpen" size="md" :title="editing ? t('permissions.editRule') : t('permissions.addRuleButton')" @close="modalOpen = false">
       <div class="grid gap-3 sm:grid-cols-2">
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('permissions.behavior') }}</span>
-          <select v-model="form.behavior" class="forebrain-field h-9 text-[13px]" data-testid="rule-behavior">
-            <option value="allow">{{ t('permissions.allow') }}</option>
-            <option value="ask">{{ t('permissions.ask') }}</option>
-            <option value="deny">{{ t('permissions.deny') }}</option>
-          </select>
-        </label>
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('permissions.tool') }}</span>
-          <select v-model="form.toolName" class="forebrain-field h-9 font-mono text-[12px]" data-testid="rule-tool">
-            <option v-if="!tools.length" value="">{{ t('common.loading') }}</option>
-            <option v-for="tool in tools" :key="tool" :value="tool">{{ tool }}</option>
-          </select>
-        </label>
+        <!-- The labels are their own elements rather than wrappers: the controls
+             are the library's Select, a button, and a button inside a `label`
+             would answer one click with two. -->
+        <div class="block">
+          <Label for="rule-behavior" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('permissions.behavior') }}</Label>
+          <Select :model-value="form.behavior" @update:model-value="(value) => (form.behavior = String(value ?? ''))">
+            <SelectTrigger id="rule-behavior" class="forebrain-field h-9 text-[13px]" data-testid="rule-behavior">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="allow">{{ t('permissions.allow') }}</SelectItem>
+              <SelectItem value="ask">{{ t('permissions.ask') }}</SelectItem>
+              <SelectItem value="deny">{{ t('permissions.deny') }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div class="block">
+          <Label for="rule-tool" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('permissions.tool') }}</Label>
+          <Select :model-value="form.toolName" @update:model-value="(value) => (form.toolName = String(value ?? ''))">
+            <SelectTrigger id="rule-tool" class="forebrain-field h-9 font-mono text-[12px]" data-testid="rule-tool">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-if="!tools.length" :value="EMPTY_CHOICE">{{ t('common.loading') }}</SelectItem>
+              <SelectItem v-for="tool in tools" :key="tool" :value="tool">{{ tool }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
       <label class="block">
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('permissions.rulesTitle') }}</span>
-        <input v-model="form.ruleContent" class="forebrain-field h-9 w-full font-mono text-[12px]" :placeholder="t('permissions.contentPlaceholder')" data-testid="rule-content" />
+        <Input v-model="form.ruleContent" class="forebrain-field h-9 w-full font-mono text-[12px]" :placeholder="t('permissions.contentPlaceholder')" data-testid="rule-content" />
       </label>
       <p class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('permissions.agentWhere') }}</p>
       <p v-if="ruleError" class="text-[12px] text-[var(--forebrain-danger)]">{{ ruleError }}</p>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalOpen = false">{{ t('common.cancel') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!form.ruleContent.trim() || busy" data-testid="rule-save" @click="saveRule">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="modalOpen = false">{{ t('common.cancel') }}</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="!form.ruleContent.trim() || busy" data-testid="rule-save" @click="saveRule">
           {{ busy ? t('common.loading') : editing ? t('common.save') : t('common.add') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
 
     <ForebrainModal :open="verifyOpen" size="md" :title="t('permissions.verifyTitle')" @close="verifyOpen = false">
       <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.verifyDescription') }}</p>
       <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-        <select v-model="probe.toolName" class="forebrain-field h-9 font-mono text-[12px]" data-testid="verify-tool" :aria-label="t('permissions.verifyTool')">
-          <option v-for="tool in tools" :key="tool" :value="tool">{{ tool }}</option>
-        </select>
-        <input v-model="probe.input" class="forebrain-field h-9 w-full font-mono text-[12px]" data-testid="verify-input" :placeholder="t('permissions.inputPlaceholder')" @keyup.enter="runVerify" />
+        <Select :model-value="probe.toolName" @update:model-value="(value) => (probe.toolName = String(value ?? ''))">
+          <SelectTrigger
+            class="forebrain-field h-9 w-full font-mono text-[12px]"
+            data-testid="verify-tool"
+            :aria-label="t('permissions.verifyTool')"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="tool in tools" :key="tool" :value="tool">{{ tool }}</SelectItem>
+          </SelectContent>
+        </Select>
+        <Input v-model="probe.input" class="forebrain-field h-9 w-full font-mono text-[12px]" data-testid="verify-input" :placeholder="t('permissions.inputPlaceholder')" @keyup.enter="runVerify" />
       </div>
       <PermissionExplainResult v-if="explain" :explain="explain" />
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="verifyOpen = false">{{ t('common.close') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="verifying || !probe.toolName.trim()" data-testid="verify-run" @click="runVerify">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="verifyOpen = false">{{ t('common.close') }}</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="verifying || !probe.toolName.trim()" data-testid="verify-run" @click="runVerify">
           {{ verifying ? t('common.loading') : t('permissions.verify') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
 
@@ -138,6 +160,10 @@
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Pencil, Plus, Trash2 } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
@@ -151,6 +177,7 @@ import PermissionExplainResult from '@/components/permissions/PermissionExplainR
 import { useServerList } from '@/composables/useServerList'
 import { getErrorMessage, forebrainApi, type PermissionExplainResponse, type PermissionRuleRecord } from '@/lib/api'
 import { permissionBehaviorLabel } from '@/lib/permissionLabels'
+import { EMPTY_CHOICE } from '@/lib/selectValue'
 import { useI18n } from '@/locales'
 
 const { t } = useI18n()

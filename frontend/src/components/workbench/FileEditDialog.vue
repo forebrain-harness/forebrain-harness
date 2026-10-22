@@ -3,7 +3,7 @@
     <div class="fed-head">
       <label class="fed-field">
         <span class="fed-label">{{ t('chat.treeEditName') }}</span>
-        <input v-model="name" class="forebrain-field font-mono" autocomplete="off" data-testid="tree-edit-name" />
+        <Input v-model="name" class="forebrain-field h-auto font-mono" autocomplete="off" data-testid="tree-edit-name" />
       </label>
       <span v-if="dir" class="fed-dir font-mono">{{ dir }}/</span>
     </div>
@@ -21,18 +21,18 @@
 
     <template #footer>
       <p v-if="saveError" class="fed-footer-error">{{ saveError }}</p>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="emit('close')">
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="emit('close')">
         {{ t('common.cancel') }}
-      </button>
-      <button
+      </Button>
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="saving || loading || !name.trim()"
         data-testid="tree-edit-save"
         @click="save"
       >
         {{ saving ? t('common.loading') : t('chat.treeEditSave') }}
-      </button>
+      </Button>
     </template>
   </ForebrainModal>
 </template>
@@ -47,6 +47,8 @@
  */
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import { getErrorMessage, forebrainApi, type WorkspaceScope } from '@/lib/api'
 import { useI18n } from '@/locales'

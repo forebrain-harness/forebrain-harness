@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 
-import { shot, signIn } from './support'
+import { pickOption, shot, signIn } from './support'
 
 /**
  * The skill lifecycle across its three pages: the primary agent's page, the
@@ -11,6 +11,13 @@ import { shot, signIn } from './support'
  */
 
 const fixtureZip = process.env.E2E_SKILL_ZIP ?? ''
+
+test.beforeEach(async ({ page }) => {
+  // The pages' copy is the design's Chinese; pinning it keeps the assertions —
+  // and the layer filter's own labels, which a person picks by word — reading
+  // the same words the prototype draws.
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+})
 
 /** One project skill directory seeded before the project is created. */
 function seedProject(root: string): void {
@@ -94,8 +101,10 @@ test('batch download zips every selected skill', async ({ page }) => {
   await ensureDemoSkill(page)
 
   const builtinName = await page.locator('[data-skill-origin="builtin"]').first().getAttribute('data-skill-row')
-  await page.locator(`[data-skill-row="demo-e2e"] input[type=checkbox]`).first().check()
-  await page.locator(`[data-skill-row="${builtinName}"] input[type=checkbox]`).first().check()
+  // A row's box is the library's Checkbox — a `role="checkbox"` button, not an
+  // `input` (plan 096).
+  await page.locator(`[data-skill-row="demo-e2e"] [role="checkbox"]`).first().check()
+  await page.locator(`[data-skill-row="${builtinName}"] [role="checkbox"]`).first().check()
   const downloadPromise = page.waitForEvent('download')
   await page.click('[data-testid="skills-batch-download"]')
   const download = await downloadPromise
@@ -149,7 +158,7 @@ test('project skills tab: project rows editable, inherited rows read-only', asyn
   await page.click('[data-testid="project-trust"]')
   // The tab pages its rows (plan 073), so the layer filter is what brings the
   // project's own skill onto the page.
-  await page.selectOption('[data-testid="project-skills-source-filter"]', 'project')
+  await pickOption(page, 'project-skills-source-filter', '项目')
   await expect(page.locator('[data-skill-row="proj-skill"][data-skill-origin="project"]')).toBeVisible({ timeout: 10_000 })
   await expect(page.locator('[data-testid="skill-toggle-proj-skill"]')).toBeVisible()
   // Inherited layers load with the project but stay read-only here.

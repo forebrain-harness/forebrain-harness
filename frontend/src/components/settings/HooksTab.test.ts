@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { forebrainApi, type HookRowRecord } from '@/lib/api'
 import tip from '@/directives/tip'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
+import { pickOption, selectedText } from '@/test-utils/formControls'
 import HooksTab from './HooksTab.vue'
 
 /**
@@ -26,14 +28,31 @@ function pageOf(rows: HookRowRecord[] = ROWS) {
 }
 
 async function mountTab(): Promise<VueWrapper> {
-  const wrapper = mount(HooksTab, { global: { directives: { tip }, stubs: { teleport: true } } })
+  // The modal's content is rendered inline by the teleport stub, so the wrapper
+  // is attached to the document: the select's options are looked up on the
+  // document, and an inline portal would otherwise sit in a detached node.
+  const wrapper = mount(HooksTab, {
+    global: { directives: { tip }, stubs: { teleport: InlineTeleport } },
+    attachTo: document.body,
+  })
   await flushPromises()
   return wrapper
 }
 
+enableAutoUnmount(afterEach)
+
 describe('HooksTab', () => {
   beforeEach(() => {
     setLocale('zh')
+    // The from/to selects measure their viewport with ResizeObserver, which
+    // jsdom does not have; scrolling an item into view is not implemented
+    // either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
     vi.spyOn(forebrainApi, 'hooksPage').mockResolvedValue(pageOf())
     vi.spyOn(forebrainApi, 'hooks').mockResolvedValue({ hooks: MAP, events: ['PreToolUse', 'PostToolUse'], knownTypes: ['command', 'prompt'] })
     vi.spyOn(forebrainApi, 'saveHooks').mockResolvedValue({ applied: true })
@@ -86,13 +105,18 @@ describe('HooksTab', () => {
     vi.useRealTimers()
   })
 
+  /** One of the modal's selects, by the test id on its trigger. */
+  function field(wrapper: VueWrapper, testid: string): HTMLElement {
+    return wrapper.find(`[data-testid="${testid}"]`).element as HTMLElement
+  }
+
   it('edits one command by reading the whole map and writing it back', async () => {
     const wrapper = await mountTab()
     await wrapper.find('[data-testid="hook-edit"]').trigger('click')
     await flushPromises()
 
     // The row's own kind comes from the whole map, not from the page.
-    expect((wrapper.find('[data-testid="hook-type"]').element as HTMLSelectElement).value).toBe('command')
+    expect(selectedText(field(wrapper, 'hook-type'))).toBe('command')
     expect((wrapper.find('[data-testid="hook-command"]').element as HTMLInputElement).value).toBe('scripts/guard.sh')
 
     await wrapper.find('[data-testid="hook-command"]').setValue('scripts/guard-v2.sh')
@@ -125,10 +149,10 @@ describe('HooksTab', () => {
   it('adds a command to the map the server keeps', async () => {
     const wrapper = await mountTab()
     await wrapper.find('[data-testid="hooks-add"]').trigger('click')
-    expect((wrapper.find('[data-testid="hook-event"]').element as HTMLSelectElement).value).toBe('PreToolUse')
+    expect(selectedText(field(wrapper, 'hook-event'))).toBe('PreToolUse')
 
     // The same matcher keeps its commands in order; the new one lands behind them.
-    await wrapper.find('[data-testid="hook-matcher"]').setValue('shell')
+    await pickOption(field(wrapper, 'hook-matcher'), 'shell')
     await wrapper.find('[data-testid="hook-command"]').setValue('scripts/new.sh')
     await wrapper.find('[data-testid="hook-save"]').trigger('click')
     await flushPromises()

@@ -10,36 +10,45 @@
 
     <ListToolbar>
       <template #left>
-        <input
+        <Input
           v-model="q"
           type="search"
           :placeholder="t('mcp.searchPlaceholder')"
-          class="forebrain-field h-[34px]"
+          class="forebrain-field h-[34px] w-auto"
           style="max-width: 240px"
           data-testid="mcp-search"
         />
         <!-- The layer filter exists only where more than one layer is listed,
              and its options are exactly the layers this page shows, highest
-             first — the order the rows arrive in. -->
-        <select
+             first — the order the rows arrive in. 全部来源 is the empty string
+             the list filters by, which a SelectItem may not carry: the sentinel
+             stands in for it on both sides. -->
+        <Select
           v-if="multiLayer"
-          v-model="sourceFilter"
-          class="forebrain-field h-[34px]"
-          style="width: 110px"
-          :aria-label="t('mcp.colSource')"
-          data-testid="mcp-source-filter"
+          :model-value="toChoice(sourceFilter)"
+          @update:model-value="(value) => (sourceFilter = fromChoice(value))"
         >
-          <option value="">{{ t('mcp.sourceAll') }}</option>
-          <option v-for="layer in layers" :key="layer" :value="layer">{{ layerName(layer) }}</option>
-        </select>
+          <SelectTrigger
+            class="forebrain-field !h-[34px]"
+            style="width: 110px"
+            :aria-label="t('mcp.colSource')"
+            data-testid="mcp-source-filter"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem :value="EMPTY_CHOICE">{{ t('mcp.sourceAll') }}</SelectItem>
+            <SelectItem v-for="layer in layers" :key="layer" :value="layer">{{ layerName(layer) }}</SelectItem>
+          </SelectContent>
+        </Select>
       </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="mcp-add" @click="openNew">
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" data-testid="mcp-add" @click="openNew">
           <Plus class="size-3.5" aria-hidden="true" />{{ t('mcp.addServer') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="mcp-refresh" @click="refresh">
+        </Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" data-testid="mcp-refresh" @click="refresh">
           <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-        </button>
+        </Button>
       </template>
     </ListToolbar>
 
@@ -223,6 +232,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { Check, Eye, Pencil, Plus, RotateCw, Trash2, X } from 'lucide-vue-next'
 import type { AxiosError } from 'axios'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -245,6 +257,7 @@ import {
   type McpNotAppliedRow,
   type McpServerRow,
 } from '@/lib/api'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { useI18n } from '@/locales'
 
 import McpServerDrawer from './McpServerDrawer.vue'

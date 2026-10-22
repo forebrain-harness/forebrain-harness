@@ -18,12 +18,12 @@
       </div>
       <label class="block">
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.yourFeedback') }}</span>
-        <textarea v-model="feedback" rows="2" class="forebrain-field w-full" :placeholder="t('workshop.feedbackPlaceholder')" data-testid="workshop-eval-feedback" />
+        <Textarea v-model="feedback" rows="2" class="forebrain-field min-h-0 w-full" :placeholder="t('workshop.feedbackPlaceholder')" data-testid="workshop-eval-feedback" />
       </label>
     </div>
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="emit('cancel')">{{ t('common.cancel') }}</button>
-      <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="workshop-eval-feedback-save" @click="save">{{ t('common.save') }}</button>
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="emit('cancel')">{{ t('common.cancel') }}</Button>
+      <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" data-testid="workshop-eval-feedback-save" @click="save">{{ t('common.save') }}</Button>
     </template>
   </ForebrainModal>
 </template>
@@ -32,6 +32,8 @@
 /** One evaluation case's two runs side by side, with a feedback box saved
  *  back into the round's feedback.json. */
 import { ref, watch } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import type { WorkshopEvalCase } from '@/lib/api'

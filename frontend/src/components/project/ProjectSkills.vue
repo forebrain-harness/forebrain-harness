@@ -7,56 +7,69 @@
       <div v-if="!trusted" class="rounded-lg border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
         <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
         <p class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.trustHint') }}</p>
-        <button type="button" class="forebrain-btn forebrain-btn-primary mt-3 text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
+        <Button type="button" class="forebrain-btn forebrain-btn-primary mt-3 h-auto text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
           {{ trusting ? t('common.loading') : t('projects.trustLabel') }}
-        </button>
+        </Button>
       </div>
 
       <template v-else>
         <ListToolbar>
           <template #left>
-            <input
+            <Input
               v-model="q"
               type="search"
               :placeholder="t('skills.searchPlaceholder')"
-              class="forebrain-field h-[34px]"
+              class="forebrain-field h-[34px] w-auto"
               style="max-width: 240px"
               data-testid="project-skills-search"
             />
-            <select v-model="origin" class="forebrain-field h-[34px]" style="width: 110px" :aria-label="t('skills.colSource')" data-testid="project-skills-source-filter">
-              <option value="">{{ t('skills.sourceAll') }}</option>
-              <option value="project">{{ t('skills.originProject') }}</option>
-              <option value="agent">{{ t('skills.originAgent') }}</option>
-              <option value="shared">{{ t('skills.originShared') }}</option>
-              <option value="builtin">{{ t('skills.originBuiltin') }}</option>
-            </select>
+            <!-- 全部来源 is the empty string the list filters by, which a
+                 SelectItem may not carry: the sentinel stands in for it on
+                 both sides. -->
+            <Select :model-value="toChoice(origin)" @update:model-value="(value) => (origin = fromChoice(value))">
+              <SelectTrigger
+                class="forebrain-field !h-[34px]"
+                style="width: 110px"
+                :aria-label="t('skills.colSource')"
+                data-testid="project-skills-source-filter"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="EMPTY_CHOICE">{{ t('skills.sourceAll') }}</SelectItem>
+                <SelectItem value="project">{{ t('skills.originProject') }}</SelectItem>
+                <SelectItem value="agent">{{ t('skills.originAgent') }}</SelectItem>
+                <SelectItem value="shared">{{ t('skills.originShared') }}</SelectItem>
+                <SelectItem value="builtin">{{ t('skills.originBuiltin') }}</SelectItem>
+              </SelectContent>
+            </Select>
           </template>
           <template #actions>
             <span v-if="selected.size" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.selectedCount', { count: selected.size }) }}</span>
-            <button
+            <Button
               type="button"
-              class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs"
+              class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs"
               :disabled="!selected.size || downloading"
               data-testid="project-skills-batch-download"
               @click="batchDownload"
             >
               <Download class="size-3.5" aria-hidden="true" />{{ t('skills.batchDownload') }}
-            </button>
-            <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" data-testid="project-skills-offline-install" @click="offlineOpen = true">
+            </Button>
+            <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" data-testid="project-skills-offline-install" @click="offlineOpen = true">
               <Upload class="size-3.5" aria-hidden="true" />{{ t('skills.offlineInstall') }}
-            </button>
-            <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" data-testid="project-skills-online-install" @click="onlineOpen = true">
+            </Button>
+            <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" data-testid="project-skills-online-install" @click="onlineOpen = true">
               <Globe class="size-3.5" aria-hidden="true" />{{ t('skills.onlineInstall') }}
-            </button>
-            <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" data-testid="project-skills-discover" @click="openWorkshop('discover')">
+            </Button>
+            <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" data-testid="project-skills-discover" @click="openWorkshop('discover')">
               <Search class="size-3.5" aria-hidden="true" />{{ t('skills.discoverInstall') }}
-            </button>
-            <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="project-skills-create" @click="openWorkshop('create')">
+            </Button>
+            <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" data-testid="project-skills-create" @click="openWorkshop('create')">
               <Plus class="size-3.5" aria-hidden="true" />{{ t('skills.createSkill') }}
-            </button>
-            <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+            </Button>
+            <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" @click="refresh">
               <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-            </button>
+            </Button>
           </template>
         </ListToolbar>
 
@@ -94,10 +107,10 @@
         <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('skills.deleteTitle', { name: confirmDelete.name }) }}</div>
         <p class="mt-2 text-[12px] text-[var(--forebrain-text-2)]">{{ t('skills.deleteHint') }}</p>
         <div class="mt-4 flex justify-end gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="confirmDelete = null">{{ t('common.cancel') }}</button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving" @click="doDelete">
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="confirmDelete = null">{{ t('common.cancel') }}</Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="saving" @click="doDelete">
             {{ saving ? t('common.loading') : t('common.delete') }}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -108,6 +121,9 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Download, Globe, Plus, RotateCw, Search, Upload } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import TablePager from '@/components/common/TablePager.vue'
@@ -120,6 +136,7 @@ import forebrainApi, {
   type ProjectRecord,
   type SkillRecord,
 } from '@/lib/api'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { workshopRoute } from '@/lib/workshopTarget'
 import { useI18n } from '@/locales'
 

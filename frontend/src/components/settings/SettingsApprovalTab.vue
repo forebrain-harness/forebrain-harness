@@ -26,15 +26,15 @@
     <p v-if="notice" class="text-[12px] text-[var(--forebrain-text-2)]">{{ notice }}</p>
 
     <div>
-      <button
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="!changed || saving"
         data-testid="approval-save"
         @click="save"
       >
         {{ saving ? t('common.loading') : t('common.save') }}
-      </button>
+      </Button>
     </div>
   </div>
 </template>
@@ -47,6 +47,7 @@
  * view from the composer.
  */
 import { computed, onMounted, ref } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import RadioField from '@/components/common/RadioField.vue'
 import { getErrorMessage, forebrainApi } from '@/lib/api'
 import { tIn, useI18n, type I18nKey } from '@/locales'
