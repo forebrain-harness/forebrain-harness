@@ -368,6 +368,147 @@ func TestConfigureChatGPTProviderFetchFailureAborts(t *testing.T) {
 	}
 }
 
+// stubChatGPTProbe replaces the saved-login probe with a fixed answer and
+// reports how many times the page probed.
+func stubChatGPTProbe(t *testing.T, check turn.SignInCheck) *int {
+	t.Helper()
+	calls := 0
+	previous := probeChatGPTLogin
+	probeChatGPTLogin = func(context.Context, string) turn.SignInCheck {
+		calls++
+		return check
+	}
+	t.Cleanup(func() { probeChatGPTLogin = previous })
+	return &calls
+}
+
+// countedChatGPTLogin replaces the browser login with a counter, so a test
+// can prove the flow never started.
+func countedChatGPTLogin(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	previous := chatGPTLogin
+	chatGPTLogin = func(context.Context, string, io.Writer) (openai.Credentials, error) {
+		calls++
+		return openai.Credentials{Email: "dev@example.com"}, nil
+	}
+	t.Cleanup(func() { chatGPTLogin = previous })
+	return &calls
+}
+
+// A saved sign-in that can list its models is the finished sign-in: no
+// browser flow, no confirmation panel, and the picker opens directly on the
+// probe's records. This is the /connect behavior the reuse fix exists for.
+func TestConfigureChatGPTProviderReusesSavedSignIn(t *testing.T) {
+	loginCalls := countedChatGPTLogin(t)
+	probeCalls := stubChatGPTProbe(t, turn.SignInCheck{State: turn.SignInUsable, Records: discoveredFixture()})
+	selector := &fakeSelector{
+		selects: []string{"GPT Second · gpt-second", "max"},
+	}
+	opts, ok, err := runChatGPTSetup(PromptConfig{
+		Selector: selector, Output: io.Discard, Home: t.TempDir(),
+	})
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if *loginCalls != 0 {
+		t.Fatalf("browser login ran %d times; a usable saved sign-in must not log in again", *loginCalls)
+	}
+	if *probeCalls != 1 {
+		t.Fatalf("probe calls = %d, want exactly one", *probeCalls)
+	}
+	if selector.confirmIdx != 0 {
+		t.Fatalf("%d confirmation panels appeared, want the picker to open directly", selector.confirmIdx)
+	}
+	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{
+		"GPT Future · gpt-future", "GPT Second · gpt-second", manualModelInput,
+	}) {
+		t.Fatalf("model options = %#v, want the probe's records in the picker", got)
+	}
+	if opts.Model != "gpt-second" {
+		t.Fatalf("model = %q, want the chosen slug", opts.Model)
+	}
+}
+
+// Missing — this machine holds no login — keeps the OAuth path exactly as it
+// was: the confirmation panel, then the browser flow.
+func TestConfigureChatGPTProviderMissingLoginRunsOAuth(t *testing.T) {
+	loginCalls := countedChatGPTLogin(t)
+	stubChatGPTProbe(t, turn.SignInCheck{State: turn.SignInMissing})
+	stubChatGPTModels(t, discoveredFixture(), nil)
+	selector := &fakeSelector{
+		selects:  []string{"GPT Future · gpt-future"},
+		confirms: []bool{true},
+	}
+	opts, ok, err := runChatGPTSetup(PromptConfig{
+		Selector: selector, Output: io.Discard, Home: t.TempDir(),
+	})
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if *loginCalls != 1 {
+		t.Fatalf("browser logins = %d, want the OAuth flow to run", *loginCalls)
+	}
+	if opts.Model != "gpt-future" {
+		t.Fatalf("model = %q", opts.Model)
+	}
+}
+
+// Dead — the server refused the stored login — runs the OAuth flow too: only
+// a new sign-in restores what the refresh token lost.
+func TestConfigureChatGPTProviderDeadLoginRunsOAuth(t *testing.T) {
+	loginCalls := countedChatGPTLogin(t)
+	stubChatGPTProbe(t, turn.SignInCheck{
+		State: turn.SignInDead,
+		Err:   errors.New("ChatGPT login expired; sign in again"),
+	})
+	stubChatGPTModels(t, discoveredFixture(), nil)
+	selector := &fakeSelector{
+		selects:  []string{"GPT Future · gpt-future"},
+		confirms: []bool{true},
+	}
+	_, ok, err := runChatGPTSetup(PromptConfig{
+		Selector: selector, Output: io.Discard, Home: t.TempDir(),
+	})
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if *loginCalls != 1 {
+		t.Fatalf("browser logins = %d, want the OAuth flow to run", *loginCalls)
+	}
+}
+
+// Unreachable never pushes a working login back through the browser: the
+// saved sign-in stands, the fetch panel owns the retry, and declining it
+// aborts with the actionable error. No OAuth anywhere in this path.
+func TestConfigureChatGPTProviderUnreachableKeepsSavedLogin(t *testing.T) {
+	loginCalls := countedChatGPTLogin(t)
+	stubChatGPTProbe(t, turn.SignInCheck{
+		State: turn.SignInUnreachable,
+		Err:   errors.New("resolve client version: registry unreachable"),
+	})
+	stubChatGPTModels(t, nil, errors.New("fetch ChatGPT models: connection refused"))
+	selector := &fakeSelector{confirms: []bool{false}, failUnexpectedSelect: true}
+	opts, ok, err := runChatGPTSetup(PromptConfig{
+		Selector: selector, Output: io.Discard, Home: t.TempDir(),
+	})
+	if err == nil || ok {
+		t.Fatalf("err=%v ok=%t, want the declined retry to abort", err, ok)
+	}
+	if *loginCalls != 0 {
+		t.Fatalf("browser logins = %d, an unreachable listing must not log in", *loginCalls)
+	}
+	if !strings.Contains(err.Error(), "could not be fetched") {
+		t.Fatalf("err = %v, want the actionable fetch failure", err)
+	}
+	if selector.confirmIdx != 1 {
+		t.Fatalf("confirmations = %d, want only the retry panel", selector.confirmIdx)
+	}
+	if opts.Provider != "" {
+		t.Fatalf("options = %+v, want none written", opts)
+	}
+}
+
 // Accepting the retry refetches on the saved login — no second browser flow —
 // and the flow then continues with the fresh listing.
 func TestConfigureChatGPTProviderFetchRetrySkipsRelogin(t *testing.T) {
@@ -688,6 +829,97 @@ func TestConfigureOpenCodeGoSignsInAndOffersTheGoCatalog(t *testing.T) {
 		if fact.Label == "Endpoint" && fact.Value != opencode.ProviderBaseURL("opencode-go") {
 			t.Fatalf("review endpoint = %q", fact.Value)
 		}
+	}
+}
+
+// stubOpenCodeProbe replaces the OpenCode saved-login probe with a fixed
+// answer and reports how many times the page probed.
+func stubOpenCodeProbe(t *testing.T, check turn.SignInCheck) *int {
+	t.Helper()
+	calls := 0
+	previous := probeOpenCodeLogin
+	probeOpenCodeLogin = func(context.Context, string) turn.SignInCheck {
+		calls++
+		return check
+	}
+	t.Cleanup(func() { probeOpenCodeLogin = previous })
+	return &calls
+}
+
+// countedOpenCodeDeviceLogin replaces the device flow with a counter, so a
+// test can prove the flow never started.
+func countedOpenCodeDeviceLogin(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	previous := openCodeLogin
+	openCodeLogin = func(_ context.Context, path string, _ io.Writer, _ func(opencode.LoginInfo), _ func(opencode.LoginStage)) (opencode.Credentials, error) {
+		calls++
+		return opencode.Credentials{AccessToken: "go-token", RefreshToken: "go-refresh", Email: "dev@example.com"}, nil
+	}
+	t.Cleanup(func() { openCodeLogin = previous })
+	return &calls
+}
+
+// The Go subscription's saved login is reused the same way ChatGPT's is: the
+// device flow never runs, no confirmation panel, the picker opens on the
+// probe's Go catalog records.
+func TestConfigureOpenCodeGoReusesSavedSignIn(t *testing.T) {
+	loginCalls := countedOpenCodeDeviceLogin(t)
+	probeCalls := stubOpenCodeProbe(t, turn.SignInCheck{State: turn.SignInUsable, Records: openCodeGoFixture()})
+	selector := &fakeSelector{}
+	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
+		Selector: selector, Output: io.Discard, Home: t.TempDir(),
+	}, "opencode-go")
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if *loginCalls != 0 {
+		t.Fatalf("device logins = %d; a usable saved sign-in must not log in again", *loginCalls)
+	}
+	if *probeCalls != 1 {
+		t.Fatalf("probe calls = %d, want exactly one", *probeCalls)
+	}
+	if selector.confirmIdx != 0 {
+		t.Fatalf("%d confirmation panels appeared, want the picker to open directly", selector.confirmIdx)
+	}
+	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{
+		"glm-5.3", "kimi-k3", manualModelInput,
+	}) {
+		t.Fatalf("model options = %#v, want the probe's records in the picker", got)
+	}
+	if opts.Provider != "opencode-go" || opts.Model != "glm-5.3" {
+		t.Fatalf("options = %+v", opts)
+	}
+}
+
+// Unreachable keeps the OpenCode Go login too: the fetch panel owns the
+// retry, the device flow never starts, and declining aborts with the
+// actionable error.
+func TestConfigureOpenCodeGoUnreachableKeepsSavedLogin(t *testing.T) {
+	loginCalls := countedOpenCodeDeviceLogin(t)
+	stubOpenCodeProbe(t, turn.SignInCheck{
+		State: turn.SignInUnreachable,
+		Err:   errors.New("fetch OpenCode models: connection refused"),
+	})
+	stubOpenCodeModels(t, nil, errors.New("fetch OpenCode models: gateway 503"))
+	selector := &fakeSelector{confirms: []bool{false}, failUnexpectedSelect: true}
+	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
+		Selector: selector, Output: io.Discard, Home: t.TempDir(),
+	}, "opencode-go")
+	if err == nil || ok {
+		t.Fatalf("err=%v ok=%t, want the declined retry to abort", err, ok)
+	}
+	if *loginCalls != 0 {
+		t.Fatalf("device logins = %d, an unreachable listing must not log in", *loginCalls)
+	}
+	if !strings.Contains(err.Error(), "could not be fetched") {
+		t.Fatalf("err = %v, want the actionable fetch failure", err)
+	}
+	if selector.confirmIdx != 1 {
+		t.Fatalf("confirmations = %d, want only the retry panel", selector.confirmIdx)
+	}
+	if opts.Provider != "" {
+		t.Fatalf("options = %+v, want none written", opts)
 	}
 }
 

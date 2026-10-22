@@ -181,3 +181,80 @@ test('signing in to ChatGPT shows the authorization link, then its account catal
   // The endpoint comes from the login's own completion answer.
   await expect(row).toContainText('https://chatgpt.com/backend-api/codex')
 })
+
+test('a reusable saved login skips the flow and opens the catalog directly', async ({ page }) => {
+  test.skip(!home, 'E2E_HOME missing')
+  await recordWindowOpen(page)
+  // The start answer a machine with a live login gets: complete with the base
+  // URL and no login_id — there is nothing to poll and no code to confirm.
+  await page.route('**/api/auth/login/opencode', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback()
+      return
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ provider: 'opencode', status: 'complete', base_url: 'https://opencode.ai/inference/go' }),
+    })
+  })
+  await stubCatalog(page, 'opencode-go', [
+    { id: 'glm-5.3', name: 'GLM 5.3' },
+    { id: 'kimi-k3', name: 'Kimi K3' },
+  ])
+  await signIn(page)
+  await page.goto('/providers', { waitUntil: 'networkidle' })
+
+  await page.click('[data-testid="providers-connect-opencode"]')
+
+  // No device code step, no authorization to open — the catalog is the first
+  // thing on the screen, holding the listing the page itself fetched.
+  await expect(page.locator('[data-testid="provider-login-models"]')).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('[data-testid="provider-login-code"]')).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { __openedAuthorizations: string[] }).__openedAuthorizations))
+    .toEqual([])
+  await expect(page.locator('[data-testid="provider-login-model-glm-5.3"]')).toBeVisible()
+
+  await page.click('[data-testid="provider-login-model-kimi-k3"]')
+  await page.click('[data-testid="provider-login-save"]')
+  const row = page.locator('[data-provider-row="opencode-go"]')
+  await expect(row).toBeVisible({ timeout: 15_000 })
+  await expect(row).toContainText('kimi-k3')
+  await expect(row).toContainText('https://opencode.ai/inference/go')
+})
+
+test('a complete answer whose catalog fetch fails offers the same retry, not a login', async ({ page }) => {
+  test.skip(!home, 'E2E_HOME missing')
+  await recordWindowOpen(page)
+  await page.route('**/api/auth/login/opencode', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback()
+      return
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ provider: 'opencode', status: 'complete', base_url: 'https://opencode.ai/inference/go' }),
+    })
+  })
+  await page.route('**/api/models**', async (route) => {
+    const asked = new URL(route.request().url()).searchParams.get('provider') ?? ''
+    if (asked !== 'opencode-go') {
+      await route.fallback()
+      return
+    }
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'unavailable' }) })
+  })
+  await signIn(page)
+  await page.goto('/providers', { waitUntil: 'networkidle' })
+
+  await page.click('[data-testid="providers-connect-opencode"]')
+
+  // The listing failed, but the login stands: the page reports the failure
+  // with its own retry — no device code, no authorization link.
+  await expect(page.locator('[data-testid="provider-login-error"]')).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('[data-testid="provider-login-retry"]')).toBeVisible()
+  await expect(page.locator('[data-testid="provider-login-code"]')).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { __openedAuthorizations: string[] }).__openedAuthorizations))
+    .toEqual([])
+})

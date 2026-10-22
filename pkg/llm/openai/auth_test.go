@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -285,5 +287,135 @@ func TestLoginWithBrowserHandsTheAuthorizationURLToTheCallback(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("authorization URL %q is missing %q", got, want)
 		}
+	}
+}
+
+// stubTokenEndpoint stands the token endpoint up locally, the way the OpenCode
+// tests stub their console base: what the endpoint answers decides whether a
+// login is dead, so the classification tests need to serve the answers.
+func stubTokenEndpoint(t *testing.T, handler http.HandlerFunc) string {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	old := tokenEndpoint
+	tokenEndpoint = server.URL + "/oauth/token"
+	t.Cleanup(func() { tokenEndpoint = old })
+	return server.URL
+}
+
+// exchange itself never judges a login dead: it reports the endpoint's status
+// and the OAuth machine code untouched, because the same invalid_grant answer
+// to an authorization code (the login flow's call site) means the code
+// expired, not the login. Only the refresh call site reclassifies.
+func TestExchangeTypesTokenEndpointRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		wantCode string
+	}{
+		{"invalid grant keeps its status and code", http.StatusBadRequest, `{"error":"invalid_grant","error_description":"refresh token revoked"}`, "invalid_grant"},
+		{"other refusals keep their status and code", http.StatusForbidden, `{"error":"unauthorized_client"}`, "unauthorized_client"},
+		{"object-shaped errors yield their code", http.StatusBadRequest, `{"error":{"code":"invalid_grant","message":"revoked"}}`, "invalid_grant"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			})
+			_, err := exchange(context.Background(), url.Values{"grant_type": {"refresh_token"}})
+			var api *llm.APIError
+			if !errors.As(err, &api) {
+				t.Fatalf("err = %v, want *llm.APIError", err)
+			}
+			if api.StatusCode != tc.status {
+				t.Fatalf("StatusCode = %d, want %d: exchange must not reclassify", api.StatusCode, tc.status)
+			}
+			if api.Code != tc.wantCode {
+				t.Fatalf("Code = %q, want %q", api.Code, tc.wantCode)
+			}
+			if !strings.Contains(api.Message, "ChatGPT token endpoint returned") {
+				t.Fatalf("Message = %q, want the endpoint's answer in it", api.Message)
+			}
+		})
+	}
+}
+
+// A dead refresh token is the login being gone, so the refresh path answers
+// 401 in the typed shape the OpenCode refresh uses — classifiers upstream then
+// offer "sign in again" instead of retrying a grant that cannot succeed.
+func TestTransportRefreshTreatsInvalidGrantAsExpiredLogin(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	// A non-JWT access token reads as already expired, so current() refreshes.
+	if err := os.WriteFile(path, []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"not-a-jwt","refresh_token":"dead"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	})
+	transport := &Transport{Path: path}
+	_, err := transport.current(context.Background())
+	var api *llm.APIError
+	if !errors.As(err, &api) {
+		t.Fatalf("err = %v, want *llm.APIError", err)
+	}
+	if api.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("StatusCode = %d, want 401", api.StatusCode)
+	}
+	if !strings.Contains(api.Message, "sign in again") {
+		t.Fatalf("Message = %q, want the sign-in-again wording", api.Message)
+	}
+	if strings.Contains(api.Message, "/connect") {
+		t.Fatalf("Message = %q, must stay surface-neutral: the web login renders it verbatim", api.Message)
+	}
+}
+
+// A failing endpoint is not a dead login: no OAuth code, no 401 — the error
+// stays a wrapped failure so "log in again" is never offered for it.
+func TestTransportRefreshKeepsOtherFailturesUnjudged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(path, []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"not-a-jwt","refresh_token":"live"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"server errors stay unreachable", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}},
+		{"other oauth refusals stay unreclassified", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"temporarily_unavailable"}`))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubTokenEndpoint(t, tc.handler)
+			transport := &Transport{Path: path}
+			_, err := transport.current(context.Background())
+			var api *llm.APIError
+			if !errors.As(err, &api) || api.StatusCode == http.StatusUnauthorized {
+				t.Fatalf("err = %v, want a failure that does not read as an expired login", err)
+			}
+		})
+	}
+
+	// A transport failure never reaches the token endpoint at all: it must
+	// not carry an API refusal shape, or a broken network would read as a
+	// dead login.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	old := tokenEndpoint
+	tokenEndpoint = deadURL + "/oauth/token"
+	t.Cleanup(func() { tokenEndpoint = old })
+	transport := &Transport{Path: path}
+	_, err := transport.current(context.Background())
+	var api *llm.APIError
+	if errors.As(err, &api) {
+		t.Fatalf("err = %v, a transport failure must not read as an API refusal", err)
 	}
 }

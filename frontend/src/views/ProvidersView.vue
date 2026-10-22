@@ -871,6 +871,21 @@ async function beginConnectLogin(provider: ProviderLoginProvider) {
   try {
     const started = await forebrainApi.startProviderLogin(provider)
     if (connectProvider.value !== provider) return
+    // A reusable login on this machine (or one that stands while only the
+    // listing is unreachable) is already the finished sign-in: go straight to
+    // the catalog, whose own fetch reports a listing that still fails.
+    if (started.status === 'complete' && started.baseUrl) {
+      connectLoginId.value = ''
+      await chooseCatalog(connectTargetFor(provider, started.baseUrl))
+      return
+    }
+    // Type narrowing, not a defense branch: the contract is complete-with-
+    // base_url or pending-with-loginId; the guard below satisfies the compiler.
+    if (!started.loginId) {
+      connectError.value = getErrorMessage(new Error('login started without an id'))
+      connectStep.value = 'failed'
+      return
+    }
     connectLoginId.value = started.loginId
     pollConnect(provider, started.loginId)
   } catch (cause) {
