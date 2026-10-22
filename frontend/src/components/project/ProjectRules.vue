@@ -4,9 +4,9 @@
     <div v-if="!trusted" class="rounded-lg border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
       <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
       <p class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.trustHint') }}</p>
-      <button type="button" class="forebrain-btn forebrain-btn-primary mt-3 text-xs" :disabled="trusting" data-testid="rules-trust" @click="trust">
+      <Button type="button" class="forebrain-btn forebrain-btn-primary mt-3 h-auto text-xs" :disabled="trusting" data-testid="rules-trust" @click="trust">
         {{ trusting ? t('common.loading') : t('projects.trustLabel') }}
-      </button>
+      </Button>
     </div>
 
     <template v-else>
@@ -15,19 +15,19 @@
 
       <ListToolbar>
         <template #left>
-          <input
+          <Input
             v-model="q"
             type="search"
             :placeholder="t('rules.searchPlaceholder')"
-            class="forebrain-field h-[34px]"
+            class="forebrain-field h-[34px] w-auto"
             style="max-width: 240px"
             data-testid="rules-search"
           />
         </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="rules-create" @click="openCreate">
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" data-testid="rules-create" @click="openCreate">
             <Plus class="size-3.5" aria-hidden="true" />{{ t('rules.newFile') }}
-          </button>
+          </Button>
         </template>
       </ListToolbar>
 
@@ -68,21 +68,36 @@
     </template>
 
     <ForebrainModal :open="creating" size="sm" :title="t('rules.createModalTitle')" @close="creating = false">
-      <label class="block">
-        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('rules.typeLabel') }}</span>
-        <select class="forebrain-field w-full text-[13px]" data-testid="rules-create-type">
-          <option>{{ t('rules.subdirType') }}</option>
-        </select>
-      </label>
-      <label class="block">
-        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('rules.dirLabel') }}</span>
-        <select v-model="createDir" class="forebrain-field w-full text-[13px]" data-testid="rules-create-select">
-          <option v-for="dir in creatable" :key="dir" :value="dir">{{ dir }}</option>
-        </select>
-      </label>
+      <!-- The labels are their own elements rather than wrappers: the control is
+           the library's Select, a button, and a button inside a `label` would
+           answer one click with two. -->
+      <div class="block">
+        <Label for="rules-create-type" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('rules.typeLabel') }}</Label>
+        <!-- One kind of file is created here — a first-level directory's own
+             FOREBRAIN.md — so the dropdown shows it and offers nothing else. -->
+        <Select :model-value="CREATE_TYPE">
+          <SelectTrigger id="rules-create-type" class="forebrain-field w-full text-[13px]" data-testid="rules-create-type">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem :value="CREATE_TYPE">{{ t('rules.subdirType') }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div class="block">
+        <Label for="rules-create-select" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('rules.dirLabel') }}</Label>
+        <Select :model-value="createDir" @update:model-value="(value) => (createDir = String(value ?? ''))">
+          <SelectTrigger id="rules-create-select" class="forebrain-field w-full text-[13px]" data-testid="rules-create-select">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="dir in creatable" :key="dir" :value="dir">{{ dir }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="creating = false">{{ t('common.cancel') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!createDir" data-testid="rules-create-ok" @click="confirmCreate">{{ t('rules.create') }}</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="creating = false">{{ t('common.cancel') }}</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="!createDir" data-testid="rules-create-ok" @click="confirmCreate">{{ t('rules.create') }}</Button>
       </template>
     </ForebrainModal>
 
@@ -94,10 +109,10 @@
       </div>
       <p class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('rules.applyShort') }}</p>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeEdit">{{ t('common.cancel') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving || !dirty" data-testid="rules-save" @click="save">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeEdit">{{ t('common.cancel') }}</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="saving || !dirty" data-testid="rules-save" @click="save">
           {{ saving ? t('common.loading') : t('common.save') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
   </div>
@@ -106,6 +121,10 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { Pencil, Plus } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
@@ -141,6 +160,9 @@ const trusting = ref(false)
 
 /** The layers with no FOREBRAIN.md yet: what the create modal may offer. */
 const creatable = ref<string[]>([])
+/** The one kind of file the create modal writes: a first-level directory's own
+ *  FOREBRAIN.md. The type dropdown shows it; a SelectItem needs a value. */
+const CREATE_TYPE = 'dir'
 const notice = ref('')
 const creating = ref(false)
 const createDir = ref('')

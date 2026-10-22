@@ -4,6 +4,30 @@
 
 ## 最新审核信息
 
+- **2026-10-22 `097`（MCP 启动失败归属）与 `099`（一屏一张错误卡 + 重放替换屏幕）已实施，落在工作区未提交**：owner 当日截图报障 ——
+  TUI 启动后出现一条 `mcp caveman-shrink / startup timed out after 30s` 错误卡，`/resume` 切到历史会话后
+  **同一张卡出现两次**（一次在 `resumed N messages above` 之上、一次在之下）。定位结论是**归属错误**，不是"没清屏"：
+  - 一个进程只有一个 `run.Runner`（`pkg/tui/chat_session.go:632-637`），MCP 世代挂在它身上且**只在 MCP 配置指纹变化时重建**
+    （`pkg/run/runner.go:2251-2270`，注释 `:905-910`）；`SetPrimaryModel`/`ResetPrimaryModel` 走同一条 load，换会话/换模型**不重启 MCP**。
+  - `subscribeMCPStatus` 订阅时**同步重放**当前 snapshot（`pkg/run/runner.go:2838-2846`，含 `ConnStatusError`）；
+    切会话时 `switchStreamSession` 把 watch 重挂到新会话（`pkg/tui/run.go:1768`），于是
+    `recordMCPStartupFailures(next, 既定失败)`（`pkg/tui/notify.go:1287-1317`）把**旧世代的失败**写进新会话历史
+    （`publishRunEvent` → `AppendSessionEventOnce`，`notify.go:794-837`），并投一张卡进主循环队列（`chat_session.go:991-1013`）。
+  - 重放随后读到刚插那行 → 画在 `resumed` 之上；队列里那张 live 卡在 `resumed` 之后落地 → 画第二张。
+    `publishRunEvent` 的 `!inserted → 不画` 挡不住：**这一行就是它自己插的**。
+  - **owner 本机库实证**：`2026-10-22 01:07:04Z–01:09:36Z` 的 2.5 分钟内 **6 个不同会话**各得到一条完全相同的
+    `mcp:caveman-shrink:9a948827be19:error` 行，其中 5 个是 `/new` 出来的**空会话**（`fb_messages` 为 0 条）；
+    全库没有任何会话有两条 mcp 行（ID 稳定 ⇒ 每会话被污染一次）。
+  - `097` 修归属（失败只记在"看着这个世代启动"的会话名下；状态行照旧跨会话显示现状）；
+    `099` 彻底堵死"同一条事实被 live 与重放各画一次"：`Frame`/`Message` 盖上事件身份 + 绘制侧"一屏一张错误卡"的闸门
+    （`retainCardOnceLocked`）+ 重放改为**替换**屏幕（顺带修好 `/rewind` 把整段 transcript 再贴一遍的既有缺陷 —— 它此前
+    没被报，是因为只有 `/rewind` 的重放没有 `switchStreamSession` 替它清屏）。
+  - **owner 2026-10-22 另两条裁决**：① `/clear` **保持现状**（只清模型上下文，不清屏、也不在运行中拒绝；
+    原先拟的 `098-clear-wipes-the-viewport` 计划已按要求删除）；② 库里既有的 `mcp:%` 污染行**不清理**
+    （此后各自只会画出一次）。
+  - 与既有设计偏差登记一致：本文件"web 实现与设计稿的偏差"第 3 条已写明"MCP 只在新开对话时启动一次，设计稿改为对话开头的提示"。
+    `097` 不改这条产品方向（提示形态仍待重构），只先保证失败不再被记进别人的历史。
+
 - **2026-10-21 新增 `096`（web 表单 / 弹窗 / 抽屉全量迁到 shadcn-vue，未开始执行）**：由 owner 当日三条裁决产出 ——
   「所有的表单组件都必须使用 shadcn-vue 的原生表单组件，必须全部替换」（同轮选「连按钮也换」）、
   「所有抽屉和弹窗必须改成 shadcn-vue 原生组件」、「子代理抽屉和工作台抽屉必须新增拖拽左侧边框上的把手自定义伸缩抽屉宽度」。
@@ -455,7 +479,9 @@
 | [093-dead-code-from-this-batch](093-dead-code-from-this-batch.md) | 删掉从不挂载的 `PendingActionsPanel`（与 `ApprovalCard` 重复 ~200 行、已漂移、还带 6 条绿测试）、无人读的 `ApprovalFacts.path`、无人 inject 的 `FileTreeFolderKey`、从不 emit 的 `activate`、3 对零引用文案键与 `reviewModelLabel`；顺带修中文界面里的 `暂无 live agents`、硬编码英文 aria-label、TUI 空数组参数只印标签 | Tech Debt / i18n | DONE | P3 | S | LOW |
 | [094-remember-image-refusal-per-session-and-model](094-remember-image-refusal-per-session-and-model.md) | provider 拒图不再静默也不再白送：**当场**发一条 `image_rejected` run event（两端各一行，live 与回放逐字相同，固定 id `image-rejected:<run>` 保证一轮只一条），并把这次拒绝记进会话（owner 2026-10-21 裁决：**粗档 provider+model**、**落库**，schema v15→v16 新增 `fb_session_image_refusals`），既有 `ImageTurnRefusal` 在"请求确实会带图"时提前拦下并返回 `ImageRejectedCode`；web 一个提示块按 `unsupported`/`rejected`/`remembered` 三种措辞。终止永久 2× 请求 | Bug Fix / Cost | DONE | **P1** | M–L | MED |
 | [095-modelsdev-reasoning-options](095-modelsdev-reasoning-options.md) | `models.json` **按上游最新数据整体刷新**（362→**732** 条：canonical 568 + 注入的 opencode 131 / opencode-go 33；文件 500KB→941KB；`scripts/update-models-asset.sh` 唯一入口，键排序后每次 diff 只落变化条目）；**TUI 与 web 的推理强度只取它的 `reasoning_options`**（308 条带 options；删 `ReasoningEffortLevels` 四档兜底与 opencode 的 50 条手抄表；`anthropic-sdk-go v1.80` 已支持 `xhigh` 故不裁；toggle/budget 或上游无数据的不出页）；解析上游 `type`，把 **63 条非 chat**（whisper / gpt-image / veo…）从选择器投影里滤掉（今天已漏 30 条），provider 推断跳过登录型 provider；**home 的 `models.json`：缺失时 `Install` 写一份完整副本、已存在时一个字节都不碰**，载入时它按字段覆盖 shipped 基底 （用户改的永远赢；老副本没有的 `type`/`reasoning_options` 自动由 shipped 补上，所以新能力到达存量安装而无需改写用户文件）。ChatGPT 保留账号后端返回的档位 | Feature / Data | DONE | **P1** | L | MED–HIGH |
-| [096-web-form-controls-shadcn-vue](096-web-form-controls-shadcn-vue.md) | **web 端表单控件、遮罩弹窗、遮罩抽屉全量改用 shadcn-vue 原生组件**（owner 2026-10-21 三条裁决）：132 处原生 `<input>`/`<select>`/`<textarea>` + 385 处非 `Button` 标签上的 `forebrain-btn`（60 文件；其中 8 处是库里已有的 `ConfirmationAction` → 门禁起步 **377 处 / 59 文件**）→ 库的 `Input/Select/Textarea/Checkbox/Switch/RadioGroup/Button`；`ForebrainModal`→`Dialog`、`ForebrainDrawer`→`Sheet`（**外壳保留**，24+4 个调用点、栈规则、焦点回还不变；`.forebrain-modal-mask` 在库结构里无处安放，明确允许改 1 行 `radius.spec` 排除选择器 + 3 行单测取 DOM 的方式）；**新增**工作台(340px)/子代理面板(440px) 左缘把手拖宽度（本会话有效，双击复位，方向键 ±16px）。12 批（**没有批次 9**），推荐序 **10→0→1…8→11→12**；地基是实测过的「设计类排在**普通**工具类之后」（`forebrain-field` 62117 > `.h-9` 15373；但 `SelectTrigger` 的 `data-[size=default]:h-9` 是 0,2,0 → 34px 下拉写 `!h-[34px]`，`Button` 默认 variant 塞 `bg-primary h-9` → 普通按钮要 `h-auto` + 配色抵消）、reka 的空串哨兵、Tailwind v4-only 语法；`selectValue.ts`/`usePanelWidth.ts` 各带自测，批次 12 是唯一一次全量 e2e | Migration / UI | TODO（**计划已冷读复核并收紧，未执行**；`plans/096-…md`） | **P2** | L | MED–HIGH |
+| [096-web-form-controls-shadcn-vue](096-web-form-controls-shadcn-vue.md) | **web 端表单控件、遮罩弹窗、遮罩抽屉全量改用 shadcn-vue 原生组件**（owner 2026-10-21 三条裁决）：132 处原生 `<input>`/`<select>`/`<textarea>` + 385 处非 `Button` 标签上的 `forebrain-btn`（60 文件；其中 8 处是库里已有的 `ConfirmationAction` → 门禁起步 **377 处 / 59 文件**）→ 库的 `Input/Select/Textarea/Checkbox/Switch/RadioGroup/Button`；`ForebrainModal`→`Dialog`、`ForebrainDrawer`→`Sheet`（**外壳保留**，24+4 个调用点、栈规则、焦点回还不变；`.forebrain-modal-mask` 在库结构里无处安放，明确允许改 1 行 `radius.spec` 排除选择器 + 3 行单测取 DOM 的方式）；**新增**工作台(340px)/子代理面板(440px) 左缘把手拖宽度（本会话有效，双击复位，方向键 ±16px）。12 批（**没有批次 9**），推荐序 **10→0→1…8→11→12**；地基是实测过的「设计类排在**普通**工具类之后」（`forebrain-field` 62117 > `.h-9` 15373；但 `SelectTrigger` 的 `data-[size=default]:h-9` 是 0,2,0 → 34px 下拉写 `!h-[34px]`，`Button` 默认 variant 塞 `bg-primary h-9` → 普通按钮要 `h-auto` + 配色抵消）、reka 的空串哨兵、Tailwind v4-only 语法；`selectValue.ts`/`usePanelWidth.ts` 各带自测，批次 12 是唯一一次全量 e2e | Migration / UI | DONE（**2026-10-22 执行完毕，12 批全落工作区、未提交**：门禁 `原生控件 0 / offenders 0 / selectOption 0 / v-model.number 0`；`vue-tsc` exit 0；单测 **138 文件 / 986 用例**全绿；全量 e2e **187 passed / 2 skipped / `web e2e: PASS`**。两条 done criterion 未按字面成立且已记录在计划里：`ForebrainModal` 必须 `:modal="false"`（reka 的 modal 焦点陷阱会把"对话框还开着时落到 composer 的按键"抢回对话框按钮 —— 实测附件确认后立刻回车变成第二次上传，`e2e/auth.spec.ts:107` 从绿变红），因此外壳自绘 `.forebrain-modal-mask` 并保留一层 `<Teleport>`；`ForebrainDrawer` 仍用库 modal 根。执行期另修三个根因：reka 的 focus-scope 抢焦点、`ScheduleBuilder` 卸载后 debounce 计时器跨用例打中新 spy（flaky）、radio 换库件后 `radius.spec` 的 12px composer 例外需扩到 `input-group` 容器（owner 批准）。owner 2026-10-22 起统一用 `deepseek-v4-flash`（不再用 `deepseek-chat`），e2e 假模式与相关 spec 已改 | **P2** | L | MED–HIGH |
+| [097-mcp-failure-belongs-to-its-own-conversation](097-mcp-failure-belongs-to-its-own-conversation.md) | **MCP 启动失败只记在「看着这个世代启动的那个会话」名下**（owner 2026-10-22 截图报障：`/resume` 之后同一张 `mcp caveman-shrink` 错误卡出现两次）。根因：一个进程一个 `run.Runner`，MCP 世代只在配置指纹变化时重建（换会话/换模型不重启，`pkg/run/runner.go:2251-2270`），而切会话把 watch 重挂到新会话（`pkg/tui/run.go:1768`）、订阅时同步重放当前 snapshot（`runner.go:2838-2846`）⇒ `recordMCPStartupFailures` 把旧世代的既定失败写进新会话历史并投一张卡（`notify.go:1287-1317`）；重放读到刚插的行画一张（`resumed` 之上）、队列里的 live 卡在之后落地画第二张。修法：世代第一次被看见时由在场会话认领（`claimMCPGenerationOwner`/`ownsMCPGeneration`），非归属会话只走状态行、不落历史不画卡；顺带改对三处与实现不符的注释（"resume restarts MCP" 等） | Bug Fix | DONE（advisor 评审 APPROVE，2026-10-22，工作区未提交；criteria 复跑与 scope 证据见计划头 Review） | **P1** | S | LOW |
+| [099-one-error-card-per-screen](099-one-error-card-per-screen.md) | **一屏之内同一条错误事件只画一张卡；重放替换屏幕而不是追加**（owner 2026-10-22：「加入本期计划，彻底修复」）。097 只管族外污染，本计划堵族内重复：① live 卡（`publishRunEvent`→`notifyTurnError`）与重放卡之间**没有任何共同身份**（`Frame`/`Message` 里没有事件 ID，`markEventShownOnce` 只在发布侧），同屏必然两张；② `replaySession` 从不清屏（`ViewportResetSession` 的唯一调用方是 `switchStreamSession`），`/resume` 只因调用方刚清过屏才看着正常，而 `/rewind` 的两个成功分支直接重放 ⇒ 整段 transcript 视觉上翻倍（既有缺陷）。修法：`Frame.EventID`/`Message.EventID` + 重放接缝一处盖上 `evt.ID`；`appendFrameViewportLocked` 前置闸门 `retainCardOnceLocked`（**只**对带 ID 的 `FrameError` 生效，key 含 `AgentID`，不影响全局错误镜像进子代理视图）；`screenCards` 随 `ViewportResetSession`/`EnableViewportMode` 清空（= 一次屏幕世代）；`commandController.resetScreen` 接到 `run.go` 的 `resetStreamTranscript`，重放先替换屏幕再画，并用 `ScreenShowsOnlyBanner` 避免切会话后重复全屏重绘 | Bug Fix | DONE（advisor 评审 APPROVE，2026-10-22，工作区未提交；criteria 复跑与 scope 证据见计划头 Review） | **P1** | M | MED |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 

@@ -7,11 +7,12 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode"
 	"unicode/utf8"
 )
 
-func TestExplainErrorCodexUsageLimitSaysWhatAndWhen(t *testing.T) {
+// A spent allowance is the provider's own sentence, with the status that
+// carried it; the runtime does not restate it in words of its own.
+func TestExplainErrorCodexUsageLimitQuotesTheProvider(t *testing.T) {
 	received := time.Unix(1788534136, 0)
 	err := &APIError{
 		StatusCode: http.StatusTooManyRequests,
@@ -22,16 +23,11 @@ func TestExplainErrorCodexUsageLimitSaysWhatAndWhen(t *testing.T) {
 	}
 
 	got := ExplainError(err)
-	for _, want := range []string{
-		"Usage limit reached on your plus plan",
-		"available again in 2h 28m",
-		time.Unix(1788543035, 0).Local().Format("2006-01-02 15:04 MST"),
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("explanation is missing %q:\n%s", want, got)
-		}
+	want := "The usage limit has been reached (HTTP 429 Too Many Requests)"
+	if got != want {
+		t.Errorf("explanation =\n%s\nwant:\n%s", got, want)
 	}
-	for _, unwanted := range []string{"{", "}", "429", "https://"} {
+	for _, unwanted := range []string{"{", "}", "https://"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("explanation leaks transport detail %q:\n%s", unwanted, got)
 		}
@@ -39,11 +35,11 @@ func TestExplainErrorCodexUsageLimitSaysWhatAndWhen(t *testing.T) {
 }
 
 // A provider that writes the whole refusal in prose used to produce an
-// explanation that argued with itself: an English shell around an untranslated
-// sentence, a line claiming the provider never said when the limit resets, and
-// an invitation to retry in a few minutes -- under a sentence naming a
-// five-hour allowance and the minute it comes back. It now reads as one
-// sentence that agrees with the provider.
+// explanation that argued with itself: an English shell around the
+// untranslated sentence, a line claiming the provider never said when the
+// limit resets, and an invitation to retry in a few minutes -- under a
+// sentence naming a five-hour allowance and the minute it comes back. It now
+// reads as the provider's sentence and the status, quoted verbatim.
 func TestExplainErrorProseOnlyUsageLimitAgreesWithTheProvider(t *testing.T) {
 	reset := time.Date(2026, 9, 10, 19, 16, 37, 0, time.Local)
 	received := reset.Add(-92 * time.Minute)
@@ -56,16 +52,53 @@ func TestExplainErrorProseOnlyUsageLimitAgreesWithTheProvider(t *testing.T) {
 	}
 
 	got := ExplainError(err)
-	want := "Usage limit reached for this account — available again in 1h 32m, at " +
-		reset.Format("2006-01-02 15:04 MST") + "."
+	want := "已达到 5 小时的使用上限。您的限额将在 2026-09-10 19:16:37 重置。 (HTTP 429 Too Many Requests)"
 	if got != want {
 		t.Errorf("explanation =\n%s\nwant:\n%s", got, want)
 	}
-	for _, r := range got {
-		if unicode.Is(unicode.Han, r) {
-			t.Errorf("the terminal wording must be written in one language, got:\n%s", got)
-			break
-		}
+}
+
+// A gateway writes where the request died in front of the provider's sentence.
+// That hop is not part of the refusal, so it comes off -- in both the plain and
+// the JSON-enveloped body -- and a body that is only the prefix says nothing at
+// all, leaving forebrain's own sentence to state the failure.
+func TestExplainErrorDropsTheGatewayPrefix(t *testing.T) {
+	const sentence = "Invalid credential"
+	cases := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{
+			name:    "plain body",
+			message: "Upstream request failed: " + sentence,
+			want:    sentence + " (HTTP 401 Unauthorized)",
+		},
+		{
+			name:    "json envelope",
+			message: `{"error":{"message":"Upstream request failed: ` + sentence + `","type":"invalid_request_error"}}`,
+			want:    sentence + " (HTTP 401 Unauthorized)",
+		},
+		{
+			name:    "prefix without a sentence",
+			message: "Upstream request failed:",
+			want:    "The provider rejected this request's credentials (HTTP 401 Unauthorized).",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ExplainError(&APIError{
+				StatusCode: http.StatusUnauthorized,
+				Message:    tc.message,
+				Err:        errors.New("raw dump"),
+			})
+			if got != tc.want {
+				t.Errorf("explanation =\n%s\nwant:\n%s", got, tc.want)
+			}
+			if strings.Contains(got, "Upstream request failed") {
+				t.Errorf("explanation still names the gateway hop:\n%s", got)
+			}
+		})
 	}
 }
 
@@ -77,27 +110,27 @@ func TestExplainErrorLooksThroughRetryWrapper(t *testing.T) {
 		RateLimit:  ParseRateLimit(http.StatusTooManyRequests, codexUsageLimitBody, "", time.Unix(1788534136, 0)),
 	}
 	wrapped := &MaxAttemptsExceededError{Attempts: 3, Err: inner}
-	if got := ExplainError(wrapped); !strings.HasPrefix(got, "Usage limit reached") {
+	if got := ExplainError(wrapped); !strings.HasPrefix(got, "The usage limit has been reached") {
 		t.Errorf("a retried failure must still explain the provider's refusal, got:\n%s", got)
 	}
 }
 
 func TestExplainErrorByStatus(t *testing.T) {
 	cases := []struct {
-		name   string
-		err    *APIError
-		want   string
-		unwant string
+		name    string
+		err     *APIError
+		want    string
+		unwants []string
 	}{
 		{
-			name: "unauthorized names the credentials",
+			name: "unauthorized quotes the provider's refusal",
 			err: &APIError{
 				StatusCode: http.StatusUnauthorized,
 				Message:    `{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}`,
 				Err:        errors.New("raw dump"),
 			},
-			want:   "rejected this request's credentials",
-			unwant: "raw dump",
+			want:    "Incorrect API key provided (HTTP 401 Unauthorized)",
+			unwants: []string{"raw dump", "sign-in may have expired"},
 		},
 		{
 			name: "server error is described as the provider's problem",
@@ -105,8 +138,8 @@ func TestExplainErrorByStatus(t *testing.T) {
 				StatusCode: http.StatusBadGateway,
 				Err:        errors.New("raw dump"),
 			},
-			want:   "having trouble on its side",
-			unwant: "raw dump",
+			want:    "having trouble on its side (HTTP 502 Bad Gateway).",
+			unwants: []string{"raw dump", "should be retried"},
 		},
 		{
 			name: "unclassified 4xx leads with the provider's sentence",
@@ -115,8 +148,8 @@ func TestExplainErrorByStatus(t *testing.T) {
 				Message:    `{"error":{"message":"tool_choice is not supported for this model"}}`,
 				Err:        errors.New("raw dump"),
 			},
-			want:   "tool_choice is not supported for this model",
-			unwant: "raw dump",
+			want:    "tool_choice is not supported for this model (HTTP 422 Unprocessable Entity)",
+			unwants: []string{"raw dump"},
 		},
 	}
 	for _, tc := range cases {
@@ -125,8 +158,10 @@ func TestExplainErrorByStatus(t *testing.T) {
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("explanation is missing %q:\n%s", tc.want, got)
 			}
-			if strings.Contains(got, tc.unwant) {
-				t.Errorf("explanation leaks %q:\n%s", tc.unwant, got)
+			for _, unwant := range tc.unwants {
+				if strings.Contains(got, unwant) {
+					t.Errorf("explanation leaks %q:\n%s", unwant, got)
+				}
 			}
 		})
 	}
@@ -154,15 +189,34 @@ func TestExplainErrorPassesThroughNonProviderErrors(t *testing.T) {
 }
 
 func TestExplainErrorContextWindow(t *testing.T) {
-	err := &APIError{
-		StatusCode: http.StatusBadRequest,
-		Code:       "context_length_exceeded",
-		Message:    "This model's maximum context length is 128000 tokens",
-		Err:        errors.New("raw dump"),
-	}
-	if got := ExplainError(err); !strings.Contains(got, "context window") {
-		t.Errorf("a size rejection should name the context window, got:\n%s", got)
-	}
+	t.Run("quotes the provider when it said why", func(t *testing.T) {
+		err := &APIError{
+			StatusCode: http.StatusBadRequest,
+			Code:       "context_length_exceeded",
+			Message:    "This model's maximum context length is 128000 tokens",
+			Err:        errors.New("raw dump"),
+		}
+		want := "This model's maximum context length is 128000 tokens (HTTP 400 Bad Request)"
+		if got := ExplainError(err); got != want {
+			t.Errorf("explanation =\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	// A size rejection the provider explains no further still names the context
+	// window, and stops at what happened: the advice that used to follow it is
+	// not part of the sentence.
+	t.Run("names the window when the provider said nothing", func(t *testing.T) {
+		err := &APIError{
+			StatusCode: http.StatusBadRequest,
+			Code:       "context_length_exceeded",
+			Err:        errors.New("raw dump"),
+		}
+		got := ExplainError(err)
+		want := "The conversation no longer fits in the model's context window."
+		if got != want {
+			t.Errorf("explanation =\n%s\nwant:\n%s", got, want)
+		}
+	})
 }
 
 func TestFormatWait(t *testing.T) {

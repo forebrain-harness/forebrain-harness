@@ -10,6 +10,7 @@ import {
 } from '@/lib/api'
 import tip from '@/directives/tip'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 import LspTab from './LspTab.vue'
 
 vi.mock('@/lib/api', async (importOriginal) => {
@@ -68,7 +69,7 @@ function pageOf(servers: LspServerStatus[], overrides: Partial<LspSnapshotPage> 
 }
 
 async function mountTab(): Promise<VueWrapper> {
-  const wrapper = mount(LspTab, { global: { directives: { tip }, stubs: { teleport: true } } })
+  const wrapper = mount(LspTab, { global: { directives: { tip }, stubs: { teleport: InlineTeleport } } })
   await flushPromises()
   return wrapper
 }
@@ -188,7 +189,7 @@ describe('LspTab', () => {
       .mockResolvedValueOnce(installing) // first tick: still installing
       .mockResolvedValue(settled) // second tick: the install ended
 
-    const wrapper = mount(LspTab, { global: { directives: { tip }, stubs: { teleport: true } } })
+    const wrapper = mount(LspTab, { global: { directives: { tip }, stubs: { teleport: InlineTeleport } } })
     await vi.advanceTimersByTimeAsync(0)
     await flushPromises()
     expect(lspPage).toHaveBeenCalledTimes(1)

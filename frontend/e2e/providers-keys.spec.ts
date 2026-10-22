@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { shot, signIn } from './support'
+import { pickOption, shot, signIn } from './support'
 
 /**
  * The model-service list: order is priority, models are chips, and an API key
@@ -16,16 +16,6 @@ const configPath = home ? join(home, 'forebrain.yaml') : ''
 const envPath = home ? join(home, '.env') : ''
 
 test.describe.configure({ mode: 'serial' })
-
-/**
- * The provider and format dropdowns are shadcn-vue selects (reka-ui), so a
- * value is picked the way a person picks it: open the trigger, click the item.
- * There is no native <select> for Playwright's selectOption to drive.
- */
-async function pickOption(page: Page, testid: string, label: string): Promise<void> {
-  await page.click(`[data-testid="${testid}"]`)
-  await page.getByRole('option', { name: label, exact: true }).click()
-}
 
 async function rowOf(page: Page, name: string) {
   const index = await page.locator('[data-provider-row]').evaluateAll(

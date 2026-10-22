@@ -5,22 +5,22 @@
 
       <ListToolbar>
         <template #left>
-          <input
+          <Input
             v-model="q"
             type="search"
             :placeholder="t('projects.searchPlaceholder')"
-            class="forebrain-field h-[34px]"
+            class="forebrain-field h-[34px] w-auto"
             style="max-width: 240px"
             data-testid="projects-search"
           />
         </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="projects-new" @click="openCreate">
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" data-testid="projects-new" @click="openCreate">
             <Plus class="size-3.5" aria-hidden="true" />{{ t('projects.newProject') }}
-          </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+          </Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" @click="refresh">
             <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-          </button>
+          </Button>
         </template>
       </ListToolbar>
 
@@ -89,13 +89,13 @@
       <div>
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.dirLabel') }}</span>
         <div class="flex gap-2">
-          <input v-model="draft.root" class="forebrain-field h-9 flex-1 font-mono text-[12px]" :placeholder="t('projects.rootPlaceholder')" data-testid="project-root" />
-          <button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" @click="browse">{{ t('projects.browse') }}</button>
+          <Input v-model="draft.root" class="forebrain-field h-9 flex-1 font-mono text-[12px]" :placeholder="t('projects.rootPlaceholder')" data-testid="project-root" />
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" @click="browse">{{ t('projects.browse') }}</Button>
         </div>
       </div>
       <label class="block">
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.namePlaceholder') }}</span>
-        <input v-model="draft.name" class="forebrain-field h-9 w-full" :placeholder="t('projects.namePlaceholder')" data-testid="project-name" />
+        <Input v-model="draft.name" class="forebrain-field h-9 w-full" :placeholder="t('projects.namePlaceholder')" data-testid="project-name" />
       </label>
       <div v-if="taken" class="rounded-lg border border-[var(--forebrain-warning)] bg-[var(--forebrain-bg-alt)] px-3 py-2 text-[12px] text-[var(--forebrain-text-2)]">
         {{ t('projects.taken', { name: taken.name }) }}
@@ -104,10 +104,10 @@
       <p v-else class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.rootHint') }}</p>
       <p v-if="createError" class="text-[12px] text-[var(--forebrain-danger)]">{{ createError }}</p>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeCreate">{{ t('common.cancel') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!draft.name.trim() || !draft.root.trim() || submitting || !!taken" data-testid="project-create" @click="create">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeCreate">{{ t('common.cancel') }}</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="!draft.name.trim() || !draft.root.trim() || submitting || !!taken" data-testid="project-create" @click="create">
           {{ submitting ? t('common.loading') : t('projects.create') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
 
@@ -139,6 +139,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { FolderOpen, Pin, PinOff, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'

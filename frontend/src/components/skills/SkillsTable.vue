@@ -11,20 +11,18 @@
     :row-attrs="(row) => ({ 'data-skill-row': row.name, 'data-skill-origin': row.origin })"
   >
     <template #header-select>
-      <input
-        type="checkbox"
-        :checked="allSelected"
+      <Checkbox
+        :model-value="allSelected"
         :aria-label="t('skills.selectAll')"
         data-testid="skills-select-all"
-        @change="toggleAll(($event.target as HTMLInputElement).checked)"
+        @update:model-value="(checked) => toggleAll(checked === true)"
       />
     </template>
     <template #cell-select="{ row }">
-      <input
-        type="checkbox"
-        :checked="selected.has(row.name)"
+      <Checkbox
+        :model-value="selected.has(row.name)"
         :aria-label="t('skills.selectForDownload', { name: row.name })"
-        @change="toggleSelect(row, ($event.target as HTMLInputElement).checked)"
+        @update:model-value="(checked) => toggleSelect(row, checked === true)"
       />
     </template>
     <template #cell-name="{ row }">
@@ -109,6 +107,7 @@
  * missing one of them keeps its hole so the icons line up down the column.
  */
 import { computed } from 'vue'
+import { Checkbox } from '@repo/shadcn-vue/components/ui/checkbox'
 import { Download, Eye, Lock as LockIcon, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'

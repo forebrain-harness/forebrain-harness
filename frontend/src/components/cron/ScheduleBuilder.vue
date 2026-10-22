@@ -1,79 +1,121 @@
 <template>
   <div class="space-y-3" data-testid="schedule-builder">
     <div class="grid gap-2 sm:grid-cols-2">
-      <label class="block">
-        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.mode') }}</span>
-        <select v-model="mode" class="forebrain-field h-9" data-testid="schedule-mode">
-          <option v-for="item in modes" :key="item.key" :value="item.key">{{ item.label }}</option>
-        </select>
-      </label>
+      <!-- The label is its own element rather than a wrapper: the control is the
+           library's Select, a button, and a button inside a `label` would answer
+           one click with two. -->
+      <div class="block">
+        <Label for="schedule-mode" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('cron.mode') }}</Label>
+        <Select :model-value="mode" @update:model-value="(value) => (mode = String(value) as ModeKey)">
+          <SelectTrigger id="schedule-mode" class="forebrain-field h-9" data-testid="schedule-mode">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="item in modes" :key="item.key" :value="item.key">{{ item.label }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
 
       <template v-if="mode === 'once-at'">
         <label class="block">
           <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.pickDateTime') }}</span>
-          <input v-model="onceAt" type="datetime-local" class="forebrain-field h-9" data-testid="schedule-once-at" />
+          <!-- The library's Input hands `type` down to the native element and
+               its own default is text: dropping this line would quietly turn the
+               picker into a free-text box. -->
+          <Input v-model="onceAt" type="datetime-local" class="forebrain-field h-9" data-testid="schedule-once-at" />
         </label>
       </template>
 
       <template v-else-if="mode === 'once-in'">
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.after') }}</span>
+        <div class="block">
+          <Label for="schedule-in-count" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('cron.after') }}</Label>
           <div class="flex gap-2">
-            <input v-model.number="inCount" type="number" min="1" class="forebrain-field h-9 w-24" data-testid="schedule-in-count" />
-            <select v-model="inUnit" class="forebrain-field h-9 flex-1" data-testid="schedule-in-unit">
-              <option value="m">{{ t('cron.unitMinutes') }}</option>
-              <option value="h">{{ t('cron.unitHours') }}</option>
-            </select>
+            <!-- A number is a number: the library's Input does not implement
+                 `v-model`'s `.number` modifier, so the conversion is here and an
+                 emptied box falls back to the field's own floor. -->
+            <Input
+              :model-value="String(inCount)"
+              type="number"
+              min="1"
+              class="forebrain-field h-9 w-24"
+              data-testid="schedule-in-count"
+              @update:model-value="(value) => (inCount = Number(value) || 1)"
+            />
+            <!-- The unit belongs to the count above it, so the label names the
+                 pair and this trigger reuses that name as its own. -->
+            <Select :model-value="inUnit" @update:model-value="(value) => (inUnit = String(value) as 'm' | 'h')">
+              <SelectTrigger class="forebrain-field h-9 flex-1" :aria-label="t('cron.after')" data-testid="schedule-in-unit">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="m">{{ t('cron.unitMinutes') }}</SelectItem>
+                <SelectItem value="h">{{ t('cron.unitHours') }}</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-        </label>
+        </div>
       </template>
 
       <template v-else-if="mode === 'every'">
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.everyLabel') }}</span>
+        <div class="block">
+          <Label for="schedule-every-count" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('cron.everyLabel') }}</Label>
           <div class="flex gap-2">
-            <input v-model.number="everyCount" type="number" min="1" class="forebrain-field h-9 w-24" data-testid="schedule-every-count" />
-            <select v-model="everyUnit" class="forebrain-field h-9 flex-1" data-testid="schedule-every-unit">
-              <option value="m">{{ t('cron.unitMinutes') }}</option>
-              <option value="h">{{ t('cron.unitHours') }}</option>
-              <option value="d">{{ t('cron.unitDays') }}</option>
-            </select>
+            <Input
+              :model-value="String(everyCount)"
+              type="number"
+              min="1"
+              class="forebrain-field h-9 w-24"
+              data-testid="schedule-every-count"
+              @update:model-value="(value) => (everyCount = Number(value) || 1)"
+            />
+            <Select :model-value="everyUnit" @update:model-value="(value) => (everyUnit = String(value) as 'm' | 'h' | 'd')">
+              <SelectTrigger class="forebrain-field h-9 flex-1" :aria-label="t('cron.everyLabel')" data-testid="schedule-every-unit">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="m">{{ t('cron.unitMinutes') }}</SelectItem>
+                <SelectItem value="h">{{ t('cron.unitHours') }}</SelectItem>
+                <SelectItem value="d">{{ t('cron.unitDays') }}</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-        </label>
+        </div>
       </template>
 
       <template v-else-if="mode === 'daily' || mode === 'weekdays' || mode === 'weekly'">
         <label class="block">
           <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.atTime') }}</span>
-          <input v-model="clockTime" type="time" class="forebrain-field h-9" data-testid="schedule-time" />
+          <Input v-model="clockTime" type="time" class="forebrain-field h-9" data-testid="schedule-time" />
         </label>
       </template>
 
       <template v-else-if="mode === 'cron'">
         <label class="block">
           <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.cronLabel') }}</span>
-          <input v-model="cronText" type="text" class="forebrain-field h-9 font-mono" data-testid="schedule-cron" :placeholder="t('cron.cronPlaceholder')" />
+          <Input v-model="cronText" type="text" class="forebrain-field h-9 font-mono" data-testid="schedule-cron" :placeholder="t('cron.cronPlaceholder')" />
         </label>
       </template>
     </div>
 
     <div v-if="mode === 'weekly'" class="flex flex-wrap gap-2" data-testid="schedule-weekdays">
-      <label
+      <!-- A chip is a box with its day's name beside it. The box is the library's
+           Checkbox, a button, so the name is a Label bound to it rather than a
+           wrapper around it: a `label` around a button toggles it twice. -->
+      <div
         v-for="day in weekdays"
         :key="day.value"
-        class="flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px]"
+        class="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px]"
         :class="pickedDays.has(day.value)
           ? 'border-[var(--forebrain-brand-border-strong)] bg-[var(--forebrain-brand-soft)] text-[var(--forebrain-brand-1)]'
           : 'border-[var(--forebrain-divider)] text-[var(--forebrain-text-2)]'"
       >
-        <input
-          type="checkbox"
-          class="h-3.5 w-3.5 rounded border-[var(--forebrain-divider-strong)] text-[var(--forebrain-brand-1)]"
-          :checked="pickedDays.has(day.value)"
-          @change="toggleDay(day.value, ($event.target as HTMLInputElement).checked)"
+        <Checkbox
+          :id="`schedule-day-${day.value}`"
+          :model-value="pickedDays.has(day.value)"
+          @update:model-value="(checked) => toggleDay(day.value, checked === true)"
         />
-        {{ day.label }}
-      </label>
+        <Label :for="`schedule-day-${day.value}`" class="cursor-pointer font-normal text-[12px] leading-[normal]">{{ day.label }}</Label>
+      </div>
     </div>
 
     <div class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2" data-testid="schedule-preview">
@@ -94,7 +136,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { Checkbox } from '@repo/shadcn-vue/components/ui/checkbox'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
+
 import forebrainApi, { getErrorMessage, type CronPreviewResponse } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -236,6 +283,13 @@ watch(expression, (value) => {
     }
   }, 400)
 }, { immediate: true })
+
+// The debounce is the builder's own: a preview asked for by a builder that is
+// already gone answers nobody, so the timer leaves with the component.
+onBeforeUnmount(() => {
+  if (previewDebounce) clearTimeout(previewDebounce)
+  previewDebounce = null
+})
 
 function formatPreviewTime(iso: string): string {
   const date = new Date(iso)

@@ -10,8 +10,8 @@ import { seedProject, signIn } from './support'
  * controls 6px, chips 5px, the composer input alone 12px, pills and circles
  * round. This walk forbids the retired values — 16/10/9/7px — on every page,
  * every settings tab, every project tab and every known dialog, and pins the
- * surviving 12px to the composer textarea whitelist, so a future card cannot
- * quietly drift back to the old scale.
+ * surviving 12px to the composer, so a future card cannot quietly drift back
+ * to the old scale.
  */
 
 type Offender = { tag: string; cls: string; radius: string; text: string; testid: string | null }
@@ -20,7 +20,7 @@ const FORBIDDEN = ['16px', '10px', '9px', '7px']
 
 /** One radius audit of the live document: every in-layout element that draws
  * a border or a background and is wide enough to show a corner must stay on
- * the scale. 12px survives only on the composer textarea. */
+ * the scale. 12px survives only on the composer. */
 async function auditRadii(page: Page): Promise<Offender[]> {
   return page.evaluate((forbidden) => {
     const offenders: Offender[] = []
@@ -28,8 +28,10 @@ async function auditRadii(page: Page): Promise<Offender[]> {
       if (!(el instanceof HTMLElement)) continue
       // The shared modal shell is a 12px container by design (the approved
       // preview draws every dialog at 12px), so the open-modal stack is out of
-      // this walk the same way the composer textarea is.
-      if (el.closest('.forebrain-modal-mask')) continue
+      // this walk the same way the composer is. The shell is the
+      // library's Dialog, which renders the panel and its overlay as siblings
+      // (no shared mask ancestor), so both are named here.
+      if (el.closest('.forebrain-modal, [data-slot="dialog-overlay"]')) continue
       const cs = getComputedStyle(el)
       if (cs.display === 'none' || cs.visibility === 'hidden') continue
       const rect = el.getBoundingClientRect()
@@ -45,7 +47,12 @@ async function auditRadii(page: Page): Promise<Offender[]> {
         cs.borderBottomRightRadius,
         cs.borderBottomLeftRadius,
       ]
-      const isComposer = el.tagName === 'TEXTAREA' && (el.getAttribute('data-testid') ?? '').includes('composer')
+      // The composer is the one 12px surface by design: the textarea itself and
+      // the library's input-group box it sits in (`rounded-xl` on the chat
+      // page's composer, owner decision 2026-10-22). Nothing else is exempt.
+      const isComposer =
+        (el.tagName === 'TEXTAREA' && (el.getAttribute('data-testid') ?? '').includes('composer')) ||
+        (el.getAttribute('data-slot') === 'input-group' && el.closest('.chat-composer') !== null)
       for (const corner of corners) {
         const radius = corner.split(' ')[0] ?? ''
         if (forbidden.includes(radius) || (radius === '12px' && !isComposer)) {

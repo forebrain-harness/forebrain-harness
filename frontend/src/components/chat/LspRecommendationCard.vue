@@ -8,6 +8,7 @@
  */
 import { computed, onBeforeUnmount, reactive } from 'vue'
 import { ServerCog, X } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { decideLspRecommendation, getErrorMessage, lspSnapshot } from '@/lib/api'
 import type { LspRecommendation, LspRecommendationChoice } from '@/lib/lspRecommendation'
 import { useI18n } from '@/locales'
@@ -185,7 +186,7 @@ function showResult(line: string) {
       </div>
 
       <div v-else class="mt-2 flex flex-wrap items-center gap-2">
-        <button
+        <Button
           type="button"
           class="forebrain-btn forebrain-btn-primary h-7 px-3 text-[12px]"
           :disabled="state.phase === 'sending'"
@@ -193,8 +194,8 @@ function showResult(line: string) {
           @click="decide(primaryChoice)"
         >
           {{ primaryChoice === 'install' ? t('lsp.recommendation.installBtn') : t('lsp.recommendation.enableBtn') }}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
           class="forebrain-btn forebrain-btn-ghost h-7 px-3 text-[12px]"
           :disabled="state.phase === 'sending'"
@@ -202,8 +203,8 @@ function showResult(line: string) {
           @click="decide('not_now')"
         >
           {{ t('lsp.recommendation.notNow') }}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
           class="forebrain-btn forebrain-btn-ghost h-7 px-3 text-[12px]"
           :disabled="state.phase === 'sending'"
@@ -211,8 +212,8 @@ function showResult(line: string) {
           @click="decide('never')"
         >
           {{ t('lsp.recommendation.never', { id: recommendation.serverId }) }}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
           class="forebrain-btn forebrain-btn-ghost h-7 px-3 text-[12px]"
           :disabled="state.phase === 'sending'"
@@ -220,7 +221,7 @@ function showResult(line: string) {
           @click="decide('disable_all')"
         >
           {{ t('lsp.recommendation.disableAll') }}
-        </button>
+        </Button>
       </div>
     </template>
 

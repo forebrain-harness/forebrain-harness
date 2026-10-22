@@ -13,22 +13,23 @@
         <div class="font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ candidate.source }}</div>
       </div>
       <BadgeComponent v-if="isInstalled(candidate)" variant="success">{{ t('skills.enabled') }}</BadgeComponent>
-      <button
+      <Button
         v-else
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="busy === candidate.name"
         :data-testid="`workshop-install-${candidate.name}`"
         @click="emit('install', candidate)"
       >
         {{ busy === candidate.name ? t('common.loading') : t('common.install') }}
-      </button>
+      </Button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 /** The discovery reply's candidate skills as installable cards. */
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import type { SkillCandidate } from '@/lib/api'
 import { useI18n } from '@/locales'

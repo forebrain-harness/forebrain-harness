@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { expect, test, type Locator } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { seedSessionInRoot, shot, signIn } from './support'
 
@@ -389,4 +389,66 @@ test("a tab's own composer adds attachments and @ references, and closing it is 
   await page.reload({ waitUntil: 'networkidle' })
   await expect(page.locator('[data-testid="subagent-drawer"]')).toBeVisible({ timeout: 30_000 })
   await expect(page.locator(`[data-testid="subagent-tab-${AGENT_ID}"]`)).toBeVisible()
+})
+
+/** The drawer's width as drawn, in whole pixels. */
+async function drawerWidth(page: Page): Promise<number> {
+  const box = await page.locator('[data-testid="subagent-drawer"]').boundingBox()
+  return Math.round(box?.width ?? 0)
+}
+
+/** Drag the drawer's left edge by `dx` px — a negative `dx` widens it. */
+async function dragEdge(page: Page, dx: number): Promise<void> {
+  const handle = page.locator('[data-testid="subagent-drawer-resizer"]')
+  const box = await handle.boundingBox()
+  if (!box) throw new Error('the drawer handle was not laid out')
+  const x = box.x + box.width / 2
+  const y = box.y + box.height / 2
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  await page.mouse.move(x + dx, y, { steps: 8 })
+  await page.mouse.up()
+}
+
+test('the drawer is resized by its left edge, for this session only', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
+  await signIn(page)
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-subagent-drag')
+  seedRunningSubagent(session)
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await page.locator('[data-testid="subagent-drawer-toggle"]').click({ timeout: 30_000 })
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+  // Measure it where it lands, not where the slide-in happens to be.
+  await expect(drawer).toHaveCSS('transform', 'none')
+  const design = await drawerWidth(page)
+  expect(design).toBe(440)
+
+  // 80px of travel left is 80px of drawer, taken from the conversation.
+  await expect(page.locator('[data-testid="subagent-drawer-resizer"]')).toBeVisible()
+  await dragEdge(page, -80)
+  await expect.poll(async () => Math.abs((await drawerWidth(page)) - (design + 80))).toBeLessThanOrEqual(2)
+  await shot(page, 'subagent-drawer-resized')
+
+  // A double-click on the handle is the way back to the design width.
+  await page.locator('[data-testid="subagent-drawer-resizer"]').dblclick()
+  await expect.poll(() => drawerWidth(page)).toBe(design)
+
+  // Dragged wide and reloaded: the width was this tab's, so the drawer comes
+  // back at 440 while its own shape (open, tab in front) survives.
+  await dragEdge(page, -80)
+  await expect.poll(async () => Math.abs((await drawerWidth(page)) - (design + 80))).toBeLessThanOrEqual(2)
+  await expect.poll(async () => page.evaluate((key) => {
+    const raw = localStorage.getItem(key)
+    if (!raw) return false
+    const parsed = JSON.parse(raw) as { drawer?: { open?: boolean } }
+    return parsed.drawer?.open === true
+  }, browseKey(session))).toBe(true)
+  await page.reload({ waitUntil: 'networkidle' })
+  await expect(page.locator('[data-testid="subagent-drawer"]')).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator(`[data-testid="subagent-tab-${AGENT_ID}"]`)).toBeVisible()
+  await expect(page.locator('[data-testid="subagent-drawer"]')).toHaveCSS('transform', 'none')
+  expect(await drawerWidth(page)).toBe(design)
 })

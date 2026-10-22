@@ -36,12 +36,12 @@
               <AlertTitle>{{ t('chat.historyLoadFailed') }}</AlertTitle>
               <AlertDescription class="space-y-2">
                 <div class="whitespace-pre-line">{{ historyError }}</div>
-                <button
+                <Button
                   type="button"
-                  class="forebrain-btn forebrain-btn-ghost text-xs"
+                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
                   :disabled="historyLoading || !sessionId"
                   @click="sessionId && loadMessages(sessionId)"
-                >{{ t('chat.retry') }}</button>
+                >{{ t('chat.retry') }}</Button>
               </AlertDescription>
             </Alert>
             <!--
@@ -584,6 +584,7 @@ import { h, ref, computed, nextTick, onMounted, onUnmounted, watch, withDirectiv
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { CheckCircle, CircleAlert, Bot, Image as ImageIcon, ImageOff, Paperclip, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import ProjectPill from '@/components/chat/ProjectPill.vue'
 import FolderDialog from '@/components/chat/FolderDialog.vue'
 import RewindDialog from '@/components/chat/RewindDialog.vue'

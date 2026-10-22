@@ -13,20 +13,18 @@
       @update:sorting="sortBy($event.key, $event.order)"
     >
       <template #header-select>
-        <input
-          type="checkbox"
-          :checked="allSelected"
+        <Checkbox
+          :model-value="allSelected"
           :aria-label="t('memories.selectAll')"
           data-testid="memories-select-all"
-          @change="toggleAll(($event.target as HTMLInputElement).checked)"
+          @update:model-value="(checked) => toggleAll(checked === true)"
         />
       </template>
       <template #cell-select="{ row }">
-        <input
-          type="checkbox"
-          :checked="selected.has(row.path)"
+        <Checkbox
+          :model-value="selected.has(row.path)"
           :aria-label="t('memories.selectFile', { path: row.path })"
-          @change="toggleSelect(row.path, ($event.target as HTMLInputElement).checked)"
+          @update:model-value="(checked) => toggleSelect(row.path, checked === true)"
         />
       </template>
       <template #cell-path="{ row }">
@@ -86,14 +84,14 @@
         </div>
         <p v-if="editorError" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ editorError }}</p>
         <div class="mt-3 flex items-center gap-2 border-t border-[var(--forebrain-divider)] pt-3">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" :disabled="saving" data-testid="memories-editor-delete" @click="deleteFromEditor">
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs text-[var(--forebrain-danger)]" :disabled="saving" data-testid="memories-editor-delete" @click="deleteFromEditor">
             {{ editing?.core ? t('memories.emptyContent') : t('memories.deleteFile') }}
-          </button>
+          </Button>
           <span class="flex-1" />
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeEditor">{{ t('common.cancel') }}</button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving || !dirty" data-testid="memories-editor-save" @click="saveEditor">
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeEditor">{{ t('common.cancel') }}</Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="saving || !dirty" data-testid="memories-editor-save" @click="saveEditor">
             {{ saving ? t('common.loading') : t('common.save') }}
-          </button>
+          </Button>
         </div>
       </div>
     </ForebrainModal>
@@ -102,6 +100,8 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Checkbox } from '@repo/shadcn-vue/components/ui/checkbox'
 import { Pencil, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'

@@ -10,9 +10,9 @@
       <span>{{ t('chat.mcpNoticeLine', { names: failureNames }) }}</span>
       <span class="forebrain-err-s">
         {{ t('chat.mcpNoticeFix') }}
-        <button type="button" class="forebrain-btn forebrain-btn-ghost h-auto px-0.5 py-0 text-[12px]" data-testid="mcp-notice-toggle" @click="open = !open">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto px-0.5 py-0 text-[12px]" data-testid="mcp-notice-toggle" @click="open = !open">
           {{ open ? t('chat.mcpNoticeHide') : t('chat.mcpNoticeShow') }}
-        </button>
+        </Button>
       </span>
       <code
         v-for="row in failures"
@@ -28,6 +28,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { PlugZap } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{

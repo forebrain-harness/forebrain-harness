@@ -111,7 +111,7 @@ agents:
       primary: true
       llm_providers:
       - provider: deepseek
-        model: deepseek-chat
+        model: deepseek-v4-flash
         api_key: \${FAKE_LLM_KEY}
         base_url: http://127.0.0.1:$PORT
 YAML

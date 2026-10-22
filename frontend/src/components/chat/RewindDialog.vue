@@ -24,13 +24,27 @@
         <template v-if="mode !== 'chat'">
           <div v-if="files.length" class="rw-files">
             <div class="cap">{{ t('chat.rewindFiles', { n: files.length }) }}</div>
-            <label v-for="f in files" :key="f.path" class="rw-file">
-              <input type="checkbox" :checked="!keep.includes(f.path)" @change="toggle(f.path)">
-              <span class="mono">{{ f.path }}</span>
-              <span v-if="f.changedAfter" class="badge warn" style="height: 18px">{{ t('chat.rewindChangedAfter') }}</span>
-              <span v-else-if="f.created" class="badge" style="height: 18px">{{ t('chat.rewindNewFile') }}</span>
-              <span class="dt">+{{ f.added }} −{{ f.removed }}</span>
-            </label>
+            <!-- Checked means "discard this file": the box shows the inverse of
+                 `keep`. The tick is the library's Checkbox, a button, so it
+                 cannot sit inside the label that names the file — that click
+                 would toggle it twice — and the row's text is that label. -->
+            <div v-for="(f, i) in files" :key="f.path" class="rw-file">
+              <Checkbox
+                :id="`rw-keep-${i}`"
+                class="rw-file-check"
+                :model-value="!keep.includes(f.path)"
+                @update:model-value="toggle(f.path)"
+              />
+              <!-- `contents` keeps the row's own flex layout (the label draws no
+                   box); the size and weight are put back because the library's
+                   Label brings its own. -->
+              <Label :for="`rw-keep-${i}`" class="contents text-[12px] font-normal leading-[normal]">
+                <span class="mono">{{ f.path }}</span>
+                <span v-if="f.changedAfter" class="badge warn" style="height: 18px">{{ t('chat.rewindChangedAfter') }}</span>
+                <span v-else-if="f.created" class="badge" style="height: 18px">{{ t('chat.rewindNewFile') }}</span>
+                <span class="dt">+{{ f.added }} −{{ f.removed }}</span>
+              </Label>
+            </div>
           </div>
           <span class="hint">{{ t('chat.rewindTerminalNote') }}</span>
         </template>
@@ -51,6 +65,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { X } from 'lucide-vue-next'
+import { Checkbox } from '@repo/shadcn-vue/components/ui/checkbox'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
 import { useI18n, type I18nKey } from '@/locales'
 import type { RewindPreview } from '@/lib/api'
 
@@ -247,8 +263,12 @@ function toggle(path: string) {
   font-size: 11.5px;
   color: var(--forebrain-muted-text);
 }
-.rw-file input {
-  accent-color: var(--forebrain-brand-1);
+/* The tick is the library's Checkbox, a button: the native box's
+   `accent-color` no longer reaches it (its checked fill is the brand through
+   `--primary`), and what is left to hold is the rule every design control
+   keeps — no static shadow from the library. */
+.rw-file-check {
+  box-shadow: none;
 }
 .badge {
   display: inline-flex;

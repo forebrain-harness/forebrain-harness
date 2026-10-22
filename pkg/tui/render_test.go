@@ -63,8 +63,8 @@ func codexUsageLimitError() error {
 }
 
 // TestPrintErrorExplainsProviderRefusal guards the terminal's last error
-// surface: a failed turn must read as a sentence about the account's limit,
-// never as the provider's HTTP body.
+// surface: a failed turn must read as the provider's own sentence and the HTTP
+// status, never as the provider's HTTP body.
 func TestPrintErrorExplainsProviderRefusal(t *testing.T) {
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
@@ -79,12 +79,11 @@ func TestPrintErrorExplainsProviderRefusal(t *testing.T) {
 	if content == "" {
 		t.Fatalf("no error frame was rendered: %#v", renderer.vm.blocks)
 	}
-	for _, want := range []string{"Usage limit reached on your plus plan", "available again in 2h 28m"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("error frame is missing %q:\n%s", want, content)
-		}
+	want := "The usage limit has been reached (HTTP 429 Too Many Requests)"
+	if !strings.Contains(content, want) {
+		t.Errorf("error frame is missing %q:\n%s", want, content)
 	}
-	for _, unwanted := range []string{"usage_limit_reached", "resets_in_seconds", "chatgpt.com", "429"} {
+	for _, unwanted := range []string{"usage_limit_reached", "resets_in_seconds", "chatgpt.com"} {
 		if strings.Contains(content, unwanted) {
 			t.Errorf("error frame still shows raw transport data %q:\n%s", unwanted, content)
 		}

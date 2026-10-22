@@ -233,10 +233,10 @@
     <ForebrainModal :open="newAgentOpen" size="sm" :title="t('agents.newTitle')" @close="closeNewAgent">
       <label class="block">
         <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('agents.newNameLabel') }}</span>
-        <input
+        <Input
           ref="newAgentInputRef"
           v-model="newAgentName"
-          class="forebrain-field mt-1 w-full font-mono"
+          class="forebrain-field mt-1 h-auto w-full font-mono"
           :placeholder="t('agents.newNamePlaceholder')"
           autocomplete="off"
           data-testid="new-agent-name"
@@ -246,16 +246,16 @@
       <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('agents.newHint') }}</p>
       <p v-if="newAgentError" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="new-agent-error">{{ newAgentError }}</p>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeNewAgent">{{ t('common.cancel') }}</button>
-        <button
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeNewAgent">{{ t('common.cancel') }}</Button>
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
+          class="forebrain-btn forebrain-btn-primary h-auto text-xs"
           :disabled="newAgentBusy || !newAgentValid"
           data-testid="new-agent-create"
           @click="submitNewAgent"
         >
           {{ newAgentBusy ? t('common.loading') : t('common.create') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
 
@@ -299,6 +299,8 @@ import {
 } from 'lucide-vue-next'
 import { computed, defineComponent, nextTick, onMounted, onUnmounted, ref, watch, type VNode } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import ChatDrawer from '@/components/ChatDrawer.vue'
 import AppTooltip from '@/components/common/AppTooltip.vue'
 import BrandMark from '@/components/BrandMark.vue'
@@ -356,7 +358,8 @@ const newAgentOpen = ref(false)
 const newAgentName = ref('')
 const newAgentError = ref('')
 const newAgentBusy = ref(false)
-const newAgentInputRef = ref<HTMLInputElement | null>(null)
+/** The name field is the library's Input, so the element is its `$el`. */
+const newAgentInputRef = ref<{ $el: unknown } | null>(null)
 const deleteTarget = ref('')
 
 /** The tenant key pattern the loader enforces: a legal id is a legal name. */
@@ -400,7 +403,7 @@ function openNewAgent() {
   newAgentName.value = ''
   newAgentError.value = ''
   newAgentOpen.value = true
-  void nextTick(() => newAgentInputRef.value?.focus())
+  void nextTick(() => (newAgentInputRef.value?.$el as HTMLInputElement | undefined)?.focus())
 }
 
 function closeNewAgent() {

@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import tip from '@/directives/tip'
 import { forebrainApi } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect, selectedText } from '@/test-utils/formControls'
 import RulesView from './RulesView.vue'
 
 /**
@@ -19,6 +20,20 @@ async function mountPage(): Promise<VueWrapper> {
   mounted.push(wrapper)
   await flushPromises()
   return wrapper
+}
+
+/**
+ * The file dropdown is the library's select: it measures its viewport with
+ * ResizeObserver, which jsdom does not have, and scrolling an item into view is
+ * not implemented either.
+ */
+function stubSelectMeasurement(): void {
+  ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  Element.prototype.scrollIntoView = () => undefined
 }
 
 describe('RulesView', () => {
@@ -79,15 +94,24 @@ describe('RulesView', () => {
         { name: 'USER.md', exists: false },
       ],
     })
+    // The dropdown needs the jsdom stubs above before it can open.
+    stubSelectMeasurement()
     const wrapper = await mountPage()
 
     await wrapper.find('[data-testid="rules-create"]').trigger('click')
     await flushPromises()
 
     // The modal renders into a Teleport at the document's body.
-    const select = document.body.querySelector('[data-testid="rules-create-select"]') as HTMLSelectElement | null
+    const select = document.body.querySelector('[data-testid="rules-create-select"]') as HTMLElement | null
     expect(select).not.toBeNull()
-    expect(Array.from(select!.options).map((option) => option.textContent?.trim())).toEqual(['USER.md'])
-    expect(select!.value).toBe('USER.md')
+    // The trigger shows the one file there is to create.
+    expect(selectedText(select as HTMLElement)).toBe('USER.md')
+    await openSelect(select as HTMLElement)
+    // Scoped to the list this trigger opened: reka renders the items into a
+    // portal of its own, and the pager draws a select too.
+    const list = document.querySelector('[role="listbox"][data-state="open"]')
+    expect([...(list?.querySelectorAll('[role="option"]') ?? [])].map((option) => (option.textContent ?? '').trim())).toEqual([
+      'USER.md',
+    ])
   })
 })

@@ -2,9 +2,13 @@
   <div class="pj-pop" role="listbox" :aria-label="t('chat.pickProject')">
     <div class="srch">
       <Search class="ics" aria-hidden="true" />
-      <input
+      <!-- The search is the pill's own field: the row already draws the border
+           and the padding, so the library's Input keeps only its text (no
+           border, no padding, no fixed height). -->
+      <Input
         ref="searchRef"
         v-model="query"
+        class="srch-input h-auto w-auto px-0 py-0 shadow-none"
         :placeholder="t('chat.searchProjects')"
         :aria-label="t('chat.searchProjects')"
         @keydown.escape="emit('close')"
@@ -60,6 +64,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { Check, Folder, FolderGit2, FolderPlus, Search } from 'lucide-vue-next'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import type { ProjectRecord } from '@/lib/api'
 import { targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
 import { useI18n } from '@/locales'
@@ -83,7 +88,9 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const query = ref('')
-const searchRef = ref<HTMLInputElement | null>(null)
+// A template ref on the library's Input is the component instance; the field
+// it draws is the instance's root element.
+const searchRef = ref<{ $el: unknown } | null>(null)
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
@@ -98,7 +105,7 @@ function trustOf(p: ProjectRecord) {
 }
 
 onMounted(() => {
-  void nextTick(() => searchRef.value?.focus())
+  void nextTick(() => (searchRef.value?.$el as HTMLInputElement | undefined)?.focus())
 })
 </script>
 
@@ -131,7 +138,7 @@ onMounted(() => {
   width: 15px;
   height: 15px;
 }
-.srch input {
+.srch .srch-input {
   border: 0;
   outline: none;
   flex: 1;

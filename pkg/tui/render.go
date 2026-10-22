@@ -266,6 +266,14 @@ type Renderer struct {
 	// real terminal; left false for non-TTY/pipe runs, which keep the plain
 	// append path so redirected output stays clean and tests are unaffected.
 	viewportMode bool
+	// screenCards remembers which event-backed cards this screen has already
+	// painted, keyed by event id and the view the card belongs to. It is the
+	// drawing half of "one fact, one card": the live path and a replay can both
+	// ask for the same card on the same screen, and only the first request
+	// paints. It is cleared together with the screen (ViewportResetSession,
+	// EnableViewportMode) on purpose: after a reset the cards that were on it are
+	// gone, so a replay must be able to draw them again.
+	screenCards map[string]struct{}
 	// paintSuppressed defers viewport repaints while >0 (see BeginBatch). Used
 	// around bulk frame appends such as session replay, where repainting on
 	// every one of thousands of appended frames is O(n^2) and freezes the TUI.

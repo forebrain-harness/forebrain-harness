@@ -106,6 +106,32 @@ type ChatSession struct {
 	mcpWatchSession string
 	mcpWatchCancel  func()
 
+	// mcpOwner* name the conversation that owns the failures of one MCP startup
+	// generation: the one that was open when the generation was first seen. A
+	// generation belongs to the Runner, not to a conversation (see
+	// run.Runner.startOrReplayMCPSegmentLocked: a generation is rebuilt only
+	// when the MCP server list changes), so a failure observed after a session
+	// switch is a standing failure of that earlier generation, and no other
+	// conversation's history may claim it.
+	//
+	// mcpOwnerMu is its own lock on purpose, NOT mcpWatchMu: the subscribe
+	// callback that claims a generation runs inside the registry's delivery
+	// lock, while WatchMCPStartup calls the unsubscribe (which takes that same
+	// lock) with mcpWatchMu held — sharing the mutex would invert the lock order.
+	//
+	// Two slots, not one: a delivery from the generation that was current before
+	// the latest one can still be in flight when the newer one is claimed, and
+	// reading it as a brand-new generation would hand the older generation's
+	// failures to whoever is open now — the very misattribution this exists to
+	// prevent. A generation older than the two most recent ones can only be a
+	// delivery even further behind, and falls back to the pre-attribution
+	// behaviour rather than a third slot.
+	mcpOwnerMu         sync.Mutex
+	mcpOwnerGeneration string
+	mcpOwnerSession    string
+	mcpPrevGeneration  string
+	mcpPrevSession     string
+
 	// shownEvents* remember which events carrying a derived (stable) identity
 	// this surface has already painted, keyed per conversation. They are the
 	// publishing half's counterpart of the store's UNIQUE(session_id,event_id)

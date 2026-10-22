@@ -28,7 +28,7 @@
       </div>
     </div>
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="emit('cancel')">{{ t('common.close') }}</button>
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="emit('cancel')">{{ t('common.close') }}</Button>
     </template>
   </ForebrainModal>
 </template>
@@ -41,6 +41,7 @@
  * pane summarises the selected file's changes rather than pasting its body.
  */
 import { computed, ref, watch } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import forebrainApi, { getErrorMessage, type SkillFileDiff } from '@/lib/api'
 import { useI18n } from '@/locales'

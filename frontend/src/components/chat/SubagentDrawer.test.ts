@@ -188,4 +188,22 @@ describe('SubagentDrawer', () => {
     // Closing the plan tab asks for nothing from the subagent tabs.
     expect(wrapper.emitted('close-tab')).toBeUndefined()
   })
+
+  // The drawer's width is dragged by the edge it shares with the conversation
+  // (owner 2026-10-21), and starts at the design's 440px.
+  it('carries the handle on its left edge and the design width as its own', () => {
+    const wrapper = mountDrawer()
+    const handle = wrapper.get('[data-testid="subagent-drawer-resizer"]')
+    expect(handle.attributes('role')).toBe('separator')
+    expect(handle.attributes('aria-label')).toBe('Resize panel')
+    expect(wrapper.get('[data-testid="subagent-drawer"]').attributes('style')).toContain('width: 440px')
+  })
+
+  // As an overlay the width is the layout's, not the handle's: an inline width
+  // would beat the narrow-window rule that keeps the drawer on screen.
+  it('writes no width of its own while it is an overlay', () => {
+    const wrapper = mountDrawer({ overlay: true })
+    expect(wrapper.get('[data-testid="subagent-drawer"]').classes()).toContain('subagent-drawer--overlay')
+    expect(wrapper.get('[data-testid="subagent-drawer"]').attributes('style')).toBeUndefined()
+  })
 })

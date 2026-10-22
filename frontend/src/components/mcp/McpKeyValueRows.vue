@@ -11,23 +11,23 @@
         :class="{ 'mcp-kv-row--ro': readonly }"
         :data-kv-row="index"
       >
-        <input
+        <Input
           class="forebrain-field h-[34px] font-mono"
-          :value="row.key"
+          :model-value="row.key"
           :aria-label="t('mcp.kvKey')"
           :readonly="readonly"
           autocomplete="off"
           data-kv-key
-          @input="setKey(index, ($event.target as HTMLInputElement).value)"
+          @update:model-value="(value) => setKey(index, String(value))"
         />
-        <input
+        <Input
           class="forebrain-field h-[34px] font-mono"
-          :value="row.value"
+          :model-value="row.value"
           :aria-label="t('mcp.kvValue')"
           :readonly="readonly"
           autocomplete="off"
           data-kv-value
-          @input="setValue(index, ($event.target as HTMLInputElement).value)"
+          @update:model-value="(value) => setValue(index, String(value))"
         />
         <button
           v-if="!readonly"
@@ -42,15 +42,15 @@
         </button>
       </div>
     </div>
-    <button
+    <Button
       v-if="!readonly"
       type="button"
-      class="forebrain-btn forebrain-btn-ghost mcp-kv-add gap-1.5 text-xs"
+      class="forebrain-btn forebrain-btn-ghost mcp-kv-add h-auto gap-1.5 text-xs"
       data-kv-add
       @click="add"
     >
       <Plus class="size-3.5" aria-hidden="true" />{{ addLabel }}
-    </button>
+    </Button>
   </div>
 </template>
 
@@ -71,6 +71,8 @@
  * showing nothing at all.
  */
 import { computed } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { Plus, Trash2 } from 'lucide-vue-next'
 
 import { useI18n } from '@/locales'

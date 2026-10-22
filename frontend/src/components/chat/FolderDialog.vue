@@ -34,7 +34,13 @@
         </div>
         <div class="fb-search">
           <Search class="ic" aria-hidden="true" />
-          <input v-model="query" :placeholder="t('chat.folderSearch')" :aria-label="t('chat.folderSearch')" />
+          <!-- The row draws the 28px box; the field inside it is text only. -->
+          <Input
+            v-model="query"
+            class="fb-search-input h-auto w-auto px-0 py-0 shadow-none"
+            :placeholder="t('chat.folderSearch')"
+            :aria-label="t('chat.folderSearch')"
+          />
         </div>
       </div>
 
@@ -136,6 +142,7 @@ import {
 } from 'lucide-vue-next'
 import { forebrainApi, getErrorMessage, type HostDirEntry, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import NewFolderSheet from '@/components/chat/NewFolderSheet.vue'
 import { baseName } from '@/lib/projectTarget'
 
@@ -312,6 +319,11 @@ function formatDate(sec: number): string {
   z-index: 60;
   display: grid;
   place-items: center;
+  /* The page teleports this dialog, so it is not inside the modal that opened
+     it: the library's modal locks the body's pointer events and hands `auto`
+     back only to its own layer and overlay. Without this line every click here
+     lands on that modal's overlay instead. */
+  pointer-events: auto;
 }
 .modal {
   background: var(--forebrain-surface);
@@ -451,7 +463,7 @@ function formatDate(sec: number): string {
   width: 13px;
   height: 13px;
 }
-.fb-search input {
+.fb-search .fb-search-input {
   border: 0;
   outline: none;
   background: transparent;

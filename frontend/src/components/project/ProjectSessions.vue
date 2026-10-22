@@ -4,19 +4,19 @@
 
     <ListToolbar>
       <template #left>
-        <input
+        <Input
           v-model="q"
           type="search"
           :placeholder="t('projects.sessionSearchPlaceholder')"
-          class="forebrain-field h-[34px]"
+          class="forebrain-field h-[34px] w-auto"
           style="max-width: 240px"
           data-testid="project-sessions-search"
         />
       </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" :disabled="creating" data-testid="project-session-create" @click="createSession">
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" :disabled="creating" data-testid="project-session-create" @click="createSession">
           <Plus class="size-3.5" aria-hidden="true" />{{ creating ? t('common.loading') : t('projects.newProjectSession') }}
-        </button>
+        </Button>
       </template>
     </ListToolbar>
 
@@ -77,6 +77,8 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { MessageSquare, Plus } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'

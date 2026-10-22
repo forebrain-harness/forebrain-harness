@@ -4,6 +4,8 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import tip from '@/directives/tip'
 import { forebrainApi, type McpServerRow, type ProjectRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect } from '@/test-utils/formControls'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import ProjectMcp from './ProjectMcp.vue'
 
@@ -67,7 +69,7 @@ async function mountTab(trusted: boolean, rows: McpServerRow[] = [row()]): Promi
   vi.mocked(forebrainApi.mcpPage).mockResolvedValue({ rows, total: rows.length, page: 1, pageSize: 10, notApplied: [] })
   const wrapper = mount(ProjectMcp, {
     props: { project: projectRecord(trusted), projectId: 'p1' },
-    global: { stubs: { teleport: true }, directives: { tip } },
+    global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
   })
   mounted.push(wrapper)
   await flushPromises()
@@ -78,6 +80,15 @@ describe('ProjectMcp', () => {
   beforeAll(() => setLocale('zh'))
 
   beforeEach(() => {
+    // The source filter is the library's select: it measures its viewport with
+    // ResizeObserver, which jsdom does not have, and scrolling an item into
+    // view is not implemented either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
     vi.spyOn(forebrainApi, 'mcpPage')
     vi.spyOn(forebrainApi, 'projectUpdate').mockResolvedValue(projectRecord())
   })
@@ -102,7 +113,14 @@ describe('ProjectMcp', () => {
     expect(wrapper.find('[data-testid="mcp-search"]').exists()).toBe(true)
     // The project view lists project, agent and global: the source filter and
     // the source column are there, and the note is the project's own.
-    expect(wrapper.find('[data-testid="mcp-source-filter"]').findAll('option').map((option) => option.text())).toEqual([
+    const filter = wrapper.find('[data-testid="mcp-source-filter"]')
+    await openSelect(filter.element as HTMLElement)
+    // Scoped to the list this trigger opened rather than the document-wide
+    // `optionTexts()`: the table draws a page-size select too, and both render
+    // their items inline here, so the document holds options of a select
+    // nobody opened.
+    const list = wrapper.find('[role="listbox"][data-state="open"]')
+    expect(list.findAll('[role="option"]').map((option) => option.text())).toEqual([
       '全部来源',
       '项目',
       '主代理',

@@ -192,13 +192,15 @@ agents:
       primary: true
       llm_providers:
       - provider: deepseek
-        model: deepseek-chat
+        # The model every run uses (owner ruling 2026-10-22). The catalog gives
+        # it both image input and effort levels, which the composer and the
+        # image-refusal specs read.
+        model: deepseek-v4-flash
         api_key: \${FAKE_LLM_KEY}
         base_url: http://127.0.0.1:$LLM_PORT
-      # A reasoning-capable fallback so the session model chip offers a model
-      # with effort levels (the catalog reports none for deepseek-chat); the
-      # fake provider answers any model identity, and the chain never reaches
-      # the fallback while the first entry works.
+      # A second reasoning-capable entry, so the model chip has another option
+      # to switch to (chat-composer.spec.ts). The fake provider answers any
+      # model identity, and the chain never reaches it while the first works.
       - provider: zhipuai
         model: glm-5.3-flash
         api_key: \${FAKE_LLM_KEY}

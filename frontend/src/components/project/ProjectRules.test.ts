@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import tip from '@/directives/tip'
 import { forebrainApi, type ProjectRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect } from '@/test-utils/formControls'
 import ProjectRules from './ProjectRules.vue'
 
 /**
@@ -101,13 +102,28 @@ describe('ProjectRules', () => {
   })
 
   it('offers the layers without a file in the create modal', async () => {
+    // The layer dropdown is the library's select: it measures its viewport
+    // with ResizeObserver, which jsdom does not have, and scrolling an item
+    // into view is not implemented either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
+
     const wrapper = await mountTab()
     await wrapper.find('[data-testid="rules-create"]').trigger('click')
     await flushPromises()
 
     // The modal teleports to body.
-    const select = document.body.querySelector('[data-testid="rules-create-select"]') as HTMLSelectElement | null
-    expect(select ? Array.from(select.options).map((option) => option.text) : []).toEqual(['docs', 'pkg'])
+    const select = document.body.querySelector('[data-testid="rules-create-select"]') as HTMLElement | null
+    expect(select).not.toBeNull()
+    await openSelect(select as HTMLElement)
+    // Scoped to the list this trigger opened: the modal draws a second select
+    // (the one kind of file it creates), and the page a page-size one.
+    const list = document.querySelector('[role="listbox"][data-state="open"]')
+    expect([...(list?.querySelectorAll('[role="option"]') ?? [])].map((option) => (option.textContent ?? '').trim())).toEqual(['docs', 'pkg'])
   })
 
   it('keeps the trust gate in front of the table', async () => {

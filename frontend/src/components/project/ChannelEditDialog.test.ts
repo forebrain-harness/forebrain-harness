@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import tip from '@/directives/tip'
 import { forebrainApi, type ProjectChannelRow } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import ChannelEditDialog from './ChannelEditDialog.vue'
 
@@ -42,7 +43,7 @@ function storedChannels() {
 function mountDialog(row: ProjectChannelRow = feishuRow()): VueWrapper {
   return mount(ChannelEditDialog, {
     props: { projectId: 'p1', row },
-    global: { stubs: { teleport: true }, directives: { tip } },
+    global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
   })
 }
 

@@ -5,6 +5,7 @@ import { createRouter, createMemoryHistory } from 'vue-router'
 import { nextTick } from 'vue'
 
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 import { forebrainApi, type ProjectRecord } from '@/lib/api'
 import { useTopbarContent } from '@/composables/useTopbar'
 import { persistLastSessionId } from '@/composables/useLastSession'
@@ -684,7 +685,7 @@ describe('ChatView conversation bubbles', () => {
       effort: '',
       options: [
         { provider: 'deepseek', model: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', efforts: [], supportsImages: false },
-        { provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek Chat', efforts: [], supportsImages: true },
+        { provider: 'deepseek', model: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', efforts: [], supportsImages: true },
       ],
     })
     try {
@@ -712,10 +713,10 @@ describe('ChatView conversation bubbles', () => {
       expect(wrapper.text()).toContain('shot.png')
 
       // The way out is the composer's own model menu, opened from here.
-      expect(wrapper.find('[data-testid="model-option-deepseek-chat"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="model-option-deepseek-v4-flash"]').exists()).toBe(false)
       await wrapper.find('[data-testid="image-refused-switch"]').trigger('click')
       await nextTick()
-      expect(wrapper.find('[data-testid="model-option-deepseek-chat"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="model-option-deepseek-v4-flash"]').exists()).toBe(true)
       wrapper.unmount()
     } finally {
       sessionModel.mockRestore()
@@ -1129,7 +1130,7 @@ describe('ChatView saves attachments into the project', () => {
     })
     vi.spyOn(forebrainApi, 'projectDirs').mockResolvedValue({ path: '', entries: [] })
 
-    const wrapper = await mountView({ teleport: true })
+    const wrapper = await mountView({ teleport: InlineTeleport })
     await flushPromises()
     const file = new File(['x'], 'shot.png', { type: 'image/png' })
     await pasteImage(wrapper, file)
@@ -1156,7 +1157,7 @@ describe('ChatView saves attachments into the project', () => {
     })
     vi.spyOn(forebrainApi, 'projectDirs').mockResolvedValue({ path: '', entries: [] })
 
-    const wrapper = await mountView({ teleport: true })
+    const wrapper = await mountView({ teleport: InlineTeleport })
     await flushPromises()
     await pasteImage(wrapper, new File(['x'], 'shot.png', { type: 'image/png' }))
     await wrapper.find('[data-testid="attach-cancel"]').trigger('click')

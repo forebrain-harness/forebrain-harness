@@ -23,8 +23,9 @@ test('a reasoning effort picked on the chip survives a reload', async ({ page })
   await page.waitForSelector('textarea')
 
   // The model chip names the effective model. Effort levels belong to the
-  // model: deepseek-chat offers none (its chip stays hidden), so switch to
-  // the reasoning-capable entry the agent is configured with first.
+  // model, and the menu offers every configured entry; switching to the other
+  // reasoning-capable one is what this case exercises (the choice has to
+  // survive a reload, not just live).
   await expect(page.locator('[data-testid="model-chip"]')).toContainText(/glm|deepseek/i)
   await page.click('[data-testid="model-chip"]')
   await page.click('[data-testid="model-option-glm-5.3-flash"]')

@@ -88,10 +88,14 @@ describe('ProjectOverview', () => {
     ])
 
     // The root and the key are the project's identity: shown, never edited.
-    expect(wrapper.find('[data-testid="project-settings-root"]').attributes('readonly')).toBeDefined()
-    expect(wrapper.find('[data-testid="project-settings-root"]').attributes('value')).toBe('/Users/me/alpha')
-    expect(wrapper.find('[data-testid="project-settings-key"]').attributes('readonly')).toBeDefined()
-    expect(wrapper.find('[data-testid="project-settings-key"]').attributes('value')).toBe('alpha')
+    // Read off the field itself — the library's Input keeps the value as its
+    // own model, so there is no `value` attribute to read.
+    const root = wrapper.find('[data-testid="project-settings-root"]')
+    expect(root.attributes('readonly')).toBeDefined()
+    expect((root.element as HTMLInputElement).value).toBe('/Users/me/alpha')
+    const key = wrapper.find('[data-testid="project-settings-key"]')
+    expect(key.attributes('readonly')).toBeDefined()
+    expect((key.element as HTMLInputElement).value).toBe('alpha')
 
     // Two switch rows carry the trust and the reading-outside choice.
     const switches = wrapper.findAll('[role="switch"]')
@@ -163,7 +167,7 @@ describe('ProjectOverview', () => {
     expect(wrapper.find('[role="radiogroup"]').exists()).toBe(true)
     expect(hint()).toBe('本项目的会话也能召回其他记忆；修改只在新会话生效。')
 
-    await wrapper.find('input[type="radio"][value="project_only"]').setValue(true)
+    await wrapper.find('[role="radio"][value="project_only"]').trigger('click')
     expect(hint()).toBe('只召回本项目自己的记忆；修改只在新会话生效。')
 
     await wrapper.find('form').trigger('submit')

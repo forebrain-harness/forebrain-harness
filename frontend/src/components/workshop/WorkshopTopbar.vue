@@ -55,17 +55,17 @@
       {{ t('chat.workbench') }}
       <span v-if="runningCount" class="forebrain-chip-count">{{ runningCount }}</span>
     </button>
-    <button
+    <Button
       v-if="hasSkill"
       type="button"
-      class="forebrain-btn forebrain-btn-primary text-xs"
+      class="forebrain-btn forebrain-btn-primary h-auto text-xs"
       :disabled="!canPublish"
       data-testid="workshop-publish"
       v-tip:top="canPublish ? '' : t('workshop.noDraftToPublish')"
       @click="emit('publish')"
     >
       {{ t('workshop.publish', { version: publishVersion }) }}
-    </button>
+    </Button>
   </div>
 </template>
 
@@ -80,6 +80,7 @@
  * (owner 2026-10-18).
  */
 import { ChevronRight, FolderGit2, MessageSquarePlus, PanelRight } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import SessionHeartbeat from '@/components/chat/SessionHeartbeat.vue'
 import { useI18n } from '@/locales'

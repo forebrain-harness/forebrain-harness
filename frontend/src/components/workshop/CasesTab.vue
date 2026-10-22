@@ -2,15 +2,15 @@
   <div class="space-y-3" data-testid="workshop-cases">
     <div class="flex flex-wrap items-center justify-between gap-y-1.5">
       <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabCases') }}</span>
-      <button
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="!editable || saving"
         data-testid="workshop-case-add"
         @click="openAdd"
       >
         {{ t('workshop.addCase') }}
-      </button>
+      </Button>
     </div>
 
     <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-cases-error">{{ error }}</p>
@@ -21,8 +21,8 @@
         <div class="flex items-center justify-between">
           <span class="text-[12px] font-medium text-[var(--forebrain-text)]">{{ t('workshop.caseN', { n: index + 1 }) }}</span>
           <span class="flex gap-1">
-            <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!editable" @click="openEdit(index)">{{ t('common.edit') }}</button>
-            <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" :disabled="!editable" @click="remove(index)">{{ t('common.delete') }}</button>
+            <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :disabled="!editable" @click="openEdit(index)">{{ t('common.edit') }}</Button>
+            <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs text-[var(--forebrain-danger)]" :disabled="!editable" @click="remove(index)">{{ t('common.delete') }}</Button>
           </span>
         </div>
         <div class="mt-1 text-[12px] text-[var(--forebrain-text)]">{{ item.prompt }}</div>
@@ -50,6 +50,7 @@
  * in the skill's draft (plan 036) and travels with the next publish.
  */
 import { onMounted, ref, watch } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import CaseEditDialog from './CaseEditDialog.vue'
 import forebrainApi, { getErrorMessage } from '@/lib/api'
 import { useI18n } from '@/locales'

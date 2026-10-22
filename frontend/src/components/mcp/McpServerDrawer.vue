@@ -44,7 +44,7 @@
     <div class="mcp-grid2">
       <label class="mcp-field">
         <span class="mcp-label">{{ t('common.name') }}<span class="mcp-key">name</span></span>
-        <input
+        <Input
           v-model="form.name"
           class="forebrain-field h-[34px] font-mono"
           :readonly="readonly"
@@ -53,18 +53,36 @@
           data-testid="mcp-name"
         />
       </label>
-      <label class="mcp-field">
-        <span class="mcp-label">{{ t('mcp.fieldTransport') }}<span class="mcp-key">transport</span></span>
-        <select v-model="form.transport" class="forebrain-field h-[34px]" :disabled="readonly" data-testid="mcp-transport">
-          <option value="stdio">{{ t('mcp.transportStdio') }}</option>
-          <option value="streamable_http">{{ t('mcp.transportHttp') }}</option>
-        </select>
-      </label>
+      <!-- The label is its own element rather than a wrapper: the control is
+           the library's Select, a button, and a button inside a `label` would
+           answer one click with two. -->
+      <div class="mcp-field">
+        <Label for="mcp-transport" class="mcp-label block text-[12px] leading-[normal]">
+          {{ t('mcp.fieldTransport') }}<span class="mcp-key">transport</span>
+        </Label>
+        <Select
+          :model-value="form.transport"
+          @update:model-value="(value) => (form.transport = value === 'streamable_http' ? 'streamable_http' : 'stdio')"
+        >
+          <SelectTrigger
+            id="mcp-transport"
+            class="forebrain-field !h-[34px] w-full"
+            :disabled="readonly"
+            data-testid="mcp-transport"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="stdio">{{ t('mcp.transportStdio') }}</SelectItem>
+            <SelectItem value="streamable_http">{{ t('mcp.transportHttp') }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
     </div>
 
     <label class="mcp-field">
       <span class="mcp-label">{{ t('mcp.fieldTarget') }}</span>
-      <input
+      <Input
         v-model="form.target"
         class="forebrain-field h-[34px] font-mono"
         :readonly="readonly"
@@ -99,7 +117,7 @@
     <div class="mcp-grid2">
       <label class="mcp-field">
         <span class="mcp-label">{{ t('mcp.fieldStartupTimeout') }}<span class="mcp-key">startup_timeout</span></span>
-        <input
+        <Input
           v-model="form.startupTimeout"
           class="forebrain-field h-[34px] font-mono"
           :readonly="readonly"
@@ -111,7 +129,7 @@
       </label>
       <label class="mcp-field">
         <span class="mcp-label">{{ t('mcp.fieldRequestTimeout') }}<span class="mcp-key">request_timeout</span></span>
-        <input
+        <Input
           v-model="form.requestTimeout"
           class="forebrain-field h-[34px] font-mono"
           :readonly="readonly"
@@ -152,7 +170,7 @@
             <span class="mcp-label">
               {{ t('mcp.fieldCommandSha256') }}<span class="mcp-key">expected_command_sha256</span>
             </span>
-            <input
+            <Input
               v-model="form.expectedCommandSha256"
               class="forebrain-field h-[34px] font-mono"
               :readonly="readonly"
@@ -177,21 +195,36 @@
             </span>
           </div>
           <span class="mcp-label">OAuth<span class="mcp-key">oauth</span></span>
-          <label class="mcp-field">
-            <span class="mcp-label">{{ t('mcp.fieldOAuthMode') }}<span class="mcp-key">mode</span></span>
-            <select v-model="form.oauth.mode" class="forebrain-field h-[34px]" :disabled="readonly" data-testid="mcp-oauth-mode">
-              <option value="">{{ t('mcp.oauthModeNone') }}</option>
-              <option value="static">{{ t('mcp.oauthModeStatic') }}</option>
-              <option value="client_credentials">{{ t('mcp.oauthModeClientCredentials') }}</option>
-              <option value="refresh">{{ t('mcp.oauthModeRefresh') }}</option>
-            </select>
-          </label>
+          <div class="mcp-field">
+            <Label for="mcp-oauth-mode" class="mcp-label block text-[12px] leading-[normal]">
+              {{ t('mcp.fieldOAuthMode') }}<span class="mcp-key">mode</span>
+            </Label>
+            <Select
+              :model-value="toChoice(form.oauth.mode)"
+              @update:model-value="(value) => (form.oauth.mode = fromChoice(value))"
+            >
+              <SelectTrigger
+                id="mcp-oauth-mode"
+                class="forebrain-field !h-[34px] w-full"
+                :disabled="readonly"
+                data-testid="mcp-oauth-mode"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="EMPTY_CHOICE">{{ t('mcp.oauthModeNone') }}</SelectItem>
+                <SelectItem value="static">{{ t('mcp.oauthModeStatic') }}</SelectItem>
+                <SelectItem value="client_credentials">{{ t('mcp.oauthModeClientCredentials') }}</SelectItem>
+                <SelectItem value="refresh">{{ t('mcp.oauthModeRefresh') }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <div class="mcp-grid2">
             <label class="mcp-field">
               <span class="mcp-label">
                 {{ t('mcp.fieldAuthorizationUrl') }}<span class="mcp-key">authorization_url</span>
               </span>
-              <input
+              <Input
                 v-model="form.oauth.authorizationUrl"
                 class="forebrain-field h-[34px] font-mono"
                 :readonly="readonly"
@@ -202,7 +235,7 @@
             </label>
             <label class="mcp-field">
               <span class="mcp-label">{{ t('mcp.fieldTokenUrl') }}<span class="mcp-key">token_url</span></span>
-              <input
+              <Input
                 v-model="form.oauth.tokenUrl"
                 class="forebrain-field h-[34px] font-mono"
                 :readonly="readonly"
@@ -215,7 +248,7 @@
           <div class="mcp-grid2">
             <label class="mcp-field">
               <span class="mcp-label">client_id</span>
-              <input
+              <Input
                 v-model="form.oauth.clientId"
                 class="forebrain-field h-[34px] font-mono"
                 :readonly="readonly"
@@ -226,7 +259,7 @@
             </label>
             <label class="mcp-field">
               <span class="mcp-label">client_secret</span>
-              <input
+              <Input
                 v-model="form.oauth.clientSecret"
                 class="forebrain-field h-[34px] font-mono"
                 :readonly="readonly"
@@ -239,7 +272,7 @@
           <div class="mcp-grid2">
             <label class="mcp-field">
               <span class="mcp-label">scopes</span>
-              <input
+              <Input
                 v-model="form.oauth.scopes"
                 class="forebrain-field h-[34px] font-mono"
                 :readonly="readonly"
@@ -250,7 +283,7 @@
             </label>
             <label class="mcp-field">
               <span class="mcp-label">redirect_url</span>
-              <input
+              <Input
                 v-model="form.oauth.redirectUrl"
                 class="forebrain-field h-[34px] font-mono"
                 :readonly="readonly"
@@ -262,23 +295,33 @@
           </div>
         </template>
 
-        <label class="mcp-field">
-          <span class="mcp-label">
+        <div class="mcp-field">
+          <Label for="mcp-default-approval" class="mcp-label block text-[12px] leading-[normal]">
             {{ t('mcp.fieldDefaultApproval') }}<span class="mcp-key">default_tools_approval_mode</span>
-          </span>
-          <select
-            v-model="form.defaultToolsApprovalMode"
-            class="forebrain-field h-[34px]"
-            :disabled="readonly"
-            data-testid="mcp-default-approval"
+          </Label>
+          <!-- 跟随全局 is the empty string on the wire, which a SelectItem may
+               not carry: the sentinel stands in for it on both sides. -->
+          <Select
+            :model-value="toChoice(form.defaultToolsApprovalMode)"
+            @update:model-value="(value) => (form.defaultToolsApprovalMode = fromChoice(value))"
           >
-            <option value="">{{ t('mcp.approvalInherit') }}</option>
-            <option value="auto">{{ t('mcp.approvalAuto') }}</option>
-            <option value="prompt">{{ t('mcp.approvalPrompt') }}</option>
-            <option value="writes">{{ t('mcp.approvalWrites') }}</option>
-            <option value="approve">{{ t('mcp.approvalApprove') }}</option>
-          </select>
-        </label>
+            <SelectTrigger
+              id="mcp-default-approval"
+              class="forebrain-field !h-[34px] w-full"
+              :disabled="readonly"
+              data-testid="mcp-default-approval"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="EMPTY_CHOICE">{{ t('mcp.approvalInherit') }}</SelectItem>
+              <SelectItem value="auto">{{ t('mcp.approvalAuto') }}</SelectItem>
+              <SelectItem value="prompt">{{ t('mcp.approvalPrompt') }}</SelectItem>
+              <SelectItem value="writes">{{ t('mcp.approvalWrites') }}</SelectItem>
+              <SelectItem value="approve">{{ t('mcp.approvalApprove') }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
         <template v-if="!readonly">
           <span class="mcp-hint">{{ t('mcp.hintToolsTable') }}</span>
           <span class="mcp-hint">{{ t('mcp.hintSecrets') }}</span>
@@ -297,15 +340,15 @@
     </div>
     <div v-else class="mcp-test-row">
       <div class="mcp-test">
-        <button
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs"
+          class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs"
           :disabled="testState === 'running'"
           data-testid="mcp-test-run"
           @click="runTest"
         >
           <PlugZap class="size-3.5" aria-hidden="true" />{{ t('mcp.testConnection') }}
-        </button>
+        </Button>
         <span v-if="testState === 'running'" class="mcp-hint" data-testid="mcp-test-running">{{ t('mcp.testing') }}</span>
         <template v-else-if="testState === 'ok'">
           <BadgeComponent variant="success" data-testid="mcp-test-ok">✓ {{ t('mcp.statusConnected') }}</BadgeComponent>
@@ -341,19 +384,19 @@
     </div>
 
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="mcp-cancel" @click="requestClose">
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" data-testid="mcp-cancel" @click="requestClose">
         {{ t('common.cancel') }}
-      </button>
-      <button
+      </Button>
+      <Button
         v-if="!readonly"
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="saving"
         data-testid="mcp-save"
         @click="save"
       >
         {{ saving ? t('mcp.saving') : t('common.save') }}
-      </button>
+      </Button>
     </template>
   </ForebrainDrawer>
 </template>
@@ -389,12 +432,17 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { ChevronRight, CircleAlert, PlugZap } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'
 import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import { forebrainApi, getErrorMessage, type McpLayer, type McpServerRow, type McpTestResult } from '@/lib/api'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { useI18n } from '@/locales'
 
 import McpKeyValueRows from './McpKeyValueRows.vue'

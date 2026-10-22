@@ -1,9 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 
 import tip from '@/directives/tip'
 import { forebrainApi, type SubagentConfigDetail, type ToolMetaRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { pickOption, selectedText } from '@/test-utils/formControls'
+import { InlineTeleport } from '@/test-utils/portal'
 
 import SubagentConfigDrawer from './SubagentConfigDrawer.vue'
 
@@ -42,9 +44,15 @@ function tool(name: string): ToolMetaRecord {
 function mountDrawer(props: Record<string, unknown> = {}): VueWrapper {
   return mount(SubagentConfigDrawer, {
     props: { open: true, agentId: 'main', name: 'explore', mode: 'edit', ...props },
-    global: { stubs: { teleport: true }, directives: { tip } },
+    // The drawer's selects are the library's, whose items render through a
+    // portal: attached to the document, the shared `pickOption` reaches them
+    // the way a person's clicks would.
+    attachTo: document.body,
+    global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
   })
 }
+
+enableAutoUnmount(afterEach)
 
 async function openDrawer(props: Record<string, unknown> = {}): Promise<VueWrapper> {
   const wrapper = mountDrawer(props)
@@ -97,14 +105,13 @@ describe('SubagentConfigDrawer', () => {
     // change, so a wrapper held across one would point at a stale element.
     const effort = () => wrapper.find('[data-testid="subagent-effort"]')
     expect(effort().attributes('disabled')).toBeUndefined()
-    expect((effort().element as HTMLSelectElement).value).toBe('high')
+    expect(selectedText(effort().element as HTMLElement)).toBe('高')
 
-    await wrapper.find('[data-testid="subagent-model"]').setValue('')
+    await pickOption(wrapper.find('[data-testid="subagent-model"]').element as HTMLElement, '跟随主代理（deepseek/deepseek-v4）')
 
     // Following the primary agent takes the effort with it, and the box says so.
     expect(effort().attributes('disabled')).toBeDefined()
-    expect((effort().element as HTMLSelectElement).value).toBe('')
-    expect(effort().find('option').text()).toBe('跟随主代理')
+    expect(selectedText(effort().element as HTMLElement)).toBe('跟随主代理')
   })
 
   it('offers a chosen tool set without the subagent_* family', async () => {
@@ -114,7 +121,7 @@ describe('SubagentConfigDrawer', () => {
     const wrapper = await openDrawer({ name: 'db-migrator' })
 
     expect(wrapper.find('[data-testid="subagent-picker"]').exists()).toBe(false)
-    await wrapper.find('input[value="pick"]').setValue()
+    await wrapper.find('[role="radio"][value="pick"]').trigger('click')
     await flushPromises()
 
     const picker = wrapper.find('[data-testid="subagent-picker"]')
@@ -134,8 +141,10 @@ describe('SubagentConfigDrawer', () => {
     const picker = wrapper.find('[data-testid="subagent-picker"]')
     expect(picker.exists()).toBe(true)
     expect(picker.find('[data-testid="subagent-pick-note"]').text()).toContain('已选 1 个')
-    const checked = wrapper.findAll('.sa-chk input').filter((box) => (box.element as HTMLInputElement).checked)
-    expect(checked.map((box) => (box.element as HTMLInputElement).value)).toEqual(['grep'])
+    const chosen = wrapper
+      .findAll('.sa-chk')
+      .filter((cell) => cell.find('[role="checkbox"]').attributes('aria-checked') === 'true')
+    expect(chosen.map((cell) => cell.text())).toEqual(['grep'])
 
     await wrapper.find('[data-testid="subagent-save"]').trigger('click')
     await flushPromises()
@@ -192,7 +201,11 @@ describe('SubagentConfigDrawer', () => {
 
     expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('查看系统子代理 · guardian')
     expect(wrapper.findAll('input').every((input) => input.attributes('readonly') !== undefined)).toBe(true)
-    expect(wrapper.findAll('select').every((select) => select.attributes('disabled') !== undefined)).toBe(true)
+    // Both dropdowns are the library's triggers, and both are off: nothing here
+    // is this page's to change.
+    const triggers = wrapper.findAll('[data-testid="subagent-model"], [data-testid="subagent-effort"]')
+    expect(triggers).toHaveLength(2)
+    expect(triggers.every((trigger) => trigger.attributes('disabled') !== undefined)).toBe(true)
     expect(wrapper.find('textarea').attributes('readonly')).toBeDefined()
     expect((wrapper.find('[data-testid="subagent-prompt"]').element as HTMLTextAreaElement).value).toBe('You are the guardian.')
     // 何时调用 and the tool tier are the harness's facts about it.
@@ -235,5 +248,44 @@ describe('SubagentConfigDrawer', () => {
     await wrapper.find('[data-testid="subagent-name"]').setValue('db-migrator')
     expect(wrapper.find('[data-testid="subagent-name-invalid"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="subagent-save"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('writes an empty effort tier as the empty string, not the select’s marker', async () => {
+    vi.mocked(forebrainApi.subagentConfig).mockResolvedValue(
+      detail({ modelProvider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'high', modelSource: 'agent' }),
+    )
+    const wrapper = await openDrawer()
+
+    // 跟随模型默认 is the empty string on the wire: a marker that no real value
+    // can equal stands in for it inside the list, and the form field — which is
+    // what the save carries — goes back to ''.
+    const effort = wrapper.find('[data-testid="subagent-effort"]')
+    await pickOption(effort.element as HTMLElement, '跟随模型默认')
+    expect(selectedText(wrapper.find('[data-testid="subagent-effort"]').element as HTMLElement)).toBe('跟随模型默认')
+
+    await wrapper.find('[data-testid="subagent-save"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.updateSubagentConfig).toHaveBeenCalledWith('main', 'explore', {
+      model: 'deepseek/deepseek-v4',
+      reasoningEffort: '',
+    })
+  })
+
+  it('keeps the run mode a boolean although the select speaks in words', async () => {
+    const wrapper = await openDrawer({ mode: 'create', name: undefined })
+
+    await wrapper.find('[data-testid="subagent-name"]').setValue('db-migrator')
+    await pickOption(wrapper.find('[data-testid="subagent-mode"]').element as HTMLElement, '完成即结束')
+
+    await wrapper.find('[data-testid="subagent-save"]').trigger('click')
+    await flushPromises()
+
+    // The option's own value is the word `off`; the form field — and the body
+    // the server reads — stay boolean.
+    expect(forebrainApi.createSubagentConfig).toHaveBeenCalledWith(
+      'main',
+      expect.objectContaining({ name: 'db-migrator', continuable: false }),
+    )
   })
 })

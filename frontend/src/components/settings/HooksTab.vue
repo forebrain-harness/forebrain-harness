@@ -5,22 +5,22 @@
 
     <ListToolbar>
       <template #left>
-        <input
+        <Input
           v-model="q"
           type="search"
           :placeholder="t('hooks.searchPlaceholder')"
-          class="forebrain-field h-[34px]"
+          class="forebrain-field h-[34px] w-auto"
           style="max-width: 240px"
           data-testid="hooks-search"
         />
       </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" :disabled="saving" data-testid="hooks-add" @click="openAdd">
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" :disabled="saving" data-testid="hooks-add" @click="openAdd">
           <Plus class="size-3.5" aria-hidden="true" />{{ t('hooks.addTitle') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="hooks-refresh" @click="reload">
+        </Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" data-testid="hooks-refresh" @click="reload">
           <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-        </button>
+        </Button>
       </template>
     </ListToolbar>
 
@@ -76,35 +76,50 @@
 
     <ForebrainModal :open="modalOpen" size="md" :title="editing ? t('hooks.editModalTitle') : t('hooks.addModalTitle')" @close="modalOpen = false">
       <div class="grid gap-3 sm:grid-cols-2">
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('hooks.eventLabel') }}</span>
-          <select v-model="form.event" class="forebrain-field h-9 text-[13px]" data-testid="hook-event">
-            <option v-for="name in events" :key="name" :value="name">{{ name }}</option>
-          </select>
-        </label>
-        <label class="block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('hooks.typeLabel') }}</span>
-          <select v-model="form.type" class="forebrain-field h-9 text-[13px]" data-testid="hook-type">
-            <option v-for="kind in knownTypes" :key="kind" :value="kind">{{ kind }}</option>
-          </select>
-        </label>
+        <div>
+          <Label for="hook-event" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('hooks.eventLabel') }}</Label>
+          <Select :model-value="form.event" @update:model-value="(value) => (form.event = String(value ?? ''))">
+            <SelectTrigger id="hook-event" class="forebrain-field h-9 text-[13px]" data-testid="hook-event">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="name in events" :key="name" :value="name">{{ name }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label for="hook-type" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('hooks.typeLabel') }}</Label>
+          <Select :model-value="form.type" @update:model-value="(value) => (form.type = String(value ?? ''))">
+            <SelectTrigger id="hook-type" class="forebrain-field h-9 text-[13px]" data-testid="hook-type">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="kind in knownTypes" :key="kind" :value="kind">{{ kind }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div>
+        <Label for="hook-matcher" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('hooks.matcherLabel') }}</Label>
+        <Select :model-value="toChoice(form.matcher)" @update:model-value="(value) => (form.matcher = fromChoice(value))">
+          <SelectTrigger id="hook-matcher" class="forebrain-field h-9 font-mono text-[12px]" data-testid="hook-matcher">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem :value="EMPTY_CHOICE">{{ t('hooks.anyTool') }}</SelectItem>
+            <SelectItem v-for="tool in tools" :key="tool" :value="tool">{{ tool }}</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
       <label class="block">
-        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('hooks.matcherLabel') }}</span>
-        <select v-model="form.matcher" class="forebrain-field h-9 font-mono text-[12px]" data-testid="hook-matcher">
-          <option value="">{{ t('hooks.anyTool') }}</option>
-          <option v-for="tool in tools" :key="tool" :value="tool">{{ tool }}</option>
-        </select>
-      </label>
-      <label class="block">
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('hooks.commandLabel') }}</span>
-        <input v-model="form.command" class="forebrain-field h-9 w-full font-mono text-[12px]" :placeholder="t('hooks.commandPlaceholder')" data-testid="hook-command" />
+        <Input v-model="form.command" class="forebrain-field h-9 w-full font-mono text-[12px]" :placeholder="t('hooks.commandPlaceholder')" data-testid="hook-command" />
       </label>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalOpen = false">{{ t('common.cancel') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!form.event || !form.command.trim() || saving" data-testid="hook-save" @click="saveModal">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="modalOpen = false">{{ t('common.cancel') }}</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="!form.event || !form.command.trim() || saving" data-testid="hook-save" @click="saveModal">
           {{ saving ? t('common.loading') : editing ? t('common.save') : t('common.add') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
 
@@ -135,6 +150,10 @@
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
@@ -152,6 +171,7 @@ import {
   type HooksSettingsRecord,
   type ListQuery,
 } from '@/lib/api'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { useI18n } from '@/locales'
 
 const { t } = useI18n()

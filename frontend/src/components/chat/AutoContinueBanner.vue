@@ -7,6 +7,7 @@
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { TriangleAlert } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { formatAutoContinueNotice, type AutoContinueState } from '@/lib/autoContinue'
 import { useI18n } from '@/locales'
 
@@ -45,7 +46,7 @@ const notice = computed(() => (props.state ? formatAutoContinueNotice(props.stat
   >
     <TriangleAlert class="size-4 shrink-0" aria-hidden="true" />
     <span class="min-w-0 flex-1">{{ notice }}</span>
-    <button
+    <Button
       type="button"
       class="forebrain-btn forebrain-btn-ghost h-7 shrink-0 px-3 text-[12px]"
       v-tip:top="t('autoContinue.cancelHint')"
@@ -53,7 +54,7 @@ const notice = computed(() => (props.state ? formatAutoContinueNotice(props.stat
       @click="emit('cancel')"
     >
       {{ t('autoContinue.cancel') }}
-    </button>
+    </Button>
   </div>
 </template>
 

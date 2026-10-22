@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import tip from '@/directives/tip'
 import { forebrainApi, type ToolMetaRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect, pickOption } from '@/test-utils/formControls'
 import ToolsView from './ToolsView.vue'
 
 /**
@@ -37,6 +38,20 @@ async function mountPage(): Promise<VueWrapper> {
   mounted.push(wrapper)
   await flushPromises()
   return wrapper
+}
+
+/**
+ * The two filters are the library's select: they measure their viewport with
+ * ResizeObserver, which jsdom does not have, and scrolling an item into view is
+ * not implemented either.
+ */
+function stubSelectMeasurement(): void {
+  ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  Element.prototype.scrollIntoView = () => undefined
 }
 
 describe('ToolsView', () => {
@@ -73,17 +88,25 @@ describe('ToolsView', () => {
   })
 
   it('offers the server’s categories in Chinese and leaves an unknown one as its key', async () => {
+    stubSelectMeasurement()
     const wrapper = await mountPage()
 
-    const options = wrapper.findAll('[data-testid="tools-category-filter"] option')
-    expect(options.map((option) => option.text())).toEqual(['全部分类', '文件', '命令', 'mcp__github'])
-    expect(options.map((option) => (option.element as HTMLOptionElement).value)).toEqual(['', 'filesystem', 'shell', 'mcp__github'])
+    // Both filters are the library's select: their items exist only while they
+    // are open, and reka renders them into a portal of its own. jsdom runs no
+    // pointer-outside dismissal, so the list a trigger opened is the one its
+    // `aria-controls` names — two would otherwise be open at once.
+    const trigger = (testid: string) => wrapper.find(`[data-testid="${testid}"]`).element as HTMLElement
+    const openList = (el: HTMLElement) => document.getElementById(el.getAttribute('aria-controls') ?? '')
+    const labels = (el: HTMLElement) =>
+      [...(openList(el)?.querySelectorAll('[role="option"]') ?? [])].map((option) => (option.textContent ?? '').trim())
 
-    expect(wrapper.findAll('[data-testid="tools-type-filter"] option').map((option) => option.text())).toEqual([
-      '全部类型',
-      '只读',
-      '有副作用',
-    ])
+    const categoryFilter = trigger('tools-category-filter')
+    await openSelect(categoryFilter)
+    expect(labels(categoryFilter)).toEqual(['全部分类', '文件', '命令', 'mcp__github'])
+
+    const typeFilter = trigger('tools-type-filter')
+    await openSelect(typeFilter)
+    expect(labels(typeFilter)).toEqual(['全部类型', '只读', '有副作用'])
   })
 
   it('draws the tool, its description, its category and its type', async () => {
@@ -100,16 +123,22 @@ describe('ToolsView', () => {
   })
 
   it('sends the category and the type to the server', async () => {
+    stubSelectMeasurement()
     const wrapper = await mountPage()
     const page = vi.mocked(forebrainApi.toolsPage)
 
-    await wrapper.find('[data-testid="tools-type-filter"]').setValue('write')
+    await pickOption(wrapper.find('[data-testid="tools-type-filter"]').element as HTMLElement, '有副作用')
     await flushPromises()
     expect(page.mock.calls[1][0]).toMatchObject({ type: 'write', page: 1 })
 
-    await wrapper.find('[data-testid="tools-category-filter"]').setValue('shell')
+    await pickOption(wrapper.find('[data-testid="tools-category-filter"]').element as HTMLElement, '命令')
     await flushPromises()
     expect(page.mock.calls[2][0]).toMatchObject({ type: 'write', category: 'shell', page: 1 })
+
+    // 全部分类 is the empty string on the wire: the sentinel maps back to it.
+    await pickOption(wrapper.find('[data-testid="tools-category-filter"]').element as HTMLElement, '全部分类')
+    await flushPromises()
+    expect(page.mock.calls[3][0]).toMatchObject({ type: 'write', category: '', page: 1 })
   })
 
   it('opens one tool’s inputs under its row, and closes them again', async () => {

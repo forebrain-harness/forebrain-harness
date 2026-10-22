@@ -4,19 +4,19 @@
 
     <ListToolbar>
       <template #left>
-        <input
+        <Input
           v-model="q"
           type="search"
           :placeholder="t('lsp.searchPlaceholder')"
-          class="forebrain-field h-[34px]"
+          class="forebrain-field h-[34px] w-auto"
           style="max-width: 240px"
           data-testid="lsp-search"
         />
       </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="lsp-refresh" @click="reload">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" data-testid="lsp-refresh" @click="reload">
           <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-        </button>
+        </Button>
       </template>
     </ListToolbar>
 
@@ -186,12 +186,12 @@
         <p class="mt-1 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('lsp.installHostNote') }}</p>
       </div>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :data-install-cancel="confirming?.id" @click="confirming = null">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :data-install-cancel="confirming?.id" @click="confirming = null">
           {{ t('common.cancel') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :data-install-run="confirming?.id" @click="install()">
+        </Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :data-install-run="confirming?.id" @click="install()">
           {{ t('lsp.installRun') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
   </div>
@@ -212,6 +212,8 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Download, Eye, Power, PowerOff, RotateCw } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'

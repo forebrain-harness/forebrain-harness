@@ -5,40 +5,40 @@
 
       <ListToolbar>
         <template #left>
-          <input
+          <Input
             v-model="q"
             type="search"
             :placeholder="t('providers.searchPlaceholder')"
-            class="forebrain-field h-[34px]"
+            class="forebrain-field h-[34px] w-auto"
             style="max-width: 240px"
             data-testid="providers-search"
           />
         </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" :disabled="saving" data-testid="providers-add" @click="openAdd">
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs" :disabled="saving" data-testid="providers-add" @click="openAdd">
             <Plus class="size-3.5" aria-hidden="true" />{{ t('providers.add') }}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs"
+            class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs"
             :disabled="saving"
             data-testid="providers-connect-opencode"
             @click="openConnect('opencode')"
           >
             <LogIn class="size-3.5" aria-hidden="true" />{{ t('providers.connectOpenCode') }}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs"
+            class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs"
             :disabled="saving"
             data-testid="providers-connect-chatgpt"
             @click="openConnect('chatgpt')"
           >
             <LogIn class="size-3.5" aria-hidden="true" />{{ t('providers.connectChatGPT') }}
-          </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+          </Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" @click="refresh">
             <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-          </button>
+          </Button>
         </template>
       </ListToolbar>
 
@@ -232,7 +232,7 @@
           </span>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <button
+          <Button
             type="button"
             class="forebrain-btn forebrain-btn-primary h-9 px-3 text-xs"
             :disabled="!connectUrl"
@@ -240,7 +240,7 @@
             @click="openAuthorizePage"
           >
             {{ t('providers.connectOpenPage') }}
-          </button>
+          </Button>
           <Loader :size="14" class="text-[var(--forebrain-muted-text)]" data-testid="provider-login-spinner" />
           <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('providers.connectWaiting') }}</span>
         </div>
@@ -281,28 +281,28 @@
       </template>
 
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="provider-login-cancel" @click="closeConnect">
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" data-testid="provider-login-cancel" @click="closeConnect">
           {{ connectStep === 'auth' ? t('providers.cancelLogin') : t('common.close') }}
-        </button>
-        <button
+        </Button>
+        <Button
           v-if="connectStep === 'failed' || connectStep === 'lost'"
           type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
+          class="forebrain-btn forebrain-btn-primary h-auto text-xs"
           data-testid="provider-login-retry"
           @click="restartConnect"
         >
           {{ t('providers.connectRetry') }}
-        </button>
-        <button
+        </Button>
+        <Button
           v-else-if="connectStep === 'choose'"
           type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
+          class="forebrain-btn forebrain-btn-primary h-auto text-xs"
           :disabled="!connectChoice || saving"
           data-testid="provider-login-save"
           @click="saveConnectModel"
         >
           {{ saving ? t('common.loading') : t('providers.connectSave') }}
-        </button>
+        </Button>
       </template>
     </ForebrainModal>
 

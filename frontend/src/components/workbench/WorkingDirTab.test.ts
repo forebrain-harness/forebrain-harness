@@ -5,6 +5,7 @@ import tip from '@/directives/tip'
 import WorkingDirTab from './WorkingDirTab.vue'
 import { forebrainApi } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 
 setLocale('zh')
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
@@ -36,7 +37,7 @@ function stubTree() {
 async function mountTab() {
   const wrapper = mount(WorkingDirTab, {
     props: { scope: { sessionId: 's1' }, rootPath: '/tmp/proj' },
-    global: { stubs: { teleport: true } },
+    global: { stubs: { teleport: InlineTeleport } },
   })
   await flush()
   return wrapper

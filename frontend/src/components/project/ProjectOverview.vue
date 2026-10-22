@@ -7,33 +7,33 @@
     <div class="grid gap-3 md:grid-cols-2">
       <label class="forebrain-form-field">
         <span>{{ t('projects.namePlaceholder') }}</span>
-        <input v-model="draft.name" class="forebrain-field h-[34px] w-full" data-testid="project-settings-name" />
+        <Input v-model="draft.name" class="forebrain-field h-[34px] w-full" data-testid="project-settings-name" />
       </label>
       <label class="forebrain-form-field">
         <span>{{ t('projects.fieldRoot') }}</span>
-        <input :value="project?.root ?? ''" class="forebrain-field h-[34px] w-full font-mono" readonly data-testid="project-settings-root" />
+        <Input :model-value="project?.root ?? ''" class="forebrain-field h-[34px] w-full font-mono" readonly data-testid="project-settings-root" />
       </label>
     </div>
 
     <label class="forebrain-form-field">
       <span>{{ t('projects.fieldDescription') }}</span>
-      <input v-model="draft.description" class="forebrain-field h-[34px] w-full" :placeholder="t('projects.descriptionPlaceholder')" data-testid="project-settings-description" />
+      <Input v-model="draft.description" class="forebrain-field h-[34px] w-full" :placeholder="t('projects.descriptionPlaceholder')" data-testid="project-settings-description" />
     </label>
 
     <div class="grid gap-3 md:grid-cols-2">
       <label class="forebrain-form-field">
         <span>{{ t('projects.iconPlaceholder') }}</span>
-        <input v-model="draft.icon" class="forebrain-field h-[34px] w-full" data-testid="project-settings-icon" />
+        <Input v-model="draft.icon" class="forebrain-field h-[34px] w-full" data-testid="project-settings-icon" />
       </label>
       <label class="forebrain-form-field">
         <span>{{ t('projects.projectKey') }}</span>
-        <input :value="project?.projectKey ?? ''" class="forebrain-field h-[34px] w-full font-mono" readonly data-testid="project-settings-key" />
+        <Input :model-value="project?.projectKey ?? ''" class="forebrain-field h-[34px] w-full font-mono" readonly data-testid="project-settings-key" />
       </label>
     </div>
 
     <label class="forebrain-form-field">
       <span>{{ t('projects.instructionsLabel') }}</span>
-      <textarea v-model="draft.instructions" rows="3" class="forebrain-field w-full" data-testid="project-instructions" />
+      <Textarea v-model="draft.instructions" rows="3" class="forebrain-field min-h-0 w-full" data-testid="project-instructions" />
       <span class="forebrain-list-note">{{ t('projects.instructionsHint') }}</span>
     </label>
 
@@ -56,22 +56,24 @@
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
-      <button
+      <!-- Saving is the form's submit: pressing Enter in a field and clicking
+           this button are the same act, and there is no click handler. -->
+      <Button
         type="submit"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="!changed || saving"
         data-testid="project-settings-save"
       >
         {{ saving ? t('common.loading') : t('common.save') }}
-      </button>
-      <button
+      </Button>
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn--danger text-xs"
+        class="forebrain-btn forebrain-btn--danger h-auto bg-transparent text-xs hover:bg-transparent"
         data-testid="project-settings-delete"
         @click="deleteOpen = true"
       >
         {{ t('projects.deleteProject') }}
-      </button>
+      </Button>
       <span v-if="formNotice" class="text-[12px] text-[var(--forebrain-text-2)]" data-testid="project-settings-saved">{{ formNotice }}</span>
     </div>
     <p v-if="formError" class="text-[12px] text-[var(--forebrain-danger)]">{{ formError }}</p>
@@ -95,6 +97,9 @@
  */
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
 import ProjectDeleteDialog from '@/components/project/ProjectDeleteDialog.vue'
 import RadioField from '@/components/common/RadioField.vue'
 import SwitchRow from '@/components/common/SwitchRow.vue'

@@ -12,15 +12,15 @@
     </div>
     <label class="block">
       <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.releaseNote') }}</span>
-      <input v-model="note" class="forebrain-field w-full" :placeholder="t('workshop.releaseNotePlaceholder')" data-testid="workshop-publish-note" />
+      <Input v-model="note" class="forebrain-field h-auto w-full" :placeholder="t('workshop.releaseNotePlaceholder')" data-testid="workshop-publish-note" />
     </label>
     <span class="text-[11px] text-[var(--forebrain-muted-text)]">
       {{ currentVersion ? t('workshop.publishHint', { next: currentVersion + 1, cur: currentVersion }) : t('workshop.publishFirstHint') }}
     </span>
     <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="busy" @click="emit('cancel')">{{ t('common.cancel') }}</button>
-      <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="busy" data-testid="workshop-publish-confirm" @click="confirm">{{ busy ? t('common.loading') : t('workshop.publishAction') }}</button>
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" :disabled="busy" @click="emit('cancel')">{{ t('common.cancel') }}</Button>
+      <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" :disabled="busy" data-testid="workshop-publish-confirm" @click="confirm">{{ busy ? t('common.loading') : t('workshop.publishAction') }}</Button>
     </template>
   </ForebrainModal>
 </template>
@@ -29,6 +29,8 @@
 /** The publish dialog: what changed since the current version, an optional
  *  release note, and the note that running sessions keep the old version. */
 import { ref, watch } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import forebrainApi, { getErrorMessage, type SkillFileDiff } from '@/lib/api'
 import { useI18n } from '@/locales'

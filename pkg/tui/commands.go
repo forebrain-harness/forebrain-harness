@@ -29,6 +29,12 @@ type commandController struct {
 	// openPanel, when wired by the main loop, opens an interactive slash
 	// panel (composer state, §3.1) and reports whether it opened.
 	openPanel func(kind string) bool
+	// resetScreen, when wired by the main loop, replaces everything the terminal
+	// is showing with the chrome a fresh screen opens with. A replay appends
+	// otherwise: /resume looked right only because switchStreamSession had just
+	// cleared the screen, and /rewind — which has no such caller — pasted the
+	// whole transcript on top of the one already there.
+	resetScreen func()
 	// replayCardsTo, when wired by the main loop, is the reducer the live
 	// event loop reduces every notification through. A resume's replay
 	// rebuilds the conversation's cards in its own reducer; without this
@@ -122,6 +128,13 @@ func (c *commandController) replaySession(sessionID string, note func(messages i
 	}
 	if len(turns) == 0 && len(events) == 0 {
 		return
+	}
+	// A replay replaces the screen rather than adding to it: what is on screen
+	// now is either the same conversation drawn from a store that has since
+	// changed (/rewind) or another conversation entirely (/resume). Replaying
+	// above it doubled the transcript and every card in it.
+	if c.resetScreen != nil {
+		c.resetScreen()
 	}
 	// A subagent's words are rebuilt from its own worker session's transcript
 	// (plan 017): the rows the runtime wrote there are read the same way this
@@ -470,6 +483,20 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 				continue
 			}
 		}
+		// One event, one identity: the message and every frame rebuilt from it
+		// carry the event's own id, so the card this replay draws is recognizable
+		// as the same card the live path already painted (and vice versa) instead
+		// of a second copy of it.
+		eventID := strings.TrimSpace(evt.ID)
+		if m, isMessage := msg.(Message); isMessage {
+			m.EventID = eventID
+			msg = m
+		}
+		for i := range frames {
+			if strings.TrimSpace(frames[i].EventID) == "" {
+				frames[i].EventID = eventID
+			}
+		}
 		pending[pos] = append(pending[pos], replayEventItem{sequence: sequence, message: msg, frames: frames})
 	}
 	// A tool call the transcript shows as issued but never as run is a call the
@@ -653,7 +680,12 @@ func replayTurnErrorEventFrames(evt event.RunEvent) []Frame {
 	if title == "" {
 		title = "error"
 	}
-	return []Frame{{Kind: FrameError, Title: title, Content: text, Final: true}}
+	// The event's identity travels with the frame: this card is the same card
+	// the live path painted for the same event, and the renderer keeps one of
+	// them on one screen. It is stamped here rather than at the replay seam
+	// because a run that ended cleanly diverts its last error into runEndFrames
+	// before that seam is reached.
+	return []Frame{{Kind: FrameError, Title: title, Content: text, EventID: strings.TrimSpace(evt.ID), Final: true}}
 }
 
 // replayMigrationEventFrames rebuilds the migration report frame from its

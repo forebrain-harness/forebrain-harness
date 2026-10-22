@@ -6,7 +6,7 @@
     <div class="grid gap-3 sm:grid-cols-2">
       <label v-for="key in keys" :key="key" class="block">
         <span class="mb-1 block font-mono text-[12px] text-[var(--forebrain-text-2)]">{{ key }}</span>
-        <input
+        <Input
           v-model="draft[key]"
           :type="isSecret(key) ? 'password' : 'text'"
           class="forebrain-field h-9 w-full font-mono text-[12px]"
@@ -21,16 +21,16 @@
     </p>
     <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="emit('cancel')">{{ t('common.cancel') }}</button>
-      <button
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="emit('cancel')">{{ t('common.cancel') }}</Button>
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="saving"
         data-testid="channel-save"
         @click="save"
       >
         {{ saving ? t('common.loading') : t('common.save') }}
-      </button>
+      </Button>
     </template>
   </ForebrainModal>
 </template>
@@ -46,6 +46,8 @@
  * clears it — and replaces only this kind's fields.
  */
 import { computed, ref } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import { forebrainApi, getErrorMessage, type ProjectChannelRow } from '@/lib/api'
 import { channelLabel } from '@/lib/channelLabels'

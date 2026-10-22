@@ -5,28 +5,50 @@
 
       <ListToolbar>
         <template #left>
-          <input
+          <Input
             v-model="q"
             type="search"
             :placeholder="t('tools.searchPlaceholder')"
-            class="forebrain-field h-[34px]"
+            class="forebrain-field h-[34px] w-auto"
             style="max-width: 240px"
             data-testid="tools-search"
           />
-          <select v-model="category" class="forebrain-field h-[34px]" style="width: 110px" :aria-label="t('tools.colCategory')" data-testid="tools-category-filter">
-            <option value="">{{ t('tools.categoryAll') }}</option>
-            <option v-for="name in categories" :key="name" :value="name">{{ categoryLabel(name) }}</option>
-          </select>
-          <select v-model="typeFilter" class="forebrain-field h-[34px]" style="width: 110px" :aria-label="t('tools.colType')" data-testid="tools-type-filter">
-            <option value="">{{ t('tools.typeAll') }}</option>
-            <option value="readonly">{{ t('tools.type.readonly') }}</option>
-            <option value="write">{{ t('tools.type.write') }}</option>
-          </select>
+          <!-- Both filters carry the empty string for "all", which a SelectItem
+               may not hold: the sentinel stands in for it on both sides. -->
+          <Select :model-value="toChoice(category)" @update:model-value="(value) => (category = fromChoice(value))">
+            <SelectTrigger
+              class="forebrain-field !h-[34px]"
+              style="width: 110px"
+              :aria-label="t('tools.colCategory')"
+              data-testid="tools-category-filter"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="EMPTY_CHOICE">{{ t('tools.categoryAll') }}</SelectItem>
+              <SelectItem v-for="name in categories" :key="name" :value="name">{{ categoryLabel(name) }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select :model-value="toChoice(typeFilter)" @update:model-value="(value) => (typeFilter = fromChoice(value))">
+            <SelectTrigger
+              class="forebrain-field !h-[34px]"
+              style="width: 110px"
+              :aria-label="t('tools.colType')"
+              data-testid="tools-type-filter"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="EMPTY_CHOICE">{{ t('tools.typeAll') }}</SelectItem>
+              <SelectItem value="readonly">{{ t('tools.type.readonly') }}</SelectItem>
+              <SelectItem value="write">{{ t('tools.type.write') }}</SelectItem>
+            </SelectContent>
+          </Select>
         </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" @click="refresh">
             <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-          </button>
+          </Button>
         </template>
       </ListToolbar>
 
@@ -112,6 +134,9 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { ChevronDown, ChevronUp, RotateCw } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'
@@ -121,6 +146,7 @@ import RowActions from '@/components/common/RowActions.vue'
 import TablePager from '@/components/common/TablePager.vue'
 import { useServerList } from '@/composables/useServerList'
 import { forebrainApi, type ListQuery, type ToolMetaRecord } from '@/lib/api'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { toolParams, type ToolParam } from '@/lib/toolSchema'
 import { useI18n } from '@/locales'
 

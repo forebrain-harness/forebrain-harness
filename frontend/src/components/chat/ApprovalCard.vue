@@ -26,12 +26,12 @@
       <AlertTitle>{{ t('chat.approvalsLoadFailed') }}</AlertTitle>
       <AlertDescription class="space-y-2">
         <div class="whitespace-pre-line">{{ loadError }}</div>
-        <button
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-ghost text-xs"
+          class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
           :disabled="loading || !sessionId"
           @click="load"
-        >{{ t('chat.retry') }}</button>
+        >{{ t('chat.retry') }}</Button>
       </AlertDescription>
     </Alert>
     <div v-for="a in pendingApprovals" :key="a.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2" data-testid="pending-approval" :data-action-id="a.id">
@@ -60,73 +60,73 @@
                 <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--forebrand-1,var(--forebrain-brand-1))]" />
                 <span>{{ t('chat.exitPlanReviewRunning', { model: activeReviewLabel(a) }) }}</span>
                 <span class="flex-1" />
-                <button
-                  class="forebrain-btn forebrain-btn-ghost text-xs"
+                <Button
+                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
                   type="button"
                   data-testid="exit-plan-stop-review"
                   @click="stopReview(a)"
-                >{{ t('chat.exitPlanReviewStop') }}</button>
+                >{{ t('chat.exitPlanReviewStop') }}</Button>
               </div>
               <div class="text-xs text-[var(--forebrain-muted-text)]">{{ t('chat.exitPlanReviewHint') }}</div>
             </div>
             <div v-else class="space-y-2">
               <div class="flex flex-wrap gap-2">
-                <button
-                  class="forebrain-btn forebrain-btn-primary text-xs"
+                <Button
+                  class="forebrain-btn forebrain-btn-primary h-auto text-xs"
                   type="button"
                   :disabled="submitting[a.id]"
                   data-testid="exit-plan-approve-clear"
                   @click="approveExitPlan(a, true)"
-                >{{ clearContextLabel }}</button>
-                <button
-                  class="forebrain-btn forebrain-btn-ghost text-xs"
+                >{{ clearContextLabel }}</Button>
+                <Button
+                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
                   type="button"
                   :disabled="submitting[a.id]"
                   data-testid="exit-plan-approve"
                   @click="approveExitPlan(a, false)"
-                >{{ t('chat.exitPlanApprove') }}</button>
-                <button
-                  class="forebrain-btn forebrain-btn-ghost text-xs"
+                >{{ t('chat.exitPlanApprove') }}</Button>
+                <Button
+                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
                   type="button"
                   :disabled="submitting[a.id]"
                   data-testid="exit-plan-keep-planning"
                   :aria-expanded="!!planFeedbackOpen[a.id]"
                   @click="keepPlanningChosen(a)"
-                >{{ t('chat.exitPlanKeepPlanning') }}</button>
-                <button
+                >{{ t('chat.exitPlanKeepPlanning') }}</Button>
+                <Button
                   v-if="(exitPlanRequest(a)?.planReviewModels ?? []).length"
-                  class="forebrain-btn forebrain-btn-ghost text-xs"
+                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
                   type="button"
                   :disabled="submitting[a.id]"
                   data-testid="exit-plan-ask-review"
                   @click="askReviewChosen(a)"
-                >{{ t('chat.exitPlanAskReview') }}</button>
+                >{{ t('chat.exitPlanAskReview') }}</Button>
               </div>
               <!-- The feedback field appears only after「继续规划」is chosen —
                    the verdict comes first, the words for the planner after —
                    and folds away with its draft on any other decision. -->
               <div v-if="planFeedbackOpen[a.id]" class="flex flex-wrap items-center gap-2" data-testid="exit-plan-feedback">
-                <input
+                <Input
                   :ref="(el) => setFeedbackInput(a.id, el)"
                   v-model="denyFeedback[a.id]"
-                  class="min-w-[12rem] flex-1 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
+                  class="min-w-[12rem] h-auto flex-1 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)] shadow-none"
                   :disabled="submitting[a.id]"
                   :placeholder="t('chat.exitPlanFeedbackPlaceholder')"
                   @keydown.enter.prevent="keepPlanning(a)"
                   @keydown.esc.prevent="closePlanFeedback(a)"
                 />
-                <button
-                  class="forebrain-btn forebrain-btn-primary text-xs"
+                <Button
+                  class="forebrain-btn forebrain-btn-primary h-auto text-xs"
                   type="button"
                   :disabled="submitting[a.id]"
                   @click="keepPlanning(a)"
-                >{{ t('chat.exitPlanSendFeedback') }}</button>
-                <button
-                  class="forebrain-btn forebrain-btn-ghost text-xs"
+                >{{ t('chat.exitPlanSendFeedback') }}</Button>
+                <Button
+                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
                   type="button"
                   :disabled="submitting[a.id]"
                   @click="closePlanFeedback(a)"
-                >{{ t('common.cancel') }}</button>
+                >{{ t('common.cancel') }}</Button>
               </div>
               <div
                 v-if="modelPicking[a.id]"
@@ -281,6 +281,8 @@
 import { computed, nextTick, ref } from 'vue'
 import { CircleAlert, ClipboardCheck, MessageSquareText } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { MessageResponse } from '@repo/elements/message'
 import {
   Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequest, ConfirmationTitle,
@@ -392,7 +394,10 @@ function chatAboutQuestion(actionId: string) {
 }
 
 function setFeedbackInput(actionId: string, el: unknown) {
-  feedbackInputs.value[actionId] = (el as HTMLInputElement | null) ?? null
+  // The library's Input is a component: the ref hands over the instance, and
+  // the field to focus is the instance's root element.
+  const field = el as { $el?: unknown } | null
+  feedbackInputs.value[actionId] = (field?.$el as HTMLInputElement | undefined) ?? null
 }
 
 /** 「继续规划」first opens the field for the planner's words; the same verdict

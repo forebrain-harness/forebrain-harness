@@ -121,8 +121,8 @@ const codexUsageLimitResponse = `{"error":{"type":"usage_limit_reached","message
 // TestResponsesUsageLimitExplainsInsteadOfDumpingJSON walks the whole path a
 // subscription quota failure takes -- the provider's 429 body, the transport's
 // error normalizer, the SDK's error type, this package's normalizeError -- and
-// asserts the surfaces get a sentence rather than the transport dump they used
-// to print.
+// asserts the surfaces get the provider's own sentence and the status rather
+// than the transport dump they used to print.
 func TestResponsesUsageLimitExplainsInsteadOfDumpingJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -149,19 +149,17 @@ func TestResponsesUsageLimitExplainsInsteadOfDumpingJSON(t *testing.T) {
 	}
 
 	explained := llm.ExplainError(err)
-	if !strings.Contains(explained, "Usage limit reached on your plus plan") {
-		t.Errorf("explanation does not say what happened:\n%s", explained)
-	}
-	if !strings.Contains(explained, "available again in") {
-		t.Errorf("explanation does not say when it recovers:\n%s", explained)
+	if want := "The usage limit has been reached (HTTP 429 Too Many Requests)"; explained != want {
+		t.Errorf("explanation =\n%s\nwant:\n%s", explained, want)
 	}
 	if strings.Contains(explained, "usage_limit_reached") || strings.Contains(explained, "{") {
 		t.Errorf("explanation still leaks the raw payload:\n%s", explained)
 	}
 }
 
-// TestResponsesRateLimitUsesRetryAfterHeader covers the providers that say
-// nothing useful in the body and put the whole answer in the header.
+// TestResponsesRateLimitUsesRetryAfterHeader covers the wait a provider states
+// only in the header. The wording is the provider's own sentence, so the wait
+// travels as a fact the surfaces can count down from, not inside the line.
 func TestResponsesRateLimitUsesRetryAfterHeader(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -189,8 +187,9 @@ func TestResponsesRateLimitUsesRetryAfterHeader(t *testing.T) {
 		t.Errorf("retry after = %v, want 1s", limit.RetryAfter)
 	}
 	explained := llm.ExplainError(err)
-	if !strings.Contains(explained, "available again in 1s") {
-		t.Errorf("explanation does not carry the header's wait:\n%s", explained)
+	want := "Rate limit reached for gpt-test in organization org-1 on requests per min (HTTP 429 Too Many Requests)"
+	if explained != want {
+		t.Errorf("explanation =\n%s\nwant:\n%s", explained, want)
 	}
 }
 

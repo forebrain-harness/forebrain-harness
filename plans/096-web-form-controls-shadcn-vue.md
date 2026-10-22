@@ -1214,35 +1214,43 @@ cd frontend && corepack pnpm test && corepack pnpm exec vue-tsc --noEmit && core
 
 ## Done criteria
 
-全部成立才算完成：
+全部成立才算完成（执行完于 HEAD `81a770e` 的工作区，逐条实测，见下方括号）：
 
-- [ ] `grep -rn '<input\|<select\|<textarea' frontend/src --include=*.vue | grep -v ForebrainPromptTextarea | wc -l` → `0`
-- [ ] 批次 12 的 `offenders:` 门禁（带 `Button`/`ConfirmationAction` 豁免）→ `0`
-- [ ] `grep -rn "\.selectOption(" frontend/e2e | wc -l` → `0`（用带点的正则；**裸词 grep 不会到 0**，
+- [x] `grep -rn '<input\|<select\|<textarea' frontend/src --include=*.vue | grep -v ForebrainPromptTextarea | wc -l` → `0`
+- [x] 批次 12 的 `offenders:` 门禁（带 `Button`/`ConfirmationAction` 豁免）→ `0`
+- [x] `grep -rn "\.selectOption(" frontend/e2e | wc -l` → `0`（用带点的正则；**裸词 grep 不会到 0**，
       因为 `providers-keys.spec.ts:23` 与 `support.ts` 的注释里就写着这个词）
-- [ ] `cd frontend && corepack pnpm exec vue-tsc --noEmit` → exit 0
-- [ ] `cd frontend && corepack pnpm test` → 全绿（新文件 `selectValue.test.ts`、
-      `usePanelWidth.test.ts` 也在里面）
-- [ ] `cd frontend && corepack pnpm run build` → exit 0
-- [ ] `e2e/radius.spec.ts` + `e2e/visual.spec.ts` 通过（几何与视觉系统未漂移）
-- [ ] 每个批次自己那份 spec 通过；批次 12 的全量 e2e 通过
-- [ ] `grep -rn "v-model.number" frontend/src --include=*.vue | wc -l` → `0`（库组件不实现该修饰符；
+- [x] `cd frontend && corepack pnpm exec vue-tsc --noEmit` → exit 0
+- [x] `cd frontend && corepack pnpm test` → 全绿（执行完是 **138 文件 / 986 用例**；比计划的 136 多出的
+      两份是计划自己要求的 `selectValue.test.ts`、`usePanelWidth.test.ts`）
+- [x] `cd frontend && corepack pnpm run build` → exit 0
+- [x] `e2e/radius.spec.ts` + `e2e/visual.spec.ts` 通过（几何与视觉系统未漂移）。radios 换库件后
+      `radius` 会因 12px composer `input-group` 报一条**既有**违规，本计划执行期经 owner 批准把该例外
+      从"composer textarea"扩到"composer 的 input-group 容器"（仅该容器，不是全页放宽）
+- [x] 每个批次自己那份 spec 通过；批次 12 的全量 e2e 通过（`187 passed / 2 skipped / web e2e: PASS`）
+- [x] `grep -rn "v-model.number" frontend/src --include=*.vue | wc -l` → `0`（库组件不实现该修饰符；
       今天有 5 处，见"迁移写法"第 8 条）
-- [ ] `grep -rn "components/ui/dialog" frontend/src/components/common/ForebrainModal.vue` 有输出，
+- [x] `grep -rn "components/ui/dialog" frontend/src/components/common/ForebrainModal.vue` 有输出，
       `grep -rn "components/ui/sheet" frontend/src/components/common/ForebrainDrawer.vue` 有输出
       （外壳真的建在库组件上，不是换了个注释；**不要**引 `reka-ui`——`frontend/package.json`
       没有这个依赖，`frontend/node_modules` 里也没有它，引了会直接解析失败）
 - [ ] `grep -rn "<Teleport" frontend/src/components/common/{ForebrainModal,ForebrainDrawer}.vue` → 无输出
-      （挂载点交给库的 portal）
-- [ ] `grep -rnl "forebrain-modal" frontend/e2e | wc -l` → `5`（`tenant-shell`、`projects-modals`、
+      （挂载点交给库的 portal）。**这一条没有照字面成立，且是有意的**：`ForebrainModal` 的库根必须是
+      `:modal="false"`——`DialogContentModal` 把 `trap-focus` 硬绑到 `open`，焦点陷阱会把"对话框还开着时
+      落到 composer 的按键"抢回对话框最后按下的按钮（实测：附件确认后立刻回车 = 第二次上传、消息不发出，
+      `e2e/auth.spec.ts:107` 从绿变红）。库只给 modal 根画遮罩，所以外壳自己
+      `<Teleport to="body">` 一层 `.forebrain-modal-mask`（排在面板之前）。`ForebrainDrawer` 已无 `<Teleport>`
+- [x] `grep -rnl "forebrain-modal" frontend/e2e | wc -l` → `5`（`tenant-shell`、`projects-modals`、
       `radius`、`settings-tabs`、`providers-keys`）；
       `grep -rnl "forebrain-drawer" frontend/e2e | wc -l` → `3`（类名没被改名）
 - [ ] `grep -rn "forebrain-modal-mask" frontend/src frontend/e2e` → 只剩批次 10 第 5 步允许的
-      那 1 行 e2e（已改成排除集）与组件历史注释
-- [ ] `grep -rn "resizer" frontend/src/components/chat/{ChatWorkbench,SubagentDrawer}.vue` 各有一条（把手在）
-- [ ] `git status` 只出现本计划 In-scope 的文件（外加既有的工作区基线与 `pkg/gateway/dist`；
-      基线里 `pkg/gateway/dist/assets/*` 有一批 **deleted** 条目，那是既有状态，别去恢复别去提交）
-- [ ] `plans/README.md` 的本行状态更新（或按 owner 要求不动）
+      那 1 行 e2e（已改成排除集）与组件历史注释。**同上一条**：这个类没有消失，它现在是外壳自绘的遮罩
+      （`main.css` 的 `.forebrain-modal-mask` + 组件里的那个 div），语义与 32% 暗度不变；
+      `radius.spec.ts` 的排除集因此同时保留 `.forebrain-modal` 与 `[data-slot="dialog-overlay"]`
+- [x] `grep -rn "resizer" frontend/src/components/chat/{ChatWorkbench,SubagentDrawer}.vue` 各有一条（把手在）
+- [x] `git status` 只出现本计划 In-scope 的文件（外加既有的工作区基线与 `pkg/gateway/dist`；
+      跑过 `pnpm run build` 后 dist 的 deleted 条目被重新写出，属构建产物，未提交）
+- [x] `plans/README.md` 的本行状态更新（见索引）
 
 ## STOP conditions
 

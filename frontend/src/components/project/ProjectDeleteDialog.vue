@@ -22,7 +22,7 @@
   >
     <p class="text-[13px] text-[var(--forebrain-text-2)]">{{ preview ? t('projects.deleteBusy') : t('common.loading') }}</p>
     <template #footer>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="emit('cancel')">{{ t('common.close') }}</button>
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="emit('cancel')">{{ t('common.close') }}</Button>
     </template>
   </ForebrainModal>
 </template>
@@ -39,6 +39,7 @@
  * performs the delete so a refusal lands on that page's own error line.
  */
 import { computed, ref, watch } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import { forebrainApi, getErrorMessage, type ProjectRecord } from '@/lib/api'

@@ -2,7 +2,7 @@ import { join } from 'node:path'
 
 import { expect, test, type Page } from '@playwright/test'
 
-import { expectAssistantReply, seedProject, signIn } from './support'
+import { expectAssistantReply, pickOption, seedProject, signIn } from './support'
 
 /**
  * The project space as the design draws it (plan 075): the breadcrumb that
@@ -146,7 +146,9 @@ async function seedChannels(page: Page, projectId: string): Promise<void> {
 function settingsControls(page: Page): Promise<string[]> {
   return page.evaluate(() => {
     const nodes = Array.from(document.querySelectorAll(
-      'main input:not([type="radio"]), main textarea, main [role="radiogroup"], main [role="switch"], main button',
+      // The memory scope is the library's RadioGroup (plan 096), so its options
+      // are buttons; the group itself is the one entry it contributes here.
+      'main input:not([type="radio"]), main textarea, main [role="radiogroup"], main [role="switch"], main button:not([role="radio"])',
     ))
     return nodes.map((node) => {
       const el = node as HTMLElement
@@ -203,7 +205,7 @@ test('the top bar carries the breadcrumb and 项目设置 is the first tab of on
   await expect(scope).toHaveCount(1)
   const help = scope.locator('.forebrain-list-note')
   await expect(help).toContainText('本项目的会话也能召回其他记忆；修改只在新会话生效。')
-  await scope.locator('label', { hasText: '仅本项目' }).locator('input').check()
+  await scope.locator('[role="radio"][value="project_only"]').click()
   await expect(help).toContainText('只召回本项目自己的记忆；修改只在新会话生效。')
   await pageShot(page, '075-project-settings.png')
 
@@ -328,7 +330,9 @@ test('the channel table masks secrets, disables what is unconfigured, and edits 
   await page.goto(`/projects/${project.id}/channels`, { waitUntil: 'networkidle' })
   // Every kind on one page, so the configured and the unconfigured read alike.
   await expect(page.locator('[data-testid="pager-size"]')).toBeVisible({ timeout: 20_000 })
-  await page.selectOption('[data-testid="pager-size"]', '50')
+  // The pager's size control is the library's Select (plan 096): click the
+  // trigger, then the item.
+  await pickOption(page, 'pager-size', '每页 50 条')
 
   const feishu = page.locator('[data-channel-row="feishu"]')
   await expect(feishu).toBeVisible({ timeout: 20_000 })

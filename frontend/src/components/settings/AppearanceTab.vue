@@ -25,18 +25,26 @@
     />
 
     <!-- The same setting the top bar's language menu writes: one locale, two
-         places to change it. -->
-    <label class="forebrain-form-field w-40">
-      <span>{{ t('settings.appearanceLanguage') }}</span>
-      <select
-        class="forebrain-field h-[34px] w-full"
-        :value="locale"
-        data-testid="appearance-language"
-        @change="chooseLanguage"
-      >
-        <option v-for="option in languageOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-      </select>
-    </label>
+         places to change it. The label is its own element rather than a wrapper:
+         the control is the library's Select, a button, and a button inside a
+         `<label>` would answer one click with two. -->
+    <div class="forebrain-form-field w-40">
+      <Label for="appearance-language" class="block text-[12px] font-medium leading-[normal] text-[var(--forebrain-text-2)]">
+        {{ t('settings.appearanceLanguage') }}
+      </Label>
+      <Select :model-value="locale" @update:model-value="chooseLanguage">
+        <SelectTrigger
+          id="appearance-language"
+          class="forebrain-field !h-[34px] w-full"
+          data-testid="appearance-language"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem v-for="option in languageOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
   </div>
 </template>
 
@@ -46,6 +54,8 @@
  * applied at once: there is no form to submit and nothing to save.
  */
 import { computed } from 'vue'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import RadioField from '@/components/common/RadioField.vue'
 import { BRAND_SCHEMES, useAppearance, type BrandScheme, type RailTheme } from '@/composables/useAppearance'
 import { useI18n, type I18nKey, type Locale } from '@/locales'
@@ -79,7 +89,7 @@ const railOptions = computed(() => [
   { value: 'light', label: t('appearance.railLight') },
 ])
 
-function chooseLanguage(event: Event): void {
-  setLocale((event.target as HTMLSelectElement).value as Locale)
+function chooseLanguage(value: unknown): void {
+  setLocale(String(value ?? '') as Locale)
 }
 </script>

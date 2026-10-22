@@ -42,12 +42,14 @@ test('agent rules page creates and edits a bootstrap file', async ({ page }) => 
   // The three bootstrap files are listed.
   const rows = await page.locator('[data-testid="rule-file-row"]').allInnerTexts()
   expect(rows.length).toBe(3)
-  // Create USER.md through the modal (only uncreated files are offered).
+  // Create USER.md through the modal (only uncreated files are offered). The
+  // file dropdown is the library's select: its items exist only while it is
+  // open, so the offered set is read off the open listbox.
   await page.click('[data-testid="rules-create"]')
-  const select = page.locator('[data-testid="rules-create-select"]')
-  const options = await select.locator('option').allInnerTexts()
+  await page.click('[data-testid="rules-create-select"]')
+  const options = await page.getByRole('option').allInnerTexts()
   if (options.some((option) => option.includes('USER.md'))) {
-    await select.selectOption({ index: options.findIndex((option) => option.includes('USER.md')) })
+    await page.getByRole('option', { name: 'USER.md', exact: true }).click()
     await page.click('[data-testid="rules-create-ok"]')
     // The editor modal opens; write into the WYSIWYG editor and save.
     const prose = page.locator('[data-testid="rules-editor-modal"] .ProseMirror')
@@ -83,11 +85,12 @@ test('project rules tab manages the FOREBRAIN.md chain', async ({ page }) => {
   await expect(page.getByText(/已保存|Saved/).first()).toBeVisible({ timeout: 10_000 })
   // Create one in a first-level directory through the modal.
   await page.click('[data-testid="rules-create"]')
-  const select = page.locator('[data-testid="rules-create-select"]')
-  const options = await select.locator('option').allInnerTexts()
-  const docsIndex = options.findIndex((option) => option.includes('docs'))
+  // The layer dropdown is the library's select: its items exist only while it
+  // is open, so the list is read off the open listbox.
+  await page.click('[data-testid="rules-create-select"]')
+  const docsIndex = (await page.getByRole('option').allInnerTexts()).findIndex((option) => option.includes('docs'))
   if (docsIndex >= 0) {
-    await select.selectOption({ index: docsIndex })
+    await page.getByRole('option').nth(docsIndex).click()
     await page.click('[data-testid="rules-create-ok"]')
     const docsProse = page.locator('[data-testid="rules-editor-modal"] .ProseMirror')
     await expect(docsProse).toBeVisible({ timeout: 15_000 })
@@ -106,11 +109,12 @@ test('permissions page adds a rule through a modal and removes it', async ({ pag
   await signIn(page)
   await page.goto('/permissions', { waitUntil: 'networkidle' })
   await page.click('[data-testid="add-rule"]')
-  // The tool dropdown is populated from the runtime registry.
-  await page.waitForFunction(() => {
-    const select = document.querySelector('[data-testid="rule-tool"]') as HTMLSelectElement | null
-    return !!select && select.options.length > 0
-  }, undefined, { timeout: 15_000 })
+  // The tool dropdown is populated from the runtime registry: its items exist
+  // only while it is open, so the list arriving is seen by opening it and
+  // waiting for the first item — the same fact the old `options.length` wait
+  // wrote down. The add button above wakes only once the registry has arrived.
+  await page.click('[data-testid="rule-tool"]')
+  await page.getByRole('option').first().click({ timeout: 15_000 })
   await page.fill('[data-testid="rule-content"]', '/tmp/e2e-rules-*')
   await page.click('[data-testid="rule-save"]')
   const row = page.locator('[data-testid="agent-rule"]', { hasText: '/tmp/e2e-rules-*' })
@@ -132,15 +136,19 @@ test('settings approval tab persists the preset', async ({ page }) => {
   await page.locator('[data-testid="settings-tabs"] button', { hasText: /审批默认|Approval default/ }).click()
   // The presets are one standard radio group and the write is the save at the
   // bottom of the tab (plan 076), not a click on the choice itself.
-  await page.locator('[data-testid="approval-default"] input[value="full-access"]').check()
+  await page.locator('[data-testid="approval-default"] [role="radio"][value="full-access"]').click()
   await page.locator('[data-testid="approval-save"]').click()
   await expect(page.getByText(/已保存为全局默认|Saved as the global default/).first()).toBeVisible({ timeout: 10_000 })
   // Reopening keeps the selection.
   await page.reload({ waitUntil: 'networkidle' })
   await page.locator('[data-testid="settings-tabs"] button', { hasText: /审批默认|Approval default/ }).click()
-  await expect(page.locator('[data-testid="approval-default"] input[value="full-access"]')).toBeChecked({ timeout: 10_000 })
+  await expect(page.locator('[data-testid="approval-default"] [role="radio"][value="full-access"]')).toHaveAttribute(
+    'aria-checked',
+    'true',
+    { timeout: 10_000 },
+  )
   // Restore the safe default.
-  await page.locator('[data-testid="approval-default"] input[value="auto"]').check()
+  await page.locator('[data-testid="approval-default"] [role="radio"][value="auto"]').click()
   await page.locator('[data-testid="approval-save"]').click()
   await expect(page.getByText(/已保存为全局默认|Saved as the global default/).first()).toBeVisible({ timeout: 10_000 })
 })
@@ -183,10 +191,12 @@ test('project perm tab gates on trust', async ({ page }) => {
   // The rule lands in this project's own settings, and the trust decision
   // survives a reload (the gate reads the project row, not the create answer).
   await page.click('[data-testid="add-rule"]')
-  await page.waitForFunction(() => {
-    const select = document.querySelector('[data-testid="rule-tool"]') as HTMLSelectElement | null
-    return !!select && select.options.length > 0
-  }, undefined, { timeout: 15_000 })
+  // The tool dropdown is populated from the runtime registry: its items exist
+  // only while it is open, so the tool is picked off the open listbox. The add
+  // button above wakes once that list has arrived, which is what the old
+  // `options.length` wait wrote down.
+  await page.click('[data-testid="rule-tool"]')
+  await page.getByRole('option').first().click({ timeout: 15_000 })
   await page.fill('[data-testid="rule-content"]', 'rm -rf:*')
   await page.click('[data-testid="rule-save"]')
   await expect(page.getByText('rm -rf:*').first()).toBeVisible({ timeout: 10_000 })

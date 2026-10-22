@@ -12,6 +12,7 @@ vi.mock('@/lib/api', () => ({
 }))
 
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 import AttachSaveDialog, { type AttachFileRow } from './AttachSaveDialog.vue'
 
 function listing(path: string, entries: Array<{ name: string; hasChildren?: boolean }>) {
@@ -45,7 +46,7 @@ describe('AttachSaveDialog', () => {
   function mountDialog(initialDir = '') {
     return mount(AttachSaveDialog, {
       props: { open: true, project: { id: 'prj_1', name: 'demo' }, files, initialDir },
-      global: { stubs: { teleport: true } },
+      global: { stubs: { teleport: InlineTeleport } },
     })
   }
 

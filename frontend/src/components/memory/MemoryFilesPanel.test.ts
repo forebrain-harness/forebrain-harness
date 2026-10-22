@@ -139,10 +139,10 @@ describe('MemoryFilesPanel', () => {
   it('reports the selection the page keeps, one box or all of them', async () => {
     const wrapper = await mountPanel()
 
-    await wrapper.find('[data-memory-file="notes/habit.md"] input[type="checkbox"]').setValue(true)
+    await wrapper.find('[data-memory-file="notes/habit.md"] [role="checkbox"]').trigger('click')
     expect(wrapper.emitted('update:selected')?.[0]).toEqual([new Set(['notes/habit.md'])])
 
-    await wrapper.find('[data-testid="memories-select-all"]').setValue(true)
+    await wrapper.find('[data-testid="memories-select-all"]').trigger('click')
     expect(wrapper.emitted('update:selected')?.[1]).toEqual([new Set(['MEMORY.md', 'notes/habit.md'])])
   })
 

@@ -18,15 +18,15 @@
     <ListNote>{{ t('settings.subagentFeatureNote') }}</ListNote>
 
     <div class="flex flex-wrap items-center gap-2">
-      <button
+      <Button
         type="button"
-        class="forebrain-btn forebrain-btn-primary text-xs"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
         :disabled="!changed || saving"
         data-testid="subagents-feature-save"
         @click="save"
       >
         {{ saving ? t('common.loading') : t('common.save') }}
-      </button>
+      </Button>
     </div>
   </div>
 </template>
@@ -38,6 +38,7 @@
  * menu bar's 子代理 page, where that one agent may override it.
  */
 import { computed, onMounted, ref } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 import ListNote from '@/components/common/ListNote.vue'
 import SwitchRow from '@/components/common/SwitchRow.vue'
 import forebrainApi from '@/lib/api'

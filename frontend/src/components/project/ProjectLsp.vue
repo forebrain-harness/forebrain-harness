@@ -8,27 +8,27 @@
     <div v-if="!trusted" class="rounded-lg border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
       <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
       <p class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.trustHint') }}</p>
-      <button type="button" class="forebrain-btn forebrain-btn-primary mt-3 text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
+      <Button type="button" class="forebrain-btn forebrain-btn-primary mt-3 h-auto text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
         {{ trusting ? t('common.loading') : t('projects.trustLabel') }}
-      </button>
+      </Button>
     </div>
 
     <template v-else>
       <ListToolbar>
         <template #left>
-          <input
+          <Input
             v-model="q"
             type="search"
             :placeholder="t('projects.lspSearchPlaceholder')"
-            class="forebrain-field h-[34px]"
+            class="forebrain-field h-[34px] w-auto"
             style="max-width: 240px"
             data-testid="project-lsp-search"
           />
         </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="project-lsp-refresh" @click="refresh">
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" :disabled="loading" data-testid="project-lsp-refresh" @click="refresh">
             <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
-          </button>
+          </Button>
         </template>
       </ListToolbar>
 
@@ -109,6 +109,8 @@
 import { computed, ref, watch } from 'vue'
 import { Check, RotateCw, X } from 'lucide-vue-next'
 import type { AxiosError } from 'axios'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ListNote from '@/components/common/ListNote.vue'

@@ -1,11 +1,17 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import tip from '@/directives/tip'
 import { forebrainApi, type SkillRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect, optionTexts, pickOption } from '@/test-utils/formControls'
 import SettingsSharedSkillsTab from './SettingsSharedSkillsTab.vue'
+
+// The layer filter is the library's select, so its options render in a portal
+// on the document rather than inside the wrapper. A wrapper left mounted would
+// keep them there for the next test's document-wide lookups.
+enableAutoUnmount(afterEach)
 
 /**
  * The shared skills library (plan 073): the table asks the server for its own
@@ -40,7 +46,17 @@ async function mountTab() {
 }
 
 describe('SettingsSharedSkillsTab', () => {
-  beforeAll(() => setLocale('zh'))
+  beforeAll(() => {
+    setLocale('zh')
+    // The filter measures its viewport with ResizeObserver, which jsdom does
+    // not have; scrolling an item into view is not implemented either.
+    ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Element.prototype.scrollIntoView = () => undefined
+  })
 
   beforeEach(() => {
     vi.spyOn(forebrainApi, 'skillsPage').mockResolvedValue({
@@ -75,9 +91,16 @@ describe('SettingsSharedSkillsTab', () => {
   it('offers only the two layers this library holds', async () => {
     const wrapper = await mountTab()
 
-    const options = wrapper.findAll('[data-testid="shared-skills-source-filter"] option')
-    expect(options.map((option) => option.text())).toEqual(['全部来源', '共享', '内置'])
-    expect(options.map((option) => (option.element as HTMLOptionElement).value)).toEqual(['shared,builtin', 'shared', 'builtin'])
+    const layer = wrapper.find('[data-testid="shared-skills-source-filter"]').element as HTMLElement
+    await openSelect(layer)
+    expect(optionTexts()).toEqual(['全部来源', '共享', '内置'])
+
+    // A row carries the layer the endpoint takes, not the word on screen:
+    // picking 共享 asks for `origin: 'shared'`.
+    const page = vi.mocked(forebrainApi.skillsPage)
+    await pickOption(layer, '共享')
+    await flushPromises()
+    expect(page.mock.calls[page.mock.calls.length - 1][0]).toMatchObject({ origin: 'shared' })
   })
 
   it('asks for both layers at once, and for one of them when picked', async () => {
@@ -86,7 +109,7 @@ describe('SettingsSharedSkillsTab', () => {
 
     expect(page.mock.calls[0][0]).toMatchObject({ origin: 'shared,builtin', page: 1 })
 
-    await wrapper.find('[data-testid="shared-skills-source-filter"]').setValue('builtin')
+    await pickOption(wrapper.find('[data-testid="shared-skills-source-filter"]').element as HTMLElement, '内置')
     await flushPromises()
 
     expect(page).toHaveBeenCalledTimes(2)

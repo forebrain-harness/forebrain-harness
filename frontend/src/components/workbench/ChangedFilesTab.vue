@@ -15,31 +15,31 @@
           <span v-if="file.created" class="chg-badge">{{ t('chat.changesNew') }}</span>
           <span v-else class="chg-stats font-mono">+{{ file.added }} −{{ file.removed }}</span>
           <div class="chg-acts">
-            <button
+            <Button
               v-if="!file.created"
               type="button"
-              class="forebrain-btn text-xs"
+              class="forebrain-btn h-auto text-xs"
               :data-testid="`chg-diff-${file.path}`"
               @click="openDiff(file.path)"
             >
               {{ t('chat.changesDiff') }}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              class="forebrain-btn text-xs"
+              class="forebrain-btn h-auto text-xs"
               :data-testid="`chg-edit-${file.path}`"
               @click="openEdit(file.path)"
             >
               {{ t('chat.changesEdit') }}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              class="forebrain-btn text-xs"
+              class="forebrain-btn h-auto text-xs"
               :data-testid="`chg-revert-${file.path}`"
               @click="askRevert(file)"
             >
               {{ t('chat.changesRevert') }}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -81,6 +81,7 @@
  */
 import { computed, ref, toRef, watch } from 'vue'
 import { FileDiff } from 'lucide-vue-next'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
 
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'

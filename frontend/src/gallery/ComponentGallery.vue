@@ -48,29 +48,107 @@
     </section>
 
     <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
+      <h2 class="text-[15px] font-medium">表单控件</h2>
+      <p class="text-[12px] text-[var(--forebrain-text-2)]">
+        全站表单只有这一套：控件是 <code class="font-mono">@repo/shadcn-vue/components/ui/*</code>
+        的组件，外观只有一个来源，就是设计类——字段是 <code class="font-mono">forebrain-field</code>，
+        按钮是它的普通 / 主色 / 次要三档（都在 <code class="font-mono">main.css</code>，计划 096）。
+        下面每一格都是真实可用的控件。
+      </p>
+
+      <div class="grid gap-3 md:grid-cols-2">
+        <div class="grid gap-1">
+          <Label for="gallery-input" class="text-[12px] font-normal text-[var(--forebrain-text-2)]">输入框 Input</Label>
+          <Input id="gallery-input" v-model="sample" class="forebrain-field h-9 w-full" placeholder="请输入名称" />
+        </div>
+        <div class="grid gap-1">
+          <Label for="gallery-select" class="text-[12px] font-normal text-[var(--forebrain-text-2)]">下拉 Select</Label>
+          <Select :model-value="sampleChoice" @update:model-value="(value) => (sampleChoice = String(value ?? ''))">
+            <SelectTrigger id="gallery-select" class="forebrain-field h-9 w-full">
+              <SelectValue placeholder="请选择" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="chat">Chat Completions</SelectItem>
+              <SelectItem value="responses">Responses</SelectItem>
+              <SelectItem value="messages">Anthropic Messages</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div class="grid gap-1">
+          <Label for="gallery-select-sm" class="text-[12px] font-normal text-[var(--forebrain-text-2)]">
+            下拉 34px（工具栏筛选的形状）
+          </Label>
+          <Select :model-value="sampleChoice" @update:model-value="(value) => (sampleChoice = String(value ?? ''))">
+            <SelectTrigger id="gallery-select-sm" class="forebrain-field !h-[34px] w-[220px]">
+              <SelectValue placeholder="请选择" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="chat">Chat Completions</SelectItem>
+              <SelectItem value="responses">Responses</SelectItem>
+              <SelectItem value="messages">Anthropic Messages</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div class="grid gap-1">
+          <Label for="gallery-textarea" class="text-[12px] font-normal text-[var(--forebrain-text-2)]">文本域 Textarea</Label>
+          <Textarea id="gallery-textarea" v-model="sampleText" rows="3" class="forebrain-field min-h-0 w-full" />
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-4 border-t border-[var(--forebrain-divider)] pt-3">
+        <span class="flex items-center gap-2 text-[13px]">
+          <Checkbox
+            id="gallery-checkbox"
+            :model-value="sampleChecked"
+            @update:model-value="(value) => (sampleChecked = value === true)"
+          />
+          <Label for="gallery-checkbox" class="text-[13px] font-normal">复选框 Checkbox</Label>
+        </span>
+        <span class="flex items-center gap-2 text-[13px]">
+          开关 Switch
+          <SwitchComponent v-model="sampleSwitch" aria-label="示例开关" />
+        </span>
+      </div>
+
+      <div class="grid gap-3 border-t border-[var(--forebrain-divider)] pt-3">
+        <RadioField v-model="sampleRadio" label="单选 RadioGroup" name="gallery-sample" :options="sampleRadioOptions" />
+        <div class="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            class="forebrain-btn h-auto bg-transparent text-[var(--forebrain-text)] hover:bg-transparent"
+          >
+            普通按钮
+          </Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto">主要按钮</Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto">次要按钮</Button>
+        </div>
+      </div>
+    </section>
+
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
       <h2 class="text-[15px] font-medium">ForebrainModal 弹窗</h2>
       <div class="flex flex-wrap gap-2">
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalSmOpen = true">小弹窗 sm</button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalMdOpen = true">普通弹窗 md</button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalXlOpen = true">编辑器弹窗 xl</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="modalSmOpen = true">小弹窗 sm</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="modalMdOpen = true">普通弹窗 md</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="modalXlOpen = true">编辑器弹窗 xl</Button>
       </div>
       <ForebrainModal :open="modalSmOpen" size="sm" title="小弹窗" @close="modalSmOpen = false">
         <p class="text-[13px] text-[var(--forebrain-text-2)]">440px 宽，用于只有一个输入框的表单。</p>
         <template #footer>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalSmOpen = false">取消</button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" @click="modalSmOpen = false">创建</button>
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="modalSmOpen = false">取消</Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" @click="modalSmOpen = false">创建</Button>
         </template>
       </ForebrainModal>
       <ForebrainModal :open="modalMdOpen" title="普通弹窗" @close="modalMdOpen = false">
         <p class="text-[13px] text-[var(--forebrain-text-2)]">560px 宽，默认尺寸。</p>
         <template #footer>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" @click="modalMdOpen = false">好</button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" @click="modalMdOpen = false">好</Button>
         </template>
       </ForebrainModal>
       <ForebrainModal :open="modalXlOpen" size="xl" title="编辑器弹窗" @close="modalXlOpen = false">
         <p class="text-[13px] text-[var(--forebrain-text-2)]">860px 宽，用于文件编辑器。</p>
         <template #footer>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" @click="modalXlOpen = false">保存</button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" @click="modalXlOpen = false">保存</Button>
         </template>
       </ForebrainModal>
     </section>
@@ -78,8 +156,8 @@
     <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
       <h2 class="text-[15px] font-medium">ConfirmDialog 确认框</h2>
       <div class="flex flex-wrap gap-2">
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="confirmOpen = true">普通确认</button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" @click="typedOpen = true">危险确认（需输入）</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="confirmOpen = true">普通确认</Button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs text-[var(--forebrain-danger)]" @click="typedOpen = true">危险确认（需输入）</Button>
       </div>
       <ConfirmDialog
         :open="confirmOpen"
@@ -110,11 +188,11 @@
 
       <ListToolbar>
         <template #left>
-          <input v-model="search" class="forebrain-field h-[34px] w-[240px]" placeholder="搜索名称" />
+          <Input v-model="search" class="forebrain-field h-[34px] w-[240px]" placeholder="搜索名称" />
         </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="drawerOpen = true">查看入参</button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" @click="drawerOpen = true">添加 MCP 服务</button>
+          <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="drawerOpen = true">查看入参</Button>
+          <Button type="button" class="forebrain-btn forebrain-btn-primary h-auto text-xs" @click="drawerOpen = true">添加 MCP 服务</Button>
         </template>
       </ListToolbar>
 
@@ -168,18 +246,18 @@
       </div>
     </section>
 
-    <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="drawerOpen = true">打开抽屉（只读）</button>
+    <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="drawerOpen = true">打开抽屉（只读）</Button>
     <ForebrainDrawer :open="drawerOpen" title="MCP 服务 · github" readonly @close="drawerOpen = false">
       <label class="forebrain-form-field">
         <span>名称</span>
-        <input class="forebrain-field h-[34px]" value="github" readonly />
+        <Input class="forebrain-field h-[34px]" default-value="github" readonly />
       </label>
       <label class="forebrain-form-field">
         <span>命令</span>
-        <input class="forebrain-field h-[34px]" value="npx -y @modelcontextprotocol/server-github" readonly />
+        <Input class="forebrain-field h-[34px]" default-value="npx -y @modelcontextprotocol/server-github" readonly />
       </label>
       <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="drawerOpen = false">取消</button>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="drawerOpen = false">取消</Button>
       </template>
     </ForebrainDrawer>
   </main>
@@ -193,6 +271,12 @@
  */
 import { Eye, Pencil, Trash2 } from 'lucide-vue-next'
 import { ref } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Checkbox } from '@repo/shadcn-vue/components/ui/checkbox'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Label } from '@repo/shadcn-vue/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
+import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import CardComponent from '@/components/common/CardComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -230,6 +314,19 @@ const pageSize = ref(10)
 const drawerOpen = ref(false)
 const density = ref('standard')
 const brand = ref('teal')
+
+// The form-controls section (plan 096): one live instance of every control the
+// product's forms are made of, so the shapes can be compared to the design.
+const sample = ref('')
+const sampleText = ref('')
+const sampleChoice = ref('')
+const sampleChecked = ref(true)
+const sampleSwitch = ref(true)
+const sampleRadio = ref('a')
+const sampleRadioOptions = [
+  { value: 'a', label: '选项 A' },
+  { value: 'b', label: '选项 B' },
+]
 
 const galleryRows = [
   { name: 'github', updated: '2026-10-18 09:12', removable: true },

@@ -139,7 +139,7 @@ test('a review in flight is an event away: the card says so and the reviewer has
   sqlite(`
     ${event(session, runId, 'e2e-exitplan-started', 'plan_review_started', {
       action_id: actionId, review_id: reviewId,
-      provider: 'deepseek', model: 'deepseek-chat',
+      provider: 'deepseek', model: 'deepseek-v4-flash',
     }, (now - 20) * 1000)}
     ${event(session, runId, 'e2e-exitplan-spawn', 'subagent_spawned', {
       agent_id: 'plan-review-e2e-1', agent_type: 'plan-reviewer', task_id: 'plan-review-e2e-1',

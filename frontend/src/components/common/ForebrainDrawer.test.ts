@@ -1,8 +1,9 @@
 import { beforeAll, describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
 import tip from '@/directives/tip'
 import { setLocale } from '@/locales'
+import { InlineTeleport } from '@/test-utils/portal'
 import ForebrainDrawer from './ForebrainDrawer.vue'
 import ForebrainModal from './ForebrainModal.vue'
 
@@ -10,10 +11,11 @@ import ForebrainModal from './ForebrainModal.vue'
 describe('ForebrainDrawer', () => {
   beforeAll(() => setLocale('en'))
 
-  function mountDrawer(props: Record<string, unknown> = {}) {
+  function mountDrawer(props: Record<string, unknown> = {}, attach = false) {
     return mount(ForebrainDrawer, {
       props: { open: true, title: 'MCP server', ...props },
-      global: { stubs: { teleport: true }, directives: { tip } },
+      global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
+      ...(attach ? { attachTo: document.body } : {}),
     })
   }
 
@@ -48,8 +50,14 @@ describe('ForebrainDrawer', () => {
   })
 
   it('closes on a mask click', async () => {
-    const wrapper = mountDrawer()
-    await wrapper.find('.forebrain-drawer-mask').trigger('click')
+    // The scrim is the library's own sheet overlay, which reports an outside
+    // press as a pointerdown; the panel is attached so that press reaches the
+    // document the library listens on.
+    const wrapper = mountDrawer({}, true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const overlays = document.querySelectorAll('[data-slot="sheet-overlay"]')
+    overlays[overlays.length - 1].dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    await flushPromises()
     expect(wrapper.emitted('close')).toHaveLength(1)
     wrapper.unmount()
   })
@@ -58,7 +66,7 @@ describe('ForebrainDrawer', () => {
     const drawer = mountDrawer()
     const modal = mount(ForebrainModal, {
       props: { open: true, title: 'Delete this server?' },
-      global: { stubs: { teleport: true } },
+      global: { stubs: { teleport: InlineTeleport } },
     })
     pressEscape()
     await modal.vm.$nextTick()
@@ -81,7 +89,7 @@ describe('ForebrainDrawer', () => {
     const footed = mount(ForebrainDrawer, {
       props: { open: true, title: 'Edit' },
       slots: { footer: '<button type="button" class="probe">Save</button>' },
-      global: { stubs: { teleport: true }, directives: { tip } },
+      global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
     })
     expect(footed.find('.forebrain-drawer-foot .probe').exists()).toBe(true)
     footed.unmount()

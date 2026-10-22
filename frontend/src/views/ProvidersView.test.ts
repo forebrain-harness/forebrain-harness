@@ -1,11 +1,20 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 
 import tip from '@/directives/tip'
 import { forebrainApi, type ModelRecord, type ProviderLoginStatus, type ProviderRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { openSelect, optionTexts, pickOption, selectedText } from '@/test-utils/formControls'
+import { InlineTeleport } from '@/test-utils/portal'
 import ProvidersView from './ProvidersView.vue'
+
+// Every wrapper this file mounts goes away with its test. Left mounted, one
+// test's page keeps re-rendering while the next test's mount installs its own
+// Teleport stub — the portal then swaps node types mid-life and unmounts a
+// teleport that never rendered — and its dialogs stay in `document.body`,
+// where the next test's document-wide queries would find them.
+enableAutoUnmount(afterEach)
 
 /**
  * The model services (plan 073): the fallback order paged by the server, each
@@ -199,36 +208,6 @@ async function type(testid: string, value: string): Promise<void> {
   await flushPromises()
 }
 
-/**
- * A shadcn select is reka-ui's, so the browser's own `selectOption` is gone:
- * the trigger opens on Enter, and the item commits on pointerup. A plain
- * `.click()` reaches neither, which is why the tests drive it the way a
- * keyboard user does.
- */
-async function openSelect(testid: string): Promise<void> {
-  field<HTMLElement>(testid).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-  await flushPromises()
-}
-
-function optionTexts(): string[] {
-  return [...document.querySelectorAll<HTMLElement>('[role="option"]')].map((el) => (el.textContent ?? '').trim())
-}
-
-async function pick(testid: string, optionText: string): Promise<void> {
-  await openSelect(testid)
-  const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
-    (el) => (el.textContent ?? '').trim() === optionText,
-  )
-  if (!option) throw new Error(`no option "${optionText}" in ${testid}; saw ${JSON.stringify(optionTexts())}`)
-  option.dispatchEvent(new Event('pointerup'))
-  await flushPromises()
-}
-
-/** What a select shows: the item it is on, read off its trigger. */
-function picked(testid: string): string {
-  return (field(testid).textContent ?? '').trim()
-}
-
 describe('ProvidersView add/edit form', () => {
   beforeAll(() => {
     setLocale('zh')
@@ -255,8 +234,10 @@ describe('ProvidersView add/edit form', () => {
   })
 
   afterEach(() => {
+    // The page itself is unmounted by enableAutoUnmount (top of this file);
+    // wiping the body here first would tear the nodes out from under that
+    // unmount.
     vi.restoreAllMocks()
-    document.body.innerHTML = ''
   })
 
   it('flattens the format and the params into the form, with no 高级 fold left', async () => {
@@ -266,8 +247,8 @@ describe('ProvidersView add/edit form', () => {
     expect(document.querySelector('.forebrain-modal details')).toBeNull()
     // The key's storage is the gateway's business, not a line in the form.
     expect(document.body.textContent).not.toContain('配置文件里只写引用')
-    expect(picked('provider-api-format')).toBe('Chat Completions（/chat/completions）')
-    await openSelect('provider-api-format')
+    expect(selectedText(field('provider-api-format'))).toBe('Chat Completions（/chat/completions）')
+    await openSelect(field('provider-api-format'))
     expect(optionTexts()).toEqual([
       'Anthropic Messages（/v1/messages）',
       'Chat Completions（/chat/completions）',
@@ -282,14 +263,14 @@ describe('ProvidersView add/edit form', () => {
 
     const providerSelect = field<HTMLElement>('provider-name')
     expect(providerSelect.getAttribute('role')).toBe('combobox')
-    expect(picked('provider-name')).toBe('选择服务商')
-    await openSelect('provider-name')
+    expect(selectedText(field('provider-name'))).toBe('选择服务商')
+    await openSelect(field('provider-name'))
     expect(optionTexts()).toContain('moonshotai')
 
-    await pick('provider-name', 'moonshotai')
+    await pickOption(field('provider-name'), 'moonshotai')
     expect(field<HTMLInputElement>('provider-base-url').value).toBe('https://api.moonshot.ai/v1')
     // A Chat Completions service starts on the empty path that names it.
-    expect(picked('provider-api-format')).toBe('Chat Completions（/chat/completions）')
+    expect(selectedText(field('provider-api-format'))).toBe('Chat Completions（/chat/completions）')
   })
 
   it('says Anthropic Messages for the providers that speak it', async () => {
@@ -304,14 +285,14 @@ describe('ProvidersView add/edit form', () => {
     await mountModalPage()
     await click('provider-edit-0')
 
-    expect(picked('provider-api-format')).toBe('Anthropic Messages（/v1/messages）')
+    expect(selectedText(field('provider-api-format'))).toBe('Anthropic Messages（/v1/messages）')
 
     // Picking one back also selects it, so switching providers cannot leave a
     // format behind that the new provider does not speak.
-    await pick('provider-name', 'moonshotai')
-    expect(picked('provider-api-format')).toBe('Chat Completions（/chat/completions）')
-    await pick('provider-name', 'anthropic')
-    expect(picked('provider-api-format')).toBe('Anthropic Messages（/v1/messages）')
+    await pickOption(field('provider-name'), 'moonshotai')
+    expect(selectedText(field('provider-api-format'))).toBe('Chat Completions（/chat/completions）')
+    await pickOption(field('provider-name'), 'anthropic')
+    expect(selectedText(field('provider-api-format'))).toBe('Anthropic Messages（/v1/messages）')
   })
 
   it('keeps a provider the catalog no longer lists when a row is edited', async () => {
@@ -324,8 +305,8 @@ describe('ProvidersView add/edit form', () => {
     await mountModalPage()
     await click('provider-edit-0')
 
-    expect(picked('provider-name')).toBe('arcee-ai')
-    await openSelect('provider-name')
+    expect(selectedText(field('provider-name'))).toBe('arcee-ai')
+    await openSelect(field('provider-name'))
     expect(optionTexts()).toContain('arcee-ai')
   })
 
@@ -333,14 +314,14 @@ describe('ProvidersView add/edit form', () => {
     await mountModalPage()
     await click('providers-add')
 
-    await pick('provider-name', 'moonshotai')
+    await pickOption(field('provider-name'), 'moonshotai')
     await type('provider-base-url', 'https://api.openai.com/v1')
     // A new key-mode row cannot be saved without its key (owner 2026-10-21).
     await type('provider-key-input', 'sk-typed-1234')
     await type('model-chips-input', 'gpt-5')
     field('model-chips-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
     await flushPromises()
-    await pick('provider-api-format', 'Responses（/responses）')
+    await pickOption(field('provider-api-format'), 'Responses（/responses）')
     await click('provider-save')
 
     const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
@@ -363,8 +344,8 @@ describe('ProvidersView add/edit form', () => {
     await click('provider-edit-0')
 
     const format = field<HTMLElement>('provider-api-format')
-    expect(picked('provider-api-format')).toBe('自定义（/v1/chat/completions）')
-    await openSelect('provider-api-format')
+    expect(selectedText(field('provider-api-format'))).toBe('自定义（/v1/chat/completions）')
+    await openSelect(field('provider-api-format'))
     expect(optionTexts()).toContain('自定义（/v1/chat/completions）')
     expect(format.getAttribute('role')).toBe('combobox')
 
@@ -394,7 +375,7 @@ describe('ProvidersView add/edit form', () => {
   it('will not save a new key-mode service without an api key, and says why', async () => {
     await mountModalPage()
     await click('providers-add')
-    await pick('provider-name', 'moonshotai')
+    await pickOption(field('provider-name'), 'moonshotai')
 
     // A key-mode row with no stored key and nothing typed can never be
     // accepted, so the form refuses to send it and names the field.
@@ -413,7 +394,7 @@ describe('ProvidersView add/edit form', () => {
     })
     await mountModalPage()
     await click('providers-add')
-    await pick('provider-name', 'chatgpt')
+    await pickOption(field('provider-name'), 'chatgpt')
 
     // The credential is the login file; an empty key is this row's normal
     // shape, so the form saves it.
@@ -458,7 +439,7 @@ function loginStatus(overrides: Partial<ProviderLoginStatus> = {}): ProviderLogi
 /** The modal teleports to the body; stubbing the teleport keeps it inside the
  * wrapper, so the steps are found and clicked like anything else on the page. */
 async function mountConnectPage(): Promise<VueWrapper> {
-  const wrapper = mount(ProvidersView, { global: { directives: { tip }, stubs: { teleport: true } } })
+  const wrapper = mount(ProvidersView, { global: { directives: { tip }, stubs: { teleport: InlineTeleport } } })
   await flushPromises()
   return wrapper
 }

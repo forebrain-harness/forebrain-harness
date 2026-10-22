@@ -50,10 +50,10 @@ test('an image the model cannot take keeps its message and refuses only the turn
   await page.waitForSelector('textarea')
 
   // The session model menu marks what the catalog knows takes images: the
-  // text-only entry carries no badge, deepseek-chat does. Switching to the
+  // text-only entry carries no badge, deepseek-v4-flash does. Switching to the
   // text-only one is what makes the next turn refusable.
   await page.click('[data-testid="model-chip"]')
-  const chatOption = page.locator('[data-testid="model-option-deepseek-chat"]')
+  const chatOption = page.locator('[data-testid="model-option-deepseek-v4-flash"]')
   const proOption = page.locator('[data-testid="model-option-deepseek-v4-pro"]')
   await expect(chatOption).toContainText('支持图片')
   await expect(chatOption.locator('[data-testid="model-supports-images"]')).toBeVisible()
@@ -95,11 +95,11 @@ test('an image the model cannot take keeps its message and refuses only the turn
   // lets the same conversation continue, picture and all.
   await page.locator('[data-testid="image-refused-notice"]').last()
     .locator('[data-testid="image-refused-switch"]').click()
-  await expect(page.locator('[data-testid="model-option-deepseek-chat"]')).toBeVisible()
-  await expect(page.locator('[data-testid="model-option-deepseek-chat"] [data-testid="model-supports-images"]')).toBeVisible()
+  await expect(page.locator('[data-testid="model-option-deepseek-v4-flash"]')).toBeVisible()
+  await expect(page.locator('[data-testid="model-option-deepseek-v4-flash"] [data-testid="model-supports-images"]')).toBeVisible()
   await shot(page, '070-image-model-menu')
-  await page.click('[data-testid="model-option-deepseek-chat"]')
-  await expect(page.locator('[data-testid="model-chip"]')).toContainText('deepseek-chat')
+  await page.click('[data-testid="model-option-deepseek-v4-flash"]')
+  await expect(page.locator('[data-testid="model-chip"]')).toContainText('deepseek-v4-flash')
   await page.fill('textarea', '继续')
   await page.press('textarea', 'Enter')
   await expectAssistantReply(page)

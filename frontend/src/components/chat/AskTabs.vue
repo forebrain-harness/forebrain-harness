@@ -97,37 +97,37 @@
             <span v-else class="font-mono text-[var(--forebrain-muted-text)]">{{ currentQuestion.options.length + 1 }}.</span>
             <span>{{ t('chat.otherOptional') }}</span>
           </button>
-          <input
+          <Input
             v-else
             ref="otherInput"
             v-model="otherText"
-            class="mt-1 w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
+            class="mt-1 h-auto w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)] shadow-none"
             :placeholder="t('chat.otherOptional')"
             :disabled="submitting"
             data-testid="ask-other-input"
-          >
+          />
         </div>
       </div>
 
       <!-- A multi-select question only toggles, so it gets one way forward:
            the last question submits, the others move on (prototype :3272). -->
       <div v-if="currentQuestion.allowMultiple" class="flex justify-end">
-        <button
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
+          class="forebrain-btn forebrain-btn-primary h-auto text-xs"
           :disabled="submitting"
           :data-testid="isLastQuestion ? 'ask-review-open' : 'ask-next'"
           @click="current += 1"
-        >{{ isLastQuestion ? t('common.submit') : t('chat.askNext') }}</button>
+        >{{ isLastQuestion ? t('common.submit') : t('chat.askNext') }}</Button>
       </div>
       <div v-else-if="!showSubmit && otherOpen[currentQuestion.id]" class="flex justify-end">
-        <button
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
+          class="forebrain-btn forebrain-btn-primary h-auto text-xs"
           :disabled="submitting"
           data-testid="ask-submit"
           @click="emit('submit')"
-        >{{ t('common.submit') }}</button>
+        >{{ t('common.submit') }}</Button>
       </div>
     </div>
 
@@ -146,20 +146,20 @@
       <!-- The prototype's last question before the verdict (:3284). -->
       <p class="mt-2 text-[13px] text-[var(--forebrain-text)]">{{ t('chat.askReviewConfirm') }}</p>
       <div class="mt-2 flex justify-end gap-2">
-        <button
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-ghost text-xs"
+          class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
           :disabled="submitting"
           data-testid="ask-review-back"
           @click="current = questions.length - 1"
-        >{{ t('common.cancel') }}</button>
-        <button
+        >{{ t('common.cancel') }}</Button>
+        <Button
           type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
+          class="forebrain-btn forebrain-btn-primary h-auto text-xs"
           :disabled="submitting"
           data-testid="ask-submit"
           @click="emit('submit')"
-        >{{ t('chat.askSubmitAnswers') }}</button>
+        >{{ t('chat.askSubmitAnswers') }}</Button>
       </div>
     </div>
 
@@ -193,6 +193,8 @@
  * it identically.
  */
 import { computed, nextTick, onMounted, ref } from 'vue'
+import { Button } from '@repo/shadcn-vue/components/ui/button'
+import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { useI18n } from '@/locales'
 import type { AskAction } from '@/composables/usePendingActions'
 
@@ -232,7 +234,9 @@ const current = ref(0)
  * keeps until its text is answered. */
 const otherOpen = ref<Record<string, boolean>>({})
 
-const otherInput = ref<HTMLInputElement | null>(null)
+// The library's Input is a component: the template ref is the instance, and
+// the field it draws is the instance's root element.
+const otherInput = ref<{ $el: unknown } | null>(null)
 
 /** The Submit tab — and with it the arrows — shows for exactly the forms the
  * terminal shows it for: as soon as any question is a multi-select one
@@ -357,7 +361,7 @@ function openOther() {
   const q = currentQuestion.value
   if (!q) return
   otherOpen.value = { ...otherOpen.value, [q.id]: true }
-  void nextTick(() => otherInput.value?.focus())
+  void nextTick(() => (otherInput.value?.$el as HTMLInputElement | undefined)?.focus())
 }
 
 /** What the review says was picked: the options' labels in their order, the

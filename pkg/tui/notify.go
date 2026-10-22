@@ -54,6 +54,11 @@ type Message struct {
 	ToolMeta  tool.ToolMeta
 	AgentID   string
 	RunID     string // Non-empty for subagent frames so reducer keys on child run, not primary.
+	// EventID is the stable identity of the run event this message was built
+	// from, when the event has one. It travels into the frame so a card painted
+	// live and the same card drawn again by a replay are one card on one screen
+	// (see Renderer.retainCardOnceLocked).
+	EventID   string
 	ToolPhase string // event.RunEventToolStarted ("tool_call_started") or RunEventToolCompleted ("tool_call_completed")
 	// ToolOutputDelta marks Content as an incremental stdout/stderr chunk. The
 	// TUI accumulates it into the existing running tool frame.
@@ -1069,6 +1074,7 @@ func (s *ChatSession) notifyTurnError(evt event.RunEvent) {
 	}
 	s.notifyUIForSession(evt.SessionID, NewMessageMsg{Msg: Message{
 		Kind: MsgKindError, Content: text, Title: p.Title, Timestamp: evt.CreatedAt,
+		EventID: strings.TrimSpace(evt.ID),
 	}})
 }
 
@@ -1180,12 +1186,13 @@ func mcpStartupErrorEvent(sessionID string, generation string, rec mcp.ServerRec
 
 // mcpFailureEventID is the stable identity of one server's failure in one
 // conversation: the server and what it said. The generation is deliberately not
-// part of it. Every launch (and every resume) starts MCP again under a new
-// generation, so a server that keeps failing the same way would otherwise add
-// one more identical block to the history per launch, and a resumed
-// conversation would show the stored block and a live copy of it right under
-// the replay. A server that fails differently, or recovers and fails anew with
-// other words, is a different fact and gets its own record.
+// part of it — a session switch and a model switch both reuse the running
+// segment instead of starting MCP again (see
+// run.Runner.startOrReplayMCPSegmentLocked), so a generation is not a fact about
+// the conversation. A server that keeps failing the same way therefore owns one
+// record, and the live card and the replayed one are recognized as the same
+// card. A server that fails differently is a different fact and gets its own
+// record.
 func mcpFailureEventID(server, text string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(text)))
 	return "mcp:" + strings.TrimSpace(server) + ":" + hex.EncodeToString(sum[:6]) + ":error"
@@ -1212,9 +1219,11 @@ type MCPStatusMsg struct {
 //
 // It is per session because both halves are: a failure is appended to the
 // conversation the user has open, and the progress line belongs to the screen
-// showing it. Switching sessions re-arms the watch for the new one, which also
-// means a startup that happened before the switch is still found — the
-// subscription replays the registry's current state.
+// showing it. Switching sessions re-arms the watch for the new one, and the
+// subscription replays the registry's current state — which is how the *status
+// line* survives a switch. The failures in that replay are not the new
+// conversation's news: a generation belongs to the Runner, so only the
+// conversation that saw it start records them (see claimMCPGenerationOwner).
 //
 // Idempotent per session id, so a caller that cannot tell whether it is first (a
 // resume, a switch) can simply call it.
@@ -1243,6 +1252,11 @@ func (s *ChatSession) WatchMCPStartup(sessionID string) {
 		return
 	}
 	cancel := runner.MCPStartup().Subscribe(func(snapshot run.MCPSnapshot) {
+		// The first conversation to see a generation owns its failures. This runs
+		// before the failure pass on purpose: a generation that is already failing
+		// when the subscription replays it must still be attributed to the
+		// conversation that saw it start, not to the one that just opened.
+		s.claimMCPGenerationOwner(sid, snapshot.Generation)
 		s.recordMCPStartupFailures(sid, snapshot)
 		// An empty snapshot is delivered too: it is how a generation says its
 		// servers are gone (the registry closed with the Runner), and dropping it
@@ -1271,6 +1285,45 @@ func (s *ChatSession) WatchMCPStartup(sessionID string) {
 	s.mcpWatchMu.Unlock()
 }
 
+// claimMCPGenerationOwner names the conversation that owns one MCP startup
+// generation — the first one to see it — and returns that owner. An empty
+// generation cannot be attributed and owns nothing; claiming one that is already
+// owned changes nothing, which is what keeps a standing failure from following
+// the user from conversation to conversation. It is called from the watch, so
+// ownership is decided the moment a generation is seen, and again from the
+// failure pass, so no entry point has to know whether it is the first one.
+func (s *ChatSession) claimMCPGenerationOwner(sessionID, generation string) string {
+	if s == nil {
+		return ""
+	}
+	gen := strings.TrimSpace(generation)
+	sid := strings.TrimSpace(sessionID)
+	if gen == "" {
+		return ""
+	}
+	s.mcpOwnerMu.Lock()
+	defer s.mcpOwnerMu.Unlock()
+	switch gen {
+	case s.mcpOwnerGeneration:
+		if s.mcpOwnerSession == "" {
+			s.mcpOwnerSession = sid
+		}
+		return s.mcpOwnerSession
+	case s.mcpPrevGeneration:
+		// A delivery from the generation that was current just before the latest
+		// one: still that generation's fact, not a new generation to claim.
+		if s.mcpPrevSession == "" {
+			s.mcpPrevSession = sid
+		}
+		return s.mcpPrevSession
+	}
+	// New generation: the one it replaces keeps its owner in the spare slot, so
+	// an in-flight delivery from it is still recognized.
+	s.mcpPrevGeneration, s.mcpPrevSession = s.mcpOwnerGeneration, s.mcpOwnerSession
+	s.mcpOwnerGeneration, s.mcpOwnerSession = gen, sid
+	return sid
+}
+
 // recordMCPStartupFailures writes one durable event per failed server of this
 // snapshot, off the delivery path.
 //
@@ -1280,11 +1333,25 @@ func (s *ChatSession) WatchMCPStartup(sessionID string) {
 // database write here would hold up every other server's status transition, and
 // the settling generation behind them.
 //
-// Repeats are harmless by construction: the event id is derived from the
-// generation and the server, so the store keeps the first one and reports the
-// rest as already present. That is also why the goroutines need no ordering
-// between them.
+// Only the conversation that owns the generation records its failures: a
+// subscription replays whatever the Runner's current generation looks like, and
+// that generation outlives every session switch (see
+// run.Runner.startOrReplayMCPSegmentLocked), so recording it here for whoever is
+// open would file a standing failure under a conversation whose startup never
+// produced it. A snapshot with no generation cannot be attributed and keeps the
+// pre-attribution behaviour: it is recorded against the session that is open.
+//
+// Repeats are harmless by construction: the event id is derived from the server
+// and its failure text (see mcpFailureEventID), so the store keeps the first one
+// and reports the rest as already present. That is also why the goroutines need
+// no ordering between them.
 func (s *ChatSession) recordMCPStartupFailures(sessionID string, snapshot run.MCPSnapshot) {
+	// Claiming here as well as in the watch means no caller has to know whether
+	// it is the first to see the generation: whoever arrives first owns it, and
+	// every later observer of the same generation is a non-owner.
+	if owner := s.claimMCPGenerationOwner(sessionID, snapshot.Generation); owner != "" && owner != strings.TrimSpace(sessionID) {
+		return
+	}
 	var failures []mcp.ServerRecord
 	for _, rec := range snapshot.Servers {
 		// A failure with no text is still a failure, but the event exists to
@@ -1309,9 +1376,10 @@ func (s *ChatSession) recordMCPStartupFailures(sessionID string, snapshot run.MC
 			// resubscription replays the same snapshot without appending it
 			// twice. A failure observed before the conversation exists is shown
 			// and not stored (state.ErrSessionNotStarted): no session's history
-			// may claim work that happened before the session did, and a resume
-			// restarts MCP, recording a failure then against the session that
-			// exists by then.
+			// may claim work that happened before the session did. A session
+			// switch restarts nothing — the generation is reused — so no
+			// failure is ever recorded against a conversation that merely
+			// opened later.
 			_ = s.publishRunEvent(bg, mcpStartupErrorEvent(sessionID, generation, rec, now))
 		}
 	}()

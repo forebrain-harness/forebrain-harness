@@ -16,6 +16,16 @@ const usageLimitPayload = {
 
 const arrivedAt = new Date('2026-09-04T15:02:16Z')
 
+// The same failure from a provider that wrote no sentence of its own: the
+// wording then comes from the locales, and the reset has to be counted down.
+const usageLimitWithoutMessage = {
+  code: 'rate_limit_quota',
+  status: 429,
+  plan: 'plus',
+  resetAt: '2026-09-04T17:30:35Z',
+  retryAfterSeconds: 8899,
+}
+
 describe('provider error detail', () => {
   it('reads the gateway payload', () => {
     expect(parseProviderErrorDetail(usageLimitPayload)).toEqual({
@@ -47,48 +57,40 @@ describe('provider error detail', () => {
 })
 
 describe('provider error wording', () => {
-  it('says what happened and when it recovers, in one Chinese sentence', () => {
+  it('quotes the provider sentence with the status, in both languages', () => {
     const detail = parseProviderErrorDetail(usageLimitPayload)!
-    const text = formatProviderError(detail, 'zh', arrivedAt)!
-    expect(text).toContain('你的 plus 套餐用量已经用完')
-    expect(text).toContain('2 小时 28 分钟')
-    expect(text).not.toContain('\n')
-    expect(text).not.toContain('{')
-    expect(text).not.toContain('usage_limit_reached')
-  })
-
-  it('says the same thing in one English sentence', () => {
-    const detail = parseProviderErrorDetail(usageLimitPayload)!
-    const text = formatProviderError(detail, 'en', arrivedAt)!
-    expect(text).toContain('Usage limit reached on your plus plan')
-    expect(text).toContain('available again in 2h 28m')
-    expect(text).not.toContain('\n')
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe(
+      'The usage limit has been reached（HTTP 429）',
+    )
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe(
+      'The usage limit has been reached (HTTP 429)',
+    )
+    expect(formatProviderError(detail, 'en', arrivedAt)).not.toContain('\n')
+    expect(formatProviderError(detail, 'en', arrivedAt)).not.toContain('usage_limit_reached')
   })
 
   it('counts down from the absolute reset rather than repeating the original wait', () => {
-    const detail = parseProviderErrorDetail(usageLimitPayload)!
+    const detail = parseProviderErrorDetail(usageLimitWithoutMessage)!
     const anHourLater = new Date(arrivedAt.getTime() + 60 * 60 * 1000)
     expect(formatProviderError(detail, 'en', anHourLater)).toContain('1h 28m')
   })
 
   it('says the allowance is back once the reset has passed', () => {
-    const detail = parseProviderErrorDetail(usageLimitPayload)!
+    const detail = parseProviderErrorDetail(usageLimitWithoutMessage)!
     const afterReset = new Date('2026-09-04T18:00:00Z')
     expect(formatProviderError(detail, 'zh', afterReset)).toContain('额度应该已经在')
   })
 
-  it('repeats the provider sentence for a plain throttle', () => {
+  it('gives a plain throttle as the provider sentence and the status', () => {
     const detail = parseProviderErrorDetail({
       code: 'rate_limit_throttle',
       status: 429,
       providerMessage: 'Rate limit reached for gpt-test on requests per min',
       retryAfterSeconds: 20,
     })!
-    const text = formatProviderError(detail, 'zh', arrivedAt)!
-    expect(text.split('\n')).toEqual([
-      '模型服务正在限流，预计 20 秒后恢复。',
-      '模型服务原话：Rate limit reached for gpt-test on requests per min',
-    ])
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe(
+      'Rate limit reached for gpt-test on requests per min（HTTP 429）',
+    )
   })
 
   it('admits when the provider gave no reset', () => {
@@ -96,18 +98,21 @@ describe('provider error wording', () => {
     expect(formatProviderError(detail, 'zh', arrivedAt)).toContain('没有说明什么时候恢复')
   })
 
-  it('renders the non-rate-limit failures with the status and the provider words', () => {
+  it('renders the non-rate-limit failures with the provider words and the status', () => {
     const detail = parseProviderErrorDetail({
       code: 'credentials',
       status: 401,
       providerMessage: 'Incorrect API key provided',
     })!
-    const zh = formatProviderError(detail, 'zh', arrivedAt)!
-    expect(zh).toContain('模型服务拒绝了本次请求的凭据')
-    expect(zh).toContain('（HTTP 401）')
-    expect(zh).toContain('模型服务原话：Incorrect API key provided')
-    expect(formatProviderError(detail, 'en', arrivedAt)).toContain(
-      "rejected this request's credentials",
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe('Incorrect API key provided（HTTP 401）')
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe('Incorrect API key provided (HTTP 401)')
+  })
+
+  it('states the failure itself when the provider wrote nothing', () => {
+    const detail = parseProviderErrorDetail({ code: 'credentials', status: 401 })!
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe('模型服务拒绝了本次请求的凭据。（HTTP 401）')
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe(
+      "The provider rejected this request's credentials. (HTTP 401)",
     )
   })
 
@@ -212,7 +217,9 @@ describe('provider error wording', () => {
   })
 
   it('follows the active locale when none is passed', () => {
-    const detail = parseProviderErrorDetail(usageLimitPayload)!
+    // A provider sentence is shown in the provider's language, so following the
+    // viewer's language is only observable where forebrain writes the line.
+    const detail = parseProviderErrorDetail(usageLimitWithoutMessage)!
     setLocale('zh')
     expect(formatProviderError(detail)).toContain('套餐用量已经用完')
     setLocale('en')
