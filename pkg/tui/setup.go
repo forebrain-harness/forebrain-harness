@@ -317,6 +317,19 @@ var discoverOpenCodeModels = func(ctx context.Context, home string) ([]turn.Mode
 	return turn.DiscoverOpenCodeModels(ctx, process.NewOpenCodeModelsSource(home), true)
 }
 
+// probeChatGPTLogin / probeOpenCodeLogin are package vars for the same reason
+// as discoverChatGPTModels: tests stub them, production probes through the
+// shared turn helpers every surface uses. The probe is what decides whether a
+// sign-in page may skip its OAuth flow: a login this machine already holds
+// that can list its models is the finished sign-in.
+var probeChatGPTLogin = func(ctx context.Context, home string) turn.SignInCheck {
+	return turn.ProbeChatGPTModels(ctx, openai.CredentialsPath(home), process.NewChatGPTModelsSource(home))
+}
+
+var probeOpenCodeLogin = func(ctx context.Context, home string) turn.SignInCheck {
+	return turn.ProbeOpenCodeGoModels(ctx, process.NewOpenCodeModelsSource(home))
+}
+
 // modelsDiscoveryTimeout bounds one account model fetch. The browser and device
 // logins have their own long budget because a human is typing in another
 // window; the fetch is one HTTP call and must not hold the input loop for
@@ -790,9 +803,63 @@ func displayHomePath(path string) string {
 	return path
 }
 
+// reuseSignedInModels settles a sign-in page before any OAuth flow runs: a
+// login this machine already holds that lists its models IS the finished
+// sign-in, and repeating the browser or device flow for it is the bug this
+// exists to fix. done=false means no reusable login exists — the caller runs
+// the OAuth flow it asked about. Unreachable delegates to fetchSignedInModels,
+// whose retry panel is the existing semantics for "login stands, listing
+// failed"; neither branch ever repeats the browser or device flow.
+func (s *llmSetup) reuseSignedInModels(
+	title string,
+	probe func(context.Context) turn.SignInCheck,
+	discover func(context.Context) ([]turn.ModelRecord, error)) (ok, done bool, err error) {
+	status := s.statusOutput(title)
+	// The probe is a network round trip that can take up to the discovery
+	// timeout; without a line the screen stands still and the user cannot
+	// tell a slow probe from a hang — the same rule the device flow's live
+	// line follows. statusOutput may hand back nil, like it does for
+	// fetchSignedInModels.
+	if status != nil {
+		fmt.Fprintln(status, "Checking for a saved sign-in…")
+	}
+	probeCtx, cancel := context.WithTimeout(s.ctx(), modelsDiscoveryTimeout)
+	check := probe(probeCtx)
+	cancel()
+	switch check.State {
+	case turn.SignInUsable:
+		s.records = check.Records
+		if s.records == nil {
+			s.records = []turn.ModelRecord{}
+		}
+		if status != nil {
+			fmt.Fprintf(status, "Already signed in — %d models available.\n", len(s.records))
+		}
+		logPromptChoice(s.cfg, "llmsetup.login_reused", s.choice, map[string]any{"count": len(s.records)})
+		return true, true, nil
+	case turn.SignInMissing:
+		logPromptChoice(s.cfg, "llmsetup.login_missing", s.choice, nil)
+		return false, false, nil
+	case turn.SignInDead:
+		logPromptChoice(s.cfg, "llmsetup.login_dead", s.choice, map[string]any{"error": errString(check.Err)})
+		return false, false, nil
+	default: // SignInUnreachable: the login stands, only the listing failed.
+		logPromptChoice(s.cfg, "llmsetup.login_unreachable", s.choice, map[string]any{"error": errString(check.Err)})
+		ok, err := s.fetchSignedInModels(status, discover)
+		return ok, true, err
+	}
+}
+
 // signInChatGPT signs in through the browser and fetches the models the
 // account may run.
 func (s *llmSetup) signInChatGPT() (bool, error) {
+	if ok, done, err := s.reuseSignedInModels(
+		"Sign in with ChatGPT",
+		func(ctx context.Context) turn.SignInCheck { return probeChatGPTLogin(ctx, s.cfg.Home) },
+		func(ctx context.Context) ([]turn.ModelRecord, error) { return discoverChatGPTModels(ctx, s.cfg.Home) },
+	); done {
+		return ok, err
+	}
 	// Browser OAuth is the only provider option with an irreversible,
 	// out-of-band side effect (it opens a browser and then blocks waiting for
 	// the callback), so require an explicit opt-in first. Every other provider
@@ -867,6 +934,13 @@ func (s *llmSetup) startConnectProgress(stage func() string) func() {
 // signInOpenCode runs the device-code login of the OpenCode Go subscription and
 // then fetches the models that subscription serves.
 func (s *llmSetup) signInOpenCode() (bool, error) {
+	if ok, done, err := s.reuseSignedInModels(
+		"Sign in with OpenCode",
+		func(ctx context.Context) turn.SignInCheck { return probeOpenCodeLogin(ctx, s.cfg.Home) },
+		func(ctx context.Context) ([]turn.ModelRecord, error) { return discoverOpenCodeModels(ctx, s.cfg.Home) },
+	); done {
+		return ok, err
+	}
 	ctx := s.ctx()
 	// The device flow also has an out-of-band side effect — it opens a browser
 	// and then blocks while the user confirms a code there — so it asks first,

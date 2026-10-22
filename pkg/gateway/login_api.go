@@ -26,6 +26,8 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
 // The two providers with a web login, spelled as the provider ids in
@@ -62,6 +64,18 @@ var (
 	openCodeLoginRun = opencode.LoginDeviceFlow
 	chatGPTLoginRun  = openai.LoginWithBrowser
 )
+
+// authLoginProbe is a package var like the two login flows above: tests stub
+// it, production probes through the same turn helper the terminal's /connect
+// uses. The answer decides whether a login flow is needed at all — one login
+// serves both surfaces, and a login the machine already holds that can list
+// its models completes the request the way a finished flow's poll would.
+var authLoginProbe = func(ctx context.Context, home, provider string) turn.SignInCheck {
+	if provider == authLoginChatGPT {
+		return turn.ProbeChatGPTModels(ctx, openai.CredentialsPath(home), process.NewChatGPTModelsSource(home))
+	}
+	return turn.ProbeOpenCodeGoModels(ctx, process.NewOpenCodeModelsSource(home))
+}
 
 // errAuthLoginInProgress is the answer to a second login for the same provider.
 // Both flows own fixed resources — a device code, and the loopback ports 1455
@@ -229,6 +243,25 @@ func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 	provider := authLoginProvider(pathParam(r, "provider"))
 	if provider == "" {
 		http.Error(w, "unknown login provider", http.StatusNotFound)
+		return
+	}
+	// Before starting a flow, ask whether this machine's login already
+	// answers the request. Usable and Unreachable both complete: the model
+	// fetch the page runs next is the same fact source and reports its own
+	// failures — a registry being unreachable is not a dead login, and
+	// pushing a working login back through the browser would be the very
+	// bug this fixes. Missing and dead start the flow; the page is the
+	// progress display and the flow reports its own failures.
+	probeCtx, probeCancel := context.WithTimeout(r.Context(), modelsDiscoveryTimeout)
+	check := authLoginProbe(probeCtx, s.Home, provider)
+	probeCancel()
+	if check.State == turn.SignInUsable || check.State == turn.SignInUnreachable {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"provider": provider,
+			"status":   authLoginComplete,
+			"base_url": authLoginBaseURL(provider),
+		})
 		return
 	}
 	now := time.Now()

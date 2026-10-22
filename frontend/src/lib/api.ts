@@ -3535,14 +3535,23 @@ export const forebrainApi = {
   /** Begins a browser sign-in for one provider and answers the id to poll. The
    * flow runs in the gateway — a page cannot print a status line or open a
    * window on the machine the gateway sits on — and it saves the credential the
-   * same way the terminal's /connect does, so one login serves both surfaces. */
+   * same way the terminal's /connect does, so one login serves both surfaces.
+   * When the machine already holds a reusable login (or a login that stands
+   * while only the model listing is unreachable), the gateway answers the
+   * request itself with `status: 'complete'` and the base URL — there is no
+   * login to poll. */
   async startProviderLogin(provider: ProviderLoginProvider) {
     const res = await gatewayFetch(`${API_BASE}/auth/login/${provider}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
     if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
-    return toCamelCase(await res.json()) as { loginId: string; provider: string }
+    return toCamelCase(await res.json()) as {
+      provider: string
+      loginId?: string
+      status?: 'pending' | 'complete'
+      baseUrl?: string
+    }
   },
 
   /** One poll of a running sign-in. `null` is the gateway no longer knowing

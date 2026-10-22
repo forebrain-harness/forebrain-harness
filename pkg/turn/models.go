@@ -3,7 +3,9 @@ package turn
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -306,6 +308,94 @@ func chatGPTModelRecord(info openai.ModelInfo, fetched time.Time) ModelRecord {
 		Source:                 ModelSourceChatGPTAccount,
 		FetchedAt:              fetched,
 	}
+}
+
+// SignInState is what a connect entry learns about the login this machine
+// already holds for a provider.
+type SignInState int
+
+const (
+	// SignInUsable: the stored login listed its models — a finished sign-in.
+	SignInUsable SignInState = iota
+	// SignInMissing: no login on this machine (no file, an incomplete one,
+	// and for OpenCode no OPENCODE_API_KEY either).
+	SignInMissing
+	// SignInDead: the server rejected the login (a dead refresh token or a
+	// 401 on the catalog) — only a new OAuth flow restores it.
+	SignInDead
+	// SignInUnreachable: the models could not be fetched for a reason that
+	// is not the login (network, the npm registry lookup ChatGPT discovery
+	// needs, 5xx). The login stands; no sign-in may be forced on it.
+	SignInUnreachable
+)
+
+// SignInCheck is a sign-in probe's answer. Records is set only when State is
+// SignInUsable, so a caller can go straight to the model picker.
+type SignInCheck struct {
+	State   SignInState
+	Records []ModelRecord
+	// Err is the discovery error behind SignInDead and SignInUnreachable,
+	// for a caller that reports or retries it; nil otherwise.
+	Err error
+}
+
+// ProbeChatGPTModels answers whether the ChatGPT login at path can list its
+// models right now: it lists them through src, which refreshes a nearly
+// expired token the way a turn would. path must come from
+// openai.CredentialsPath (it honors the configured override).
+func ProbeChatGPTModels(ctx context.Context, path string, src ChatGPTModelsSource) SignInCheck {
+	if _, err := openai.Load(path); err != nil {
+		return SignInCheck{State: SignInMissing}
+	}
+	records, err := DiscoverChatGPTModels(ctx, src)
+	return signInCheckFrom(records, err)
+}
+
+// ProbeOpenCodeGoModels answers whether the OpenCode Go subscription's
+// credential can list its models. OpenCodeSignedIn covers both the login file
+// and OPENCODE_API_KEY, so key mode is reusable too.
+func ProbeOpenCodeGoModels(ctx context.Context, src OpenCodeModelsSource) SignInCheck {
+	if src == nil {
+		return SignInCheck{State: SignInMissing}
+	}
+	if !src.OpenCodeSignedIn() {
+		return SignInCheck{State: SignInMissing}
+	}
+	records, err := DiscoverOpenCodeModels(ctx, src, true)
+	return signInCheckFrom(records, err)
+}
+
+func signInCheckFrom(records []ModelRecord, err error) SignInCheck {
+	if err == nil {
+		return SignInCheck{State: SignInUsable, Records: records}
+	}
+	if SignInRejected(err) {
+		return SignInCheck{State: SignInDead, Err: err}
+	}
+	return SignInCheck{State: SignInUnreachable, Err: err}
+}
+
+// SignInRejected reports an error that only a new login can fix. The model
+// endpoints and the OpenCode refresh already classify "log in again" as an
+// HTTP 401 in typed errors; 403 is "no subscription", which a login cannot
+// fix, so it stays unreachable-and-retryable. It lives here — not in
+// pkg/llm — because the typed errors it reads (each provider's ModelsError)
+// are defined in the provider packages this projection already imports; a
+// future sign-in provider adds its type to this one place.
+func SignInRejected(err error) bool {
+	var api *llm.APIError
+	if errors.As(err, &api) && api.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	var oc *opencode.ModelsError
+	if errors.As(err, &oc) && oc.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	var oa *openai.ModelsError
+	if errors.As(err, &oa) && oa.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	return false
 }
 
 // ModelCatalogStatus reports, per provider, where a listing's records came

@@ -577,6 +577,49 @@ describe('ProvidersView sign-in', () => {
     })
   })
 
+  it('goes straight to the catalog when the machine already holds a usable login', async () => {
+    // The gateway answers the start request itself: a reusable login is the
+    // finished sign-in, so there is no id to poll and no auth step to sit
+    // through.
+    vi.mocked(forebrainApi.startProviderLogin).mockResolvedValue({
+      provider: 'opencode',
+      status: 'complete',
+      baseUrl: 'https://go.example.test/inference/go',
+    })
+    vi.mocked(forebrainApi.getModels).mockResolvedValue({
+      records: [loginModel('opencode-go', 'glm-5.3', { isDefault: true })],
+      status: [],
+    })
+
+    const wrapper = await mountConnectPage()
+    await wrapper.find('[data-testid="providers-connect-opencode"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.providerLoginStatus).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="provider-login-code"]').exists()).toBe(false)
+    expect(forebrainApi.getModels).toHaveBeenCalledWith({ provider: 'opencode-go' })
+    expect(wrapper.find('[data-testid="provider-login-model-glm-5.3"]').exists()).toBe(true)
+  })
+
+  it('reports the catalog failure itself when a complete answer cannot list models', async () => {
+    // Complete also answers an unreachable listing: the login stands, and the
+    // page's own fetch is the fact source that reports the failure.
+    vi.mocked(forebrainApi.startProviderLogin).mockResolvedValue({
+      provider: 'opencode',
+      status: 'complete',
+      baseUrl: 'https://go.example.test/inference/go',
+    })
+    vi.mocked(forebrainApi.getModels).mockRejectedValue(new Error('gateway unreachable'))
+
+    const wrapper = await mountConnectPage()
+    await wrapper.find('[data-testid="providers-connect-opencode"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.providerLoginStatus).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="provider-login-error"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="provider-login-retry"]').exists()).toBe(true)
+  })
+
   it('says why a sign-in ended and starts a fresh one on retry', async () => {
     vi.mocked(forebrainApi.providerLoginStatus).mockResolvedValue(loginStatus({ status: 'failed', error: 'denied' }))
 

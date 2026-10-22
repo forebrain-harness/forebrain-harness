@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -339,4 +341,122 @@ func TestAuthLoginStateLivesOnTheServerAndToleratesAnEmptyOne(t *testing.T) {
 		_, ok := bare.authLoginGet(authLoginOpenCode, id)
 		return ok
 	}(), "an expired login is pruned on the next read")
+}
+
+// stubAuthLoginProbe pins the probe's answer, so a start request can be driven
+// through one branch without a login file or a network.
+func stubAuthLoginProbe(t *testing.T, check turn.SignInCheck) {
+	t.Helper()
+	previous := authLoginProbe
+	authLoginProbe = func(context.Context, string, string) turn.SignInCheck {
+		return check
+	}
+	t.Cleanup(func() { authLoginProbe = previous })
+}
+
+// countingBothLogins replaces both flows with counters, so a probe test can
+// prove neither one started.
+func countingBothLogins(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	previousOC := openCodeLoginRun
+	openCodeLoginRun = func(context.Context, string, io.Writer, func(string) error, func(opencode.LoginInfo), func(opencode.LoginStage)) (opencode.Credentials, error) {
+		calls++
+		return opencode.Credentials{}, nil
+	}
+	previousCG := chatGPTLoginRun
+	chatGPTLoginRun = func(context.Context, string, io.Writer, func(string) error) (openai.Credentials, error) {
+		calls++
+		return openai.Credentials{}, nil
+	}
+	t.Cleanup(func() {
+		openCodeLoginRun = previousOC
+		chatGPTLoginRun = previousCG
+	})
+	return &calls
+}
+
+// A login this machine already holds answers the start request the way a
+// finished flow's poll would — complete with the base URL — and neither flow
+// starts: no login id exists to poll.
+func TestAuthLoginStartCompletesOnAUsableSavedLogin(t *testing.T) {
+	for _, provider := range []string{authLoginChatGPT, authLoginOpenCode} {
+		t.Run(provider, func(t *testing.T) {
+			loginCalls := countingBothLogins(t)
+			stubAuthLoginProbe(t, turn.SignInCheck{State: turn.SignInUsable})
+			s, do := loginAPIServer(t)
+			rec := do(http.MethodPost, "/api/auth/login/"+provider)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var body struct {
+				Provider string `json:"provider"`
+				Status   string `json:"status"`
+				BaseURL  string `json:"base_url"`
+				LoginID  string `json:"login_id"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Equal(t, provider, body.Provider)
+			require.Equal(t, authLoginComplete, body.Status)
+			require.Equal(t, authLoginBaseURL(provider), body.BaseURL)
+			require.Empty(t, body.LoginID)
+			require.Zero(t, *loginCalls, "a usable saved login must not start a flow")
+			require.Empty(t, s.authLogins, "no login session may be registered")
+		})
+	}
+}
+
+// Unreachable completes too: a listing that fails for a reason that is not the
+// login must not push a working login back through the browser. The page's own
+// model fetch is the fact source that reports the failure.
+func TestAuthLoginStartCompletesOnAnUnreachableListing(t *testing.T) {
+	for _, provider := range []string{authLoginChatGPT, authLoginOpenCode} {
+		t.Run(provider, func(t *testing.T) {
+			loginCalls := countingBothLogins(t)
+			stubAuthLoginProbe(t, turn.SignInCheck{
+				State: turn.SignInUnreachable,
+				Err:   errors.New("registry unreachable"),
+			})
+			_, do := loginAPIServer(t)
+			rec := do(http.MethodPost, "/api/auth/login/"+provider)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var body struct {
+				Status  string `json:"status"`
+				BaseURL string `json:"base_url"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Equal(t, authLoginComplete, body.Status)
+			require.Equal(t, authLoginBaseURL(provider), body.BaseURL)
+			require.Zero(t, *loginCalls, "an unreachable listing must not start a flow")
+		})
+	}
+}
+
+// Missing keeps the flow exactly as it was: 202 with a login id to poll, and
+// the flow running in the background.
+func TestAuthLoginStartRunsTheFlowWhenNoLoginIsSaved(t *testing.T) {
+	stub := newOpenCodeLoginStub(t)
+	stubAuthLoginProbe(t, turn.SignInCheck{State: turn.SignInMissing})
+	_, do := loginAPIServer(t)
+
+	id := startLogin(t, do, authLoginOpenCode)
+
+	awaitPending(t, do, authLoginOpenCode, id)
+	close(stub.release)
+	done := awaitTerminal(t, do, authLoginOpenCode, id)
+	require.Equal(t, authLoginComplete, done.Status)
+	require.Equal(t, opencode.ProviderBaseURL("opencode-go"), done.BaseURL)
+}
+
+// Dead keeps the flow too: only a new sign-in restores a login the server
+// refused.
+func TestAuthLoginStartRunsTheFlowWhenTheLoginIsDead(t *testing.T) {
+	stubAuthLoginProbe(t, turn.SignInCheck{
+		State: turn.SignInDead,
+		Err:   errors.New("OpenCode login expired; run /connect again"),
+	})
+	newOpenCodeLoginStub(t)
+	s, do := loginAPIServer(t)
+
+	rec := do(http.MethodPost, "/api/auth/login/"+authLoginOpenCode)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	require.NotEmpty(t, s.authLogins, "the flow must be registered and pollable")
 }

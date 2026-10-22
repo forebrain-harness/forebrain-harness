@@ -22,6 +22,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
 const (
@@ -359,8 +361,14 @@ func listenLoopback() (net.Listener, string, error) {
 	return nil, "", errors.New("cannot start ChatGPT login callback on localhost ports 1455 or 1457")
 }
 
+// tokenEndpoint is the token URL exchange posts to. It is a var for the same
+// reason the flows around it take injected callbacks: the token endpoint's
+// answers (above all invalid_grant) decide whether a login is dead, and the
+// tests that pin that classification need to stand the endpoint up locally.
+var tokenEndpoint = Issuer + "/oauth/token"
+
 func exchange(ctx context.Context, form url.Values) (tokenResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, Issuer+"/oauth/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return tokenResponse{}, err
 	}
@@ -375,7 +383,15 @@ func exchange(ctx context.Context, form url.Values) (tokenResponse, error) {
 		return tokenResponse{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return tokenResponse{}, fmt.Errorf("ChatGPT token endpoint returned %s: %s", resp.Status, safeOAuthError(body))
+		// Typed, with the OAuth machine code, so the refresh path can tell a
+		// dead login (invalid_grant) from a failing endpoint; the human text
+		// is unchanged for the login flow, where the same answer to an
+		// authorization code means the code expired, not the login.
+		return tokenResponse{}, &llm.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       oauthErrorCode(body),
+			Message:    "ChatGPT token endpoint returned " + resp.Status + ": " + safeOAuthError(body),
+		}
 	}
 	var tokens tokenResponse
 	if err := json.Unmarshal(body, &tokens); err != nil {
@@ -473,6 +489,29 @@ func safeOAuthError(body []byte) string {
 	return "authentication failed"
 }
 
+// oauthErrorCode reads just the OAuth machine code from a token-endpoint
+// body. safeOAuthError cannot serve here: it prefers error_description, the
+// human text, and the refresh classifier needs the code (invalid_grant above
+// all) to tell a dead login from a failing endpoint. The code appears as the
+// error string itself or inside the object form some endpoints use, the same
+// shapes safeOAuthError reads for display.
+func oauthErrorCode(body []byte) string {
+	var v struct {
+		Error any `json:"error"`
+	}
+	if json.Unmarshal(body, &v) != nil {
+		return ""
+	}
+	switch e := v.Error.(type) {
+	case string:
+		return e
+	case map[string]any:
+		code, _ := e["code"].(string)
+		return code
+	}
+	return ""
+}
+
 // openSystemBrowser is the default browser opener: the one a terminal login
 // wants, and the one a web login must not use.
 func openSystemBrowser(target string) error {
@@ -544,6 +583,19 @@ func (t *Transport) current(ctx context.Context) (Credentials, error) {
 		"client_id":     {ClientID},
 	})
 	if err != nil {
+		// A dead refresh token is the login itself being gone: the server
+		// answers invalid_grant, and only a new browser flow restores it. The
+		// 401 matches the OpenCode refresh's shape so the classifiers
+		// upstream offer "sign in again" instead of retrying a grant that
+		// cannot succeed. The message stays surface-neutral — the web login
+		// renders it verbatim.
+		var api *llm.APIError
+		if errors.As(err, &api) && api.Code == "invalid_grant" {
+			return Credentials{}, &llm.APIError{
+				StatusCode: http.StatusUnauthorized,
+				Message:    "ChatGPT login expired; sign in again",
+			}
+		}
 		return Credentials{}, fmt.Errorf("refresh ChatGPT login: %w", err)
 	}
 	updated := credentialsFromTokens(tokens)
