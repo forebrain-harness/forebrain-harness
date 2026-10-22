@@ -844,6 +844,9 @@ const (
 	transientSourceMCP     = "mcp"
 	transientSourceLSP     = "lsp"
 	transientSourceWorking = "working"
+	// transientSourceConnect is the line a /connect sign-in shows while the
+	// login blocks.
+	transientSourceConnect = "connect"
 )
 
 var transientSourcePriority = []string{
@@ -6951,6 +6954,29 @@ func (s *rawSelector) StatusWriter(title string) io.Writer {
 		return nil
 	}
 	return &pageStatusWriter{sel: s, title: title}
+}
+
+// ConnectProgress shows the sign-in's live line over the conversation.
+// The stage is read on every paint, so a later stage replaces the text
+// without reinstalling the line. The returned call ends it.
+func (s *rawSelector) ConnectProgress(stage func() string) func() {
+	if s == nil || s.renderer == nil || stage == nil {
+		return func() {}
+	}
+	stop := s.renderer.StartTimedTransientStatus(transientSourceConnect,
+		func(elapsed time.Duration, tick int, view string) string {
+			return transientSpinnerFrame(tick) + " " + stage() +
+				" (" + formatWorkingElapsed(elapsed) + ")"
+		})
+	// Both calls are needed: stop("") only ends the ticker, and
+	// FinishTransientStatus is what takes the line off the screen.
+	// Stopping the ticker alone leaves a row behind whose timer keeps
+	// counting. This is the pattern the MCP status line uses
+	// (mcpStatusLine.apply in pkg/tui/run.go).
+	return func() {
+		stop("")
+		s.renderer.FinishTransientStatus(transientSourceConnect)
+	}
 }
 
 // pageStatusWriter repaints its page with everything written to it so far.

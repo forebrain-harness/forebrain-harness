@@ -518,7 +518,7 @@ func stubOpenCodeDeviceLogin(t *testing.T) *[]string {
 	t.Helper()
 	paths := []string{}
 	previous := openCodeLogin
-	openCodeLogin = func(_ context.Context, path string, _ io.Writer, _ func(opencode.LoginInfo)) (opencode.Credentials, error) {
+	openCodeLogin = func(_ context.Context, path string, _ io.Writer, _ func(opencode.LoginInfo), _ func(opencode.LoginStage)) (opencode.Credentials, error) {
 		paths = append(paths, path)
 		return opencode.Credentials{AccessToken: "go-token", RefreshToken: "go-refresh", Email: "dev@example.com"}, nil
 	}
@@ -688,6 +688,105 @@ func TestConfigureOpenCodeGoSignsInAndOffersTheGoCatalog(t *testing.T) {
 		if fact.Label == "Endpoint" && fact.Value != opencode.ProviderBaseURL("opencode-go") {
 			t.Fatalf("review endpoint = %q", fact.Value)
 		}
+	}
+}
+
+// Each stage the engine names has its own words in the TUI, so the live line
+// says what changed. A stage added later without its own line falls to the
+// generic wording — a fixed table like this cannot catch that, it only pins
+// the three stages the engine has today as distinct and non-empty.
+func TestConnectStageTextNamesEveryStage(t *testing.T) {
+	stages := []opencode.LoginStage{
+		opencode.LoginStageRequestingCode,
+		opencode.LoginStageWaitingAuthorization,
+		opencode.LoginStageFinishing,
+	}
+	seen := make(map[string]bool, len(stages))
+	for _, stage := range stages {
+		text := connectStageText(stage)
+		if text == "" {
+			t.Fatalf("connectStageText(%q) is empty", stage)
+		}
+		if seen[text] {
+			t.Fatalf("connectStageText(%q) = %q, already the wording of another stage", stage, text)
+		}
+		seen[text] = true
+	}
+}
+
+// connectProgressSelector is a fakeSelector whose ConnectProgress delegates to
+// a real rawSelector wired to a renderer, so a test can prove both that the
+// line is installed through the production path and that it is taken off the
+// screen at the end.
+type connectProgressSelector struct {
+	*fakeSelector
+	raw *rawSelector
+
+	installs int
+	stage    func() string
+	ended    bool
+}
+
+func (s *connectProgressSelector) ConnectProgress(stage func() string) func() {
+	s.installs++
+	s.stage = stage
+	rawEnd := s.raw.ConnectProgress(stage)
+	return func() {
+		s.ended = true
+		rawEnd()
+	}
+}
+
+// The sign-in installs one live line whose text follows the stage, and the
+// line is gone once the login is over — including its renderer-side source, so
+// no orphaned row keeps counting after the flow returns.
+func TestSignInOpenCodeShowsALiveProgressLine(t *testing.T) {
+	stubOpenCodeModels(t, openCodeGoFixture(), nil)
+	renderer := NewRenderer(nil, nil)
+	sel := &connectProgressSelector{
+		fakeSelector: &fakeSelector{confirms: []bool{true}},
+		raw:          newRawSelector(nil, renderer),
+	}
+
+	// The stub walks the engine's stages and samples the live stage closure
+	// once per stage, the way the renderer's paint would.
+	var stageTexts []string
+	previous := openCodeLogin
+	openCodeLogin = func(_ context.Context, path string, _ io.Writer, _ func(opencode.LoginInfo), onStage func(opencode.LoginStage)) (opencode.Credentials, error) {
+		for _, stage := range []opencode.LoginStage{
+			opencode.LoginStageRequestingCode,
+			opencode.LoginStageWaitingAuthorization,
+			opencode.LoginStageFinishing,
+		} {
+			onStage(stage)
+			stageTexts = append(stageTexts, sel.stage())
+		}
+		return opencode.Credentials{AccessToken: "go-token", RefreshToken: "go-refresh"}, nil
+	}
+	t.Cleanup(func() { openCodeLogin = previous })
+
+	_, ok, err := runOpenCodeSetup(t, PromptConfig{
+		Selector: sel, Output: io.Discard, Home: t.TempDir(),
+	}, "opencode-go")
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if sel.installs != 1 {
+		t.Fatalf("ConnectProgress installs = %d, want exactly one line for the whole login", sel.installs)
+	}
+	if len(stageTexts) != 3 {
+		t.Fatalf("stage samples = %v, want one per stage", stageTexts)
+	}
+	for i := 1; i < len(stageTexts); i++ {
+		if stageTexts[i] == stageTexts[i-1] {
+			t.Fatalf("stage samples = %v, want the wording to change with each stage", stageTexts)
+		}
+	}
+	if !sel.ended {
+		t.Fatal("the live line was never ended after the login")
+	}
+	if renderer.TransientStatusSourceLive(transientSourceConnect) {
+		t.Fatal("the connect source outlived its line: the row would keep counting on screen")
 	}
 }
 

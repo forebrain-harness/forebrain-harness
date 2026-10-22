@@ -675,6 +675,16 @@ type InfoOverlaySelector interface {
 	ConfirmInfo(label string, body string, action string) (bool, error)
 }
 
+// ConnectProgressSelector is an optional capability of a selector that
+// can show a live line while a sign-in runs. A selector without it
+// simply shows nothing: the sign-in still works, it just has no
+// progress line.
+type ConnectProgressSelector interface {
+	// ConnectProgress installs a live line whose text comes from stage()
+	// on every paint, and returns a call that ends the line.
+	ConnectProgress(stage func() string) func()
+}
+
 func NewSelector(out io.Writer, readLine func(context.Context) (string, error)) Selector {
 	return &lineSelector{out: out, readLine: readLine}
 }
