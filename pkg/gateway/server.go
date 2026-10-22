@@ -152,6 +152,29 @@ func (s *Server) runnerFor(ctx context.Context, sessionID string) *run.Runner {
 	return s.Runner
 }
 
+// reconcileSessionMCP reconciles the MCP half of the Runner the bound session
+// runs on: a conversation that was just opened re-resolves the server list and
+// starts whatever is not connected, while connections that are already up stay
+// untouched. It is asynchronous on purpose — a socket bind must not wait for a
+// server's startup timeout — and the Runner's own ready barrier keeps the
+// conversation's first request behind the tool table it is still building.
+// A bind with nothing to do costs one resolution and returns.
+func (s *Server) reconcileSessionMCP(sessionID string) {
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" || sid == "default" {
+		return
+	}
+	r := s.runnerFor(context.Background(), sid)
+	if r == nil {
+		return
+	}
+	go func() {
+		if err := r.ReconcileSessionMCP(); err != nil {
+			slog.Warn("mcp reconcile on session bind", "session", sid, "err", err)
+		}
+	}()
+}
+
 // runnerForTurn resolves the Runner one conversation's turn must run on. Unlike
 // runnerFor it never falls back to the base runner for a conversation with a
 // project: an unresolvable turn is refused with an error the caller reports.
@@ -1353,6 +1376,10 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				pushMCPStatusSnapshot(sid)
 				mcpBoundSession = sid
 			}
+			// Every bind reconciles the session's MCP half, not only the
+			// first one: a consent answered just now needs the rebind that
+			// follows it to connect the server it allowed.
+			s.reconcileSessionMCP(sid)
 			if sid != wsSid && s.Notifier != nil {
 				if unsubWS != nil {
 					unsubWS()

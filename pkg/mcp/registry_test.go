@@ -254,6 +254,81 @@ func TestRegistryConcurrentMarkSubscribeCancel(t *testing.T) {
 	}
 }
 
+// TestRegistryRetireDropsTheRecordClosesTheSessionAndNotifies pins the
+// retirement of a server the configuration no longer names: its record
+// disappears, the connection it owned is reclaimed, and the subscribers see
+// the list without it.
+func TestRegistryRetireDropsTheRecordClosesTheSessionAndNotifies(t *testing.T) {
+	reg := NewRegistry()
+	sess := &Session{}
+	reg.Apply(StatusUpdate{Name: "docs", Transport: "stdio", Status: ConnStatusConnected,
+		AuthStatus: AuthStatusAuthenticated, ToolCount: 2, Session: sess})
+
+	var mu sync.Mutex
+	var last []ServerRecord
+	deliveries := 0
+	reg.Subscribe(func(snapshot []ServerRecord) {
+		mu.Lock()
+		last = snapshot
+		deliveries++
+		mu.Unlock()
+	})
+
+	reg.Retire("docs")
+
+	if _, ok := reg.StatusOf("docs"); ok {
+		t.Fatal("the retired server is still in the registry")
+	}
+	if got := len(reg.ListStatus()); got != 0 {
+		t.Fatalf("the registry holds %d servers after the retirement, want 0", got)
+	}
+	if !sess.closed {
+		t.Fatal("the retired server's connection was not closed")
+	}
+	if _, ok := reg.GetSession("docs"); ok {
+		t.Fatal("the retired server still hands out a session")
+	}
+	mu.Lock()
+	gotLast, gotDeliveries := last, deliveries
+	mu.Unlock()
+	if gotDeliveries != 2 {
+		t.Fatalf("the retirement delivered %d snapshots, want the replay plus one", gotDeliveries)
+	}
+	if _, ok := recordByName(gotLast, "docs"); ok {
+		t.Fatalf("the delivered snapshot still holds the retired server: %+v", gotLast)
+	}
+}
+
+// TestRegistryRetireUnknownNameIsANoop pins that retiring a server the
+// registry never held changes nothing: no record is dropped and no subscriber
+// is told about a change that did not happen.
+func TestRegistryRetireUnknownNameIsANoop(t *testing.T) {
+	reg := NewRegistry()
+	reg.Apply(StatusUpdate{Name: "docs", Transport: "stdio", Status: ConnStatusConnected,
+		AuthStatus: AuthStatusAuthenticated, ToolCount: 1})
+
+	var mu sync.Mutex
+	deliveries := 0
+	reg.Subscribe(func([]ServerRecord) {
+		mu.Lock()
+		deliveries++
+		mu.Unlock()
+	})
+
+	reg.Retire("not-here")
+	reg.Retire("")
+
+	mu.Lock()
+	got := deliveries
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("retiring an unknown name delivered %d snapshots, want only the replay", got)
+	}
+	if rec, ok := reg.StatusOf("docs"); !ok || rec.ConnStatus != ConnStatusConnected {
+		t.Fatalf("retiring an unknown name touched a record: %+v ok=%v", rec, ok)
+	}
+}
+
 func recordByName(records []ServerRecord, name string) (ServerRecord, bool) {
 	for _, rec := range records {
 		if rec.Name == name {

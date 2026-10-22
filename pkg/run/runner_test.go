@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
@@ -506,7 +508,7 @@ func fakeAgentForMCPReplay(t *testing.T) *agent.Agent {
 func (r *Runner) startOrReplayMCPSegmentLockedUnderTest(a *agent.Agent) *mcpLoad {
 	r.mu.load.Lock()
 	defer r.mu.load.Unlock()
-	return r.startOrReplayMCPSegmentLocked(a)
+	return r.startOrReplayMCPSegmentLocked(a, false)
 }
 
 // waitMCPLoad waits for one generation's startup barrier to lift.
@@ -609,7 +611,7 @@ func TestRunnerMCPProjectStatusWithoutHook(t *testing.T) {
 
 // TestRunnerMCPProjectStatusReadsInstalledHook verifies the hook flows through.
 func TestRunnerMCPProjectStatusReadsInstalledHook(t *testing.T) {
-	r := &Runner{Deps: &Deps{MCPDiagnostics: func() mcp.ProjectMCPScopeSummary {
+	r := &Runner{Deps: &Deps{MCPDiagnostics: func(frozen []appcfg.MCPServerConfig) mcp.ProjectMCPScopeSummary {
 		return mcp.ProjectMCPScopeSummary{ProjectRoot: "/proj", PendingReload: true}
 	}}}
 	st := r.MCPProjectStatus()
@@ -751,7 +753,17 @@ func mcpLoadTestRunner(t *testing.T, servers ...appcfg.MCPServerConfig) *Runner 
 func startMCPLoad(t *testing.T, r *Runner, a *agent.Agent) *mcpLoad {
 	t.Helper()
 	r.mu.load.Lock()
-	ld := r.startOrReplayMCPSegmentLocked(a)
+	ld := r.startOrReplayMCPSegmentLocked(a, false)
+	r.mu.load.Unlock()
+	return ld
+}
+
+// startMCPLoadSessionOpen is startMCPLoad for a conversation that is
+// beginning: the same entry point with the reconciliation half enabled.
+func startMCPLoadSessionOpen(t *testing.T, r *Runner, a *agent.Agent) *mcpLoad {
+	t.Helper()
+	r.mu.load.Lock()
+	ld := r.startOrReplayMCPSegmentLocked(a, true)
 	r.mu.load.Unlock()
 	return ld
 }
@@ -981,6 +993,292 @@ func TestMCPReplayAfterSettleIsByteStableAndKeepsTheAdvertisedCount(t *testing.T
 	}
 }
 
+// --- session open: the MCP half is reconciled instead of replayed ---
+//
+// The reconciliation answers one question per configured server: is it already
+// connected with the same configuration identity? Then it keeps its
+// connection. Is it configured but not connected? Then it starts it. Is it
+// connected but no longer configured? Then it is retired.
+
+// mcpSnapshotServer finds one server's record in a startup snapshot.
+func mcpSnapshotServer(t *testing.T, snap MCPSnapshot, name string) mcp.ServerRecord {
+	t.Helper()
+	for _, rec := range snap.Servers {
+		if strings.EqualFold(rec.Name, name) {
+			return rec
+		}
+	}
+	t.Fatalf("server %q is not in the snapshot: %+v", name, snap.Servers)
+	return mcp.ServerRecord{}
+}
+
+// TestSessionOpenKeepsAConnectedServerAndStartsTheFailedOne pins the core of
+// the reconciliation: a conversation that is beginning retries the server that
+// did not come up and leaves the one that did alone — its connection, its
+// record and the moment it connected are the same ones.
+func TestSessionOpenKeepsAConnectedServerAndStartsTheFailedOne(t *testing.T) {
+	exe := buildRunMCPFixture(t)
+	live := appcfg.MCPServerConfig{Name: "live", Transport: "stdio", Command: exe}
+	live.Env = map[string]string{fixtureRunToolsEnv: "alpha"}
+	dead := appcfg.MCPServerConfig{Name: "dead", Transport: "stdio", Command: "/nonexistent/mcp-server-binary"}
+
+	r := mcpLoadTestRunner(t, live, dead)
+	first := fakeAgentForMCPReplay(t)
+	awaitMCPLoad(t, startMCPLoad(t, r, first))
+
+	before := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "live")
+	if before.ConnStatus != mcp.ConnStatusConnected || before.ConnectedAt == nil {
+		t.Fatalf("the first server must be connected: %+v", before)
+	}
+	if rec := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "dead"); rec.ConnStatus != mcp.ConnStatusError {
+		t.Fatalf("the unreachable server must report its failure: %+v", rec)
+	}
+
+	// The failed server is given a working command: the session open has to
+	// pick that up and start it, while the working one is left alone.
+	fixed := dead
+	fixed.Command = exe
+	fixed.Env = map[string]string{fixtureRunToolsEnv: "beta"}
+	r.Deps.MCPServers = []appcfg.MCPServerConfig{live, fixed}
+
+	second := fakeAgentForMCPReplay(t)
+	ld := startMCPLoadSessionOpen(t, r, second)
+	if ld == nil {
+		t.Fatal("a session open must start the server that did not come up")
+	}
+	// The barrier: the agent of the previous conversation is not published
+	// while the reconcile is still starting, so the first request of the new
+	// one waits for a complete tool table.
+	if got := r.Agent(); got != nil {
+		t.Fatal("the agent was published before the reconcile generation settled")
+	}
+	awaitMCPLoad(t, ld)
+	if got := r.Agent(); got == nil {
+		t.Fatal("the agent was not published after the reconcile generation settled")
+	}
+
+	after := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "live")
+	if after.ConnectedAt == nil || !after.ConnectedAt.Equal(*before.ConnectedAt) {
+		t.Fatalf("the connected server was restarted: before=%v after=%v", before.ConnectedAt, after.ConnectedAt)
+	}
+	if rec := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "dead"); rec.ConnStatus != mcp.ConnStatusConnected {
+		t.Fatalf("the failed server must be connected after the session open: %+v", rec)
+	}
+	want := []string{"mcp__live__alpha", "mcp__dead__beta"}
+	if names := agentToolNames(second); !slices.Equal(names, want) {
+		t.Fatalf("tools = %v, want %v", names, want)
+	}
+}
+
+// TestSessionOpenWithEverythingConnectedReplaysInsteadOfRestarting pins the
+// other half: a session open with every server already up must not move a
+// single connection. The generation, the records and the tool table all stay
+// exactly what they were.
+func TestSessionOpenWithEverythingConnectedReplaysInsteadOfRestarting(t *testing.T) {
+	exe := buildRunMCPFixture(t)
+	server := appcfg.MCPServerConfig{Name: "docs", Transport: "stdio", Command: exe}
+	server.Env = map[string]string{fixtureRunToolsEnv: "one,two"}
+
+	r := mcpLoadTestRunner(t, server)
+	first := fakeAgentForMCPReplay(t)
+	awaitMCPLoad(t, startMCPLoad(t, r, first))
+
+	generation := r.MCPStartup().Progress().Generation
+	before := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "docs")
+	firstJSON := agentToolsJSON(t, first)
+
+	second := fakeAgentForMCPReplay(t)
+	if ld := startMCPLoadSessionOpen(t, r, second); ld != nil {
+		t.Fatal("a session open with everything connected must replay instead of starting servers")
+	}
+	if got := r.MCPStartup().Progress().Generation; got != generation {
+		t.Fatalf("generation changed across a session open: %q -> %q", generation, got)
+	}
+	after := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "docs")
+	if after.ConnectedAt == nil || !after.ConnectedAt.Equal(*before.ConnectedAt) {
+		t.Fatalf("the connected server was restarted: before=%v after=%v", before.ConnectedAt, after.ConnectedAt)
+	}
+	if got := agentToolsJSON(t, second); got != firstJSON {
+		t.Fatalf("replayed tools differ from the first load:\n first=%s\nsecond=%s", firstJSON, got)
+	}
+}
+
+// TestModelSwitchDoesNotReconnectAFailedServer is the red line: a model
+// switch is not a session opening, so it must not retry a server that failed
+// to start. The record stays in error and the generation does not move.
+func TestModelSwitchDoesNotReconnectAFailedServer(t *testing.T) {
+	exe := buildRunMCPFixture(t)
+	live := appcfg.MCPServerConfig{Name: "live", Transport: "stdio", Command: exe}
+	live.Env = map[string]string{fixtureRunToolsEnv: "alpha"}
+	dead := appcfg.MCPServerConfig{Name: "dead", Transport: "stdio", Command: "/nonexistent/mcp-server-binary"}
+
+	r := mcpLoadTestRunner(t, live, dead)
+	first := fakeAgentForMCPReplay(t)
+	awaitMCPLoad(t, startMCPLoad(t, r, first))
+
+	generation := r.MCPStartup().Progress().Generation
+	before := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "live")
+
+	second := fakeAgentForMCPReplay(t)
+	if ld := startMCPLoad(t, r, second); ld != nil {
+		t.Fatal("a model switch must replay the cached segment instead of starting servers")
+	}
+	if got := r.MCPStartup().Progress().Generation; got != generation {
+		t.Fatalf("generation changed across a model switch: %q -> %q", generation, got)
+	}
+	after := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "live")
+	if after.ConnectedAt == nil || !after.ConnectedAt.Equal(*before.ConnectedAt) {
+		t.Fatalf("the connected server was restarted by a model switch: before=%v after=%v", before.ConnectedAt, after.ConnectedAt)
+	}
+	if rec := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "dead"); rec.ConnStatus != mcp.ConnStatusError {
+		t.Fatalf("a model switch must not retry the failed server: %+v", rec)
+	}
+}
+
+// TestSessionOpenReResolvesTheServerListThroughThePort pins the
+// re-resolution port: a conversation that is beginning asks the composition
+// root for the list as it stands now and the Runner adopts it.
+func TestSessionOpenReResolvesTheServerListThroughThePort(t *testing.T) {
+	exe := buildRunMCPFixture(t)
+	live := appcfg.MCPServerConfig{Name: "live", Transport: "stdio", Command: exe}
+	live.Env = map[string]string{fixtureRunToolsEnv: "alpha"}
+	added := appcfg.MCPServerConfig{Name: "added", Transport: "stdio", Command: exe}
+	added.Env = map[string]string{fixtureRunToolsEnv: "beta"}
+
+	r := mcpLoadTestRunner(t, live)
+	first := fakeAgentForMCPReplay(t)
+	awaitMCPLoad(t, startMCPLoad(t, r, first))
+
+	calls := 0
+	r.Deps.MCPResolve = func(string, string, safety.ProjectContext) (MCPServersResolution, error) {
+		calls++
+		return MCPServersResolution{Servers: []appcfg.MCPServerConfig{live, added}}, nil
+	}
+
+	second := fakeAgentForMCPReplay(t)
+	ld := startMCPLoadSessionOpen(t, r, second)
+	if ld == nil {
+		t.Fatal("a session open must start the server the re-resolution added")
+	}
+	awaitMCPLoad(t, ld)
+	if calls == 0 {
+		t.Fatal("a session open must ask the composition root for the current list")
+	}
+	if len(r.MCPServers) != 2 || r.MCPServers[1].Name != "added" {
+		t.Fatalf("the re-resolved list was not adopted: %+v", r.MCPServers)
+	}
+	want := []string{"mcp__live__alpha", "mcp__added__beta"}
+	if names := agentToolNames(second); !slices.Equal(names, want) {
+		t.Fatalf("tools = %v, want %v", names, want)
+	}
+
+	// A resolution that fails keeps the list the Runner was built with: a
+	// conversation must not fail to open because a file could not be read.
+	r.Deps.MCPResolve = func(string, string, safety.ProjectContext) (MCPServersResolution, error) {
+		return MCPServersResolution{}, errors.New("config unreadable")
+	}
+	third := fakeAgentForMCPReplay(t)
+	if ld := startMCPLoadSessionOpen(t, r, third); ld != nil {
+		t.Fatal("a failed re-resolution must not start a generation")
+	}
+	if len(r.MCPServers) != 2 {
+		t.Fatalf("a failed re-resolution must keep the list: %+v", r.MCPServers)
+	}
+}
+
+// TestSessionOpenRetiresAServerTheListNoLongerNames pins the other end of the
+// reconciliation: a server the configuration no longer names leaves the
+// registry and the tool table, instead of lingering as a server that is merely
+// disconnected.
+func TestSessionOpenRetiresAServerTheListNoLongerNames(t *testing.T) {
+	exe := buildRunMCPFixture(t)
+	keep := appcfg.MCPServerConfig{Name: "keep", Transport: "stdio", Command: exe}
+	keep.Env = map[string]string{fixtureRunToolsEnv: "alpha"}
+	drop := appcfg.MCPServerConfig{Name: "drop", Transport: "stdio", Command: exe}
+	drop.Env = map[string]string{fixtureRunToolsEnv: "beta"}
+
+	r := mcpLoadTestRunner(t, keep, drop)
+	first := fakeAgentForMCPReplay(t)
+	awaitMCPLoad(t, startMCPLoad(t, r, first))
+	if _, ok := r.MCPRegistry().StatusOf("drop"); !ok {
+		t.Fatal("the second server must be in the registry")
+	}
+
+	r.Deps.MCPServers = []appcfg.MCPServerConfig{keep}
+	second := fakeAgentForMCPReplay(t)
+	ld := startMCPLoadSessionOpen(t, r, second)
+	if ld == nil {
+		t.Fatal("a session open must retire the server the list no longer names")
+	}
+	awaitMCPLoad(t, ld)
+
+	if _, ok := r.MCPRegistry().StatusOf("drop"); ok {
+		t.Fatal("the retired server is still in the registry")
+	}
+	want := []string{"mcp__keep__alpha"}
+	if names := agentToolNames(second); !slices.Equal(names, want) {
+		t.Fatalf("tools = %v, want %v", names, want)
+	}
+}
+
+// TestSessionOpenFailureCarriesANewGenerationID pins the attribution of a
+// retry: the reconcile generation has an id of its own, so the failure of the
+// server it retried is recorded on that generation and not on the one that
+// served the previous conversation.
+func TestSessionOpenFailureCarriesANewGenerationID(t *testing.T) {
+	exe := buildRunMCPFixture(t)
+	live := appcfg.MCPServerConfig{Name: "live", Transport: "stdio", Command: exe}
+	live.Env = map[string]string{fixtureRunToolsEnv: "alpha"}
+	dead := appcfg.MCPServerConfig{Name: "dead", Transport: "stdio", Command: "/nonexistent/mcp-server-binary"}
+
+	r := mcpLoadTestRunner(t, live, dead)
+	first := fakeAgentForMCPReplay(t)
+	awaitMCPLoad(t, startMCPLoad(t, r, first))
+	generation := r.MCPStartup().Progress().Generation
+	if generation == "" {
+		t.Fatal("the first generation must be named")
+	}
+
+	second := fakeAgentForMCPReplay(t)
+	ld := startMCPLoadSessionOpen(t, r, second)
+	if ld == nil {
+		t.Fatal("a session open must retry the server that failed")
+	}
+	awaitMCPLoad(t, ld)
+
+	got := r.MCPStartup().Progress().Generation
+	if got == generation {
+		t.Fatalf("the reconcile generation reused the old id: %q", got)
+	}
+	prefix := mcpGenerationID(mcpSegmentFingerprint(r.MCPServers, r.mcpProjectDir()))
+	if !strings.HasPrefix(got, prefix+".") {
+		t.Fatalf("generation %q must carry the fingerprint prefix %q", got, prefix)
+	}
+	rec := mcpSnapshotServer(t, r.MCPStartup().Snapshot(), "dead")
+	if rec.Generation != got {
+		t.Fatalf("the failure is recorded on generation %q, want %q", rec.Generation, got)
+	}
+}
+
+// TestMCPProjectStatusUsesTheLiveFrozenList pins the display hook's input: it
+// reports on the list the Runner runs now, not the one it froze at startup,
+// because a session open re-resolves the list.
+func TestMCPProjectStatusUsesTheLiveFrozenList(t *testing.T) {
+	var seen []appcfg.MCPServerConfig
+	r := &Runner{Deps: &Deps{
+		MCPServers:  []appcfg.MCPServerConfig{{Name: "live"}},
+		MCPDisabled: []appcfg.MCPServerConfig{{Name: "off"}},
+		MCPDiagnostics: func(frozen []appcfg.MCPServerConfig) mcp.ProjectMCPScopeSummary {
+			seen = frozen
+			return mcp.ProjectMCPScopeSummary{}
+		},
+	}}
+	r.MCPProjectStatus()
+	if len(seen) != 2 || seen[0].Name != "live" || seen[1].Name != "off" {
+		t.Fatalf("the hook received %+v, want the runner's current list", seen)
+	}
+}
+
 // TestLoadedToolsWaitsForTheBarrier pins F7: the tool table a fork or hook
 // agent is built from must never be the one that is still missing its MCP half.
 func TestLoadedToolsWaitsForTheBarrier(t *testing.T) {
@@ -1207,7 +1505,7 @@ func TestMCPStartupCancellationIsBoundedAndReleasesChildren(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
-	if err := r.loadLocked(nil); err == nil {
+	if err := r.loadLocked(nil, false); err == nil {
 		t.Fatal("a closed Runner must refuse a new load")
 	}
 	waitForRunProcessGone(t, pid)
@@ -1942,7 +2240,7 @@ func TestSetPrimaryModelRuntimeUncertainFailsClosed(t *testing.T) {
 	// rollback would swap the pointer back before the switch runs.
 	r.mu.load.Lock()
 	r.AppCfg = broken
-	switchErr := r.loadWithIntentLocked(primaryModelExplicit, "openai", "gpt-b", nil)
+	switchErr := r.loadWithIntentLocked(primaryModelExplicit, "openai", "gpt-b", nil, false)
 	r.mu.load.Unlock()
 
 	if !IsPrimaryModelRuntimeUncertain(switchErr) {
@@ -1957,7 +2255,7 @@ func TestSetPrimaryModelRuntimeUncertainFailsClosed(t *testing.T) {
 	// A complete successful build clears the flag and restores service.
 	r.mu.load.Lock()
 	r.AppCfg = good
-	recoverErr := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil)
+	recoverErr := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, false)
 	r.mu.load.Unlock()
 	if recoverErr != nil {
 		t.Fatalf("recovery load: %v", recoverErr)

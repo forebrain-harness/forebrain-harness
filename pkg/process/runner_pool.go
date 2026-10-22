@@ -939,11 +939,7 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	mcpRes := ResolveSessionMCP(env.Root, agentWorkspace, baseDeps.AppCfg.Agents, baseDeps.AgentName, launch)
 	frozenProject := project
 	frozenServers := mcpRes.Servers
-	// The whole frozen list, disabled entries included, is what the drift
-	// check compares against the disk: a disable toggle is not drift.
-	frozenAll := append(append([]appcfg.MCPServerConfig(nil), frozenServers...), mcpRes.Disabled...)
 	frozenAgentWorkspace := agentWorkspace
-	frozenOverridden := mcpRes.Summary.OverriddenGlobal
 	entry := &poolEntry{
 		project:      frozenProject,
 		cfgLaunch:    cfgLaunch,
@@ -975,10 +971,16 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		MCPServers:    frozenServers,
 		MCPProject:    mcpRes.ProjectRoot,
 		MCPDisabled:   mcpRes.Disabled,
-		MCPDiagnostics: func() mcp.ProjectMCPScopeSummary {
-			summary := InspectProjectMCP(frozenAgentWorkspace, frozenAll, launch)
-			summary.OverriddenGlobal = frozenOverridden
-			return summary
+		MCPDiagnostics: func(frozen []appcfg.MCPServerConfig) mcp.ProjectMCPScopeSummary {
+			return InspectProjectMCP(frozenAgentWorkspace, frozen, launch)
+		},
+		// The re-resolution port: a session that is beginning on this entry
+		// asks for the three scope layers again, with this entry's own launch
+		// context and workspace.
+		MCPResolve: func(agentName, agentWorkspace string, launch safety.ProjectContext) (run.MCPServersResolution, error) {
+			agents := env.Deps.AppCfg.Agents
+			res := ResolveSessionMCP(env.Root, agentWorkspace, agents, agentName, launch)
+			return run.MCPServersResolution{Servers: res.Servers, Disabled: res.Disabled}, nil
 		},
 		LaunchProject: launch,
 		MemoryStore:   baseDeps.MemoryStore,

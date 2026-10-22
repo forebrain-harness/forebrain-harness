@@ -22,6 +22,7 @@ import (
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -492,6 +493,11 @@ func (s *ChatSession) ResumeSession(ctx context.Context, sessionID string) (stri
 // to the default with a non-fatal warning. Every fatal path restores the
 // outgoing selection first, so an aborted switch leaves the outgoing session
 // and its runtime intact.
+//
+// Entering a conversation is a session opening, so the model choice and the
+// MCP half are settled in the same load: the servers the configuration
+// changed are reconciled in the conversation being entered rather than one
+// session later.
 func (s *ChatSession) ActivateSessionModel(ctx context.Context, sessionID string) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("session unavailable")
@@ -515,13 +521,12 @@ func (s *ChatSession) ActivateSessionModel(ctx context.Context, sessionID string
 	}
 	if !hasRow {
 		// A session that never chose runs on the latest file default.
-		if err := r.ResetPrimaryModel(); err != nil {
+		if err := r.OpenSession(run.PrimaryModelState{}); err != nil {
 			return "", s.restoreAfterActivationFailure(r, outgoing, err)
 		}
 		return "", nil
 	}
-	effort := sel.Effort
-	err = r.SetPrimaryModel(sel.Provider, sel.Model, &effort)
+	err = r.OpenSession(run.PrimaryModelState{Set: true, Provider: sel.Provider, Model: sel.Model, Effort: sel.Effort})
 	if err == nil {
 		return "", nil
 	}
@@ -530,7 +535,7 @@ func (s *ChatSession) ActivateSessionModel(ctx context.Context, sessionID string
 	}
 	// The stored pair is gone from the config: fall back to the new default,
 	// overwrite the stale row, and continue with a warning.
-	if resetErr := r.ResetPrimaryModel(); resetErr != nil {
+	if resetErr := r.OpenSession(run.PrimaryModelState{}); resetErr != nil {
 		return "", s.restoreAfterActivationFailure(r, outgoing, fmt.Errorf("%v (resetting to the default then failed: %w)", err, resetErr))
 	}
 	fallback := run.PrimaryModelSelection(r)
@@ -559,6 +564,45 @@ func (s *ChatSession) restoreAfterActivationFailure(r *run.Runner, outgoing run.
 		return cause
 	}
 	return run.NewRuntimeUncertainError(cause, restoreErr)
+}
+
+// PendingProjectMCPConsents lists the project-level MCP entries this project
+// declares that nobody has decided about yet. A surface asks for them before
+// it enters a conversation, because the answer is what the conversation's own
+// MCP reconcile reads: an entry allowed here is up in the session being
+// entered rather than one session later.
+func (s *ChatSession) PendingProjectMCPConsents() []mcp.PendingProjectConsent {
+	r := s.runner()
+	deps := s.deps()
+	if r == nil || deps == nil {
+		return nil
+	}
+	return process.PendingProjectMCPConsents(r.WorkspaceRoot, deps.LaunchProject)
+}
+
+// DecideProjectMCPConsents records the operator's answers for the project's
+// MCP entries. allowed carries the names that were accepted; every other
+// pending entry is recorded as declined, so it is not asked again until its
+// configuration changes.
+func (s *ChatSession) DecideProjectMCPConsents(allowed []string) error {
+	r := s.runner()
+	deps := s.deps()
+	if r == nil || deps == nil {
+		return nil
+	}
+	return process.DecideProjectMCPConsents(r.WorkspaceRoot, deps.LaunchProject, allowed)
+}
+
+// ReconcileSessionMCP reconciles the MCP half of this session's runner: the
+// servers that are up keep their connection and the ones that are not are
+// started, so a conversation that is being opened sees the configuration as
+// it stands now.
+func (s *ChatSession) ReconcileSessionMCP() error {
+	r := s.runner()
+	if r == nil {
+		return nil
+	}
+	return r.ReconcileSessionMCP()
 }
 
 const tuiBrowseStateSurface = "tui"
@@ -2457,11 +2501,11 @@ func (s *ChatSession) applyConfigFromDisk() error {
 	}
 	// The runner shares this very Deps, so publishing here publishes to it too;
 	// there is no second copy left to keep in step. MCPServers is deliberately
-	// NOT taken from the reloaded file: the effective MCP list (global entries
-	// plus gated, consented project entries) was resolved once for this
-	// session and is frozen, so a file change lands in the next session and
-	// /mcp reports it as pending. LoadConfig therefore only restores the
-	// config pointer on failure.
+	// NOT taken from the reloaded file: a reload only re-points the config.
+	// The MCP list is re-resolved when a conversation begins (run.Runner.
+	// OpenSession / LoadSession), which is what "a file change lands in the
+	// next session" means; until then /mcp reports it as pending.
+	// LoadConfig therefore only restores the config pointer on failure.
 	if r := s.runner(); r != nil {
 		if rerr := r.LoadConfig(&loaded); rerr != nil {
 			return fmt.Errorf("load runner: %w", rerr)

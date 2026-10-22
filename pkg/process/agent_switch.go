@@ -87,7 +87,10 @@ func ApplyAgent(deps AgentDeps, active appcfg.Summary) error {
 	runner.Deps.MemoryStore.BindPrimaryAgent(active.ID)
 	// Load rebuilds the tool state: allowed roots, the sibling-workspace
 	// boundary, and the permission rules reloaded from this agent's settings.
-	if err := runner.Load(); err != nil {
+	// LoadSession is that same rebuild with the MCP half reconciled instead of
+	// replayed, because the primary agent's own MCP layer changes with the
+	// agent: replaying would keep serving the previous agent's servers.
+	if err := runner.LoadSession(); err != nil {
 		return fmt.Errorf("agentswitch: reload runner for %q: %w", active.ID, err)
 	}
 
