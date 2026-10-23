@@ -4939,6 +4939,68 @@ func TestGatewayApproveCancelsAnInFlightPlanReview(t *testing.T) {
 	require.Equal(t, state.ActionApproved, act.Status, "the approval the user made keeps the last word")
 }
 
+// The approval is already stored by the time the continuation is dispatched, so
+// a client that went away between writing it and this lookup must not silently
+// lose the resumed run: the lookup ignores the request's cancellation.
+func TestResumeIfParkedStillDispatchesWhenTheRequestIsGone(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+		}}},
+	}}}
+	s, _, _, actionID, _ := exitPlanServer(t, cfg)
+
+	dispatched := make(chan string, 1)
+	previous := dispatchGatewayResume
+	dispatchGatewayResume = func(_ *Server, actionID string, _ bool) {
+		dispatched <- actionID
+	}
+	t.Cleanup(func() { dispatchGatewayResume = previous })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.resumeGatewayRunIfParked(ctx, actionID, false)
+
+	select {
+	case got := <-dispatched:
+		require.Equal(t, actionID, got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("a request that went away must not drop the continuation of an answered action")
+	}
+}
+
+// Nothing is parked on the action, so there is no continuation to dispatch: the
+// lookup finds no wait row and no goroutine is left behind writing into stores
+// the surface may be closing.
+func TestResumeIfParkedDispatchesNothingWithoutAParkedRun(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+		}}},
+	}}}
+	s, runs, _, actionID, _ := exitPlanServer(t, cfg)
+
+	runID, _, err := runs.FindRunByAction(context.Background(), actionID)
+	require.NoError(t, err)
+	require.NotEmpty(t, runID)
+	require.NoError(t, runs.ClearWait(context.Background(), runID))
+
+	dispatched := make(chan string, 1)
+	previous := dispatchGatewayResume
+	dispatchGatewayResume = func(_ *Server, actionID string, _ bool) {
+		dispatched <- actionID
+	}
+	t.Cleanup(func() { dispatchGatewayResume = previous })
+
+	s.resumeGatewayRunIfParked(context.Background(), actionID, false)
+
+	select {
+	case got := <-dispatched:
+		t.Fatalf("nothing is parked on %s, so nothing may be dispatched (got %s)", actionID, got)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // The retry of an approval whose decision already committed converges on the
 // idempotent path; it must still stop a review running against the plan, the
 // same way the first response did.

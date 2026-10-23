@@ -38,7 +38,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
-      "loc": 23934,
+      "loc": 24139,
       "fan_in": 0,
       "fan_out": 20
     },
@@ -170,13 +170,13 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
-      "loc": 21995,
+      "loc": 22798,
       "fan_in": 9,
       "fan_out": 9
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
-      "loc": 49692,
+      "loc": 49005,
       "fan_in": 0,
       "fan_out": 21
     },

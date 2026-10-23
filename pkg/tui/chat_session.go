@@ -547,7 +547,7 @@ func (s *ChatSession) ActivateSessionModel(ctx context.Context, sessionID string
 		"stored_provider", strings.TrimSpace(sel.Provider),
 		"stored_model", strings.TrimSpace(sel.Model),
 		"hint", "re-select with /model")
-	return fmt.Sprintf("本会话保存的模型 %s / %s 已不在配置中；重新发消息会报错，请先用 /model 选择模型", sel.Provider, sel.Model), nil
+	return fmt.Sprintf("The model saved for this conversation (%s / %s) is no longer configured; your next message will be refused until you choose one with /model.", sel.Provider, sel.Model), nil
 }
 
 // restoreAfterActivationFailure rebuilds the outgoing selection a fatal

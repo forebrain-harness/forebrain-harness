@@ -30666,7 +30666,7 @@ func TestResumeMissingStoredModelOpensWithWarning(t *testing.T) {
 	// resolves), warns that the next message will be refused, and keeps the
 	// row exactly as the user wrote it.
 	require.NotEmpty(t, warning, "the staleness must be visible to the user")
-	require.Contains(t, warning, "已不在配置中")
+	require.Contains(t, warning, "no longer configured")
 	require.Contains(t, warning, "/model")
 	requireRunnerModel(t, s, "openai", "gpt-main", "")
 	require.Equal(t, "gpt-other", s.storedSelection(t, "sess-a").Model, "the stored row must not be rewritten")
@@ -30725,7 +30725,7 @@ func TestSwitchFailureKeepsQueuedInputAndSession(t *testing.T) {
 	// next message will be refused, and the switch still happens.
 	require.NoError(t, err)
 	require.True(t, switched)
-	require.Contains(t, warning, "已不在配置中")
+	require.Contains(t, warning, "no longer configured")
 	requireRunnerModel(t, s, "openai", "gpt-renamed", "")
 	require.Equal(t, "gpt-main", s.storedSelection(t, "sess-b").Model, "the stored row must not be rewritten")
 	if q := s.SurfaceInputQueue("sess-a"); q != nil {

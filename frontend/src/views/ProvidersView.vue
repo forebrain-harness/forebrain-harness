@@ -604,7 +604,7 @@ function blankDraft(): ProviderDraft {
  * The table's columns, at the widths the design declares. The models column has
  * no width: it takes the room the others leave, which is what makes the list fit
  * the page at any width. No column sorts — the row order is storage order
- * (owner 2026-10-26), not priority, and the default model is marked by the
+ * (owner decision), not priority, and the default model is marked by the
  * badge, not by position.
  */
 const columns = computed<DataColumn[]>(() => [

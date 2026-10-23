@@ -1933,7 +1933,7 @@ func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Conte
 		"old_provider", strings.TrimSpace(row.Provider),
 		"old_model", strings.TrimSpace(row.Model),
 		"hint", "re-select with /model")
-	return ctx, fmt.Errorf("本会话选择的模型 %s/%s 已不在配置中；请用 /model 重新选择",
+	return ctx, fmt.Errorf("the model chosen for this conversation (%s/%s) is no longer configured; choose another with /model",
 		strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model))
 }
 

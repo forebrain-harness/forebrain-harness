@@ -2655,7 +2655,7 @@ func TestRunContentRefusesStaleSessionModelRow(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run on a stale session model row succeeded; want the turn refused")
 	}
-	if !strings.Contains(err.Error(), "gpt-gone") || !strings.Contains(err.Error(), "/model") {
+	if !strings.Contains(err.Error(), "gpt-gone") || !strings.Contains(err.Error(), "/model") || !strings.Contains(err.Error(), "no longer configured") {
 		t.Fatalf("refusal error does not guide the user: %v", err)
 	}
 	// Nothing ran, and the row still names what the user chose.

@@ -4119,6 +4119,12 @@ func gatewayResumeState(resume turn.ApprovalResume) *tool.ToolApprovalResumeStat
 	}
 }
 
+// dispatchGatewayResume starts the continuation of an answered action. It is a
+// variable only so a test can observe the dispatch without running the run.
+var dispatchGatewayResume = func(s *Server, actionID string, clearedContext bool) {
+	go s.resumeGatewayRun(actionID, clearedContext)
+}
+
 // resumeGatewayRunIfParked dispatches the continuation for an answered action,
 // but only while a wait row still parks a run on it. A run with no wait row has
 // nothing to continue: resumeGatewayRun looks one up, finds none and returns. A
@@ -4130,11 +4136,14 @@ func (s *Server) resumeGatewayRunIfParked(ctx context.Context, actionID string, 
 	if s == nil || s.RunRT == nil {
 		return
 	}
-	_, w, err := s.RunRT.FindRunByAction(ctx, actionID)
+	// The answer is already stored by the time this runs; whether to continue the
+	// run must not depend on the client still being connected. WithoutCancel keeps
+	// the request's values and drops its cancellation — the lookup is one short read.
+	_, w, err := s.RunRT.FindRunByAction(context.WithoutCancel(ctx), actionID)
 	if err != nil || w == nil {
 		return
 	}
-	go s.resumeGatewayRun(actionID, clearedContext)
+	dispatchGatewayResume(s, actionID, clearedContext)
 }
 
 // resumeGatewayRun resumes the paused run for actionID. When
