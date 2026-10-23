@@ -31,12 +31,13 @@ func TestApplyAgentLLMSecondModelSameProviderKeepsExistingEntry(t *testing.T) {
 	if len(def.LLMProviders) != 2 {
 		t.Fatalf("llm_providers entries = %d, want 2: %+v", len(def.LLMProviders), def.LLMProviders)
 	}
-	// The just-configured entry is promoted to primary.
-	primary := def.LLMProviders[0]
-	if primary.Model != "glm-5.3-flash" {
-		t.Fatalf("primary model = %q, want glm-5.3-flash", primary.Model)
+	// The just-configured entry is appended at the end; the existing entry
+	// keeps both its position and its settings.
+	appended := def.LLMProviders[len(def.LLMProviders)-1]
+	if appended.Model != "glm-5.3-flash" {
+		t.Fatalf("appended model = %q, want glm-5.3-flash", appended.Model)
 	}
-	kept := def.LLMProviders[1]
+	kept := def.LLMProviders[0]
 	if kept.Provider != "zhipuai" || kept.Model != "glm-5.3" {
 		t.Fatalf("kept entry = %s/%s, want zhipuai/glm-5.3", kept.Provider, kept.Model)
 	}

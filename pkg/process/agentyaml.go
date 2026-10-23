@@ -36,7 +36,7 @@ func readDefaultAgentLLMDefaults(home, agentName string) AgentLLMDefaults {
 	if !ok {
 		return AgentLLMDefaults{}
 	}
-	p := appcfg.PrimaryLLM(def)
+	p := appcfg.EffectiveDefaultLLM(def)
 	if p == nil {
 		return AgentLLMDefaults{}
 	}
@@ -92,11 +92,9 @@ func applyAgentLLMFields(cfg *appcfg.Root, agentName, provider, model, apiKey, b
 
 	// /connect (and the setup flows that share this function) configure one
 	// provider+model connection per entry, so the write is add-or-replace by
-	// that pair, not an overwrite of the primary slot: mutating
-	// LLMProviders[0] would discard whatever provider was primary, and
-	// matching on the provider alone would replace the model an existing
-	// entry for that provider carries. Find an existing entry for this
-	// provider+model and update it; when none exists, add a new entry.
+	// that pair: an existing entry is updated in place (position unchanged),
+	// a new one is appended to the end. The list's order is user data — no
+	// write path reorders it or moves anything to a "primary" slot.
 	p := strings.TrimSpace(provider)
 	m := strings.TrimSpace(model)
 	idx := appcfg.FindLLMProviderIndex(def, p, m)
@@ -140,16 +138,10 @@ func applyAgentLLMFields(cfg *appcfg.Root, agentName, provider, model, apiKey, b
 			target.Params = append(appcfg.LLMRequestParams(nil), params...)
 		}
 	}
-	// Promote the configured entry to the primary slot so the change governs
-	// the next turn without a restart — the same effect /model achieves with
-	// PromoteMatchingLLMProvider. An empty placeholder left behind (e.g. the
-	// bare entry main carries before first setup) is dropped on save by
+	// No promotion: the entry stays where it is (existing) or at the end
+	// (new). An empty placeholder left behind (e.g. the bare entry main
+	// carries before first setup) is dropped on save by
 	// dropPlaceholderLLMProviders, so this never persists a `- {}` stub.
-	if idx > 0 {
-		entry := def.LLMProviders[idx]
-		copy(def.LLMProviders[1:idx+1], def.LLMProviders[0:idx])
-		def.LLMProviders[0] = entry
-	}
 	appcfg.NormalizeLLMProviderEntries(&def)
 	cfg.Agents.Definitions[name] = def
 }

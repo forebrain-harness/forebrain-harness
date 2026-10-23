@@ -3,6 +3,7 @@ package process
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -32,6 +33,13 @@ type chatGPTModelsSource struct {
 }
 
 func (s chatGPTModelsSource) ChatGPTModels(ctx context.Context) ([]openai.ModelInfo, error) {
+	// No login on this machine means nothing to discover. Resolving the client
+	// version is a request to the npm registry, and the fetch would fail on the
+	// missing credentials right after it — so ask for the login first. The
+	// wording is the Transport's own, which callers already match on.
+	if _, err := openai.Load(s.path); err != nil {
+		return nil, fmt.Errorf("ChatGPT login required: %w", err)
+	}
 	// The declared client version is resolved live on every discovery: it
 	// names the newest released codex client, whose availability gates the
 	// backend's model list.

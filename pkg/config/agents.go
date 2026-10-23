@@ -38,6 +38,11 @@ type AgentDefinition struct {
 	// same-named entry here replaces the shared one whole.
 	MCPServers   []MCPServerConfig        `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 	LLMProviders []AgentLLMProviderConfig `yaml:"llm_providers,omitempty" json:"llm_providers,omitempty"`
+	// DefaultModel is "provider/model" — this agent's default model. Empty
+	// (or absent) means the first llm_providers entry. It must name an entry
+	// on this agent's list; the loader and Save both reject a value nothing
+	// resolves to. The list's order is pure storage: nothing reorders it.
+	DefaultModel string `yaml:"default_model,omitempty" json:"default_model,omitempty"`
 	// EnableSubagent is this primary agent's own subagent switch. Absent
 	// follows agents.defaults.enable_subagent; set, it decides on its own
 	// whether the model of this agent sees the subagent_* tools.

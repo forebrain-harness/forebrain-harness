@@ -5492,6 +5492,28 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	require.Equal(t, []string{"low", "high", "max"}, got.Options[2].Efforts)
 	publishedBefore := run.PrimaryModelSelection(runner)
 
+	// A conversation that does not exist yet reads the same model and options
+	// with no session to name — the new-chat page's chips draw from it.
+	defaultRec := httptest.NewRecorder()
+	s.handleChatModelDefault(defaultRec, httptest.NewRequest(http.MethodGet, "/api/chat/model", nil))
+	require.Equal(t, http.StatusOK, defaultRec.Code, defaultRec.Body.String())
+	var fresh struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Options  []struct {
+			Model   string   `json:"model"`
+			Efforts []string `json:"efforts"`
+		} `json:"options"`
+	}
+	require.NoError(t, json.Unmarshal(defaultRec.Body.Bytes(), &fresh))
+	require.Equal(t, got.Provider, fresh.Provider)
+	require.Equal(t, got.Model, fresh.Model)
+	require.Len(t, fresh.Options, 3)
+	require.Equal(t, []string{"low", "high", "max"}, fresh.Options[0].Efforts)
+	wrong := httptest.NewRecorder()
+	s.handleChatModelDefault(wrong, httptest.NewRequest(http.MethodPost, "/api/chat/model", nil))
+	require.Equal(t, http.StatusMethodNotAllowed, wrong.Code)
+
 	// A pair the agent is not configured with is refused before any write.
 	rec = modelCall(http.MethodPut, map[string]any{"provider": "openai", "model": "gpt-9"})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -7625,4 +7647,562 @@ func TestWithConfigWriteSerialisesWriters(t *testing.T) {
 	require.Equal(t, 1, peak, "writers must never overlap")
 	require.Equal(t, 8, ran, "every writer must have run")
 	require.Equal(t, 0, inside)
+}
+
+// providersGetPaged exercises the paged GET branch, which must carry the same
+// agent-level default_model the plain GET does.
+func providersGetPaged(t *testing.T, s *Server) (string, []map[string]any) {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/providers?page=1", nil)
+	s.handleProviders(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var out struct {
+		DefaultModel string           `json:"default_model"`
+		Items        []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	return out.DefaultModel, out.Items
+}
+
+func providersGetDefaultModel(t *testing.T, s *Server) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	s.handleProviders(rr, httptest.NewRequest(http.MethodGet, "/api/providers", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var out struct {
+		DefaultModel string `json:"default_model"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	return out.DefaultModel
+}
+
+// seedProvidersConfig writes main's llm_providers (one entry per line,
+// provider/model pairs) straight to the yaml, in the exact order given.
+func seedProvidersConfig(t *testing.T, home string, extraTop string, pairs ...[2]string) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("agents:\n  definitions:\n    main:\n      primary: true\n")
+	b.WriteString(extraTop)
+	b.WriteString("      llm_providers:\n")
+	for _, p := range pairs {
+		b.WriteString("      - provider: " + p[0] + "\n        model: " + p[1] + "\n        api_key: ${DEEPSEEK_API_KEY}\n        base_url: https://api.deepseek.com\n")
+	}
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(b.String()), 0o600))
+	return cfgPath
+}
+
+// The PUT must not write the client's row order into the config: the disk
+// order is the base, known rows update in place, dropped rows are deleted,
+// and genuinely new rows are appended at the end.
+func TestProvidersDTOPutPreservesDiskOrder(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := seedProvidersConfig(t, home, "",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+		[2]string{"moonshotai", "kimi"},
+	)
+
+	// The page reorders two rows (moonshot first), drops openai, and adds a
+	// brand-new row — as a stale snapshot written back whole would.
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"moonshotai","models":["kimi"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-keep-1111"},
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-keep-2222"},
+		{"provider":"zhipuai","models":["glm-5.3"],"base_url":"https://open.bigmodel.cn/api/paas/v4","api_key_plain":"sk-new-3333"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	cfgRaw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, []string{"deepseek", "moonshotai", "zhipuai"}, providerOrderInYAML(t, string(cfgRaw)), "disk order must be preserved: existing rows in place, new row appended at the end")
+}
+
+func providerOrderInYAML(t *testing.T, raw string) []string {
+	t.Helper()
+	cfg, err := appcfg.ParseRootYAML([]byte(raw))
+	require.NoError(t, err)
+	out := []string{}
+	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
+		out = append(out, item.Provider)
+	}
+	return out
+}
+
+// default_model is the agent-level default: the PUT writes it, refuses a
+// dangling value, refuses clearing it, and both GET branches report the
+// effective value (default_model when set, otherwise the first row).
+func TestProvidersDTODefaultModel(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := seedProvidersConfig(t, home, "",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+	)
+
+	require.Equal(t, "deepseek/deepseek-v4", providersGetDefaultModel(t, s), "absent default_model reports the first row")
+	pagedDefault, _ := providersGetPaged(t, s)
+	require.Equal(t, "deepseek/deepseek-v4", pagedDefault, "paged GET reports the same default_model")
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	],"default_model":"openai/gpt-test"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	cfgRaw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Contains(t, string(cfgRaw), "default_model: openai/gpt-test")
+	require.Equal(t, "openai/gpt-test", providersGetDefaultModel(t, s))
+
+	// A dangling default_model is refused, not saved.
+	rr = providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	],"default_model":"openai/gone"}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "default_model")
+
+	// Clearing is refused: switch the default, do not empty it.
+	rr = providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	],"default_model":""}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// The row the default resolves to may not be deleted — explicitly pointed at
+// by default_model, or implicitly as the first row of an unset default.
+func TestProvidersDTORefusesDeletingTheDefaultRow(t *testing.T) {
+	s, home := providersDTOServer(t)
+	seedProvidersConfig(t, home, "      default_model: openai/gpt-test\n",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+	)
+
+	// Dropping openai while default_model points at it: refused.
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"}
+	]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "默认模型")
+
+	// Retargeting the default in the same write that drops openai: allowed.
+	rr = providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"}
+	],"default_model":"deepseek/deepseek-v4"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// Implicit default: with default_model unset, the first row cannot be
+	// deleted either.
+	s2, home2 := providersDTOServer(t)
+	seedProvidersConfig(t, home2, "",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+	)
+	rr = providersPut(t, s2, `{"providers":[
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "默认模型")
+}
+
+// providerModelOrderInYAML is the expanded provider/model order the file was
+// written in, one item per stored entry.
+func providerModelOrderInYAML(t *testing.T, raw string) []string {
+	t.Helper()
+	cfg, err := appcfg.ParseRootYAML([]byte(raw))
+	require.NoError(t, err)
+	out := []string{}
+	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
+		out = append(out, item.Provider+"/"+item.Model)
+	}
+	return out
+}
+
+func providerBaseURLInYAML(t *testing.T, raw, provider string) string {
+	t.Helper()
+	cfg, err := appcfg.ParseRootYAML([]byte(raw))
+	require.NoError(t, err)
+	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
+		if strings.EqualFold(strings.TrimSpace(item.Provider), provider) {
+			return strings.TrimSpace(item.BaseURL)
+		}
+	}
+	return ""
+}
+
+// An edit is an edit, not a delete plus an append: a row the page changed the
+// endpoint of keeps the position its stored entries occupy.
+func TestProvidersDTOPutEditsARowInPlace(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := seedProvidersConfig(t, home, "",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+		[2]string{"moonshotai", "kimi"},
+	)
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://mirror.example.com","api_key_plain":"sk-b-2222",
+		 "replaces":{"provider":"openai","base_url":"https://api.deepseek.com","models":["gpt-test"]}},
+		{"provider":"moonshotai","models":["kimi"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-c-3333"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	cfgRaw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, []string{"deepseek", "openai", "moonshotai"}, providerOrderInYAML(t, string(cfgRaw)),
+		"the edited row must keep its stored slot instead of being appended at the end")
+	require.Equal(t, "https://mirror.example.com", providerBaseURLInYAML(t, string(cfgRaw), "openai"))
+}
+
+// Adding a model to an existing service must leave its entries adjacent: the
+// read path folds only adjacent same-signature entries into one row.
+func TestProvidersDTOPutAddsAModelNextToItsRow(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := seedProvidersConfig(t, home, "",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+	)
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4","deepseek-v4-flash"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111",
+		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	cfgRaw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, []string{"deepseek/deepseek-v4", "deepseek/deepseek-v4-flash", "openai/gpt-test"},
+		providerModelOrderInYAML(t, string(cfgRaw)),
+		"the new model must sit next to the row it belongs to")
+
+	rows := providersGet(t, s)
+	require.Len(t, rows, 2, "the two deepseek models are one row, not two")
+	require.Equal(t, "deepseek", rows[0]["provider"])
+	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, rows[0]["models"].([]any))
+}
+
+func TestProvidersDTOPutRemovesAModelFromARow(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := seedProvidersConfig(t, home, "",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"deepseek", "deepseek-v4-flash"},
+		[2]string{"openai", "gpt-test"},
+	)
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111",
+		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-v4-flash"]}},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	cfgRaw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, []string{"deepseek/deepseek-v4", "openai/gpt-test"}, providerModelOrderInYAML(t, string(cfgRaw)))
+	require.NotContains(t, string(cfgRaw), "deepseek-v4-flash")
+}
+
+// Editing the row the default resolves to must not hand the default to another
+// model: with default_model unset the first stored row is the default, so the
+// edited row has to keep its slot.
+func TestProvidersDTOEditingTheImplicitDefaultKeepsItDefault(t *testing.T) {
+	s, home := providersDTOServer(t)
+	seedProvidersConfig(t, home, "",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+	)
+	require.Equal(t, "deepseek/deepseek-v4", providersGetDefaultModel(t, s))
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://mirror.example.com","api_key_plain":"sk-a-1111",
+		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "deepseek/deepseek-v4", providersGetDefaultModel(t, s),
+		"the user did not touch the default, so it must not move to another model")
+
+	rows := providersGet(t, s)
+	require.Len(t, rows, 2)
+	require.Equal(t, "deepseek", rows[0]["provider"])
+	require.Equal(t, "https://mirror.example.com", rows[0]["base_url"])
+	require.Equal(t, "openai", rows[1]["provider"])
+}
+
+// Editing the model an explicit default_model names is an edit of the default,
+// not a deletion of it: the default follows the edit.
+func TestProvidersDTOEditingTheExplicitDefaultFollowsTheEdit(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := seedProvidersConfig(t, home, "      default_model: deepseek/deepseek-v4\n",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+	)
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4-pro"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111",
+		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	cfgRaw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Contains(t, string(cfgRaw), "default_model: deepseek/deepseek-v4-pro")
+	require.Equal(t, "deepseek/deepseek-v4-pro", providersGetDefaultModel(t, s))
+}
+
+// A stale page (its row no longer on disk) claims no slot: the row falls back
+// to identity matching, which makes it a new row appended at the end.
+func TestProvidersDTOStaleReplacesFallsBackToIdentity(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := seedProvidersConfig(t, home, "",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"openai", "gpt-test"},
+	)
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"},
+		{"provider":"zhipuai","models":["glm-5.3"],"base_url":"https://open.bigmodel.cn/api/paas/v4","api_key_plain":"sk-c-3333",
+		 "replaces":{"provider":"ghost","base_url":"https://nowhere.example.com","models":["ghost-model"]}}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	cfgRaw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, []string{"deepseek", "openai", "zhipuai"}, providerOrderInYAML(t, string(cfgRaw)))
+}
+
+// Editing a row so that the model the default points at disappears is still a
+// deletion of the default model.
+func TestProvidersDTOEditThatRemovesTheDefaultModelIsRefused(t *testing.T) {
+	s, home := providersDTOServer(t)
+	seedProvidersConfig(t, home, "      default_model: deepseek/deepseek-v4-flash\n",
+		[2]string{"deepseek", "deepseek-v4"},
+		[2]string{"deepseek", "deepseek-v4-flash"},
+		[2]string{"openai", "gpt-test"},
+	)
+
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111",
+		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-v4-flash"]}},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+	]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "默认模型")
+}
+
+// mergeProviderEntries is the PUT's merge on its own: the slot-claiming rules
+// the HTTP tests above only reach one path at a time.
+func TestMergeProviderEntries(t *testing.T) {
+	entry := func(provider, baseURL, model string) appcfg.AgentLLMProviderConfig {
+		return appcfg.AgentLLMProviderConfig{Provider: provider, BaseURL: baseURL, Model: model}
+	}
+	labels := func(entries []appcfg.AgentLLMProviderConfig) []string {
+		out := []string{}
+		for _, item := range entries {
+			out = append(out, item.Provider+"/"+item.Model)
+		}
+		return out
+	}
+	slot := func(provider, model string) *string {
+		label := provider + "/" + model
+		return &label
+	}
+	const ds = "https://api.deepseek.com"
+
+	cases := []struct {
+		name string
+		// stored is the list on disk (already expanded, one entry per model).
+		// rows are the request's rows after the same expansion.
+		stored []appcfg.AgentLLMProviderConfig
+		rows   []providerMergeRow
+		// order is the merged provider/model order.
+		order []string
+		// replaced maps a stored slot to what the edit put there; a nil value
+		// means the edit removed that slot's model. A slot with no key was
+		// never claimed by an edited row.
+		replaced map[int]*string
+	}{
+		{
+			name:   "no replaces keeps the identity merge and the stored order",
+			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("openai", ds, "gpt-test")},
+			rows: []providerMergeRow{
+				{Entries: []appcfg.AgentLLMProviderConfig{
+					entry("openai", "https://mirror.example.com", "gpt-test"),
+					entry("deepseek", ds, "deepseek-v4"),
+				}},
+			},
+			order:    []string{"deepseek/deepseek-v4", "openai/gpt-test"},
+			replaced: map[int]*string{},
+		},
+		{
+			name:   "an edited row replaces its own slot in place",
+			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("openai", ds, "gpt-test"), entry("moonshotai", ds, "kimi")},
+			rows: []providerMergeRow{
+				{Entries: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")}},
+				{
+					Entries:  []appcfg.AgentLLMProviderConfig{entry("openai", "https://mirror.example.com", "gpt-test")},
+					Replaces: &providerReplaces{Provider: "openai", BaseURL: ds, Models: []string{"gpt-test"}},
+				},
+				{Entries: []appcfg.AgentLLMProviderConfig{entry("moonshotai", ds, "kimi")}},
+			},
+			order:    []string{"deepseek/deepseek-v4", "openai/gpt-test", "moonshotai/kimi"},
+			replaced: map[int]*string{1: slot("openai", "gpt-test")},
+		},
+		{
+			name:   "an added model lands right after the row's last slot",
+			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("openai", ds, "gpt-test")},
+			rows: []providerMergeRow{
+				{
+					Entries: []appcfg.AgentLLMProviderConfig{
+						entry("deepseek", ds, "deepseek-v4"),
+						entry("deepseek", ds, "deepseek-v4-flash"),
+					},
+					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds, Models: []string{"deepseek-v4"}},
+				},
+				{Entries: []appcfg.AgentLLMProviderConfig{entry("openai", ds, "gpt-test")}},
+			},
+			order:    []string{"deepseek/deepseek-v4", "deepseek/deepseek-v4-flash", "openai/gpt-test"},
+			replaced: map[int]*string{0: slot("deepseek", "deepseek-v4")},
+		},
+		{
+			name:   "a model the edit dropped deletes its slot",
+			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("deepseek", ds, "deepseek-v4-flash"), entry("openai", ds, "gpt-test")},
+			rows: []providerMergeRow{
+				{
+					Entries:  []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")},
+					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds, Models: []string{"deepseek-v4", "deepseek-v4-flash"}},
+				},
+				{Entries: []appcfg.AgentLLMProviderConfig{entry("openai", ds, "gpt-test")}},
+			},
+			order:    []string{"deepseek/deepseek-v4", "openai/gpt-test"},
+			replaced: map[int]*string{0: slot("deepseek", "deepseek-v4"), 1: nil},
+		},
+		{
+			name:   "a second claimant of a taken slot falls back to identity matching",
+			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("openai", ds, "gpt-test")},
+			rows: []providerMergeRow{
+				{
+					Entries:  []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4-pro")},
+					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds, Models: []string{"deepseek-v4"}},
+				},
+				{
+					Entries:  []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4-flash")},
+					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds, Models: []string{"deepseek-v4"}},
+				},
+				{Entries: []appcfg.AgentLLMProviderConfig{entry("openai", ds, "gpt-test")}},
+			},
+			order:    []string{"deepseek/deepseek-v4-pro", "openai/gpt-test", "deepseek/deepseek-v4-flash"},
+			replaced: map[int]*string{0: slot("deepseek", "deepseek-v4-pro")},
+		},
+		{
+			name:   "an empty Replaces.Models claims the bare entry",
+			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, ""), entry("openai", ds, "gpt-test")},
+			rows: []providerMergeRow{
+				{
+					Entries:  []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")},
+					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds},
+				},
+				{Entries: []appcfg.AgentLLMProviderConfig{entry("openai", ds, "gpt-test")}},
+			},
+			order:    []string{"deepseek/deepseek-v4", "openai/gpt-test"},
+			replaced: map[int]*string{0: slot("deepseek", "deepseek-v4")},
+		},
+		{
+			name:   "a Replaces that matches nothing claims nothing",
+			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")},
+			rows: []providerMergeRow{
+				{Entries: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")}},
+				{
+					Entries:  []appcfg.AgentLLMProviderConfig{entry("zhipuai", "https://open.bigmodel.cn/api/paas/v4", "glm-5.3")},
+					Replaces: &providerReplaces{Provider: "ghost", BaseURL: "https://nowhere.example.com", Models: []string{"ghost-model"}},
+				},
+			},
+			order:    []string{"deepseek/deepseek-v4", "zhipuai/glm-5.3"},
+			replaced: map[int]*string{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := mergeProviderEntries(tc.stored, tc.rows)
+			require.Equal(t, tc.order, labels(result.Merged))
+
+			got := map[int]*string{}
+			for position, replaced := range result.Replaced {
+				if replaced == nil {
+					got[position] = nil
+					continue
+				}
+				got[position] = slot(replaced.Provider, replaced.Model)
+			}
+			require.Equal(t, tc.replaced, got, "Replaced must report what every claimed slot became")
+		})
+	}
+}
+
+// TestChatSessionsFiltersTheDrawerListByProject pins the drawer's project
+// filter: project_id narrows the list — and the total the pages are counted
+// from — to one project's conversations, on the server; an empty filter is
+// every project, and a project nothing belongs to lists nothing.
+func TestChatSessionsFiltersTheDrawerListByProject(t *testing.T) {
+	s, projects, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+	alpha, err := projects.Create(ctx, state.CreateProjectInput{Name: "alpha", Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta, err := projects.Create(ctx, state.CreateProjectInput{Name: "beta", Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, project := range map[string]string{"a-1": alpha.ID, "a-2": alpha.ID, "b-1": beta.ID} {
+		if err := s.Sessions.Ensure(ctx, id, "conversation "+id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sessions.Append(ctx, id, "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+		if err := projects.BindSession(ctx, id, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	get := func(query string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions"+query, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", query, rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	names := func(body map[string]any) []string {
+		out := []string{}
+		for _, row := range body["records"].([]any) {
+			out = append(out, row.(map[string]any)["project_name"].(string))
+		}
+		slices.Sort(out)
+		return out
+	}
+
+	all := get("?page=1&page_size=50")
+	if all["total"].(float64) != 3 {
+		t.Fatalf("unfiltered total = %v, want 3", all["total"])
+	}
+	only := get("?page=1&page_size=50&project_id=" + alpha.ID)
+	if only["total"].(float64) != 2 || !slices.Equal(names(only), []string{"alpha", "alpha"}) {
+		t.Fatalf("alpha list = %v (total %v), want alpha's two", names(only), only["total"])
+	}
+	none := get("?page=1&page_size=50&project_id=prj_nothing")
+	if none["total"].(float64) != 0 || len(none["records"].([]any)) != 0 {
+		t.Fatalf("unknown project list = %v, want nothing", none)
+	}
 }

@@ -258,13 +258,16 @@ func subagentRowModel(cfg *config.Root, name string, entry config.SubagentConfig
 	if !defined {
 		return "", "", "", ""
 	}
-	providers := config.ResolvedLLMConfigs(def)
-	if len(providers) == 0 {
+	// The same resolution run.SubagentOwnModel answers with: the effective
+	// default (default_model when set, otherwise the first entry), never a
+	// bare first-entry read.
+	defEntry := config.EffectiveDefaultLLM(def)
+	if defEntry == nil {
 		return "", "", "", ""
 	}
-	return strings.TrimSpace(providers[0].Provider),
-		strings.TrimSpace(providers[0].Model),
-		config.ReasoningEffort(providers[0].Params),
+	return strings.TrimSpace(defEntry.Provider),
+		strings.TrimSpace(defEntry.Model),
+		config.ReasoningEffort(defEntry.Params),
 		subagentModelFromGlobal
 }
 

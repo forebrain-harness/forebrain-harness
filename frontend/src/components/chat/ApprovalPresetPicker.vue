@@ -56,6 +56,11 @@ import { useI18n } from '@/locales'
  * conversation's own state, read back from the server for each session the
  * page opens, so a choice made in one conversation never appears to carry
  * over to another.
+ *
+ * A new chat has no conversation yet, and the switch still works: it shows
+ * the agent's default, and a pick is held as a draft that the page hands to
+ * the conversation its first message opens (`takeDraft`) — the same
+ * session-scoped write, made the moment there is a session to make it on.
  */
 const props = defineProps<{ sessionId: string | null }>()
 
@@ -75,9 +80,11 @@ const switching = ref(false)
 const error = ref('')
 const menuRef = ref<HTMLElement | null>(null)
 
-const disabled = computed(() => switching.value || !props.sessionId)
+/** The preset picked before any conversation existed, until it is handed over. */
+const draft = ref<string | null>(null)
+
+const disabled = computed(() => switching.value)
 const currentLabel = computed(() => {
-  if (!props.sessionId) return t('approval.needSession')
   const preset = presets.value.find((item) => item.id === current.value)
   return preset ? preset.label : t('approval.followDefault')
 })
@@ -86,10 +93,14 @@ const currentLabel = computed(() => {
 // moved to another session is that other session's no longer.
 async function load(sessionId: string | null) {
   current.value = null
+  draft.value = null
   error.value = ''
-  if (!sessionId) return
   try {
-    const res = await forebrainApi.sessionPresetCurrent(sessionId)
+    // No conversation yet: what a new one would start under is the agent's own
+    // default.
+    const res = sessionId
+      ? await forebrainApi.sessionPresetCurrent(sessionId)
+      : await forebrainApi.approvalDefault()
     if (props.sessionId === sessionId) current.value = res.current
   } catch (cause) {
     if (props.sessionId === sessionId) error.value = getErrorMessage(cause)
@@ -98,10 +109,16 @@ async function load(sessionId: string | null) {
 
 async function choose(id: string) {
   const sessionId = props.sessionId
-  if (switching.value || !sessionId) return
-  switching.value = true
+  if (switching.value) return
   open.value = false
   error.value = ''
+  if (!sessionId) {
+    // Held for the conversation the first message opens.
+    current.value = id
+    draft.value = id
+    return
+  }
+  switching.value = true
   try {
     await forebrainApi.sessionPreset(sessionId, id)
     if (props.sessionId === sessionId) current.value = id
@@ -126,6 +143,18 @@ watch(() => props.sessionId, (sessionId) => {
 watch(open, (value) => {
   if (value) error.value = ''
 })
+
+/**
+ * The preset picked on a new chat, once: the page applies it to the
+ * conversation it just opened. Null when nothing was picked there.
+ */
+function takeDraft(): string | null {
+  const picked = draft.value
+  draft.value = null
+  return picked
+}
+
+defineExpose({ takeDraft })
 
 onMounted(() => {
   document.addEventListener('pointerdown', onDocPointerDown)

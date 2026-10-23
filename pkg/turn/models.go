@@ -467,7 +467,13 @@ func listModelCatalogLive(ctx context.Context, sources modelSources, q ModelCata
 		}
 		listing.Status = append(listing.Status, status)
 	}
-	if sources.opencode != nil && (provider == "" || provider == opencodeProvider) {
+	// A listing that names no provider asks every source the machine could
+	// have an account on. The Console catalog is read with a public token, so
+	// without this guard every unscoped listing — the web providers page opens
+	// one each time — would contact opencode.ai for users who never signed in
+	// to it. A query that names "opencode" is an explicit ask and still fetches.
+	if sources.opencode != nil && (provider == opencodeProvider ||
+		(provider == "" && sources.opencode.OpenCodeSignedIn())) {
 		// The Console catalog needs a Console credential: the free family is
 		// not reachable from a third-party client any more (the gateway
 		// rejects every request without OpenCode's own client identity), so a
@@ -702,7 +708,8 @@ func agentDefinition(cfg *appcfg.Root, agentName string) appcfg.AgentDefinition 
 }
 
 // ModelChoices lists the models agentName is configured with, in their
-// configured order; the first is the one in force.
+// configured order — storage order, not priority: the one in force is the
+// effective default (default_model when set, otherwise the first).
 func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 	var out []ModelChoice
 	for _, configured := range appcfg.ResolvedLLMConfigs(agentDefinition(cfg, agentName)) {
@@ -722,4 +729,23 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 		out = append(out, choice)
 	}
 	return out
+}
+
+// defaultModelIndex reports the index within choices of the effective default
+// — the entry default_model names, otherwise the first — so surfaces mark and
+// diff against what an empty selection actually resolves to, not blindly
+// against index zero. -1 when nothing resolves (empty list, or a hot-edited
+// dangling default_model the loader would refuse).
+func defaultModelIndex(cfg *appcfg.Root, agentName string, choices []ModelChoice) int {
+	entry := appcfg.EffectiveDefaultLLM(agentDefinition(cfg, agentName))
+	if entry == nil {
+		return -1
+	}
+	for i, choice := range choices {
+		if strings.EqualFold(strings.TrimSpace(choice.Provider), strings.TrimSpace(entry.Provider)) &&
+			strings.EqualFold(strings.TrimSpace(choice.Model), strings.TrimSpace(entry.Model)) {
+			return i
+		}
+	}
+	return -1
 }

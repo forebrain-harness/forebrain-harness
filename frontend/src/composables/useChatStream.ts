@@ -176,6 +176,13 @@ export interface SubagentToolStep {
   stepId: string
   toolName: string
   summary: string
+  /**
+   * The card's header as the terminal words it ("Read plans/100.md lines 1-96",
+   * "Ran ls", "Notes"), from the engine — the gateway sends it with the step and
+   * with every stored row. The summary stands in only for an older payload that
+   * lacks it.
+   */
+  header?: string
   status: string
   output?: string
   error?: string
@@ -511,18 +518,40 @@ export function skillCardTitle(step: SubagentToolStep): string | undefined {
 }
 
 /**
+ * isSubagentDispatchTool names the verbs whose card is the subagent's own: the
+ * agents they start outlive the call, so the card is built from the
+ * execution's events, not from the call's row — and a dispatch whose row never
+ * came (the run stopped under it) has no outcomes of its own to invent. The
+ * terminal draws no card for such a call either (pkg/tui/commands.go
+ * isSubagentDispatchTool); the set is the same four verbs.
+ */
+export function isSubagentDispatchTool(name: string): boolean {
+  switch (String(name ?? '').trim()) {
+    case 'subagent_fanout':
+    case 'subagent_run':
+    case 'subagent_send':
+    case 'subagent_continue':
+      return true
+    default:
+      return false
+  }
+}
+
+/**
  * canceledToolStep is the card for a call the transcript shows as issued but
  * never as run: a gate the user canceled, or a call an interruption stopped.
  * Its status is the same "canceled" the terminal stamps on a pending card when a
- * run aborts, so both surfaces agree the call never ran.
+ * run aborts, so both surfaces agree the call never ran. The head names what the
+ * call was aimed at; the state word says it was canceled — never "denied",
+ * because nobody was asked (a YOLO conversation asks for nothing).
  */
-export function canceledToolStep(call: StoredToolCall): SubagentToolStep {
+export function canceledToolStep(call: StoredToolCall, header?: string): SubagentToolStep {
   const target = toolCallTarget(call.name, call.arguments)
-  const label = translate('chat.toolCanceled')
   return {
     stepId: call.id,
     toolName: call.name,
-    summary: target ? `${label} · ${target}` : label,
+    summary: target || String(call.name ?? '').trim(),
+    ...(header ? { header } : {}),
     status: 'canceled',
   }
 }
@@ -587,6 +616,7 @@ export function toolStepFromPayload(
     stepId: String(payload.stepId ?? '').trim() || fallbackStepId,
     toolName: String(payload.toolName ?? '').trim(),
     summary: subagentStepSummary(payload),
+    ...(String(payload.header ?? '').trim() ? { header: String(payload.header).trim() } : {}),
     status: subagentStepStatus(payload, completed),
     output: completed ? String(payload.displayBody ?? '').trim() || undefined : undefined,
     error: String(payload.error ?? '').trim() || undefined,
@@ -626,16 +656,18 @@ function stepHoldsNoCard(step: { toolName: string; status: string }): boolean {
  * When a row carries none, the card is left without a body rather than
  * falling back to the model-facing result, which was never meant to be read.
  */
-export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?: string | null; partsJson?: string | null; subagentCall?: SubagentCall | null }, call?: StoredToolCall): SubagentToolStep {
+export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?: string | null; partsJson?: string | null; subagentCall?: SubagentCall | null; header?: string }, call?: StoredToolCall): SubagentToolStep {
   const display = parseToolDisplayPart(row.partsJson)
   const meta = { ...toolMetaRecord(row.toolMetaJson), ...toolMetaRecord(display.toolMetaJson) }
   const toolName = metaString(meta, 'tool_name') || String(call?.name ?? '').trim()
   const summary = String(display.summary ?? '').trim() || metaString(meta, 'invocation') || toolName
   const status = metaString(meta, 'status') || 'completed'
+  const header = String(row.header ?? '').trim()
   return {
     stepId: String(row.toolStepId ?? '').trim() || String(call?.id ?? '').trim(),
     toolName,
     summary,
+    ...(header ? { header } : {}),
     status,
     output: display.body,
     category: metaString(meta, 'category') || undefined,
@@ -804,12 +836,16 @@ export function conversationFromTranscript(
         continue
       }
       drawn.add(call.id)
+      // A dispatch call with no row of its own is the subagent card's to draw
+      // (from its execution's events): a second, canceled card for the same
+      // call would be a card the terminal does not show.
+      if (!answer && isSubagentDispatchTool(String(call.name ?? ''))) continue
       current.blocks = [...(current.blocks ?? []), {
         kind: 'tool',
         // A call with no tool row never ran: the gate the user canceled, or a
         // call an interruption stopped. It is a card all the same, and a
         // canceled one - the same thing the terminal shows for it.
-        step: answer ? toolStepFromRow(answer, call) : canceledToolStep(call),
+        step: answer ? toolStepFromRow(answer, call) : canceledToolStep(call, row.callHeaders?.[call.id]),
       }]
     }
     applyTranscriptRowMetadata(current, row, renderPlan)

@@ -2,7 +2,10 @@
   <!-- The prototype's .think, drawn with the library's own reasoning card: a
        caption that folds the prose away, closed until asked. -->
   <Reasoning :default-open="false" class="think" data-testid="thinking-card">
-    <ReasoningTrigger class="think-l">{{ thinkingBlockLabel(props.block, t) }}</ReasoningTrigger>
+    <ReasoningTrigger class="think-l">
+      <ChevronRight class="think-chev" aria-hidden="true" />
+      <span>{{ thinkingBlockLabel(props.block, t) }}</span>
+    </ReasoningTrigger>
     <ReasoningContent :content="props.block.text.trim()" class="think-body" />
   </Reasoning>
 </template>
@@ -17,6 +20,7 @@
  * surface's words and this design's metrics — the fold, the state and the
  * content are the component's, not a second implementation of them.
  */
+import { ChevronRight } from 'lucide-vue-next'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@repo/elements/reasoning'
 import { useI18n } from '@/locales'
 import { thinkingBlockLabel, type TimelineBlock } from '@/composables/useChatStream'
@@ -39,8 +43,8 @@ const { t } = useI18n()
 
 .think-l {
   width: 100%;
-  gap: 4px;
-  font-size: 11px;
+  gap: 6px;
+  font-size: 12px;
   color: var(--forebrain-muted-text);
   text-align: left;
 }
@@ -49,14 +53,18 @@ const { t } = useI18n()
   color: var(--forebrain-text-2);
 }
 
-/* The prototype's fold marker: ▸ closed, ▾ open — the trigger carries the
-   state, so the marker needs no JavaScript. */
-.think-l::before {
-  content: "▸";
+/* The fold marker: a 14px chevron, turned down when open — the trigger carries
+   the state, so the marker needs no JavaScript. (A "▸" glyph at the caption's
+   11px was too small to read as a control.) */
+.think-chev {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  transition: transform 0.15s ease;
 }
 
-.think-l[data-state="open"]::before {
-  content: "▾";
+.think-l[data-state="open"] .think-chev {
+  transform: rotate(90deg);
 }
 
 /* The body is the reasoning verbatim: 12px at 1.65, muted, its own lines

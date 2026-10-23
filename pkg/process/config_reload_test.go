@@ -117,9 +117,11 @@ func TestReloadConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T) {
 	}
 	env := &Environment{Deps: run.Deps{AppCfg: live}, Root: home, ConfigPath: cfgPath, Runner: runner}
 
-	// Parses and passes the startup check, but has no llm_providers, so
-	// Runner.Load fails after the fields above have already been swapped.
-	const broken = "agents:\n  definitions:\n    main: {}\n"
+	// Parses but is refused by the loader: a default_model naming no entry
+	// never reaches the runner, so ReloadConfig fails after the fields above
+	// have already been swapped. (An emptied llm_providers list no longer
+	// fails here by design — the runner keeps serving its published model.)
+	const broken = "agents:\n  definitions:\n    main:\n      default_model: openai/gone\n      llm_providers:\n        - provider: openai\n          model: gpt-old\n          api_key: ${FOREBRAIN_ROLLBACK_TEST_KEY}\n          base_url: http://localhost:0/v1\n"
 	if err := os.WriteFile(cfgPath, []byte(broken), 0o600); err != nil {
 		t.Fatal(err)
 	}

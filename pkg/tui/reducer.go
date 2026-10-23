@@ -2295,63 +2295,6 @@ func fanoutQueryPhrase(fs *fanoutState, t *FanoutTaskState) string {
 	return strings.Join(parts, " · ")
 }
 
-// singleDisplayLine folds text that arrives with its own line breaks onto one
-// line, joining what the breaks separated with a single space.
-//
-// Every caller renders into a row of a card, and those rows are line-oriented:
-// a row's role is encoded in its leading whitespace and per-row data is indexed
-// by line number, so a value that is semantically one row must not carry a
-// newline into it. A column budget is meaningless across a line break as well —
-// the second line starts over at column zero — so folding first is what makes
-// truncation measure the text the reader actually sees.
-func singleDisplayLine(s string) string {
-	if !strings.ContainsAny(s, "\r\n") {
-		return s
-	}
-	parts := strings.FieldsFunc(s, func(r rune) bool { return r == '\n' || r == '\r' })
-	out := parts[:0]
-	for _, part := range parts {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
-	}
-	return strings.Join(out, " ")
-}
-
-// truncateForDisplay shortens s to at most maxLen terminal columns, ending it
-// with an ellipsis when it had to cut.
-//
-// Every caller spends maxLen as a column budget (a task title beside a fixed
-// label, a query inside a card), so columns — not bytes — is the unit that
-// makes those budgets come out right. Counting bytes went wrong twice: it cut
-// multi-byte characters mid-rune, which the terminal draws as a replacement
-// glyph, and it under-filled the budget for wide text, since CJK costs three
-// bytes per two columns — a title got barely a third of the width it was given.
-//
-// Input that is already invalid UTF-8 is repaired rather than passed along:
-// these strings come from tool output and model text that something upstream
-// may have byte-sliced, and runewidth measures a stray byte as zero columns,
-// which would silently skew the budget it is asked to enforce.
-// displayLine normalizes a value for a tool header: one logical line, valid
-// UTF-8, and no length cap.
-//
-// A header segment that carries the call's own arguments must use this rather
-// than truncateForDisplay. wrapToolDisplayLine already folds a long header onto
-// continuation rows, so there is nothing to gain from cutting the tail off —
-// and a reader who cannot see the last of the arguments cannot tell what the
-// call actually asked for.
-func displayLine(s string) string {
-	s = singleDisplayLine(strings.TrimSpace(s))
-	if !utf8.ValidString(s) {
-		s = strings.ToValidUTF8(s, "�")
-	}
-	return s
-}
-
-func truncateForDisplay(s string, maxLen int) string {
-	return runewidth.Truncate(displayLine(s), maxLen, "…")
-}
-
 func sessionSummary(m SessionSwitchedMsg) string {
 	if title := strings.TrimSpace(m.Title); title != "" {
 		return title

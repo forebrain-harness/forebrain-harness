@@ -237,20 +237,14 @@
                         <div class="u">
                           <div v-if="String(msg.content ?? '').trim()" class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
                           <!-- The prototype's .u-atts: what the message attached sits in
-                               the bubble, under the words, as the terminal shows it. -->
-                          <ul v-if="msg.attachments?.length" class="u-atts" :aria-label="t('chat.messageAttachments')">
-                            <li v-for="(attachment, index) in msg.attachments" :key="attachment.fileId ?? attachment.path ?? index">
-                              <component :is="attachment.fileId ? 'a' : 'span'"
-                                v-bind="attachment.fileId ? { href: attachmentUrl(attachment.fileId), target: '_blank', rel: 'noopener noreferrer' } : {}"
-                                class="inline-flex min-h-[26px] items-center gap-1.5 rounded-md border border-border bg-background px-1.5 py-0.5 font-mono text-[11.5px] text-foreground"
-                                :class="attachment.fileId ? 'group hover:bg-accent hover:text-accent-foreground' : ''"
-                                v-tip:top="attachment.path ?? attachment.name">
-                                <ImageIcon v-if="isImageAttachment(attachment)" class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
-                                <Paperclip v-else class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
-                                <span class="min-w-0 break-all">{{ attachment.name || t('chat.attachment') }}</span>
-                              </component>
-                            </li>
-                          </ul>
+                               the bubble, under the words, as the terminal shows it —
+                               each chip downloads by its name and previews by its mark. -->
+                          <UserAttachments
+                            v-if="msg.attachments?.length"
+                            :attachments="msg.attachments"
+                            :session-id="sessionId"
+                            :row-id="msg.rowId"
+                          />
                         </div>
                         <!-- The prototype's .u-acts: on hover (or keyboard focus) the
                              two actions the message offers — rewind to here and copy. -->
@@ -411,7 +405,7 @@
                   <div class="flex min-w-0 flex-1 items-center gap-2">
                     <ComposerPlusMenu :disabled="composerLocked" @insert="insertPlusCommand" />
                     <ModeChip :mode="mode" :disabled="isStreaming || composerLocked" @select="selectMode" />
-                    <ApprovalPresetPicker :session-id="sessionId" />
+                    <ApprovalPresetPicker ref="approvalPickerRef" :session-id="sessionId" />
                     <ViewModeChip v-model="viewMode" />
                   </div>
                   <div class="flex items-center gap-2">
@@ -428,6 +422,7 @@
                       :disabled="composerLocked || !sessionModelData"
                       :compact="drawerVisible"
                       @saved="loadSessionModel(sessionId ?? '')"
+                      @pick="pickDraftModel"
                     />
                     <EffortChip
                       :effort="sessionModelData?.effort ?? ''"
@@ -593,7 +588,7 @@
 <script setup lang="ts">
 import { h, ref, computed, nextTick, onMounted, onUnmounted, watch, withDirectives } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { CheckCircle, CircleAlert, Bot, Image as ImageIcon, ImageOff, Paperclip, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
+import { CheckCircle, CircleAlert, Bot, ImageOff, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import ProjectPill from '@/components/chat/ProjectPill.vue'
@@ -614,6 +609,7 @@ import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import McpNotice from '@/components/chat/McpNotice.vue'
 import ComposerPlusMenu from '@/components/chat/ComposerPlusMenu.vue'
 import ModeChip from '@/components/chat/ModeChip.vue'
+import UserAttachments from '@/components/chat/UserAttachments.vue'
 import ModelChip from '@/components/chat/ModelChip.vue'
 import EffortChip from '@/components/chat/EffortChip.vue'
 import ContextRing from '@/components/chat/ContextRing.vue'
@@ -677,7 +673,7 @@ import { useWorkspaceTree, migrateWorkspaceTree } from '@/composables/useWorkspa
 import { useChatSessions } from '@/composables/useChatSessions'
 import { useSessionInfo, sessionHeaderTitle } from '@/composables/useSessionInfo'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
-import { getErrorMessage, forebrainApi, type AgentRosterRow, type ChatAttachmentRecord, type ProjectRecord, type RewindPreview, type SessionContextDebug, type SessionModelResponse, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
+import { getErrorMessage, forebrainApi, type AgentRosterRow, type ProjectRecord, type RewindPreview, type SessionContextDebug, type SessionModelResponse, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
 import { targetFromFolder, targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
 import { formatProviderError } from '@/lib/providerError'
 import type { ComposerSubmission, PickedFile, SubmittedAttachment } from '@/lib/composerSubmission'
@@ -1063,6 +1059,22 @@ function cancelTrust() {
 }
 
 /**
+ * Writes the model, effort and approval preset a new chat's chips were set to
+ * onto the conversation its first message just opened. A write that fails
+ * leaves that conversation on the default; the chips then read what it really
+ * runs on, so nothing claims a choice the server does not hold.
+ */
+async function applyDraftChoices(id: string) {
+  const model = draftModel.value
+  const preset = approvalPickerRef.value?.takeDraft() ?? null
+  draftModel.value = null
+  const writes: Promise<unknown>[] = []
+  if (model) writes.push(forebrainApi.saveSessionModel(id, model).catch(() => undefined))
+  if (preset) writes.push(forebrainApi.sessionPreset(id, preset).catch(() => undefined))
+  await Promise.all(writes)
+}
+
+/**
  * Open the conversation this send belongs to: the current one, or a new one in
  * the picked project. Returns null when nothing was opened — no project picked
  * (the pill is marked) or the trust prompt was declined — so the caller keeps
@@ -1085,6 +1097,10 @@ async function ensureSessionForSend(): Promise<string | null> {
       ...(picked.projectId ? { projectId: picked.projectId } : { folder: picked.folder }),
     })
     createdLine.value = created.created ? { name: created.project?.name ?? picked.name } : null
+    // What the chips were set to before there was a conversation becomes this
+    // conversation's own choice, ahead of its first turn (and before the page
+    // re-reads the session's chips, so they show what it will really run on).
+    await applyDraftChoices(created.id)
     sessionId.value = created.id
     // The tree the pill's project already loaded is this conversation's file
     // view now: carry it over so the first send does not flash an empty tree.
@@ -1377,20 +1393,37 @@ function imageRefusalSentence(msg: { imageRefusal?: { kind?: 'unsupported' | 're
 
 let sessionModelGeneration = 0
 
+/** The composer's approval switch, so a new chat's pick can be carried into its session. */
+const approvalPickerRef = ref<InstanceType<typeof ApprovalPresetPicker> | null>(null)
+
+/**
+ * What a new chat's model and effort chips have been set to, until its first
+ * message opens the conversation and the page writes it as that conversation's
+ * own choice. The chips themselves work before there is a session: they read
+ * the agent's default (`chatModelDefault`) and the pick is held here.
+ */
+const draftModel = ref<{ provider: string; model: string; effort: string } | null>(null)
+
 async function loadSessionModel(sid: string | null) {
   const generation = ++sessionModelGeneration
-  if (!sid) {
-    sessionModelData.value = null
-    return
-  }
+  if (!sid) draftModel.value = null
   try {
-    const res = await forebrainApi.sessionModel(sid)
+    // No session yet: the model a new conversation would start on.
+    const res = sid ? await forebrainApi.sessionModel(sid) : await forebrainApi.chatModelDefault()
     if (generation === sessionModelGeneration) sessionModelData.value = res
   } catch {
     // Without the facts the chips stay hidden: nothing is invented for a
     // conversation whose model could not be read.
     if (generation === sessionModelGeneration) sessionModelData.value = null
   }
+}
+
+/** A model picked on a new chat: held, with the effort back at the model's default. */
+function pickDraftModel(option: { provider: string; model: string }) {
+  const data = sessionModelData.value
+  if (!data) return
+  draftModel.value = { provider: option.provider, model: option.model, effort: '' }
+  sessionModelData.value = { ...data, provider: option.provider, model: option.model, effort: '' }
 }
 
 watch(sessionId, (sid) => {
@@ -1408,7 +1441,12 @@ const sessionEfforts = computed(() => {
 async function selectEffort(effort: string) {
   const sid = sessionId.value
   const data = sessionModelData.value
-  if (!sid || !data) return
+  if (!data) return
+  if (!sid) {
+    draftModel.value = { provider: data.provider, model: data.model, effort }
+    sessionModelData.value = { ...data, effort }
+    return
+  }
   try {
     const saved = await forebrainApi.saveSessionModel(sid, { provider: data.provider, model: data.model, effort })
     sessionModelData.value = { ...data, provider: saved.provider, model: saved.model, effort: saved.effort }
@@ -2109,15 +2147,6 @@ function messageContentClass(role: string): string | undefined {
   return 'w-full min-w-0 max-w-full overflow-visible break-words gap-[10px] text-[13px] leading-[1.55] [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto'
 }
 
-/** An attachment the model was shown as an image: an image upload, or an image picked from the workspace. */
-function isImageAttachment(attachment: ChatAttachmentRecord): boolean {
-  return Boolean(attachment.path) || String(attachment.mediaType ?? '').startsWith('image/')
-}
-
-function attachmentUrl(fileId: string): string {
-  return `/api/files/${encodeURIComponent(fileId)}/download`
-}
-
 function isAllowedAttachmentType(mediaType: string, filename: string): boolean {
   const t = (mediaType ?? '').toLowerCase()
   const name = (filename ?? '').toLowerCase()
@@ -2657,12 +2686,6 @@ onUnmounted(() => {
   justify-self: end;
   font-size: 11px;
   color: var(--forebrain-muted-text);
-}
-.u-atts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
 }
 .u-acts {
   display: flex;

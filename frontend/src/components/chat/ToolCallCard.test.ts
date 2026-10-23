@@ -197,4 +197,40 @@ describe('ToolCallCard', () => {
     expect(head.attributes('title')).toBe(summary)
     expect(head.text()).toBe(summary)
   })
+
+  // A call that never ran is canceled, not refused: in a conversation that
+  // asks for no approvals nothing was denied, so the state word must never say so.
+  it('says a call that never ran was canceled, and a refused one was denied', () => {
+    const state = (status: string) => mount(ToolCallCard, {
+      props: { step: stepOf({ status, summary: 'go test ./...', toolName: 'shell' }) },
+    }).get('.tool-status')
+
+    const canceled = state('canceled')
+    expect(canceled.text()).toBe('Canceled')
+    expect(canceled.classes()).toContain('tool-status--canceled')
+
+    const denied = state('denied')
+    expect(denied.text()).toBe('Denied')
+    expect(denied.classes()).toContain('tool-status--denied')
+  })
+
+  // The head is the engine's header — the terminal's words — so only a shell
+  // call says "Ran"; every other tool names what it did.
+  it('heads the card with the engine header and draws the state as an icon', () => {
+    const wrapper = mount(ToolCallCard, {
+      props: { step: stepOf({ header: 'Read plans/100.md lines 1-96 · <0.1s', summary: 'ran read /abs/plans/100.md · lines 1-96' }) },
+    })
+    expect(wrapper.get('.tool-head-cmd').text()).toBe('Read plans/100.md lines 1-96 · <0.1s')
+    expect(wrapper.text()).not.toContain('ran read')
+    // The state is an icon with its word as the label, not a word in the header.
+    const state = wrapper.get('.tool-status')
+    expect(state.attributes('role')).toBe('img')
+    expect(state.attributes('aria-label')).toBe('Done')
+    expect(state.find('svg').exists()).toBe(true)
+  })
+
+  it('falls back to the summary for a step that arrived without a header', () => {
+    const wrapper = mount(ToolCallCard, { props: { step: stepOf({ summary: 'ran read a.go' }) } })
+    expect(wrapper.get('.tool-head-cmd').text()).toBe('ran read a.go')
+  })
 })

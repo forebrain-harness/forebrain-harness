@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -533,7 +532,6 @@ type Transport struct {
 	// Path is the credentials file this transport reads and refreshes.
 	Path string
 	Base http.RoundTripper
-	mu   sync.Mutex
 }
 
 func (t *Transport) SetBase(base http.RoundTripper) { t.Base = base }
@@ -568,8 +566,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func (t *Transport) current(ctx context.Context) (Credentials, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	// One lock per login file, not per Transport: every client of this file in
+	// the process (a turn's LLM, a subagent's, a codex probe) shares it, so the
+	// refresh token — which rotates on use — is exchanged once.
+	mu := llm.CredentialMutex(t.Path)
+	mu.Lock()
+	defer mu.Unlock()
 	c, err := Load(t.Path)
 	if err != nil {
 		return Credentials{}, fmt.Errorf("ChatGPT login required: %w", err)
@@ -591,6 +593,15 @@ func (t *Transport) current(ctx context.Context) (Credentials, error) {
 		// renders it verbatim.
 		var api *llm.APIError
 		if errors.As(err, &api) && api.Code == "invalid_grant" {
+			// Not necessarily dead: another process on this same login file
+			// (the TUI beside the gateway) may have exchanged the token first
+			// and written the rotated pair. A different refresh token plus a
+			// login that is not about to expire is that live login.
+			if latest, loadErr := Load(t.Path); loadErr == nil &&
+				latest.RefreshToken != c.RefreshToken &&
+				time.Until(latest.ExpiresAt) > 2*time.Minute {
+				return latest, nil
+			}
 			return Credentials{}, &llm.APIError{
 				StatusCode: http.StatusUnauthorized,
 				Message:    "ChatGPT login expired; sign in again",

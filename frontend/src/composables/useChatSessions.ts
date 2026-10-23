@@ -41,6 +41,8 @@ const page = ref(1)
 const hasMore = ref(false)
 /** The drawer's search box, as the server last saw it. */
 const search = ref('')
+/** The drawer's project filter, as the server last saw it: '' is every project. */
+const projectFilter = ref('')
 
 // The newest request's sequence number: an answer whose number is stale is
 // dropped instead of applied, the same guard every paged list carries.
@@ -57,13 +59,19 @@ function toItems(records: ChatSessionRecord[]): ChatSessionItem[] {
   }))
 }
 
-async function fetchSessions(q?: string) {
+async function fetchSessions(q?: string, projectId?: string) {
   if (q !== undefined) search.value = q
+  if (projectId !== undefined) projectFilter.value = projectId
   const mine = ++latest
   loading.value = true
   error.value = null
   try {
-    const data = await forebrainApi.chatSessions('', { page: 1, pageSize: drawerPageSize, q: search.value })
+    const data = await forebrainApi.chatSessions('', {
+      page: 1,
+      pageSize: drawerPageSize,
+      q: search.value,
+      projectId: projectFilter.value || undefined,
+    })
     if (mine !== latest) return
     sessions.value = toItems(data?.records ?? [])
     total.value = data?.total ?? sessions.value.length
@@ -91,6 +99,7 @@ async function loadMore() {
       page: page.value + 1,
       pageSize: drawerPageSize,
       q: search.value,
+      projectId: projectFilter.value || undefined,
     })
     if (mine !== latest) return
     const records = toItems(data?.records ?? [])
@@ -132,7 +141,7 @@ async function createSession(opts: { title?: string; source?: '' | 'workshop'; p
 }
 
 export function useChatSessions() {
-  return { sessions, loading, loadingMore, error, total, page, hasMore, search, fetchSessions, loadMore, createSession }
+  return { sessions, loading, loadingMore, error, total, page, hasMore, search, projectFilter, fetchSessions, loadMore, createSession }
 }
 
 import { onTenantReset } from '@/composables/useTenantScope'
@@ -148,4 +157,5 @@ onTenantReset(() => {
   page.value = 1
   hasMore.value = false
   search.value = ''
+  projectFilter.value = ''
 })

@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { config, mount } from '@vue/test-utils'
 import tip from '@/directives/tip'
 
-import type { SessionModelOption } from '@/lib/api'
+import { forebrainApi, type SessionModelOption } from '@/lib/api'
 import { setLocale } from '@/locales'
 import ModelChip from './ModelChip.vue'
 
@@ -80,5 +80,20 @@ describe('ModelChip', () => {
     expect(full.get('[data-testid="model-chip"]').findAll('svg')).toHaveLength(2)
     expect(compact.get('[data-testid="model-chip"]').findAll('svg')).toHaveLength(1)
     expect(compact.get('[data-testid="model-chip"]').text()).toContain('deepseek-v4-pro')
+  })
+
+  // A new chat has no session row to write: the chip works and hands the pick
+  // to the page, which writes it once the first message opens the session.
+  it('hands a pick on a new chat to the page instead of writing a session row', async () => {
+    const save = vi.spyOn(forebrainApi, 'saveSessionModel').mockResolvedValue({ provider: '', model: '', effort: '' })
+    const wrapper = mountChip({ sessionId: '' })
+    expect(wrapper.find('[data-testid="model-chip"]').attributes('disabled')).toBeUndefined()
+
+    await wrapper.find('[data-testid="model-chip"]').trigger('click')
+    await wrapper.find('[data-testid="model-option-deepseek-v4-flash"]').trigger('click')
+
+    expect(save).not.toHaveBeenCalled()
+    expect(wrapper.emitted('pick')?.[0]?.[0]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+    expect(wrapper.emitted('saved')).toBeUndefined()
   })
 })

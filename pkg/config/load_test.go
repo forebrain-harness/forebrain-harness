@@ -10,8 +10,9 @@ import (
 )
 
 // TestSavePreservesLLMProviderSecretsAfterReorder guards the regression where
-// PromoteMatchingLLMProvider reorders llm_providers, then Save's positional
-// secret restore swaps api_key placeholders between entries.
+// a list reorder (any writer moving llm_providers entries) is followed by
+// Save's positional secret restore, which used to swap api_key placeholders
+// between entries.
 func TestSavePreservesLLMProviderSecretsAfterReorder(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", dir)
@@ -54,8 +55,8 @@ func TestSavePreservesLLMProviderSecretsAfterReorder(t *testing.T) {
 		t.Fatalf("provider[1] api_key: got %q, want ${ANTHROPIC_API_KEY}", mainDef.LLMProviders[1].APIKey)
 	}
 
-	// Simulate /model switch: reorder providers (move anthropic to index 0).
-	// This mimics PromoteMatchingLLMProvider.
+	// Simulate a list reorder (move anthropic to index 0) to exercise the
+	// positional secret restore.
 	entry := mainDef.LLMProviders[1]
 	copy(mainDef.LLMProviders[1:2], mainDef.LLMProviders[0:1])
 	mainDef.LLMProviders[0] = entry
@@ -731,5 +732,60 @@ func TestSaveLeavesNoTempFileAndKeepsMode(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDanglingDefaultModelRejectedBothWays pins that a default_model naming
+// no llm_providers entry is refused by load AND by Save — no write path can
+// persist a yaml the process would refuse to read back.
+func TestDanglingDefaultModelRejectedBothWays(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", dir)
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	path := filepath.Join(dir, "forebrain.yaml")
+	seed := `agents:
+  definitions:
+    main:
+      default_model: openai/gone
+      llm_providers:
+      - provider: openai
+        model: gpt-4
+        api_key: ${OPENAI_API_KEY}
+        base_url: https://api.openai.com/v1
+`
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if _, err := LoadPersisted(path); err == nil {
+		t.Fatal("load accepted a dangling default_model")
+	} else if !strings.Contains(err.Error(), "agents.definitions.main.default_model") {
+		t.Fatalf("load error does not name the field path: %v", err)
+	}
+
+	cfg := Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+		"main": {
+			Primary: true,
+			LLMProviders: []AgentLLMProviderConfig{
+				{Provider: "openai", Model: "gpt-4", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
+			},
+			DefaultModel: "openai/gone",
+		},
+	}}}
+	if err := Save(path, cfg); err == nil {
+		t.Fatal("Save accepted a dangling default_model")
+	} else if !strings.Contains(err.Error(), "agents.definitions.main.default_model") {
+		t.Fatalf("Save error does not name the field path: %v", err)
+	}
+
+	// A default_model that does resolve saves cleanly, and a first-entry
+	// default (absent field) still loads.
+	main := cfg.Agents.Definitions["main"]
+	main.DefaultModel = "openai/gpt-4"
+	cfg.Agents.Definitions["main"] = main
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save with resolvable default_model: %v", err)
+	}
+	if _, err := LoadPersisted(path); err != nil {
+		t.Fatalf("load after save: %v", err)
 	}
 }

@@ -1287,3 +1287,58 @@ func TestProviderInferenceIgnoresLoginBackedProviders(t *testing.T) {
 		t.Fatalf("ProviderForAgentModel(kimi-k3) = %q, want empty (opencode-only id)", got)
 	}
 }
+
+// An empty model selector is the default model: default_model when main names
+// one, otherwise the first entry. A subagent type without providers of its
+// own inherits main's default through the same read.
+func TestResolveAgentProviderEmptySelectorUsesDefaultModel(t *testing.T) {
+	first := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}
+	second := appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4"}
+	newCfg := func(defaultModel string) *appcfg.Root {
+		return &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{first, second}, DefaultModel: defaultModel},
+		}}}
+	}
+
+	got, err := resolveAgentProvider(newCfg(""), "main", modelSelector{})
+	if err != nil || got.Model != first.Model {
+		t.Fatalf("absent default_model = %s/%v, want first entry %s", got.Provider, err, first.Model)
+	}
+	got, err = resolveAgentProvider(newCfg("deepseek/deepseek-v4"), "main", modelSelector{})
+	if err != nil || got.Provider != second.Provider || got.Model != second.Model {
+		t.Fatalf("default_model = %s/%v, want deepseek/deepseek-v4", got.Provider, err)
+	}
+	// A provider-less type definition inherits main's default, so background
+	// and user-session subagents read the same "default".
+	got, err = resolveAgentProvider(newCfg("deepseek/deepseek-v4"), "goal-evaluator", modelSelector{})
+	if err != nil || got.Model != second.Model {
+		t.Fatalf("type inheritance = %s/%v, want main's default deepseek-v4", got.Model, err)
+	}
+	// Dangling default_model is an error naming the value — no fall-back to
+	// the first entry.
+	_, err = resolveAgentProvider(newCfg("deepseek/gone"), "main", modelSelector{})
+	if err == nil || !strings.Contains(err.Error(), "default_model") || !errors.Is(err, errModelNotConfigured) {
+		t.Fatalf("dangling default_model error = %v", err)
+	}
+}
+
+// The background memory pipeline resolves its default the same way the
+// primary path does: default_model when set, otherwise the first entry.
+func TestResolveMemoryLLMProviderUsesDefaultModel(t *testing.T) {
+	first := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}
+	second := appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4"}
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{first, second}, DefaultModel: "deepseek/deepseek-v4"},
+	}}}
+	got := resolveMemoryLLMProvider(cfg, "main", "")
+	if got == nil || got.Provider != "deepseek" || got.Model != "deepseek-v4" {
+		t.Fatalf("memory default = %+v, want deepseek/deepseek-v4", got)
+	}
+	main := cfg.Agents.Definitions["main"]
+	main.DefaultModel = ""
+	cfg.Agents.Definitions["main"] = main
+	got = resolveMemoryLLMProvider(cfg, "main", "")
+	if got == nil || got.Model != "gpt-4o" {
+		t.Fatalf("memory default absent = %+v, want first entry gpt-4o", got)
+	}
+}

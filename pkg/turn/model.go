@@ -266,10 +266,20 @@ type ModelSelectionState struct {
 
 // ModelSettings is what /model works from: the live config, the agent whose
 // models it offers, and the selection the runtime is actually running.
+//
+// Selection is the session's own stored row, raw: a row the config no longer
+// offers reads as exactly that, so /model's "changed" test cannot be tricked
+// into "no change" by a resolution that fell back to the runner's current
+// model — the re-choose a turn refusal asks for must be able to land on the
+// default entry itself. LiveSelection is the same row resolved against the
+// runner (effort derived, absent rows falling back to the published
+// selection): the display-and-inherit view fork and other consumers that
+// need "what does this conversation actually run on" use that one.
 type ModelSettings struct {
-	Config    *appcfg.Root
-	AgentName string
-	Selection ModelSelectionState
+	Config        *appcfg.Root
+	AgentName     string
+	Selection     ModelSelectionState
+	LiveSelection ModelSelectionState
 }
 
 // ModelApplyOutcome classifies how far a model selection got. A plain nil

@@ -756,16 +756,25 @@ func (r *Runner) approvalHookModel(ctx context.Context) string {
 	return ""
 }
 
-// unloadedPrimaryModelFallback is the config-order read every primary-model
+// unloadedPrimaryModelFallback is the config read every primary-model
 // consumer keeps for a Runner that never completed a load (test fixtures
 // assembled without Load). A loaded runner's truth is the published snapshot;
-// this fallback is not a live-selection channel.
+// this fallback is not a live-selection channel. It resolves the effective
+// default — default_model when set, otherwise the first entry — the same way
+// the runtime does, so the two cannot disagree.
 func (r *Runner) unloadedPrimaryModelFallback() (appcfg.AgentLLMProviderConfig, bool) {
-	providers := resolvedAgentProviders(r.AppCfg, r.activeAgentNameForModel())
-	if len(providers) == 0 {
+	def, ok := r.AppCfg.Agents.Definitions[r.activeAgentNameForModel()]
+	if !ok || len(appcfg.ResolvedLLMConfigs(def)) == 0 {
+		def, ok = r.AppCfg.Agents.Definitions["main"]
+	}
+	if !ok {
 		return appcfg.AgentLLMProviderConfig{}, false
 	}
-	return providers[0], true
+	entry := appcfg.EffectiveDefaultLLM(def)
+	if entry == nil {
+		return appcfg.AgentLLMProviderConfig{}, false
+	}
+	return *entry, true
 }
 
 // effectivePrimaryClient builds a fresh client from the published effective
@@ -1436,8 +1445,14 @@ func (r *Runner) RunContent(ctx context.Context, parts []llm.ContentPart) (*agen
 	if r != nil {
 		// One store read per turn: the conversation's own stored model choice
 		// becomes the run's immutable selection, inherited by every child
-		// context the run spawns.
-		ctx = r.injectSessionModelSelection(ctx)
+		// context the run spawns. A stored pair the config no longer offers
+		// fails the turn here — the user re-chooses with /model; nothing is
+		// silently substituted.
+		var injectErr error
+		ctx, injectErr = r.injectSessionModelSelection(ctx)
+		if injectErr != nil {
+			return nil, injectErr
+		}
 	}
 	if r != nil {
 		// Every read of the "current directory" this turn makes — tool
@@ -1665,11 +1680,11 @@ func (r *Runner) activeAgentNameForModel() string {
 // A loaded runner answers from the published effective snapshot. A Runner that
 // never completed a load (test fixtures) keeps the config-order fallback,
 // which expands a provider entry that names several models (Models: [a, b])
-// into one entry per model — the old per-surface copies read
-// appcfg.PrimaryLLM, which returns the raw first entry untouched, so a config
-// that used the Models list form showed an empty model id on /status and
-// /model while the runtime was running the first model. Every caller that
-// draws "which model am I on" must come through here, not re-read the config.
+// into one entry per model — the old per-surface copies read the raw first
+// entry untouched, so a config that used the Models list form showed an empty
+// model id on /status and /model while the runtime was running the first
+// model. Every caller that draws "which model am I on" must come through
+// here, not re-read the config.
 func PrimaryModel(r *Runner) (string, string) {
 	if r == nil || r.AppCfg == nil {
 		return "", ""
@@ -1728,13 +1743,13 @@ func SubagentOwnModel(r *Runner, agentType string) (provider, model, effort stri
 	if !defined {
 		return "", "", "", false
 	}
-	providers := appcfg.ResolvedLLMConfigs(def)
-	if len(providers) == 0 {
+	entry := appcfg.EffectiveDefaultLLM(def)
+	if entry == nil {
 		return "", "", "", false
 	}
-	return strings.TrimSpace(providers[0].Provider),
-		strings.TrimSpace(providers[0].Model),
-		reasoningEffortFromParams(providers[0].Params),
+	return strings.TrimSpace(entry.Provider),
+		strings.TrimSpace(entry.Model),
+		reasoningEffortFromParams(entry.Params),
 		true
 }
 

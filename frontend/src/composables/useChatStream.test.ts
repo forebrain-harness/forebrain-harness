@@ -17,6 +17,7 @@ import {
   formatWorkedDurationLabel,
   hasVisibleBlocks,
   imageBytesLabel,
+  isSubagentDispatchTool,
   placeBeforeGateAnchor,
   previewFieldsFromMeta,
   subagentCallView,
@@ -2863,7 +2864,7 @@ describe('conversation tool and approval timeline', () => {
       expect(turn?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'tool', 'tool', 'tool'])
       expect(turn?.blocks?.[0]).toMatchObject({ kind: 'assistant', text: 'let me check' })
       expect(turn?.blocks?.[1]).toMatchObject({ kind: 'tool', step: { stepId: 'call-1', status: 'completed', output: 'a.go\nb.go' } })
-      expect(turn?.blocks?.[2]).toMatchObject({ kind: 'tool', step: { stepId: 'call-2', status: 'canceled', summary: 'Canceled · go test ./...' } })
+      expect(turn?.blocks?.[2]).toMatchObject({ kind: 'tool', step: { stepId: 'call-2', status: 'canceled', summary: 'go test ./...' } })
       expect(turn?.blocks?.[3]).toMatchObject({ kind: 'tool', step: { stepId: 'call-grep', status: 'canceled' } })
       // The row that only issued a call contributes its card and no prose.
       expect(turn?.content).toBe('let me check')
@@ -3338,6 +3339,79 @@ describe('conversation tool and approval timeline', () => {
     }
   }))
 
+})
+
+describe('a dispatch call the run never answered', () => {
+  beforeAll(() => setLocale('en'))
+  afterAll(() => setLocale('en'))
+
+  const issued = (id: string, name: string, args = '{}') => JSON.stringify([
+    { type: 'tool_calls', tool_calls: [{ id, type: 'function', function: { name, arguments: args } }] },
+  ])
+
+  // A run that stopped under a subagent_* call leaves the call with no row of
+  // its own. The execution's card comes from its events; a second, canceled
+  // card for the same call is one the terminal does not draw — and with
+  // nobody asked (a YOLO conversation) it must not read as a refusal either.
+  it('draws no card of its own, while an ordinary call it ran beside still shows canceled', async () => {
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', rowId: 1, role: 'user', content: 'go' },
+      { id: 'a1', rowId: 2, role: 'assistant', content: 'Dispatching plan 102:', partsJson: issued('call-run', 'subagent_run') },
+      { id: 'a2', rowId: 3, role: 'assistant', content: '', partsJson: issued('call-shell', 'shell', '{"command":"go test ./..."}') },
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 'dispatch-session', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'dispatch-session', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 'dispatch-session'
+      await stream.loadMessages('dispatch-session')
+
+      const turn = stream.messages.value.find((message) => message.role === 'assistant')
+      const tools = (turn?.blocks ?? []).filter((block) => block.kind === 'tool')
+      expect(tools).toHaveLength(1)
+      expect(tools[0]).toMatchObject({ kind: 'tool', step: { stepId: 'call-shell', status: 'canceled', summary: 'go test ./...' } })
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
+  it('names which verbs are dispatches, the same four the terminal does', () => {
+    for (const name of ['subagent_fanout', 'subagent_run', 'subagent_send', 'subagent_continue']) {
+      expect(isSubagentDispatchTool(name)).toBe(true)
+    }
+    for (const name of ['shell', 'subagent_status', 'subagent_wait', 'subagent_list', '']) {
+      expect(isSubagentDispatchTool(name)).toBe(false)
+    }
+  })
+})
+
+describe('the engine header of a tool card', () => {
+  const issued = (id: string, name: string, args: string) => JSON.stringify([
+    { type: 'tool_calls', tool_calls: [{ id, type: 'function', function: { name, arguments: args } }] },
+  ])
+
+  it('rides a stored tool row, a live payload and an unanswered call', () => {
+    expect(toolStepFromRow({ toolStepId: 'c1', partsJson: '[]', header: 'Read a.go lines 1-9' }).header).toBe('Read a.go lines 1-9')
+    expect(toolStepFromRow({ toolStepId: 'c1', partsJson: '[]' }).header).toBeUndefined()
+    expect(toolStepFromPayload({ stepId: 's1', toolName: 'shell', header: 'Ran ls', summary: 'ran ls' }, true, 'x').header).toBe('Ran ls')
+    expect(toolStepFromPayload({ stepId: 's1', toolName: 'shell', summary: 'ran ls' }, true, 'x').header).toBeUndefined()
+  })
+
+  it('heads a call the run never answered with the header the gateway worded for it', () => {
+    const messages = conversationFromTranscript([
+      { id: 'u1', rowId: 1, role: 'user', content: 'go' },
+      {
+        id: 'a1', rowId: 2, role: 'assistant', content: '', partsJson: issued('c1', 'shell', '{"command":"go test ./..."}'),
+        callHeaders: { c1: 'Canceled go test ./...' },
+      },
+    ] as never)
+    const tool = messages.flatMap((m) => m.blocks ?? []).find((b) => b.kind === 'tool')
+    expect(tool).toMatchObject({ kind: 'tool', step: { stepId: 'c1', status: 'canceled', header: 'Canceled go test ./...' } })
+  })
 })
 
 describe('conversation timeline copy', () => {

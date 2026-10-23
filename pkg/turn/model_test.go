@@ -302,7 +302,7 @@ func (f *modelSelectionFixture) modelSettings(_ string) (ModelSettings, error) {
 	if err != nil {
 		return ModelSettings{}, err
 	}
-	return ModelSettings{Config: &cfg, AgentName: "main", Selection: f.handler.selection}, nil
+	return ModelSettings{Config: &cfg, AgentName: "main", Selection: f.handler.selection, LiveSelection: f.handler.selection}, nil
 }
 
 // choiceLabel names a configured model the way /model's picker does.
@@ -644,4 +644,35 @@ func TestStatusFactsLSPRow(t *testing.T) {
 	}
 	require.Equal(t, "2 running, 1 failed · /lsp", values["Language servers"])
 	require.Greater(t, slices.Index(labels, "Language servers"), slices.Index(labels, "MCP servers"), "the LSP row must follow MCP servers:\n%v", labels)
+}
+
+// With no live selection, the picker's "current" mark and chooseModel's
+// "changed" diff follow the effective default — the entry default_model names
+// — not index zero.
+func TestModelPickerMarksTheDefaultModelEntry(t *testing.T) {
+	f := newModelSelectionFixture(t, ModelSelectionState{})
+	seed, err := os.ReadFile(f.cfgPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(f.cfgPath, append([]byte(""), bytes.Replace(seed,
+		[]byte("    main:\n"), []byte("    main:\n      default_model: deepseek/deepseek-chat\n"), 1)...), 0o600))
+
+	res := execModel(f.ctx)
+	require.True(t, res.Handled)
+	require.NotNil(t, res.Picker)
+	current := -1
+	for i, item := range res.Picker.Items {
+		if item.Current {
+			require.Equal(t, -1, current, "more than one current item")
+			current = i
+		}
+	}
+	require.NotEqual(t, -1, current, "no current item")
+	require.True(t, strings.Contains(res.Picker.Items[current].Value, "deepseek"), "current item = %s, want the default_model entry", res.Picker.Items[current].Value)
+
+	// Choosing the default_model entry is a no-op, not a switch.
+	label := f.choiceLabel(t, "deepseek", "deepseek-chat")
+	res = Choose(f.ctx, SlashChoice{Command: "model", Value: label})
+	require.True(t, res.Handled)
+	require.Equal(t, -1, slices.Index(f.calls(), "select("), "re-selecting the default applied a live switch: %v", f.calls())
+	require.Equal(t, "Still using deepseek / deepseek-chat.", res.Reply)
 }

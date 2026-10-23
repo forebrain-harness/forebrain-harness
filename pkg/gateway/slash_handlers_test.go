@@ -504,19 +504,29 @@ func requireGatewaySelection(t *testing.T, s *Server, sessionID, provider, model
 	require.Equal(t, effort, settings.Selection.Effort)
 }
 
+// requireGatewayNoSelection pins the raw-row rule: a session that never chose
+// carries no selection into /model — the picker marks the effective default
+// instead of borrowing the runner's process-level pin.
+func requireGatewayNoSelection(t *testing.T, s *Server, sessionID string) {
+	t.Helper()
+	settings, err := s.ModelSettings(sessionID)
+	require.NoError(t, err)
+	require.False(t, settings.Selection.Set, "a session without a stored row must not borrow the runner's pin")
+}
+
 // TestGatewayModelSettingsReadsSessionSelection pins the marker's source:
 // the session's own stored row, resolved against the runner's live config —
 // never config order alone.
 func TestGatewayModelSettingsReadsSessionSelection(t *testing.T) {
 	s := gatewayModelServer(t)
 	require.NoError(t, s.Sessions.Ensure(context.Background(), "s1", "s1"))
-	requireGatewaySelection(t, s, "s1", "openai", "gpt-a", "")
+	requireGatewayNoSelection(t, s, "s1")
 
 	// nil effort derives the entry's configured effort once.
 	require.NoError(t, s.SelectModel(context.Background(), "s1", turn.ModelChoice{Provider: "openai", Model: "gpt-b"}, nil))
 	requireGatewaySelection(t, s, "s1", "openai", "gpt-b", "high")
-	// A session with no row keeps reading the runner's published selection.
-	requireGatewaySelection(t, s, "s2", "openai", "gpt-a", "")
+	// A session with no row carries no selection of its own.
+	requireGatewayNoSelection(t, s, "s2")
 	// The catalog still comes from the live config.
 	settings, err := s.ModelSettings("s1")
 	require.NoError(t, err)
@@ -547,7 +557,7 @@ func TestGatewayModelSelectionIsPerSession(t *testing.T) {
 
 	require.NoError(t, s.SelectModel(ctx, "s1", turn.ModelChoice{Provider: "openai", Model: "gpt-b"}, nil))
 	// s2 resolves to the same base runner and observes nothing of s1's choice.
-	requireGatewaySelection(t, s, "s2", "openai", "gpt-a", "")
+	requireGatewayNoSelection(t, s, "s2")
 	requireGatewaySelection(t, s, "s1", "openai", "gpt-b", "high")
 
 	// The runner's own published selection is the process default, untouched.
@@ -584,7 +594,7 @@ func TestGatewayProjectRunnerSelectionIsolated(t *testing.T) {
 	require.Equal(t, "gpt-a", run.PrimaryModelSelection(s.Runner).Model)
 	// The gateway seam routes through the pool's resolution; here it settles
 	// on the base runner, which the project selections never touched.
-	requireGatewaySelection(t, s, "any-session", "openai", "gpt-a", "")
+	requireGatewayNoSelection(t, s, "any-session")
 }
 
 // TestGatewayCatalogAgreesAfterPropagatedReload pins the boundary this test
@@ -645,10 +655,12 @@ func TestGatewayCatalogAgreesAfterPropagatedReload(t *testing.T) {
 	require.True(t, sel.Set)
 	require.Equal(t, "gpt-b", sel.Model)
 	require.Equal(t, "http://propagated.test/v1", run.PrimaryEndpoint(pooled))
+	// The session never chose on the web, so its marker carries no selection
+	// (the runner-level pin above is the pool entry's own, not the row's);
+	// the catalog still has to describe the reloaded world.
 	settings, err := s.ModelSettings(sid)
 	require.NoError(t, err)
-	require.Equal(t, sel.Provider, settings.Selection.Provider)
-	require.Equal(t, sel.Model, settings.Selection.Model)
+	require.False(t, settings.Selection.Set)
 	for _, choice := range turn.ModelChoices(settings.Config, settings.AgentName) {
 		if strings.EqualFold(choice.Model, "gpt-b") || strings.EqualFold(choice.Model, "gpt-a") {
 			continue

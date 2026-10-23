@@ -1627,7 +1627,7 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	// reads — is untouched.
 	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
-	require.Equal(t, "gpt-old", appcfg.PrimaryLLM(s.cfg().Agents.Definitions["main"]).Model, "the shared config file was rewritten")
+	require.Equal(t, "gpt-old", appcfg.EffectiveDefaultLLM(s.cfg().Agents.Definitions["main"]).Model, "the shared config file was rewritten")
 	require.Same(t, s.cfg(), s.runner().AppCfg)
 	sel, hasRow, selErr := s.sessStore().SessionModelSelection(context.Background(), "s1")
 	require.NoError(t, selErr)
@@ -30644,7 +30644,7 @@ func TestFooterNamesTheConfiguredDefaultBeforeAnyProjectRunner(t *testing.T) {
 	require.Equal(t, "openai/gpt-main", summarizeComposerModel(s))
 }
 
-func TestResumeMissingStoredModelFallsBackWithWarning(t *testing.T) {
+func TestResumeMissingStoredModelOpensWithWarning(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
@@ -30662,12 +30662,14 @@ func TestResumeMissingStoredModelFallsBackWithWarning(t *testing.T) {
 	switched, warning, err := switchStreamSession(ctx, state, renderer, nil, "sess-a")
 	require.NoError(t, err)
 	require.True(t, switched)
-	require.NotEmpty(t, warning, "the fallback must be visible to the user")
-	require.Contains(t, warning, "no longer configured")
+	// The conversation still opens (on the config default, which always
+	// resolves), warns that the next message will be refused, and keeps the
+	// row exactly as the user wrote it.
+	require.NotEmpty(t, warning, "the staleness must be visible to the user")
+	require.Contains(t, warning, "已不在配置中")
+	require.Contains(t, warning, "/model")
 	requireRunnerModel(t, s, "openai", "gpt-main", "")
-	// The stale row is overwritten with the fallback, so the next activation
-	// is warning-free.
-	require.Equal(t, "gpt-main", s.storedSelection(t, "sess-a").Model)
+	require.Equal(t, "gpt-other", s.storedSelection(t, "sess-a").Model, "the stored row must not be rewritten")
 	_, err = s.ActivateSessionModel(ctx, "sess-a")
 	require.NoError(t, err)
 }
@@ -30718,12 +30720,14 @@ func TestSwitchFailureKeepsQueuedInputAndSession(t *testing.T) {
 		q.FollowUp(queueInput(textSubmission("still mine")))
 	}
 	switched, warning, err := switchStreamSession(ctx, state, renderer, nil, "sess-b")
-	// The stored pair is gone; the fallback adopts the new configured
-	// default with a warning, and the switch still happens.
+	// The stored pair is gone: the conversation still opens — on the config
+	// default (always resolvable), so /model stays reachable — warns that the
+	// next message will be refused, and the switch still happens.
 	require.NoError(t, err)
 	require.True(t, switched)
-	require.Contains(t, warning, "no longer configured")
+	require.Contains(t, warning, "已不在配置中")
 	requireRunnerModel(t, s, "openai", "gpt-renamed", "")
+	require.Equal(t, "gpt-main", s.storedSelection(t, "sess-b").Model, "the stored row must not be rewritten")
 	if q := s.SurfaceInputQueue("sess-a"); q != nil {
 		require.False(t, q.Preview().Visible(), "a successful switch still discards queued input")
 	}
@@ -30887,15 +30891,16 @@ func TestCrossProcessProviderDetailsStillRefresh(t *testing.T) {
 	requireModel(t, f.b, "openai", "gpt-m1", "")
 	require.Equal(t, "http://rotated.test/v1", run.PrimaryEndpoint(f.b.runner()))
 
-	// Removing B's pair is a documented fallback, not a reload failure: B
-	// moves to the new configured default with a warning.
+	// Removing B's pair keeps B on the SAME model (the published snapshot's
+	// entry) — reload never fails on a missing pin and never switches models
+	// either; the conversation that pinned it is refused at its next turn.
 	withoutPair := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
 			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"},
 		}},
 	}}}
 	f.reloadFileIn(t, f.b, withoutPair)
-	requireModel(t, f.b, "openai", "gpt-m2", "")
+	requireModel(t, f.b, "openai", "gpt-m1", "")
 }
 
 // TestCrossProcessAgentSwitchDropsOldPin pins the /agent rule at the
@@ -30936,7 +30941,7 @@ func (tuiStubLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Res
 // rather than discarded, and a live model selection concurrent with a config
 // reload never corrupts the published selection.
 
-func TestApplyConfigFromDiskRollsBackOnUnloadableConfig(t *testing.T) {
+func TestApplyConfigFromDiskKeepsServingWhenProvidersEmptied(t *testing.T) {
 	t.Setenv("FOREBRAIN_TUI_RELOAD_TEST_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
@@ -30956,11 +30961,17 @@ func TestApplyConfigFromDiskRollsBackOnUnloadableConfig(t *testing.T) {
 	live := s.cfg()
 	require.Equal(t, "gpt-a", live.Agents.Definitions["main"].LLMProviders[0].Model)
 
-	// Parses, passes the startup check, but cannot load.
+	// A config whose providers list is emptied parses and passes the startup
+	// check, and a reload must not fail on the missing pin either: the runner
+	// keeps serving the published snapshot's model (no switch, no torn
+	// write). The error lands at the use point — a session that pinned the
+	// gone pair is refused at its next turn, where the user can re-choose.
 	require.NoError(t, os.WriteFile(cfgPath, []byte("agents:\n  definitions:\n    main: {}\n"), 0o600))
-	require.Error(t, s.reloadConfigFromDisk())
-	require.Same(t, live, s.cfg(), "a failed reload must leave the session on its previous config")
-	require.Equal(t, "gpt-a", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
+	require.NoError(t, s.reloadConfigFromDisk())
+	require.NotSame(t, live, s.cfg(), "a successful reload adopts the new config pointer")
+	sel := run.PrimaryModelSelection(s.runner())
+	require.True(t, sel.Set)
+	require.Equal(t, "gpt-a", sel.Model, "the runner keeps serving the snapshot's model")
 }
 
 func TestApplyConfigFromDiskRollbackFailureIsVisible(t *testing.T) {

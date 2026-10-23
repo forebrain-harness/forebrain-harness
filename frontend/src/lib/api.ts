@@ -128,6 +128,13 @@ export interface ChatMessageRecord {
    * transcript — the reloaded card says what the live one said.
    */
   subagentCall?: import('@/composables/useChatStream').SubagentCall | null
+  /**
+   * A tool row's card header, and — on an assistant row — the header each call
+   * it issued would carry if it never ran. Worded by the engine exactly as the
+   * terminal words them, paths relative to the conversation's directory.
+   */
+  header?: string
+  callHeaders?: Record<string, string> | null
   memoryCitation?: MemoryCitation | null
 }
 
@@ -1092,8 +1099,8 @@ export interface ProviderRecord {
   apiKeySet?: boolean
   apiKeyHint?: string
   /**
-   * The row's position in the whole fallback order (0 is the primary). A paged
-   * table holds one page, so "move up" acts on this and never on the page.
+   * The row's position in the whole stored list — a stable row id across
+   * pages, not a priority.
    */
   index?: number
 }
@@ -2190,12 +2197,13 @@ export const forebrainApi = {
    *  conversation across every project, searched and paged on the server —
    * 'workshop' the skill workshop lists whole, the way it always has. The
    * filter is the server's. Omit page for the unpaged window. */
-  chatSessions(source: '' | 'workshop' = '', opts?: { page?: number; pageSize?: number; q?: string }) {
+  chatSessions(source: '' | 'workshop' = '', opts?: { page?: number; pageSize?: number; q?: string; projectId?: string }) {
     const params = listParams({
       page: opts?.page ?? 0,
       pageSize: opts?.pageSize ?? 0,
       q: opts?.q,
       source,
+      projectId: opts?.projectId,
     })
     return api.get<ChatSessionsResponse>('/chat/sessions', { params }).then((res) => res.data)
   },
@@ -2280,6 +2288,13 @@ export const forebrainApi = {
 
   sessionMode(sessionId: string) {
     return api.get<SessionModeResponse>(`/chat/sessions/${sessionId}/mode`).then((res) => res.data)
+  },
+
+  /** The model a conversation that does not exist yet would start on, with
+   *  the same options a session's own read lists — the new-chat page's model
+   *  and effort chips read it. Nothing is written. */
+  chatModelDefault() {
+    return api.get<SessionModelResponse>('/chat/model').then((res) => res.data)
   },
 
   /** The conversation's own model choice, and the models it may be switched
@@ -3007,6 +3022,26 @@ export const forebrainApi = {
    * travels through an event or a JSON response as base64. The endpoint serves
    * only images; a non-image path is refused (415).
    */
+  /**
+   * Where one thing a user message attached is read: an upload by its file id,
+   * a path the terminal recorded by the message that holds it. A download by
+   * default; `inline` asks for the bytes to be drawn in place (an image or a
+   * PDF — anything else is still served as a download). Empty when the page
+   * has nothing to name it by.
+   */
+  attachmentUrl(
+    attachment: ChatAttachmentRecord,
+    where: { sessionId?: string; rowId?: number; index: number },
+    inline = false,
+  ): string {
+    const query = inline ? '?disposition=inline' : ''
+    if (attachment.fileId) return `/api/files/${encodeURIComponent(attachment.fileId)}/download${query}`
+    if (where.sessionId && where.rowId) {
+      return `/api/chat/sessions/${encodeURIComponent(where.sessionId)}/messages/${where.rowId}/attachments/${where.index}${query}`
+    }
+    return ''
+  },
+
   workspaceFileRawUrl(scope: WorkspaceScope, path: string): string {
     const params = new URLSearchParams({ path, ...workspaceScopeParams(scope) })
     return `/api/workspace/file/raw?${params.toString()}`
@@ -3507,17 +3542,23 @@ export const forebrainApi = {
     ).then((res) => res.data)
   },
 
+  /** The whole model-services list plus the agent's effective default
+   * ("provider/model" — default_model when set, otherwise the first row), the
+   * way the engine resolves an empty selection. */
   providers() {
-    return api.get<{ agentId?: string; providers: ProviderRecord[] }>('/providers')
-      .then((res) => (Array.isArray(res.data?.providers) ? res.data.providers : []))
+    return api.get<{ agentId?: string; defaultModel?: string; providers: ProviderRecord[] }>('/providers')
+      .then((res) => ({
+        providers: Array.isArray(res.data?.providers) ? res.data.providers : [],
+        defaultModel: String(res.data?.defaultModel ?? ''),
+      }))
   },
 
   /** One page of the model-services table: searched over service, models and
-   * endpoint, in the stored fallback order, counted on the server. Each row
-   * keeps its position in the whole order. */
+   * endpoint, in stored order, counted on the server. Each row keeps its
+   * position in the whole list as a stable row id. */
   providersPage(query: ListQuery) {
     return api
-      .get<{ providers?: ProviderRecord[]; agentId?: string } & ListPageMeta>('/providers', {
+      .get<{ providers?: ProviderRecord[]; agentId?: string; defaultModel?: string } & ListPageMeta>('/providers', {
         params: listParams(query),
       })
       .then((res) => ({
@@ -3525,11 +3566,15 @@ export const forebrainApi = {
         total: Number(res.data?.total ?? 0),
         page: Number(res.data?.page ?? 1),
         pageSize: Number(res.data?.pageSize ?? query.pageSize),
+        defaultModel: String(res.data?.defaultModel ?? ''),
       }))
   },
 
-  saveProviders(providers: Array<Record<string, unknown>>) {
-    return putRaw<{ applied: boolean }>('/providers', { providers })
+  /** Saves the model-services list. `defaultModel` ("provider/model") is sent
+   * only when the write retargets the default; an omitted field means "leave
+   * the stored default_model alone". */
+  saveProviders(providers: Array<Record<string, unknown>>, defaultModel?: string) {
+    return putRaw<{ applied: boolean }>('/providers', { providers, default_model: defaultModel })
   },
 
   /** Begins a browser sign-in for one provider and answers the id to poll. The

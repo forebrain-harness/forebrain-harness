@@ -17,9 +17,10 @@ import ProvidersView from './ProvidersView.vue'
 enableAutoUnmount(afterEach)
 
 /**
- * The model services (plan 073): the fallback order paged by the server, each
- * row naming its place in the whole order, and 上移 swapping with the row
- * before it there — the write is whole-table, so it reads the order back.
+ * The model services (plan 073): stored order paged by the server, the
+ * default model marked by a badge (default_model, else the first row), and
+ * 设为默认 retargeting the default without touching the order — the write is
+ * whole-table, so it reads the order back.
  */
 function provider(overrides: Partial<ProviderRecord> = {}): ProviderRecord {
   return {
@@ -48,11 +49,15 @@ describe('ProvidersView', () => {
       total: 2,
       page: 1,
       pageSize: 10,
+      defaultModel: 'deepseek/deepseek-v4',
     })
-    vi.spyOn(forebrainApi, 'providers').mockResolvedValue([
-      provider(),
-      provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyHint: '', index: 1 }),
-    ])
+    vi.spyOn(forebrainApi, 'providers').mockResolvedValue({
+      providers: [
+        provider(),
+        provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyHint: '', index: 1 }),
+      ],
+      defaultModel: 'deepseek/deepseek-v4',
+    })
     vi.spyOn(forebrainApi, 'saveProviders').mockResolvedValue({ applied: true })
     vi.spyOn(forebrainApi, 'getModels').mockResolvedValue({ records: [], status: [] })
   })
@@ -61,7 +66,7 @@ describe('ProvidersView', () => {
     vi.restoreAllMocks()
   })
 
-  it('opens on a search toolbar, the table, the pager and the note — no title row', async () => {
+  it('opens on a search toolbar, the table and the pager — no title row, no order note', async () => {
     const wrapper = await mountPage()
     expect(wrapper.find('h2').exists()).toBe(false)
 
@@ -70,82 +75,58 @@ describe('ProvidersView', () => {
     expect(wrapper.find('.forebrain-table-wrap table.forebrain-table--fixed').exists()).toBe(true)
     expect(wrapper.findAll('[data-provider-row]').length).toBe(2)
     expect(wrapper.find('[data-testid="table-pager"]').text()).toContain('共 2 条')
-    expect(wrapper.find('p.forebrain-list-note').text()).toBe('按顺序尝试：第一条主用，其余回退。')
+    // Storage order carries no priority: no order note, no order column.
+    expect(wrapper.find('p.forebrain-list-note').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('主用')
+    expect(wrapper.text()).not.toContain('回退')
   })
 
-  it('draws the position, the models, the endpoint and whether a key is stored', async () => {
+  it('draws the default badge on the default row, the models, the endpoint and the key state', async () => {
     const wrapper = await mountPage()
 
-    const primary = wrapper.find('[data-provider-row="deepseek"]')
-    expect(primary.find('.forebrain-badge').text()).toBe('主用')
-    expect(primary.text()).toContain('deepseek-v4')
-    expect(primary.text()).toContain('https://api.deepseek.com')
-    expect(primary.find('[data-testid="provider-key-saved-0"]').text()).toBe('••••3f9a')
+    const defaultRow = wrapper.find('[data-provider-row="deepseek"]')
+    expect(defaultRow.find('[data-testid="provider-default-0"]').text()).toBe('默认')
+    expect(defaultRow.text()).toContain('deepseek-v4')
+    expect(defaultRow.text()).toContain('https://api.deepseek.com')
+    expect(defaultRow.find('[data-testid="provider-key-saved-0"]').text()).toBe('••••3f9a')
 
-    const fallback = wrapper.find('[data-provider-row="openai"]')
-    expect(fallback.text()).toContain('回退 1')
-    expect(fallback.text()).toContain('gpt-5、gpt-5-mini')
-    expect(fallback.find('[data-testid="provider-key-unset-1"]').text()).toBe('未设置')
+    const other = wrapper.find('[data-provider-row="openai"]')
+    expect(other.find('[data-testid^="provider-default-"]:not([data-testid^="provider-default-set-"])').exists()).toBe(false)
+    expect(other.text()).toContain('gpt-5、gpt-5-mini')
+    expect(other.find('[data-testid="provider-key-unset-1"]').text()).toBe('未设置')
   })
 
-  it('leaves the first row without 上移 and names the row on every other action', async () => {
+  it('names the row on every action; the default row shows no set-default', async () => {
     const wrapper = await mountPage()
 
-    const primary = wrapper.find('[data-provider-row="deepseek"]')
-    expect(primary.find('.forebrain-icon-slot').exists()).toBe(true)
-    expect(primary.findAll('.forebrain-row-action').map((button) => button.attributes('aria-label'))).toEqual([
+    const defaultRow = wrapper.find('[data-provider-row="deepseek"]')
+    expect(defaultRow.findAll('.forebrain-row-action').map((button) => button.attributes('aria-label'))).toEqual([
       '编辑 deepseek',
       '删除 deepseek',
     ])
 
-    const fallback = wrapper.find('[data-provider-row="openai"]')
-    expect(fallback.findAll('.forebrain-row-action').map((button) => button.attributes('aria-label'))).toEqual([
-      '上移 openai',
+    const other = wrapper.find('[data-provider-row="openai"]')
+    expect(other.findAll('.forebrain-row-action').map((button) => button.attributes('aria-label'))).toEqual([
+      '设为默认 openai',
       '编辑 openai',
       '删除 openai',
     ])
   })
 
-  it('moves a row up in the whole order, not on the page', async () => {
+  it('sets the default without touching the order', async () => {
     const wrapper = await mountPage()
 
-    await wrapper.find('[data-testid="provider-up-1"]').trigger('click')
+    await wrapper.find('[data-testid="provider-default-set-1"]').trigger('click')
     await flushPromises()
 
     expect(forebrainApi.providers).toHaveBeenCalled()
-    const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
-    expect(saved.map((entry) => entry.provider)).toEqual(['openai', 'deepseek'])
+    const call = vi.mocked(forebrainApi.saveProviders).mock.calls[0]
+    // The default travels as its own field; the stored order is written back
+    // exactly as it was read.
+    expect(call[0].map((entry) => entry.provider)).toEqual(['deepseek', 'openai'])
+    expect(call[1]).toBe('openai/gpt-5')
     // The untouched key does not travel: only a typed one is sent.
-    expect(saved[1].api_key_plain).toBeUndefined()
-  })
-
-  it('moves a row up once per click, even when the clicks arrive together', async () => {
-    // The row's place in the order is not its identity: a write pins the entry
-    // by its own fields and the writes run one after another, so two quick
-    // clicks carry the row two places up instead of undoing each other.
-    const order = ['alpha', 'beta', 'gamma']
-    const row = (name: string, index: number) => provider({ provider: name, models: [`${name}-model`], index })
-    vi.mocked(forebrainApi.providersPage).mockResolvedValue({
-      rows: order.map((name, index) => row(name, index)),
-      total: order.length,
-      page: 1,
-      pageSize: 10,
-    })
-    vi.mocked(forebrainApi.providers).mockImplementation(async () => order.map((name, index) => row(name, index)))
-    vi.mocked(forebrainApi.saveProviders).mockImplementation(async (entries) => {
-      order.splice(0, order.length, ...entries.map((entry) => String(entry.provider)))
-      return { applied: true }
-    })
-    const wrapper = await mountPage()
-
-    const up = wrapper.find('[data-testid="provider-up-2"]')
-    void up.trigger('click')
-    void up.trigger('click')
-    await flushPromises()
-    await flushPromises()
-
-    // Two clicks: gamma passes beta and then alpha.
-    expect(order).toEqual(['gamma', 'alpha', 'beta'])
+    expect(call[0][1].api_key_plain).toBeUndefined()
   })
 })
 
@@ -223,8 +204,8 @@ describe('ProvidersView add/edit form', () => {
   })
 
   beforeEach(() => {
-    vi.spyOn(forebrainApi, 'providersPage').mockResolvedValue({ rows: [provider()], total: 1, page: 1, pageSize: 10 })
-    vi.spyOn(forebrainApi, 'providers').mockResolvedValue([provider()])
+    vi.spyOn(forebrainApi, 'providersPage').mockResolvedValue({ rows: [provider()], total: 1, page: 1, pageSize: 10, defaultModel: 'deepseek/deepseek-v4' })
+    vi.spyOn(forebrainApi, 'providers').mockResolvedValue({ providers: [provider()], defaultModel: 'deepseek/deepseek-v4' })
     vi.spyOn(forebrainApi, 'saveProviders').mockResolvedValue({ applied: true })
     vi.spyOn(forebrainApi, 'getModels').mockResolvedValue({
       records: [loginModel('moonshotai', 'kimi-k3'), loginModel('anthropic', 'claude-sonnet-5')],
@@ -281,6 +262,7 @@ describe('ProvidersView add/edit form', () => {
       total: 1,
       page: 1,
       pageSize: 10,
+      defaultModel: '',
     })
     await mountModalPage()
     await click('provider-edit-0')
@@ -301,6 +283,7 @@ describe('ProvidersView add/edit form', () => {
       total: 1,
       page: 1,
       pageSize: 10,
+      defaultModel: '',
     })
     await mountModalPage()
     await click('provider-edit-0')
@@ -338,8 +321,9 @@ describe('ProvidersView add/edit form', () => {
       total: 1,
       page: 1,
       pageSize: 10,
+      defaultModel: '',
     })
-    vi.mocked(forebrainApi.providers).mockResolvedValue([provider({ apiPath: '/v1/chat/completions' })])
+    vi.mocked(forebrainApi.providers).mockResolvedValue({ providers: [provider({ apiPath: '/v1/chat/completions' })], defaultModel: 'deepseek/deepseek-v4' })
     await mountModalPage()
     await click('provider-edit-0')
 
@@ -354,6 +338,45 @@ describe('ProvidersView add/edit form', () => {
 
     const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
     expect(saved[0].api_path).toBe('/v1/chat/completions')
+  })
+
+  it('sends the row as it was loaded when an edit changes it', async () => {
+    await mountModalPage()
+    await click('provider-edit-0')
+    await type('provider-base-url', 'https://mirror.example.com')
+    await click('provider-save')
+
+    const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
+    expect(saved[0].base_url).toBe('https://mirror.example.com')
+    // The row as the page read it: what the server replaces in place, so an
+    // edit is an edit and not a delete plus an append at the end of the list.
+    expect(saved[0].replaces).toEqual({
+      provider: 'deepseek',
+      base_url: 'https://api.deepseek.com',
+      api_path: '',
+      models: ['deepseek-v4'],
+    })
+  })
+
+  it('does not send replaces for rows it did not edit', async () => {
+    const rows = [provider(), provider({ provider: 'openai', models: ['gpt-5'], baseUrl: 'https://api.openai.com/v1', index: 1 })]
+    vi.mocked(forebrainApi.providersPage).mockResolvedValue({ rows, total: 2, page: 1, pageSize: 10, defaultModel: 'deepseek/deepseek-v4' })
+    vi.mocked(forebrainApi.providers).mockResolvedValue({ providers: rows, defaultModel: 'deepseek/deepseek-v4' })
+    await mountModalPage()
+    await click('provider-edit-0')
+    await type('provider-base-url', 'https://mirror.example.com')
+    await click('provider-save')
+
+    const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
+    expect(saved[0].replaces).toEqual({
+      provider: 'deepseek',
+      base_url: 'https://api.deepseek.com',
+      api_path: '',
+      models: ['deepseek-v4'],
+    })
+    // An untouched row says nothing about where it started: the server keeps
+    // matching it by identity.
+    expect(saved[1].replaces).toBeUndefined()
   })
 
   it('refuses params that are not a JSON object, and says why', async () => {
@@ -465,8 +488,9 @@ describe('ProvidersView sign-in', () => {
       total: 1,
       page: 1,
       pageSize: 10,
+      defaultModel: '',
     })
-    vi.spyOn(forebrainApi, 'providers').mockResolvedValue([provider()])
+    vi.spyOn(forebrainApi, 'providers').mockResolvedValue({ providers: [provider()], defaultModel: 'deepseek/deepseek-v4' })
     vi.spyOn(forebrainApi, 'saveProviders').mockResolvedValue({ applied: true })
     vi.spyOn(forebrainApi, 'getModels').mockResolvedValue({ records: [], status: [] })
     vi.spyOn(forebrainApi, 'startProviderLogin').mockResolvedValue({ loginId: 'login-1', provider: 'opencode' })
@@ -540,6 +564,52 @@ describe('ProvidersView sign-in', () => {
     expect(saved[1].api_key_plain).toBeUndefined()
     // Saving closes the modal.
     expect(wrapper.find('[data-testid="provider-login-save"]').exists()).toBe(false)
+  })
+
+  it('the connect flow replaces an existing row instead of appending a second one', async () => {
+    // The machine is already signed in to the Go subscription and its row
+    // serves one model; picking a second one there is an edit of that row.
+    const existing = provider({
+      provider: 'opencode-go',
+      models: ['glm-5.3'],
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      apiKeySet: false,
+      apiKeyHint: '',
+      index: 1,
+    })
+    const rows = [provider(), existing]
+    vi.mocked(forebrainApi.providersPage).mockResolvedValue({ rows, total: 2, page: 1, pageSize: 10, defaultModel: 'deepseek/deepseek-v4' })
+    vi.mocked(forebrainApi.providers).mockResolvedValue({ providers: rows, defaultModel: 'deepseek/deepseek-v4' })
+    vi.mocked(forebrainApi.providerLoginStatus).mockResolvedValue(
+      loginStatus({ status: 'complete', baseUrl: 'https://go.example.test/inference/go' }),
+    )
+    vi.mocked(forebrainApi.getModels).mockResolvedValue({
+      // kimi-k3 is the preset, so it is the model the flow writes.
+      records: [loginModel('opencode-go', 'glm-5.3'), loginModel('opencode-go', 'kimi-k3', { isDefault: true })],
+      status: [],
+    })
+
+    const wrapper = await mountConnectPage()
+    await wrapper.find('[data-testid="providers-connect-opencode"]').trigger('click')
+    await flushPromises()
+    await tick()
+    await wrapper.find('[data-testid="provider-login-save"]').trigger('click')
+    await flushPromises()
+
+    const saved = vi.mocked(forebrainApi.saveProviders).mock.calls[0][0]
+    expect(saved).toHaveLength(2)
+    expect(saved[1]).toMatchObject({
+      provider: 'opencode-go',
+      models: ['glm-5.3', 'kimi-k3'],
+      base_url: 'https://go.example.test/inference/go',
+      // The model the row carried before this edit.
+      replaces: {
+        provider: 'opencode-go',
+        base_url: 'https://opencode.ai/zen/go/v1',
+        api_path: '',
+        models: ['glm-5.3'],
+      },
+    })
   })
 
   it('signs in to ChatGPT and writes the endpoint its completion named', async () => {

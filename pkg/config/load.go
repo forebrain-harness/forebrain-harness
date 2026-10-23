@@ -852,6 +852,15 @@ func validatePrimaryAgents(r *Root) error {
 		if !primaryAgentIDPattern.MatchString(id) {
 			return fmt.Errorf("agents.definitions.%s: invalid agent id", id)
 		}
+		// A dangling default_model must never reach disk: the runtime treats
+		// an unresolvable default as an error (no fall-back to the first
+		// entry), so load, hot reload and every structured write path share
+		// this one verdict via validateLoadedRoot/Save.
+		if strings.TrimSpace(def.DefaultModel) != "" && EffectiveDefaultLLM(def) == nil {
+			return fmt.Errorf(
+				"agents.definitions.%s.default_model: %q does not match any llm_providers entry on this agent's list",
+				id, def.DefaultModel)
+		}
 		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames); err != nil {
 			return err
 		}

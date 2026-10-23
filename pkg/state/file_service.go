@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -749,6 +750,26 @@ func ExtractFileRefInfos(partsJSON string) []FileRefInfo {
 // it names in its text (attachment).
 func MessageAttachments(partsJSON string) []FileRefInfo {
 	return fileEntries(partsJSON, PartTypeFileReference, PartTypeAttachment)
+}
+
+// UserMessageAttachments lists what one owned user message row attached, in the
+// order it attached them — the order a page numbers its attachment chips by.
+// ok is false when the session has no such user row.
+func (s *SessionStore) UserMessageAttachments(ctx context.Context, sessionID string, rowID int64) (refs []FileRefInfo, ok bool, err error) {
+	if s == nil || s.db == nil {
+		return nil, false, fmt.Errorf("user message attachments: session store unavailable")
+	}
+	var parts string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(parts, '') FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+		rowID, strings.TrimSpace(sessionID)).Scan(&parts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return MessageAttachments(parts), true, nil
 }
 
 func fileEntries(partsJSON string, types ...string) []FileRefInfo {

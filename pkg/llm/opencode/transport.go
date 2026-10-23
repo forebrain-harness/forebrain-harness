@@ -2,10 +2,10 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -61,10 +61,6 @@ type Transport struct {
 
 	// key is the static token of key mode (an API key or PublicBearer).
 	key string
-	// mu serializes refresh so that several goroutines noticing the same
-	// expiring token refresh it once: the first writes the rotated pair back,
-	// and the others then read a login that is no longer near expiry.
-	mu sync.Mutex
 }
 
 // NewKeyTransport returns a transport that sends key as a static bearer token,
@@ -111,8 +107,12 @@ func (t *Transport) token(ctx context.Context) (string, error) {
 	if t.key != "" || strings.TrimSpace(t.Path) == "" {
 		return t.key, nil
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	// One lock per login file, not per Transport: every client of this file in
+	// the process (a turn's LLM, a subagent's, a model-listing probe) shares it,
+	// so the refresh token — which rotates on use — is exchanged once.
+	mu := llm.CredentialMutex(t.Path)
+	mu.Lock()
+	defer mu.Unlock()
 	c, err := Load(t.Path)
 	if err != nil {
 		return "", fmt.Errorf("OpenCode login required; run /connect to log in: %w", err)
@@ -122,10 +122,33 @@ func (t *Transport) token(ctx context.Context) (string, error) {
 	}
 	updated, err := refresh(ctx, c)
 	if err != nil {
+		if adopted, ok := adoptRotatedLogin(t.Path, c, err); ok {
+			return adopted.AccessToken, nil
+		}
 		return "", err
 	}
 	if err := Save(t.Path, updated); err != nil {
 		return "", fmt.Errorf("save refreshed OpenCode credentials: %w", err)
 	}
 	return updated.AccessToken, nil
+}
+
+// adoptRotatedLogin handles a refresh the server refused as invalid_grant. The
+// refresh token we sent may simply be stale: another process (the TUI beside
+// the gateway) exchanged it first and wrote the rotated pair. When the file now
+// holds a different refresh token and a login that is not about to expire, that
+// login is the live one — use it instead of reporting a dead login.
+func adoptRotatedLogin(path string, sent Credentials, refreshErr error) (Credentials, bool) {
+	var api *llm.APIError
+	if !errors.As(refreshErr, &api) || api.StatusCode != http.StatusUnauthorized {
+		return Credentials{}, false
+	}
+	latest, err := Load(path)
+	if err != nil || latest.RefreshToken == sent.RefreshToken {
+		return Credentials{}, false
+	}
+	if time.Until(latest.ExpiresAt) <= refreshMargin {
+		return Credentials{}, false
+	}
+	return latest, true
 }

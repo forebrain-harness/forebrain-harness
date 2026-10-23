@@ -213,10 +213,11 @@ jobs:
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.24.0
-      - name: pnpm install, test and build
+      - name: pnpm install, typecheck, test and build
         working-directory: frontend
         run: |
           pnpm install --frozen-lockfile
+          pnpm typecheck
           pnpm test
           pnpm run build
 

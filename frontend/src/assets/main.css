@@ -1828,20 +1828,152 @@ textarea.forebrain-field {
   color: var(--forebrain-text-2);
 }
 
-/* Rendered Markdown, as the prototype draws it (app-preview.html :240-241):
-   a paragraph's own margin is nothing — the block that holds it decides the
-   rhythm — and inline code is a 12px mono chip on the alt surface with a
-   hairline around it. Both selectors out-specify the renderer's defaults, so
-   they win wherever they sit in the cascade. */
+/* Rendered Markdown: ONE type scale, set by the text size of whatever holds it.
+   The renderer ships its own scale in rem (a 30px h1, 14px code and table
+   cells, a 14px language label) that is sized for a page, not for a 13px chat
+   column — so headings towered over the prose and code, tables and labels sat
+   at a different size from it. Every size below is an em of the container
+   (13px in a message and a tool card, 12px in a thinking block), so the parts
+   of one answer always read as one voice. Each selector repeats the attribute
+   to out-specify the renderer's own wherever it sits in the cascade. */
+.stream-markdown {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* Headings: a step apart, never a different page. */
+.stream-markdown [data-stream-markdown][data-stream-markdown^="heading-"] {
+  margin-top: 1.1em;
+  margin-bottom: 0.45em;
+  font-size: 1em;
+  line-height: 1.4;
+  font-weight: 600;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="heading-1"] { font-size: 1.25em; }
+.stream-markdown [data-stream-markdown][data-stream-markdown="heading-2"] { font-size: 1.15em; }
+.stream-markdown [data-stream-markdown][data-stream-markdown="heading-3"] { font-size: 1.05em; }
+
+/* Prose: a paragraph, a list, a quote and a table are separated by the same
+   gap (a prototype .a is a grid of blocks 10px apart; one renderer root is one
+   block, so the rhythm is set here). The last child of a root draws no gap. */
 .stream-markdown [data-stream-markdown][data-stream-markdown="paragraph"] {
+  margin-bottom: 0.65em;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="ordered-list"],
+.stream-markdown [data-stream-markdown][data-stream-markdown="unordered-list"],
+.stream-markdown [data-stream-markdown][data-stream-markdown="task-list"] {
+  margin-block: 0 0.65em;
+}
+.stream-markdown [data-stream-markdown="list-item"] > [data-stream-markdown="ordered-list"],
+.stream-markdown [data-stream-markdown="list-item"] > [data-stream-markdown="unordered-list"],
+.stream-markdown [data-stream-markdown="list-item"] > [data-stream-markdown="task-list"] {
+  margin-block: 0.15em 0;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="list-item"] {
+  padding-block: 0.12em;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="blockquote"] {
+  margin-block: 0 0.65em;
+  border-left-width: 3px;
+  padding-left: 0.9em;
+  font-style: normal;
+}
+.stream-markdown > :last-child {
   margin-bottom: 0;
 }
 
+/* Inline code: a chip a little under the prose, hairline around the alt
+   surface (prototype :240-241). */
 .stream-markdown [data-stream-markdown][data-stream-markdown="inline-code"] {
   background-color: var(--forebrain-bg-alt);
   border: 1px solid var(--forebrain-divider);
   border-radius: 4px;
-  padding: 0 4px;
-  font-size: 12px;
+  padding: 0 0.3em;
+  font-size: 0.92em;
   line-height: inherit;
+}
+
+/* A code block: 12px mono at 1.6, the label a 11px caption. The header is
+   not sticky — it sat at the top of whichever box scrolled and floated over
+   the code's own lines inside a bounded tool card. */
+.stream-markdown [data-stream-markdown][data-stream-markdown="code-block"] {
+  margin-block: 0 0.75em;
+  border-radius: 8px;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="code-block-header"] {
+  position: static;
+  padding-block: 4px;
+  padding-inline: 12px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="language-name"] {
+  font-size: 11px;
+  line-height: 1.4;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="code"],
+.stream-markdown [data-stream-markdown="code"] code {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="code"] {
+  padding: 10px 12px;
+}
+.stream-markdown [data-stream-markdown="code"] [data-stream-markdown][data-stream-markdown="code-line"] {
+  font-size: 12px;
+}
+.stream-markdown [data-stream-markdown="code"] [data-stream-markdown="code-line"]::before {
+  width: 1.6em;
+  margin-right: 0.75em;
+  font-size: 11px;
+}
+
+/* A table: the cells at the prose's own size and weight (the renderer set the
+   body in bold at 14px), the copy/download row out of the flow until the
+   table is hovered. */
+.stream-markdown [data-stream-markdown][data-stream-markdown="table-wrapper"] {
+  position: relative;
+  margin-block: 0 0.75em;
+  gap: 0;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="table-controls"] {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+  width: auto;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.stream-markdown [data-stream-markdown="table-wrapper"]:hover [data-stream-markdown="table-controls"],
+.stream-markdown [data-stream-markdown="table-controls"]:focus-within {
+  opacity: 1;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="table-body"] {
+  font-weight: 400;
+}
+.stream-markdown [data-stream-markdown="table-header"] th,
+.stream-markdown [data-stream-markdown="table-body"] td {
+  padding-block: 0.4em;
+  padding-inline: 0.75em;
+  font-size: 0.96em;
+  line-height: 1.5;
+}
+.stream-markdown [data-stream-markdown="table-header"] th {
+  font-weight: 600;
+  text-align: left;
+}
+.stream-markdown [data-stream-markdown][data-stream-markdown="table"] {
+  border-radius: 8px;
+}
+
+/* A tool card's output is the call's result, not a document: the language
+   label of a fenced block names nothing the card's head has not said. */
+.tool-body .stream-markdown [data-stream-markdown="code-block-header"] {
+  display: none;
+}
+/* ...and what it prints already carries its own line numbers ("12|…"), so the
+   renderer's counter beside them would number every line twice. */
+.tool-body .stream-markdown [data-stream-markdown="code"] [data-stream-markdown="code-line"]::before {
+  display: none;
 }

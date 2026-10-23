@@ -45,4 +45,14 @@ describe('ThinkingCard', () => {
     )
     expect(wrapper.text()).toContain('and the view should read it')
   })
+
+  // The fold marker was a "▸" glyph at the caption's 11px — too small to read
+  // as a control. It is a real icon now, turned down when open.
+  it('draws the fold marker as an icon, not a glyph', async () => {
+    const wrapper = mount(ThinkingCard, { props: { block } })
+    const chevron = wrapper.get('.think-chev')
+    expect(chevron.element.tagName.toLowerCase()).toBe('svg')
+    expect(chevron.attributes('aria-hidden')).toBe('true')
+    expect(wrapper.get('[data-slot="collapsible-trigger"]').text()).toBe('Thought for 4s')
+  })
 })

@@ -141,167 +141,6 @@ func TestWithReasoningEffortPreservesSiblings(t *testing.T) {
 	}
 }
 
-func TestSetLLMProviderReasoningEffortExactEntry(t *testing.T) {
-	t.Parallel()
-	cfg := Root{
-		Agents: AgentsSection{
-			Definitions: map[string]AgentDefinition{
-				"main": {
-					LLMProviders: []AgentLLMProviderConfig{
-						{Provider: "anthropic", Model: "claude-a", APIKey: "anthropic-key", BaseURL: "https://anthropic.test", Params: LLMRequestParams(`{"max_tokens":128}`)},
-						{Provider: "openai", Model: "gpt-b", APIKey: "openai-key", BaseURL: "https://openai.test", Params: LLMRequestParams(`{"top_p":0.5,"reasoning":{"effort":"low"}}`)},
-					},
-				},
-			},
-		},
-	}
-	if err := SetLLMProviderReasoningEffort(&cfg, "main", "openai", "gpt-b", "high"); err != nil {
-		t.Fatalf("SetLLMProviderReasoningEffort error: %v", err)
-	}
-	def := cfg.Agents.Definitions["main"]
-	if len(def.LLMProviders) != 2 {
-		t.Fatalf("provider count = %d, want 2", len(def.LLMProviders))
-	}
-	promoted := def.LLMProviders[0]
-	if promoted.Provider != "openai" || promoted.Model != "gpt-b" {
-		t.Fatalf("promoted entry = %s/%s, want openai/gpt-b", promoted.Provider, promoted.Model)
-	}
-	if promoted.APIKey != "openai-key" || promoted.BaseURL != "https://openai.test" {
-		t.Fatalf("promoted entry lost its own credentials: %+v", promoted)
-	}
-	if got := ReasoningEffort(promoted.Params); got != "high" {
-		t.Fatalf("promoted effort = %q, want high", got)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(promoted.Params, &payload); err != nil {
-		t.Fatalf("promoted params invalid json: %v", err)
-	}
-	if payload["top_p"] != float64(0.5) {
-		t.Fatalf("promoted params lost top_p: %v", payload)
-	}
-	demoted := def.LLMProviders[1]
-	if demoted.Provider != "anthropic" || demoted.Model != "claude-a" || demoted.APIKey != "anthropic-key" {
-		t.Fatalf("demoted entry changed: %+v", demoted)
-	}
-	if got := ReasoningEffort(demoted.Params); got != "" {
-		t.Fatalf("demoted entry gained an effort: %q", got)
-	}
-	if string(demoted.Params) != `{"max_tokens":128}` {
-		t.Fatalf("demoted params changed: %s", demoted.Params)
-	}
-
-	// Clearing the effort removes it without touching anything else.
-	if err := SetLLMProviderReasoningEffort(&cfg, "main", "openai", "gpt-b", ""); err != nil {
-		t.Fatalf("clear effort error: %v", err)
-	}
-	if got := ReasoningEffort(cfg.Agents.Definitions["main"].LLMProviders[0].Params); got != "" {
-		t.Fatalf("effort after clear = %q, want empty", got)
-	}
-}
-
-func TestSetLLMProviderReasoningEffortModelsList(t *testing.T) {
-	t.Parallel()
-	cfg := Root{
-		Agents: AgentsSection{
-			Definitions: map[string]AgentDefinition{
-				"main": {
-					LLMProviders: []AgentLLMProviderConfig{{
-						Provider: "openai",
-						Models:   StringList{"gpt-first", "gpt-second"},
-						APIKey:   "openai-key",
-						Params:   LLMRequestParams(`{"top_p":0.9}`),
-					}},
-				},
-			},
-		},
-	}
-	if err := SetLLMProviderReasoningEffort(&cfg, "main", "openai", "gpt-second", "medium"); err != nil {
-		t.Fatalf("models-list second item error: %v", err)
-	}
-	def := cfg.Agents.Definitions["main"]
-	if len(def.LLMProviders) != 2 {
-		t.Fatalf("expanded entries = %d, want 2", len(def.LLMProviders))
-	}
-	if def.LLMProviders[0].Model != "gpt-second" {
-		t.Fatalf("promoted model = %q, want gpt-second", def.LLMProviders[0].Model)
-	}
-	if got := ReasoningEffort(def.LLMProviders[0].Params); got != "medium" {
-		t.Fatalf("promoted effort = %q, want medium", got)
-	}
-	if def.LLMProviders[0].APIKey != "openai-key" {
-		t.Fatalf("expanded entry lost credentials: %+v", def.LLMProviders[0])
-	}
-	if got := ReasoningEffort(def.LLMProviders[1].Params); got != "" {
-		t.Fatalf("sibling gained effort: %q", got)
-	}
-}
-
-func TestSetLLMProviderReasoningEffortMissingPairLeavesConfigUnchanged(t *testing.T) {
-	t.Parallel()
-	cfg := Root{
-		Agents: AgentsSection{
-			Definitions: map[string]AgentDefinition{
-				"main": {
-					LLMProviders: []AgentLLMProviderConfig{
-						{Provider: "openai", Model: "gpt-a", Params: LLMRequestParams(`{"reasoning":{"effort":"low"}}`)},
-						{Provider: "openai", Model: "gpt-b"},
-					},
-				},
-			},
-		},
-	}
-	if err := SetLLMProviderReasoningEffort(&cfg, "main", "openai", "gone-model", "high"); err == nil {
-		t.Fatal("expected missing exact pair error")
-	}
-	def := cfg.Agents.Definitions["main"]
-	if len(def.LLMProviders) != 2 || def.LLMProviders[0].Model != "gpt-a" || def.LLMProviders[1].Model != "gpt-b" {
-		t.Fatalf("config changed on missing pair: %+v", def.LLMProviders)
-	}
-	if got := ReasoningEffort(def.LLMProviders[0].Params); got != "low" {
-		t.Fatalf("config params changed on missing pair: %q", got)
-	}
-	if err := SetLLMProviderReasoningEffort(&cfg, "missing-agent", "openai", "gpt-a", "high"); err == nil {
-		t.Fatal("expected unknown agent error")
-	}
-}
-
-func TestPromoteMatchingLLMProviderExpandsModelsList(t *testing.T) {
-	t.Parallel()
-	cfg := Root{
-		Agents: AgentsSection{
-			Definitions: map[string]AgentDefinition{
-				"main": {
-					LLMProviders: []AgentLLMProviderConfig{
-						{Provider: "anthropic", Model: "claude-a"},
-						{Provider: "openai", Models: StringList{"gpt-first", "gpt-second"}},
-					},
-				},
-			},
-		},
-	}
-	if err := PromoteMatchingLLMProvider(&cfg, "main", "openai", "gpt-second"); err != nil {
-		t.Fatalf("second-item promotion error: %v", err)
-	}
-	def := cfg.Agents.Definitions["main"]
-	if len(def.LLMProviders) != 3 {
-		t.Fatalf("expanded entries = %d, want 3", len(def.LLMProviders))
-	}
-	if def.LLMProviders[0].Provider != "openai" || def.LLMProviders[0].Model != "gpt-second" {
-		t.Fatalf("promoted entry = %s/%s, want openai/gpt-second", def.LLMProviders[0].Provider, def.LLMProviders[0].Model)
-	}
-	if def.LLMProviders[1].Provider != "anthropic" || def.LLMProviders[1].Model != "claude-a" {
-		t.Fatalf("old primary moved wrong: %+v", def.LLMProviders[1])
-	}
-
-	before := cfg
-	if err := PromoteMatchingLLMProvider(&cfg, "main", "openai", "missing"); err == nil {
-		t.Fatal("expected missing pair error")
-	}
-	if len(cfg.Agents.Definitions["main"].LLMProviders) != len(before.Agents.Definitions["main"].LLMProviders) {
-		t.Fatalf("missing pair changed the provider list")
-	}
-}
-
 // TestCredentialBackedProvidersSkipAPIKey pins the three providers whose
 // credential is a file this machine holds rather than an api_key in
 // configuration. They must validate with no api_key, and every other provider
@@ -361,5 +200,74 @@ func TestCredentialBackedProviderMatchingIsCaseInsensitive(t *testing.T) {
 		if CredentialsBackedProvider(provider) {
 			t.Fatalf("CredentialsBackedProvider(%q) = true, want false", provider)
 		}
+	}
+}
+
+// TestEffectiveDefaultLLM pins the three states of the default-model
+// resolution: absent default_model → first expanded entry; a configured
+// default_model → the matched entry; a configured default_model naming
+// nothing → nil (an error for callers, never a fall-back to the first entry).
+func TestEffectiveDefaultLLM(t *testing.T) {
+	t.Parallel()
+	def := AgentDefinition{
+		LLMProviders: []AgentLLMProviderConfig{
+			{Provider: "anthropic", Model: "claude-a", APIKey: "anthropic-key"},
+			{Provider: "openai", Models: StringList{"gpt-first", "deep/model-id"}, APIKey: "openai-key"},
+		},
+	}
+
+	if got := EffectiveDefaultLLM(def); got == nil || got.Provider != "anthropic" || got.Model != "claude-a" {
+		t.Fatalf("absent default_model = %+v, want first entry anthropic/claude-a", got)
+	}
+	if got := EffectiveDefaultLLM(AgentDefinition{}); got != nil {
+		t.Fatalf("empty definition = %+v, want nil", got)
+	}
+
+	// Case-insensitive pair match, including a model id that itself
+	// contains a slash (split on the FIRST slash only).
+	second := def
+	second.DefaultModel = " OpenAI / deep/model-id "
+	if got := EffectiveDefaultLLM(second); got == nil || got.Provider != "openai" || got.Model != "deep/model-id" {
+		t.Fatalf("default_model openai/deep/model-id = %+v, want the second expanded entry", got)
+	}
+
+	// Dangling value → nil, even though the list is non-empty.
+	dangling := def
+	dangling.DefaultModel = "openai/gone"
+	if got := EffectiveDefaultLLM(dangling); got != nil {
+		t.Fatalf("dangling default_model = %+v, want nil", got)
+	}
+
+	// Mutating the returned entry must not touch the definition's slice.
+	got := EffectiveDefaultLLM(def)
+	got.APIKey = "mutated"
+	if def.LLMProviders[0].APIKey != "anthropic-key" {
+		t.Fatal("returned entry aliases the definition's slice")
+	}
+}
+
+// TestValidateAgentLLMConfiguredUsesDefaultModel pins that completeness is
+// judged on the entry an empty selection actually resolves to, not the raw
+// first list entry.
+func TestValidateAgentLLMConfiguredUsesDefaultModel(t *testing.T) {
+	t.Parallel()
+	cfg := Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+		"main": {
+			LLMProviders: []AgentLLMProviderConfig{
+				{Provider: "openai", Model: "gpt-a", APIKey: "key", BaseURL: "https://a.test"},
+				{Provider: "anthropic", Model: "claude-b"}, // incomplete
+			},
+			DefaultModel: "anthropic/claude-b",
+		},
+	}}}
+	v := ValidateAgentLLMConfigured(&cfg, "main")
+	if v.Provider != "anthropic" || v.Model != "claude-b" {
+		t.Fatalf("validation read %+v, want the default_model entry anthropic/claude-b", v)
+	}
+	if v.Complete() {
+		t.Fatal("incomplete default entry judged complete")
+	}
+	if v.BaseURL != "" || v.APIKey != "" {
+		t.Fatalf("incomplete default entry reported fields it does not carry: %+v", v)
 	}
 }

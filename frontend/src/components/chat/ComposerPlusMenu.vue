@@ -1,9 +1,8 @@
 <template>
-  <!-- Deliberately not a positioning context: the sheet below is absolute with
-       left/right anchors, so its containing block must be the composer that
-       mounts this menu (the prototype's `.plus-pop` sits in the composer, not
-       in the "+" button), and it must be as wide as the input area. -->
-  <div ref="rootRef">
+  <!-- The positioning context is the "+" itself: the sheet opens right above the
+       button that opened it, its left edge on the button's, never hovering over
+       the whole composer. -->
+  <div ref="rootRef" class="relative">
     <button
       type="button"
       class="forebrain-chip-btn composer-icon-btn !h-7 !w-7 !justify-center !border-0 !bg-transparent !px-0"
@@ -14,11 +13,11 @@
       aria-haspopup="menu"
       :aria-expanded="open"
       data-testid="composer-plus"
-      @click="open = !open"
+      @click="toggle"
     >
       <Plus class="size-4" aria-hidden="true" />
     </button>
-    <div v-if="open" class="forebrain-plus-pop" role="menu" :aria-label="t('chat.plusAdd')">
+    <div v-if="open" class="forebrain-plus-pop" role="menu" :aria-label="t('chat.plusAdd')" :style="{ width: `${sheetWidth}px` }">
       <div class="forebrain-plus-cap">{{ t('chat.plusAdd') }}</div>
       <button type="button" class="forebrain-plus-opt" role="menuitem" data-testid="plus-attach" @click="attach">
         <Paperclip class="size-3.5 shrink-0" aria-hidden="true" />
@@ -82,6 +81,23 @@ const { openFileDialog } = usePromptInput()
 
 const open = ref(false)
 const rootRef = ref<HTMLElement | null>(null)
+
+/** The sheet's widest: a menu, not the width of the composer it opens over. */
+const SHEET_MAX = 440
+const sheetWidth = ref(SHEET_MAX)
+
+/**
+ * Opens or closes the sheet. It is as wide as it can be up to SHEET_MAX but
+ * stays inside the composer that holds the "+" (a narrow one — the subagent
+ * drawer's — would otherwise let it run past the column's edge and be cut).
+ */
+function toggle() {
+  if (!open.value) {
+    const host = rootRef.value?.closest('[data-slot="input-group"]')
+    sheetWidth.value = host ? Math.max(260, Math.min(SHEET_MAX, host.clientWidth - 16)) : SHEET_MAX
+  }
+  open.value = !open.value
+}
 const skills = ref<{ name: string; description: string }[]>([])
 
 async function loadSkills() {
@@ -117,15 +133,14 @@ onUnmounted(() => document.removeEventListener('pointerdown', onDocPointerDown))
 </script>
 
 <style scoped>
-/* The prototype's .plus-pop: a sheet as wide as the composer, opening above
-   it, with the add entries, the session's skills, and the @// hints. Its
-   width comes from the composer, so every host must be the positioning
-   context (see the template's first comment). */
+/* The prototype's .plus-pop: a sheet with the add entries, the session's
+   skills, and the @// hints. It opens above the "+" that opened it (its
+   containing block), left edges aligned, 8px clear — and its width is set by
+   the script, never by the composer's. */
 .forebrain-plus-pop {
   position: absolute;
   left: 0;
-  right: 0;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 8px);
   background: var(--forebrain-surface);
   border: 1px solid var(--forebrain-divider);
   border-radius: 12px;
@@ -181,10 +196,15 @@ onUnmounted(() => document.removeEventListener('pointerdown', onDocPointerDown))
   color: var(--forebrain-text-2);
 }
 
+/* One column that is allowed to be narrower than its widest description
+   (minmax(0, 1fr)): an auto track grew to the longest nowrap line, so the
+   description's ellipsis never fired and the list scrolled sideways instead. */
 .forebrain-plus-skills {
   max-height: 176px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1px;
 }
 

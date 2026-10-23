@@ -52,11 +52,15 @@ func TestExecuteConnectSecondModelSameProviderKeepsFirstEntry(t *testing.T) {
 	if len(def.LLMProviders) != 3 {
 		t.Fatalf("provider count = %d, want 3 (openai and claude-old preserved, claude-new added)", len(def.LLMProviders))
 	}
-	// The configured provider+model must be primary (index 0) so /connect
-	// takes effect for the next turn.
-	primary := def.LLMProviders[0]
-	if !strings.EqualFold(primary.Provider, "anthropic") || primary.Model != "claude-new" {
-		t.Fatalf("primary = %+v, want anthropic/claude-new", primary)
+	// The configured provider+model must be APPENDED at the end — the list
+	// order is user data and /connect never reorders it; the session-level
+	// switch (not the config) governs the next turn.
+	last := def.LLMProviders[len(def.LLMProviders)-1]
+	if !strings.EqualFold(last.Provider, "anthropic") || last.Model != "claude-new" {
+		t.Fatalf("last entry = %+v, want anthropic/claude-new appended", last)
+	}
+	if def.LLMProviders[0].Provider != "openai" || def.LLMProviders[0].Model != "gpt-old" {
+		t.Fatalf("first entry = %+v, want openai/gpt-old untouched", def.LLMProviders[0])
 	}
 	// openai must still be present, unchanged.
 	var openai *appcfg.AgentLLMProviderConfig
@@ -94,8 +98,8 @@ func TestExecuteConnectSecondModelSameProviderKeepsFirstEntry(t *testing.T) {
 	}
 }
 
-// Connecting a provider the agent does not yet carry adds a new entry and makes
-// it primary, leaving existing providers intact.
+// Connecting a provider the agent does not yet carry appends a new entry at
+// the END, leaving existing providers intact and in place.
 func TestExecuteConnectAddsNewProvider(t *testing.T) {
 	home := t.TempDir()
 	rt := Context{
@@ -129,11 +133,11 @@ func TestExecuteConnectAddsNewProvider(t *testing.T) {
 	if len(def.LLMProviders) != 2 {
 		t.Fatalf("provider count = %d, want 2 (openai kept, anthropic added)", len(def.LLMProviders))
 	}
-	if !strings.EqualFold(def.LLMProviders[0].Provider, "anthropic") || def.LLMProviders[0].Model != "claude-new" {
-		t.Fatalf("primary = %+v, want anthropic/claude-new", def.LLMProviders[0])
+	if def.LLMProviders[0].Provider != "openai" || def.LLMProviders[0].Model != "gpt-old" {
+		t.Fatalf("first entry = %+v, want openai/gpt-old untouched", def.LLMProviders[0])
 	}
-	if def.LLMProviders[1].Provider != "openai" || def.LLMProviders[1].Model != "gpt-old" {
-		t.Fatalf("secondary = %+v, want openai/gpt-old preserved", def.LLMProviders[1])
+	if def.LLMProviders[1].Provider != "anthropic" || def.LLMProviders[1].Model != "claude-new" {
+		t.Fatalf("last entry = %+v, want anthropic/claude-new appended", def.LLMProviders[1])
 	}
 }
 
@@ -215,8 +219,11 @@ func TestExecuteConnectMatchesProviderCaseInsensitively(t *testing.T) {
 	if len(def.LLMProviders) != 2 {
 		t.Fatalf("provider count = %d, want 2 (openai matched, not duplicated)", len(def.LLMProviders))
 	}
-	if !strings.EqualFold(def.LLMProviders[0].Provider, "openai") || def.LLMProviders[0].Model != "GPT-OLD" {
-		t.Fatalf("primary = %+v, want openai/GPT-OLD promoted", def.LLMProviders[0])
+	if def.LLMProviders[0].Provider != "anthropic" || def.LLMProviders[0].Model != "claude-old" {
+		t.Fatalf("first entry = %+v, want anthropic/claude-old untouched", def.LLMProviders[0])
+	}
+	if !strings.EqualFold(def.LLMProviders[1].Provider, "openai") || def.LLMProviders[1].Model != "GPT-OLD" {
+		t.Fatalf("second entry = %+v, want openai/GPT-OLD updated in place", def.LLMProviders[1])
 	}
 }
 
@@ -557,11 +564,17 @@ func TestExecuteConfiguresNamedAgentOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	review := appcfg.PrimaryLLM(cfg.Agents.Definitions["review"])
-	if review == nil || review.Model != "claude-opus-4-7" || review.Provider != "anthropic" {
-		t.Fatalf("review agent not configured: %+v", review)
+	reviewDef := cfg.Agents.Definitions["review"]
+	if len(reviewDef.LLMProviders) != 2 {
+		t.Fatalf("review providers = %+v, want 2 (review-old kept, claude-opus-4-7 appended)", reviewDef.LLMProviders)
 	}
-	main := appcfg.PrimaryLLM(cfg.Agents.Definitions["main"])
+	if appended := reviewDef.LLMProviders[1]; appended.Provider != "anthropic" || appended.Model != "claude-opus-4-7" {
+		t.Fatalf("review agent not configured: %+v", appended)
+	}
+	if review := appcfg.EffectiveDefaultLLM(reviewDef); review == nil || review.Model != "review-old" {
+		t.Fatalf("review default changed by an append-only write: %+v", review)
+	}
+	main := appcfg.EffectiveDefaultLLM(cfg.Agents.Definitions["main"])
 	if main == nil || main.Model != "gpt-old" {
 		t.Fatalf("main agent was rewritten by a setup aimed at review: %+v", main)
 	}
@@ -588,10 +601,14 @@ func TestExecuteDefaultsToMainAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if main := appcfg.PrimaryLLM(cfg.Agents.Definitions["main"]); main == nil || main.Model != "gpt-new" {
-		t.Fatalf("main agent not configured: %+v", main)
+	mainDef := cfg.Agents.Definitions["main"]
+	if len(mainDef.LLMProviders) != 2 {
+		t.Fatalf("main providers = %+v, want 2 (gpt-old kept, gpt-new appended)", mainDef.LLMProviders)
 	}
-	if review := appcfg.PrimaryLLM(cfg.Agents.Definitions["review"]); review == nil || review.Model != "review-old" {
+	if appended := mainDef.LLMProviders[1]; appended.Provider != "openai" || appended.Model != "gpt-new" {
+		t.Fatalf("main agent not configured: %+v", appended)
+	}
+	if review := appcfg.EffectiveDefaultLLM(cfg.Agents.Definitions["review"]); review == nil || review.Model != "review-old" {
 		t.Fatalf("review agent was rewritten: %+v", review)
 	}
 }

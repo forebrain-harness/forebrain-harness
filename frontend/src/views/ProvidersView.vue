@@ -51,12 +51,9 @@
         :row-key="entryKey"
         :row-attrs="providerRowAttrs"
       >
-        <template #cell-order="{ row }">
-          <BadgeComponent v-if="rowIndex(row) === 0">{{ t('providers.primary') }}</BadgeComponent>
-          <BadgeComponent v-else variant="gray">{{ t('providers.fallback', { n: rowIndex(row) }) }}</BadgeComponent>
-        </template>
         <template #cell-provider="{ row }">
           <span class="forebrain-cell-1" v-tip:top.trunc="row.provider">{{ row.provider }}</span>
+          <BadgeComponent v-if="isDefaultRow(row)" class="ml-1.5" :data-testid="`provider-default-${rowIndex(row)}`">{{ t('providers.defaultBadge') }}</BadgeComponent>
         </template>
         <template #cell-models="{ row }">
           <span class="forebrain-cell-1" v-tip:top.trunc="row.models.join('、')">{{ row.models.join('、') }}</span>
@@ -72,15 +69,14 @@
         </template>
         <template #cell-actions="{ row }">
           <RowActions>
-            <RowActionSlot v-if="rowIndex(row) === 0" />
             <RowAction
-              v-else
-              :icon="ArrowUp"
-              :label="t('providers.moveUp')"
+              v-if="!isDefaultRow(row)"
+              :icon="Star"
+              :label="t('providers.setDefault')"
               :name="row.provider"
               :disabled="saving"
-              :data-testid="`provider-up-${rowIndex(row)}`"
-              @click="moveUp(row)"
+              :data-testid="`provider-default-set-${rowIndex(row)}`"
+              @click="setDefault(row)"
             />
             <RowAction
               :icon="Pencil"
@@ -104,7 +100,6 @@
       </DataTable>
 
       <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
-      <ListNote>{{ t('providers.description') }}</ListNote>
     </div>
 
     <ForebrainModal :open="modalOpen" :size="'md'" :title="editingKey !== null ? t('providers.editModalTitle') : t('providers.addModalTitle')" @close="modalOpen = false">
@@ -340,7 +335,7 @@
  * row.
  */
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ArrowUp, Check, CircleAlert, LogIn, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import { Check, CircleAlert, LogIn, Pencil, Plus, RotateCw, Star, Trash2 } from 'lucide-vue-next'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import {
   Command,
@@ -358,11 +353,9 @@ import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
-import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
-import RowActionSlot from '@/components/common/RowActionSlot.vue'
 import TablePager from '@/components/common/TablePager.vue'
 import ModelChipsInput from '@/components/providers/ModelChipsInput.vue'
 // The params editor carries CodeMirror, which only the add/edit modal needs: the
@@ -416,11 +409,27 @@ type ProviderDraft = {
  * touch — the page never receives the stored value, so it must not send a guess
  * back.
  */
-type ProviderEntry = ProviderRecord & { apiKeyPlain?: string; apiKey?: string }
+type ProviderEntry = ProviderRecord & {
+  apiKeyPlain?: string
+  apiKey?: string
+  /** The row as it stood before this edit; the server replaces its entries in place. */
+  replaces?: { provider: string; baseUrl: string; apiPath: string; models: string[] }
+}
 
-const { rows, total, page, pageSize, q, loading, error, reload } = useServerList<ProviderRecord>(forebrainApi.providersPage, {
-  pageSize: 10,
-})
+/** The agent's effective default ("provider/model"), as the server resolves
+ * it — default_model when set, otherwise the first row. The default badge and
+ * the set-default action both read this one value, never a client-side
+ * re-derivation. */
+const defaultModel = ref('')
+const { rows, total, page, pageSize, q, loading, error, reload } = useServerList<ProviderRecord>(
+  (query) => forebrainApi.providersPage(query).then((res) => {
+    defaultModel.value = res.defaultModel
+    return res
+  }),
+  {
+    pageSize: 10,
+  },
+)
 
 const saving = ref(false)
 const catalogProviders = ref<string[]>([])
@@ -594,12 +603,11 @@ function blankDraft(): ProviderDraft {
 /**
  * The table's columns, at the widths the design declares. The models column has
  * no width: it takes the room the others leave, which is what makes the list fit
- * the page at any width. No column sorts — the order of the rows *is* the
- * fallback order (owner 2026-10-21), so 主用 and 回退 N must always match the
- * real chain.
+ * the page at any width. No column sorts — the row order is storage order
+ * (owner 2026-10-26), not priority, and the default model is marked by the
+ * badge, not by position.
  */
 const columns = computed<DataColumn[]>(() => [
-  { id: 'order', header: t('providers.colOrder'), size: 70 },
   { id: 'provider', header: t('providers.colProvider'), size: 140 },
   { id: 'models', header: t('providers.colModels'), cellClass: 'font-mono' },
   { id: 'baseUrl', header: t('providers.colBaseUrl'), size: 220, cellClass: 'font-mono text-[var(--forebrain-text-2)]' },
@@ -612,9 +620,17 @@ function providerRowAttrs(row: ProviderRecord): Record<string, string> {
   return { 'data-provider-row': row.provider || '' }
 }
 
-/** A row's position in the whole order, as the list draws it (主用 / 回退 N). */
+/** A row's position in the whole stored list — a stable row id for tests, not
+ * a priority: no badge and no action derives meaning from it. */
 function rowIndex(row: ProviderRecord): number {
   return row.index ?? 0
+}
+
+/** Whether the agent's effective default names any model on this row. */
+function isDefaultRow(row: ProviderRecord): boolean {
+  const provider = String(row.provider ?? '').trim()
+  if (!provider || !defaultModel.value) return false
+  return (row.models ?? []).some((model) => defaultModel.value === `${provider}/${String(model ?? '').trim()}`)
 }
 
 /**
@@ -625,6 +641,16 @@ function rowIndex(row: ProviderRecord): number {
  */
 function entryKey(entry: ProviderRecord): string {
   return [String(entry.provider ?? '').trim(), String(entry.baseUrl ?? '').trim(), [...(entry.models ?? [])].join('|')].join('\u0000')
+}
+
+/** The row as it stands now, for the server to find the stored entries an edit replaces. */
+function rowAsLoaded(row: ProviderRecord): NonNullable<ProviderEntry['replaces']> {
+  return {
+    provider: String(row.provider ?? '').trim(),
+    baseUrl: String(row.baseUrl ?? '').trim(),
+    apiPath: String(row.apiPath ?? '').trim(),
+    models: [...(row.models ?? [])],
+  }
 }
 
 function toDraft(record: ProviderRecord): ProviderDraft {
@@ -657,6 +683,14 @@ function toBody(entry: ProviderEntry): Record<string, unknown> {
   // A row the user emptied states that on the wire: the empty string is the
   // clear. Absent (never set here) means the same as an untouched key.
   if (entry.apiKey !== undefined) body.api_key = entry.apiKey
+  if (entry.replaces) {
+    body.replaces = {
+      provider: entry.replaces.provider,
+      base_url: entry.replaces.baseUrl,
+      api_path: entry.replaces.apiPath,
+      models: [...entry.replaces.models],
+    }
+  }
   return body
 }
 
@@ -674,15 +708,15 @@ let lastWrite: Promise<void> = Promise.resolve()
  * a refused save then says so in the dialog that raised it, and the page banner
  * — which that dialog covers — stays empty.
  */
-function writeWholeOrder(change: (all: ProviderEntry[]) => void, report?: (message: string) => void): Promise<void> {
+function writeWholeOrder(change: (all: ProviderEntry[]) => void, report?: (message: string) => void, defaultModelOverride?: string): Promise<void> {
   pendingWrites += 1
   saving.value = true
   const write = lastWrite.then(async () => {
     error.value = ''
     try {
-      const all: ProviderEntry[] = await forebrainApi.providers()
+      const all: ProviderEntry[] = (await forebrainApi.providers()).providers
       change(all)
-      await forebrainApi.saveProviders(all.map(toBody))
+      await forebrainApi.saveProviders(all.map(toBody), defaultModelOverride)
       await reload()
     } catch (cause) {
       const message = getErrorMessage(cause)
@@ -764,7 +798,7 @@ async function modalSave() {
   await writeWholeOrder(
     (all) => {
       const at = key === null ? -1 : all.findIndex((candidate) => entryKey(candidate) === key)
-      if (at >= 0) all[at] = { ...all[at], ...entry }
+      if (at >= 0) all[at] = { ...all[at], ...entry, replaces: rowAsLoaded(all[at]) }
       else all.push(entry)
     },
     (message) => {
@@ -781,13 +815,14 @@ async function modalSave() {
   modalOpen.value = false
 }
 
-function moveUp(row: ProviderRecord) {
-  const key = entryKey(row)
-  void writeWholeOrder((all) => {
-    const at = all.findIndex((candidate) => entryKey(candidate) === key)
-    if (at <= 0) return
-    ;[all[at - 1], all[at]] = [all[at], all[at - 1]]
-  })
+/** Retargets agents.definitions.<agent>.default_model at this row. The list's
+ * order never changes — the default is a named value, not a position. A row
+ * serving several models sets its first one (the tooltip says so). */
+function setDefault(row: ProviderRecord) {
+  const provider = String(row.provider ?? '').trim()
+  const model = String(row.models?.[0] ?? '').trim()
+  if (!provider || !model) return
+  void writeWholeOrder(() => {}, undefined, `${provider}/${model}`)
 }
 
 function askRemove(row: ProviderRecord) {
@@ -1011,10 +1046,13 @@ async function saveConnectModel() {
   await writeWholeOrder((all) => {
     const at = all.findIndex((candidate) => String(candidate.provider ?? '').trim() === provider)
     if (at >= 0) {
-      // Re-signing in to a service keeps the models already on its row; the one
-      // just chosen becomes the model it leads with.
-      const models = [...(all[at].models ?? [])].filter((known) => known !== model)
-      all[at] = { ...all[at], models: [model, ...models], baseUrl }
+      // Re-signing in to a service keeps the row's models exactly as they are;
+      // the one just chosen is appended when it is new, never re-ordered. No
+      // default_model is written here — this page holds no conversation to
+      // enable the model for.
+      const models = [...(all[at].models ?? [])]
+      if (!models.includes(model)) models.push(model)
+      all[at] = { ...all[at], models, baseUrl, replaces: rowAsLoaded(all[at]) }
       return
     }
     all.push({ provider, models: [model], baseUrl, apiPath: '', params: '', apiKeyPlain: '' })

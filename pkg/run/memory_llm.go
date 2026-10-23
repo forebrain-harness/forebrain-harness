@@ -234,7 +234,16 @@ func resolveMemoryLLMProvider(cfg *appcfg.Root, agentType, model string) *LLMPro
 	}
 	model = strings.TrimSpace(model)
 	if model == "" {
-		return llmYAMLsFromResolved(providers)[0]
+		// The default model for a background pipeline: default_model when the
+		// owning definition names one, otherwise its first entry — the same
+		// resolution the primary path uses, so background and foreground
+		// cannot disagree about what "default" means.
+		entry, err := effectiveDefaultProvider(cfg, agentType)
+		if err != nil {
+			slog.Error("memory llm default model is not resolvable", "agent", agentType, "err", err)
+			return nil
+		}
+		return llmYAMLsFromResolved([]appcfg.AgentLLMProviderConfig{entry})[0]
 	}
 	for _, provider := range providers {
 		if strings.EqualFold(strings.TrimSpace(provider.Model), model) {

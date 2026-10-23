@@ -161,8 +161,9 @@ func TestTransportRefreshesOnceForConcurrentRequests(t *testing.T) {
 		RefreshToken: "refresh-1",
 		ExpiresAt:    time.Now().Add(-time.Minute),
 	})
-	// One transport shared by every goroutine: the mutex that makes the refresh
-	// single is per transport, so this is the shape production has.
+	// One transport shared by every goroutine is the shortest shape for this
+	// test: the refresh lock is per login file, so a second transport on the
+	// same path queues on the same mutex too.
 	shared := &Transport{Path: path, Base: &headerRecorder{headers: make(chan string, 16)}}
 	const workers = 5
 	var wg sync.WaitGroup
@@ -203,6 +204,189 @@ func TestTransportRefreshesOnceForConcurrentRequests(t *testing.T) {
 	}
 	if sent != workers {
 		t.Fatalf("header captures = %d, want %d", sent, workers)
+	}
+}
+
+// The server retires a refresh token the moment it exchanges it, so two clients
+// of one login file must not both exchange it: the loser presents a token the
+// console has already rotated and would report a dead login that is in fact
+// alive. A turn's LLM, a subagent's and a model-listing probe each build their
+// own Transport on the same file, so the serialization cannot be per instance.
+func TestTransportsSharingAFileRefreshOnce(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	current := "refresh-1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode refresh body: %v", err)
+		}
+		sent, _ := body["refresh_token"].(string)
+		mu.Lock()
+		calls++
+		rotated := sent == current
+		if rotated {
+			current = "refresh-2"
+		}
+		mu.Unlock()
+		// Hold the response briefly so the requests really overlap.
+		time.Sleep(20 * time.Millisecond)
+		if !rotated {
+			writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "invalid_grant"})
+			return
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"access_token":  "access-2",
+			"refresh_token": "refresh-2",
+			"expires_in":    3600,
+		})
+	}))
+	defer server.Close()
+	stubConsole(t, server.URL)
+
+	path := filepath.Join(t.TempDir(), "opencode.json")
+	writeCredentials(t, path, Credentials{
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ExpiresAt:    time.Now().Add(-time.Minute),
+	})
+	recorder := &headerRecorder{headers: make(chan string, 16)}
+	transports := []*Transport{
+		{Path: path, Base: recorder},
+		{Path: path, Base: recorder},
+	}
+	const workers = 5
+	var wg sync.WaitGroup
+	errs := make(chan error, workers*len(transports))
+	for _, transport := range transports {
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func(transport *Transport) {
+				defer wg.Done()
+				req, err := http.NewRequest(http.MethodGet, "https://opencode.ai/inference/v1/models", nil)
+				if err != nil {
+					errs <- err
+					return
+				}
+				resp, err := transport.RoundTrip(req)
+				if err != nil {
+					errs <- err
+					return
+				}
+				resp.Body.Close()
+			}(transport)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent RoundTrip: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("refresh calls = %d, want exactly 1: the second transport exchanged a refresh token the console had already retired", calls)
+	}
+	close(recorder.headers)
+	sent := 0
+	for got := range recorder.headers {
+		sent++
+		if got != "Bearer access-2" {
+			t.Fatalf("Authorization = %q, want the refreshed token", got)
+		}
+	}
+	if want := workers * len(transports); sent != want {
+		t.Fatalf("header captures = %d, want %d", sent, want)
+	}
+}
+
+// The TUI and the gateway are two processes on one login file, so one of them
+// can rotate the refresh token and persist it while the other is mid-exchange.
+// The refused exchange is then not a dead login: the file already holds a live
+// one, and sending the user through the browser flow again would be busywork.
+func TestTransportAdoptsALoginAnotherProcessRotated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.json")
+	writeCredentials(t, path, Credentials{
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ExpiresAt:    time.Now().Add(-time.Minute),
+	})
+	var mu sync.Mutex
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		// The other process got there first and wrote the pair it received,
+		// which retires the token this request is still presenting.
+		writeCredentials(t, path, Credentials{
+			AccessToken:  "access-other",
+			RefreshToken: "refresh-other",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		})
+		writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "invalid_grant"})
+	}))
+	defer server.Close()
+	stubConsole(t, server.URL)
+
+	captured := &captureTransport{}
+	transport := &Transport{Path: path, Base: captured}
+	req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/inference/openai/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("refresh calls = %d, want 1", got)
+	}
+	if got := captured.request.Header.Get("Authorization"); got != "Bearer access-other" {
+		t.Fatalf("Authorization = %q, want the login the other process wrote", got)
+	}
+}
+
+// A login another process wrote is only worth adopting while it is still
+// usable: one that is already inside the refresh margin would hand the next
+// request the same problem, so the refusal stands and the surface offers the
+// login route.
+func TestTransportDoesNotAdoptARotationThatIsAlreadyExpiring(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.json")
+	writeCredentials(t, path, Credentials{
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ExpiresAt:    time.Now().Add(-time.Minute),
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeCredentials(t, path, Credentials{
+			AccessToken:  "access-other",
+			RefreshToken: "refresh-other",
+			ExpiresAt:    time.Now().Add(10 * time.Second),
+		})
+		writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "invalid_grant"})
+	}))
+	defer server.Close()
+	stubConsole(t, server.URL)
+
+	transport := &Transport{Path: path, Base: &captureTransport{}}
+	req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/inference/openai/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = transport.RoundTrip(req)
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want a *llm.APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Error(), "/connect") {
+		t.Fatalf("message = %q, want it to point at /connect", apiErr.Error())
 	}
 }
 

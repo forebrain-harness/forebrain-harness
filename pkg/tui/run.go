@@ -4953,21 +4953,6 @@ func transientSpinnerFrame(tick int) string {
 	return frames[tick%len(frames)]
 }
 
-func formatWorkingElapsed(elapsed time.Duration) string {
-	totalSeconds := int(elapsed / time.Second)
-	if totalSeconds < 60 {
-		return fmt.Sprintf("%ds", totalSeconds)
-	}
-	seconds := totalSeconds % 60
-	totalMinutes := totalSeconds / 60
-	if totalMinutes < 60 {
-		return fmt.Sprintf("%dm %02ds", totalMinutes, seconds)
-	}
-	minutes := totalMinutes % 60
-	hours := totalMinutes / 60
-	return fmt.Sprintf("%dh %02dm %02ds", hours, minutes, seconds)
-}
-
 func streamTimeAgo(ts int64) string {
 	if ts <= 0 {
 		return ""

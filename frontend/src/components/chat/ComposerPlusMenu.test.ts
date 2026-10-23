@@ -69,4 +69,18 @@ describe('ComposerPlusMenu', () => {
     expect(menu.emitted('insert')).toEqual([['/plan-writing ']])
     expect(menu.find('[data-testid="plus-attach"]').exists()).toBe(false)
   })
+
+  // The sheet opens above the "+" that opened it — its containing block is the
+  // button's own wrapper — not above the whole composer, and its width is set
+  // for it (a menu, not the composer's width).
+  it('anchors the sheet to the plus button and sizes it itself', async () => {
+    const { menu } = mountMenu()
+    const button = menu.get('[data-testid="composer-plus"]')
+    const wrapper = button.element.parentElement as HTMLElement
+    expect(wrapper.classList.contains('relative')).toBe(true)
+    await button.trigger('click')
+    const sheet = menu.get('.forebrain-plus-pop').element as HTMLElement
+    expect(wrapper.contains(sheet)).toBe(true)
+    expect(sheet.style.width).toBe('440px')
+  })
 })

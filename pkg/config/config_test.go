@@ -316,8 +316,8 @@ func TestSaveRejectsInvalidPrimaryAgentConfig(t *testing.T) {
 }
 
 func TestAgentLLMHelpersAndYAMLUnmarshal(t *testing.T) {
-	if PrimaryLLM(AgentDefinition{}) != nil {
-		t.Fatal("PrimaryLLM empty = non-nil")
+	if EffectiveDefaultLLM(AgentDefinition{}) != nil {
+		t.Fatal("EffectiveDefaultLLM empty = non-nil")
 	}
 	NormalizeLLMProviderEntries(nil)
 

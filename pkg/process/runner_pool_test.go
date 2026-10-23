@@ -839,11 +839,12 @@ func TestRunnerPoolPropagateConfigReachesEveryEntry(t *testing.T) {
 	}
 }
 
-// TestRunnerPoolPropagateConfigKeepsFailingEntryOnOldConfig pins the
-// failure half: an entry that cannot adopt the new config keeps its previous
-// configuration and runtime (LoadConfig's own rollback), and is named in the
-// returned error rather than silently skipped.
-func TestRunnerPoolPropagateConfigKeepsFailingEntryOnOldConfig(t *testing.T) {
+// TestRunnerPoolPropagateConfigKeepsEntryServingWhenPinRemoved pins the
+// ordinary-reload rule across the pool: a config that drops an entry's pinned
+// pair still propagates (LoadConfig succeeds — the runner keeps serving the
+// published model, no switch, no error), the config pointer moves to the new
+// config, and the served selection is exactly the one that was in force.
+func TestRunnerPoolPropagateConfigKeepsEntryServingWhenPinRemoved(t *testing.T) {
 	ctx := context.Background()
 	env, projects, _ := newPoolTestEnv(t)
 	env.poolOnce.Do(func() { env.pool = NewRunnerPool(env, 4) })
@@ -852,21 +853,20 @@ func TestRunnerPoolPropagateConfigKeepsFailingEntryOnOldConfig(t *testing.T) {
 	before := pooled.AppCfg
 	pinnedBefore := run.PrimaryModelSelection(pooled)
 
-	// Parses, but no agent definition resolves, so the entry's LoadConfig
-	// fails and its own rollback keeps the old runtime.
-	broken := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true},
+	// The pinned pair is gone from this config; another entry remains.
+	withoutPin := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "openai", Model: "gpt-other", APIKey: "${FOREBRAIN_POOL_TEST_KEY}", BaseURL: "http://localhost:0/v1"},
+		}},
 	}}}
-	err := env.pool.PropagateConfig(ctx, *broken)
-	if err == nil {
-		t.Fatal("an entry that cannot adopt the config must be reported")
-	}
-	if pooled.AppCfg != before {
-		t.Fatalf("failing entry's config pointer moved: %p", pooled.AppCfg)
+	err := env.pool.PropagateConfig(ctx, *withoutPin)
+	require.NoError(t, err, "a reload whose pin disappeared must not fail")
+	if pooled.AppCfg == before {
+		t.Fatal("the entry did not adopt the new config pointer")
 	}
 	pinned := run.PrimaryModelSelection(pooled)
 	require.True(t, pinned.Set)
-	require.Equal(t, pinnedBefore.Model, pinned.Model, "failing entry must keep its previous selection")
+	require.Equal(t, pinnedBefore.Model, pinned.Model, "the runner keeps serving the model that was in force")
 }
 
 // TestRunnerPoolPropagateConfigSkipsClosedRunners pins the teardown rule: a

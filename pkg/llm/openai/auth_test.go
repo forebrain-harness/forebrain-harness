@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -369,6 +370,104 @@ func TestTransportRefreshTreatsInvalidGrantAsExpiredLogin(t *testing.T) {
 	}
 	if strings.Contains(api.Message, "/connect") {
 		t.Fatalf("Message = %q, must stay surface-neutral: the web login renders it verbatim", api.Message)
+	}
+}
+
+// The token endpoint retires a refresh token as soon as it exchanges it, so two
+// clients of one login file must not both exchange it: the loser presents a
+// token the endpoint has already rotated and would report a dead login that is
+// in fact alive. Every turn, subagent and codex probe builds its own Transport
+// on the same file, so the serialization cannot be per instance.
+func TestTransportsSharingAFileRefreshOnce(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	// A non-JWT-free shape: the initial access token is a real-looking JWT
+	// whose exp is already behind us, so current() refreshes.
+	raw := `{"auth_mode":"chatgpt","tokens":{"access_token":` + quote(jwtWithExp(t, time.Now().Add(-time.Minute))) + `,"refresh_token":"refresh-1"}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	renewed := jwtWithExp(t, time.Now().Add(time.Hour))
+	var mu sync.Mutex
+	calls := 0
+	current := "refresh-1"
+	stubTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse token form: %v", err)
+		}
+		sent := r.PostForm.Get("refresh_token")
+		mu.Lock()
+		calls++
+		rotated := sent == current
+		if rotated {
+			current = "refresh-2"
+		}
+		mu.Unlock()
+		// Hold the response briefly so the two exchanges really overlap.
+		time.Sleep(20 * time.Millisecond)
+		if !rotated {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":` + quote(renewed) + `,"refresh_token":"refresh-2","expires_in":3600}`))
+	})
+
+	transports := []*Transport{{Path: path}, {Path: path}}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(transports))
+	for _, transport := range transports {
+		wg.Add(1)
+		go func(transport *Transport) {
+			defer wg.Done()
+			if _, err := transport.current(context.Background()); err != nil {
+				errs <- err
+			}
+		}(transport)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent current(): %v", err)
+	}
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("refresh calls = %d, want exactly 1: the second transport exchanged a refresh token the endpoint had already rotated", got)
+	}
+}
+
+// The TUI and the gateway are two processes on one login file, so one of them
+// can rotate the refresh token and persist it while the other is mid-exchange.
+// The refused exchange is then not a dead login: the file already holds a live
+// one, and making the user sign in again would be busywork.
+func TestTransportAdoptsALoginAnotherProcessRotated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	// A non-JWT access token reads as already expired, so current() refreshes.
+	if err := os.WriteFile(path, []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"not-a-jwt","refresh_token":"refresh-1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rotated := jwtWithExp(t, time.Now().Add(time.Hour))
+	stubTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		// The other process got there first and wrote the pair it received,
+		// which retires the token this request is still presenting.
+		if err := Save(path, Credentials{AccessToken: rotated, RefreshToken: "refresh-other"}); err != nil {
+			t.Errorf("save the rotated login: %v", err)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	})
+
+	transport := &Transport{Path: path}
+	got, err := transport.current(context.Background())
+	if err != nil {
+		t.Fatalf("current(): %v, want the login the other process wrote", err)
+	}
+	if got.AccessToken != rotated || got.RefreshToken != "refresh-other" {
+		t.Fatalf("credentials = %+v, want the rotated pair already on disk", got)
 	}
 }
 

@@ -45,7 +45,8 @@
  * session's own model row — the same switch /model makes, session-scoped —
  * and rides the next turn; the agent's default for other conversations never
  * moves. Switching resets the effort to the model's default, exactly as a
- * /model switch does.
+ * /model switch does. On a new chat there is no row to write yet: the pick is
+ * handed to the page, which writes it once its first message opens the session.
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Check, ChevronDown, Cpu } from 'lucide-vue-next'
@@ -61,7 +62,11 @@ const props = defineProps<{
   compact?: boolean
 }>()
 
-const emit = defineEmits<{ (e: 'saved'): void }>()
+const emit = defineEmits<{
+  (e: 'saved'): void
+  /** A new chat has no session to write: the page holds the pick for the one it opens. */
+  (e: 'pick', option: SessionModelOption): void
+}>()
 
 const { t } = useI18n()
 const open = ref(false)
@@ -79,9 +84,13 @@ function isCurrent(option: SessionModelOption): boolean {
 
 async function choose(option: SessionModelOption) {
   const sessionId = props.sessionId
-  if (switching.value || !sessionId) return
+  if (switching.value) return
   open.value = false
   if (isCurrent(option)) return
+  if (!sessionId) {
+    emit('pick', option)
+    return
+  }
   switching.value = true
   error.value = ''
   try {

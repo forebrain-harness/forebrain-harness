@@ -820,11 +820,14 @@ func execModel(ctx Context) Result {
 	if len(choices) == 0 {
 		return Result{Handled: true, Reply: "This agent has no models configured."}
 	}
+	// The effective default (default_model, else the first) is what an empty
+	// selection resolves to; index zero only matches it by coincidence.
+	defaultAt := defaultModelIndex(settings.Config, settings.AgentName, choices)
 	items := make([]PickerItem, len(choices))
 	for i, choice := range choices {
-		// The live selection marks the current model; index zero is only the
-		// fallback for a runtime that has never published one.
-		items[i] = PickerItem{Value: choice.Label, Label: choice.Label, Current: i == 0 && !settings.Selection.Set || selectionMatches(settings.Selection, choice)}
+		// The live selection marks the current model; the effective default
+		// is only the fallback for a runtime that has never published one.
+		items[i] = PickerItem{Value: choice.Label, Label: choice.Label, Current: !settings.Selection.Set && i == defaultAt || selectionMatches(settings.Selection, choice)}
 	}
 	return Result{Handled: true, Picker: &Picker{Command: "model", Title: "Model", Hint: "The model this agent runs on", Items: items}}
 }
@@ -874,12 +877,12 @@ func chooseModel(ctx Context, label string) Result {
 	chosen := choices[at]
 	name := llm.FormatProviderModel(chosen.Provider, chosen.Model)
 	// A published live selection decides what "changed" means; a runtime
-	// that never published one keeps the config-order reading.
+	// that never published one diffs against the effective default.
 	changed := false
 	if settings.Selection.Set {
 		changed = !selectionMatches(settings.Selection, chosen)
 	} else {
-		changed = at != 0
+		changed = at != defaultModelIndex(settings.Config, settings.AgentName, choices)
 	}
 	reply := ""
 	if changed {
@@ -903,8 +906,13 @@ func chooseModel(ctx Context, label string) Result {
 	}
 	// The current marker reads the live selection's concrete effort, not
 	// config order. The levels are the model's own: offering a global list
-	// would let the picker pin a level this model would reject.
+	// would let the picker pin a level this model would reject. A session
+	// without a row shows the effort its runner actually carries (the
+	// resolved view), while a session with one shows its own pinned effort.
 	current := settings.Selection.Effort
+	if !settings.Selection.Set {
+		current = settings.LiveSelection.Effort
+	}
 	items := make([]PickerItem, len(chosen.ReasoningEfforts))
 	for i, effort := range chosen.ReasoningEfforts {
 		items[i] = PickerItem{Value: encodeEffortChoice(chosen.Label, effort, changed), Label: effort, Current: effort == current}
@@ -931,7 +939,11 @@ func chooseReasoningEffort(ctx Context, value string) Result {
 		return Result{Handled: true, Reply: "That reasoning effort is no longer offered for this model."}
 	}
 	chosen := choices[at]
-	if selectionMatches(settings.Selection, chosen) && effort == settings.Selection.Effort {
+	pinnedEffort := settings.Selection.Effort
+	if !settings.Selection.Set {
+		pinnedEffort = settings.LiveSelection.Effort
+	}
+	if selectionMatches(settings.Selection, chosen) && effort == pinnedEffort {
 		if modelChanged {
 			// The switch was already reported; its effort stayed as it was.
 			return Result{Handled: true}
@@ -1052,13 +1064,16 @@ func copySlashModelSelection(ctx Context, sourceSessionID, targetSessionID strin
 	if err != nil {
 		return err
 	}
-	if !settings.Selection.Set {
+	// The fork inherits what the conversation actually runs on — the resolved
+	// view, falling back to the runner's published selection when the source
+	// never chose — not the raw row (a stale row inherits nothing).
+	if !settings.LiveSelection.Set {
 		// No live selection: nothing to inherit; the fork starts on the
 		// file default like any new session.
 		return nil
 	}
-	choice := ModelChoice{Provider: settings.Selection.Provider, Model: settings.Selection.Model}
-	effort := settings.Selection.Effort
+	choice := ModelChoice{Provider: settings.LiveSelection.Provider, Model: settings.LiveSelection.Model}
+	effort := settings.LiveSelection.Effort
 	// A Runner no-op for the live runtime; what it makes durable is the
 	// source session's row, so the copy below has something to copy.
 	if err := ctx.Model.SelectModel(ctx.commandContext(), sourceSessionID, choice, &effort); err != nil {

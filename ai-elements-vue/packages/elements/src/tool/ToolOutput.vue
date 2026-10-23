@@ -96,14 +96,11 @@ const formattedOutput = computed(() => {
   margin-bottom: 0;
 }
 
-.tool-body :deep(p) {
-  margin: 0;
-}
-
+/* The body is the one vertical scroller (208px, above): a second bound on the
+   code block gave a box inside a box, each with its own bar. The block scrolls
+   sideways only, by itself. */
 .tool-body :deep(pre) {
   border-radius: 6px;
-  max-height: 208px;
-  overflow: auto;
 }
 
 .tool-body-error {

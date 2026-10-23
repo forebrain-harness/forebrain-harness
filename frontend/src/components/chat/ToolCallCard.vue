@@ -157,8 +157,8 @@ const isSkill = computed(() => String(props.step.category ?? '').trim().toLowerC
  * short summaries — every card does not grow an extra block.
  */
 const fullCommand = computed(() => {
-  const summary = props.step.summary
-  if (summary.length > 120 || summary.includes('\n')) return summary
+  const headline = props.step.header || props.step.summary
+  if (headline.length > 120 || headline.includes('\n')) return headline
   return ''
 })
 
@@ -213,12 +213,16 @@ const imageMetaLine = computed(() => {
  * toolStatus maps the runtime's own status onto the states the prototype names
  * (app-preview.html :3130). A call parked on the user's approval has a state of
  * its own — it is not "running", and the reader is the reason it is not done.
- * A canceled or denied call never produced output, which is what the denied
- * state says; the alternative painted it as an error.
+ * A call the user refused is denied; one that never ran — a run that stopped
+ * under it, a prompt that was dismissed — is canceled. Neither produced output
+ * and neither is an error (the alternative painted them red), but a canceled
+ * call must never read as a refusal: a conversation that asks for no approvals
+ * refused nothing.
  */
-const toolStatus = computed<'running' | 'awaiting' | 'done' | 'denied' | 'error'>(() => {
+const toolStatus = computed<'running' | 'awaiting' | 'done' | 'denied' | 'canceled' | 'error'>(() => {
   const status = String(props.step.status ?? '').trim().toLowerCase()
-  if (status === 'canceled' || status === 'cancelled' || status === 'denied') return 'denied'
+  if (status === 'canceled' || status === 'cancelled') return 'canceled'
+  if (status === 'denied') return 'denied'
   if (props.step.error || status === 'failed' || status === 'error') return 'error'
   if (status === 'awaiting approval' || status === 'awaiting_approval' || status === 'approval-requested') return 'awaiting'
   if (!status || status === 'running' || status === 'pending') return 'running'
@@ -250,6 +254,7 @@ const toolStatusLabel = computed(() => {
     awaiting: t('chat.toolStatusAwaiting'),
     done: t('chat.toolStatusDone'),
     denied: t('chat.toolStatusDenied'),
+    canceled: t('chat.toolStatusCanceled'),
     error: t('chat.toolStatusError'),
   }
   return labels[toolStatus.value]
@@ -273,6 +278,10 @@ async function copyCommand() {
  * the noise this card exists to prevent.
  */
 const title = computed(() => {
+  // The engine's own header — the terminal's words for the call ("Read
+  // plans/100.md lines 1-96", "Ran ls", "Notes") — is the head whenever the
+  // gateway sent it. Everything below is the fallback for an older payload.
+  if (props.step.header) return props.step.header
   // A question call's head says the one thing it did — that the agent asked —
   // and leaves the questions to the card's own tab row (prototype :3299).
   if (String(props.step.toolName ?? '') === 'user_interaction') {
@@ -283,8 +292,8 @@ const title = computed(() => {
   const skill = skillCardTitle(props.step)
   if (skill !== undefined) return skill
   if (String(props.step.status ?? '').trim().toLowerCase().startsWith('cancel')) {
-    // A canceled call never ran, so the card says so rather than naming what it
-    // would have done as though it had.
+    // A canceled call never ran: its state word says so, and the head names
+    // what it would have done (or, with nothing to name, that it was canceled).
     return props.step.summary || t('chat.toolCanceled')
   }
   return props.step.summary || props.step.toolName

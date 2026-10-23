@@ -5,10 +5,12 @@ import { join } from 'node:path'
 import { pickOption, shot, signIn } from './support'
 
 /**
- * The model-service list: order is priority, models are chips, and an API key
- * is typed once and never seen again — the config keeps a ${ENV} reference and
- * the plaintext lives in .env with owner-only permissions. Adding and editing
- * happen in a modal; every change round-trips the whole ordered list.
+ * The model-service list: row order is pure storage, models are chips, and an
+ * API key is typed once and never seen again — the config keeps a ${ENV}
+ * reference and the plaintext lives in .env with owner-only permissions.
+ * Adding and editing happen in a modal; every change round-trips the whole
+ * stored list, and the default model is a named default_model the 设为默认
+ * action retargets.
  */
 
 const home = process.env.E2E_HOME ?? ''
@@ -115,13 +117,11 @@ test('changing the key rotates .env', async ({ page }) => {
   expect(env).not.toContain('sk-e2e-secret-9931')
 })
 
-test('row order is the fallback order and persists', async ({ page }) => {
+test('rows keep their stored order and the default is a named choice', async ({ page }) => {
   await signIn(page)
   await page.goto('/providers', { waitUntil: 'networkidle' })
   await page.click('[data-testid="providers-add"]')
   await pickOption(page, 'provider-name', 'moonshotai')
-  // It becomes the primary below, and a primary must be complete — the
-  // server refuses one that would keep the gateway from starting again.
   await page.fill('[data-testid="provider-base-url"]', 'http://127.0.0.1:8762')
   const chipsInput = page.locator('[data-testid="model-chips-input"]')
   await chipsInput.fill('kimi-e2e-model,')
@@ -130,21 +130,34 @@ test('row order is the fallback order and persists', async ({ page }) => {
   await page.click('[data-testid="provider-save"]')
   await expect(page.locator('[data-provider-row="moonshotai"] [data-testid^="provider-key-saved-"]')).toContainText('7788', { timeout: 15_000 })
 
-  // Move the new row above every existing one: it becomes the primary and
-  // stays there after a reload. The chain's length is whatever the suite's
-  // config offers, so the move is counted from the row's own position.
-  const indexOf = (name: string) => page.locator('[data-provider-row]').evaluateAll(
-    (rows, want) => rows.findIndex((row) => row.getAttribute('data-provider-row') === want), name)
-  const up = page.locator('[data-provider-row="moonshotai"]').locator('[data-testid^="provider-up-"]')
-  for (let i = await indexOf('moonshotai'); i > 0; i--) await up.click()
-  await expect(page.locator('[data-provider-row]').first()).toHaveAttribute('data-provider-row', 'moonshotai', { timeout: 15_000 })
+  // A new row is appended at the END and the stored order survives a reload:
+  // the list is storage, not priority, and no operation reorders it.
+  await expect(page.locator('[data-provider-row]').last()).toHaveAttribute('data-provider-row', 'moonshotai', { timeout: 15_000 })
   await page.reload({ waitUntil: 'networkidle' })
-  await expect(page.locator('[data-provider-row]').first()).toHaveAttribute('data-provider-row', 'moonshotai')
+  await expect(page.locator('[data-provider-row]').last()).toHaveAttribute('data-provider-row', 'moonshotai')
   await shot(page, 'providers-form')
 
-  // Remove the row this test added so the suite's own primary is first again
-  // for the specs that follow; the move has already proven order persists.
-  await page.click('[data-testid="provider-remove-0"]')
+  // 设为默认 retargets default_model — badge moves, rows do not.
+  await page.locator('[data-provider-row="moonshotai"]').locator('[data-testid^="provider-default-set-"]').click()
+  // The badge is asserted by its class, not its text: the e2e gateway runs
+  // the English locale (the zh wording is pinned by the unit tests).
+  const badgeOf = (name: string) => page.locator(`[data-provider-row="${name}"]`).locator('.forebrain-badge--default')
+  await expect(badgeOf('moonshotai')).toHaveCount(1, { timeout: 15_000 })
+  expect(readFileSync(configPath, 'utf8')).toContain('default_model: moonshotai/kimi-e2e-model')
+  await page.reload({ waitUntil: 'networkidle' })
+  await expect(badgeOf('moonshotai')).toHaveCount(1)
+  await expect(page.locator('[data-provider-row]').last()).toHaveAttribute('data-provider-row', 'moonshotai')
+
+  // Remove the row this test added so the suite's own default is back for the
+  // specs that follow. The row is the default right now, and deleting the
+  // default row is refused — so the default goes back to the first other row
+  // first.
+  const firstOther = page.locator('[data-provider-row]:not([data-provider-row="moonshotai"])').first()
+  const firstOtherName = await firstOther.getAttribute('data-provider-row')
+  await firstOther.locator('[data-testid^="provider-default-set-"]').click()
+  await expect(badgeOf(firstOtherName ?? '')).toHaveCount(1, { timeout: 15_000 })
+  const { index } = await rowOf(page, 'moonshotai')
+  await page.click(`[data-testid="provider-remove-${index}"]`)
   await page.click('[data-testid="confirm-ok"]')
   await expect(page.locator('[data-provider-row="moonshotai"]')).toHaveCount(0, { timeout: 15_000 })
 })
@@ -225,9 +238,9 @@ test('a column widens on a drag, fits its content on a double-click and is forgo
 
   const wrap = page.locator('.forebrain-table-wrap')
   const heads = page.locator('.forebrain-table thead th')
-  // 顺序 / 服务商 / 模型 / Base URL / API Key / 操作.
-  const models = heads.nth(2)
-  const baseUrl = heads.nth(3)
+  // 服务商 / 模型 / Base URL / API Key / 操作.
+  const models = heads.nth(1)
+  const baseUrl = heads.nth(2)
   const handle = models.locator('[data-col-resizer]')
   const widthOf = async (locator: typeof models): Promise<number> => {
     const box = await locator.boundingBox()
@@ -272,7 +285,7 @@ test('a column widens on a drag, fits its content on a double-click and is forgo
 
   // The widths are the session's, not the user's: a reload is the design again.
   await page.reload({ waitUntil: 'networkidle' })
-  expect(Math.abs((await widthOf(page.locator('.forebrain-table thead th').nth(2))) - startModels)).toBeLessThanOrEqual(2)
+  expect(Math.abs((await widthOf(page.locator('.forebrain-table thead th').nth(1))) - startModels)).toBeLessThanOrEqual(2)
 })
 
 /**

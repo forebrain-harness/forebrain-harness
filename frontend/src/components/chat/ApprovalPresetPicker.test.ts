@@ -43,4 +43,35 @@ describe('ApprovalPresetPicker', () => {
     expect(wrapper.find('[data-testid="approval-option-full-access"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="approval-option-read-only"]').attributes('aria-selected')).toBe('true')
   })
+
+  // A new chat has no conversation, and the switch still works: it shows the
+  // agent's default, and a pick is held until the page hands it to the
+  // conversation the first message opens.
+  describe('on a new chat (no session yet)', () => {
+    it('is usable, shows the agent default, and holds a pick as a draft', async () => {
+      vi.spyOn(forebrainApi, 'approvalDefault').mockResolvedValue({ current: 'auto' })
+      const session = vi.spyOn(forebrainApi, 'sessionPreset').mockResolvedValue({ ok: true })
+      const wrapper = mount(ApprovalPresetPicker, { props: { sessionId: null } })
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Default'))
+      expect(wrapper.get('[data-testid="approval-picker"]').attributes('disabled')).toBeUndefined()
+
+      await wrapper.get('[data-testid="approval-picker"]').trigger('click')
+      await wrapper.get('[data-testid="approval-option-full-access"]').trigger('click')
+      // The label follows the pick, and nothing was written: there is no session to write to.
+      expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Full Access')
+      expect(session).not.toHaveBeenCalled()
+
+      const exposed = wrapper.vm as unknown as { takeDraft: () => string | null }
+      expect(exposed.takeDraft()).toBe('full-access')
+      // Handed over once.
+      expect(exposed.takeDraft()).toBeNull()
+    })
+
+    it('has no draft when nothing was picked', async () => {
+      vi.spyOn(forebrainApi, 'approvalDefault').mockResolvedValue({ current: 'auto' })
+      const wrapper = mount(ApprovalPresetPicker, { props: { sessionId: null } })
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Default'))
+      expect((wrapper.vm as unknown as { takeDraft: () => string | null }).takeDraft()).toBeNull()
+    })
+  })
 })

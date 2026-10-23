@@ -50,10 +50,10 @@ type Message struct {
 	// Title overrides the frame heading a kind would otherwise use. A failure
 	// that belongs to a named subsystem says which one here, so the reader knows
 	// where it came from before reading the error itself.
-	Title     string
-	ToolMeta  tool.ToolMeta
-	AgentID   string
-	RunID     string // Non-empty for subagent frames so reducer keys on child run, not primary.
+	Title    string
+	ToolMeta tool.ToolMeta
+	AgentID  string
+	RunID    string // Non-empty for subagent frames so reducer keys on child run, not primary.
 	// EventID is the stable identity of the run event this message was built
 	// from, when the event has one. It travels into the frame so a card painted
 	// live and the same card drawn again by a replay are one card on one screen

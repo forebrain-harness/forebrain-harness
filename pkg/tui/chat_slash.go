@@ -630,16 +630,22 @@ func (s *ChatSession) SwitchPrimaryAgent(ctx context.Context, id string) (turn.P
 // surface is actually running — never config order alone, and never the
 // runner's default for a conversation that picked its own.
 func (s *ChatSession) ModelSettings(sessionID string) (turn.ModelSettings, error) {
-	sel := s.sessionModelState(sessionID)
+	// /model's "changed" test reads the session's own stored row — raw, not
+	// the resolved display state. A row the config no longer offers must not
+	// be laundered into "no change" through the runner's current model, or
+	// the re-choose the turn refusal asks for could never land on the very
+	// entry the runner already serves (the default). The picker draws no
+	// current marker for such a row, which is the truth: it is not on offer.
+	sel := turn.ModelSelectionState{}
+	if row, ok, err := s.sessStore().SessionModelSelection(context.Background(), strings.TrimSpace(sessionID)); err == nil && ok {
+		sel = turn.ModelSelectionState{Provider: row.Provider, Model: row.Model, Effort: row.Effort, Set: true}
+	}
+	live := s.sessionModelState(sessionID)
 	return turn.ModelSettings{
-		Config:    modelConfigFromChatSession(s),
-		AgentName: chatSessionActiveAgentName(s),
-		Selection: turn.ModelSelectionState{
-			Provider: sel.Provider,
-			Model:    sel.Model,
-			Effort:   sel.Effort,
-			Set:      sel.Set,
-		},
+		Config:        modelConfigFromChatSession(s),
+		AgentName:     chatSessionActiveAgentName(s),
+		Selection:     sel,
+		LiveSelection: turn.ModelSelectionState{Provider: live.Provider, Model: live.Model, Effort: live.Effort, Set: live.Set},
 	}, nil
 }
 

@@ -514,3 +514,33 @@ func TestCustomSubagentWithoutPolicySeesNoTools(t *testing.T) {
 		t.Fatalf("a custom subagent with no policy was offered %d tools", len(got))
 	}
 }
+
+// A user-session subagent whose type has no LLM chain of its own, and whose
+// caller pinned no model, runs on the conversation's model: the session-model
+// wrapper sits below the typed wrapper, so an unknown-type call lands on the
+// session client, not on some config-level default. This is the product rule
+// "subagents in a user session follow the session's model".
+func TestTypedSubagentSessionModelWinsBelowTypedWrapper(t *testing.T) {
+	baseLLM := &recordingLLM{name: "base"}
+	sessionLLM := &recordingLLM{name: "session"}
+	inner := wrapSessionModelLLM(baseLLM, func(PrimaryModelState) (llm.LLM, error) {
+		return sessionLLM, nil
+	})
+	wrapped := wrapTypedSubagentProviderLLM(inner, nil) // no typed chains
+
+	ctx := toolpkg.WithSubagentType(context.Background(), "verification")
+	ctx = WithSessionModelSelection(ctx, PrimaryModelState{Provider: "deepseek", Model: "deepseek-v4"})
+	res, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("check x"))}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionLLM.calls != 1 {
+		t.Fatalf("session LLM calls = %d, want 1", sessionLLM.calls)
+	}
+	if baseLLM.calls != 0 {
+		t.Fatalf("base LLM calls = %d, want 0 — the session model must win", baseLLM.calls)
+	}
+	if got := res.Message.TextContent(); got != "session" {
+		t.Fatalf("answer came from %q, want session", got)
+	}
+}

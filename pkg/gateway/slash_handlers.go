@@ -216,12 +216,13 @@ func (s *Server) HandleSandboxSlash(sessionID, channel string, args []string) (s
 }
 
 // ModelSettings is what /model works from on the web: the live config, the
-// session's agent, and the selection that session actually runs. The marker
-// is the session's own resolved choice — its stored row validated against the
-// exact runner serving sessionID — falling back to that runner's published
-// selection when the session never chose. The catalog comes from
-// s.liveCfg(); a config reload propagates to every live pooled runner, so the
-// catalog and every marker describe the same provider set.
+// session's agent, and the session's own stored choice — raw. The "changed"
+// test in chooseModel must see a stale row as stale: resolving it against the
+// runner (which falls back to the published default) would launder "the row
+// names nothing" into "no change", and the re-choose a turn refusal asks for
+// could never land on the default entry. The catalog comes from s.liveCfg();
+// a config reload propagates to every live pooled runner, so the catalog and
+// every marker describe the same provider set.
 func (s *Server) ModelSettings(sessionID string) (turn.ModelSettings, error) {
 	cfg := s.liveCfg()
 	if cfg == nil {
@@ -233,10 +234,18 @@ func (s *Server) ModelSettings(sessionID string) (turn.ModelSettings, error) {
 		if strings.TrimSpace(r.AgentName) != "" {
 			agentName = strings.TrimSpace(r.AgentName)
 		}
-		state := s.sessionModelSelection(r, sessionID)
-		sel = turn.ModelSelectionState{Provider: state.Provider, Model: state.Model, Effort: state.Effort, Set: state.Set}
 	}
-	return turn.ModelSettings{Config: cfg, AgentName: agentName, Selection: sel}, nil
+	if s.Sessions != nil {
+		if row, ok, err := s.Sessions.SessionModelSelection(context.Background(), strings.TrimSpace(sessionID)); err == nil && ok {
+			sel = turn.ModelSelectionState{Provider: row.Provider, Model: row.Model, Effort: row.Effort, Set: true}
+		}
+	}
+	var live turn.ModelSelectionState
+	if r := s.runnerFor(context.Background(), sessionID); r != nil {
+		state := s.sessionModelSelection(r, sessionID)
+		live = turn.ModelSelectionState{Provider: state.Provider, Model: state.Model, Effort: state.Effort, Set: state.Set}
+	}
+	return turn.ModelSettings{Config: cfg, AgentName: agentName, Selection: sel, LiveSelection: live}, nil
 }
 
 // sessionModelSelection resolves one web session's effective model: its

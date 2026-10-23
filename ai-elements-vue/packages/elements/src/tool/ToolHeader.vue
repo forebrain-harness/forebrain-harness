@@ -16,7 +16,7 @@ type ToolHeaderProps = {
   /** The call's own mark, matching the tool it invoked (prototype TOOL_ICON). */
   icon?: Component
   /** The call's state, in this surface's own vocabulary. */
-  status: 'running' | 'awaiting' | 'done' | 'denied' | 'error'
+  status: 'running' | 'awaiting' | 'done' | 'denied' | 'canceled' | 'error'
   /** What that state is called in the reader's language. */
   statusLabel: string
   class?: HTMLAttributes['class']

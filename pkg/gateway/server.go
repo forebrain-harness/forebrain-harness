@@ -851,6 +851,16 @@ type wsServerMsg struct {
 	event.RunPlanFacts
 }
 
+// withToolHeader returns the event with its tool card header added (a no-op for
+// any other event): the web draws the terminal's wording for the same call.
+func (s *Server) withToolHeader(ctx context.Context, evt event.RunEvent) event.RunEvent {
+	if evt.Type != event.RunEventToolStarted && evt.Type != event.RunEventToolCompleted {
+		return evt
+	}
+	evt.Payload = toolEventPayloadWithHeader(s.sessionDisplayRoot(ctx, evt.SessionID), evt.Type, evt.Payload)
+	return evt
+}
+
 func runEventToWSMessage(requestID, traceID string, evt event.RunEvent) wsServerMsg {
 	return wsServerMsg{
 		Op:        "run_event",
@@ -1117,7 +1127,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				return false, false
 			}
 			for _, evt := range s.withoutSupersededAbandonedErrors(context.Background(), page.Events) {
-				writeMsg(runEventToWSMessage(requestID, loadCurrentTraceID(), turn.RunEventFromRecord(evt)))
+				writeMsg(runEventToWSMessage(requestID, loadCurrentTraceID(), s.withToolHeader(context.Background(), turn.RunEventFromRecord(evt))))
 			}
 			if page.NextCursor <= next || !page.HasMore {
 				next = highWater
@@ -1225,7 +1235,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				// writeMsg stamps the connection's current trace id.
-				writeMsg(runEventToWSMessage("", "", queued.event))
+				writeMsg(runEventToWSMessage("", "", s.withToolHeader(context.Background(), queued.event)))
 				runEventBindingMu.Unlock()
 			}
 		}
@@ -2116,10 +2126,10 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 								RequestID: m.RequestID,
 								RunID:     rid,
 								SessionID: sid,
-								Data: withStepSummary(
+								Data: withStepHeader(withStepSummary(
 									gatewayToolStartedStepData(stepID, fmt.Sprintf("tool %s", evt.ToolName), evt.ToolName, evt.Input, meta),
 									tool.SummarizeToolStep(evt),
-								),
+								), toolHeaderFor(s.sessionDisplayRoot(stepCtx, sid), evt.ToolName, tool.SummarizeToolStep(evt), "", meta, false, 0)),
 							})
 							return
 						}
@@ -2139,7 +2149,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 								RequestID: m.RequestID,
 								RunID:     rid,
 								SessionID: sid,
-								Data: withStepSummary(
+								Data: withStepHeader(withStepSummary(
 									gatewayToolCompletedStepData(
 										stepID,
 										fmt.Sprintf("tool %s", evt.ToolName),
@@ -2152,7 +2162,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 										rendered.ToolMeta,
 									),
 									tool.SummarizeToolStep(evt),
-								),
+								), toolHeaderFor(s.sessionDisplayRoot(stepCtx, sid), evt.ToolName, tool.SummarizeToolStep(evt), rendered.DisplayBody, rendered.ToolMeta, true, evt.Duration)),
 							})
 							return
 						}

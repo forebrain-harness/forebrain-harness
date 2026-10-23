@@ -838,12 +838,16 @@ const conversationsMaxPageSize = 100
 // an ordinary conversation is born, and one without a project is legacy data
 // the drawer leaves out — that hold a message (see
 // conversationHoldsAMessage), optionally narrowed to the ones whose title
-// matches the drawer's search box. A scheduled task's fire is reached from
+// matches the drawer's search box and to one project. A scheduled task's fire is reached from
 // its task's run record and a subagent's conversation from its own view, so
 // neither is listed.
-func (s *SessionStore) conversationsWhere(q string) (string, []any) {
+func (s *SessionStore) conversationsWhere(q, projectID string) (string, []any) {
 	where := `agent_id = ? AND source IN (?, ?) AND (project_id IS NOT NULL OR source = ?) AND ` + conversationHoldsAMessage
 	args := []any{s.AgentID(), SessionSourceConversation, SessionSourceWorkshop, SessionSourceWorkshop}
+	if projectID = strings.TrimSpace(projectID); projectID != "" {
+		where += ` AND project_id = ?`
+		args = append(args, projectID)
+	}
 	if q = strings.TrimSpace(q); q != "" {
 		where += ` AND title LIKE ?`
 		args = append(args, "%"+q+"%")
@@ -860,8 +864,9 @@ func (s *SessionStore) conversationsWhere(q string) (string, []any) {
 // endpoint follows. The near-twin without the legacy exclusion is
 // ListSessionsRecentPaged, the terminal /resume picker's list; whether the
 // terminal should drop the legacy rows too is undecided, so the two methods
-// stay separate.
-func (s *SessionStore) ListConversationsPage(ctx context.Context, q string, limit, offset int) ([]SessionSummary, int, error) {
+// stay separate. A non-empty projectID narrows the list to that project's
+// conversations, the drawer's project filter.
+func (s *SessionStore) ListConversationsPage(ctx context.Context, q, projectID string, limit, offset int) ([]SessionSummary, int, error) {
 	if s == nil || s.db == nil {
 		return nil, 0, nil
 	}
@@ -874,7 +879,7 @@ func (s *SessionStore) ListConversationsPage(ctx context.Context, q string, limi
 	if offset < 0 {
 		offset = 0
 	}
-	where, args := s.conversationsWhere(q)
+	where, args := s.conversationsWhere(q, projectID)
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err

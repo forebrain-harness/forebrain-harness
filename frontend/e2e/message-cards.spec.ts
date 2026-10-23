@@ -383,20 +383,21 @@ test('the composer’s view mode keeps the answers and hides the run’s cards, 
   const chip = page.locator('[data-testid="view-mode-chip"]')
   const main = page.locator('.chat-shell main')
   await expect(chip).toContainText('默认')
-  await expect(main).toContainText('ran ls')
+  // The head is the engine's header — the terminal's words: a shell call is "Ran ls".
+  await expect(main).toContainText('Ran ls')
   await expect(main).toContainText('the listing is empty')
 
   // Reading mode, not a delete: the run's cards step out, the answer stays.
   await chip.click()
   await page.locator('[data-testid="view-mode-option-concise"]').click()
   await expect(chip).toContainText('简洁')
-  await expect(main).not.toContainText('ran ls')
+  await expect(main).not.toContainText('Ran ls')
   await expect(main).toContainText('the listing is empty')
 
   // The choice belongs to this conversation: a reload lands back in it.
   await page.reload({ waitUntil: 'networkidle' })
   await expect(page.locator('[data-testid="view-mode-chip"]')).toContainText('简洁')
-  await expect(page.locator('.chat-shell main')).not.toContainText('ran ls')
+  await expect(page.locator('.chat-shell main')).not.toContainText('Ran ls')
   await expect(page.locator('.chat-shell main')).toContainText('the listing is empty')
   await shot(page, 'message-cards-view-concise')
 })

@@ -196,7 +196,7 @@ func mainLLMBaseURL(cfg *appcfg.Root) string {
 	if !ok {
 		return ""
 	}
-	p := appcfg.PrimaryLLM(def)
+	p := appcfg.EffectiveDefaultLLM(def)
 	if p == nil {
 		return ""
 	}
@@ -211,7 +211,7 @@ func mainLLMAPIPath(cfg *appcfg.Root) string {
 	if !ok {
 		return ""
 	}
-	p := appcfg.PrimaryLLM(def)
+	p := appcfg.EffectiveDefaultLLM(def)
 	if p == nil {
 		return ""
 	}
@@ -1503,13 +1503,16 @@ func (c *commandController) handleConnect(ctx context.Context, sessionID string)
 		c.renderer.PrintError(fmt.Errorf("connect: config saved but active session reload failed: %w", err))
 		return true
 	}
-	// The connected provider is now this session's own model, not just the
-	// file default: apply and persist it for the conversation the user is in.
-	if strings.TrimSpace(rep.Provider) != "" && strings.TrimSpace(rep.Model) != "" {
+	// The connected model is now this session's own choice, not the file
+	// default: apply and persist the model the wizard just configured for the
+	// conversation the user is in. The wizard's own selection (opts) is the
+	// value — rep re-reads the file's effective default, which since the
+	// order-freeze lands on the first entry, not the new one.
+	if strings.TrimSpace(opts.Provider) != "" && strings.TrimSpace(opts.Model) != "" {
 		selectErr := c.session.SelectModel(ctx, sessionID, turn.ModelChoice{
-			Provider:         rep.Provider,
-			Model:            rep.Model,
-			ReasoningEfforts: turn.ModelReasoningEfforts(rep.Provider, rep.Model),
+			Provider:         opts.Provider,
+			Model:            opts.Model,
+			ReasoningEfforts: turn.ModelReasoningEfforts(opts.Provider, opts.Model),
 		}, nil)
 		if selectErr != nil {
 			switch turn.SelectionApplyOutcome(selectErr) {
@@ -1524,8 +1527,11 @@ func (c *commandController) handleConnect(ctx context.Context, sessionID string)
 			return true
 		}
 	}
-	summary := strings.TrimSpace(rep.Provider)
-	if m := strings.TrimSpace(rep.Model); m != "" {
+	// Report the model the wizard configured, the one this session now runs
+	// on — not the file's effective default, which the append-only write
+	// leaves on the first entry.
+	summary := strings.TrimSpace(opts.Provider)
+	if m := strings.TrimSpace(opts.Model); m != "" {
 		if summary != "" {
 			summary += " · " + m
 		} else {
@@ -1621,7 +1627,7 @@ func connectCurrentLLM(cfg *appcfg.Root, agentName string) *appcfg.AgentLLMProvi
 	if !ok {
 		return nil
 	}
-	return appcfg.PrimaryLLM(def)
+	return appcfg.EffectiveDefaultLLM(def)
 }
 
 // NeedsFirstSetup reports whether this home still has to be set up.
@@ -1666,9 +1672,9 @@ func StartupConfigError() error {
 func formatStartupConfigError(home, cfgPath string, missing []string) string {
 	envPath := homepkg.DefaultEnvPath(home)
 	var b strings.Builder
-	b.WriteString("main agent LLM is not fully configured; set agents.definitions.main.llm_providers[0].")
+	b.WriteString("main agent LLM is not fully configured; set the missing fields (")
 	b.WriteString(strings.Join(missing, ", "))
-	b.WriteString(" in ")
+	b.WriteString(") on the effective default entry — agents.definitions.main.default_model's target, or the first llm_providers entry — in ")
 	b.WriteString(cfgPath)
 	if st, err := os.Stat(envPath); err != nil || st.IsDir() {
 		b.WriteString("; missing or unreadable env file: ")

@@ -150,7 +150,8 @@ async function mountView(extraStubs: Record<string, unknown> = {}, router = make
         SubagentTab: true,
         ChatWorkbench: true,
         ContextDebugPanel: true,
-        ApprovalPresetPicker: true,
+        // The real picker hands a new chat's pick over through takeDraft.
+        ApprovalPresetPicker: { template: '<div />', methods: { takeDraft: () => null } },
         SessionHeartbeat: true,
         LspRecommendationCard: true,
         AutoContinueBanner: true,

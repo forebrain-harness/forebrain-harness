@@ -324,10 +324,10 @@ func TestRunnerLoadsPrimaryAgentWithoutItsOwnProvider(t *testing.T) {
 // provider that names several models with the Models list form must resolve to
 // its first model, not to an empty id.
 //
-// The per-surface copies read appcfg.PrimaryLLM, which returns the raw first
-// provider entry, so a Models: [a, b] config with no Model field reported an
-// empty model id on /status and /model while the runtime was running a. This is
-// the single place the two must agree.
+// The per-surface copies used to read the raw first provider entry, so a
+// Models: [a, b] config with no Model field reported an empty model id on
+// /status and /model while the runtime was running a. This is the single
+// place the two must agree.
 func TestPrimaryModelExpandsTheModelsList(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
@@ -2117,7 +2117,11 @@ func TestLoadRefreshesPinnedProviderDetails(t *testing.T) {
 	}
 }
 
-func TestLoadFallsBackWhenPinnedModelRemoved(t *testing.T) {
+// Ordinary reload with the pinned pair deleted from the new config: the
+// runner keeps serving the SAME model (the published snapshot's entry), so a
+// row of the list disappearing never changes what runs — the session that
+// pinned it is refused at its next turn instead, where the user re-chooses.
+func TestLoadKeepsServingPinnedModelWhenRemoved(t *testing.T) {
 	key := "${" + primaryModelTestKeyEnv + "}"
 	cfg := newPrimaryModelRoot(
 		primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil),
@@ -2129,7 +2133,10 @@ func TestLoadFallsBackWhenPinnedModelRemoved(t *testing.T) {
 	if err := r.LoadConfig(withoutPin); err != nil {
 		t.Fatalf("LoadConfig without the pinned pair: %v", err)
 	}
-	requireSelection(t, r, "openai", "gpt-b", "")
+	requireSelection(t, r, "openai", "gpt-a", "")
+	if got := PrimaryEndpoint(r); got != "http://a.test/v1" {
+		t.Fatalf("endpoint after reload = %q, want the snapshot's own endpoint kept", got)
+	}
 }
 
 func TestSetPrimaryModelRequiresExactPair(t *testing.T) {
@@ -2629,10 +2636,10 @@ func TestRunContentInjectsSessionModelSelection(t *testing.T) {
 	}
 }
 
-// TestRunContentHealsStaleSessionModelRow pins the gateway-side fallback: a
-// stored pair the config no longer offers runs the turn on the runner's
-// default and rewrites the stale row, so the next turn and every marker agree.
-func TestRunContentHealsStaleSessionModelRow(t *testing.T) {
+// A stored pair the config no longer offers REFUSES the turn: the error names
+// the pair and points at /model, the row is left exactly as the user wrote it
+// (their choice, not ours to rewrite), and no other model is substituted.
+func TestRunContentRefusesStaleSessionModelRow(t *testing.T) {
 	rec := &recordingSessionLLM{}
 	r, store := newSessionRoutingRunner(t, rec)
 	ctx := context.Background()
@@ -2644,20 +2651,23 @@ func TestRunContentHealsStaleSessionModelRow(t *testing.T) {
 	}
 
 	turnCtx := llm.WithAgentSessionID(ctx, "s1")
-	if _, err := r.Run(turnCtx, "hello"); err != nil {
-		t.Fatalf("Run: %v", err)
+	_, err := r.Run(turnCtx, "hello")
+	if err == nil {
+		t.Fatal("Run on a stale session model row succeeded; want the turn refused")
 	}
-	// The turn ran on the runner's default, not the stale pair.
-	if got := builtSnapshot(rec); len(got) != 1 || got[0] != "-" {
+	if !strings.Contains(err.Error(), "gpt-gone") || !strings.Contains(err.Error(), "/model") {
+		t.Fatalf("refusal error does not guide the user: %v", err)
+	}
+	// Nothing ran, and the row still names what the user chose.
+	if got := builtSnapshot(rec); len(got) != 0 {
 		t.Fatalf("stale row routed somewhere: %v", got)
 	}
-	// The row now names the default.
-	row, ok, err := store.SessionModelSelection(ctx, "s1")
-	if err != nil || !ok {
-		t.Fatalf("healed row read: ok=%v err=%v", ok, err)
+	row, ok, rerr := store.SessionModelSelection(ctx, "s1")
+	if rerr != nil || !ok {
+		t.Fatalf("row read: ok=%v err=%v", ok, rerr)
 	}
-	if row.Model != "gpt-a" {
-		t.Fatalf("healed row = %+v, want the runner's default gpt-a", row)
+	if row.Provider != "openai" || row.Model != "gpt-gone" {
+		t.Fatalf("row was rewritten: %+v, want the user's original choice kept", row)
 	}
 }
 

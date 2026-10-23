@@ -46,11 +46,36 @@ func ResolvedLLMConfigs(def AgentDefinition) []AgentLLMProviderConfig {
 	return out
 }
 
-func PrimaryLLM(def AgentDefinition) *AgentLLMProviderConfig {
-	if len(def.LLMProviders) == 0 {
+// EffectiveDefaultLLM resolves the provider entry an empty (default) model
+// selection uses for this agent: def.DefaultModel when set, otherwise the
+// first llm_providers entry. DefaultModel is "provider/model" split on the
+// first slash — model ids may themselves contain slashes — and is matched
+// case-insensitively (values trimmed) against the expanded entries, so an
+// entry naming several models (model: [a, b]) resolves a second-item choice
+// too. A non-empty DefaultModel that matches no entry returns nil: callers
+// treat that as a configuration error, never a silent fall-back to the first
+// entry. An empty list also returns nil.
+func EffectiveDefaultLLM(def AgentDefinition) *AgentLLMProviderConfig {
+	expanded := expandLLMProviderConfigs(def.LLMProviders)
+	if dm := strings.TrimSpace(def.DefaultModel); dm != "" {
+		provider, model := dm, ""
+		if i := strings.Index(dm, "/"); i >= 0 {
+			provider, model = dm[:i], dm[i+1:]
+		}
+		provider = strings.TrimSpace(provider)
+		model = strings.TrimSpace(model)
+		for i := range expanded {
+			if strings.EqualFold(strings.TrimSpace(expanded[i].Provider), provider) &&
+				strings.EqualFold(strings.TrimSpace(expanded[i].Model), model) {
+				return &expanded[i]
+			}
+		}
 		return nil
 	}
-	return &def.LLMProviders[0]
+	if len(expanded) == 0 {
+		return nil
+	}
+	return &expanded[0]
 }
 
 func NormalizeLLMProviderEntries(def *AgentDefinition) {
@@ -96,49 +121,6 @@ type LLMSummary struct {
 	CatalogID        string
 	CatalogName      string
 	ContextWindow    int64
-}
-
-// PromoteMatchingLLMProvider finds an existing LLMProviders entry matching
-// provider+model and moves it to index 0. This ensures the full config
-// (including base_url, params, etc.) is used as the primary provider.
-// The definition is normalized first, so an entry naming several models
-// (model: [a, b]) is expanded into one entry per model and a second-item
-// choice resolves instead of being reported missing.
-// Returns an error if no matching entry is found.
-func PromoteMatchingLLMProvider(cfg *Root, agent, provider, model string) error {
-	agent = strings.TrimSpace(agent)
-	if agent == "" {
-		agent = "main"
-	}
-	if cfg.Agents.Definitions == nil {
-		return fmt.Errorf("no agent definitions")
-	}
-	def, ok := cfg.Agents.Definitions[agent]
-	if !ok {
-		return fmt.Errorf("unknown agent %q", agent)
-	}
-	NormalizeLLMProviderEntries(&def)
-	provider = strings.TrimSpace(provider)
-	model = strings.TrimSpace(model)
-	idx := -1
-	for i, entry := range def.LLMProviders {
-		if strings.EqualFold(strings.TrimSpace(entry.Provider), provider) &&
-			strings.EqualFold(strings.TrimSpace(entry.Model), model) {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("no matching llm_providers entry for %s/%s", provider, model)
-	}
-	if idx != 0 {
-		// Move matched entry to front
-		entry := def.LLMProviders[idx]
-		copy(def.LLMProviders[1:idx+1], def.LLMProviders[0:idx])
-		def.LLMProviders[0] = entry
-	}
-	cfg.Agents.Definitions[agent] = def
-	return nil
 }
 
 // ReasoningEffort returns the normalized concrete reasoning.effort in params,
@@ -192,49 +174,6 @@ func WithReasoningEffort(params LLMRequestParams, effort string) LLMRequestParam
 		return nil
 	}
 	return LLMRequestParams(b)
-}
-
-// SetLLMProviderReasoningEffort updates only the exact provider+model entry's
-// reasoning effort and promotes that complete entry to the default position.
-// It never borrows params or credentials from another entry: the matched
-// entry keeps everything else it already carried. A pair that is not
-// configured is an error, and the config is left untouched in that case.
-func SetLLMProviderReasoningEffort(
-	cfg *Root, agent, provider, model, effort string,
-) error {
-	agent = strings.TrimSpace(agent)
-	if agent == "" {
-		agent = "main"
-	}
-	if cfg.Agents.Definitions == nil {
-		return fmt.Errorf("no agent definitions")
-	}
-	def, ok := cfg.Agents.Definitions[agent]
-	if !ok {
-		return fmt.Errorf("unknown agent %q", agent)
-	}
-	NormalizeLLMProviderEntries(&def)
-	provider = strings.TrimSpace(provider)
-	model = strings.TrimSpace(model)
-	idx := -1
-	for i, entry := range def.LLMProviders {
-		if strings.EqualFold(strings.TrimSpace(entry.Provider), provider) &&
-			strings.EqualFold(strings.TrimSpace(entry.Model), model) {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("no matching llm_providers entry for %s/%s", provider, model)
-	}
-	entry := def.LLMProviders[idx]
-	entry.Params = WithReasoningEffort(entry.Params, effort)
-	if idx != 0 {
-		copy(def.LLMProviders[1:idx+1], def.LLMProviders[0:idx])
-	}
-	def.LLMProviders[0] = entry
-	cfg.Agents.Definitions[agent] = def
-	return nil
 }
 
 // CloneAgentLLMProviderConfig returns a deep copy of c, duplicating the slice
@@ -480,11 +419,13 @@ func ValidateMainAgentLLMConfigured(root *Root) MainAgentLLMValidation {
 	return ValidateAgentLLMConfigured(root, "main")
 }
 
-// ValidateAgentLLMConfigured reports the LLM fields one agent definition
-// carries. Every primary agent has its own definition and its own provider, so
-// a flow that configures the active one has to check the definition it wrote
-// rather than main's, or configuring a second primary agent would be judged by
-// whether the first is set up.
+// ValidateAgentLLMConfigured reports the LLM fields of the entry an empty
+// model selection for this agent resolves to — the effective default
+// (agents.definitions.<name>.default_model when set, otherwise the first
+// llm_providers entry). Every primary agent has its own definition and its
+// own provider, so a flow that configures the active one has to check the
+// definition it wrote rather than main's, or configuring a second primary
+// agent would be judged by whether the first is set up.
 func ValidateAgentLLMConfigured(root *Root, agentName string) MainAgentLLMValidation {
 	var out MainAgentLLMValidation
 	if root == nil {
@@ -498,7 +439,7 @@ func ValidateAgentLLMConfigured(root *Root, agentName string) MainAgentLLMValida
 	if !ok {
 		return out
 	}
-	p := PrimaryLLM(def)
+	p := EffectiveDefaultLLM(def)
 	if p == nil {
 		return out
 	}

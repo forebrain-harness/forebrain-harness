@@ -132,8 +132,8 @@ func TestLLMRequestParamsAndProviderHelpers(t *testing.T) {
 	if got := ResolvedLLMConfigs(def); len(got) != 2 || got[0].Provider != "a" {
 		t.Fatalf("ResolvedLLMConfigs = %#v", got)
 	}
-	if got := PrimaryLLM(def); got == nil || got.Provider != "a" {
-		t.Fatalf("PrimaryLLM = %#v", got)
+	if got := EffectiveDefaultLLM(def); got == nil || got.Provider != "a" {
+		t.Fatalf("EffectiveDefaultLLM = %#v", got)
 	}
 	cfg := AgentLLMProviderConfig{}
 	if err := json.Unmarshal([]byte(`{"provider":"openai","model":"gpt","api_key":"k","params":{"temperature":0.1}}`), &cfg); err != nil {

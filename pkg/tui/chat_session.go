@@ -533,20 +533,21 @@ func (s *ChatSession) ActivateSessionModel(ctx context.Context, sessionID string
 	if !run.IsPrimaryModelNotConfigured(err) {
 		return "", s.restoreAfterActivationFailure(r, outgoing, err)
 	}
-	// The stored pair is gone from the config: fall back to the new default,
-	// overwrite the stale row, and continue with a warning.
+	// The stored pair is gone from the config. The conversation still opens —
+	// on the config's default, which is resolvable (a dangling default_model
+	// never passes the loader) — so /model stays reachable and the user can
+	// re-choose. The stored row is NOT overwritten: the choice is the user's,
+	// and the next message fails at turn entry with the same diagnosis rather
+	// than silently changing models under them.
 	if resetErr := r.OpenSession(run.PrimaryModelState{}); resetErr != nil {
-		return "", s.restoreAfterActivationFailure(r, outgoing, fmt.Errorf("%v (resetting to the default then failed: %w)", err, resetErr))
+		return "", s.restoreAfterActivationFailure(r, outgoing, fmt.Errorf("%v (opening on the default then failed: %w)", err, resetErr))
 	}
-	fallback := run.PrimaryModelSelection(r)
-	if _, saveErr := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
-		Provider: fallback.Provider,
-		Model:    fallback.Model,
-		Effort:   fallback.Effort,
-	}); saveErr != nil {
-		return "", s.restoreAfterActivationFailure(r, outgoing, fmt.Errorf("the stored model %s/%s is no longer configured and the fallback could not be saved: %w", sel.Provider, sel.Model, saveErr))
-	}
-	return fmt.Sprintf("The model saved for this conversation (%s / %s) is no longer configured; it now runs on %s / %s.", sel.Provider, sel.Model, fallback.Provider, fallback.Model), nil
+	slog.Error("session model no longer configured; the session opens on the default and the next message will be refused",
+		"session_id", sid,
+		"stored_provider", strings.TrimSpace(sel.Provider),
+		"stored_model", strings.TrimSpace(sel.Model),
+		"hint", "re-select with /model")
+	return fmt.Sprintf("本会话保存的模型 %s / %s 已不在配置中；重新发消息会报错，请先用 /model 选择模型", sel.Provider, sel.Model), nil
 }
 
 // restoreAfterActivationFailure rebuilds the outgoing selection a fatal

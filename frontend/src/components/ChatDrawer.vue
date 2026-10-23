@@ -39,11 +39,27 @@
         />
       </label>
 
+      <!-- The project filter (prototype .d-filter, :737): the list is the
+           server's, so the choice goes to it and the count and pages follow. -->
+      <Select :model-value="toChoice(projectFilter)" @update:model-value="(value) => chooseProject(fromChoice(value))">
+        <SelectTrigger
+          class="forebrain-field chat-drawer-filter"
+          :aria-label="t('chatDrawer.filterByProject')"
+          data-testid="drawer-project-filter"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent class="chat-drawer-filter-menu">
+          <SelectItem :value="EMPTY_CHOICE">{{ t('chatDrawer.allProjects') }}</SelectItem>
+          <SelectItem v-for="project in projectOptions" :key="project.id" :value="project.id">{{ project.name }}</SelectItem>
+        </SelectContent>
+      </Select>
+
       <div class="chat-drawer-section">{{ t('chatDrawer.sessions') }}</div>
       <div class="chat-drawer-list">
         <p v-if="loading" class="chat-drawer-hint">{{ t('chatDrawer.loading') }}</p>
         <p v-else-if="error" class="chat-drawer-hint chat-drawer-error">{{ error }}</p>
-        <p v-else-if="!sessions.length && query.trim()" class="chat-drawer-hint">{{ t('chatDrawer.noMatch') }}</p>
+        <p v-else-if="!sessions.length && (query.trim() || projectFilter)" class="chat-drawer-hint">{{ t('chatDrawer.noMatch') }}</p>
         <p v-else-if="!sessions.length" class="chat-drawer-hint">{{ t('chatDrawer.empty') }}</p>
         <template v-else>
           <button
@@ -93,8 +109,11 @@
 import { nextTick, ref, watch } from 'vue'
 import { Activity, Plus, Search, X } from 'lucide-vue-next'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
 import { useChatSessions } from '@/composables/useChatSessions'
 import { useHeartbeats } from '@/composables/useHeartbeats'
+import { forebrainApi } from '@/lib/api'
+import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { useI18n } from '@/locales'
 
 /**
@@ -116,7 +135,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { sessions, loading, loadingMore, error, hasMore, fetchSessions, loadMore } = useChatSessions()
+const { sessions, loading, loadingMore, error, hasMore, projectFilter, fetchSessions, loadMore } = useChatSessions()
 const { forSession: beatOf, refresh: refreshHeartbeats } = useHeartbeats()
 
 const query = ref('')
@@ -134,6 +153,29 @@ watch(query, () => {
     void fetchSessions(query.value.trim())
   }, 300)
 })
+
+// The projects the filter offers: what the new-chat page's pill lists, newest
+// first. A project the person filtered by that has since gone from the list
+// is cleared, so the filter never names something nothing can match.
+const projectOptions = ref<{ id: string; name: string }[]>([])
+
+async function loadProjects() {
+  try {
+    const rows = await forebrainApi.projectsList({ sort: 'updated', limit: 200 })
+    projectOptions.value = rows.map((row) => ({ id: row.id, name: row.name }))
+    if (projectFilter.value && !projectOptions.value.some((row) => row.id === projectFilter.value)) {
+      void fetchSessions(undefined, '')
+    }
+  } catch {
+    // Without the list the filter keeps "all projects"; the sessions still list.
+    projectOptions.value = []
+  }
+}
+
+function chooseProject(id: string) {
+  if (id === projectFilter.value) return
+  void fetchSessions(undefined, id)
+}
 
 /** Every conversation a heartbeat asks again is marked, the open one or not. */
 function heartbeatLabel(sessionId: string): string {
@@ -158,6 +200,7 @@ watch(() => props.open, async (open) => {
     // something the chat page may or may not have fetched earlier (a fresh
     // load elsewhere, a tenant switch, a turn in another tab).
     void fetchSessions()
+    void loadProjects()
     // The marks are the drawer's to read too; a failed read leaves them off.
     refreshHeartbeats().catch(() => {})
     await nextTick()
@@ -259,6 +302,14 @@ watch(() => props.open, async (open) => {
   background: transparent;
   font-size: 12.5px;
   color: var(--forebrain-text);
+}
+
+/* The prototype's .d-filter select.field (:737): 30px tall, 12px text, the
+   width of the drawer's column. */
+.chat-drawer-filter {
+  height: 30px;
+  width: 100%;
+  font-size: 12px;
 }
 
 .chat-drawer-foot {

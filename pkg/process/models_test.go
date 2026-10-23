@@ -136,6 +136,22 @@ func TestDiscoverChatGPTModelsWithoutCredentialsErrors(t *testing.T) {
 	require.ErrorContains(t, err, "ChatGPT login required")
 }
 
+// A machine with no login has nothing to discover. Resolving the client
+// version is a request to the npm registry, and the fetch that follows would
+// fail on the missing credentials anyway, so the login is asked for first.
+func TestChatGPTModelsSourceWithoutALoginDoesNotResolveTheVersion(t *testing.T) {
+	src := newChatGPTModelsSource(filepath.Join(t.TempDir(), "auth.json"), "https://example.invalid")
+	resolutions := 0
+	src.resolveVersion = func(context.Context) (string, error) {
+		resolutions++
+		return "0.156.1", nil
+	}
+
+	_, err := src.ChatGPTModels(context.Background())
+	require.ErrorContains(t, err, "ChatGPT login required")
+	require.Zero(t, resolutions, "no npm round trip may leave without a login")
+}
+
 // The public constructor resolves the same path the run client uses, so the
 // credentials.chatgpt override is honored by both or neither.
 func TestNewChatGPTModelsSourceUsesTheResolvedCredentialsPath(t *testing.T) {

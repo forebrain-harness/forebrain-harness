@@ -677,7 +677,7 @@ func TestListConversationsPagePinsTheDrawerList(t *testing.T) {
 		return out
 	}
 
-	rows, total, err := store.ListConversationsPage(ctx, "", 100, 0)
+	rows, total, err := store.ListConversationsPage(ctx, "", "", 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +698,7 @@ func TestListConversationsPagePinsTheDrawerList(t *testing.T) {
 	}
 
 	// Search narrows by title, on the server, before the page is cut.
-	rows, total, err = store.ListConversationsPage(ctx, "own-task", 100, 0)
+	rows, total, err = store.ListConversationsPage(ctx, "own-task", "", 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,12 +706,30 @@ func TestListConversationsPagePinsTheDrawerList(t *testing.T) {
 		t.Fatalf("searched list = %v (total %d), want only own-task", ids(rows), total)
 	}
 
-	// Pages walk the same order without overlap.
-	first, total, err := store.ListConversationsPage(ctx, "", 2, 0)
+	// The project filter is the server's too: only that project's rows
+	// (its conversation and its workshop task), counted before the page is
+	// cut, and a project nothing belongs to lists nothing.
+	rows, total, err = store.ListConversationsPage(ctx, "", p.ID, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, total2, err := store.ListConversationsPage(ctx, "", 2, 2)
+	if total != 2 || !slices.Equal(ids(rows), []string{"proj-task", "proj-talk"}) {
+		t.Fatalf("project list = %v (total %d), want the project's two rows", ids(rows), total)
+	}
+	rows, total, err = store.ListConversationsPage(ctx, "", "prj_nothing", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("unknown project list = %v (total %d), want nothing", ids(rows), total)
+	}
+
+	// Pages walk the same order without overlap.
+	first, total, err := store.ListConversationsPage(ctx, "", "", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, total2, err := store.ListConversationsPage(ctx, "", "", 2, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,7 +738,7 @@ func TestListConversationsPagePinsTheDrawerList(t *testing.T) {
 	}
 
 	// A page past the end reads the last page rather than an empty one.
-	rows, total, err = store.ListConversationsPage(ctx, "", 2, 99)
+	rows, total, err = store.ListConversationsPage(ctx, "", "", 2, 99)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@
     "dev": "vite",
     "test": "vitest run",
     "build": "vite build",
+    "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview",
     "e2e": "playwright test -c e2e/playwright.config.ts"
   },

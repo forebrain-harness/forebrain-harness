@@ -158,7 +158,12 @@ func resolveAgentProvider(cfg *appcfg.Root, agentType string, sel modelSelector)
 		if wantProvider != "" {
 			return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
 		}
-		return providers[0], nil
+		// An empty selection is the default model: default_model when the
+		// agent's definition names one, otherwise the first entry. A dangling
+		// default_model is an error, never a quiet fall-back to the first
+		// entry — the loader refuses one, but a hot-edited config can still
+		// carry it.
+		return effectiveDefaultProvider(cfg, agentType)
 	}
 	for _, provider := range providers {
 		if !strings.EqualFold(strings.TrimSpace(provider.Model), wantModel) {
@@ -287,6 +292,31 @@ func resolvedAgentProviders(cfg *appcfg.Root, agentType string) []appcfg.AgentLL
 		return appcfg.ResolvedLLMConfigs(def)
 	}
 	return nil
+}
+
+// effectiveDefaultProvider resolves the entry an empty model selection uses.
+// The definition that owns the list decides: the agent's own definition when
+// it carries providers (its default_model, else its first entry), main's
+// otherwise — the same ownership resolvedAgentProviders gives the whole chain.
+// A dangling default_model is an error naming the value; there is no fall-back
+// to the first entry.
+func effectiveDefaultProvider(cfg *appcfg.Root, agentType string) (appcfg.AgentLLMProviderConfig, error) {
+	def, ok := cfg.Agents.Definitions[agentType]
+	if !ok || len(appcfg.ResolvedLLMConfigs(def)) == 0 {
+		def, ok = cfg.Agents.Definitions["main"]
+	}
+	if !ok {
+		return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
+	}
+	entry := appcfg.EffectiveDefaultLLM(def)
+	if entry == nil {
+		if strings.TrimSpace(def.DefaultModel) != "" {
+			return appcfg.AgentLLMProviderConfig{}, fmt.Errorf("%w: agents.definitions.%s.default_model %q matches no llm_providers entry",
+				errModelNotConfigured, agentType, def.DefaultModel)
+		}
+		return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
+	}
+	return *entry, nil
 }
 
 func llmYAMLsFromResolved(cfgs []appcfg.AgentLLMProviderConfig) []*LLMProviderYAML {
@@ -1409,8 +1439,8 @@ type primaryModelIntent uint8
 const (
 	// primaryModelOrdinary keeps the current snapshot when its agent and
 	// exact provider/model still resolve, refreshing provider details and
-	// overlaying the pinned effort; it falls back to the new configured
-	// default when the pin disappeared.
+	// overlaying the pinned effort; when the pin disappeared from the new
+	// config it keeps serving the snapshot's own entry (no model switch).
 	primaryModelOrdinary primaryModelIntent = iota
 	// primaryModelExplicit requires the exact provider+model pair and never
 	// falls back.
@@ -1459,18 +1489,19 @@ func (r *Runner) resolvePrimaryModelCandidateLocked(
 		if !errors.Is(err, errModelNotConfigured) {
 			return appcfg.AgentLLMProviderConfig{}, err
 		}
-		fallback, ferr := resolveAgentProvider(r.AppCfg, name, modelSelector{})
-		if ferr != nil {
-			return appcfg.AgentLLMProviderConfig{}, ferr
-		}
-		// Only ordinary reload falls back when the pin is gone. The warning
-		// carries no credentials.
-		slog.Warn("pinned primary model is no longer configured; using the configured default",
+		// Ordinary reload with the pinned pair gone from the new config: the
+		// runtime keeps serving the SAME model — the published snapshot's own
+		// entry, credentials included, exactly what rebuildPreviousRuntime
+		// restores — rather than switching to the new default. This is not a
+		// fall-back: no model change happens. /model stops listing the pair;
+		// the status line keeps telling the truth; the session that pinned it
+		// fails its next turn at the turn-entry check, where the user can
+		// actually re-choose. The error log carries no credentials.
+		slog.Error("pinned primary model is no longer configured; the runner keeps serving it",
 			"old_provider", strings.TrimSpace(snap.provider.Provider),
 			"old_model", strings.TrimSpace(snap.provider.Model),
-			"new_provider", strings.TrimSpace(fallback.Provider),
-			"new_model", strings.TrimSpace(fallback.Model))
-		return fallback, nil
+			"hint", "re-select with /model or fix default_model")
+		return snap.provider, nil
 	}
 }
 
@@ -1643,7 +1674,7 @@ func (r *Runner) LoadSession() error {
 // OpenSession makes this Runner the runtime of a conversation that is
 // beginning: it takes the conversation's own model selection and reconciles
 // the MCP half in the same load. sel.Set false means the conversation never
-// chose, which runs on the configured default.
+// chose, so it adopts the configured default.
 func (r *Runner) OpenSession(sel PrimaryModelState) error {
 	r.mu.load.Lock()
 	var err error
@@ -1837,10 +1868,11 @@ func (w *sessionModelLLM) Execute(ctx context.Context, messages []llm.Message, t
 	}
 	client, err := w.clientFor(sel)
 	if err != nil {
-		// The pair vanished under a mid-run reload. The ordinary-reload
-		// semantics apply: fall back to the runner's current model and say
-		// so, rather than failing a turn whose conversation is still healthy.
-		slog.Warn("session model no longer configured; the call runs on the runner's current model",
+		// The pair vanished under a mid-run reload. The turn keeps running on
+		// the runner's current model — which, by the ordinary-reload rule, is
+		// the same model this selection named, so this is no model switch —
+		// and the next turn is refused at the turn-entry check.
+		slog.Error("session model no longer resolves; the call runs on the runner's current model",
 			"provider", sel.Provider, "model", sel.Model, "err", err)
 		return w.inner.Execute(ctx, messages, tools)
 	}
@@ -1869,46 +1901,40 @@ func (w *sessionModelLLM) clientFor(sel PrimaryModelState) (llm.LLM, error) {
 // injectSessionModelSelection resolves the conversation's stored model choice
 // once at turn entry and carries it in the context. A context that already
 // carries one (a child inheriting its parent session's) keeps it. A stored
-// pair the config no longer offers heals the row to the runner's current
-// selection and runs on it — the same ordinary-reload fallback the TUI's
-// activation applies, per turn.
-func (r *Runner) injectSessionModelSelection(ctx context.Context) context.Context {
+// pair the config no longer offers is an ERROR for this turn — the row is left
+// untouched (the user's choice is theirs to change, not ours to rewrite) and
+// the message tells them to re-choose with /model; no other model is silently
+// adopted. Store read errors and absent rows inject nothing and fail nothing.
+func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Context, error) {
 	if r == nil || r.Deps == nil || r.Deps.SessionStore == nil {
-		return ctx
+		return ctx, nil
 	}
 	if _, ok := SessionModelSelectionFromContext(ctx); ok {
-		return ctx
+		return ctx, nil
 	}
 	sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
 	if sid == "" {
-		return ctx
+		return ctx, nil
 	}
 	row, hasRow, err := r.Deps.SessionStore.SessionModelSelection(ctx, sid)
 	if err != nil || !hasRow {
-		return ctx
+		return ctx, nil
 	}
 	effort := row.Effort
 	resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort)
 	if err == nil {
-		return WithSessionModelSelection(ctx, resolved)
+		return WithSessionModelSelection(ctx, resolved), nil
 	}
-	// The stored pair is gone: run on the runner's current selection and
-	// rewrite the stale row so the next turn and every marker agree.
-	fallback := PrimaryModelSelection(r)
-	slog.Warn("session model no longer configured; the session runs on the configured default",
+	// The stored pair is gone: this turn fails rather than running on a model
+	// the user did not pick. The row stays as written so the choice is
+	// recoverable; the log carries no credentials.
+	slog.Error("session model no longer configured; the turn is refused",
 		"session_id", sid,
 		"old_provider", strings.TrimSpace(row.Provider),
 		"old_model", strings.TrimSpace(row.Model),
-		"new_provider", fallback.Provider,
-		"new_model", fallback.Model)
-	if _, saveErr := r.Deps.SessionStore.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
-		Provider: fallback.Provider,
-		Model:    fallback.Model,
-		Effort:   fallback.Effort,
-	}); saveErr != nil {
-		slog.Warn("rewrite the stale session model row", "session_id", sid, "err", saveErr)
-	}
-	return ctx
+		"hint", "re-select with /model")
+	return ctx, fmt.Errorf("本会话选择的模型 %s/%s 已不在配置中；请用 /model 重新选择",
+		strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model))
 }
 
 // effectiveModelFor names the model this context's conversation runs on: the
@@ -2045,6 +2071,12 @@ func PrimaryModelStateForSession(r *Runner, store *state.SessionStore, sessionID
 // row the config no longer resolves. A surface passes the model that
 // conversation's next turn will actually run on, which is not always this
 // runner's published selection.
+//
+// This is a display path, not a resolution path: an unresolvable row falls
+// back to the caller's answer only to keep the UI truthful, and no request is
+// ever routed by it — the turn itself is refused at turn entry, where the
+// user is told to re-choose. That is why this fall-through is not the
+// silent-fallback the loader forbids.
 func PrimaryModelStateForSessionOn(
 	r *Runner, store *state.SessionStore, sessionID string, fallback PrimaryModelState,
 ) PrimaryModelState {
