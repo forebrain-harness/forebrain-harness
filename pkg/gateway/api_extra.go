@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -2098,7 +2099,8 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	workedLines := turn.RunWorkedLines(turns)
 	// Paths in a card's header are shown relative to the conversation's own
 	// directory — the project root — and absolute only outside it.
-	displayRoot := s.sessionDisplayRoot(r.Context(), sid)
+	// It is looked up once, and only if a row has a card to head.
+	displayRoot := sync.OnceValue(func() string { return s.sessionDisplayRoot(r.Context(), sid) })
 	for i, t := range turns {
 		emitCompactions(i)
 		if _, ok := visible[i]; ok {
@@ -2134,7 +2136,7 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			switch strings.ToLower(strings.TrimSpace(t.Role)) {
 			case "tool":
-				m.Header = storedToolRowHeader(displayRoot, t.PartsJSON, t.ToolMetaJSON, time.Duration(t.ExecDurationMs)*time.Millisecond)
+				m.Header = storedToolRowHeader(displayRoot(), t.PartsJSON, t.ToolMetaJSON, time.Duration(t.ExecDurationMs)*time.Millisecond)
 			case "assistant":
 				m.CallHeaders = canceledCallHeaders(displayRoot, t.PartsJSON)
 			}
@@ -2204,9 +2206,11 @@ func (s *Server) handleChatSessionEvents(w http.ResponseWriter, r *http.Request)
 	page.Events = s.withoutSupersededAbandonedErrors(r.Context(), page.Events)
 	// A tool call's card reads with the terminal's header wording, paths
 	// relative to the conversation's directory.
-	root := s.sessionDisplayRoot(r.Context(), sid)
+	root := sync.OnceValue(func() string { return s.sessionDisplayRoot(r.Context(), sid) })
 	for i := range page.Events {
-		page.Events[i].Payload = toolEventPayloadWithHeader(root, page.Events[i].Type, page.Events[i].Payload)
+		if t := page.Events[i].Type; t == event.RunEventToolStarted || t == event.RunEventToolCompleted {
+			page.Events[i].Payload = toolEventPayloadWithHeader(root(), t, page.Events[i].Payload)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(page)

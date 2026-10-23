@@ -9,9 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/mattn/go-runewidth"
-
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
+	"github.com/mattn/go-runewidth"
 )
 
 // DisplayFrame is what a tool card's header is built from: the call's name, its
