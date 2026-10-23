@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -444,6 +446,55 @@ func TestSelectOrg(t *testing.T) {
 	// The caller's slice must not be reordered by the lookup.
 	if orgs[0].ID != "org_z" {
 		t.Error("selectOrg reordered the caller's org slice")
+	}
+}
+
+// The page reports "canceled" the moment the user asks, so the file must not
+// appear afterwards: the profile calls that follow the token grant swallow
+// every error, a cancel included, and the flow would otherwise save a login
+// nobody is waiting for any more.
+func TestLoginDeviceFlowDoesNotSaveAfterTheLoginIsCanceled(t *testing.T) {
+	stubPollFloor(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/device/code":
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"device_code":               "device-1",
+				"user_code":                 "ABCD-EFGH",
+				"verification_uri_complete": "/console/device?user_code=ABCD-EFGH",
+				"expires_in":                600,
+				"interval":                  0,
+			})
+		case "/auth/device/token":
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"access_token":  "access-1",
+				"refresh_token": "refresh-1",
+				"expires_in":    3600,
+			})
+		case "/api/user":
+			// The user gave up while this request was in flight; the profile
+			// calls answer normally anyway, exactly as the real console would.
+			cancel()
+			writeJSON(t, w, http.StatusOK, map[string]any{"id": "usr_1", "email": "dev@example.com"})
+		case "/api/orgs":
+			writeJSON(t, w, http.StatusOK, []map[string]any{{"id": "org_a", "name": "Alpha"}})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	stubConsole(t, server.URL)
+
+	path := filepath.Join(t.TempDir(), "opencode.json")
+	_, err := LoginDeviceFlow(ctx, path, io.Discard, func(string) error { return nil }, nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the canceled login", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("a canceled login left a credentials file behind (stat err = %v)", statErr)
 	}
 }
 

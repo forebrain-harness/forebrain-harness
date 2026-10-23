@@ -284,6 +284,15 @@ func LoginWithBrowser(ctx context.Context, path string, out io.Writer, openBrows
 		err  error
 	}
 	resultCh := make(chan result, 1)
+	// The first answer decides the login; any later one (a browser retrying or
+	// refreshing the callback) is dropped instead of blocking a handler that
+	// Shutdown would then wait for forever.
+	deliver := func(r result) {
+		select {
+		case resultCh <- r:
+		default:
+		}
+	}
 	server := &http.Server{ReadHeaderTimeout: 10 * time.Second}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/auth/callback" {
@@ -291,8 +300,11 @@ func LoginWithBrowser(ctx context.Context, path string, out io.Writer, openBrows
 			return
 		}
 		if r.URL.Query().Get("state") != state {
+			// Not our request: the state is a secret only the browser we sent
+			// to the authorization page can know. Answering it with an error is
+			// enough — ending the login for a stranger's request would let any
+			// page on this machine cancel it.
 			http.Error(w, "State mismatch. Return to Forebrain Harness and try again.", http.StatusBadRequest)
-			resultCh <- result{err: errors.New("OAuth state mismatch")}
 			return
 		}
 		if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
@@ -301,22 +313,22 @@ func LoginWithBrowser(ctx context.Context, path string, out io.Writer, openBrows
 				msg = oauthErr
 			}
 			http.Error(w, "Sign-in failed. Return to Forebrain Harness.", http.StatusBadRequest)
-			resultCh <- result{err: fmt.Errorf("ChatGPT sign-in failed: %s", msg)}
+			deliver(result{err: fmt.Errorf("ChatGPT sign-in failed: %s", msg)})
 			return
 		}
 		code := strings.TrimSpace(r.URL.Query().Get("code"))
 		if code == "" {
 			http.Error(w, "Missing authorization code.", http.StatusBadRequest)
-			resultCh <- result{err: errors.New("ChatGPT callback did not include an authorization code")}
+			deliver(result{err: errors.New("ChatGPT callback did not include an authorization code")})
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, "<!doctype html><title>Forebrain Harness signed in</title><h1>Signed in to Forebrain Harness</h1><p>You can close this window and return to your terminal.</p>")
-		resultCh <- result{code: code}
+		deliver(result{code: code})
 	})
 	go func() {
 		if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			resultCh <- result{err: err}
+			deliver(result{err: err})
 		}
 	}()
 
@@ -326,7 +338,11 @@ func LoginWithBrowser(ctx context.Context, path string, out io.Writer, openBrows
 	case <-ctx.Done():
 		callback.err = ctx.Err()
 	}
-	_ = server.Shutdown(context.Background())
+	shutdownCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		_ = server.Close()
+	}
+	stop()
 	if callback.err != nil {
 		return Credentials{}, callback.err
 	}

@@ -213,6 +213,13 @@ func LoginDeviceFlow(ctx context.Context, path string, out io.Writer,
 	c.AccountID = account.ID
 	c.Email = account.Email
 	c.OrgID, c.OrgName = selectOrg(c.OrgID, orgs)
+	// fetchAccount swallows every error, a cancel included, so the flow gets
+	// here even when the caller already gave up. A login the caller canceled
+	// must leave nothing behind: the page shows "canceled", and a credentials
+	// file appearing after that would make the page a liar.
+	if err := ctx.Err(); err != nil {
+		return Credentials{}, err
+	}
 	if err := Save(path, c); err != nil {
 		return Credentials{}, fmt.Errorf("save OpenCode credentials: %w", err)
 	}

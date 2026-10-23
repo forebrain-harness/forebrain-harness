@@ -291,6 +291,130 @@ func TestLoginWithBrowserHandsTheAuthorizationURLToTheCallback(t *testing.T) {
 	}
 }
 
+// The callback port is open to the whole machine while a login is pending, so
+// anything can knock on it: a prefetcher, another page, another program. A
+// request whose state does not match is not this sign-in's answer and must not
+// be able to end it — only the authorization server's own reply may.
+func TestLoginWithBrowserIgnoresACallbackWithTheWrongState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stubTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"access_token":"`+jwtWithExp(t, time.Now().Add(time.Hour))+`","refresh_token":"refresh-1","expires_in":3600}`)
+	})
+	path := filepath.Join(t.TempDir(), "auth.json")
+
+	attempted := make(chan struct{})
+	browserCalled := make(chan struct{})
+	_, err := LoginWithBrowser(ctx, path, io.Discard, func(authURL string) error {
+		close(browserCalled)
+		parsed, parseErr := url.Parse(authURL)
+		if parseErr != nil {
+			t.Errorf("authorization URL: %v", parseErr)
+			return nil
+		}
+		redirect := parsed.Query().Get("redirect_uri")
+		state := parsed.Query().Get("state")
+		go func() {
+			defer close(attempted)
+			stray, strayErr := http.Get(redirect + "?code=stray&state=WRONG")
+			if strayErr != nil {
+				t.Errorf("stray callback: %v", strayErr)
+				return
+			}
+			_ = stray.Body.Close()
+			if stray.StatusCode != http.StatusBadRequest {
+				t.Errorf("stray callback = %d, want 400", stray.StatusCode)
+			}
+			real, realErr := http.Get(redirect + "?code=real-code&state=" + url.QueryEscape(state))
+			if realErr != nil {
+				t.Errorf("real callback: %v", realErr)
+				return
+			}
+			_ = real.Body.Close()
+		}()
+		return nil
+	})
+	select {
+	case <-browserCalled:
+	default:
+		t.Skipf("the loopback login listener is unavailable on this machine: %v", err)
+	}
+	select {
+	case <-attempted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the stray and the real callback never both completed")
+	}
+	if err != nil {
+		t.Fatalf("LoginWithBrowser: %v, want the login to survive a stranger's callback", err)
+	}
+	saved, loadErr := Load(path)
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if saved.RefreshToken != "refresh-1" {
+		t.Fatalf("RefreshToken = %q, want refresh-1", saved.RefreshToken)
+	}
+}
+
+// A browser that retries or refreshes the callback address sends several
+// requests, and only the first one decides the login. The others must not
+// block a handler that the shutdown then waits for: the flow has to return.
+func TestLoginWithBrowserSurvivesRepeatedCallbacks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stubTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"access_token":"`+jwtWithExp(t, time.Now().Add(time.Hour))+`","refresh_token":"refresh-1","expires_in":3600}`)
+	})
+	path := filepath.Join(t.TempDir(), "auth.json")
+
+	started := make(chan struct{})
+	browserCalled := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := LoginWithBrowser(ctx, path, io.Discard, func(authURL string) error {
+			close(browserCalled)
+			parsed, parseErr := url.Parse(authURL)
+			if parseErr != nil {
+				t.Errorf("authorization URL: %v", parseErr)
+				return nil
+			}
+			redirect := parsed.Query().Get("redirect_uri")
+			state := parsed.Query().Get("state")
+			go func() {
+				defer close(started)
+				var wg sync.WaitGroup
+				for i := 0; i < 4; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						resp, getErr := http.Get(redirect + "?code=real-code&state=" + url.QueryEscape(state))
+						if getErr != nil {
+							return
+						}
+						_ = resp.Body.Close()
+					}()
+				}
+				wg.Wait()
+			}()
+			return nil
+		})
+		done <- err
+	}()
+	select {
+	case <-browserCalled:
+	case <-time.After(3 * time.Second):
+		t.Skip("the loopback login listener is unavailable on this machine")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("LoginWithBrowser: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("repeated callbacks left the login waiting: the flow never returned")
+	}
+}
+
 // stubTokenEndpoint stands the token endpoint up locally, the way the OpenCode
 // tests stub their console base: what the endpoint answers decides whether a
 // login is dead, so the classification tests need to serve the answers.

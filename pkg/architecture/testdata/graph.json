@@ -56,7 +56,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm",
-      "loc": 13939,
+      "loc": 13962,
       "fan_in": 20,
       "fan_out": 1
     },
@@ -80,13 +80,13 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai",
-      "loc": 4019,
+      "loc": 4035,
       "fan_in": 5,
       "fan_out": 1
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode",
-      "loc": 1265,
+      "loc": 1272,
       "fan_in": 5,
       "fan_out": 1
     },
