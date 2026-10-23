@@ -242,11 +242,47 @@ func Login(ctx context.Context, path string, out io.Writer) (Credentials, error)
 // listener still lives here, which is why a browser and the gateway have to be
 // on the same machine for this to complete.
 func LoginWithBrowser(ctx context.Context, path string, out io.Writer, openBrowser func(url string) error) (Credentials, error) {
+	return LoginWithManualCallback(ctx, path, out, openBrowser, nil)
+}
+
+// ManualCallback is a sign-in callback handed over by hand: the address the
+// browser was sent to after the user approved, copied from its address bar.
+// A gateway that is not on the browser's machine cannot receive the redirect
+// itself (it goes to localhost on the browser's side), so the page asks the
+// user to paste it. Reply gets nil when the flow took the callback as the
+// provider's answer and an error saying why not otherwise — a rejected callback
+// never ends the login, because the sender is a person who can try again.
+type ManualCallback struct {
+	URL   string
+	Reply chan<- error
+}
+
+var (
+	// ErrCallbackNotACallback: the text is not this sign-in's redirect address.
+	ErrCallbackNotACallback = errors.New("not a sign-in callback address")
+	// ErrCallbackStateMismatch: the address belongs to a different sign-in.
+	ErrCallbackStateMismatch = errors.New("callback belongs to a different sign-in")
+	// ErrCallbackNoCode: the address carries no authorization code.
+	ErrCallbackNoCode = errors.New("callback carries no authorization code")
+)
+
+// LoginWithManualCallback is LoginWithBrowser with a second way in: a callback
+// the user pasted, for a gateway the browser's redirect cannot reach. A nil
+// manual channel is exactly LoginWithBrowser — the listener is the whole flow.
+func LoginWithManualCallback(ctx context.Context, path string, out io.Writer, openBrowser func(url string) error, manual <-chan ManualCallback) (Credentials, error) {
 	ln, redirectURI, err := listenLoopback()
 	if err != nil {
-		return Credentials{}, err
+		if manual == nil {
+			return Credentials{}, err
+		}
+		// Both ports taken (or no loopback at all): the redirect address the
+		// authorization server accepts is fixed and never has to be served when
+		// the user hands the callback over.
+		ln, redirectURI = nil, "http://localhost:1455/auth/callback"
 	}
-	defer ln.Close()
+	if ln != nil {
+		defer ln.Close()
+	}
 
 	state, err := randomURLToken(32)
 	if err != nil {
@@ -293,56 +329,79 @@ func LoginWithBrowser(ctx context.Context, path string, out io.Writer, openBrows
 		default:
 		}
 	}
-	server := &http.Server{ReadHeaderTimeout: 10 * time.Second}
-	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/auth/callback" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.URL.Query().Get("state") != state {
-			// Not our request: the state is a secret only the browser we sent
-			// to the authorization page can know. Answering it with an error is
-			// enough — ending the login for a stranger's request would let any
-			// page on this machine cancel it.
-			http.Error(w, "State mismatch. Return to Forebrain Harness and try again.", http.StatusBadRequest)
-			return
-		}
-		if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
-			msg := strings.TrimSpace(r.URL.Query().Get("error_description"))
-			if msg == "" {
-				msg = oauthErr
+	var server *http.Server
+	if ln != nil {
+		server = &http.Server{ReadHeaderTimeout: 10 * time.Second}
+		server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/auth/callback" {
+				http.NotFound(w, r)
+				return
 			}
-			http.Error(w, "Sign-in failed. Return to Forebrain Harness.", http.StatusBadRequest)
-			deliver(result{err: fmt.Errorf("ChatGPT sign-in failed: %s", msg)})
-			return
-		}
-		code := strings.TrimSpace(r.URL.Query().Get("code"))
-		if code == "" {
-			http.Error(w, "Missing authorization code.", http.StatusBadRequest)
-			deliver(result{err: errors.New("ChatGPT callback did not include an authorization code")})
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, "<!doctype html><title>Forebrain Harness signed in</title><h1>Signed in to Forebrain Harness</h1><p>You can close this window and return to your terminal.</p>")
-		deliver(result{code: code})
-	})
-	go func() {
-		if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			deliver(result{err: err})
-		}
-	}()
+			if r.URL.Query().Get("state") != state {
+				// Not our request: the state is a secret only the browser we sent
+				// to the authorization page can know. Answering it with an error is
+				// enough — ending the login for a stranger's request would let any
+				// page on this machine cancel it.
+				http.Error(w, "State mismatch. Return to Forebrain Harness and try again.", http.StatusBadRequest)
+				return
+			}
+			if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
+				msg := strings.TrimSpace(r.URL.Query().Get("error_description"))
+				if msg == "" {
+					msg = oauthErr
+				}
+				http.Error(w, "Sign-in failed. Return to Forebrain Harness.", http.StatusBadRequest)
+				deliver(result{err: fmt.Errorf("ChatGPT sign-in failed: %s", msg)})
+				return
+			}
+			code := strings.TrimSpace(r.URL.Query().Get("code"))
+			if code == "" {
+				http.Error(w, "Missing authorization code.", http.StatusBadRequest)
+				deliver(result{err: errors.New("ChatGPT callback did not include an authorization code")})
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, "<!doctype html><title>Forebrain Harness signed in</title><h1>Signed in to Forebrain Harness</h1><p>You can close this window and return to your terminal.</p>")
+			deliver(result{code: code})
+		})
+		go func() {
+			if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				deliver(result{err: err})
+			}
+		}()
+	}
 
 	var callback result
-	select {
-	case callback = <-resultCh:
-	case <-ctx.Done():
-		callback.err = ctx.Err()
+wait:
+	for {
+		select {
+		case callback = <-resultCh:
+			break wait
+		case m := <-manual:
+			code, providerErr, rejected := parseCallback(m.URL, redirectURI, state)
+			if m.Reply != nil {
+				select {
+				case m.Reply <- rejected:
+				default:
+				}
+			}
+			if rejected != nil {
+				continue
+			}
+			callback = result{code: code, err: providerErr}
+			break wait
+		case <-ctx.Done():
+			callback.err = ctx.Err()
+			break wait
+		}
 	}
-	shutdownCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		_ = server.Close()
+	if server != nil {
+		shutdownCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+		}
+		stop()
 	}
-	stop()
 	if callback.err != nil {
 		return Credentials{}, callback.err
 	}
@@ -374,6 +433,50 @@ func listenLoopback() (net.Listener, string, error) {
 		}
 	}
 	return nil, "", errors.New("cannot start ChatGPT login callback on localhost ports 1455 or 1457")
+}
+
+// parseCallback reads a pasted callback address against this sign-in. rejected
+// means the text is not an answer to this sign-in (the caller keeps waiting);
+// providerErr is the authorization server's own refusal carried by a valid one.
+func parseCallback(raw, redirectURI, state string) (code string, providerErr, rejected error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil, ErrCallbackNotACallback
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	got, err := url.Parse(raw)
+	if err != nil {
+		return "", nil, ErrCallbackNotACallback
+	}
+	want, err := url.Parse(redirectURI)
+	if err != nil {
+		return "", nil, ErrCallbackNotACallback
+	}
+	// The browser shows localhost or 127.0.0.1 depending on how it got there;
+	// the port is the one this sign-in's redirect address names.
+	if got.Scheme != "http" || got.Port() != want.Port() ||
+		(!strings.EqualFold(got.Hostname(), "localhost") && got.Hostname() != "127.0.0.1") ||
+		got.Path != want.Path {
+		return "", nil, ErrCallbackNotACallback
+	}
+	q := got.Query()
+	if q.Get("state") != state {
+		return "", nil, ErrCallbackStateMismatch
+	}
+	if oauthErr := q.Get("error"); oauthErr != "" {
+		msg := strings.TrimSpace(q.Get("error_description"))
+		if msg == "" {
+			msg = oauthErr
+		}
+		return "", fmt.Errorf("ChatGPT sign-in failed: %s", msg), nil
+	}
+	code = strings.TrimSpace(q.Get("code"))
+	if code == "" {
+		return "", nil, ErrCallbackNoCode
+	}
+	return code, nil, nil
 }
 
 // tokenEndpoint is the token URL exchange posts to. It is a var for the same

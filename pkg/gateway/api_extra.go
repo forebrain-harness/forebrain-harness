@@ -55,6 +55,10 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	auth.Post("/login/:provider", s.handleAuthLoginStart)
 	auth.Get("/login/:provider/:loginId", s.handleAuthLoginStatus)
 	auth.Post("/login/:provider/:loginId/cancel", s.handleAuthLoginCancel)
+	// The redirect a ChatGPT sign-in sends the browser to is a localhost
+	// address, so a gateway on another machine never sees it: the page asks the
+	// user to paste the address back here instead.
+	auth.Post("/login/:provider/:loginId/callback", s.handleAuthLoginCallback)
 	api.Get("/tools", s.handleToolsList)
 	api.Get("/models", s.handleModelsList)
 

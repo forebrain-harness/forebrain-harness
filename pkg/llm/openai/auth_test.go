@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -412,6 +414,245 @@ func TestLoginWithBrowserSurvivesRepeatedCallbacks(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("repeated callbacks left the login waiting: the flow never returned")
+	}
+}
+
+// manualLogin drives one LoginWithManualCallback from a test. submit hands the
+// flow a pasted address the way the page does and returns the flow's answer.
+type manualLogin struct {
+	redirectURI string
+	state       string
+	manual      chan ManualCallback
+	creds       chan Credentials
+	done        chan error
+}
+
+// startManualLogin begins a flow and waits until it has handed its
+// authorization URL out, so the caller can build callbacks the flow will
+// recognise. occupyPorts takes 1455 and 1457 first, which is how a gateway on a
+// machine where the loopback is unusable still gets a flow to carry by hand.
+func startManualLogin(t *testing.T, path string, occupyPorts bool) *manualLogin {
+	t.Helper()
+	if occupyPorts {
+		for _, port := range []int{1455, 1457} {
+			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+			if err != nil {
+				t.Skipf("cannot occupy localhost:%d on this machine: %v", port, err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+		}
+	}
+	m := &manualLogin{
+		manual: make(chan ManualCallback),
+		creds:  make(chan Credentials, 1),
+		done:   make(chan error, 1),
+	}
+	opened := make(chan string, 1)
+	go func() {
+		creds, err := LoginWithManualCallback(context.Background(), path, io.Discard, func(authURL string) error {
+			select {
+			case opened <- authURL:
+			default:
+			}
+			return nil
+		}, m.manual)
+		m.creds <- creds
+		m.done <- err
+	}()
+	select {
+	case authURL := <-opened:
+		parsed, err := url.Parse(authURL)
+		if err != nil {
+			t.Fatalf("authorization URL: %v", err)
+		}
+		m.redirectURI = parsed.Query().Get("redirect_uri")
+		m.state = parsed.Query().Get("state")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the flow never handed its authorization URL out")
+	}
+	return m
+}
+
+func (m *manualLogin) submit(t *testing.T, pasted string) error {
+	t.Helper()
+	reply := make(chan error, 1)
+	select {
+	case m.manual <- ManualCallback{URL: pasted, Reply: reply}:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the flow took no callback: %q", pasted)
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the flow answered no callback: %q", pasted)
+	}
+	return nil
+}
+
+func (m *manualLogin) wait(t *testing.T) (Credentials, error) {
+	t.Helper()
+	select {
+	case creds := <-m.creds:
+		return creds, <-m.done
+	case <-time.After(10 * time.Second):
+		t.Fatal("the manual login never finished")
+	}
+	return Credentials{}, nil
+}
+
+func stubValidTokenGrant(t *testing.T) {
+	t.Helper()
+	stubTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"access_token":"`+jwtWithExp(t, time.Now().Add(time.Hour))+`","refresh_token":"refresh-1","expires_in":3600}`)
+	})
+}
+
+// A gateway that cannot be reached by the browser's redirect — a server, a
+// container, another machine — still finishes the login when the user copies
+// the address out of the browser and pastes it back. The loopback listener is
+// not just unused here: both of its ports are taken, so the flow has to run
+// without one at all.
+func TestManualCallbackCompletesTheLogin(t *testing.T) {
+	stubValidTokenGrant(t)
+	path := filepath.Join(t.TempDir(), "auth.json")
+	m := startManualLogin(t, path, true)
+
+	if want := "http://localhost:1455/auth/callback"; m.redirectURI != want {
+		t.Fatalf("redirect_uri = %q, want the fixed %q", m.redirectURI, want)
+	}
+	if err := m.submit(t, m.redirectURI+"?code=real&state="+m.state); err != nil {
+		t.Fatalf("a real callback was rejected: %v", err)
+	}
+	creds, err := m.wait(t)
+	if err != nil {
+		t.Fatalf("LoginWithManualCallback: %v", err)
+	}
+	if creds.RefreshToken != "refresh-1" {
+		t.Fatalf("credentials = %+v", creds)
+	}
+	saved, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if saved.RefreshToken != "refresh-1" {
+		t.Fatalf("saved RefreshToken = %q, want refresh-1", saved.RefreshToken)
+	}
+}
+
+// Whatever the user pastes is text from a person, so a wrong paste is a try
+// again, not the end: the flow says why it is not its callback and keeps
+// waiting for the right one.
+func TestManualCallbackRejectsWithoutEndingTheLogin(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input func(m *manualLogin) string
+		want  error
+	}{
+		{
+			name:  "plain text",
+			input: func(*manualLogin) string { return "hello" },
+			want:  ErrCallbackNotACallback,
+		},
+		{
+			name:  "another sign-in's state",
+			input: func(m *manualLogin) string { return m.redirectURI + "?code=x&state=WRONG" },
+			want:  ErrCallbackStateMismatch,
+		},
+		{
+			name: "some other site",
+			input: func(m *manualLogin) string {
+				return "http://evil.example.com:1455/auth/callback?code=x&state=" + m.state
+			},
+			want: ErrCallbackNotACallback,
+		},
+		{
+			name: "another port",
+			input: func(m *manualLogin) string {
+				return "http://localhost:9999/auth/callback?code=x&state=" + m.state
+			},
+			want: ErrCallbackNotACallback,
+		},
+		{
+			name: "another path",
+			input: func(m *manualLogin) string {
+				return "http://localhost:1455/other?code=x&state=" + m.state
+			},
+			want: ErrCallbackNotACallback,
+		},
+		{
+			name: "no code",
+			input: func(m *manualLogin) string {
+				return m.redirectURI + "?state=" + m.state
+			},
+			want: ErrCallbackNoCode,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubValidTokenGrant(t)
+			m := startManualLogin(t, filepath.Join(t.TempDir(), "auth.json"), true)
+			got := m.submit(t, tc.input(m))
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("rejection = %v, want %v", got, tc.want)
+			}
+			// Still waiting: the login has not ended, and the right address
+			// still completes it.
+			if err := m.submit(t, m.redirectURI+"?code=real&state="+m.state); err != nil {
+				t.Fatalf("the login no longer takes a callback after a rejected one: %v", err)
+			}
+			if _, err := m.wait(t); err != nil {
+				t.Fatalf("LoginWithManualCallback: %v", err)
+			}
+		})
+	}
+}
+
+// The address bar carries what the browser put there, not what a parser would
+// like: whitespace from a careless copy, 127.0.0.1 instead of localhost, no
+// scheme at all once a chat client has trimmed it, and query parameters the
+// request never named.
+func TestManualCallbackAcceptsWhatABrowserShows(t *testing.T) {
+	const (
+		redirect = "http://localhost:1455/auth/callback"
+		state    = "st-1"
+	)
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{name: "padded with whitespace", input: "  \n" + redirect + "?code=c&state=" + state + "\t "},
+		{name: "loopback address instead of a name", input: "http://127.0.0.1:1455/auth/callback?code=c&state=" + state},
+		{name: "no scheme", input: "localhost:1455/auth/callback?code=c&state=" + state},
+		{name: "extra parameters", input: redirect + "?code=c&scope=openid%20profile&state=" + state + "&session_state=s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, providerErr, rejected := parseCallback(tc.input, redirect, state)
+			if rejected != nil {
+				t.Fatalf("parseCallback(%q) rejected a callback a browser can show: %v", tc.input, rejected)
+			}
+			if providerErr != nil {
+				t.Fatalf("providerErr = %v, want none", providerErr)
+			}
+			if code != "c" {
+				t.Fatalf("code = %q, want c", code)
+			}
+		})
+	}
+}
+
+// The authorization server's own refusal is an answer, not a bad paste: it
+// belongs to this sign-in, so it ends the login with the reason it gave — the
+// same wording the loopback listener produces for it.
+func TestManualCallbackCarriesTheProvidersOwnRefusal(t *testing.T) {
+	stubValidTokenGrant(t)
+	m := startManualLogin(t, filepath.Join(t.TempDir(), "auth.json"), true)
+
+	if err := m.submit(t, m.redirectURI+"?error=access_denied&error_description=nope&state="+m.state); err != nil {
+		t.Fatalf("the provider's own refusal was rejected as a bad paste: %v", err)
+	}
+	_, err := m.wait(t)
+	if err == nil || !strings.Contains(err.Error(), "ChatGPT sign-in failed: nope") {
+		t.Fatalf("err = %v, want the provider's refusal", err)
 	}
 }
 

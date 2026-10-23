@@ -62,7 +62,7 @@ const authLoginRetention = 5 * time.Minute
 // talking to opencode.ai or auth.openai.com.
 var (
 	openCodeLoginRun = opencode.LoginDeviceFlow
-	chatGPTLoginRun  = openai.LoginWithBrowser
+	chatGPTLoginRun  = openai.LoginWithManualCallback
 )
 
 // authLoginProbe is a package var like the two login flows above: tests stub
@@ -102,6 +102,11 @@ type gatewayAuthLogin struct {
 	// flow's own timeout already bounds that.
 	keepUntil time.Time
 	cancel    context.CancelFunc
+	// manual carries the callbacks a user pastes back when the browser's
+	// redirect cannot reach this machine. Only a ChatGPT login has one: the
+	// device flow it does not apply to, so it stays nil and the endpoint
+	// refuses rather than pretending.
+	manual chan openai.ManualCallback
 }
 
 // authLoginStart records a new pending login for provider and returns its id.
@@ -111,7 +116,8 @@ type gatewayAuthLogin struct {
 //
 // One login per provider: both flows own fixed resources — a device code, and
 // the loopback ports 1455 and 1457 — so two at once would fight over them.
-func (s *Server) authLoginStart(provider string, keepUntil time.Time, cancel context.CancelFunc) (string, error) {
+func (s *Server) authLoginStart(provider string, keepUntil time.Time, cancel context.CancelFunc,
+	manual chan openai.ManualCallback) (string, error) {
 	if s == nil {
 		return "", errors.New("no server")
 	}
@@ -135,6 +141,7 @@ func (s *Server) authLoginStart(provider string, keepUntil time.Time, cancel con
 		status:    authLoginPending,
 		keepUntil: keepUntil,
 		cancel:    cancel,
+		manual:    manual,
 	}
 	return id, nil
 }
@@ -197,6 +204,24 @@ func (s *Server) authLoginAbort(provider, id string, keepUntil time.Time) (conte
 		login.keepUntil = keepUntil
 	}
 	return login.cancel, true
+}
+
+// authLoginManual hands out the channel a pasted callback goes into, together
+// with the login's status so the caller can tell "no such login" from "this
+// login cannot take one any more". The channel itself is never copied: the
+// flow owns its receiving end.
+func (s *Server) authLoginManual(provider, id string) (chan openai.ManualCallback, string, bool) {
+	if s == nil {
+		return nil, "", false
+	}
+	s.authLoginMu.Lock()
+	defer s.authLoginMu.Unlock()
+	s.pruneAuthLoginsLocked(time.Now())
+	login, ok := s.authLogins[id]
+	if !ok || login.provider != provider {
+		return nil, "", false
+	}
+	return login.manual, login.status, true
 }
 
 // authLoginGet returns a copy of a login, or false when the id is unknown to
@@ -267,7 +292,14 @@ func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	keepUntil := now.Add(authLoginTimeout + authLoginRetention)
 	ctx, cancel := context.WithTimeout(context.Background(), authLoginTimeout)
-	id, err := s.authLoginStart(provider, keepUntil, cancel)
+	// Only the ChatGPT flow has a second way in: its redirect goes to localhost
+	// on the browser's machine, which is the gateway's own machine only when the
+	// two are the same one.
+	var manual chan openai.ManualCallback
+	if provider == authLoginChatGPT {
+		manual = make(chan openai.ManualCallback)
+	}
+	id, err := s.authLoginStart(provider, keepUntil, cancel, manual)
 	if err != nil {
 		cancel()
 		status := http.StatusConflict
@@ -283,7 +315,7 @@ func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 	owner := s
 	go func() {
 		defer cancel()
-		runErr := owner.runAuthLogin(ctx, provider, id)
+		runErr := owner.runAuthLogin(ctx, provider, id, manual)
 		owner.authLoginFinish(id, runErr, authLoginBaseURL(provider), keepUntil)
 	}()
 	w.Header().Set("Content-Type", "application/json")
@@ -296,12 +328,12 @@ func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 // out is discarded because the page is the progress display, and the browser is
 // never opened here — the gateway may be running where nobody can see one, and
 // opening it there would be a window onto a terminal nobody is watching.
-func (s *Server) runAuthLogin(ctx context.Context, provider, id string) error {
+func (s *Server) runAuthLogin(ctx context.Context, provider, id string, manual chan openai.ManualCallback) error {
 	if provider == authLoginChatGPT {
 		_, err := chatGPTLoginRun(ctx, openai.CredentialsPath(s.Home), io.Discard, func(url string) error {
 			s.authLoginUpdate(id, func(login *gatewayAuthLogin) { login.url = url })
 			return nil
-		})
+		}, manual)
 		return err
 	}
 	_, err := openCodeLoginRun(ctx, opencode.DefaultPath(s.Home), io.Discard,
@@ -361,6 +393,75 @@ func (s *Server) handleAuthLoginStatus(w http.ResponseWriter, r *http.Request) {
 		Error:    login.errText,
 		BaseURL:  login.baseURL,
 	})
+}
+
+// handleAuthLoginCallback takes the address a user pasted from their browser's
+// address bar after approving a ChatGPT sign-in whose redirect could not reach
+// this machine. The flow decides whether it is theirs; the answer is a short
+// machine-readable reason the page words itself. The address carries a one-time
+// authorization code, so it is never logged or echoed.
+func (s *Server) handleAuthLoginCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if s == nil {
+		http.Error(w, "nil", http.StatusInternalServerError)
+		return
+	}
+	provider := authLoginProvider(pathParam(r, "provider"))
+	if provider != authLoginChatGPT {
+		http.Error(w, "unknown login provider", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil || strings.TrimSpace(body.URL) == "" {
+		http.Error(w, "bad_request", http.StatusBadRequest)
+		return
+	}
+	manual, status, ok := s.authLoginManual(provider, pathParam(r, "loginId"))
+	if !ok {
+		http.Error(w, "unknown login", http.StatusNotFound)
+		return
+	}
+	if status != authLoginPending || manual == nil {
+		http.Error(w, "login not pending", http.StatusConflict)
+		return
+	}
+	reply := make(chan error, 1)
+	select {
+	case manual <- openai.ManualCallback{URL: body.URL, Reply: reply}:
+	case <-time.After(5 * time.Second):
+		http.Error(w, "login not pending", http.StatusConflict)
+		return
+	case <-r.Context().Done():
+		return
+	}
+	select {
+	case err := <-reply:
+		if err != nil {
+			http.Error(w, callbackReason(err), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	case <-time.After(5 * time.Second):
+		http.Error(w, "login not pending", http.StatusConflict)
+	case <-r.Context().Done():
+	}
+}
+
+// callbackReason maps the flow's refusal to the short code the page words.
+func callbackReason(err error) string {
+	switch {
+	case errors.Is(err, openai.ErrCallbackStateMismatch):
+		return "state_mismatch"
+	case errors.Is(err, openai.ErrCallbackNoCode):
+		return "no_code"
+	default:
+		return "not_a_callback"
+	}
 }
 
 // handleAuthLoginCancel ends a login the page walked away from. The state is
