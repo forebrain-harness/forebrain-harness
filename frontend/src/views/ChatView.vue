@@ -221,13 +221,6 @@
                             :text="block.text"
                             :detail="block.detail"
                           />
-                          <!-- The retry half of the transport-failure pair: the
-                               same card every subagent view draws, driven by
-                               the same event. -->
-                          <TransportRetryCard
-                            v-else-if="block.kind === 'retry'"
-                            :block="block"
-                          />
                         </template>
                       </div>
                       <!-- What the user sent reads exactly as they wrote it, the way
@@ -348,6 +341,7 @@
             data-testid="run-status-line"
             class="mb-1.5"
             :label="runLine.label"
+            :reason="runLine.reason"
             :plan="runLine.plan"
             :tail="runLine.tail"
           />
@@ -657,7 +651,6 @@ import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
 import ViewModeChip from '@/components/chat/ViewModeChip.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
-import TransportRetryCard from '@/components/chat/TransportRetryCard.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
 import LspRecommendationCard from '@/components/chat/LspRecommendationCard.vue'
@@ -666,7 +659,7 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, formatFirstTokenDuration, formatRuntimeStatusLabel, type ChatMessage, type PlanBlock, type SubagentTranscript } from '@/composables/useChatStream'
+import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { subagentPhase } from '@/lib/subagentStatus'
 import { blockVisibleIn } from '@/lib/viewMode'
 import { useViewMode } from '@/composables/useViewMode'
@@ -2034,18 +2027,27 @@ const submitLabel = computed(() => (
 /**
  * The run's own line above the composer, in the terminal's order: the state,
  * then the checklist, then the wait for the model's first token. Nothing is
- * drawn while no run is under way.
+ * drawn while no run is under way. A network retry replaces the whole line:
+ * the reason, then the countdown with the attempt.
  */
 const runLine = computed(() => {
   const status = runtimeStatus.value
   if (status.kind === 'idle') return null
+  if (status.retry) {
+    // The once-a-second timer replaces runtimeStatus.value wholesale, so this
+    // line re-reads — and re-counts down — every tick; the elapsedMs read
+    // keeps that refresh a tracked dependency even if the timer stops
+    // replacing the object.
+    void status.elapsedMs
+    return { ...formatTransportRetryLine(status.retry, t), plan: undefined, tail: '' }
+  }
   // formatRuntimeStatusLabel already appends the first-token wait; the
   // terminal puts it last, after the checklist, so it is lifted out here and
   // handed back as the line's trailing segment.
   const { label, plan } = formatRuntimeStatusLabel({ ...status, firstTokenMs: undefined }, t)
   if (!label) return null
   const wait = formatFirstTokenDuration(status.firstTokenMs)
-  return { label, plan, tail: wait ? t('chat.firstToken', { duration: wait }) : '' }
+  return { reason: undefined, label, plan, tail: wait ? t('chat.firstToken', { duration: wait }) : '' }
 })
 
 /**

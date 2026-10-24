@@ -95,18 +95,11 @@
 		  :line="formatWorkedDurationLabel(block.durationMs, t, block.finishedAt, block.plan)"
 		/>
 
-		<RunErrorBlock
-		  v-else-if="block.kind === 'error'"
-		  :text="block.text"
-		  :detail="block.detail"
-		/>
-
-		<!-- The same transport-retry card the conversation's timeline draws:
-		     one event, one component, identical semantics on both views. -->
-		<TransportRetryCard
-		  v-else-if="block.kind === 'retry'"
-		  :block="block"
-		/>
+	<RunErrorBlock
+	  v-else-if="block.kind === 'error'"
+	  :text="block.text"
+	  :detail="block.detail"
+	/>
 
         <Message v-else-if="block.kind === 'assistant'" from="assistant">
           <Avatar class="size-8 shrink-0 ring-1 ring-border">
@@ -163,7 +156,6 @@ import ToolCallCard from '@/components/chat/ToolCallCard.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
-import TransportRetryCard from '@/components/chat/TransportRetryCard.vue'
 import { formatWorkedDurationLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { subagentPhase } from '@/lib/subagentStatus'
 import { blockVisibleIn } from '@/lib/viewMode'

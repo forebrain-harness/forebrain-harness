@@ -30,14 +30,17 @@
     </Conversation>
 
     <!-- The terminal's working line sits above the composer, never in the
-         record: the state, then the checklist it is working through. -->
+         record: the state, then the checklist it is working through. A network
+         retry replaces it whole — the reason, then the countdown with the
+         attempt — exactly as the conversation's own line does. -->
     <RunStatusLine
       v-if="active"
       class="px-[18px] pb-1.5"
       data-testid="subagent-working"
-      :label="t('chat.subagentWorking', { duration })"
-      :plan="record.plan && record.plan.total > 0 ? record.plan : undefined"
-      :tail="record.plan?.active ?? ''"
+      :label="workingLabel"
+      :reason="retryLine?.reason"
+      :plan="retryLine ? undefined : (record.plan && record.plan.total > 0 ? record.plan : undefined)"
+      :tail="retryLine ? '' : (record.plan?.active ?? '')"
     />
 
     <div class="subagent-composer">
@@ -140,6 +143,7 @@ import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import {
   formatRuntimeDuration,
+  formatTransportRetryLine,
   type PendingInputPreview,
   type SubagentCallTaskLive,
   type SubagentTranscript,
@@ -244,6 +248,17 @@ const duration = computed(() => {
   if (!Number.isFinite(start)) return ''
   return formatRuntimeDuration(Math.max(0, nowMs.value - start))
 })
+
+// The retry line, when this subagent's own stream is waiting on the network:
+// it counts down on the same once-a-second clock the duration walks.
+const retryLine = computed(() =>
+  props.record.retry ? formatTransportRetryLine(props.record.retry, t, nowMs.value) : undefined)
+
+// What the tab's status line says: the retry owns it while one is pending,
+// and the ordinary working label — with its checklist and its task — returns
+// once the retry is over.
+const workingLabel = computed(() =>
+  retryLine.value ? retryLine.value.label : t('chat.subagentWorking', { duration: duration.value }))
 
 /** A command picked in the "+" menu lands in this tab's composer, not sent. */
 function insertCommand(text: string) {

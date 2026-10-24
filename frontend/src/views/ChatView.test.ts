@@ -582,6 +582,36 @@ describe('ChatView run status line', () => {
     wrapper.unmount()
   })
 
+  it('replaces the whole line with the network retry while one is pending', async () => {
+    setLocale('en')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      { id: 'u1', role: 'user', content: 'fix it' },
+    ]
+    runtimeStatus().value = {
+      kind: 'working',
+      elapsedMs: 72_000,
+      planCompleted: 3,
+      planTotal: 5,
+      planActive: 'fix the middleware',
+      retry: { attempt: 2, total: 10, deadline: Date.now() + 8000, error: '' },
+    }
+    const wrapper = await mountView()
+    await flushPromises()
+    const line = wrapper.find('[data-testid="run-status-line"]')
+    expect(line.exists()).toBe(true)
+    const text = line.text().replace(/\s+/g, ' ')
+    // The reason, then the countdown with the attempt — and none of the
+    // ordinary working-line segments (no duration, no checklist, no
+    // first-token wait, no "Working").
+    expect(text).toContain('Network error')
+    expect(text).toContain('Retrying in ')
+    expect(text).toContain('attempt 2/10')
+    expect(text).not.toContain('Working')
+    expect(text).not.toContain('3/5')
+    expect(text).not.toContain('first token')
+    wrapper.unmount()
+  })
+
   it('draws nothing while no run is under way', async () => {
     ;(fake as { messages: { value: unknown[] } }).messages.value = [
       { id: 'u1', role: 'user', content: 'fix it' },

@@ -29,6 +29,9 @@ TOOL_SCRIPT = [
 if os.environ.get("FAKE_TOOL_NAME"):
     TOOL_SCRIPT = [(os.environ["FAKE_TOOL_NAME"], os.environ.get("FAKE_TOOL_ARGS", "{}"))]
 REQUESTS = itertools.count()
+# How many netdrop-marker requests have been cut so far; the marker's own
+# counter counts only requests that carried it.
+NETDROP_MARKER_COUNT = itertools.count()
 
 
 def chunk(delta=None, finish=None):
@@ -67,6 +70,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if MODE == "reply" and self.serve_subagent_steer(request):
             return
         if MODE == "reply" and self.serve_subagent_net(request):
+            return
+        if MODE == "reply" and self.serve_netdrop_marker(request):
             return
 
         if MODE == "netdrop" and self.serve_netdrop():
@@ -113,6 +118,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # The marker for the subagent-steer case. The dispatched task carries it
     # too, so the subagent's own requests are recognised by it.
     SUBAGENT_STEER_MARKER = "[[e2e:subagent-steer]]"
+    # The marker for the run-line network-retry case: the first three
+    # requests that carry it are cut mid-answer, every later one answers
+    # normally, so the retry shows on the status line and the turn recovers.
+    NETDROP_MARKER = "[[e2e:netdrop]]"
+    NETDROP_MARKER_DROPS = 3
     # How long the subagent holds its answer after the delta that takes the
     # steer: the page is checked inside this window, while it still runs.
     SUBAGENT_STEER_HOLD = 30
@@ -236,6 +246,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_event(chunk(finish="stop"))
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
+        return True
+
+    def serve_netdrop_marker(self, request):
+        """Answers the run-line network-retry case in `reply` mode; False to
+        fall through.
+
+        The first three requests whose last human message carries the marker
+        each answer 200 with `text/event-stream`, write one assistant chunk,
+        and close the connection without a finish frame — a proxy cutting an
+        SSE stream mid-answer. Every request from the fourth on falls through
+        to the ordinary reply, so the turn recovers on the run's own retry
+        and the dead attempts' partial text must never survive anywhere.
+        """
+        messages = request.get("messages") if isinstance(request, dict) else None
+        if not isinstance(messages, list) or not messages:
+            return False
+        human = self.human_user_texts(messages)
+        if not any(self.NETDROP_MARKER in text for text in human):
+            return False
+        if next(NETDROP_MARKER_COUNT) >= self.NETDROP_MARKER_DROPS:
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_event(chunk(delta={"role": "assistant", "content": "partial answer that never"}))
+        sys.stderr.write("NETDROP marker clean close without a finish frame\n")
+        sys.stderr.flush()
+        self.close_connection = True
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.connection.close()
+        except OSError:
+            pass
         return True
 
     def serve_netdrop(self):

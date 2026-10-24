@@ -1224,15 +1224,6 @@ export type TimelineBlock =
    * viewer's language; text is the runtime's sentence for the rest.
    */
   | { kind: 'error'; id?: string; text: string; detail?: ProviderErrorDetail }
-  /**
-   * A transport failure of the run's own LLM stream and the retry about to
-   * run: a spinner while it waits, a live countdown to the next attempt and
-   * the n/total progress straight from the event. The first streamed words of
-   * the retried attempt remove it (a recovered retry leaves no success card);
-   * `stopped` freezes it when the retries ran out, and the turn's closing
-   * events remove any still-waiting one.
-   */
-  | { kind: 'retry'; id: string; retry: number; total: number; deadline?: number; stopped?: boolean }
   /** A compaction of this history, drawn as one card from start to end. */
   | { kind: 'compaction'; id: string; compaction: ForebrainCompaction }
   /** A line of a /goal: how it opened, a continuation round, or how it ended. */
@@ -1252,9 +1243,6 @@ export type TimelineBlock =
    * live turn, a reloaded one and the terminal all read the same.
    */
   | { kind: 'gate'; id: string; stepId: string; actionId?: string }
-
-/** The retry card's block shape, shared by the timeline renderers. */
-export type TransportRetryBlock = Extract<TimelineBlock, { kind: 'retry' }>
 
 /**
  * A subagent's own transcript.
@@ -1299,6 +1287,11 @@ export interface SubagentTranscript {
    * next worked line closes with. A list spans the agent's executions.
    */
   plan?: WorkedPlanProgress
+  /**
+   * The network retry this subagent's own stream is waiting on. Its tab's
+   * status line becomes it while set, exactly as the conversation's does.
+   */
+  retry?: TransportRetryStatus
   /** When each execution started, by its id — the clock a worked line counts. */
   executionStarts?: Record<string, string>
   /**
@@ -1348,10 +1341,6 @@ function appendStreamedText(
   eventId?: string,
   occurredAt?: unknown,
 ): TimelineBlock[] {
-  // Streamed words mean the response is alive again: whatever retry card was
-  // waiting for this stream is spent. Recovery removal lives here because this
-  // is the one funnel every live delta of both paths passes through.
-  blocks = withoutLiveRetryBlocks(blocks)
   const last = blocks[blocks.length - 1]
   if (last && last.kind === kind && last.open) {
     const grown = { ...last, text: last.text + text }
@@ -1364,54 +1353,18 @@ function appendStreamedText(
 }
 
 /**
- * withoutLiveRetryBlocks removes waiting retry cards, keeping frozen ones:
- * recovery and the turn's close both end with no live card on the timeline.
+ * transportRetryStatusOf reads the status line's retry facts off one
+ * transport_retry payload: the n/total progress straight from the event, the
+ * countdown deadline from its wait, and the transport's own sentence (shown
+ * from the third attempt on).
  */
-function withoutLiveRetryBlocks(blocks: TimelineBlock[]): TimelineBlock[] {
-  return blocks.filter((block) => !(block.kind === 'retry' && !block.stopped))
-}
-
-/**
- * applyTransportRetryBlocks folds one transport_retry into a block list: the
- * dead attempt's streamed text is withdrawn — its still-open blocks are
- * removed, the whole request is re-sent and the retried attempt's first
- * delta starts its own block below — the error card updates in place
- * (consecutive failures describe one story), and the retry card carries the
- * countdown deadline. The retry's cleared notice changes nothing. Used by the
- * conversation's own stream and by every subagent view — one event, one
- * rendering.
- */
-function applyTransportRetryBlocks(
-  blocks: TimelineBlock[],
-  payload: Record<string, unknown>,
-): TimelineBlock[] {
-  if (payload.cleared) return blocks
-  const retry = Math.max(0, Number(payload.retry ?? 0))
-  const total = Math.max(0, Number(payload.total ?? 0))
-  const waitMs = Math.max(0, Number(payload.waitMs ?? 0))
-  // The transport's own sentence, kept whole enough to recognize (provider
-  // and address) but capped so a wall of socket noise cannot push the
-  // timeline around.
-  const errorText = truncateTransportError(String(payload.error ?? '').trim() || 'network error')
-  const exhausted = Boolean(payload.exhausted)
-
-  const out = dropOpenStreamedBlocks(blocks)
-  const errorBlock: TimelineBlock = { kind: 'error', id: 'transport-retry-error', text: errorText }
-  const retryBlock: TimelineBlock = exhausted
-    ? { kind: 'retry', id: 'transport-retry', retry, total, stopped: true }
-    : { kind: 'retry', id: 'transport-retry', retry, total, deadline: Date.now() + waitMs }
-  return replaceOrAppendById(replaceOrAppendById(out, errorBlock), retryBlock)
-}
-
-function replaceOrAppendById(blocks: TimelineBlock[], block: TimelineBlock): TimelineBlock[] {
-  const index = blocks.findIndex((candidate) => candidate.kind === block.kind && candidate.id === block.id)
-  if (index < 0) return [...blocks, block]
-  return blocks.map((candidate, i) => (i === index ? block : candidate))
-}
-
-/** The error card's body cap: 200 characters, hard cut, no ellipsis games. */
-function truncateTransportError(text: string): string {
-  return text.length > 200 ? `${text.slice(0, 200)}…` : text
+function transportRetryStatusOf(payload: Record<string, unknown>): TransportRetryStatus {
+  return {
+    attempt: Number(payload.retry ?? 0),
+    total: Number(payload.total ?? 0),
+    deadline: Date.now() + Math.max(0, Number(payload.waitMs ?? 0)),
+    error: String(payload.error ?? '').trim(),
+  }
 }
 
 function closeStreamedBlocks(
@@ -1494,6 +1447,16 @@ function subagentStepSummary(payload: Record<string, unknown>): string {
 export type SessionMode = 'agent' | 'plan'
 export type RuntimeStatusKind = 'idle' | 'working' | 'reconnecting'
 
+/** The network retry a run is waiting on: what the status line shows instead of "Working". */
+export interface TransportRetryStatus {
+  attempt: number
+  total: number
+  /** When the next attempt fires, epoch ms. */
+  deadline: number
+  /** The transport's own sentence; shown from the third attempt on. */
+  error: string
+}
+
 export interface RuntimeStatus {
   kind: RuntimeStatusKind
   startedAt?: number
@@ -1511,6 +1474,12 @@ export interface RuntimeStatus {
   goalChecking?: boolean
   /** How long this run waited for the model's first output, once it arrived. */
   firstTokenMs?: number
+  /**
+   * The network retry this run is waiting on. While set, it owns the whole
+   * status line above the composer — reason, countdown, attempt — and no
+   * duration, checklist or first-token wait is drawn beside it.
+   */
+  retry?: TransportRetryStatus
 }
 
 export interface ContextRuntimeSignals {
@@ -2290,6 +2259,51 @@ export function formatRuntimeStatusLabel(status: RuntimeStatus, tr: TranslateFn 
     return { label: tr('chat.runtimeReconnecting', { attempt, max, duration }) + firstToken, plan }
   }
   return { label: '', plan }
+}
+
+/**
+ * The status line while a network retry is pending: the reason (the only
+ * part that may be cut) and the countdown with the attempt. The generic
+ * "network error" stands in until the third attempt, from which the
+ * transport's own sentence is shown — the terminal's same rule.
+ */
+export interface TransportRetryLine {
+  reason: string
+  label: string
+}
+
+export function formatTransportRetryLine(
+  retry: TransportRetryStatus,
+  tr: TranslateFn = translate,
+  now = Date.now(),
+): TransportRetryLine {
+  const reason = retry.attempt >= Math.min(3, retry.total) && retry.error
+    ? retry.error
+    : tr('chat.transportRetry.networkError')
+  return {
+    reason,
+    label: tr('chat.transportRetry.retryIn', {
+      countdown: formatRetryCountdown(retry.deadline - now, tr),
+      n: retry.attempt,
+      total: retry.total,
+    }),
+  }
+}
+
+/**
+ * The countdown a retry line waits by: ceiled to whole seconds so it never
+ * reads shorter than the true wait, one second at a time under a minute,
+ * minutes-with-seconds up to five, and beyond that only the highest unit.
+ */
+export function formatRetryCountdown(ms: number, tr: TranslateFn = translate): string {
+  const secs = Math.max(0, Math.ceil(ms / 1000))
+  if (secs < 60) return tr('chat.transportRetry.seconds', { n: secs })
+  if (secs < 300) {
+    return tr('chat.transportRetry.minutesSeconds', { m: Math.floor(secs / 60), s: secs % 60 })
+  }
+  if (secs >= 86_400) return tr('chat.transportRetry.days', { n: Math.floor(secs / 86_400) })
+  if (secs >= 3_600) return tr('chat.transportRetry.hours', { n: Math.floor(secs / 3_600) })
+  return tr('chat.transportRetry.minutes', { n: Math.floor(secs / 60) })
 }
 
 export function useChatStream() {
@@ -3391,12 +3405,14 @@ export function useChatStream() {
         return true
       case 'transport_retry':
         // Same semantics as the conversation's own stream, scoped to this
-        // subagent's transcript: dead in-flight text out, card pair in; the
-        // retry's cleared notice changes nothing.
-        if (payload.cleared) return true
+        // subagent's transcript: the dead attempt's in-flight text goes — a
+        // cleared notice carries the final dead attempt's withdraw when the
+        // cap ran out — and the retry itself lives on the tab's status line,
+        // never in the transcript.
         updateSubagent(agentId, (entry) => ({
           ...entry,
-          blocks: applyTransportRetryBlocks(entry.blocks, payload),
+          blocks: dropOpenStreamedBlocks(entry.blocks),
+          retry: payload.cleared ? undefined : transportRetryStatusOf(payload),
         }))
         return true
       case 'usage_delta':
@@ -4324,13 +4340,13 @@ export function useChatStream() {
 	    status: transcriptStatus,
 		error: errText || undefined,
         finishedAt: evt.createdAt ?? entry.finishedAt,
+        // The run is over, so its status line's retry — if the network was
+        // still down when it ended — leaves with it.
+        retry: undefined,
         // The run is over, so nothing more will be appended to the text it was
         // streaming.
 	    blocks: (() => {
 		  let blocks = closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt)
-		  // The execution is over, so its waiting retry card — if the network
-		  // was still down when it ended — leaves with it.
-		  blocks = withoutLiveRetryBlocks(blocks)
 		  let promptIndex = -1
 		  if (promptId) {
 			for (let i = blocks.length - 1; i >= 0; i--) {
@@ -4693,11 +4709,13 @@ export function useChatStream() {
         return
       case 'transport_retry': {
         // The attempt that was streaming died on the network: its buffered
-        // text goes (the retry re-streams from the first token) and the
-        // error/retry card pair paints from the same payload the terminal
-        // renders. Only the dead tail leaves the composer's answer — words
-        // from earlier rounds of this same turn stay.
-        if (payload.cleared) return
+        // text goes — the retry re-streams from the first token, and a
+        // cleared notice (the retry's end) carries the final dead attempt's
+        // withdraw when the cap ran out. The retry itself never enters the
+        // conversation: the status line above the composer becomes it, and
+        // the cleared notice hands that line back. Only the dead tail leaves
+        // the composer's answer — words from earlier rounds of this same
+        // turn stay.
         const current = messages.value.find((message) => message.id === assistantMessageId)
         const dead = (current?.blocks ?? []).find((block) => block.kind === 'assistant' && block.open)
         if (dead && dead.kind === 'assistant' && dead.text && state.fullAnswer.endsWith(dead.text)) {
@@ -4706,8 +4724,11 @@ export function useChatStream() {
         answer.value = state.fullAnswer
         updateMessageById(assistantMessageId, (message) => ({
           ...message,
-          blocks: applyTransportRetryBlocks(message.blocks ?? [], payload as Record<string, unknown>),
+          blocks: dropOpenStreamedBlocks(message.blocks ?? []),
         }))
+        runtimeStatus.value = payload.cleared
+          ? { ...runtimeStatus.value, retry: undefined }
+          : { ...runtimeStatus.value, retry: transportRetryStatusOf(payload) }
         return
       }
       case 'turn_completed': {
@@ -4720,32 +4741,22 @@ export function useChatStream() {
         if (payload.pendingInput) {
           applyPendingInputPreview(payload.pendingInput)
         }
-        updateMessageById(assistantMessageId, (message) => {
-          const settled = withSettledTurnText(message, finalText, evt.createdAt)
-          return {
-            ...settled,
-            ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
-            // A turn that closed leaves no waiting retry card behind; a
-            // frozen one is history and stays.
-            blocks: withoutLiveRetryBlocks(settled.blocks ?? []),
-          }
-        })
-        runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
+        updateMessageById(assistantMessageId, (message) => ({
+          ...withSettledTurnText(message, finalText, evt.createdAt),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+        }))
+        runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
         return
       }
       case 'turn_error': {
         state.completedNormally = false
         const msg = String(payload.error ?? payload.message ?? 'Request failed')
-        updateMessageById(assistantMessageId, (message) => {
-          const failed = withRunError(message, evt.runId, msg, parseProviderErrorDetail(payload.detail), evt.createdAt)
-          return {
-            ...failed,
-            ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
-            blocks: withoutLiveRetryBlocks(failed.blocks ?? []),
-          }
-        })
-        runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
+        updateMessageById(assistantMessageId, (message) => ({
+          ...withRunError(message, evt.runId, msg, parseProviderErrorDetail(payload.detail), evt.createdAt),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+        }))
+        runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
         return
       }
@@ -4820,15 +4831,11 @@ export function useChatStream() {
       case 'turn_cancelled': {
         state.completedNormally = false
         state.completedRunId = String(evt.runId ?? activeRunId ?? '').trim() || state.completedRunId || null
-        updateMessageById(assistantMessageId, (message) => {
-          const cancelled = withCancelledTurn(message, evt.createdAt)
-          return {
-            ...cancelled,
-            ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
-            blocks: withoutLiveRetryBlocks(cancelled.blocks ?? []),
-          }
-        })
-        runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
+        updateMessageById(assistantMessageId, (message) => ({
+          ...withCancelledTurn(message, evt.createdAt),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+        }))
+        runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
         return
       }

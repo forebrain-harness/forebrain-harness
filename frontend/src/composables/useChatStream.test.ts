@@ -12,8 +12,10 @@ import {
   emptyPendingInputPreview,
   applyPlanUpdateToMessage,
   computeWorkedDurationMs,
+  formatRetryCountdown,
   formatRuntimeStatusLabel,
   formatToolDuration,
+  formatTransportRetryLine,
   formatWorkedDurationLabel,
   hasVisibleBlocks,
   imageBytesLabel,
@@ -323,6 +325,44 @@ describe('useChatStream helpers', () => {
     // Unknown stays off the line.
     expect(formatRuntimeStatusLabel({ kind: 'working', elapsedMs: 3000 }).label)
       .toBe('Working (3s • esc to interrupt)')
+  })
+
+  it('counts a retry down one second at a time, then by its highest unit', () => {
+    // Ceiled to whole seconds, so the wait never reads shorter than it is.
+    expect(formatRetryCountdown(500)).toBe('1s')
+    expect(formatRetryCountdown(8000)).toBe('8s')
+    expect(formatRetryCountdown(59200)).toBe('1m 0s')
+    expect(formatRetryCountdown(65000)).toBe('1m 5s')
+    // Five minutes and beyond: only the highest unit, floored.
+    expect(formatRetryCountdown(360000)).toBe('6m')
+    expect(formatRetryCountdown(9000000)).toBe('2h')
+    expect(formatRetryCountdown(93600000)).toBe('1d')
+    // A deadline already past reads zero, never negative.
+    expect(formatRetryCountdown(-1000)).toBe('0s')
+    // The same waits in Chinese.
+    setLocale('zh')
+    try {
+      expect(formatRetryCountdown(8000)).toBe('8 秒')
+      expect(formatRetryCountdown(65000)).toBe('1 分 5 秒')
+    } finally {
+      setLocale('en')
+    }
+  })
+
+  it('names a retry by its error only from the third attempt on', () => {
+    const retry = (attempt: number, total: number, error = '') =>
+      ({ attempt, total, deadline: 0, error })
+    // The generic reason while the failure is still anonymous.
+    expect(formatTransportRetryLine(retry(2, 10), t, 0).reason).toBe('Network error')
+    expect(formatTransportRetryLine(retry(2, 10), t, 0).label).toBe('Retrying in 0s · attempt 2/10')
+    // From the third attempt (or a cap below it) the transport's own
+    // sentence stands in, whole.
+    expect(formatTransportRetryLine(retry(3, 10, 'read tcp 10.0.0.2:59383->…: operation timed out'), t, 0).reason)
+      .toBe('read tcp 10.0.0.2:59383->…: operation timed out')
+    expect(formatTransportRetryLine(retry(2, 2, 'read tcp: reset'), t, 0).reason).toBe('read tcp: reset')
+    // The countdown is read against the moment passed in.
+    expect(formatTransportRetryLine({ attempt: 1, total: 3, deadline: 8000, error: '' }, t, 0).label)
+      .toBe('Retrying in 8s · attempt 1/3')
   })
 
   it('formats active runtime labels with interrupt hints', () => {
@@ -4900,7 +4940,7 @@ describe('useChatStream stream_partial', () => {
   })
 })
 
-  it('renders the transport retry: dead text withdrawn, card pair in, recovery opens its own block', async () => {
+  it('puts the transport retry on the status line: dead text withdrawn, nothing added to the conversation', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket
     Object.defineProperty(globalThis, 'WebSocket', {
@@ -4930,35 +4970,35 @@ describe('useChatStream stream_partial', () => {
       // The stream died mid-answer. The dead attempt's half answer is
       // withdrawn — the whole request is re-sent, so the half words never
       // happened — while the thinking block that had already finished
-      // stays. The error card carries the failure and the retry card
-      // carries the progress straight from the payload — 1/3 here, proving
-      // no surface hard-codes a denominator of 10.
+      // stays. The retry itself never enters the conversation: the status
+      // line above the composer becomes it, its n/total straight from the
+      // payload — 1/3 here, proving no surface hard-codes a denominator
+      // of 10.
       runEvent('transport_retry', { retry: 1, total: 3, wait_ms: 500, error: 'read tcp 10.0.0.1:1->10.0.0.2:2: i/o timeout' })
       primary = stream.messages.value[stream.messages.value.length - 1]
       const blocks = primary?.blocks ?? []
       expect(blocks.some((b) => b.kind === 'assistant' && b.text === 'half an an')).toBe(false)
       expect(blocks.some((b) => b.kind === 'thinking' && !b.open)).toBe(true)
-      expect(blocks.filter((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toHaveLength(1)
-      const retryBlock = blocks.find((b) => b.kind === 'retry') as Extract<TimelineBlock, { kind: 'retry' }> | undefined
-      expect(retryBlock?.stopped).toBeFalsy()
-      expect(typeof retryBlock?.deadline).toBe('number')
+      expect(blocks.some((b) => b.kind === 'error')).toBe(false)
+      expect(stream.runtimeStatus.value.retry).toMatchObject({ attempt: 1, total: 3 })
+      expect(typeof stream.runtimeStatus.value.retry?.deadline).toBe('number')
+      expect(stream.runtimeStatus.value.retry?.error).toBe('read tcp 10.0.0.1:1->10.0.0.2:2: i/o timeout')
       // The composer-level answer buffer went with the dead attempt.
       expect(stream.answer.value).toBe('')
 
-      // The next failure updates the same two blocks, never stacks.
+      // The next failure walks the same status, never stacks anything.
       runEvent('transport_retry', { retry: 2, total: 3, wait_ms: 1000, error: 'read tcp: connection reset' })
-      primary = stream.messages.value[stream.messages.value.length - 1]
-      expect((primary?.blocks ?? []).filter((b) => b.kind === 'retry')).toHaveLength(1)
-      expect((primary?.blocks ?? []).filter((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toHaveLength(1)
+      expect(stream.runtimeStatus.value.retry?.attempt).toBe(2)
 
-      // Recovery: the re-sent request's first words remove the retry card
-      // and open a NEW block — the dead half answer is gone, never glued
-      // onto, never doubled.
+      // Recovery: the cleared notice hands the status line back before the
+      // re-sent request's first words, which open a NEW block — the dead
+      // half answer is gone, never glued onto, never doubled.
+      runEvent('transport_retry', { retry: 2, total: 3, cleared: true })
+      expect(stream.runtimeStatus.value.retry).toBeUndefined()
       runEvent('assistant_delta', { text: 'and this is the rest' })
       primary = stream.messages.value[stream.messages.value.length - 1]
       const after = primary?.blocks ?? []
-      expect(after.some((b) => b.kind === 'retry')).toBe(false)
-      expect(after.some((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toBe(true)
+      expect(after.some((b) => b.kind === 'error')).toBe(false)
       const answerBlocks = after.filter((b) => b.kind === 'assistant') as Extract<TimelineBlock, { kind: 'assistant' }>[]
       expect(answerBlocks).toHaveLength(1)
       expect(answerBlocks[0]?.open && answerBlocks[0]?.text === 'and this is the rest').toBe(true)
@@ -5033,7 +5073,7 @@ describe('useChatStream stream_partial', () => {
     }
   })
 
-  it('freezes the retry card when the retries are exhausted and clears it with the turn', async () => {
+  it('clears the retry status when the turn ends', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket
     Object.defineProperty(globalThis, 'WebSocket', {
@@ -5056,17 +5096,15 @@ describe('useChatStream stream_partial', () => {
 
       runEvent('turn_started', {})
       runEvent('transport_retry', { retry: 2, total: 2, wait_ms: 0, error: 'read tcp: i/o timeout', exhausted: true })
-      let primary = stream.messages.value[stream.messages.value.length - 1]
-      let retryBlock = (primary?.blocks ?? []).find((b) => b.kind === 'retry') as Extract<TimelineBlock, { kind: 'retry' }> | undefined
-      expect(retryBlock).toMatchObject({ retry: 2, total: 2, stopped: true })
+      expect(stream.runtimeStatus.value.retry).toMatchObject({ attempt: 2, total: 2 })
 
-      // A cancelled turn takes its still-waiting card with it; the frozen
-      // card is history and would have stayed.
-      runEvent('transport_retry', { retry: 1, total: 2, wait_ms: 60000, error: 'read tcp: reset' })
+      // The turn's close takes the status line's retry with it; the turn
+      // ends with its own error line and no retry block anywhere.
       runEvent('turn_cancelled', {})
       await pendingSend
-      primary = stream.messages.value[stream.messages.value.length - 1]
-      expect((primary?.blocks ?? []).some((b) => b.kind === 'retry' && !b.stopped)).toBe(false)
+      expect(stream.runtimeStatus.value.retry).toBeUndefined()
+      const primary = stream.messages.value[stream.messages.value.length - 1]
+      expect((primary?.blocks ?? []).some((b) => b.kind === 'error')).toBe(false)
     } finally {
       Object.defineProperty(globalThis, 'WebSocket', {
         configurable: true,
@@ -5076,7 +5114,7 @@ describe('useChatStream stream_partial', () => {
     }
   })
 
-  it('treats a cleared transport_retry as a no-op: blocks unchanged', async () => {
+  it('a cleared transport_retry withdraws the final dead attempt and frees the status line', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket
     Object.defineProperty(globalThis, 'WebSocket', {
@@ -5097,19 +5135,25 @@ describe('useChatStream stream_partial', () => {
         data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
       })
 
+      // The exhaustion shape the engine guarantees: the retried attempt
+      // streamed and died, and the catch-up cleared notice is the only
+      // announcement that final attempt ever gets.
       runEvent('turn_started', {})
-      runEvent('assistant_delta', { text: 'live words of the retried attempt' })
-      runEvent('transport_retry', { retry: 1, total: 3, cleared: true })
+      runEvent('transport_retry', { retry: 1, total: 2, wait_ms: 500, error: 'read tcp: i/o timeout' })
+      expect(stream.runtimeStatus.value.retry?.attempt).toBe(1)
+      runEvent('assistant_delta', { text: 'final attempt partial' })
+      runEvent('transport_retry', { retry: 2, total: 2, cleared: true })
 
-      // The cleared notice ends the retry; it withdraws nothing, adds no
-      // cards, and the words the retried attempt is streaming stay.
+      // The cleared notice ends the retry: the final dead attempt's words
+      // are withdrawn, the status line goes back to the run's own state,
+      // and nothing was added to the conversation.
       const primary = stream.messages.value[stream.messages.value.length - 1]
       const blocks = primary?.blocks ?? []
-      expect(blocks.some((b) => b.kind === 'assistant' && b.open && b.text === 'live words of the retried attempt')).toBe(true)
-      expect(blocks.some((b) => b.kind === 'retry')).toBe(false)
+      expect(blocks.some((b) => b.kind === 'assistant' && b.text === 'final attempt partial')).toBe(false)
       expect(blocks.some((b) => b.kind === 'error')).toBe(false)
-      expect(stream.answer.value).toBe('live words of the retried attempt')
-      runEvent('turn_completed', { text: 'live words of the retried attempt' })
+      expect(stream.runtimeStatus.value.retry).toBeUndefined()
+      expect(stream.answer.value).toBe('')
+      runEvent('turn_error', { error: 'network error, gave up after 2 retries: read tcp: i/o timeout' })
       await pendingSend
     } finally {
       Object.defineProperty(globalThis, 'WebSocket', {
@@ -5120,7 +5164,7 @@ describe('useChatStream stream_partial', () => {
     }
   })
 
-  it('scopes a subagent transport retry to the subagent transcript', async () => {
+  it('scopes a subagent transport retry to the subagent status line', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket
     Object.defineProperty(globalThis, 'WebSocket', {
@@ -5153,23 +5197,27 @@ describe('useChatStream stream_partial', () => {
       runEvent('assistant_delta', { agent_id: 'task-explore-1', text: 'dead words' })
       runEvent('transport_retry', { agent_id: 'task-explore-1', retry: 1, total: 10, wait_ms: 500, error: 'read tcp: i/o timeout' })
 
-      // The card pair lands in the subagent's own transcript with the same
-      // shape the conversation draws, the dead attempt's words are withdrawn
-      // rather than sealed, and the conversation's blocks stay untouched:
-      // same semantics, one event.
+      // The retry lands on the subagent's own status line with the same
+      // facts the conversation's would carry, the dead attempt's words are
+      // withdrawn rather than sealed, nothing enters its transcript, and
+      // the conversation's own state stays untouched: same semantics, one
+      // event.
       const entry = stream.subagents.value.find((row) => row.agentId === 'task-explore-1')
       expect(entry).toBeTruthy()
-      const retryBlock = (entry?.blocks ?? []).find((b) => b.kind === 'retry') as Extract<TimelineBlock, { kind: 'retry' }> | undefined
-      expect(retryBlock).toMatchObject({ retry: 1, total: 10 })
+      expect(entry?.retry).toMatchObject({ attempt: 1, total: 10 })
       expect((entry?.blocks ?? []).some((b) => b.kind === 'assistant' && b.text === 'dead words')).toBe(false)
-      expect((entry?.blocks ?? []).some((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toBe(true)
+      expect((entry?.blocks ?? []).some((b) => b.kind === 'error')).toBe(false)
       const primary = stream.messages.value[stream.messages.value.length - 1]
-      expect((primary?.blocks ?? []).some((b) => b.kind === 'retry')).toBe(false)
+      expect((primary?.blocks ?? []).some((b) => b.kind === 'error')).toBe(false)
+      expect(stream.runtimeStatus.value.retry).toBeUndefined()
 
-      // Recovery inside the subagent view removes its card the same way.
+      // Recovery inside the subagent view frees its line the same way.
       runEvent('assistant_delta', { agent_id: 'task-explore-1', text: 'live words' })
       const recovered = stream.subagents.value.find((row) => row.agentId === 'task-explore-1')
-      expect((recovered?.blocks ?? []).some((b) => b.kind === 'retry')).toBe(false)
+      expect((recovered?.blocks ?? []).some((b) => b.kind === 'assistant' && b.text === 'live words')).toBe(true)
+      runEvent('transport_retry', { agent_id: 'task-explore-1', retry: 1, total: 10, cleared: true })
+      const cleared = stream.subagents.value.find((row) => row.agentId === 'task-explore-1')
+      expect(cleared?.retry).toBeUndefined()
       runEvent('subagent_ended', { agent_id: 'task-explore-1', agent_type: 'explore', task_id: 'task-explore-1', status: 'ok', execution_id: 'exec-1' })
       runEvent('turn_completed', { text: 'done' })
       await pendingSend
