@@ -255,3 +255,58 @@ func TestNetworkRetryMountOrder(t *testing.T) {
 		t.Fatalf("summary-chain notifications = %+v, want the network retry mounted (retry then cleared)", notes)
 	}
 }
+
+// A server error the provider normalized with a status is the network retry
+// layer's business now: the request is re-sent and the notification carries
+// the status so the surfaces can call it an API error.
+func TestNetworkRetryRetriesServerErrors(t *testing.T) {
+	inner := &netRetryTestLLM{failure: &llm.APIError{StatusCode: 503, Message: "service unavailable"}}
+	wrapped := wrapNetworkRetryLLM(inner, 3)
+
+	var notes []llm.TransportRetry
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnTransportRetry: func(tr llm.TransportRetry) { notes = append(notes, tr) },
+	})
+
+	res, err := wrapped.Execute(ctx, nil, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "full answer" {
+		t.Fatalf("result = %+v, want the retried attempt's answer", res)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2 (503 then re-sent)", inner.calls)
+	}
+	if len(notes) != 2 || notes[0].Cleared || !notes[1].Cleared {
+		t.Fatalf("notifications = %+v, want retry 1 in flight then its cleared notice", notes)
+	}
+	if notes[0].Status != 503 {
+		t.Fatalf("notification status = %d, want 503", notes[0].Status)
+	}
+}
+
+// 529 is the overload path's own failure and stays there: the network retry
+// layer rejects it without a word, and the recoverable layer's 529 branch is
+// the one that re-enters the stack — so no transport-retry notification ever
+// fires for it.
+func TestNetworkRetryLeaves529ToRecovery(t *testing.T) {
+	inner := &netRetryTestLLM{failure: &llm.APIError{StatusCode: 529, Message: "overloaded"}}
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{}, 3)
+
+	var notes []llm.TransportRetry
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnTransportRetry: func(tr llm.TransportRetry) { notes = append(notes, tr) },
+	})
+
+	res, err := recoverable.Execute(ctx, nil, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "full answer" {
+		t.Fatalf("result = %+v, want the recovery branch's answer", res)
+	}
+	if len(notes) != 0 {
+		t.Fatalf("transport-retry notifications = %+v, want none — 529 is recovered above this layer", notes)
+	}
+}

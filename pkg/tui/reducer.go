@@ -148,6 +148,9 @@ type TransportRetryStatus struct {
 	Total    int
 	Deadline time.Time
 	Err      string
+	// Status is the HTTP status of the failure, 0 for transport errors; it
+	// picks the line's generic reason (API error vs Network error).
+	Status int
 }
 
 // Active reports whether a retry is pending.
@@ -1383,7 +1386,7 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			if m.Err != nil {
 				errText = m.Err.Error()
 			}
-			r.tracker.ObserveTransportRetry(agentID, m.Retry, m.Total, m.Wait, errText)
+			r.tracker.ObserveTransportRetry(agentID, m.Retry, m.Total, m.Wait, errText, m.Status)
 		}
 		return EventResult{}
 	case GoalStartedMsg:
@@ -7870,8 +7873,9 @@ func (t *Tracker) ObserveFirstToken(runID string, wait time.Duration) {
 
 // ObserveTransportRetry records the retry an agent is about to make: the
 // countdown is derived from the deadline it stores, so the Working line walks
-// it at paint time with no timer of its own.
-func (t *Tracker) ObserveTransportRetry(agentID string, retry, total int, wait time.Duration, errText string) {
+// it at paint time with no timer of its own. status is the failure's HTTP
+// status, 0 for transport errors.
+func (t *Tracker) ObserveTransportRetry(agentID string, retry, total int, wait time.Duration, errText string, status int) {
 	if t == nil {
 		return
 	}
@@ -7885,6 +7889,7 @@ func (t *Tracker) ObserveTransportRetry(agentID string, retry, total int, wait t
 		Total:    total,
 		Deadline: time.Now().Add(wait),
 		Err:      errText,
+		Status:   status,
 	}
 	t.mu.Unlock()
 }

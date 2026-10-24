@@ -350,18 +350,21 @@ describe('useChatStream helpers', () => {
   })
 
   it('names a retry by its error only from the third attempt on', () => {
-    const retry = (attempt: number, total: number, error = '') =>
-      ({ attempt, total, deadline: 0, error })
+    const retry = (attempt: number, total: number, error = '', status = 0) =>
+      ({ attempt, total, deadline: 0, error, status })
     // The generic reason while the failure is still anonymous.
     expect(formatTransportRetryLine(retry(2, 10), t, 0).reason).toBe('Network error')
     expect(formatTransportRetryLine(retry(2, 10), t, 0).label).toBe('Retrying in 0s · attempt 2/10')
+    // A failure the provider answered with an HTTP status is an API error,
+    // not a network one.
+    expect(formatTransportRetryLine(retry(2, 10, '503 unavailable', 503), t, 0).reason).toBe('API error')
     // From the third attempt (or a cap below it) the transport's own
     // sentence stands in, whole.
     expect(formatTransportRetryLine(retry(3, 10, 'read tcp 10.0.0.2:59383->…: operation timed out'), t, 0).reason)
       .toBe('read tcp 10.0.0.2:59383->…: operation timed out')
     expect(formatTransportRetryLine(retry(2, 2, 'read tcp: reset'), t, 0).reason).toBe('read tcp: reset')
     // The countdown is read against the moment passed in.
-    expect(formatTransportRetryLine({ attempt: 1, total: 3, deadline: 8000, error: '' }, t, 0).label)
+    expect(formatTransportRetryLine({ attempt: 1, total: 3, deadline: 8000, error: '', status: 0 }, t, 0).label)
       .toBe('Retrying in 8s · attempt 1/3')
   })
 

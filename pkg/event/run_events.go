@@ -598,14 +598,16 @@ type ImageRejectedPayload struct {
 
 // TransportRetryPayload mirrors llm.TransportRetry on the wire. Retry/Total
 // is the n/total progress the cards show (the denominator is the configured
-// cap, not a constant); WaitMs drives the live countdown; Cleared marks the
-// retry's end; AgentID routes the event to the subagent whose stream died,
-// empty meaning the conversation's own.
+// cap, not a constant); WaitMs drives the live countdown; Status is the HTTP
+// status behind Error (0 for transport failures); Cleared marks the retry's
+// end; AgentID routes the event to the subagent whose stream died, empty
+// meaning the conversation's own.
 type TransportRetryPayload struct {
 	Retry   int    `json:"retry"`
 	Total   int    `json:"total"`
 	WaitMs  int64  `json:"wait_ms"`
 	Error   string `json:"error"`
+	Status  int    `json:"status,omitempty"`
 	AgentID string `json:"agent_id,omitempty"`
 	Cleared bool   `json:"cleared,omitempty"`
 }

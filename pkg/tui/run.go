@@ -4267,10 +4267,15 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 
 // transportRetryStatusLine renders the Working line while a network retry is
 // pending: the reason, the countdown to the next attempt and the attempt
-// counter. The first attempts name the failure generically; from the third on
-// the transport's own sentence is shown, cut to fit.
+// counter. The first attempts name the failure generically — API error when
+// the provider answered with an HTTP status, Network error when the transport
+// itself died; from the third on the transport's own sentence is shown, cut
+// to fit.
 func transportRetryStatusLine(tick int, s TransportRetryStatus, now time.Time) string {
 	reason := "Network error"
+	if s.Status > 0 {
+		reason = "API error"
+	}
 	if s.Retry >= min(3, s.Total) && strings.TrimSpace(s.Err) != "" {
 		reason = truncateForDisplay(strings.TrimSpace(s.Err), 60)
 	}

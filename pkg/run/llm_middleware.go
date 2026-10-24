@@ -343,6 +343,10 @@ func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int) llm.LLM {
 		llm.WithShouldRetry(llm.IsRetryableNetworkError),
 		llm.WithMaxBackoff(32*time.Second),
 		llm.WithUpwardJitter(),
+		// A server that answered with Retry-After sets the wait itself; a
+		// request for more than five minutes is not a wait this turn should
+		// park on, and the error surfaces instead.
+		llm.WithRetryAfter(llm.RetryAfterOf, 5*time.Minute),
 		llm.WithRetryNotify(func(ctx context.Context, tr llm.TransportRetry) {
 			if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnTransportRetry != nil {
 				sink.OnTransportRetry(tr)

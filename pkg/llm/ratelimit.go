@@ -331,6 +331,12 @@ func parseRetryAfter(header string, receivedAt time.Time) time.Duration {
 	return 0
 }
 
+// ParseRetryAfter is the exported form of parseRetryAfter for the provider
+// packages, which fill APIError.RetryAfter off their own response headers.
+func ParseRetryAfter(header string, receivedAt time.Time) time.Duration {
+	return parseRetryAfter(header, receivedAt)
+}
+
 func isQuotaReason(text string) bool {
 	s := strings.ToLower(strings.TrimSpace(text))
 	if s == "" {

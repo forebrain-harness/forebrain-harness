@@ -501,7 +501,7 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 		// a no-op.
 		OnTransportRetry: func(tr llm.TransportRetry) {
 			accum.Reset()
-			s.notifyUIForSession(sessionID, TransportRetryMsg{turn: foreground, Retry: tr.Retry, Total: tr.Total, Wait: tr.Wait, Err: tr.Err, Cleared: tr.Cleared})
+			s.notifyUIForSession(sessionID, TransportRetryMsg{turn: foreground, Retry: tr.Retry, Total: tr.Total, Wait: tr.Wait, Err: tr.Err, Status: tr.Status, Cleared: tr.Cleared})
 		},
 		OnWebSearch: func(id, detail string, completed bool) {
 			if !foreground.acknowledgeResponse() {

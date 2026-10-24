@@ -248,6 +248,81 @@ func TestNewRetry_NotifySilentOnPredicateRejection(t *testing.T) {
 	}
 }
 
+// The server's Retry-After raises the wait to at least what it asked for,
+// even when the back-off step computed is far shorter.
+func TestRetryHonoursRetryAfter(t *testing.T) {
+	calls := 0
+	overloaded := &APIError{StatusCode: 503, Message: "unavailable", RetryAfter: 40 * time.Millisecond}
+	inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		calls++
+		if calls == 1 {
+			return nil, overloaded
+		}
+		return &Result{Message: &Message{Parts: []ContentPart{Text("ok")}}}, nil
+	}}
+
+	var got []TransportRetry
+	mw, err := NewRetry(3,
+		WithInitialBackoff(time.Millisecond),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryAfter(RetryAfterOf, 5*time.Minute),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) { got = append(got, tr) }),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	res, execErr := Use(inner, mw).Execute(context.Background(), nil, nil)
+	if execErr != nil {
+		t.Fatalf("Execute: %v", execErr)
+	}
+	if res.Message.TextContent() != "ok" {
+		t.Fatalf("result = %q, want the retried attempt's answer", res.Message.TextContent())
+	}
+	if len(got) != 2 || got[0].Cleared || !got[1].Cleared {
+		t.Fatalf("notifications = %+v, want retry 1 in flight then its cleared notice", got)
+	}
+	// The back-off step is 1ms with ±25% jitter; only the server's 40ms can
+	// account for a wait this long.
+	if got[0].Wait < 40*time.Millisecond {
+		t.Fatalf("wait = %v, want at least the server-requested 40ms", got[0].Wait)
+	}
+}
+
+// A Retry-After longer than the limit is the server saying not now: the loop
+// returns the error on the spot — one call, no notification, no parked turn.
+func TestRetryStopsOnLongRetryAfter(t *testing.T) {
+	calls := 0
+	overloaded := &APIError{StatusCode: 503, Message: "unavailable", RetryAfter: time.Minute}
+	inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		calls++
+		return nil, overloaded
+	}}
+
+	var got []TransportRetry
+	mw, err := NewRetry(3,
+		WithInitialBackoff(time.Millisecond),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryAfter(RetryAfterOf, 5*time.Second),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) { got = append(got, tr) }),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	_, execErr := Use(inner, mw).Execute(context.Background(), nil, nil)
+	if execErr == nil {
+		t.Fatal("expected the overload error to surface")
+	}
+	if !errors.Is(execErr, overloaded) {
+		t.Fatalf("error = %v, want the original overload error", execErr)
+	}
+	if calls != 1 {
+		t.Fatalf("callCount=%d, want 1 (no retry)", calls)
+	}
+	if len(got) != 0 {
+		t.Fatalf("notifications = %+v, want none", got)
+	}
+}
+
 func TestRetryBackoffCapsWithUpwardJitter(t *testing.T) {
 	inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
 		return nil, errors.New("transient")

@@ -52,6 +52,7 @@ func normalizeError(err error) error {
 				retryAfterHeader(respErr.Response),
 				receivedAt,
 			),
+			RetryAfter: llm.ParseRetryAfter(retryAfterHeader(respErr.Response), receivedAt),
 		}
 	}
 	return err

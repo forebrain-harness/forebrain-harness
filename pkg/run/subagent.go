@@ -1035,6 +1035,7 @@ func EventStreamSink(ctx context.Context, sink event.Sink, runID, sessionID, age
 				Total:   tr.Total,
 				WaitMs:  tr.Wait.Milliseconds(),
 				Error:   errText,
+				Status:  tr.Status,
 				AgentID: agentID,
 				Cleared: tr.Cleared,
 			})

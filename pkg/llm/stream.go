@@ -65,6 +65,10 @@ type TransportRetry struct {
 	Wait time.Duration
 	// Err is the failure that just happened, rendered on the error card.
 	Err error
+	// Status is the HTTP status of the failure, 0 for transport errors. It
+	// only picks the status line's generic reason; the retry decision was
+	// already made by the predicate.
+	Status int
 	// Cleared marks the end of a retry: the retried request started producing
 	// output, or the retry loop returned (success, exhaustion or cancel). Only
 	// Retry and Total are set on it.

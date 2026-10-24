@@ -189,6 +189,17 @@ func TestWorkingLineShowsRetryStatus(t *testing.T) {
 		t.Fatalf("2/2 retry line = %q, want the verbatim reason", got)
 	}
 
+	// A failure the provider answered with an HTTP status is named an API
+	// error, not a network one — the same rule on every attempt that would
+	// have been generic.
+	got = formatterFor(TransportRetryStatus{Retry: 1, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: "503 unavailable", Status: 503})(20*time.Second, 0, "")
+	if !strings.Contains(got, "API error · Retrying in 8s · attempt 1/10") {
+		t.Fatalf("503 retry line = %q, want the API error generic reason", got)
+	}
+	if strings.Contains(got, "Network error") {
+		t.Fatalf("503 retry line = %q, must not read as a network error", got)
+	}
+
 	// A deadline that has passed reads 0s until the request produces or fails.
 	got = formatterFor(TransportRetryStatus{Retry: 3, Total: 10, Deadline: time.Now().Add(-time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
 	if !strings.Contains(got, "Retrying in 0s") {
@@ -225,7 +236,7 @@ func TestFormatRetryCountdownTiers(t *testing.T) {
 func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
 	tracker := NewTracker()
 	tracker.ObserveAgent("task-1", "exec-1", time.Now())
-	tracker.ObserveTransportRetry("task-1", 1, 10, 8*time.Second, "x")
+	tracker.ObserveTransportRetry("task-1", 1, 10, 8*time.Second, "x", 0)
 
 	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
 	sub := formatter(time.Second, 0, "task-1")
@@ -244,7 +255,7 @@ func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
 // A new run does not inherit the previous run's retry status.
 func TestStartRunClearsAStaleRetry(t *testing.T) {
 	tracker := NewTracker()
-	tracker.ObserveTransportRetry("", 1, 10, time.Second, "x")
+	tracker.ObserveTransportRetry("", 1, 10, time.Second, "x", 0)
 	if !tracker.SnapshotActiveRun().Retry.Active() {
 		t.Fatal("sanity: the retry must be pending before the new run")
 	}

@@ -31,6 +31,7 @@ func normalizeError(err error) error {
 		return err
 	}
 	body := apiErr.RawJSON()
+	receivedAt := time.Now()
 	return &llm.APIError{
 		StatusCode: apiErr.StatusCode,
 		Message:    body,
@@ -39,8 +40,9 @@ func normalizeError(err error) error {
 			apiErr.StatusCode,
 			body,
 			retryAfterHeader(apiErr.Response),
-			time.Now(),
+			receivedAt,
 		),
+		RetryAfter: llm.ParseRetryAfter(retryAfterHeader(apiErr.Response), receivedAt),
 	}
 }
 

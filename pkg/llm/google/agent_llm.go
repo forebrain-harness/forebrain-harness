@@ -405,12 +405,14 @@ func newAPIError(status int, payload []byte, retryAfter string) error {
 	if message == "" {
 		message = http.StatusText(status)
 	}
+	receivedAt := time.Now()
 	return &llm.APIError{
 		StatusCode: status,
 		Code:       info.Code,
 		Type:       info.Type,
 		Message:    message,
-		RateLimit:  llm.ParseRateLimit(status, string(payload), retryAfter, time.Now()),
+		RateLimit:  llm.ParseRateLimit(status, string(payload), retryAfter, receivedAt),
+		RetryAfter: llm.ParseRetryAfter(retryAfter, receivedAt),
 	}
 }
 

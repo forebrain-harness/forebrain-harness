@@ -28,6 +28,13 @@ type retryConfig struct {
 	// undershoots the step it was computed from.
 	upwardJitter bool
 	shouldRetry  func(error) bool
+	// retryAfter reads the wait the server asked for off an error, and
+	// maxRetryAfter is the longest such wait this loop will honour: each
+	// wait becomes at least the server's, and a request for longer than the
+	// limit ends the retries and returns the error instead of parking the
+	// turn.
+	retryAfter    func(error) time.Duration
+	maxRetryAfter time.Duration
 	// notify, when set, is called before every retry sleep and once more
 	// (Cleared=true) when that retry is over: the retried request started
 	// producing output, or the retry loop returned. It is how the
@@ -51,6 +58,12 @@ func WithMaxBackoff(d time.Duration) RetryOption {
 // each wait is the back-off step plus 0–25% of it.
 func WithUpwardJitter() RetryOption {
 	return func(c *retryConfig) { c.upwardJitter = true }
+}
+
+// WithRetryAfter makes each wait at least the server-requested one; a request
+// for longer than limit ends the retries and returns the error.
+func WithRetryAfter(of func(error) time.Duration, limit time.Duration) RetryOption {
+	return func(c *retryConfig) { c.retryAfter = of; c.maxRetryAfter = limit }
 }
 
 // WithRetryNotify registers a callback fired before each retry sleep, with the
@@ -182,12 +195,28 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 			}
 		}
 
+		// The server's own wait wins whenever it asked for more than the
+		// back-off computed — but never an unbounded one: past the limit the
+		// provider is not asking for patience, it is saying not now, and the
+		// caller gets the error instead of a parked turn.
+		if r.cfg.retryAfter != nil {
+			if ra := r.cfg.retryAfter(err); ra > 0 {
+				if r.cfg.maxRetryAfter > 0 && ra > r.cfg.maxRetryAfter {
+					return nil, err
+				}
+				if ra > sleep {
+					sleep = ra
+				}
+			}
+		}
+
 		if r.cfg.notify != nil {
 			r.cfg.notify(notifyCtx, TransportRetry{
-				Retry: attempt + 1,
-				Total: maxRetries,
-				Wait:  sleep,
-				Err:   err,
+				Retry:  attempt + 1,
+				Total:  maxRetries,
+				Wait:   sleep,
+				Err:    err,
+				Status: HTTPStatusOf(err),
 			})
 			pendingRetry.Store(int64(attempt + 1))
 		}

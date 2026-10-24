@@ -141,6 +141,18 @@ func TestIsRetryableNetworkErrorClassification(t *testing.T) {
 	badStatus := &APIError{StatusCode: http.StatusBadRequest, Message: "unexpected role"}
 	rateLimited := &APIError{StatusCode: http.StatusTooManyRequests, Message: "slow down"}
 	wrappedTransport := &APIError{Err: opTimeout}
+	// The server statuses the network-retry layer now owns: 408/409 and 5xx
+	// minus 529 (overload keeps its own recovery layer) and 429 (rate limits
+	// have their own path).
+	requestTimeout := &APIError{StatusCode: http.StatusRequestTimeout, Message: "try again"}
+	conflict := &APIError{StatusCode: http.StatusConflict, Message: "conflict"}
+	internalError := &APIError{StatusCode: http.StatusInternalServerError, Message: "boom"}
+	badGateway := &APIError{StatusCode: http.StatusBadGateway, Message: "upstream gone"}
+	serviceUnavailable := &APIError{StatusCode: http.StatusServiceUnavailable, Message: "unavailable"}
+	gatewayTimeout := &APIError{StatusCode: http.StatusGatewayTimeout, Message: "gateway timeout"}
+	overloaded := &APIError{StatusCode: 529, Message: "overloaded_error"}
+	unauthorized := &APIError{StatusCode: http.StatusUnauthorized, Message: "bad key"}
+	notFound := &APIError{StatusCode: http.StatusNotFound, Message: "no such model"}
 
 	tests := []struct {
 		name string
@@ -156,10 +168,19 @@ func TestIsRetryableNetworkErrorClassification(t *testing.T) {
 		{name: "bare eof", err: io.EOF, want: true},
 		{name: "stream truncated", err: ErrStreamTruncated, want: true},
 		{name: "wrapped transport inside api error", err: wrappedTransport, want: true},
+		{name: "408 request timeout", err: requestTimeout, want: true},
+		{name: "409 conflict", err: conflict, want: true},
+		{name: "500 internal", err: internalError, want: true},
+		{name: "502 bad gateway", err: badGateway, want: true},
+		{name: "503 service unavailable", err: serviceUnavailable, want: true},
+		{name: "504 gateway timeout", err: gatewayTimeout, want: true},
+		{name: "529 overloaded", err: overloaded, want: false},
 		{name: "context cancelled", err: context.Canceled, want: false},
 		{name: "context deadline", err: context.DeadlineExceeded, want: false},
 		{name: "bad request", err: badStatus, want: false},
 		{name: "rate limited", err: rateLimited, want: false},
+		{name: "unauthorized", err: unauthorized, want: false},
+		{name: "not found", err: notFound, want: false},
 		{name: "dns nxdomain", err: nxdomain, want: false},
 		{name: "x509 unknown authority", err: x509.UnknownAuthorityError{}, want: false},
 		{name: "x509 hostname", err: x509.HostnameError{Host: "api.example"}, want: false},

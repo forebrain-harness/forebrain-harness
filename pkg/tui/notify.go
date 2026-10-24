@@ -106,6 +106,9 @@ type TransportRetryMsg struct {
 	Total   int
 	Wait    time.Duration
 	Err     error
+	// Status is the HTTP status of the failure, 0 for transport errors; it
+	// picks the status line's generic reason.
+	Status  int
 	Cleared bool
 }
 type RunStartedMsg struct {
@@ -895,6 +898,7 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 				Total:   p.Total,
 				Wait:    time.Duration(p.WaitMs) * time.Millisecond,
 				Err:     err,
+				Status:  p.Status,
 				Cleared: p.Cleared,
 			})
 		}

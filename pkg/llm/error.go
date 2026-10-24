@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const lengthErrorCode = "context_length_exceeded"
@@ -20,13 +21,16 @@ const lengthErrorCode = "context_length_exceeded"
 // instead of returning the partial text as a success.
 var ErrStreamTruncated = errors.New("stream ended without a finish frame")
 
-// IsRetryableNetworkError reports whether err is a transport-level failure a
-// resend can plausibly fix: timeouts, resets, aborted/dropped connections and
-// truncated streams. It is the retry predicate of the network-retry
-// middleware; everything else — cancellation, provider rejections, request
-// encoding, DNS NXDOMAIN (a misspelled base_url is permanent) and TLS
-// certificate failures (permanent in proxy environments) — is excluded so the
-// retry loop never parks a turn on an error that cannot clear.
+// IsRetryableNetworkError reports whether err is a failure a resend can
+// plausibly fix: transport-level ones (timeouts, resets, aborted/dropped
+// connections, truncated streams) and the server's transient statuses (408,
+// 409 and 5xx except 529, which has its own recovery layer). It is the retry
+// predicate of the network-retry middleware; everything else — cancellation,
+// provider rejections, request encoding, DNS NXDOMAIN (a misspelled base_url
+// is permanent) and TLS certificate failures (permanent in proxy
+// environments) — is excluded so the retry loop never parks a turn on an
+// error that cannot clear. 429 stays out too: rate limits and usage caps
+// have their own path.
 func IsRetryableNetworkError(err error) bool {
 	if err == nil {
 		return false
@@ -70,8 +74,16 @@ func IsRetryableNetworkError(err error) bool {
 		return true
 	}
 	var aerr *APIError
-	if errors.As(err, &aerr) && aerr != nil && aerr.Err != nil {
-		return IsRetryableNetworkError(aerr.Err) // unwrap provider normalizeError wrappers
+	if errors.As(err, &aerr) && aerr != nil {
+		switch status := aerr.StatusCode; {
+		case status == http.StatusRequestTimeout, status == http.StatusConflict:
+			return true // the server's own "send it again" statuses
+		case status >= 500 && status <= 599 && status != 529:
+			return true // server-side trouble that is not the overload path
+		}
+		if aerr.Err != nil {
+			return IsRetryableNetworkError(aerr.Err) // unwrap provider normalizeError wrappers
+		}
 	}
 	return false
 }
@@ -106,6 +118,9 @@ type APIError struct {
 	// provider package fills it because only it knows the shape of its own
 	// body; it is nil for every other failure.
 	RateLimit *RateLimit
+	// RetryAfter is the wait the provider asked for with Retry-After on any
+	// status, zero when it sent none.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -176,6 +191,20 @@ func statusOf(err error) int {
 	var aErr *APIError
 	if errors.As(err, &aErr) && aErr != nil {
 		return aErr.StatusCode
+	}
+	return 0
+}
+
+// HTTPStatusOf returns the HTTP status of a normalized provider error, 0 when
+// it carries none.
+func HTTPStatusOf(err error) int { return statusOf(err) }
+
+// RetryAfterOf returns the Retry-After wait a normalized provider error
+// carries, 0 when none.
+func RetryAfterOf(err error) time.Duration {
+	var aErr *APIError
+	if errors.As(err, &aErr) && aErr != nil {
+		return aErr.RetryAfter
 	}
 	return 0
 }
