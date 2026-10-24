@@ -16,6 +16,19 @@
     <template v-else>
       <ListToolbar>
         <template #left>
+          <!-- The project's "always allow" switch, the same one the MCP tab
+               shows: on, undecided entries load without asking; off, new and
+               changed entries ask again in the next session. -->
+          <span class="inline-flex items-center gap-2" data-testid="project-servers-auto-allow">
+            <SwitchComponent
+              :model-value="autoAllow"
+              :disabled="switching"
+              :aria-label="t('projects.serversAutoAllow')"
+              data-testid="project-servers-auto-allow-switch"
+              @update:model-value="setAutoAllow"
+            />
+            <span class="whitespace-nowrap text-xs text-[var(--forebrain-text-2)]">{{ t('projects.serversAutoAllow') }}</span>
+          </span>
           <Input
             v-model="q"
             type="search"
@@ -118,6 +131,7 @@ import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActionSlot from '@/components/common/RowActionSlot.vue'
 import RowActions from '@/components/common/RowActions.vue'
+import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import TablePager from '@/components/common/TablePager.vue'
 import { useServerList } from '@/composables/useServerList'
 import { getErrorMessage, forebrainApi, type ProjectLspRow, type ProjectRecord } from '@/lib/api'
@@ -160,6 +174,41 @@ const columns: DataColumn[] = [
 ]
 
 const error = computed(() => listError.value || writeError.value)
+
+/** The project's "always allow" switch, read beside the table it decides. */
+const autoAllow = ref(false)
+const switching = ref(false)
+
+async function loadAutoAllow(): Promise<void> {
+  try {
+    const record = await forebrainApi.projectLsp(props.projectId)
+    autoAllow.value = record.autoAllow === true
+  } catch {
+    // The switch keeps its last read; the table's own read reports list
+    // errors, and a switch without a value yet stays off.
+  }
+}
+
+async function setAutoAllow(on: boolean): Promise<void> {
+  if (switching.value) return
+  switching.value = true
+  writeError.value = ''
+  try {
+    await forebrainApi.projectServersAutoAllow(props.projectId, on)
+    autoAllow.value = on
+    // The switch decides whether pending entries are rows at all, so the
+    // table is re-read with it.
+    await reload()
+  } catch (cause) {
+    writeError.value = getErrorMessage(cause)
+  } finally {
+    switching.value = false
+  }
+}
+
+watch(() => props.projectId, () => {
+  void loadAutoAllow()
+}, { immediate: true })
 
 // The gate follows the project row the shell loaded (its trust decision is
 // part of the detail read); the trust action here moves it forward.

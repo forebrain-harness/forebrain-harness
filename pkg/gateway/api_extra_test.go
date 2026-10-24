@@ -1515,6 +1515,9 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
 	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
 	projects.Post("/:id/lsp/consent", s.handleProjectLSPConsent)
+	projects.Get("/:id/servers/pending", s.handleProjectServersPending)
+	projects.Post("/:id/servers/consent", s.handleProjectServersConsent)
+	projects.Put("/:id/servers/auto-allow", s.handleProjectServersAutoAllow)
 	// Project-scoped skill lifecycle, mirroring the production routes.
 	projects.Get("/:id/skills", s.handleProjectSkillsList)
 	projects.Post("/:id/skills", s.handleProjectSkillsCreate)

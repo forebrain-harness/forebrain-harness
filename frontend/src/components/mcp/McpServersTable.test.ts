@@ -85,7 +85,7 @@ async function mountTable(
   rows: McpServerRow[],
   notApplied: Array<{ name: string; reason: string }> = [],
 ): Promise<VueWrapper> {
-  vi.mocked(forebrainApi.mcpPage).mockResolvedValue({ rows, total: rows.length, page: 1, pageSize: 10, notApplied })
+  vi.mocked(forebrainApi.mcpPage).mockResolvedValue({ rows, total: rows.length, page: 1, pageSize: 10, notApplied, autoAllow: false })
   const wrapper = mount(McpServersTable, {
     props: { agentId: 'primary-1', ...props },
     global: { plugins: [routerOf()], stubs: { teleport: InlineTeleport }, directives: { tip } },
@@ -411,6 +411,7 @@ describe('McpServersTable', () => {
       page: 1,
       pageSize: 10,
       notApplied: [],
+      autoAllow: false,
     })
     await wrapper.find('[data-testid="mcp-refresh"]').trigger('click')
     await flushPromises()

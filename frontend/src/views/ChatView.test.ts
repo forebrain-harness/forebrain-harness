@@ -34,6 +34,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
     autoContinueForView: unknown
     cancelAutoContinue: unknown
     resetForNewChat: unknown
+    rebindSessionObserver: unknown
     send: unknown
     runtimeStatus: unknown
   }
@@ -53,6 +54,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
   f.autoContinueForView = vi.fn(() => null)
   f.cancelAutoContinue = vi.fn()
   f.resetForNewChat = vi.fn()
+  f.rebindSessionObserver = vi.fn()
   return {
     ...actual,
     useChatStream: () => ({
@@ -100,6 +102,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       loadMessages: vi.fn(),
       switchToSession: vi.fn(),
       resetForNewChat: f.resetForNewChat,
+      rebindSessionObserver: f.rebindSessionObserver,
       formatRuntimeStatusLabel: actual.formatRuntimeStatusLabel,
     }),
   }
@@ -1369,5 +1372,97 @@ describe('ChatView view mode', () => {
     expect(reopened.findAllComponents({ name: 'ToolCallCard' }).length).toBe(0)
     await flushPromises()
     reopened.unmount()
+  })
+})
+
+/**
+ * The project's undecided MCP and language-server entries (plan 113): the
+ * conversation that would load them asks once, on one panel, and the whole
+ * answer is recorded at once — closing the panel is the same decline.
+ */
+describe('ChatView project servers consent', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  function seedProjectSessionApi() {
+    vi.spyOn(forebrainApi, 'chatSession').mockResolvedValue({
+      id: 's1',
+      title: 'Proj chat',
+      project: { id: 'p1', name: 'proj', root: '/tmp/proj' },
+    })
+  }
+
+  const pendingRows = {
+    mcp: [{ name: 'caveman', detail: 'npx -y caveman-shrink', fingerprint: 'fp-caveman' }],
+    lsp: [{ name: 'gopls', detail: 'gopls serve', fingerprint: 'fp-gopls' }],
+    autoAllow: false,
+  }
+
+  const rebind = () => (fake as { rebindSessionObserver: { mock: { calls: unknown[][] } } }).rebindSessionObserver.mock.calls
+
+  it('asks about both kinds on one panel and records the whole answer', async () => {
+    setLocale('zh')
+    seedProjectSessionApi()
+    const pending = vi.spyOn(forebrainApi, 'projectServersPending').mockResolvedValue(pendingRows)
+    const consent = vi.spyOn(forebrainApi, 'projectServersConsent').mockResolvedValue({ ok: true })
+    const wrapper = await mountView({ Teleport: InlineTeleport })
+    await flushPromises()
+
+    const dialog = wrapper.find('[data-testid="project-servers-consent"]')
+    expect(dialog.exists()).toBe(true)
+    expect(dialog.text()).toContain('2 个服务要在本项目运行')
+    expect(dialog.text()).toContain('MCP')
+    expect(dialog.text()).toContain('语言服务器')
+
+    // The language server left unchecked is declined with the same answer.
+    await wrapper.find('[data-testid="project-servers-check-gopls"]').trigger('click')
+    await wrapper.find('[data-testid="project-servers-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(consent).toHaveBeenCalledWith('p1', {
+      mcp: [{ name: 'caveman', fingerprint: 'fp-caveman', allow: true }],
+      lsp: [{ name: 'gopls', fingerprint: 'fp-gopls', allow: false }],
+      alwaysAllow: false,
+    })
+    // The re-read decides whether anything is still asking, and the
+    // conversation is bound again so the allowed entry is up in this one.
+    // (A session-info refresh re-asks too, so the count is a floor, not an
+    // exact number.)
+    expect(pending.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(rebind().length).toBe(1)
+    wrapper.unmount()
+  })
+
+  it('records closing the dialog as declining every listed entry', async () => {
+    setLocale('zh')
+    seedProjectSessionApi()
+    vi.spyOn(forebrainApi, 'projectServersPending').mockResolvedValue(pendingRows)
+    const consent = vi.spyOn(forebrainApi, 'projectServersConsent').mockResolvedValue({ ok: true })
+    const wrapper = await mountView({ Teleport: InlineTeleport })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="project-servers-consent"]').exists()).toBe(true)
+    await wrapper.find('.forebrain-modal-close').trigger('click')
+    await flushPromises()
+
+    expect(consent).toHaveBeenCalledWith('p1', {
+      mcp: [{ name: 'caveman', fingerprint: 'fp-caveman', allow: false }],
+      lsp: [{ name: 'gopls', fingerprint: 'fp-gopls', allow: false }],
+      alwaysAllow: false,
+    })
+    wrapper.unmount()
+  })
+
+  it('stays closed when the project has nothing to ask about', async () => {
+    setLocale('zh')
+    seedProjectSessionApi()
+    vi.spyOn(forebrainApi, 'projectServersPending').mockResolvedValue({ mcp: [], lsp: [], autoAllow: false })
+    const wrapper = await mountView({ Teleport: InlineTeleport })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="project-servers-consent"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 })

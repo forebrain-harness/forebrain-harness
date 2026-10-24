@@ -54,11 +54,15 @@ describe('ProjectLsp', () => {
       rows: lspRows(),
       trusted: true,
       notes: [],
+      autoAllow: false,
       total: 3,
       page: 1,
       pageSize: 10,
     })
     vi.spyOn(forebrainApi, 'projectLspConsent').mockResolvedValue({ ok: true, allowed: [] })
+    vi.spyOn(forebrainApi, 'projectLsp').mockResolvedValue({
+      trusted: true, pending: [], allowed: [], denied: [], notes: [],
+    })
   })
 
   afterEach(() => {
@@ -114,6 +118,30 @@ describe('ProjectLsp', () => {
     expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['projectls'], ['projectls'], [
       { name: 'projectls', fingerprint: 'fp-projectls' },
     ])
+    expect(forebrainApi.projectLspPage).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads and writes the always-allow switch beside the table', async () => {
+    vi.mocked(forebrainApi.projectLsp).mockResolvedValue({
+      trusted: true, pending: [], allowed: [], denied: [], notes: [], autoAllow: true,
+    })
+    vi.spyOn(forebrainApi, 'projectServersAutoAllow').mockResolvedValue({ ok: true, on: false })
+    const wrapper = await mountTab()
+
+    // The same switch the MCP tab shows, at the toolbar's left edge, read
+    // from the project's own answer.
+    const label = wrapper.find('[data-testid="project-servers-auto-allow"]')
+    expect(label.text()).toContain('总是允许本项目的服务')
+    const toggle = wrapper.find('[data-testid="project-servers-auto-allow-switch"]')
+    expect(toggle.attributes('data-state')).toBe('checked')
+
+    await toggle.trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.projectServersAutoAllow).toHaveBeenCalledWith('p1', false)
+    expect(wrapper.find('[data-testid="project-servers-auto-allow-switch"]').attributes('data-state')).toBe('unchecked')
+    // The switch decides whether pending entries are rows at all, so the
+    // table is re-read with it.
     expect(forebrainApi.projectLspPage).toHaveBeenCalledTimes(2)
   })
 

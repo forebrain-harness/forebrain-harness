@@ -388,6 +388,9 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 		"overridden_global": res.Summary.OverriddenGlobal,
 		"not_applied":       unlisted,
 		"pending_consent":   pendingRows,
+		// The project page's "always allow" switch reads the same answer both
+		// paged and unpaged, so the toolbar toggle never guesses.
+		"auto_allow": process.ProjectServersAutoAllowed(workspace, launch),
 	}
 	if q := readListQuery(r); q.Paged {
 		// A table's order is its own, and it follows the project entry's own
@@ -435,6 +438,7 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 		"overridden_global": res.Summary.OverriddenGlobal,
 		"not_applied":       notApplied,
 		"pending_consent":   pendingRows,
+		"auto_allow":        process.ProjectServersAutoAllowed(workspace, launch),
 	})
 }
 

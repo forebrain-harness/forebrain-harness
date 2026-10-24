@@ -933,6 +933,8 @@ export interface ProjectMcpRecord {
   overriddenGlobal: string[]
   notApplied: Array<{ name: string; reason: string }>
   pendingConsent: Array<{ name: string; summary: string }>
+  /** The project's "always allow" switch, as the toolbar toggle reads it. */
+  autoAllow?: boolean
 }
 
 /** The project-level language-server view: what <root>/.forebrain/lsp_servers.yaml declares and its per-entry decisions. */
@@ -942,6 +944,41 @@ export interface ProjectLspRecord {
   allowed: string[]
   denied: string[]
   notes: string[]
+  /** The project's "always allow" switch, as the toolbar toggle reads it. */
+  autoAllow?: boolean
+}
+
+/** One entry of the project servers confirmation's pending answer: the name
+ * the answer sends back (an MCP server name or a language-server id), the
+ * command or address the dialog shows, and the fingerprint the answer is
+ * bound to. */
+export interface ProjectServerPendingRow {
+  name: string
+  detail: string
+  fingerprint: string
+}
+
+/** The session dialog's one read: both groups of undecided entries and the
+ * project's "always allow" switch. */
+export interface ProjectServersPending {
+  mcp: ProjectServerPendingRow[]
+  lsp: ProjectServerPendingRow[]
+  autoAllow: boolean
+}
+
+/** One checked-or-unchecked row of the dialog's answer. */
+export interface ProjectServerChoice {
+  name: string
+  fingerprint: string
+  allow: boolean
+}
+
+/** The session dialog's whole answer: every listed entry decided — checked
+ * means allowed, unchecked means declined — and the switch with it. */
+export interface ProjectServersConsent {
+  mcp: ProjectServerChoice[]
+  lsp: ProjectServerChoice[]
+  alwaysAllow: boolean
 }
 
 
@@ -3134,7 +3171,7 @@ export const forebrainApi = {
     if (view === 'global') params.set('scope', 'global')
     if (view === 'agent') params.set('view', 'agent')
     const path = view === 'project' ? `/v1/projects/${encodeURIComponent(projectId ?? '')}/mcp` : '/v1/mcp/servers'
-    return getRawJSON<{ servers?: Record<string, unknown>[]; not_applied?: McpNotAppliedRow[]; total?: number; page?: number; page_size?: number }>(path, params).then((answer) => ({
+    return getRawJSON<{ servers?: Record<string, unknown>[]; not_applied?: McpNotAppliedRow[]; auto_allow?: boolean; total?: number; page?: number; page_size?: number }>(path, params).then((answer) => ({
       rows: Array.isArray(answer.servers) ? answer.servers.map(mcpRowFromWire) : [],
       total: Number(answer.total ?? 0),
       page: Number(answer.page ?? 1),
@@ -3142,6 +3179,9 @@ export const forebrainApi = {
       // A project file's entries that did not apply: the preview reported them
       // beside the list, and the table says so under it (the old tab did).
       notApplied: Array.isArray(answer.not_applied) ? answer.not_applied : [],
+      // The project's "always allow" switch, which only the project view's
+      // answer carries.
+      autoAllow: answer.auto_allow === true,
     }))
   },
 
@@ -3329,7 +3369,7 @@ export const forebrainApi = {
    * summary for. */
   projectLspPage(id: string, query: ListQuery) {
     return api
-      .get<{ rows?: ProjectLspRow[]; trusted?: boolean; notes?: string[] } & ListPageMeta>(
+      .get<{ rows?: ProjectLspRow[]; trusted?: boolean; notes?: string[]; autoAllow?: boolean } & ListPageMeta>(
         `/v1/projects/${encodeURIComponent(id)}/lsp`,
         { params: listParams(query) },
       )
@@ -3337,6 +3377,7 @@ export const forebrainApi = {
         rows: Array.isArray(res.data?.rows) ? res.data.rows : [],
         trusted: Boolean(res.data?.trusted),
         notes: Array.isArray(res.data?.notes) ? res.data.notes : [],
+        autoAllow: res.data?.autoAllow === true,
         total: Number(res.data?.total ?? 0),
         page: Number(res.data?.page ?? 1),
         pageSize: Number(res.data?.pageSize ?? query.pageSize),
@@ -3351,6 +3392,40 @@ export const forebrainApi = {
     const body: { allow: string[]; decide?: string[]; fingerprints?: Array<{ name: string; fingerprint: string }> } =
       decide ? { allow, decide, fingerprints } : { allow }
     return postJson<{ ok: boolean; allowed: string[] }, typeof body>(`/v1/projects/${encodeURIComponent(id)}/lsp/consent`, body)
+  },
+
+  /** The project's undecided MCP and language-server entries in one read,
+   * with the "always allow" switch — the session confirmation dialog's whole
+   * question. Two empty groups mean there is nothing to ask. */
+  projectServersPending(id: string) {
+    return api
+      .get<ProjectServersPending>(`/v1/projects/${encodeURIComponent(id)}/servers/pending`)
+      .then((res) => ({
+        mcp: Array.isArray(res.data?.mcp) ? res.data.mcp : [],
+        lsp: Array.isArray(res.data?.lsp) ? res.data.lsp : [],
+        autoAllow: res.data?.autoAllow === true,
+      }))
+  },
+
+  /** Record the session dialog's whole answer at once: every listed entry
+   * decided — checked means allowed, unchecked means declined — and
+   * `alwaysAllow` turning the switch on with it. Each choice carries the
+   * fingerprint the dialog showed, so a project file that moved under the
+   * operator is refused whole (409) and the dialog asks again. The choices
+   * travel as arrays for the same key-rewrite reason as `projectMcpConsent`:
+   * postJson snake-cases object keys, which would corrupt an object keyed by
+   * entry name. */
+  projectServersConsent(id: string, body: ProjectServersConsent) {
+    return postJson<
+      { ok: boolean },
+      { mcp: ProjectServerChoice[]; lsp: ProjectServerChoice[]; alwaysAllow: boolean }
+    >(`/v1/projects/${encodeURIComponent(id)}/servers/consent`, body)
+  },
+
+  /** Turn the project's "always allow" switch: on, undecided entries load
+   * without asking; off, new and changed entries ask again. */
+  projectServersAutoAllow(id: string, on: boolean) {
+    return putRaw<{ ok: boolean; on: boolean }>(`/v1/projects/${encodeURIComponent(id)}/servers/auto-allow`, { on })
   },
 
   agentRuleFiles() {

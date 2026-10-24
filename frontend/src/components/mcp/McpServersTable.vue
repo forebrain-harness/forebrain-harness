@@ -10,6 +10,9 @@
 
     <ListToolbar>
       <template #left>
+        <!-- A page-specific control that belongs at the toolbar's left edge —
+             the project page fills it with the "always allow" switch. -->
+        <slot name="toolbar-left" />
         <Input
           v-model="q"
           type="search"
@@ -326,6 +329,11 @@ const sourceFilter = computed({
     filters.value = { ...filters.value, source: value }
   },
 })
+
+// A page that fills the toolbar slot changes what the list reads (the
+// "always allow" switch decides whether pending entries are rows at all), so
+// the reload is handed out for it to call after its own write.
+defineExpose({ reload })
 
 /** One row as the template draws it: the entry with the two derived facts every
  * cell needs, computed once per read instead of once per cell. */

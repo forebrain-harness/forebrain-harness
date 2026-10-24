@@ -254,6 +254,11 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Delete("/:id/mcp/servers/:name", s.handleProjectMCPServersWrite)
 	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
 	projects.Post("/:id/lsp/consent", s.handleProjectLSPConsent)
+	// The one-screen project servers confirmation the session view opens, its
+	// answer, and the project page's "always allow" switch.
+	projects.Get("/:id/servers/pending", s.handleProjectServersPending)
+	projects.Post("/:id/servers/consent", s.handleProjectServersConsent)
+	projects.Put("/:id/servers/auto-allow", s.handleProjectServersAutoAllow)
 
 	// Scheduled tasks and channels belong to a project, so their routes hang
 	// off the project they configure.
@@ -8004,6 +8009,9 @@ func (s *Server) handleProjectLSPPreview(w http.ResponseWriter, r *http.Request)
 			"allowed": allowed,
 			"denied":  denied,
 			"notes":   notes,
+			// The project page's "always allow" switch reads the same answer
+			// both paged and unpaged, so the toolbar toggle never guesses.
+			"auto_allow": process.ProjectServersAutoAllowed(workspace, launch),
 		})
 		return
 	}
@@ -8043,8 +8051,9 @@ func (s *Server) handleProjectLSPPreview(w http.ResponseWriter, r *http.Request)
 	}
 	page, servedPage := pageOf(matched, q)
 	writeListPage(w, "rows", page, len(matched), servedPage, q, map[string]any{
-		"trusted": trusted,
-		"notes":   notes,
+		"trusted":    trusted,
+		"notes":      notes,
+		"auto_allow": process.ProjectServersAutoAllowed(workspace, launch),
 	})
 }
 

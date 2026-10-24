@@ -66,7 +66,7 @@ function row(overrides: Partial<McpServerRow> = {}): McpServerRow {
 const mounted: VueWrapper[] = []
 
 async function mountTab(trusted: boolean, rows: McpServerRow[] = [row()]): Promise<VueWrapper> {
-  vi.mocked(forebrainApi.mcpPage).mockResolvedValue({ rows, total: rows.length, page: 1, pageSize: 10, notApplied: [] })
+  vi.mocked(forebrainApi.mcpPage).mockResolvedValue({ rows, total: rows.length, page: 1, pageSize: 10, notApplied: [], autoAllow: false })
   const wrapper = mount(ProjectMcp, {
     props: { project: projectRecord(trusted), projectId: 'p1' },
     global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
@@ -91,6 +91,9 @@ describe('ProjectMcp', () => {
     Element.prototype.scrollIntoView = () => undefined
     vi.spyOn(forebrainApi, 'mcpPage')
     vi.spyOn(forebrainApi, 'projectUpdate').mockResolvedValue(projectRecord())
+    vi.spyOn(forebrainApi, 'projectMcp').mockResolvedValue({
+      servers: [], overriddenGlobal: [], notApplied: [], pendingConsent: [],
+    })
   })
 
   afterEach(() => {
@@ -141,5 +144,29 @@ describe('ProjectMcp', () => {
     expect(wrapper.find('[data-testid="project-trust"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="mcp-search"]').exists()).toBe(true)
     expect(vi.mocked(forebrainApi.mcpPage)).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads and writes the always-allow switch beside the table', async () => {
+    vi.mocked(forebrainApi.projectMcp).mockResolvedValue({
+      servers: [], overriddenGlobal: [], notApplied: [], pendingConsent: [], autoAllow: true,
+    })
+    vi.spyOn(forebrainApi, 'projectServersAutoAllow').mockResolvedValue({ ok: true, on: false })
+    const wrapper = await mountTab(true)
+
+    // The same switch the LSP tab shows, at the toolbar's left edge, read from
+    // the project's own answer.
+    const label = wrapper.find('[data-testid="project-servers-auto-allow"]')
+    expect(label.text()).toContain('总是允许本项目的服务')
+    const toggle = wrapper.find('[data-testid="project-servers-auto-allow-switch"]')
+    expect(toggle.attributes('data-state')).toBe('checked')
+
+    await toggle.trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.projectServersAutoAllow).toHaveBeenCalledWith('p1', false)
+    expect(wrapper.find('[data-testid="project-servers-auto-allow-switch"]').attributes('data-state')).toBe('unchecked')
+    // The switch decides whether pending entries are rows at all, so the
+    // table is re-read with it.
+    expect(forebrainApi.mcpPage).toHaveBeenCalledTimes(2)
   })
 })

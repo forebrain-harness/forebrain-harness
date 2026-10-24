@@ -15,7 +15,23 @@
     <!-- Trusted: the three layers this project loads, in the order the merge
          resolves them, with this project's own entries editable here and a
          pending entry asking for its decision in its own row. -->
-    <McpServersTable v-else view="project" :project-id="projectId" :agent-id="activePrimaryId" />
+    <McpServersTable v-else ref="mcpTable" view="project" :project-id="projectId" :agent-id="activePrimaryId">
+      <template #toolbar-left>
+        <!-- The project's "always allow" switch, the same one the LSP tab
+             shows: on, undecided entries load without asking; off, new and
+             changed entries ask again in the next session. -->
+        <span class="inline-flex items-center gap-2" data-testid="project-servers-auto-allow">
+          <SwitchComponent
+            :model-value="autoAllow"
+            :disabled="switching"
+            :aria-label="t('projects.serversAutoAllow')"
+            data-testid="project-servers-auto-allow-switch"
+            @update:model-value="setAutoAllow"
+          />
+          <span class="whitespace-nowrap text-xs text-[var(--forebrain-text-2)]">{{ t('projects.serversAutoAllow') }}</span>
+        </span>
+      </template>
+    </McpServersTable>
   </div>
 </template>
 
@@ -34,6 +50,7 @@
 import { ref, watch } from 'vue'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import McpServersTable from '@/components/mcp/McpServersTable.vue'
+import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { forebrainApi, getErrorMessage, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
@@ -45,6 +62,43 @@ const { activeId: activePrimaryId } = usePrimaryAgents()
 
 const trusting = ref(false)
 const error = ref('')
+
+/** The table, whose reload the switch's own write needs: the switch decides
+ * whether pending entries are rows at all. */
+const mcpTable = ref<InstanceType<typeof McpServersTable> | null>(null)
+
+/** The project's "always allow" switch, read beside the table it decides. */
+const autoAllow = ref(false)
+const switching = ref(false)
+
+async function loadAutoAllow(): Promise<void> {
+  try {
+    const record = await forebrainApi.projectMcp(props.projectId)
+    autoAllow.value = record.autoAllow === true
+  } catch {
+    // The switch keeps its last read; the table's own read reports list
+    // errors, and a switch without a value yet stays off.
+  }
+}
+
+async function setAutoAllow(on: boolean): Promise<void> {
+  if (switching.value) return
+  switching.value = true
+  error.value = ''
+  try {
+    await forebrainApi.projectServersAutoAllow(props.projectId, on)
+    autoAllow.value = on
+    await mcpTable.value?.reload()
+  } catch (cause) {
+    error.value = getErrorMessage(cause)
+  } finally {
+    switching.value = false
+  }
+}
+
+watch(() => props.projectId, () => {
+  void loadAutoAllow()
+}, { immediate: true })
 
 // The gate follows the project row the shell loaded (its trust decision is
 // part of the detail read); the trust action here moves it forward.
