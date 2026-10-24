@@ -7,10 +7,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 )
 
@@ -779,5 +781,216 @@ func TestResolveSessionMCPHonoursTheConfigSwitchAndTheAgentLayerTogether(t *test
 	}
 	if res.Disabled[0].Scope != appcfg.MCPServerScopeAgent || appcfg.ServerEnabled(res.Disabled[0]) {
 		t.Fatalf("the disabled entry keeps its layer and its switch: %+v", res.Disabled[0])
+	}
+}
+
+// writeProjectLSPFile writes the project's lsp_servers.yaml the way the MCP
+// tests write mcp_servers.yaml.
+func writeProjectLSPFile(t *testing.T, dir, body string) {
+	t.Helper()
+	p := filepath.Join(dir, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The project's "always allow" switch on, an entry nobody decided about
+// loads, and nothing is presented for confirmation any more.
+func TestResolveSessionMCPAutoAllowLoadsUndecided(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n")
+	if err := SetProjectServersAutoAllow(ws, launch, true); err != nil {
+		t.Fatal(err)
+	}
+	if !ProjectServersAutoAllowed(ws, launch) {
+		t.Fatal("the switch must read as on")
+	}
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
+	if names := serverNames(res.Servers); !containsFold(names, "projtool") {
+		t.Fatalf("an undecided entry must load under the switch: %v", names)
+	}
+	if pending := PendingProjectMCPConsents(ws, launch); len(pending) != 0 {
+		t.Fatalf("the switch leaves nothing to confirm: %+v", pending)
+	}
+}
+
+// The switch does not revive an entry the operator declined explicitly.
+func TestResolveSessionMCPAutoAllowKeepsDeclined(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n")
+	if err := DecideProjectMCPConsents(ws, launch, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetProjectServersAutoAllow(ws, launch, true); err != nil {
+		t.Fatal(err)
+	}
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
+	if names := serverNames(res.Servers); containsFold(names, "projtool") {
+		t.Fatalf("a declined entry must stay out under the switch: %v", names)
+	}
+	found := false
+	for _, na := range res.Summary.NotApplied {
+		if strings.EqualFold(na.Name, "projtool") {
+			found = true
+			if !strings.Contains(na.Reason, "declined") {
+				t.Fatalf("reason=%q, want it to name the decline", na.Reason)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("notApplied=%+v", res.Summary.NotApplied)
+	}
+}
+
+// An untrusted launch has no project servers regardless of the switch, and
+// its switch reads as off.
+func TestResolveSessionMCPAutoAllowNeedsTrust(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n")
+	launch := safety.ProjectContext{Project: safety.Project{Root: dir, VersionControlled: true}}
+	// The store itself says on (written directly: the surface-level setter
+	// refuses untrusted launches), so trust is the only thing keeping the
+	// entry out.
+	if err := mcp.SetProjectAutoAllow(ws, memory.ProjectKey(dir), true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
+	if names := serverNames(res.Servers); containsFold(names, "projtool") {
+		t.Fatalf("an untrusted project's entries must not load: %v", names)
+	}
+	if ProjectServersAutoAllowed(ws, launch) {
+		t.Fatal("an untrusted launch must read the switch as off")
+	}
+}
+
+// One panel answer decides every entry of both kinds, bound to the
+// fingerprints the operator was shown, and leaves the switch alone.
+func TestDecideProjectServersRecordsShownEntries(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: keep\n    transport: stdio\n    command: /bin/k\n  - name: drop\n    transport: stdio\n    command: /bin/d\n")
+	writeProjectLSPFile(t, dir, "servers:\n  one: {command: /bin/one}\n  two: {command: /bin/two}\n")
+	d := ProjectServersDecision{
+		MCP: []ProjectServerChoice{
+			{Name: "keep", Fingerprint: pendingMCPFingerprint(t, ws, launch, "keep"), Allow: true},
+			{Name: "drop", Fingerprint: pendingMCPFingerprint(t, ws, launch, "drop"), Allow: false},
+		},
+		LSP: []ProjectServerChoice{
+			{Name: "one", Fingerprint: pendingLSPFingerprint(t, ws, launch, "one"), Allow: true},
+			{Name: "two", Fingerprint: pendingLSPFingerprint(t, ws, launch, "two"), Allow: false},
+		},
+	}
+	if err := DecideProjectServers(ws, launch, d); err != nil {
+		t.Fatal(err)
+	}
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
+	names := serverNames(res.Servers)
+	if !containsFold(names, "keep") || containsFold(names, "drop") {
+		t.Fatalf("mcp resolution=%v", names)
+	}
+	if _, pending, allowed, denied, _ := InspectProjectLSP(ws, launch); len(pending) != 0 ||
+		len(allowed) != 1 || allowed[0] != "one" || len(denied) != 1 || denied[0] != "two" {
+		t.Fatalf("lsp inspect: pending=%+v allowed=%v denied=%v", pending, allowed, denied)
+	}
+	if ProjectServersAutoAllowed(ws, launch) {
+		t.Fatal("the switch must stay off when the answer did not set AlwaysAllow")
+	}
+}
+
+// AlwaysAllow turns the switch on as part of the same answer, and an entry
+// added to the project file afterwards loads without any confirmation.
+func TestDecideProjectServersAlwaysAllow(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n")
+	if err := DecideProjectServers(ws, launch, ProjectServersDecision{
+		MCP:         []ProjectServerChoice{{Name: "one", Fingerprint: pendingMCPFingerprint(t, ws, launch, "one"), Allow: true}},
+		AlwaysAllow: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !ProjectServersAutoAllowed(ws, launch) {
+		t.Fatal("AlwaysAllow must turn the switch on")
+	}
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n  - name: added\n    transport: stdio\n    command: /bin/added\n")
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
+	if names := serverNames(res.Servers); !containsFold(names, "added") {
+		t.Fatalf("a new entry must load without confirmation: %v", names)
+	}
+	if pending := PendingProjectMCPConsents(ws, launch); len(pending) != 0 {
+		t.Fatalf("nothing may be pending under the switch: %+v", pending)
+	}
+}
+
+// The answer is bound to what the operator was shown: an entry that changed
+// since makes the whole call fail as stale, and the entry stays pending.
+func TestDecideProjectServersStale(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n")
+	fp := pendingMCPFingerprint(t, ws, launch, "one")
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/changed\n")
+	err := DecideProjectServers(ws, launch, ProjectServersDecision{
+		MCP:         []ProjectServerChoice{{Name: "one", Fingerprint: fp, Allow: true}},
+		AlwaysAllow: true,
+	})
+	var stale interface{ StaleNames() []string }
+	if !errors.As(err, &stale) {
+		t.Fatalf("err=%v, want a stale-consent error", err)
+	}
+	if !slices.Equal(stale.StaleNames(), []string{"one"}) {
+		t.Fatalf("stale names=%v", stale.StaleNames())
+	}
+	if pending := PendingProjectMCPConsents(ws, launch); len(pending) != 1 || pending[0].Name != "one" {
+		t.Fatalf("a refused answer must leave the entry pending: %+v", pending)
+	}
+	if ProjectServersAutoAllowed(ws, launch) {
+		t.Fatal("a refused answer must not turn the switch on")
+	}
+}
+
+// The pending lists carry a name-free description of what runs, for surfaces
+// that show the name and the command as separate columns.
+func TestPendingProjectConsentDetails(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: cli\n    transport: stdio\n    command: /bin/cli\n    args: [--watch, .]\n  - name: remote\n    url: https://remote.test/mcp\n")
+	byName := map[string]mcp.PendingProjectConsent{}
+	for _, item := range PendingProjectMCPConsents(ws, launch) {
+		byName[item.Name] = item
+	}
+	if d := byName["cli"].Detail; d != "/bin/cli --watch ." {
+		t.Fatalf("cli detail=%q", d)
+	}
+	if d := byName["remote"].Detail; d != "https://remote.test/mcp" {
+		t.Fatalf("remote detail=%q", d)
+	}
+
+	writeProjectLSPFile(t, dir, "servers:\n  gopls:\n    settings: {gopls: {buildFlags: [\"-tags=integration\"]}}\n")
+	pending := PendingProjectLSPConsents(ws, launch)
+	if len(pending) != 1 || pending[0].ID != "gopls" {
+		t.Fatalf("lsp pending=%+v", pending)
+	}
+	if d := pending[0].Detail; d != "changes built-in gopls settings" {
+		t.Fatalf("gopls detail=%q", d)
 	}
 }

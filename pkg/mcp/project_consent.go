@@ -170,6 +170,24 @@ type PendingProjectConsent struct {
 	// Summary describes what the entry would run or contact, in one line the
 	// operator can act on without seeing the raw file.
 	Summary string `json:"summary"`
+	// Detail is the same description without the entry's name, for surfaces
+	// that show the name and what it runs as separate columns.
+	Detail string `json:"-"`
+}
+
+// ConsentDetail is what an entry would run or contact, without its name:
+// the command line, or the address.
+func ConsentDetail(srv appcfg.MCPServerConfig) string {
+	if cmd := strings.TrimSpace(srv.Command); cmd != "" {
+		if len(srv.Args) > 0 {
+			return cmd + " " + strings.Join(srv.Args, " ")
+		}
+		return cmd
+	}
+	if u := strings.TrimSpace(srv.URL); u != "" {
+		return u
+	}
+	return "no command or URL"
 }
 
 // ConsentSummary renders what an entry would execute or connect to.

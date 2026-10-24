@@ -956,6 +956,13 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		ProjectKey:     project.ProjectKey,
 		Trusted:        safety.TrustedRoot(launch) != "",
 	}
+	// pkg/lsp may not import the store's package, so the composition root
+	// hands it the switch as an answer. The closure captures the workspace
+	// and key by value: both are frozen for this entry's lifetime.
+	ws, key := agentWorkspace, lspOpts.ProjectKey
+	lspOpts.AutoAllowProject = func() bool {
+		return mcp.ProjectAutoAllowed(ws, key)
+	}
 	lspOpts.ToolRegistered = lsp.ToolEnabled(baseDeps.AppCfg, lspOpts)
 	if env.LSP != nil {
 		entry.lsp = env.LSP.NewManager(lspOpts)

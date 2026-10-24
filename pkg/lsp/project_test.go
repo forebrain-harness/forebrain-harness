@@ -184,7 +184,7 @@ func TestResolveProjectServers(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
-		state := ResolveProjectServers(t.TempDir(), root, "proj", false)
+		state := ResolveProjectServers(t.TempDir(), root, "proj", false, false)
 		if !reflect.DeepEqual(state, ProjectServerState{}) {
 			t.Fatalf("state=%+v, want the zero value", state)
 		}
@@ -206,7 +206,7 @@ func TestResolveProjectServers(t *testing.T) {
 		if err := SaveProjectConsents(ws, consents); err != nil {
 			t.Fatal(err)
 		}
-		state := ResolveProjectServers(ws, root, "proj", true)
+		state := ResolveProjectServers(ws, root, "proj", true, false)
 		if len(state.Allowed) != 1 || state.Allowed["one"].Command != "/bin/one" {
 			t.Fatalf("allowed=%v", state.Allowed)
 		}
@@ -229,7 +229,7 @@ func TestResolveProjectServers(t *testing.T) {
     command: /bin/pyright
     enabled: true
 `)
-		state := ResolveProjectServers(t.TempDir(), root, "proj", true)
+		state := ResolveProjectServers(t.TempDir(), root, "proj", true, false)
 		byID := map[string]PendingProjectServer{}
 		for _, p := range state.Pending {
 			byID[p.ID] = p
@@ -272,7 +272,7 @@ func TestDecideProjectServersForOnlyTouchesNamed(t *testing.T) {
 	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, nil, nil); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	state := ResolveProjectServers(ws, root, "proj", true)
+	state := ResolveProjectServers(ws, root, "proj", true, false)
 	if len(state.Denied) != 1 || state.Denied[0] != "one" {
 		t.Fatalf("denied=%v", state.Denied)
 	}
@@ -299,13 +299,13 @@ func TestDecideProjectServersForAllowsADeniedEntry(t *testing.T) {
 	if err := DecideProjectServers(ws, root, "proj", nil); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if state := ResolveProjectServers(ws, root, "proj", true); len(state.Denied) != 2 {
+	if state := ResolveProjectServers(ws, root, "proj", true, false); len(state.Denied) != 2 {
 		t.Fatalf("denied=%v", state.Denied)
 	}
 	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, []string{"one"}, nil); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	state := ResolveProjectServers(ws, root, "proj", true)
+	state := ResolveProjectServers(ws, root, "proj", true, false)
 	if len(state.Allowed) != 1 || state.Allowed["one"].Command != "/bin/one" {
 		t.Fatalf("allowed=%v", state.Allowed)
 	}
@@ -323,7 +323,7 @@ func TestDecideProjectServersForRefusesAChangedEntry(t *testing.T) {
 	ws := t.TempDir()
 	pendingFP := func(id string) string {
 		t.Helper()
-		for _, item := range ResolveProjectServers(ws, root, "proj", true).Pending {
+		for _, item := range ResolveProjectServers(ws, root, "proj", true, false).Pending {
 			if item.ID == id {
 				return item.Fingerprint
 			}
@@ -350,7 +350,7 @@ func TestDecideProjectServersForRefusesAChangedEntry(t *testing.T) {
 	}
 	// two keeps awaiting its own decision as well: a stale name spoils the
 	// whole call, not just itself.
-	if state := ResolveProjectServers(ws, root, "proj", true); len(state.Pending) != 2 {
+	if state := ResolveProjectServers(ws, root, "proj", true, false); len(state.Pending) != 2 {
 		t.Fatalf("nothing may be recorded, so both entries stay pending: %+v", state.Pending)
 	}
 
@@ -361,7 +361,7 @@ func TestDecideProjectServersForRefusesAChangedEntry(t *testing.T) {
 	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, []string{"one"}, map[string]string{"one": fp2}); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if state := ResolveProjectServers(ws, root, "proj", true); len(state.Allowed) != 1 || state.Allowed["one"].Command != "/bin/changed" {
+	if state := ResolveProjectServers(ws, root, "proj", true, false); len(state.Allowed) != 1 || state.Allowed["one"].Command != "/bin/changed" {
 		t.Fatalf("allowed=%v", state.Allowed)
 	}
 }
@@ -378,7 +378,7 @@ func TestDecideProjectServers(t *testing.T) {
 	if err := DecideProjectServers(ws, root, "proj", []string{"keep"}); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	state := ResolveProjectServers(ws, root, "proj", true)
+	state := ResolveProjectServers(ws, root, "proj", true, false)
 	if len(state.Allowed) != 1 || state.Allowed["keep"].Command != "/bin/keep" {
 		t.Fatalf("allowed=%v", state.Allowed)
 	}
@@ -411,7 +411,7 @@ func TestDecideProjectServers(t *testing.T) {
 	if err := DecideProjectServers(ws, root, "proj", []string{"drop"}); err != nil {
 		t.Fatal(err)
 	}
-	state = ResolveProjectServers(ws, root, "proj", true)
+	state = ResolveProjectServers(ws, root, "proj", true, false)
 	if len(state.Allowed) != 1 || state.Allowed["keep"].Command != "/bin/keep" {
 		t.Fatalf("allowed after re-decide=%v", state.Allowed)
 	}
@@ -425,11 +425,34 @@ func TestDecideProjectServers(t *testing.T) {
 	if err := DecideProjectServers(ws, root, "proj", []string{"drop"}); err != nil {
 		t.Fatal(err)
 	}
-	state = ResolveProjectServers(ws, root, "proj", true)
+	state = ResolveProjectServers(ws, root, "proj", true, false)
 	if len(state.Allowed) != 2 || state.Allowed["drop"].Command != "/bin/drop2" {
 		t.Fatalf("allowed after the file changed=%v", state.Allowed)
 	}
 	if len(state.Pending) != 0 || len(state.Denied) != 0 {
 		t.Fatalf("pending=%+v denied=%v", state.Pending, state.Denied)
+	}
+}
+
+// The project's "always allow" switch lets an undecided entry through while
+// an explicit denial still wins.
+func TestResolveProjectServersAutoAllow(t *testing.T) {
+	root := t.TempDir()
+	writeProjectLSP(t, root, "servers:\n  one:\n    command: /bin/one\n  two:\n    command: /bin/two\n")
+	ws := t.TempDir()
+	consents := ProjectConsents{}
+	consents.Decide("proj", "two", ProjectServerFingerprint(mustLoadProjectEntry(t, root, "two")), ProjectConsentDeny, time.Unix(1, 0))
+	if err := SaveProjectConsents(ws, consents); err != nil {
+		t.Fatal(err)
+	}
+	state := ResolveProjectServers(ws, root, "proj", true, true)
+	if len(state.Allowed) != 1 || state.Allowed["one"].Command != "/bin/one" {
+		t.Fatalf("undecided entry must land in Allowed under the switch: %+v", state.Allowed)
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("nothing stays pending under the switch: %+v", state.Pending)
+	}
+	if len(state.Denied) != 1 || state.Denied[0] != "two" {
+		t.Fatalf("a denied entry must stay denied: %v", state.Denied)
 	}
 }

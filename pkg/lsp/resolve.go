@@ -650,7 +650,7 @@ func ToolEnabled(cfg *appcfg.Root, opts ManagerOptions) bool {
 	if err != nil {
 		enabled = nil
 	}
-	project := ResolveProjectServers(opts.AgentWorkspace, opts.ProjectRoot, opts.ProjectKey, opts.Trusted)
+	project := ResolveProjectServers(opts.AgentWorkspace, opts.ProjectRoot, opts.ProjectKey, opts.Trusted, opts.autoAllowProject())
 	for _, sc := range ResolveServers(ResolveInput{Config: cfg, ProjectServers: project.Allowed, Enabled: enabled, GOOS: runtime.GOOS}) {
 		if sc.Enabled && sc.Invalid == "" && sc.Role == appcfg.LSPRolePrimary {
 			return true

@@ -371,6 +371,13 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	if lspOpts.ProjectRoot != "" {
 		lspOpts.ProjectKey = state.ProjectKeyForRoot(lspOpts.ProjectRoot)
 	}
+	// pkg/lsp may not import the store's package, so the composition root
+	// hands it the switch as an answer. The closure captures the workspace
+	// and key by value: both are frozen for this manager's lifetime.
+	ws, key := activeAgent.WorkspaceRoot, lspOpts.ProjectKey
+	lspOpts.AutoAllowProject = func() bool {
+		return mcp.ProjectAutoAllowed(ws, key)
+	}
 	lspOpts.ToolRegistered = lsp.ToolEnabled(cfgRoot, lspOpts)
 	env.lspManager = env.LSP.NewManager(lspOpts)
 	env.Deps = run.Deps{

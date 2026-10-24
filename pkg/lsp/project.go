@@ -7,7 +7,10 @@
 // executes, and a decision is recorded per fingerprint, per project, per
 // primary agent. An entry whose fingerprint has no recorded decision — or a
 // recorded denial — contributes nothing, not even its override of a built-in
-// server. The store mirrors the project-level MCP one field for field but
+// server. When the project's "always allow" switch is on (the composition
+// root reads it and hands it in; pkg/lsp does not read that store itself), an
+// entry nobody decided about runs; an explicit denial still excludes it.
+// The store mirrors the project-level MCP one field for field but
 // lives in state/lsp/project_consent.json: the two consent histories stay
 // separate because they answer different questions.
 package lsp
@@ -296,6 +299,9 @@ type PendingProjectServer struct {
 	// Summary describes what the entry would run or change, in one line the
 	// operator can act on without seeing the raw file.
 	Summary string `json:"summary"`
+	// Detail is the same description without the entry's id, for surfaces
+	// that show the id and what it runs as separate columns.
+	Detail string `json:"-"`
 }
 
 // ProjectServerState is the project file as it applies to one agent.
@@ -311,8 +317,11 @@ type ProjectServerState struct {
 // ResolveProjectServers reads the file and the consent store. trusted false
 // (not trusted or not version controlled) yields an empty state: the file is
 // not even parsed. Each entry then lands in exactly one of Allowed, Pending
-// and Denied by its recorded decision, in ascending id order.
-func ResolveProjectServers(agentWorkspace, projectRoot, projectKey string, trusted bool) ProjectServerState {
+// and Denied by its recorded decision, in ascending id order. autoAllow is
+// the project's "always allow" switch, handed in by the composition root
+// (pkg/lsp does not read that store itself): when it is on, an entry nobody
+// decided about lands in Allowed — an explicit denial still wins.
+func ResolveProjectServers(agentWorkspace, projectRoot, projectKey string, trusted, autoAllow bool) ProjectServerState {
 	if !trusted || strings.TrimSpace(projectRoot) == "" {
 		return ProjectServerState{}
 	}
@@ -333,11 +342,16 @@ func ResolveProjectServers(agentWorkspace, projectRoot, projectKey string, trust
 			state.Allowed[id] = entries[id]
 		case decided && decision == ProjectConsentDeny:
 			state.Denied = append(state.Denied, id)
+		case autoAllow:
+			// The project's servers are always allowed: an entry nobody
+			// decided about runs; an explicit decline above still wins.
+			state.Allowed[id] = entries[id]
 		default:
 			state.Pending = append(state.Pending, PendingProjectServer{
 				ID:          id,
 				Fingerprint: fp,
 				Summary:     projectServerSummary(id, entries[id]),
+				Detail:      projectServerDetail(id, entries[id]),
 			})
 		}
 	}
@@ -363,6 +377,27 @@ func projectServerSummary(id string, srv appcfg.LSPServerConfig) string {
 	}
 	if srv.Enabled != nil && *srv.Enabled {
 		base += " and enables it"
+	}
+	return base
+}
+
+// projectServerDetail is what one entry would run or change, without its id:
+// the command line, or the built-in server whose settings it adjusts.
+func projectServerDetail(id string, srv appcfg.LSPServerConfig) string {
+	var base string
+	if cmd := strings.TrimSpace(srv.Command); cmd != "" {
+		if len(srv.Args) > 0 {
+			base = cmd + " " + strings.Join(srv.Args, " ")
+		} else {
+			base = cmd
+		}
+	} else if inCatalog(id) {
+		base = "changes built-in " + id + " settings"
+	} else {
+		base = "no command"
+	}
+	if srv.Enabled != nil && *srv.Enabled {
+		base += " · turns it on"
 	}
 	return base
 }

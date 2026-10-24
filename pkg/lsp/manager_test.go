@@ -1172,3 +1172,39 @@ func TestProjectEntryEnvFromDotEnvOnly(t *testing.T) {
 		t.Fatalf("process environment leaked into a project entry: SECRET_FROM_ENV=%q", v)
 	}
 }
+
+// The manager's cache honors the "always allow" switch: flipping the answer
+// the composition root supplies re-resolves the project entries even though
+// no file changed, so an entry that was pending moves into the effective set.
+func TestManagerCacheHonorsAutoAllow(t *testing.T) {
+	project := t.TempDir()
+	writeProjectLSP(t, project, "servers:\n  fake:\n    command: /bin/echo\n")
+	ws := t.TempDir()
+	cfgRoot := &appcfg.Root{LSP: appcfg.LSPSection{}}
+	p := NewPool(cfgRoot)
+	t.Cleanup(func() { _ = p.Close() })
+	auto := false
+	m := p.NewManager(ManagerOptions{
+		Home:           t.TempDir(),
+		AgentWorkspace: ws,
+		ProjectRoot:    project,
+		ProjectKey:     "projkey",
+		Trusted:        true,
+		AutoAllowProject: func() bool {
+			return auto
+		},
+	})
+	waitForBackgroundWriters(t, m)
+	if state := m.projectState(); len(state.Pending) != 1 || state.Pending[0].ID != "fake" {
+		t.Fatalf("pending=%+v", state.Pending)
+	}
+
+	auto = true
+	state := m.projectState()
+	if len(state.Allowed) != 1 || state.Allowed["fake"].Command != "/bin/echo" {
+		t.Fatalf("the flipped switch must re-resolve: allowed=%v pending=%+v", state.Allowed, state.Pending)
+	}
+	if sc := findServer(t, m.servers(), "fake"); sc.Scope != "project" {
+		t.Fatalf("scope=%s, want project", sc.Scope)
+	}
+}

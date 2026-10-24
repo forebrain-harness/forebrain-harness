@@ -8,7 +8,9 @@
 //  2. Per-entry consent — each project entry is confirmed once per
 //     fingerprint, per primary agent, per project. Unconfirmed entries fail
 //     closed: they are not loaded, and surfaces show them as awaiting
-//     confirmation.
+//     confirmation. When the project's "always allow" switch is on, an entry
+//     nobody decided about passes without confirmation; an explicit decline
+//     still excludes it.
 //  3. Approval clamping — applied inside mcp.MergeSessionServers; a project
 //     entry may not widen approvals beyond "prompt".
 //
@@ -64,6 +66,7 @@ func ResolveSessionMCP(home, agentWorkspace string, agents appcfg.AgentsSection,
 	entries, notes := mcp.LoadProjectMCPServers(projectRoot)
 	gated := safety.TrustedRoot(launch) != ""
 	projectKey := memory.ProjectKey(projectRoot)
+	autoAllow := gated && mcp.ProjectAutoAllowed(agentWorkspace, projectKey)
 	consents, err := mcp.LoadProjectConsents(agentWorkspace)
 	if err != nil {
 		// An unreadable consent store means no entry can be shown a valid
@@ -91,12 +94,17 @@ func ResolveSessionMCP(home, agentWorkspace string, agents appcfg.AgentsSection,
 				included = append(included, srv)
 			case decided && decision == mcp.ProjectConsentDeny:
 				notApplied = append(notApplied, mcp.MCPNotApplied{Name: name, Reason: "entry was declined for this project"})
+			case autoAllow:
+				// The project's servers are always allowed: an entry nobody
+				// decided about runs; an explicit decline above still wins.
+				included = append(included, srv)
 			default:
 				notApplied = append(notApplied, mcp.MCPNotApplied{Name: name, Reason: "awaiting confirmation"})
 				pending = append(pending, mcp.PendingProjectConsent{
 					Name:        name,
 					Fingerprint: fp,
 					Summary:     mcp.ConsentSummary(srv),
+					Detail:      mcp.ConsentDetail(srv),
 				})
 			}
 		}
@@ -178,6 +186,11 @@ func PendingProjectMCPConsents(agentWorkspace string, launch safety.ProjectConte
 		return nil
 	}
 	projectKey := memory.ProjectKey(strings.TrimSpace(launch.Project.Root))
+	if mcp.ProjectAutoAllowed(agentWorkspace, projectKey) {
+		// The switch is on: undecided entries load, so there is nothing to
+		// ask about.
+		return nil
+	}
 	consents, _ := mcp.LoadProjectConsents(agentWorkspace)
 	var pending []mcp.PendingProjectConsent
 	for _, srv := range entries {
@@ -189,6 +202,7 @@ func PendingProjectMCPConsents(agentWorkspace string, launch safety.ProjectConte
 			Name:        strings.TrimSpace(srv.Name),
 			Fingerprint: fp,
 			Summary:     mcp.ConsentSummary(srv),
+			Detail:      mcp.ConsentDetail(srv),
 		})
 	}
 	return pending
@@ -336,9 +350,97 @@ func DeclinedProjectMCPConsents(agentWorkspace string, launch safety.ProjectCont
 			Name:        strings.TrimSpace(srv.Name),
 			Fingerprint: fp,
 			Summary:     mcp.ConsentSummary(srv),
+			Detail:      mcp.ConsentDetail(srv),
 		})
 	}
 	return declined
+}
+
+// ProjectServersAutoAllowed reports the launch project's "always allow" switch.
+// An untrusted launch has no project servers at all and reads as off.
+func ProjectServersAutoAllowed(agentWorkspace string, launch safety.ProjectContext) bool {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return false
+	}
+	return mcp.ProjectAutoAllowed(agentWorkspace, memory.ProjectKey(root))
+}
+
+// SetProjectServersAutoAllow turns the switch on or off. An untrusted launch is
+// a no-op: its project files are never read.
+func SetProjectServersAutoAllow(agentWorkspace string, launch safety.ProjectContext, on bool) error {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return nil
+	}
+	return mcp.SetProjectAutoAllow(agentWorkspace, memory.ProjectKey(root), on, time.Now())
+}
+
+// ProjectServerChoice is one project entry as the operator was shown it — an
+// MCP server name or a language-server id, and the fingerprint it had — and
+// whether they allowed it.
+type ProjectServerChoice struct {
+	Name        string
+	Fingerprint string
+	Allow       bool
+}
+
+// ProjectServersDecision is one answer to the project-servers confirmation:
+// every entry it lists is decided (allowed or declined), and AlwaysAllow turns
+// the project's "always allow" switch on as well.
+type ProjectServersDecision struct {
+	MCP         []ProjectServerChoice
+	LSP         []ProjectServerChoice
+	AlwaysAllow bool
+}
+
+// DecideProjectServers records the answer. Each kind is bound to the
+// fingerprints the operator was shown: an entry that changed since makes that
+// kind's call fail with its *StaleConsentError before anything of that kind
+// is recorded (MCP is recorded first; a stale LSP list leaves the MCP answers
+// in place, and the caller asks again about what is still pending). The switch
+// is turned on last, only when both kinds were recorded.
+func DecideProjectServers(agentWorkspace string, launch safety.ProjectContext, d ProjectServersDecision) error {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return nil
+	}
+	if len(d.MCP) > 0 {
+		names, allowed, fps := splitProjectServerChoices(d.MCP)
+		if err := DecideProjectMCPConsentsFor(agentWorkspace, launch, names, allowed, fps); err != nil {
+			return err
+		}
+	}
+	if len(d.LSP) > 0 {
+		names, allowed, fps := splitProjectServerChoices(d.LSP)
+		if err := DecideProjectLSPConsentsFor(agentWorkspace, launch, names, allowed, fps); err != nil {
+			return err
+		}
+	}
+	if d.AlwaysAllow {
+		return mcp.SetProjectAutoAllow(agentWorkspace, memory.ProjectKey(root), true, time.Now())
+	}
+	return nil
+}
+
+// splitProjectServerChoices unpacks one kind's choices into the decide,
+// allowed and fingerprint arguments the per-kind decision functions take.
+// fingerprints is never nil: an empty map still binds the decision to the
+// file as it was shown.
+func splitProjectServerChoices(choices []ProjectServerChoice) (names, allowed []string, fingerprints map[string]string) {
+	fingerprints = make(map[string]string, len(choices))
+	for _, c := range choices {
+		key := strings.ToLower(strings.TrimSpace(c.Name))
+		if key == "" {
+			continue
+		}
+		names = append(names, key)
+		fingerprints[key] = c.Fingerprint
+		if c.Allow {
+			allowed = append(allowed, key)
+		}
+	}
+	return names, allowed, fingerprints
 }
 
 // PendingProjectLSPConsents lists the project language-server entries that
@@ -349,7 +451,7 @@ func PendingProjectLSPConsents(agentWorkspace string, launch safety.ProjectConte
 	if root == "" {
 		return nil
 	}
-	return lsp.ResolveProjectServers(agentWorkspace, root, memory.ProjectKey(root), true).Pending
+	return lsp.ResolveProjectServers(agentWorkspace, root, memory.ProjectKey(root), true, mcp.ProjectAutoAllowed(agentWorkspace, memory.ProjectKey(root))).Pending
 }
 
 // DecideProjectLSPConsents records the operator's answers from the startup
@@ -403,7 +505,7 @@ func InspectProjectLSP(agentWorkspace string, launch safety.ProjectContext) (tru
 	if root == "" {
 		return false, nil, nil, nil, nil
 	}
-	state := lsp.ResolveProjectServers(agentWorkspace, root, memory.ProjectKey(root), true)
+	state := lsp.ResolveProjectServers(agentWorkspace, root, memory.ProjectKey(root), true, mcp.ProjectAutoAllowed(agentWorkspace, memory.ProjectKey(root)))
 	for _, id := range sortedMapKeys(state.Allowed) {
 		allowed = append(allowed, id)
 	}

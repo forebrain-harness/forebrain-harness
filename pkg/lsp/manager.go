@@ -28,9 +28,18 @@ type ManagerOptions struct {
 	ProjectRoot    string // the launch project root; "" when the runner has no project
 	ProjectKey     string
 	Trusted        bool // safety.TrustedRoot(launch) != ""
+	// AutoAllowProject reports the project's "always allow" switch. The
+	// composition root supplies it; pkg/lsp does not read that store itself.
+	// Nil reads as off.
+	AutoAllowProject func() bool
 	// ToolRegistered is the frozen answer of ToolEnabled for this runner; the
 	// caller computes it and passes it in so the snapshot can report it.
 	ToolRegistered bool
+}
+
+// autoAllowProject is AutoAllowProject with the nil case read as off.
+func (o ManagerOptions) autoAllowProject() bool {
+	return o.AutoAllowProject != nil && o.AutoAllowProject()
 }
 
 // quietWindow is the push-server quiet period after the target files
@@ -66,6 +75,7 @@ type Manager struct {
 	cacheEnabled time.Time
 	cacheProjMod time.Time
 	cacheConsMod time.Time
+	cacheAuto    bool
 
 	// The late-diagnostics queue (spec §8.4), keyed by agent session id.
 	late        map[string]*lateSession
@@ -233,23 +243,25 @@ func (m *Manager) resolveCached() ([]ServerConfig, ProjectServerState) {
 	mod := enabledModTime(m.opts.AgentWorkspace)
 	projMod := projectFileModTime(m.opts.ProjectRoot)
 	consMod := projectConsentModTime(m.opts.AgentWorkspace)
+	auto := m.opts.autoAllowProject()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cache != nil && m.cacheCfg == cfg && mod.Equal(m.cacheEnabled) &&
-		projMod.Equal(m.cacheProjMod) && consMod.Equal(m.cacheConsMod) {
+		projMod.Equal(m.cacheProjMod) && consMod.Equal(m.cacheConsMod) && auto == m.cacheAuto {
 		return m.cache, m.cacheProject
 	}
 	enabled, err := LoadEnabled(m.opts.AgentWorkspace) // unreadable: resolve as if empty
 	if err != nil {
 		enabled = nil
 	}
-	project := ResolveProjectServers(m.opts.AgentWorkspace, m.opts.ProjectRoot, m.opts.ProjectKey, m.opts.Trusted)
+	project := ResolveProjectServers(m.opts.AgentWorkspace, m.opts.ProjectRoot, m.opts.ProjectKey, m.opts.Trusted, auto)
 	m.cache = ResolveServers(ResolveInput{Config: cfg, ProjectServers: project.Allowed, Enabled: enabled, GOOS: runtime.GOOS})
 	m.cacheProject = project
 	m.cacheCfg = cfg
 	m.cacheEnabled = mod
 	m.cacheProjMod = projMod
 	m.cacheConsMod = consMod
+	m.cacheAuto = auto
 	return m.cache, m.cacheProject
 }
 
