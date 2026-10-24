@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 16
+const stateSchemaVersion = 17
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -55,6 +55,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 14, apply: migrateStateV13ToV14},
 	{version: 15, apply: migrateStateV14ToV15},
 	{version: 16, apply: migrateStateV15ToV16},
+	{version: 17, apply: migrateStateV16ToV17},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -736,6 +737,27 @@ CREATE TABLE IF NOT EXISTS fb_session_image_refusals (
   PRIMARY KEY (session_id, provider, model)
 ) STRICT, WITHOUT ROWID`); err != nil {
 		return fmt.Errorf("create fb_session_image_refusals: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV16ToV17 adds fb_session_permission_state: the per-session
+// approval-preset row (preset + source), the persistence half of a preset
+// choice that used to live only in the process's permission store. Pure
+// addition — a database already at v17 or a fixture built from the current
+// schema.sql is untouched (CREATE TABLE IF NOT EXISTS), nothing existing is
+// rewritten, and no backfill scan runs: legacy YOLO sessions are recognised
+// lazily at read time from their tool results, not by a migration.
+func migrateStateV16ToV17(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_session_permission_state (
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  preset TEXT NOT NULL,
+  source TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id)
+) STRICT, WITHOUT ROWID`); err != nil {
+		return fmt.Errorf("create fb_session_permission_state: %w", err)
 	}
 	return nil
 }

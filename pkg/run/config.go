@@ -1750,6 +1750,32 @@ func PrimaryReasoningEffort(r *Runner) string {
 	return PrimaryModelSelection(r).Effort
 }
 
+// NewSessionModel is the model a new session starts on: this primary agent's
+// most recently used model (the newest session row among its conversations
+// and workshops, provider/model/effort together), resolved against the
+// current configuration. A derived default, not a user's choice: when no row
+// exists, or the newest row's model is no longer configured, it answers the
+// zero state — silently, so the caller falls back to the configuration
+// default without an error. Both surfaces and the run entry share this one
+// reading; TUI startup, /new and the web new-session chip must never each
+// decide it for themselves.
+func NewSessionModel(r *Runner, store *state.SessionStore) PrimaryModelState {
+	if r == nil || store == nil {
+		return PrimaryModelState{}
+	}
+	row, hasRow, err := store.LatestSessionModelSelection(context.Background())
+	if err != nil || !hasRow {
+		return PrimaryModelState{}
+	}
+	resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &row.Effort)
+	if err != nil {
+		// The derived default never refuses anything: an unresolvable newest
+		// row is simply not a default, and the configuration default answers.
+		return PrimaryModelState{}
+	}
+	return resolved
+}
+
 // runtimeHealthErr is the run entry-point gate: an unhealthy Runner refuses
 // work until a complete build operation succeeds.
 func (r *Runner) runtimeHealthErr() error {
@@ -1912,25 +1938,78 @@ func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Conte
 	if sid == "" {
 		return ctx, nil
 	}
-	row, hasRow, err := r.Deps.SessionStore.SessionModelSelection(ctx, sid)
-	if err != nil || !hasRow {
+	store := r.Deps.SessionStore
+	row, hasRow, err := store.SessionModelSelection(ctx, sid)
+	if err != nil {
 		return ctx, nil
 	}
-	effort := row.Effort
-	resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort)
-	if err == nil {
-		return WithSessionModelSelection(ctx, resolved), nil
+	if hasRow {
+		effort := row.Effort
+		resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort)
+		if err == nil {
+			// The row is what the session runs on, so this turn makes it the
+			// agent's most recently used model. A refresh failure only logs:
+			// it costs the next new session a staler default, never this
+			// turn. Scheduled fires, channel conversations and subagent
+			// workers hold no row and never reach here.
+			if touchErr := store.TouchSessionModelSelection(ctx, sid); touchErr != nil {
+				slog.Warn("refresh session model row", "session_id", sid, "err", touchErr)
+			}
+			return WithSessionModelSelection(ctx, resolved), nil
+		}
+		// The stored pair is gone: this turn fails rather than running on a
+		// model the user did not pick. The row stays as written so the choice
+		// is recoverable; the log carries no credentials.
+		slog.Error("session model no longer configured; the turn is refused",
+			"session_id", sid,
+			"old_provider", strings.TrimSpace(row.Provider),
+			"old_model", strings.TrimSpace(row.Model),
+			"hint", "re-select with /model")
+		return ctx, fmt.Errorf("the model chosen for this conversation (%s/%s) is no longer configured; choose another with /model",
+			strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model))
 	}
-	// The stored pair is gone: this turn fails rather than running on a model
-	// the user did not pick. The row stays as written so the choice is
-	// recoverable; the log carries no credentials.
-	slog.Error("session model no longer configured; the turn is refused",
-		"session_id", sid,
-		"old_provider", strings.TrimSpace(row.Provider),
-		"old_model", strings.TrimSpace(row.Model),
-		"hint", "re-select with /model")
-	return ctx, fmt.Errorf("the model chosen for this conversation (%s/%s) is no longer configured; choose another with /model",
-		strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model))
+	// No row. Outside the D8 scope (scheduled fires, channel conversations,
+	// subagent workers) nothing is adopted or written: they keep the
+	// configuration default and stay out of "most recently used".
+	source, hasMessages, factsErr := store.SessionFactsForModelDefault(ctx, sid)
+	if factsErr != nil {
+		return ctx, nil
+	}
+	if source != state.SessionSourceConversation && source != state.SessionSourceWorkshop {
+		return ctx, nil
+	}
+	if !hasMessages {
+		// A new conversation: its first message fixes it on the most
+		// recently used model, as that session's own row. A derived default
+		// that cannot be resolved (fresh install, dangling newest row)
+		// leaves the configuration default in charge and writes nothing.
+		adopted := NewSessionModel(r, store)
+		if adopted.Set {
+			if _, saveErr := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
+				Provider: adopted.Provider, Model: adopted.Model, Effort: adopted.Effort,
+			}); saveErr != nil {
+				slog.Warn("persist new session model row", "session_id", sid, "err", saveErr)
+			}
+			return WithSessionModelSelection(ctx, adopted), nil
+		}
+		return ctx, nil
+	}
+	// A session older than the model-state table: it runs this turn on the
+	// configuration default as before, and the turn writes that actually
+	// used model as its row, so every session ends up owning one (D9a) and
+	// counts toward "most recently used".
+	def := PrimaryModelSelection(r)
+	if strings.TrimSpace(def.Provider) == "" || strings.TrimSpace(def.Model) == "" {
+		return ctx, nil
+	}
+	if _, saveErr := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
+		Provider: def.Provider, Model: def.Model, Effort: def.Effort,
+	}); saveErr != nil {
+		slog.Warn("persist legacy session model row", "session_id", sid, "err", saveErr)
+	}
+	return WithSessionModelSelection(ctx, PrimaryModelState{
+		Provider: def.Provider, Model: def.Model, Effort: def.Effort, Set: true,
+	}), nil
 }
 
 // effectiveModelFor names the model this context's conversation runs on: the

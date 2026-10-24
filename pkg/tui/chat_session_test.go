@@ -30414,8 +30414,9 @@ func TestInteractiveResumeRestoresSessionModelSelection(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
 
-	// sess-a pins the second provider with its concrete effort; sess-b has
-	// no row and follows the file default.
+	// Two pinned sessions and one empty one. sess-a's write comes last, so
+	// it is the agent's most recently used model.
+	require.NoError(t, s.SelectModel(ctx, "sess-b", turn.ModelChoice{Provider: "openai", Model: "gpt-main"}, nil))
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	require.Equal(t, "gpt-other", s.storedSelection(t, "sess-a").Model)
 
@@ -30423,7 +30424,7 @@ func TestInteractiveResumeRestoresSessionModelSelection(t *testing.T) {
 	renderer := NewRenderer(&out, &out)
 	state := newSwitchState(s, "sess-a")
 
-	// A → B: no stored row, the file default (gpt-main, no effort).
+	// A → B: B's own stored row is restored exactly, no effort.
 	switched, _, err := switchStreamSession(ctx, state, renderer, nil, "sess-b")
 	require.NoError(t, err)
 	require.True(t, switched)
@@ -30435,22 +30436,30 @@ func TestInteractiveResumeRestoresSessionModelSelection(t *testing.T) {
 	require.True(t, switched)
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 
-	// A → B → A again stays deterministic.
-	switched, _, err = switchStreamSession(ctx, state, renderer, nil, "sess-b")
+	// A → C: a session with no row of its own opens on the agent's most
+	// recently used model (owner 2026-10-23) — not the file default.
+	switched, _, err = switchStreamSession(ctx, state, renderer, nil, "sess-c")
 	require.NoError(t, err)
 	require.True(t, switched)
-	requireRunnerModel(t, s, "openai", "gpt-main", "")
+	requireRunnerModel(t, s, "openai", "gpt-other", "high")
+
+	// C → A → C again stays deterministic.
 	switched, _, err = switchStreamSession(ctx, state, renderer, nil, "sess-a")
+	require.NoError(t, err)
+	require.True(t, switched)
+	requireRunnerModel(t, s, "openai", "gpt-other", "high")
+	switched, _, err = switchStreamSession(ctx, state, renderer, nil, "sess-c")
 	require.NoError(t, err)
 	require.True(t, switched)
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 }
 
-// TestNewSessionKeepsTheCurrentModel pins owner's ruling: /new opens on the
-// model the conversation it was typed in runs on. The carry-over is a copy of
-// that conversation's own row — the choice belongs to the conversation, never
-// to the shared configuration file.
-func TestNewSessionKeepsTheCurrentModel(t *testing.T) {
+// TestNewSessionOpensOnTheMostRecentlyUsedModel pins owner's ruling
+// (2026-10-23): /new inherits nothing from the conversation it was typed in.
+// The new conversation follows the same rule every fresh one does — the
+// agent's most recently used model — and its own row materializes only when
+// its first message goes out, never as a copy at /new time.
+func TestNewSessionOpensOnTheMostRecentlyUsedModel(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
@@ -30462,23 +30471,28 @@ func TestNewSessionKeepsTheCurrentModel(t *testing.T) {
 	res, ok := s.ExecuteSurfaceSlash(ctx, "sess-a", "/new")
 	require.True(t, ok)
 	require.True(t, res.SessionSwitched)
-	require.Equal(t, "gpt-other", s.storedSelection(t, res.SessionID).Model)
-	require.Equal(t, "high", s.storedSelection(t, res.SessionID).Effort)
 
+	// Nothing was copied at /new: the new conversation holds no row yet.
+	_, hasRow, err := s.sessStore().SessionModelSelection(ctx, res.SessionID)
+	require.NoError(t, err)
+	require.False(t, hasRow, "/new must not copy the left conversation's model row")
+
+	// Entering it opens on the most recently used model, effort included.
 	switched, _, err := switchStreamSession(ctx, state, renderer, nil, res.SessionID)
 	require.NoError(t, err)
 	require.True(t, switched)
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 }
 
-// TestNewConversationInheritsTheCurrentModelAndFooterNamesIt pins both halves
-// of owner's ruling: /new opens on the model of the conversation it was typed
-// in, and the composer footer names exactly that model.
+// TestNewConversationOpensOnTheMostRecentlyUsedModelAndFooterNamesIt pins both
+// halves of owner's ruling (2026-10-23): /new does not inherit the left
+// conversation's model; every fresh conversation opens on the agent's most
+// recently used model, and the composer footer names exactly that model.
 //
-// The carry-over is a copy of the source conversation's own row, so it keeps
-// working after the user edits the configured default: the third conversation
-// inherits the second one's model, not whatever llm_providers[0] says now.
-func TestNewConversationInheritsTheCurrentModelAndFooterNamesIt(t *testing.T) {
+// The reading is the session-row recency, so it keeps working after the user
+// edits the configured default: the third conversation still opens on the most
+// recently used model, not whatever llm_providers[0] says now.
+func TestNewConversationOpensOnTheMostRecentlyUsedModelAndFooterNamesIt(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
 
@@ -30518,16 +30532,19 @@ func TestNewConversationInheritsTheCurrentModelAndFooterNamesIt(t *testing.T) {
 	renderer := NewRenderer(&out, &out)
 	state := newSwitchState(s, "sess-a")
 
-	// The second conversation opens on this one's model, and the footer says so.
+	// The second conversation opens on the most recently used model, and the
+	// footer says so. No row was copied: the adoption lives in the activation,
+	// and its own row materializes only at its first message.
 	res, ok := s.ExecuteSurfaceSlash(ctx, "sess-a", "/new")
 	require.True(t, ok)
 	require.True(t, res.SessionSwitched)
 	second := res.SessionID
+	_, hasRow, err := s.sessStore().SessionModelSelection(ctx, second)
+	require.NoError(t, err)
+	require.False(t, hasRow, "/new must not copy the left conversation's model row")
 	switched, _, err := switchStreamSession(ctx, state, renderer, nil, second)
 	require.NoError(t, err)
 	require.True(t, switched)
-	require.Equal(t, "gpt-other", s.storedSelection(t, second).Model)
-	require.Equal(t, "high", s.storedSelection(t, second).Effort)
 	require.Equal(t, "openai/gpt-other", renderer.footer.Model)
 	require.Equal(t, "high", renderer.footer.ReasoningEffort)
 
@@ -30535,8 +30552,9 @@ func TestNewConversationInheritsTheCurrentModelAndFooterNamesIt(t *testing.T) {
 	setConfiguredDefault("gpt-main")
 	require.Equal(t, "gpt-main", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
 
-	// A third conversation, opened from the second, still inherits the
-	// second's model — and both existing conversations keep their own.
+	// A third conversation, opened from the second, still opens on the most
+	// recently used model — the row nothing has dethroned — and sess-a keeps
+	// its own stored choice.
 	res, ok = s.ExecuteSurfaceSlash(ctx, second, "/new")
 	require.True(t, ok)
 	require.True(t, res.SessionSwitched)
@@ -30544,9 +30562,7 @@ func TestNewConversationInheritsTheCurrentModelAndFooterNamesIt(t *testing.T) {
 	switched, _, err = switchStreamSession(ctx, state, renderer, nil, third)
 	require.NoError(t, err)
 	require.True(t, switched)
-	require.Equal(t, "gpt-other", s.storedSelection(t, third).Model)
 	require.Equal(t, "openai/gpt-other", renderer.footer.Model)
-	require.Equal(t, "gpt-other", s.storedSelection(t, second).Model)
 	require.Equal(t, "gpt-other", s.storedSelection(t, "sess-a").Model)
 }
 
@@ -30921,8 +30937,10 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 
 	// The user then edits the file itself — the one action that may change a
 	// configured default. B's own conversation keeps its row; a conversation
-	// in B that never chose follows B's edited default, which is neither A's
-	// pick nor B's pinned model.
+	// in B that never chose opens on the agent's most recently used model
+	// (owner 2026-10-23): A's switch left gpt-m2 as the newest session row,
+	// which is what a fresh conversation follows — the edited file default
+	// (gpt-m3) is only the fallback, not the decider.
 	key := "${FOREBRAIN_CROSS_PROCESS_TEST_KEY}"
 	edited := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
@@ -30936,8 +30954,8 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 
 	fresh := f.loadRuntime(t, "sess-fresh")
 	require.NoError(t, func() error { _, err := fresh.ActivateSessionModel(ctx, "sess-fresh"); return err }())
-	requireModel(t, fresh, "openai", "gpt-m3", "")
-	require.Equal(t, "gpt-m3", fresh.sessionModelState("sess-fresh").Model, "the footer of a conversation that never chose")
+	requireModel(t, fresh, "openai", "gpt-m2", "")
+	require.Equal(t, "gpt-m2", fresh.sessionModelState("sess-fresh").Model, "the footer of a conversation that never chose")
 }
 
 // TestCrossProcessProviderDetailsStillRefresh pins the other half of the

@@ -2990,6 +2990,60 @@ func TestSessionPresetValidates(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 }
 
+// A preset picked in the web dropdown is durable: a server (and runner)
+// rebuilt over the same state database — a restart, or another process —
+// reads the same preset back from the row the POST wrote.
+func TestSessionPresetSurvivesServerRestart(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	cfg := &appcfg.Root{}
+	newServer := func() *Server {
+		runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+		return &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
+	}
+	s := newServer()
+
+	rr := httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full-access"}`)))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// The "other process": a fresh Server and Runner, nothing in memory.
+	rr = httptest.NewRecorder()
+	newServer().handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset?session_id=s1", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"current":"full-access"`)
+	require.Contains(t, rr.Body.String(), `"source":"picker"`)
+}
+
+// A session that ran under TUI --yolo before presets were persisted is read
+// back as full-access once its own tool results carry the bypass marker.
+func TestSessionPresetGetInfersLegacyYoloSession(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "yoloed", "yoloed"))
+	_, err = db.Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('yoloed','tool','visible','{"output":"ok","approval_bypassed_by_yolo":true}',10)`)
+	require.NoError(t, err)
+
+	cfg := &appcfg.Root{}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+	s := &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
+
+	rr := httptest.NewRecorder()
+	s.handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset?session_id=yoloed", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"current":"full-access"`)
+	require.Contains(t, rr.Body.String(), `"source":"observed"`)
+}
+
 // A preset picked for one conversation is that conversation's alone: the
 // live config every other conversation, channel and scheduled job of the
 // gateway runs under keeps its sandbox and approval policy.
@@ -5612,6 +5666,48 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 // The web chip's levels come from the same capability question /model asks: an
 // OpenCode model carries the levels models.json records for its own surface,
 // trimmed to what the protocol's client can send.
+// The new-chat page's model read follows the agent's most recently used
+// model (owner 2026-10-23): a session row fresher than the chain's first
+// entry is what the chips show, and the runner's published selection stays
+// untouched — the row is a reading, not a switch.
+func TestChatModelDefaultFollowsMostRecentlyUsed(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	t.Setenv("FOREBRAIN_WEB_MODEL_TEST_KEY", "test-key")
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"},
+			{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"},
+		}},
+	}}}
+	require.NoError(t, appcfg.Save(cfgPath, cfg))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	require.NoError(t, sess.Ensure(context.Background(), "used", "used"))
+	// Another conversation chose the chain's second entry — that row is the
+	// most recently used one.
+	_, err = sess.SaveSessionModelSelection(context.Background(), "used", state.SessionModelSelection{
+		Provider: "deepseek", Model: "deepseek-chat", Effort: "",
+	})
+	require.NoError(t, err)
+
+	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
+	runner := &run.Runner{Deps: &env.Deps}
+	env.Runner = runner
+	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
+	require.NoError(t, s.Env.ReloadConfig())
+
+	rec := httptest.NewRecorder()
+	s.handleChatModelDefault(rec, httptest.NewRequest(http.MethodGet, "/api/chat/model", nil))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"provider":"deepseek"`)
+	require.Contains(t, rec.Body.String(), `"model":"deepseek-chat"`)
+	// The read moved nothing on the runner.
+	require.Equal(t, "glm-5.3-flash", run.PrimaryModelSelection(runner).Model)
+}
+
 func TestSessionModelOptionsCarryOpenCodeEfforts(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{

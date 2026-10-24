@@ -530,16 +530,19 @@ func steerCompactFixture(t *testing.T, steer string) (*tool.State, *llm.Tool, *I
 	t.Helper()
 	st := tool.NewState(t.TempDir())
 	st.RegisterToolMeta(event.ToolMeta{Name: "read_chunk", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	// The steer is queued while the tool call runs: a message that is already
+	// waiting when the batch starts takes the turn instead of it (plan 121),
+	// so the fixture puts it where a user's message actually arrives.
 	readTool, err := llm.NewTool("read_chunk", "read a chunk", func(context.Context, *struct{}) (string, error) {
+		q.Steer(Input{Text: steer, Parts: []llm.ContentPart{llm.Text(steer)}})
 		return strings.Repeat("large tool result\n", 300), nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := NewInputQueue()
-	rt := NewTurnInputRuntime()
-	q.Attach(rt)
-	q.Steer(Input{Text: steer, Parts: []llm.ContentPart{llm.Text(steer)}})
 	return st, readTool, q, rt
 }
 

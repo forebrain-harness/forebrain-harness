@@ -1838,13 +1838,29 @@ func (s *Server) handleChatModelDefault(w http.ResponseWriter, r *http.Request) 
 	if name := strings.TrimSpace(runner.AgentName); name != "" {
 		agentName = name
 	}
-	sel := run.PrimaryModelSelection(runner)
+	// The reading every fresh conversation follows (owner 2026-10-23): the
+	// agent's most recently used model — the newest session row — with the
+	// runner's published selection as the fallback when no row resolves (a
+	// fresh install, or a newest row the config no longer offers).
+	sel := run.NewSessionModel(runner, runnerSessionStore(runner))
+	if !sel.Set {
+		sel = run.PrimaryModelSelection(runner)
+	}
 	writeJSON(w, map[string]any{
 		"provider": sel.Provider,
 		"model":    sel.Model,
 		"effort":   sel.Effort,
 		"options":  s.sessionModelOptions(cfg, agentName),
 	})
+}
+
+// runnerSessionStore is the runner's session store, nil when this server was
+// assembled without one.
+func runnerSessionStore(runner *run.Runner) *state.SessionStore {
+	if runner == nil || runner.Deps == nil {
+		return nil
+	}
+	return runner.Deps.SessionStore
 }
 
 // handleChatSessionModelPut records this conversation's own model choice,
@@ -7375,6 +7391,12 @@ func (s *Server) handleProjectRuleFile(w http.ResponseWriter, r *http.Request) {
 type approvalDefaultAnswer struct {
 	Current     *string `json:"current"`
 	Description string  `json:"description,omitempty"`
+	// Effective is the preset actually executing after the trust gate (a
+	// persisted full-access in an untrusted directory narrows to Default);
+	// Source is who set the stored row (picker | yolo | observed) — backend
+	// and logs only, the surfaces never label it.
+	Effective *string `json:"effective,omitempty"`
+	Source    string  `json:"source,omitempty"`
 }
 
 func (s *Server) handleApprovalDefaultGet(w http.ResponseWriter, r *http.Request) {
@@ -7475,15 +7497,33 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	// Persist first, apply second: the row is what the other surface and the
+	// next process restore, so a choice that failed to persist never ran
+	// only in memory either.
+	s.saveSessionPresetRow(r.Context(), sid, preset.ID)
 	for _, update := range preset.SessionUpdates(sid) {
 		runner.ApplyPermissionUpdate(update)
 	}
 	writeJSON(w, map[string]any{"ok": true, "description": preset.Description})
 }
 
-// handleSessionPresetGet names the preset one conversation is running under,
-// or null when its approval mode and sandbox add up to none of them — the
-// same reading the terminal's /permissions picker opens on.
+// saveSessionPresetRow persists a picker preset choice for one session. The
+// store is the gateway runner's own; a session another agent owns reads as
+// no row, which the ownership check above has already ruled out.
+func (s *Server) saveSessionPresetRow(ctx context.Context, sid, presetID string) {
+	if s == nil || s.Runner == nil || s.Runner.Deps == nil || s.Runner.Deps.SessionStore == nil {
+		return
+	}
+	if _, err := s.Runner.Deps.SessionStore.SaveSessionPermissionPreset(ctx, sid, presetID, state.SessionPresetSourcePicker); err != nil {
+		slog.Warn("persist session approval preset", "session_id", sid, "err", err)
+	}
+}
+
+// handleSessionPresetGet names the preset one conversation is running under —
+// the shared reading (Runner.SessionPresetFor): the persisted row first (with
+// lazy YOLO inference), the live in-process preset when no row exists, the
+// configuration default last. current is the row's choice, effective what
+// actually executes after the trust gate, and null when nothing matches.
 func (s *Server) handleSessionPresetGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -7499,14 +7539,18 @@ func (s *Server) handleSessionPresetGet(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	snap := runner.PermissionSnapshotForSession(sid)
-	preset, ok := safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(runner.AppCfg, snap))
-	if !ok {
+	st := runner.SessionPresetFor(r.Context(), sid)
+	if st.Current == "" {
 		writeJSON(w, approvalDefaultAnswer{Current: nil})
 		return
 	}
-	id := preset.ID
-	writeJSON(w, approvalDefaultAnswer{Current: &id, Description: preset.Description})
+	current := st.Current
+	effective := st.Effective
+	answer := approvalDefaultAnswer{Current: &current, Effective: &effective, Source: st.Source}
+	if preset, ok := safety.ApprovalPresetByID(st.Current); ok {
+		answer.Description = preset.Description
+	}
+	writeJSON(w, answer)
 }
 
 // permissionRuntimeMode reads the live permission mode the way the running

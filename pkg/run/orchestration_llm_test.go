@@ -4133,7 +4133,12 @@ func TestCancelledRunKeepsQueuedSteerInsteadOfDrainingAtToolBoundary(t *testing.
 	}
 	// The user presses esc while this tool runs, so it returns the run's
 	// context error just like a cancelled shell command does.
+	rt := NewTurnInputRuntime()
 	readTool, err := llm.NewTool("read_file", "read", func(_ context.Context, _ *readInput) (string, error) {
+		// The user queues a message and presses esc while this tool runs, so
+		// it returns the run's context error just like a cancelled shell
+		// command does.
+		rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("不需要重新构建dist，我手动构建")})
 		cancel()
 		return "", context.Canceled
 	})
@@ -4141,8 +4146,6 @@ func TestCancelledRunKeepsQueuedSteerInsteadOfDrainingAtToolBoundary(t *testing.
 		t.Fatalf("read_file tool: %v", err)
 	}
 
-	rt := NewTurnInputRuntime()
-	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("不需要重新构建dist，我手动构建")})
 	delivered := 0
 	rt.SetChangeHook(func(entries []TurnInputEntry) { delivered += len(entries) })
 
@@ -9512,5 +9515,397 @@ func TestTransportRetryDropsBufferedReasoningFromTheTranscript(t *testing.T) {
 	}
 	if len(surfaceNotes) != 1 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Total != 3 {
 		t.Fatalf("surface notifications = %+v, want the chained retry 1/3", surfaceNotes)
+	}
+}
+
+// ---- plan 121: a queued steer preempts the tool calls a turn has not started ----
+
+// preemptToolCall is one scripted tool call of the preempt fixture.
+func preemptToolCall(id, name string) llm.ToolCall {
+	return llm.ToolCall{ID: id, Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: name, Arguments: `{}`}}
+}
+
+// preemptScriptedLLM answers its first request with the given tool calls and
+// records every request it receives.
+type preemptScriptedLLM struct {
+	mu       sync.Mutex
+	requests [][]llm.Message
+	calls    []llm.ToolCall
+	answer   string
+}
+
+func (m *preemptScriptedLLM) Execute(_ context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.mu.Lock()
+	m.requests = append(m.requests, append([]llm.Message(nil), messages...))
+	n := len(m.requests)
+	m.mu.Unlock()
+	if n == 1 {
+		msg := llm.AssistantMessage(nil, m.calls...)
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text(m.answer)})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+}
+
+// request returns the nth request the model received.
+func (m *preemptScriptedLLM) request(t *testing.T, n int) []llm.Message {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.requests) < n {
+		t.Fatalf("model requests = %d, want at least %d", len(m.requests), n)
+	}
+	return m.requests[n-1]
+}
+
+// preemptSerialTool builds a tool the orchestration runs one call at a time
+// (it is not concurrency-safe), together with the counter of its executions.
+func preemptSerialTool(t *testing.T, name string, fn func(ctx context.Context, call int) (string, error)) (*llm.Tool, *int32) {
+	t.Helper()
+	var calls int32
+	tool, err := llm.NewTool(name, "test tool", func(ctx context.Context, _ *struct{}) (string, error) {
+		n := int(atomic.AddInt32(&calls, 1))
+		return fn(ctx, n)
+	})
+	if err != nil {
+		t.Fatalf("new tool %s: %v", name, err)
+	}
+	return tool, &calls
+}
+
+// toolResultMessages picks the tool results out of one model request.
+func toolResultMessages(messages []llm.Message) []llm.Message {
+	out := make([]llm.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == llm.RoleTool {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+// A steer queued while the first of three serial calls runs takes the turn at
+// the next call boundary: the two calls that have not started are answered
+// "not run" for the model, and the steer rides on the next request.
+func TestQueuedSteerPreemptsUnstartedSerialCalls(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "write_note"})
+
+	rt := NewTurnInputRuntime()
+	tool, calls := preemptSerialTool(t, "write_note", func(context.Context, int) (string, error) {
+		// The user queues a message while this call is running.
+		rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop and say hi")})
+		return "wrote", nil
+	})
+	inner := &preemptScriptedLLM{
+		calls: []llm.ToolCall{
+			preemptToolCall("call-1", "write_note"),
+			preemptToolCall("call-2", "write_note"),
+			preemptToolCall("call-3", "write_note"),
+		},
+		answer: "steer received",
+	}
+	ctx := WithTurnInputRuntime(context.Background(), rt)
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("run the notes"))},
+		[]*llm.Tool{tool},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "steer received" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("tool executions = %d, want 1 (the steer takes the turn at the next call boundary)", got)
+	}
+	second := inner.request(t, 2)
+	results := toolResultMessages(second)
+	if len(results) != 3 {
+		t.Fatalf("tool results = %d, want 3: %#v", len(results), second)
+	}
+	if got := results[0].TextContent(); got != "wrote" {
+		t.Fatalf("first tool result = %q, want the call that ran", got)
+	}
+	for i, result := range results[1:] {
+		if got := result.TextContent(); got != steerPreemptedResultText {
+			t.Fatalf("tool result %d = %q, want the not-run answer", i+2, got)
+		}
+	}
+	last := second[len(second)-1]
+	if last.Role != llm.RoleUser || last.TextContent() != "stop and say hi" {
+		t.Fatalf("last message = role %q content %q, want the steered user message", last.Role, last.TextContent())
+	}
+}
+
+// A steer already queued when the batch starts stops every call of it: not one
+// tool runs, and all of them are answered "not run".
+func TestSteerQueuedBeforeTheBatchSkipsEveryCall(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "write_note"})
+
+	rt := NewTurnInputRuntime()
+	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop and say hi")})
+	tool, calls := preemptSerialTool(t, "write_note", func(context.Context, int) (string, error) {
+		return "wrote", nil
+	})
+	inner := &preemptScriptedLLM{
+		calls: []llm.ToolCall{
+			preemptToolCall("call-1", "write_note"),
+			preemptToolCall("call-2", "write_note"),
+			preemptToolCall("call-3", "write_note"),
+		},
+		answer: "steer received",
+	}
+	ctx := WithTurnInputRuntime(context.Background(), rt)
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("run the notes"))},
+		[]*llm.Tool{tool},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "steer received" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("tool executions = %d, want 0 (a queued steer stops the batch before it starts)", got)
+	}
+	second := inner.request(t, 2)
+	results := toolResultMessages(second)
+	if len(results) != 3 {
+		t.Fatalf("tool results = %d, want 3: %#v", len(results), second)
+	}
+	for i, result := range results {
+		if got := result.TextContent(); got != steerPreemptedResultText {
+			t.Fatalf("tool result %d = %q, want the not-run answer", i+1, got)
+		}
+	}
+	last := second[len(second)-1]
+	if last.Role != llm.RoleUser || last.TextContent() != "stop and say hi" {
+		t.Fatalf("last message = role %q content %q, want the steered user message", last.Role, last.TextContent())
+	}
+}
+
+// The group that is already running is not interrupted: both of its calls
+// finish, and only the call behind it is skipped.
+func TestQueuedSteerLetsTheRunningParallelGroupFinish(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_a", ReadOnly: true, ConcurrencySafe: true})
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_b", ReadOnly: true, ConcurrencySafe: true})
+	st.RegisterToolMeta(event.ToolMeta{Name: "write_note"})
+
+	rt := NewTurnInputRuntime()
+	bothRunning := make(chan struct{})
+	release := make(chan struct{})
+	var running int32
+	var once sync.Once
+	readTool := func(name string) *llm.Tool {
+		tool, err := llm.NewTool(name, "read", func(ctx context.Context, _ *struct{}) (string, error) {
+			if atomic.AddInt32(&running, 1) == 2 {
+				once.Do(func() { close(bothRunning) })
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return name + " done", nil
+		})
+		if err != nil {
+			t.Fatalf("new tool %s: %v", name, err)
+		}
+		return tool
+	}
+	// The steer is queued while the parallel group is still running, so the
+	// group finishes and only the call behind it is skipped.
+	go func() {
+		<-bothRunning
+		rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop and say hi")})
+		close(release)
+	}()
+
+	noteTool, calls := preemptSerialTool(t, "write_note", func(context.Context, int) (string, error) {
+		return "wrote", nil
+	})
+	inner := &preemptScriptedLLM{
+		calls: []llm.ToolCall{
+			preemptToolCall("call-a", "read_a"),
+			preemptToolCall("call-b", "read_b"),
+			preemptToolCall("call-note", "write_note"),
+		},
+		answer: "steer received",
+	}
+	ctx := WithTurnInputRuntime(context.Background(), rt)
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("run the notes"))},
+		[]*llm.Tool{readTool("read_a"), readTool("read_b"), noteTool},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "steer received" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+	if got := atomic.LoadInt32(&running); got != 2 {
+		t.Fatalf("parallel group executions = %d, want 2 (a running group is not interrupted)", got)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("tool executions = %d, want 0 (the call behind the running group is skipped)", got)
+	}
+	second := inner.request(t, 2)
+	results := toolResultMessages(second)
+	if len(results) != 3 {
+		t.Fatalf("tool results = %d, want 3: %#v", len(results), second)
+	}
+	if got := results[0].TextContent(); got != "read_a done" {
+		t.Fatalf("first tool result = %q, want the call that ran", got)
+	}
+	if got := results[1].TextContent(); got != "read_b done" {
+		t.Fatalf("second tool result = %q, want the call that ran", got)
+	}
+	if got := results[2].TextContent(); got != steerPreemptedResultText {
+		t.Fatalf("third tool result = %q, want the not-run answer", got)
+	}
+}
+
+// A cancelled run keeps its own behaviour: the calls it started are settled as
+// they were, and no call is answered "not run".
+func TestCancelledRunDoesNotPreempt(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "write_note"})
+
+	rt := NewTurnInputRuntime()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tool, calls := preemptSerialTool(t, "write_note", func(context.Context, int) (string, error) {
+		// The user queues a message and the run is cancelled while this call
+		// runs: a cancelled turn settles its own calls, it does not preempt.
+		rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop and say hi")})
+		cancel()
+		return "wrote", nil
+	})
+	inner := &preemptScriptedLLM{
+		calls: []llm.ToolCall{
+			preemptToolCall("call-1", "write_note"),
+			preemptToolCall("call-2", "write_note"),
+			preemptToolCall("call-3", "write_note"),
+		},
+		answer: "steer received",
+	}
+	runCtx := WithTurnInputRuntime(ctx, rt)
+	if _, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		runCtx,
+		[]llm.Message{llm.UserMessage(llm.Text("run the notes"))},
+		[]*llm.Tool{tool},
+	); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := atomic.LoadInt32(calls); got != 3 {
+		t.Fatalf("tool executions = %d, want 3 (a cancelled run does not preempt)", got)
+	}
+	for i, request := range inner.requests {
+		for _, msg := range request {
+			if msg.Role == llm.RoleTool && msg.TextContent() == steerPreemptedResultText {
+				t.Fatalf("request %d carries a not-run result: %#v", i+1, request)
+			}
+		}
+	}
+}
+
+// A call that was skipped never ran, so it cannot stop the turn: the stop tool
+// is answered "not run" and the model is asked again.
+func TestNotRunResultNeverStopsTheTurn(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "stop_tool"})
+
+	rt := NewTurnInputRuntime()
+	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop and say hi")})
+	tool, calls := preemptSerialTool(t, "stop_tool", func(context.Context, int) (string, error) {
+		return "stopped", nil
+	})
+	inner := &preemptScriptedLLM{
+		calls:  []llm.ToolCall{preemptToolCall("call-stop", "stop_tool")},
+		answer: "steer received",
+	}
+	ctx := WithTurnInputRuntime(context.Background(), rt)
+	ctx = context.WithValue(ctx, stopAfterToolResultKey{}, "stop_tool")
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("run the notes"))},
+		[]*llm.Tool{tool},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "steer received" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("tool executions = %d, want 0 (the steer took the turn first)", got)
+	}
+	inner.mu.Lock()
+	requests := len(inner.requests)
+	inner.mu.Unlock()
+	if requests != 2 {
+		t.Fatalf("model requests = %d, want 2 (a skipped call does not stop the turn)", requests)
+	}
+}
+
+// The skipped call's row carries the drop key, so every surface's replay
+// projection drops the row whole.
+func TestNotRunResultPersistsTheDropKey(t *testing.T) {
+	const sid = "steer-preempted"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "write_note"})
+
+	rt := NewTurnInputRuntime()
+	tool, _ := preemptSerialTool(t, "write_note", func(context.Context, int) (string, error) {
+		rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop and say hi")})
+		return "wrote", nil
+	})
+	inner := &preemptScriptedLLM{
+		calls: []llm.ToolCall{
+			preemptToolCall("call-1", "write_note"),
+			preemptToolCall("call-2", "write_note"),
+			preemptToolCall("call-3", "write_note"),
+		},
+		answer: "steer received",
+	}
+	base := context.Background()
+	ctx := llm.WithAgentSessionID(toolpkg.WithRunID(base, runID), sid)
+	ctx = WithTurnInputRuntime(ctx, rt)
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	if _, err := w.Execute(
+		ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("run the notes"))},
+		[]*llm.Tool{tool},
+	); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	dropped := 0
+	for _, row := range rows {
+		if row.Role != "tool" || row.Content != steerPreemptedResultText {
+			continue
+		}
+		dropped++
+		display, ok := state.ParseToolDisplayPart(row.PartsJSON)
+		if !ok {
+			t.Fatalf("the skipped call's row carries no display: %q", row.PartsJSON)
+		}
+		if display.Body != toolpkg.SteerPreemptedDisplayKey {
+			t.Fatalf("display body = %q, want %q", display.Body, toolpkg.SteerPreemptedDisplayKey)
+		}
+	}
+	if dropped != 2 {
+		t.Fatalf("dropped tool rows = %d, want 2", dropped)
 	}
 }

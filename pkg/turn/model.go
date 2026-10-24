@@ -424,6 +424,11 @@ type SessionStore interface {
 	// choice onto the target session. copied=false means the source had no
 	// stored choice; a missing target is an error.
 	CopySessionModelSelection(ctx context.Context, source, target string) (copied bool, err error)
+	// CopySessionPermissionPreset copies the source session's stored
+	// approval preset onto the target session (the /fork half of preset
+	// inheritance; /new starts on the default). copied=false means the
+	// source had no stored preset.
+	CopySessionPermissionPreset(ctx context.Context, source, target string) (copied bool, err error)
 }
 
 type Context struct {

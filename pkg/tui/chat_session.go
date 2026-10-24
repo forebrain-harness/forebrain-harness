@@ -520,6 +520,21 @@ func (s *ChatSession) ActivateSessionModel(ctx context.Context, sessionID string
 		return "", err
 	}
 	if !hasRow {
+		// A conversation that has not started yet opens on the agent's most
+		// recently used model — the same rule its first message will adopt —
+		// so the header already names what the first turn will run on. An
+		// older session without a row (predating the model-state table) keeps
+		// the file default here; its next turn writes the model it actually
+		// used as its row (D9a, at the run entry).
+		if source, hasRunATurn, factsErr := store.SessionFactsForModelDefault(ctx, sid); factsErr == nil &&
+			!hasRunATurn && (source == "" || source == "workshop") {
+			if adopted := run.NewSessionModel(r, store); adopted.Set {
+				if err := r.OpenSession(adopted); err != nil {
+					return "", s.restoreAfterActivationFailure(r, outgoing, err)
+				}
+				return "", nil
+			}
+		}
 		// A session that never chose runs on the latest file default.
 		if err := r.OpenSession(run.PrimaryModelState{}); err != nil {
 			return "", s.restoreAfterActivationFailure(r, outgoing, err)
@@ -1005,17 +1020,28 @@ func (s *ChatSession) sessionModelState(sessionID string) run.PrimaryModelState 
 	}
 	base := s.runner()
 	sid := strings.TrimSpace(sessionID)
+	store := s.sessStore()
+	// A session with no row yet starts on the agent's most recently used
+	// model — the same reading its first message adopts (run.NewSessionModel)
+	// — so the footer names what the next turn will actually run on, not the
+	// configured default the adoption would have to override. An older
+	// session's row appears at its next turn (D9a) and this fallback stops
+	// applying the moment it does.
+	fallback := run.NewSessionModel(base, store)
+	if !fallback.Set {
+		if def, err := run.ConfiguredDefaultSelection(base); err == nil {
+			fallback = def
+		} else {
+			fallback = run.PrimaryModelSelection(base)
+		}
+	}
 	if bound, ok := s.Env.BoundRunnerForSession(context.Background(), sid); ok {
-		return run.PrimaryModelStateForSession(bound, s.sessStore(), sid)
+		return run.PrimaryModelStateForSessionOn(bound, store, sid, fallback)
 	}
 	// No project runner exists yet: the first turn builds it from the live
-	// config, so the model it will adopt is the configured default — never
-	// this process's base-runner pin.
-	fallback, err := run.ConfiguredDefaultSelection(base)
-	if err != nil {
-		fallback = run.PrimaryModelSelection(base)
-	}
-	return run.PrimaryModelStateForSessionOn(base, s.sessStore(), sid, fallback)
+	// config; the answer above is what that turn adopts — never this
+	// process's base-runner pin.
+	return run.PrimaryModelStateForSessionOn(base, store, sid, fallback)
 }
 
 // currentModelNames is the provider/model pair this conversation's requests go
@@ -2564,30 +2590,28 @@ func (s *ChatSession) reloadConfigAfterRun() {
 }
 
 // PermissionPresets lists the built-in presets described under this
-// session's settings, and names the one the session is running under, or ""
-// when its approval mode and sandbox do not add up to one.
+// session's settings, and names the one the session is running under — the
+// shared reading (Runner.SessionPresetFor): the persisted row first, the
+// in-process preset when no row exists, "" when neither names one.
 func (s *ChatSession) PermissionPresets(sessionID string) ([]safety.ApprovalPreset, string) {
 	presets := safety.BuiltinApprovalPresets()
 	for i := range presets {
 		presets[i].Description = presets[i].DescriptionFor(s.cfg())
 	}
-	snap := s.runner().PermissionSnapshotForSession(sessionID)
-	preset, ok := safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(s.cfg(), snap))
-	if !ok {
-		return presets, ""
-	}
-	return presets, preset.ID
+	return presets, s.runner().SessionPresetFor(context.Background(), sessionID).Current
 }
 
 // ApplyPermissionPreset switches the session to one of the built-in approval
 // presets and reports the resulting state.
 //
 // Both halves of the preset are scoped to this session in the permission
-// store; nothing is written to forebrain.yaml or to the live config. A preset
-// picked to get through one task therefore governs neither the other
-// conversations of this process nor the next session, and a reload of the
-// config cannot undo it. Editing forebrain.yaml is what persisting a choice is
-// for.
+// store, and the choice is persisted as the session's own row before it is
+// applied — the row is what the web surface, a resumed session and the next
+// process restore. Nothing is written to forebrain.yaml or to the live
+// config: a preset picked to get through one task governs neither the other
+// conversations of this process nor a new session, and a reload of the
+// config cannot undo it. Editing forebrain.yaml is what a default for every
+// conversation is for.
 func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string, error) {
 	if s == nil || s.runner() == nil {
 		return "", fmt.Errorf("permissions: unavailable")
@@ -2595,6 +2619,18 @@ func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string,
 	preset, ok := safety.ApprovalPresetByID(presetID)
 	if !ok {
 		return "", fmt.Errorf("permissions: unknown preset %q", strings.TrimSpace(presetID))
+	}
+	// Persist first, apply second — a choice that failed to persist never
+	// ran only in memory either.
+	if r := s.runner(); r != nil && r.Deps != nil && r.Deps.SessionStore != nil {
+		if _, err := r.Deps.SessionStore.SaveSessionPermissionPreset(context.Background(), sessionID, preset.ID, state.SessionPresetSourcePicker); err != nil {
+			slog.Error("persist session approval preset", "session_id", sessionID, "err", err)
+			s.notifyUI(NewMessageMsg{Msg: Message{
+				Kind:      MsgKindError,
+				Content:   "preset not saved: " + err.Error(),
+				Timestamp: time.Now(),
+			}})
+		}
 	}
 	for _, update := range preset.SessionUpdates(sessionID) {
 		s.runner().ApplyPermissionUpdate(update)

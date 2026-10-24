@@ -29,6 +29,12 @@ const DefaultMaxFormattedBody = 120_000
 // delivery's persistence path writes it.
 const PlanReviewDeliveredDisplayKey = "Plan review delivered — the planner is revising the plan."
 
+// SteerPreemptedDisplayKey is the display body persisted for a tool call the
+// run never started because a queued user message took the turn first. No
+// surface renders it: the TUI's and the web's replay projections drop the row
+// whole, the same way they drop PlanReviewDeliveredDisplayKey.
+const SteerPreemptedDisplayKey = "Not run — a queued user message took the turn first."
+
 // DeniedToolDisplayBody is the one sentence a refused tool call shows as its
 // card body — live when the refusal lands, and on every replay of the tool
 // result row that recorded it. feedback is the user's own words from the

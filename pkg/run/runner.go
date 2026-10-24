@@ -170,6 +170,11 @@ type Runner struct {
 	FileResolver FileReferenceResolver
 	tools        *tool.State
 	mu           runnerLocks
+	// sessionPerm is the applied-preset tracker injectSessionPermission
+	// consults: session id -> the updated_at of the stored approval-preset
+	// row this process already applied. A zero Map means nothing applied
+	// yet; it is concurrency-safe because several sessions share one Runner.
+	sessionPerm sync.Map
 	// mcpReg owns this Runner's MCP sessions. Per-Runner rather than the
 	// process-wide registry: see mcp.NewRegistry for the cross-tenant teardown
 	// bug that ownership fixes (R7).
@@ -1463,6 +1468,14 @@ func (r *Runner) RunContent(ctx context.Context, parts []llm.ContentPart) (*agen
 		if injectErr != nil {
 			return nil, injectErr
 		}
+	}
+	if r != nil {
+		// The same entry applies the conversation's stored approval preset
+		// (or records the YOLO one) before any work starts. Deliberately
+		// after the model injection and never failing the turn: a preset
+		// problem narrows to this concern and logs, it cannot refuse a turn
+		// the model choice already accepted.
+		ctx = r.injectSessionPermission(ctx)
 	}
 	if r != nil {
 		// Every read of the "current directory" this turn makes — tool

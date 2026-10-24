@@ -2841,7 +2841,10 @@ func (s *SessionStore) SaveSessionModelSelection(
 		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
-		sessionID, sel.Provider, sel.Model, sel.Effort, time.Now().Unix(), sessionID, s.AgentID(),
+		// Millisecond precision: updated_at also orders "most recently
+		// used", and TouchSessionModelSelection refreshes it — two writes
+		// inside one second must still order by the later one.
+		sessionID, sel.Provider, sel.Model, sel.Effort, time.Now().UnixMilli(), sessionID, s.AgentID(),
 	)
 	if err != nil {
 		return false, err
@@ -3016,12 +3019,12 @@ func (s *SessionStore) CopySessionModelSelection(
 		`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
 		SELECT ?, src.provider, src.model, src.effort, ?
 		FROM fb_session_model_state src
-		WHERE src.session_id=? AND EXISTS (
-			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
-		)
-		ON CONFLICT(session_id) DO UPDATE SET
-			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
-		targetSessionID, time.Now().Unix(), sourceSessionID, s.AgentID(),
+	WHERE src.session_id=? AND EXISTS (
+		SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
+	)
+	ON CONFLICT(session_id) DO UPDATE SET
+		provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
+		targetSessionID, time.Now().UnixMilli(), sourceSessionID, s.AgentID(),
 	)
 	if err != nil {
 		return false, err
@@ -3031,4 +3034,254 @@ func (s *SessionStore) CopySessionModelSelection(
 		return false, err
 	}
 	return affected > 0, nil
+}
+
+// LatestSessionModelSelection returns the newest model row among this
+// primary agent's own conversation and workshop sessions — the "most
+// recently used" model a new session should start on (D6/D7/D8: by agent,
+// across projects and surfaces; scheduled fires, channel conversations and
+// subagent workers hold no row in this set and never count). Reading one row
+// by the model-state index stays millisecond-scale as sessions grow; it never
+// touches fb_messages.
+func (s *SessionStore) LatestSessionModelSelection(ctx context.Context) (SessionModelSelection, bool, error) {
+	if s == nil || s.db == nil {
+		return SessionModelSelection{}, false, nil
+	}
+	var sel SessionModelSelection
+	err := s.db.QueryRowContext(ctx,
+		`SELECT p.provider, p.model, p.effort
+		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
+		WHERE s.agent_id = ? AND s.source IN (?, ?)
+		ORDER BY p.updated_at DESC LIMIT 1`,
+		s.AgentID(), SessionSourceConversation, SessionSourceWorkshop,
+	).Scan(&sel.Provider, &sel.Model, &sel.Effort)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SessionModelSelection{}, false, nil
+	}
+	if err != nil {
+		return SessionModelSelection{}, false, err
+	}
+	return sel, true, nil
+}
+
+// TouchSessionModelSelection refreshes one session row's updated_at without
+// touching its provider/model/effort — the every-turn half of "the row is
+// what the session actually uses": a turn that runs on the stored model
+// makes that row the agent's most recently used one. Scoped to this agent's
+// own sessions; a missing row is a quiet no-op (nothing to touch).
+func (s *SessionStore) TouchSessionModelSelection(ctx context.Context, sessionID string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE fb_session_model_state SET updated_at = ?
+		WHERE session_id = ?
+		  AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = ? AND source IN (?, ?))`,
+		time.Now().UnixMilli(), sessionID, s.AgentID(), SessionSourceConversation, SessionSourceWorkshop,
+	)
+	return err
+}
+
+// SessionFactsForModelDefault reports what the new-session default needs to
+// know about one session: its source (the D8 scope — only conversations and
+// workshops take part) and whether it has ever produced model output (a
+// non-user row). At the run entry the surface has already persisted the
+// current turn's user message, so "holds a message" cannot tell a new session
+// from an old one — but a session that has run a turn always has an assistant
+// or tool row, and a brand-new session has nothing but user rows: that is the
+// discriminator. A session with no output row adopts the most recently used
+// model on its first turn; one with output but no model row is older than the
+// model-state table and gets its actually used model written as its row
+// instead (D9a).
+func (s *SessionStore) SessionFactsForModelDefault(ctx context.Context, sessionID string) (source string, hasRunATurn bool, err error) {
+	if s == nil || s.db == nil {
+		return "", false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", false, nil
+	}
+	err = s.db.QueryRowContext(ctx,
+		`SELECT s.source,
+			EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.role != 'user')
+		FROM fb_sessions s WHERE s.id = ?`,
+		sessionID,
+	).Scan(&source, &hasRunATurn)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return source, hasRunATurn, nil
+}
+
+// Session-preset sources, the "who set this row" half of
+// fb_session_permission_state. Backend and logs only — never a surface label.
+const (
+	// SessionPresetSourcePicker is a deliberate choice in a preset picker
+	// (web dropdown, /permissions).
+	SessionPresetSourcePicker = "picker"
+	// SessionPresetSourceYolo marks the row a --yolo process wrote for the
+	// session it is running, so the full-access effect outlives the flag.
+	SessionPresetSourceYolo = "yolo"
+	// SessionPresetSourceObserved marks a row inferred from history: the
+	// session's tool results carry the YOLO bypass marker, so it is recorded
+	// as full-access instead of re-inferring on every read.
+	SessionPresetSourceObserved = "observed"
+)
+
+// SaveSessionPermissionPreset stores the approval preset one session runs
+// under, last-write-wins, the persistence twin of the in-process session
+// update. source is one of the SessionPresetSource* constants.
+func (s *SessionStore) SaveSessionPermissionPreset(
+	ctx context.Context, sessionID, presetID, source string,
+) (stored bool, err error) {
+	if s == nil || s.db == nil {
+		return false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	presetID = strings.TrimSpace(presetID)
+	if sessionID == "" || presetID == "" {
+		return false, nil
+	}
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return false, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			preset=excluded.preset, source=excluded.source, updated_at=excluded.updated_at`,
+		sessionID, presetID, source, time.Now().UnixMilli(), sessionID, s.AgentID(),
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// SessionPermissionPreset returns the session's stored approval preset, its
+// source and the row's updated_at (the caller's skip-if-unchanged stamp), and
+// false when it has none (or the session belongs to another primary agent,
+// which is the same answer as not existing).
+func (s *SessionStore) SessionPermissionPreset(
+	ctx context.Context, sessionID string,
+) (presetID, source string, updatedAt int64, stored bool, err error) {
+	if s == nil || s.db == nil {
+		return "", "", 0, false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", "", 0, false, nil
+	}
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return "", "", 0, false, err
+	}
+	err = s.db.QueryRowContext(ctx,
+		`SELECT p.preset, p.source, p.updated_at
+		FROM fb_session_permission_state p
+		JOIN fb_sessions s ON s.id=p.session_id AND s.agent_id=?
+		WHERE p.session_id=?`,
+		s.AgentID(), sessionID,
+	).Scan(&presetID, &source, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", 0, false, nil
+	}
+	if err != nil {
+		return "", "", 0, false, err
+	}
+	return presetID, source, updatedAt, true, nil
+}
+
+// CopySessionPermissionPreset copies the source session's stored approval
+// preset onto the target, the /fork half of preset inheritance (/new starts
+// fresh on purpose). No row on the source copies nothing.
+func (s *SessionStore) CopySessionPermissionPreset(
+	ctx context.Context, sourceSessionID, targetSessionID string,
+) (copied bool, err error) {
+	if s == nil || s.db == nil {
+		return false, nil
+	}
+	sourceSessionID = strings.TrimSpace(sourceSessionID)
+	targetSessionID = strings.TrimSpace(targetSessionID)
+	if sourceSessionID == "" || targetSessionID == "" || sourceSessionID == targetSessionID {
+		return false, nil
+	}
+	if err := s.requireOwned(ctx, s.db, sourceSessionID); err != nil {
+		return false, err
+	}
+	var target int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT CASE WHEN EXISTS(
+			SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?
+		) THEN 1 ELSE 0 END`,
+		targetSessionID, s.AgentID(),
+	).Scan(&target); err != nil {
+		return false, err
+	}
+	if target != 1 {
+		return false, fmt.Errorf("%w: %s", ErrSessionNotOwned, targetSessionID)
+	}
+	// The SELECT ends with a WHERE clause on purpose: SQLite binds ON
+	// CONFLICT to the upsert only then; without it the statement is a syntax
+	// error.
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT ?, src.preset, src.source, ?
+		FROM fb_session_permission_state src
+		WHERE src.session_id=? AND EXISTS (
+			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
+		)
+		ON CONFLICT(session_id) DO UPDATE SET
+			preset=excluded.preset, source=excluded.source, updated_at=excluded.updated_at`,
+		targetSessionID, time.Now().UnixMilli(), sourceSessionID, s.AgentID(),
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// SessionLastToolResultBypassedApprovals reports whether the session's newest
+// tool result carries the YOLO bypass marker — the read half of lazy
+// inference for sessions that ran under --yolo before presets were persisted.
+// One row, newest first; sessions with no tool result answer false.
+func (s *SessionStore) SessionLastToolResultBypassedApprovals(
+	ctx context.Context, sessionID string,
+) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false, nil
+	}
+	var content string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT content FROM fb_messages
+		WHERE session_id=? AND role='tool'
+		ORDER BY id DESC LIMIT 1`,
+		sessionID,
+	).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(content, `"approval_bypassed_by_yolo":true`), nil
 }

@@ -887,6 +887,14 @@ func isPlanReviewDeliveredDisplay(body string) bool {
 	return strings.TrimSpace(body) == tool.PlanReviewDeliveredDisplayKey
 }
 
+// isHiddenToolDisplay reports whether a stored tool display is one no surface
+// draws: a delivered review's handoff, or a call a queued message took the
+// turn from before it started.
+func isHiddenToolDisplay(body string) bool {
+	body = strings.TrimSpace(body)
+	return body == tool.PlanReviewDeliveredDisplayKey || body == tool.SteerPreemptedDisplayKey
+}
+
 // replayApprovalEventFrames rebuilds the frames an approval record carries that
 // have no message form. Only the confirmation line does: the gate's own card is
 // the tool call the record names, and replay rebuilds it as a canceled card
@@ -1610,8 +1618,10 @@ func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[str
 	}
 	// A delivered review closed this gate, not the user: the stored display
 	// body is the delivery drop key, so the row draws nothing — the handoff
-	// it recorded was never user-facing.
-	if hasStoredDisplay && isPlanReviewDeliveredDisplay(storedDisplay.Body) {
+	// it recorded was never user-facing. A call a queued message took the
+	// turn from never ran either: its row carries the same kind of drop key
+	// and draws nothing.
+	if hasStoredDisplay && isHiddenToolDisplay(storedDisplay.Body) {
 		return Message{}, "", false
 	}
 	// The gate's wait holds no card on any surface, live included, and a

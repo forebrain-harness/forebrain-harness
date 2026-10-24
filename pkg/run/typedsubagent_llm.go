@@ -123,6 +123,10 @@ func wrapTypedSubagentToolFilterLLM(inner llm.LLM) llm.LLM {
 }
 
 func (w typedSubagentToolFilterLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	// The list gate of the one-level rule comes first and unconditionally: a
+	// subagent run never sees subagent_* tools, even on the paths below that
+	// skip the per-type filter.
+	tools = dropSubagentManagementTools(ctx, tools)
 	if explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
 		return w.inner.Execute(ctx, messages, tools)
 	}

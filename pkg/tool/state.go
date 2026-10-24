@@ -143,11 +143,16 @@ type runtimeSessionMode struct {
 type ctxKey string
 
 const (
-	ctxKeyRunID                ctxKey = "forebrain_run_id"
-	ctxKeyConversationSession  ctxKey = "forebrain_conversation_session_id"
-	ctxKeyApprovedActionID     ctxKey = "forebrain_approved_action_id"
-	ctxKeyMode                 ctxKey = "forebrain_mode"
-	ctxKeyAllowedPlanPath      ctxKey = "forebrain_allowed_plan_path"
+	ctxKeyRunID               ctxKey = "forebrain_run_id"
+	ctxKeyConversationSession ctxKey = "forebrain_conversation_session_id"
+	ctxKeyApprovedActionID    ctxKey = "forebrain_approved_action_id"
+	ctxKeyMode                ctxKey = "forebrain_mode"
+	ctxKeyAllowedPlanPath     ctxKey = "forebrain_allowed_plan_path"
+	// ctxKeySubagentRun marks every context a subagent execution runs under,
+	// regardless of kind (fork, typed, custom). It is the structural fact the
+	// subagent-tool guards key on: only the primary agent may dispatch or
+	// manage subagents, one level deep, ever.
+	ctxKeySubagentRun          ctxKey = "forebrain_subagent_run"
 	ctxKeyForkChild            ctxKey = "forebrain_subagent_fork_child"
 	ctxKeySubagentType         ctxKey = "forebrain_subagent_type"
 	ctxKeySubagentPolicy       ctxKey = "forebrain_subagent_tool_policy"
@@ -480,6 +485,29 @@ func IsForkChildFromContext(ctx context.Context) bool {
 		return false
 	}
 	v, _ := ctx.Value(ctxKeyForkChild).(bool)
+	return v
+}
+
+// WithSubagentRun tags a context as a subagent execution's own: set once in
+// subagentExecContext for every agent kind, so "is this run a subagent" is one
+// structural fact instead of a per-kind (or per-type) enumeration. The
+// subagent-tool guards, the tool-list filters and GuardTool all key on it — a
+// subagent may never dispatch or manage subagents of its own.
+func WithSubagentRun(ctx context.Context, on bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeySubagentRun, on)
+}
+
+// IsSubagentRunFromContext reports whether ctx belongs to a subagent execution
+// (fork child, typed, or custom). The primary agent's own context returns
+// false; that is the only context the subagent_* tools answer to.
+func IsSubagentRunFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(ctxKeySubagentRun).(bool)
 	return v
 }
 

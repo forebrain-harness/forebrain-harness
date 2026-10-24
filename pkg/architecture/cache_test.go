@@ -906,9 +906,16 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // the runner owns the config-pointer swap and the rollback, which callers
 // previously did by hand (and got wrong: a discarded rollback error left a
 // half-mutated runtime).
+// 27 fields (was 26): sessionPerm is the applied-preset tracker (session
+// permission preset persistence), a sync.Map so the row a turn already
+// applied is not re-applied every turn.
+//
+// 45 methods (was 44): SessionPresetFor is the one shared reading of the
+// conversation's approval preset (stored row, live preset, config default)
+// the gateway and the TUI both show.
 const (
-	runnerFields  = 26
-	runnerMethods = 44
+	runnerFields  = 27
+	runnerMethods = 45
 )
 
 func TestRunnerOnlyShrinks(t *testing.T) {

@@ -1530,13 +1530,42 @@ func TestTypedSubagentPolicyAllowsVerificationShell(t *testing.T) {
 	}
 }
 
+// The subagent management tools are refused inside any subagent run by the
+// structural rule, not by a per-type table row: the explore marker here rides
+// the same subagent-run marker every real explore execution carries.
 func TestTypedSubagentPolicyBlocksExploreSubagentLifecycleTools(t *testing.T) {
 	st := NewState()
-	ctx := WithSubagentType(context.Background(), "explore")
-	for _, tool := range []string{"subagent_send", "subagent_wait", "subagent_status", "subagent_list", "subagent_close"} {
-		err := st.GuardTool(ctx, tool)
-		if err == nil || !strings.Contains(err.Error(), "blocked by policy") {
-			t.Fatalf("expected explore %s blocked, got %v", tool, err)
+	ctx := WithSubagentRun(WithSubagentType(context.Background(), "explore"), true)
+	for _, name := range []string{"subagent_run", "subagent_fanout", "subagent_send", "subagent_wait", "subagent_status", "subagent_list", "subagent_close", "subagent_continue"} {
+		err := st.GuardTool(ctx, name)
+		if err == nil || !strings.Contains(err.Error(), "subagent tools are only available to the primary agent") {
+			t.Fatalf("expected explore %s refused, got %v", name, err)
+		}
+	}
+}
+
+// The type table owns type capabilities (file writes, plan-mode tools), never
+// the subagent tools: those are structural. A subagent_* entry re-added to
+// any type here would suggest the rule lives in the table again — it must not.
+func TestTypedSubagentDisallowedToolsHasNoSubagentEntries(t *testing.T) {
+	for st, blocked := range typedSubagentDisallowedTools {
+		for name := range blocked {
+			if isSubagentManagementToolName(name) {
+				t.Fatalf("type %q lists %q: subagent tools are governed structurally, remove the table entry", st, name)
+			}
+		}
+	}
+}
+
+// The name-only guard answers the same structural refusal without a State.
+func TestGuardToolNameOnlyRefusesSubagentToolsInSubagentRuns(t *testing.T) {
+	for _, name := range []string{"subagent_run", "subagent_fanout", "subagent_send", "subagent_wait", "subagent_status", "subagent_list", "subagent_close", "subagent_continue"} {
+		if err := GuardToolNameOnly(WithSubagentRun(context.Background(), true), name); err == nil ||
+			!strings.Contains(err.Error(), "subagent tools are only available to the primary agent") {
+			t.Fatalf("subagent run calling %s = %v, want refusal", name, err)
+		}
+		if err := GuardToolNameOnly(context.Background(), name); err != nil {
+			t.Fatalf("primary agent calling %s = %v, want nil", name, err)
 		}
 	}
 }
@@ -3405,9 +3434,9 @@ func TestRequestPermissionsVisibleToEveryTypedSubagent(t *testing.T) {
 }
 
 func TestVisibleToolsCavecrewInvestigator(t *testing.T) {
-	tools := []string{"read_file", "shell", "write_file", "edit_file", "subagent_run"}
+	tools := []string{"read_file", "shell", "write_file", "edit_file"}
 	visible := VisibleToolsForSubagentSubtype("cavecrew-investigator", tools)
-	if containsTool(visible, "write_file") || containsTool(visible, "edit_file") || containsTool(visible, "subagent_run") {
+	if containsTool(visible, "write_file") || containsTool(visible, "edit_file") {
 		t.Fatalf("cavecrew-investigator leaked mutating tools: %v", visible)
 	}
 	if !containsTool(visible, "read_file") || !containsTool(visible, "shell") {
@@ -3416,20 +3445,17 @@ func TestVisibleToolsCavecrewInvestigator(t *testing.T) {
 }
 
 func TestVisibleToolsCavecrewBuilder(t *testing.T) {
-	tools := []string{"read_file", "shell", "write_file", "edit_file", "subagent_run", "request_permissions"}
+	tools := []string{"read_file", "shell", "write_file", "edit_file", "request_permissions"}
 	visible := VisibleToolsForSubagentSubtype("cavecrew-builder", tools)
-	if containsTool(visible, "subagent_run") {
-		t.Fatalf("cavecrew-builder leaked blocked tools: %v", visible)
-	}
 	if !containsTool(visible, "read_file") || !containsTool(visible, "edit_file") || !containsTool(visible, "write_file") || !containsTool(visible, "shell") {
 		t.Fatalf("cavecrew-builder lost allowed tools: %v", visible)
 	}
 }
 
 func TestVisibleToolsCavecrewReviewer(t *testing.T) {
-	tools := []string{"read_file", "shell", "write_file", "edit_file", "subagent_run"}
+	tools := []string{"read_file", "shell", "write_file", "edit_file"}
 	visible := VisibleToolsForSubagentSubtype("cavecrew-reviewer", tools)
-	if containsTool(visible, "write_file") || containsTool(visible, "edit_file") || containsTool(visible, "subagent_run") {
+	if containsTool(visible, "write_file") || containsTool(visible, "edit_file") {
 		t.Fatalf("cavecrew-reviewer leaked mutating tools: %v", visible)
 	}
 	if !containsTool(visible, "read_file") || !containsTool(visible, "shell") {
@@ -3455,7 +3481,6 @@ func TestVisibleToolsPlanReviewerMatchesPlanMinusPlanModeTools(t *testing.T) {
 		"memories_search", "retrieve_output",
 		"write_file", "edit_file", "request_permissions",
 		"enter_plan_mode", "exit_plan_mode",
-		"subagent_run", "subagent_fanout",
 	}
 	plan := VisibleToolsForSubagentSubtype("plan", all)
 	reviewer := VisibleToolsForSubagentSubtype("plan-reviewer", all)
@@ -3469,7 +3494,7 @@ func TestVisibleToolsPlanReviewerMatchesPlanMinusPlanModeTools(t *testing.T) {
 			t.Fatalf("reviewer must be able to call %q; got %v", name, reviewer)
 		}
 	}
-	for _, name := range []string{"write_file", "edit_file", "enter_plan_mode", "exit_plan_mode", "subagent_run", "subagent_fanout"} {
+	for _, name := range []string{"write_file", "edit_file", "enter_plan_mode", "exit_plan_mode"} {
 		if visible[name] {
 			t.Fatalf("reviewer must not be able to call %q; got %v", name, reviewer)
 		}

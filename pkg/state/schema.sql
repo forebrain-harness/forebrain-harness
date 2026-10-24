@@ -186,6 +186,20 @@ CREATE TABLE fb_session_model_state (
   PRIMARY KEY (session_id)
 ) STRICT, WITHOUT ROWID;
 
+-- One session's own approval-preset choice (the read-only / default /
+-- full-access pair of approval mode and sandbox mode). The row is what the
+-- session actually runs under once restored, on either surface; the source
+-- column records who last set it (picker | yolo | observed) and is for the
+-- backend and logs only. Single approvals (accept_for_session) are
+-- deliberately not persisted — only the preset pair is.
+CREATE TABLE fb_session_permission_state (
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  preset TEXT NOT NULL,
+  source TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id)
+) STRICT, WITHOUT ROWID;
+
 -- One session's observed image rejections, coarsely: a provider that refused an
 -- image for this conversation is remembered per provider+model, so the next
 -- request on that model is withheld instead of sent to be refused again. A

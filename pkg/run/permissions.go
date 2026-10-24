@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -878,6 +879,194 @@ func (r *Runner) ResetRuntimePermissionGrants() {
 		return
 	}
 	r.permRuntimeGet().ResetGrants(r.AppCfg)
+	// A reset is a fresh permission runtime: the next turn re-applies the
+	// session's stored preset row rather than believing it already did.
+	r.sessionPerm.Range(func(key, _ any) bool {
+		r.sessionPerm.Delete(key)
+		return true
+	})
+}
+
+// SessionPresetState is one conversation's approval-preset answer, the one
+// reading both surfaces show: which preset is in force ("" when none — the
+// configuration default), which preset actually executes after the trust
+// gate, and who set the stored row (picker | yolo | observed; backend and
+// logs only, never a surface label).
+type SessionPresetState struct {
+	Current   string
+	Effective string
+	Source    string
+}
+
+// SessionPresetFor names the preset one conversation runs under. The live
+// in-process preset wins (the store is the truth of what executes this
+// instant); the persisted row — including a lazily inferred YOLO row — is
+// what a cold session or the other surface would resume under; the
+// configuration default is the answer when neither exists.
+func (r *Runner) SessionPresetFor(ctx context.Context, sessionID string) SessionPresetState {
+	if r == nil {
+		return SessionPresetState{}
+	}
+	if safety.RuntimeYOLOEnabled() {
+		return SessionPresetState{Current: safety.PresetFullAccess, Effective: safety.PresetFullAccess, Source: state.SessionPresetSourceYolo}
+	}
+	sid := strings.TrimSpace(sessionID)
+	// The stored row outranks the in-process state: every write path persists
+	// first (picker) or is the row itself (yolo, observed), so a live preset
+	// that disagrees with the row is the trust gate narrowing execution, and
+	// the row is what the picker must show and the next process restores.
+	// The in-memory preset answers only when no row exists — a write that
+	// failed to persist still leaves the user's just-made choice visible.
+	if r.Deps != nil && r.Deps.SessionStore != nil && sid != "" && ctx != nil {
+		presetID, source, _, stored, err := r.Deps.SessionStore.SessionPermissionPreset(ctx, sid)
+		if err == nil && stored {
+			return r.presetStateFromRow(presetID, source)
+		}
+		// No row: a session that ran under --yolo before presets were
+		// persisted is recognised from its own tool results and recorded
+		// once, so every later read (either surface, any process) answers
+		// full-access without re-inferring.
+		if err == nil {
+			if saw, serr := r.Deps.SessionStore.SessionLastToolResultBypassedApprovals(ctx, sid); serr == nil && saw {
+				r.persistSessionPreset(ctx, sid, safety.PresetFullAccess, state.SessionPresetSourceObserved)
+				return r.presetStateFromRow(safety.PresetFullAccess, state.SessionPresetSourceObserved)
+			}
+		}
+	}
+	if preset, ok := r.matchLivePreset(sid); ok {
+		return SessionPresetState{Current: preset.ID, Effective: preset.ID, Source: state.SessionPresetSourcePicker}
+	}
+	if preset, ok := safety.MatchApprovalPreset(r.permissionRuntimeModeOf(), r.AppCfg); ok {
+		return SessionPresetState{Current: preset.ID, Effective: preset.ID}
+	}
+	return SessionPresetState{}
+}
+
+// presetStateFromRow is the stored row as an answer: the row names the
+// preset, the trust gate decides what actually executes — a persisted
+// full-access is honoured only while the working directory is trusted, and
+// narrows to Default otherwise, while the row itself stays as written.
+func (r *Runner) presetStateFromRow(presetID, source string) SessionPresetState {
+	effective := presetID
+	if presetID == safety.PresetFullAccess && !r.launchProjectTrusted() {
+		effective = safety.PresetDefault
+	}
+	return SessionPresetState{Current: presetID, Effective: effective, Source: source}
+}
+
+// matchLivePreset reports the preset the in-process permission store is
+// running this session under right now, when its mode and sandbox add up to
+// one of the built-ins.
+func (r *Runner) matchLivePreset(sessionID string) (safety.ApprovalPreset, bool) {
+	snap := r.PermissionSnapshotForSession(sessionID)
+	return safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(r.AppCfg, snap))
+}
+
+// permissionRuntimeModeOf is the configured policy mode, the fallback answer
+// for a runner whose permission runtime has nothing session-scoped to read.
+func (r *Runner) permissionRuntimeModeOf() safety.PermissionMode {
+	if r.AppCfg != nil && strings.TrimSpace(string(r.AppCfg.ApprovalPolicy.Mode)) != "" {
+		return safety.PermissionMode(r.AppCfg.ApprovalPolicy.Mode)
+	}
+	return safety.ApprovalOnRequest
+}
+
+// launchProjectTrusted reports the frozen launch-project trust decision this
+// runtime was built from — the trust gate a persisted full-access preset must
+// pass to execute as full-access.
+func (r *Runner) launchProjectTrusted() bool {
+	return safety.TrustedRoot(r.LaunchProject) != ""
+}
+
+// persistSessionPreset stores the row, idempotently: a write failure (or a
+// no-op store) is logged and never blocks a turn — the preset still applies
+// in-process for this run either way.
+func (r *Runner) persistSessionPreset(ctx context.Context, sessionID, presetID, source string) {
+	if r == nil || r.Deps == nil || r.Deps.SessionStore == nil {
+		return
+	}
+	if _, err := r.Deps.SessionStore.SaveSessionPermissionPreset(ctx, sessionID, presetID, source); err != nil {
+		slog.Warn("persist session approval preset", "session_id", sessionID, "err", err)
+	}
+}
+
+// injectSessionPermission is the run-entry half of persisted presets: it
+// makes the stored row true in this process before the turn's work starts.
+// Both surfaces reach it through RunContent, so the TUI, the gateway and a
+// resumed session all restore the same row. It never fails a turn — a read
+// or write error logs and leaves the configuration default in charge.
+//
+// YOLO is recorded (source "yolo") but not applied from a row: the
+// environment flag already outranks everything, in this process and any
+// other. The row is what makes the effect survive into processes started
+// without the flag.
+func (r *Runner) injectSessionPermission(ctx context.Context) context.Context {
+	if r == nil || r.Deps == nil || r.Deps.SessionStore == nil || ctx == nil {
+		return ctx
+	}
+	// The permission session is the conversation that owns the turn, not the
+	// worker session a subagent runs on (D5): subagent runs never reach here
+	// anyway — this is the main-turn entry — but the id read is the rule.
+	sid := strings.TrimSpace(tool.ConversationSessionIDFromContext(ctx))
+	if sid == "" {
+		return ctx
+	}
+	if safety.RuntimeYOLOEnabled() {
+		r.recordYoloPreset(ctx, sid)
+		return ctx
+	}
+	presetID, source, updatedAt, stored, err := r.Deps.SessionStore.SessionPermissionPreset(ctx, sid)
+	if err != nil || !stored {
+		if err == nil {
+			// Lazy inference for sessions that predate the table: the
+			// newest tool result carries the YOLO bypass marker.
+			if saw, serr := r.Deps.SessionStore.SessionLastToolResultBypassedApprovals(ctx, sid); serr == nil && saw {
+				presetID, source = safety.PresetFullAccess, state.SessionPresetSourceObserved
+				r.persistSessionPreset(ctx, sid, presetID, source)
+			}
+		}
+		if source == "" {
+			return ctx
+		}
+		updatedAt = 0
+	}
+	// One application per stored row: a turn that finds the row it (or
+	// another process) already applied skips the filesystem-policy refresh.
+	// Swap returns the previous stamp and records this one atomically.
+	if prev, applied := r.sessionPerm.Swap(sid, updatedAt); applied {
+		if prevStamp, _ := prev.(int64); prevStamp == updatedAt {
+			return ctx
+		}
+	}
+	effective := presetID
+	// The trust gate: a persisted full-access executes as full-access only
+	// while the working directory is trusted; otherwise Default runs and the
+	// row keeps the wider choice for when it is.
+	if effective == safety.PresetFullAccess && !r.launchProjectTrusted() {
+		effective = safety.PresetDefault
+	}
+	preset, ok := safety.ApprovalPresetByID(effective)
+	if !ok {
+		return ctx
+	}
+	for _, update := range preset.SessionUpdates(sid) {
+		r.ApplyPermissionUpdate(update)
+	}
+	return ctx
+}
+
+// recordYoloPreset writes the full-access row a --yolo process runs under,
+// once per stored state: a row already saying full-access (whatever its
+// source) is left alone, so a deliberate picker choice is not relabelled.
+func (r *Runner) recordYoloPreset(ctx context.Context, sid string) {
+	presetID, _, _, stored, err := r.Deps.SessionStore.SessionPermissionPreset(ctx, sid)
+	if err != nil {
+		return
+	}
+	if stored && presetID == safety.PresetFullAccess {
+		return
+	}
+	r.persistSessionPreset(ctx, sid, safety.PresetFullAccess, state.SessionPresetSourceYolo)
 }
 
 func (r *Runner) ApplyPermissionUpdate(update safety.PermissionUpdate) {

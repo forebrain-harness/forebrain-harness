@@ -347,18 +347,6 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 			if err := guardSubagentTool(ctx, fac, "subagent_run"); err != nil {
 				return "", err
 			}
-			if err := guardForkChildNoSubagentTools(ctx); err != nil {
-				return "", err
-			}
-			if in != nil {
-				if err := guardForkChildImplicitFork(ctx, in.SubagentType); err != nil {
-					return "", err
-				}
-			} else {
-				if err := guardForkChildImplicitFork(ctx, ""); err != nil {
-					return "", err
-				}
-			}
 			task := ""
 			subType := ""
 			title := ""
@@ -452,6 +440,24 @@ func subagentToolName(name string) bool {
 	}
 }
 
+// dropSubagentManagementTools implements the list gate of the one-level rule:
+// a model running inside a subagent never even sees the subagent_* tools, so
+// it cannot plan around calling them. Applied unconditionally to every
+// subagent run — fork, typed, or custom — not only to runs with a subtype.
+func dropSubagentManagementTools(ctx context.Context, tools []*llm.Tool) []*llm.Tool {
+	if !tool.IsSubagentRunFromContext(ctx) || len(tools) == 0 {
+		return tools
+	}
+	out := make([]*llm.Tool, 0, len(tools))
+	for _, t := range tools {
+		if t != nil && subagentToolName(strings.TrimSpace(t.Name())) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
 // subagentDispatchTool names the tools that block on subagents they dispatch
 // and answer those subagents' approval gates in place (runAcrossApprovals)
 // when the surface offers a hook for it, instead of stopping the turn.
@@ -471,7 +477,15 @@ func maxParallelSubagentsFromAppConfig(cfg *appcfg.Root) int {
 	return cfg.Agents.Defaults.Execution.MaxParallelSubagentsValue()
 }
 
+// guardSubagentTool is the call gate every subagent_* tool passes first. The
+// structural rule lives here, ahead of any per-type policy: only the primary
+// agent may dispatch or manage subagents — a context that is itself a
+// subagent execution (fork, typed or custom) is refused outright, so nesting
+// is impossible rather than merely discouraged per type.
 func guardSubagentTool(ctx context.Context, fac Factory, name string) error {
+	if tool.IsSubagentRunFromContext(ctx) {
+		return fmt.Errorf("subagent tools are only available to the primary agent")
+	}
 	if maxParallelSubagentsFromFactory(fac) <= 0 && subagentToolName(name) {
 		return fmt.Errorf("subagent capacity is 0; main agent must execute this step directly")
 	}
@@ -479,20 +493,6 @@ func guardSubagentTool(ctx context.Context, fac Factory, name string) error {
 		return fac.Tools.GuardTool(ctx, name)
 	}
 	return tool.GuardToolNameOnly(ctx, name)
-}
-
-func guardForkChildImplicitFork(ctx context.Context, subagentType string) error {
-	if tool.IsForkChildFromContext(ctx) && strings.TrimSpace(subagentType) == "" {
-		return fmt.Errorf("fork is not available inside a forked worker")
-	}
-	return nil
-}
-
-func guardForkChildNoSubagentTools(ctx context.Context) error {
-	if tool.IsForkChildFromContext(ctx) {
-		return fmt.Errorf("subagent tools are not available inside a forked worker")
-	}
-	return nil
 }
 
 // subagentUserTurnFromContext returns the hook a channel installed for the
@@ -1337,6 +1337,14 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	own := fac.Owner
 	task := d.task
 	rawSubtype := strings.TrimSpace(d.subtype)
+	// Last-resort gate, below the call and list gates: a dispatch whose caller
+	// is itself a subagent execution can never reach here legitimately, but a
+	// future entry point that forgets the earlier gates must still be unable
+	// to create a nested worker session or run row. Refuse before anything is
+	// persisted.
+	if tool.IsSubagentRunFromContext(baseCtx) {
+		return preparedSubagent{}, fmt.Errorf("subagent tools are only available to the primary agent")
+	}
 	if own == nil {
 		return preparedSubagent{}, fmt.Errorf("subagent requires runner")
 	}
@@ -1510,11 +1518,8 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	}
 	// The worker session is born before anything can reference it. Its row is
 	// what turns "a string in the ledger" into a session: every message row
-	// this execution writes carries it as a foreign key, and a dispatch THIS
-	// subagent itself makes names it as its session for CreateSubagentRun —
-	// which is how a nested typed dispatch used to die on the foreign key
-	// (plan 013's handoff): the outer worker session had no row. Birth is
-	// also what carries the session-purpose identity plan 002 reads on: the
+	// this execution writes carries it as a foreign key. Birth is also what
+	// carries the session-purpose identity plan 002 reads on: the
 	// worker conversation is private to this subagent, its parent is the
 	// conversation that dispatched it, and every conversation list filters it
 	// out in SQL.
@@ -2614,16 +2619,8 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 			if err := guardSubagentTool(ctx, fac, "subagent_fanout"); err != nil {
 				return "", err
 			}
-			if err := guardForkChildNoSubagentTools(ctx); err != nil {
-				return "", err
-			}
 			if in == nil || len(in.Tasks) == 0 {
 				return "", fmt.Errorf("tasks required")
-			}
-			for _, item := range in.Tasks {
-				if err := guardForkChildImplicitFork(ctx, item.SubagentType); err != nil {
-					return "", err
-				}
 			}
 			maxP := in.MaxParallel
 			if maxP <= 0 {
@@ -2761,9 +2758,6 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if err := guardSubagentTool(ctx, fac, "subagent_send"); err != nil {
 				return "", err
 			}
-			if err := guardForkChildNoSubagentTools(ctx); err != nil {
-				return "", err
-			}
 			task := ""
 			subType := ""
 			title := ""
@@ -2778,9 +2772,6 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 					"error":  "skipped: empty prompt",
 				})
 				return string(b), nil
-			}
-			if err := guardForkChildImplicitFork(ctx, subType); err != nil {
-				return "", err
 			}
 			baseCtx := context.Background()
 			if sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)); sid != "" {
@@ -2828,9 +2819,6 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if err := guardSubagentTool(ctx, fac, "subagent_list"); err != nil {
 				return "", err
 			}
-			if err := guardForkChildNoSubagentTools(ctx); err != nil {
-				return "", err
-			}
 			limit := 20
 			if in != nil && in.Limit > 0 {
 				limit = in.Limit
@@ -2855,9 +2843,6 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if err := guardSubagentTool(ctx, fac, "subagent_status"); err != nil {
 				return "", err
 			}
-			if err := guardForkChildNoSubagentTools(ctx); err != nil {
-				return "", err
-			}
 			record, ok, err := lookupSubagentRecord(fac.subagentScopeRoot(), ctx, in)
 			if err != nil {
 				return "", err
@@ -2875,9 +2860,6 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 		"Use when blocking until a previously-sent subagent finishes: waits by task_id or run_id. Returns the latest status even when the wait times out.",
 		func(ctx context.Context, in *SubagentLookupInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_wait"); err != nil {
-				return "", err
-			}
-			if err := guardForkChildNoSubagentTools(ctx); err != nil {
 				return "", err
 			}
 			timeout := 60 * time.Second
@@ -2917,9 +2899,6 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if err := guardSubagentTool(ctx, fac, "subagent_continue"); err != nil {
 				return "", err
 			}
-			if err := guardForkChildNoSubagentTools(ctx); err != nil {
-				return "", err
-			}
 			record, err := continueSubagentExecution(ctx, fac, in)
 			if err != nil {
 				return "", err
@@ -2934,9 +2913,6 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 		"Use when cancelling a running async subagent you no longer need: closes it by task_id or run_id (one is required — unlike status/wait there is no latest-scoped fallback). Returns not-found if the subagent has already finished.",
 		func(ctx context.Context, in *SubagentLookupInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_close"); err != nil {
-				return "", err
-			}
-			if err := guardForkChildNoSubagentTools(ctx); err != nil {
 				return "", err
 			}
 			query := lookupQueryFromContext(ctx, in)
@@ -3203,14 +3179,20 @@ func subagentDispatchBlocksFileWrites(cat SubagentCatalog, subagentType string) 
 // on a model nobody announced.
 func subagentExecContext(prep preparedSubagent) context.Context {
 	hostCtx := prep.ctx
+	// Every subagent execution — fork, typed or custom — carries one marker:
+	// this run is a subagent. It is set here, the single place every dispatch
+	// path builds the child's context from, so the subagent-tool guards and
+	// tool-list filters below key on one structural fact: a subagent can never
+	// dispatch or manage subagents of its own, whatever its kind or type.
+	hostCtx = tool.WithSubagentRun(hostCtx, true)
 	switch prep.agentKind {
 	case "fork":
 		// A fork child is a fork child on every dispatch path: the marker is
-		// what refuses a nested dispatch from inside it, what keeps plan
-		// mode's reminder addressed to a child rather than the plan's owner,
-		// and what tags its tool cards. Like the model pin below, it is
-		// derived from the prepared dispatch itself, because a path that had
-		// to remember it separately is a path that could forget.
+		// what keeps plan mode's reminder addressed to a child rather than
+		// the plan's owner, and what tags its tool cards. Like the model pin
+		// below, it is derived from the prepared dispatch itself, because a
+		// path that had to remember it separately is a path that could
+		// forget.
 		hostCtx = tool.WithForkChild(hostCtx, true)
 	default:
 		hostCtx = tool.WithSubagentType(hostCtx, prep.agentType)

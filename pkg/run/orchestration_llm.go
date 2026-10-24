@@ -46,6 +46,10 @@ type orchestratedToolResult struct {
 	timing  llm.ExecutionTiming
 	display *llm.ToolDisplayState
 	err     error
+	// notRun marks a call the turn never started because a queued user
+	// message took the turn at the call boundary. Its result is the model-facing
+	// "not run" answer, and no surface draws a card for it.
+	notRun bool
 }
 
 type capturedToolStepData struct {
@@ -617,7 +621,7 @@ func shouldStopAfterToolResult(ctx context.Context, results []orchestratedToolRe
 		return false
 	}
 	for _, result := range results {
-		if result.err == nil && strings.TrimSpace(result.call.Function.Name) == toolName {
+		if result.err == nil && !result.notRun && strings.TrimSpace(result.call.Function.Name) == toolName {
 			return true
 		}
 	}
@@ -984,12 +988,28 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 	for _, call := range calls {
 		names = append(names, call.Function.Name)
 	}
+	// A queued steer takes the turn at the next call boundary: whatever has
+	// not started yet is answered "not run" so the steer goes out now instead
+	// of after the whole batch.
+	preempted := false
+	steerWaiting := func() bool {
+		if !preempted && ctx.Err() == nil && TurnInputRuntimeFromContext(ctx).HasSteers() {
+			preempted = true
+		}
+		return preempted
+	}
 	plans := w.state.PartitionToolCalls(names)
 	callIndex := 0
 	for _, plan := range plans {
 		batch := calls[callIndex : callIndex+len(plan.ToolNames)]
 		for _, seg := range w.segmentToolCallPlan(ctx, plan, batch, callIndex) {
 			if seg.concurrent {
+				if steerWaiting() {
+					for i, call := range seg.calls {
+						results[seg.offset+i] = steerPreemptedResult(seg.offset+i, call)
+					}
+					continue
+				}
 				segResults := results[seg.offset : seg.offset+len(seg.calls)]
 				groups := parallelToolCallSummaryGroups(seg.calls, toolMap)
 				w.emitParallelBatchSummary(ctx, groups, tool.StepKindToolParallelStarted, nil)
@@ -1001,6 +1021,10 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 				continue
 			}
 			for i, call := range seg.calls {
+				if steerWaiting() {
+					results[seg.offset+i] = steerPreemptedResult(seg.offset+i, call)
+					continue
+				}
 				results[seg.offset+i] = w.executeOneToolCall(ctx, seg.offset+i, call, toolMap, toolUISuppression{})
 				if isRequiresActionError(results[seg.offset+i].err) {
 					return results
@@ -1516,6 +1540,24 @@ func executeToolHandler(ctx context.Context, toolMap map[string]*llm.Tool, call 
 		return execution.Result, nil, execution.Timing, fmt.Errorf("tool %s: %w", name, err)
 	}
 	return execution.Result, toolResultContentParts(execution.Result), execution.Timing, nil
+}
+
+// steerPreemptedResultText is what the model reads for a call skipped because
+// the user's queued message went out first.
+const steerPreemptedResultText = "Not run: the user sent a new message before this tool call started. Read the message and call the tool again if it is still needed."
+
+// steerPreemptedResult is the result of a call the turn never started. Its
+// display carries the drop key, so the persisted row draws nothing on any
+// surface: the call never ran, and the user never saw it.
+func steerPreemptedResult(index int, call llm.ToolCall) orchestratedToolResult {
+	metaJSON, _ := json.Marshal(map[string]string{"tool_name": strings.TrimSpace(call.Function.Name), "status": "not_run"})
+	return orchestratedToolResult{
+		index:   index,
+		call:    call,
+		parts:   []llm.ContentPart{llm.Text(steerPreemptedResultText)},
+		display: &llm.ToolDisplayState{Body: tool.SteerPreemptedDisplayKey, ToolMetaJSON: string(metaJSON)},
+		notRun:  true,
+	}
 }
 
 func toolResultMessage(result orchestratedToolResult) llm.Message {

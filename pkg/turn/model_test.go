@@ -505,11 +505,13 @@ func TestChooseReasoningEffortDoesNotWriteTheConfigFile(t *testing.T) {
 	require.True(t, bytes.Equal(before, after), "the shared config file changed:\nbefore:\n%s\nafter:\n%s", before, after)
 }
 
-// TestNewConversationInheritsTheCurrentModel pins owner's ruling that /new
-// opens on the model the conversation it was typed in runs on. The carry-over
-// is a copy of that conversation's own row — never a write to the shared
-// configuration file, which is what used to make the choice cross-process.
-func TestNewConversationInheritsTheCurrentModel(t *testing.T) {
+// TestNewConversationInheritsNoModel pins owner's ruling (2026-10-23) that
+// /new inherits nothing: a model is a choice of the conversation that made
+// it, not of the next one. The new conversation follows the same rule every
+// fresh conversation does — the agent's most recently used model, adopted as
+// its own row when its first message goes out — and nothing is copied here,
+// and the shared configuration file never moves.
+func TestNewConversationInheritsNoModel(t *testing.T) {
 	f := newModelSelectionFixture(t, ModelSelectionState{Provider: "deepseek", Model: "deepseek-chat", Effort: "high", Set: true})
 	before, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
@@ -518,25 +520,12 @@ func TestNewConversationInheritsTheCurrentModel(t *testing.T) {
 	require.True(t, res.SessionSwitched, "the surface must switch to the new conversation")
 	require.True(t, res.SessionChanged)
 	require.NotEmpty(t, res.SessionID)
-	require.Equal(t, "s1", f.store.copiedModelFrom)
-	require.Equal(t, res.SessionID, f.store.copiedModelTo)
+	require.Empty(t, f.store.copiedModelFrom, "/new must not copy the left conversation's model row")
+	require.Empty(t, f.store.copiedModelTo)
+	require.Equal(t, "Started a new conversation.", res.Reply)
 	after, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(before, after), "the shared config file changed")
-}
-
-// TestNewConversationReportsAModelThatCouldNotBeCarriedOver pins that a failed
-// copy is not fatal: the conversation exists, the surface switches to it, and
-// the reply says what did not carry over.
-func TestNewConversationReportsAModelThatCouldNotBeCarriedOver(t *testing.T) {
-	f := newModelSelectionFixture(t, ModelSelectionState{})
-	f.store.copiedModelErr = errors.New("row store is gone")
-	res := Execute(f.ctx, "/new")
-	require.True(t, res.Handled)
-	require.True(t, res.SessionSwitched)
-	require.NotEmpty(t, res.SessionID)
-	require.Contains(t, res.Reply, "could not be carried over")
-	require.Contains(t, res.Reply, "row store is gone")
 }
 
 func TestForkCopiesMaterializedModelSelection(t *testing.T) {

@@ -2498,10 +2498,12 @@ func TestExecGeneralForkSubagentUsesParentSnapshotAndStableForkMessages(t *testi
 // What a subagent run is — fork or typed — is decided at dispatch and given to
 // the execution together with its model, by the one constructor every path
 // uses. The front fork goes through the executor rather than the detached
-// spawn, and it must arrive carrying the same identity: the marker is what
-// refuses a nested dispatch from inside it, what keeps plan mode's reminder
-// addressed to a child, and what tags its tool cards. A typed run carries the
-// opposite answer, so the marker cannot be satisfied by tagging everything.
+// spawn, and it must arrive carrying the same identity: the fork marker keeps
+// plan mode's reminder addressed to a child and tags its tool cards, and the
+// subagent-run marker — carried by fork and typed runs alike — is what refuses
+// a nested dispatch from inside it. A typed run carries the opposite fork
+// answer and the same subagent-run answer, so neither marker can be satisfied
+// by tagging everything.
 func TestFrontForkChildCarriesItsOwnIdentity(t *testing.T) {
 	ctx := context.Background()
 	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
@@ -2544,8 +2546,12 @@ func TestFrontForkChildCarriesItsOwnIdentity(t *testing.T) {
 	if !toolpkg.IsForkChildFromContext(forkCtx) {
 		t.Fatal("the front fork's execution was not marked as a fork child")
 	}
-	if err := guardForkChildNoSubagentTools(forkCtx); err == nil || !strings.Contains(err.Error(), "subagent tools are not available inside a forked worker") {
-		t.Fatalf("a nested dispatch from the front fork child = %v, want the forked-worker refusal", err)
+	if !toolpkg.IsSubagentRunFromContext(forkCtx) {
+		t.Fatal("the front fork's execution was not marked as a subagent run")
+	}
+	if err := guardSubagentTool(forkCtx, Factory{}, "subagent_run"); err == nil ||
+		!strings.Contains(err.Error(), "subagent tools are only available to the primary agent") {
+		t.Fatalf("a nested dispatch from the front fork child = %v, want the primary-agent-only refusal", err)
 	}
 	meta := toolpkg.EnrichToolMeta(forkCtx, toolpkg.ToolMeta{ToolName: "read_file"})
 	if meta.AgentKind != "fork" || meta.AgentType != "fork" {
@@ -2573,6 +2579,9 @@ func TestFrontForkChildCarriesItsOwnIdentity(t *testing.T) {
 	}
 	if toolpkg.IsForkChildFromContext(typedCtx) {
 		t.Fatal("a typed dispatch's execution was marked as a fork child")
+	}
+	if !toolpkg.IsSubagentRunFromContext(typedCtx) {
+		t.Fatal("a typed dispatch's execution was not marked as a subagent run")
 	}
 	if got := toolpkg.SubagentTypeFromContext(typedCtx); got != "repo-scout" {
 		t.Fatalf("typed exec context subtype = %q, want repo-scout", got)
@@ -2669,31 +2678,130 @@ func TestContinueSubagentExecutionRejectsOneShotSubtype(t *testing.T) {
 	}
 }
 
-func TestForkChildRejectsImplicitForkSubagentRun(t *testing.T) {
-	ctx := toolpkg.WithForkChild(context.Background(), true)
-	err := guardForkChildImplicitFork(ctx, "")
-	if err == nil {
-		t.Fatalf("expected implicit fork rejection")
+// The one-level rule, call gate: every subagent management tool refuses to
+// run inside any subagent execution — a fork child, the default typed
+// subagent (which has no per-type table entry at all), or a custom type —
+// with the one fixed sentence. The primary agent's own context answers nil.
+func TestSubagentToolsRefuseInsideSubagentRuns(t *testing.T) {
+	names := subagentManagementToolNamesForTest()
+	if len(names) != 8 {
+		t.Fatalf("management tool name list = %v (len %d), want the eight known tools", names, len(names))
 	}
-	if !strings.Contains(err.Error(), "fork is not available inside a forked worker") {
-		t.Fatalf("unexpected error: %v", err)
+	// The wraps mirror what subagentExecContext actually builds: every kind
+	// carries the subagent-run marker, plus its own kind detail. The bare
+	// marker row proves the structural fact alone is enough.
+	kinds := map[string]func(ctx context.Context) context.Context{
+		"fork child": func(ctx context.Context) context.Context {
+			return toolpkg.WithSubagentRun(toolpkg.WithForkChild(ctx, true), true)
+		},
+		"general-purpose": func(ctx context.Context) context.Context {
+			return toolpkg.WithSubagentRun(toolpkg.WithSubagentType(ctx, "general-purpose"), true)
+		},
+		"custom type": func(ctx context.Context) context.Context {
+			return toolpkg.WithSubagentRun(toolpkg.WithSubagentType(ctx, "repo-scout"), true)
+		},
+		"structural marker": func(ctx context.Context) context.Context { return toolpkg.WithSubagentRun(ctx, true) },
+	}
+	for kind, wrap := range kinds {
+		for _, name := range names {
+			err := guardSubagentTool(wrap(context.Background()), Factory{}, name)
+			if err == nil || !strings.Contains(err.Error(), "subagent tools are only available to the primary agent") {
+				t.Fatalf("%s calling %s = %v, want the primary-agent-only refusal", kind, name, err)
+			}
+		}
+	}
+	// The dispatching conversation — the primary agent — is the one context
+	// these tools answer to.
+	if err := guardSubagentTool(context.Background(), Factory{}, "subagent_run"); err != nil {
+		t.Fatalf("primary agent calling subagent_run = %v, want nil (capacity defaults above 0)", err)
 	}
 }
 
-func TestForkChildRejectsSubagentLifecycleTools(t *testing.T) {
-	ctx := toolpkg.WithForkChild(context.Background(), true)
-	if err := guardForkChildNoSubagentTools(ctx); err == nil {
-		t.Fatalf("expected subagent lifecycle rejection")
+// subagentManagementToolNamesForTest pins the management tool list in test
+// space: if a ninth subagent_* tool is added to subagentToolName without
+// updating this list, the cross-check below fails; if it is added here without
+// a guard, the refusal test above fails. Either way a new tool cannot slip
+// past the one-level rule unnoticed.
+func subagentManagementToolNamesForTest() []string {
+	return []string{
+		"subagent_run", "subagent_fanout", "subagent_send", "subagent_status",
+		"subagent_wait", "subagent_continue", "subagent_close", "subagent_list",
 	}
 }
 
-func TestForkChildRejectsSubagentToolsEvenWithExplicitSubtype(t *testing.T) {
-	ctx := toolpkg.WithForkChild(context.Background(), true)
-	if err := guardForkChildNoSubagentTools(ctx); err == nil {
-		t.Fatalf("expected rejection for subagent tools in fork child")
+func TestSubagentManagementNameListMatchesTheGuardList(t *testing.T) {
+	for _, name := range subagentManagementToolNamesForTest() {
+		if !subagentToolName(name) {
+			t.Fatalf("%q is guarded in tests but missing from subagentToolName — the guards would not cover it", name)
+		}
 	}
-	if err := guardForkChildImplicitFork(ctx, "general-purpose"); err != nil {
-		t.Fatalf("implicit-fork guard should allow explicit subtype path: %v", err)
+}
+
+// The one-level rule, list gate: a subagent execution never even sees the
+// management tools, whatever kind it is, while every other tool survives.
+func TestSubagentToolListHidesManagementTools(t *testing.T) {
+	mkTools := func() []*llm.Tool {
+		out := make([]*llm.Tool, 0, 9)
+		for _, name := range subagentManagementToolNamesForTest() {
+			out = append(out, mustSubagentStubTool(t, name))
+		}
+		out = append(out, mustSubagentStubTool(t, "read_file"))
+		return out
+	}
+	for _, wrap := range []func(context.Context) context.Context{
+		func(ctx context.Context) context.Context {
+			return toolpkg.WithSubagentRun(toolpkg.WithForkChild(ctx, true), true)
+		},
+		func(ctx context.Context) context.Context {
+			return toolpkg.WithSubagentRun(toolpkg.WithSubagentType(ctx, "general-purpose"), true)
+		},
+		func(ctx context.Context) context.Context { return toolpkg.WithSubagentRun(ctx, true) },
+	} {
+		got := dropSubagentManagementTools(wrap(context.Background()), mkTools())
+		if len(got) != 1 || strings.TrimSpace(got[0].Name()) != "read_file" {
+			names := make([]string, 0, len(got))
+			for _, tl := range got {
+				names = append(names, tl.Name())
+			}
+			t.Fatalf("subagent run tool list = %v, want only read_file", names)
+		}
+	}
+	// The primary agent keeps the whole list.
+	if got := dropSubagentManagementTools(context.Background(), mkTools()); len(got) != 9 {
+		t.Fatalf("primary agent tool list lost tools: %d, want 9", len(got))
+	}
+}
+
+func mustSubagentStubTool(t *testing.T, name string) *llm.Tool {
+	t.Helper()
+	tl, err := llm.NewTool(name, "stub", func(ctx context.Context, in map[string]any) (string, error) {
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("stub tool %s: %v", name, err)
+	}
+	return tl
+}
+
+// The one-level rule, prepare gate: even if a caller sidestepped the call and
+// list gates, a dispatch whose caller context is a subagent execution is
+// refused before any worker session or run row is persisted.
+func TestPrepareSubagentRefusedFromSubagentRun(t *testing.T) {
+	owner := &Runner{Deps: &Deps{}, SubagentExecutor: noopSubagentExecutor{}}
+	for _, wrap := range []func(context.Context) context.Context{
+		func(ctx context.Context) context.Context {
+			return toolpkg.WithSubagentRun(toolpkg.WithForkChild(ctx, true), true)
+		},
+		func(ctx context.Context) context.Context {
+			return toolpkg.WithSubagentRun(toolpkg.WithSubagentType(ctx, "general-purpose"), true)
+		},
+		func(ctx context.Context) context.Context { return toolpkg.WithSubagentRun(ctx, true) },
+	} {
+		ctx := wrap(toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "session-1"), "parent-1"))
+		_, err := prepareSubagentExecution(ctx, Factory{AgentName: "main", Owner: owner}, "task-nested", "spawn a grandchild", "general-purpose")
+		if err == nil || !strings.Contains(err.Error(), "subagent tools are only available to the primary agent") {
+			t.Fatalf("prepare from a subagent run = %v, want the primary-agent-only refusal", err)
+		}
 	}
 }
 

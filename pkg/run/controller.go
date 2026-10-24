@@ -602,7 +602,9 @@ func effectiveToolsForContext(ctx context.Context, tools []*llm.Tool) []*llm.Too
 	if len(tools) == 0 {
 		return nil
 	}
-	out := tools
+	// List gate of the one-level rule: subagent_* tools are invisible inside
+	// any subagent run, regardless of subtype (a fork child carries none).
+	out := dropSubagentManagementTools(ctx, tools)
 	if subtype := strings.TrimSpace(tool.SubagentTypeFromContext(ctx)); subtype != "" {
 		return filterToolsForSubagentSubtype(ctx, subtype, out)
 	}

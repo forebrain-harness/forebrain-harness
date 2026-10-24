@@ -315,26 +315,12 @@ func execNew(ctx Context) Result {
 		return Result{Handled: true, Reply: "Could not start a new conversation: " + err.Error()}
 	}
 	title := "New Session"
-	// The new conversation opens on the model this one runs on: the choice is
-	// the user's and belongs to the conversation, so it must not travel
-	// through the shared configuration file — that is what used to make /model
-	// a cross-process switch. A source with no stored choice copies nothing:
-	// the new conversation then follows the configured default like any fresh
-	// one.
-	if src := strings.TrimSpace(ctx.SessionID); src != "" && src != sessionID {
-		if _, err := ctx.Sessions.CopySessionModelSelection(createCtx, src, sessionID); err != nil {
-			// Fatal to the inheritance, not to the conversation: it exists,
-			// and the reply says which part did not carry over.
-			return Result{
-				Handled:         true,
-				Reply:           "Started a new conversation, but the model of the conversation you left could not be carried over: " + err.Error(),
-				SessionChanged:  true,
-				SessionSwitched: true,
-				SessionID:       sessionID,
-				SessionTitle:    title,
-			}
-		}
-	}
+	// /new inherits no model on purpose (owner 2026-10-23, D4's sibling for
+	// models): a preset is a grant and must not sneak into a new session, and
+	// a model is a choice of the conversation that made it, not of the next
+	// one. The new conversation starts on the agent's most recently used
+	// model — the same rule every fresh conversation follows — which the run
+	// entry adopts as its own row when its first message goes out.
 	return Result{
 		Handled:         true,
 		Reply:           "Started a new conversation.",
@@ -1049,7 +1035,10 @@ func copySlashSessionState(ctx Context, sourceSessionID, targetSessionID string)
 	if err := state.Set(stateRoot, targetSessionID, modeState); err != nil {
 		return err
 	}
-	return copySlashModelSelection(ctx, sourceSessionID, targetSessionID)
+	if err := copySlashModelSelection(ctx, sourceSessionID, targetSessionID); err != nil {
+		return err
+	}
+	return copySlashPermissionPreset(ctx, sourceSessionID, targetSessionID)
 }
 
 // copySlashModelSelection makes the fork inherit the source session's model
@@ -1085,6 +1074,21 @@ func copySlashModelSelection(ctx Context, sourceSessionID, targetSessionID strin
 	}
 	if !copied && ctx.Surface == SurfaceTUI {
 		return fmt.Errorf("fork: the source session's model choice could not be copied")
+	}
+	return nil
+}
+
+// copySlashPermissionPreset makes the fork inherit the source session's
+// approval preset. Unlike the model choice there is nothing to materialise
+// first — the row either exists or it does not — and no row is a quiet no-op:
+// the fork then starts on the configuration default, which is exactly what
+// /new does on purpose.
+func copySlashPermissionPreset(ctx Context, sourceSessionID, targetSessionID string) error {
+	if ctx.Sessions == nil {
+		return nil
+	}
+	if _, err := ctx.Sessions.CopySessionPermissionPreset(ctx.commandContext(), sourceSessionID, targetSessionID); err != nil {
+		return fmt.Errorf("fork: inherit the source session's approval preset: %w", err)
 	}
 	return nil
 }

@@ -739,6 +739,12 @@ var planModeBlockedTools = map[string]struct{}{}
 // call. An entry here is a capability its type does not have at all, so the
 // call could only ever be refused and is better never offered.
 //
+// subagent_* tools are deliberately absent from every entry: no subagent —
+// typed, fork, or custom — may dispatch or manage subagents at all. That rule
+// is structural (IsSubagentRunFromContext, checked in GuardTool and the
+// dispatch guards in pkg/run), not a per-type table row, so a new type or a
+// forgotten entry cannot reintroduce nesting.
+//
 // request_permissions is deliberately absent from every entry. It is how an
 // agent asks the operator for access it does not have, and denying a subagent
 // the question is not a restriction on what it can reach — it only removes the
@@ -746,14 +752,26 @@ var planModeBlockedTools = map[string]struct{}{}
 // to read. A read-only type still cannot obtain write access through it:
 // normalizeRequestPermissionsInput refuses a write entry from a type that
 // TypedSubagentBlocksFileWrites reports on.
+// isSubagentManagementToolName reports whether name is one of the subagent
+// dispatch/management tools (run, fanout, send, continue, wait, status,
+// close, list). Together with IsSubagentRunFromContext it forms the
+// structural one-level rule: those tools answer to the primary agent only.
+func isSubagentManagementToolName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "subagent_run", "subagent_fanout", "subagent_send", "subagent_status",
+		"subagent_wait", "subagent_continue", "subagent_close", "subagent_list":
+		return true
+	default:
+		return false
+	}
+}
+
 var typedSubagentDisallowedTools = map[string]map[string]struct{}{
 	"explore": {
 		"write_file": {}, "edit_file": {},
-		"subagent_run": {}, "subagent_fanout": {}, "subagent_send": {}, "subagent_continue": {}, "subagent_close": {}, "subagent_wait": {}, "subagent_status": {}, "subagent_list": {},
 	},
 	"plan": {
 		"write_file": {}, "edit_file": {},
-		"subagent_run": {}, "subagent_fanout": {}, "subagent_send": {}, "subagent_continue": {}, "subagent_close": {}, "subagent_wait": {}, "subagent_status": {}, "subagent_list": {},
 	},
 	// plan-reviewer sees exactly what a plan subagent sees, because it has to
 	// do the same investigation: read the code the plan touches and form its own
@@ -765,7 +783,6 @@ var typedSubagentDisallowedTools = map[string]map[string]struct{}{
 	"plan-reviewer": {
 		"write_file": {}, "edit_file": {},
 		"enter_plan_mode": {}, "exit_plan_mode": {},
-		"subagent_run": {}, "subagent_fanout": {}, "subagent_send": {}, "subagent_continue": {}, "subagent_close": {}, "subagent_wait": {}, "subagent_status": {}, "subagent_list": {},
 	},
 	// goal-evaluator checks the workspace against a /goal objective, so it may
 	// read and run whatever a plan reviewer may, and nothing that changes the
@@ -773,22 +790,16 @@ var typedSubagentDisallowedTools = map[string]map[string]struct{}{
 	"goal-evaluator": {
 		"write_file": {}, "edit_file": {},
 		"enter_plan_mode": {}, "exit_plan_mode": {},
-		"subagent_run": {}, "subagent_fanout": {}, "subagent_send": {}, "subagent_continue": {}, "subagent_close": {}, "subagent_wait": {}, "subagent_status": {}, "subagent_list": {},
 	},
 	"verification": {
 		"write_file": {}, "edit_file": {},
-		"subagent_run": {}, "subagent_fanout": {}, "subagent_send": {}, "subagent_continue": {}, "subagent_close": {}, "subagent_wait": {}, "subagent_status": {}, "subagent_list": {},
 	},
 	"cavecrew-investigator": {
 		"write_file": {}, "edit_file": {},
-		"subagent_run": {}, "subagent_fanout": {}, "subagent_send": {}, "subagent_continue": {}, "subagent_close": {}, "subagent_wait": {}, "subagent_status": {}, "subagent_list": {},
 	},
-	"cavecrew-builder": {
-		"subagent_run": {}, "subagent_fanout": {}, "subagent_send": {}, "subagent_continue": {}, "subagent_close": {}, "subagent_wait": {}, "subagent_status": {}, "subagent_list": {},
-	},
+	"cavecrew-builder": {},
 	"cavecrew-reviewer": {
 		"write_file": {}, "edit_file": {},
-		"subagent_run": {}, "subagent_fanout": {}, "subagent_send": {}, "subagent_continue": {}, "subagent_close": {}, "subagent_wait": {}, "subagent_status": {}, "subagent_list": {},
 	},
 }
 
@@ -841,6 +852,11 @@ func (s *State) GuardTool(ctx context.Context, toolName string) error {
 	if name == "" {
 		return nil
 	}
+	// Structural rule, above every policy: a subagent execution never gets
+	// the subagent management tools, whatever its type or configuration.
+	if IsSubagentRunFromContext(ctx) && isSubagentManagementToolName(name) {
+		return fmt.Errorf("subagent tools are only available to the primary agent")
+	}
 	// A custom subagent's policy comes from this primary agent's configuration
 	// and travels on its run's context; every other type's stays the static
 	// table. When a policy is present it is the whole answer for that run, so a
@@ -890,6 +906,9 @@ func (s *State) ToolMetaByName(name string) (event.ToolMeta, bool) {
 }
 
 func GuardToolNameOnly(ctx context.Context, toolName string) error {
+	if IsSubagentRunFromContext(ctx) && isSubagentManagementToolName(strings.TrimSpace(toolName)) {
+		return fmt.Errorf("subagent tools are only available to the primary agent")
+	}
 	mode := strings.ToLower(strings.TrimSpace(ModeFromContext(ctx)))
 	name := strings.TrimSpace(toolName)
 	if mode == "" || mode == "agent" {

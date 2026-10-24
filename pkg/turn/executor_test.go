@@ -177,12 +177,16 @@ func TestBuildInitPromptExistingFile(t *testing.T) {
 
 // fakeNewSessionStore records the id/title pairs passed to Ensure.
 type fakeNewSessionStore struct {
-	ensuredID       string
-	ensuredTitle    string
-	copiedModel     bool
-	copiedModelErr  error
-	copiedModelFrom string
-	copiedModelTo   string
+	ensuredID        string
+	ensuredTitle     string
+	copiedModel      bool
+	copiedModelErr   error
+	copiedModelFrom  string
+	copiedModelTo    string
+	copiedPreset     bool
+	copiedPresetErr  error
+	copiedPresetFrom string
+	copiedPresetTo   string
 }
 
 func (f *fakeNewSessionStore) Ensure(ctx context.Context, id string, title string) error {
@@ -222,6 +226,12 @@ func (f *fakeNewSessionStore) CopySessionModelSelection(ctx context.Context, sou
 		return false, f.copiedModelErr
 	}
 	return f.copiedModel, nil
+}
+
+func (f *fakeNewSessionStore) CopySessionPermissionPreset(ctx context.Context, source, target string) (bool, error) {
+	f.copiedPresetFrom = source
+	f.copiedPresetTo = target
+	return f.copiedPreset, f.copiedPresetErr
 }
 
 // TestExecNewPersistsSessionIDAsTitleSentinel guards against regressing to a

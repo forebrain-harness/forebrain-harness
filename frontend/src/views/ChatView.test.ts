@@ -678,6 +678,37 @@ describe('ChatView conversation bubbles', () => {
     wrapper.unmount()
   })
 
+  it('shows the server-computed most recently used model on a new chat', async () => {
+    // The new-chat page never decides a model itself: the chip shows whatever
+    // /api/chat/model answers — which the server computes as the agent's most
+    // recently used model. Here the server names the chain's second entry, so
+    // the chip must say deepseek-chat, not the chain's first.
+    const defaultModel = vi.spyOn(forebrainApi, 'chatModelDefault').mockResolvedValue({
+      provider: 'deepseek',
+      model: 'deepseek-chat',
+      effort: '',
+      options: [
+        { provider: 'zhipuai', model: 'glm-5.3-flash', label: 'GLM 5.3 Flash', efforts: [], supportsImages: true },
+        { provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek Chat', efforts: [], supportsImages: false },
+      ],
+    })
+    const bySession = vi.spyOn(forebrainApi, 'sessionModel')
+    try {
+      const wrapper = await mountView()
+      await flushPromises()
+
+      const chip = wrapper.find('[data-testid="model-chip"]')
+      expect(chip.exists()).toBe(true)
+      expect(chip.text()).toContain('deepseek-chat')
+      expect(defaultModel).toHaveBeenCalled()
+      expect(bySession).not.toHaveBeenCalled()
+      wrapper.unmount()
+    } finally {
+      defaultModel.mockRestore()
+      bySession.mockRestore()
+    }
+  })
+
   it('draws an image refusal under its message and opens the model menu from it', async () => {
     setLocale('en')
     const sessionModel = vi.spyOn(forebrainApi, 'sessionModel').mockResolvedValue({

@@ -2512,6 +2512,37 @@ describe('conversation tool and approval timeline', () => {
     expect(denied.flatMap((message) => (message.blocks ?? []).filter((block) => block.kind === 'tool'))).toHaveLength(1)
   })
 
+  it('draws nothing for a call a queued message took the turn from', () => {
+    const toolRow = (callId: string, toolName: string, body: string) => ({
+      id: `t-${callId}`, rowId: 2, role: 'tool', content: '{}', toolStepId: callId,
+      partsJson: JSON.stringify([
+        { type: 'tool_result_meta', tool_call_id: callId },
+        { type: 'tool_display', body, summary: '', tool_meta_json: JSON.stringify({ tool_name: toolName, status: 'completed' }) },
+      ]),
+    })
+    const assistantParts = JSON.stringify([
+      { type: 'text', text: 'running them' },
+      {
+        type: 'tool_calls',
+        tool_calls: [
+          { id: 'call-1', type: 'function', function: { name: 'shell', arguments: '{}' } },
+          { id: 'call-2', type: 'function', function: { name: 'read_file', arguments: '{}' } },
+        ],
+      },
+    ])
+    const history = conversationFromTranscript([
+      { id: 'a1', rowId: 1, role: 'assistant', content: 'running them', partsJson: assistantParts },
+      toolRow('call-1', 'shell', 'one'),
+      toolRow('call-2', 'read_file', 'Not run — a queued user message took the turn first.'),
+    ] as unknown as Parameters<typeof conversationFromTranscript>[0])
+
+    // The call that ran keeps its card; the one a queued message took the turn
+    // from never ran, so the timeline draws nothing for it.
+    const tools = history.flatMap((message) => (message.blocks ?? []).filter((block) => block.kind === 'tool'))
+    expect(tools).toHaveLength(1)
+    expect((tools[0] as { step?: { stepId?: string } }).step?.stepId).toBe('call-1')
+  })
+
   it('places a gate record after the records already at its anchor, and only a gate draws nothing', () => {
     const anchor: TimelineBlock = { kind: 'gate', id: 'gate:call-1', stepId: 'call-1', actionId: 'act-1' }
     const firstLine: Extract<TimelineBlock, { kind: 'approval' }> = {

@@ -9,11 +9,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -1011,5 +1013,193 @@ func TestPermissionRequestHookCwdIsSessionProjectRoot(t *testing.T) {
 	}
 	if filepath.Clean(got.Cwd) == filepath.Clean(workspace) {
 		t.Fatalf("hook cwd leaked the main agent workspace %q", workspace)
+	}
+}
+
+// newPresetTestRunner returns a runner over a throwaway state database with
+// one owned session ("s") and its store, for the persisted-preset tests.
+func newPresetTestRunner(t *testing.T, trust safety.Level) (*Runner, *state.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('s','main','s',10,1,'/repo/s')`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	sessions := state.NewSessionStore(db, "main")
+	r := &Runner{
+		Deps: &Deps{
+			SessionStore: sessions,
+			// A non-nil config: MatchApprovalPreset reads the snapshot's
+			// sandbox through it, and a nil config never matches.
+			AppCfg: &appcfg.Root{},
+			LaunchProject: safety.ProjectContext{
+				Project:    safety.Project{Root: "/repo/s"},
+				TrustLevel: trust,
+			},
+		},
+		FileResolver: PathResolver{},
+	}
+	return r, sessions
+}
+
+func mustPreset(t *testing.T, id string) safety.ApprovalPreset {
+	t.Helper()
+	preset, ok := safety.ApprovalPresetByID(id)
+	if !ok {
+		t.Fatalf("unknown preset %q", id)
+	}
+	return preset
+}
+
+func presetSnapshotMatches(t *testing.T, r *Runner, sid string, want safety.ApprovalPreset) {
+	t.Helper()
+	snap := r.PermissionSnapshotForSession(sid)
+	preset, ok := safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(r.AppCfg, snap))
+	if !ok || preset.ID != want.ID {
+		t.Fatalf("live preset after apply = %+v ok=%v, want %q (mode=%q)", preset, ok, want.ID, snap.Mode)
+	}
+}
+
+// A stored row is applied at the run entry: the turn's permission store runs
+// under the preset the row names. A row that has not moved is not re-applied
+// (a manual drift survives), and a moved row wins back.
+func TestInjectSessionPermissionAppliesStoredRow(t *testing.T) {
+	r, sessions := newPresetTestRunner(t, safety.LevelTrusted)
+	ctx := tool.WithConversationSessionID(context.Background(), "s")
+	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetReadOnly, state.SessionPresetSourcePicker); err != nil {
+		t.Fatal(err)
+	}
+	r.injectSessionPermission(ctx)
+	presetSnapshotMatches(t, r, "s", mustPreset(t, safety.PresetReadOnly))
+
+	// The same row again: not re-applied, so a drift introduced after the
+	// first application stays until the row itself moves.
+	readOnly, _ := safety.ApprovalPresetByID(safety.PresetReadOnly)
+	fullAccess, _ := safety.ApprovalPresetByID(safety.PresetFullAccess)
+	for _, update := range fullAccess.SessionUpdates("s") {
+		r.ApplyPermissionUpdate(update)
+	}
+	r.injectSessionPermission(ctx)
+	presetSnapshotMatches(t, r, "s", fullAccess)
+
+	// A moved row wins back: the picker changed it on the other surface. The
+	// sleep crosses a millisecond tick so the row's updated_at really moves.
+	time.Sleep(2 * time.Millisecond)
+	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetReadOnly, state.SessionPresetSourcePicker); err != nil {
+		t.Fatal(err)
+	}
+	r.injectSessionPermission(ctx)
+	presetSnapshotMatches(t, r, "s", readOnly)
+}
+
+// No row, no inference: the configuration default stays in charge and
+// nothing is written.
+func TestInjectSessionPermissionNoRowLeavesDefault(t *testing.T) {
+	r, sessions := newPresetTestRunner(t, safety.LevelTrusted)
+	ctx := tool.WithConversationSessionID(context.Background(), "s")
+	r.injectSessionPermission(ctx)
+	if _, _, _, stored, err := sessions.SessionPermissionPreset(ctx, "s"); err != nil || stored {
+		t.Fatalf("preset row after a no-row inject: stored=%v err=%v", stored, err)
+	}
+}
+
+// A --yolo process records full-access for the session it runs; a later
+// process without the flag applies that row like any picker choice.
+func TestInjectSessionPermissionYoloRecordsAndALaterProcessApplies(t *testing.T) {
+	t.Setenv(safety.EnvYOLO, "1")
+	r, sessions := newPresetTestRunner(t, safety.LevelTrusted)
+	ctx := tool.WithConversationSessionID(context.Background(), "s")
+	r.injectSessionPermission(ctx)
+	preset, source, _, stored, err := sessions.SessionPermissionPreset(ctx, "s")
+	if err != nil || !stored || preset != safety.PresetFullAccess || source != state.SessionPresetSourceYolo {
+		t.Fatalf("yolo row = %q/%q stored=%v err=%v, want full-access/yolo", preset, source, stored, err)
+	}
+
+	// A second process (no YOLO) restores the same session: the row applies.
+	t.Setenv(safety.EnvYOLO, "")
+	r2, _ := newPresetTestRunner(t, safety.LevelTrusted)
+	r2.Deps.SessionStore = sessions
+	r2.injectSessionPermission(ctx)
+	presetSnapshotMatches(t, r2, "s", mustPreset(t, safety.PresetFullAccess))
+}
+
+// The trust gate: a persisted full-access executes as Default while the
+// working directory is not trusted; the row keeps the wider choice.
+func TestInjectSessionPermissionTrustGateNarrowsFullAccess(t *testing.T) {
+	r, sessions := newPresetTestRunner(t, safety.LevelUnknown)
+	ctx := tool.WithConversationSessionID(context.Background(), "s")
+	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetFullAccess, state.SessionPresetSourcePicker); err != nil {
+		t.Fatal(err)
+	}
+	r.injectSessionPermission(ctx)
+	presetSnapshotMatches(t, r, "s", mustPreset(t, safety.PresetDefault))
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetFullAccess || got.Effective != safety.PresetDefault {
+		t.Fatalf("preset state under the trust gate = %+v, want current=full-access effective=auto", got)
+	}
+	// The row itself is untouched.
+	if preset, _, _, stored, _ := sessions.SessionPermissionPreset(ctx, "s"); !stored || preset != safety.PresetFullAccess {
+		t.Fatalf("row narrowed by the gate = %q stored=%v, want full-access", preset, stored)
+	}
+}
+
+// Lazy inference: a session with no row whose newest tool result carries the
+// YOLO bypass marker answers full-access/observed and is recorded once.
+func TestSessionPresetForInfersLegacyYoloSessions(t *testing.T) {
+	r, sessions := newPresetTestRunner(t, safety.LevelTrusted)
+	ctx := tool.WithConversationSessionID(context.Background(), "s")
+	if _, err := sessions.DB().Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('s','tool','visible','{"output":"ok","approval_bypassed_by_yolo":true}',10)`); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetFullAccess || got.Effective != safety.PresetFullAccess || got.Source != state.SessionPresetSourceObserved {
+		t.Fatalf("inferred preset = %+v, want full-access/observed", got)
+	}
+	preset, source, _, stored, err := sessions.SessionPermissionPreset(ctx, "s")
+	if err != nil || !stored || preset != safety.PresetFullAccess || source != state.SessionPresetSourceObserved {
+		t.Fatalf("inferred row = %q/%q stored=%v err=%v", preset, source, stored, err)
+	}
+	// Recorded once: the row now answers, the tool results no longer matter.
+	if _, err := sessions.DB().Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('s','tool','visible','{"output":"asked"}',11)`); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetFullAccess || got.Source != state.SessionPresetSourceObserved {
+		t.Fatalf("preset after the inferred row = %+v, want the recorded row to answer", got)
+	}
+}
+
+// The shared reading the surfaces show: no row and no memory says the
+// configuration default; a YOLO environment says full-access without reading
+// anything.
+func TestSessionPresetForFallsBackToConfigAndYOLO(t *testing.T) {
+	// AppCfg stays nil: with no row and no in-memory preset the answer is
+	// the zero state regardless of what the configuration would match.
+	r, _ := newPresetTestRunner(t, safety.LevelTrusted)
+	ctx := tool.WithConversationSessionID(context.Background(), "s")
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != "" || got.Effective != "" || got.Source != "" {
+		t.Fatalf("no row, no memory = %+v, want the zero answer", got)
+	}
+	t.Setenv(safety.EnvYOLO, "1")
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetFullAccess || got.Source != state.SessionPresetSourceYolo {
+		t.Fatalf("yolo answer = %+v, want full-access/yolo", got)
+	}
+}
+
+// Single approvals never reach the table: only the preset pair persists, so
+// a session grant leaves no row behind.
+func TestSessionGrantsDoNotPersistAPresetRow(t *testing.T) {
+	r, sessions := newPresetTestRunner(t, safety.LevelTrusted)
+	ctx := tool.WithConversationSessionID(context.Background(), "s")
+	r.ApplyPermissionUpdate(safety.PermissionUpdate{
+		Type:        safety.UpdateAddRules,
+		Destination: safety.DestinationSession,
+		SessionID:   "s",
+		Behavior:    safety.BehaviorAllow,
+		Rules:       []safety.PermissionRuleValue{{ToolName: "Bash", RuleContent: "npm run:*"}},
+	})
+	if _, _, _, stored, err := sessions.SessionPermissionPreset(ctx, "s"); err != nil || stored {
+		t.Fatalf("a session grant wrote a preset row: stored=%v err=%v", stored, err)
 	}
 }

@@ -2668,6 +2668,51 @@ func TestReplaySealsTheResponseThatIssuedACardlessGate(t *testing.T) {
 	}
 }
 
+// assistantToolCallsRow builds an assistant row that issued several tool calls
+// in one reply.
+func assistantToolCallsRow(text string, calls ...llm.ToolCall) state.Message {
+	return state.Message{
+		Role: "assistant", Content: text,
+		PartsJSON: state.MessagePartsJSON(llm.AssistantMessage(nil, calls...), text),
+		CreatedAt: 100,
+	}
+}
+
+// A call a queued user message took the turn from never ran: its row carries
+// the drop key, so the replay draws no card for it — not even a canceled one.
+// The call that did run keeps its card.
+func TestReplayDropsTheCallAQueuedMessageTookTheTurnFrom(t *testing.T) {
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "run the commands", CreatedAt: 99},
+		assistantToolCallsRow("running them",
+			llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"echo one"}`}},
+			llm.ToolCall{ID: "call-2", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"server.go"}`}},
+		),
+		toolRowWithDisplay(3, "call-1", "one", `{"tool_name":"shell","status":"completed"}`),
+		toolRowWithDisplay(4, "call-2", tool.SteerPreemptedDisplayKey, `{"tool_name":"read_file","status":"not_run"}`),
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, turns, nil, &Reducer{}, nil)
+
+	var cards []string
+	for i := range renderer.vm.blocks {
+		f := renderer.vm.blocks[i].frame
+		if f.Kind != FrameTool {
+			continue
+		}
+		cards = append(cards, f.StepID)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("tool cards = %v, want only the call that ran", cards)
+	}
+	if cards[0] != "call-1" {
+		t.Fatalf("the surviving card is %q, want the call that ran", cards[0])
+	}
+}
+
 // The orphan rebuild the exit gate opted out of still serves every other call:
 // a non-gate call issued but never answered replays as the one canceled card
 // live stamped on it when the run aborted.

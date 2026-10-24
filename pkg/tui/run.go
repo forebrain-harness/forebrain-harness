@@ -3709,6 +3709,12 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 	}
 	defer func() {
 		renderer.FinishTransientStatus(transientSourceWorking)
+		// A turn is also when a session without a model row gains one: the
+		// run entry adopts the most recently used model for a new session, or
+		// writes the actually-used one for an older one (D9a). The footer was
+		// repainted at submission from the pre-turn answer; repaint from the
+		// row the turn just wrote so it names what the next turn runs on.
+		refreshSessionFooter(renderer, session, sessionID)
 	}()
 	defer stopStatusOnce()
 	foreground := foregroundTurnFrom(ctx)

@@ -1340,3 +1340,174 @@ func TestResolveMemoryLLMProviderUsesDefaultModel(t *testing.T) {
 		t.Fatalf("memory default absent = %+v, want first entry gpt-4o", got)
 	}
 }
+
+// The new-session default: a conversation with no row adopts the agent's most
+// recently used model as its own row on its first message; an older session
+// with messages but no row keeps the configuration default for this turn and
+// gets that model written as its row (D9a); a session outside the scope
+// (scheduled fire) adopts and writes nothing.
+func TestNewSessionModelAdoptionAtRunEntry(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingSessionLLM{}
+	r, store := newSessionRoutingRunner(t, rec)
+
+	// The "most recently used" source: another conversation that chose gpt-b.
+	if err := store.Ensure(ctx, "used-b", "used-b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "used-b", state.SessionModelSelection{Provider: "openai", Model: "gpt-b", Effort: "high"}); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh conversation: exists, holds no message, has no row.
+	if err := store.Ensure(ctx, "fresh", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.Run(llm.WithAgentSessionID(ctx, "fresh"), "hello"); err != nil {
+		t.Fatalf("Run(fresh): %v", err)
+	}
+	if got := builtSnapshot(rec); len(got) != 1 || got[0] != "openai/gpt-b/high" {
+		t.Fatalf("fresh session ran on %v, want the most recently used openai/gpt-b/high", got)
+	}
+	row, ok, err := store.SessionModelSelection(ctx, "fresh")
+	if err != nil || !ok {
+		t.Fatalf("fresh session row after first message: ok=%v err=%v", ok, err)
+	}
+	if row.Provider != "openai" || row.Model != "gpt-b" || row.Effort != "high" {
+		t.Fatalf("fresh session row = %+v, want openai/gpt-b/high adopted as its own", row)
+	}
+
+	// D9a: a session older than the table — it has messages, no row. This
+	// turn still runs on the configuration default (gpt-a, the first entry)
+	// and the turn writes that model as its row.
+	if err := store.Ensure(ctx, "legacy", "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	// A legacy session has model output but no row. (The user row alone
+	// would not make it legacy: surfaces persist the current turn's user
+	// message before the run entry, so only non-user rows count.)
+	if _, err := store.DB().Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('legacy','user','visible','old turn',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('legacy','assistant','visible','old answer',2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run(llm.WithAgentSessionID(ctx, "legacy"), "hello again"); err != nil {
+		t.Fatalf("Run(legacy): %v", err)
+	}
+	if got := builtSnapshot(rec); len(got) != 2 || got[1] != "openai/gpt-a/" {
+		t.Fatalf("legacy session ran on %v, want the configuration default openai/gpt-a", got)
+	}
+	row, ok, err = store.SessionModelSelection(ctx, "legacy")
+	if err != nil || !ok {
+		t.Fatalf("legacy session row after its turn: ok=%v err=%v", ok, err)
+	}
+	if row.Provider != "openai" || row.Model != "gpt-a" {
+		t.Fatalf("legacy session row = %+v, want openai/gpt-a (what it actually ran on)", row)
+	}
+}
+
+// A derived default never refuses anything: when the newest row's model is no
+// longer configured, a new session silently falls back to the configuration
+// default — the refusal is reserved for a model the user explicitly chose
+// (TestRunContentRefusesStaleSessionModelRow).
+func TestNewSessionFallsBackWhenLatestUnresolvable(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingSessionLLM{}
+	r, store := newSessionRoutingRunner(t, rec)
+
+	if err := store.Ensure(ctx, "gone", "gone"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "gone", state.SessionModelSelection{Provider: "openai", Model: "gpt-gone"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure(ctx, "fresh", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.Run(llm.WithAgentSessionID(ctx, "fresh"), "hello"); err != nil {
+		t.Fatalf("Run(fresh) with an unresolvable newest row: %v", err)
+	}
+	// "-" is the recorder's "no carried selection": nothing was adopted, so
+	// the turn routes on the runner's published default (gpt-a, the first
+	// configured entry) exactly as before — no error, no substitution.
+	if got := builtSnapshot(rec); len(got) != 1 || got[0] != "-" {
+		t.Fatalf("fresh session ran on %v, want no carried selection (runner default)", got)
+	}
+	if _, ok, err := store.SessionModelSelection(ctx, "fresh"); err != nil || ok {
+		t.Fatalf("fresh session row: ok=%v err=%v, want none (nothing resolvable to adopt)", ok, err)
+	}
+	// NewSessionModel itself answers zero for an unresolvable newest row.
+	if got := NewSessionModel(r, store); got.Set {
+		t.Fatalf("NewSessionModel = %+v, want the zero state", got)
+	}
+}
+
+// Sessions outside the D8 scope adopt nothing and keep nothing fresh: a
+// scheduled fire's turn neither adopts the most recently used model nor
+// writes a row, so it never becomes anyone's default.
+func TestOutOfScopeSessionsAdoptAndTouchNothing(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingSessionLLM{}
+	r, store := newSessionRoutingRunner(t, rec)
+
+	if err := store.Ensure(ctx, "used-b", "used-b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "used-b", state.SessionModelSelection{Provider: "openai", Model: "gpt-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd, source) VALUES('fire','main','fire',5,1,'/repo/s','cron')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.Run(llm.WithAgentSessionID(ctx, "fire"), "tick"); err != nil {
+		t.Fatalf("Run(fire): %v", err)
+	}
+	// No carried selection: the fire routes on the runner's configuration
+	// default as it always did, and adopts nothing.
+	if got := builtSnapshot(rec); len(got) != 1 || got[0] != "-" {
+		t.Fatalf("scheduled fire ran on %v, want no carried selection", got)
+	}
+	if _, ok, err := store.SessionModelSelection(ctx, "fire"); err != nil || ok {
+		t.Fatalf("scheduled fire row: ok=%v err=%v, want none", ok, err)
+	}
+	// The fire's turn did not refresh the conversation row either.
+	sel, ok, err := store.LatestSessionModelSelection(ctx)
+	if err != nil || !ok || sel.Model != "gpt-b" {
+		t.Fatalf("latest after the fire = %+v ok=%v err=%v, want unchanged gpt-b", sel, ok, err)
+	}
+}
+
+// A turn on a stored row refreshes it, making that session the most recently
+// used one — the every-turn half of the same rule (B5 scenario iii).
+func TestTurnOnStoredRowRefreshesRecency(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingSessionLLM{}
+	r, store := newSessionRoutingRunner(t, rec)
+
+	for _, sid := range []string{"a-first", "b-second"} {
+		if err := store.Ensure(ctx, sid, sid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "a-first", state.SessionModelSelection{Provider: "openai", Model: "gpt-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "b-second", state.SessionModelSelection{Provider: "openai", Model: "gpt-b"}); err != nil {
+		t.Fatal(err)
+	}
+	// Run the older one: its row must become the newest.
+	if _, err := r.Run(llm.WithAgentSessionID(ctx, "a-first"), "hello"); err != nil {
+		t.Fatalf("Run(a-first): %v", err)
+	}
+	sel, ok, err := store.LatestSessionModelSelection(ctx)
+	if err != nil || !ok || !strings.Contains(sel.Model, "gpt") || sel.Model != "gpt-a" {
+		t.Fatalf("latest after a-first's turn = %+v ok=%v err=%v, want gpt-a refreshed to the top", sel, ok, err)
+	}
+	// And the reading surfaces share: NewSessionModel answers the refreshed row.
+	if got := NewSessionModel(r, store); !got.Set || got.Model != "gpt-a" {
+		t.Fatalf("NewSessionModel = %+v, want gpt-a after its session's turn", got)
+	}
+}

@@ -279,12 +279,30 @@ export function parseStoredToolCalls(partsJson?: string | null): StoredToolCall[
 export const PLAN_REVIEW_DELIVERED_KEY = 'Plan review delivered — the planner is revising the plan.'
 
 /**
+ * The body a tool row carries when the run never started that call because a
+ * queued user message took the turn first. The call never ran, so no surface
+ * draws it: every replay projection that meets the key drops the row whole.
+ * Must stay byte-identical with the runtime's
+ * tool.SteerPreemptedDisplayKey.
+ */
+export const STEER_PREEMPTED_KEY = 'Not run — a queued user message took the turn first.'
+
+/**
  * isPlanReviewDeliveredRow reports whether a stored tool row is the delivery
  * drop key: such a row is internal handoff plumbing, so the timeline draws
  * nothing for it.
  */
 function isPlanReviewDeliveredRow(row: { partsJson?: string | null }): boolean {
   return String(parseToolDisplayPart(row.partsJson).body ?? '').trim() === PLAN_REVIEW_DELIVERED_KEY
+}
+
+/**
+ * isSteerPreemptedRow reports whether a stored tool row is the drop key of a
+ * call a queued user message took the turn from before it started. The call
+ * never ran, so the timeline draws nothing for it.
+ */
+function isSteerPreemptedRow(row: { partsJson?: string | null }): boolean {
+  return String(parseToolDisplayPart(row.partsJson).body ?? '').trim() === STEER_PREEMPTED_KEY
 }
 
 /**
@@ -799,6 +817,9 @@ export function conversationFromTranscript(
       // approval confirmation line.
       if (isPlanReviewDeliveredRow(row)) return
       if (isCanceledExitRow(row)) return
+      // A call a queued user message took the turn from never ran: the row's
+      // body is the drop key, so the row draws nothing.
+      if (isSteerPreemptedRow(row)) return
       const current = openTurn(row, index)
       drawn.add(stepId)
       current.blocks = [...(current.blocks ?? []), { kind: 'tool', step: toolStepFromRow(row, calls.get(stepId)) }]
@@ -840,6 +861,9 @@ export function conversationFromTranscript(
       // (from its execution's events): a second, canceled card for the same
       // call would be a card the terminal does not show.
       if (!answer && isSubagentDispatchTool(String(call.name ?? ''))) continue
+      // A call a queued user message took the turn from never ran: its row is
+      // the drop key, so no card is drawn for it.
+      if (answer && isSteerPreemptedRow(answer)) continue
       current.blocks = [...(current.blocks ?? []), {
         kind: 'tool',
         // A call with no tool row never ran: the gate the user canceled, or a

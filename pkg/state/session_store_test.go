@@ -1388,6 +1388,164 @@ func TestSessionModelSelectionRoundTripAndOverwrite(t *testing.T) {
 	}
 }
 
+// The "most recently used" model is the newest row among this agent's own
+// conversation and workshop sessions only — scheduled fires, channel
+// conversations and subagent workers never count, another agent's rows are
+// invisible, and a touch refreshes the time without touching the model.
+func TestLatestSessionModelSelectionScopesAndTouch(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	seed := func(id, agent, source string, at int64, provider, model string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd, source) VALUES(?,?,?,?,?,?,?)`,
+			id, agent, id, at, 1, "/repo/s", source); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+		if provider != "" {
+			if _, err := db.Exec(`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at) VALUES(?,?,?,?,?)`,
+				id, provider, model, "", at); err != nil {
+				t.Fatalf("seed row %s: %v", id, err)
+			}
+		}
+	}
+	seed("old-talk", "main", "", 100, "openai", "gpt-old")
+	seed("workshop-late", "main", "workshop", 300, "anthropic", "claude-late")
+	seed("cron-fire", "main", "cron", 900, "zhipuai", "glm-cron")
+	seed("chan", "main", "telegram", 800, "zhipuai", "glm-chan")
+	seed("worker", "main", "subagent", 700, "zhipuai", "glm-worker")
+	seed("other-agent", "other", "", 950, "openai", "gpt-theirs")
+
+	mine := NewSessionStore(db, "main")
+	sel, ok, err := mine.LatestSessionModelSelection(ctx)
+	if err != nil || !ok || sel.Provider != "anthropic" || sel.Model != "claude-late" {
+		t.Fatalf("latest = %+v ok=%v err=%v, want workshop-late's claude-late", sel, ok, err)
+	}
+
+	// Touch makes an ordinary conversation the most recently used, without
+	// changing its model; it does not reach another agent's sessions.
+	if err := mine.TouchSessionModelSelection(ctx, "old-talk"); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	sel, ok, err = mine.LatestSessionModelSelection(ctx)
+	if err != nil || !ok || sel.Provider != "openai" || sel.Model != "gpt-old" {
+		t.Fatalf("latest after touch = %+v ok=%v err=%v, want old-talk's gpt-old", sel, ok, err)
+	}
+	var provider, model string
+	var at int64
+	if err := db.QueryRow(`SELECT provider, model, updated_at FROM fb_session_model_state WHERE session_id='old-talk'`).Scan(&provider, &model, &at); err != nil {
+		t.Fatal(err)
+	}
+	if provider != "openai" || model != "gpt-old" {
+		t.Fatalf("touch changed the model: %s/%s", provider, model)
+	}
+	if at <= 300 {
+		t.Fatalf("touch did not move updated_at past the workshop row: %d", at)
+	}
+	// A ghost session and another agent's session are quiet no-ops.
+	if err := mine.TouchSessionModelSelection(ctx, "ghost"); err != nil {
+		t.Fatalf("touch ghost: %v", err)
+	}
+	if err := mine.TouchSessionModelSelection(ctx, "other-agent"); err != nil {
+		t.Fatalf("touch another agent's session: %v", err)
+	}
+	var otherAt int64
+	if err := db.QueryRow(`SELECT updated_at FROM fb_session_model_state WHERE session_id='other-agent'`).Scan(&otherAt); err != nil {
+		t.Fatal(err)
+	}
+	if otherAt != 950 {
+		t.Fatalf("touch reached another agent's row: %d", otherAt)
+	}
+
+	// A fresh agent with no rows answers nothing.
+	fresh := NewSessionStore(db, "nobody")
+	if _, ok, err := fresh.LatestSessionModelSelection(ctx); err != nil || ok {
+		t.Fatalf("fresh agent latest: ok=%v err=%v", ok, err)
+	}
+}
+
+// The permission-preset row follows the model-selection row's rules: write and
+// read back, last write wins, another primary agent sees nothing, /fork copies
+// and /new (a fresh row) does not, deleting the session takes the row with it,
+// and the lazy YOLO observation reads the newest tool result only.
+func TestSessionPermissionPresetRoundTripOwnershipAndCascade(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	mustExec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	mustExec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('s','main','s',10,1,'/repo/s')`)
+	mustExec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('forked','main','f',11,2,'/repo/s')`)
+	mustExec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('fresh','main','n',12,3,'/repo/s')`)
+
+	store := NewSessionStore(db, "main")
+	stored, err := store.SaveSessionPermissionPreset(ctx, "s", "full-access", SessionPresetSourcePicker)
+	if err != nil || !stored {
+		t.Fatalf("save: stored=%v err=%v", stored, err)
+	}
+	// Last write wins, source travels with it.
+	if stored, err = store.SaveSessionPermissionPreset(ctx, "s", "auto", SessionPresetSourcePicker); err != nil || !stored {
+		t.Fatalf("overwrite: stored=%v err=%v", stored, err)
+	}
+	preset, source, _, ok, err := store.SessionPermissionPreset(ctx, "s")
+	if err != nil || !ok || preset != "auto" || source != SessionPresetSourcePicker {
+		t.Fatalf("read back = %q/%q ok=%v err=%v, want auto/picker", preset, source, ok, err)
+	}
+
+	// A ghost session stores nothing and reads nothing.
+	if stored, err = store.SaveSessionPermissionPreset(ctx, "ghost", "auto", SessionPresetSourcePicker); err != nil || stored {
+		t.Fatalf("ghost save: stored=%v err=%v", stored, err)
+	}
+	if _, _, _, ok, err := store.SessionPermissionPreset(ctx, "ghost"); err != nil || ok {
+		t.Fatalf("ghost read: ok=%v err=%v", ok, err)
+	}
+
+	// /fork inherits; a fresh target with no source row stays empty.
+	copied, err := store.CopySessionPermissionPreset(ctx, "s", "forked")
+	if err != nil || !copied {
+		t.Fatalf("fork copy: copied=%v err=%v", copied, err)
+	}
+	if preset, _, _, ok, _ := store.SessionPermissionPreset(ctx, "forked"); !ok || preset != "auto" {
+		t.Fatalf("forked preset = %q ok=%v, want auto", preset, ok)
+	}
+	if copied, err = store.CopySessionPermissionPreset(ctx, "fresh", "forked"); err != nil || copied {
+		t.Fatalf("copy from a source with no row: copied=%v err=%v", copied, err)
+	}
+
+	// Another primary agent owns neither the row nor the write.
+	mine, theirs := NewSessionStore(db, "main"), NewSessionStore(db, "other")
+	if _, err = theirs.SaveSessionPermissionPreset(ctx, "s", "read-only", SessionPresetSourcePicker); err == nil {
+		t.Fatal("another agent stored a preset on a session it does not own")
+	}
+	if _, _, _, ok, err := theirs.SessionPermissionPreset(ctx, "s"); err == nil || ok {
+		t.Fatalf("another agent read the row: ok=%v err=%v, want the ownership refusal", ok, err)
+	}
+	if _, _, _, ok, err := mine.SessionPermissionPreset(ctx, "s"); err != nil || !ok {
+		t.Fatalf("owning agent lost the row: ok=%v err=%v", ok, err)
+	}
+
+	// Lazy YOLO observation: the newest tool result decides, older ones do not.
+	mustExec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('s','tool','visible','{"output":"ok","approval_bypassed_by_yolo":true}',10)`)
+	if saw, err := store.SessionLastToolResultBypassedApprovals(ctx, "s"); err != nil || !saw {
+		t.Fatalf("yolo observation = %v err=%v, want true", saw, err)
+	}
+	mustExec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('s','tool','visible','{"output":"asked this time"}',11)`)
+	if saw, err := store.SessionLastToolResultBypassedApprovals(ctx, "s"); err != nil || saw {
+		t.Fatalf("yolo observation after a normal tool result = %v err=%v, want false", saw, err)
+	}
+	if saw, err := store.SessionLastToolResultBypassedApprovals(ctx, "fresh"); err != nil || saw {
+		t.Fatalf("yolo observation without tool results = %v err=%v, want false", saw, err)
+	}
+
+	// Deleting the session releases the row (ON DELETE CASCADE).
+	mustExec(`DELETE FROM fb_sessions WHERE id='s'`)
+	if _, _, _, ok, err := store.SessionPermissionPreset(ctx, "s"); err != nil || ok {
+		t.Fatalf("preset row survived session delete: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestSessionModelSelectionSaveNeedsASessionRow(t *testing.T) {
 	ctx := context.Background()
 	store := NewSessionStore(openStateDB(t), "owner")
