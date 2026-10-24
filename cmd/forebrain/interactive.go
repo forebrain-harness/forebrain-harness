@@ -29,8 +29,6 @@ var interactiveIsTerminal = func(f *os.File) bool {
 	return f != nil && term.IsTerminal(int(f.Fd()))
 }
 var interactiveEnsureWorkspaceTrusted = ensureWorkspaceTrusted
-var interactiveEnsureProjectMCPConsent = ensureProjectMCPConsent
-var interactiveEnsureProjectLSPConsent = ensureProjectLSPConsent
 var interactiveNeedsFirstSetup = tui.NeedsFirstSetup
 var onboardRunner = tui.RunOnboarding
 var interactiveRunOnboard = onboardRunner
@@ -86,18 +84,6 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 	}
 	if !allowed {
 		return tui.ErrCancelled
-	}
-	// Project-level MCP entries are confirmed right after the trust prompt:
-	// the list is frozen for the session, so startup is the only moment to
-	// ask. Anything left unconfirmed stays out of the session.
-	if err := interactiveEnsureProjectMCPConsent(cmd.InOrStdin(), cmd.OutOrStdout(), root, launchRoot); err != nil {
-		return err
-	}
-	// The project's language-server entries follow the same rule, asked
-	// right after the MCP ones (spec §5.2): an unconfirmed entry does not
-	// apply, not even as an override of a built-in server.
-	if err := interactiveEnsureProjectLSPConsent(cmd.InOrStdin(), cmd.OutOrStdout(), root, launchRoot); err != nil {
-		return err
 	}
 	restoreLog := tui.RedirectProcessLoggingForTUI(root)
 	defer restoreLog()
@@ -206,8 +192,7 @@ const (
 // launch that runs before the TUI paints its own. The trust prompt is a
 // selector, onboarding draws its own caret and opening the session takes no
 // input, so a bare caret blinking under the last prompt only claims the
-// terminal wants typing when it does not. The one line typed at the caret,
-// the project-MCP confirmation, shows it while it waits for the answer.
+// terminal wants typing when it does not.
 //
 // Hiding it obliges the launch to bring it back on every way out. A return
 // does so through restore. An interrupt while the terminal is still cooked

@@ -661,11 +661,14 @@ func Run(ctx context.Context, opts Options) error {
 		cmds.printSessionResumeContext(state.sessionID)
 	}
 
+	// The TUI is drawn first, then the project's servers are asked about on
+	// one panel: the answer comes before the project runner is built, so the
+	// servers allowed here are in at its first startup.
+	askProjectServers(cmds, renderer)
 	// The conversation's runtime comes up here, strictly after the notify sink
 	// exists: the MCP watch's subscription replays the runner's current state,
 	// and a replay delivered before there is anywhere to deliver it is a status
-	// line that simply never appears. The project consent panel (plans/112)
-	// goes before this line.
+	// line that simply never appears.
 	startConversationRuntime(ctx, opts.Session, renderer, state.sessionID)
 
 	// After the replay, so an approval this session left unfinished is reported
@@ -4114,17 +4117,6 @@ type mcpStartupSkipper interface {
 	SkipOptionalMCPStartup() bool
 }
 
-// projectMCPConsenter is the session-side half of the project MCP consent
-// path: the entries nobody has decided about yet, the answers, and a
-// reconcile so an entry allowed just now connects in the conversation that is
-// being entered. It is optional, so a surface (or a test's fake session) that
-// does not offer the consent simply does not implement it.
-type projectMCPConsenter interface {
-	PendingProjectMCPConsents() []mcp.PendingProjectConsent
-	DecideProjectMCPConsents(allowed []string) error
-	ReconcileSessionMCP() error
-}
-
 // mcpStatusLine owns the MCP startup status line for one terminal.
 //
 // The line is installed as a timed source rather than as fixed text because its
@@ -4754,61 +4746,16 @@ func refreshSessionFooter(renderer *Renderer, session Session, sessionID string)
 	renderer.SetComposerTokenStats("", initialComposerTokenStats(session, sessionID))
 }
 
-// askProjectMCPConsentBeforeSwitch offers the project-level MCP entries this
-// project declares that nobody has decided about yet, one question each,
-// before the surface enters the target conversation: the answer decides what
-// that conversation's own MCP reconcile finds, so the servers the user allowed
-// are up in the session being entered rather than one session later.
-func askProjectMCPConsentBeforeSwitch(cmds *commandController, renderer *Renderer) {
-	if cmds == nil || cmds.selector == nil {
-		return
-	}
-	c, ok := cmds.session.(projectMCPConsenter)
-	if !ok {
-		return
-	}
-	pending := c.PendingProjectMCPConsents()
-	if len(pending) == 0 {
-		return
-	}
-	var allowed []string
-	for _, entry := range pending {
-		label := "Project MCP: " + strings.TrimSpace(entry.Summary) +
-			"\nRun it in this project? The answer is remembered for this project; change it later on the project page's MCP tab."
-		items := []SelectItem{
-			{Label: "Allow it to run", Description: "It starts in this conversation and in every later one."},
-			{Label: "Keep it out", Description: "It does not run; you can allow it later on the project page's MCP tab."},
-		}
-		idx, okSel, err := cmds.selector.SelectRich(label, items, 0)
-		if err != nil {
-			if renderer != nil {
-				renderer.PrintError(err)
-			}
-			return
-		}
-		if !okSel {
-			// Esc: nothing is recorded, so the next session asks again.
-			return
-		}
-		if idx == 0 {
-			allowed = append(allowed, entry.Name)
-		}
-	}
-	if err := c.DecideProjectMCPConsents(allowed); err != nil && renderer != nil {
-		renderer.PrintError(err)
-	}
-}
-
 func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, title string, rawLine string, outcome SlashOutcome) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
 	if state == nil {
 		return false, false, ComposerSubmission{}, false
 	}
 	reply := Frame{Kind: FrameSystem, Title: strings.TrimSpace(title), Content: strings.TrimSpace(outcome.Reply), Final: true}
 	if outcome.SessionSwitched && strings.TrimSpace(outcome.SessionID) != "" {
-		// The project's MCP entries are asked about before the switch: the
-		// answer is what the target conversation's own MCP reconcile reads,
-		// so an entry allowed here is up in the session being entered.
-		askProjectMCPConsentBeforeSwitch(cmds, renderer)
+		// The project's servers are confirmed before the target conversation
+		// is entered: the reconcile entering it runs against the project
+		// runner, so an entry allowed here is up in the session being entered.
+		askProjectServers(cmds, renderer)
 		// The reply is only true once the switch itself succeeded: the
 		// activation runs first, and a failure keeps the outgoing session —
 		// reporting the created target as recoverable rather than entered.

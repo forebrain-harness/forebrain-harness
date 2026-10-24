@@ -97,8 +97,8 @@ type lspEnv struct {
 }
 
 // loadLSPEnv resolves the runtime context and the project a subcommand acts
-// on. A trust-lookup failure is not an error: like mcp_consent.go, the
-// subcommands fail closed — no project, no trust, nothing starts.
+// on. A trust-lookup failure is not an error: the subcommands fail closed —
+// no project, no trust, nothing starts.
 func loadLSPEnv(projectDir string) (lspEnv, error) {
 	rt, err := process.Resolve()
 	if err != nil {

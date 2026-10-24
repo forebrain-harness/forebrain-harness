@@ -28,6 +28,7 @@ import (
 	statepkg "github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
+	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/require"
 )
 
@@ -6462,5 +6463,144 @@ func TestRosterOwnsOnlyEmptyEnterAndX(t *testing.T) {
 		if st.rosterOwnsLine(line) {
 			t.Errorf("unfocused, line %q: the roster must own nothing", line)
 		}
+	}
+}
+
+// run.go's TransportRetryMsg branch withdraws the dead stream's live blocks
+// for BOTH notices, so the exhaustion timeline — whose only notice after the
+// final dead attempt is the Cleared one — leaves the sealed history alone in
+// the view, the same way a mid-turn retry does.
+func TestClearedTransportRetryWithdrawsTheFinalDeadAttempt(t *testing.T) {
+	tracker := NewTracker()
+	var reducer Reducer
+	reducer.WithTracker(tracker)
+	renderer := &Renderer{}
+	renderer.vm.append(Frame{Kind: FrameThinking, Content: "sealed thought", Final: true})
+	// The final dead attempt's partial, streamed after the last retry was
+	// announced; only the deferred Cleared notice follows it.
+	renderer.vm.append(Frame{Kind: FrameAssistant, Content: "partial answer that never"})
+
+	m := TransportRetryMsg{Retry: 2, Total: 2, Cleared: true}
+	// The run.go loop, gate for gate: reduce first, then withdraw.
+	reducer.Reduce(m)
+	if !m.turn.isWithdrawn() && renderer != nil {
+		renderer.WithdrawDeadStreamBlocks(m.AgentID)
+	}
+
+	if len(renderer.vm.blocks) != 1 || renderer.vm.blocks[0].frame.Content != "sealed thought" {
+		t.Fatalf("view = %+v, want only the sealed block after the cleared notice", renderer.vm.blocks)
+	}
+	if tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("the cleared notice left the retry status pending")
+	}
+}
+
+// While a retry is pending the Working line is the retry status alone: the
+// reason (generic for the first attempts, the transport's own sentence from
+// the third on, cut to 60 columns), the countdown, and the attempt counter —
+// never the ordinary "Working" segments.
+func TestWorkingLineShowsRetryStatus(t *testing.T) {
+	formatterFor := func(s TransportRetryStatus) transientStatusFormatter {
+		return workingStatusFormatter(func() Counters { return Counters{Retry: s} }, nil)
+	}
+
+	// Attempt 2 of 10 names the failure generically.
+	got := formatterFor(TransportRetryStatus{Retry: 2, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	if !strings.Contains(got, "Network error · Retrying in 8s · attempt 2/10") {
+		t.Fatalf("retry line = %q, want the generic reason with the countdown and progress", got)
+	}
+	if strings.Contains(got, "Working") || strings.Contains(got, "esc to interrupt") {
+		t.Fatalf("retry line = %q, must not carry the ordinary Working segments", got)
+	}
+
+	// From the third attempt the transport's own sentence is the reason.
+	long := strings.Repeat("a", 80)
+	got = formatterFor(TransportRetryStatus{Retry: 3, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: long})(20*time.Second, 0, "")
+	if !strings.Contains(got, "attempt 3/10") {
+		t.Fatalf("retry line = %q, want attempt 3/10", got)
+	}
+	reason := got
+	if i := strings.Index(reason, " · Retrying in"); i >= 0 {
+		reason = reason[:i]
+	}
+	reason = strings.TrimPrefix(reason, transientSpinnerFrame(0)+" ")
+	if reason != long[:59]+"…" {
+		t.Fatalf("reason = %q, want the error cut to 60 columns ending in …", reason)
+	}
+	if runewidth.StringWidth(reason) != 60 {
+		t.Fatalf("reason width = %d, want 60", runewidth.StringWidth(reason))
+	}
+
+	// A total under three keeps the generic reason one attempt longer:
+	// min(3, 2) = 2, so attempt 1 is generic and attempt 2 is verbatim.
+	got = formatterFor(TransportRetryStatus{Retry: 1, Total: 2, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	if !strings.Contains(got, "Network error · Retrying in 8s · attempt 1/2") {
+		t.Fatalf("1/2 retry line = %q, want the generic reason", got)
+	}
+	got = formatterFor(TransportRetryStatus{Retry: 2, Total: 2, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	if !strings.Contains(got, "read tcp x · Retrying in 8s · attempt 2/2") {
+		t.Fatalf("2/2 retry line = %q, want the verbatim reason", got)
+	}
+
+	// A failure the provider answered with an HTTP status is named an API
+	// error, not a network one — the same rule on every attempt that would
+	// have been generic.
+	got = formatterFor(TransportRetryStatus{Retry: 1, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: "503 unavailable", Status: 503})(20*time.Second, 0, "")
+	if !strings.Contains(got, "API error · Retrying in 8s · attempt 1/10") {
+		t.Fatalf("503 retry line = %q, want the API error generic reason", got)
+	}
+	if strings.Contains(got, "Network error") {
+		t.Fatalf("503 retry line = %q, must not read as a network error", got)
+	}
+
+	// A deadline that has passed reads 0s until the request produces or fails.
+	got = formatterFor(TransportRetryStatus{Retry: 3, Total: 10, Deadline: time.Now().Add(-time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	if !strings.Contains(got, "Retrying in 0s") {
+		t.Fatalf("past-deadline retry line = %q, want Retrying in 0s", got)
+	}
+}
+
+// The countdown's tiers: seconds under a minute (ceilinged), minutes and
+// seconds under five, then the largest unit alone.
+func TestFormatRetryCountdownTiers(t *testing.T) {
+	cases := []struct {
+		remaining time.Duration
+		want      string
+	}{
+		{500 * time.Millisecond, "1s"},
+		{8 * time.Second, "8s"},
+		{59200 * time.Millisecond, "1m 0s"},
+		{65 * time.Second, "1m 5s"},
+		{6 * time.Minute, "6m"},
+		{150 * time.Minute, "2h"},
+		{26 * time.Hour, "1d"},
+		{-time.Second, "0s"},
+	}
+	for _, tc := range cases {
+		if got := formatRetryCountdown(tc.remaining); got != tc.want {
+			t.Fatalf("formatRetryCountdown(%v) = %q, want %q", tc.remaining, got, tc.want)
+		}
+	}
+}
+
+// A subagent's view shows that subagent's own retry; the conversation's
+// Working line shows the conversation's — one agent's dead stream is not the
+// other's news.
+func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
+	tracker := NewTracker()
+	tracker.ObserveAgent("task-1", "exec-1", time.Now())
+	tracker.ObserveTransportRetry("task-1", 1, 10, 8*time.Second, "x", 0)
+
+	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
+	sub := formatter(time.Second, 0, "task-1")
+	if !strings.Contains(sub, "Retrying in 8s · attempt 1/10") {
+		t.Fatalf("subagent working line = %q, want its own retry status", sub)
+	}
+	if strings.Contains(sub, "Working (") {
+		t.Fatalf("subagent working line = %q, must be the retry status alone", sub)
+	}
+	conv := formatter(time.Second, 0, "")
+	if !strings.Contains(conv, "Working (") || strings.Contains(conv, "Retrying in") {
+		t.Fatalf("conversation working line = %q, want the ordinary line with no retry status", conv)
 	}
 }

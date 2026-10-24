@@ -22,7 +22,6 @@ import (
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
-	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -586,31 +585,60 @@ func (s *ChatSession) restoreAfterActivationFailure(r *run.Runner, outgoing run.
 	return run.NewRuntimeUncertainError(cause, restoreErr)
 }
 
-// PendingProjectMCPConsents lists the project-level MCP entries this project
-// declares that nobody has decided about yet. A surface asks for them before
-// it enters a conversation, because the answer is what the conversation's own
-// MCP reconcile reads: an entry allowed here is up in the session being
-// entered rather than one session later.
-func (s *ChatSession) PendingProjectMCPConsents() []mcp.PendingProjectConsent {
+// PendingProjectServers lists the project's MCP servers and language servers
+// that nobody has decided about yet — MCP first, in file order, then language
+// servers by id — for the project-servers panel. A surface asks for them
+// before it enters a conversation, because the answer is what the
+// conversation's own reconcile reads: an entry allowed here is up in the
+// session being entered rather than one session later.
+func (s *ChatSession) PendingProjectServers() []projectServerItem {
 	r := s.runner()
 	deps := s.deps()
 	if r == nil || deps == nil {
 		return nil
 	}
-	return process.PendingProjectMCPConsents(r.WorkspaceRoot, deps.LaunchProject)
+	var items []projectServerItem
+	for _, entry := range process.PendingProjectMCPConsents(r.WorkspaceRoot, deps.LaunchProject) {
+		items = append(items, projectServerItem{
+			Kind:        projectServerMCP,
+			Name:        entry.Name,
+			Detail:      entry.Detail,
+			Fingerprint: entry.Fingerprint,
+		})
+	}
+	for _, entry := range process.PendingProjectLSPConsents(r.WorkspaceRoot, deps.LaunchProject) {
+		items = append(items, projectServerItem{
+			Kind:        projectServerLSP,
+			Name:        entry.ID,
+			Detail:      entry.Detail,
+			Fingerprint: entry.Fingerprint,
+		})
+	}
+	return items
 }
 
-// DecideProjectMCPConsents records the operator's answers for the project's
-// MCP entries. allowed carries the names that were accepted; every other
-// pending entry is recorded as declined, so it is not asked again until its
-// configuration changes.
-func (s *ChatSession) DecideProjectMCPConsents(allowed []string) error {
+// DecideProjectServers records the panel's answer for exactly the items it
+// showed, bound to the fingerprints they had.
+func (s *ChatSession) DecideProjectServers(items []projectServerItem, answer projectServersAnswer) error {
 	r := s.runner()
 	deps := s.deps()
 	if r == nil || deps == nil {
 		return nil
 	}
-	return process.DecideProjectMCPConsents(r.WorkspaceRoot, deps.LaunchProject, allowed)
+	if len(answer.Allowed) != len(items) {
+		return fmt.Errorf("project servers answer covers %d of %d items", len(answer.Allowed), len(items))
+	}
+	d := process.ProjectServersDecision{AlwaysAllow: answer.AlwaysAllow}
+	for i, item := range items {
+		choice := process.ProjectServerChoice{Name: item.Name, Fingerprint: item.Fingerprint, Allow: answer.Allowed[i]}
+		switch item.Kind {
+		case projectServerMCP:
+			d.MCP = append(d.MCP, choice)
+		case projectServerLSP:
+			d.LSP = append(d.LSP, choice)
+		}
+	}
+	return process.DecideProjectServers(r.WorkspaceRoot, deps.LaunchProject, d)
 }
 
 // ReconcileSessionMCP reconciles the MCP half of the conversation's runner

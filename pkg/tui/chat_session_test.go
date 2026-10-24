@@ -38,7 +38,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
-	mcppkg "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -30597,23 +30596,25 @@ func TestNewSessionOpensThroughTheSessionEntryPoint(t *testing.T) {
 	require.Greater(t, resolves, 0, "entering a conversation must re-resolve the MCP list")
 }
 
-// consentSession is a session that offers the project MCP consent half: the
-// entries nobody decided about yet, the answers it was given, and the order in
-// which the surface asked and activated.
+// consentSession is a session that offers the project-servers consent half:
+// the entries nobody decided about yet, the answers it was given, and the
+// order in which the surface asked and activated.
 type consentSession struct {
 	*fakeSession
-	pending    []mcppkg.PendingProjectConsent
-	decided    [][]string
+	pending    []projectServerItem
+	decided    [][]projectServerItem
+	answers    []projectServersAnswer
 	reconciles int
 	order      []string
 }
 
-func (s *consentSession) PendingProjectMCPConsents() []mcppkg.PendingProjectConsent {
+func (s *consentSession) PendingProjectServers() []projectServerItem {
 	return s.pending
 }
 
-func (s *consentSession) DecideProjectMCPConsents(allowed []string) error {
-	s.decided = append(s.decided, append([]string(nil), allowed...))
+func (s *consentSession) DecideProjectServers(items []projectServerItem, answer projectServersAnswer) error {
+	s.decided = append(s.decided, append([]projectServerItem(nil), items...))
+	s.answers = append(s.answers, answer)
 	s.order = append(s.order, "decide")
 	return nil
 }
@@ -30628,21 +30629,23 @@ func (s *consentSession) ActivateSessionModel(ctx context.Context, sessionID str
 	return s.fakeSession.ActivateSessionModel(ctx, sessionID)
 }
 
-// TestNewSessionAsksForProjectMCPConsentBeforeSwitching pins the order of the
-// two halves: the project's MCP entries are asked about before the surface
-// enters the target conversation, so the answer is what that conversation's own
-// MCP reconcile reads and the allowed server is up in the session being
-// entered rather than one session later.
-func TestNewSessionAsksForProjectMCPConsentBeforeSwitching(t *testing.T) {
+// TestNewSessionAsksForProjectServersBeforeSwitching pins the order of the
+// two halves: the project's undecided servers are asked about on one panel
+// before the surface enters the target conversation, so the answer is what
+// that conversation's own reconcile reads and the allowed server is up in the
+// session being entered rather than one session later.
+func TestNewSessionAsksForProjectServersBeforeSwitching(t *testing.T) {
 	session := &consentSession{
 		fakeSession: &fakeSession{},
-		pending: []mcppkg.PendingProjectConsent{
-			{Name: "stub2", Summary: "run /tmp/mcpstub"},
+		pending: []projectServerItem{
+			{Kind: projectServerMCP, Name: "stub2", Detail: "runs /tmp/mcpstub", Fingerprint: "fp"},
 		},
 	}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
-	selector := &recordingSelector{selectSteps: []selectorStep{{value: "Allow it to run", ok: true}}}
+	selector := &projectServersRecordingSelector{
+		answer: projectServersAnswer{Decided: true, Allowed: []bool{true}},
+	}
 	cmds := newCommandController(session, renderer, selector, nil, t.TempDir())
 	state := &streamState{sessionID: "sess-a", session: session}
 
@@ -30654,13 +30657,12 @@ func TestNewSessionAsksForProjectMCPConsentBeforeSwitching(t *testing.T) {
 		SessionID:       "sess-b",
 	})
 	require.True(t, handled)
-	require.Len(t, selector.selects, 1, "the pending entry must be asked about exactly once")
-	require.Contains(t, selector.selects[0].label, "run /tmp/mcpstub",
-		"the question must say what the entry would run")
-	require.Equal(t, []string{"Allow it to run", "Keep it out"}, selector.selects[0].options,
-		"the question must offer the two answers the operator can give")
-	require.Len(t, session.decided, 1, "the pending entry must be decided exactly once")
-	require.Equal(t, []string{"stub2"}, session.decided[0], "the allowed entry must be recorded by name")
+	require.Equal(t, 1, selector.reviews, "the panel must be shown exactly once")
+	require.Len(t, selector.listed[0], 1)
+	require.Equal(t, "runs /tmp/mcpstub", selector.listed[0][0].Detail,
+		"the panel must show what the entry would run")
+	require.Len(t, session.decided, 1, "the answer must be recorded exactly once")
+	require.True(t, session.answers[0].Allowed[0], "the checked entry must be recorded as allowed")
 	require.Equal(t, []string{"decide", "activate"}, session.order,
 		"the consent must be asked before the conversation is entered")
 	require.Equal(t, 0, session.reconciles,

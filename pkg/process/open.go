@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -665,88 +664,4 @@ func ActiveAgentWorkspace() (string, error) {
 		}
 	}
 	return strings.TrimSpace(activePrimaryAgent(root, &ctx.Config).WorkspaceRoot), nil
-}
-
-// ResolveConsentProjectContext resolves the project the startup consent
-// prompts speak about: a registered project wins whenever cwd sits inside
-// its root (deepest match), because that is the boundary the runtime gives
-// the project's sessions — the runner pool resolves registered roots through
-// ResolveRegisteredContext. Anything outside every registered project is
-// itself the boundary (R2): the launch directory is taken as given rather
-// than walked up to the enclosing .git, because that is the root the runtime
-// freezes the session's consents against. A launch in a checkout
-// subdirectory therefore asks about — and records the answer under — that
-// subdirectory, not the checkout.
-func ResolveConsentProjectContext(root, cwd string) (safety.ProjectContext, error) {
-	root = strings.TrimSpace(root)
-	if registered := consentRegisteredRoot(root, cwd); registered != "" {
-		if registeredCtx, err := safety.ResolveRegisteredContext(root, registered); err == nil {
-			return registeredCtx, nil
-		}
-	}
-	dir := strings.TrimSpace(cwd)
-	if dir == "" {
-		if wd, err := os.Getwd(); err == nil {
-			dir = wd
-		}
-	}
-	return safety.ResolveRegisteredContext(root, dir)
-}
-
-// consentRegisteredRoot answers the registered project root containing cwd,
-// deepest first, or "" when cwd sits outside every registered project. The
-// registry is the one the runner pool resolves session→project through: the
-// state database's project rows for the active primary agent.
-func consentRegisteredRoot(root, cwd string) string {
-	dir := strings.TrimSpace(cwd)
-	if dir == "" {
-		if wd, err := os.Getwd(); err == nil {
-			dir = wd
-		}
-	}
-	if dir == "" {
-		return ""
-	}
-	dir, err := safety.CanonicalPath(dir)
-	if err != nil {
-		return ""
-	}
-	rt, err := Resolve()
-	if err != nil {
-		return ""
-	}
-	agent := activePrimaryAgent(rt.Home, &rt.Config)
-	if strings.TrimSpace(agent.ID) == "" {
-		return ""
-	}
-	ctx := context.Background()
-	db, err := state.OpenStateFromHome(ctx, root, &rt.Config)
-	if err != nil {
-		return ""
-	}
-	defer db.Close()
-	projects := state.NewProjectStore(db, agent.ID)
-	var best string
-	for offset := 0; ; offset += 500 {
-		page, err := projects.ListProjects(ctx, state.ListProjectsOptions{}, 500, offset)
-		if err != nil {
-			return best
-		}
-		for _, p := range page {
-			candidate, err := safety.CanonicalPath(strings.TrimSpace(p.Root))
-			if err != nil {
-				continue
-			}
-			rel, err := filepath.Rel(candidate, dir)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				continue
-			}
-			if best == "" || len(candidate) > len(best) {
-				best = candidate
-			}
-		}
-		if len(page) < 500 {
-			return best
-		}
-	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -5057,5 +5058,122 @@ func TestComposerSelectionDroppedAcrossOverlayOpenAndClose(t *testing.T) {
 	r.EndOverlay()
 	if r.selectDidDrag {
 		t.Fatal("closing an overlay must drop its selection")
+	}
+}
+
+// The reducer half of the transport retry: the dead attempt's buffered text
+// goes, no frame is emitted, and the tracker holds the payload's progress for
+// the Working line.
+func TestTransportRetryMsgSetsTrackerAndEmitsNoFrames(t *testing.T) {
+	tracker := NewTracker()
+	var r Reducer
+	r.WithTracker(tracker)
+	// Seed the primary agent buffer with the dead attempt's in-flight text:
+	// an assistant tail and a reasoning block that never ended.
+	buf := r.agentBuf("")
+	buf.assistant.WriteString("half an answer")
+	buf.reasoning.WriteString("late thought")
+
+	ev := r.Reduce(TransportRetryMsg{
+		Retry: 1,
+		Total: 10,
+		Wait:  8 * time.Second,
+		Err:   errors.New("read tcp 10.0.0.1:1->10.0.0.2:2: read: operation timed out"),
+	})
+	if len(ev.Frames) != 0 {
+		t.Fatalf("frames = %+v, want none — the retry lives on the Working line", ev.Frames)
+	}
+	buf = r.agentBuf("")
+	if buf == nil || buf.assistant.Len() != 0 || buf.reasoning.Len() != 0 {
+		t.Fatal("the dead attempt's buffered text survived the retry")
+	}
+	snap := tracker.SnapshotActiveRun()
+	if snap.Retry.Retry != 1 || snap.Retry.Total != 10 {
+		t.Fatalf("tracker retry = %d/%d, want 1/10 from the payload", snap.Retry.Retry, snap.Retry.Total)
+	}
+	if !snap.Retry.Active() {
+		t.Fatal("the recorded retry must read as active")
+	}
+	if want := "read tcp 10.0.0.1:1->10.0.0.2:2: read: operation timed out"; snap.Retry.Err != want {
+		t.Fatalf("tracker retry err = %q, want the transport's own sentence", snap.Retry.Err)
+	}
+	if remaining := time.Until(snap.Retry.Deadline); remaining <= 0 || remaining > 8*time.Second {
+		t.Fatalf("tracker retry deadline = %v away, want about 8s", remaining)
+	}
+}
+
+// The renderer half of the boundary: the dead stream's trailing live blocks
+// are withdrawn (removed), while the finished block below them stays sealed
+// as history, and a zero-output death changes nothing.
+func TestWithdrawDeadStreamBlocksRemovesOnlyLiveBlocks(t *testing.T) {
+	r := &Renderer{}
+	r.vm.append(Frame{Kind: FrameThinking, Content: "sealed thought", Final: true})
+	r.vm.append(Frame{Kind: FrameAssistant, Content: "dead half-answer"})
+	r.WithdrawDeadStreamBlocks("")
+	if len(r.vm.blocks) != 1 {
+		t.Fatalf("blocks after withdrawal = %d, want only the finished thinking block", len(r.vm.blocks))
+	}
+	if got := r.vm.blocks[0].frame; got.Kind != FrameThinking || !got.Final || got.Content != "sealed thought" {
+		t.Fatalf("surviving block = %+v, want the sealed thinking kept", got)
+	}
+	// A zero-output death has no live blocks: no-op.
+	r.WithdrawDeadStreamBlocks("")
+	if len(r.vm.blocks) != 1 {
+		t.Fatalf("repeat withdrawal changed the transcript: %d blocks", len(r.vm.blocks))
+	}
+	// The retried attempt's first delta opens its own block.
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "fresh answer"})
+	if len(r.vm.blocks) != 2 {
+		t.Fatalf("blocks = %d, want the sealed one plus the fresh live one", len(r.vm.blocks))
+	}
+	fresh := r.vm.blocks[1].frame
+	if fresh.Content != "fresh answer" || fresh.Final {
+		t.Fatalf("the retried delta must start its own live block, got %+v", fresh)
+	}
+}
+
+// The retry's Cleared notice drops the status AND withdraws whatever the
+// final dead attempt left behind. At exhaustion no further non-Cleared notice
+// comes — the final attempt dies after the last announcement, and the only
+// notice that follows is the deferred Cleared — so it must clear the buffer
+// too. On a successful retry the notice lands before the retried stream's
+// first token, when the buffer is already empty: a no-op there.
+func TestTransportRetryClearedClearsTheStatus(t *testing.T) {
+	tracker := NewTracker()
+	var r Reducer
+	r.WithTracker(tracker)
+	r.Reduce(TransportRetryMsg{Retry: 2, Total: 2, Wait: time.Second, Err: errors.New("x")})
+	if !tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("sanity: the retry must be pending before the clear")
+	}
+	// The final dead attempt streamed after the last retry was announced;
+	// its words are still buffered when the Cleared notice arrives.
+	buf := r.agentBuf("")
+	buf.assistant.WriteString("partial answer that never")
+	buf.reasoning.WriteString("dead thought")
+
+	ev := r.Reduce(TransportRetryMsg{Retry: 2, Total: 2, Cleared: true})
+	if len(ev.Frames) != 0 {
+		t.Fatalf("frames = %+v, want none", ev.Frames)
+	}
+	if tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("the cleared notice left the retry status pending")
+	}
+	buf = r.agentBuf("")
+	if buf == nil || buf.assistant.Len() != 0 || buf.reasoning.Len() != 0 {
+		t.Fatal("the cleared notice left the final dead attempt's text buffered")
+	}
+}
+
+// A new run does not inherit the previous run's retry status.
+func TestStartRunClearsAStaleRetry(t *testing.T) {
+	tracker := NewTracker()
+	tracker.ObserveTransportRetry("", 1, 10, time.Second, "x", 0)
+	if !tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("sanity: the retry must be pending before the new run")
+	}
+	tracker.StartRun("run-2")
+	if tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("StartRun left the previous run's retry status pending")
 	}
 }
