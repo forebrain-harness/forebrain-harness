@@ -1,12 +1,80 @@
 package llm
 
 import (
+	"context"
+	"crypto/x509"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 )
 
 const lengthErrorCode = "context_length_exceeded"
+
+// ErrStreamTruncated reports a stream that ended without a finish frame after
+// it had already produced output: the provider (or something between, most
+// often a proxy) closed the connection cleanly, and the answer is missing its
+// tail. Providers whose wire protocol carries finish frames must raise this
+// instead of returning the partial text as a success.
+var ErrStreamTruncated = errors.New("stream ended without a finish frame")
+
+// IsRetryableNetworkError reports whether err is a transport-level failure a
+// resend can plausibly fix: timeouts, resets, aborted/dropped connections and
+// truncated streams. It is the retry predicate of the network-retry
+// middleware; everything else — cancellation, provider rejections, request
+// encoding, DNS NXDOMAIN (a misspelled base_url is permanent) and TLS
+// certificate failures (permanent in proxy environments) — is excluded so the
+// retry loop never parks a turn on an error that cannot clear.
+func IsRetryableNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return false // NXDOMAIN: base_url spelling errors are permanent.
+	}
+	// TLS certificate failures are permanent (most common in proxied
+	// environments: self-signed or mismatched certificates); retrying only
+	// means waiting for nothing.
+	var uaErr x509.UnknownAuthorityError
+	if errors.As(err, &uaErr) {
+		return false
+	}
+	var hErr x509.HostnameError
+	if errors.As(err, &hErr) {
+		return false
+	}
+	var ciErr x509.CertificateInvalidError
+	if errors.As(err, &ciErr) {
+		return false
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) {
+		return true // *net.OpError timeouts, *url.Error (incl. H2 via Do); refused stays retryable (a restarting proxy recovers).
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true // common shape of an SSE stream cut mid-flight
+	}
+	if errors.Is(err, io.EOF) {
+		return true // provider-level bare EOF on a live stream
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+	if errors.Is(err, ErrStreamTruncated) {
+		return true
+	}
+	var aerr *APIError
+	if errors.As(err, &aerr) && aerr != nil && aerr.Err != nil {
+		return IsRetryableNetworkError(aerr.Err) // unwrap provider normalizeError wrappers
+	}
+	return false
+}
 
 // APIError is a provider error after the provider package has normalized it.
 //

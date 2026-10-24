@@ -31,11 +31,10 @@ func TestSessionFastAvailableModelGating(t *testing.T) {
 		model string
 		want  bool
 	}{
-		{"opus", "anthropic / claude-opus-4-7", true},
-		{"opus with extra label", "anthropic / claude-opus-4-7 - fast", true},
-		{"sonnet", "anthropic / claude-sonnet-4-6", false},
-		{"haiku", "anthropic / claude-haiku-4-5", false},
-		{"openai", "openai / gpt-5.3", false},
+		{"opus", "anthropic/claude-opus-4-7", true},
+		{"sonnet", "anthropic/claude-sonnet-4-6", false},
+		{"haiku", "anthropic/claude-haiku-4-5", false},
+		{"openai", "openai/gpt-5.3", false},
 		{"empty", "", false},
 	}
 	for _, tc := range cases {

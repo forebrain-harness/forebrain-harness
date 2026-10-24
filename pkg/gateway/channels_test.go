@@ -486,7 +486,6 @@ func TestHandleModelsListUsesAppCoreCatalog(t *testing.T) {
 	for _, rec := range out.Records {
 		require.Equal(t, "openai", rec.Provider)
 		require.NotEmpty(t, rec.ModelID)
-		require.NotEmpty(t, rec.ModelName)
 		require.NotEmpty(t, rec.APIModel)
 	}
 }

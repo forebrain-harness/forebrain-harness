@@ -23,7 +23,6 @@ func TestListModelCatalogReturnsStableRecords(t *testing.T) {
 	require.LessOrEqual(t, len(records), 10)
 	for _, rec := range records {
 		require.NotEmpty(t, rec.ModelID)
-		require.NotEmpty(t, rec.ModelName)
 		require.NotEmpty(t, rec.Provider)
 		require.NotEmpty(t, rec.APIModel)
 	}
@@ -58,15 +57,15 @@ func (s *stubChatGPTSource) ChatGPTModels(ctx context.Context) ([]openai.ModelIn
 func TestDiscoverChatGPTModelsProjectsAccountModels(t *testing.T) {
 	contextWindow := int64(272000)
 	src := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-hidden", DisplayName: "Hidden", Visibility: "hide", Priority: 0},
-		{Slug: "gpt-legacy", DisplayName: "GPT Legacy", Visibility: "list", Priority: 30,
+		{Slug: "gpt-hidden", Visibility: "hide", Priority: 0},
+		{Slug: "gpt-legacy", Visibility: "list", Priority: 30,
 			SupportedReasoningEfforts: []openai.ReasoningEffortPreset{{Effort: "low"}, {Effort: "medium"}}},
-		{Slug: "gpt-beta", DisplayName: "GPT Beta", Visibility: "list", Priority: 7,
+		{Slug: "gpt-beta", Visibility: "list", Priority: 7,
 			InputModalities: []string{"text", "image"}, ContextWindow: &contextWindow,
 			DefaultReasoningEffort: "max", SupportedInAPI: false,
 			SupportedReasoningEfforts: []openai.ReasoningEffortPreset{
 				{Effort: "low"}, {Effort: "max", Description: "deepest"}, {Effort: ""}}},
-		{Slug: "gpt-alpha", DisplayName: "", Visibility: "list", Priority: 7},
+		{Slug: "gpt-alpha", Visibility: "list", Priority: 7},
 	}}
 
 	records, err := DiscoverChatGPTModels(context.Background(), src)
@@ -75,7 +74,6 @@ func TestDiscoverChatGPTModelsProjectsAccountModels(t *testing.T) {
 
 	require.Equal(t, "gpt-beta", records[0].APIModel)
 	require.True(t, records[0].IsDefault, "first visible in priority order is the preselectable default")
-	require.Equal(t, "GPT Beta", records[0].ModelName)
 	require.Equal(t, "chatgpt/gpt-beta", records[0].ModelID)
 	require.Equal(t, "chatgpt", records[0].Provider)
 	require.Equal(t, int64(272000), records[0].ContextWindow)
@@ -87,7 +85,6 @@ func TestDiscoverChatGPTModelsProjectsAccountModels(t *testing.T) {
 	require.False(t, records[0].FetchedAt.IsZero())
 
 	require.Equal(t, "gpt-alpha", records[1].APIModel, "equal priorities keep backend order")
-	require.Equal(t, "gpt-alpha", records[1].ModelName, "missing display name falls back to the slug")
 	require.False(t, records[1].IsDefault)
 	require.False(t, records[1].CanReason, "no effort levels means not known to reason")
 
@@ -97,7 +94,7 @@ func TestDiscoverChatGPTModelsProjectsAccountModels(t *testing.T) {
 
 func TestDiscoverChatGPTModelsKeepsSubscriptionOnlyModels(t *testing.T) {
 	src := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-subscription-only", DisplayName: "Sub Only", Visibility: "list", Priority: 1, SupportedInAPI: false},
+		{Slug: "gpt-subscription-only", Visibility: "list", Priority: 1, SupportedInAPI: false},
 	}}
 	records, err := DiscoverChatGPTModels(context.Background(), src)
 	require.NoError(t, err)
@@ -148,7 +145,7 @@ func installRepoCatalog(t *testing.T) {
 func TestListModelCatalogLiveChatGPTScopeHasNoStaticLeakage(t *testing.T) {
 	useStaticCatalog(t)
 	src := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-live", DisplayName: "GPT Live", Visibility: "list", Priority: 1},
+		{Slug: "gpt-live", Visibility: "list", Priority: 1},
 	}}
 	listing := ListModelCatalogLive(context.Background(), src, ModelCatalogQuery{Provider: "chatgpt"})
 	require.Len(t, listing.Records, 1)
@@ -166,7 +163,7 @@ func TestListModelCatalogLiveChatGPTScopeHasNoStaticLeakage(t *testing.T) {
 func TestListModelCatalogLiveMergesStaticAndDiscovered(t *testing.T) {
 	useStaticCatalog(t)
 	src := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-live", DisplayName: "GPT Live", Visibility: "list", Priority: 1},
+		{Slug: "gpt-live", Visibility: "list", Priority: 1},
 	}}
 	listing := ListModelCatalogLive(context.Background(), src, ModelCatalogQuery{Query: "live", Limit: 5})
 	require.Len(t, listing.Records, 1)
@@ -220,10 +217,10 @@ func TestServiceListModelCatalogLiveWithoutSource(t *testing.T) {
 // calls: the second login must fully replace the first listing.
 func TestDiscoverChatGPTModelsHasNoCrossSourceState(t *testing.T) {
 	first := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-first", DisplayName: "First", Visibility: "list", Priority: 1},
+		{Slug: "gpt-first", Visibility: "list", Priority: 1},
 	}}
 	second := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-second", DisplayName: "Second", Visibility: "list", Priority: 1},
+		{Slug: "gpt-second", Visibility: "list", Priority: 1},
 	}}
 	one, err := DiscoverChatGPTModels(context.Background(), first)
 	require.NoError(t, err)
@@ -263,8 +260,7 @@ func (s *stubOpenCodeSource) OpenCodeModels(ctx context.Context, goSubscription 
 func (s *stubOpenCodeSource) OpenCodeSignedIn() bool { return s.signedIn }
 
 // The OpenCode projection drops the systemone ids (not chat models), keeps the
-// free family first because those run with no login, names them so a picker
-// shows why they work, and marks the first as the preselected entry. Metadata
+// catalog's order and marks the first as the preselected entry. Metadata
 // the live catalog never reports comes from the package's own table, with the
 // conservative default for an id the table has not seen.
 func TestDiscoverOpenCodeModelsProjectsConsoleCatalog(t *testing.T) {
@@ -280,11 +276,10 @@ func TestDiscoverOpenCodeModelsProjectsConsoleCatalog(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 4, "the systemone id is not a chat model")
 
-	require.Equal(t, "glm-5.3-flash-free", records[0].APIModel, "the free family is listed first")
+	require.Equal(t, "deepseek-v4-pro", records[0].APIModel, "the catalog's order is kept")
 	require.True(t, records[0].IsDefault)
-	require.Equal(t, "opencode/glm-5.3-flash-free", records[0].ModelID)
+	require.Equal(t, "opencode/deepseek-v4-pro", records[0].ModelID)
 	require.Equal(t, "opencode", records[0].Provider)
-	require.Equal(t, "glm-5.3-flash-free (free)", records[0].ModelName)
 	require.Equal(t, ModelSourceOpenCodeAccount, records[0].Source)
 	require.False(t, records[0].FetchedAt.IsZero())
 
@@ -293,8 +288,7 @@ func TestDiscoverOpenCodeModelsProjectsConsoleCatalog(t *testing.T) {
 		byID[rec.APIModel] = rec
 	}
 	// Capabilities come from models.json's row for this surface: qwen3.8-flash
-	// has a 1M window there, and the free family's own rows carry theirs
-	// instead of one conservative default.
+	// has a 1M window there instead of one conservative default.
 	qwen := byID["qwen3.8-flash"]
 	require.Equal(t, int64(1000000), qwen.ContextWindow)
 	require.True(t, qwen.CanReason, "the catalog records qwen3.8's reasoning output")
@@ -302,7 +296,6 @@ func TestDiscoverOpenCodeModelsProjectsConsoleCatalog(t *testing.T) {
 
 	unseen := byID["gpt-7-unseen"]
 	require.Equal(t, int64(128000), unseen.ContextWindow, "an unknown id gets the conservative window")
-	require.Equal(t, "gpt-7-unseen", unseen.ModelName, "no free suffix outside the free family")
 	require.Equal(t, "opencode/gpt-7-unseen", unseen.ModelID)
 
 	require.Equal(t, 1, src.consoleCalls)
@@ -439,10 +432,9 @@ func TestListModelCatalogLiveQueriesGoCatalogWhenSignedIn(t *testing.T) {
 	require.Equal(t, 1, opencodeSrc.goCalls)
 }
 
-// A failed Console fetch answers with nothing and says why. It used to answer
-// with the free family, which no third-party client can run any more: the
-// gateway rejects every request that does not come from OpenCode itself, so an
-// offline list would only lead the user into a 403.
+// A failed Console fetch answers with nothing and says why. An offline list of
+// models would only lead the user into a request that fails: every OpenCode
+// model, the free ones included, needs a credential.
 func TestListModelCatalogLiveReportsAFailedConsoleFetch(t *testing.T) {
 	useStaticCatalog(t)
 	opencodeSrc := &stubOpenCodeSource{err: errors.New("fetch OpenCode models: http 503")}
@@ -658,7 +650,7 @@ func TestListModelCatalogSkipsNonChatAndLoginProviders(t *testing.T) {
 func TestListModelCatalogLiveOpenCodeBlocksFollowEachOther(t *testing.T) {
 	useStaticCatalog(t)
 	chatgptSrc := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-live", DisplayName: "GPT Live", Visibility: "list", Priority: 1},
+		{Slug: "gpt-live", Visibility: "list", Priority: 1},
 	}}
 	opencodeSrc := &stubOpenCodeSource{
 		signedIn:  true,
@@ -725,7 +717,7 @@ func saveChatGPTCredentials(t *testing.T, dir string) string {
 // answer "no login" must not cost a round trip.
 func TestProbeChatGPTModelsWithoutALoginIsMissing(t *testing.T) {
 	src := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-5", DisplayName: "GPT 5", Visibility: "list", Priority: 1},
+		{Slug: "gpt-5", Visibility: "list", Priority: 1},
 	}}
 	check := ProbeChatGPTModels(context.Background(), filepath.Join(t.TempDir(), "auth.json"), src)
 	require.Equal(t, SignInMissing, check.State)
@@ -739,7 +731,7 @@ func TestProbeChatGPTModelsWithoutALoginIsMissing(t *testing.T) {
 func TestProbeChatGPTModelsUsableCarriesRecords(t *testing.T) {
 	path := saveChatGPTCredentials(t, t.TempDir())
 	src := &stubChatGPTSource{models: []openai.ModelInfo{
-		{Slug: "gpt-5", DisplayName: "GPT 5", Visibility: "list", Priority: 1},
+		{Slug: "gpt-5", Visibility: "list", Priority: 1},
 	}}
 	check := ProbeChatGPTModels(context.Background(), path, src)
 	require.Equal(t, SignInUsable, check.State)

@@ -240,20 +240,20 @@ func runChatGPTSetup(cfg PromptConfig) (process.Options, bool, error) {
 
 func discoveredFixture() []turn.ModelRecord {
 	return []turn.ModelRecord{
-		{ModelName: "GPT Future", APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
+		{APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
 			ReasoningEfforts: []string{"low", "medium", "max"}, DefaultReasoningEffort: "low"},
-		{ModelName: "GPT Second", APIModel: "gpt-second", Provider: "chatgpt",
+		{APIModel: "gpt-second", Provider: "chatgpt",
 			ReasoningEfforts: []string{"low", "medium", "max"}, DefaultReasoningEffort: "medium"},
 	}
 }
 
 // The picker must offer exactly what the account returned, in backend order,
-// labeled with the display name and the exact slug that will be saved.
+// labeled with the exact slug that will be saved.
 func TestConfigureChatGPTProviderOffersDiscoveredModels(t *testing.T) {
 	stubChatGPTBrowserLogin(t)
 	stubChatGPTModels(t, discoveredFixture(), nil)
 	selector := &fakeSelector{
-		selects:  []string{"GPT Second · gpt-second", "max"},
+		selects:  []string{"gpt-second", "max"},
 		confirms: []bool{true, true},
 	}
 	opts, ok, err := runChatGPTSetup(PromptConfig{
@@ -264,11 +264,11 @@ func TestConfigureChatGPTProviderOffersDiscoveredModels(t *testing.T) {
 	}
 	modelSelect := 0
 	if got := selector.selectOptions[modelSelect]; !reflect.DeepEqual(got, []string{
-		"GPT Future · gpt-future", "GPT Second · gpt-second", manualModelInput,
+		"gpt-future", "gpt-second", manualModelInput,
 	}) {
 		t.Fatalf("model options = %#v", got)
 	}
-	if got := selector.selectDefaults[modelSelect]; got != "GPT Future · gpt-future" {
+	if got := selector.selectDefaults[modelSelect]; got != "gpt-future" {
 		t.Fatalf("model default = %q, want the account's priority-first default", got)
 	}
 	if got := selector.selectOptions[1]; !reflect.DeepEqual(got, []string{"low", "medium", "max", reasoningEffortUnset}) {
@@ -302,7 +302,7 @@ func TestConfigureChatGPTProviderCurrentModelDefaultRules(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
-	if got := selector.selectDefaults[0]; got != "GPT Second · gpt-second" {
+	if got := selector.selectDefaults[0]; got != "gpt-second" {
 		t.Fatalf("still-listed model default = %q", got)
 	}
 
@@ -314,7 +314,7 @@ func TestConfigureChatGPTProviderCurrentModelDefaultRules(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
-	if got := selector.selectDefaults[0]; got != "GPT Future · gpt-future" {
+	if got := selector.selectDefaults[0]; got != "gpt-future" {
 		t.Fatalf("retired model default = %q, want the account's default", got)
 	}
 }
@@ -403,7 +403,7 @@ func TestConfigureChatGPTProviderReusesSavedSignIn(t *testing.T) {
 	loginCalls := countedChatGPTLogin(t)
 	probeCalls := stubChatGPTProbe(t, turn.SignInCheck{State: turn.SignInUsable, Records: discoveredFixture()})
 	selector := &fakeSelector{
-		selects: []string{"GPT Second · gpt-second", "max"},
+		selects: []string{"gpt-second", "max"},
 	}
 	opts, ok, err := runChatGPTSetup(PromptConfig{
 		Selector: selector, Output: io.Discard, Home: t.TempDir(),
@@ -421,7 +421,7 @@ func TestConfigureChatGPTProviderReusesSavedSignIn(t *testing.T) {
 		t.Fatalf("%d confirmation panels appeared, want the picker to open directly", selector.confirmIdx)
 	}
 	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{
-		"GPT Future · gpt-future", "GPT Second · gpt-second", manualModelInput,
+		"gpt-future", "gpt-second", manualModelInput,
 	}) {
 		t.Fatalf("model options = %#v, want the probe's records in the picker", got)
 	}
@@ -437,7 +437,7 @@ func TestConfigureChatGPTProviderMissingLoginRunsOAuth(t *testing.T) {
 	stubChatGPTProbe(t, turn.SignInCheck{State: turn.SignInMissing})
 	stubChatGPTModels(t, discoveredFixture(), nil)
 	selector := &fakeSelector{
-		selects:  []string{"GPT Future · gpt-future"},
+		selects:  []string{"gpt-future"},
 		confirms: []bool{true},
 	}
 	opts, ok, err := runChatGPTSetup(PromptConfig{
@@ -464,7 +464,7 @@ func TestConfigureChatGPTProviderDeadLoginRunsOAuth(t *testing.T) {
 	})
 	stubChatGPTModels(t, discoveredFixture(), nil)
 	selector := &fakeSelector{
-		selects:  []string{"GPT Future · gpt-future"},
+		selects:  []string{"gpt-future"},
 		confirms: []bool{true},
 	}
 	_, ok, err := runChatGPTSetup(PromptConfig{
@@ -531,7 +531,7 @@ func TestConfigureChatGPTProviderFetchRetrySkipsRelogin(t *testing.T) {
 	}
 	t.Cleanup(func() { discoverChatGPTModels = previous })
 	selector := &fakeSelector{
-		selects:  []string{"GPT Future · gpt-future", "low"},
+		selects:  []string{"gpt-future", "low"},
 		confirms: []bool{true, true, true},
 	}
 	opts, ok, err := runChatGPTSetup(PromptConfig{
@@ -613,8 +613,8 @@ func TestCatalogModelOptionsComeFromTheSharedCatalog(t *testing.T) {
 	if len(options) != 2 {
 		t.Fatalf("options = %#v", options)
 	}
-	if options[0].Label != "Claude Haiku Lite · claude-haiku-lite" || options[0].Value != "claude-haiku-lite" {
-		t.Fatalf("first option = %+v, want catalog name plus exact id, name-sorted", options[0])
+	if options[0].Label != "claude-haiku-lite" || options[0].Value != "claude-haiku-lite" {
+		t.Fatalf("first option = %+v, want the exact id, id-sorted", options[0])
 	}
 	for _, option := range options {
 		if option.Label == manualModelInput {
@@ -723,8 +723,8 @@ func openCodeProviderChoice(t *testing.T, provider string) providerChoice {
 
 func openCodeGoFixture() []turn.ModelRecord {
 	return []turn.ModelRecord{
-		{ModelName: "glm-5.3", APIModel: "glm-5.3", Provider: "opencode-go", IsDefault: true},
-		{ModelName: "kimi-k3", APIModel: "kimi-k3", Provider: "opencode-go"},
+		{APIModel: "glm-5.3", Provider: "opencode-go", IsDefault: true},
+		{APIModel: "kimi-k3", Provider: "opencode-go"},
 	}
 }
 
@@ -739,8 +739,8 @@ func runOpenCodeSetup(t *testing.T, cfg PromptConfig, provider string) (process.
 }
 
 // The OpenCode group has exactly one way in — the Go subscription's device-code
-// login. The Console free family is gone: the gateway only answers OpenCode's
-// own client, so offering it would end in a 403 on the first message.
+// login. Every OpenCode model, the free ones included, needs a login with a Go
+// or Go Plus subscription, so there is no way in without one.
 func TestProviderGroupsOfferOpenCodeGoOnly(t *testing.T) {
 	group := providerGroups[1]
 	if group.Label != "OpenCode" {

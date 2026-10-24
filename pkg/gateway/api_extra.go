@@ -3753,7 +3753,7 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 	models := make([]planReviewModelWire, 0, len(req.PlanReviewModels))
 	for _, option := range req.PlanReviewModels {
 		models = append(models, planReviewModelWire{
-			Provider: option.Provider, Model: option.Model, Label: option.Label, Current: option.Current,
+			Provider: option.Provider, Model: option.Model, Current: option.Current,
 		})
 	}
 	reviews := make([]planReviewNoteWire, 0, len(req.PlanReviews))
@@ -3772,7 +3772,7 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 	if active, open := turn.ActivePlanReview(r.Context(), s.RunRT, sid, req.ActionID); open {
 		out.PlanReviewActive = &planReviewInFlightWire{
 			ReviewID: active.ReviewID, Provider: active.Provider, Model: active.Model,
-			Label: active.Label, AgentID: active.AgentID,
+			AgentID: active.AgentID,
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -3794,7 +3794,6 @@ type sessionApprovalRequestWire struct {
 type planReviewModelWire struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
-	Label    string `json:"label,omitempty"`
 	Current  bool   `json:"current,omitempty"`
 }
 
@@ -3809,7 +3808,6 @@ type planReviewInFlightWire struct {
 	ReviewID string `json:"review_id"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model"`
-	Label    string `json:"label,omitempty"`
 	AgentID  string `json:"agent_id,omitempty"`
 }
 
@@ -3871,7 +3869,6 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 	for _, option := range s.approvalGate().ReviewModels(sid) {
 		if option.MatchesSelection(model.Provider, model.Model) {
 			allowed = true
-			model.Label = option.Label
 			break
 		}
 	}

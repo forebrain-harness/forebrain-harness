@@ -113,6 +113,48 @@ test('a subagent view talks to its own subagent', async ({ page }) => {
 })
 
 /**
+ * A steer queued in a subagent's tab waits for its next tool boundary; once the
+ * subagent takes it there, the tab's queue lets it go at once and it is drawn as
+ * the user's own message — while the subagent is still running, so no
+ * execution-end refresh can be what clears it.
+ */
+test('a steer the subagent takes at its tool boundary leaves its queue at once', async ({ page }) => {
+  test.skip(realLLM, 'the subagent-steer probe drives the fake provider')
+  test.info().setTimeout(180_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
+  await signIn(page)
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-subagent')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('textarea')
+  await page.fill('textarea', 'delegate the slow probe [[e2e:subagent-steer]]')
+  await page.press('textarea', 'Enter')
+
+  await page.waitForSelector('[data-testid="subagent-call-card"]', { timeout: 90_000 })
+  await page.locator('[data-testid="subagent-task-row"]').first().click()
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+
+  // The subagent is inside its 8-second shell call: the message waits in the
+  // tab's queue for the call to return.
+  const steer = 'retries must stay invisible to the user'
+  const tabInput = drawer.locator('textarea')
+  await tabInput.fill(steer)
+  await tabInput.press('Enter')
+  const queue = drawer.locator('[data-testid="pending-queue"]')
+  await expect(queue).toContainText(steer)
+  // The queue fades in; shoot it once the fade is over.
+  await expect(queue.locator('..')).toHaveCSS('opacity', '1')
+  await shot(page, 'subagent-steer-queued')
+
+  // The call returns and the subagent takes the steer, then holds its answer
+  // for 30 seconds: the queue must be gone well inside that window.
+  await expect(drawer.locator('[data-testid="subagent-user-message"]').last()).toContainText(steer, { timeout: 30_000 })
+  await expect(queue).toHaveCount(0)
+  await expect(drawer).toContainText('steer received')
+  await shot(page, 'subagent-steer-delivered')
+})
+
+/**
  * The real-model counterpart of the drawer test above: the provider is reached
  * through the flaky proxy, so the test can cut the subagent's own request
  * mid-stream (a live provider will not do that on request) and then continue

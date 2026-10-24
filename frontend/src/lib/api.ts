@@ -187,7 +187,6 @@ export interface SubagentWithdrawResponse {
 
 export interface ModelRecord {
   modelId: string
-  modelName: string
   provider?: string
   apiModel?: string
   contextWindow?: number
@@ -1175,7 +1174,6 @@ export interface ActionApprovalBody {
 export interface PlanReviewModelOption {
   provider: string
   model: string
-  label?: string
   current?: boolean
 }
 
@@ -1192,7 +1190,6 @@ export interface PlanReviewInFlight {
   reviewId: string
   provider?: string
   model: string
-  label?: string
   /** The reviewer subagent's roster key; cancelling it stops the review. */
   agentId?: string
 }
@@ -3607,6 +3604,19 @@ export const forebrainApi = {
     if (res.status === 404) return null
     if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
     return toCamelCase(await res.json()) as ProviderLoginStatus
+  },
+
+  /** Hands the gateway the address a user pasted from their browser after
+   * approving a ChatGPT sign-in whose redirect could not reach the gateway's
+   * machine. 202 means the flow took it (the poll reports the ending); a
+   * refusal is a short reason code. */
+  async submitProviderLoginCallback(provider: ProviderLoginProvider, loginId: string, url: string) {
+    const res = await gatewayFetch(`${API_BASE}/auth/login/${provider}/${encodeURIComponent(loginId)}/callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    })
+    if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
   },
 
   /** Ends a sign-in the page walked away from. An id the gateway already

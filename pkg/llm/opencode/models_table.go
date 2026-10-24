@@ -13,9 +13,8 @@ import "strings"
 // row for every id below and is refreshed with scripts/update-models-asset.sh.
 // The window, image capability and levels are only fallbacks here for an id
 // models.json has never heard of — a model the live catalog reports after this
-// table was written. Two facts stay in code because they are code, not data:
-// the protocol a surface serves a model on (it picks the client) and whether
-// the Console free family works without a credential.
+// table was written. One fact stays in code because it is code, not data: the
+// protocol a surface serves a model on (it picks the client).
 //
 // The tables are deliberately not exhaustive. Console lists whole families
 // ("all gpt-*", "all claude-*", "all gemini-*") whose members are not named in
@@ -49,9 +48,6 @@ type ModelMeta struct {
 	// it. It is stored redundantly with ProtocolFor; a test holds the two in
 	// agreement so a protocol edit that misses one of them fails loudly.
 	Protocol Protocol
-	// Free marks the Console family that works without any credential, with
-	// the literal "public" bearer.
-	Free bool
 	// ContextWindow is the model's prompt window in tokens. It is a fallback
 	// for an id models.json does not carry; the catalog's value wins.
 	ContextWindow int64
@@ -64,25 +60,10 @@ type ModelMeta struct {
 	Attachments bool
 }
 
-// ConsoleModels is the Console (free and pay-as-you-go) table. The systemone
+// ConsoleModels is the Console (pay-as-you-go) table. The systemone
 // endpoint (jev-*) is excluded: it is a structured decision API, not a chat
 // model, and ProtocolFor refuses it by prefix.
 var ConsoleModels = []ModelMeta{
-	// Free family: usable with the literal "public" bearer.
-	{ID: "big-pickle", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "beam-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "glm-5.3-flash-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "deepseek-v4.1-flash-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "minimax-m3.1-flash-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "ll-alpha-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "longcat-2.5-preview-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "exo-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "mimo-v2.6-flash-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "mimo-v2.5-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "nemotron-3-ultra-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "nemotron-3.5-lightning-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true},
-	{ID: "nemotron-3.5-super-vl-free", Protocol: ProtocolChatCompletions, Free: true, ContextWindow: defaultContextWindow, Reasoning: true, Attachments: true},
-
 	// Models the official table names individually on Console.
 	{ID: "qwen3.8-max", Protocol: ProtocolChatCompletions, ContextWindow: defaultContextWindow, Reasoning: true, Attachments: true},
 	{ID: "qwen3.8-flash", Protocol: ProtocolAnthropic, ContextWindow: defaultContextWindow, Reasoning: true, Attachments: true},
@@ -96,8 +77,8 @@ var ConsoleModels = []ModelMeta{
 
 // GoModels is the Go subscription table: every model the official table lists
 // for the subscription, with the protocol that surface actually serves.
-// Nothing here is Free: the subscription token pays for all of it, so the free
-// family's "public" bearer does not apply.
+// The free models are here too: they need a login with a Go or Go Plus
+// subscription like the rest.
 var GoModels = []ModelMeta{
 	{ID: "grok-4.7", Protocol: ProtocolResponses, ContextWindow: grokContextWindow, Reasoning: true},
 	{ID: "gpt-6-luna", Protocol: ProtocolResponses, ContextWindow: gptContextWindow, Reasoning: true, Attachments: true},

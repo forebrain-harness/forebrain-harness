@@ -1200,6 +1200,15 @@ export type TimelineBlock =
    * viewer's language; text is the runtime's sentence for the rest.
    */
   | { kind: 'error'; id?: string; text: string; detail?: ProviderErrorDetail }
+  /**
+   * A transport failure of the run's own LLM stream and the retry about to
+   * run: a spinner while it waits, a live countdown to the next attempt and
+   * the n/total progress straight from the event. The first streamed words of
+   * the retried attempt remove it (a recovered retry leaves no success card);
+   * `stopped` freezes it when the retries ran out, and the turn's closing
+   * events remove any still-waiting one.
+   */
+  | { kind: 'retry'; id: string; retry: number; total: number; deadline?: number; stopped?: boolean }
   /** A compaction of this history, drawn as one card from start to end. */
   | { kind: 'compaction'; id: string; compaction: ForebrainCompaction }
   /** A line of a /goal: how it opened, a continuation round, or how it ended. */
@@ -1219,6 +1228,9 @@ export type TimelineBlock =
    * live turn, a reloaded one and the terminal all read the same.
    */
   | { kind: 'gate'; id: string; stepId: string; actionId?: string }
+
+/** The retry card's block shape, shared by the timeline renderers. */
+export type TransportRetryBlock = Extract<TimelineBlock, { kind: 'retry' }>
 
 /**
  * A subagent's own transcript.
@@ -1312,6 +1324,10 @@ function appendStreamedText(
   eventId?: string,
   occurredAt?: unknown,
 ): TimelineBlock[] {
+  // Streamed words mean the response is alive again: whatever retry card was
+  // waiting for this stream is spent. Recovery removal lives here because this
+  // is the one funnel every live delta of both paths passes through.
+  blocks = withoutLiveRetryBlocks(blocks)
   const last = blocks[blocks.length - 1]
   if (last && last.kind === kind && last.open) {
     const grown = { ...last, text: last.text + text }
@@ -1321,6 +1337,56 @@ function appendStreamedText(
     return [...blocks, { kind, id: eventId, text, open: true, startedAt: eventTimestamp(occurredAt) }]
   }
   return [...blocks, { kind, id: eventId, text, open: true }]
+}
+
+/**
+ * withoutLiveRetryBlocks removes waiting retry cards, keeping frozen ones:
+ * recovery and the turn's close both end with no live card on the timeline.
+ */
+function withoutLiveRetryBlocks(blocks: TimelineBlock[]): TimelineBlock[] {
+  return blocks.filter((block) => !(block.kind === 'retry' && !block.stopped))
+}
+
+/**
+ * applyTransportRetryBlocks folds one transport_retry into a block list: the
+ * dead attempt's streamed text is kept — sealed where it stands, the way a
+ * completed block seals, because the engine persisted it as the interrupted
+ * message it is — the error card updates in place (consecutive failures
+ * describe one story), and the retry card carries the countdown deadline or
+ * the frozen state. The retried attempt's first delta opens its own block
+ * below the sealed words. Used by the conversation's own stream and by every
+ * subagent view — one event, one rendering.
+ */
+function applyTransportRetryBlocks(
+  blocks: TimelineBlock[],
+  payload: Record<string, unknown>,
+): TimelineBlock[] {
+  const retry = Math.max(0, Number(payload.retry ?? 0))
+  const total = Math.max(0, Number(payload.total ?? 0))
+  const waitMs = Math.max(0, Number(payload.waitMs ?? 0))
+  // The transport's own sentence, kept whole enough to recognize (provider
+  // and address) but capped so a wall of socket noise cannot push the
+  // timeline around.
+  const errorText = truncateTransportError(String(payload.error ?? '').trim() || 'network error')
+  const exhausted = Boolean(payload.exhausted)
+
+  const out = closeStreamedBlocks(blocks, ['assistant', 'thinking'])
+  const errorBlock: TimelineBlock = { kind: 'error', id: 'transport-retry-error', text: errorText }
+  const retryBlock: TimelineBlock = exhausted
+    ? { kind: 'retry', id: 'transport-retry', retry, total, stopped: true }
+    : { kind: 'retry', id: 'transport-retry', retry, total, deadline: Date.now() + waitMs }
+  return replaceOrAppendById(replaceOrAppendById(out, errorBlock), retryBlock)
+}
+
+function replaceOrAppendById(blocks: TimelineBlock[], block: TimelineBlock): TimelineBlock[] {
+  const index = blocks.findIndex((candidate) => candidate.kind === block.kind && candidate.id === block.id)
+  if (index < 0) return [...blocks, block]
+  return blocks.map((candidate, i) => (i === index ? block : candidate))
+}
+
+/** The error card's body cap: 200 characters, hard cut, no ellipsis games. */
+function truncateTransportError(text: string): string {
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text
 }
 
 function closeStreamedBlocks(
@@ -3293,6 +3359,14 @@ export function useChatStream() {
           blocks: closeStreamedBlocks(entry.blocks, ['thinking'], evt.createdAt),
         }))
         return true
+      case 'transport_retry':
+        // Same semantics as the conversation's own stream, scoped to this
+        // subagent's transcript: dead in-flight text out, card pair in.
+        updateSubagent(agentId, (entry) => ({
+          ...entry,
+          blocks: applyTransportRetryBlocks(entry.blocks, payload),
+        }))
+        return true
       case 'usage_delta':
         updateSubagent(agentId, (entry) => ({
           ...entry,
@@ -4222,6 +4296,9 @@ export function useChatStream() {
         // streaming.
 	    blocks: (() => {
 		  let blocks = closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt)
+		  // The execution is over, so its waiting retry card — if the network
+		  // was still down when it ended — leaves with it.
+		  blocks = withoutLiveRetryBlocks(blocks)
 		  let promptIndex = -1
 		  if (promptId) {
 			for (let i = blocks.length - 1; i >= 0; i--) {
@@ -4274,7 +4351,7 @@ export function useChatStream() {
       if (!reviewId) return
       const provider = String(payload.provider ?? '').trim()
       const model = String(payload.model ?? '').trim()
-      const label = String(payload.label ?? '').trim() || [provider, model].filter(Boolean).join('/')
+      const label = [provider, model].filter(Boolean).join('/')
       const step = {
         stepId: reviewId,
         toolName: '',
@@ -4582,6 +4659,19 @@ export function useChatStream() {
           blocks: closeStreamedBlocks(message.blocks ?? [], ['thinking'], evt.createdAt),
         }))
         return
+      case 'transport_retry': {
+        // The attempt that was streaming died on the network: its buffered
+        // text goes (the retry re-streams from the first token) and the
+        // error/retry card pair paints from the same payload the terminal
+        // renders.
+        state.fullAnswer = ''
+        answer.value = ''
+        updateMessageById(assistantMessageId, (message) => ({
+          ...message,
+          blocks: applyTransportRetryBlocks(message.blocks ?? [], payload as Record<string, unknown>),
+        }))
+        return
+      }
       case 'turn_completed': {
         state.completedNormally = true
         state.completedRunId = String(evt.runId ?? activeRunId ?? '').trim() || state.completedRunId || null
@@ -4592,10 +4682,16 @@ export function useChatStream() {
         if (payload.pendingInput) {
           applyPendingInputPreview(payload.pendingInput)
         }
-        updateMessageById(assistantMessageId, (message) => ({
-          ...withSettledTurnText(message, finalText, evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
-        }))
+        updateMessageById(assistantMessageId, (message) => {
+          const settled = withSettledTurnText(message, finalText, evt.createdAt)
+          return {
+            ...settled,
+            ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+            // A turn that closed leaves no waiting retry card behind; a
+            // frozen one is history and stays.
+            blocks: withoutLiveRetryBlocks(settled.blocks ?? []),
+          }
+        })
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
         isStreaming.value = false
         return
@@ -4603,10 +4699,14 @@ export function useChatStream() {
       case 'turn_error': {
         state.completedNormally = false
         const msg = String(payload.error ?? payload.message ?? 'Request failed')
-        updateMessageById(assistantMessageId, (message) => ({
-          ...withRunError(message, evt.runId, msg, parseProviderErrorDetail(payload.detail), evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
-        }))
+        updateMessageById(assistantMessageId, (message) => {
+          const failed = withRunError(message, evt.runId, msg, parseProviderErrorDetail(payload.detail), evt.createdAt)
+          return {
+            ...failed,
+            ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+            blocks: withoutLiveRetryBlocks(failed.blocks ?? []),
+          }
+        })
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
         isStreaming.value = false
         return
@@ -4682,10 +4782,14 @@ export function useChatStream() {
       case 'turn_cancelled': {
         state.completedNormally = false
         state.completedRunId = String(evt.runId ?? activeRunId ?? '').trim() || state.completedRunId || null
-        updateMessageById(assistantMessageId, (message) => ({
-          ...withCancelledTurn(message, evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
-        }))
+        updateMessageById(assistantMessageId, (message) => {
+          const cancelled = withCancelledTurn(message, evt.createdAt)
+          return {
+            ...cancelled,
+            ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+            blocks: withoutLiveRetryBlocks(cancelled.blocks ?? []),
+          }
+        })
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
         isStreaming.value = false
         return

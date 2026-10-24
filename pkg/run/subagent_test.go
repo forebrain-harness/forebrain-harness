@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1861,11 +1862,12 @@ func TestSubagentContextDoesNotInheritPrimarySteerRuntime(t *testing.T) {
 
 // streamProbe records the run events a subagent's own stream sink republishes.
 type streamProbe struct {
-	assistant     []event.AssistantDeltaPayload
-	reasoning     []event.ReasoningDeltaPayload
-	usage         []event.UsageDeltaPayload
-	toolStarted   []event.ToolCallStartedPayload
-	toolCompleted []event.ToolCallCompletedPayload
+	assistant      []event.AssistantDeltaPayload
+	reasoning      []event.ReasoningDeltaPayload
+	usage          []event.UsageDeltaPayload
+	toolStarted    []event.ToolCallStartedPayload
+	toolCompleted  []event.ToolCallCompletedPayload
+	transportRetry []event.TransportRetryPayload
 }
 
 func (p *streamProbe) Publish(_ context.Context, evt event.RunEvent) error {
@@ -1879,6 +1881,11 @@ func (p *streamProbe) Publish(_ context.Context, evt event.RunEvent) error {
 		var m event.ReasoningDeltaPayload
 		if json.Unmarshal(evt.Payload, &m) == nil {
 			p.reasoning = append(p.reasoning, m)
+		}
+	case event.RunEventTransportRetry:
+		var m event.TransportRetryPayload
+		if json.Unmarshal(evt.Payload, &m) == nil {
+			p.transportRetry = append(p.transportRetry, m)
 		}
 	case event.RunEventUsageDelta:
 		var m event.UsageDeltaPayload
@@ -5148,6 +5155,55 @@ func TestSubagentQueueChangesReachTheSurface(t *testing.T) {
 	waitSubagentIdle(t, owner, conv, "task-hook")
 }
 
+// A subagent's delivered steer is drawn from its runtime's delivery event, so
+// nothing reads its queue's delivered list. The channel must drop that list
+// itself, whatever surface is attached, or every steer the user ever sent the
+// subagent — attachments and all — stays in memory for the life of the process.
+func TestSubagentQueueKeepsNoDeliveredSteers(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	owner.Events = &channelEventProbe{}
+	release := make(chan struct{})
+	owner.SubagentExecutor = &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
+	boundary := make(chan struct{}, 1)
+	surface := SubagentSurface{OnBoundary: func(string, []Input, []Input) { boundary <- struct{}{} }}
+	conv := "conv-delivered"
+	worker := "main:conv-delivered:worker:00000000-0000-0000-0000-0000000005cc"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-delivered", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	send := func(text string, want SubagentDelivery) {
+		t.Helper()
+		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-delivered", Input{Text: text}, TurnInputModeSteer); err != nil || got != want {
+			t.Fatalf("send %q = %q, %v; want %q", text, got, err, want)
+		}
+	}
+	send("start", SubagentDeliveryStarted)
+	waitSubagentBusy(t, owner, conv, "task-delivered")
+	send("steer", SubagentDeliverySteered)
+
+	q := owner.Control.SessionQueue(worker)
+	delivery := q.Runtime().BeginSteerDelivery(context.Background())
+	if delivery == nil || !delivery.Commit() {
+		t.Fatal("expected the running execution to take the steer")
+	}
+	if left := q.TakeDelivered(); len(left) != 0 {
+		t.Fatalf("the subagent's queue still holds %d delivered steer(s)", len(left))
+	}
+
+	close(release)
+	select {
+	case <-boundary:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the execution never reached its boundary")
+	}
+	waitSubagentIdle(t, owner, conv, "task-delivered")
+}
+
 // TestWithdrawBeforeTheSubagentAnswers pins Esc's first meaning (D1): a message
 // the user just sent a subagent can be taken back before its model answers —
 // the worker row is hidden and no result is written — but not after. The
@@ -6116,5 +6172,42 @@ func TestUserMessageToDisabledCustomSubagentStillRuns(t *testing.T) {
 	ctx := s.startedContext(t)
 	if _, ok := toolpkg.SubagentToolPolicyFromContext(ctx); !ok {
 		t.Fatal("a disabled custom subagent lost its policy")
+	}
+}
+
+// TestSubagentTransportRetryIsPublishedAndRetried pins the subagent half of
+// the network retry: a subagent's LLM call that dies on the network retries
+// through the same chain the primary agent uses, and the failure/retry reach
+// the surfaces as one transport_retry event tagged with the roster key — so
+// the subagent's own view draws the same error/retry cards the conversation
+// does, never the conversation's transcript.
+func TestSubagentTransportRetryIsPublishedAndRetried(t *testing.T) {
+	probe := &streamProbe{}
+	childCtx := subagentRunContext(context.Background(), nil, probe, "child-run-1", "session-1", agent.HistoryEntry{TaskID: "task-search-1"})
+
+	inner := &netRetryTestLLM{
+		deltas:  []string{"dead ", "words"},
+		failure: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")},
+	}
+	wrapped := wrapNetworkRetryLLM(inner, 3)
+	res, err := wrapped.Execute(childCtx, nil, nil)
+	if err != nil {
+		t.Fatalf("subagent Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "full answer" {
+		t.Fatalf("result = %+v, want the retried attempt's answer", res)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2 (the dropped stream retried)", inner.calls)
+	}
+	if len(probe.transportRetry) != 1 {
+		t.Fatalf("transport_retry events = %#v, want exactly one", probe.transportRetry)
+	}
+	tr := probe.transportRetry[0]
+	if tr.AgentID != "task-search-1" {
+		t.Fatalf("transport_retry agent = %q, want the roster key so the card lands in the subagent's view", tr.AgentID)
+	}
+	if tr.Retry != 1 || tr.Total != 3 || tr.Exhausted || tr.Error == "" || tr.WaitMs <= 0 {
+		t.Fatalf("transport_retry payload = %+v, want retry 1/3 with the failure and a wait", tr)
 	}
 }

@@ -584,6 +584,20 @@ func (p *StreamPartial) ResponseReasoningDone() {
 	p.mu.Unlock()
 }
 
+// Reset drops both the answer text and the reasoning collected so far: the
+// attempt that was streaming them died on the network and the retry re-streams
+// from the first token, so both buffers must go in one step. It is the
+// transport-retry discard boundary for surfaces that hold a StreamPartial.
+func (p *StreamPartial) Reset() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.content.Reset()
+	p.reasoning.Reset()
+	p.mu.Unlock()
+}
+
 func (p *StreamPartial) Content() string {
 	if p == nil {
 		return ""

@@ -74,6 +74,22 @@ agents:
         api_key: \${FAKE_LLM_KEY}
         base_url: http://127.0.0.1:$PORT
 YAML
+  # NETWORK_RETRY_MAX pins agents.defaults.network_retry_max for the run: the
+  # transport-retry scripts use it to watch a custom cap's n/total wording and
+  # its exhaustion. Inserted under agents.defaults, where the key lives.
+  if [ -n "${NETWORK_RETRY_MAX:-}" ]; then
+    python3 - "$HOME_DIR/forebrain.yaml" "$NETWORK_RETRY_MAX" <<'PY'
+import sys
+path, value = sys.argv[1], sys.argv[2]
+lines = open(path).read().splitlines()
+out = []
+for line in lines:
+    out.append(line)
+    if line.strip().startswith("enable_subagent:"):
+        out.append("    network_retry_max: %s" % value)
+open(path, "w").write("\n".join(out) + "\n")
+PY
+  fi
   # COMPACT_LIMIT lowers the auto-compaction threshold so a short scripted
   # conversation crosses it: the way to watch a pre-turn or mid-turn compaction.
   if [ -n "${COMPACT_LIMIT:-}" ]; then
@@ -306,6 +322,11 @@ usage: driver.sh <command>
                         subagent's own request is refused with a usage-limit 429
                         for FAKE_LIMIT_SECONDS (default 20) and then answers,
                         so the subagent's automatic continuation is what runs
+                        subagent-steer = the main agent dispatches a
+                        general-purpose probe (needs ENABLE_SUBAGENT=1) that
+                        runs a shell call (the answer text, default sleep 8);
+                        its next request takes a steer queued meanwhile, sends
+                        one delta and hangs, so the subagent keeps running
                          RESUME_ID=<session> resumes that session instead of
                          starting a new one (does not reset the home)
                          ENABLE_SUBAGENT=1 enables the subagent tools

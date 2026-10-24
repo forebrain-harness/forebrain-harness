@@ -431,7 +431,7 @@ func TestTransportKeyModeSendsAStaticBearer(t *testing.T) {
 	// server that fails the test if it is reached.
 	stubConsole(t, "http://127.0.0.1:1")
 	captured := &captureTransport{}
-	transport := NewKeyTransport(PublicBearer)
+	transport := NewKeyTransport(testConsoleKey)
 	transport.Base = captured
 
 	req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/inference/openai/v1/chat/completions", nil)
@@ -444,7 +444,7 @@ func TestTransportKeyModeSendsAStaticBearer(t *testing.T) {
 		t.Fatalf("RoundTrip: %v", err)
 	}
 	resp.Body.Close()
-	if got := captured.request.Header.Get("Authorization"); got != "Bearer "+PublicBearer {
+	if got := captured.request.Header.Get("Authorization"); got != "Bearer "+testConsoleKey {
 		t.Fatalf("Authorization = %q, want the static bearer", got)
 	}
 	if got := captured.request.Header.Get("x-opencode-session"); got != "" {
@@ -486,7 +486,7 @@ func TestUserAgentCarriesTheInstalledVersion(t *testing.T) {
 // announces — so the transport has to say that it owns the header, or every
 // request would reach the gateway anonymous.
 func TestTransportOwnsTheUserAgent(t *testing.T) {
-	var owner interface{ OwnsUserAgent() bool } = NewKeyTransport(PublicBearer)
+	var owner interface{ OwnsUserAgent() bool } = NewKeyTransport(testConsoleKey)
 	if !owner.OwnsUserAgent() {
 		t.Fatal("Transport reported it does not own the User-Agent; the responses client would blank it")
 	}

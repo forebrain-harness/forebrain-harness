@@ -782,7 +782,7 @@ func TestReviewDeliveryGuidanceCarriesReviewWithoutUserFeedback(t *testing.T) {
 	for _, want := range []string{
 		"The plan review you asked for has returned.",
 		"call exit_plan_mode again",
-		`<review model="zhipuai / glm-5.3-flash">`,
+		`<review model="zhipuai/glm-5.3-flash">`,
 		"Add a test for the cancel race.",
 	} {
 		if !strings.Contains(got, want) {

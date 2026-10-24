@@ -1154,9 +1154,11 @@ func (m *viewModel) append(f Frame) *viewBlock {
 // streamingFrameKind reports whether a frame kind arrives as a run of live
 // updates carrying the full accumulated text, each replacing the last, and is
 // closed by a Final frame. Both of forebrain's streamed model outputs work this
-// way: the answer and the reasoning behind it.
+// way: the answer and the reasoning behind it. The retry card joins them: its
+// live line replaces the last live one (no per-failure stacking) and its
+// frozen Final frame seals the same block.
 func streamingFrameKind(k FrameKind) bool {
-	return k == FrameThinking || k == FrameAssistant
+	return k == FrameThinking || k == FrameAssistant || k == FrameRetrying
 }
 
 // blockByID returns the block with the given id, or nil. Linear scan: block
@@ -1229,7 +1231,7 @@ func (m *viewModel) endsOnError(content string) bool {
 func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 	if f.StepID != "" {
 		switch f.Kind {
-		case FrameFanout, FrameTool, FrameMemoryCompact, FrameSkillInstall, FrameMigration:
+		case FrameFanout, FrameTool, FrameMemoryCompact, FrameSkillInstall, FrameMigration, FrameRetrying:
 			for _, b := range m.blocks {
 				if b.frame.Kind == f.Kind && b.frame.StepID == f.StepID && !b.frame.RetainAsHistory {
 					b.frame = f
@@ -1238,6 +1240,18 @@ func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 					// image when the result arrives, and that card must stop
 					// folding.
 					b.collapsible = frameCollapsible(f)
+					b.cache.valid = false
+					return b
+				}
+			}
+		}
+		// The transport-retry error card replaces its predecessor in place
+		// (consecutive failures describe one story); every other error card
+		// has no StepID and stacks as it always did.
+		if f.Kind == FrameError && strings.HasPrefix(f.StepID, "transport_retry") {
+			for _, b := range m.blocks {
+				if b.frame.Kind == FrameError && b.frame.StepID == f.StepID {
+					b.frame = f
 					b.cache.valid = false
 					return b
 				}

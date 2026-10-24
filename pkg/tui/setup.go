@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -178,14 +179,10 @@ func mainLLMSummary(cfg *appcfg.Root) string {
 	if !v.Complete() {
 		return "Not configured."
 	}
-	switch {
-	case v.Provider != "" && v.Model != "":
-		return v.Provider + " · " + v.Model
-	case v.Model != "":
-		return v.Model
-	default:
-		return "Configured."
+	if label := llm.FormatProviderModel(v.Provider, v.Model); label != "" {
+		return label
 	}
+	return "Configured."
 }
 
 func mainLLMBaseURL(cfg *appcfg.Root) string {
@@ -277,9 +274,8 @@ type providerChoice struct {
 	ChatGPTOAuth    bool
 	// OpenCodeDevice is the way into the OpenCode gateway: the Go
 	// subscription behind a device-code login. It asks for no API key, so it
-	// skips the key page. The Console surface keeps no entry here: its free
-	// family only answers OpenCode's own client, and a paid Console key is
-	// configured from the web app or the config file.
+	// skips the key page. The Console surface keeps no entry here: a paid
+	// Console key is configured from the web app or the config file.
 	OpenCodeDevice bool
 }
 
@@ -1194,7 +1190,7 @@ func catalogModelOptions(provider string) []modelOption {
 	records := turn.ListModelCatalog(turn.ModelCatalogQuery{Provider: provider})
 	options := make([]modelOption, 0, len(records)+1)
 	for _, rec := range records {
-		options = append(options, modelOption{Label: modelOptionLabel(rec), Value: rec.APIModel})
+		options = append(options, modelOption{Label: rec.APIModel, Value: rec.APIModel})
 	}
 	return options
 }
@@ -1205,20 +1201,9 @@ func catalogModelOptions(provider string) []modelOption {
 func discoveredModelOptions(records []turn.ModelRecord) []modelOption {
 	options := make([]modelOption, 0, len(records)+1)
 	for _, rec := range records {
-		options = append(options, modelOption{Label: modelOptionLabel(rec), Value: rec.APIModel, IsDefault: rec.IsDefault})
+		options = append(options, modelOption{Label: rec.APIModel, Value: rec.APIModel, IsDefault: rec.IsDefault})
 	}
 	return options
-}
-
-// modelOptionLabel shows the display name and the exact id together when they
-// differ, so the value being saved is always visible in the prompt.
-func modelOptionLabel(rec turn.ModelRecord) string {
-	name := strings.TrimSpace(rec.ModelName)
-	apiModel := strings.TrimSpace(rec.APIModel)
-	if name == "" || name == apiModel {
-		return apiModel
-	}
-	return name + " · " + apiModel
 }
 
 // promptModel asks for the model: from the options, or typed as an ID when

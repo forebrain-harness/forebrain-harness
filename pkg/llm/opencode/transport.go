@@ -59,12 +59,12 @@ type Transport struct {
 	// http.DefaultTransport.
 	Base http.RoundTripper
 
-	// key is the static token of key mode (an API key or PublicBearer).
+	// key is the static token of key mode: a Console API key.
 	key string
 }
 
 // NewKeyTransport returns a transport that sends key as a static bearer token,
-// with no refresh logic. It is the API-key and public-token path.
+// with no refresh logic. It is the API-key path.
 func NewKeyTransport(key string) *Transport {
 	return &Transport{key: strings.TrimSpace(key)}
 }

@@ -993,12 +993,10 @@ const (
 type Model struct {
 	Provider string
 	Model    string
-	// Label is the catalog display name, when the model is in the catalog.
-	Label string
 }
 
 // Display renders the model for a UI row or a confirmation line, in the same
-// "provider / model" form the rest of the UI uses.
+// "provider/model" form the rest of the UI uses.
 func (m Model) Display() string {
 	return llm.FormatProviderModel(m.Provider, m.Model)
 }
@@ -1200,7 +1198,6 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentProvider, curren
 		out = append(out, PlanReviewModelOption{
 			Provider: provider,
 			Model:    model,
-			Label:    strings.TrimSpace(entry.Name),
 			Current: strings.EqualFold(provider, strings.TrimSpace(currentProvider)) &&
 				strings.EqualFold(model, strings.TrimSpace(currentModel)),
 		})
@@ -1253,7 +1250,6 @@ func PlanReviewsForAction(ctx context.Context, log PlanReviewLog, sessionID, act
 			Model: Model{
 				Provider: strings.TrimSpace(payload.Provider),
 				Model:    strings.TrimSpace(payload.Model),
-				Label:    strings.TrimSpace(payload.Label),
 			},
 			Text:     payload.Text,
 			Duration: time.Duration(payload.DurationMs) * time.Millisecond,
@@ -1292,7 +1288,6 @@ type PlanReviewInFlight struct {
 	ReviewID string
 	Provider string
 	Model    string
-	Label    string
 	// AgentID is the reviewer's roster key, from the subagent_spawned event
 	// whose parent tool call is the review. It is what a surface cancels to
 	// stop the review, the same way it stops any other subagent.
@@ -1339,7 +1334,6 @@ func ActivePlanReview(ctx context.Context, log PlanReviewLog, sessionID, actionI
 			ReviewID: payload.ReviewID,
 			Provider: strings.TrimSpace(payload.Provider),
 			Model:    strings.TrimSpace(payload.Model),
-			Label:    strings.TrimSpace(payload.Label),
 			AgentID:  planReviewerAgentID(ctx, log, sessionID, payload.ReviewID),
 		}
 		return open, true
@@ -1479,7 +1473,6 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 	model := Model{
 		Provider: strings.TrimSpace(in.Model.Provider),
 		Model:    strings.TrimSpace(in.Model.Model),
-		Label:    strings.TrimSpace(in.Model.Label),
 	}
 	actionID := strings.TrimSpace(in.ActionID)
 	sessionID := strings.TrimSpace(in.SessionID)
@@ -1494,12 +1487,12 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 	publish(event.NewRunEvent("plan-review:"+reviewID+":started", runID, sessionID,
 		event.RunEventPlanReviewStarted, event.PlanReviewStartedPayload{
 			ActionID: actionID, ReviewID: reviewID,
-			Provider: model.Provider, Model: model.Model, Label: model.Label,
+			Provider: model.Provider, Model: model.Model,
 		}, time.Now()))
 	finish := func(outcome string, err error, text string, duration time.Duration) {
 		reviewed := event.PlanReviewedPayload{
 			ActionID: actionID, ReviewID: reviewID,
-			Provider: model.Provider, Model: model.Model, Label: model.Label,
+			Provider: model.Provider, Model: model.Model,
 			Text: text, DurationMs: duration.Milliseconds(), Outcome: outcome,
 		}
 		if err != nil && outcome == planReviewOutcomeFailed {

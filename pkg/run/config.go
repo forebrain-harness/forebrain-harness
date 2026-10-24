@@ -526,8 +526,8 @@ func (t *openCodeAuthTransport) OwnsUserAgent() bool {
 // The credential is resolved in the order the login flows write it: an
 // api_key in configuration (which may be an ${ENV} reference), then
 // OPENCODE_API_KEY, then the opencode.json that /connect and the web login
-// write, and finally the literal "public" bearer — which only the free model
-// family accepts, so it is offered only for a model the table marks free.
+// write. There is no anonymous fallback: every model, the free ones included,
+// needs a login with a Go or Go Plus subscription or a Console key.
 //
 // The model decides the wire protocol, and the protocol decides which client
 // the request goes to; each client gets the base URL whose path suffix it
@@ -541,7 +541,6 @@ func newOpenCodeLLM(prov, model, apiKey, baseURL string, cfg *LLMProviderYAML) (
 	opencode.SetClientVersion(home.Version)
 
 	goSubscription := strings.EqualFold(prov, "opencode-go")
-	meta, known := opencode.LookupModelMeta(prov, model)
 
 	key := strings.TrimSpace(apiKey)
 	if key == "" {
@@ -555,9 +554,6 @@ func newOpenCodeLLM(prov, model, apiKey, baseURL string, cfg *LLMProviderYAML) (
 				auth.Path = path
 			}
 		}
-	}
-	if auth.Path == "" && key == "" && known && meta.Free {
-		key = opencode.PublicBearer
 	}
 	if auth.Path == "" && key == "" {
 		return nil, fmt.Errorf("OpenCode login or %s is required for provider %s; run /connect", opencode.APIKeyEnv, prov)

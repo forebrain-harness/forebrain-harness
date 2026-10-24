@@ -1085,6 +1085,62 @@ func TestExecutionMaxParallelSubagentsNegativeClampsToZero(t *testing.T) {
 	}
 }
 
+func TestNetworkRetryMaxDefaultsToTenAndRoundTrips(t *testing.T) {
+	if got := (AgentDefaults{}).NetworkRetryMaxOrDefault(); got != DefaultNetworkRetryMax {
+		t.Fatalf("unset NetworkRetryMaxOrDefault = %d, want the default %d", got, DefaultNetworkRetryMax)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forebrain.yaml")
+	if err := os.WriteFile(path, []byte("agents:\n  defaults: {}\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := loaded.Agents.Defaults.NetworkRetryMaxOrDefault(); got != DefaultNetworkRetryMax {
+		t.Fatalf("loaded default = %d, want %d", got, DefaultNetworkRetryMax)
+	}
+
+	four := 4
+	if err := Save(path, Root{Agents: AgentsSection{Defaults: AgentDefaults{NetworkRetryMax: &four}}}); err != nil {
+		t.Fatalf("save 4: %v", err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload 4: %v", err)
+	}
+	if got := reloaded.Agents.Defaults.NetworkRetryMaxOrDefault(); got != 4 {
+		t.Fatalf("reloaded value = %d, want 4", got)
+	}
+	if reloaded.Agents.Defaults.NetworkRetryMax == nil || *reloaded.Agents.Defaults.NetworkRetryMax != 4 {
+		t.Fatalf("reloaded pointer = %v, want 4", reloaded.Agents.Defaults.NetworkRetryMax)
+	}
+}
+
+func TestNetworkRetryMaxLoadRejectsNegativeAndAllowsAnyLargerValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forebrain.yaml")
+	if err := os.WriteFile(path, []byte("agents:\n  defaults:\n    network_retry_max: -1\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "agents.defaults.network_retry_max must be non-negative") {
+		t.Fatalf("negative load error = %v, want agents.defaults.network_retry_max must be non-negative", err)
+	}
+
+	// No upper bound: a large custom cap loads as-is.
+	if err := os.WriteFile(path, []byte("agents:\n  defaults:\n    network_retry_max: 100\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 100: %v", err)
+	}
+	if got := loaded.Agents.Defaults.NetworkRetryMaxOrDefault(); got != 100 {
+		t.Fatalf("loaded value = %d, want 100", got)
+	}
+}
+
 // Restored after the unused helpers these tests also touched were removed:
 // the assertions below cover live code and would otherwise have gone with
 // them.

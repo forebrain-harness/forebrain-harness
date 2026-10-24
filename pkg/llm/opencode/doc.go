@@ -4,12 +4,13 @@
 // discovery, and the static table that says which wire protocol each model
 // speaks.
 //
-// # Three token sources
+// # Two token sources
 //
-// A request is authenticated by exactly one of three tokens: an OAuth access
-// token from the device flow (an interactive login, refreshed by Transport), a
-// Console API key from the environment (Transport built by NewKeyTransport),
-// or the literal "public" that the free model family accepts anonymously.
+// A request is authenticated by exactly one of two tokens: an OAuth access
+// token from the device flow (an interactive login, refreshed by Transport) or
+// a Console API key from the environment (Transport built by NewKeyTransport).
+// Nothing is served without one: the free models, too, need a login with a Go
+// or Go Plus subscription.
 //
 // # The protocol split is not derivable from a model id
 //

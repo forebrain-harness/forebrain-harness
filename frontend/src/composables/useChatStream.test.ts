@@ -595,8 +595,8 @@ describe('useChatStream helpers', () => {
         session_id: 'web-pick',
         text: '',
         data: { picker: { command: 'model', title: 'Model', hint: 'The model this agent runs on', items: [
-          { value: 'openai / gpt-4o', label: 'openai / gpt-4o', current: true },
-          { value: 'deepseek / deepseek-chat', label: 'deepseek / deepseek-chat' },
+          { value: 'openai/gpt-4o', label: 'openai/gpt-4o', current: true },
+          { value: 'deepseek/deepseek-chat', label: 'deepseek/deepseek-chat' },
         ] } },
       })
       await pendingSend
@@ -605,18 +605,18 @@ describe('useChatStream helpers', () => {
       expect(notice.picker?.items[0]?.current).toBe(true)
 
       const socketsBefore = FakeChatWebSocket.instances.length
-      const pendingPick = stream.choose(notice.id!, { command: 'model', value: 'deepseek / deepseek-chat' })
+      const pendingPick = stream.choose(notice.id!, { command: 'model', value: 'deepseek/deepseek-chat' })
       for (const candidate of FakeChatWebSocket.instances.slice(socketsBefore)) candidate.open()
       const pickSocket = FakeChatWebSocket.instances.slice(socketsBefore).find((candidate) =>
         candidate.sent.some((raw) => JSON.parse(raw).op === 'start_run'))!
       const pick = JSON.parse(pickSocket.sent.find((raw) => JSON.parse(raw).op === 'start_run')!) as { request_id?: string; message?: { content?: string; choice?: unknown } }
-      expect(pick.message).toMatchObject({ content: '/model', choice: { command: 'model', value: 'deepseek / deepseek-chat' } })
-      pickSocket.message({ op: 'slash_reply', request_id: pick.request_id, session_id: 'web-pick', text: 'Switched to deepseek / deepseek-chat.' })
+      expect(pick.message).toMatchObject({ content: '/model', choice: { command: 'model', value: 'deepseek/deepseek-chat' } })
+      pickSocket.message({ op: 'slash_reply', request_id: pick.request_id, session_id: 'web-pick', text: 'Switched to deepseek/deepseek-chat.' })
       await pendingPick
 
       expect(stream.messages.value.map((m) => m.role)).toEqual(['user', 'notice', 'notice'])
-      expect(stream.messages.value[1]).toMatchObject({ picked: 'deepseek / deepseek-chat' })
-      expect(stream.messages.value[2]).toMatchObject({ role: 'notice', content: 'Switched to deepseek / deepseek-chat.' })
+      expect(stream.messages.value[1]).toMatchObject({ picked: 'deepseek/deepseek-chat' })
+      expect(stream.messages.value[2]).toMatchObject({ role: 'notice', content: 'Switched to deepseek/deepseek-chat.' })
     } finally {
       chatMessagesSpy.mockRestore()
       sessionModeSpy.mockRestore()
@@ -4042,6 +4042,8 @@ describe('subagent_* call cards', () => {
   it('opens one card for a plan review and binds its reviewer without a dispatch call', async () => {
     const { stream, runEvent, finish } = liveStream()
     const before = stream.messages.value.length
+    // Written before reviewer labels were dropped: the label it still carries
+    // must not name the reviewer, provider/model does, as in the terminal.
     runEvent('plan_review_started', { action_id: 'act-1', review_id: 'rev-1', provider: 'zhipuai', model: 'glm-5.3-flash', label: 'GLM' })
     runEvent('subagent_spawned', {
       agent_id: 'plan-review-rev-1', agent_type: 'plan-reviewer', task_id: 'plan-review-rev-1',
@@ -4060,6 +4062,7 @@ describe('subagent_* call cards', () => {
     const blocks = (host?.blocks ?? []).filter((b) => b.kind === 'subagent')
     expect(blocks).toHaveLength(1)
     const block = blocks[0] as Extract<TimelineBlock, { kind: 'subagent' }>
+    expect(block.step.summary).toBe('review the plan with zhipuai/glm-5.3-flash')
     const live = stream.subagentCallTasks.get(block.stepId)
     expect(live).toBeTruthy()
     const view = subagentCallView(block.step, live, Date.parse('2026-10-07T08:00:06.000Z'))
@@ -4865,3 +4868,182 @@ describe('useChatStream stream_partial', () => {
     }
   })
 })
+
+  it('renders the transport retry: dead text out, card pair in, recovery removes the card', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: FakeChatWebSocket,
+    })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('reasoning_delta', { text: 'half a thought' })
+      runEvent('assistant_delta', { text: 'half an an' })
+      let primary = stream.messages.value[stream.messages.value.length - 1]
+      expect(primary?.blocks?.some((b) => b.kind === 'assistant' && b.open)).toBe(true)
+
+      // The stream died mid-answer. What was already shown is kept — sealed
+      // where it stands, the way a completed block seals — the error card
+      // carries the failure, and the retry card carries the progress straight
+      // from the payload — 1/3 here, proving no surface hard-codes a
+      // denominator of 10.
+      runEvent('transport_retry', { retry: 1, total: 3, wait_ms: 500, error: 'read tcp 10.0.0.1:1->10.0.0.2:2: i/o timeout' })
+      primary = stream.messages.value[stream.messages.value.length - 1]
+      const blocks = primary?.blocks ?? []
+      expect(blocks.some((b) => b.kind === 'assistant' && !b.open && b.text === 'half an an')).toBe(true)
+      expect(blocks.some((b) => b.kind === 'thinking' && !b.open)).toBe(true)
+      expect(blocks.filter((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toHaveLength(1)
+      const retryBlock = blocks.find((b) => b.kind === 'retry') as Extract<TimelineBlock, { kind: 'retry' }> | undefined
+      expect(retryBlock?.stopped).toBeFalsy()
+      expect(typeof retryBlock?.deadline).toBe('number')
+      // The composer-level answer buffer went with the dead attempt.
+      expect(stream.answer.value).toBe('')
+
+      // The next failure updates the same two blocks, never stacks.
+      runEvent('transport_retry', { retry: 2, total: 3, wait_ms: 1000, error: 'read tcp: connection reset' })
+      primary = stream.messages.value[stream.messages.value.length - 1]
+      expect((primary?.blocks ?? []).filter((b) => b.kind === 'retry')).toHaveLength(1)
+      expect((primary?.blocks ?? []).filter((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toHaveLength(1)
+
+      // Recovery: the continuation's first words remove the retry card and
+      // open a NEW block below the sealed words — the answer continues, it is
+      // never rewritten over, never doubled.
+      runEvent('assistant_delta', { text: 'and this is the rest' })
+      primary = stream.messages.value[stream.messages.value.length - 1]
+      const after = primary?.blocks ?? []
+      expect(after.some((b) => b.kind === 'retry')).toBe(false)
+      expect(after.some((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toBe(true)
+      expect(after.some((b) => b.kind === 'assistant' && !b.open && b.text === 'half an an')).toBe(true)
+      expect(after.some((b) => b.kind === 'assistant' && b.open && b.text === 'and this is the rest')).toBe(true)
+      runEvent('turn_completed', { text: 'and this is the rest' })
+      await pendingSend
+      const final = stream.messages.value.find((message) => message.runId === 'run-1')
+      expect(final?.content).toContain('half an an')
+      expect(final?.content).toContain('and this is the rest')
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+    }
+  })
+
+  it('freezes the retry card when the retries are exhausted and clears it with the turn', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: FakeChatWebSocket,
+    })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('transport_retry', { retry: 2, total: 2, wait_ms: 0, error: 'read tcp: i/o timeout', exhausted: true })
+      let primary = stream.messages.value[stream.messages.value.length - 1]
+      let retryBlock = (primary?.blocks ?? []).find((b) => b.kind === 'retry') as Extract<TimelineBlock, { kind: 'retry' }> | undefined
+      expect(retryBlock).toMatchObject({ retry: 2, total: 2, stopped: true })
+
+      // A cancelled turn takes its still-waiting card with it; the frozen
+      // card is history and would have stayed.
+      runEvent('transport_retry', { retry: 1, total: 2, wait_ms: 60000, error: 'read tcp: reset' })
+      runEvent('turn_cancelled', {})
+      await pendingSend
+      primary = stream.messages.value[stream.messages.value.length - 1]
+      expect((primary?.blocks ?? []).some((b) => b.kind === 'retry' && !b.stopped)).toBe(false)
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+    }
+  })
+
+  it('scopes a subagent transport retry to the subagent transcript', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: FakeChatWebSocket,
+    })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('find the callers')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('subagent_spawned', {
+        agent_id: 'task-explore-1',
+        agent_type: 'explore',
+        task_id: 'task-explore-1',
+        title: 'Trace callers',
+        task: 'find the callers',
+        execution_id: 'exec-1',
+      })
+      runEvent('assistant_delta', { agent_id: 'task-explore-1', text: 'dead words' })
+      runEvent('transport_retry', { agent_id: 'task-explore-1', retry: 1, total: 10, wait_ms: 500, error: 'read tcp: i/o timeout' })
+
+      // The card pair lands in the subagent's own transcript with the same
+      // shape the conversation draws, the streamed words stay sealed in
+      // place, and the conversation's blocks stay untouched: same semantics,
+      // one event.
+      const entry = stream.subagents.value.find((row) => row.agentId === 'task-explore-1')
+      expect(entry).toBeTruthy()
+      const retryBlock = (entry?.blocks ?? []).find((b) => b.kind === 'retry') as Extract<TimelineBlock, { kind: 'retry' }> | undefined
+      expect(retryBlock).toMatchObject({ retry: 1, total: 10 })
+      expect((entry?.blocks ?? []).some((b) => b.kind === 'assistant' && !b.open && b.text === 'dead words')).toBe(true)
+      expect((entry?.blocks ?? []).some((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toBe(true)
+      const primary = stream.messages.value[stream.messages.value.length - 1]
+      expect((primary?.blocks ?? []).some((b) => b.kind === 'retry')).toBe(false)
+
+      // Recovery inside the subagent view removes its card the same way.
+      runEvent('assistant_delta', { agent_id: 'task-explore-1', text: 'live words' })
+      const recovered = stream.subagents.value.find((row) => row.agentId === 'task-explore-1')
+      expect((recovered?.blocks ?? []).some((b) => b.kind === 'retry')).toBe(false)
+      runEvent('subagent_ended', { agent_id: 'task-explore-1', agent_type: 'explore', task_id: 'task-explore-1', status: 'ok', execution_id: 'exec-1' })
+      runEvent('turn_completed', { text: 'done' })
+      await pendingSend
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+    }
+  })

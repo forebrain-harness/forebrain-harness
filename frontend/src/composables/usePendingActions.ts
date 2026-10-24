@@ -105,7 +105,7 @@ export function usePendingActions(options: {
 
   function activeReviewLabel(a: ActionRow): string {
     const active = exitPlanRequest(a)?.planReviewActive
-    return [active?.provider, active?.model ?? ''].filter(Boolean).join('/') || active?.label || ''
+    return [active?.provider, active?.model ?? ''].filter(Boolean).join('/')
   }
 
   /** The clear-context choice names what it frees when the number is known,

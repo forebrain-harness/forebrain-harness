@@ -25,14 +25,14 @@ import (
 const ModelSourceChatGPTAccount = "chatgpt-account"
 
 // ModelSourceOpenCodeAccount marks records discovered live from an OpenCode
-// surface — Console (free family and pay-as-you-go) or the Go subscription.
+// surface — Console (pay-as-you-go) or the Go subscription.
 // Like the ChatGPT ones, they exist nowhere in the static catalog.
 const ModelSourceOpenCodeAccount = "opencode-account"
 
 // The two OpenCode provider ids. They differ only in the inference root and in
 // the protocol a handful of models speak, but they stay separate provider
-// names so a free Console model and a Go subscription model can never be
-// conflated in a picker or a config.
+// names so a Console model and a Go subscription model can never be conflated
+// in a picker or a config.
 const (
 	opencodeProvider   = "opencode"
 	opencodeGoProvider = "opencode-go"
@@ -40,7 +40,6 @@ const (
 
 type ModelRecord struct {
 	ModelID             string `json:"model_id"`
-	ModelName           string `json:"model_name"`
 	Provider            string `json:"provider"`
 	APIModel            string `json:"api_model"`
 	ContextWindow       int64  `json:"context_window"`
@@ -97,9 +96,8 @@ type OpenCodeModelsSource interface {
 
 // DiscoverOpenCodeModels returns one surface's picker-visible models: the
 // systemone ids (jev-*, a structured decision endpoint rather than a chat
-// model) dropped, the free family first — those are the models a user can run
-// with no credential at all — and the first entry marked as the default a
-// fresh listing preselects.
+// model) dropped, in the catalog's order, and the first entry marked as the
+// default a fresh listing preselects.
 //
 // The catalogs carry nothing but ids, so the rest of each record comes from
 // models.json — which now carries a row for every id these surfaces serve —
@@ -118,8 +116,7 @@ func DiscoverOpenCodeModels(ctx context.Context, src OpenCodeModelsSource, goSub
 		provider = opencodeGoProvider
 	}
 	fetched := time.Now()
-	free := make([]ModelRecord, 0, len(infos))
-	paid := make([]ModelRecord, 0, len(infos))
+	records := make([]ModelRecord, 0, len(infos))
 	seen := make(map[string]bool, len(infos))
 	for _, info := range infos {
 		id := strings.ToLower(strings.TrimSpace(info.ID))
@@ -131,14 +128,8 @@ func DiscoverOpenCodeModels(ctx context.Context, src OpenCodeModelsSource, goSub
 		if !known {
 			meta = opencode.DefaultModelMeta(id)
 		}
-		record := openCodeModelRecord(provider, id, meta)
-		if meta.Free {
-			free = append(free, record)
-			continue
-		}
-		paid = append(paid, record)
+		records = append(records, openCodeModelRecord(provider, id, meta))
 	}
-	records := append(free, paid...)
 	for i := range records {
 		records[i].Source = ModelSourceOpenCodeAccount
 		records[i].FetchedAt = fetched
@@ -150,20 +141,13 @@ func DiscoverOpenCodeModels(ctx context.Context, src OpenCodeModelsSource, goSub
 }
 
 // openCodeModelRecord projects one catalog id onto this package's record shape.
-// The free suffix is the only capability the picker needs to show in the name:
-// it tells a user which models work before logging in.
 //
 // Capabilities come from models.json first — it carries every id these surfaces
 // serve, with the upstream window, image support and reasoning flag — and from
 // opencode's own table only for an id the catalog has no row for.
 func openCodeModelRecord(provider, id string, meta opencode.ModelMeta) ModelRecord {
-	name := id
-	if meta.Free {
-		name = id + " (free)"
-	}
 	record := ModelRecord{
 		ModelID:             provider + "/" + id,
-		ModelName:           name,
 		Provider:            provider,
 		APIModel:            id,
 		ContextWindow:       meta.ContextWindow,
@@ -278,10 +262,6 @@ func DiscoverChatGPTModels(ctx context.Context, src ChatGPTModelsSource) ([]Mode
 
 func chatGPTModelRecord(info openai.ModelInfo, fetched time.Time) ModelRecord {
 	apiModel := strings.TrimSpace(info.Slug)
-	name := strings.TrimSpace(info.DisplayName)
-	if name == "" {
-		name = apiModel
-	}
 	efforts := make([]string, 0, len(info.SupportedReasoningEfforts))
 	for _, preset := range info.SupportedReasoningEfforts {
 		if effort := strings.TrimSpace(preset.Effort); effort != "" {
@@ -297,7 +277,6 @@ func chatGPTModelRecord(info openai.ModelInfo, fetched time.Time) ModelRecord {
 	}
 	return ModelRecord{
 		ModelID:                chatgptProvider + "/" + apiModel,
-		ModelName:              name,
 		Provider:               chatgptProvider,
 		APIModel:               apiModel,
 		ContextWindow:          contextWindow,
@@ -468,17 +447,15 @@ func listModelCatalogLive(ctx context.Context, sources modelSources, q ModelCata
 		listing.Status = append(listing.Status, status)
 	}
 	// A listing that names no provider asks every source the machine could
-	// have an account on. The Console catalog is read with a public token, so
-	// without this guard every unscoped listing — the web providers page opens
-	// one each time — would contact opencode.ai for users who never signed in
-	// to it. A query that names "opencode" is an explicit ask and still fetches.
+	// have an account on. Without this guard every unscoped listing — the web
+	// providers page opens one each time — would spend a request on a catalog
+	// that answers 401 for users who never signed in to OpenCode. A query that
+	// names "opencode" is an explicit ask and still fetches.
 	if sources.opencode != nil && (provider == opencodeProvider ||
 		(provider == "" && sources.opencode.OpenCodeSignedIn())) {
-		// The Console catalog needs a Console credential: the free family is
-		// not reachable from a third-party client any more (the gateway
-		// rejects every request without OpenCode's own client identity), so a
-		// failed fetch is reported as status rather than answered with an
-		// offline list of models that would 403 on the first message.
+		// The Console catalog needs a credential, so a failed fetch is
+		// reported as status rather than answered with an offline list of
+		// models that would fail on the first message.
 		records, err := DiscoverOpenCodeModels(ctx, sources.opencode, false)
 		status := ModelCatalogStatus{Provider: opencodeProvider, Source: ModelSourceOpenCodeAccount}
 		switch {
@@ -496,8 +473,7 @@ func listModelCatalogLive(ctx context.Context, sources modelSources, q ModelCata
 	if sources.opencode != nil && (provider == "" || provider == opencodeGoProvider) {
 		// The Go catalog needs the subscription token, so asking without a
 		// credential spends a request to learn what the login file already
-		// says. Nothing on that surface is free, so there is no offline
-		// fallback to answer with.
+		// says, and there is no offline fallback to answer with.
 		status := ModelCatalogStatus{Provider: opencodeGoProvider, Source: ModelSourceOpenCodeAccount}
 		if !sources.opencode.OpenCodeSignedIn() {
 			status.Source = ""
@@ -579,8 +555,8 @@ func ListModelCatalog(q ModelCatalogQuery) []ModelRecord {
 		if !strings.EqualFold(out[i].Provider, out[j].Provider) {
 			return strings.ToLower(out[i].Provider) < strings.ToLower(out[j].Provider)
 		}
-		if !strings.EqualFold(out[i].ModelName, out[j].ModelName) {
-			return strings.ToLower(out[i].ModelName) < strings.ToLower(out[j].ModelName)
+		if !strings.EqualFold(out[i].APIModel, out[j].APIModel) {
+			return strings.ToLower(out[i].APIModel) < strings.ToLower(out[j].APIModel)
 		}
 		return strings.ToLower(out[i].ModelID) < strings.ToLower(out[j].ModelID)
 	})
@@ -595,13 +571,8 @@ func modelRecordFromCatalog(m llm.Model) ModelRecord {
 	if apiModel == "" {
 		apiModel = m.ID
 	}
-	name := strings.TrimSpace(m.Name)
-	if name == "" {
-		name = apiModel
-	}
 	return ModelRecord{
 		ModelID:             m.ID,
-		ModelName:           name,
 		Provider:            m.Provider,
 		APIModel:            apiModel,
 		ContextWindow:       m.ContextWindow,
@@ -613,7 +584,6 @@ func modelRecordFromCatalog(m llm.Model) ModelRecord {
 
 func modelRecordMatches(rec ModelRecord, needle string) bool {
 	return strings.Contains(strings.ToLower(rec.ModelID), needle) ||
-		strings.Contains(strings.ToLower(rec.ModelName), needle) ||
 		strings.Contains(strings.ToLower(rec.Provider), needle) ||
 		strings.Contains(strings.ToLower(rec.APIModel), needle)
 }
@@ -679,13 +649,10 @@ func (s *Service) ListRunSubagents(ctx context.Context, parentRunID string, limi
 
 // ModelChoice is one model an agent is configured with, as /model offers it.
 type ModelChoice struct {
-	// Label is what a picker shows and a choice names: "provider / model",
-	// with the catalog's display name when it has one.
+	// Label is what a picker shows and a choice names: "provider/model".
 	Label    string
 	Provider string
 	Model    string
-	// Name is the catalog's display name for the model, "" when it has none.
-	Name string
 	// ReasoningEfforts are the thinking levels this model offers that this
 	// build can send; empty means the picker has nothing to ask, either
 	// because the model does not reason or because it has no discrete level.
@@ -719,10 +686,6 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 		}
 		choice := ModelChoice{Label: llm.FormatProviderModel(provider, model), Provider: provider, Model: model}
 		if hit, ok := llm.Lookup(provider, model); ok {
-			if name := strings.TrimSpace(hit.DisplayName); name != "" {
-				choice.Name = name
-				choice.Label += " - " + name
-			}
 			choice.SupportsImages = hit.SupportsAttachments
 		}
 		choice.ReasoningEfforts = ModelReasoningEfforts(provider, model)

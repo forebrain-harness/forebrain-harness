@@ -296,6 +296,9 @@ func Run(ctx context.Context, opts Options) error {
 			// background goroutine; apply it on the main loop.
 			handleSubagentInputBoundaryMsg(opts.Session, renderer, &state, msg)
 			return
+		case SubagentQueueChangedMsg:
+			handleSubagentQueueChangedMsg(renderer, &state, msg)
+			return
 		}
 		if handleAutoContinueNotification(renderer, &state, m) {
 			return
@@ -342,6 +345,13 @@ func Run(ctx context.Context, opts Options) error {
 		// succeeded, in the session they describe; a failed activation discards
 		// them so the surface never says the user is somewhere they are not.
 		holdFramesForSwitch := strings.TrimSpace(ev.SwitchSessionID) != ""
+		// A transport failure killed the attempt mid-stream: seal its live
+		// blocks where they stand BEFORE the error/retry cards render, so the
+		// trailing-block walk still finds them and the retried attempt's
+		// first delta starts a block of its own below the kept words.
+		if retry, ok := m.(TransportRetryMsg); ok && !retry.turn.isWithdrawn() && renderer != nil {
+			renderer.SealDeadStreamBlocks(retry.AgentID)
+		}
 		if !holdFramesForSwitch {
 			for _, frame := range ev.Frames {
 				renderer.RenderFrame(frame)
@@ -1060,7 +1070,7 @@ func summarizeComposerModel(session Session) string {
 		return ""
 	}
 	if current := strings.TrimSpace(session.CurrentModelOption()); current != "" {
-		return strings.ReplaceAll(current, " / ", "/")
+		return current
 	}
 	summary := strings.ReplaceAll(strings.TrimSpace(session.ModelSummaryString()), "\r", "")
 	if summary == "" {
@@ -2616,6 +2626,22 @@ func handleSubagentInputBoundaryMsg(session Session, renderer *Renderer, state *
 		}
 		renderComposerWithState(renderer, state)
 	}
+}
+
+// handleSubagentQueueChangedMsg repaints the composer when the subagent whose
+// queue changed is the view on screen, so its preview drops a steer the model
+// already took. No other view's preview reads that queue.
+func handleSubagentQueueChangedMsg(renderer *Renderer, state *streamState, m SubagentQueueChangedMsg) {
+	if state == nil || renderer == nil {
+		return
+	}
+	if sid := strings.TrimSpace(m.SessionID); sid != "" && sid != state.sessionID {
+		return
+	}
+	if view := strings.TrimSpace(m.AgentKey); view == "" || view != strings.TrimSpace(state.composerView) {
+		return
+	}
+	renderComposerWithState(renderer, state)
 }
 
 // prependRestoredToViewDraft keeps restored input for a subagent whose view is

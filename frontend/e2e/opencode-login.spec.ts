@@ -64,22 +64,19 @@ async function stubLogin(page: Page, provider: string, statuses: LoginBody[]): P
   })
 }
 
-type CatalogModel = { id: string; name: string; free?: boolean }
-
 /** Answers the catalog listing for one provider and lets every other listing
  * through to the gateway. */
-async function stubCatalog(page: Page, provider: string, models: CatalogModel[]): Promise<void> {
+async function stubCatalog(page: Page, provider: string, ids: string[]): Promise<void> {
   await page.route('**/api/models**', async (route) => {
     const asked = new URL(route.request().url()).searchParams.get('provider') ?? ''
     if (asked !== provider) {
       await route.fallback()
       return
     }
-    const records = models.map((model, index) => ({
-      model_id: `${provider}/${model.id}`,
-      model_name: model.free ? `${model.name} (free)` : model.name,
+    const records = ids.map((id, index) => ({
+      model_id: `${provider}/${id}`,
       provider,
-      api_model: model.id,
+      api_model: id,
       context_window: 128000,
       can_reason: false,
       supports_attachments: false,
@@ -114,10 +111,7 @@ test('signing in to OpenCode shows the device code, then the catalog it unlocks'
     pending({ url: 'https://opencode.ai/console/device?user_code=ABCD-1234', user_code: 'ABCD-1234' }),
     complete('https://opencode.ai/inference/go'),
   ])
-  await stubCatalog(page, 'opencode-go', [
-    { id: 'glm-5.3', name: 'GLM 5.3' },
-    { id: 'kimi-k3', name: 'Kimi K3' },
-  ])
+  await stubCatalog(page, 'opencode-go', ['glm-5.3', 'kimi-k3'])
   await signIn(page)
   await page.goto('/providers', { waitUntil: 'networkidle' })
 
@@ -160,7 +154,7 @@ test('signing in to ChatGPT shows the authorization link, then its account catal
   await recordWindowOpen(page)
   const authorize = 'https://auth.openai.com/oauth/authorize?client_id=app_e2e&state=xyz'
   await stubLogin(page, 'chatgpt', [pending({ url: authorize }), complete('https://chatgpt.com/backend-api/codex')])
-  await stubCatalog(page, 'chatgpt', [{ id: 'gpt-5.6', name: 'GPT-5.6' }])
+  await stubCatalog(page, 'chatgpt', ['gpt-5.6'])
   await signIn(page)
   await page.goto('/providers', { waitUntil: 'networkidle' })
 
@@ -198,10 +192,7 @@ test('a reusable saved login skips the flow and opens the catalog directly', asy
       body: JSON.stringify({ provider: 'opencode', status: 'complete', base_url: 'https://opencode.ai/inference/go' }),
     })
   })
-  await stubCatalog(page, 'opencode-go', [
-    { id: 'glm-5.3', name: 'GLM 5.3' },
-    { id: 'kimi-k3', name: 'Kimi K3' },
-  ])
+  await stubCatalog(page, 'opencode-go', ['glm-5.3', 'kimi-k3'])
   await signIn(page)
   await page.goto('/providers', { waitUntil: 'networkidle' })
 

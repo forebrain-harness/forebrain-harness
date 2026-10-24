@@ -904,7 +904,6 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 	model := turn.Model{
 		Provider: strings.TrimSpace(selection.Provider),
 		Model:    strings.TrimSpace(selection.Model),
-		Label:    strings.TrimSpace(selection.Label),
 	}
 	reviewer, err := s.planReviewerFor(model)
 	if err != nil {

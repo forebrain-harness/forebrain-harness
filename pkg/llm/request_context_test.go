@@ -314,11 +314,11 @@ func TestFormatProviderModelRoundTrips(t *testing.T) {
 	cases := []struct {
 		provider, model, want string
 	}{
-		{"openai", "gpt-5.1", "openai / gpt-5.1"},
+		{"openai", "gpt-5.1", "openai/gpt-5.1"},
 		{"", "gpt-5.1", "gpt-5.1"},
 		{"openai", "", "openai"},
 		{"", "", ""},
-		{"  anthropic  ", "  claude-opus-4-1 ", "anthropic / claude-opus-4-1"},
+		{"  anthropic  ", "  claude-opus-4-1 ", "anthropic/claude-opus-4-1"},
 	}
 	for _, tc := range cases {
 		got := FormatProviderModel(tc.provider, tc.model)
@@ -452,7 +452,6 @@ func TestIsOpusLabel(t *testing.T) {
 		want  bool
 	}{
 		{"plain opus label", "anthropic/claude-opus-4-7", true},
-		{"label with extra", "anthropic/claude-opus-4-7 - fast", true},
 		{"sonnet label", "anthropic/claude-sonnet-4-6", false},
 		{"openai label", "openai/gpt-4o", false},
 		{"empty label", "", false},

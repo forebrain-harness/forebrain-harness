@@ -252,3 +252,20 @@ func decodeStreamPartial(t *testing.T, msg wsServerMsg) *streamPartialSnapshot {
 		Tools:     data.ToolOutputs,
 	}
 }
+
+// A transport retry is a continuation: the subagent text this registry
+// accumulated stays and the continued attempt's deltas append to it, so a page
+// reconnecting mid-retry is shown the whole answer-so-far, exactly as a page
+// that watched it live.
+func TestStreamPartsTransportRetryKeepsAccumulating(t *testing.T) {
+	parts := newStreamParts()
+
+	parts.observe(event.NewRunEvent("", "child-run", "session-1", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: "partial words", AgentID: "task-1"}, time.Now()))
+	parts.observe(event.NewRunEvent("", "child-run", "session-1", event.RunEventTransportRetry,
+		event.TransportRetryPayload{Retry: 1, Total: 10, WaitMs: 500, Error: "read tcp: i/o timeout", AgentID: "task-1"}, time.Now()))
+	parts.observe(event.NewRunEvent("", "child-run", "session-1", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: " continued", AgentID: "task-1"}, time.Now()))
+
+	child, ok := parts.snapshotRun("child-run", "task-1")
+	require.True(t, ok)
+	require.Equal(t, "partial words continued", child.Content)
+}

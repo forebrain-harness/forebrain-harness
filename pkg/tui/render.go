@@ -307,6 +307,11 @@ type Renderer struct {
 	// subagent view shows its own tool/thinking/assistant history and none of it
 	// reaches the conversation.
 	perAgentVM map[string]*viewModel
+	// liveRetryAgents tracks which views hold a live (non-Final) transport-
+	// retry card, keyed like perAgentVM — "" is the conversation's own. It
+	// keeps the recovery dismissal O(1): streamed deltas arrive constantly,
+	// and only a view with a card on screen pays for the removal.
+	liveRetryAgents map[string]bool
 	// subagentTypes is what the footer calls each subagent whose view can be
 	// opened: the kind of agent it is. Entries are never removed — a view stays
 	// open and readable long after the roster row that described it is gone,
@@ -387,7 +392,10 @@ type Renderer struct {
 	// overlayFocusRow is the overlay panel's focus line (-1 for none) and
 	// overlayFocusPending that it moved since the last paint: the paint then
 	// scrolls it into view once, the way a modal's cursor row is kept visible.
+	// A modal's option list has no cursor row, so it names the rows
+	// [overlayFocusRow, overlayFocusEnd) to keep in view the same way.
 	overlayFocusRow     int
+	overlayFocusEnd     int
 	overlayFocusPending bool
 	// slashMenuTop is the first body row the composer's slash menu shows.
 	slashMenuTop int
@@ -3634,19 +3642,29 @@ func (r *Renderer) IsViewportMode() bool {
 // position the hardware cursor within the block (0-based, excluding the
 // separator); pass cursorRow < 0 to hide the cursor.
 func (r *Renderer) SetOverlayComposer(lines []string, cursorRow, cursorCol int) {
-	r.setOverlayComposer(lines, cursorRow, cursorCol, false, false)
+	r.setOverlayComposer(lines, cursorRow, cursorCol, false, overlayKeepScroll, 0, 0)
 }
 
-// SetOverlayComposerAtEnd installs overlay lines and pins the overlay's scroll
-// offset to the end of the content in the same paint. An overlay taller than
-// its area keeps its decision rows — the option list and footer, which sit at
-// the bottom of the block — on screen even when the body above them (a full
-// file diff, say) is far taller than the overlay area. Callers use it for the
-// renders that follow a decision key and SetOverlayComposer for the renders
-// that follow a scroll key, so a deliberate scroll up through the body is not
-// undone by the repaint that follows it.
-func (r *Renderer) SetOverlayComposerAtEnd(lines []string, cursorRow, cursorCol int) {
-	r.setOverlayComposer(lines, cursorRow, cursorCol, false, true)
+// overlayKeepScroll is the top row SetOverlayComposerAt takes to leave the
+// overlay's scroll where it is.
+const overlayKeepScroll = -1
+
+// SetOverlayComposerAt installs overlay lines and places the overlay's scroll
+// for them in the same paint. top is the content row the overlay starts at,
+// clamped to the end of the content, so overlayScrollToEdge pins the end — which
+// keeps an approval's decision rows, at the bottom of the block, on screen under
+// a body (a full file diff, say) far taller than the overlay area — and
+// overlayKeepScroll leaves the scroll alone. The rows [focusStart, focusEnd),
+// empty for none, are an option list's selection with whatever must be read
+// along with it, which no hardware cursor marks for the paint to follow: the
+// paint then brings them on screen moving as little as it can, so a list taller
+// than the overlay never scrolls its selection out of sight. A range taller
+// than the overlay keeps its start. Callers use it for the renders that follow
+// a decision key and SetOverlayComposer for the renders that follow a scroll
+// key, so a deliberate scroll up through the body is not undone by the repaint
+// that follows it.
+func (r *Renderer) SetOverlayComposerAt(lines []string, cursorRow, cursorCol, top, focusStart, focusEnd int) {
+	r.setOverlayComposer(lines, cursorRow, cursorCol, false, top, focusStart, focusEnd)
 }
 
 // SetSoftWrappingOverlayComposer installs logical modal-overlay lines that are
@@ -3655,10 +3673,10 @@ func (r *Renderer) SetOverlayComposerAtEnd(lines []string, cursorRow, cursorCol 
 // text. Keeping the unwrapped source here also makes terminal resize reflow the
 // overlay without waiting for another key event.
 func (r *Renderer) SetSoftWrappingOverlayComposer(lines []string, cursorRow, cursorCol int) {
-	r.setOverlayComposer(lines, cursorRow, cursorCol, true, false)
+	r.setOverlayComposer(lines, cursorRow, cursorCol, true, overlayKeepScroll, 0, 0)
 }
 
-func (r *Renderer) setOverlayComposer(lines []string, cursorRow, cursorCol int, softWrap, scrollToEnd bool) {
+func (r *Renderer) setOverlayComposer(lines []string, cursorRow, cursorCol int, softWrap bool, top, focusStart, focusEnd int) {
 	if r == nil {
 		return
 	}
@@ -3674,11 +3692,12 @@ func (r *Renderer) setOverlayComposer(lines []string, cursorRow, cursorCol int, 
 	r.overlayComposer = composerBlock{lines: clean, cursorRow: cursorRow, cursorCol: cursorCol}
 	r.overlayPanel = nil
 	r.overlaySoftWrap = softWrap
-	r.overlayFocusRow, r.overlayFocusPending = -1, false
-	if scrollToEnd {
-		// Computed from the lines just installed, so the offset the paint
-		// below uses is already the bottom of the new content.
-		r.overlayScrollOffset = r.overlayMaxScrollLocked()
+	r.overlayFocusRow, r.overlayFocusEnd = focusStart, focusEnd
+	r.overlayFocusPending = focusStart >= 0 && focusEnd > focusStart
+	if top >= 0 {
+		// Clamped against the lines just installed, so the offset the paint
+		// below uses is already inside the new content.
+		r.overlayScrollOffset = min(top, r.overlayMaxScrollLocked())
 	}
 	r.paintViewportLocked()
 }

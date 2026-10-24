@@ -191,8 +191,8 @@ func TestLookupModelMeta(t *testing.T) {
 		t.Errorf("Go qwen3.8-max protocol = %q, want %q", goSub.Protocol, ProtocolAnthropic)
 	}
 	// A surface does not answer for the other surface's table.
-	if meta, ok := LookupModelMeta("opencode-go", "big-pickle"); ok {
-		t.Errorf("Go table answered for the Console free model: %+v", meta)
+	if meta, ok := LookupModelMeta("opencode-go", "mistral-large-4"); ok {
+		t.Errorf("Go table answered for a Console-only model: %+v", meta)
 	}
 	if _, ok := LookupModelMeta("opencode", "  "); ok {
 		t.Error("LookupModelMeta accepted a blank id")
@@ -201,7 +201,7 @@ func TestLookupModelMeta(t *testing.T) {
 		t.Error("LookupModelMeta invented an entry for an unknown id")
 	}
 	// Picker and config input arrive in mixed case.
-	if _, ok := LookupModelMeta("opencode", "Big-Pickle"); !ok {
+	if _, ok := LookupModelMeta("opencode", "Mistral-Large-4"); !ok {
 		t.Error("LookupModelMeta did not normalize case")
 	}
 }
@@ -217,7 +217,7 @@ func TestDefaultModelMeta(t *testing.T) {
 	if meta.ContextWindow != defaultContextWindow {
 		t.Errorf("DefaultModelMeta window = %d, want %d", meta.ContextWindow, defaultContextWindow)
 	}
-	if meta.Free || meta.Reasoning || meta.Attachments {
+	if meta.Reasoning || meta.Attachments {
 		t.Errorf("DefaultModelMeta promises capabilities it cannot know: %+v", meta)
 	}
 }

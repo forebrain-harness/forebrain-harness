@@ -1,8 +1,14 @@
 package llm
 
 import (
+	"context"
+	"crypto/x509"
 	"errors"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"syscall"
 	"testing"
 )
 
@@ -123,5 +129,48 @@ func TestAPIErrorPreservesTheOriginalForErrorsAs(t *testing.T) {
 	// With no wrapped error the message stands in for the text.
 	if got := (&APIError{Message: "just a message"}).Error(); got != "just a message" {
 		t.Fatalf("Error() = %q, want the message", got)
+	}
+}
+
+func TestIsRetryableNetworkErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	opTimeout := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	urlErr := &url.Error{Op: "Post", URL: "https://api.example/v1/chat", Err: &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}}
+	nxdomain := &net.DNSError{Err: "no such host", Name: "api.example.invalid", IsNotFound: true}
+	badStatus := &APIError{StatusCode: http.StatusBadRequest, Message: "unexpected role"}
+	rateLimited := &APIError{StatusCode: http.StatusTooManyRequests, Message: "slow down"}
+	wrappedTransport := &APIError{Err: opTimeout}
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "op error timeout", err: opTimeout, want: true},
+		{name: "url error refused", err: urlErr, want: true},
+		{name: "econnreset", err: syscall.ECONNRESET, want: true},
+		{name: "econnaborted", err: syscall.ECONNABORTED, want: true},
+		{name: "unexpected eof", err: io.ErrUnexpectedEOF, want: true},
+		{name: "bare eof", err: io.EOF, want: true},
+		{name: "stream truncated", err: ErrStreamTruncated, want: true},
+		{name: "wrapped transport inside api error", err: wrappedTransport, want: true},
+		{name: "context cancelled", err: context.Canceled, want: false},
+		{name: "context deadline", err: context.DeadlineExceeded, want: false},
+		{name: "bad request", err: badStatus, want: false},
+		{name: "rate limited", err: rateLimited, want: false},
+		{name: "dns nxdomain", err: nxdomain, want: false},
+		{name: "x509 unknown authority", err: x509.UnknownAuthorityError{}, want: false},
+		{name: "x509 hostname", err: x509.HostnameError{Host: "api.example"}, want: false},
+		{name: "x509 invalid certificate", err: x509.CertificateInvalidError{Reason: x509.Expired}, want: false},
+		{name: "plain error", err: errors.New("some build failure"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsRetryableNetworkError(tt.err); got != tt.want {
+				t.Fatalf("IsRetryableNetworkError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

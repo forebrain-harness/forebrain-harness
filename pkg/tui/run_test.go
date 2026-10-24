@@ -2749,13 +2749,13 @@ func TestNextAutomaticSubmissionDrainsQueuedShellBeforeQueuedTurn(t *testing.T) 
 
 func TestActiveRunSlashNativePickerDoesNotQueueTurn(t *testing.T) {
 	session := &fakeSession{streamSlashReply: map[string]SlashOutcome{
-		"/model": {Handled: true, Picker: &turn.Picker{Command: "model", Title: "Model", Items: []turn.PickerItem{{Value: "openai / gpt-4.1 - GPT 4.1", Label: "openai / gpt-4.1 - GPT 4.1", Current: true}}}},
+		"/model": {Handled: true, Picker: &turn.Picker{Command: "model", Title: "Model", Items: []turn.PickerItem{{Value: "openai/gpt-4.1", Label: "openai/gpt-4.1", Current: true}}}},
 	}}
 	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	cmds := newCommandController(session, renderer, &sequenceSelector{
-		steps: []selectorStep{{value: "openai / gpt-4.1 - GPT 4.1", ok: true}},
+		steps: []selectorStep{{value: "openai/gpt-4.1", ok: true}},
 	}, nil, "")
 
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventLine, line: "/model"}, cmds)
@@ -3521,7 +3521,7 @@ func TestAbbreviateHomePathUsesTilde(t *testing.T) {
 }
 
 func TestSummarizeComposerModelFormatsProviderAndModelWithoutSpaces(t *testing.T) {
-	session := &fakeSession{model: "custom / qwen3.5-122b"}
+	session := &fakeSession{model: "custom/qwen3.5-122b"}
 	if got := summarizeComposerModel(session); got != "custom/qwen3.5-122b" {
 		t.Fatalf("summarizeComposerModel()=%q", got)
 	}
@@ -6037,6 +6037,60 @@ func TestRestoredInputGoesBackToItsOwnViewsComposer(t *testing.T) {
 	})
 	if len(session.subagentSent) != 1 || session.subagentSent[0].Submission.Text != "go on" {
 		t.Fatalf("boundary send = %#v, want go on", session.subagentSent)
+	}
+}
+
+// A steer the subagent's model takes at a tool boundary leaves its queue on the
+// engine's goroutine. The TUI's subagent surface must tell the event loop, or
+// nothing repaints the subagent's composer and the preview keeps claiming the
+// message waits for the next tool call.
+func TestSubagentSurfaceReportsQueueChangesToTheEventLoop(t *testing.T) {
+	s := &ChatSession{}
+	got := make(chan any, 1)
+	s.PrependUINotify(func(m any) {
+		select {
+		case got <- m:
+		default:
+		}
+	})
+	defer s.stopUINotificationDispatcher()
+	surface := s.subagentSurface("conv")
+	if surface.OnQueueChanged == nil {
+		t.Fatal("the TUI's subagent surface must observe that subagent's queue")
+	}
+	surface.OnQueueChanged("task-b", runpkg.QueuePreview{})
+	select {
+	case m := <-got:
+		changed, ok := m.(SubagentQueueChangedMsg)
+		if !ok || changed.SessionID != "conv" || changed.AgentKey != "task-b" {
+			t.Fatalf("notification = %#v, want SubagentQueueChangedMsg conv/task-b", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queue change never reached the event loop")
+	}
+}
+
+// When a subagent's queue changes, its view repaints the composer: a steer its
+// model already took drops out of the preview at once, not on the next scroll.
+func TestSubagentQueueChangeRepaintsItsViewsPreview(t *testing.T) {
+	session := &fakeSession{subagentPreview: ComposerPendingInputPreview{PendingSteers: []string{"retry transparently"}}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "plan-reviewer", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	renderComposerWithState(renderer, state)
+	if got := renderer.composerState.PendingInput.PendingSteers; len(got) != 1 {
+		t.Fatalf("preview steers = %v, want the queued steer", got)
+	}
+
+	// The model took the steer at a tool boundary.
+	session.mu.Lock()
+	session.subagentPreview = ComposerPendingInputPreview{}
+	session.mu.Unlock()
+	handleSubagentQueueChangedMsg(renderer, state, SubagentQueueChangedMsg{SessionID: "conv", AgentKey: "task-b"})
+	if p := renderer.composerState.PendingInput; composerPreviewVisible(p) {
+		t.Fatalf("preview after delivery = %#v, want it gone", p)
 	}
 }
 

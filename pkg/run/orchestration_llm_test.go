@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -137,7 +138,7 @@ func TestStreamingOverflowRecoversAndContinues(t *testing.T) {
 			}, true, nil
 		},
 	}
-	wrapped := WrapRecoverableLLM(inner, nil, deps)
+	wrapped := WrapRecoverableLLM(inner, nil, deps, 0)
 
 	ctx := toolpkg.WithRunID(context.Background(), "run-overflow")
 	res, err := wrapped.Execute(ctx, history, nil)
@@ -175,7 +176,7 @@ func TestOverflowCompactionKeepsProvisionalSteersOutOfTheCheckpoint(t *testing.T
 	adoption := &compactionAdoptionSink{}
 	ctx := withCompactionAdoptionSink(toolpkg.WithRunID(context.Background(), "run-overflow-steer"), adoption)
 	ctx = withProvisionalTail(ctx, ctx, len(history), 1)
-	if _, err := WrapRecoverableLLM(inner, nil, deps).Execute(ctx, history, nil); err != nil {
+	if _, err := WrapRecoverableLLM(inner, nil, deps, 0).Execute(ctx, history, nil); err != nil {
 		t.Fatalf("overflow was not recovered: %v", err)
 	}
 	if len(compactedInput) != len(history)-1 {
@@ -214,7 +215,7 @@ func TestOverflowTeachesWindowSoNextRunCompactsProactively(t *testing.T) {
 	wrapped := WrapRecoverableLLM(
 		inner,
 		func(context.Context) (json.RawMessage, bool) { return snapshot, true },
-		deps,
+		deps, 0,
 	)
 
 	// First run: rejected once, recovered reactively.
@@ -256,7 +257,7 @@ func TestOverflowWithoutRecoveryStillReportsProviderError(t *testing.T) {
 				attempted++
 				return nil, false, errors.New("compact backend down")
 			},
-		},
+		}, 0,
 	)
 	_, err := wrapped.Execute(toolpkg.WithRunID(context.Background(), "run-fail"), history, nil)
 	if err == nil || !strings.Contains(err.Error(), "context_length_exceeded") {
@@ -3742,7 +3743,7 @@ func TestRecoverableLLMCompactsAndRetriesAfterContextOverflow(t *testing.T) {
 			}
 			reactive = append(reactive, isReactive)
 			return replacement, true, nil
-		}},
+		}}, 0,
 	)
 	ctx, sinkState := newCompactionStreamTestContext()
 	ctx = toolpkg.WithRunID(ctx, "run-reactive")
@@ -9434,5 +9435,82 @@ func TestToolOrchestrationConcurrentGatesStopOnTheFirstAndWithdrawTheRest(t *tes
 	var again *toolpkg.RequiresActionError
 	if !errors.As(err, &again) || again.ActionID != "act-b" {
 		t.Fatalf("expected the withdrawn gate to be asked again, got %T %v", err, err)
+	}
+}
+
+// netDropReasoningLLM streams a reasoning block, then dies on a transport
+// error on the first attempt; the retry streams its own reasoning and answers.
+type netDropReasoningLLM struct{ calls int }
+
+func (m *netDropReasoningLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	sink := llm.StreamSinkFrom(ctx)
+	if m.calls == 1 {
+		if sink != nil && sink.OnReasoningDelta != nil {
+			sink.OnReasoningDelta("dead attempt thought")
+		}
+		return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	}
+	if sink != nil && sink.OnReasoningDelta != nil {
+		sink.OnReasoningDelta("live attempt thought")
+		sink.OnReasoningDone()
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")})
+	return &llm.Result{Message: &msg}, nil
+}
+
+// TestTransportRetryDropsBufferedReasoningFromTheTranscript pins the discard
+// half of the network retry: the dead attempt's buffered reasoning never lands
+// in the transcript, and the retried attempt's block lands on its own row,
+// not glued onto the dead one's half-thought.
+func TestTransportRetryDropsBufferedReasoningFromTheTranscript(t *testing.T) {
+	ctx := context.Background()
+	const sid = "netdrop-reasoning"
+	store, runID := newProgressStore(t, sid)
+
+	st := toolpkg.NewState(t.TempDir())
+	var surfaceNotes []llm.TransportRetry
+	base := &llm.StreamSink{
+		OnTransportRetry: func(tr llm.TransportRetry) { surfaceNotes = append(surfaceNotes, tr) },
+	}
+
+	// The mounted order: orchestration outside, network retry inside, exactly
+	// as Runner.Load builds the product chain.
+	inner := wrapNetworkRetryLLM(&netDropReasoningLLM{}, 3)
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(
+		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
+		base,
+	)
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "answer" {
+		t.Fatalf("result = %+v, want the retried attempt's answer", res)
+	}
+
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	var reasoningRows []string
+	for _, row := range rows {
+		if row.Role == "reasoning" {
+			reasoningRows = append(reasoningRows, row.Content)
+		}
+	}
+	// The persistence contract: what the dead attempt had already streamed is
+	// kept as the interrupted message it is (flushInterrupted), and the
+	// continued attempt's block lands as its own row after it — the screen,
+	// the transcript and the record all say the same thing.
+	if len(reasoningRows) != 2 {
+		t.Fatalf("reasoning rows = %v, want the dead attempt's and the continued attempt's", reasoningRows)
+	}
+	if !strings.Contains(reasoningRows[0], "dead attempt") || !strings.Contains(reasoningRows[1], "live attempt") {
+		t.Fatalf("reasoning rows = %v, want the dead block first, the live block second", reasoningRows)
+	}
+	if len(surfaceNotes) != 1 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Total != 3 {
+		t.Fatalf("surface notifications = %+v, want the chained retry 1/3", surfaceNotes)
 	}
 }

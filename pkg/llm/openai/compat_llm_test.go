@@ -412,6 +412,7 @@ func TestOpenAICompatLLMStreamReportsUsageImmediately(t *testing.T) {
 		var body bytes.Buffer
 		body.WriteString(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n")
 		body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}],"usage":{"prompt_tokens":1499,"completion_tokens":75,"total_tokens":1574}}` + "\n\n")
+		body.WriteString(`data: {"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n")
 		body.WriteString("data: [DONE]\n\n")
 		_, _ = rec.Write(body.Bytes())
 		return rec.response(), nil
@@ -969,5 +970,49 @@ func TestCompatToolResultImage(t *testing.T) {
 				t.Fatalf("model %s did not name the colour %q in its answer: %q", tc.model, "red", answer)
 			}
 		})
+	}
+}
+
+func TestOpenAICompatLLMStreamCleanCloseAfterOutputIsTruncation(t *testing.T) {
+	t.Parallel()
+
+	// One content delta, then the body simply ends: no finish chunk, no
+	// [DONE]. A proxy dropping the SSE connection mid-answer looks exactly
+	// like this, and the partial text must not pass as a success.
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		_, _ = rec.Write([]byte(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = rec.Write([]byte(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"partial an"},"finish_reason":null}]}` + "\n\n"))
+		return rec.response(), nil
+	})
+
+	_, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if !errors.Is(err, llm.ErrStreamTruncated) {
+		t.Fatalf("Execute error = %v, want ErrStreamTruncated", err)
+	}
+}
+
+func TestOpenAICompatLLMStreamCleanCloseZeroOutputIsNotTruncation(t *testing.T) {
+	t.Parallel()
+
+	// Zero output and a clean close keeps the existing empty-answer path:
+	// endpoints that answer nothing are not truncations.
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		_, _ = rec.Write([]byte(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		return rec.response(), nil
+	})
+
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v, want the empty-answer path", err)
+	}
+	if res == nil || res.Message == nil {
+		t.Fatalf("expected non-nil result message")
+	}
+	if got := res.Message.TextContent(); got != "" {
+		t.Fatalf("content = %q, want empty", got)
 	}
 }

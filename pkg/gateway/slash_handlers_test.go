@@ -208,7 +208,7 @@ func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 	require.True(t, res.Picker.Items[0].Current)
 
 	chosen := parseSlashCommandWithOptions(s, "s1", "webchat", "/model", turn.Context{}, &turn.SlashChoice{Command: "model", Value: res.Picker.Items[1].Value})
-	require.Equal(t, "Switched to deepseek / deepseek-chat.", chosen.Reply)
+	require.Equal(t, "Switched to deepseek/deepseek-chat.", chosen.Reply)
 	saved, err := appcfg.LoadPersisted(cfgPath)
 	require.NoError(t, err)
 	require.Equal(t, "gpt-4o", saved.Agents.Definitions["main"].LLMProviders[0].Model, "the shared config file was rewritten")

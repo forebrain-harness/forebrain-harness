@@ -184,23 +184,33 @@ func stubOpenCodeFetch(t *testing.T, captured *capturedOpenCodeFetch, ids ...str
 	}
 }
 
-// The Console catalog is readable without an account — the free family is
-// served to the literal public bearer — so discovery sends exactly that, on the
-// transport a login-less turn would use.
-func TestOpenCodeModelsSourceReadsTheConsoleCatalogWithThePublicBearer(t *testing.T) {
-	src := newOpenCodeModelsSource(filepath.Join(t.TempDir(), opencode.CredentialsFile))
+// The Console catalog is not served anonymously: with no login and no key the
+// source refuses before spending a request, and with a login it reads through
+// the login-file transport, the same as the Go catalog.
+func TestOpenCodeModelsSourceReadsTheConsoleCatalogOnlyWithACredential(t *testing.T) {
+	t.Setenv(opencode.APIKeyEnv, "")
+	path := filepath.Join(t.TempDir(), opencode.CredentialsFile)
+	src := newOpenCodeModelsSource(path)
 	var got capturedOpenCodeFetch
-	src.fetch = stubOpenCodeFetch(t, &got, "big-pickle")
+	src.fetch = stubOpenCodeFetch(t, &got, "glm-5.3")
 
+	_, err := src.OpenCodeModels(context.Background(), false)
+	require.ErrorContains(t, err, "/connect")
+	require.False(t, src.OpenCodeSignedIn())
+
+	require.NoError(t, opencode.Save(path, opencode.Credentials{
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}))
 	models, err := src.OpenCodeModels(context.Background(), false)
 	require.NoError(t, err)
 	require.Len(t, models, 1)
-	require.Equal(t, "big-pickle", models[0].ID)
 	require.False(t, got.goSubscription)
-	require.Equal(t, opencode.PublicBearer, got.token)
+	require.Equal(t, "access-1", got.token)
 	transport, ok := got.transport.(*opencode.Transport)
 	require.True(t, ok, "the Console catalog is read through the provider transport")
-	require.Empty(t, transport.Path, "the public bearer reads no login file")
+	require.Equal(t, path, transport.Path)
 }
 
 // The Go catalog needs the real subscription credential, and reading it through

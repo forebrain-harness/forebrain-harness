@@ -3,7 +3,7 @@ import { enableAutoUnmount, flushPromises, mount, type VueWrapper } from '@vue/t
 import { defineComponent, h } from 'vue'
 
 import tip from '@/directives/tip'
-import { forebrainApi, type ModelRecord, type ProviderLoginStatus, type ProviderRecord } from '@/lib/api'
+import { forebrainApi, GatewayHttpError, type ModelRecord, type ProviderLoginStatus, type ProviderRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
 import { openSelect, optionTexts, pickOption, selectedText } from '@/test-utils/formControls'
 import { InlineTeleport } from '@/test-utils/portal'
@@ -39,6 +39,31 @@ async function mountPage(): Promise<VueWrapper> {
   const wrapper = mount(ProvidersView, { global: { directives: { tip } } })
   await flushPromises()
   return wrapper
+}
+
+/** The page with its own default: the mock is replaced before the page reads it. */
+async function mountPageWithDefault(defaultModel: string): Promise<VueWrapper> {
+  vi.mocked(forebrainApi.providersPage).mockResolvedValue({
+    rows: [provider(), provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyHint: '', index: 1 })],
+    total: 2,
+    page: 1,
+    pageSize: 10,
+    defaultModel,
+  })
+  return mountPage()
+}
+
+/**
+ * The default picker of a row that serves several models: the star opens a
+ * menu of that row's models, and picking one writes it as the default.
+ */
+async function pickDefaultModel(wrapper: VueWrapper, rowIndex: number, model: string): Promise<void> {
+  await wrapper.find(`[data-testid="provider-default-set-${rowIndex}"]`).trigger('click')
+  await flushPromises()
+  const item = document.querySelector(`[data-testid="provider-default-pick-${rowIndex}-${model}"]`)
+  if (!item) throw new Error(`no pick item for ${model}`)
+  ;(item as HTMLElement).dispatchEvent(new Event('click', { bubbles: true }))
+  await flushPromises()
 }
 describe('ProvidersView', () => {
   beforeAll(() => setLocale('zh'))
@@ -85,7 +110,9 @@ describe('ProvidersView', () => {
     const wrapper = await mountPage()
 
     const defaultRow = wrapper.find('[data-provider-row="deepseek"]')
-    expect(defaultRow.find('[data-testid="provider-default-0"]').text()).toBe('默认')
+    // The badge names the model the default sits on (plan 109): a row can
+    // serve several models, so "default" alone would not say which one.
+    expect(defaultRow.find('[data-testid="provider-default-0"]').text()).toBe('默认 · deepseek-v4')
     expect(defaultRow.text()).toContain('deepseek-v4')
     expect(defaultRow.text()).toContain('https://api.deepseek.com')
     expect(defaultRow.find('[data-testid="provider-key-saved-0"]').text()).toBe('••••3f9a')
@@ -116,8 +143,9 @@ describe('ProvidersView', () => {
   it('sets the default without touching the order', async () => {
     const wrapper = await mountPage()
 
-    await wrapper.find('[data-testid="provider-default-set-1"]').trigger('click')
-    await flushPromises()
+    // This row serves two models, so the default is chosen from the menu the
+    // star opens (plan 109); the write it makes is the one this test pins.
+    await pickDefaultModel(wrapper, 1, 'gpt-5')
 
     expect(forebrainApi.providers).toHaveBeenCalled()
     const call = vi.mocked(forebrainApi.saveProviders).mock.calls[0]
@@ -127,6 +155,62 @@ describe('ProvidersView', () => {
     expect(call[1]).toBe('openai/gpt-5')
     // The untouched key does not travel: only a typed one is sent.
     expect(call[0][1].api_key_plain).toBeUndefined()
+  })
+
+  // A row can serve several models, and the default is one model of it: the
+  // star opens the row's models so the person says which one, and it stays
+  // available on the row that already holds the default — otherwise the
+  // default could never move back to another model of the same row.
+  it('lets a multi-model row pick which model is the default', async () => {
+    const wrapper = await mountPageWithDefault('deepseek/deepseek-v4')
+
+    await pickDefaultModel(wrapper, 1, 'gpt-5-mini')
+
+    const call = vi.mocked(forebrainApi.saveProviders).mock.calls[0]
+    expect(call[1]).toBe('openai/gpt-5-mini')
+  })
+
+  it('keeps set-default available on the row that holds the default model, to pick another of its models', async () => {
+    const wrapper = await mountPageWithDefault('openai/gpt-5-mini')
+
+    const row = wrapper.find('[data-provider-row="openai"]')
+    expect(row.find('[data-testid="provider-default-set-1"]').exists()).toBe(true)
+
+    await pickDefaultModel(wrapper, 1, 'gpt-5')
+
+    const call = vi.mocked(forebrainApi.saveProviders).mock.calls[0]
+    expect(call[1]).toBe('openai/gpt-5')
+  })
+
+  it('marks the model the default sits on in the picker', async () => {
+    const wrapper = await mountPageWithDefault('openai/gpt-5-mini')
+
+    await wrapper.find('[data-testid="provider-default-set-1"]').trigger('click')
+    await flushPromises()
+
+    const current = document.querySelector('[data-testid="provider-default-pick-1-gpt-5-mini"]')
+    expect(current?.getAttribute('aria-checked')).toBe('true')
+    const other = document.querySelector('[data-testid="provider-default-pick-1-gpt-5"]')
+    expect(other?.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('a single-model row still sets the default in one click', async () => {
+    const wrapper = await mountPageWithDefault('openai/gpt-5')
+
+    await wrapper.find('[data-testid="provider-default-set-0"]').trigger('click')
+    await flushPromises()
+
+    const call = vi.mocked(forebrainApi.saveProviders).mock.calls[0]
+    expect(call[1]).toBe('deepseek/deepseek-v4')
+    // One model, nothing to choose: no menu was opened.
+    expect(document.querySelector('[data-testid^="provider-default-pick-"]')).toBeNull()
+  })
+
+  it('names the default model on the badge', async () => {
+    const wrapper = await mountPageWithDefault('openai/gpt-5-mini')
+
+    const badge = wrapper.find('[data-testid="provider-default-1"]')
+    expect(badge.text()).toContain('gpt-5-mini')
   })
 })
 
@@ -452,7 +536,7 @@ describe('ProvidersView add/edit form', () => {
  * ordered list. OpenCode's free tier skips the login entirely.
  */
 function loginModel(provider: string, id: string, overrides: Partial<ModelRecord> = {}): ModelRecord {
-  return { modelId: `${provider}/${id}`, modelName: id, provider, apiModel: id, ...overrides }
+  return { modelId: `${provider}/${id}`, provider, apiModel: id, ...overrides }
 }
 
 function loginStatus(overrides: Partial<ProviderLoginStatus> = {}): ProviderLoginStatus {
@@ -496,6 +580,7 @@ describe('ProvidersView sign-in', () => {
     vi.spyOn(forebrainApi, 'startProviderLogin').mockResolvedValue({ loginId: 'login-1', provider: 'opencode' })
     vi.spyOn(forebrainApi, 'providerLoginStatus').mockResolvedValue(loginStatus())
     vi.spyOn(forebrainApi, 'cancelProviderLogin').mockResolvedValue(undefined)
+    vi.spyOn(forebrainApi, 'submitProviderLoginCallback').mockResolvedValue(undefined)
     vi.useFakeTimers()
   })
 
@@ -645,6 +730,88 @@ describe('ProvidersView sign-in', () => {
       models: ['gpt-5.6'],
       base_url: 'https://chatgpt.com/backend-api/codex',
     })
+  })
+
+  // A ChatGPT sign-in finished on another computer ends on an address the
+  // gateway cannot reach, so the user pastes that address back: the flow takes
+  // it, and a refusal is one short reason.
+  it('offers the paste row for ChatGPT only, and hands the address to the gateway', async () => {
+    vi.mocked(forebrainApi.startProviderLogin).mockResolvedValue({ loginId: 'gpt-1', provider: 'chatgpt' })
+    const wrapper = await mountConnectPage()
+
+    await wrapper.find('[data-testid="providers-connect-chatgpt"]').trigger('click')
+    await flushPromises()
+    const paste = wrapper.find('[data-testid="provider-login-paste"]')
+    expect(paste.exists()).toBe(true)
+
+    await paste.setValue('http://localhost:1455/auth/callback?code=abc')
+    await wrapper.find('[data-testid="provider-login-paste-submit"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.submitProviderLoginCallback).toHaveBeenCalledWith(
+      'chatgpt',
+      'gpt-1',
+      'http://localhost:1455/auth/callback?code=abc',
+    )
+    // The flow took it: the field is empty again and the login is still running.
+    expect((wrapper.find('[data-testid="provider-login-paste"]').element as HTMLInputElement).value).toBe('')
+    expect(wrapper.find('[data-testid="provider-login-paste-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="provider-login-open"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('has no paste row for an OpenCode sign-in', async () => {
+    vi.mocked(forebrainApi.startProviderLogin).mockResolvedValue({ loginId: 'login-1', provider: 'opencode' })
+    const wrapper = await mountConnectPage()
+
+    await wrapper.find('[data-testid="providers-connect-opencode"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="provider-login-paste"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('words each refusal of a pasted address, and the login goes on', async () => {
+    vi.mocked(forebrainApi.startProviderLogin).mockResolvedValue({ loginId: 'gpt-1', provider: 'chatgpt' })
+    const reasons: [string, string][] = [
+      ['state_mismatch', '是另一次登录的地址'],
+      ['no_code', '地址里没有授权码'],
+      ['not_a_callback', '不是登录回调地址'],
+    ]
+    const wrapper = await mountConnectPage()
+    await wrapper.find('[data-testid="providers-connect-chatgpt"]').trigger('click')
+    await flushPromises()
+
+    for (const [reason, text] of reasons) {
+      vi.mocked(forebrainApi.submitProviderLoginCallback).mockRejectedValueOnce(
+        new GatewayHttpError(400, reason),
+      )
+      await wrapper.find('[data-testid="provider-login-paste"]').setValue(`http://localhost:1455/auth/callback?code=${reason}`)
+      await wrapper.find('[data-testid="provider-login-paste-submit"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="provider-login-paste-error"]').text()).toBe(text)
+      // The sign-in is still running: a refused address ends nothing.
+      expect(wrapper.find('[data-testid="provider-login-open"]').exists()).toBe(true)
+    }
+    wrapper.unmount()
+  })
+
+  it('keeps the pasted address out of the page', async () => {
+    vi.mocked(forebrainApi.startProviderLogin).mockResolvedValue({ loginId: 'gpt-1', provider: 'chatgpt' })
+    const wrapper = await mountConnectPage()
+    await wrapper.find('[data-testid="providers-connect-chatgpt"]').trigger('click')
+    await flushPromises()
+
+    const address = 'http://localhost:1455/auth/callback?code=secret-code'
+    await wrapper.find('[data-testid="provider-login-paste"]').setValue(address)
+    await wrapper.find('[data-testid="provider-login-paste-submit"]').trigger('click')
+    await flushPromises()
+
+    // The address is in the field the user typed it in, and nowhere else.
+    const elsewhere = wrapper.text().includes('secret-code')
+    expect(elsewhere).toBe(false)
+    wrapper.unmount()
   })
 
   it('goes straight to the catalog when the machine already holds a usable login', async () => {

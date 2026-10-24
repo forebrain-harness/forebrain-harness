@@ -57,9 +57,8 @@ func DiscoverChatGPTModels(ctx context.Context, home string) ([]turn.ModelRecord
 }
 
 // NewOpenCodeModelsSource returns the OpenCode model source for a home: the
-// Console catalog (public bearer, no login needed) and the Go subscription
-// catalog (the login file or OPENCODE_API_KEY), fetched through the same
-// transport a turn would use.
+// Console and the Go subscription catalogs, both read with the login file or
+// OPENCODE_API_KEY through the same transport a turn would use.
 func NewOpenCodeModelsSource(home string) turn.OpenCodeModelsSource {
 	return newOpenCodeModelsSource(opencode.DefaultPath(home))
 }
@@ -79,29 +78,24 @@ type openCodeModelsSource struct {
 
 // OpenCodeModels lists one surface's catalog.
 func (s openCodeModelsSource) OpenCodeModels(ctx context.Context, goSubscription bool) ([]opencode.ModelInfo, error) {
-	token, transport, err := s.credential(goSubscription)
+	token, transport, err := s.credential()
 	if err != nil {
 		return nil, err
 	}
 	return s.fetch(ctx, transport, goSubscription, token)
 }
 
-// OpenCodeSignedIn reports whether this machine has a Go subscription
-// credential at all: a login file, or an API key in the environment. Callers
-// use it to spend no request on a catalog that would answer 401.
+// OpenCodeSignedIn reports whether this machine has an OpenCode credential at
+// all: a login file, or an API key in the environment. Callers use it to spend
+// no request on a catalog that would answer 401.
 func (s openCodeModelsSource) OpenCodeSignedIn() bool {
-	_, _, err := s.credential(true)
+	_, _, err := s.credential()
 	return err == nil
 }
 
-// credential resolves the bearer and the transport one surface is read with.
-func (s openCodeModelsSource) credential(goSubscription bool) (string, http.RoundTripper, error) {
-	if !goSubscription {
-		// The Console catalog is readable without an account: the free family
-		// is served to the literal public bearer, exactly the token a turn
-		// with no login sends.
-		return opencode.PublicBearer, opencode.NewKeyTransport(opencode.PublicBearer), nil
-	}
+// credential resolves the bearer and the transport the catalogs are read with.
+// Neither surface answers without one.
+func (s openCodeModelsSource) credential() (string, http.RoundTripper, error) {
 	if c, err := opencode.Load(s.path); err == nil && strings.TrimSpace(c.AccessToken) != "" {
 		// The login-file transport refreshes a nearly expired token and writes
 		// the rotated pair back, so discovery leaves the login usable.
@@ -110,9 +104,9 @@ func (s openCodeModelsSource) credential(goSubscription bool) (string, http.Roun
 	if key := strings.TrimSpace(os.Getenv(opencode.APIKeyEnv)); key != "" {
 		return key, opencode.NewKeyTransport(key), nil
 	}
-	// The turn layer asks OpenCodeSignedIn before listing this surface, so this
-	// is the belt to those suspenders: it is reached only when a caller asked
-	// for Go models on a machine with no credential at all.
-	return "", nil, errors.New("OpenCode Go models require a login or " +
+	// The turn layer asks OpenCodeSignedIn before an unscoped listing, so this
+	// is reached when a caller asked for one surface by name on a machine with
+	// no credential at all.
+	return "", nil, errors.New("OpenCode models require a login or " +
 		opencode.APIKeyEnv + "; run /connect to sign in")
 }

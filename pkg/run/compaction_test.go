@@ -78,7 +78,7 @@ func TestOrchestrationAutoCompactsDuringTurnWithoutSnapshot(t *testing.T) {
 					}
 					return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 				},
-			})
+			}, 0)
 			ctx := tool.WithRunID(context.Background(), "one-continuous-turn")
 			res, err := wrapToolOrchestrationLLM(recoverable, st).Execute(ctx,
 				[]llm.Message{llm.UserMessage(llm.Text("start"))}, []*llm.Tool{readTool})
@@ -556,7 +556,7 @@ func TestCompactionKeepsInFlightSteersOutOfTheCheckpoint(t *testing.T) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},
-	})
+	}, 0)
 	ctx := WithTurnInputRuntime(tool.WithRunID(context.Background(), "steer-compaction"), rt)
 	res, err := wrapToolOrchestrationLLM(recoverable, st).Execute(ctx,
 		[]llm.Message{llm.UserMessage(llm.Text("start"))}, []*llm.Tool{readTool})
@@ -598,7 +598,7 @@ func TestRetractionDuringCompactionKeepsTheCheckpoint(t *testing.T) {
 			compactCtxErr = ctx.Err()
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},
-	})
+	}, 0)
 	ctx := WithTurnInputRuntime(tool.WithRunID(context.Background(), "steer-compaction-retract"), rt)
 	res, err := wrapToolOrchestrationLLM(recoverable, st).Execute(ctx,
 		[]llm.Message{llm.UserMessage(llm.Text("start"))}, []*llm.Tool{readTool})
@@ -687,7 +687,7 @@ func TestObservedEstimateMatchesDecisionEstimator(t *testing.T) {
 
 	recoverable := WrapRecoverableLLM(&observedUsageLLM{input: real}, nil, &CompactChainDeps{
 		ActiveModel: func(context.Context) (string, string) { return provider, model },
-	})
+	}, 0)
 	if _, err := recoverable.Execute(context.Background(), msgs, tools); err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func TestObservationRecordedUnderActiveEstimator(t *testing.T) {
 	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("z", 2000)))}
 	recoverable := WrapRecoverableLLM(&observedUsageLLM{input: real}, nil, &CompactChainDeps{
 		ActiveModel: func(context.Context) (string, string) { return provider, model },
-	})
+	}, 0)
 	if _, err := recoverable.Execute(context.Background(), msgs, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func TestCompactionGuardKeepsAHistorysCheckpointToItself(t *testing.T) {
 			compactions++
 			return []llm.Message{llm.UserMessage(llm.Text(fmt.Sprintf("checkpoint-%d", compactions)))}, true, nil
 		},
-	})
+	}, 0)
 	child := []llm.Message{
 		llm.UserMessage(llm.Text("child task")),
 		llm.UserMessage(llm.Text(strings.Repeat("large child history\n", 300))),
@@ -804,7 +804,7 @@ func TestCompactionGuardCachesNothingWithoutARunID(t *testing.T) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},
-	})
+	}, 0)
 	history := []llm.Message{
 		llm.UserMessage(llm.Text("first")),
 		llm.UserMessage(llm.Text("second")),
@@ -848,7 +848,7 @@ func TestCompactionSkipsACallWhoseProvisionalTailCannotBeHonored(t *testing.T) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},
-	})
+	}, 0)
 	ctx := WithTurnInputRuntime(tool.WithRunID(context.Background(), "steer-tail-reshaped"), rt)
 	if _, err := wrapToolOrchestrationLLM(reshapingLLM{inner: recoverable}, st).Execute(ctx,
 		[]llm.Message{llm.UserMessage(llm.Text("start"))}, []*llm.Tool{readTool}); err != nil {
@@ -889,7 +889,7 @@ func TestCompactionOfAHistoryThatCarriesAnotherHistorysTail(t *testing.T) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},
-	})
+	}, 0)
 	history := []llm.Message{
 		llm.UserMessage(llm.Text("start")),
 		llm.UserMessage(llm.Text(strings.Repeat("large history\n", 300))),

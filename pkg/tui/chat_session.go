@@ -1533,6 +1533,15 @@ func (s *ChatSession) subagentSurface(sessionID string) run.SubagentSurface {
 				Restore:  subagentSubmissions(restore),
 			})
 		},
+		// The view reads the queue itself on every paint, so the preview the
+		// engine passes is not needed — only the nudge to paint. notifyUI just
+		// enqueues, which is all this hook may do under the channel's lock.
+		OnQueueChanged: func(agentKey string, _ run.QueuePreview) {
+			s.notifyUI(SubagentQueueChangedMsg{
+				SessionID: strings.TrimSpace(sessionID),
+				AgentKey:  strings.TrimSpace(agentKey),
+			})
+		},
 	}
 }
 

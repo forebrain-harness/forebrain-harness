@@ -118,7 +118,26 @@ func (w *toolOrchestrationLLM) recordReasoningBlocks(ctx context.Context, sink *
 	if downstreamDelta != nil {
 		wrapped.OnDelta = func(text string) {
 			finishReasoning()
+			transcript.appendAssistant(text)
 			downstreamDelta(text)
+		}
+	}
+	// A transport retry means the whole request is re-sent from the first
+	// token. What the dead attempt had already streamed stays — a shown half
+	// answer is a message that happened — so it is persisted here, once, as
+	// the interrupted message it is, and both buffers start clean for the
+	// retry (which would otherwise glue onto the dead words). Set
+	// unconditionally so the boundary holds even when the surface registers
+	// no retry callback of its own; the downstream call keeps the cards alive.
+	downstreamTransportRetry := wrapped.OnTransportRetry
+	wrapped.OnTransportRetry = func(tr llm.TransportRetry) {
+		model := ""
+		if w.transcriptModel != nil {
+			model = w.transcriptModel(sinkCtx)
+		}
+		transcript.flushInterrupted(sinkCtx, model)
+		if downstreamTransportRetry != nil {
+			downstreamTransportRetry(tr)
 		}
 	}
 	return &wrapped

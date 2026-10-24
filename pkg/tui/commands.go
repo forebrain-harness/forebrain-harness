@@ -1282,13 +1282,13 @@ func replaySubagentRunEventMessage(evt event.RunEvent) (any, bool) {
 		if json.Unmarshal(evt.Payload, &p) != nil {
 			return nil, false
 		}
-		return PlanReviewStartedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Label: p.Label}, true
+		return PlanReviewStartedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model}, true
 	case event.RunEventPlanReviewed:
 		var p event.PlanReviewedPayload
 		if json.Unmarshal(evt.Payload, &p) != nil {
 			return nil, false
 		}
-		return PlanReviewReviewedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Label: p.Label, Outcome: p.Outcome, Error: p.Error}, true
+		return PlanReviewReviewedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Outcome: p.Outcome, Error: p.Error}, true
 	case event.RunEventApprovalReq:
 		var p event.ApprovalRequestedPayload
 		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" {

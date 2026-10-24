@@ -874,6 +874,18 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		}
 		_ = stream.Close()
 
+		// A clean close with no finish frame after output means the stream
+		// was cut mid-answer (most often a proxy dropping the SSE
+		// connection): report it instead of returning the partial text as a
+		// success, so the retry layers get a chance to re-send. Zero output
+		// keeps the existing empty-answer path.
+		if lastFinish == "" && (contentAcc.Len() > 0 || reasoningAcc.Len() > 0 || len(toolBuf) > 0) {
+			if sink != nil && sink.OnEnd != nil {
+				sink.OnEnd()
+			}
+			return nil, fmt.Errorf("%s: %w", c.model, llm.ErrStreamTruncated)
+		}
+
 		if !openAIReasoningLengthShouldContinue(lastFinish, reasoningAcc.Len(), contentAcc.Len(), len(toolBuf)) {
 			break
 		}

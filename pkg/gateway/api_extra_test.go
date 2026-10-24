@@ -1696,13 +1696,13 @@ func (s *stubModelsSource) ChatGPTModels(ctx context.Context) ([]llmopenai.Model
 // priority order, exact slugs, and per-provider status the frontend can show.
 func TestHandleModelsListChatGPTDiscoversAccountModels(t *testing.T) {
 	src := &stubModelsSource{models: []llmopenai.ModelInfo{
-		{Slug: "gpt-hidden", DisplayName: "Hidden", Visibility: "hide", Priority: 0},
-		{Slug: "gpt-future", DisplayName: "GPT Future", Visibility: "list", Priority: 1,
+		{Slug: "gpt-hidden", Visibility: "hide", Priority: 0},
+		{Slug: "gpt-future", Visibility: "list", Priority: 1,
 			DefaultReasoningEffort: "low",
 			SupportedReasoningEfforts: []llmopenai.ReasoningEffortPreset{
 				{Effort: "low"}, {Effort: "max"},
 			}},
-		{Slug: "gpt-second", DisplayName: "GPT Second", Visibility: "list", Priority: 2},
+		{Slug: "gpt-second", Visibility: "list", Priority: 2},
 	}}
 	s := &Server{Core: turn.New(turn.WithChatGPTModels(src))}
 	req := httptest.NewRequest(http.MethodGet, "/api/models?provider=chatgpt", nil)

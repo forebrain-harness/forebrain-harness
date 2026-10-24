@@ -591,7 +591,6 @@ type ToolApprovalRequest struct {
 type PlanReviewModelOption struct {
 	Provider string
 	Model    string
-	Label    string
 	Current  bool
 }
 
@@ -916,13 +915,7 @@ func SanitizeEndpoint(raw string) string {
 }
 
 func statusModelLine(provider, model string, fastOn bool) string {
-	line := strings.TrimSpace(provider)
-	if value := strings.TrimSpace(model); value != "" {
-		if line != "" {
-			line += " / "
-		}
-		line += value
-	}
+	line := llm.FormatProviderModel(provider, model)
 	if line == "" {
 		line = "unknown"
 	}

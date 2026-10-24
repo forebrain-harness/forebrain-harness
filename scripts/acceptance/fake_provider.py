@@ -9,6 +9,7 @@ import http.server
 import itertools
 import json
 import os
+import socket
 import socketserver
 import sys
 import time
@@ -63,7 +64,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # of order), dispatches a probe when asked, drops the subagent's
         # connection until it is told to continue, and answers `continue`. Any
         # other request falls through to the ordinary reply.
+        if MODE == "reply" and self.serve_subagent_steer(request):
+            return
         if MODE == "reply" and self.serve_subagent_net(request):
+            return
+
+        if MODE == "netdrop" and self.serve_netdrop():
             return
 
         if MODE == "hang":
@@ -104,6 +110,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # general-purpose subagent's own request.
     SUBAGENT_NET_MARKER = "[[e2e:subagent-net]]"
     SUBAGENT_SYSTEM = "You are a general-purpose subagent"
+    # The marker for the subagent-steer case. The dispatched task carries it
+    # too, so the subagent's own requests are recognised by it.
+    SUBAGENT_STEER_MARKER = "[[e2e:subagent-steer]]"
+    # How long the subagent holds its answer after the delta that takes the
+    # steer: the page is checked inside this window, while it still runs.
+    SUBAGENT_STEER_HOLD = 30
 
     @staticmethod
     def text_of(content):
@@ -178,6 +190,83 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "task": "answer briefly",
             "subagent_type": "general-purpose",
         })
+        return True
+
+    def serve_subagent_steer(self, request):
+        """Answers the subagent-steer case in `reply` mode; False to fall through.
+
+        The main agent dispatches a subagent whose task carries the marker. The
+        subagent's first request runs a slow shell call, the window a steer is
+        queued in from its tab; the request after it carries the call's result
+        and the steer, and gets one delta - which commits the steer's delivery
+        - and then holds its finish for SUBAGENT_STEER_HOLD seconds, so the
+        subagent is still running while the page is checked.
+        """
+        messages = request.get("messages") if isinstance(request, dict) else None
+        if not isinstance(messages, list) or not messages:
+            return False
+        human = self.human_user_texts(messages)
+        if not any(self.SUBAGENT_STEER_MARKER in text for text in human):
+            return False
+        system = " ".join(
+            self.text_of(message.get("content"))
+            for message in messages
+            if message.get("role") == "system"
+        )
+        has_tool_result = any(message.get("role") == "tool" for message in messages)
+        if self.SUBAGENT_SYSTEM not in system:
+            if has_tool_result:
+                self.stream_text("primary done")
+            else:
+                self.stream_tool_call("subagent_run", {
+                    "title": "slow probe",
+                    "task": "run the slow step " + self.SUBAGENT_STEER_MARKER,
+                    "subagent_type": "general-purpose",
+                })
+            return True
+        if not has_tool_result:
+            self.stream_tool_call("shell", {"command": "sleep 8"})
+            return True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_event(chunk(delta={"role": "assistant", "content": "steer received"}))
+        time.sleep(self.SUBAGENT_STEER_HOLD)
+        self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+        return True
+
+    def serve_netdrop(self):
+        """Request 1 streams part of the answer and closes the connection
+        cleanly with no finish frame — a proxy cutting an SSE stream
+        mid-answer, which must surface as a truncation and be continued, not
+        pass as a success. Requests from the second on answer normally, so
+        the continuation succeeds. FAKE_NETDROP_EVERY=1 drops every request
+        instead, for cancellation and exhaustion cases."""
+        if next(REQUESTS) > 0 and not os.environ.get("FAKE_NETDROP_EVERY"):
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_event(chunk(delta={"role": "assistant", "content": "partial answer that never"}))
+        sys.stderr.write("NETDROP clean close without a finish frame\n")
+        sys.stderr.flush()
+        self.close_connection = True
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.connection.close()
+        except OSError:
+            pass
         return True
 
     def stream_text(self, text):

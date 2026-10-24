@@ -719,7 +719,13 @@ func (ch *subagentChannel) setSurface(surface SubagentSurface) {
 // queueChanged hands the surface the subagent's queue as its view shows it.
 // It is the queue's change hook, so it runs after the queue has released its
 // own lock.
+//
+// It also empties the queue's delivered list. A subagent's view draws a
+// delivered steer from the runtime's delivery hook (publishInputDelivered),
+// so that list has no reader here: kept, it would hold every steer the user
+// ever sent this subagent, attachments included, for the life of the process.
 func (ch *subagentChannel) queueChanged() {
+	ch.queue.TakeDelivered()
 	ch.queueHookMu.Lock()
 	notify := ch.onQueueChanged
 	ch.queueHookMu.Unlock()
@@ -1014,6 +1020,19 @@ func EventStreamSink(ctx context.Context, sink event.Sink, runID, sessionID, age
 		},
 		OnReasoningDone: func() {
 			publishEvent(ctx, sink, runID, sessionID, event.RunEventReasoningDone, event.ReasoningDonePayload{AgentID: agentID})
+		},
+		// The transport retry is published here and nowhere else: the failure
+		// and the retry about to run reach every watching surface through the
+		// same event, cards on both ends driven by one payload.
+		OnTransportRetry: func(tr llm.TransportRetry) {
+			publishEvent(ctx, sink, runID, sessionID, event.RunEventTransportRetry, event.TransportRetryPayload{
+				Retry:     tr.Retry,
+				Total:     tr.Total,
+				WaitMs:    tr.Wait.Milliseconds(),
+				Error:     tr.Err.Error(),
+				AgentID:   agentID,
+				Exhausted: tr.Exhausted,
+			})
 		},
 		// Provider-executed web search reaches a surface only through this
 		// callback, so it is published as the tool step every surface already

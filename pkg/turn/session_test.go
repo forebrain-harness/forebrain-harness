@@ -575,3 +575,18 @@ func TestStreamPartialResponseCompleted(t *testing.T) {
 	partial.AppendContent("interrupted text")
 	require.Equal(t, "interrupted text", partial.Content())
 }
+
+// TestStreamPartialReset pins the transport-retry discard boundary: a dead
+// attempt's answer text and reasoning both go, because the retry re-streams
+// from the first token.
+func TestStreamPartialReset(t *testing.T) {
+	partial := &StreamPartial{}
+	partial.AppendContent("half an answer")
+	partial.AppendReasoning("half a thought")
+	partial.Reset()
+	require.Equal(t, "", partial.Content())
+	require.Equal(t, "", partial.Reasoning())
+	// The buffers keep working for the retried attempt.
+	partial.AppendContent("full answer")
+	require.Equal(t, "full answer", partial.Content())
+}

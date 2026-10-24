@@ -88,7 +88,7 @@ func TestFetchModelsDecodesModelsAndIgnoresUnknownFields(t *testing.T) {
 		t.Fatalf("models = %d, want 2 (hidden entries stay in the raw list)", len(models))
 	}
 	first := models[0]
-	if first.Slug != "gpt-future" || first.DisplayName != "GPT Future" {
+	if first.Slug != "gpt-future" {
 		t.Fatalf("first model = %+v", first)
 	}
 	if !first.PickerVisible() {

@@ -96,7 +96,7 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 	for _, want := range []string{
 		"Session ID: s1",
 		"Agent: plan (draft)",
-		"Model: openai / gpt-main · fast on",
+		"Model: openai/gpt-main · fast on",
 		// URL sanitization: credentials and query strings never render.
 		"https://api.example.com/v1",
 		"Workspace · 3 rules",
@@ -357,7 +357,7 @@ func TestChooseModelAppliesLiveSelectionWithoutWritingTheConfigFile(t *testing.T
 	label := f.choiceLabel(t, "deepseek", "deepseek-chat")
 	res := Choose(f.ctx, SlashChoice{Command: "model", Value: label})
 	require.True(t, res.Handled)
-	require.Equal(t, "Switched to deepseek / deepseek-chat.", res.Reply)
+	require.Equal(t, "Switched to deepseek/deepseek-chat.", res.Reply)
 	require.NotEqual(t, -1, slices.Index(f.calls(), "select(s1,deepseek/deepseek-chat)"), "SelectModel was not called: %v", f.calls())
 	after, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
@@ -371,7 +371,7 @@ func TestChooseModelSameSelectionIsNoOp(t *testing.T) {
 	res := Choose(f.ctx, SlashChoice{Command: "model", Value: label})
 	require.True(t, res.Handled)
 	require.Equal(t, -1, slices.Index(f.calls(), "select("), "a repeat selection applied a live switch: %v", f.calls())
-	require.Equal(t, "Still using deepseek / deepseek-chat.", res.Reply)
+	require.Equal(t, "Still using deepseek/deepseek-chat.", res.Reply)
 }
 
 func TestChooseModelClassifiesSelectionOutcomes(t *testing.T) {
@@ -388,13 +388,13 @@ func TestChooseModelClassifiesSelectionOutcomes(t *testing.T) {
 	f.handler.selectErr = NewModelSelectionError(ModelAppliedNotDurable, errors.New("row save failed"))
 	res = Choose(f.ctx, SlashChoice{Command: "model", Value: label})
 	require.True(t, res.Handled)
-	require.Contains(t, res.Reply, "Switched to deepseek / deepseek-chat, but the choice could not be saved")
+	require.Contains(t, res.Reply, "Switched to deepseek/deepseek-chat, but the choice could not be saved")
 
 	f = newModelSelectionFixture(t, ModelSelectionState{})
 	f.handler.selectErr = errors.New("provider not configured")
 	res = Choose(f.ctx, SlashChoice{Command: "model", Value: label})
 	require.True(t, res.Handled)
-	require.Contains(t, res.Reply, "Could not switch to deepseek / deepseek-chat: provider not configured")
+	require.Contains(t, res.Reply, "Could not switch to deepseek/deepseek-chat: provider not configured")
 }
 
 // addConfigEntry appends a provider entry to the fixture's config file, for
@@ -466,7 +466,7 @@ func TestChooseModelUsesTheModelsOwnEffortLevels(t *testing.T) {
 		require.True(t, res.Handled)
 		if len(tc.want) == 0 {
 			require.Nil(t, res.Picker, "%s: nothing to pick, so no effort page", tc.model)
-			require.Equal(t, "Switched to opencode-go / "+tc.model+".", res.Reply)
+			require.Equal(t, "Switched to opencode-go/"+tc.model+".", res.Reply)
 			continue
 		}
 		require.NotNil(t, res.Picker, tc.model)
@@ -674,5 +674,5 @@ func TestModelPickerMarksTheDefaultModelEntry(t *testing.T) {
 	res = Choose(f.ctx, SlashChoice{Command: "model", Value: label})
 	require.True(t, res.Handled)
 	require.Equal(t, -1, slices.Index(f.calls(), "select("), "re-selecting the default applied a live switch: %v", f.calls())
-	require.Equal(t, "Still using deepseek / deepseek-chat.", res.Reply)
+	require.Equal(t, "Still using deepseek/deepseek-chat.", res.Reply)
 }

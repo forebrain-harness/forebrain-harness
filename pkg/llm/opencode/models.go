@@ -39,8 +39,8 @@ func (e *ModelsError) Error() string {
 // FetchModels lists the models a surface offers.
 //
 // goSubscription selects the Go subscription's catalog (its endpoint needs a
-// real subscription token); otherwise the Console catalog is read, which the
-// free family serves to the literal PublicBearer. base injects routing and
+// real subscription token); otherwise the Console catalog is read. base injects
+// routing and
 // identity, typically a *Transport; the catalog itself is authenticated by
 // token, matching the inference path. The call honors ctx, never follows
 // redirects (a bearer token must not be re-sent to another host) and bounds the

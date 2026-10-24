@@ -91,6 +91,22 @@ type ReasoningDoneMsg struct {
 	Timestamp time.Time
 }
 type StreamResetMsg struct{ turn *foregroundTurn }
+
+// TransportRetryMsg reports one transport failure of a run's LLM stream and
+// the retry about to run — or, with Exhausted set, that every retry was used
+// up. It implies discard: the reducer drops the dead attempt's buffered text,
+// the renderer withdraws its live blocks, and the error/retry card pair
+// paints. The foreground path fills turn; the subagent event path carries
+// only AgentID.
+type TransportRetryMsg struct {
+	turn      *foregroundTurn
+	AgentID   string
+	Retry     int
+	Total     int
+	Wait      time.Duration
+	Err       error
+	Exhausted bool
+}
 type RunStartedMsg struct {
 	RunID string
 	turn  *foregroundTurn
@@ -434,6 +450,17 @@ type SubagentInputBoundaryMsg struct {
 	Restore  []ComposerSubmission
 }
 
+// SubagentQueueChangedMsg reports that a subagent's input queue changed on the
+// engine's side — a steer handed to its model at a tool boundary, or the queue
+// settled when an execution ended. The subagent's view reads that queue on
+// every paint of its composer, but these changes happen off the event loop, so
+// without this message nothing repaints and the preview keeps a message the
+// model already has.
+type SubagentQueueChangedMsg struct {
+	SessionID string
+	AgentKey  string
+}
+
 // PlanReviewStartedMsg opens a plan review's card. The review request itself is
 // the review run's dispatch: the reviewer's subagent_spawned names the ReviewID
 // as its parent tool call, so the card binds its task exactly the way a
@@ -442,7 +469,6 @@ type PlanReviewStartedMsg struct {
 	ReviewID string
 	Provider string
 	Model    string
-	Label    string
 }
 
 // PlanReviewReviewedMsg closes the card PlanReviewStartedMsg opened, with the
@@ -453,7 +479,6 @@ type PlanReviewReviewedMsg struct {
 	ReviewID string
 	Provider string
 	Model    string
-	Label    string
 	Outcome  string
 	Error    string
 }
@@ -856,6 +881,18 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		if json.Unmarshal(evt.Payload, &p) == nil {
 			s.notifyUIForSession(evt.SessionID, ReasoningDoneMsg{AgentID: p.AgentID, Timestamp: evt.CreatedAt})
 		}
+	case event.RunEventTransportRetry:
+		var p event.TransportRetryPayload
+		if json.Unmarshal(evt.Payload, &p) == nil {
+			s.notifyUIForSession(evt.SessionID, TransportRetryMsg{
+				AgentID:   p.AgentID,
+				Retry:     p.Retry,
+				Total:     p.Total,
+				Wait:      time.Duration(p.WaitMs) * time.Millisecond,
+				Err:       errors.New(p.Error),
+				Exhausted: p.Exhausted,
+			})
+		}
 	case event.RunEventUsageDelta:
 		var p event.UsageDeltaPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && (p.InputTokens != 0 || p.OutputTokens != 0) {
@@ -951,12 +988,12 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 	case event.RunEventPlanReviewStarted:
 		var p event.PlanReviewStartedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUIForSession(evt.SessionID, PlanReviewStartedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Label: p.Label})
+			s.notifyUIForSession(evt.SessionID, PlanReviewStartedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model})
 		}
 	case event.RunEventPlanReviewed:
 		var p event.PlanReviewedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUIForSession(evt.SessionID, PlanReviewReviewedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Label: p.Label, Outcome: p.Outcome, Error: p.Error})
+			s.notifyUIForSession(evt.SessionID, PlanReviewReviewedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Outcome: p.Outcome, Error: p.Error})
 		}
 	case event.RunEventContextCompacting:
 		var p event.ContextCompactingPayload

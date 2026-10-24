@@ -39,13 +39,17 @@ func redirectTo(t *testing.T, serverURL string) *redirectTransport {
 	return &redirectTransport{target: target}
 }
 
+// testConsoleKey stands in for a Console API key: every catalog read carries a
+// real credential.
+const testConsoleKey = "sk-console-test"
+
 func TestFetchModelsConsoleCatalog(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/inference/v1/models" {
 			t.Errorf("path = %q, want the Console catalog", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer "+PublicBearer {
-			t.Errorf("Authorization = %q, want the public bearer the free family accepts", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer "+testConsoleKey {
+			t.Errorf("Authorization = %q, want the caller's token", got)
 		}
 		if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "forebrain-harness/") {
 			t.Errorf("User-Agent = %q", got)
@@ -61,7 +65,7 @@ func TestFetchModelsConsoleCatalog(t *testing.T) {
 	defer server.Close()
 
 	transport := redirectTo(t, server.URL)
-	models, err := FetchModels(context.Background(), transport, false, PublicBearer)
+	models, err := FetchModels(context.Background(), transport, false, testConsoleKey)
 	if err != nil {
 		t.Fatalf("FetchModels: %v", err)
 	}
@@ -137,7 +141,7 @@ func TestFetchModelsErrorBodies(t *testing.T) {
 			_, _ = w.Write([]byte(tc.body))
 		}))
 		transport := redirectTo(t, server.URL)
-		_, err := FetchModels(context.Background(), transport, false, PublicBearer)
+		_, err := FetchModels(context.Background(), transport, false, testConsoleKey)
 		server.Close()
 		if err == nil {
 			t.Fatalf("%s: FetchModels succeeded", tc.name)
@@ -164,7 +168,7 @@ func TestFetchModelsRejectsOversizedResponse(t *testing.T) {
 	defer server.Close()
 
 	transport := redirectTo(t, server.URL)
-	_, err := FetchModels(context.Background(), transport, false, PublicBearer)
+	_, err := FetchModels(context.Background(), transport, false, testConsoleKey)
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("error = %v, want an over-limit rejection", err)
 	}
@@ -177,7 +181,7 @@ func TestFetchModelsRequiresTheDataField(t *testing.T) {
 	defer server.Close()
 
 	transport := redirectTo(t, server.URL)
-	if _, err := FetchModels(context.Background(), transport, false, PublicBearer); err == nil {
+	if _, err := FetchModels(context.Background(), transport, false, testConsoleKey); err == nil {
 		t.Fatal("FetchModels accepted a response with no data field")
 	}
 }

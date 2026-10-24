@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 type StreamSink struct {
@@ -39,8 +40,32 @@ type StreamSink struct {
 	// responses is only persisted as a standalone transcript row on the cancel
 	// path, so dropping it per iteration would lose it from resume replay.
 	OnResponseCompleted func()
-	OnEnd               func()
-	Streamed            *bool
+	// OnTransportRetry fires when a transport failure killed the current
+	// attempt and the request is about to be re-sent. The notification
+	// implies discard: every holder of the current response's streamed text
+	// must drop it (the next attempt re-streams from the first token), and
+	// every surface shows the failure/retry cards. The middlewares copy the
+	// sink by value, so each layer that keeps state across attempts chains
+	// this callback explicitly (see orchestration's reasoning recorder).
+	OnTransportRetry func(TransportRetry)
+	OnEnd            func()
+	Streamed         *bool
+}
+
+// TransportRetry describes one transport failure and the retry about to run.
+type TransportRetry struct {
+	// Retry is the retry's 1-based sequence number (the numerator of n/total).
+	Retry int
+	// Total is the retry cap from configuration (default 10).
+	Total int
+	// Wait is the back-off before the next attempt (0 when Exhausted).
+	Wait time.Duration
+	// Err is the failure that just happened, rendered on the error card. When
+	// Exhausted it is the last real error.
+	Err error
+	// Exhausted reports that every retry has been used up. It is the only
+	// producer of the retry card's frozen final state.
+	Exhausted bool
 }
 
 // NotifyResponseStarted fires the response acknowledgement exactly once for
@@ -76,6 +101,42 @@ func StreamSinkFrom(ctx context.Context) *StreamSink {
 	return v
 }
 
+// ContinuationPrefill is what a network-interrupted attempt had already
+// streamed when it died: the thinking so far and the answer text so far. A
+// retry carries it so the model CONTINUES from its own words instead of
+// starting over — the continuation message is appended at the innermost layer,
+// where every prompt-shaping wrapper has already had its say.
+type ContinuationPrefill struct {
+	Reasoning string
+	Text      string
+}
+
+// Blank reports whether there is nothing worth continuing from.
+func (p ContinuationPrefill) Blank() bool {
+	return strings.TrimSpace(p.Reasoning) == "" && strings.TrimSpace(p.Text) == ""
+}
+
+type continuationPrefillCtxKey struct{}
+
+// WithContinuationPrefill attaches the partial output the next attempt must
+// continue from.
+func WithContinuationPrefill(ctx context.Context, prefill ContinuationPrefill) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, continuationPrefillCtxKey{}, prefill)
+}
+
+// ContinuationPrefillFrom returns the continuation carried by this request, or
+// the zero value when the request is a fresh one.
+func ContinuationPrefillFrom(ctx context.Context) ContinuationPrefill {
+	if ctx == nil {
+		return ContinuationPrefill{}
+	}
+	v, _ := ctx.Value(continuationPrefillCtxKey{}).(ContinuationPrefill)
+	return v
+}
+
 // WithMutedForegroundStream keeps non-visual sink callbacks like usage/end,
 // but prevents nested/internal LLM calls from surfacing assistant/reasoning
 // deltas or marking the parent run as streamed in the foreground UI.
@@ -97,6 +158,9 @@ func WithMutedForegroundStream(ctx context.Context) context.Context {
 	// muted above), so letting it signal a response boundary would only discard
 	// the parent turn's buffered text and lose it from a later cancel.
 	muted.OnResponseCompleted = nil
+	// A nested call's retries surface no cards and clear no foreground
+	// buffers — it has none; it just retries quietly.
+	muted.OnTransportRetry = nil
 	muted.Streamed = nil
 	return WithStreamSink(ctx, &muted)
 }

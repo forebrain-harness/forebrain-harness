@@ -19,11 +19,36 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/mattn/go-runewidth"
 )
+
+// transportRetryStepIDFor and transportRetryErrorStepIDFor scope one retry
+// card and one error card per agent: replaceOrAppendBlock matches on
+// Kind+StepID, so two subagents retrying at once each keep their own card.
+func transportRetryStepIDFor(agentID string) string {
+	if agentID = strings.TrimSpace(agentID); agentID == "" {
+		return "transport_retry"
+	}
+	return "transport_retry:" + agentID
+}
+
+func transportRetryErrorStepIDFor(agentID string) string {
+	return transportRetryStepIDFor(agentID) + ":error"
+}
+
+// transportRetryErrorText renders the failure on the error card verbatim —
+// the same policy the run-error card has: the provider's own sentence, never
+// translated, never summarized.
+func transportRetryErrorText(err error) string {
+	if err == nil {
+		return "network error"
+	}
+	return err.Error()
+}
 
 type FrameKind string
 
@@ -63,6 +88,12 @@ const (
 	// for the current terminal width on every repaint, so a resize reflows
 	// it; the directory is wrapped, never truncated.
 	FrameBannerInfo FrameKind = "banner_info"
+	// FrameRetrying is the transport-retry card: one live block whose line is
+	// the spinner, the live countdown to the next attempt and the n/total
+	// progress, frozen (Final) as "Retried t/total times" when the retries
+	// are exhausted. It is push-only state — a recovered attempt removes it,
+	// the turn's closing frames remove any still-live one.
+	FrameRetrying FrameKind = "retrying"
 )
 
 type Frame struct {
@@ -138,6 +169,13 @@ type Frame struct {
 	// RetainAsHistory keeps a completed attempt immutable when the logical tool
 	// call continues with an approval-gated retry using the same StepID.
 	RetainAsHistory bool
+	// Retry and RetryTotal carry the transport-retry card's n/total progress;
+	// the denominator is the configured cap, never a constant. RetryDeadline
+	// is when the pending retry fires, rendered as a live countdown at paint
+	// time (zero or past when the request is already in flight).
+	Retry         int
+	RetryTotal    int
+	RetryDeadline time.Time
 }
 
 // Counters captures the running tally for the active session.
@@ -1160,20 +1198,16 @@ func (r *Reducer) cancelInFlightQueryCards(runID, ownerAgentID string) []Frame {
 // openPlanReviewCard opens the plan review's card: one task, waiting, named
 // for what the review is of. The review request is the dispatch — the
 // reviewer's spawned event names the ReviewID as its parent tool call.
-func (r *Reducer) openPlanReviewCard(reviewID, provider, model, label string) *fanoutState {
+func (r *Reducer) openPlanReviewCard(reviewID, provider, model string) *fanoutState {
 	stepID := strings.TrimSpace(reviewID)
 	if fs := r.findFanoutByStepID(stepID); fs != nil {
 		return fs
-	}
-	target := strings.TrimSpace(provider) + "/" + strings.TrimSpace(model)
-	if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
-		target = strings.TrimSpace(label)
 	}
 	fs := &fanoutState{
 		StepID:       stepID,
 		Verb:         "review",
 		RunID:        r.activeRunID,
-		ReviewTarget: target,
+		ReviewTarget: llm.FormatProviderModel(provider, model),
 		Tasks: []FanoutTaskState{{
 			Title:        "Plan review",
 			SubagentType: run.PlanReviewSubagentType,
@@ -1346,6 +1380,44 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		// calls never complete, so their cards settle as canceled here the
 		// way the tool cards do below them (Renderer.FinalizePendingTools).
 		return EventResult{Frames: r.cancelInFlightQueryCards(r.activeRunID, "")}
+	case TransportRetryMsg:
+		if m.turn.isWithdrawn() {
+			return EventResult{}
+		}
+		// The streamed buffers start over for the retry — the retried attempt
+		// re-streams from the first token and would otherwise glue onto the
+		// dead attempt's words. The words themselves stay: run.go seals their
+		// live blocks on screen and the engine persisted them as the
+		// interrupted message they are.
+		agentID := strings.TrimSpace(m.AgentID)
+		if buf := r.agentBuf(agentID); buf != nil {
+			buf.assistant.Reset()
+			buf.reasoning.Reset()
+		}
+		frames := []Frame{{
+			Kind:    FrameError,
+			Title:   "Network error",
+			Content: transportRetryErrorText(m.Err),
+			StepID:  transportRetryErrorStepIDFor(agentID),
+			AgentID: agentID,
+			turn:    m.turn,
+			Final:   true,
+		}}
+		card := Frame{
+			Kind:       FrameRetrying,
+			StepID:     transportRetryStepIDFor(agentID),
+			AgentID:    agentID,
+			turn:       m.turn,
+			Retry:      m.Retry,
+			RetryTotal: m.Total,
+		}
+		if m.Exhausted {
+			card.Final = true
+		} else if m.Wait > 0 {
+			card.RetryDeadline = time.Now().Add(m.Wait)
+		}
+		frames = append(frames, card)
+		return EventResult{Frames: frames}
 	case GoalStartedMsg:
 		if r.tracker != nil {
 			r.tracker.ObserveGoalRound(1)
@@ -1601,10 +1673,10 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		r.dropCardTaskOfAgent(agentID)
 		return EventResult{Frames: append(append(append(flushed, closing...), card), extra...)}
 	case PlanReviewStartedMsg:
-		fs := r.openPlanReviewCard(m.ReviewID, m.Provider, m.Model, m.Label)
+		fs := r.openPlanReviewCard(m.ReviewID, m.Provider, m.Model)
 		return EventResult{Frames: []Frame{r.emitFanoutFrame(fs)}}
 	case PlanReviewReviewedMsg:
-		fs := r.openPlanReviewCard(m.ReviewID, m.Provider, m.Model, m.Label)
+		fs := r.openPlanReviewCard(m.ReviewID, m.Provider, m.Model)
 		task := &fs.Tasks[0]
 		outcome := strings.TrimSpace(m.Outcome)
 		switch outcome {
@@ -3002,7 +3074,8 @@ func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int,
 	animated := (toolStatusRunning(b.frame) && !toolStatusAwaitingApproval(b.frame)) ||
 		(b.frame.Kind == FrameMemoryCompact && !b.frame.Final) ||
 		(b.frame.Kind == FrameSkillInstall && !b.frame.Final) ||
-		(b.frame.Kind == FrameMigration && !b.frame.Final)
+		(b.frame.Kind == FrameMigration && !b.frame.Final) ||
+		(b.frame.Kind == FrameRetrying && !b.frame.Final)
 	// A subagent card with a running task clock depends on the second, not the
 	// spinner phase: the clock walks once a second, so keying it on the tick
 	// would re-render the whole card ten times for one visible change.
@@ -3035,6 +3108,43 @@ func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int,
 	return lines
 }
 
+// retryCardLine renders the transport-retry card's single line: the marker
+// (spinner while live, seal when frozen), then the continuation wording with
+// the n/total progress. The retry is a continuation — the model picks up from
+// the words it already wrote — so the copy says "continuing", never "retry".
+// The countdown is derived from the frame's deadline at paint time. TUI copy
+// is an English literal, matching the surface's existing wording conventions.
+func retryCardLine(f Frame, spinnerPhase int) string {
+	if f.Final {
+		return fmt.Sprintf("%s Could not continue, tried %d/%d times", statusMarker(f, spinnerPhase), f.Retry, f.RetryTotal)
+	}
+	if remaining := time.Until(f.RetryDeadline); remaining > 0 {
+		return fmt.Sprintf("%s Hang tight, continuing in %s (%d/%d)",
+			statusMarker(f, spinnerPhase), formatRetryCountdown(remaining), f.Retry, f.RetryTotal)
+	}
+	return fmt.Sprintf("%s Continuing (%d/%d)", statusMarker(f, spinnerPhase), f.Retry, f.RetryTotal)
+}
+
+// formatRetryCountdown renders a remaining wait for the retry card, ceiling
+// to the unit so the number never reads shorter than the true wait: seconds
+// under a minute, then minutes, hours, days. Large configured retry caps can
+// genuinely reach the hour and day tiers.
+func formatRetryCountdown(remaining time.Duration) string {
+	if remaining < 0 {
+		remaining = 0
+	}
+	switch {
+	case remaining < time.Minute:
+		return fmt.Sprintf("%ds", int(math.Ceil(remaining.Seconds())))
+	case remaining < time.Hour:
+		return fmt.Sprintf("%dm", int(math.Ceil(remaining.Minutes())))
+	case remaining < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(math.Ceil(remaining.Hours())))
+	default:
+		return fmt.Sprintf("%dd", int(math.Ceil(remaining.Hours()/24)))
+	}
+}
+
 // fanoutHasLiveClock reports whether a subagent card holds a task row whose
 // execution is still running: its clock is computed at paint time from "now",
 // so the card changes once a second until the execution ends.
@@ -3053,6 +3163,12 @@ func fanoutHasLiveClock(f Frame) bool {
 func renderFrameLinesWithAgents(f Frame, width int, theme DiffTheme, spinnerPhase int, cwdOpt ...string) ([]string, []string) {
 	if f.Kind == FrameThinking {
 		return trimTrailingBlank(thinkingDisplayLinesWithWidth(f, width)), nil
+	}
+	if f.Kind == FrameRetrying {
+		// The retry card is one line — spinner, live countdown, progress —
+		// computed at paint time so the ~200ms repaint walks the countdown
+		// and rotates the spinner without any timer of its own.
+		return []string{retryCardLine(f, spinnerPhase)}, nil
 	}
 	if f.Kind == FrameRaw {
 		// Verbatim, already-styled lines (status text such as the OAuth URL).
@@ -3169,6 +3285,13 @@ func statusMarker(f Frame, spinnerPhase int) string {
 			return thinkComplete
 		}
 		return thinkRunning
+	}
+	// The retry card spins while it waits and seals when the retries ran out.
+	if f.Kind == FrameRetrying {
+		if f.Final {
+			return toolComplete
+		}
+		return spinnerGlyphs[spinnerPhase%len(spinnerGlyphs)]
 	}
 	// Plan-mode tools get a diamond marker.
 	if f.Kind == FrameTool {
@@ -3926,6 +4049,8 @@ func (r *Renderer) hasLiveBlockLocked() bool {
 			return true
 		case block.frame.Kind == FrameMigration && !block.frame.Final:
 			return true
+		case block.frame.Kind == FrameRetrying && !block.frame.Final:
+			return true
 		case block.frame.Kind == FrameFanout && fanoutHasLiveClock(block.frame):
 			return true
 		}
@@ -4361,19 +4486,22 @@ func (r *Renderer) paintViewportLocked() {
 			// visible.  Without this the user can arrow the cursor off-screen
 			// when the command string is long enough to push options past the
 			// bottom of the composer area, making the bottom choices invisible
-			// and unselectable. A panel has no hardware cursor; its focus row
-			// is followed only when it moved, so a wheel or page scroll over
-			// an unchanged selection is not snapped back on the next paint.
-			focusRow := cursorRow
-			if focusRow < 0 && r.overlayFocusPending {
-				focusRow = r.overlayFocusRow
+			// and unselectable. An option list has no hardware cursor; its
+			// focus rows are followed only when they moved, so a wheel or page
+			// scroll over an unchanged selection is not snapped back on the
+			// next paint.
+			focusStart, focusEnd := cursorRow, cursorRow+1
+			if cursorRow < 0 && r.overlayFocusPending {
+				focusStart, focusEnd = r.overlayFocusRow, r.overlayFocusEnd
 			}
-			if focusRow >= 0 {
-				overlayEnd := r.overlayScrollOffset + maxContentHeight
-				if focusRow < r.overlayScrollOffset {
-					r.overlayScrollOffset = focusRow
-				} else if focusRow >= overlayEnd {
-					r.overlayScrollOffset = focusRow - maxContentHeight + 1
+			if focusStart >= 0 && focusEnd > focusStart {
+				// The end first and the start last, so a range taller than
+				// the area keeps its start on screen, as a panel's does.
+				if focusEnd > r.overlayScrollOffset+maxContentHeight {
+					r.overlayScrollOffset = focusEnd - maxContentHeight
+				}
+				if focusStart < r.overlayScrollOffset {
+					r.overlayScrollOffset = focusStart
 				}
 			}
 
@@ -5182,6 +5310,89 @@ func (r *Renderer) withdrawSubmission(turn *foregroundTurn) {
 	r.paintViewportLocked()
 }
 
+// liveRetryCardMatch matches one view's live (non-Final) transport-retry
+// card. Frozen exhausted cards are history and never match.
+func liveRetryCardMatch(agentID string) func(Frame) bool {
+	return func(f Frame) bool {
+		return f.Kind == FrameRetrying && !f.Final && f.AgentID == agentID
+	}
+}
+
+// dismissLiveRetryCardsLocked removes live transport-retry cards: the named
+// agent's own, or every view's when all is set. Recovery (the retried
+// attempt's first streamed words) and the turn's closing frames both end with
+// the card gone — a recovered retry leaves no success card, and a closed turn
+// leaves no dead-stream residue. Caller holds r.mu.
+func (r *Renderer) dismissLiveRetryCardsLocked(all bool, agentID string) {
+	agentID = strings.TrimSpace(agentID)
+	if len(r.liveRetryAgents) == 0 {
+		return
+	}
+	if !all && !r.liveRetryAgents[agentID] {
+		return
+	}
+	targets := map[string]*viewModel{"": &r.vm}
+	if all {
+		for id, vm := range r.perAgentVM {
+			targets[id] = vm
+		}
+	} else if agentID != "" {
+		targets = map[string]*viewModel{agentID: r.ensurePerAgentVM(agentID)}
+	}
+	for id, vm := range targets {
+		if !r.liveRetryAgents[id] || vm == nil {
+			continue
+		}
+		vm.removeLast(liveRetryCardMatch(id))
+		delete(r.liveRetryAgents, id)
+	}
+	r.syncLiveBlockAnimationLocked()
+}
+
+// SealDeadStreamBlocks finalizes the trailing live assistant and thinking
+// blocks of the stream that just died on the network: what the user already
+// watched appear stays — a shown half answer is a message that happened, and
+// the engine persisted it as one — so the blocks are sealed where they stand
+// (the way a completed block seals) instead of removed, and the retried
+// attempt's first delta starts its own new block below them. A zero-output
+// death holds no live blocks and is a no-op. run.go calls this from its
+// TransportRetryMsg branch before the error/retry cards render.
+func (r *Renderer) SealDeadStreamBlocks(agentID string) {
+	if r == nil {
+		return
+	}
+	agentID = strings.TrimSpace(agentID)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	vm := &r.vm
+	if agentID != "" {
+		vm = r.perAgentVM[agentID]
+		if vm == nil {
+			return
+		}
+	}
+	sealed := false
+	for n := len(vm.blocks); n > 0; n-- {
+		f := vm.blocks[n-1].frame
+		if f.Final || (f.Kind != FrameAssistant && f.Kind != FrameThinking) {
+			break
+		}
+		vm.blocks[n-1].frame.Final = true
+		vm.blocks[n-1].frame.turn = nil
+		vm.blocks[n-1].cache.valid = false
+		sealed = true
+	}
+	if !sealed {
+		return
+	}
+	if r.activeView != agentID {
+		return
+	}
+	r.vpHoverRow = -1
+	r.selectClearLocked()
+	r.paintViewportLocked()
+}
+
 // appendFrameViewportLocked retains a frame in the view model and repaints.
 // Follow mode remains as-is: if the user has scrolled up, a new frame must not
 // yank the viewport back to the bottom — instead the frame is counted as an
@@ -5259,6 +5470,30 @@ func (r *Renderer) countNewMessageLocked(f Frame, visible *viewModel, blocksBefo
 // reports whether the visible transcript changed and needs a repaint. Caller
 // holds r.mu.
 func (r *Renderer) retainFrameLocked(f Frame) bool {
+	// The transport-retry card pair has its own lifecycle hooks. A live
+	// streamed delta (the retried attempt's first words) retires the card of
+	// the view it belongs to — recovery leaves no success card. A turn's
+	// closing frames (status, error) retire any card still waiting in the
+	// views they close, so no dead-stream residue survives its turn. Frozen
+	// (Final) cards are history and never dismissed.
+	switch {
+	case (f.Kind == FrameAssistant || f.Kind == FrameThinking) && !f.Final:
+		r.dismissLiveRetryCardsLocked(false, f.AgentID)
+	case f.Kind == FrameStatus || (f.Kind == FrameError && f.StepID == ""):
+		if f.AgentID != "" {
+			r.dismissLiveRetryCardsLocked(false, f.AgentID)
+		} else {
+			// The conversation's own closing frame ends the turn for every
+			// stream that ran inside it.
+			r.dismissLiveRetryCardsLocked(true, "")
+		}
+	}
+	if f.Kind == FrameRetrying {
+		if r.liveRetryAgents == nil {
+			r.liveRetryAgents = make(map[string]bool)
+		}
+		r.liveRetryAgents[strings.TrimSpace(f.AgentID)] = !f.Final
+	}
 	// Terminal errors with no owner are global: retain them in the primary
 	// transcript and mirror them into the currently visible subagent
 	// transcript — unless that view already ends on the same failure. A
@@ -5279,10 +5514,14 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 					return prev.Kind == FrameStatus && strings.HasPrefix(prev.Title, "Worked for ")
 				}, f)
 			} else {
-				r.vm.append(f)
+				// replaceOrAppendBlock is append for every ordinary error
+				// card (no StepID) and in-place replacement for the
+				// transport-retry error card, whose consecutive failures
+				// describe one story.
+				r.vm.replaceOrAppendBlock(f)
 			}
 		} else {
-			r.vm.append(f)
+			r.vm.replaceOrAppendBlock(f)
 		}
 		if r.activeView != "" {
 			if vm := r.ensurePerAgentVM(r.activeView); !vm.endsOnError(f.Content) {
@@ -5310,18 +5549,18 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 		} else {
 			vm.replaceOrAppendBlock(f)
 		}
-		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout {
+		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout || f.Kind == FrameRetrying {
 			r.syncLiveBlockAnimationLocked()
 		}
 		return r.activeView == f.AgentID
 	}
-	// Tool, fanout, memory-compact, skill-install and migration frames
-	// replace the previous block with the same StepID (compact running →
-	// compact ran, installing → installed, previewing → migrating →
-	// migrated).
-	if f.Kind == FrameFanout || f.Kind == FrameTool || f.Kind == FrameMemoryCompact || f.Kind == FrameSkillInstall || f.Kind == FrameMigration {
+	// Tool, fanout, memory-compact, skill-install, migration and retry
+	// frames replace the previous block with the same StepID (compact
+	// running → compact ran, installing → installed, previewing → migrating
+	// → migrated, retrying → retried).
+	if f.Kind == FrameFanout || f.Kind == FrameTool || f.Kind == FrameMemoryCompact || f.Kind == FrameSkillInstall || f.Kind == FrameMigration || f.Kind == FrameRetrying {
 		r.vm.replaceOrAppendBlock(f)
-		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout || f.Kind == FrameMigration {
+		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout || f.Kind == FrameMigration || f.Kind == FrameRetrying {
 			r.syncLiveBlockAnimationLocked()
 		}
 	} else if f.Kind == FrameStatus && f.InsertBeforeLastTool {

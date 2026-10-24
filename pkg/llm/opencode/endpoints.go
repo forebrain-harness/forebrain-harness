@@ -11,8 +11,8 @@ const (
 	// account endpoints live here.
 	ConsoleServer = "https://opencode.ai/console"
 
-	// InferenceBase is the Console inference root, serving both the free
-	// family and pay-as-you-go models.
+	// InferenceBase is the Console inference root, serving the pay-as-you-go
+	// models.
 	InferenceBase = "https://opencode.ai/inference"
 
 	// GoInferenceBase is the Go subscription's inference root.
@@ -26,10 +26,6 @@ const (
 	// CredentialsFile is the login file, resolved against FOREBRAIN_HOME so it
 	// sits next to forebrain.yaml.
 	CredentialsFile = "opencode.json"
-
-	// PublicBearer is the literal token the free model family accepts. It is
-	// what the official client sends when the user has no OpenCode account.
-	PublicBearer = "public"
 
 	// APIKeyEnv is the Console API key variable. It is spelled out rather than
 	// derived from the provider name: the generic derivation would turn

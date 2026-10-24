@@ -114,6 +114,25 @@ type AgentDefaults struct {
 	WebSearch      WebSearchConfig     `yaml:"web_search,omitempty" json:"web_search"`
 	WebFetch       WebFetchConfig      `yaml:"web_fetch,omitempty" json:"web_fetch"`
 	EnableSubagent *bool               `yaml:"enable_subagent,omitempty" json:"enable_subagent,omitempty"`
+	// NetworkRetryMax caps LLM transport-failure retries (default 10). Nil
+	// means the default; 0 disables network retries; load rejects negative
+	// values. There is no upper bound: the user may customise it freely.
+	NetworkRetryMax *int `yaml:"network_retry_max,omitempty" json:"network_retry_max,omitempty"`
+}
+
+// DefaultNetworkRetryMax is the network-retry cap when the configuration
+// leaves network_retry_max unset. It lives here, next to the field it
+// defaults, so no other package restates it.
+const DefaultNetworkRetryMax = 10
+
+// NetworkRetryMaxOrDefault resolves the network-retry cap: nil → the default;
+// set values pass through as-is (the loader already rejected negative ones,
+// so there is nothing to clamp here).
+func (d AgentDefaults) NetworkRetryMaxOrDefault() int {
+	if d.NetworkRetryMax == nil {
+		return DefaultNetworkRetryMax
+	}
+	return *d.NetworkRetryMax
 }
 
 // ExecutionConfig controls coordinated execution capacity for agent mode.

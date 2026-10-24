@@ -221,6 +221,13 @@
                             :text="block.text"
                             :detail="block.detail"
                           />
+                          <!-- The retry half of the transport-failure pair: the
+                               same card every subagent view draws, driven by
+                               the same event. -->
+                          <TransportRetryCard
+                            v-else-if="block.kind === 'retry'"
+                            :block="block"
+                          />
                         </template>
                       </div>
                       <!-- What the user sent reads exactly as they wrote it, the way
@@ -650,6 +657,7 @@ import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
 import ViewModeChip from '@/components/chat/ViewModeChip.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
+import TransportRetryCard from '@/components/chat/TransportRetryCard.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
 import LspRecommendationCard from '@/components/chat/LspRecommendationCard.vue'

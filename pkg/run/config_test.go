@@ -982,7 +982,7 @@ func TestNewLLMFromYAMLOpenCodeRoutesByProtocol(t *testing.T) {
 		apiKey   string
 		wantPath string
 	}{
-		{name: "free console model speaks chat completions", provider: "opencode", model: "big-pickle", wantPath: "/openai/v1/chat/completions"},
+		{name: "free go model speaks chat completions", provider: "opencode-go", model: "beam-free", apiKey: "sk-test", wantPath: "/go/openai/v1/chat/completions"},
 		{name: "gpt family speaks responses", provider: "opencode", model: "gpt-5.6-luna", apiKey: "sk-test", wantPath: "/openai/v1/responses"},
 		{name: "grok family speaks responses", provider: "opencode", model: "grok-4.7", apiKey: "sk-test", wantPath: "/openai/v1/responses"},
 		{name: "claude family speaks anthropic", provider: "opencode", model: "claude-sonnet-5", apiKey: "sk-test", wantPath: "/anthropic/v1/messages"},
@@ -1020,11 +1020,7 @@ func TestNewLLMFromYAMLOpenCodeRoutesByProtocol(t *testing.T) {
 			if got[0].Agent == "" || !strings.HasPrefix(got[0].Agent, "forebrain-harness/") {
 				t.Fatalf("User-Agent = %q, want forebrain-harness/<version>", got[0].Agent)
 			}
-			wantAuth := "Bearer " + tc.apiKey
-			if tc.apiKey == "" {
-				wantAuth = "Bearer public"
-			}
-			if got[0].Auth != wantAuth {
+			if wantAuth := "Bearer " + tc.apiKey; got[0].Auth != wantAuth {
 				t.Fatalf("Authorization = %q, want %q", got[0].Auth, wantAuth)
 			}
 		})
@@ -1080,9 +1076,8 @@ func TestNewLLMFromYAMLAPIPathNamesTheProtocol(t *testing.T) {
 
 // TestNewLLMFromYAMLOpenCodeCredentialChain pins the order a credential is
 // taken in, because three different login surfaces write different things: an
-// api_key (possibly an ${ENV} reference), OPENCODE_API_KEY, the opencode.json
-// the device-code login writes, and the literal "public" bearer that only the
-// free family accepts.
+// api_key (possibly an ${ENV} reference), OPENCODE_API_KEY and the opencode.json
+// the device-code login writes. Nothing is sent anonymously.
 func TestNewLLMFromYAMLOpenCodeCredentialChain(t *testing.T) {
 	const paidModel = "deepseek-v4-pro"
 	t.Run("paid model without any credential fails loudly", func(t *testing.T) {
@@ -1136,14 +1131,17 @@ func TestNewLLMFromYAMLOpenCodeCredentialChain(t *testing.T) {
 			t.Fatalf("requests = %+v, want one with the logged-in access token", got)
 		}
 	})
-	t.Run("public bearer is offered to the free family only", func(t *testing.T) {
+	// The free models need a login with a Go or Go Plus subscription like the
+	// rest: nothing stands in for a missing credential.
+	t.Run("free model without any credential fails loudly too", func(t *testing.T) {
 		t.Setenv("FOREBRAIN_HOME", t.TempDir())
 		t.Setenv("OPENCODE_API_KEY", "")
-		srv, calls := openCodeGateway(t)
-		runOpenCodeClient(t, &LLMProviderYAML{Provider: "opencode", Model: "glm-5.3-flash-free", BaseURL: srv.URL})
-		got := calls()
-		if len(got) != 1 || got[0].Auth != "Bearer public" {
-			t.Fatalf("requests = %+v, want one with Bearer public", got)
+		_, err := NewLLMFromYAML(&LLMProviderYAML{Provider: "opencode-go", Model: "beam-free", BaseURL: "https://opencode.ai/inference/go"})
+		if err == nil {
+			t.Fatal("NewLLMFromYAML accepted a free OpenCode model with no credential")
+		}
+		if !strings.Contains(err.Error(), "OPENCODE_API_KEY") || !strings.Contains(err.Error(), "/connect") {
+			t.Fatalf("error = %v, want it to name the credential and /connect", err)
 		}
 	})
 }

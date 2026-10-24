@@ -29,7 +29,6 @@ type ReasoningEffortPreset struct {
 // response are ignored by the decoder.
 type ModelInfo struct {
 	Slug                      string                  `json:"slug"`
-	DisplayName               string                  `json:"display_name"`
 	Description               string                  `json:"description,omitempty"`
 	DefaultReasoningEffort    string                  `json:"default_reasoning_level,omitempty"`
 	SupportedReasoningEfforts []ReasoningEffortPreset `json:"supported_reasoning_levels"`

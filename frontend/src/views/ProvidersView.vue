@@ -53,7 +53,7 @@
       >
         <template #cell-provider="{ row }">
           <span class="forebrain-cell-1" v-tip:top.trunc="row.provider">{{ row.provider }}</span>
-          <BadgeComponent v-if="isDefaultRow(row)" class="ml-1.5" :data-testid="`provider-default-${rowIndex(row)}`">{{ t('providers.defaultBadge') }}</BadgeComponent>
+          <BadgeComponent v-if="isDefaultRow(row)" class="ml-1.5" :data-testid="`provider-default-${rowIndex(row)}`">{{ t('providers.defaultBadgeWithModel', { model: defaultModelOf(row) }) }}</BadgeComponent>
         </template>
         <template #cell-models="{ row }">
           <span class="forebrain-cell-1" v-tip:top.trunc="row.models.join('、')">{{ row.models.join('、') }}</span>
@@ -69,15 +69,44 @@
         </template>
         <template #cell-actions="{ row }">
           <RowActions>
+            <!-- 设为默认: a row serving one model sets it in one click; a row
+                 serving several opens the list, so the person says which one.
+                 It stays on the row that already holds the default as long as
+                 another of its models can take over. -->
             <RowAction
-              v-if="!isDefaultRow(row)"
+              v-if="canSetDefault(row) && (row.models ?? []).length <= 1"
               :icon="Star"
               :label="t('providers.setDefault')"
               :name="row.provider"
               :disabled="saving"
               :data-testid="`provider-default-set-${rowIndex(row)}`"
-              @click="setDefault(row)"
+              @click="setDefault(row, (row.models ?? [])[0])"
             />
+            <DropdownMenu v-else-if="canSetDefault(row)">
+              <DropdownMenuTrigger as-child>
+                <RowAction
+                  :icon="Star"
+                  :label="t('providers.setDefault')"
+                  :name="row.provider"
+                  :disabled="saving"
+                  :data-testid="`provider-default-set-${rowIndex(row)}`"
+                />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent class="w-[240px]">
+                <DropdownMenuLabel>{{ t('providers.defaultModel') }}</DropdownMenuLabel>
+                <DropdownMenuItem
+                  v-for="model in row.models ?? []"
+                  :key="model"
+                  role="menuitemradio"
+                  :aria-checked="model === defaultModelOf(row)"
+                  :data-testid="`provider-default-pick-${rowIndex(row)}-${model}`"
+                  @select="setDefault(row, model)"
+                >
+                  <b class="font-medium">{{ model }}</b>
+                  <Check v-if="model === defaultModelOf(row)" class="size-3.5" aria-hidden="true" />
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <RowAction
               :icon="Pencil"
               :label="t('providers.edit')"
@@ -239,7 +268,40 @@
           <Loader :size="14" class="text-[var(--forebrain-muted-text)]" data-testid="provider-login-spinner" />
           <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('providers.connectWaiting') }}</span>
         </div>
-        <p v-if="connectProvider === 'chatgpt'" class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('providers.connectChatGPTLocal') }}</p>
+        <!-- A sign-in finished on another computer ends on an address the
+             gateway cannot reach; the user pastes that address back here. -->
+        <div v-if="connectProvider === 'chatgpt'" class="grid gap-1.5">
+          <Label class="text-[11px] text-[var(--forebrain-muted-text)]" for="provider-login-paste">
+            {{ t('providers.connectPasteLabel') }}
+          </Label>
+          <div class="flex items-center gap-2">
+            <Input
+              id="provider-login-paste"
+              v-model="connectPasteUrl"
+              class="h-9 flex-1 font-mono text-xs"
+              placeholder="http://localhost:1455/auth/callback?code=…"
+              :aria-invalid="connectPasteError ? 'true' : undefined"
+              data-testid="provider-login-paste"
+            />
+            <Button
+              type="button"
+              class="forebrain-btn h-9 px-3 text-xs"
+              :disabled="!connectPasteUrl.trim()"
+              data-testid="provider-login-paste-submit"
+              @click="submitConnectCallback"
+            >
+              {{ t('providers.connectPasteSubmit') }}
+            </Button>
+          </div>
+          <p
+            v-if="connectPasteError"
+            class="text-[12px] text-[var(--forebrain-danger)]"
+            role="alert"
+            data-testid="provider-login-paste-error"
+          >
+            {{ connectPasteError }}
+          </p>
+        </div>
       </template>
 
       <!-- The catalog the finished login belongs to: the Go subscription after
@@ -254,11 +316,11 @@
               <CommandItem
                 v-for="record in connectModels"
                 :key="record.modelId"
-                :value="record.modelName ?? record.apiModel"
+                :value="modelIdOf(record)"
                 :data-testid="`provider-login-model-${modelIdOf(record)}`"
                 @select="connectChoice = modelIdOf(record)"
               >
-                <span class="flex-1 truncate text-left">{{ record.modelName }}</span>
+                <span class="flex-1 truncate text-left">{{ modelIdOf(record) }}</span>
                 <Check v-if="connectChoice === modelIdOf(record)" class="size-3.5" aria-hidden="true" />
               </CommandItem>
             </CommandGroup>
@@ -345,6 +407,13 @@ import {
   CommandItem,
   CommandList,
 } from '@repo/shadcn-vue/components/ui/command'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from '@repo/shadcn-vue/components/ui/dropdown-menu'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { Label } from '@repo/shadcn-vue/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
@@ -626,11 +695,31 @@ function rowIndex(row: ProviderRecord): number {
   return row.index ?? 0
 }
 
+/**
+ * The model of this row the agent's effective default names, or '' when the
+ * default is on another row. A row can serve several models, so the default
+ * is one of them — the badge and the picker both say which.
+ */
+function defaultModelOf(row: ProviderRecord): string {
+  const provider = String(row.provider ?? '').trim()
+  if (!provider || !defaultModel.value) return ''
+  return (row.models ?? []).find((model) => defaultModel.value === `${provider}/${String(model ?? '').trim()}`) ?? ''
+}
+
 /** Whether the agent's effective default names any model on this row. */
 function isDefaultRow(row: ProviderRecord): boolean {
-  const provider = String(row.provider ?? '').trim()
-  if (!provider || !defaultModel.value) return false
-  return (row.models ?? []).some((model) => defaultModel.value === `${provider}/${String(model ?? '').trim()}`)
+  return defaultModelOf(row) !== ''
+}
+
+/**
+ * Whether this row still offers 设为默认. A row whose only model is the default
+ * has nothing left to set; a row with several models always offers it, so the
+ * default can move from one of its models to another.
+ */
+function canSetDefault(row: ProviderRecord): boolean {
+  const models = row.models ?? []
+  if (!models.length) return false
+  return models.length > 1 || !isDefaultRow(row)
 }
 
 /**
@@ -815,14 +904,15 @@ async function modalSave() {
   modalOpen.value = false
 }
 
-/** Retargets agents.definitions.<agent>.default_model at this row. The list's
- * order never changes — the default is a named value, not a position. A row
- * serving several models sets its first one (the tooltip says so). */
-function setDefault(row: ProviderRecord) {
+/** Retargets agents.definitions.<agent>.default_model at this row's model. The
+ * list's order never changes — the default is a named value, not a position.
+ * The model is named, not taken from the row's first one: a row serving
+ * several models says which of them is the default. */
+function setDefault(row: ProviderRecord, model: string) {
   const provider = String(row.provider ?? '').trim()
-  const model = String(row.models?.[0] ?? '').trim()
-  if (!provider || !model) return
-  void writeWholeOrder(() => {}, undefined, `${provider}/${model}`)
+  const picked = String(model ?? '').trim()
+  if (!provider || !picked) return
+  void writeWholeOrder(() => {}, undefined, `${provider}/${picked}`)
 }
 
 function askRemove(row: ProviderRecord) {
@@ -851,6 +941,10 @@ const connectLoginId = ref('')
 const connectUrl = ref('')
 const connectCode = ref('')
 const connectError = ref('')
+/** The address a user pasted back after signing in on another computer. */
+const connectPasteUrl = ref('')
+/** Why the gateway refused that address, in the reader's language. */
+const connectPasteError = ref('')
 const connectModels = ref<ModelRecord[]>([])
 const connectChoice = ref('')
 const connectTarget = ref<ConnectTarget | null>(null)
@@ -884,6 +978,8 @@ function resetConnect() {
   connectUrl.value = ''
   connectCode.value = ''
   connectError.value = ''
+  connectPasteUrl.value = ''
+  connectPasteError.value = ''
   connectModels.value = []
   connectChoice.value = ''
   connectTarget.value = null
@@ -928,6 +1024,39 @@ async function beginConnectLogin(provider: ProviderLoginProvider) {
       cause instanceof GatewayHttpError && cause.status === 409 ? t('providers.connectBusy') : t('providers.connectFailed')
     connectStep.value = 'failed'
   }
+}
+
+/**
+ * Hands the pasted address to the gateway. The flow took it or refused it: a
+ * refusal is one short reason (the address is not a callback, it belongs to
+ * another sign-in, it carries no code), and the login stays where it was.
+ */
+async function submitConnectCallback() {
+  const url = connectPasteUrl.value.trim()
+  const loginId = connectLoginId.value
+  if (!url || !loginId) return
+  connectPasteError.value = ''
+  try {
+    await forebrainApi.submitProviderLoginCallback('chatgpt', loginId, url)
+    // The gateway took the address; the poll says how the sign-in ended.
+    connectPasteUrl.value = ''
+  } catch (cause) {
+    if (cause instanceof GatewayHttpError && (cause.status === 404 || cause.status === 409)) {
+      // The gateway forgot this login (it restarted) or it is no longer
+      // pending: the modal offers a restart, as it does for a lost poll.
+      connectStep.value = 'lost'
+      return
+    }
+    connectPasteError.value = pasteCallbackText(cause)
+  }
+}
+
+/** The refusal, in the reader's language: the gateway's own short reason. */
+function pasteCallbackText(cause: unknown): string {
+  const reason = cause instanceof GatewayHttpError ? cause.message.trim() : ''
+  if (reason === 'state_mismatch') return t('providers.connectPasteStateMismatch')
+  if (reason === 'no_code') return t('providers.connectPasteNoCode')
+  return t('providers.connectPasteNotCallback')
 }
 
 function pollConnect(provider: ProviderLoginProvider, loginId: string) {

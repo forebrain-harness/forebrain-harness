@@ -70,6 +70,16 @@ Modes:
           seconds after its first request and then answers with the answer text,
           which is the automatic continuation running. The conversation's later
           requests answer with a fixed line.
+  subagent-steer
+          drive the "a steer queued in a subagent's view is taken at its tool
+          boundary while the subagent keeps running" scenario. The
+          conversation's first request dispatches the general-purpose probe;
+          the subagent's first request answers with a shell call running the
+          answer text (default "sleep 8", inside the shell tool's 10s timeout), and any later subagent request -
+          the one carrying the tool result and the steer - sends one delta and
+          then hangs. That delta is what commits the steer's delivery, and the
+          hang keeps the execution running, so no execution-end repaint can
+          hide a preview that failed to drop the delivered steer.
 
 Every request is logged to stderr, which is the only reliable way to know the
 request actually went out: forebrain buffers assistant deltas in the reducer and
@@ -223,6 +233,16 @@ SUBAGENT_NET_PROBE_ARGS = json.dumps({
 SUBAGENT_NET_MAIN = itertools.count()
 SUBAGENT_LIMIT_RESETS_AT = []
 SUBAGENT_LIMIT_MAIN = itertools.count()
+SUBAGENT_STEER_MAIN = itertools.count()
+
+
+def _has_tool_result(body):
+    """Whether the request already carries a tool result."""
+    try:
+        messages = json.loads(body).get("messages") or []
+    except Exception:
+        return False
+    return any(message.get("role") == "tool" for message in messages)
 
 
 def chunk(delta=None, finish=None):
@@ -273,7 +293,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.serve_subagent_limit(body)
             return
 
+        if MODE == "subagent-steer":
+            self.serve_subagent_steer(body)
+            return
+
         if MODE == "limit" and self.serve_limit():
+            return
+
+        if MODE == "netdrop" and self.serve_netdrop():
             return
 
         if MODE == "hang":
@@ -418,6 +445,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
 
+    def serve_subagent_steer(self, body):
+        """Drive "a steer queued in a subagent's view is taken at its tool
+        boundary while the subagent keeps running".
+
+        The subagent's first request (no tool result yet) is answered with a
+        shell call running the answer text, which is the window the user
+        queues a steer in. A later subagent request carries that call's result
+        and the steer: it gets one delta, which commits the steer's delivery,
+        and then hangs, so the subagent stays running. The conversation's
+        first request dispatches the probe; the rest answer with a fixed line.
+        """
+        system, _ = _system_and_last_user(body)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if SUBAGENT_SYSTEM_MARK in system:
+            if _has_tool_result(body):
+                sys.stderr.write("SUBAGENT-STEER took the steer, holding the subagent\n")
+                sys.stderr.flush()
+                self.write_event(chunk(delta={"role": "assistant", "content": "steer received, still working"}))
+                while True:
+                    time.sleep(3600)
+            command = TEXT if TEXT != "FAKE_ANSWER" else "sleep 8"
+            self.write_event(chunk(delta={
+                "role": "assistant",
+                "content": "running the slow step",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_steer_0",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": json.dumps({"command": command})},
+                }],
+            }))
+            self.write_event(chunk(finish="tool_calls"))
+        elif next(SUBAGENT_STEER_MAIN) == 0:
+            self.write_event(chunk(delta={
+                "role": "assistant",
+                "content": "delegating the probe",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_steer_main_0",
+                    "type": "function",
+                    "function": {"name": "subagent_run", "arguments": SUBAGENT_NET_PROBE_ARGS},
+                }],
+            }))
+            self.write_event(chunk(finish="tool_calls"))
+        else:
+            self.write_event(chunk(delta={"role": "assistant", "content": "primary done"}))
+            self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
     def serve_goal(self, body):
         """Answer the evaluator with the next verdict, a round with text."""
         self.send_response(200)
@@ -444,6 +524,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_event(chunk(finish="stop"))
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
+
+    def serve_netdrop(self):
+        """Answer request 1 with part of the answer, then close the connection
+        cleanly with no finish frame — the shape of a proxy cutting an SSE
+        stream mid-answer, which must surface as a truncation and be retried
+        rather than pass as a success. Every request from the second on
+        returns False so the normal path answers, and the retry succeeds.
+
+        FAKE_NETDROP_EVERY=1 drops every request instead, for driving a
+        cancellation mid-backoff or a retry cap exhausting itself.
+        FAKE_NETDROP_SILENT=1 drops with no bytes at all, for the zero-output
+        death whose retries must leave the withdraw window open."""
+        if next(REQUESTS) > 0 and not os.environ.get("FAKE_NETDROP_EVERY"):
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if not os.environ.get("FAKE_NETDROP_SILENT"):
+            self.write_event(chunk(delta={"role": "assistant", "content": "partial answer that never"}))
+        sys.stderr.write("NETDROP clean close without a finish frame\n")
+        sys.stderr.flush()
+        self.close_connection = True
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.connection.close()
+        except OSError:
+            pass
+        return True
 
     def serve_subagent_net(self, body):
         """Drive the "subagent fails on the network, then the user continues it"

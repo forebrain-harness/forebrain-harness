@@ -38,7 +38,6 @@ type ReasoningOption struct {
 // Hit holds model capability data from the catalog.
 type Hit struct {
 	CatalogID           string `json:"catalog_id,omitempty"`
-	DisplayName         string `json:"display_name,omitempty"`
 	CompHash            string `json:"comp_hash,omitempty"`
 	ContextWindow       int64  `json:"context_window,omitempty"`
 	InputTokenLimit     int64  `json:"input_token_limit,omitempty"`
@@ -609,7 +608,6 @@ func Lookup(provider, apiModel string) (Hit, bool) {
 	if m, ok := cat.LookupModel(key); ok {
 		return Hit{
 			CatalogID:           m.ID,
-			DisplayName:         m.Name,
 			CompHash:            m.CompHash,
 			ContextWindow:       m.ContextWindow,
 			InputTokenLimit:     m.InputTokenLimit,
@@ -700,14 +698,14 @@ func IsOpus(provider, apiModel string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(apiModel)), "opus")
 }
 
-// IsOpusLabel parses a "provider / model" or "provider/model - extra" label
-// and reports whether it is an Anthropic Opus variant.
+// IsOpusLabel parses a "provider/model" label and reports whether it is an
+// Anthropic Opus variant.
 func IsOpusLabel(label string) bool {
 	provider, model := ParseProviderModelLabel(label)
 	return IsOpus(provider, model)
 }
 
-// FormatProviderModel renders a provider/model pair as the "provider / model"
+// FormatProviderModel renders a provider/model pair as the "provider/model"
 // label used across the UI: the /model picker, the composer footer, approval
 // rows and plan-review reviewer names. It is the inverse of
 // ParseProviderModelLabel, and lives beside it so both halves of the format
@@ -724,15 +722,14 @@ func FormatProviderModel(provider, model string) string {
 	case model == "":
 		return provider
 	default:
-		return provider + " / " + model
+		return provider + "/" + model
 	}
 }
 
 func ParseProviderModelLabel(label string) (string, string) {
-	base := strings.TrimSpace(strings.SplitN(label, " - ", 2)[0])
-	provider, model, ok := strings.Cut(base, "/")
+	provider, model, ok := strings.Cut(strings.TrimSpace(label), "/")
 	if !ok {
-		return "", strings.TrimSpace(base)
+		return "", strings.TrimSpace(label)
 	}
 	return strings.TrimSpace(provider), strings.TrimSpace(model)
 }

@@ -75,6 +75,13 @@ const (
 	// sent to a model that can see them. The refusal names no image: the
 	// provider's own sentence never does.
 	RunEventImageRejected = "image_rejected"
+	// RunEventTransportRetry announces that a transport failure killed the
+	// current LLM attempt and the request is about to be re-sent (or, with
+	// Exhausted set, that every retry was used up). It implies discard: every
+	// holder of the dead attempt's streamed text drops it, and both surfaces
+	// draw the error/retry cards. Push-only by design — the retried answer
+	// lands in the transcript whole.
+	RunEventTransportRetry = "transport_retry"
 )
 
 // IsPushOnlyStreamEvent reports a fragment of a run as it happens — answer and
@@ -84,7 +91,7 @@ const (
 // pushed to whoever is watching and never stored.
 func IsPushOnlyStreamEvent(eventType string) bool {
 	switch eventType {
-	case RunEventAssistantDelta, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta:
+	case RunEventAssistantDelta, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta, RunEventTransportRetry:
 		return true
 	}
 	return false
@@ -418,7 +425,6 @@ type PlanReviewStartedPayload struct {
 	ReviewID string `json:"review_id"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model"`
-	Label    string `json:"label,omitempty"`
 }
 
 // PlanReviewedPayload closes the review PlanReviewStartedPayload opened: its
@@ -428,7 +434,6 @@ type PlanReviewedPayload struct {
 	ReviewID   string `json:"review_id"`
 	Provider   string `json:"provider,omitempty"`
 	Model      string `json:"model"`
-	Label      string `json:"label,omitempty"`
 	Text       string `json:"text,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Outcome    string `json:"outcome"`
@@ -588,4 +593,18 @@ type ImageRejectedPayload struct {
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+// TransportRetryPayload mirrors llm.TransportRetry on the wire. Retry/Total
+// is the n/total progress the cards show (the denominator is the configured
+// cap, not a constant); WaitMs drives the live countdown; Exhausted freezes
+// the retry card for good; AgentID routes the event to the subagent whose
+// stream died, empty meaning the conversation's own.
+type TransportRetryPayload struct {
+	Retry     int    `json:"retry"`
+	Total     int    `json:"total"`
+	WaitMs    int64  `json:"wait_ms"`
+	Error     string `json:"error"`
+	AgentID   string `json:"agent_id,omitempty"`
+	Exhausted bool   `json:"exhausted,omitempty"`
 }

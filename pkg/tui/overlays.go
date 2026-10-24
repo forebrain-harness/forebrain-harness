@@ -61,6 +61,17 @@ type approvalOverlay struct {
 	// review the plan. planReviewCursor indexes req.PlanReviewModels.
 	planReviewPicking bool
 	planReviewCursor  int
+	// planReviewShown is set once the picker has been painted since it opened:
+	// its first paint starts the overlay at the picker's question, at row
+	// planReviewTopRow, and later ones only follow the selection.
+	planReviewShown  bool
+	planReviewTopRow int
+	// focusStart and focusEnd are the rows [start, end) kept on screen as last
+	// rendered: the selected option, or the selected reviewer while picking —
+	// with the picker's question over the first and its key hint under the
+	// last, which the list's two ends would otherwise scroll out of sight.
+	// Equal when nothing is selected.
+	focusStart, focusEnd int
 	// confirmFn is called with the decision before Run() returns (and before
 	// the deferred release/EndOverlay) so the approval confirmation frame is
 	// added to the viewport without a race window against async tool
@@ -415,8 +426,7 @@ func (o *approvalOverlay) resetFocusForOpen() {
 	o.showExplain = false
 	o.showHelp = false
 	o.planDenyEditing = false
-	o.planReviewPicking = false
-	o.planReviewCursor = 0
+	o.exitPlanReviewMode()
 	o.clearFeedback()
 }
 
@@ -441,6 +451,8 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 	lines := make([]string, 0, 24)
 	cursorLine := -1
 	lineCount := 0
+	o.focusStart, o.focusEnd = 0, 0
+	focusToEnd := false
 	writeLine := func(format string, args ...any) {
 		line := format
 		if len(args) != 0 {
@@ -643,21 +655,35 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		}
 		cursorLine = o.feedbackFirstRow + o.feedbackLayout.cursorRow
 	case o.planReviewPicking:
+		o.planReviewTopRow = lineCount
 		writeLine("Which model should review this plan? (Esc to go back)")
-		for i, model := range o.req.PlanReviewModels {
+		models := o.req.PlanReviewModels
+		for i, model := range models {
 			marker := "  "
 			if i == o.planReviewCursor {
 				marker = "\x1b[1m> \x1b[0m"
+				o.focusStart = lineCount
+				if i == 0 {
+					o.focusStart = o.planReviewTopRow
+				}
 			}
 			writeLine("%s%d. %s", marker, i+1, planReviewModelRow(model))
+			if i == o.planReviewCursor {
+				o.focusEnd = lineCount
+				focusToEnd = i == len(models)-1
+			}
 		}
 	default:
 		for i, opt := range o.options {
 			marker := "  "
 			if i == o.cursor {
 				marker = "\x1b[1m> \x1b[0m"
+				o.focusStart = lineCount
 			}
 			writeLine("%s%d. %s", marker, i+1, opt.label)
+			if i == o.cursor {
+				o.focusEnd = lineCount
+			}
 		}
 	}
 
@@ -770,6 +796,9 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		}
 		writeLine("\x1b[2m%s · ctrl+e to explain · ? for keys\x1b[0m", dismiss)
 	}
+	if focusToEnd {
+		o.focusEnd = lineCount
+	}
 
 	return lines, cursorLine
 }
@@ -786,14 +815,26 @@ func (o *approvalOverlay) renderViewport() {
 		cursorCol = o.feedbackLayout.cursorCol
 	}
 	if o.rs != nil && o.rs.inViewportOverlay() {
-		if o.keepOptionsInView {
-			o.rs.setOverlayComposerAtEnd(lines, cursorLine, cursorCol)
-		} else {
+		switch {
+		case !o.keepOptionsInView:
 			// The user scrolled away on purpose. The paint keeps a visible
 			// caret on screen by scrolling back to it, which would undo that
 			// scroll on the spot, so the caret is reported hidden until the
 			// next key re-anchors the overlay on it.
 			o.rs.setOverlayComposer(lines, -1, 0)
+		case o.planReviewPicking && !o.planReviewShown:
+			// The reviewer list can be taller than the overlay. Pinned to the
+			// end like the verdict rows, it would open with its question and
+			// first models — the selection among them — above the overlay.
+			o.planReviewShown = true
+			o.rs.setOverlayComposerAt(lines, cursorLine, cursorCol, o.planReviewTopRow, o.focusStart, o.focusEnd)
+		case o.planReviewPicking:
+			// Moving through the list scrolls only as far as the selection
+			// needs: re-pinning the end on each key carried the rows above the
+			// selection, and then the selection itself, off the top.
+			o.rs.setOverlayComposerAt(lines, cursorLine, cursorCol, overlayKeepScroll, o.focusStart, o.focusEnd)
+		default:
+			o.rs.setOverlayComposerAt(lines, cursorLine, cursorCol, overlayScrollToEdge, o.focusStart, o.focusEnd)
 		}
 		return
 	}
@@ -1050,8 +1091,9 @@ func (o *approvalOverlay) placeFeedbackCaret(line, col int) {
 	o.renderViewport()
 }
 
-// overlayScrollToEdge is a delta larger than any overlay is tall, which is how
-// the jump-to-top and jump-to-bottom keys ask for the end of the content.
+// overlayScrollToEdge is a row count larger than any overlay is tall: as a
+// scroll delta it is how the jump-to-top and jump-to-bottom keys ask for the end
+// of the content, and as the row an overlay starts at it pins the end.
 const overlayScrollToEdge = 100000
 
 // scrollOverlay moves the overlay body by delta rows. A scroll that actually
@@ -1137,6 +1179,7 @@ func (o *approvalOverlay) handlePlanDenyKey(key parsedKey) (turn.ToolApprovalDec
 
 func (o *approvalOverlay) enterPlanReviewMode() {
 	o.planReviewPicking = true
+	o.planReviewShown = false
 	o.planReviewCursor = 0
 	// Start on a model other than the one that wrote the plan: a second opinion
 	// is the point of the row, and the current model is still one keypress away.
@@ -1150,6 +1193,7 @@ func (o *approvalOverlay) enterPlanReviewMode() {
 
 func (o *approvalOverlay) exitPlanReviewMode() {
 	o.planReviewPicking = false
+	o.planReviewShown = false
 	o.planReviewCursor = 0
 }
 
@@ -1213,13 +1257,9 @@ func planReviewChoiceIndex(options []overlayChoice) int {
 }
 
 // planReviewModelRow renders one reviewer row: the provider/model pair the
-// decision carries, plus the catalog name when it adds something the model id
-// does not already say.
+// decision carries.
 func planReviewModelRow(model turn.PlanReviewModelOption) string {
 	row := planReviewModelDisplay(model.Provider, model.Model)
-	if label := strings.TrimSpace(model.Label); label != "" && !strings.EqualFold(label, strings.TrimSpace(model.Model)) {
-		row += " — " + label
-	}
 	if model.Current {
 		row += " (current)"
 	}
@@ -3250,15 +3290,16 @@ func (s *rawSelector) setOverlayComposer(lines []string, cursorRow, cursorCol in
 	s.renderer.SetOverlayComposer(lines, cursorRow, cursorCol)
 }
 
-// setOverlayComposerAtEnd is the variant used for renders that follow a
-// decision key: it installs the lines and pins the overlay scroll to the end of
-// the content, keeping the option rows visible under a body taller than the
-// overlay area. No-op outside viewport mode.
-func (s *rawSelector) setOverlayComposerAtEnd(lines []string, cursorRow, cursorCol int) {
+// setOverlayComposerAt is the variant used for renders that follow a decision
+// key: it installs the lines, starts the overlay at row top (overlayScrollToEdge
+// pins the end, keeping the option rows visible under a body taller than the
+// overlay area) and keeps the selection rows [focusStart, focusEnd) on screen.
+// No-op outside viewport mode.
+func (s *rawSelector) setOverlayComposerAt(lines []string, cursorRow, cursorCol, top, focusStart, focusEnd int) {
 	if !s.inViewportOverlay() {
 		return
 	}
-	s.renderer.SetOverlayComposerAtEnd(lines, cursorRow, cursorCol)
+	s.renderer.SetOverlayComposerAt(lines, cursorRow, cursorCol, top, focusStart, focusEnd)
 }
 
 // setSoftWrappingOverlayComposer is the long-form text variant used by

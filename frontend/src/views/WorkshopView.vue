@@ -37,6 +37,7 @@
                   <ToolCallCard v-else-if="block.kind === 'tool'" class="my-2" :step="block.step" :scope="workbenchScope" :default-open="false" />
                   <ApprovalCard v-else-if="block.kind === 'approval'" class="my-2" :block="block" />
                   <RunErrorBlock v-else-if="block.kind === 'error'" class="my-2" :text="block.text" :detail="block.detail" />
+                  <TransportRetryCard v-else-if="block.kind === 'retry'" class="my-2" :block="block" />
                 </template>
               </div>
               <div
@@ -221,6 +222,7 @@ import EffortChip from '@/components/chat/EffortChip.vue'
 import ModeChip from '@/components/chat/ModeChip.vue'
 import ModelChip from '@/components/chat/ModelChip.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
+import TransportRetryCard from '@/components/chat/TransportRetryCard.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import ToolCallCard from '@/components/chat/ToolCallCard.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'

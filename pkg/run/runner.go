@@ -1025,7 +1025,16 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// carrying an image the provider refuses can never be compacted — the
 	// summary request would be refused the same way every time, and the history
 	// would keep growing until nothing fits.
-	summaryChain := withImageHeal(llmClient)
+	//
+	// The network retry joins the image heal for the same reason: a summary
+	// request that dies on a dropped connection must be re-sent, or the
+	// compaction silently never happens and the next conversation request
+	// overflows and kills the turn. Its context is muted
+	// (WithMutedForegroundStream), so its retries surface no cards and clear
+	// no foreground buffers; its retries continue from the partial summary the
+	// dead attempt streamed, like every other retry.
+	networkRetryMax := r.AppCfg.Agents.Defaults.NetworkRetryMaxOrDefault()
+	summaryChain := wrapNetworkRetryLLM(withImageHeal(wrapContinuationPrefillLLM(llmClient)), networkRetryMax)
 	r.summaryLLM = summaryChain
 	// The reminder planModeLLM injects is not written here. It reaches the
 	// transcript through the run's own message sequence, which the orchestration
@@ -1109,6 +1118,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 			return r.tools.GetContextSnapshot(sessionID)
 		},
 		compactDeps,
+		networkRetryMax,
 	)
 	// The dedup lives inside the wrapper this hands it to, which is rebuilt on
 	// every Load along with it, so the Runner has no reason to keep a

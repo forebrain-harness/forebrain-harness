@@ -1618,8 +1618,8 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	}
 	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 
-	reply := chooseInSession(t, s, "model", "openai / gpt-new").Reply
-	require.Equal(t, "Switched to openai / gpt-new.", reply)
+	reply := chooseInSession(t, s, "model", "openai/gpt-new").Reply
+	require.Equal(t, "Switched to openai/gpt-new.", reply)
 
 	// The model change landed as this session's own persisted selection and
 	// the preset is still the session's sandbox. The configured default —
@@ -1840,8 +1840,8 @@ func TestAvailableModelOptionsUseConfiguredLLMProvidersOnly(t *testing.T) {
 		labels = append(labels, item.Label)
 	}
 	require.Equal(t, []string{
-		"zhipuai / glm-5.1 - GLM-5.1",
-		"openai / " + codeModel + " - GPT-5.3 Codex",
+		"zhipuai/glm-5.1",
+		"openai/" + codeModel,
 	}, labels)
 	require.True(t, res.Picker.Items[0].Current)
 }
@@ -1900,7 +1900,7 @@ func TestConversationModelAnswersFollowTheSessionsOwnRow(t *testing.T) {
 	save("other-session", "openai", "gpt-a", "")
 
 	s.SetViewingSession("s1")
-	require.Equal(t, "openai / gpt-b", s.CurrentModelOption(), "the footer names the conversation's model")
+	require.Equal(t, "openai/gpt-b", s.CurrentModelOption(), "the footer names the conversation's model")
 	require.Equal(t, "high", s.CurrentModelReasoningEffort(), "and the effort its requests carry")
 	require.Equal(t, "gpt-b", cliResultModel(s, "s1"), "the rows it writes record the conversation's model")
 	settings, err := s.ModelSettings("s1")
@@ -1917,7 +1917,7 @@ func TestConversationModelAnswersFollowTheSessionsOwnRow(t *testing.T) {
 	// A row the config no longer offers resolves to the published selection,
 	// which is also what a conversation with no row at all answers.
 	save("s1", "openai", "gpt-gone", "")
-	require.Equal(t, "openai / gpt-a", s.CurrentModelOption())
+	require.Equal(t, "openai/gpt-a", s.CurrentModelOption())
 	require.Equal(t, "", s.CurrentModelReasoningEffort())
 	require.Equal(t, "gpt-a", cliResultModel(s, "s1"))
 }
@@ -1955,7 +1955,7 @@ func TestChooseModelEffortLeavesTheConfigFileAlone(t *testing.T) {
 		Runner:    &run.Runner{Deps: &run.Deps{AppCfg: &cfg}},
 	}.session()
 
-	picked := chooseInSession(t, s, "model", "openai / "+model+" - GPT-5.3 Codex")
+	picked := chooseInSession(t, s, "model", "openai/"+model)
 	require.Equal(t, "", picked.Reply, "re-picking the model in force changes nothing")
 	require.NotNil(t, picked.Picker)
 	require.Equal(t, "model-effort", picked.Picker.Command)
@@ -2023,7 +2023,7 @@ func TestChooseModelInTheTerminalLeavesTheConfigFileAlone(t *testing.T) {
 		Runner:    &run.Runner{Deps: &run.Deps{AppCfg: &cfg, AgentName: "main"}},
 	}.session()
 
-	require.Equal(t, "Switched to openai / gpt-4o-mini.", chooseInSession(t, s, "model", modelLabel(t, s, "openai / gpt-4o-mini")).Reply)
+	require.Equal(t, "Switched to openai/gpt-4o-mini.", chooseInSession(t, s, "model", modelLabel(t, s, "openai/gpt-4o-mini")).Reply)
 
 	// The choice is this conversation's, resolved against the picked entry:
 	// model and its configured effort, which is what its next request carries.
@@ -2090,7 +2090,7 @@ func TestChooseModelResolvesAgainstTheActiveAgent(t *testing.T) {
 		Runner:    &run.Runner{Deps: &run.Deps{AppCfg: &cfg, AgentName: "writer"}},
 	}.session()
 
-	require.Equal(t, "Switched to openai / gpt-4o-mini.", chooseInSession(t, s, "model", modelLabel(t, s, "openai / gpt-4o-mini")).Reply)
+	require.Equal(t, "Switched to openai/gpt-4o-mini.", chooseInSession(t, s, "model", modelLabel(t, s, "openai/gpt-4o-mini")).Reply)
 
 	// The pick resolved against writer's entry, not main's: the reason the
 	// row names gpt-4o-mini while main only offers gpt-4o.
@@ -2842,7 +2842,7 @@ func TestFastContextFlowOpusEnabled(t *testing.T) {
 
 	// Simulate the dispatchUserTurnContent flow
 	ctx := context.Background()
-	if s.IsFastMode() && s.CurrentModelOption() == "anthropic / claude-opus-4-7" {
+	if s.IsFastMode() && s.CurrentModelOption() == "anthropic/claude-opus-4-7" {
 		ctx = llm.WithFast(ctx, true)
 	}
 
@@ -2854,7 +2854,7 @@ func TestFastContextFlowOpusDisabled(t *testing.T) {
 	require.NoError(t, s.SetFastMode(false))
 
 	ctx := context.Background()
-	if s.IsFastMode() && s.CurrentModelOption() == "anthropic / claude-opus-4-7" {
+	if s.IsFastMode() && s.CurrentModelOption() == "anthropic/claude-opus-4-7" {
 		ctx = llm.WithFast(ctx, true)
 	}
 
@@ -4560,6 +4560,76 @@ func TestPlanReviewPickerScrollKeysReleaseTheOptionAnchor(t *testing.T) {
 	r.mu.Unlock()
 	if scrolled >= pinned {
 		t.Fatalf("the render after PageUp pinned the overlay back to %d, want it above the pinned %d", scrolled, pinned)
+	}
+}
+
+// A reviewer list taller than the overlay was pinned to the end of the content
+// on every key, the way the short verdict list is, so the rows at its top — and
+// the selection with them — were scrolled off the overlay: Down hid models 1 and
+// 2 along with the arrow. The picker opens on its question and then scrolls
+// only as far as the selection needs, in both directions — taking the question
+// along at the first model and the key hint along at the last, which a scroll
+// to the bare selection would leave off screen.
+func TestPlanReviewPickerKeepsTheSelectionOnScreen(t *testing.T) {
+	r := newComposerRenderer(t, 100, 30)
+	req := exitPlanReviewRequest(t, "# Plan\n\n"+strings.Repeat("- a step of the plan\n", 10))
+	req.PlanReviewModels = nil
+	for i := 1; i <= 21; i++ {
+		req.PlanReviewModels = append(req.PlanReviewModels, turn.PlanReviewModelOption{
+			Provider: "opencode-go",
+			Model:    fmt.Sprintf("model-%02d", i),
+			Current:  i == 12,
+		})
+	}
+	overlay := newApprovalOverlay(context.Background(), io.Discard, newRawSelector(nil, r), withServiceDecisions(req), nil)
+	overlay.resetFocusForOpen()
+	overlay.renderViewport()
+	press := func(key parsedKey) string {
+		t.Helper()
+		if _, done := overlay.handleKey(key); done {
+			t.Fatalf("key %v ended the overlay", key.kind)
+		}
+		overlay.renderViewport()
+		return paintedScreen(r)
+	}
+	const question = "Which model should review this plan?"
+	selected := func(i int) string { return fmt.Sprintf("> %d. opencode-go/model-%02d", i, i) }
+
+	screen := press(parsedKey{kind: rawKeyRune, r: 'm'})
+	if !overlay.planReviewPicking {
+		t.Fatal("m must open the reviewer picker")
+	}
+	if !strings.Contains(screen, question) || !strings.Contains(screen, selected(1)) {
+		t.Fatalf("the picker must open on its question with model 1 selected:\n%s", screen)
+	}
+
+	screen = press(parsedKey{kind: rawKeyDown})
+	if !strings.Contains(screen, selected(2)) {
+		t.Fatalf("Down scrolled the selection off the overlay:\n%s", screen)
+	}
+	if !strings.Contains(screen, "1. opencode-go/model-01") || !strings.Contains(screen, question) {
+		t.Fatalf("Down moved a selection that was already on screen, hiding the rows above it:\n%s", screen)
+	}
+	for i := 3; i <= 21; i++ {
+		if screen = press(parsedKey{kind: rawKeyDown}); !strings.Contains(screen, selected(i)) {
+			t.Fatalf("model %d selected but not on screen:\n%s", i, screen)
+		}
+	}
+	const hint = "Esc to go back · Enter to request the review"
+	if strings.Contains(screen, question) || !strings.Contains(screen, hint) {
+		t.Fatalf("the last model must scroll the question away and bring the key hint along:\n%s", screen)
+	}
+	for i := 20; i >= 1; i-- {
+		if screen = press(parsedKey{kind: rawKeyUp}); !strings.Contains(screen, selected(i)) {
+			t.Fatalf("model %d selected but not on screen:\n%s", i, screen)
+		}
+	}
+	if !strings.Contains(screen, question) || strings.Contains(screen, hint) {
+		t.Fatalf("the first model must scroll the key hint away and bring the question along:\n%s", screen)
+	}
+	// A jump lands on either end the same way the arrows do.
+	if screen = press(parsedKey{kind: rawKeyRune, r: '9'}); !strings.Contains(screen, selected(9)) {
+		t.Fatalf("model 9 selected but not on screen:\n%s", screen)
 	}
 }
 
@@ -8316,7 +8386,7 @@ func TestCharacterizationModelSwitchAppliesWithinSession(t *testing.T) {
 		t.Fatalf("Messages = %+v, want the first reply recorded against gpt-main", first.Messages)
 	}
 
-	if reply := chooseInSession(t, s, "model", "openai / gpt-main-v2").Reply; reply != "Switched to openai / gpt-main-v2." {
+	if reply := chooseInSession(t, s, "model", "openai/gpt-main-v2").Reply; reply != "Switched to openai/gpt-main-v2." {
 		t.Fatalf("/model choice replied %q", reply)
 	}
 	if got := cliResultModel(s, sessionID); got != "gpt-main-v2" {
@@ -10962,7 +11032,7 @@ func exitPlanReviewRequest(t *testing.T, plan string) turn.ToolApprovalRequest {
 		PermissionToolName: "exit_plan_mode",
 		PlanFilePath:       planFile,
 		PlanReviewModels: []turn.PlanReviewModelOption{
-			{Provider: "anthropic", Model: "claude-opus-4-1", Label: "Claude Opus 4.1", Current: true},
+			{Provider: "anthropic", Model: "claude-opus-4-1", Current: true},
 			{Provider: "openai", Model: "gpt-5.1"},
 		},
 	}
@@ -11085,7 +11155,7 @@ func TestExitPlanOverlayRendersPickerAndCollectedReviews(t *testing.T) {
 	plain := stripANSI(strings.Join(lines, "\n"))
 	for _, want := range []string{
 		"Here is the plan:",
-		"Review by openai / gpt-5.1",
+		"Review by openai/gpt-5.1",
 		"never says how the change is verified",
 		"Ask another model to review this plan",
 	} {
@@ -11099,8 +11169,8 @@ func TestExitPlanOverlayRendersPickerAndCollectedReviews(t *testing.T) {
 	plain = stripANSI(strings.Join(lines, "\n"))
 	for _, want := range []string{
 		"Which model should review this plan?",
-		"anthropic / claude-opus-4-1 — Claude Opus 4.1 (current)",
-		"openai / gpt-5.1",
+		"anthropic/claude-opus-4-1 (current)",
+		"openai/gpt-5.1",
 		"Enter to request the review",
 	} {
 		if !strings.Contains(plain, want) {
@@ -11135,7 +11205,7 @@ func TestApprovalConfirmationTextPlanReviewRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("a review request is not a rejection")
 	}
-	if want := "You asked openai / gpt-5.1 to review the plan"; msg != want {
+	if want := "You asked openai/gpt-5.1 to review the plan"; msg != want {
 		t.Fatalf("confirmation = %q, want %q", msg, want)
 	}
 }
@@ -14147,7 +14217,7 @@ func TestPromptMainLLMSetupQwenMethodsUseDistinctEndpoints(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			useSetupTestCatalog(t)
 			selector := &fakeSelector{
-				selects:  []string{"Qwen Cloud", tt.method, "Qwen3.5 Plus · qwen3.5-plus"},
+				selects:  []string{"Qwen Cloud", tt.method, "qwen3.5-plus"},
 				inputs:   []string{"sk-qwen", "", "", ""},
 				confirms: []bool{true},
 			}
@@ -14171,7 +14241,7 @@ func TestPromptMainLLMSetupQwenMethodsUseDistinctEndpoints(t *testing.T) {
 func TestPromptMainLLMSetupGoogleUsesCanonicalProviderID(t *testing.T) {
 	useSetupTestCatalog(t)
 	selector := &fakeSelector{
-		selects:  []string{"Google", "Gemini 3.1 Pro Preview · gemini-3.1-pro-preview"},
+		selects:  []string{"Google", "gemini-3.1-pro-preview"},
 		inputs:   []string{"sk-google", "", "", ""},
 		confirms: []bool{true},
 	}
@@ -14199,11 +14269,11 @@ func TestPromptMainLLMSetupChatGPTUsesOAuthWithoutAPIKey(t *testing.T) {
 		return openai.Credentials{Email: "dev@example.com"}, nil
 	}
 	stubChatGPTModels(t, []turn.ModelRecord{
-		{ModelName: "GPT Future", APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
+		{APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
 			ReasoningEfforts: []string{"low", "medium"}, DefaultReasoningEffort: "low"},
 	}, nil)
 	selector := &fakeSelector{
-		selects: []string{"ChatGPT", "GPT Future · gpt-future"},
+		selects: []string{"ChatGPT", "gpt-future"},
 		// First confirm opts into the browser login, second accepts the account.
 		confirms: []bool{true, true},
 	}
@@ -14245,7 +14315,7 @@ func TestPromptMainLLMSetupChatGPTRequiresExplicitLoginOptIn(t *testing.T) {
 func TestPromptMainLLMSetupMiniMaxUsesAnthropicEndpoint(t *testing.T) {
 	useSetupTestCatalog(t)
 	selector := &fakeSelector{
-		selects:  []string{"MiniMax", "MiniMax API key (Global) — Endpoint: api.minimax.io", "MiniMax M2.7 · MiniMax-M2.7"},
+		selects:  []string{"MiniMax", "MiniMax API key (Global) — Endpoint: api.minimax.io", "MiniMax-M2.7"},
 		inputs:   []string{"sk-minimax", "", ""},
 		confirms: []bool{true},
 	}
@@ -14384,7 +14454,7 @@ func (s *fakeSelector) Confirm(label string, defaultValue bool) (bool, bool, err
 func TestPromptMainLLMSetupPersistsReasoningEffort(t *testing.T) {
 	useSetupTestCatalog(t)
 	selector := &fakeSelector{
-		selects: []string{"Anthropic", "Claude Sonnet 4.6 · claude-sonnet-4-6", "high"},
+		selects: []string{"Anthropic", "claude-sonnet-4-6", "high"},
 		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 	}
 	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector})
@@ -14408,7 +14478,7 @@ func TestPromptMainLLMSetupPersistsReasoningEffort(t *testing.T) {
 func TestPromptMainLLMSetupProviderDefaultLeavesEffortUnset(t *testing.T) {
 	useSetupTestCatalog(t)
 	selector := &fakeSelector{
-		selects: []string{"Anthropic", "Claude Sonnet 4.6 · claude-sonnet-4-6", reasoningEffortUnset},
+		selects: []string{"Anthropic", "claude-sonnet-4-6", reasoningEffortUnset},
 		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 	}
 	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector})
@@ -14423,7 +14493,7 @@ func TestPromptMainLLMSetupProviderDefaultLeavesEffortUnset(t *testing.T) {
 func TestPromptMainLLMSetupKeepsOtherParamsWhenSettingEffort(t *testing.T) {
 	useSetupTestCatalog(t)
 	selector := &fakeSelector{
-		selects: []string{"Anthropic", "Claude Sonnet 4.6 · claude-sonnet-4-6", "low"},
+		selects: []string{"Anthropic", "claude-sonnet-4-6", "low"},
 		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 	}
 	opts, ok, err := PromptMainLLMSetup(PromptConfig{
@@ -14445,11 +14515,11 @@ func TestPromptMainLLMSetupChatGPTAsksForReasoningEffort(t *testing.T) {
 		return openai.Credentials{Email: "dev@example.com"}, nil
 	}
 	stubChatGPTModels(t, []turn.ModelRecord{
-		{ModelName: "GPT Future", APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
+		{APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
 			ReasoningEfforts: []string{"low", "medium", "high", "xhigh"}, DefaultReasoningEffort: "low"},
 	}, nil)
 	selector := &fakeSelector{
-		selects:  []string{"ChatGPT", "GPT Future · gpt-future", "xhigh"},
+		selects:  []string{"ChatGPT", "gpt-future", "xhigh"},
 		confirms: []bool{true, true},
 	}
 	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector, Home: t.TempDir()})
@@ -21909,7 +21979,7 @@ func TestStatusMarkdownRendersMCPCountsAndTokens(t *testing.T) {
 	out := turn.RenderStatusMarkdown(turn.StatusReport{
 		SessionID:   "s1",
 		Mode:        "agent",
-		ModelLine:   "openai / gpt-main · fast off",
+		ModelLine:   "openai/gpt-main · fast off",
 		MCP:         turn.MCPCountLine{Total: 2, Connected: 1, Failed: 1},
 		Context:     turn.StatusContext{PercentLeft: 62, UsedTokens: 48_000, WindowTokens: 128_000, AutoCompactAt: 102_000},
 		Session:     turn.StatusUsageTotals{InputTokens: 1_900_000, OutputTokens: 42_000, Requests: 38},
@@ -21917,7 +21987,7 @@ func TestStatusMarkdownRendersMCPCountsAndTokens(t *testing.T) {
 	})
 	for _, want := range []string{
 		"MCP servers: 1 connected, 1 failed",
-		"Model: openai / gpt-main · fast off",
+		"Model: openai/gpt-main · fast off",
 		"Workspace · 3 rules",
 		"62% left · 48k of 128k",
 		"Auto-compact at: 102k",
@@ -28650,7 +28720,7 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 		selector: &wizardSelector{
 			selects: []string{
 				"OpenAI",
-				"GPT-5.5 · gpt-5.5",
+				"gpt-5.5",
 				"high",
 			},
 			inputs: []string{
@@ -28677,7 +28747,7 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 		t.Fatalf("expected LLM configured, missing=%v", v.MissingFields())
 	}
 	w.printSummary(&out)
-	if got := stripANSI(out.String()); !strings.Contains(got, "Model:  openai · gpt-5.5") {
+	if got := stripANSI(out.String()); !strings.Contains(got, "Model:  openai/gpt-5.5") {
 		t.Fatalf("expected configured LLM summary, got %q", got)
 	}
 }
@@ -28715,7 +28785,7 @@ func TestOnboardShowsConfiguredLLMAsDone(t *testing.T) {
 		t.Fatalf("run error: %v", err)
 	}
 	w.printSummary(&out)
-	if got := stripANSI(out.String()); !strings.Contains(got, "Model:  openai · gpt-5.5") {
+	if got := stripANSI(out.String()); !strings.Contains(got, "Model:  openai/gpt-5.5") {
 		t.Fatalf("expected configured LLM summary, got %q", got)
 	}
 }
@@ -28724,7 +28794,7 @@ func TestSelectLLMProviderUsesSelectorLabels(t *testing.T) {
 	useSetupTestCatalog(t)
 	choice, ok, err := PromptMainLLMSetup(PromptConfig{
 		Selector: &wizardSelector{
-			selects: []string{"Anthropic", "Claude Sonnet 4.6 · claude-sonnet-4-6", "high"},
+			selects: []string{"Anthropic", "claude-sonnet-4-6", "high"},
 			inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 			confirms: []bool{
 				true,
@@ -28774,7 +28844,7 @@ func TestOnboardEscGoesBackAPage(t *testing.T) {
 	}
 	t.Setenv("FOREBRAIN_HOME", home)
 	selector := &backtrackSelector{fakeSelector: fakeSelector{
-		selects: []string{"OpenAI", "GPT-5.5 · gpt-5.5", "high", "GPT-5.5 · gpt-5.5", "low"},
+		selects: []string{"OpenAI", "gpt-5.5", "high", "gpt-5.5", "low"},
 		inputs:  []string{"sk-live-secret"},
 	}, backAt: map[string]int{"Review": 1}}
 	w := &Wizard{rt: process.Context{Home: home, ConfigPath: cfgPath}, out: io.Discard, selector: selector}
@@ -28784,7 +28854,7 @@ func TestOnboardEscGoesBackAPage(t *testing.T) {
 	if got := strings.Join(selector.pages, " → "); got != "Welcome to Forebrain Harness → OpenAI API key → Model → Reasoning effort → Review → Model → Reasoning effort → Review" {
 		t.Fatalf("pages = %s", got)
 	}
-	if got := selector.selectDefaults[3]; got != "GPT-5.5 · gpt-5.5" {
+	if got := selector.selectDefaults[3]; got != "gpt-5.5" {
 		t.Fatalf("model default on the way back = %q, want the model chosen before", got)
 	}
 	if got := selector.selectDefaults[4]; got != "high" {
@@ -30832,8 +30902,8 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 	require.NoError(t, err)
 
 	// A switches m1 → m2 through the real /model flow.
-	require.Equal(t, "Switched to openai / gpt-m2.",
-		f.a.ChooseSurfaceSlash(ctx, "sess-a", turn.SlashChoice{Command: "model", Value: "openai / gpt-m2"}).Reply)
+	require.Equal(t, "Switched to openai/gpt-m2.",
+		f.a.ChooseSurfaceSlash(ctx, "sess-a", turn.SlashChoice{Command: "model", Value: "openai/gpt-m2"}).Reply)
 	requireModel(t, f.a, "openai", "gpt-m2", "")
 	// A's switch is immediately durable for A's own session.
 	sel, ok, err := f.a.sessStore().SessionModelSelection(ctx, "sess-a")

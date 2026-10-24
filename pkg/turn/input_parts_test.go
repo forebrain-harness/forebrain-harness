@@ -861,10 +861,10 @@ func TestComposeDenyFeedbackCarriesReviewsAndRanksTheUserAbove(t *testing.T) {
 	}, "I disagree about the verification step.")
 
 	for _, want := range []string{
-		"openai / gpt-5.1 and anthropic / claude-opus-4-1",
-		`<review model="openai / gpt-5.1">`,
+		"openai/gpt-5.1 and anthropic/claude-opus-4-1",
+		`<review model="openai/gpt-5.1">`,
 		"No verification step.",
-		`<review model="anthropic / claude-opus-4-1">`,
+		`<review model="anthropic/claude-opus-4-1">`,
 		"The user's own feedback, which outranks the reviews:",
 		"I disagree about the verification step.",
 	} {
@@ -901,7 +901,7 @@ func TestComposeDenyFeedbackTruncatesARamblingReview(t *testing.T) {
 
 func TestModelDisplayHandlesPartialIdentity(t *testing.T) {
 	cases := map[Model]string{
-		{Provider: "openai", Model: "gpt-5.1"}: "openai / gpt-5.1",
+		{Provider: "openai", Model: "gpt-5.1"}: "openai/gpt-5.1",
 		{Model: "gpt-5.1"}:                     "gpt-5.1",
 		{Provider: "openai"}:                   "openai",
 		{}:                                     "",

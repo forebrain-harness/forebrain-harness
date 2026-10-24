@@ -17,6 +17,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 )
@@ -169,4 +170,126 @@ func TestNewRetry_ContextCancellation(t *testing.T) {
 // It doubles on each subsequent attempt (capped by WithMaxBackoff). Default: 500ms.
 func WithInitialBackoff(d time.Duration) RetryOption {
 	return func(c *retryConfig) { c.initialBackoff = d }
+}
+
+func TestNewRetry_NotifyPayloadAndExhausted(t *testing.T) {
+	calls := 0
+	boom := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		calls++
+		return nil, boom
+	}}
+
+	var got []TransportRetry
+	mw, err := NewRetry(4, // 1 first call + 3 retries
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) { got = append(got, tr) }),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	_, execErr := Use(inner, mw).Execute(context.Background(), nil, nil)
+	if execErr == nil {
+		t.Fatal("expected exhaustion error")
+	}
+
+	// Three pre-sleep notifications (retry 1, 2, 3) plus one exhausted.
+	if len(got) != 4 {
+		t.Fatalf("notifications = %d, want 4: %+v", len(got), got)
+	}
+	for i, tr := range got[:3] {
+		if tr.Retry != i+1 || tr.Total != 3 {
+			t.Fatalf("notification %d: Retry=%d Total=%d, want %d/3", i, tr.Retry, tr.Total, i+1)
+		}
+		if tr.Exhausted {
+			t.Fatalf("notification %d must not be Exhausted", i)
+		}
+		if tr.Err != boom {
+			t.Fatalf("notification %d: Err = %v, want the failure", i, tr.Err)
+		}
+	}
+	last := got[3]
+	if !last.Exhausted || last.Retry != 3 || last.Total != 3 || last.Wait != 0 || last.Err != boom {
+		t.Fatalf("exhausted notification = %+v, want Exhausted 3/3 wait 0 with the last error", last)
+	}
+	if calls != 4 {
+		t.Fatalf("callCount=%d, want 4", calls)
+	}
+}
+
+func TestNewRetry_NotifySilentOnPredicateRejection(t *testing.T) {
+	fatal := &APIError{StatusCode: 400, Message: "bad shape"}
+	inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		return nil, fatal
+	}}
+
+	var got []TransportRetry
+	mw, err := NewRetry(3,
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) { got = append(got, tr) }),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	_, execErr := Use(inner, mw).Execute(context.Background(), nil, nil)
+	if execErr == nil {
+		t.Fatal("expected the fatal error")
+	}
+	if len(got) != 0 {
+		t.Fatalf("a rejected error must produce no notifications, got %+v", got)
+	}
+}
+
+func TestRetryBackoffUnboundedVersusCapped(t *testing.T) {
+	run := func(unbounded bool) []TransportRetry {
+		inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
+			return nil, errors.New("transient")
+		}}
+		var notes []TransportRetry
+		cfg := &retryConfig{
+			maxAttempts:    4,
+			initialBackoff: time.Millisecond,
+			maxBackoff:     2 * time.Millisecond,
+			shouldRetry:    func(error) bool { return true },
+			notify:         func(_ context.Context, tr TransportRetry) { notes = append(notes, tr) },
+		}
+		if unbounded {
+			WithUnboundedBackoff()(cfg)
+		}
+		if _, err := (&retryLLM{inner: inner, cfg: cfg}).Execute(context.Background(), nil, nil); err == nil {
+			t.Fatal("expected exhaustion error")
+		}
+		return notes
+	}
+
+	// Jitter keeps each wait within [75%, 125%] of its back-off step, so the
+	// capped run saturates near 2ms while the unbounded run keeps doubling
+	// past it (3rd wait ≈4ms). Each list also carries the trailing exhausted
+	// notification (Wait=0).
+	waits := func(run []TransportRetry) []time.Duration {
+		var out []time.Duration
+		for _, tr := range run {
+			if !tr.Exhausted {
+				out = append(out, tr.Wait)
+			}
+		}
+		return out
+	}
+	cappedAll := run(false)
+	if len(cappedAll) != 4 || !cappedAll[3].Exhausted {
+		t.Fatalf("capped notifications = %+v, want 3 waits plus the exhausted one", cappedAll)
+	}
+	capped := waits(cappedAll)
+	if capped[2] > 2500*time.Microsecond {
+		t.Fatalf("capped waits = %v, want the third one at the 2ms ceiling", capped)
+	}
+	unbounded := waits(run(true))
+	if len(unbounded) != 3 {
+		t.Fatalf("unbounded waits = %v, want 3 entries", unbounded)
+	}
+	if unbounded[2] < 2800*time.Microsecond {
+		t.Fatalf("unbounded waits = %v, want the third one doubling past the ceiling (≈4ms)", unbounded)
+	}
 }
