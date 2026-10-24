@@ -614,19 +614,6 @@ func Run(ctx context.Context, opts Options) error {
 		notifyQ.Push(m)
 	})
 
-	// The MCP startup watch is armed strictly after the notify sink exists. Its
-	// subscription replays the generation's current state, and that replay is
-	// the only delivery a startup in flight will produce until something changes
-	// — a startup that takes a minute produces nothing else for a minute — so a
-	// replay delivered before there is anywhere to deliver it is a status line
-	// that simply never appears.
-	watchMCPStartup := func(sessionID string) {
-		if watcher, ok := opts.Session.(mcpStartupWatcher); ok {
-			watcher.WatchMCPStartup(sessionID)
-		}
-	}
-	watchMCPStartup(initialSessionID)
-
 	// Enter the alt-screen virtual viewport for interactive terminals BEFORE
 	// seeding the banner/startup info/hint and replaying any resumed
 	// transcript, so all of that content lands inside the viewport (visible at
@@ -673,6 +660,13 @@ func Run(ctx context.Context, opts Options) error {
 	if strings.TrimSpace(opts.InitialSessionID) != "" {
 		cmds.printSessionResumeContext(state.sessionID)
 	}
+
+	// The conversation's runtime comes up here, strictly after the notify sink
+	// exists: the MCP watch's subscription replays the runner's current state,
+	// and a replay delivered before there is anywhere to deliver it is a status
+	// line that simply never appears. The project consent panel (plans/112)
+	// goes before this line.
+	startConversationRuntime(ctx, opts.Session, renderer, state.sessionID)
 
 	// After the replay, so an approval this session left unfinished is reported
 	// below the history it belongs to rather than above it.
@@ -1802,11 +1796,10 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 	// so the switch has to re-point it together with the surface.
 	state.session.SetViewingSession(next)
 	syncPlanModeIndicator(renderer, state)
-	// The MCP watch follows the conversation: its failures belong to the session
-	// the user has open, and the progress line describes that session's runner.
-	if watcher, ok := state.session.(mcpStartupWatcher); ok {
-		watcher.WatchMCPStartup(next)
-	}
+	// The conversation's runtime follows the conversation: it is bound to its
+	// project's runner here, and the status line — failures and progress —
+	// watches that runner, not whatever the surface opened with.
+	startConversationRuntime(ctx, state.session, renderer, next)
 	if state.titleAnimator != nil {
 		state.titleAnimator.Settle(lookupSessionTitle(context.Background(), state.session, next))
 	}
@@ -4090,6 +4083,27 @@ func printResumeHint(out io.Writer, sessionID string) {
 // the concrete session for the same reason as the skipper below.
 type mcpStartupWatcher interface {
 	WatchMCPStartup(sessionID string)
+}
+
+// conversationRuntimeBinder is the session half that brings a conversation's
+// runtime up: its project's runner, built when it does not exist yet.
+type conversationRuntimeBinder interface {
+	BindConversationRuntime(ctx context.Context, sessionID string) error
+}
+
+// startConversationRuntime binds the conversation to its project's runner and
+// points the MCP status line at that runner. A bind that fails is reported and
+// the surface carries on: the conversation's first turn reports the same
+// failure through RunnerForTurn.
+func startConversationRuntime(ctx context.Context, session Session, renderer *Renderer, sessionID string) {
+	if b, ok := session.(conversationRuntimeBinder); ok {
+		if err := b.BindConversationRuntime(ctx, sessionID); err != nil && renderer != nil {
+			renderer.PrintError(err)
+		}
+	}
+	if w, ok := session.(mcpStartupWatcher); ok {
+		w.WatchMCPStartup(sessionID)
+	}
 }
 
 // mcpStartupSkipper is the optional half of the MCP ready barrier: cancelling

@@ -137,9 +137,10 @@ type poolEntry struct {
 }
 
 // RunnerForSessionOnEnv resolves the Runner one session should run on,
-// creating the environment's pool on first use. The TUI never triggers pool
-// creation: its sessions have no project row, so every call returns the base
-// Runner and the pool is never built.
+// creating the environment's pool on first use. The TUI's sessions belong to
+// the launch directory's project, so their turns run on that project's
+// runner; the base Runner only answers agent-level reads (status, slash
+// commands, rosters), which are the same on any runner of the agent.
 func (env *Environment) RunnerForSession(ctx context.Context, sessionID string) *run.Runner {
 	if env == nil {
 		return nil
@@ -175,6 +176,30 @@ func (env *Environment) BoundRunnerForSession(ctx context.Context, sessionID str
 		return env.Runner, env.Runner != nil
 	}
 	return env.pool.BoundRunnerForSession(ctx, sessionID)
+}
+
+// BindConversation binds sessionID to projectID ahead of its first turn and
+// returns the project's runner, building it — and so starting its MCP servers
+// — when it does not exist yet. It is how a surface that opens a conversation
+// before anything is said gets that conversation's runtime up front.
+func (env *Environment) BindConversation(ctx context.Context, sessionID, projectID string) (*run.Runner, error) {
+	if env == nil {
+		return nil, nil
+	}
+	if env.SQL == nil {
+		// No project registry: a harness with no project concept has only its
+		// own runner.
+		return env.Runner, nil
+	}
+	env.EnsureRunnerPool()
+	if err := env.pool.BindSession(ctx, sessionID, projectID); err != nil {
+		return nil, err
+	}
+	r, ok := env.BoundRunnerForSession(ctx, sessionID)
+	if !ok || r == nil {
+		return nil, fmt.Errorf("runner pool: session %s has no runner after binding", sessionID)
+	}
+	return r, nil
 }
 
 // ErrSessionHasNoProject reports a turn that cannot start: its conversation
@@ -606,6 +631,16 @@ func (p *RunnerPool) BoundRunnerForSession(ctx context.Context, sessionID string
 	if sessionID == "" || p.projects == nil {
 		return base, base != nil
 	}
+	// A session bound ahead of its first turn (BindSession) has no row yet;
+	// the binding itself is the answer.
+	p.mu.Lock()
+	if key, ok := p.sessions[sessionID]; ok {
+		if entry := p.entries[key]; entry != nil && entry.runner != nil {
+			p.mu.Unlock()
+			return entry.runner, true
+		}
+	}
+	p.mu.Unlock()
 	project, ok, err := p.projects.ProjectForSession(ctx, sessionID)
 	if err != nil || !ok {
 		return base, base != nil

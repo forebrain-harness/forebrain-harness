@@ -97,6 +97,9 @@ func (s *ChatSession) HandleStatusSlash(sessionID, channel string, side bool) (s
 func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool) turn.StatusSource {
 	r := s.runner()
 	sid := strings.TrimSpace(sessionID)
+	// The MCP and LSP facts come from the conversation's runner; the rest are
+	// agent-level reads, the same on any runner.
+	cr := s.conversationRunner(sid)
 	// The model /status names is the one this conversation's requests go to,
 	// not the runner's default: the two differ whenever the conversation
 	// picked a model of its own.
@@ -129,14 +132,14 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 		Sandbox:      safety.SandboxStatusLine(cfg),
 		MCP:          s.mcpInventorySource(),
 		Instructions: instructions,
-		ConfigFiles:  turn.StatusConfigFiles(cfg, r.MCPProjectStatus().ProjectRoot),
+		ConfigFiles:  turn.StatusConfigFiles(cfg, cr.MCPProjectStatus().ProjectRoot),
 		SkillOffer:   cfg.EffectiveFeatures().SkillOffer,
 		ContextUsage: func() (int, int) {
 			used, _ := run.ContextOccupancy(context.Background(), s.sessStore(), sid)
 			return used, s.compactExplicitLimit()
 		},
 	}
-	if ctl := r.CodeIntelControl; ctl != nil {
+	if ctl := cr.CodeIntelControl; ctl != nil {
 		snap := ctl.Snapshot()
 		src.LSP = &snap
 	}
@@ -147,7 +150,7 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 // entries the disable store kept out of it, and the live state. It never
 // waits for an MCP startup still in flight — the panel shows it connecting.
 func (s *ChatSession) mcpInventorySource() turn.MCPInventorySource {
-	r := s.runner()
+	r := s.sessionRunner()
 	scope := r.MCPProjectStatus()
 	src := turn.MCPInventorySource{
 		Servers:       r.MCPServers,
@@ -622,6 +625,14 @@ func (s *ChatSession) SwitchPrimaryAgent(ctx context.Context, id string) (turn.P
 	if err := s.AdoptLaunchProject(ctx); err != nil {
 		return turn.PrimaryAgent{}, err
 	}
+	// The pool was torn down with the old agent's runners, so the conversation
+	// on screen binds to the new agent's project runner here and the MCP watch
+	// moves to that runner.
+	sid := s.currentSessionID()
+	if err := s.BindConversationRuntime(ctx, sid); err != nil {
+		return turn.PrimaryAgent{}, err
+	}
+	s.WatchMCPStartup(sid)
 	return turn.PrimaryAgent{ID: summary.ID, WorkspaceRoot: summary.WorkspaceRoot, Active: true}, nil
 }
 
@@ -849,12 +860,22 @@ func (s *ChatSession) agentSwitchDeps() process.AgentDeps {
 	if s == nil {
 		return process.AgentDeps{}
 	}
-	return process.AgentDeps{
+	deps := process.AgentDeps{
 		Home:    strings.TrimSpace(s.home()),
 		Cfg:     s.cfg(),
 		Runner:  s.runner(),
 		Sandbox: s.sandbox(),
 	}
+	deps.OnApplied = func(active appcfg.Summary) {
+		// Every pooled runner belongs to the previous agent's stores and
+		// consent records, so the switch tears them down; the conversation
+		// being carried over re-binds to the new agent's project runner in
+		// SwitchPrimaryAgent, below.
+		if pool := s.Env.RunnerPool(); pool != nil {
+			pool.RebindAgent(active.ID)
+		}
+	}
+	return deps
 }
 
 // stateRoot returns the active primary agent's per-agent state root (its
@@ -1155,7 +1176,7 @@ func (s *ChatSession) HandleLSPSlash(sessionID, channel string) (string, bool) {
 // the stored token the next time it reconnects; a server that registered
 // nothing without the credential gets its tools in a new session.
 func (s *ChatSession) startMCPLocalOAuth(serverName string, done func(result string)) (string, error) {
-	r := s.runner()
+	r := s.sessionRunner()
 	if r == nil {
 		return "", errors.New("mcp auth: unavailable")
 	}

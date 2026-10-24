@@ -1271,8 +1271,8 @@ type MCPStatusMsg struct {
 // conversation's news: a generation belongs to the Runner, so only the
 // conversation that saw it start records them (see claimMCPGenerationOwner).
 //
-// Idempotent per session id, so a caller that cannot tell whether it is first (a
-// resume, a switch) can simply call it.
+// Idempotent per session id and runner, so a caller that cannot tell whether
+// it is first (a resume, a switch) can simply call it.
 func (s *ChatSession) WatchMCPStartup(sessionID string) {
 	if s == nil {
 		return
@@ -1281,8 +1281,12 @@ func (s *ChatSession) WatchMCPStartup(sessionID string) {
 	if sid == "" {
 		return
 	}
+	// The watch follows the conversation's runner: when a session's binding
+	// changed runners (first bind, an agent switch), the watch must move to
+	// the runner this conversation now waits on.
+	runner := s.conversationRunner(sid)
 	s.mcpWatchMu.Lock()
-	if s.mcpWatchSession == sid && s.mcpWatchCancel != nil {
+	if s.mcpWatchSession == sid && s.mcpWatchRunner == runner && s.mcpWatchCancel != nil {
 		s.mcpWatchMu.Unlock()
 		return
 	}
@@ -1293,7 +1297,6 @@ func (s *ChatSession) WatchMCPStartup(sessionID string) {
 		previous()
 	}
 
-	runner := s.runner()
 	if runner == nil {
 		return
 	}
@@ -1328,6 +1331,7 @@ func (s *ChatSession) WatchMCPStartup(sessionID string) {
 		s.mcpWatchCancel()
 	}
 	s.mcpWatchCancel = cancel
+	s.mcpWatchRunner = runner
 	s.mcpWatchMu.Unlock()
 }
 
@@ -1442,7 +1446,7 @@ func (s *ChatSession) SkipOptionalMCPStartup() bool {
 	if s == nil {
 		return false
 	}
-	runner := s.runner()
+	runner := s.sessionRunner()
 	if runner == nil {
 		return false
 	}
@@ -1537,7 +1541,10 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 		// that subdirectory's project, never the enclosing repository.
 		LaunchDir:       cwd,
 		ExactLaunchRoot: true,
-		SessionSource:   memory.SessionSourceTUI,
+		// A conversation's MCP servers live on its project's runner (see
+		// RunnerPool), so the base runner hosts none.
+		AgentRunnerWithoutMCP: true,
+		SessionSource:         memory.SessionSourceTUI,
 	})
 	if err != nil {
 		return nil, err

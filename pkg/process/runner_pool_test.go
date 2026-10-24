@@ -987,3 +987,82 @@ func TestProjectRunnerDerivesSandboxFromItsOwnTrust(t *testing.T) {
 	require.Equal(t, appcfg.SandboxModeReadOnly, undecided.AppCfg.SandboxMode,
 		"an undecided project runner must stay read-only")
 }
+
+// TestRunnerPoolBoundRunnerForSessionSeesUnpersistedBinding pins the read half
+// of binding a conversation ahead of its first turn: BindSession records the
+// binding in memory and pre-builds the project's runner, but the session has
+// no fb_sessions row yet — a conversation nothing was said in never touched
+// the store — so the database lookup alone would answer the base runner. The
+// binding itself is the answer, and it is the same runner the session's first
+// turn gets once the row exists.
+func TestRunnerPoolBoundRunnerForSessionSeesUnpersistedBinding(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+
+	root := t.TempDir()
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "prebound", Root: root, ProjectKey: state.ProjectKeyForRoot(root)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.BindSession(ctx, "sess-prebound", proj.ID); err != nil {
+		t.Fatalf("BindSession without a session row: %v", err)
+	}
+	r, ok := pool.BoundRunnerForSession(ctx, "sess-prebound")
+	if !ok || r == nil {
+		t.Fatal("the in-memory binding must answer before the session row exists")
+	}
+	if r == env.Runner {
+		t.Fatal("the pre-bound runner is the project's, never the base runner")
+	}
+
+	ensurePoolSessions(t, env, "sess-prebound")
+	if err := projects.BindSession(ctx, "sess-prebound", proj.ID); err != nil {
+		t.Fatal(err)
+	}
+	turnRunner, err := pool.RunnerForTurn(ctx, "sess-prebound")
+	if err != nil {
+		t.Fatalf("RunnerForTurn after the row exists: %v", err)
+	}
+	if turnRunner != r {
+		t.Fatalf("first-turn runner %p is not the pre-bound runner %p", turnRunner, r)
+	}
+}
+
+// TestEnvironmentBindConversationBuildsTheProjectRunner pins the entry point a
+// surface uses when it opens a conversation before anything is said in it:
+// BindConversation builds the project's runner — carrying the global MCP
+// entries — and answers it. The environment's own runner is never that runner.
+func TestEnvironmentBindConversationBuildsTheProjectRunner(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	defer env.CloseRunnerPool()
+	// The shared list every project runner inherits (the base runner was
+	// already built without it, so only the pool sees the change).
+	env.Deps.AppCfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
+		Name: "global-srv", Transport: "stdio", Command: "/usr/bin/true",
+	}}
+
+	root := t.TempDir()
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "bindconv", Root: root, ProjectKey: state.ProjectKeyForRoot(root)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := env.BindConversation(ctx, "sess-bindconv", proj.ID)
+	if err != nil {
+		t.Fatalf("BindConversation: %v", err)
+	}
+	if r == nil || r == env.Runner {
+		t.Fatal("BindConversation must answer the project runner, not the environment's own")
+	}
+	found := false
+	for _, srv := range r.MCPServers {
+		if strings.EqualFold(strings.TrimSpace(srv.Name), "global-srv") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("project runner MCPServers = %+v, want the global entry", r.MCPServers)
+	}
+}

@@ -57,6 +57,13 @@ type OpenOptions struct {
 	// subdirectory runs — and records trust and consent — as that
 	// subdirectory's project.
 	ExactLaunchRoot bool
+	// AgentRunnerWithoutMCP keeps the environment's own runner from hosting
+	// MCP servers. That runner is the primary agent's: it serves no
+	// conversation — every conversation runs on its project's runner (see
+	// RunnerPool) — so servers started here would be a second copy of the
+	// ones the conversation actually uses. The interactive surface sets it;
+	// the gateway follows in plans/114, which then removes this option.
+	AgentRunnerWithoutMCP bool
 
 	EnableUploads     bool
 	EnableChannels    bool
@@ -342,7 +349,10 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// recorded per-entry consents. Nothing later in this process may recompute
 	// it — a mid-session change would rebuild the tool table and the prompt
 	// prefix derived from it.
-	mcpRes := ResolveSessionMCP(root, activeAgent.WorkspaceRoot, cfgRoot.Agents, activeAgent.ID, launchProject)
+	var mcpRes MCPResolution
+	if !opts.AgentRunnerWithoutMCP {
+		mcpRes = ResolveSessionMCP(root, activeAgent.WorkspaceRoot, cfgRoot.Agents, activeAgent.ID, launchProject)
+	}
 	frozenMCP := mcpRes.Servers
 	frozenAgentWorkspace := activeAgent.WorkspaceRoot
 
@@ -416,6 +426,12 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		AppCfg:           cfgRoot,
 		SessionStore:     sessStore,
 		RunRT:            runSvc,
+	}
+	if opts.AgentRunnerWithoutMCP {
+		// No re-resolution either: a conversation that begins re-resolves on
+		// its project's runner, never here.
+		env.Deps.MCPResolve = nil
+		env.Deps.MCPDiagnostics = nil
 	}
 	runner := &run.Runner{Deps: &env.Deps, Control: env.Control, SkillCommands: run.SkillCommandHooks{
 		Refresh:   turn.RefreshSkills,

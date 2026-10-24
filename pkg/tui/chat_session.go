@@ -103,8 +103,12 @@ type ChatSession struct {
 	// mcpWatch* hold the one MCP startup subscription this session has open.
 	// It is re-armed per session id (see WatchMCPStartup), so the fields record
 	// which conversation the live subscription belongs to and how to end it.
+	// mcpWatchRunner records which runner that subscription reads: a session
+	// whose binding changed runners (first bind, an agent switch) must not be
+	// short-circuited by the session-id match alone.
 	mcpWatchMu      sync.Mutex
 	mcpWatchSession string
+	mcpWatchRunner  *run.Runner
 	mcpWatchCancel  func()
 
 	// mcpOwner* name the conversation that owns the failures of one MCP startup
@@ -609,12 +613,12 @@ func (s *ChatSession) DecideProjectMCPConsents(allowed []string) error {
 	return process.DecideProjectMCPConsents(r.WorkspaceRoot, deps.LaunchProject, allowed)
 }
 
-// ReconcileSessionMCP reconciles the MCP half of this session's runner: the
-// servers that are up keep their connection and the ones that are not are
-// started, so a conversation that is being opened sees the configuration as
-// it stands now.
+// ReconcileSessionMCP reconciles the MCP half of the conversation's runner
+// (sessionRunner): the servers that are up keep their connection and the ones
+// that are not are started, so a conversation that is being opened sees the
+// configuration as it stands now.
 func (s *ChatSession) ReconcileSessionMCP() error {
-	r := s.runner()
+	r := s.sessionRunner()
 	if r == nil {
 		return nil
 	}
@@ -720,6 +724,46 @@ func (s *ChatSession) runner() *run.Runner {
 		return nil
 	}
 	return s.Env.Runner
+}
+
+// conversationRunner is the runner sessionID's conversation runs on: its
+// project's runner once bound (BindConversationRuntime), else the
+// environment's own — a harness with no project registry, or a test fixture.
+// Everything that shows or acts on a conversation's MCP servers and language
+// servers reads this, never runner(): the environment's own runner hosts none.
+func (s *ChatSession) conversationRunner(sessionID string) *run.Runner {
+	if s == nil || s.Env == nil {
+		return s.runner()
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return s.runner()
+	}
+	if r, ok := s.Env.BoundRunnerForSession(context.Background(), sid); ok && r != nil {
+		return r
+	}
+	return s.runner()
+}
+
+// sessionRunner is conversationRunner for the conversation on screen.
+func (s *ChatSession) sessionRunner() *run.Runner {
+	return s.conversationRunner(s.currentSessionID())
+}
+
+// BindConversationRuntime binds sessionID to this surface's project and makes
+// sure its runner exists — which starts its MCP servers — then reconciles that
+// runner's MCP half the way a conversation that is beginning does, so a
+// configuration change lands here rather than one conversation later.
+func (s *ChatSession) BindConversationRuntime(ctx context.Context, sessionID string) error {
+	if s == nil || s.Env == nil || s.Env.SQL == nil || strings.TrimSpace(s.ProjectID) == "" {
+		return nil
+	}
+	sid := strings.TrimSpace(sessionID)
+	r, err := s.Env.BindConversation(ctx, sid, s.ProjectID)
+	if err != nil {
+		return err
+	}
+	return r.ReconcileSessionMCP()
 }
 
 func (s *ChatSession) pipe() *hook.AgentPipeline {
@@ -2973,7 +3017,7 @@ func (s *ChatSession) PanelStatusReport(sessionID string) (turn.StatusReport, er
 // PanelMCPInventory assembles the /mcp projection for the panel. It never
 // waits on an MCP startup in flight.
 func (s *ChatSession) PanelMCPInventory() (*turn.MCPInventory, error) {
-	if s == nil || s.runner() == nil {
+	if s == nil || s.sessionRunner() == nil {
 		return nil, errPanelUnavailable
 	}
 	inv := turn.BuildMCPInventory(s.mcpInventorySource())
@@ -2999,7 +3043,7 @@ func (s *ChatSession) PanelAuthenticateMCP(serverName string) {
 // session in the agent's store, the same action the web runs. The user's YAML
 // is never rewritten, and this session's servers and tool table do not move.
 func (s *ChatSession) PanelSetMCPDisabled(serverName string, disable bool) (string, error) {
-	r := s.runner()
+	r := s.sessionRunner()
 	if r == nil {
 		return "", errPanelUnavailable
 	}
@@ -3009,7 +3053,7 @@ func (s *ChatSession) PanelSetMCPDisabled(serverName string, disable bool) (stri
 // PanelListMCPResources fetches one server's resource list off the main loop
 // and reports it as MCPResourcesMsg.
 func (s *ChatSession) PanelListMCPResources(serverName string) {
-	r := s.runner()
+	r := s.sessionRunner()
 	go func() {
 		msg := MCPResourcesMsg{Server: serverName}
 		reg := r.MCPRegistry()
@@ -3035,7 +3079,7 @@ func (s *ChatSession) PanelListMCPResources(serverName string) {
 // server settles, so a settled snapshot also posts one more tick once the
 // table is there — the panel's tool counts would otherwise wait for a key.
 func (s *ChatSession) SubscribeMCPStatusTick() (func(), bool) {
-	r := s.runner()
+	r := s.sessionRunner()
 	if r == nil {
 		return nil, false
 	}
@@ -3056,7 +3100,7 @@ var errPanelUnavailable = errors.New("panel unavailable")
 // lspControl is the /lsp panel's slice of the session's runner: nil when this
 // runtime has no language servers.
 func (s *ChatSession) lspControl() tool.CodeIntelControl {
-	r := s.runner()
+	r := s.sessionRunner()
 	if r == nil {
 		return nil
 	}

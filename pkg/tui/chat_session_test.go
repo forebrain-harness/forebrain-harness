@@ -31571,3 +31571,120 @@ func TestImageRejectedEventDrawsOneLineAndReplaysTheSame(t *testing.T) {
 		t.Fatal("an unrelated event decoded into an image-rejected line")
 	}
 }
+
+// newConversationRuntimeProject gives the session the one thing a
+// conversation's runtime needs: a project of its own under the same agent
+// scope the environment's pool resolves projects under.
+func newConversationRuntimeProject(t *testing.T, s *ChatSession, name string) state.Project {
+	t.Helper()
+	s.Env.Deps.AgentName = "main"
+	projects := state.NewProjectStore(s.Env.SQL, "main")
+	project, err := projects.Create(context.Background(), state.CreateProjectInput{Name: name, Root: s.home()})
+	require.NoError(t, err)
+	s.ProjectID = project.ID
+	return project
+}
+
+// TestConversationRunnerFollowsTheBoundProjectRunner pins the read half of
+// plans/111: once a conversation is bound to its project's runner — before
+// anything is said in it — every session-level runtime read (conversationRunner
+// and what the surface looks at, sessionRunner) answers that runner, never the
+// environment's own.
+func TestConversationRunnerFollowsTheBoundProjectRunner(t *testing.T) {
+	s := newModelSelectionTestSession(t)
+	ctx := context.Background()
+	t.Cleanup(s.Env.CloseRunnerPool)
+	newConversationRuntimeProject(t, s, "convrunner")
+
+	require.NoError(t, s.BindConversationRuntime(ctx, "sess-x"))
+	bound := s.conversationRunner("sess-x")
+	require.NotNil(t, bound)
+	require.NotSame(t, s.runner(), bound, "the conversation's runner is its project's, not the environment's own")
+
+	s.SetViewingSession("sess-x")
+	require.Same(t, bound, s.sessionRunner())
+}
+
+// TestWatchMCPStartupFollowsARunnerChange pins the second half of the watch
+// fix: the same session id whose binding changed runners re-arms the MCP watch
+// on the new runner. The session-id match alone must not short-circuit it.
+func TestWatchMCPStartupFollowsARunnerChange(t *testing.T) {
+	s := newModelSelectionTestSession(t)
+	ctx := context.Background()
+	t.Cleanup(s.Env.CloseRunnerPool)
+	// The pool the first watch builds reads the agent scope at creation time,
+	// so the fixture names the agent before anything touches the pool.
+	s.Env.Deps.AgentName = "main"
+
+	// Unbound: the watch falls back to the environment's own runner.
+	s.WatchMCPStartup("sess-x")
+	require.Same(t, s.runner(), s.mcpWatchRunner)
+
+	newConversationRuntimeProject(t, s, "watchchange")
+	require.NoError(t, s.BindConversationRuntime(ctx, "sess-x"))
+	bound := s.conversationRunner("sess-x")
+	require.NotSame(t, s.runner(), bound)
+
+	s.WatchMCPStartup("sess-x")
+	require.Same(t, bound, s.mcpWatchRunner, "the watch must follow the conversation's runner change")
+}
+
+// bindOrderSession records when the switch path binds the conversation's
+// runtime and when it arms the MCP watch. Embedding the real session satisfies
+// the Session interface; the two overrides only record.
+type bindOrderSession struct {
+	*ChatSession
+	calls []string
+}
+
+func (b *bindOrderSession) BindConversationRuntime(ctx context.Context, sessionID string) error {
+	b.calls = append(b.calls, "bind:"+sessionID)
+	return nil
+}
+
+func (b *bindOrderSession) WatchMCPStartup(sessionID string) {
+	b.calls = append(b.calls, "watch:"+sessionID)
+}
+
+// TestSwitchStreamSessionBindsBeforeWatching pins the order the switch path
+// brings a conversation's runtime up: bind first — the runner exists and its
+// servers are starting — then point the MCP watch at it. Both exactly once.
+func TestSwitchStreamSessionBindsBeforeWatching(t *testing.T) {
+	s := newModelSelectionTestSession(t)
+	ctx := context.Background()
+
+	rec := &bindOrderSession{ChatSession: s}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	state := &streamState{sessionID: "sess-a", session: rec}
+	switched, _, err := switchStreamSession(ctx, state, renderer, nil, "sess-b")
+	require.NoError(t, err)
+	require.True(t, switched)
+
+	require.Equal(t, []string{"bind:sess-b", "watch:sess-b"}, rec.calls,
+		"the conversation's runtime must be bound before the MCP watch is armed")
+}
+
+// TestPanelMCPInventoryReadsTheConversationRunner pins where the /mcp panel's
+// inventory comes from: the conversation's runner. The environment's own runner
+// hosts none (plans/111), so an inventory read from it would be empty however
+// much the project's runner serves.
+func TestPanelMCPInventoryReadsTheConversationRunner(t *testing.T) {
+	s := newModelSelectionTestSession(t)
+	ctx := context.Background()
+	t.Cleanup(s.Env.CloseRunnerPool)
+	// A shared entry every project runner inherits; the fixture's base runner
+	// was built without it.
+	s.Env.Deps.AppCfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
+		Name: "global-srv", Transport: "stdio", Command: "/usr/bin/true",
+	}}
+
+	newConversationRuntimeProject(t, s, "panelinv")
+	require.NoError(t, s.BindConversationRuntime(ctx, "sess-x"))
+	s.SetViewingSession("sess-x")
+
+	require.Empty(t, s.runner().MCPServers, "contrast: the environment's own runner hosts no MCP servers")
+	inv, err := s.PanelMCPInventory()
+	require.NoError(t, err)
+	require.NotNil(t, inv.Entry("global-srv"), "the panel's inventory comes from the conversation's runner")
+}
