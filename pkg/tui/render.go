@@ -307,11 +307,6 @@ type Renderer struct {
 	// subagent view shows its own tool/thinking/assistant history and none of it
 	// reaches the conversation.
 	perAgentVM map[string]*viewModel
-	// liveRetryAgents tracks which views hold a live (non-Final) transport-
-	// retry card, keyed like perAgentVM — "" is the conversation's own. It
-	// keeps the recovery dismissal O(1): streamed deltas arrive constantly,
-	// and only a view with a card on screen pays for the removal.
-	liveRetryAgents map[string]bool
 	// subagentTypes is what the footer calls each subagent whose view can be
 	// opened: the kind of agent it is. Entries are never removed — a view stays
 	// open and readable long after the roster row that described it is gone,

@@ -1154,11 +1154,9 @@ func (m *viewModel) append(f Frame) *viewBlock {
 // streamingFrameKind reports whether a frame kind arrives as a run of live
 // updates carrying the full accumulated text, each replacing the last, and is
 // closed by a Final frame. Both of forebrain's streamed model outputs work this
-// way: the answer and the reasoning behind it. The retry card joins them: its
-// live line replaces the last live one (no per-failure stacking) and its
-// frozen Final frame seals the same block.
+// way: the answer and the reasoning behind it.
 func streamingFrameKind(k FrameKind) bool {
-	return k == FrameThinking || k == FrameAssistant || k == FrameRetrying
+	return k == FrameThinking || k == FrameAssistant
 }
 
 // blockByID returns the block with the given id, or nil. Linear scan: block
@@ -1231,7 +1229,7 @@ func (m *viewModel) endsOnError(content string) bool {
 func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 	if f.StepID != "" {
 		switch f.Kind {
-		case FrameFanout, FrameTool, FrameMemoryCompact, FrameSkillInstall, FrameMigration, FrameRetrying:
+		case FrameFanout, FrameTool, FrameMemoryCompact, FrameSkillInstall, FrameMigration:
 			for _, b := range m.blocks {
 				if b.frame.Kind == f.Kind && b.frame.StepID == f.StepID && !b.frame.RetainAsHistory {
 					b.frame = f

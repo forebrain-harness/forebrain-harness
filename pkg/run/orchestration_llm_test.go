@@ -9518,6 +9518,125 @@ func TestTransportRetryDropsBufferedReasoningFromTheTranscript(t *testing.T) {
 	}
 }
 
+// netDropEveryReasoningLLM streams a reasoning block and then dies on a
+// transport error on every attempt: the retry loop runs to exhaustion, and
+// the final dead attempt only ever gets the deferred Cleared notice.
+type netDropEveryReasoningLLM struct{ calls int }
+
+func (m *netDropEveryReasoningLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	sink := llm.StreamSinkFrom(ctx)
+	if sink != nil && sink.OnReasoningDelta != nil {
+		sink.OnReasoningDelta(fmt.Sprintf("attempt %d thought", m.calls))
+	}
+	return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+}
+
+// TestExhaustedRetriesDropTheFinalAttemptsReasoning pins the Cleared half of
+// the discard: after the last announcement the final attempt streams and dies
+// with no further non-Cleared notice — only the deferred Cleared follows — so
+// that notice must drop the in-flight reasoning too, or exhaustion would
+// persist the dead attempt's half-thought.
+func TestExhaustedRetriesDropTheFinalAttemptsReasoning(t *testing.T) {
+	ctx := context.Background()
+	const sid = "netdrop-exhausted"
+	store, runID := newProgressStore(t, sid)
+
+	st := toolpkg.NewState(t.TempDir())
+	var surfaceNotes []llm.TransportRetry
+	base := &llm.StreamSink{
+		OnTransportRetry: func(tr llm.TransportRetry) { surfaceNotes = append(surfaceNotes, tr) },
+	}
+
+	// The mounted order: orchestration outside, network retry inside, exactly
+	// as Runner.Load builds the product chain. Two retries, three attempts.
+	inner := wrapNetworkRetryLLM(&netDropEveryReasoningLLM{}, 2)
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(
+		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
+		base,
+	)
+	_, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatal("execute must fail once the retries are exhausted")
+	}
+	if got, want := err.Error(), "network error, gave up after 2 retries:"; !strings.HasPrefix(got, want) {
+		t.Fatalf("execute error = %q, want the exhaustion sentence", got)
+	}
+
+	// The streaming exhaustion sequence: every retry's Cleared fires at the
+	// retried attempt's first token (retry.go's sink wrapper), the final
+	// attempt streams after its token clear and dies unannounced — until the
+	// engine's catch-up Cleared at the exhaustion return, which is what lets
+	// the wrapped sink drop the final attempt's in-flight reasoning.
+	if len(surfaceNotes) != 5 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Cleared ||
+		!surfaceNotes[1].Cleared || surfaceNotes[1].Retry != 1 ||
+		surfaceNotes[2].Retry != 2 || surfaceNotes[2].Cleared ||
+		!surfaceNotes[3].Cleared || surfaceNotes[3].Retry != 2 ||
+		!surfaceNotes[4].Cleared || surfaceNotes[4].Retry != 2 || surfaceNotes[4].Total != 2 {
+		t.Fatalf("surface notifications = %+v, want retry, cleared, retry, cleared, catch-up cleared", surfaceNotes)
+	}
+
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	for _, row := range rows {
+		if row.Role == "reasoning" {
+			t.Fatalf("a dead attempt's in-flight reasoning persisted: %+v", row)
+		}
+	}
+}
+
+// netDropSilentLLM dies on a transport error before producing a single byte
+// on every attempt: no token ever fires a retry's Cleared early, so the
+// deferred clearPending at the loop's return is the ONLY Cleared — and the
+// only notice of any kind after the final death.
+type netDropSilentLLM struct{}
+
+func (m *netDropSilentLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+}
+
+// TestExhaustedSilentRetriesAnnounceTheDeathWithCleared pins the zero-output
+// exhaustion shape the wrapped sink must survive: notify, notify, then one
+// deferred Cleared, and never a non-Cleared notice for the final attempt.
+func TestExhaustedSilentRetriesAnnounceTheDeathWithCleared(t *testing.T) {
+	ctx := context.Background()
+	const sid = "netdrop-exhausted-silent"
+	store, runID := newProgressStore(t, sid)
+
+	st := toolpkg.NewState(t.TempDir())
+	var surfaceNotes []llm.TransportRetry
+	base := &llm.StreamSink{
+		OnTransportRetry: func(tr llm.TransportRetry) { surfaceNotes = append(surfaceNotes, tr) },
+	}
+
+	inner := wrapNetworkRetryLLM(&netDropSilentLLM{}, 2)
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(
+		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
+		base,
+	)
+	_, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatal("execute must fail once the retries are exhausted")
+	}
+
+	if len(surfaceNotes) != 3 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Cleared ||
+		surfaceNotes[1].Retry != 2 || surfaceNotes[1].Cleared || !surfaceNotes[2].Cleared {
+		t.Fatalf("surface notifications = %+v, want retry, retry, cleared", surfaceNotes)
+	}
+
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows = %+v, want none — a zero-output death persists nothing", rows)
+	}
+}
+
 // netDropAnswerLLM streams answer text, then dies on a transport error on the
 // first attempt; the retry streams its own answer and returns it.
 type netDropAnswerLLM struct{ calls int }

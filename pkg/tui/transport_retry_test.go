@@ -5,12 +5,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // The reducer half of the transport retry: the dead attempt's buffered text
-// goes, and the error/retry card pair is emitted with the payload's progress.
-func TestTransportRetryMsgClearsBuffersAndEmitsCardPair(t *testing.T) {
+// goes, no frame is emitted, and the tracker holds the payload's progress for
+// the Working line.
+func TestTransportRetryMsgSetsTrackerAndEmitsNoFrames(t *testing.T) {
+	tracker := NewTracker()
 	var r Reducer
+	r.WithTracker(tracker)
 	// Seed the primary agent buffer with the dead attempt's in-flight text:
 	// an assistant tail and a reasoning block that never ended.
 	buf := r.agentBuf("")
@@ -20,29 +25,28 @@ func TestTransportRetryMsgClearsBuffersAndEmitsCardPair(t *testing.T) {
 	ev := r.Reduce(TransportRetryMsg{
 		Retry: 1,
 		Total: 10,
-		Wait:  2 * time.Second,
+		Wait:  8 * time.Second,
 		Err:   errors.New("read tcp 10.0.0.1:1->10.0.0.2:2: read: operation timed out"),
 	})
-	if len(ev.Frames) != 2 {
-		t.Fatalf("frames = %d, want the error/retry pair", len(ev.Frames))
-	}
-	errCard, retryCard := ev.Frames[0], ev.Frames[1]
-	if errCard.Kind != FrameError || errCard.Title != "Network error" ||
-		!strings.Contains(errCard.Content, "operation timed out") {
-		t.Fatalf("error card = %+v, want the transport failure verbatim", errCard)
-	}
-	if retryCard.Kind != FrameRetrying || retryCard.Final {
-		t.Fatalf("retry card = %+v, want a live FrameRetrying", retryCard)
-	}
-	if retryCard.Retry != 1 || retryCard.RetryTotal != 10 {
-		t.Fatalf("retry card progress = %d/%d, want 1/10 from the payload", retryCard.Retry, retryCard.RetryTotal)
-	}
-	if retryCard.RetryDeadline.IsZero() {
-		t.Fatal("retry card carries no deadline for the countdown")
+	if len(ev.Frames) != 0 {
+		t.Fatalf("frames = %+v, want none — the retry lives on the Working line", ev.Frames)
 	}
 	buf = r.agentBuf("")
 	if buf == nil || buf.assistant.Len() != 0 || buf.reasoning.Len() != 0 {
 		t.Fatal("the dead attempt's buffered text survived the retry")
+	}
+	snap := tracker.SnapshotActiveRun()
+	if snap.Retry.Retry != 1 || snap.Retry.Total != 10 {
+		t.Fatalf("tracker retry = %d/%d, want 1/10 from the payload", snap.Retry.Retry, snap.Retry.Total)
+	}
+	if !snap.Retry.Active() {
+		t.Fatal("the recorded retry must read as active")
+	}
+	if want := "read tcp 10.0.0.1:1->10.0.0.2:2: read: operation timed out"; snap.Retry.Err != want {
+		t.Fatalf("tracker retry err = %q, want the transport's own sentence", snap.Retry.Err)
+	}
+	if remaining := time.Until(snap.Retry.Deadline); remaining <= 0 || remaining > 8*time.Second {
+		t.Fatalf("tracker retry deadline = %v away, want about 8s", remaining)
 	}
 }
 
@@ -76,162 +80,176 @@ func TestWithdrawDeadStreamBlocksRemovesOnlyLiveBlocks(t *testing.T) {
 	}
 }
 
-// The retry's Cleared notice draws nothing and clears nothing: the buffers
-// hold the retried attempt's words by then, and the cards are the engine's
-// to retire (plan 116).
-func TestTransportRetryClearedIsANoOp(t *testing.T) {
+// The retry's Cleared notice drops the status AND withdraws whatever the
+// final dead attempt left behind. At exhaustion no further non-Cleared notice
+// comes — the final attempt dies after the last announcement, and the only
+// notice that follows is the deferred Cleared — so it must clear the buffer
+// too. On a successful retry the notice lands before the retried stream's
+// first token, when the buffer is already empty: a no-op there.
+func TestTransportRetryClearedClearsTheStatus(t *testing.T) {
+	tracker := NewTracker()
 	var r Reducer
+	r.WithTracker(tracker)
+	r.Reduce(TransportRetryMsg{Retry: 2, Total: 2, Wait: time.Second, Err: errors.New("x")})
+	if !tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("sanity: the retry must be pending before the clear")
+	}
+	// The final dead attempt streamed after the last retry was announced;
+	// its words are still buffered when the Cleared notice arrives.
 	buf := r.agentBuf("")
-	buf.assistant.WriteString("retried words")
+	buf.assistant.WriteString("partial answer that never")
+	buf.reasoning.WriteString("dead thought")
 
-	ev := r.Reduce(TransportRetryMsg{Retry: 1, Total: 3, Cleared: true})
+	ev := r.Reduce(TransportRetryMsg{Retry: 2, Total: 2, Cleared: true})
 	if len(ev.Frames) != 0 {
 		t.Fatalf("frames = %+v, want none", ev.Frames)
 	}
+	if tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("the cleared notice left the retry status pending")
+	}
 	buf = r.agentBuf("")
-	if buf == nil || buf.assistant.Len() != len("retried words") {
-		t.Fatal("the cleared notice wiped the live buffer")
+	if buf == nil || buf.assistant.Len() != 0 || buf.reasoning.Len() != 0 {
+		t.Fatal("the cleared notice left the final dead attempt's text buffered")
 	}
 }
 
-// The live card's wording walks the countdown and the in-flight state, with
-// the progress straight from the payload (no hard-coded denominator).
-func TestRetryCardLineWordingAndCountdownTiers(t *testing.T) {
-	live := Frame{Kind: FrameRetrying, Retry: 2, RetryTotal: 3, RetryDeadline: time.Now().Add(90 * time.Second)}
-	if got := retryCardLine(live, 0); !strings.Contains(got, "continuing in 2m (2/3)") {
-		t.Fatalf("live line = %q, want a 2m countdown with 2/3", got)
+// run.go's TransportRetryMsg branch withdraws the dead stream's live blocks
+// for BOTH notices, so the exhaustion timeline — whose only notice after the
+// final dead attempt is the Cleared one — leaves the sealed history alone in
+// the view, the same way a mid-turn retry does.
+func TestClearedTransportRetryWithdrawsTheFinalDeadAttempt(t *testing.T) {
+	tracker := NewTracker()
+	var reducer Reducer
+	reducer.WithTracker(tracker)
+	renderer := &Renderer{}
+	renderer.vm.append(Frame{Kind: FrameThinking, Content: "sealed thought", Final: true})
+	// The final dead attempt's partial, streamed after the last retry was
+	// announced; only the deferred Cleared notice follows it.
+	renderer.vm.append(Frame{Kind: FrameAssistant, Content: "partial answer that never"})
+
+	m := TransportRetryMsg{Retry: 2, Total: 2, Cleared: true}
+	// The run.go loop, gate for gate: reduce first, then withdraw.
+	reducer.Reduce(m)
+	if !m.turn.isWithdrawn() && renderer != nil {
+		renderer.WithdrawDeadStreamBlocks(m.AgentID)
 	}
-	inFlight := live
-	inFlight.RetryDeadline = time.Now().Add(-time.Second)
-	if got := retryCardLine(inFlight, 0); !strings.Contains(got, "Continuing (2/3)") {
-		t.Fatalf("in-flight line = %q, want Continuing (2/3)", got)
+
+	if len(renderer.vm.blocks) != 1 || renderer.vm.blocks[0].frame.Content != "sealed thought" {
+		t.Fatalf("view = %+v, want only the sealed block after the cleared notice", renderer.vm.blocks)
 	}
-	hours := Frame{Kind: FrameRetrying, Retry: 9, RetryTotal: 20, RetryDeadline: time.Now().Add(25 * time.Hour)}
-	if got := retryCardLine(hours, 0); !strings.Contains(got, "continuing in 2d (9/20)") {
-		t.Fatalf("day-tier line = %q, want a 2d countdown with 9/20", got)
-	}
-	secs := Frame{Kind: FrameRetrying, Retry: 1, RetryTotal: 10, RetryDeadline: time.Now().Add(1500 * time.Millisecond)}
-	if got := retryCardLine(secs, 0); !strings.Contains(got, "continuing in 2s (1/10)") {
-		t.Fatalf("second-tier line = %q, want a ceiling 2s countdown", got)
+	if tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("the cleared notice left the retry status pending")
 	}
 }
 
-// Consecutive failures update the same two blocks in place — no per-failure
-// stacking — and the final frame seals the very same card.
-func TestRetryCardsReplaceInPlace(t *testing.T) {
-	r := &Renderer{}
-	r.RenderFrame(Frame{Kind: FrameRetrying, StepID: transportRetryStepIDFor(""), Retry: 1, RetryTotal: 3, RetryDeadline: time.Now().Add(time.Second)})
-	r.RenderFrame(Frame{Kind: FrameError, Title: "Network error", StepID: transportRetryErrorStepIDFor(""), Content: "first", Final: true})
-	r.RenderFrame(Frame{Kind: FrameRetrying, StepID: transportRetryStepIDFor(""), Retry: 2, RetryTotal: 3, RetryDeadline: time.Now().Add(2 * time.Second)})
-	r.RenderFrame(Frame{Kind: FrameError, Title: "Network error", StepID: transportRetryErrorStepIDFor(""), Content: "second", Final: true})
-	r.RenderFrame(Frame{Kind: FrameRetrying, StepID: transportRetryStepIDFor(""), Retry: 3, RetryTotal: 3, Final: true})
-	if len(r.vm.blocks) != 2 {
-		t.Fatalf("blocks = %d, want one error card and one retry card", len(r.vm.blocks))
+// While a retry is pending the Working line is the retry status alone: the
+// reason (generic for the first attempts, the transport's own sentence from
+// the third on, cut to 60 columns), the countdown, and the attempt counter —
+// never the ordinary "Working" segments.
+func TestWorkingLineShowsRetryStatus(t *testing.T) {
+	formatterFor := func(s TransportRetryStatus) transientStatusFormatter {
+		return workingStatusFormatter(func() Counters { return Counters{Retry: s} }, nil)
 	}
-	var errCard, retryCard Frame
-	for _, b := range r.vm.blocks {
-		switch b.frame.Kind {
-		case FrameError:
-			errCard = b.frame
-		case FrameRetrying:
-			retryCard = b.frame
+
+	// Attempt 2 of 10 names the failure generically.
+	got := formatterFor(TransportRetryStatus{Retry: 2, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	if !strings.Contains(got, "Network error · Retrying in 8s · attempt 2/10") {
+		t.Fatalf("retry line = %q, want the generic reason with the countdown and progress", got)
+	}
+	if strings.Contains(got, "Working") || strings.Contains(got, "esc to interrupt") {
+		t.Fatalf("retry line = %q, must not carry the ordinary Working segments", got)
+	}
+
+	// From the third attempt the transport's own sentence is the reason.
+	long := strings.Repeat("a", 80)
+	got = formatterFor(TransportRetryStatus{Retry: 3, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: long})(20*time.Second, 0, "")
+	if !strings.Contains(got, "attempt 3/10") {
+		t.Fatalf("retry line = %q, want attempt 3/10", got)
+	}
+	reason := got
+	if i := strings.Index(reason, " · Retrying in"); i >= 0 {
+		reason = reason[:i]
+	}
+	reason = strings.TrimPrefix(reason, transientSpinnerFrame(0)+" ")
+	if reason != long[:59]+"…" {
+		t.Fatalf("reason = %q, want the error cut to 60 columns ending in …", reason)
+	}
+	if runewidth.StringWidth(reason) != 60 {
+		t.Fatalf("reason width = %d, want 60", runewidth.StringWidth(reason))
+	}
+
+	// A total under three keeps the generic reason one attempt longer:
+	// min(3, 2) = 2, so attempt 1 is generic and attempt 2 is verbatim.
+	got = formatterFor(TransportRetryStatus{Retry: 1, Total: 2, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	if !strings.Contains(got, "Network error · Retrying in 8s · attempt 1/2") {
+		t.Fatalf("1/2 retry line = %q, want the generic reason", got)
+	}
+	got = formatterFor(TransportRetryStatus{Retry: 2, Total: 2, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	if !strings.Contains(got, "read tcp x · Retrying in 8s · attempt 2/2") {
+		t.Fatalf("2/2 retry line = %q, want the verbatim reason", got)
+	}
+
+	// A deadline that has passed reads 0s until the request produces or fails.
+	got = formatterFor(TransportRetryStatus{Retry: 3, Total: 10, Deadline: time.Now().Add(-time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	if !strings.Contains(got, "Retrying in 0s") {
+		t.Fatalf("past-deadline retry line = %q, want Retrying in 0s", got)
+	}
+}
+
+// The countdown's tiers: seconds under a minute (ceilinged), minutes and
+// seconds under five, then the largest unit alone.
+func TestFormatRetryCountdownTiers(t *testing.T) {
+	cases := []struct {
+		remaining time.Duration
+		want      string
+	}{
+		{500 * time.Millisecond, "1s"},
+		{8 * time.Second, "8s"},
+		{59200 * time.Millisecond, "1m 0s"},
+		{65 * time.Second, "1m 5s"},
+		{6 * time.Minute, "6m"},
+		{150 * time.Minute, "2h"},
+		{26 * time.Hour, "1d"},
+		{-time.Second, "0s"},
+	}
+	for _, tc := range cases {
+		if got := formatRetryCountdown(tc.remaining); got != tc.want {
+			t.Fatalf("formatRetryCountdown(%v) = %q, want %q", tc.remaining, got, tc.want)
 		}
 	}
-	if errCard.Content != "second" {
-		t.Fatalf("error card = %+v, want the latest failure in place", errCard)
+}
+
+// A subagent's view shows that subagent's own retry; the conversation's
+// Working line shows the conversation's — one agent's dead stream is not the
+// other's news.
+func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
+	tracker := NewTracker()
+	tracker.ObserveAgent("task-1", "exec-1", time.Now())
+	tracker.ObserveTransportRetry("task-1", 1, 10, 8*time.Second, "x")
+
+	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
+	sub := formatter(time.Second, 0, "task-1")
+	if !strings.Contains(sub, "Retrying in 8s · attempt 1/10") {
+		t.Fatalf("subagent working line = %q, want its own retry status", sub)
 	}
-	if !retryCard.Final || retryCard.Retry != 3 {
-		t.Fatalf("retry card = %+v, want the frozen 3/3 card", retryCard)
+	if strings.Contains(sub, "Working (") {
+		t.Fatalf("subagent working line = %q, must be the retry status alone", sub)
+	}
+	conv := formatter(time.Second, 0, "")
+	if !strings.Contains(conv, "Working (") || strings.Contains(conv, "Retrying in") {
+		t.Fatalf("conversation working line = %q, want the ordinary line with no retry status", conv)
 	}
 }
 
-// Recovery removes the live card on the retried attempt's first streamed
-// words; the turn's closing frames remove whatever is still waiting; the
-// frozen exhausted card is history and survives both.
-func TestLiveRetryCardDismissal(t *testing.T) {
-	// Recovery: the first assistant delta of the retried attempt.
-	r := &Renderer{}
-	r.RenderFrame(Frame{Kind: FrameRetrying, StepID: transportRetryStepIDFor(""), Retry: 1, RetryTotal: 3, RetryDeadline: time.Now().Add(time.Hour)})
-	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "the answer arrives"})
-	if len(r.vm.blocks) != 1 || r.vm.blocks[0].frame.Kind != FrameAssistant {
-		t.Fatalf("blocks after recovery = %+v, want the retry card gone", r.vm.blocks)
+// A new run does not inherit the previous run's retry status.
+func TestStartRunClearsAStaleRetry(t *testing.T) {
+	tracker := NewTracker()
+	tracker.ObserveTransportRetry("", 1, 10, time.Second, "x")
+	if !tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("sanity: the retry must be pending before the new run")
 	}
-	if r.liveRetryAgents[""] {
-		t.Fatal("the live-card tracker still names the conversation")
+	tracker.StartRun("run-2")
+	if tracker.SnapshotActiveRun().Retry.Active() {
+		t.Fatal("StartRun left the previous run's retry status pending")
 	}
-
-	// Turn close: a status frame sweeps every view's still-live card.
-	r2 := &Renderer{}
-	r2.RenderFrame(Frame{Kind: FrameRetrying, StepID: transportRetryStepIDFor(""), Retry: 2, RetryTotal: 3, RetryDeadline: time.Now().Add(time.Hour)})
-	r2.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 4s", Final: true})
-	if len(r2.vm.blocks) != 1 || r2.vm.blocks[0].frame.Kind != FrameStatus {
-		t.Fatalf("blocks after turn close = %+v, want only the status", r2.vm.blocks)
-	}
-
-	// A frozen card is history: neither recovery nor close removes it.
-	r3 := &Renderer{}
-	r3.RenderFrame(Frame{Kind: FrameRetrying, StepID: transportRetryStepIDFor(""), Retry: 3, RetryTotal: 3, Final: true})
-	r3.RenderFrame(Frame{Kind: FrameAssistant, Content: "late words"})
-	r3.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 4s", Final: true})
-	if len(r3.vm.blocks) != 3 {
-		t.Fatalf("blocks = %d, want frozen card, assistant and status kept", len(r3.vm.blocks))
-	}
-}
-
-// A subagent's retry card lives in its own view; its recovery is scoped to
-// that view and never touches the conversation.
-func TestSubagentRetryCardIsScopedToItsView(t *testing.T) {
-	r := &Renderer{}
-	r.RenderFrame(Frame{Kind: FrameRetrying, StepID: transportRetryStepIDFor("task-1"), AgentID: "task-1", Retry: 1, RetryTotal: 2, RetryDeadline: time.Now().Add(time.Hour)})
-	if len(r.vm.blocks) != 0 {
-		t.Fatalf("primary transcript = %d blocks, want none", len(r.vm.blocks))
-	}
-	vm := r.perAgentVM["task-1"]
-	if vm == nil || len(vm.blocks) != 1 {
-		t.Fatalf("subagent view = %+v, want its retry card", vm)
-	}
-	r.WithdrawDeadStreamBlocks("task-1")
-	if len(vm.blocks) != 1 {
-		t.Fatalf("the retry card itself must survive the dead-stream withdrawal, got %d blocks", len(vm.blocks))
-	}
-	r.RenderFrame(Frame{Kind: FrameAssistant, AgentID: "task-1", Content: "recovered"})
-	if len(vm.blocks) != 1 || vm.blocks[0].frame.Kind != FrameAssistant {
-		t.Fatalf("subagent view after recovery = %+v, want the card replaced by the answer", vm.blocks)
-	}
-}
-
-// The three animation gates: without them the spinner never turns and the
-// countdown never walks.
-func TestRetryCardAnimationGating(t *testing.T) {
-	live := &viewBlock{frame: Frame{Kind: FrameRetrying, Retry: 1, RetryTotal: 3, RetryDeadline: time.Now().Add(time.Hour)}}
-	if !hasLiveRetryFrame(live.frame) {
-		t.Fatal("sanity: the frame under test must be a live retry card")
-	}
-	r := &Renderer{}
-	r.vm.append(live.frame)
-	r.mu.Lock()
-	liveBlock := r.hasLiveBlockLocked()
-	r.mu.Unlock()
-	if !liveBlock {
-		t.Fatal("a live retry card must drive the animation ticker")
-	}
-	// The frozen card does not.
-	r.mu.Lock()
-	r.vm.blocks[0].frame.Final = true
-	frozen := r.hasLiveBlockLocked()
-	r.mu.Unlock()
-	if frozen {
-		t.Fatal("a frozen retry card must stop the animation ticker")
-	}
-	// The rendered line advances with the spinner phase (cache invalidation
-	// is keyed on it via the animated flag in renderBlockFull).
-	phase0 := retryCardLine(Frame{Kind: FrameRetrying, Retry: 1, RetryTotal: 3, RetryDeadline: time.Now().Add(time.Hour)}, 0)
-	phase1 := retryCardLine(Frame{Kind: FrameRetrying, Retry: 1, RetryTotal: 3, RetryDeadline: time.Now().Add(time.Hour)}, 1)
-	if phase0 == phase1 {
-		t.Fatalf("the marker must rotate with the phase: %q vs %q", phase0, phase1)
-	}
-}
-
-func hasLiveRetryFrame(f Frame) bool {
-	return f.Kind == FrameRetrying && !f.Final
 }

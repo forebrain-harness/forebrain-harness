@@ -17,6 +17,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -321,6 +322,157 @@ func TestNewRetry_ClearedOnFirstDeltaAfterRetry(t *testing.T) {
 	}
 	if got := strings.Join(seq, "|"); got != "retry 1|cleared|delta hi" {
 		t.Fatalf("sequence = %q, want retry 1, cleared, delta hi and nothing after", got)
+	}
+}
+
+// The streaming shape of exhaustion: every attempt streams one delta before
+// dying, so each retry's Cleared fires at the retried attempt's first token
+// and the final attempt's own death is announced by nothing else — the
+// exhaustion return must emit a catch-up Cleared, or every holder of the
+// final attempt's streamed text keeps it forever.
+func TestNewRetry_ExhaustionAnnouncesTheFinalStreamingAttempt(t *testing.T) {
+	boom := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	calls := 0
+	inner := &stubLLM{fn: func(ctx context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		calls++
+		if sink := StreamSinkFrom(ctx); sink != nil && sink.OnDelta != nil {
+			sink.OnDelta(fmt.Sprintf("attempt %d words", calls))
+		}
+		return nil, boom
+	}}
+
+	var got []TransportRetry
+	mw, err := NewRetry(3, // 1 first call + 2 retries
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) { got = append(got, tr) }),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	sink := &StreamSink{OnDelta: func(string) {}}
+	_, execErr := Use(inner, mw).Execute(WithStreamSink(context.Background(), sink), nil, nil)
+	var maxErr *MaxAttemptsExceededError
+	if !errors.As(execErr, &maxErr) {
+		t.Fatalf("got %T %v, want MaxAttemptsExceededError", execErr, execErr)
+	}
+
+	// retry 1 → cleared at attempt 2's first token → retry 2 → cleared at
+	// attempt 3's first token → the catch-up Cleared for the final death.
+	if len(got) != 5 {
+		t.Fatalf("notifications = %+v, want 5", got)
+	}
+	for i, wantRetry := range []int{1, 1, 2, 2, 2} {
+		if got[i].Retry != wantRetry || got[i].Total != 2 {
+			t.Fatalf("notification %d = %+v, want Retry %d/2", i, got[i], wantRetry)
+		}
+	}
+	if got[0].Cleared || got[2].Cleared {
+		t.Fatalf("the retry announcements must not be Cleared: %+v", got)
+	}
+	if !got[1].Cleared || !got[3].Cleared {
+		t.Fatalf("the token clears must be Cleared: %+v", got)
+	}
+	// After the second retry announcement only the two Cleared notices
+	// follow, and the catch-up is the last word: a bare Cleared 2/2.
+	last := got[4]
+	if !last.Cleared || last.Err != nil || last.Wait != 0 {
+		t.Fatalf("catch-up notification = %+v, want a bare Cleared 2/2", last)
+	}
+}
+
+// A user cancel keeps the streamed partial on purpose: when the attempt in
+// flight has already spent the pending notice on its first token and then
+// dies on the cancellation, no Cleared may fire — it would withdraw text the
+// user chose to keep.
+func TestNewRetry_CancelAfterFirstTokenEmitsNoCleared(t *testing.T) {
+	boom := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	calls := 0
+	inner := &stubLLM{fn: func(ctx context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		calls++
+		if calls == 1 {
+			return nil, boom // retryable: retry 1 is announced
+		}
+		if sink := StreamSinkFrom(ctx); sink != nil && sink.OnDelta != nil {
+			sink.OnDelta("kept words") // spends the pending notice
+		}
+		<-ctx.Done()          // the user hits Esc mid-stream
+		return nil, ctx.Err() // non-retryable: the loop returns at once
+	}}
+
+	notes := make(chan TransportRetry, 8)
+	mw, err := NewRetry(3,
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) { notes <- tr }),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	sink := &StreamSink{OnDelta: func(string) {}}
+	done := make(chan error, 1)
+	go func() {
+		_, execErr := Use(inner, mw).Execute(WithStreamSink(ctx, sink), nil, nil)
+		done <- execErr
+	}()
+	// The retry announcement, then its token clear — in that order.
+	for i, wantCleared := range []bool{false, true} {
+		select {
+		case tr := <-notes:
+			if tr.Cleared != wantCleared || tr.Retry != 1 || tr.Total != 2 {
+				t.Fatalf("notification %d = %+v", i, tr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("notification %d never arrived", i)
+		}
+	}
+	cancel()
+	select {
+	case execErr := <-done:
+		if !errors.Is(execErr, context.Canceled) {
+			t.Fatalf("Execute error = %v, want context.Canceled", execErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute never returned after the cancel")
+	}
+	// Nothing after the token clear: no retry 2, no Cleared.
+	select {
+	case tr := <-notes:
+		t.Fatalf("unexpected notification after the cancel: %+v", tr)
+	default:
+	}
+}
+
+// A fatal first attempt never starts a retry cycle, streamed text or not:
+// nothing may be announced — in particular no Cleared, which would withdraw
+// text no retry ever owned.
+func TestNewRetry_FatalFirstStreamAnnouncesNothing(t *testing.T) {
+	fatal := &APIError{StatusCode: 400, Message: "bad shape"}
+	inner := &stubLLM{fn: func(ctx context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		if sink := StreamSinkFrom(ctx); sink != nil && sink.OnDelta != nil {
+			sink.OnDelta("doomed words")
+		}
+		return nil, fatal
+	}}
+
+	var got []TransportRetry
+	mw, err := NewRetry(3,
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) { got = append(got, tr) }),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	sink := &StreamSink{OnDelta: func(string) {}}
+	if _, execErr := Use(inner, mw).Execute(WithStreamSink(context.Background(), sink), nil, nil); !errors.Is(execErr, fatal) {
+		t.Fatalf("Execute error = %v, want the fatal error", execErr)
+	}
+	if len(got) != 0 {
+		t.Fatalf("notifications = %+v, want none", got)
 	}
 }
 

@@ -204,6 +204,20 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 		}
 	}
 
+	// The exhaustion return is the final dead attempt's withdraw point. Its
+	// own first token already consumed the pending notice, and every holder
+	// of the text it streamed learns of the death only here — so when the
+	// pending is spent, the catch-up Cleared below is the only announcement
+	// that final attempt ever gets. clearPending covers the other shape, a
+	// final attempt that died before producing a single byte; both paths
+	// together guarantee exactly one Cleared per exhaustion.
+	if r.cfg.notify != nil && maxRetries > 0 {
+		spent := pendingRetry.Load() == 0
+		clearPending()
+		if spent {
+			r.cfg.notify(notifyCtx, TransportRetry{Retry: maxRetries, Total: maxRetries, Cleared: true})
+		}
+	}
 	return nil, &MaxAttemptsExceededError{Attempts: r.cfg.maxAttempts, Err: lastErr}
 }
 

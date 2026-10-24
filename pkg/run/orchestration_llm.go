@@ -128,14 +128,14 @@ func (w *toolOrchestrationLLM) recordReasoningBlocks(ctx context.Context, sink *
 	// A transport retry re-sends the whole request from the first token, so
 	// the reasoning block the dead attempt was still streaming is void — it
 	// is dropped here, never written — while blocks that already ended were
-	// written when they ended and stay. The drop runs on every non-Cleared
-	// notification even when the surface registers no retry callback of its
-	// own; the downstream call keeps the cards alive.
+	// written when they ended and stay. The drop runs on every
+	// notification, Cleared included: at exhaustion the final dead attempt
+	// only ever gets Cleared, and on success that notice lands before the
+	// retried stream's first token, when nothing is in flight — a no-op.
+	// The downstream call keeps the surface's own handling alive.
 	downstreamTransportRetry := wrapped.OnTransportRetry
 	wrapped.OnTransportRetry = func(tr llm.TransportRetry) {
-		if !tr.Cleared {
-			transcript.dropInFlightReasoning()
-		}
+		transcript.dropInFlightReasoning()
 		if downstreamTransportRetry != nil {
 			downstreamTransportRetry(tr)
 		}

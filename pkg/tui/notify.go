@@ -96,9 +96,9 @@ type StreamResetMsg struct{ turn *foregroundTurn }
 // the retry about to run — or, with Cleared set, that the retry is over: the
 // retried request started producing output, or the retry loop returned. A
 // non-Cleared message implies discard: the reducer drops the dead attempt's
-// buffered text, the renderer withdraws its live blocks, and the error/retry
-// card pair paints. The foreground path fills turn; the subagent event path
-// carries only AgentID.
+// buffered text, the renderer withdraws its live blocks, and the Working
+// line switches to the retry status until Cleared arrives. The foreground
+// path fills turn; the subagent event path carries only AgentID.
 type TransportRetryMsg struct {
 	turn    *foregroundTurn
 	AgentID string

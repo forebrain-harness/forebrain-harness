@@ -492,14 +492,15 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 		},
 		// A transport failure killed the whole attempt: drop the cancelled-
 		// turn buffer's streamed text (the retry re-streams from the first
-		// token) and let the reducer paint the error/retry cards. It must
-		// NOT acknowledge the response — a zero-output death leaves the
-		// withdraw window open, and Esc still takes the message back. The
-		// retry's Cleared notice drops nothing; it only ends the retry.
+		// token) and let the reducer move the retry onto the Working line.
+		// It must NOT acknowledge the response — a zero-output death leaves
+		// the withdraw window open, and Esc still takes the message back.
+		// Cleared withdraws too: at exhaustion it is the only notice the
+		// final dead attempt ever gets, and on success it fires before the
+		// retried stream's first token, when the buffer is already empty —
+		// a no-op.
 		OnTransportRetry: func(tr llm.TransportRetry) {
-			if !tr.Cleared {
-				accum.Reset()
-			}
+			accum.Reset()
 			s.notifyUIForSession(sessionID, TransportRetryMsg{turn: foreground, Retry: tr.Retry, Total: tr.Total, Wait: tr.Wait, Err: tr.Err, Cleared: tr.Cleared})
 		},
 		OnWebSearch: func(id, detail string, completed bool) {

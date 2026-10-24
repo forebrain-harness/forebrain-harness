@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -345,12 +346,13 @@ func Run(ctx context.Context, opts Options) error {
 		// succeeded, in the session they describe; a failed activation discards
 		// them so the surface never says the user is somewhere they are not.
 		holdFramesForSwitch := strings.TrimSpace(ev.SwitchSessionID) != ""
-		// A transport failure killed the attempt mid-stream: withdraw its
-		// live blocks BEFORE the error/retry cards render, so the
-		// trailing-block walk still finds them and the retried attempt's
-		// first delta starts a block of its own. The retry's Cleared notice
-		// withdraws nothing.
-		if retry, ok := m.(TransportRetryMsg); ok && !retry.Cleared && !retry.turn.isWithdrawn() && renderer != nil {
+		// A transport failure killed the attempt mid-stream: withdraw its live
+		// blocks, so the trailing-block walk still finds them and the retried
+		// attempt's first delta starts a block of its own. Cleared withdraws
+		// too: at exhaustion it is the only notice the final dead attempt ever
+		// gets, and on success it fires before the retried stream's first
+		// token, when the blocks are already gone — a no-op.
+		if retry, ok := m.(TransportRetryMsg); ok && !retry.turn.isWithdrawn() && renderer != nil {
 			renderer.WithdrawDeadStreamBlocks(retry.AgentID)
 		}
 		if !holdFramesForSwitch {
@@ -4226,6 +4228,9 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 			if !ok || snap.Ended {
 				return ""
 			}
+			if snap.Counters.Retry.Active() {
+				return transportRetryStatusLine(tick, snap.Counters.Retry, time.Now())
+			}
 			title := transientSpinnerFrame(tick) + " Working (" + formatWorkingElapsed(snap.Elapsed) + ")"
 			if counters := formatWorkingCounters(snap.Counters); counters != "" {
 				title += " · " + counters
@@ -4235,6 +4240,9 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 		counters := Counters{}
 		if counterSnapshot != nil {
 			counters = counterSnapshot()
+		}
+		if counters.Retry.Active() {
+			return transportRetryStatusLine(tick, counters.Retry, time.Now())
 		}
 		working := "Working"
 		switch {
@@ -4254,6 +4262,40 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 			title += " · " + wait
 		}
 		return title
+	}
+}
+
+// transportRetryStatusLine renders the Working line while a network retry is
+// pending: the reason, the countdown to the next attempt and the attempt
+// counter. The first attempts name the failure generically; from the third on
+// the transport's own sentence is shown, cut to fit.
+func transportRetryStatusLine(tick int, s TransportRetryStatus, now time.Time) string {
+	reason := "Network error"
+	if s.Retry >= min(3, s.Total) && strings.TrimSpace(s.Err) != "" {
+		reason = truncateForDisplay(strings.TrimSpace(s.Err), 60)
+	}
+	return transientSpinnerFrame(tick) + " " + reason + " · Retrying in " + formatRetryCountdown(s.Deadline.Sub(now)) +
+		" · attempt " + strconv.Itoa(s.Retry) + "/" + strconv.Itoa(s.Total)
+}
+
+// formatRetryCountdown renders a remaining wait rounded up to the second:
+// "8s" under a minute, "1m 5s" under five minutes, then only the largest unit.
+func formatRetryCountdown(remaining time.Duration) string {
+	if remaining < 0 {
+		remaining = 0
+	}
+	secs := int(math.Ceil(remaining.Seconds()))
+	switch {
+	case secs < 60:
+		return strconv.Itoa(secs) + "s"
+	case secs < 300:
+		return strconv.Itoa(secs/60) + "m " + strconv.Itoa(secs%60) + "s"
+	case secs >= 86400:
+		return strconv.Itoa(secs/86400) + "d"
+	case secs >= 3600:
+		return strconv.Itoa(secs/3600) + "h"
+	default:
+		return strconv.Itoa(secs/60) + "m"
 	}
 }
 
