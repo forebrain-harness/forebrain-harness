@@ -134,6 +134,9 @@ func validateLoadedRoot(r *Root) error {
 	if v := r.Agents.Defaults.NetworkRetryMax; v != nil && *v < 0 {
 		return fmt.Errorf("agents.defaults.network_retry_max must be non-negative")
 	}
+	if v := r.Agents.Defaults.StreamIdleTimeoutSeconds; v != nil && *v < 0 {
+		return fmt.Errorf("agents.defaults.stream_idle_timeout_seconds must be non-negative")
+	}
 	scope := strings.TrimSpace(r.Compact.ModelAutoCompactTokenLimitScope)
 	if scope != "" && scope != "total" && scope != "body_after_prefix" {
 		return fmt.Errorf("assembly.model_auto_compact_token_limit_scope must be total or body_after_prefix")

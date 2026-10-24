@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // wrappedErr unwraps to a typed-nil error, reproducing what a provider SDK's
@@ -167,6 +169,8 @@ func TestIsRetryableNetworkErrorClassification(t *testing.T) {
 		{name: "unexpected eof", err: io.ErrUnexpectedEOF, want: true},
 		{name: "bare eof", err: io.EOF, want: true},
 		{name: "stream truncated", err: ErrStreamTruncated, want: true},
+		{name: "stream stalled on headers", err: &StreamStallError{Headers: true, After: time.Second}, want: true},
+		{name: "stream stalled on body", err: fmt.Errorf("wrap: %w", &StreamStallError{After: time.Second}), want: true},
 		{name: "wrapped transport inside api error", err: wrappedTransport, want: true},
 		{name: "408 request timeout", err: requestTimeout, want: true},
 		{name: "409 conflict", err: conflict, want: true},

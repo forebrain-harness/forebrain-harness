@@ -797,6 +797,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 
 	for round := 0; round < openAILengthContinueMax; round++ {
 		req.Messages = baseMsgs
+		ctx = llm.WithStreamingRequest(ctx)
 		stream, err := c.client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
 			if sink != nil && sink.OnEnd != nil {

@@ -6297,7 +6297,7 @@ func TestSubagentTransportRetryIsPublishedAndRetried(t *testing.T) {
 		deltas:  []string{"dead ", "words"},
 		failure: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")},
 	}
-	wrapped := wrapNetworkRetryLLM(inner, 3)
+	wrapped := wrapNetworkRetryLLM(inner, 3, 0)
 	res, err := wrapped.Execute(childCtx, nil, nil)
 	if err != nil {
 		t.Fatalf("subagent Execute: %v", err)

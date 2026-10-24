@@ -152,13 +152,15 @@ func SetHTTPTransportWrapper(wrap func(http.RoundTripper) http.RoundTripper) {
 	httpTransportWrapper.Store(&wrap)
 }
 
-// WrapHTTPTransport applies the installed wrapper, or returns next unchanged
-// when none is installed. A nil next means http.DefaultTransport, matching
-// what the http package itself does.
+// WrapHTTPTransport applies the stream watchdog and then the installed
+// wrapper, or returns the watchdog alone when none is installed — the watchdog
+// sits innermost, right against the real transport. A nil next means
+// http.DefaultTransport, matching what the http package itself does.
 func WrapHTTPTransport(next http.RoundTripper) http.RoundTripper {
 	if next == nil {
 		next = http.DefaultTransport
 	}
+	next = watchdogTransport{next: next}
 	if w := httpTransportWrapper.Load(); w != nil {
 		return (*w)(next)
 	}

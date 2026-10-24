@@ -351,8 +351,8 @@ func TestWrapHTTPTransportAppliesTheInstalledWrapper(t *testing.T) {
 	t.Cleanup(func() { SetHTTPTransportWrapper(nil) })
 
 	inner := &stubRT{}
-	if got := WrapHTTPTransport(inner); got != http.RoundTripper(inner) {
-		t.Fatalf("with no wrapper installed, WrapHTTPTransport returned %T, want the transport unchanged", got)
+	if got := WrapHTTPTransport(inner); got != http.RoundTripper(watchdogTransport{next: inner}) {
+		t.Fatalf("with no wrapper installed, WrapHTTPTransport returned %T, want the watchdog alone", got)
 	}
 
 	var sawInner http.RoundTripper
@@ -365,8 +365,8 @@ func TestWrapHTTPTransportAppliesTheInstalledWrapper(t *testing.T) {
 	if got != http.RoundTripper(marker) {
 		t.Fatalf("WrapHTTPTransport returned %T, want the wrapper's result", got)
 	}
-	if sawInner != http.RoundTripper(inner) {
-		t.Fatal("the wrapper was not handed the original transport, so the chain is broken")
+	if sawInner != http.RoundTripper(watchdogTransport{next: inner}) {
+		t.Fatal("the wrapper was not handed the watchdog-wrapped transport, so the chain is broken")
 	}
 
 	// NewHTTPClient must go through the same wrapper, otherwise a provider
@@ -381,8 +381,8 @@ func TestWrapHTTPTransportAppliesTheInstalledWrapper(t *testing.T) {
 	}
 
 	SetHTTPTransportWrapper(nil)
-	if got := WrapHTTPTransport(inner); got != http.RoundTripper(inner) {
-		t.Fatalf("after clearing, WrapHTTPTransport returned %T, want the transport unchanged", got)
+	if got := WrapHTTPTransport(inner); got != http.RoundTripper(watchdogTransport{next: inner}) {
+		t.Fatalf("after clearing, WrapHTTPTransport returned %T, want the watchdog alone", got)
 	}
 }
 
@@ -395,8 +395,8 @@ func TestWrapHTTPTransportSubstitutesTheDefaultForNil(t *testing.T) {
 		return next
 	})
 	WrapHTTPTransport(nil)
-	if seen != http.DefaultTransport {
-		t.Fatalf("wrapper saw %T for a nil transport, want http.DefaultTransport", seen)
+	if seen != http.RoundTripper(watchdogTransport{next: http.DefaultTransport}) {
+		t.Fatalf("wrapper saw %T for a nil transport, want the watchdog over http.DefaultTransport", seen)
 	}
 }
 

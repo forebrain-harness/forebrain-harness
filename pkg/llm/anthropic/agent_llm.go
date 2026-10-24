@@ -179,6 +179,7 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	// caches the tool definitions with it, so the tools have to be part of the
 	// request the markers describe.
 	ApplyPromptCache(params.System, params.Messages)
+	ctx = llm.WithStreamingRequest(ctx)
 	stream := c.client.Messages.NewStreaming(ctx, params)
 	defer func() { _ = stream.Close() }()
 

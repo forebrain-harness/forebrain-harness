@@ -138,7 +138,7 @@ func TestStreamingOverflowRecoversAndContinues(t *testing.T) {
 			}, true, nil
 		},
 	}
-	wrapped := WrapRecoverableLLM(inner, nil, deps, 0)
+	wrapped := WrapRecoverableLLM(inner, nil, deps, 0, 0)
 
 	ctx := toolpkg.WithRunID(context.Background(), "run-overflow")
 	res, err := wrapped.Execute(ctx, history, nil)
@@ -176,7 +176,7 @@ func TestOverflowCompactionKeepsProvisionalSteersOutOfTheCheckpoint(t *testing.T
 	adoption := &compactionAdoptionSink{}
 	ctx := withCompactionAdoptionSink(toolpkg.WithRunID(context.Background(), "run-overflow-steer"), adoption)
 	ctx = withProvisionalTail(ctx, ctx, len(history), 1)
-	if _, err := WrapRecoverableLLM(inner, nil, deps, 0).Execute(ctx, history, nil); err != nil {
+	if _, err := WrapRecoverableLLM(inner, nil, deps, 0, 0).Execute(ctx, history, nil); err != nil {
 		t.Fatalf("overflow was not recovered: %v", err)
 	}
 	if len(compactedInput) != len(history)-1 {
@@ -215,7 +215,7 @@ func TestOverflowTeachesWindowSoNextRunCompactsProactively(t *testing.T) {
 	wrapped := WrapRecoverableLLM(
 		inner,
 		func(context.Context) (json.RawMessage, bool) { return snapshot, true },
-		deps, 0,
+		deps, 0, 0,
 	)
 
 	// First run: rejected once, recovered reactively.
@@ -257,7 +257,7 @@ func TestOverflowWithoutRecoveryStillReportsProviderError(t *testing.T) {
 				attempted++
 				return nil, false, errors.New("compact backend down")
 			},
-		}, 0,
+		}, 0, 0,
 	)
 	_, err := wrapped.Execute(toolpkg.WithRunID(context.Background(), "run-fail"), history, nil)
 	if err == nil || !strings.Contains(err.Error(), "context_length_exceeded") {
@@ -3743,7 +3743,7 @@ func TestRecoverableLLMCompactsAndRetriesAfterContextOverflow(t *testing.T) {
 			}
 			reactive = append(reactive, isReactive)
 			return replacement, true, nil
-		}}, 0,
+		}}, 0, 0,
 	)
 	ctx, sinkState := newCompactionStreamTestContext()
 	ctx = toolpkg.WithRunID(ctx, "run-reactive")
@@ -9479,7 +9479,7 @@ func TestTransportRetryDropsBufferedReasoningFromTheTranscript(t *testing.T) {
 
 	// The mounted order: orchestration outside, network retry inside, exactly
 	// as Runner.Load builds the product chain.
-	inner := wrapNetworkRetryLLM(&netDropReasoningLLM{}, 3)
+	inner := wrapNetworkRetryLLM(&netDropReasoningLLM{}, 3, 0)
 	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
 	execCtx := llm.WithStreamSink(
 		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
@@ -9550,7 +9550,7 @@ func TestExhaustedRetriesDropTheFinalAttemptsReasoning(t *testing.T) {
 
 	// The mounted order: orchestration outside, network retry inside, exactly
 	// as Runner.Load builds the product chain. Two retries, three attempts.
-	inner := wrapNetworkRetryLLM(&netDropEveryReasoningLLM{}, 2)
+	inner := wrapNetworkRetryLLM(&netDropEveryReasoningLLM{}, 2, 0)
 	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
 	execCtx := llm.WithStreamSink(
 		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
@@ -9612,7 +9612,7 @@ func TestExhaustedSilentRetriesAnnounceTheDeathWithCleared(t *testing.T) {
 		OnTransportRetry: func(tr llm.TransportRetry) { surfaceNotes = append(surfaceNotes, tr) },
 	}
 
-	inner := wrapNetworkRetryLLM(&netDropSilentLLM{}, 2)
+	inner := wrapNetworkRetryLLM(&netDropSilentLLM{}, 2, 0)
 	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
 	execCtx := llm.WithStreamSink(
 		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
@@ -9674,7 +9674,7 @@ func TestTransportRetryPersistsNoInterruptedAnswer(t *testing.T) {
 
 	// The mounted order: orchestration outside, network retry inside, exactly
 	// as Runner.Load builds the product chain.
-	inner := wrapNetworkRetryLLM(&netDropAnswerLLM{}, 3)
+	inner := wrapNetworkRetryLLM(&netDropAnswerLLM{}, 3, 0)
 	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
 	execCtx := llm.WithStreamSink(
 		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),

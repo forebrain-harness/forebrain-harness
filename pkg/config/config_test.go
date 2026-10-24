@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	yamlv2 "go.yaml.in/yaml/v2"
 )
@@ -1159,6 +1160,35 @@ func TestNetworkRetryMaxLoadRejectsNegativeAndAllowsAnyLargerValue(t *testing.T)
 	}
 	if got := loaded.Agents.Defaults.NetworkRetryMaxOrDefault(); got != MaxNetworkRetryMax {
 		t.Fatalf("loaded value = %d, want the ceiling %d", got, MaxNetworkRetryMax)
+	}
+}
+
+func TestStreamIdleTimeoutDefaultsAndClamps(t *testing.T) {
+	value := func(v int) *int { return &v }
+	for _, tc := range []struct {
+		configured *int
+		want       time.Duration
+	}{
+		{nil, 300 * time.Second},
+		{value(0), 0},
+		{value(5), 10 * time.Second},
+		{value(300), 300 * time.Second},
+		{value(5000), 1800 * time.Second},
+	} {
+		if got := (AgentDefaults{StreamIdleTimeoutSeconds: tc.configured}).StreamIdleTimeout(); got != tc.want {
+			t.Fatalf("configured %v: StreamIdleTimeout = %v, want %v", tc.configured, got, tc.want)
+		}
+	}
+}
+
+func TestStreamIdleTimeoutLoadRejectsNegative(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forebrain.yaml")
+	if err := os.WriteFile(path, []byte("agents:\n  defaults:\n    stream_idle_timeout_seconds: -1\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "agents.defaults.stream_idle_timeout_seconds must be non-negative") {
+		t.Fatalf("negative load error = %v, want agents.defaults.stream_idle_timeout_seconds must be non-negative", err)
 	}
 }
 

@@ -71,7 +71,7 @@ func (m *resendCaptureLLM) Execute(ctx context.Context, messages []llm.Message, 
 
 func TestNetworkRetryResendsTheOriginalRequest(t *testing.T) {
 	inner := &resendCaptureLLM{}
-	wrapped := wrapNetworkRetryLLM(inner, 3)
+	wrapped := wrapNetworkRetryLLM(inner, 3, 0)
 
 	var notes []llm.TransportRetry
 	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
@@ -105,7 +105,7 @@ func TestNetworkRetryResendsTheOriginalRequest(t *testing.T) {
 
 func TestNetworkRetryExhaustionMessage(t *testing.T) {
 	inner := &alwaysNetFailLLM{}
-	wrapped := wrapNetworkRetryLLM(inner, 2)
+	wrapped := wrapNetworkRetryLLM(inner, 2, 0)
 
 	_, err := wrapped.Execute(context.Background(), nil, nil)
 	if err == nil {
@@ -133,7 +133,7 @@ func (m *alwaysNetFailLLM) Execute(context.Context, []llm.Message, []*llm.Tool) 
 }
 
 func TestNetworkRetryCapsAtFifteen(t *testing.T) {
-	wrapped := wrapNetworkRetryLLM(&netRetryTestLLM{}, 99)
+	wrapped := wrapNetworkRetryLLM(&netRetryTestLLM{}, 99, 0)
 	outer, ok := wrapped.(networkRetryLLM)
 	if !ok {
 		t.Fatalf("wrapNetworkRetryLLM returned %T, want networkRetryLLM", wrapped)
@@ -145,7 +145,7 @@ func TestNetworkRetryCapsAtFifteen(t *testing.T) {
 
 func TestNetworkRetryHonoursContextCancellationDuringBackoff(t *testing.T) {
 	inner := &netRetryTestLLM{failure: &net.OpError{Op: "read", Err: errors.New("i/o timeout")}}
-	wrapped := wrapNetworkRetryLLM(inner, 5)
+	wrapped := wrapNetworkRetryLLM(inner, 5, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -167,7 +167,7 @@ func TestNetworkRetryHonoursContextCancellationDuringBackoff(t *testing.T) {
 func TestNetworkRetryIgnoresNonTransportErrors(t *testing.T) {
 	structural := &llm.APIError{StatusCode: 400, Message: "bad shape"}
 	inner := &netRetryTestLLM{failure: structural}
-	wrapped := wrapNetworkRetryLLM(inner, 4)
+	wrapped := wrapNetworkRetryLLM(inner, 4, 0)
 
 	var notes []llm.TransportRetry
 	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
@@ -187,7 +187,7 @@ func TestNetworkRetryIgnoresNonTransportErrors(t *testing.T) {
 
 func TestNetworkRetryDisabledAtZero(t *testing.T) {
 	inner := &netRetryTestLLM{failure: &net.OpError{Op: "read", Err: errors.New("i/o timeout")}}
-	wrapped := wrapNetworkRetryLLM(inner, 0)
+	wrapped := wrapNetworkRetryLLM(inner, 0, 0)
 	_, err := wrapped.Execute(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("expected the transport error to surface immediately")
@@ -199,7 +199,7 @@ func TestNetworkRetryDisabledAtZero(t *testing.T) {
 
 func TestNetworkRetryMutedContextStaysSilent(t *testing.T) {
 	inner := &netRetryTestLLM{failure: &net.OpError{Op: "read", Err: errors.New("i/o timeout")}}
-	wrapped := wrapNetworkRetryLLM(inner, 3)
+	wrapped := wrapNetworkRetryLLM(inner, 3, 0)
 
 	var notes []llm.TransportRetry
 	ctx := llm.WithMutedForegroundStream(llm.WithStreamSink(context.Background(), &llm.StreamSink{
@@ -223,7 +223,7 @@ func TestNetworkRetryMutedContextStaysSilent(t *testing.T) {
 func TestNetworkRetryMountOrder(t *testing.T) {
 	recoverable := WrapRecoverableLLM(&netRetryTestLLM{
 		failure: &net.OpError{Op: "read", Err: errors.New("i/o timeout")},
-	}, nil, &CompactChainDeps{}, 3)
+	}, nil, &CompactChainDeps{}, 3, 0)
 
 	var notes []llm.TransportRetry
 	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
@@ -244,7 +244,7 @@ func TestNetworkRetryMountOrder(t *testing.T) {
 
 	summary := wrapNetworkRetryLLM(&netRetryTestLLM{
 		failure: &net.OpError{Op: "read", Err: errors.New("i/o timeout")},
-	}, 3)
+	}, 3, 0)
 	notes = nil
 	if _, err := summary.Execute(llm.WithStreamSink(context.Background(), &llm.StreamSink{
 		OnTransportRetry: func(tr llm.TransportRetry) { notes = append(notes, tr) },
@@ -261,7 +261,7 @@ func TestNetworkRetryMountOrder(t *testing.T) {
 // the status so the surfaces can call it an API error.
 func TestNetworkRetryRetriesServerErrors(t *testing.T) {
 	inner := &netRetryTestLLM{failure: &llm.APIError{StatusCode: 503, Message: "service unavailable"}}
-	wrapped := wrapNetworkRetryLLM(inner, 3)
+	wrapped := wrapNetworkRetryLLM(inner, 3, 0)
 
 	var notes []llm.TransportRetry
 	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
@@ -286,13 +286,40 @@ func TestNetworkRetryRetriesServerErrors(t *testing.T) {
 	}
 }
 
+// A stream the watchdog aborted for going silent reads as a dropped
+// connection: the network retry layer re-sends the whole request, exactly as
+// it does for a stream cut mid-answer.
+func TestNetworkRetryRetriesAStalledStream(t *testing.T) {
+	inner := &netRetryTestLLM{failure: &llm.StreamStallError{After: time.Second}}
+	wrapped := wrapNetworkRetryLLM(inner, 3, 0)
+
+	var notes []llm.TransportRetry
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnTransportRetry: func(tr llm.TransportRetry) { notes = append(notes, tr) },
+	})
+
+	res, err := wrapped.Execute(ctx, nil, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "full answer" {
+		t.Fatalf("result = %+v, want the re-sent attempt's answer", res)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2 (stalled + re-sent)", inner.calls)
+	}
+	if len(notes) != 2 || notes[0].Cleared || !notes[1].Cleared {
+		t.Fatalf("notifications = %+v, want one in-flight retry then its cleared notice", notes)
+	}
+}
+
 // 529 is the overload path's own failure and stays there: the network retry
 // layer rejects it without a word, and the recoverable layer's 529 branch is
 // the one that re-enters the stack — so no transport-retry notification ever
 // fires for it.
 func TestNetworkRetryLeaves529ToRecovery(t *testing.T) {
 	inner := &netRetryTestLLM{failure: &llm.APIError{StatusCode: 529, Message: "overloaded"}}
-	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{}, 3)
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{}, 3, 0)
 
 	var notes []llm.TransportRetry
 	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{

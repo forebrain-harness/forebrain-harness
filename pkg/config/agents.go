@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 type AgentsSection struct {
@@ -118,6 +119,12 @@ type AgentDefaults struct {
 	// means the default; 0 disables network retries; load rejects negative
 	// values; values above MaxNetworkRetryMax run at MaxNetworkRetryMax.
 	NetworkRetryMax *int `yaml:"network_retry_max,omitempty" json:"network_retry_max,omitempty"`
+	// StreamIdleTimeoutSeconds bounds how long a streaming LLM request may
+	// stay silent — no response headers, or no new data — before it is
+	// treated as a dropped connection and handed to the network retry layer.
+	// Nil means the default 300; 0 disables the watchdog; load rejects
+	// negative values; other values clamp to the [10, 1800] range.
+	StreamIdleTimeoutSeconds *int `yaml:"stream_idle_timeout_seconds,omitempty" json:"stream_idle_timeout_seconds,omitempty"`
 }
 
 // DefaultNetworkRetryMax is the network-retry cap when the configuration
@@ -139,6 +146,34 @@ func (d AgentDefaults) NetworkRetryMaxOrDefault() int {
 		return DefaultNetworkRetryMax
 	}
 	return min(*d.NetworkRetryMax, MaxNetworkRetryMax)
+}
+
+// DefaultStreamIdleTimeoutSeconds is the streaming silence window when the
+// configuration leaves stream_idle_timeout_seconds unset.
+const DefaultStreamIdleTimeoutSeconds = 300
+
+// MinStreamIdleTimeoutSeconds and MaxStreamIdleTimeoutSeconds bound a
+// configured stream_idle_timeout_seconds: shorter than the minimum would kill
+// reasoning models mid-thought, longer than the maximum re-introduces the
+// stuck-turn the watchdog exists to end. Configured values outside the range
+// run at its edge, not as written.
+const (
+	MinStreamIdleTimeoutSeconds = 10
+	MaxStreamIdleTimeoutSeconds = 1800
+)
+
+// StreamIdleTimeout resolves the streaming silence window: nil → the default;
+// 0 disables the watchdog; other values clamp to the [Min, Max] range (the
+// loader already rejected negative ones, so there is nothing else to exclude).
+func (d AgentDefaults) StreamIdleTimeout() time.Duration {
+	if d.StreamIdleTimeoutSeconds == nil {
+		return DefaultStreamIdleTimeoutSeconds * time.Second
+	}
+	v := *d.StreamIdleTimeoutSeconds
+	if v == 0 {
+		return 0
+	}
+	return time.Duration(min(max(v, MinStreamIdleTimeoutSeconds), MaxStreamIdleTimeoutSeconds)) * time.Second
 }
 
 // ExecutionConfig controls coordinated execution capacity for agent mode.

@@ -279,6 +279,7 @@ func WrapRecoverableLLM(
 	snapshot func(context.Context) (json.RawMessage, bool),
 	compactDeps *CompactChainDeps,
 	networkRetryMax int,
+	streamIdle time.Duration,
 ) llm.LLM {
 	if inner == nil {
 		return nil
@@ -292,7 +293,7 @@ func WrapRecoverableLLM(
 	// The network retry goes on last, i.e. outermost: it is the boundary a
 	// request first succeeds or dies on, and it owns the discard/retry
 	// notification every surface renders.
-	inner = wrapNetworkRetryLLM(inner, networkRetryMax)
+	inner = wrapNetworkRetryLLM(inner, networkRetryMax, streamIdle)
 	return recoverableLLM{
 		inner:       inner,
 		snapshot:    snapshot,
@@ -323,9 +324,13 @@ func wrapBlankOutputRetryLLM(inner llm.LLM) llm.LLM {
 // inner stack on their own retries, inheriting this protection.
 //
 // maxRetries is the retry cap (agents.defaults.network_retry_max, default
-// 10, at most config.MaxNetworkRetryMax). 0 disables the layer entirely — no
-// wrapper, no retries.
-func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int) llm.LLM {
+// 10, at most config.MaxNetworkRetryMax). streamIdle is the stream-stall
+// watchdog window (agents.defaults.stream_idle_timeout_seconds): when it is
+// positive every Execute arms it, so a request that goes silent is aborted
+// and reported as a dropped connection. 0 disables the watchdog. maxRetries
+// 0 disables the retry loop but keeps the wrapper — the watchdog still fires,
+// the stall simply surfaces as the call's error.
+func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int, streamIdle time.Duration) llm.LLM {
 	if inner == nil {
 		return nil
 	}
@@ -335,42 +340,53 @@ func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int) llm.LLM {
 	if maxRetries > appcfg.MaxNetworkRetryMax {
 		maxRetries = appcfg.MaxNetworkRetryMax
 	}
-	if maxRetries == 0 {
-		return inner
+	retryCore := inner
+	if maxRetries > 0 {
+		retryMW, err := llm.NewRetry(
+			1+maxRetries, // the first call is attempt 0: 1 + N retries
+			llm.WithShouldRetry(llm.IsRetryableNetworkError),
+			llm.WithMaxBackoff(32*time.Second),
+			llm.WithUpwardJitter(),
+			// A server that answered with Retry-After sets the wait itself; a
+			// request for more than five minutes is not a wait this turn should
+			// park on, and the error surfaces instead.
+			llm.WithRetryAfter(llm.RetryAfterOf, 5*time.Minute),
+			llm.WithRetryNotify(func(ctx context.Context, tr llm.TransportRetry) {
+				if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnTransportRetry != nil {
+					sink.OnTransportRetry(tr)
+				}
+			}),
+		)
+		if err != nil {
+			return networkRetryLLM{inner: inner, maxRetries: 0, streamIdle: streamIdle}
+		}
+		retryCore = llm.Use(inner, retryMW)
 	}
-	retryMW, err := llm.NewRetry(
-		1+maxRetries, // the first call is attempt 0: 1 + N retries
-		llm.WithShouldRetry(llm.IsRetryableNetworkError),
-		llm.WithMaxBackoff(32*time.Second),
-		llm.WithUpwardJitter(),
-		// A server that answered with Retry-After sets the wait itself; a
-		// request for more than five minutes is not a wait this turn should
-		// park on, and the error surfaces instead.
-		llm.WithRetryAfter(llm.RetryAfterOf, 5*time.Minute),
-		llm.WithRetryNotify(func(ctx context.Context, tr llm.TransportRetry) {
-			if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnTransportRetry != nil {
-				sink.OnTransportRetry(tr)
-			}
-		}),
-	)
-	if err != nil {
-		return inner
-	}
-	return networkRetryLLM{inner: llm.Use(inner, retryMW), maxRetries: maxRetries}
+	return networkRetryLLM{inner: retryCore, maxRetries: maxRetries, streamIdle: streamIdle}
 }
 
-// networkRetryLLM rewrites the retry loop's exhaustion into the sentence a
-// user reads when the network never came back.
+// networkRetryLLM arms the stream-stall watchdog on every call and rewrites
+// the retry loop's exhaustion into the sentence a user reads when the network
+// never came back.
 type networkRetryLLM struct {
 	inner      llm.LLM
 	maxRetries int
+	streamIdle time.Duration
 }
 
 func (n networkRetryLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	if n.streamIdle > 0 {
+		ctx = llm.WithStreamWatchdog(ctx, n.streamIdle)
+	}
 	res, err := n.inner.Execute(ctx, messages, tools)
-	var exhausted *llm.MaxAttemptsExceededError
-	if err != nil && errors.As(err, &exhausted) {
-		return nil, fmt.Errorf("network error, gave up after %d retries: %w", n.maxRetries, exhausted.Err)
+	// Only a mounted retry loop can exhaust: with maxRetries 0 the inner
+	// chain is the raw LLM, and an exhaustion error bubbling out of it is
+	// another layer's business, not a network give-up.
+	if n.maxRetries > 0 {
+		var exhausted *llm.MaxAttemptsExceededError
+		if err != nil && errors.As(err, &exhausted) {
+			return nil, fmt.Errorf("network error, gave up after %d retries: %w", n.maxRetries, exhausted.Err)
+		}
 	}
 	return res, err
 }

@@ -1266,6 +1266,7 @@ func openAIResponsesUserContent(parts []llm.ContentPart) responses.ResponseInput
 func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params responses.ResponseNewParams) (*llm.Result, error) {
 	sink := llm.StreamSinkFrom(ctx)
 	ctx = withOpenAIResponsesStreaming(ctx)
+	ctx = llm.WithStreamingRequest(ctx)
 	stream := c.client.Responses.NewStreaming(ctx, params)
 	defer stream.Close()
 

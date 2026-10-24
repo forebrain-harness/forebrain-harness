@@ -184,6 +184,10 @@ agents:
     # mid-answer). 0 disables network retries; values above 15 run as 15.
     # Waits start at 0.5s and double up to 32s.
     # network_retry_max: 10
+    # Default: 300. Seconds a streaming LLM request may stay silent (no response
+    # headers, or no new data) before it is treated as a dropped connection and
+    # retried. 0 disables; values run between 10 and 1800.
+    # stream_idle_timeout_seconds: 300
     # Default: none.
     # Example: context injection and bootstrap settings.
     context_inject:

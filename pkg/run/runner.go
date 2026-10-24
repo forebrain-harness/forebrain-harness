@@ -1041,7 +1041,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if v := r.AppCfg.Agents.Defaults.NetworkRetryMax; v != nil && *v > appcfg.MaxNetworkRetryMax {
 		slog.Warn("agents.defaults.network_retry_max above the limit; running with the limit", "configured", *v, "limit", appcfg.MaxNetworkRetryMax)
 	}
-	summaryChain := wrapNetworkRetryLLM(withImageHeal(llmClient), networkRetryMax)
+	summaryChain := wrapNetworkRetryLLM(withImageHeal(llmClient), networkRetryMax, r.AppCfg.Agents.Defaults.StreamIdleTimeout())
 	r.summaryLLM = summaryChain
 	// The reminder planModeLLM injects is not written here. It reaches the
 	// transcript through the run's own message sequence, which the orchestration
@@ -1126,6 +1126,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		},
 		compactDeps,
 		networkRetryMax,
+		r.AppCfg.Agents.Defaults.StreamIdleTimeout(),
 	)
 	// The dedup lives inside the wrapper this hands it to, which is rebuilt on
 	// every Load along with it, so the Runner has no reason to keep a
