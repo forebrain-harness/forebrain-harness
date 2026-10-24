@@ -447,11 +447,14 @@ func (s *Server) withAnswerStream(ctx context.Context, runID, sessionID string, 
 	stream.OnResponseCompleted = partial.ResponseCompleted
 	// A transport retry kills the whole attempt: the partial the page was
 	// shown so far belongs to a dead stream and the retry re-streams from the
-	// first token. Drop it, then let the sink's own publication draw the
-	// cards on every watching surface.
+	// first token. Drop it (the retry's Cleared notice keeps nothing to
+	// drop), then let the sink's own publication draw the cards on every
+	// watching surface.
 	publishTransportRetry := stream.OnTransportRetry
 	stream.OnTransportRetry = func(tr llm.TransportRetry) {
-		partial.Reset()
+		if !tr.Cleared {
+			partial.Reset()
+		}
 		if publishTransportRetry != nil {
 			publishTransportRetry(tr)
 		}

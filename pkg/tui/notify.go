@@ -93,19 +93,20 @@ type ReasoningDoneMsg struct {
 type StreamResetMsg struct{ turn *foregroundTurn }
 
 // TransportRetryMsg reports one transport failure of a run's LLM stream and
-// the retry about to run — or, with Exhausted set, that every retry was used
-// up. It implies discard: the reducer drops the dead attempt's buffered text,
-// the renderer withdraws its live blocks, and the error/retry card pair
-// paints. The foreground path fills turn; the subagent event path carries
-// only AgentID.
+// the retry about to run — or, with Cleared set, that the retry is over: the
+// retried request started producing output, or the retry loop returned. A
+// non-Cleared message implies discard: the reducer drops the dead attempt's
+// buffered text, the renderer withdraws its live blocks, and the error/retry
+// card pair paints. The foreground path fills turn; the subagent event path
+// carries only AgentID.
 type TransportRetryMsg struct {
-	turn      *foregroundTurn
-	AgentID   string
-	Retry     int
-	Total     int
-	Wait      time.Duration
-	Err       error
-	Exhausted bool
+	turn    *foregroundTurn
+	AgentID string
+	Retry   int
+	Total   int
+	Wait    time.Duration
+	Err     error
+	Cleared bool
 }
 type RunStartedMsg struct {
 	RunID string
@@ -884,13 +885,17 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 	case event.RunEventTransportRetry:
 		var p event.TransportRetryPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
+			var err error
+			if p.Error != "" {
+				err = errors.New(p.Error)
+			}
 			s.notifyUIForSession(evt.SessionID, TransportRetryMsg{
-				AgentID:   p.AgentID,
-				Retry:     p.Retry,
-				Total:     p.Total,
-				Wait:      time.Duration(p.WaitMs) * time.Millisecond,
-				Err:       errors.New(p.Error),
-				Exhausted: p.Exhausted,
+				AgentID: p.AgentID,
+				Retry:   p.Retry,
+				Total:   p.Total,
+				Wait:    time.Duration(p.WaitMs) * time.Millisecond,
+				Err:     err,
+				Cleared: p.Cleared,
 			})
 		}
 	case event.RunEventUsageDelta:

@@ -46,23 +46,51 @@ func TestTransportRetryMsgClearsBuffersAndEmitsCardPair(t *testing.T) {
 	}
 }
 
-// The exhausted notification freezes the retry card: same StepID, Final, and
-// the t/total wording the renderer derives from the payload.
-func TestTransportRetryExhaustedFreezesTheCard(t *testing.T) {
+// The renderer half of the boundary: the dead stream's trailing live blocks
+// are withdrawn (removed), while the finished block below them stays sealed
+// as history, and a zero-output death changes nothing.
+func TestWithdrawDeadStreamBlocksRemovesOnlyLiveBlocks(t *testing.T) {
+	r := &Renderer{}
+	r.vm.append(Frame{Kind: FrameThinking, Content: "sealed thought", Final: true})
+	r.vm.append(Frame{Kind: FrameAssistant, Content: "dead half-answer"})
+	r.WithdrawDeadStreamBlocks("")
+	if len(r.vm.blocks) != 1 {
+		t.Fatalf("blocks after withdrawal = %d, want only the finished thinking block", len(r.vm.blocks))
+	}
+	if got := r.vm.blocks[0].frame; got.Kind != FrameThinking || !got.Final || got.Content != "sealed thought" {
+		t.Fatalf("surviving block = %+v, want the sealed thinking kept", got)
+	}
+	// A zero-output death has no live blocks: no-op.
+	r.WithdrawDeadStreamBlocks("")
+	if len(r.vm.blocks) != 1 {
+		t.Fatalf("repeat withdrawal changed the transcript: %d blocks", len(r.vm.blocks))
+	}
+	// The retried attempt's first delta opens its own block.
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "fresh answer"})
+	if len(r.vm.blocks) != 2 {
+		t.Fatalf("blocks = %d, want the sealed one plus the fresh live one", len(r.vm.blocks))
+	}
+	fresh := r.vm.blocks[1].frame
+	if fresh.Content != "fresh answer" || fresh.Final {
+		t.Fatalf("the retried delta must start its own live block, got %+v", fresh)
+	}
+}
+
+// The retry's Cleared notice draws nothing and clears nothing: the buffers
+// hold the retried attempt's words by then, and the cards are the engine's
+// to retire (plan 116).
+func TestTransportRetryClearedIsANoOp(t *testing.T) {
 	var r Reducer
-	ev := r.Reduce(TransportRetryMsg{Retry: 3, Total: 3, Err: errors.New("boom"), Exhausted: true})
-	if len(ev.Frames) != 2 || ev.Frames[1].Kind != FrameRetrying {
-		t.Fatalf("frames = %+v, want the pair with a retry card", ev.Frames)
+	buf := r.agentBuf("")
+	buf.assistant.WriteString("retried words")
+
+	ev := r.Reduce(TransportRetryMsg{Retry: 1, Total: 3, Cleared: true})
+	if len(ev.Frames) != 0 {
+		t.Fatalf("frames = %+v, want none", ev.Frames)
 	}
-	card := ev.Frames[1]
-	if !card.Final {
-		t.Fatal("the exhausted card must be Final (frozen)")
-	}
-	if card.RetryDeadline.After(time.Now()) {
-		t.Fatal("an exhausted card carries no wait")
-	}
-	if got := retryCardLine(card, 0); !strings.Contains(got, "Could not continue, tried 3/3 times") {
-		t.Fatalf("frozen line = %q, want Could not continue, tried 3/3 times", got)
+	buf = r.agentBuf("")
+	if buf == nil || buf.assistant.Len() != len("retried words") {
+		t.Fatal("the cleared notice wiped the live buffer")
 	}
 }
 
@@ -88,48 +116,8 @@ func TestRetryCardLineWordingAndCountdownTiers(t *testing.T) {
 	}
 }
 
-// The renderer half of the boundary: the dead stream's trailing live blocks
-// are sealed in place (kept, finalized) — what the user watched appear stays
-// and the engine persisted it — while sealed blocks below them stay sealed
-// and a zero-output death changes nothing.
-func TestSealDeadStreamBlocksKeepsTrailingLiveBlocksSealed(t *testing.T) {
-	r := &Renderer{}
-	r.vm.append(Frame{Kind: FrameThinking, Content: "sealed thought", Final: true})
-	r.vm.append(Frame{Kind: FrameAssistant, Content: "sealed answer", Final: true})
-	r.vm.append(Frame{Kind: FrameThinking, Content: "live thought"})
-	r.vm.append(Frame{Kind: FrameAssistant, Content: "dead half-answer"})
-	r.SealDeadStreamBlocks("")
-	var kinds []string
-	var finals []bool
-	for _, b := range r.vm.blocks {
-		kinds = append(kinds, string(b.frame.Kind))
-		finals = append(finals, b.frame.Final)
-	}
-	if strings.Join(kinds, "|") != "thinking|assistant|thinking|assistant" || len(r.vm.blocks) != 4 {
-		t.Fatalf("blocks after sealing = %v, want all four kept", kinds)
-	}
-	if !finals[0] || !finals[1] || !finals[2] || !finals[3] {
-		t.Fatalf("finals after sealing = %v, want every dead-stream block sealed", finals)
-	}
-	// A zero-output death has no live blocks: no-op.
-	r.SealDeadStreamBlocks("")
-	if len(r.vm.blocks) != 4 {
-		t.Fatalf("repeat sealing changed the transcript: %d blocks", len(r.vm.blocks))
-	}
-	// The retried attempt's first delta opens its own block below the kept
-	// words instead of growing the sealed one.
-	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "fresh answer"})
-	if len(r.vm.blocks) != 5 {
-		t.Fatalf("blocks = %d, want the sealed four plus the fresh live one", len(r.vm.blocks))
-	}
-	fresh := r.vm.blocks[4].frame
-	if fresh.Content != "fresh answer" || fresh.Final {
-		t.Fatalf("the retried delta must start its own live block, got %+v", fresh)
-	}
-}
-
 // Consecutive failures update the same two blocks in place — no per-failure
-// stacking — and the exhausted frame seals the very same card.
+// stacking — and the final frame seals the very same card.
 func TestRetryCardsReplaceInPlace(t *testing.T) {
 	r := &Renderer{}
 	r.RenderFrame(Frame{Kind: FrameRetrying, StepID: transportRetryStepIDFor(""), Retry: 1, RetryTotal: 3, RetryDeadline: time.Now().Add(time.Second)})
@@ -202,7 +190,7 @@ func TestSubagentRetryCardIsScopedToItsView(t *testing.T) {
 	if vm == nil || len(vm.blocks) != 1 {
 		t.Fatalf("subagent view = %+v, want its retry card", vm)
 	}
-	r.SealDeadStreamBlocks("task-1")
+	r.WithdrawDeadStreamBlocks("task-1")
 	if len(vm.blocks) != 1 {
 		t.Fatalf("the retry card itself must survive the dead-stream withdrawal, got %d blocks", len(vm.blocks))
 	}

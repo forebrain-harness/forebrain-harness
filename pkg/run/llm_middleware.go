@@ -254,37 +254,9 @@ func (g *compactRunGuard) prefill(key string, current func() int) int {
 	return entry.prefillTokens
 }
 
-// continuationPrefillLLM appends the continuation message a network retry
-// carries — the partial answer (and thinking) the dead attempt had already
-// streamed — as the final assistant message, so the model continues its own
-// words instead of starting over. It sits at the innermost position of the
-// chain, below every prompt-shaping wrapper, so nothing can land between the
-// prefill and the provider.
-type continuationPrefillLLM struct{ inner llm.LLM }
-
-func (c continuationPrefillLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
-	if c.inner == nil {
-		return nil, fmt.Errorf("nil continuation prefill llm")
-	}
-	prefill := llm.ContinuationPrefillFrom(ctx)
-	if prefill.Blank() {
-		return c.inner.Execute(ctx, messages, tools)
-	}
-	continued := append(append([]llm.Message(nil), messages...), llm.ContinuationMessage(prefill.Reasoning, prefill.Text))
-	return c.inner.Execute(ctx, continued, tools)
-}
-
-// wrapContinuationPrefillLLM mounts the continuation prefill at the chain's
-// innermost position; see continuationPrefillLLM.
-func wrapContinuationPrefillLLM(inner llm.LLM) llm.LLM {
-	if inner == nil {
-		return nil
-	}
-	return continuationPrefillLLM{inner: inner}
-}
-
-// withImageHeal attaches the one retry a refused image gets: when the provider// rejects a request because of an image, the request is re-sent once with every
-// image degraded to a line of text.
+// withImageHeal attaches the one retry a refused image gets: when the
+// provider rejects a request because of an image, the request is re-sent once
+// with every image degraded to a line of text.
 //
 // Both chains need it. The main chain is obvious; the summary chain is the one
 // that turns "a conversation with one unsendable image" into a dead end — a
@@ -314,11 +286,8 @@ func WrapRecoverableLLM(
 	// Below the blank-output retry and the orchestration wrapper (which is what
 	// builds Result.Session): a provider that refuses an image gets one retry
 	// with that image degraded to text, and the degraded request is this call
-	// only — the transcript keeps its images. Innermost of all sits the
-	// continuation prefill: the network retry's "continue from your own words"
-	// message must be the last thing before the provider, under every
-	// prompt-shaping wrapper.
-	inner = withImageHeal(wrapContinuationPrefillLLM(inner))
+	// only — the transcript keeps its images.
+	inner = withImageHeal(inner)
 	inner = wrapBlankOutputRetryLLM(inner)
 	// The network retry goes on last, i.e. outermost: it is the boundary a
 	// request first succeeds or dies on, and it owns the discard/retry
@@ -344,16 +313,18 @@ func wrapBlankOutputRetryLLM(inner llm.LLM) llm.LLM {
 }
 
 // wrapNetworkRetryLLM attaches the transport-failure retry loop: a stream cut
-// mid-answer (timeout, reset, truncation) is re-sent with exponential,
-// unbounded back-off, and every retry is announced through the stream sink so
-// each surface can drop the dead attempt's text and show the retry cards. It
-// is applied last of the chain inside WrapRecoverableLLM, making it the
-// outermost retry: transport is the first boundary a request succeeds or dies
-// on, and the recovery layers above (compaction, blank-output, 529) re-enter
-// the whole inner stack on their own retries, inheriting this protection.
+// mid-answer (timeout, reset, truncation) is re-sent as the whole original
+// request with exponential back-off capped at 32s plus 0–25% upward jitter,
+// and every retry is announced through the stream sink so each surface can
+// drop the dead attempt's text and show the retry cards. It is applied last
+// of the chain inside WrapRecoverableLLM, making it the outermost retry:
+// transport is the first boundary a request succeeds or dies on, and the
+// recovery layers above (compaction, blank-output, 529) re-enter the whole
+// inner stack on their own retries, inheriting this protection.
 //
 // maxRetries is the retry cap (agents.defaults.network_retry_max, default
-// 10). 0 disables the layer entirely — no wrapper, no retries.
+// 10, at most config.MaxNetworkRetryMax). 0 disables the layer entirely — no
+// wrapper, no retries.
 func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int) llm.LLM {
 	if inner == nil {
 		return nil
@@ -361,13 +332,17 @@ func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int) llm.LLM {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	if maxRetries > appcfg.MaxNetworkRetryMax {
+		maxRetries = appcfg.MaxNetworkRetryMax
+	}
 	if maxRetries == 0 {
 		return inner
 	}
 	retryMW, err := llm.NewRetry(
 		1+maxRetries, // the first call is attempt 0: 1 + N retries
 		llm.WithShouldRetry(llm.IsRetryableNetworkError),
-		llm.WithUnboundedBackoff(),
+		llm.WithMaxBackoff(32*time.Second),
+		llm.WithUpwardJitter(),
 		llm.WithRetryNotify(func(ctx context.Context, tr llm.TransportRetry) {
 			if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnTransportRetry != nil {
 				sink.OnTransportRetry(tr)
@@ -377,7 +352,23 @@ func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int) llm.LLM {
 	if err != nil {
 		return inner
 	}
-	return llm.Use(inner, retryMW)
+	return networkRetryLLM{inner: llm.Use(inner, retryMW), maxRetries: maxRetries}
+}
+
+// networkRetryLLM rewrites the retry loop's exhaustion into the sentence a
+// user reads when the network never came back.
+type networkRetryLLM struct {
+	inner      llm.LLM
+	maxRetries int
+}
+
+func (n networkRetryLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	res, err := n.inner.Execute(ctx, messages, tools)
+	var exhausted *llm.MaxAttemptsExceededError
+	if err != nil && errors.As(err, &exhausted) {
+		return nil, fmt.Errorf("network error, gave up after %d retries: %w", n.maxRetries, exhausted.Err)
+	}
+	return res, err
 }
 
 func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {

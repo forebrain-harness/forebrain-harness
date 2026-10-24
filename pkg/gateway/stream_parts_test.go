@@ -253,19 +253,26 @@ func decodeStreamPartial(t *testing.T, msg wsServerMsg) *streamPartialSnapshot {
 	}
 }
 
-// A transport retry is a continuation: the subagent text this registry
-// accumulated stays and the continued attempt's deltas append to it, so a page
-// reconnecting mid-retry is shown the whole answer-so-far, exactly as a page
-// that watched it live.
-func TestStreamPartsTransportRetryKeepsAccumulating(t *testing.T) {
+// A transport retry drops the dead attempt's words: the subagent text this
+// registry accumulated is cleared and the retried attempt's deltas start
+// over, so a page reconnecting mid-retry is shown the answer from scratch,
+// exactly as a page that watched the dead words be withdrawn live. The
+// retry's Cleared notice changes nothing — the drop already happened.
+func TestStreamPartsTransportRetryDropsTheDeadAttempt(t *testing.T) {
 	parts := newStreamParts()
 
 	parts.observe(event.NewRunEvent("", "child-run", "session-1", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: "partial words", AgentID: "task-1"}, time.Now()))
 	parts.observe(event.NewRunEvent("", "child-run", "session-1", event.RunEventTransportRetry,
 		event.TransportRetryPayload{Retry: 1, Total: 10, WaitMs: 500, Error: "read tcp: i/o timeout", AgentID: "task-1"}, time.Now()))
-	parts.observe(event.NewRunEvent("", "child-run", "session-1", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: " continued", AgentID: "task-1"}, time.Now()))
+	parts.observe(event.NewRunEvent("", "child-run", "session-1", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: "full answer", AgentID: "task-1"}, time.Now()))
 
 	child, ok := parts.snapshotRun("child-run", "task-1")
 	require.True(t, ok)
-	require.Equal(t, "partial words continued", child.Content)
+	require.Equal(t, "full answer", child.Content)
+
+	parts.observe(event.NewRunEvent("", "child-run", "session-1", event.RunEventTransportRetry,
+		event.TransportRetryPayload{Retry: 1, Total: 10, Cleared: true, AgentID: "task-1"}, time.Now()))
+	child, ok = parts.snapshotRun("child-run", "task-1")
+	require.True(t, ok)
+	require.Equal(t, "full answer", child.Content)
 }

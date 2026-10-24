@@ -345,12 +345,13 @@ func Run(ctx context.Context, opts Options) error {
 		// succeeded, in the session they describe; a failed activation discards
 		// them so the surface never says the user is somewhere they are not.
 		holdFramesForSwitch := strings.TrimSpace(ev.SwitchSessionID) != ""
-		// A transport failure killed the attempt mid-stream: seal its live
-		// blocks where they stand BEFORE the error/retry cards render, so the
+		// A transport failure killed the attempt mid-stream: withdraw its
+		// live blocks BEFORE the error/retry cards render, so the
 		// trailing-block walk still finds them and the retried attempt's
-		// first delta starts a block of its own below the kept words.
-		if retry, ok := m.(TransportRetryMsg); ok && !retry.turn.isWithdrawn() && renderer != nil {
-			renderer.SealDeadStreamBlocks(retry.AgentID)
+		// first delta starts a block of its own. The retry's Cleared notice
+		// withdraws nothing.
+		if retry, ok := m.(TransportRetryMsg); ok && !retry.Cleared && !retry.turn.isWithdrawn() && renderer != nil {
+			renderer.WithdrawDeadStreamBlocks(retry.AgentID)
 		}
 		if !holdFramesForSwitch {
 			for _, frame := range ev.Frames {

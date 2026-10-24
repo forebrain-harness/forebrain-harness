@@ -4900,7 +4900,7 @@ describe('useChatStream stream_partial', () => {
   })
 })
 
-  it('renders the transport retry: dead text out, card pair in, recovery removes the card', async () => {
+  it('renders the transport retry: dead text withdrawn, card pair in, recovery opens its own block', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket
     Object.defineProperty(globalThis, 'WebSocket', {
@@ -4927,15 +4927,16 @@ describe('useChatStream stream_partial', () => {
       let primary = stream.messages.value[stream.messages.value.length - 1]
       expect(primary?.blocks?.some((b) => b.kind === 'assistant' && b.open)).toBe(true)
 
-      // The stream died mid-answer. What was already shown is kept — sealed
-      // where it stands, the way a completed block seals — the error card
-      // carries the failure, and the retry card carries the progress straight
-      // from the payload — 1/3 here, proving no surface hard-codes a
-      // denominator of 10.
+      // The stream died mid-answer. The dead attempt's half answer is
+      // withdrawn — the whole request is re-sent, so the half words never
+      // happened — while the thinking block that had already finished
+      // stays. The error card carries the failure and the retry card
+      // carries the progress straight from the payload — 1/3 here, proving
+      // no surface hard-codes a denominator of 10.
       runEvent('transport_retry', { retry: 1, total: 3, wait_ms: 500, error: 'read tcp 10.0.0.1:1->10.0.0.2:2: i/o timeout' })
       primary = stream.messages.value[stream.messages.value.length - 1]
       const blocks = primary?.blocks ?? []
-      expect(blocks.some((b) => b.kind === 'assistant' && !b.open && b.text === 'half an an')).toBe(true)
+      expect(blocks.some((b) => b.kind === 'assistant' && b.text === 'half an an')).toBe(false)
       expect(blocks.some((b) => b.kind === 'thinking' && !b.open)).toBe(true)
       expect(blocks.filter((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toHaveLength(1)
       const retryBlock = blocks.find((b) => b.kind === 'retry') as Extract<TimelineBlock, { kind: 'retry' }> | undefined
@@ -4950,21 +4951,79 @@ describe('useChatStream stream_partial', () => {
       expect((primary?.blocks ?? []).filter((b) => b.kind === 'retry')).toHaveLength(1)
       expect((primary?.blocks ?? []).filter((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toHaveLength(1)
 
-      // Recovery: the continuation's first words remove the retry card and
-      // open a NEW block below the sealed words — the answer continues, it is
-      // never rewritten over, never doubled.
+      // Recovery: the re-sent request's first words remove the retry card
+      // and open a NEW block — the dead half answer is gone, never glued
+      // onto, never doubled.
       runEvent('assistant_delta', { text: 'and this is the rest' })
       primary = stream.messages.value[stream.messages.value.length - 1]
       const after = primary?.blocks ?? []
       expect(after.some((b) => b.kind === 'retry')).toBe(false)
       expect(after.some((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toBe(true)
-      expect(after.some((b) => b.kind === 'assistant' && !b.open && b.text === 'half an an')).toBe(true)
-      expect(after.some((b) => b.kind === 'assistant' && b.open && b.text === 'and this is the rest')).toBe(true)
+      const answerBlocks = after.filter((b) => b.kind === 'assistant') as Extract<TimelineBlock, { kind: 'assistant' }>[]
+      expect(answerBlocks).toHaveLength(1)
+      expect(answerBlocks[0]?.open && answerBlocks[0]?.text === 'and this is the rest').toBe(true)
       runEvent('turn_completed', { text: 'and this is the rest' })
       await pendingSend
       const final = stream.messages.value.find((message) => message.runId === 'run-1')
-      expect(final?.content).toContain('half an an')
       expect(final?.content).toContain('and this is the rest')
+      expect(final?.content).not.toContain('half an an')
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+    }
+  })
+
+  it('withdraws only the dead round: earlier rounds of the same turn keep their words', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: FakeChatWebSocket,
+    })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('assistant_delta', { text: 'first round ' })
+      runEvent('tool_call_started', {
+        step_id: 'call-1',
+        tool_name: 'shell',
+        summary: 'running rg',
+        tool_meta: { tool_name: 'shell', status: 'running' },
+      })
+      runEvent('tool_call_completed', {
+        step_id: 'call-1',
+        tool_name: 'shell',
+        summary: 'ran rg · 3 matches',
+        display_body: 'a/b.go:1',
+        tool_meta: { tool_name: 'shell', status: 'completed' },
+      })
+      runEvent('assistant_delta', { text: 'dead' })
+      runEvent('transport_retry', { retry: 1, total: 3, wait_ms: 500, error: 'read tcp: i/o timeout' })
+
+      // The tool boundary closed round one's block, so only the dead round's
+      // words leave the composer buffer; the first round keeps its place.
+      expect(stream.answer.value).toBe('first round ')
+      const primary = stream.messages.value[stream.messages.value.length - 1]
+      const spoken = (primary?.blocks ?? []).filter((b) => b.kind === 'assistant') as Extract<TimelineBlock, { kind: 'assistant' }>[]
+      expect(spoken.some((b) => b.text === 'first round ')).toBe(true)
+      expect(spoken.some((b) => b.text === 'dead')).toBe(false)
+      runEvent('turn_completed', { text: 'first round ' })
+      await pendingSend
     } finally {
       Object.defineProperty(globalThis, 'WebSocket', {
         configurable: true,
@@ -5017,6 +5076,50 @@ describe('useChatStream stream_partial', () => {
     }
   })
 
+  it('treats a cleared transport_retry as a no-op: blocks unchanged', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: FakeChatWebSocket,
+    })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('assistant_delta', { text: 'live words of the retried attempt' })
+      runEvent('transport_retry', { retry: 1, total: 3, cleared: true })
+
+      // The cleared notice ends the retry; it withdraws nothing, adds no
+      // cards, and the words the retried attempt is streaming stay.
+      const primary = stream.messages.value[stream.messages.value.length - 1]
+      const blocks = primary?.blocks ?? []
+      expect(blocks.some((b) => b.kind === 'assistant' && b.open && b.text === 'live words of the retried attempt')).toBe(true)
+      expect(blocks.some((b) => b.kind === 'retry')).toBe(false)
+      expect(blocks.some((b) => b.kind === 'error')).toBe(false)
+      expect(stream.answer.value).toBe('live words of the retried attempt')
+      runEvent('turn_completed', { text: 'live words of the retried attempt' })
+      await pendingSend
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+    }
+  })
+
   it('scopes a subagent transport retry to the subagent transcript', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket
@@ -5051,14 +5154,14 @@ describe('useChatStream stream_partial', () => {
       runEvent('transport_retry', { agent_id: 'task-explore-1', retry: 1, total: 10, wait_ms: 500, error: 'read tcp: i/o timeout' })
 
       // The card pair lands in the subagent's own transcript with the same
-      // shape the conversation draws, the streamed words stay sealed in
-      // place, and the conversation's blocks stay untouched: same semantics,
-      // one event.
+      // shape the conversation draws, the dead attempt's words are withdrawn
+      // rather than sealed, and the conversation's blocks stay untouched:
+      // same semantics, one event.
       const entry = stream.subagents.value.find((row) => row.agentId === 'task-explore-1')
       expect(entry).toBeTruthy()
       const retryBlock = (entry?.blocks ?? []).find((b) => b.kind === 'retry') as Extract<TimelineBlock, { kind: 'retry' }> | undefined
       expect(retryBlock).toMatchObject({ retry: 1, total: 10 })
-      expect((entry?.blocks ?? []).some((b) => b.kind === 'assistant' && !b.open && b.text === 'dead words')).toBe(true)
+      expect((entry?.blocks ?? []).some((b) => b.kind === 'assistant' && b.text === 'dead words')).toBe(false)
       expect((entry?.blocks ?? []).some((b) => b.kind === 'error' && b.id === 'transport-retry-error')).toBe(true)
       const primary = stream.messages.value[stream.messages.value.length - 1]
       expect((primary?.blocks ?? []).some((b) => b.kind === 'retry')).toBe(false)

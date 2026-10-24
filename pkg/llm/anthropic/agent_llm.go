@@ -378,17 +378,13 @@ func agentAnthropicMessagesToAPI(messages []llm.Message) ([]anthropicapi.TextBlo
 						input = map[string]any{}
 					}
 				}
-			blocks = append(blocks, anthropicapi.NewToolUseBlock(id, input, tc.Function.Name))
-		}
-		// An assistant message with nothing this protocol can express — a
-		// continuation prefill that carried only thinking (this adapter has no
-		// request-side thinking form) — contributes nothing and must not be
-		// sent: an empty content array is a request error. Its words, if it
-		// had any, are in the text blocks above.
-		if len(blocks) == 0 {
-			continue
-		}
-		out = append(out, anthropicapi.NewAssistantMessage(blocks...))
+				blocks = append(blocks, anthropicapi.NewToolUseBlock(id, input, tc.Function.Name))
+			}
+			// An assistant message with nothing this protocol can express contributes nothing and must not be sent: an empty content array is a request error.
+			if len(blocks) == 0 {
+				continue
+			}
+			out = append(out, anthropicapi.NewAssistantMessage(blocks...))
 		case llm.RoleTool:
 			toolUseID := strings.TrimSpace(m.ToolCallID)
 			if toolUseID == "" {

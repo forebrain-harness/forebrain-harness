@@ -1118,6 +1118,23 @@ func TestNetworkRetryMaxDefaultsToTenAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestNetworkRetryMaxCapsAtFifteen(t *testing.T) {
+	value := func(v int) *int { return &v }
+	for _, tc := range []struct {
+		configured int
+		want       int
+	}{
+		{12, 12},
+		{99, 15},
+		{0, 0},
+	} {
+		d := AgentDefaults{NetworkRetryMax: value(tc.configured)}
+		if got := d.NetworkRetryMaxOrDefault(); got != tc.want {
+			t.Fatalf("configured %d: NetworkRetryMaxOrDefault = %d, want %d", tc.configured, got, tc.want)
+		}
+	}
+}
+
 func TestNetworkRetryMaxLoadRejectsNegativeAndAllowsAnyLargerValue(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "forebrain.yaml")
@@ -1128,7 +1145,8 @@ func TestNetworkRetryMaxLoadRejectsNegativeAndAllowsAnyLargerValue(t *testing.T)
 		t.Fatalf("negative load error = %v, want agents.defaults.network_retry_max must be non-negative", err)
 	}
 
-	// No upper bound: a large custom cap loads as-is.
+	// No load-time bound: a large custom cap loads as written and only the
+	// resolution runs it at the ceiling.
 	if err := os.WriteFile(path, []byte("agents:\n  defaults:\n    network_retry_max: 100\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -1136,8 +1154,11 @@ func TestNetworkRetryMaxLoadRejectsNegativeAndAllowsAnyLargerValue(t *testing.T)
 	if err != nil {
 		t.Fatalf("Load 100: %v", err)
 	}
-	if got := loaded.Agents.Defaults.NetworkRetryMaxOrDefault(); got != 100 {
-		t.Fatalf("loaded value = %d, want 100", got)
+	if loaded.Agents.Defaults.NetworkRetryMax == nil || *loaded.Agents.Defaults.NetworkRetryMax != 100 {
+		t.Fatalf("reloaded pointer = %v, want the configured 100 kept as written", loaded.Agents.Defaults.NetworkRetryMax)
+	}
+	if got := loaded.Agents.Defaults.NetworkRetryMaxOrDefault(); got != MaxNetworkRetryMax {
+		t.Fatalf("loaded value = %d, want the ceiling %d", got, MaxNetworkRetryMax)
 	}
 }
 

@@ -1384,11 +1384,13 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		if m.turn.isWithdrawn() {
 			return EventResult{}
 		}
+		if m.Cleared {
+			return EventResult{}
+		}
 		// The streamed buffers start over for the retry — the retried attempt
 		// re-streams from the first token and would otherwise glue onto the
-		// dead attempt's words. The words themselves stay: run.go seals their
-		// live blocks on screen and the engine persisted them as the
-		// interrupted message they are.
+		// dead attempt's words. run.go withdraws the dead attempt's live
+		// blocks.
 		agentID := strings.TrimSpace(m.AgentID)
 		if buf := r.agentBuf(agentID); buf != nil {
 			buf.assistant.Reset()
@@ -1411,9 +1413,7 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			Retry:      m.Retry,
 			RetryTotal: m.Total,
 		}
-		if m.Exhausted {
-			card.Final = true
-		} else if m.Wait > 0 {
+		if m.Wait > 0 {
 			card.RetryDeadline = time.Now().Add(m.Wait)
 		}
 		frames = append(frames, card)
@@ -5349,15 +5349,14 @@ func (r *Renderer) dismissLiveRetryCardsLocked(all bool, agentID string) {
 	r.syncLiveBlockAnimationLocked()
 }
 
-// SealDeadStreamBlocks finalizes the trailing live assistant and thinking
-// blocks of the stream that just died on the network: what the user already
-// watched appear stays — a shown half answer is a message that happened, and
-// the engine persisted it as one — so the blocks are sealed where they stand
-// (the way a completed block seals) instead of removed, and the retried
-// attempt's first delta starts its own new block below them. A zero-output
-// death holds no live blocks and is a no-op. run.go calls this from its
-// TransportRetryMsg branch before the error/retry cards render.
-func (r *Renderer) SealDeadStreamBlocks(agentID string) {
+// WithdrawDeadStreamBlocks removes the trailing live assistant and thinking
+// blocks of the stream that just died on the network: the dead attempt's
+// half-streamed words are withdrawn — the retry re-sends the whole request
+// and its first delta starts its own block — while blocks that already
+// finished (Final) stay, sealed as history. A zero-output death holds no live
+// blocks and is a no-op. run.go calls this from its TransportRetryMsg branch
+// before the error/retry cards render.
+func (r *Renderer) WithdrawDeadStreamBlocks(agentID string) {
 	if r == nil {
 		return
 	}
@@ -5371,18 +5370,17 @@ func (r *Renderer) SealDeadStreamBlocks(agentID string) {
 			return
 		}
 	}
-	sealed := false
+	removed := false
 	for n := len(vm.blocks); n > 0; n-- {
 		f := vm.blocks[n-1].frame
 		if f.Final || (f.Kind != FrameAssistant && f.Kind != FrameThinking) {
 			break
 		}
-		vm.blocks[n-1].frame.Final = true
-		vm.blocks[n-1].frame.turn = nil
-		vm.blocks[n-1].cache.valid = false
-		sealed = true
+		vm.blocks[n-1] = nil
+		vm.blocks = vm.blocks[:n-1]
+		removed = true
 	}
-	if !sealed {
+	if !removed {
 		return
 	}
 	if r.activeView != agentID {

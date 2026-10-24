@@ -6308,14 +6308,17 @@ func TestSubagentTransportRetryIsPublishedAndRetried(t *testing.T) {
 	if inner.calls != 2 {
 		t.Fatalf("provider calls = %d, want 2 (the dropped stream retried)", inner.calls)
 	}
-	if len(probe.transportRetry) != 1 {
-		t.Fatalf("transport_retry events = %#v, want exactly one", probe.transportRetry)
+	if len(probe.transportRetry) != 2 {
+		t.Fatalf("transport_retry events = %#v, want the retry and its cleared notice", probe.transportRetry)
 	}
 	tr := probe.transportRetry[0]
 	if tr.AgentID != "task-search-1" {
 		t.Fatalf("transport_retry agent = %q, want the roster key so the card lands in the subagent's view", tr.AgentID)
 	}
-	if tr.Retry != 1 || tr.Total != 3 || tr.Exhausted || tr.Error == "" || tr.WaitMs <= 0 {
-		t.Fatalf("transport_retry payload = %+v, want retry 1/3 with the failure and a wait", tr)
+	if tr.Retry != 1 || tr.Total != 3 || tr.Cleared || tr.Error == "" || tr.WaitMs <= 0 {
+		t.Fatalf("transport_retry payload = %+v, want retry 1/3 in flight with the failure and a wait", tr)
+	}
+	if !probe.transportRetry[1].Cleared {
+		t.Fatalf("transport_retry events = %#v, want the cleared notice second", probe.transportRetry)
 	}
 }

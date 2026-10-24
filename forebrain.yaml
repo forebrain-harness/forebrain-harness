@@ -181,9 +181,8 @@ agents:
     # execution:
     #   max_parallel_subagents: 7
     # Default: 10. Retry cap for LLM transport failures (a dropped stream
-    # mid-answer). 0 disables network retries; any larger value is allowed —
-    # retry waits grow exponentially and without a ceiling, so large caps mean
-    # very long waits.
+    # mid-answer). 0 disables network retries; values above 15 run as 15.
+    # Waits start at 0.5s and double up to 32s.
     # network_retry_max: 10
     # Default: none.
     # Example: context injection and bootstrap settings.

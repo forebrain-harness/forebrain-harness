@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,7 +173,7 @@ func WithInitialBackoff(d time.Duration) RetryOption {
 	return func(c *retryConfig) { c.initialBackoff = d }
 }
 
-func TestNewRetry_NotifyPayloadAndExhausted(t *testing.T) {
+func TestNewRetry_NotifyPayloadAndCleared(t *testing.T) {
 	calls := 0
 	boom := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
 	inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
@@ -194,7 +195,8 @@ func TestNewRetry_NotifyPayloadAndExhausted(t *testing.T) {
 		t.Fatal("expected exhaustion error")
 	}
 
-	// Three pre-sleep notifications (retry 1, 2, 3) plus one exhausted.
+	// Three pre-sleep notifications (retry 1, 2, 3) plus one cleared notice
+	// from the loop's return.
 	if len(got) != 4 {
 		t.Fatalf("notifications = %d, want 4: %+v", len(got), got)
 	}
@@ -202,16 +204,19 @@ func TestNewRetry_NotifyPayloadAndExhausted(t *testing.T) {
 		if tr.Retry != i+1 || tr.Total != 3 {
 			t.Fatalf("notification %d: Retry=%d Total=%d, want %d/3", i, tr.Retry, tr.Total, i+1)
 		}
-		if tr.Exhausted {
-			t.Fatalf("notification %d must not be Exhausted", i)
+		if tr.Cleared {
+			t.Fatalf("notification %d must not be Cleared", i)
 		}
 		if tr.Err != boom {
 			t.Fatalf("notification %d: Err = %v, want the failure", i, tr.Err)
 		}
 	}
 	last := got[3]
-	if !last.Exhausted || last.Retry != 3 || last.Total != 3 || last.Wait != 0 || last.Err != boom {
-		t.Fatalf("exhausted notification = %+v, want Exhausted 3/3 wait 0 with the last error", last)
+	if !last.Cleared || last.Retry != 3 || last.Total != 3 {
+		t.Fatalf("cleared notification = %+v, want Cleared 3/3", last)
+	}
+	if last.Err != nil || last.Wait != 0 {
+		t.Fatalf("cleared notification = %+v, want no error and no wait", last)
 	}
 	if calls != 4 {
 		t.Fatalf("callCount=%d, want 4", calls)
@@ -242,54 +247,151 @@ func TestNewRetry_NotifySilentOnPredicateRejection(t *testing.T) {
 	}
 }
 
-func TestRetryBackoffUnboundedVersusCapped(t *testing.T) {
-	run := func(unbounded bool) []TransportRetry {
-		inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
-			return nil, errors.New("transient")
-		}}
-		var notes []TransportRetry
-		cfg := &retryConfig{
-			maxAttempts:    4,
-			initialBackoff: time.Millisecond,
-			maxBackoff:     2 * time.Millisecond,
-			shouldRetry:    func(error) bool { return true },
-			notify:         func(_ context.Context, tr TransportRetry) { notes = append(notes, tr) },
-		}
-		if unbounded {
-			WithUnboundedBackoff()(cfg)
-		}
-		if _, err := (&retryLLM{inner: inner, cfg: cfg}).Execute(context.Background(), nil, nil); err == nil {
-			t.Fatal("expected exhaustion error")
-		}
-		return notes
+func TestRetryBackoffCapsWithUpwardJitter(t *testing.T) {
+	inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		return nil, errors.New("transient")
+	}}
+	var notes []TransportRetry
+	cfg := &retryConfig{
+		maxAttempts:    4,
+		initialBackoff: time.Millisecond,
+		maxBackoff:     2 * time.Millisecond,
+		upwardJitter:   true,
+		shouldRetry:    func(error) bool { return true },
+		notify:         func(_ context.Context, tr TransportRetry) { notes = append(notes, tr) },
+	}
+	if _, err := (&retryLLM{inner: inner, cfg: cfg}).Execute(context.Background(), nil, nil); err == nil {
+		t.Fatal("expected exhaustion error")
 	}
 
-	// Jitter keeps each wait within [75%, 125%] of its back-off step, so the
-	// capped run saturates near 2ms while the unbounded run keeps doubling
-	// past it (3rd wait ≈4ms). Each list also carries the trailing exhausted
-	// notification (Wait=0).
-	waits := func(run []TransportRetry) []time.Duration {
-		var out []time.Duration
-		for _, tr := range run {
-			if !tr.Exhausted {
-				out = append(out, tr.Wait)
-			}
+	// Upward jitter keeps each wait within [step, step+25%] of its back-off
+	// step, and the cap pins the third step at 2ms instead of letting it
+	// double to 4ms. The list ends with the loop's cleared notice.
+	if len(notes) != 4 || !notes[3].Cleared {
+		t.Fatalf("notifications = %+v, want 3 waits plus the cleared one", notes)
+	}
+	steps := []time.Duration{time.Millisecond, 2 * time.Millisecond, 2 * time.Millisecond}
+	for i, tr := range notes[:3] {
+		if tr.Cleared {
+			t.Fatalf("notification %d must not be Cleared", i)
 		}
-		return out
+		lo, hi := steps[i], steps[i]+steps[i]/4
+		if tr.Wait < lo || tr.Wait > hi {
+			t.Fatalf("wait %d = %v, want it within [%v, %v]", i, tr.Wait, lo, hi)
+		}
 	}
-	cappedAll := run(false)
-	if len(cappedAll) != 4 || !cappedAll[3].Exhausted {
-		t.Fatalf("capped notifications = %+v, want 3 waits plus the exhausted one", cappedAll)
+}
+
+// The cleared notice fires on the retried request's first non-empty delta —
+// before its downstream delta, and exactly once even though the loop also
+// returns later.
+func TestNewRetry_ClearedOnFirstDeltaAfterRetry(t *testing.T) {
+	var seq []string
+	boom := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	calls := 0
+	inner := &stubLLM{fn: func(ctx context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		calls++
+		if calls == 1 {
+			return nil, boom
+		}
+		if sink := StreamSinkFrom(ctx); sink != nil && sink.OnDelta != nil {
+			sink.OnDelta("hi")
+		}
+		msg := Message{Parts: []ContentPart{Text("hi")}}
+		return &Result{Message: &msg}, nil
+	}}
+
+	mw, err := NewRetry(3,
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) {
+			if tr.Cleared {
+				seq = append(seq, "cleared")
+				return
+			}
+			seq = append(seq, "retry 1")
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
 	}
-	capped := waits(cappedAll)
-	if capped[2] > 2500*time.Microsecond {
-		t.Fatalf("capped waits = %v, want the third one at the 2ms ceiling", capped)
+	sink := &StreamSink{OnDelta: func(text string) { seq = append(seq, "delta "+text) }}
+	if _, err := Use(inner, mw).Execute(WithStreamSink(context.Background(), sink), nil, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
-	unbounded := waits(run(true))
-	if len(unbounded) != 3 {
-		t.Fatalf("unbounded waits = %v, want 3 entries", unbounded)
+	if got := strings.Join(seq, "|"); got != "retry 1|cleared|delta hi" {
+		t.Fatalf("sequence = %q, want retry 1, cleared, delta hi and nothing after", got)
 	}
-	if unbounded[2] < 2800*time.Microsecond {
-		t.Fatalf("unbounded waits = %v, want the third one doubling past the ceiling (≈4ms)", unbounded)
+}
+
+// Without a notify callback the middleware keeps its hands off the sink: the
+// inner LLM sees the caller's sink pointer, identical.
+func TestNewRetry_LeavesSinkAloneWithoutNotify(t *testing.T) {
+	boom := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	calls := 0
+	var seen *StreamSink
+	inner := &stubLLM{fn: func(ctx context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		calls++
+		seen = StreamSinkFrom(ctx)
+		if calls == 1 {
+			return nil, boom
+		}
+		msg := Message{Parts: []ContentPart{Text("ok")}}
+		return &Result{Message: &msg}, nil
+	}}
+
+	mw, err := NewRetry(2,
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	sink := &StreamSink{}
+	if _, err := Use(inner, mw).Execute(WithStreamSink(context.Background(), sink), nil, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if seen != sink {
+		t.Fatal("without a notify callback the sink must pass through untouched")
+	}
+}
+
+// A retry re-sends the original request: both attempts see the same messages,
+// with no continuation appended between them.
+func TestNewRetry_ResendsTheSameMessages(t *testing.T) {
+	boom := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	calls := 0
+	var received [][]Message
+	inner := &stubLLM{fn: func(_ context.Context, messages []Message, _ []*Tool) (*Result, error) {
+		calls++
+		received = append(received, append([]Message(nil), messages...))
+		if calls == 1 {
+			return nil, boom
+		}
+		msg := Message{Parts: []ContentPart{Text("full answer")}}
+		return &Result{Message: &msg}, nil
+	}}
+
+	mw, err := NewRetry(2,
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	messages := []Message{UserMessage(Text("hello"))}
+	if _, err := Use(inner, mw).Execute(context.Background(), messages, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(received) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(received))
+	}
+	for i, got := range received {
+		if len(got) != 1 || got[0].Role != RoleUser || got[0].TextContent() != "hello" {
+			t.Fatalf("attempt %d messages = %+v, want the original request unchanged", i+1, got)
+		}
 	}
 }

@@ -494,10 +494,13 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 		// turn buffer's streamed text (the retry re-streams from the first
 		// token) and let the reducer paint the error/retry cards. It must
 		// NOT acknowledge the response — a zero-output death leaves the
-		// withdraw window open, and Esc still takes the message back.
+		// withdraw window open, and Esc still takes the message back. The
+		// retry's Cleared notice drops nothing; it only ends the retry.
 		OnTransportRetry: func(tr llm.TransportRetry) {
-			accum.Reset()
-			s.notifyUIForSession(sessionID, TransportRetryMsg{turn: foreground, Retry: tr.Retry, Total: tr.Total, Wait: tr.Wait, Err: tr.Err, Exhausted: tr.Exhausted})
+			if !tr.Cleared {
+				accum.Reset()
+			}
+			s.notifyUIForSession(sessionID, TransportRetryMsg{turn: foreground, Retry: tr.Retry, Total: tr.Total, Wait: tr.Wait, Err: tr.Err, Cleared: tr.Cleared})
 		},
 		OnWebSearch: func(id, detail string, completed bool) {
 			if !foreground.acknowledgeResponse() {

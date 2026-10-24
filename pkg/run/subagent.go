@@ -1021,17 +1021,22 @@ func EventStreamSink(ctx context.Context, sink event.Sink, runID, sessionID, age
 		OnReasoningDone: func() {
 			publishEvent(ctx, sink, runID, sessionID, event.RunEventReasoningDone, event.ReasoningDonePayload{AgentID: agentID})
 		},
-		// The transport retry is published here and nowhere else: the failure
-		// and the retry about to run reach every watching surface through the
-		// same event, cards on both ends driven by one payload.
+		// The transport retry is published here and nowhere else: the failure and
+		// the retry about to run (and, Cleared, its end) reach every watching
+		// surface through the same event, cards on both ends driven by one
+		// payload.
 		OnTransportRetry: func(tr llm.TransportRetry) {
+			errText := ""
+			if tr.Err != nil {
+				errText = tr.Err.Error()
+			}
 			publishEvent(ctx, sink, runID, sessionID, event.RunEventTransportRetry, event.TransportRetryPayload{
-				Retry:     tr.Retry,
-				Total:     tr.Total,
-				WaitMs:    tr.Wait.Milliseconds(),
-				Error:     tr.Err.Error(),
-				AgentID:   agentID,
-				Exhausted: tr.Exhausted,
+				Retry:   tr.Retry,
+				Total:   tr.Total,
+				WaitMs:  tr.Wait.Milliseconds(),
+				Error:   errText,
+				AgentID: agentID,
+				Cleared: tr.Cleared,
 			})
 		},
 		// Provider-executed web search reaches a surface only through this

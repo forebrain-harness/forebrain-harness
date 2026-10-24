@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
@@ -43,15 +44,15 @@ func (m *netRetryTestLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm
 	return &llm.Result{Message: &msg}, nil
 }
 
-// continuationCaptureLLM records the messages each attempt received and
-// behaves like the owner's dropped-stream scenario: attempt 1 streams part of
-// an answer and dies on the network, attempt 2 succeeds.
-type continuationCaptureLLM struct {
+// resendCaptureLLM records the messages each attempt received and behaves
+// like the owner's dropped-stream scenario: attempt 1 streams part of an
+// answer and dies on the network, attempt 2 succeeds.
+type resendCaptureLLM struct {
 	calls    int
 	received [][]llm.Message
 }
 
-func (m *continuationCaptureLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+func (m *resendCaptureLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -61,27 +62,19 @@ func (m *continuationCaptureLLM) Execute(ctx context.Context, messages []llm.Mes
 	if m.calls == 1 {
 		if sink != nil && sink.OnDelta != nil {
 			sink.OnDelta("par")
-			sink.OnDelta("tial")
-		}
-		if sink != nil && sink.OnReasoningDelta != nil {
-			sink.OnReasoningDelta("half a thought")
 		}
 		return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
 	}
-	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text(" continued")})
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("full answer")})
 	return &llm.Result{Message: &msg}, nil
 }
 
-func TestNetworkRetryContinuesFromTheStreamedText(t *testing.T) {
-	inner := &continuationCaptureLLM{}
-	// The mounted shape: the prefill wrapper innermost, the network retry
-	// around it.
-	wrapped := wrapNetworkRetryLLM(wrapContinuationPrefillLLM(inner), 3)
+func TestNetworkRetryResendsTheOriginalRequest(t *testing.T) {
+	inner := &resendCaptureLLM{}
+	wrapped := wrapNetworkRetryLLM(inner, 3)
 
-	var sinkDeltas []string
 	var notes []llm.TransportRetry
 	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
-		OnDelta:          func(s string) { sinkDeltas = append(sinkDeltas, s) },
 		OnTransportRetry: func(tr llm.TransportRetry) { notes = append(notes, tr) },
 	})
 
@@ -89,37 +82,64 @@ func TestNetworkRetryContinuesFromTheStreamedText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if res == nil || res.Message == nil || res.Message.TextContent() != " continued" {
-		t.Fatalf("result = %+v, want the continued attempt's answer", res)
+	if res == nil || res.Message == nil || res.Message.TextContent() != "full answer" {
+		t.Fatalf("result = %+v, want the retried attempt's answer", res)
 	}
 	if inner.calls != 2 {
-		t.Fatalf("provider calls = %d, want 2 (dropped + continued)", inner.calls)
+		t.Fatalf("provider calls = %d, want 2 (dropped + re-sent)", inner.calls)
 	}
-	if len(sinkDeltas) != 2 {
-		t.Fatalf("sink deltas = %v, want the dead attempt's deltas", sinkDeltas)
-	}
-	if len(notes) != 1 || notes[0].Retry != 1 || notes[0].Total != 3 {
-		t.Fatalf("notifications = %+v, want retry 1/3", notes)
-	}
-	// The continuation contract: attempt 1 received the plain request; the
-	// retry received it plus the assistant message carrying what the dead
-	// attempt had already streamed — answer text and thinking both.
+	// The resend contract: attempt 2 received exactly the request attempt 1
+	// did — nothing continued, nothing appended.
 	if len(inner.received) != 2 {
 		t.Fatalf("captured attempts = %d, want 2", len(inner.received))
 	}
-	if len(inner.received[0]) != 1 || inner.received[0][0].Role != llm.RoleUser {
-		t.Fatalf("attempt 1 messages = %+v, want the plain request", inner.received[0])
+	for i, got := range inner.received {
+		if len(got) != 1 || got[0].Role != llm.RoleUser || got[0].TextContent() != "hi" {
+			t.Fatalf("attempt %d messages = %+v, want the original request unchanged", i+1, got)
+		}
 	}
-	second := inner.received[1]
-	if len(second) != 2 || second[0].Role != llm.RoleUser {
-		t.Fatalf("attempt 2 messages = %+v, want the request plus the prefill", second)
+	if len(notes) != 2 || notes[0].Retry != 1 || notes[0].Total != 3 || notes[0].Cleared {
+		t.Fatalf("notifications = %+v, want retry 1/3 then its cleared notice", notes)
 	}
-	prefill := second[1]
-	if prefill.Role != llm.RoleAssistant || prefill.TextContent() != "partial" {
-		t.Fatalf("prefill = %+v, want the streamed 'partial' as an assistant message", prefill)
+}
+
+func TestNetworkRetryExhaustionMessage(t *testing.T) {
+	inner := &alwaysNetFailLLM{}
+	wrapped := wrapNetworkRetryLLM(inner, 2)
+
+	_, err := wrapped.Execute(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("expected the exhaustion error")
 	}
-	if !strings.HasPrefix(prefill.Name, llm.Prefix) || !strings.Contains(prefill.Name, "half a thought") {
-		t.Fatalf("prefill Name = %q, want the streamed thinking on the carry", prefill.Name)
+	if !strings.HasPrefix(err.Error(), "network error, gave up after 2 retries: ") {
+		t.Fatalf("error = %v, want the gave-up sentence with the retry count", err)
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) {
+		t.Fatalf("error = %T, want it to still unwrap to the net.Error", err)
+	}
+	if inner.calls != 3 {
+		t.Fatalf("provider calls = %d, want 1 + 2 retries", inner.calls)
+	}
+}
+
+// alwaysNetFailLLM dies on the network every call: the loop's exhaustion path
+// in miniature.
+type alwaysNetFailLLM struct{ calls int }
+
+func (m *alwaysNetFailLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+}
+
+func TestNetworkRetryCapsAtFifteen(t *testing.T) {
+	wrapped := wrapNetworkRetryLLM(&netRetryTestLLM{}, 99)
+	outer, ok := wrapped.(networkRetryLLM)
+	if !ok {
+		t.Fatalf("wrapNetworkRetryLLM returned %T, want networkRetryLLM", wrapped)
+	}
+	if outer.maxRetries != appcfg.MaxNetworkRetryMax {
+		t.Fatalf("maxRetries = %d, want the cap %d", outer.maxRetries, appcfg.MaxNetworkRetryMax)
 	}
 }
 
@@ -212,8 +232,14 @@ func TestNetworkRetryMountOrder(t *testing.T) {
 	if _, err := recoverable.Execute(ctx, nil, nil); err != nil {
 		t.Fatalf("Execute through WrapRecoverableLLM: %v", err)
 	}
-	if len(notes) != 1 || notes[0].Total != 3 {
-		t.Fatalf("notifications through the mounted chain = %+v, want one retry with total 3", notes)
+	if len(notes) != 2 {
+		t.Fatalf("notifications through the mounted chain = %+v, want retry 1/3 then its cleared notice", notes)
+	}
+	if notes[0].Retry != 1 || notes[0].Total != 3 || notes[0].Cleared {
+		t.Fatalf("first notification = %+v, want retry 1/3 in flight", notes[0])
+	}
+	if !notes[1].Cleared {
+		t.Fatalf("second notification = %+v, want the cleared notice", notes[1])
 	}
 
 	summary := wrapNetworkRetryLLM(&netRetryTestLLM{
@@ -225,7 +251,7 @@ func TestNetworkRetryMountOrder(t *testing.T) {
 	}), nil, nil); err != nil {
 		t.Fatalf("Execute through the summary chain: %v", err)
 	}
-	if len(notes) != 1 {
-		t.Fatalf("summary-chain notifications = %+v, want the network retry mounted", notes)
+	if len(notes) != 2 || !notes[1].Cleared {
+		t.Fatalf("summary-chain notifications = %+v, want the network retry mounted (retry then cleared)", notes)
 	}
 }

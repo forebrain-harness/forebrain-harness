@@ -41,31 +41,34 @@ type StreamSink struct {
 	// path, so dropping it per iteration would lose it from resume replay.
 	OnResponseCompleted func()
 	// OnTransportRetry fires when a transport failure killed the current
-	// attempt and the request is about to be re-sent. The notification
-	// implies discard: every holder of the current response's streamed text
-	// must drop it (the next attempt re-streams from the first token), and
-	// every surface shows the failure/retry cards. The middlewares copy the
-	// sink by value, so each layer that keeps state across attempts chains
-	// this callback explicitly (see orchestration's reasoning recorder).
+	// attempt and a retry is about to run (Cleared=false), and once more
+	// when that retry is over (Cleared=true): the retried request started
+	// producing output, or the retry loop returned. A non-Cleared
+	// notification implies discard: every holder of the current response's
+	// streamed in-flight text must drop it — the next attempt re-streams
+	// from the first token — while blocks that already ended stay. The
+	// middlewares copy the sink by value, so each layer that keeps state
+	// across attempts chains this callback explicitly (see orchestration's
+	// reasoning recorder).
 	OnTransportRetry func(TransportRetry)
 	OnEnd            func()
 	Streamed         *bool
 }
 
-// TransportRetry describes one transport failure and the retry about to run.
+// TransportRetry describes one transport failure and the retry around it.
 type TransportRetry struct {
 	// Retry is the retry's 1-based sequence number (the numerator of n/total).
 	Retry int
 	// Total is the retry cap from configuration (default 10).
 	Total int
-	// Wait is the back-off before the next attempt (0 when Exhausted).
+	// Wait is the back-off before the next attempt (0 when Cleared).
 	Wait time.Duration
-	// Err is the failure that just happened, rendered on the error card. When
-	// Exhausted it is the last real error.
+	// Err is the failure that just happened, rendered on the error card.
 	Err error
-	// Exhausted reports that every retry has been used up. It is the only
-	// producer of the retry card's frozen final state.
-	Exhausted bool
+	// Cleared marks the end of a retry: the retried request started producing
+	// output, or the retry loop returned (success, exhaustion or cancel). Only
+	// Retry and Total are set on it.
+	Cleared bool
 }
 
 // NotifyResponseStarted fires the response acknowledgement exactly once for
@@ -98,42 +101,6 @@ func StreamSinkFrom(ctx context.Context) *StreamSink {
 		return nil
 	}
 	v, _ := ctx.Value(llmStreamSinkCtxKey{}).(*StreamSink)
-	return v
-}
-
-// ContinuationPrefill is what a network-interrupted attempt had already
-// streamed when it died: the thinking so far and the answer text so far. A
-// retry carries it so the model CONTINUES from its own words instead of
-// starting over — the continuation message is appended at the innermost layer,
-// where every prompt-shaping wrapper has already had its say.
-type ContinuationPrefill struct {
-	Reasoning string
-	Text      string
-}
-
-// Blank reports whether there is nothing worth continuing from.
-func (p ContinuationPrefill) Blank() bool {
-	return strings.TrimSpace(p.Reasoning) == "" && strings.TrimSpace(p.Text) == ""
-}
-
-type continuationPrefillCtxKey struct{}
-
-// WithContinuationPrefill attaches the partial output the next attempt must
-// continue from.
-func WithContinuationPrefill(ctx context.Context, prefill ContinuationPrefill) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, continuationPrefillCtxKey{}, prefill)
-}
-
-// ContinuationPrefillFrom returns the continuation carried by this request, or
-// the zero value when the request is a fresh one.
-func ContinuationPrefillFrom(ctx context.Context) ContinuationPrefill {
-	if ctx == nil {
-		return ContinuationPrefill{}
-	}
-	v, _ := ctx.Value(continuationPrefillCtxKey{}).(ContinuationPrefill)
 	return v
 }
 

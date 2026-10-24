@@ -1,4 +1,4 @@
-// Retry, rate limiting, and reasoning-content carry-over middleware.
+// Retry and rate-limiting middleware.
 package llm
 
 import (
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math/rand"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,13 +23,14 @@ type retryConfig struct {
 	maxAttempts    int
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
-	// unboundedBackoff keeps the exponential growth uncapped (each wait is
-	// double the previous one, however large that gets). The default stays
-	// capped at maxBackoff for the existing callers.
-	unboundedBackoff bool
-	shouldRetry      func(error) bool
+	// upwardJitter replaces the default ±25% jitter with an upward-only one:
+	// each wait is the back-off step plus 0–25% of it, so a wait never
+	// undershoots the step it was computed from.
+	upwardJitter bool
+	shouldRetry  func(error) bool
 	// notify, when set, is called before every retry sleep and once more
-	// (Exhausted=true) after the last retryable failure. It is how the
+	// (Cleared=true) when that retry is over: the retried request started
+	// producing output, or the retry loop returned. It is how the
 	// network-retry middleware surfaces discard/retry cards; retry chains
 	// that keep no visible state (blank-output retries) leave it unset.
 	notify func(ctx context.Context, tr TransportRetry)
@@ -40,18 +42,21 @@ func WithShouldRetry(fn func(error) bool) RetryOption {
 	return func(c *retryConfig) { c.shouldRetry = fn }
 }
 
-// WithUnboundedBackoff removes the back-off ceiling: waits keep doubling for
-// as many retries as the cap allows. Callers whose retry counts are
-// user-configured and unbounded themselves need this so a large cap is not
-// silently pinned to 30-second waits.
-func WithUnboundedBackoff() RetryOption {
-	return func(c *retryConfig) { c.unboundedBackoff = true }
+// WithMaxBackoff caps each back-off step before jitter is added.
+func WithMaxBackoff(d time.Duration) RetryOption {
+	return func(c *retryConfig) { c.maxBackoff = d }
+}
+
+// WithUpwardJitter replaces the default ±25% jitter with an upward-only one:
+// each wait is the back-off step plus 0–25% of it.
+func WithUpwardJitter() RetryOption {
+	return func(c *retryConfig) { c.upwardJitter = true }
 }
 
 // WithRetryNotify registers a callback fired before each retry sleep, with the
 // 1-based retry number, the retry cap, the wait ahead and the error that
-// caused it; and once more with Exhausted=true after the final retryable
-// failure, before MaxAttemptsExceededError is returned. Errors the predicate
+// caused it; and once more with Cleared=true when that retry is over — the
+// retried request's first output, or the loop's return. Errors the predicate
 // rejected never produce a notification.
 func WithRetryNotify(fn func(ctx context.Context, tr TransportRetry)) RetryOption {
 	return func(c *retryConfig) { c.notify = fn }
@@ -92,39 +97,56 @@ type retryLLM struct {
 	cfg   *retryConfig
 }
 
-// Execute calls inner.Execute up to maxAttempts times, sleeping with
-// exponential back-off and +/-25% jitter between each attempt. A retry is a
-// continuation, not a resend: the answer text and thinking each dead attempt
-// had already streamed accumulate across attempts and travel to the next one
-// through the continuation prefill, so the model picks up from its own words.
+// Execute calls inner.Execute up to maxAttempts times with exponential
+// back-off and jitter between attempts. A retry re-sends the original request
+// unchanged — the dead attempt's half-streamed output is never continued,
+// its holders are told to discard it through the notification. With notify
+// set, one Cleared notification fires per retry: when the retried request
+// first produces a non-empty delta, or when the loop returns (success,
+// exhaustion, cancellation), whichever comes first.
 func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Tool) (*Result, error) {
 	var lastErr error
 	backoff := r.cfg.initialBackoff
 	maxRetries := r.cfg.maxAttempts - 1
 
-	// Capture what the attempt in flight streams, by wrapping this call's own
-	// view of the sink: every delta is chained downstream untouched and also
-	// accumulated, so the continuation prefill after a transport death holds
-	// the words the user already watched appear. The builders live across
-	// attempts on purpose — attempt N continues what attempts 1..N-1 wrote.
-	var continuation ContinuationPrefill
-	if sink := StreamSinkFrom(ctx); sink != nil {
-		wrapped := *sink
-		downstreamDelta := wrapped.OnDelta
-		wrapped.OnDelta = func(text string) {
-			continuation.Text += text
-			if downstreamDelta != nil {
-				downstreamDelta(text)
-			}
+	// Notifications ride the caller's own context: the callback must never
+	// observe the wrapped sink installed below.
+	notifyCtx := ctx
+	var pendingRetry atomic.Int64 // retry number awaiting its Cleared notice, 0 = none
+	clearPending := func() {
+		if n := pendingRetry.Swap(0); n > 0 {
+			r.cfg.notify(notifyCtx, TransportRetry{Retry: int(n), Total: maxRetries, Cleared: true})
 		}
-		downstreamReasoning := wrapped.OnReasoningDelta
-		wrapped.OnReasoningDelta = func(text string) {
-			continuation.Reasoning += text
-			if downstreamReasoning != nil {
-				downstreamReasoning(text)
+	}
+	if r.cfg.notify != nil {
+		// Every return path ends the retry in flight, if one is: the defer
+		// covers success, a rejected error, exhaustion and cancellation.
+		defer clearPending()
+		// The retry is over the moment the retried request produces anything:
+		// the first non-empty delta clears the pending notice early, so a
+		// surface waiting on it recovers at the first token, not at the
+		// response's end. Only callbacks that were non-nil are wrapped — a
+		// muted context holds nil OnDelta/OnReasoningDelta and keeps them.
+		if sink := StreamSinkFrom(ctx); sink != nil {
+			wrapped := *sink
+			if down := wrapped.OnDelta; down != nil {
+				wrapped.OnDelta = func(text string) {
+					if text != "" {
+						clearPending()
+					}
+					down(text)
+				}
 			}
+			if down := wrapped.OnReasoningDelta; down != nil {
+				wrapped.OnReasoningDelta = func(text string) {
+					if text != "" {
+						clearPending()
+					}
+					down(text)
+				}
+			}
+			ctx = WithStreamSink(ctx, &wrapped)
 		}
-		ctx = WithStreamSink(ctx, &wrapped)
 	}
 
 	for attempt := 0; attempt < r.cfg.maxAttempts; attempt++ {
@@ -132,11 +154,7 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 			return nil, err
 		}
 
-		attemptCtx := ctx
-		if attempt > 0 && !continuation.Blank() {
-			attemptCtx = WithContinuationPrefill(ctx, continuation)
-		}
-		result, err := r.inner.Execute(attemptCtx, messages, tools)
+		result, err := r.inner.Execute(ctx, messages, tools)
 		if err == nil {
 			return result, nil
 		}
@@ -151,7 +169,12 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 		}
 
 		sleep := backoff
-		if half := int64(backoff) / 2; half > 0 {
+		if r.cfg.upwardJitter {
+			// 0–25% on top of the step: a wait never undershoots it.
+			if quarter := int64(backoff) / 4; quarter > 0 {
+				sleep += time.Duration(rand.Int63n(quarter + 1)) //nolint:gosec
+			}
+		} else if half := int64(backoff) / 2; half > 0 {
 			jitter := time.Duration(rand.Int63n(half)) - backoff/4 //nolint:gosec
 			sleep += jitter
 			if sleep < 0 {
@@ -160,12 +183,13 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 		}
 
 		if r.cfg.notify != nil {
-			r.cfg.notify(ctx, TransportRetry{
+			r.cfg.notify(notifyCtx, TransportRetry{
 				Retry: attempt + 1,
 				Total: maxRetries,
 				Wait:  sleep,
 				Err:   err,
 			})
+			pendingRetry.Store(int64(attempt + 1))
 		}
 
 		select {
@@ -175,22 +199,9 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 		}
 
 		backoff *= 2
-		if !r.cfg.unboundedBackoff && backoff > r.cfg.maxBackoff {
+		if backoff > r.cfg.maxBackoff {
 			backoff = r.cfg.maxBackoff
 		}
-	}
-
-	// The last failure was retryable but no retries remain: surfaces the
-	// frozen final retry card. A predicate rejection returned earlier, so a
-	// non-retryable error never reaches a fake exhausted notification.
-	if r.cfg.notify != nil && lastErr != nil && r.cfg.shouldRetry(lastErr) {
-		r.cfg.notify(ctx, TransportRetry{
-			Retry:     maxRetries,
-			Total:     maxRetries,
-			Wait:      0,
-			Err:       lastErr,
-			Exhausted: true,
-		})
 	}
 
 	return nil, &MaxAttemptsExceededError{Attempts: r.cfg.maxAttempts, Err: lastErr}

@@ -34,10 +34,9 @@ type transcriptProgress struct {
 	sessionID string
 	runID     string
 
-	mu            sync.Mutex
-	reasoning     strings.Builder
-	reasoningAt   time.Time
-	assistantText strings.Builder
+	mu          sync.Mutex
+	reasoning   strings.Builder
+	reasoningAt time.Time
 }
 
 // newTranscriptProgress builds a progress writer for one session's run, or nil
@@ -115,55 +114,16 @@ func (t *transcriptProgress) takeReasoning() (string, time.Time, bool) {
 	return text, startedAt, true
 }
 
-// appendAssistant accumulates the answer text streamed by the attempt in
-// flight, the way appendReasoning accumulates its thinking. It exists for the
-// network-interrupt boundary: what the dying attempt already showed is kept
-// and persisted, so its buffer has to live somewhere the retry cannot glue
-// onto.
-func (t *transcriptProgress) appendAssistant(text string) {
-	if t == nil || text == "" {
+// dropInFlightReasoning discards the reasoning block still being streamed
+// without writing it: the attempt that streamed it died on the network and the
+// retry re-streams from the first token. Blocks that already ended were written
+// when they ended and stay.
+func (t *transcriptProgress) dropInFlightReasoning() {
+	if t == nil {
 		return
 	}
 	t.mu.Lock()
-	t.assistantText.WriteString(text)
-	t.mu.Unlock()
-}
-
-// flushInterrupted persists what a network-interrupted attempt had already
-// streamed, as the messages they are, and clears both buffers for the retry:
-// the words the user already watched appear stay on the record (screen =
-// transcript = what really happened) — a half answer that was shown is a
-// message that happened, not text to be un-shown — while the retried attempt
-// re-streams from the first token as its own message. Called from the
-// transport-retry notification, before the retry fires.
-func (t *transcriptProgress) flushInterrupted(ctx context.Context, model string) {
-	if t == nil || t.store == nil {
-		return
-	}
-	t.mu.Lock()
-	reasoning := t.reasoning.String()
-	reasoningAt := t.reasoningAt
-	assistant := t.assistantText.String()
 	t.reasoning.Reset()
 	t.reasoningAt = time.Time{}
-	t.assistantText.Reset()
 	t.mu.Unlock()
-
-	if strings.TrimSpace(reasoning) != "" {
-		endedAt := time.Now()
-		startedAt := reasoningAt
-		if startedAt.IsZero() {
-			startedAt = endedAt
-		}
-		t.reasoningDone(ctx, reasoning, startedAt, endedAt)
-	}
-	if strings.TrimSpace(assistant) == "" {
-		return
-	}
-	// The interrupted answer lands through the same idempotent sequence
-	// append every completed message uses, so a reload, a resume and the live
-	// surface all read the same rows — and the retry's full answer appends
-	// after it as its own message.
-	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text(assistant)})
-	t.flush(ctx, []llm.Message{msg}, model, nil)
 }

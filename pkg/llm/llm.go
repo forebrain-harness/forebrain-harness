@@ -278,26 +278,6 @@ func ToolResultMessage(toolCallID string, parts ...ContentPart) Message {
 	return Message{Role: RoleTool, ToolCallID: toolCallID, Parts: parts}
 }
 
-// ContinuationMessage builds the assistant message a network-interrupted
-// retry appends so the model continues its own answer: the streamed answer
-// text so far as the body, and the streamed thinking so far riding the
-// reasoning-carry convention (Name = Prefix + reasoning) the compat adapter
-// decodes back into the provider's reasoning field. Adapters with no
-// request-side reasoning representation see an assistant text prefill and
-// simply continue the prose; the thinking restarts there, which is the most
-// those protocols can express.
-func ContinuationMessage(reasoning, text string) Message {
-	var parts []ContentPart
-	if strings.TrimSpace(text) != "" {
-		parts = []ContentPart{Text(text)}
-	}
-	m := Message{Role: RoleAssistant, Parts: parts}
-	if strings.TrimSpace(reasoning) != "" {
-		m.Name = Prefix + reasoning
-	}
-	return m
-}
-
 // Usage holds token consumption figures from a single LLM call.
 type Usage struct {
 	// InputTokens is the number of tokens in the prompt sent to the model.

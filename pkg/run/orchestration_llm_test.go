@@ -9503,18 +9503,92 @@ func TestTransportRetryDropsBufferedReasoningFromTheTranscript(t *testing.T) {
 			reasoningRows = append(reasoningRows, row.Content)
 		}
 	}
-	// The persistence contract: what the dead attempt had already streamed is
-	// kept as the interrupted message it is (flushInterrupted), and the
-	// continued attempt's block lands as its own row after it — the screen,
-	// the transcript and the record all say the same thing.
-	if len(reasoningRows) != 2 {
-		t.Fatalf("reasoning rows = %v, want the dead attempt's and the continued attempt's", reasoningRows)
+	// The persistence contract: the dead attempt's in-flight reasoning was
+	// dropped, never written, and the retried attempt's block lands as its
+	// own row — the screen, the transcript and the record all say the same
+	// thing.
+	if len(reasoningRows) != 1 || !strings.Contains(reasoningRows[0], "live attempt") {
+		t.Fatalf("reasoning rows = %v, want only the live attempt's", reasoningRows)
 	}
-	if !strings.Contains(reasoningRows[0], "dead attempt") || !strings.Contains(reasoningRows[1], "live attempt") {
-		t.Fatalf("reasoning rows = %v, want the dead block first, the live block second", reasoningRows)
+	if len(surfaceNotes) != 2 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Total != 3 || surfaceNotes[0].Cleared {
+		t.Fatalf("surface notifications = %+v, want the chained retry 1/3 then its cleared notice", surfaceNotes)
 	}
-	if len(surfaceNotes) != 1 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Total != 3 {
-		t.Fatalf("surface notifications = %+v, want the chained retry 1/3", surfaceNotes)
+	if !surfaceNotes[1].Cleared {
+		t.Fatalf("surface notifications = %+v, want the cleared notice", surfaceNotes)
+	}
+}
+
+// netDropAnswerLLM streams answer text, then dies on a transport error on the
+// first attempt; the retry streams its own answer and returns it.
+type netDropAnswerLLM struct{ calls int }
+
+func (m *netDropAnswerLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	sink := llm.StreamSinkFrom(ctx)
+	if m.calls == 1 {
+		if sink != nil && sink.OnDelta != nil {
+			sink.OnDelta("dead words")
+		}
+		return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	}
+	if sink != nil && sink.OnDelta != nil {
+		sink.OnDelta("answer")
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")})
+	return &llm.Result{Message: &msg}, nil
+}
+
+// TestTransportRetryPersistsNoInterruptedAnswer pins the discard half of the
+// network retry for answer text: the dead attempt's half-streamed words never
+// land in the transcript — only the retried attempt's whole answer does.
+func TestTransportRetryPersistsNoInterruptedAnswer(t *testing.T) {
+	ctx := context.Background()
+	const sid = "netdrop-answer"
+	store, runID := newProgressStore(t, sid)
+
+	st := toolpkg.NewState(t.TempDir())
+	var deltas []string
+	base := &llm.StreamSink{
+		OnDelta:          func(text string) { deltas = append(deltas, text) },
+		OnTransportRetry: func(tr llm.TransportRetry) {},
+	}
+
+	// The mounted order: orchestration outside, network retry inside, exactly
+	// as Runner.Load builds the product chain.
+	inner := wrapNetworkRetryLLM(&netDropAnswerLLM{}, 3)
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(
+		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
+		base,
+	)
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "answer" {
+		t.Fatalf("result = %+v, want the retried attempt's answer", res)
+	}
+	if strings.Join(deltas, "") != "dead wordsanswer" {
+		t.Fatalf("streamed deltas = %q, want both attempts' words on the wire", strings.Join(deltas, ""))
+	}
+
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	for _, row := range rows {
+		if row.Role == "assistant" && strings.Contains(row.Content, "dead words") {
+			t.Fatalf("the interrupted half answer persisted: %+v", row)
+		}
+	}
+	sawAnswer := false
+	for _, row := range rows {
+		if row.Role == "assistant" && strings.Contains(row.Content, "answer") {
+			sawAnswer = true
+		}
+	}
+	if !sawAnswer {
+		t.Fatalf("rows = %v, want the retried attempt's answer persisted", rows)
 	}
 }
 

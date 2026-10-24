@@ -104,7 +104,8 @@ func (s *streamParts) observe(evt event.RunEvent) {
 		return
 	case event.RunEventAssistantDelta, event.RunEventReasoningDelta,
 		event.RunEventReasoningDone, event.RunEventToolOutputDelta,
-		event.RunEventToolStarted, event.RunEventToolCompleted:
+		event.RunEventToolStarted, event.RunEventToolCompleted,
+		event.RunEventTransportRetry:
 	default:
 		return
 	}
@@ -144,6 +145,17 @@ func (s *streamParts) observe(evt event.RunEvent) {
 			return
 		}
 		run.textFor(p.AgentID).reasoning = ""
+	case event.RunEventTransportRetry:
+		var p event.TransportRetryPayload
+		if json.Unmarshal(evt.Payload, &p) != nil || p.Cleared {
+			return
+		}
+		if run.ownsPrimaryText(p.AgentID) {
+			return
+		}
+		text := run.textFor(p.AgentID)
+		text.content = ""
+		text.reasoning = ""
 	case event.RunEventToolStarted:
 		var p event.ToolCallStartedPayload
 		if json.Unmarshal(evt.Payload, &p) != nil {

@@ -1373,18 +1373,19 @@ function withoutLiveRetryBlocks(blocks: TimelineBlock[]): TimelineBlock[] {
 
 /**
  * applyTransportRetryBlocks folds one transport_retry into a block list: the
- * dead attempt's streamed text is kept — sealed where it stands, the way a
- * completed block seals, because the engine persisted it as the interrupted
- * message it is — the error card updates in place (consecutive failures
- * describe one story), and the retry card carries the countdown deadline or
- * the frozen state. The retried attempt's first delta opens its own block
- * below the sealed words. Used by the conversation's own stream and by every
- * subagent view — one event, one rendering.
+ * dead attempt's streamed text is withdrawn — its still-open blocks are
+ * removed, the whole request is re-sent and the retried attempt's first
+ * delta starts its own block below — the error card updates in place
+ * (consecutive failures describe one story), and the retry card carries the
+ * countdown deadline. The retry's cleared notice changes nothing. Used by the
+ * conversation's own stream and by every subagent view — one event, one
+ * rendering.
  */
 function applyTransportRetryBlocks(
   blocks: TimelineBlock[],
   payload: Record<string, unknown>,
 ): TimelineBlock[] {
+  if (payload.cleared) return blocks
   const retry = Math.max(0, Number(payload.retry ?? 0))
   const total = Math.max(0, Number(payload.total ?? 0))
   const waitMs = Math.max(0, Number(payload.waitMs ?? 0))
@@ -1394,7 +1395,7 @@ function applyTransportRetryBlocks(
   const errorText = truncateTransportError(String(payload.error ?? '').trim() || 'network error')
   const exhausted = Boolean(payload.exhausted)
 
-  const out = closeStreamedBlocks(blocks, ['assistant', 'thinking'])
+  const out = dropOpenStreamedBlocks(blocks)
   const errorBlock: TimelineBlock = { kind: 'error', id: 'transport-retry-error', text: errorText }
   const retryBlock: TimelineBlock = exhausted
     ? { kind: 'retry', id: 'transport-retry', retry, total, stopped: true }
@@ -1428,6 +1429,11 @@ function closeStreamedBlocks(
     }
     return block
   })
+}
+
+/** Removes the assistant/thinking blocks still being streamed: the attempt that streamed them died. */
+function dropOpenStreamedBlocks(blocks: TimelineBlock[]): TimelineBlock[] {
+  return blocks.filter((block) => !((block.kind === 'assistant' || block.kind === 'thinking') && block.open))
 }
 
 /**
@@ -3385,7 +3391,9 @@ export function useChatStream() {
         return true
       case 'transport_retry':
         // Same semantics as the conversation's own stream, scoped to this
-        // subagent's transcript: dead in-flight text out, card pair in.
+        // subagent's transcript: dead in-flight text out, card pair in; the
+        // retry's cleared notice changes nothing.
+        if (payload.cleared) return true
         updateSubagent(agentId, (entry) => ({
           ...entry,
           blocks: applyTransportRetryBlocks(entry.blocks, payload),
@@ -4687,9 +4695,15 @@ export function useChatStream() {
         // The attempt that was streaming died on the network: its buffered
         // text goes (the retry re-streams from the first token) and the
         // error/retry card pair paints from the same payload the terminal
-        // renders.
-        state.fullAnswer = ''
-        answer.value = ''
+        // renders. Only the dead tail leaves the composer's answer — words
+        // from earlier rounds of this same turn stay.
+        if (payload.cleared) return
+        const current = messages.value.find((message) => message.id === assistantMessageId)
+        const dead = (current?.blocks ?? []).find((block) => block.kind === 'assistant' && block.open)
+        if (dead && dead.kind === 'assistant' && dead.text && state.fullAnswer.endsWith(dead.text)) {
+          state.fullAnswer = state.fullAnswer.slice(0, -dead.text.length)
+        }
+        answer.value = state.fullAnswer
         updateMessageById(assistantMessageId, (message) => ({
           ...message,
           blocks: applyTransportRetryBlocks(message.blocks ?? [], payload as Record<string, unknown>),

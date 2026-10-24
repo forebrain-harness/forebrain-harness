@@ -1036,10 +1036,12 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// compaction silently never happens and the next conversation request
 	// overflows and kills the turn. Its context is muted
 	// (WithMutedForegroundStream), so its retries surface no cards and clear
-	// no foreground buffers; its retries continue from the partial summary the
-	// dead attempt streamed, like every other retry.
+	// no foreground buffers; each retry re-sends the whole summary request.
 	networkRetryMax := r.AppCfg.Agents.Defaults.NetworkRetryMaxOrDefault()
-	summaryChain := wrapNetworkRetryLLM(withImageHeal(wrapContinuationPrefillLLM(llmClient)), networkRetryMax)
+	if v := r.AppCfg.Agents.Defaults.NetworkRetryMax; v != nil && *v > appcfg.MaxNetworkRetryMax {
+		slog.Warn("agents.defaults.network_retry_max above the limit; running with the limit", "configured", *v, "limit", appcfg.MaxNetworkRetryMax)
+	}
+	summaryChain := wrapNetworkRetryLLM(withImageHeal(llmClient), networkRetryMax)
 	r.summaryLLM = summaryChain
 	// The reminder planModeLLM injects is not written here. It reaches the
 	// transcript through the run's own message sequence, which the orchestration

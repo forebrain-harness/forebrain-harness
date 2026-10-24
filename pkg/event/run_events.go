@@ -76,11 +76,12 @@ const (
 	// provider's own sentence never does.
 	RunEventImageRejected = "image_rejected"
 	// RunEventTransportRetry announces that a transport failure killed the
-	// current LLM attempt and the request is about to be re-sent (or, with
-	// Exhausted set, that every retry was used up). It implies discard: every
-	// holder of the dead attempt's streamed text drops it, and both surfaces
-	// draw the error/retry cards. Push-only by design — the retried answer
-	// lands in the transcript whole.
+	// current LLM attempt and the request is about to be re-sent (Cleared
+	// unset), or that the retry is over (Cleared set: the retried request
+	// started producing output, or the retry loop returned). A non-Cleared
+	// event implies discard: every holder of the dead attempt's in-flight
+	// streamed text drops it, and both surfaces draw the error/retry cards.
+	// Push-only by design — the retried answer lands in the transcript whole.
 	RunEventTransportRetry = "transport_retry"
 )
 
@@ -597,14 +598,14 @@ type ImageRejectedPayload struct {
 
 // TransportRetryPayload mirrors llm.TransportRetry on the wire. Retry/Total
 // is the n/total progress the cards show (the denominator is the configured
-// cap, not a constant); WaitMs drives the live countdown; Exhausted freezes
-// the retry card for good; AgentID routes the event to the subagent whose
-// stream died, empty meaning the conversation's own.
+// cap, not a constant); WaitMs drives the live countdown; Cleared marks the
+// retry's end; AgentID routes the event to the subagent whose stream died,
+// empty meaning the conversation's own.
 type TransportRetryPayload struct {
-	Retry     int    `json:"retry"`
-	Total     int    `json:"total"`
-	WaitMs    int64  `json:"wait_ms"`
-	Error     string `json:"error"`
-	AgentID   string `json:"agent_id,omitempty"`
-	Exhausted bool   `json:"exhausted,omitempty"`
+	Retry   int    `json:"retry"`
+	Total   int    `json:"total"`
+	WaitMs  int64  `json:"wait_ms"`
+	Error   string `json:"error"`
+	AgentID string `json:"agent_id,omitempty"`
+	Cleared bool   `json:"cleared,omitempty"`
 }
