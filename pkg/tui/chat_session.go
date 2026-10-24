@@ -385,6 +385,46 @@ func (s *ChatSession) ResumeOnLaunchProject(ctx context.Context, sessionID strin
 	return nil
 }
 
+// WorkspaceTrustPending reports whether the launch folder still needs a trust
+// decision, and which folder that is. A recorded decision either way — trusted,
+// or declined on the project page — ends the question.
+func (s *ChatSession) WorkspaceTrustPending() (folder string, pending bool, err error) {
+	if s == nil {
+		return "", false, nil
+	}
+	folder = strings.TrimSpace(s.LaunchProject.Project.Root)
+	if folder == "" {
+		return "", false, nil
+	}
+	level, err := safety.TrustLevel(s.home(), safety.Project{Root: folder})
+	if err != nil {
+		return "", false, err
+	}
+	return folder, level == safety.LevelUnknown, nil
+}
+
+// TrustWorkspace records the launch folder as trusted and has the environment
+// adopt the decision, so what was derived from "not decided yet" (a read-only
+// sandbox among it) is derived again.
+func (s *ChatSession) TrustWorkspace() error {
+	if s == nil {
+		return nil
+	}
+	folder := strings.TrimSpace(s.LaunchProject.Project.Root)
+	if folder == "" {
+		return nil
+	}
+	if err := safety.MarkTrusted(s.home(), safety.Project{Root: folder}); err != nil {
+		return err
+	}
+	if err := s.Env.AdoptLaunchTrust(); err != nil {
+		return err
+	}
+	s.LaunchProject = s.Env.LaunchProject
+	s.refreshSandboxRuntime()
+	return nil
+}
+
 func (s *ChatSession) projectContextPreHook(ctx context.Context, phase string, hc hook.HookContext, text string) (hook.PreHookResult, error) {
 	out := hook.PreHookResult{Text: text}
 	if s == nil {

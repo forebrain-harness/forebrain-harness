@@ -138,10 +138,10 @@ def cmd_open(d, cols=141, rows=30):
     deadline = time.time() + 40
     while time.time() < deadline:
         text = screen_text(d)
-        if "Trust this directory?" in text and not trusted:
+        if "Trust this folder?" in text and not trusted:
             cmd_send(d, "\\x1b[B\\r")
             trusted = True
-        elif "commands" in text and (trusted or "Trust this directory?" not in text):
+        elif "commands" in text and (trusted or "Trust this folder?" not in text):
             print("window %s: forebrain %dx%d, logs in %s" % (wid, int(cols), int(rows), d))
             return
         time.sleep(0.2)

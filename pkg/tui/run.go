@@ -661,15 +661,12 @@ func Run(ctx context.Context, opts Options) error {
 		cmds.printSessionResumeContext(state.sessionID)
 	}
 
-	// The TUI is drawn first, then the project's servers are asked about on
-	// one panel: the answer comes before the project runner is built, so the
-	// servers allowed here are in at its first startup.
-	askProjectServers(cmds, renderer)
-	// The conversation's runtime comes up here, strictly after the notify sink
-	// exists: the MCP watch's subscription replays the runner's current state,
-	// and a replay delivered before there is anywhere to deliver it is a status
-	// line that simply never appears.
-	startConversationRuntime(ctx, opts.Session, renderer, state.sessionID)
+	// The TUI is drawn first, then its startup questions are asked, each after
+	// the one before it: the trust decision, the folder's registration as a
+	// project, the project's servers, the conversation's runtime.
+	if err := startupQuestions(ctx, opts, cmds, renderer, state.sessionID); err != nil {
+		return err
+	}
 
 	// After the replay, so an approval this session left unfinished is reported
 	// below the history it belongs to rather than above it.
@@ -4092,6 +4089,53 @@ type mcpStartupWatcher interface {
 // runtime up: its project's runner, built when it does not exist yet.
 type conversationRuntimeBinder interface {
 	BindConversationRuntime(ctx context.Context, sessionID string) error
+}
+
+// launchProjectAdopter is the session half that registers the launch directory
+// as a project. The startup flow calls it only after the folder is trusted (or
+// carried a decision already): choosing Quit at the trust question leaves no
+// record behind.
+type launchProjectAdopter interface {
+	AdoptLaunchProject(ctx context.Context) error
+}
+
+// startupQuestions asks, once the TUI is on screen, everything the first
+// conversation depends on, in the order that makes each step safe: whether the
+// launch folder may be worked in (until it is answered the environment stands
+// on "not decided" — a read-only sandbox — and nothing the folder declares has
+// run), the folder's registration as a project (a fresh launch only; a folder
+// its operator quit on is never registered), the project's servers, and the
+// conversation's runtime — its project runner is built last, reading the trust
+// decision this sequence just recorded. An error ends the launch; ErrCancelled
+// is the trust question's Quit.
+func startupQuestions(ctx context.Context, opts Options, cmds *commandController, renderer *Renderer, sessionID string) error {
+	if quit, err := askWorkspaceTrust(cmds, renderer); quit {
+		if err != nil {
+			return err
+		}
+		return ErrCancelled
+	}
+	// The launch folder becomes a project only now, after it was trusted (or
+	// carried a decision already): a folder its operator quit on is never
+	// registered. A resumed session already adopted its project through
+	// ResumeOnLaunchProject before the TUI opened.
+	if strings.TrimSpace(opts.InitialSessionID) == "" {
+		if a, ok := opts.Session.(launchProjectAdopter); ok {
+			if err := a.AdoptLaunchProject(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	// The project's servers are asked about on one panel: the answer comes
+	// before the project runner is built, so the servers allowed here are in
+	// at its first startup.
+	askProjectServers(cmds, renderer)
+	// The conversation's runtime comes up last, strictly after the notify sink
+	// exists: the MCP watch's subscription replays the runner's current state,
+	// and a replay delivered before there is anywhere to deliver it is a status
+	// line that simply never appears.
+	startConversationRuntime(ctx, opts.Session, renderer, sessionID)
+	return nil
 }
 
 // startConversationRuntime binds the conversation to its project's runner and

@@ -392,7 +392,7 @@ func TestStandaloneReviewLeavesTypeAheadForTheTUI(t *testing.T) {
 	w.Close()
 
 	sel := newStandaloneRawSelector(r, io.Discard)
-	idx, ok, err := sel.Review("Trust this directory?", nil, []string{"Quit", "Trust and continue"}, 0)
+	idx, ok, err := sel.Review("Apply this choice?", nil, []string{"Quit", "Apply"}, 0)
 	if err != nil || !ok || idx != 1 {
 		t.Fatalf("Review = (%d, %v, %v), want the second action", idx, ok, err)
 	}

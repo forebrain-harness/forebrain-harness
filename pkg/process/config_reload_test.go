@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -355,5 +356,71 @@ func TestHotReloadSeesAnAtomicSave(t *testing.T) {
 	}
 	if calls.Load() < 1 {
 		t.Fatal("no config reload within 3s of an atomic save; the watcher missed the rename")
+	}
+}
+
+// TestAdoptLaunchTrustRederivesTheSandbox pins the interactive surface's
+// inside-the-TUI trust question (plans/120): a process opened in a folder
+// nobody has judged stands on "not decided" — a read-only sandbox — and once
+// the operator trusts the folder, AdoptLaunchTrust re-reads the decision and
+// re-derives everything the environment froze from it. A process with no
+// launch project has nothing to re-read and stays exactly as it was.
+func TestAdoptLaunchTrustRederivesTheSandbox(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	ctx := context.Background()
+	home := t.TempDir()
+	dir := t.TempDir()
+	cfg := activeAgentTestConfig()
+
+	env, err := Open(ctx, OpenOptions{
+		Home: home, LaunchDir: dir, ExactLaunchRoot: true, Config: &cfg,
+		SessionSource: memory.SessionSourceTUI,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer env.Close()
+
+	// Not decided yet: the sandbox the environment froze is read-only.
+	if level := env.LaunchProject.TrustLevel; level != safety.LevelUnknown {
+		t.Fatalf("trust level after Open = %q, want undecided", level)
+	}
+	if got := env.Deps.AppCfg.SandboxMode; got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("sandbox after Open = %q, want read-only while undecided", got)
+	}
+
+	// The operator trusts the folder: the decision is re-read and everything
+	// derived from "not decided" is derived again.
+	if err := safety.MarkTrusted(home, safety.Project{Root: dir}); err != nil {
+		t.Fatalf("MarkTrusted: %v", err)
+	}
+	if err := env.AdoptLaunchTrust(); err != nil {
+		t.Fatalf("AdoptLaunchTrust: %v", err)
+	}
+	if level := env.LaunchProject.TrustLevel; level != safety.LevelTrusted {
+		t.Fatalf("trust level after AdoptLaunchTrust = %q, want trusted", level)
+	}
+	if level := env.Deps.LaunchProject.TrustLevel; level != safety.LevelTrusted {
+		t.Fatalf("Deps trust level after AdoptLaunchTrust = %q, want trusted", level)
+	}
+	if got := env.Deps.AppCfg.SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("sandbox after AdoptLaunchTrust = %q, want workspace-write", got)
+	}
+
+	// A process with no launch project (the gateway) has nothing to adopt.
+	gw, err := Open(ctx, OpenOptions{
+		Home: t.TempDir(), Config: &cfg,
+		NoLaunchProject: true, SessionSource: memory.SessionSourceWebchat,
+	})
+	if err != nil {
+		t.Fatalf("Open (no launch project): %v", err)
+	}
+	defer gw.Close()
+	before, beforeCfg := gw.LaunchProject, gw.Deps.AppCfg
+	if err := gw.AdoptLaunchTrust(); err != nil {
+		t.Fatalf("AdoptLaunchTrust on a no-launch-project environment: %v", err)
+	}
+	if gw.LaunchProject != before || gw.Deps.AppCfg != beforeCfg {
+		t.Fatal("a no-launch-project environment must not change on AdoptLaunchTrust")
 	}
 }

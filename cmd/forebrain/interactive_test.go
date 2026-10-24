@@ -19,7 +19,6 @@ func TestRunStreamingTerminalAutoRunsOnboardWhenNeeded(t *testing.T) {
 	t.Setenv("FOREBRAIN_HOME", root)
 
 	prevIsTerminal := interactiveIsTerminal
-	prevTrusted := interactiveEnsureWorkspaceTrusted
 	prevNeedsSetup := interactiveNeedsFirstSetup
 	prevRunOnboard := interactiveRunOnboard
 	prevStartupError := interactiveStartupConfigError
@@ -27,7 +26,6 @@ func TestRunStreamingTerminalAutoRunsOnboardWhenNeeded(t *testing.T) {
 	prevTUIRun := interactiveTUIRun
 	t.Cleanup(func() {
 		interactiveIsTerminal = prevIsTerminal
-		interactiveEnsureWorkspaceTrusted = prevTrusted
 		interactiveNeedsFirstSetup = prevNeedsSetup
 		interactiveRunOnboard = prevRunOnboard
 		interactiveStartupConfigError = prevStartupError
@@ -36,9 +34,6 @@ func TestRunStreamingTerminalAutoRunsOnboardWhenNeeded(t *testing.T) {
 	})
 
 	interactiveIsTerminal = func(*os.File) bool { return true }
-	interactiveEnsureWorkspaceTrusted = func(in io.Reader, out io.Writer, home string, cwd string) (bool, error) {
-		return true, nil
-	}
 	interactiveNeedsFirstSetup = func() (bool, error) { return true, nil }
 	onboardCalled := false
 	interactiveRunOnboard = func(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -88,7 +83,6 @@ func TestRunStreamingTerminalStopsWhenOnboardCancelled(t *testing.T) {
 	// write lock.
 	t.Setenv("FOREBRAIN_HOME", t.TempDir())
 	prevIsTerminal := interactiveIsTerminal
-	prevTrusted := interactiveEnsureWorkspaceTrusted
 	prevNeedsSetup := interactiveNeedsFirstSetup
 	prevRunOnboard := interactiveRunOnboard
 	prevStartupError := interactiveStartupConfigError
@@ -96,7 +90,6 @@ func TestRunStreamingTerminalStopsWhenOnboardCancelled(t *testing.T) {
 	prevTUIRun := interactiveTUIRun
 	t.Cleanup(func() {
 		interactiveIsTerminal = prevIsTerminal
-		interactiveEnsureWorkspaceTrusted = prevTrusted
 		interactiveNeedsFirstSetup = prevNeedsSetup
 		interactiveRunOnboard = prevRunOnboard
 		interactiveStartupConfigError = prevStartupError
@@ -105,9 +98,6 @@ func TestRunStreamingTerminalStopsWhenOnboardCancelled(t *testing.T) {
 	})
 
 	interactiveIsTerminal = func(*os.File) bool { return true }
-	interactiveEnsureWorkspaceTrusted = func(in io.Reader, out io.Writer, home string, cwd string) (bool, error) {
-		return true, nil
-	}
 	interactiveNeedsFirstSetup = func() (bool, error) { return true, nil }
 	interactiveRunOnboard = func(context.Context, io.Reader, io.Writer) error { return tui.ErrCancelled }
 	interactiveStartupConfigError = func() error { return nil }
@@ -128,7 +118,6 @@ func TestRunStreamingTerminalStopsWhenOnboardCancelled(t *testing.T) {
 
 func TestResumeCommandUsesExplicitSessionID(t *testing.T) {
 	prevIsTerminal := interactiveIsTerminal
-	prevTrusted := interactiveEnsureWorkspaceTrusted
 	prevNeedsSetup := interactiveNeedsFirstSetup
 	prevRunOnboard := interactiveRunOnboard
 	prevStartupError := interactiveStartupConfigError
@@ -136,7 +125,6 @@ func TestResumeCommandUsesExplicitSessionID(t *testing.T) {
 	prevTUIRun := interactiveTUIRun
 	t.Cleanup(func() {
 		interactiveIsTerminal = prevIsTerminal
-		interactiveEnsureWorkspaceTrusted = prevTrusted
 		interactiveNeedsFirstSetup = prevNeedsSetup
 		interactiveRunOnboard = prevRunOnboard
 		interactiveStartupConfigError = prevStartupError
@@ -145,9 +133,6 @@ func TestResumeCommandUsesExplicitSessionID(t *testing.T) {
 	})
 
 	interactiveIsTerminal = func(*os.File) bool { return true }
-	interactiveEnsureWorkspaceTrusted = func(in io.Reader, out io.Writer, home string, cwd string) (bool, error) {
-		return true, nil
-	}
 	interactiveNeedsFirstSetup = func() (bool, error) { return false, nil }
 	interactiveRunOnboard = func(context.Context, io.Reader, io.Writer) error { return nil }
 	interactiveStartupConfigError = func() error { return nil }
@@ -174,7 +159,6 @@ func stubInteractiveLaunch(t *testing.T) {
 	t.Helper()
 	t.Setenv("FOREBRAIN_HOME", t.TempDir())
 	prevIsTerminal := interactiveIsTerminal
-	prevTrusted := interactiveEnsureWorkspaceTrusted
 	prevNeedsSetup := interactiveNeedsFirstSetup
 	prevRunOnboard := interactiveRunOnboard
 	prevStartupError := interactiveStartupConfigError
@@ -182,7 +166,6 @@ func stubInteractiveLaunch(t *testing.T) {
 	prevTUIRun := interactiveTUIRun
 	t.Cleanup(func() {
 		interactiveIsTerminal = prevIsTerminal
-		interactiveEnsureWorkspaceTrusted = prevTrusted
 		interactiveNeedsFirstSetup = prevNeedsSetup
 		interactiveRunOnboard = prevRunOnboard
 		interactiveStartupConfigError = prevStartupError
@@ -190,7 +173,6 @@ func stubInteractiveLaunch(t *testing.T) {
 		interactiveTUIRun = prevTUIRun
 	})
 	interactiveIsTerminal = func(*os.File) bool { return true }
-	interactiveEnsureWorkspaceTrusted = func(io.Reader, io.Writer, string, string) (bool, error) { return true, nil }
 	interactiveNeedsFirstSetup = func() (bool, error) { return false, nil }
 	interactiveRunOnboard = func(context.Context, io.Reader, io.Writer) error { return nil }
 	interactiveStartupConfigError = func() error { return nil }
@@ -207,21 +189,13 @@ func caretShown(out string) bool {
 }
 
 // Nothing before the TUI is typed at the caret, so from the first byte of the
-// launch until the TUI paints its own it stays hidden — including after the
-// trust prompt is answered and after onboarding, which hands it back as the
-// gateway's shell wants it.
+// launch until the TUI paints its own it stays hidden — including after
+// onboarding, which hands it back as the gateway's shell wants it.
 func TestRunStreamingTerminalKeepsCaretHiddenUntilTheTUI(t *testing.T) {
 	stubInteractiveLaunch(t)
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
-	interactiveEnsureWorkspaceTrusted = func(_ io.Reader, w io.Writer, _ string, _ string) (bool, error) {
-		if caretShown(out.String()) || !strings.HasPrefix(out.String(), hideCaretSeq) {
-			t.Fatalf("the caret must be hidden before the trust prompt, got %q", out.String())
-		}
-		_, _ = io.WriteString(w, "Trust this directory?\r\n")
-		return true, nil
-	}
 	interactiveNeedsFirstSetup = func() (bool, error) { return true, nil }
 	interactiveRunOnboard = func(_ context.Context, _ io.Reader, w io.Writer) error {
 		_, _ = io.WriteString(w, "\x1b[0m"+showCaretSeq)
@@ -247,27 +221,6 @@ func TestRunStreamingTerminalKeepsCaretHiddenUntilTheTUI(t *testing.T) {
 	}
 }
 
-// A launch that ends before the TUI — here by declining trust — leaves the
-// caret visible for the shell.
-func TestRunStreamingTerminalRestoresCaretWhenTrustDeclined(t *testing.T) {
-	stubInteractiveLaunch(t)
-	var out bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetOut(&out)
-	interactiveEnsureWorkspaceTrusted = func(io.Reader, io.Writer, string, string) (bool, error) { return false, nil }
-	interactiveTUIRun = func(context.Context, tui.Options) error {
-		t.Fatal("tui should not start after trust is declined")
-		return nil
-	}
-
-	if err := runStreamingTerminal(cmd); err != tui.ErrCancelled {
-		t.Fatalf("expected declining trust to end the launch as a quit, got %v", err)
-	}
-	if !strings.HasPrefix(out.String(), hideCaretSeq) || !caretShown(out.String()) {
-		t.Fatalf("expected the caret hidden during the launch and back after it, got %q", out.String())
-	}
-}
-
 // A launch inside the forebrain data directory (or below it) is refused before
 // any prompt: the data directory is not a project.
 func TestRunStreamingTerminalRefusesDataDirectoryLaunch(t *testing.T) {
@@ -280,50 +233,10 @@ func TestRunStreamingTerminalRefusesDataDirectoryLaunch(t *testing.T) {
 	if err := os.MkdirAll(inside, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	trusted := false
-	interactiveEnsureWorkspaceTrusted = func(io.Reader, io.Writer, string, string) (bool, error) {
-		trusted = true
-		return true, nil
-	}
 	t.Chdir(inside)
 
 	err = runStreamingTerminal(&cobra.Command{})
 	if err == nil || !strings.Contains(err.Error(), "数据目录") {
 		t.Fatalf("launch inside the data directory must be refused with the data-directory message, got %v", err)
-	}
-	if trusted {
-		t.Fatal("the trust prompt must not open for a refused launch")
-	}
-}
-
-// The launch directory is the project boundary: a TUI started in a checkout
-// subdirectory trusts (and later files conversations under) that
-// subdirectory, never the enclosing repository.
-func TestRunStreamingTerminalTrustsTheLaunchSubdirectory(t *testing.T) {
-	stubInteractiveLaunch(t)
-	repo := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sub := filepath.Join(repo, "sub")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	var gotTarget string
-	interactiveEnsureWorkspaceTrusted = func(_ io.Reader, _ io.Writer, _ string, cwd string) (bool, error) {
-		gotTarget = cwd
-		return true, nil
-	}
-	t.Chdir(sub)
-
-	if err := runStreamingTerminal(&cobra.Command{}); err != nil {
-		t.Fatalf("runStreamingTerminal: %v", err)
-	}
-	want := sub
-	if resolved, err := filepath.EvalSymlinks(sub); err == nil && strings.TrimSpace(resolved) != "" {
-		want = resolved
-	}
-	if gotTarget != want {
-		t.Fatalf("trust target = %q, want the launch subdirectory %q", gotTarget, want)
 	}
 }

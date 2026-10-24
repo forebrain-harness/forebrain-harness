@@ -202,6 +202,15 @@ func (env *Environment) reloadConfig() error {
 	if err != nil {
 		return err
 	}
+	return env.applyRawConfigLocked(loaded)
+}
+
+// applyRawConfigLocked adopts loaded as the configuration and re-derives
+// everything the environment froze from it. The caller holds reloadMu: both
+// reloadConfig, after reading the file, and AdoptLaunchTrust, after replacing
+// the launch project the derivation reads, reach this through the same lock so
+// a trust adoption can never interleave with a file reload.
+func (env *Environment) applyRawConfigLocked(loaded appcfg.Root) error {
 	// The raw configuration is retained before any derivation: pool entries
 	// re-derive their own effective config from it (each project from its own
 	// trust), so the base runner's derived values must not be what they receive.
@@ -279,6 +288,33 @@ func (env *Environment) reloadConfig() error {
 		_ = env.Runner.Events.Publish(context.Background(), event.NewRunEvent("", "", "", event.RunEventConfigReloaded, event.ConfigReloadedPayload{Path: env.ConfigPath}, time.Now()))
 	}
 	return nil
+}
+
+// AdoptLaunchTrust re-reads the launch project's trust decision and
+// re-derives everything the environment froze from it — the base runner's
+// effective sandbox and approval policy, the sandbox manager, the skills
+// service — from the configuration it already holds. The interactive surface
+// calls it after the operator answers the trust question inside the TUI. A
+// process with no launch project has nothing to re-read.
+func (env *Environment) AdoptLaunchTrust() error {
+	if env == nil {
+		return fmt.Errorf("nil environment")
+	}
+	if env.noLaunchProject || strings.TrimSpace(env.LaunchProject.Project.Root) == "" {
+		return nil
+	}
+	env.reloadMu.Lock()
+	defer env.reloadMu.Unlock()
+	launch, err := safety.ResolveRegisteredContext(env.Root, env.LaunchProject.Project.Root)
+	if err != nil {
+		return err
+	}
+	env.LaunchProject = launch
+	env.Deps.LaunchProject = launch
+	if env.Runner != nil && env.Runner.Deps != &env.Deps {
+		env.Runner.Deps.LaunchProject = launch
+	}
+	return env.applyRawConfigLocked(env.RawConfig)
 }
 
 // AdoptConfig records next as the live configuration.

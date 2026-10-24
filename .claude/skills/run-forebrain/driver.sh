@@ -131,7 +131,7 @@ cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limi
   for ((i = 0; i < 200; i++)); do
     pane="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)"
     case "$pane" in
-      *"Trust this directory?"*)
+      *"Trust this folder?"*)
         if [ "$trusted" = no ]; then
           tmux send-keys -t "$SESSION" Down Enter
           trusted=yes

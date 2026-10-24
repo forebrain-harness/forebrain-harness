@@ -4798,6 +4798,13 @@ func (s *rawSelector) Confirm(label string, defaultValue bool) (bool, bool, erro
 // index of the action chosen. The label is the title, with any lines after
 // the first as its subtitle.
 func (s *rawSelector) Review(label string, facts []turn.StatusFact, actions []string, defaultIdx int) (int, bool, error) {
+	return s.reviewWith(label, facts, actions, defaultIdx, s.escHint())
+}
+
+// reviewWith is Review with the Esc hint fixed by the caller. The selector's
+// own hint says what Esc does over the conversation ("cancel"); a panel whose
+// Esc quits the surface needs to say that instead.
+func (s *rawSelector) reviewWith(label string, facts []turn.StatusFact, actions []string, defaultIdx int, escHint string) (int, bool, error) {
 	if len(actions) == 0 {
 		return -1, false, nil
 	}
@@ -4818,7 +4825,7 @@ func (s *rawSelector) Review(label string, facts []turn.StatusFact, actions []st
 		for i, action := range actions {
 			b.selectable(i == cursor, "", action)
 		}
-		b.hint("↑/↓ to navigate · Enter to confirm · " + s.escHint())
+		b.hint("↑/↓ to navigate · Enter to confirm · " + escHint)
 		return b.panel()
 	}
 	s.showPanel(panel())

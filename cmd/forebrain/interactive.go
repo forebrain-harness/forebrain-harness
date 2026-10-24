@@ -28,7 +28,6 @@ var interactiveRunner = runStreamingTerminal
 var interactiveIsTerminal = func(f *os.File) bool {
 	return f != nil && term.IsTerminal(int(f.Fd()))
 }
-var interactiveEnsureWorkspaceTrusted = ensureWorkspaceTrusted
 var interactiveNeedsFirstSetup = tui.NeedsFirstSetup
 var onboardRunner = tui.RunOnboarding
 var interactiveRunOnboard = onboardRunner
@@ -64,10 +63,11 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 		return err
 	}
 	// The directory the TUI starts in is its project (R2). It is resolved and
-	// validated before anything else — trust, MCP/LSP consent, the session —
-	// so a launch the project model cannot accept stops here, and every
-	// prompt and session that follows speaks about this exact directory
-	// rather than a .git ancestor it would otherwise walk up to.
+	// validated before anything else — the session, and the onboarding wizard
+	// that may still precede the TUI — so a launch the project model cannot
+	// accept stops here, and every prompt and session that follows speaks
+	// about this exact directory rather than a .git ancestor it would
+	// otherwise walk up to.
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -78,13 +78,6 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 	}
 	caret := hideLaunchCaret(cmd.OutOrStdout())
 	defer caret.restore()
-	allowed, err := interactiveEnsureWorkspaceTrusted(cmd.InOrStdin(), cmd.OutOrStdout(), root, launchRoot)
-	if err != nil {
-		return err
-	}
-	if !allowed {
-		return tui.ErrCancelled
-	}
 	restoreLog := tui.RedirectProcessLoggingForTUI(root)
 	defer restoreLog()
 	if needs, err := interactiveNeedsFirstSetup(); err != nil {
@@ -111,17 +104,13 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 		return err
 	}
 	defer sess.Close()
-	// A fresh launch registers its directory as a project and files its
-	// conversations under it; a resume instead adopts the resumed
-	// conversation's own project, refusing one that belongs to a different
-	// directory so a conversation never continues as the wrong project.
+	// A resume adopts the resumed conversation's own project, refusing one
+	// that belongs to a different directory so a conversation never continues
+	// as the wrong project. A fresh launch registers its directory inside the
+	// TUI, after the trust question there is answered.
 	if resumeID := strings.TrimSpace(initialSessionID); resumeID != "" {
 		if err := sess.ResumeOnLaunchProject(cmd.Context(), resumeID); err != nil {
 			return resumeRefusal(err)
-		}
-	} else {
-		if err := sess.AdoptLaunchProject(cmd.Context()); err != nil {
-			return err
 		}
 	}
 	// Typed input is tenant data: it is what the operator said to *this*
@@ -189,10 +178,10 @@ const (
 )
 
 // launchCaret keeps the terminal caret hidden for the part of an interactive
-// launch that runs before the TUI paints its own. The trust prompt is a
-// selector, onboarding draws its own caret and opening the session takes no
-// input, so a bare caret blinking under the last prompt only claims the
-// terminal wants typing when it does not.
+// launch that runs before the TUI paints its own. Onboarding draws its own
+// caret and opening the session takes no input, so a bare caret blinking
+// under the last prompt only claims the terminal wants typing when it does
+// not.
 //
 // Hiding it obliges the launch to bring it back on every way out. A return
 // does so through restore. An interrupt while the terminal is still cooked
