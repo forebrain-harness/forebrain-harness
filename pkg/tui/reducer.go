@@ -1250,6 +1250,11 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			return EventResult{}
 		}
 		return EventResult{Frames: r.flushReasoningFinal(r.agentBuf(strings.TrimSpace(m.AgentID)), m.Timestamp)}
+	case AssistantDoneMsg:
+		if m.turn.isWithdrawn() {
+			return EventResult{}
+		}
+		return EventResult{Frames: r.flushAssistantFinal(r.agentBuf(strings.TrimSpace(m.AgentID)))}
 	case RunEndedMsg:
 		runID := strings.TrimSpace(m.RunID)
 		if m.turn.isWithdrawn() {

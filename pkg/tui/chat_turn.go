@@ -486,6 +486,11 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			accum.ResponseReasoningDone()
 			s.notifyUIForSession(sessionID, ReasoningDoneMsg{turn: foreground})
 		},
+		// An answer-text block ended inside the response: seal the streamed
+		// assistant block; later text opens a new one.
+		OnTextBlockDone: func() {
+			s.notifyUIForSession(sessionID, AssistantDoneMsg{turn: foreground})
+		},
 		OnResponseCompleted: func() {
 			foreground.acknowledgeResponse()
 			accum.ResponseCompleted()

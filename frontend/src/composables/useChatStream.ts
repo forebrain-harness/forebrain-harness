@@ -3408,6 +3408,12 @@ export function useChatStream() {
         }))
         return true
       }
+      case 'assistant_done':
+        updateSubagent(agentId, (entry) => ({
+          ...entry,
+          blocks: closeStreamedBlocks(entry.blocks, ['assistant'], evt.createdAt),
+        }))
+        return true
       case 'reasoning_done':
         updateSubagent(agentId, (entry) => ({
           ...entry,
@@ -4712,6 +4718,12 @@ export function useChatStream() {
         }))
         return
       }
+      case 'assistant_done':
+        updateMessageById(assistantMessageId, (message) => ({
+          ...message,
+          blocks: closeStreamedBlocks(message.blocks ?? [], ['assistant'], evt.createdAt),
+        }))
+        return
       case 'reasoning_done':
         updateMessageById(assistantMessageId, (message) => ({
           ...message,

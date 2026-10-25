@@ -40,6 +40,22 @@ type StreamSink struct {
 	// responses is only persisted as a standalone transcript row on the cancel
 	// path, so dropping it per iteration would lose it from resume replay.
 	OnResponseCompleted func()
+	// OnToolCallReady fires once per tool call, as soon as that call's
+	// arguments are complete inside the stream — before the response ends.
+	// The call is identical (ID, name, arguments) to the one the final
+	// Result carries.
+	OnToolCallReady func(ToolCall)
+	// OnTextBlockDone fires when an answer-text block ended inside the
+	// response. Providers without an in-stream text boundary fire it when the
+	// first tool call begins.
+	OnTextBlockDone func()
+	// OnStopReason fires when the provider sent the response's finish reason.
+	OnStopReason func(reason string)
+	// OnMessageStop fires when the provider's terminal frame for the response
+	// arrived: nothing of this response is still missing. Providers whose
+	// finish reason is itself the terminal frame fire it right after
+	// OnStopReason.
+	OnMessageStop func()
 	// OnTransportRetry fires when a transport failure killed the current
 	// attempt and a retry is about to run (Cleared=false), and once more
 	// when that retry is over (Cleared=true): the retried request started
@@ -132,8 +148,18 @@ func WithMutedForegroundStream(ctx context.Context) context.Context {
 	// A nested call's retries surface no cards and clear no foreground
 	// buffers — it has none; it just retries quietly.
 	muted.OnTransportRetry = nil
+	// Nested internal calls take no part in the foreground request's
+	// progress accounting or its future mid-stream tool execution.
+	muted.OnToolCallReady = nil
+	muted.OnTextBlockDone = nil
+	muted.OnStopReason = nil
+	muted.OnMessageStop = nil
 	muted.Streamed = nil
-	return WithStreamSink(ctx, &muted)
+	ctx = WithStreamSink(ctx, &muted)
+	// Nested internal requests share this ctx chain with the foreground
+	// request; without an explicit nil record their retry layer would read
+	// the foreground request's progress.
+	return context.WithValue(ctx, streamProgressCtxKey{}, (*StreamProgress)(nil))
 }
 
 // SanitizeToolCallArguments validates that the given arguments string is a

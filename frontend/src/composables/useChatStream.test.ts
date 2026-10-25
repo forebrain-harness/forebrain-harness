@@ -1528,6 +1528,64 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  it('seals the streamed assistant block on assistant_done and opens a new one after it', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: FakeChatWebSocket,
+    })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('two blocks')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 'web-seal' })
+      socket.message({ op: 'run_started', request_id: sent.request_id, run_id: 'run-seal', session_id: 'web-seal' })
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        run_id: 'run-seal',
+        session_id: 'web-seal',
+        data: { type, run_id: 'run-seal', session_id: 'web-seal', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+
+      runEvent('assistant_delta', { text: 'first block' })
+      runEvent('assistant_done', {})
+      runEvent('assistant_delta', { text: 'second block' })
+
+      const turn = stream.messages.value[1]
+      const blocks = (turn?.blocks ?? []).filter((block) => block.kind === 'assistant')
+      // Without the seal the two deltas merge into one open block; with it the
+      // first is closed and the second opens a block of its own.
+      expect(blocks).toHaveLength(2)
+      expect(blocks[0]).toMatchObject({ kind: 'assistant', text: 'first block', open: false })
+      expect(blocks[1]).toMatchObject({ kind: 'assistant', text: 'second block', open: true })
+
+      socket.message({
+        op: 'run_completed',
+        request_id: sent.request_id,
+        run_id: 'run-seal',
+        session_id: 'web-seal',
+        text: 'done',
+        data: { elapsed_ms: 1000 },
+      })
+      await pendingSend.catch(() => {})
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+    }
+  })
+
   it('closes each execution of one subagent with its own worked line', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket

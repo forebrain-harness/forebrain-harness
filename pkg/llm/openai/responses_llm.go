@@ -1279,6 +1279,9 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 	toolCallsMap := make(map[string]*llm.ToolCall)
 	var toolCallOrder []string
 	toolCallIDByItemID := make(map[string]string)
+	// readyEmitted guards the once-per-call OnToolCallReady: the arguments
+	// frame and the item-done frame may both report the same call.
+	readyEmitted := make(map[string]bool)
 	webSearchIDs := make(map[string]bool)
 	responseStarted := false
 
@@ -1383,6 +1386,10 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			}
 			if tc, ok := toolCallsMap[callID]; ok {
 				tc.Function.Arguments = done.Arguments
+				if sink != nil && sink.OnToolCallReady != nil && !readyEmitted[callID] {
+					readyEmitted[callID] = true
+					sink.OnToolCallReady(*tc)
+				}
 			}
 		case "response.output_item.done":
 			done := evt.AsResponseOutputItemDone()
@@ -1391,6 +1398,28 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 					sink.OnWebSearch(done.Item.ID, webSearchActionDetail(done.Item.RawJSON()), true)
 				}
 				continue
+			}
+			if done.Item.Type == "message" && sink != nil && sink.OnTextBlockDone != nil {
+				sink.OnTextBlockDone()
+			}
+			// Fallback for a call whose arguments-done frame never arrived (or
+			// nobody streamed fragments for it): the completed item is final.
+			if done.Item.Type == "function_call" && sink != nil && sink.OnToolCallReady != nil && !readyEmitted[done.Item.CallID] {
+				tc, exists := toolCallsMap[done.Item.CallID]
+				if !exists {
+					tc = &llm.ToolCall{
+						ID:   done.Item.CallID,
+						Type: "function",
+						Function: llm.FunctionCall{
+							Name:      done.Item.Name,
+							Arguments: done.Item.Arguments,
+						},
+					}
+					toolCallsMap[done.Item.CallID] = tc
+					toolCallOrder = append(toolCallOrder, done.Item.CallID)
+				}
+				readyEmitted[done.Item.CallID] = true
+				sink.OnToolCallReady(*tc)
 			}
 			if reasoningItem, ok := extractReasoningCarryItem(done.Item); ok {
 				reasoningItems = appendOrReplaceReasoningItem(reasoningItems, reasoningItem)
@@ -1458,6 +1487,13 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 						toolCallOrder = append(toolCallOrder, item.CallID)
 					}
 				}
+			}
+			// response.completed is the terminal frame of a Responses stream.
+			if sink != nil && sink.OnStopReason != nil {
+				sink.OnStopReason("completed")
+			}
+			if sink != nil && sink.OnMessageStop != nil {
+				sink.OnMessageStop()
 			}
 		}
 	}

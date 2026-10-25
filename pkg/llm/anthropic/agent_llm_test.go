@@ -275,3 +275,86 @@ func writeAnthropicSSEEvent(t *testing.T, w http.ResponseWriter, event, data str
 		t.Errorf("write SSE event %s: %v", event, err)
 	}
 }
+
+// anthropicBlockSignalServer streams one text block, one tool_use block, the
+// terminal message_delta and (unless cutAfterMessageDelta) message_stop.
+func anthropicBlockSignalServer(t *testing.T, cutAfterMessageDelta bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writeAnthropicSSEEvent(t, w, "message_start", `{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Answ"}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"er here."}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
+		writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_ready","name":"weather","input":{}}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Oslo\"}"}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":1}`)
+		writeAnthropicSSEEvent(t, w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":12}}`)
+		if !cutAfterMessageDelta {
+			writeAnthropicSSEEvent(t, w, "message_stop", `{"type":"message_stop"}`)
+		}
+	}))
+}
+
+func TestAnthropicStreamBlockSignals(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	server := anthropicBlockSignalServer(t, false)
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 128_000)
+	var order []string
+	var ready []llm.ToolCall
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnTextBlockDone: func() { order = append(order, "text_block_done") },
+		OnToolCallReady: func(call llm.ToolCall) {
+			order = append(order, "ready")
+			ready = append(ready, call)
+		},
+		OnStopReason:  func(reason string) { order = append(order, "stop_reason:"+reason) },
+		OnMessageStop: func() { order = append(order, "message_stop") },
+	})
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	want := []string{"text_block_done", "ready", "stop_reason:tool_use", "message_stop"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("callback order = %v\nwant             %v", order, want)
+	}
+	if len(ready) != 1 || len(res.Message.ToolCalls) != 1 {
+		t.Fatalf("ready=%d final=%d, want 1 and 1", len(ready), len(res.Message.ToolCalls))
+	}
+	if !reflect.DeepEqual(ready[0], res.Message.ToolCalls[0]) {
+		t.Fatalf("ready = %+v, final = %+v, want identical", ready[0], res.Message.ToolCalls[0])
+	}
+	if ready[0].ID != "toolu_ready" || ready[0].Function.Name != "weather" || ready[0].Function.Arguments != `{"city":"Oslo"}` {
+		t.Fatalf("ready call = %+v", ready[0])
+	}
+}
+
+func TestAnthropicStreamStopReasonWithoutMessageStop(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	server := anthropicBlockSignalServer(t, true)
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 128_000)
+	var order []string
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnTextBlockDone: func() { order = append(order, "text_block_done") },
+		OnToolCallReady: func(llm.ToolCall) { order = append(order, "ready") },
+		OnStopReason:    func(reason string) { order = append(order, "stop_reason:"+reason) },
+		OnMessageStop:   func() { order = append(order, "message_stop") },
+	})
+	_, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	want := []string{"text_block_done", "ready", "stop_reason:tool_use"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("callback order = %v\nwant             %v", order, want)
+	}
+}

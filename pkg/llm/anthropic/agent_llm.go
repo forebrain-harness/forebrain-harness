@@ -273,6 +273,9 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 				event.Usage.CacheCreationInputTokens,
 				event.Usage.CacheReadInputTokens,
 			)
+			if event.Delta.StopReason != "" && sink != nil && sink.OnStopReason != nil {
+				sink.OnStopReason(string(event.Delta.StopReason))
+			}
 		case "content_block_start":
 			switch event.ContentBlock.Type {
 			case "text":
@@ -315,9 +318,28 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 					sink.OnReasoningDone()
 				}
 			}
+		case "message_stop":
+			if sink != nil && sink.OnMessageStop != nil {
+				sink.OnMessageStop()
+			}
 		}
 		if err := res.Accumulate(event); err != nil {
 			return nil, err
+		}
+		// Accumulate has filled the block's final state by now, so a call
+		// reported ready here is byte-identical to the one the final message
+		// carries.
+		if event.Type == "content_block_stop" && int(event.Index) < len(res.Content) {
+			switch res.Content[event.Index].Type {
+			case "tool_use":
+				if sink != nil && sink.OnToolCallReady != nil {
+					sink.OnToolCallReady(anthropicToolCallFromBlock(res.Content[event.Index]))
+				}
+			case "text":
+				if strings.TrimSpace(res.Content[event.Index].Text) != "" && sink != nil && sink.OnTextBlockDone != nil {
+					sink.OnTextBlockDone()
+				}
+			}
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -470,6 +492,25 @@ func agentAnthropicToolResultContent(parts []llm.ContentPart) []anthropicapi.Too
 	return content
 }
 
+// anthropicToolCallFromBlock converts one accumulated tool_use block into the
+// engine's representation. The mid-stream OnToolCallReady callbacks and the
+// final message both go through it, so a call reported ready is byte-identical
+// to the one the Result carries.
+func anthropicToolCallFromBlock(b anthropicapi.ContentBlockUnion) llm.ToolCall {
+	args := strings.TrimSpace(string(b.Input))
+	if args == "" {
+		args = "{}"
+	}
+	return llm.ToolCall{
+		ID:   b.ID,
+		Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{
+			Name:      b.Name,
+			Arguments: args,
+		},
+	}
+}
+
 func agentAnthropicMessageFromAPI(m *anthropicapi.Message) (*llm.Message, error) {
 	if m == nil {
 		return nil, &anthropicNilResponseError{}
@@ -483,18 +524,7 @@ func agentAnthropicMessageFromAPI(m *anthropicapi.Message) (*llm.Message, error)
 				parts = append(parts, llm.Text(b.Text))
 			}
 		case "tool_use":
-			args := strings.TrimSpace(string(b.Input))
-			if args == "" {
-				args = "{}"
-			}
-			toolCalls = append(toolCalls, llm.ToolCall{
-				ID:   b.ID,
-				Type: llm.ToolTypeFunction,
-				Function: llm.FunctionCall{
-					Name:      b.Name,
-					Arguments: args,
-				},
-			})
+			toolCalls = append(toolCalls, anthropicToolCallFromBlock(b))
 		}
 	}
 	msg := &llm.Message{

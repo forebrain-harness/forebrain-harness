@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1014,5 +1016,129 @@ func TestOpenAICompatLLMStreamCleanCloseZeroOutputIsNotTruncation(t *testing.T) 
 	}
 	if got := res.Message.TextContent(); got != "" {
 		t.Fatalf("content = %q, want empty", got)
+	}
+}
+
+func TestCompatStreamToolCallReadyFollowsIndexBoundaries(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		var body bytes.Buffer
+		writeSSE := func(payload string) {
+			body.WriteString("data: ")
+			body.WriteString(payload)
+			body.WriteString("\n\n")
+		}
+		writeSSE(`{"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)
+		writeSSE(`{"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"Let me check."},"finish_reason":null}]}`)
+		writeSSE(`{"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]},"finish_reason":null}]}`)
+		writeSSE(`{"id":"4","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]},"finish_reason":null}]}`)
+		// Index 1 appearing for the first time completes call 0.
+		writeSSE(`{"id":"5","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"get_time","arguments":"{}"}}]},"finish_reason":null}]}`)
+		// Marker between the two calls' boundaries so the order log can tell
+		// mid-stream readies from finish-frame readies.
+		writeSSE(`{"id":"6","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+		writeSSE(`{"id":"7","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`)
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = rec.Write(body.Bytes())
+		return rec.response(), nil
+	})
+
+	var order []string
+	var ready []llm.ToolCall
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnDelta:         func(string) { order = append(order, "text") },
+		OnUsage:         func(int, int) { order = append(order, "usage") },
+		OnTextBlockDone: func() { order = append(order, "text_block_done") },
+		OnToolCallReady: func(call llm.ToolCall) {
+			order = append(order, "ready:"+call.ID)
+			ready = append(ready, call)
+		},
+		OnStopReason:  func(reason string) { order = append(order, "stop_reason:"+reason) },
+		OnMessageStop: func() { order = append(order, "message_stop") },
+	})
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("weather?"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	want := []string{
+		"text",
+		"text_block_done", // first tool fragment seals the answer text
+		"ready:call_a",    // index 1 first appearing completes call 0
+		"usage",
+		"ready:call_b", // finish frame completes the last call
+		"stop_reason:tool_calls",
+		"message_stop",
+	}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("callback order = %v\nwant             %v", order, want)
+	}
+	if len(ready) != 2 || len(res.Message.ToolCalls) != 2 {
+		t.Fatalf("ready=%d final=%d, want 2 and 2", len(ready), len(res.Message.ToolCalls))
+	}
+	for i := range ready {
+		if !reflect.DeepEqual(ready[i], res.Message.ToolCalls[i]) {
+			t.Fatalf("ready[%d] = %+v, final[%d] = %+v, want identical", i, ready[i], i, res.Message.ToolCalls[i])
+		}
+	}
+	if ready[0].Function.Name != "get_weather" || ready[0].Function.Arguments != `{"city":"Paris"}` {
+		t.Fatalf("ready[0] = %+v", ready[0])
+	}
+	if ready[1].Function.Name != "get_time" || ready[1].Function.Arguments != "{}" {
+		t.Fatalf("ready[1] = %+v", ready[1])
+	}
+}
+
+func TestCompatStreamToolCallReadySynthesizesStableID(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		var body bytes.Buffer
+		writeSSE := func(payload string) {
+			body.WriteString("data: ")
+			body.WriteString(payload)
+			body.WriteString("\n\n")
+		}
+		writeSSE(`{"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)
+		writeSSE(`{"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":null}]}`)
+		writeSSE(`{"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = rec.Write(body.Bytes())
+		return rec.response(), nil
+	})
+
+	var order []string
+	var ready []llm.ToolCall
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnToolCallReady: func(call llm.ToolCall) {
+			order = append(order, "ready")
+			ready = append(ready, call)
+		},
+		OnStopReason:  func(reason string) { order = append(order, "stop_reason:"+reason) },
+		OnMessageStop: func() { order = append(order, "message_stop") },
+	})
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !reflect.DeepEqual(order, []string{"ready", "stop_reason:stop", "message_stop"}) {
+		t.Fatalf("callback order = %v", order)
+	}
+	if len(ready) != 1 || len(res.Message.ToolCalls) != 1 {
+		t.Fatalf("ready=%d final=%d, want 1 and 1", len(ready), len(res.Message.ToolCalls))
+	}
+	if !regexp.MustCompile(`^call_0_[0-9a-f]{8}$`).MatchString(ready[0].ID) {
+		t.Fatalf("synthesized ready ID = %q, want call_0_<8 hex>", ready[0].ID)
+	}
+	if ready[0].ID != res.Message.ToolCalls[0].ID {
+		t.Fatalf("ready ID %q != final ID %q", ready[0].ID, res.Message.ToolCalls[0].ID)
+	}
+	if ready[0].Function.Name != "lookup" || ready[0].Function.Arguments != `{"q":"x"}` {
+		t.Fatalf("ready = %+v", ready[0])
 	}
 }

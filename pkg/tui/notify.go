@@ -90,6 +90,14 @@ type ReasoningDoneMsg struct {
 	AgentID   string // optional: for subagent-specific reasoning finalization
 	Timestamp time.Time
 }
+
+// AssistantDoneMsg seals the streamed assistant block of the agent it names:
+// an answer-text block ended inside the response. Text that arrives after it
+// opens a new block.
+type AssistantDoneMsg struct {
+	turn    *foregroundTurn
+	AgentID string
+}
 type StreamResetMsg struct{ turn *foregroundTurn }
 
 // TransportRetryMsg reports one transport failure of a run's LLM stream and
@@ -884,6 +892,11 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		var p event.ReasoningDonePayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
 			s.notifyUIForSession(evt.SessionID, ReasoningDoneMsg{AgentID: p.AgentID, Timestamp: evt.CreatedAt})
+		}
+	case event.RunEventAssistantDone:
+		var p event.AssistantDonePayload
+		if json.Unmarshal(evt.Payload, &p) == nil {
+			s.notifyUIForSession(evt.SessionID, AssistantDoneMsg{AgentID: p.AgentID})
 		}
 	case event.RunEventTransportRetry:
 		var p event.TransportRetryPayload

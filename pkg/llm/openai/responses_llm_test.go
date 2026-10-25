@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1784,4 +1785,101 @@ func testString(v any) string {
 
 func newOpenAIResponsesLLM(apiKey, baseURL, model string, maxTokens int, paramsJSON []byte) llm.LLM {
 	return NewResponsesLLMWithCache(apiKey, baseURL, model, maxTokens, paramsJSON, true)
+}
+
+func TestOpenAIResponsesStreamBlockSignals(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[]},"output_index":0}`,
+		"",
+		`data: {"type":"response.output_text.delta","delta":"Answer text."}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Answer text."}]},"output_index":0}`,
+		"",
+		`data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","arguments":"","call_id":"call_1","name":"lookup"},"output_index":1}`,
+		"",
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"q\":"}`,
+		"",
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\"x\"}"}`,
+		"",
+		`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"q\":\"x\"}"}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","arguments":"{\"q\":\"x\"}","call_id":"call_1","name":"lookup"},"output_index":1}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		"",
+	}, "\n")
+	testLLM := newTestOpenAIResponsesLLM(t, func(req *http.Request) (*http.Response, error) {
+		return sseResponse(body), nil
+	})
+
+	var order []string
+	var ready []llm.ToolCall
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnTextBlockDone: func() { order = append(order, "text_block_done") },
+		OnToolCallReady: func(call llm.ToolCall) {
+			order = append(order, "ready")
+			ready = append(ready, call)
+		},
+		OnStopReason:  func(reason string) { order = append(order, "stop_reason:"+reason) },
+		OnMessageStop: func() { order = append(order, "message_stop") },
+	})
+	result, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("test"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	want := []string{"text_block_done", "ready", "stop_reason:completed", "message_stop"}
+	if !slices.Equal(order, want) {
+		t.Fatalf("callback order = %v\nwant             %v", order, want)
+	}
+	if len(ready) != 1 || len(result.Message.ToolCalls) != 1 {
+		t.Fatalf("ready=%d final=%d, want 1 and 1", len(ready), len(result.Message.ToolCalls))
+	}
+	if !reflect.DeepEqual(ready[0], result.Message.ToolCalls[0]) {
+		t.Fatalf("ready = %+v, final = %+v, want identical", ready[0], result.Message.ToolCalls[0])
+	}
+	if ready[0].ID != "call_1" || ready[0].Function.Name != "lookup" || ready[0].Function.Arguments != `{"q":"x"}` {
+		t.Fatalf("ready call = %+v", ready[0])
+	}
+}
+
+func TestOpenAIResponsesStreamToolReadyFallsBackToItemDone(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"id":"fc_9","type":"function_call","status":"in_progress","arguments":"{}","call_id":"call_9","name":"noop"},"output_index":0}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"id":"fc_9","type":"function_call","status":"completed","arguments":"{}","call_id":"call_9","name":"noop"},"output_index":0}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		"",
+	}, "\n")
+	testLLM := newTestOpenAIResponsesLLM(t, func(req *http.Request) (*http.Response, error) {
+		return sseResponse(body), nil
+	})
+
+	var order []string
+	var ready []llm.ToolCall
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnToolCallReady: func(call llm.ToolCall) {
+			order = append(order, "ready")
+			ready = append(ready, call)
+		},
+		OnStopReason:  func(reason string) { order = append(order, "stop_reason:"+reason) },
+		OnMessageStop: func() { order = append(order, "message_stop") },
+	})
+	result, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("test"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	want := []string{"ready", "stop_reason:completed", "message_stop"}
+	if !slices.Equal(order, want) {
+		t.Fatalf("callback order = %v\nwant             %v", order, want)
+	}
+	if len(ready) != 1 || len(result.Message.ToolCalls) != 1 {
+		t.Fatalf("ready=%d final=%d, want 1 and 1", len(ready), len(result.Message.ToolCalls))
+	}
+	if !reflect.DeepEqual(ready[0], result.Message.ToolCalls[0]) {
+		t.Fatalf("ready = %+v, final = %+v, want identical", ready[0], result.Message.ToolCalls[0])
+	}
+	if ready[0].ID != "call_9" || ready[0].Function.Name != "noop" || ready[0].Function.Arguments != "{}" {
+		t.Fatalf("ready call = %+v", ready[0])
+	}
 }

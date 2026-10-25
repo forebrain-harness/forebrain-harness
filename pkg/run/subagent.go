@@ -1021,6 +1021,11 @@ func EventStreamSink(ctx context.Context, sink event.Sink, runID, sessionID, age
 		OnReasoningDone: func() {
 			publishEvent(ctx, sink, runID, sessionID, event.RunEventReasoningDone, event.ReasoningDonePayload{AgentID: agentID})
 		},
+		// An answer-text block ended inside the response: watching surfaces
+		// seal the streamed assistant block they hold for it.
+		OnTextBlockDone: func() {
+			publishEvent(ctx, sink, runID, sessionID, event.RunEventAssistantDone, event.AssistantDonePayload{AgentID: agentID})
+		},
 		// The transport retry is published here and nowhere else: the failure and
 		// the retry about to run (and, Cleared, its end) reach every watching
 		// surface through the same event, cards on both ends driven by one

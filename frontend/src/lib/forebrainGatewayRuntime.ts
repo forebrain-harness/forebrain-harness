@@ -17,6 +17,7 @@ export type ForebrainRunEventType =
   | 'turn_cancelled'
   | 'turn_error'
   | 'assistant_delta'
+  | 'assistant_done'
   | 'reasoning_delta'
   | 'reasoning_done'
   | 'usage_delta'

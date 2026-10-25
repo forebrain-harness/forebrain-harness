@@ -365,6 +365,52 @@ func TestReducerFinalizesReasoningOnReasoningDone(t *testing.T) {
 	}
 }
 
+func TestReducerSealsAssistantBlockOnAssistantDone(t *testing.T) {
+	var r Reducer
+	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
+	streaming := r.Reduce(NewMessageMsg{Msg: Message{
+		Kind:    MsgKindAssistant,
+		Content: "First block.",
+	}}).Frames
+	if len(streaming) != 1 || streaming[0].Kind != FrameAssistant || streaming[0].Final {
+		t.Fatalf("expected a live streaming assistant frame, got %#v", streaming)
+	}
+
+	done := r.Reduce(AssistantDoneMsg{}).Frames
+	if len(done) != 1 || done[0].Kind != FrameAssistant || !done[0].Final {
+		t.Fatalf("assistant done must seal the streamed block, got %#v", done)
+	}
+	if done[0].Content != "First block." {
+		t.Fatalf("sealed content = %q", done[0].Content)
+	}
+
+	next := r.Reduce(NewMessageMsg{Msg: Message{
+		Kind:    MsgKindAssistant,
+		Content: "Second block.",
+	}}).Frames
+	if len(next) != 1 || next[0].Kind != FrameAssistant || next[0].Final {
+		t.Fatalf("text after the seal must open a new streamed block, got %#v", next)
+	}
+	if next[0].Content != "Second block." {
+		t.Fatalf("second block must restart from its own text, got %q", next[0].Content)
+	}
+
+	runEnd := r.Reduce(RunEndedMsg{RunID: "r1"}).Frames
+	assistantFrames := 0
+	for _, frame := range runEnd {
+		if frame.Kind != FrameAssistant {
+			continue
+		}
+		assistantFrames++
+		if !frame.Final || frame.Content != "Second block." {
+			t.Fatalf("run end must finalize only the second block, got %#v", frame)
+		}
+	}
+	if assistantFrames != 1 {
+		t.Fatalf("run end produced %d assistant frames, want exactly the second block: %#v", assistantFrames, runEnd)
+	}
+}
+
 func TestReducerReasoningFramesDoNotCarrySyntheticTitle(t *testing.T) {
 	var r Reducer
 	_ = r.Reduce(RunStartedMsg{RunID: "r1"})

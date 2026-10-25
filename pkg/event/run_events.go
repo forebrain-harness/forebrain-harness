@@ -13,6 +13,7 @@ const (
 	RunEventTurnError              = "turn_error"
 	RunEventTurnFailed             = "turn_failed"
 	RunEventAssistantDelta         = "assistant_delta"
+	RunEventAssistantDone          = "assistant_done"
 	RunEventReasoningDelta         = "reasoning_delta"
 	RunEventReasoningDone          = "reasoning_done"
 	RunEventUsageDelta             = "usage_delta"
@@ -92,7 +93,7 @@ const (
 // pushed to whoever is watching and never stored.
 func IsPushOnlyStreamEvent(eventType string) bool {
 	switch eventType {
-	case RunEventAssistantDelta, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta, RunEventTransportRetry:
+	case RunEventAssistantDelta, RunEventAssistantDone, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta, RunEventTransportRetry:
 		return true
 	}
 	return false
@@ -342,6 +343,12 @@ type AssistantDeltaPayload struct {
 	Text         string `json:"text,omitempty"`
 	AgentID      string `json:"agent_id,omitempty"`
 	FirstDeltaMS int64  `json:"first_delta_ms,omitempty"`
+}
+
+// AssistantDonePayload reports that an answer-text block ended inside the
+// response: the surface seals the streamed assistant block it holds.
+type AssistantDonePayload struct {
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 type ReasoningDeltaPayload struct {

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -784,6 +786,55 @@ func mergeStreamToolCalls(acc *[]openaiclient.ToolCall, delta []openaiclient.Too
 	}
 }
 
+// compatToolCallFromOpenAI converts one streamed or accumulated SDK tool call
+// into the engine's representation. The mid-stream OnToolCallReady callbacks
+// and the final message both go through it, so a call reported ready is
+// byte-identical to the one the Result carries.
+func compatToolCallFromOpenAI(tc openaiclient.ToolCall) llm.ToolCall {
+	return llm.ToolCall{
+		ID:   tc.ID,
+		Type: string(tc.Type),
+		Function: llm.FunctionCall{
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		},
+	}
+}
+
+// emitCompatToolReady fires OnToolCallReady for every accumulated call with
+// index < upTo that has not been reported yet. A call the provider left
+// without an ID gets one assigned in place, so the final message carries the
+// same ID the ready callback reported.
+func emitCompatToolReady(sink *llm.StreamSink, toolBuf *[]openaiclient.ToolCall, readyCount *int, upTo int) {
+	if sink == nil || sink.OnToolCallReady == nil {
+		return
+	}
+	limit := upTo
+	if limit > len(*toolBuf) {
+		limit = len(*toolBuf)
+	}
+	for i := *readyCount; i < limit; i++ {
+		tc := &(*toolBuf)[i]
+		if tc.ID == "" {
+			tc.ID = fmt.Sprintf("call_%d_%s", i, compatStreamIDSuffix())
+		}
+		sink.OnToolCallReady(compatToolCallFromOpenAI(*tc))
+	}
+	if limit > *readyCount {
+		*readyCount = limit
+	}
+}
+
+// compatStreamIDSuffix returns 8 random hex characters for a synthesized
+// call ID.
+func compatStreamIDSuffix() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "00000000"
+	}
+	return hex.EncodeToString(b[:])
+}
+
 func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req openaiclient.ChatCompletionRequest) (*llm.Result, error) {
 	sink := llm.StreamSinkFrom(ctx)
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
@@ -791,6 +842,12 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	var toolBuf []openaiclient.ToolCall
 	var role string
 	var lastFinish openaiclient.FinishReason
+	// readyCount is the number of leading toolBuf entries whose OnToolCallReady
+	// already fired; textDone guards the single OnTextBlockDone that seals the
+	// answer text before the first tool fragment. Both survive length-continue
+	// rounds: a round never re-fires what an earlier round already reported.
+	readyCount := 0
+	textDone := false
 	var tokIn, tokOut, tokCached int
 	var reportedIn, reportedOut int
 	responseStarted := false
@@ -850,6 +907,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				continue
 			}
 			ch := resp.Choices[0]
+			finishBefore := lastFinish
 			if ch.FinishReason != "" && ch.FinishReason != openaiclient.FinishReasonNull {
 				lastFinish = ch.FinishReason
 			}
@@ -870,7 +928,40 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				}
 			}
 			if len(d.ToolCalls) > 0 {
+				// The answer text is finished the moment the first tool
+				// fragment arrives: the compat stream has no text boundary
+				// of its own.
+				if contentAcc.Len() > 0 && !textDone {
+					textDone = true
+					if sink != nil && sink.OnTextBlockDone != nil {
+						sink.OnTextBlockDone()
+					}
+				}
+				for _, tc := range d.ToolCalls {
+					j := 0
+					if tc.Index != nil {
+						j = *tc.Index
+					}
+					// Index j appearing for the first time means every
+					// smaller index already streamed all of its fragments.
+					if j >= len(toolBuf) {
+						emitCompatToolReady(sink, &toolBuf, &readyCount, j)
+					}
+				}
 				mergeStreamToolCalls(&toolBuf, d.ToolCalls)
+			}
+			// The finish-reason frame is the compat stream's terminal frame.
+			// It is checked after the delta merge so a provider that packs
+			// the last fragment and the finish reason into one chunk still
+			// reports complete arguments.
+			if lastFinish != "" && finishBefore == "" {
+				emitCompatToolReady(sink, &toolBuf, &readyCount, len(toolBuf))
+				if sink != nil && sink.OnStopReason != nil {
+					sink.OnStopReason(string(lastFinish))
+				}
+				if sink != nil && sink.OnMessageStop != nil {
+					sink.OnMessageStop()
+				}
 			}
 		}
 		_ = stream.Close()
@@ -886,6 +977,9 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 			}
 			return nil, fmt.Errorf("%s: %w", c.model, llm.ErrStreamTruncated)
 		}
+		// Clean exit without truncation: any call the finish frame did not
+		// cover (a provider that ends [DONE] with zero output) is ready now.
+		emitCompatToolReady(sink, &toolBuf, &readyCount, len(toolBuf))
 
 		if !openAIReasoningLengthShouldContinue(lastFinish, reasoningAcc.Len(), contentAcc.Len(), len(toolBuf)) {
 			break
@@ -1189,14 +1283,7 @@ func compatMessageFromOpenAI(m openaiclient.ChatCompletionMessage) llm.Message {
 	if len(m.ToolCalls) > 0 {
 		msg.ToolCalls = make([]llm.ToolCall, len(m.ToolCalls))
 		for i, tc := range m.ToolCalls {
-			msg.ToolCalls[i] = llm.ToolCall{
-				ID:   tc.ID,
-				Type: string(tc.Type),
-				Function: llm.FunctionCall{
-					Name:      tc.Function.Name,
-					Arguments: tc.Function.Arguments,
-				},
-			}
+			msg.ToolCalls[i] = compatToolCallFromOpenAI(tc)
 		}
 	} else if synthesized := synthesizeToolCallsFromReasoning(reasoning); len(synthesized) > 0 {
 		msg.ToolCalls = synthesized
