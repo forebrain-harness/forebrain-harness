@@ -30729,34 +30729,47 @@ func TestForkCopiesSessionModelSelection(t *testing.T) {
 	require.Equal(t, "high", s.storedSelection(t, res.SessionID).Effort)
 }
 
-// TestFooterNamesTheConfiguredDefaultBeforeAnyProjectRunner pins the second
-// half of the footer fix. A conversation bound to a project runs its turns on
-// the project runner, which the pool builds from the live configuration on the
-// first turn. Before that happens there is no runner to read, and the terminal
-// used to answer from its base runner — loaded at process start, so it could
-// name a model no request of this conversation ever carried. The answer is the
-// configured default instead, i.e. what the project runner will adopt.
-func TestFooterNamesTheConfiguredDefaultBeforeAnyProjectRunner(t *testing.T) {
+// TestFooterNamesWhatAProjectConversationAdoptsBeforeAnyProjectRunner pins the
+// second half of the footer fix. A conversation bound to a project runs its
+// turns on the project runner, which the pool builds from the live
+// configuration on the first turn. Before that happens there is no runner to
+// read, and the terminal used to answer from its base runner — loaded at
+// process start, so it could name a model no request of this conversation ever
+// carried. The answer is what that first turn adopts instead: a conversation
+// that never chose follows the agent's most recently used model (owner
+// ruling, 2026-10-23), resolved against the live configuration.
+//
+// The three candidate answers are made to differ on purpose: the most
+// recently used model is gpt-other, while this process's base-runner pin and
+// the configured default are both gpt-main. Either old reading fails here.
+func TestFooterNamesWhatAProjectConversationAdoptsBeforeAnyProjectRunner(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
 
-	// The base runner is moved to the non-default entry, so reading it here
-	// would answer gpt-other.
+	// sess-a picks the non-default entry: it is now the agent's most recently
+	// used model, effort included.
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
+
+	// The base runner is then put back on the configured default without
+	// writing any session row, so "what this process pinned" and "what the
+	// newest row says" are no longer the same answer.
+	require.NoError(t, s.runner().SetPrimaryModel("openai", "gpt-main", nil))
+	requireRunnerModel(t, s, "openai", "gpt-main", "")
 
 	// The same agent scope the environment's pool resolves projects under.
 	s.Env.Deps.AgentName = "main"
 	projects := state.NewProjectStore(s.Env.SQL, "main")
-	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "footer-default", Root: s.home()})
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "footer-adopts", Root: s.home()})
 	require.NoError(t, err)
 	require.NoError(t, projects.BindSession(ctx, "sess-b", project.ID))
 
 	bound := s.sessionModelState("sess-b")
 	require.True(t, bound.Set)
-	require.Equal(t, "gpt-main", bound.Model, "the footer must name the model the project runner will adopt")
+	require.Equal(t, "gpt-other", bound.Model, "the footer must name the model the first turn will adopt")
+	require.Equal(t, "high", bound.Effort, "the adopted effort travels with the adopted model")
 	s.SetViewingSession("sess-b")
-	require.Equal(t, "openai/gpt-main", summarizeComposerModel(s))
+	require.Equal(t, "openai/gpt-other", summarizeComposerModel(s))
 }
 
 func TestResumeMissingStoredModelOpensWithWarning(t *testing.T) {
