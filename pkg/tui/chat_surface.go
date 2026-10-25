@@ -319,12 +319,16 @@ func (s *ChatSession) syncToolApprovalHooks() {
 	if sink == nil {
 		s.Env.Tools().SetNetworkApprovalPromptHook(nil)
 		s.Env.Tools().SetSubagentApprovalHook(nil)
+		s.Env.Tools().SetInlineApprovalHook(nil)
 		return
 	}
 	s.Env.Tools().SetNetworkApprovalPromptHook(s.promptInlineNetworkApproval)
 	// A subagent that hits an approval gate is asked here too, so its run and
 	// the tool call that dispatched it both stay alive while the user answers.
 	s.Env.Tools().SetSubagentApprovalHook(s.resolveSubagentApproval)
+	// The primary agent's own gates are asked here as well, where the call is,
+	// so the turn keeps running while the user answers (plan 127).
+	s.Env.Tools().SetInlineApprovalHook(s.resolveInlineApproval)
 }
 
 func (s *ChatSession) promptInlineNetworkApproval(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
@@ -477,6 +481,14 @@ func (s *ChatSession) completeSurfaceToolApprovalDecision(ctx context.Context, a
 	return s.completeSurfaceApproval(ctx, actionID, decision, nil)
 }
 
+// completeInPlaceApprovalDecision completes the decision of a gate answered
+// where its call waits: the turn never stopped on it, so nothing below may
+// dispatch a resume or cancel the run — the waiting call itself proceeds on
+// the outcome the hook carries back.
+func (s *ChatSession) completeInPlaceApprovalDecision(ctx context.Context, actionID string, decision turn.ToolApprovalDecision, inPlace bool) (err error) {
+	return s.completeSurfaceApproval(ctx, actionID, decision, &ApprovalSubmit{InPlace: inPlace})
+}
+
 func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID string, decision turn.ToolApprovalDecision, audit *ApprovalSubmit) (err error) {
 	if s == nil || s.actionSvc() == nil {
 		return fmt.Errorf("nil session or action service")
@@ -492,26 +504,6 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 	if aerr != nil || act == nil {
 		return fmt.Errorf("load action: %w", aerr)
 	}
-	// The surface knows the conversation this gate belongs to, so the cancel
-	// dispatch names it rather than looking it up from the run.
-	abort := func(id string) bool { return s.abortPendingApproval(act.SessionID, id) }
-	// A cancelled gate of the primary agent's own turn does not tear the run
-	// down: the refusal without words is recorded on the parked call and the
-	// turn ends there, finished like a cancel (plan 129). Everything else a
-	// cancel can mean — a subagent's own gate, an inline network question —
-	// keeps the direct abort.
-	cancelDispatch := abort
-	if agentID, _ := turn.ActionSubagent(act); agentID == "" && !actionNetworkInline(act) {
-		cancelDispatch = func(id string) bool {
-			if s.resumeAfterRejectedStop(id) {
-				return true
-			}
-			// No pending state, or a wait row too old to carry a snapshot:
-			// nothing to record the refusal on, so the direct cancel those
-			// rows always had is what ends the run.
-			return abort(id)
-		}
-	}
 	sub := ApprovalSubmit{
 		ActionID:  actionID,
 		Approved:  decision.Approved,
@@ -525,6 +517,27 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		sub.Cancelled = decision.Cancelled
 		if strings.TrimSpace(sub.KeyChord) == "" {
 			sub.KeyChord = "forebrain-tui-permission"
+		}
+	}
+	// The surface knows the conversation this gate belongs to, so the cancel
+	// dispatch names it rather than looking it up from the run.
+	abort := func(id string) bool { return s.abortPendingApproval(act.SessionID, id) }
+	// A cancelled gate of the primary agent's own turn does not tear the run
+	// down: the refusal without words is recorded on the parked call and the
+	// turn ends there, finished like a cancel (plan 129). Everything else a
+	// cancel can mean — a subagent's own gate, an inline network question —
+	// keeps the direct abort. An in-place answer never cancels anything: the
+	// call waiting on it ends the turn itself.
+	cancelDispatch := abort
+	if agentID, _ := turn.ActionSubagent(act); agentID == "" && !actionNetworkInline(act) && !sub.InPlace {
+		cancelDispatch = func(id string) bool {
+			if s.resumeAfterRejectedStop(id) {
+				return true
+			}
+			// No pending state, or a wait row too old to carry a snapshot:
+			// nothing to record the refusal on, so the direct cancel those
+			// rows always had is what ends the run.
+			return abort(id)
 		}
 	}
 	if act != nil && act.Kind == "user_interaction" {
@@ -556,6 +569,11 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		// still running against the plan, exactly as the first response did.
 		if result.Approved && strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") {
 			s.cancelInFlightPlanReview()
+		}
+		if sub.InPlace {
+			// The waiting call carries this outcome itself; an in-place
+			// answer has no continuation to redispatch.
+			return nil
 		}
 		if result.Cancelled {
 			s.retryResumeDispatch(actionID, "cancel", cancelDispatch)
@@ -606,6 +624,12 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 			}
 		}
 		s.markPendingApprovalClearedContext(actionID)
+	}
+	if sub.InPlace {
+		// The decision is recorded; the call waiting in place proceeds on it.
+		// Dispatching a resume here would start a second execution of the
+		// same run while the hook's caller is still inside its turn.
+		return nil
 	}
 	if result.Cancelled {
 		s.retryResumeDispatch(actionID, "cancel", cancelDispatch)
@@ -1133,7 +1157,7 @@ func (s *ChatSession) resolvePlanReviewApproval(
 		return nil, fmt.Errorf("the reviewer needs approval to run %s and this surface cannot ask for it", strings.TrimSpace(rae.ToolName))
 	}
 	gate, _ := turn.SubagentApprovalGateFromError(rae)
-	return s.answerSubagentApproval(ctx, sink, gate, s.planReviewToolApprovalRequest(sessionID, rae), "the plan review")
+	return s.answerInPlaceApproval(ctx, sink, gate, s.planReviewToolApprovalRequest(sessionID, rae), "the plan review", turn.SubagentApprovalDescription(gate))
 }
 
 // resolveSubagentApproval is the seam a model-dispatched subagent's approvals
@@ -1166,17 +1190,65 @@ func (s *ChatSession) resolveSubagentApproval(
 		return nil, fmt.Errorf("nil subagent approval")
 	}
 	req := turn.SubagentApprovalRequest(gate, s.dispatchingSessionIDForRun(gate.RunID), s.approvalEvaluator())
-	return s.answerSubagentApproval(ctx, sink, gate, req, "the subagent")
+	return s.answerInPlaceApproval(ctx, sink, gate, req, "the subagent", turn.SubagentApprovalDescription(gate))
 }
 
-// answerSubagentApproval is the terminal half both subagent approval paths
-// share: put the request on screen, resolve the pending action with the answer,
-// and hand back the context the child's run resumes under. Everything in it
-// that is not "how this surface asks" lives in pkg/turn, so the web surface
-// answers the same gate the same way.
-func (s *ChatSession) answerSubagentApproval(
+// resolveInlineApproval is the seam the primary agent's own approval gates
+// travel on (plan 127): the question is put to the user where the call is,
+// while the turn keeps running, and the call proceeds on the answer —
+// re-running approved, refused with the user's words, or stopped by a refusal
+// without them. Gates that cannot be answered this way — a subagent's own
+// gate, exit_plan_mode, or a surface with no sink — come back unchanged and
+// unwind the turn the way it always did.
+func (s *ChatSession) resolveInlineApproval(
+	ctx context.Context, rae *tool.RequiresActionError,
+) (context.Context, error) {
+	if s == nil || rae == nil {
+		return nil, rae
+	}
+	s.subagentApprovalMu.Lock()
+	defer s.subagentApprovalMu.Unlock()
+	sink := s.toolApprovalSinkGet()
+	if sink == nil {
+		return nil, rae
+	}
+	if strings.EqualFold(strings.TrimSpace(rae.ActionKind), "exit_plan_mode") || rae.AgentID != "" {
+		return nil, rae
+	}
+	// The wait row the action hook wrote carries the gate; the snapshot it
+	// holds is refreshed to everything this response has produced, so a crash
+	// while the question is open resumes from the truth rather than repeating
+	// calls that already finished.
+	if s.runSvc() != nil {
+		if err := s.runSvc().SetWaitSessionSnapshot(context.Background(), rae.RunID, rae.ActionID, rae.SessionSnapshot); err != nil {
+			return nil, rae
+		}
+	}
+	sessionID := tool.ConversationSessionIDFromContext(ctx)
+	g := s.approvalGate()
+	if g != nil {
+		g.RunIDHint = func() string { return strings.TrimSpace(rae.RunID) }
+	}
+	req, err := g.PendingForRun(ctx, sessionID, rae.RunID)
+	if err != nil || req == nil {
+		return nil, rae
+	}
+	if strings.TrimSpace(req.ToolStepID) == "" {
+		req.ToolStepID = turn.ApprovalToolStepID(rae)
+	}
+	gate, _ := turn.SubagentApprovalGateFromError(rae)
+	return s.answerInPlaceApproval(ctx, sink, gate, *req, "the tool call", firstNonEmpty(req.Description, req.Reason))
+}
+
+// answerInPlaceApproval is the terminal half the in-place approval paths
+// share — a subagent's gate and the primary agent's own alike: put the
+// request on screen, resolve the pending action with the answer, and hand
+// back the context the waiting run resumes under. Everything in it that is
+// not "how this surface asks" lives in pkg/turn, so the web surface answers
+// the same gate the same way.
+func (s *ChatSession) answerInPlaceApproval(
 	ctx context.Context, sink turn.ToolApprovalDecisionSink,
-	gate turn.SubagentApprovalGate, req turn.ToolApprovalRequest, who string,
+	gate turn.SubagentApprovalGate, req turn.ToolApprovalRequest, who, message string,
 ) (context.Context, error) {
 	owner := s.approvalResumeOwner()
 	if s.runSvc() != nil {
@@ -1216,7 +1288,7 @@ func (s *ChatSession) answerSubagentApproval(
 		"approval-requested:"+gate.ActionID, gate.RunID, req.SessionID, event.RunEventApprovalReq,
 		event.ApprovalRequestedPayload{
 			ActionID: gate.ActionID, ActionKind: gate.ActionKind, AgentID: gate.AgentID,
-			SubagentType: gate.SubagentType, Message: turn.SubagentApprovalDescription(gate),
+			SubagentType: gate.SubagentType, ToolStepID: strings.TrimSpace(req.ToolStepID), Message: message,
 		}, time.Now(),
 	))
 	decision, err := sink.PromptToolApproval(promptCtx, req)
@@ -1238,12 +1310,29 @@ func (s *ChatSession) answerSubagentApproval(
 			return nil, ownErr
 		}
 	}
-	// Released before the answer is applied: completeSurfaceToolApprovalDecision
-	// would otherwise start its own resume of this run in parallel with the
+	// Released before the answer is applied: completeSurfaceApproval would
+	// otherwise start its own resume of this run in parallel with the
 	// dispatcher's own loop, executing the child twice.
 	turn.ReleaseSubagentApprovalWait(context.Background(), s.runSvc(), s.tuiController(), gate.RunID)
-	if err := s.completeSurfaceToolApprovalDecision(ctx, gate.ActionID, decision); err != nil {
+	// The primary agent's own gate is answered where its call is waiting: the
+	// decision completes as an in-place answer — no abort, no resume dispatch —
+	// and the waiting call itself proceeds on the outcome.
+	inPlace := gate.AgentID == ""
+	if err := s.completeInPlaceApprovalDecision(ctx, gate.ActionID, decision, inPlace); err != nil {
 		return nil, err
+	}
+	if inPlace && decision.Denied {
+		// Refused with words, answered where the call waits: the runtime's
+		// denied step is recorded for replay but drawn by nothing (the step
+		// hook's rule), so this surface draws the card the parked path draws
+		// from its resume.
+		s.notifyInPlaceRefusedCard(gate, req, decision)
+	}
+	if inPlace && decision.Cancelled {
+		// "No" with nothing written, Esc, Ctrl+C: the call reads the stop
+		// sentence, the calls behind it never start, the turn ends (129).
+		s.notifyInPlaceRefusedCard(gate, req, decision)
+		return nil, tool.ErrApprovalRejectedStop
 	}
 	resumeCtx, resumeErr := turn.SubagentApprovalResumeContext(ctx, gate, turn.ApprovalResume{
 		Session:  gate.Session,
@@ -1263,6 +1352,44 @@ func (s *ChatSession) answerSubagentApproval(
 		turn.BindApprovalContinuationFence(resume, s.runSvc(), gate.RunID, gate.ActionID, owner)
 	}
 	return resumeCtx, nil
+}
+
+// notifyInPlaceRefusedCard draws the refused call's card for a gate the
+// surface answered where the call waits. The parked path draws the same card
+// from its resume (notifyToolApprovalDenied); the in-place path owns it here,
+// because the runtime's own denied step is recorded for replay but drawn by
+// nothing — the step hook leaves denied steps to the surface that heard the
+// words.
+func (s *ChatSession) notifyInPlaceRefusedCard(gate turn.SubagentApprovalGate, req turn.ToolApprovalRequest, decision turn.ToolApprovalDecision) {
+	if s == nil {
+		return
+	}
+	stepID := strings.TrimSpace(req.ToolStepID)
+	toolName := strings.TrimSpace(req.ToolName)
+	if stepID == "" || toolName == "" {
+		return
+	}
+	input := map[string]any{}
+	if raw := strings.TrimSpace(req.ToolInputJSON); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &input); err != nil {
+			input = map[string]any{"raw": raw}
+		}
+	}
+	meta := tool.BuildToolMeta(tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, StepID: stepID, ToolName: toolName, Input: input,
+	})
+	meta.Status = "denied"
+	s.notifyUI(NewMessageMsg{Msg: Message{
+		Kind:      MsgKindTool,
+		StepID:    stepID,
+		ToolName:  toolName,
+		FilePath:  extractFilePathFromInput(input),
+		Content:   tool.DeniedToolDisplayBody(toolName, strings.TrimSpace(decision.DenyReason)),
+		ToolMeta:  meta,
+		ToolPhase: event.RunEventToolCompleted,
+		RunID:     gate.RunID,
+		Timestamp: time.Now(),
+	}})
 }
 
 // dispatchingSessionIDForRun resolves a subagent run back to the conversation

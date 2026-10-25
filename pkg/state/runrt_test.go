@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
 // --- Wait-resume lease semantics -------------------------------------------
@@ -1028,5 +1029,43 @@ func TestReapAbandonedRunsLeavesTheReapersOwnRuns(t *testing.T) {
 	}
 	if reaped, err := b.ReapAbandonedRuns(ctx, time.Now()); err != nil || len(reaped) != 1 || reaped[0].ID != run.ID {
 		t.Fatalf("another process must still reap the lapsed owner's run: %+v, %v", reaped, err)
+	}
+}
+
+// --- Plan 127: the in-place approval wait row's snapshot refresh -------------
+
+// SetWaitSessionSnapshot replaces only the snapshot of the wait it names: the
+// row keeps its lease fields, and a missing wait reports no continuation.
+func TestSetWaitSessionSnapshotReplacesOnlyTheSnapshot(t *testing.T) {
+	ctx := context.Background()
+	rt, runID := newLeaseTestStore(t)
+	seedWait(t, rt, "s", runID, Wait{ActionID: "act-snap", ToolName: "shell", ToolInputJSON: "{}"})
+	if err := rt.MarkWaitResumeOwner(ctx, runID, "act-snap", "owner-live"); err != nil {
+		t.Fatalf("mark owner: %v", err)
+	}
+
+	fresh := []llm.Message{
+		llm.UserMessage(llm.Text("hello")),
+		llm.AssistantMessage(nil, llm.ToolCall{ID: "c1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: "{}"}}),
+	}
+	if err := rt.SetWaitSessionSnapshot(ctx, runID, "act-snap", fresh); err != nil {
+		t.Fatalf("SetWaitSessionSnapshot: %v", err)
+	}
+	w, err := rt.GetWaitForRun(ctx, runID)
+	if err != nil || w == nil {
+		t.Fatalf("GetWaitForRun: %v, %v", w, err)
+	}
+	if len(w.SessionSnapshot) != len(fresh) {
+		t.Fatalf("snapshot messages = %d, want %d", len(w.SessionSnapshot), len(fresh))
+	}
+	if got := w.SessionSnapshot[0].TextContent(); got != "hello" {
+		t.Fatalf("snapshot[0] text = %q, want the replaced snapshot", got)
+	}
+	if w.ResumeOwner != "owner-live" {
+		t.Fatalf("resume owner = %q, want the untouched lease", w.ResumeOwner)
+	}
+
+	if err := rt.SetWaitSessionSnapshot(ctx, runID, "act-other", fresh); !errors.Is(err, ErrNoWaitContinuation) {
+		t.Fatalf("unknown action err = %v, want ErrNoWaitContinuation", err)
 	}
 }

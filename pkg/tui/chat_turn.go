@@ -590,6 +590,7 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 	if s.toolApprovalSinkGet() != nil {
 		agBase = tool.WithNetworkApprovalPromptHook(agBase, s.promptInlineNetworkApproval)
 		agBase = tool.WithSubagentApprovalHook(agBase, s.resolveSubagentApproval)
+		agBase = tool.WithInlineApprovalHook(agBase, s.resolveInlineApproval)
 	}
 	cleanup = restoreAudit
 	return agBase, streamFlag, cleanup

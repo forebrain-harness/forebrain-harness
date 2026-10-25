@@ -10708,3 +10708,413 @@ func TestResumeDeniedSubagentWithoutWordsGetsDeniedText(t *testing.T) {
 		t.Fatalf("subagent refusal text = %q, want %q", results[0].TextContent(), want)
 	}
 }
+
+// ---- plan 127: the primary agent's approvals answered where the call is ----
+
+// inlineHookLLM is a non-streaming scripted model for the in-place approval
+// orchestration tests. Its counters are race-detector-clean because some of
+// these tests poll the call count from the test goroutine while the model
+// runs on another.
+type inlineHookLLM struct {
+	attempts []func(ctx context.Context) (*llm.Result, error)
+	calls    atomic.Int32
+	mu       sync.Mutex
+	received [][]llm.Message
+}
+
+func (m *inlineHookLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	call := int(m.calls.Add(1)) - 1
+	m.mu.Lock()
+	m.received = append(m.received, append([]llm.Message(nil), messages...))
+	m.mu.Unlock()
+	if call >= len(m.attempts) {
+		return nil, fmt.Errorf("script exhausted at call %d", call+1)
+	}
+	return m.attempts[call](ctx)
+}
+
+func (m *inlineHookLLM) callCount() int { return int(m.calls.Load()) }
+
+func (m *inlineHookLLM) receivedMessages() [][]llm.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([][]llm.Message(nil), m.received...)
+}
+
+// inlineApprovalCtx builds the execution context the in-place tests run on:
+// one run, one conversation, and the surface's inline approval hook.
+func inlineApprovalCtx(sid, runID string, hook toolpkg.InlineApprovalHook) context.Context {
+	base := llm.WithAgentSessionID(toolpkg.WithRunID(context.Background(), runID), sid)
+	if hook == nil {
+		return base
+	}
+	return toolpkg.WithInlineApprovalHook(base, hook)
+}
+
+// approveHook answers every gate with the approved action id.
+func approveHook() (toolpkg.InlineApprovalHook, *[]string) {
+	var seen []string
+	return func(ctx context.Context, rae *toolpkg.RequiresActionError) (context.Context, error) {
+		seen = append(seen, rae.ActionID)
+		return toolpkg.WithApprovedActionID(ctx, rae.ActionID), nil
+	}, &seen
+}
+
+// denyWithWordsHook answers every gate with a denial carrying the user's
+// words, the shape turn.SubagentApprovalResumeContext builds.
+func denyWithWordsHook(feedback string) toolpkg.InlineApprovalHook {
+	return func(ctx context.Context, rae *toolpkg.RequiresActionError) (context.Context, error) {
+		return toolpkg.WithToolApprovalResume(ctx, &toolpkg.ToolApprovalResumeState{
+			Denied: true, DenyReason: feedback, DenyFeedback: feedback,
+		}), nil
+	}
+}
+
+// An approved in-place gate runs its call once, in place, and the turn keeps
+// going: no RequiresActionError, a second model request happens.
+func TestInPlaceApprovalRunsTheCallWithoutEndingTheTurn(t *testing.T) {
+	const sid = "inline-approve"
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st)
+	hook, seen := approveHook()
+	gated, runs := streamHookTool(t, st, "gated_a", func(context.Context) (string, error) { return "a ok", nil })
+	inner := &inlineHookLLM{attempts: []func(ctx context.Context) (*llm.Result, error){
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "gated_a"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLM(inner, st)
+	res, err := w.Execute(inlineApprovalCtx(sid, "run-inline-approve", hook),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("result = %+v, want the follow-up answer", res)
+	}
+	if *runs != 1 {
+		t.Fatalf("gated tool runs = %d, want exactly 1 (approved in place)", *runs)
+	}
+	if inner.callCount() != 2 {
+		t.Fatalf("model calls = %d, want 2", inner.callCount())
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("hook saw %d gates, want 1", len(*seen))
+	}
+	results := toolResultMessages(inner.receivedMessages()[1])
+	if len(results) != 1 || results[0].TextContent() != "a ok" {
+		t.Fatalf("second request tool results = %+v, want the approved call's real result", results)
+	}
+}
+
+// A refusal with words refuses that one call — its result reads the user's
+// words — and every other call of the answer still runs.
+func TestInPlaceRejectionWithWordsRefusesOnlyThatCall(t *testing.T) {
+	const sid = "inline-deny-words"
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st, "plain_b")
+	gated, _ := streamHookTool(t, st, "gated_a", func(context.Context) (string, error) { return "a ok", nil })
+	plainRuns := int32(0)
+	plain, err := llm.NewTool("plain_b", "runs ungated", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&plainRuns, 1)
+		return "b ok", nil
+	})
+	if err != nil {
+		t.Fatalf("plain tool: %v", err)
+	}
+	inner := &inlineHookLLM{attempts: []func(ctx context.Context) (*llm.Result, error){
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "gated_a"), streamCall("call-b", "plain_b"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("after refusal")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLM(inner, st)
+	res, err := w.Execute(inlineApprovalCtx(sid, "run-inline-deny-words", denyWithWordsHook("use read-only")),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated, plain})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "after refusal" {
+		t.Fatalf("result = %+v, want the turn to continue", res)
+	}
+	if atomic.LoadInt32(&plainRuns) != 1 {
+		t.Fatalf("plain tool runs = %d, want 1", plainRuns)
+	}
+	results := toolResultMessages(inner.receivedMessages()[1])
+	if len(results) != 2 {
+		t.Fatalf("second request tool results = %d, want 2", len(results))
+	}
+	want := "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nuse read-only"
+	if results[0].TextContent() != want {
+		t.Fatalf("refused call result = %q, want the user's words", results[0].TextContent())
+	}
+	if results[1].TextContent() != "b ok" {
+		t.Fatalf("sibling result = %q, want its real result", results[1].TextContent())
+	}
+}
+
+// A refusal without words stops the turn: the refused call reads the stop
+// sentence, the calls behind it read the same sentence under a hidden row, no
+// second model request happens, and Execute ends with
+// ErrTurnStoppedByRejection.
+func TestInPlaceRejectionWithoutWordsStopsTheTurn(t *testing.T) {
+	const sid = "inline-deny-stop"
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st, "plain_b")
+	gated, gatedRuns := streamHookTool(t, st, "gated_a", func(context.Context) (string, error) { return "a ok", nil })
+	var plainRuns int32
+	plain, err := llm.NewTool("plain_b", "runs ungated", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&plainRuns, 1)
+		return "b ok", nil
+	})
+	if err != nil {
+		t.Fatalf("plain tool: %v", err)
+	}
+	refuse := func(ctx context.Context, rae *toolpkg.RequiresActionError) (context.Context, error) {
+		return nil, toolpkg.ErrApprovalRejectedStop
+	}
+	inner := &inlineHookLLM{attempts: []func(ctx context.Context) (*llm.Result, error){
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "gated_a"), streamCall("call-b", "plain_b"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLM(inner, st)
+	capture := NewPartialSessionCapture()
+	_, err = w.Execute(WithPartialSessionCapture(inlineApprovalCtx(sid, "run-inline-deny-stop", refuse), capture),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated, plain})
+	if !errors.Is(err, ErrTurnStoppedByRejection) {
+		t.Fatalf("execute err = %v, want ErrTurnStoppedByRejection", err)
+	}
+	if inner.callCount() != 1 {
+		t.Fatalf("model calls = %d, want 1 (the turn stops)", inner.callCount())
+	}
+	if *gatedRuns != 0 {
+		t.Fatalf("refused tool runs = %d, want 0", *gatedRuns)
+	}
+	if atomic.LoadInt32(&plainRuns) != 0 {
+		t.Fatalf("the call behind the refusal ran %d times, want 0", plainRuns)
+	}
+	snap := capture.Snapshot()
+	parked := -1
+	for i := len(snap) - 1; i >= 0; i-- {
+		if snap[i].Role == llm.RoleAssistant && len(snap[i].ToolCalls) > 0 {
+			parked = i
+			break
+		}
+	}
+	if parked < 0 {
+		t.Fatal("the parked assistant row is missing from the captured session")
+	}
+	stopped := snap[parked+1:]
+	if len(stopped) != 2 {
+		t.Fatalf("results behind the parked assistant = %d, want 2", len(stopped))
+	}
+	if stopped[0].ToolCallID != "call-a" || stopped[0].TextContent() != toolpkg.RejectedStopText {
+		t.Fatalf("refused call result = id %q text %q, want call-a with the stop sentence", stopped[0].ToolCallID, stopped[0].TextContent())
+	}
+	if stopped[1].ToolCallID != "call-b" || stopped[1].TextContent() != toolpkg.RejectedStopText {
+		t.Fatalf("not-run call result = id %q text %q, want call-b with the same stop sentence", stopped[1].ToolCallID, stopped[1].TextContent())
+	}
+	if stopped[1].ToolDisplay == nil || stopped[1].ToolDisplay.Body != toolpkg.RejectionStoppedDisplayKey {
+		t.Fatalf("not-run display = %#v, want the hidden key", stopped[1].ToolDisplay)
+	}
+}
+
+// Without the hook nothing changes: the gate unwinds the turn exactly as it
+// does today.
+func TestNoHookFallsBackToTheUnwindPath(t *testing.T) {
+	const sid = "inline-no-hook"
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st)
+	gated, _ := streamHookTool(t, st, "gated_a", func(context.Context) (string, error) { return "a ok", nil })
+	inner := &inlineHookLLM{attempts: []func(ctx context.Context) (*llm.Result, error){
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "gated_a"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLM(inner, st)
+	_, err := w.Execute(inlineApprovalCtx(sid, "run-inline-no-hook", nil),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated})
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) {
+		t.Fatalf("execute err = %v, want RequiresActionError", err)
+	}
+}
+
+// exit_plan_mode still unwinds even with the hook installed: its approval
+// carries options only the stop-turn path can honor.
+func TestExitPlanModeStillUnwinds(t *testing.T) {
+	const sid = "inline-epm"
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st)
+	var hookCalls int32
+	hook := func(ctx context.Context, rae *toolpkg.RequiresActionError) (context.Context, error) {
+		atomic.AddInt32(&hookCalls, 1)
+		return toolpkg.WithApprovedActionID(ctx, rae.ActionID), nil
+	}
+	// The gate's action is a plain tool approval; only the RAE claims
+	// exit_plan_mode, which is the fact runCallInPlace decides on.
+	epm, err := llm.NewTool("epm_probe", "raises an exit_plan_mode gate", func(ctx context.Context, _ *struct{}) (string, error) {
+		if hookFn := st.ActionHook(); hookFn != nil {
+			id, pending, hookErr := hookFn(ctx, "epm_probe", map[string]any{})
+			if hookErr != nil {
+				return "", hookErr
+			}
+			if pending && id != "" {
+				return "", &toolpkg.RequiresActionError{ActionID: id, ActionKind: "exit_plan_mode", ToolName: "exit_plan_mode"}
+			}
+		}
+		return "epm ok", nil
+	})
+	if err != nil {
+		t.Fatalf("epm tool: %v", err)
+	}
+	inner := &inlineHookLLM{attempts: []func(ctx context.Context) (*llm.Result, error){
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "epm_probe"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLM(inner, st)
+	_, err = w.Execute(inlineApprovalCtx(sid, "run-inline-epm", hook),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{epm})
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) {
+		t.Fatalf("execute err = %v, want the exit_plan_mode gate to unwind", err)
+	}
+	if atomic.LoadInt32(&hookCalls) != 0 {
+		t.Fatalf("inline hook calls = %d, want 0", hookCalls)
+	}
+}
+
+// A gate whose answer never comes ends as a cancellation when the run is
+// cancelled, and the waiting call reads the interruption.
+func TestCancelWhileAnsweringInPlace(t *testing.T) {
+	const sid = "inline-cancel"
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st)
+	gated, _ := streamHookTool(t, st, "gated_a", func(context.Context) (string, error) { return "a ok", nil })
+	blockHook := func(ctx context.Context, rae *toolpkg.RequiresActionError) (context.Context, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	inner := &inlineHookLLM{attempts: []func(ctx context.Context) (*llm.Result, error){
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "gated_a"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLM(inner, st)
+	runCtx, cancel := context.WithCancel(inlineApprovalCtx(sid, "run-inline-cancel", blockHook))
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Execute(runCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated})
+		done <- err
+	}()
+	// Wait until the model's first call happened, then cancel the run while
+	// the gate is being answered.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if inner.callCount() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("execute err = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("execute never returned after the cancellation")
+	}
+}
+
+// The gate a call raises in place carries the crash-recovery snapshot: the
+// session with this response's assistant message, and every result the
+// response has already produced.
+func TestInPlaceSnapshotCarriesCompletedResults(t *testing.T) {
+	const sid = "inline-snapshot"
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st, "plain_a")
+	plain, err := llm.NewTool("plain_a", "runs ungated", func(context.Context, *struct{}) (string, error) {
+		return "a done", nil
+	})
+	if err != nil {
+		t.Fatalf("plain tool: %v", err)
+	}
+	gated, _ := streamHookTool(t, st, "gated_b", func(context.Context) (string, error) { return "b ok", nil })
+	snapshotReady := make(chan *toolpkg.RequiresActionError, 1)
+	answer := make(chan struct{})
+	hook := func(ctx context.Context, rae *toolpkg.RequiresActionError) (context.Context, error) {
+		select {
+		case snapshotReady <- rae:
+		default:
+		}
+		<-answer
+		return toolpkg.WithApprovedActionID(ctx, rae.ActionID), nil
+	}
+	inner := &inlineHookLLM{attempts: []func(ctx context.Context) (*llm.Result, error){
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "plain_a"), streamCall("call-b", "gated_b"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLM(inner, st)
+	execDone := make(chan struct{})
+	go func() {
+		_, err := w.Execute(inlineApprovalCtx(sid, "run-inline-snapshot", hook),
+			[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{plain, gated})
+		if err != nil {
+			t.Errorf("execute: %v", err)
+		}
+		close(execDone)
+	}()
+	var rae *toolpkg.RequiresActionError
+	select {
+	case rae = <-snapshotReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the gate never reached the hook")
+	}
+	if rae == nil || len(rae.SessionSnapshot) == 0 {
+		close(answer)
+		<-execDone
+		t.Fatal("the gate carries no session snapshot")
+	}
+	sawAssistant, sawResult := false, false
+	for _, msg := range rae.SessionSnapshot {
+		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) == 2 &&
+			msg.ToolCalls[0].ID == "call-a" && msg.ToolCalls[1].ID == "call-b" {
+			sawAssistant = true
+		}
+		if msg.Role == llm.RoleTool && msg.ToolCallID == "call-a" && msg.TextContent() == "a done" {
+			sawResult = true
+		}
+	}
+	if !sawAssistant || !sawResult {
+		close(answer)
+		<-execDone
+		t.Fatalf("snapshot assistant=%v result=%v, want both calls' assistant message and the completed call's result", sawAssistant, sawResult)
+	}
+	close(answer)
+	<-execDone
+}

@@ -124,6 +124,7 @@ type State struct {
 	actionHook                   func(ctx context.Context, kind string, payload any) (actionID string, ok bool, err error)
 	networkApprovalPromptHook    func(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error)
 	subagentApprovalHook         SubagentApprovalHook
+	inlineApprovalHook           InlineApprovalHook
 	stepHook                     func(ctx context.Context, evt StepEvent)
 	readObservers                map[string]func(ctx context.Context, absPath string, content []byte)
 	// imageInputGate answers whether this session's model may be handed
@@ -176,6 +177,8 @@ const (
 	ctxKeyStepHook             ctxKey = "forebrain_step_hook"
 	ctxKeyNetworkApprovalHook  ctxKey = "forebrain_network_approval_hook"
 	ctxKeySubagentApprovalHook ctxKey = "forebrain_subagent_approval_hook"
+	ctxKeyInlineApprovalHook   ctxKey = "forebrain_inline_approval_hook"
+	ctxKeyApprovalSlotHolder   ctxKey = "forebrain_approval_slot_holder"
 )
 
 type StepEvent struct {
@@ -1900,6 +1903,13 @@ type SubagentApprovalHook func(ctx context.Context, rae *RequiresActionError) (c
 
 type NetworkApprovalPromptHook func(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error)
 
+// InlineApprovalHook answers one of the primary agent's own approval gates
+// where the call is, while the turn keeps running, and returns the context the
+// call continues under: the approved action id and the resume state. Returning
+// the gate itself (errors.Is(err, rae)) hands it back to the unwind-and-resume
+// path.
+type InlineApprovalHook func(ctx context.Context, rae *RequiresActionError) (context.Context, error)
+
 type StepHook func(ctx context.Context, evt StepEvent)
 
 // The gateway can run different conversations concurrently over one tool
@@ -1924,6 +1934,30 @@ func SubagentApprovalHookFromContext(ctx context.Context, fallback *State) Subag
 		return nil
 	}
 	return fallback.SubagentApprovalHook()
+}
+
+// The inline approval hook rides on the execution context for the same reason
+// the subagent hook does: the gateway runs different conversations over one
+// tool registry, and a State-level hook would route one conversation's
+// question to another surface. State remains the fallback for the
+// single-session TUI.
+func WithInlineApprovalHook(ctx context.Context, hook InlineApprovalHook) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeyInlineApprovalHook, hook)
+}
+
+func InlineApprovalHookFromContext(ctx context.Context, fallback *State) InlineApprovalHook {
+	if ctx != nil {
+		if hook, _ := ctx.Value(ctxKeyInlineApprovalHook).(InlineApprovalHook); hook != nil {
+			return hook
+		}
+	}
+	if fallback == nil {
+		return nil
+	}
+	return fallback.InlineApprovalHook()
 }
 
 func WithNetworkApprovalPromptHook(ctx context.Context, hook NetworkApprovalPromptHook) context.Context {
@@ -1980,6 +2014,24 @@ func (s *State) SubagentApprovalHook() SubagentApprovalHook {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.subagentApprovalHook
+}
+
+func (s *State) SetInlineApprovalHook(h InlineApprovalHook) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inlineApprovalHook = h
+}
+
+func (s *State) InlineApprovalHook() InlineApprovalHook {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inlineApprovalHook
 }
 
 func (s *State) SetStepHook(h func(ctx context.Context, evt StepEvent)) {

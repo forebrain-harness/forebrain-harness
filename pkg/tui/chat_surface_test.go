@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1250,4 +1252,186 @@ func TestApprovalRecoveryReportsOnlyTheOpenConversation(t *testing.T) {
 	recovered, err := runs.GetRun(ctx, child.ID)
 	require.NoError(t, err)
 	require.Equal(t, state.RunStatusFailed, recovered.Status)
+}
+
+// ---- plan 127: the primary agent's gates answered where the call is ----
+
+// inlineGateSession builds one session with a live run parked on a shell
+// approval whose snapshot carries the parked call, and the RAE the hook
+// receives for it.
+func inlineGateSession(t *testing.T, kind string) (*ChatSession, *state.RunStore, *state.Action, string, *tool.RequiresActionError) {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := state.NewSessionStore(db, "main").Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	actions := &state.ActionService{DB: db}
+	runs := &state.RunStore{DB: db}
+	runRow, err := runs.CreateRun(ctx, "s1", "inline gate")
+	if err != nil {
+		t.Fatalf("CreateRun error: %v", err)
+	}
+	snapshot := []llm.Message{
+		llm.UserMessage(llm.Text("run it")),
+		llm.AssistantMessage(nil, llm.ToolCall{ID: "call-inline", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: kind, Arguments: "{}"}}),
+	}
+	var act *state.Action
+	if kind == "user_interaction" {
+		form := state.AskForm{Kind: "user_interaction", SessionID: "s1", Questions: []state.AskQuestion{{
+			ID: "q1", Prompt: "Pick one",
+			Options: []state.AskOption{{ID: "A", Label: "Alpha"}, {ID: "B", Label: "Beta"}},
+		}}}
+		act, err = actions.CreateAsk(ctx, form)
+	} else {
+		act, err = actions.CreatePending(ctx, "s1", kind, map[string]any{"command": "echo hi"})
+	}
+	if err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+	if err := runs.SetWaitingAction(ctx, runRow.ID, state.Wait{
+		RunID: runRow.ID, ActionID: act.ID, ToolName: kind,
+		ToolInputJSON: `{"command":"echo hi"}`, SessionSnapshot: snapshot,
+	}); err != nil {
+		t.Fatalf("SetWaitingAction error: %v", err)
+	}
+	cs := sessionEnv{Home: home, ActionSvc: actions, RunSvc: runs}.session()
+	rae := &tool.RequiresActionError{
+		RunID: runRow.ID, ActionID: act.ID, ActionKind: kind, ToolName: kind,
+		ToolInput: map[string]any{"command": "echo hi"}, SessionSnapshot: snapshot,
+	}
+	return cs, runs, act, runRow.ID, rae
+}
+
+func inlineGateCtx(runID string) context.Context {
+	return llm.WithAgentSessionID(tool.WithRunID(context.Background(), runID), "s1")
+}
+
+// The primary agent's own gate is approved where its call waits: the waiting
+// call's context carries the approved action, the run stays the only run, and
+// the conversation records the question (with its tool step) and the answer.
+func TestInlineApprovalApprovesWithoutASecondRun(t *testing.T) {
+	cs, runs, act, runID, rae := inlineGateSession(t, "shell")
+	cs.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Approved: true}}})
+
+	resumeCtx, err := cs.resolveInlineApproval(inlineGateCtx(runID), rae)
+	if err != nil {
+		t.Fatalf("resolveInlineApproval: %v", err)
+	}
+	if got := tool.ApprovedActionIDFromContext(resumeCtx); got != act.ID {
+		t.Fatalf("approved action id = %q, want %q", got, act.ID)
+	}
+	list, err := runs.ListRunsBySession(context.Background(), "s1", 10)
+	if err != nil {
+		t.Fatalf("ListRunsBySession: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("runs = %d, want the one run the gate belongs to", len(list))
+	}
+	requested, err := runs.ListSessionEventsOfType(context.Background(), "s1", event.RunEventApprovalReq, 10)
+	if err != nil {
+		t.Fatalf("approval_requested events: %v", err)
+	}
+	if len(requested) != 1 {
+		t.Fatalf("approval_requested events = %d, want 1", len(requested))
+	}
+	var reqPayload event.ApprovalRequestedPayload
+	if err := json.Unmarshal(requested[0].Payload, &reqPayload); err != nil {
+		t.Fatalf("unmarshal approval_requested: %v", err)
+	}
+	if reqPayload.ToolStepID != "call-inline" {
+		t.Fatalf("approval_requested tool_step_id = %q, want the parked call's", reqPayload.ToolStepID)
+	}
+	resolved, err := runs.ListSessionEventsOfType(context.Background(), "s1", event.RunEventApprovalResolved, 10)
+	if err != nil {
+		t.Fatalf("approval_resolved events: %v", err)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("approval_resolved events = %d, want 1", len(resolved))
+	}
+	// The wait row is what a crash recovery would resume from: it still parks
+	// the run on the answered action, with the lease the answer left.
+	wait, err := runs.GetWaitForRun(context.Background(), runID)
+	if err != nil || wait == nil {
+		t.Fatalf("wait row after the in-place answer: %v, %v", wait, err)
+	}
+	if wait.ActionID != act.ID {
+		t.Fatalf("wait row action = %q, want the answered action", wait.ActionID)
+	}
+}
+
+// A refusal without words answers the gate with the stop error: no resume
+// dispatch, no second run — the waiting call stops the turn itself.
+func TestInlineApprovalRefusalWithoutWordsStopsInPlace(t *testing.T) {
+	cs, runs, _, runID, rae := inlineGateSession(t, "shell")
+	cs.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Cancelled: true}}})
+
+	resumeCtx, err := cs.resolveInlineApproval(inlineGateCtx(runID), rae)
+	if !errors.Is(err, tool.ErrApprovalRejectedStop) {
+		t.Fatalf("resolveInlineApproval err = %v, want ErrApprovalRejectedStop", err)
+	}
+	if resumeCtx != nil {
+		t.Fatal("a refused gate returns no continuation context")
+	}
+	list, err := runs.ListRunsBySession(context.Background(), "s1", 10)
+	if err != nil {
+		t.Fatalf("ListRunsBySession: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("runs = %d, want the one run — no rejected-stop continuation", len(list))
+	}
+}
+
+// A user_interaction question answered in place records the answer on the
+// action and dispatches no resume: the waiting call reads it on its re-run.
+func TestInlineApprovalAnswersAUserInteractionInPlace(t *testing.T) {
+	cs, runs, act, runID, rae := inlineGateSession(t, "user_interaction")
+	cs.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{
+		Approved:      true,
+		AskAnswerJSON: `{"answers":[{"question_id":"q1","option_ids":["A"]}]}`,
+	}}})
+
+	resumeCtx, err := cs.resolveInlineApproval(inlineGateCtx(runID), rae)
+	if err != nil {
+		t.Fatalf("resolveInlineApproval: %v", err)
+	}
+	if got := tool.ApprovedActionIDFromContext(resumeCtx); got != act.ID {
+		t.Fatalf("approved action id = %q, want %q", got, act.ID)
+	}
+	answered, err := cs.actionSvc().Get(context.Background(), act.ID)
+	if err != nil {
+		t.Fatalf("reload action: %v", err)
+	}
+	if answered.Status != state.ActionAnswered {
+		t.Fatalf("action status = %q, want answered", answered.Status)
+	}
+	if !strings.Contains(answered.AnswerJSON, "q1") || !strings.Contains(answered.AnswerJSON, `"A"`) {
+		t.Fatalf("answer json = %q, want the submitted answer", answered.AnswerJSON)
+	}
+	list, err := runs.ListRunsBySession(context.Background(), "s1", 10)
+	if err != nil {
+		t.Fatalf("ListRunsBySession: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("runs = %d, want the one run — the ask resumed nothing", len(list))
+	}
+}
+
+// With no interactive surface the gate comes back unchanged: the turn
+// unwinds on it exactly as it did before in-place answering existed.
+func TestInlineApprovalWithoutASinkHandsTheGateBack(t *testing.T) {
+	cs, _, _, runID, rae := inlineGateSession(t, "shell")
+	returned, err := cs.resolveInlineApproval(inlineGateCtx(runID), rae)
+	if returned != nil {
+		t.Fatal("a handed-back gate returns no continuation context")
+	}
+	var gate *tool.RequiresActionError
+	if !errors.As(err, &gate) || gate == nil || gate.ActionID != rae.ActionID {
+		t.Fatalf("resolveInlineApproval err = %v, want the gate itself handed back", err)
+	}
 }

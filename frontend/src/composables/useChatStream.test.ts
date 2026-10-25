@@ -3440,6 +3440,38 @@ describe('conversation tool and approval timeline', () => {
     expect(stream.takeReturnedDraft()).toEqual({ text: 'after that', attachments: [], mentionImages: ['shots/a.png'] })
   }))
 
+  // Plan 127: the primary agent's own gate is asked while the response still
+  // streams. The requires_action operation must not end the streaming state
+  // or set the turn's later events aside, and the approval card hangs on the
+  // tool card its tool step names.
+  it('keeps streaming through an in-place approval, the card hanging on its tool card', withFakeWebSocket(async () => {
+    const { stream, socket, pendingSend } = await startLiveStream('live-inline-approval', 'run-inline-approval')
+
+    runEvent(socket, 'evt-1', 1, 'run-inline-approval', 'live-inline-approval', 'assistant_delta', { text: 'checking' })
+    runEvent(socket, 'evt-2', 2, 'run-inline-approval', 'live-inline-approval', 'tool_call_started', { toolName: 'shell', stepId: 'call-1', summary: 'running echo hi' })
+    // The gate arrives mid-stream: the legacy op and the canonical event,
+    // exactly as the gateway files them.
+    socket.message({ op: 'requires_action', request_id: 'req-probe', run_id: 'run-inline-approval', session_id: 'live-inline-approval', data: { action_id: 'act-1', action_kind: 'shell', tool_step_id: 'call-1' } })
+    runEvent(socket, 'evt-3', 3, 'run-inline-approval', 'live-inline-approval', 'approval_requested', { actionId: 'act-1', actionKind: 'shell', toolStepId: 'call-1' })
+    // Answered where the call is: the stream keeps going, the tool completes.
+    runEvent(socket, 'evt-4', 4, 'run-inline-approval', 'live-inline-approval', 'assistant_delta', { text: ' still going' })
+    runEvent(socket, 'evt-5', 5, 'run-inline-approval', 'live-inline-approval', 'tool_call_completed', { toolName: 'shell', stepId: 'call-1', summary: 'ran echo hi', displayBody: 'hi' })
+    runEvent(socket, 'evt-6', 6, 'run-inline-approval', 'live-inline-approval', 'approval_resolved', { actionId: 'act-1', actionKind: 'shell', toolStepId: 'call-1', decision: 'approved' })
+
+    // Nothing ended the turn: it is still streaming.
+    expect(stream.isStreaming.value).toBe(true)
+
+    const host = stream.messages.value.find((message) => message.runId === 'run-inline-approval')
+    const drawnText = (host?.blocks ?? []).map((block) => (block as { text?: string }).text ?? '').join('\n')
+    expect(drawnText.split('checking').length - 1).toBe(1)
+    expect(drawnText.split('still going').length - 1).toBe(1)
+    const approval = (host?.blocks ?? []).find((block) => block.kind === 'approval')
+    expect(approval).toMatchObject({ actionId: 'act-1', toolStepId: 'call-1', status: 'approved' })
+    expect((host?.blocks ?? []).some((block) => block.kind === 'tool' && (block as { step?: { stepId?: string } }).step?.stepId === 'call-1')).toBe(true)
+    endTurn(socket, 'evt-7', 7, 'run-inline-approval', 'live-inline-approval')
+    await pendingSend
+  }))
+
   it('follows a run resumed after an approval to its end, then sends what it handed back', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-parked', 'run-parked')
     socket.message({ op: 'run_started', request_id: 'req-probe', run_id: 'run-parked', session_id: 'live-parked' })

@@ -12,6 +12,14 @@ Modes:
           open indefinitely.
   stream  send exactly one content delta, then hang - crosses the response
           boundary and stops, leaving the turn in flight.
+  streamapprove
+          the turn's first request sends the body text "checking", then a
+          require_escalated shell call (echo approved-run) with its arguments
+          complete, then one "tick N" body delta per second for six seconds,
+          then the finish frame - so the approval gate is raised while the
+          response is still streaming, which is what plan 127's in-place
+          answering shows on screen. A request carrying the tool result
+          answers "after approval".
   reply   send one delta and finish normally.
   drip    send the answer one word at a time with a pause between each, then
           finish. This is the ONLY mode that can verify streaming rendering: a
@@ -468,6 +476,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if MODE == "streamtools":
             self.serve_streamtools(body)
+            return
+
+        if MODE == "streamapprove":
+            self.serve_streamapprove(body)
             return
 
         if MODE == "goal":
@@ -1124,6 +1136,67 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "function": {"arguments": json.dumps({"command": second})},
             }],
         }))
+        self.write_event(chunk(finish="tool_calls"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_streamapprove(self, body):
+        """Answer the turn's first request with body text, then a
+        require_escalated shell call whose arguments are complete, then one
+        "tick N" delta per second for six seconds, then the finish frame: the
+        approval gate is raised while the stream is still open, which is what
+        plan 127 answers in place. A request carrying the tool result answers
+        "after approval"; background passes get the harmless answer.
+        """
+        if not _is_turn_request(body):
+            self.serve_background(body)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if _has_tool_result(body):
+            self.write_event(chunk(delta={"role": "assistant", "content": "after approval"}))
+            self.write_event(chunk(finish="stop"))
+            self.write_raw(b"data: [DONE]\n\n")
+            self.write_raw(b"")
+            return
+        self.write_event(chunk(delta={"role": "assistant", "content": "checking"}))
+        self.write_event(chunk(delta={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_streamapprove_0",
+                "type": "function",
+                "function": {"name": "shell", "arguments": json.dumps({
+                    "command": "echo approved-run",
+                    "description": "needs approval",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "test escalation",
+                })},
+            }],
+        }))
+        # Index 1 appearing is what confirms call 0's arguments complete on the
+        # compat surface (see the streamtools mode): without it the gate only
+        # fires at the finish frame, after every tick. The confirming call runs
+        # harmlessly once the stream ends.
+        self.write_event(chunk(delta={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "index": 1,
+                "id": "call_streamapprove_1",
+                "type": "function",
+                "function": {"name": "shell", "arguments": json.dumps({
+                    "command": "echo stream-confirmed",
+                    "description": "confirms call 0 mid-stream",
+                })},
+            }],
+        }))
+        for n in range(1, 7):
+            time.sleep(1)
+            self.write_event(chunk(delta={"content": " tick %d" % n}))
         self.write_event(chunk(finish="tool_calls"))
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")

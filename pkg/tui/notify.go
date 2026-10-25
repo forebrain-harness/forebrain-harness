@@ -79,6 +79,10 @@ type ApprovalSubmit struct {
 	PolicyKind    string
 	DetailPreview string
 	AskAnswerJSON string
+	// InPlace marks a decision for a gate answered where its call waits
+	// (plan 127): the turn never stopped on it, so the answer completes the
+	// action only — no abort, no resume dispatch.
+	InPlace bool
 }
 
 type NewMessageMsg struct {

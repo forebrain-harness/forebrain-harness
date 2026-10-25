@@ -1198,3 +1198,169 @@ func TestGatewaySubagentGateCancelKeepsTheDirectAbort(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	require.Empty(t, executor.recorded(), "a subagent's cancel must not dispatch a continuation")
 }
+
+// ---- plan 127: the primary agent's gates answered in place over the wire ----
+
+// newInlineApprovalServer builds a server the inline approval loop can run on:
+// a run store with an owner token (the lease this process holds), an action
+// service, and a core so the generic resume paths are real code under test.
+func newInlineApprovalServer(t *testing.T) (*Server, *state.RunStore, *state.ActionService) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	actions := &state.ActionService{DB: db}
+	runs := &state.RunStore{DB: db, Owner: "gateway-inline-test"}
+	mustGatewaySession(t, db, "session-1")
+	s := &Server{Actions: actions, RunRT: runs, Runner: &run.Runner{Deps: &run.Deps{Home: t.TempDir()}}, Core: turn.New()}
+	return s, runs, actions
+}
+
+// inlinePrimaryGate parks one primary run on a shell approval with the parked
+// call in its snapshot, the shape the action hook leaves behind.
+func inlinePrimaryGate(t *testing.T, runs *state.RunStore, actions *state.ActionService) (*state.Run, *state.Action, *tool.RequiresActionError) {
+	t.Helper()
+	ctx := context.Background()
+	runRow, err := runs.CreateRun(ctx, "session-1", "inline gate")
+	require.NoError(t, err)
+	action, err := actions.CreatePending(ctx, "session-1", "shell", map[string]any{"command": "echo hi", "session_id": "session-1"})
+	require.NoError(t, err)
+	snapshot := []llm.Message{
+		llm.UserMessage(llm.Text("go")),
+		llm.AssistantMessage(nil, llm.ToolCall{ID: "call-inline", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: "{}"}}),
+	}
+	require.NoError(t, runs.SetWaitingAction(ctx, runRow.ID, state.Wait{
+		RunID: runRow.ID, ActionID: action.ID, ToolName: "shell",
+		ToolInputJSON: `{"command":"echo hi"}`, SessionSnapshot: snapshot,
+	}))
+	return runRow, action, &tool.RequiresActionError{
+		RunID: runRow.ID, ActionID: action.ID, ActionKind: "shell", ToolName: "shell",
+		OriginatingToolCallID: "call-inline",
+		ToolInput:             map[string]any{"command": "echo hi"}, SessionSnapshot: snapshot,
+	}
+}
+
+// The web answers the primary agent's own gate where the call is: the request
+// reaches the websocket with the parked call's tool step, the approve endpoint
+// resolves the action, and the generic resume path is fenced off by the live
+// loop's lease — the turn continues in the one run it always was.
+func TestGatewayInlineApprovalApprovesInTheSameRun(t *testing.T) {
+	s, runs, actions := newInlineApprovalServer(t)
+	ctx := context.Background()
+	runRow, action, rae := inlinePrimaryGate(t, runs, actions)
+
+	var published []wsServerMsg
+	var mu sync.Mutex
+	go func() {
+		require.Eventually(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(published) > 0
+		}, 2*time.Second, 5*time.Millisecond)
+		_, err := actions.Approve(context.Background(), action.ID, "web")
+		require.NoError(t, err)
+	}()
+
+	resumeCtx, err := s.promptGatewayInlineApproval(ctx, rae, "req-1", "session-1", func(msg wsServerMsg) {
+		mu.Lock()
+		published = append(published, msg)
+		mu.Unlock()
+	})
+	require.NoError(t, err)
+	require.Equal(t, action.ID, tool.ApprovedActionIDFromContext(resumeCtx))
+
+	mu.Lock()
+	require.NotEmpty(t, published)
+	require.Equal(t, "requires_action", published[0].Op)
+	require.Equal(t, "call-inline", anyMap(published[0].Data)["tool_step_id"])
+	mu.Unlock()
+
+	list, err := runs.ListRunsBySession(ctx, "session-1", 10)
+	require.NoError(t, err)
+	require.Len(t, list, 1, "no second run: the turn continued in place")
+
+	// The endpoint's resume dispatch cannot claim the continuation this live
+	// loop holds, whichever door it tries.
+	s.resumeGatewayRunIfParked(ctx, action.ID, false)
+	claimed, err := runs.ClaimWaitResume(ctx, runRow.ID, action.ID, "another-process")
+	require.NoError(t, err)
+	require.False(t, claimed, "a second process must not resume past a live in-place loop")
+}
+
+// A denial answers the one call and the turn keeps going: the resume carries
+// the denial and the user's words.
+func TestGatewayInlineApprovalDenialRefusesOnlyThatCall(t *testing.T) {
+	s, runs, actions := newInlineApprovalServer(t)
+	ctx := context.Background()
+	_, action, rae := inlinePrimaryGate(t, runs, actions)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, err := actions.Deny(context.Background(), action.ID, "use read-only tools")
+		require.NoError(t, err)
+	}()
+	resumeCtx, err := s.promptGatewayInlineApproval(ctx, rae, "req-1", "session-1", func(wsServerMsg) {})
+	require.NoError(t, err)
+	resume := tool.ToolApprovalResumeFromContext(resumeCtx)
+	require.NotNil(t, resume)
+	require.True(t, resume.Denied)
+	require.Equal(t, "use read-only tools", resume.DenyReason)
+}
+
+// A cancellation is the refusal without words: the loop hands back the stop
+// error, the run is left alive for the turn to finish as a cancel, and no
+// rejected-stop continuation runs beside the live loop.
+func TestGatewayInlineApprovalCancelStopsInPlace(t *testing.T) {
+	s, runs, actions := newInlineApprovalServer(t)
+	ctx := context.Background()
+	runRow, action, rae := inlinePrimaryGate(t, runs, actions)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		next, err := actions.Cancel(context.Background(), action.ID, "not now")
+		require.NoError(t, err)
+		// The generic cancel handling must not touch the live loop's run.
+		s.abortGatewayRunForAction(next)
+	}()
+	_, err := s.promptGatewayInlineApproval(ctx, rae, "req-1", "session-1", func(wsServerMsg) {})
+	require.ErrorIs(t, err, tool.ErrApprovalRejectedStop)
+	require.Eventually(t, func() bool {
+		rn, rerr := runs.GetRun(ctx, runRow.ID)
+		return rerr == nil && rn != nil && rn.Status != state.RunStatusCancelled && rn.Status != state.RunStatusFailed
+	}, 2*time.Second, 10*time.Millisecond, "the run stays alive: the turn itself finishes the refusal")
+	list, err := runs.ListRunsBySession(ctx, "session-1", 10)
+	require.NoError(t, err)
+	require.Len(t, list, 1, "no rejected-stop continuation run beside the live turn")
+}
+
+// Expiry while the loop owns the gate leaves the run to the loop: the durable
+// expiry is visible, but the run is not failed underneath a live turn.
+func TestGatewayInlineApprovalExpiryLeavesTheLiveLoopInCharge(t *testing.T) {
+	s, runs, actions := newInlineApprovalServer(t)
+	ctx := context.Background()
+	runRow, action, rae := inlinePrimaryGate(t, runs, actions)
+	loopDone := make(chan error, 1)
+	go func() {
+		_, err := s.promptGatewayInlineApproval(ctx, rae, "req-1", "session-1", func(wsServerMsg) {})
+		loopDone <- err
+	}()
+	require.Eventually(t, func() bool {
+		wait, err := runs.GetWaitForRun(ctx, runRow.ID)
+		return err == nil && wait != nil && wait.ResumeOwner == s.approvalResumeOwner()
+	}, 2*time.Second, 5*time.Millisecond, "the live loop must hold the lease first")
+
+	expired, err := actions.ExpireIfPending(ctx, action.ID, "approval ttl expired")
+	require.NoError(t, err)
+	require.True(t, expired)
+	s.expireGatewayApproval(ctx, action.ID)
+
+	select {
+	case err := <-loopDone:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cancelled while waiting for tool approval")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-place loop never observed the expiration")
+	}
+	rn, err := runs.GetRun(ctx, runRow.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusWaitingAction, rn.Status, "the expired gate did not fail the live run")
+}

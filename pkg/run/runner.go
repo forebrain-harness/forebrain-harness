@@ -512,8 +512,12 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 	}
 	// A call started while its response still streams never asks anyone and
 	// never runs a reviewer: it waits for the stream to end and asks then,
-	// through the ordinary path, with the turn able to stop on it.
-	if tool.StreamingDispatchFromContext(ctx) {
+	// through the ordinary path, with the turn able to stop on it. The
+	// exception is a surface that answers the primary agent's gates where the
+	// call is: the question is asked in place, the stream keeps going, and
+	// exit_plan_mode still defers — its approval carries options only the
+	// unwind path can honor.
+	if tool.StreamingDispatchFromContext(ctx) && (exitPlanMode || tool.InlineApprovalHookFromContext(ctx, r.tools) == nil) {
 		return "", false, tool.ErrDeferToStreamEnd
 	}
 	if !exitPlanMode && !isRequestPermissions && r.permissionRequestHookApplies(kind) {
@@ -595,6 +599,15 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 	}
 	if enriched {
 		payload = pay
+	}
+	// The run asks one question at a time: this call takes the run's approval
+	// slot before its pending action exists, waiting for an earlier gate of
+	// the same run to be answered and its call to finish. A no-op for runs
+	// whose surface answers nothing in place.
+	if !exitPlanMode {
+		if err := tool.AcquireInPlaceApprovalSlot(ctx, r.policyRunIDForTool(ctx)); err != nil {
+			return "", false, err
+		}
 	}
 	a, err := r.Actions.CreatePending(context.Background(), sessionID, kind, payload)
 	if err != nil {

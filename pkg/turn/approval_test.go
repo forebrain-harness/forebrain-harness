@@ -435,6 +435,37 @@ func TestPendingApprovalGatePrefersTheCallersRunIDHint(t *testing.T) {
 	}
 }
 
+// PendingForRun builds the same request Pending does for the run it names
+// directly (plan 127): an in-place gate knows its run, so the store search is
+// not consulted, and a run that is not parked answers nil.
+func TestPendingForRunNamesTheRunWithoutSearching(t *testing.T) {
+	t.Parallel()
+
+	// The store search fails, so the request can only come back if the named
+	// run was read directly.
+	runs := &fakeApprovalRuns{
+		waitingSession: "s1",
+		runID:          "run-1",
+		firstErr:       errors.New("store search must not be reached"),
+		wait:           &state.Wait{RunID: "run-1", ActionID: "act-1", ToolName: "read_file"},
+	}
+	gate := &PendingApprovalGate{Runs: runs}
+	req, err := gate.PendingForRun(context.Background(), "s1", "run-1")
+	if err != nil {
+		t.Fatalf("PendingForRun: %v", err)
+	}
+	if req == nil || req.RunID != "run-1" || req.ActionID != "act-1" {
+		t.Fatalf("PendingForRun = %+v, want the named run's wait", req)
+	}
+	// A run with no wait row answers nil, not an error: "not parked" is the
+	// answer an in-place caller hands back to the unwind path.
+	runs.wait = nil
+	req, err = gate.PendingForRun(context.Background(), "s1", "run-2")
+	if err != nil || req != nil {
+		t.Fatalf("PendingForRun for an unparked run = %v, %v; want nil, nil", req, err)
+	}
+}
+
 func fencedWait(t *testing.T, ctx context.Context) (*sql.DB, *state.RunStore, string, string) {
 	t.Helper()
 	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)

@@ -32,13 +32,22 @@ type streamingToolExecutor struct {
 	// the steers riding on the request, persists the partial assistant message
 	// and returns the context the call runs under (nil = do not start).
 	beforeStart func(readyUpTo []llm.ToolCall) context.Context
-	limit       int
+	// stopTurn cancels the model call with ErrTurnStoppedByRejection: the
+	// user refused a streamed call without words, and the stream itself is
+	// what has to stop.
+	stopTurn func()
+	limit    int
 
 	mu     sync.Mutex
 	calls  []*streamedCall // ready order
-	halted bool            // a deferred, preempted or not-startable-in-stream call stops further starts
+	halted bool            // a deferred, preempted, refused or not-startable-in-stream call stops further starts
 	closed bool            // the stream ended; finish took over
-	wg     sync.WaitGroup
+	// refused records that a call was refused without words: the model call
+	// is being cancelled with the refusal as its cause, and the settlement
+	// after it ends the turn on ErrTurnStoppedByRejection rather than as an
+	// ordinary cancellation.
+	refused bool
+	wg      sync.WaitGroup
 }
 
 type streamedCall struct {
@@ -49,6 +58,9 @@ type streamedCall struct {
 	started bool
 	state   int // queued, executing, done, deferred, notRun
 	result  orchestratedToolResult
+	// cancel interrupts this one call's context when a refusal without words
+	// stops the turn; nil once the call has settled.
+	cancel context.CancelCauseFunc
 }
 
 // add takes one call whose arguments completed inside the stream. Calls after
@@ -164,8 +176,8 @@ func (e *streamingToolExecutor) pump() {
 		e.wg.Add(1)
 		e.mu.Unlock()
 		e.progress.MarkToolDispatched()
-		callCtx := e.beforeStart(readyUpTo)
-		if callCtx == nil {
+		baseCtx := e.beforeStart(readyUpTo)
+		if baseCtx == nil {
 			e.mu.Lock()
 			call.state = streamedCallQueued
 			e.halted = true
@@ -173,23 +185,88 @@ func (e *streamingToolExecutor) pump() {
 			e.wg.Done()
 			return
 		}
+		// The call's own cancellation, so a refusal without words elsewhere in
+		// the batch can interrupt this call without touching the turn.
+		callCtx, cancelCall := context.WithCancelCause(baseCtx)
+		e.mu.Lock()
+		call.cancel = cancelCall
+		e.mu.Unlock()
 		index := first
 		go func() {
 			defer e.wg.Done()
-			res := e.w.executeOneToolCall(tool.WithStreamingDispatch(callCtx), index, call.call, e.toolMap, toolUISuppression{})
+			defer cancelCall(nil)
+			// The crash-recovery snapshot of this call's in-place gates: the
+			// provisional session the call started under, plus every result
+			// this executor has already settled.
+			snapshot := func() []llm.Message {
+				base, _ := forkRuntimeSnapshotFromContext(callCtx)
+				e.mu.Lock()
+				defer e.mu.Unlock()
+				return appendResultsToSnapshot(base, e.calls)
+			}
+			res, stop := e.w.runCallInPlace(tool.WithStreamingDispatch(callCtx), index, call.call, e.toolMap, toolUISuppression{}, snapshot)
 			e.mu.Lock()
 			call.state = streamedCallDone
 			call.result = res
+			call.cancel = nil
 			if res.deferred {
 				call.state = streamedCallDeferred
 				// An approval or question defers to the end of the stream,
 				// and so does everything queued behind it.
 				e.halted = true
 			}
+			if stop {
+				// The user refused this call without words: the queued calls
+				// never start, the executing ones are interrupted, and the
+				// model call still streaming is cancelled with the refusal as
+				// its cause.
+				e.refused = true
+				e.halted = true
+				for i, c := range e.calls {
+					if c.state == streamedCallExecuting && c != call && c.cancel != nil {
+						c.cancel(ErrTurnStoppedByRejection)
+					}
+					if c.state != streamedCallQueued {
+						continue
+					}
+					c.state = streamedCallNotRun
+					c.result = rejectionStoppedResult(i, c.call)
+				}
+				stopTurn := e.stopTurn
+				e.mu.Unlock()
+				if stopTurn != nil {
+					stopTurn()
+				}
+				return
+			}
 			e.mu.Unlock()
 			e.pump()
 		}()
 	}
+}
+
+// appendResultsToSnapshot adds the executor's settled results, in ready
+// order, to a provisional session. The caller holds e.mu.
+func appendResultsToSnapshot(base []llm.Message, calls []*streamedCall) []llm.Message {
+	out := append([]llm.Message(nil), base...)
+	for _, c := range calls {
+		if c.state != streamedCallDone {
+			continue
+		}
+		if isRequiresActionError(c.result.err) {
+			continue
+		}
+		out = append(out, toolResultMessage(c.result))
+	}
+	return out
+}
+
+// refusedStop reports whether a streamed call was refused without words and
+// its refusal cancelled the model call.
+func (e *streamingToolExecutor) refusedStop() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.refused
 }
 
 // dispatched reports whether any call was ever started in the stream.
@@ -244,8 +321,9 @@ func (e *streamingToolExecutor) reconcile(final []llm.ToolCall) []llm.ToolCall {
 // finish settles the batch once the response is over: the calls that already
 // ran keep their results — none is ever re-run — and the rest (deferred,
 // still queued, or never reported ready) run through executeToolCalls in
-// their original order, approvals included.
-func (e *streamingToolExecutor) finish(ctx context.Context, finalCalls []llm.ToolCall) []orchestratedToolResult {
+// their original order, approvals included. Its second return reports a
+// refusal without words stopping the batch.
+func (e *streamingToolExecutor) finish(ctx context.Context, finalCalls []llm.ToolCall) ([]orchestratedToolResult, bool) {
 	finalCalls = e.reconcile(finalCalls)
 	results := make([]orchestratedToolResult, len(finalCalls))
 	byID := make(map[string]*streamedCall, len(e.calls))
@@ -268,7 +346,7 @@ func (e *streamingToolExecutor) finish(ctx context.Context, finalCalls []llm.Too
 	}
 	e.mu.Unlock()
 	if len(rest) > 0 {
-		restResults := e.w.executeToolCalls(ctx, rest, e.toolMap)
+		restResults, stopped := e.w.executeToolCalls(ctx, rest, e.toolMap)
 		for j, result := range restResults {
 			if j >= len(restAt) {
 				break
@@ -276,8 +354,11 @@ func (e *streamingToolExecutor) finish(ctx context.Context, finalCalls []llm.Too
 			result.index = restAt[j]
 			results[restAt[j]] = result
 		}
+		if stopped {
+			return results, true
+		}
 	}
-	return results
+	return results, false
 }
 
 // abort settles a cancelled request: every readied call gets a result — the
@@ -289,7 +370,9 @@ func (e *streamingToolExecutor) abort(ctx context.Context) []orchestratedToolRes
 	defer e.mu.Unlock()
 	out := make([]orchestratedToolResult, 0, len(e.calls))
 	for _, c := range e.calls {
-		if c.state == streamedCallDone {
+		if c.state == streamedCallDone || c.state == streamedCallNotRun {
+			// Not-run calls keep their own answer: a refusal without words
+			// already wrote the not-run sentence on them.
 			out = append(out, c.result)
 			continue
 		}

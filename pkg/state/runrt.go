@@ -591,6 +591,29 @@ func waitClaimedAtValue(ms int64) any {
 	return ms
 }
 
+// SetWaitSessionSnapshot replaces the session snapshot of runID's wait on
+// actionID, leaving the rest of the row — its owner lease among it — as it is.
+func (s *RunStore) SetWaitSessionSnapshot(ctx context.Context, runID, actionID string, snapshot []llm.Message) error {
+	if s == nil || s.DB == nil {
+		return fmt.Errorf("nil db")
+	}
+	runID = strings.TrimSpace(runID)
+	actionID = strings.TrimSpace(actionID)
+	if runID == "" || actionID == "" {
+		return fmt.Errorf("run id and action id are required")
+	}
+	res, err := s.DB.ExecContext(ctx, `
+UPDATE fb_run_waits SET session_snapshot_json=?, updated_at=? WHERE run_id=? AND action_id=?`,
+		MarshalWaitSessionSnapshot(snapshot), time.Now().Unix(), runID, actionID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := res.RowsAffected(); changed == 0 {
+		return ErrNoWaitContinuation
+	}
+	return nil
+}
+
 // waitColumns is the one fb_run_waits column list; scanWait is its one reader.
 // subagent_run_id is the only nullable column in it and reads as "".
 const waitColumns = `run_id, action_id, tool_name, tool_input_json, session_snapshot_json,

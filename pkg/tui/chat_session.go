@@ -1728,6 +1728,12 @@ func (s *ChatSession) submitAskUserQuestionApproval(ctx context.Context, sub App
 		return
 	}
 	s.recordAskUserQuestionDecision(ctx, result.Action)
+	if sub.InPlace {
+		// The question was answered where the call asked it: the answer is
+		// recorded, and the waiting call reads it — no resume to dispatch and
+		// nothing to abort.
+		return
+	}
 	if result.Cancelled {
 		s.abortPendingApproval(result.Action.SessionID, actionID)
 		return
@@ -2463,7 +2469,11 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			return err
 		}
 		s.clearPendingApproval()
-		if errors.Is(err, context.Canceled) {
+		// A refusal without words ends the turn exactly where the user stopped
+		// it — answered where the call asked (plan 127) or resumed (129): the
+		// refusal results are already written, so this is a cancel's finish —
+		// no error card, the run ends cancelled.
+		if errors.Is(err, context.Canceled) || errors.Is(err, run.ErrTurnStoppedByRejection) {
 			if s.chatLog != nil {
 				s.chatLog.Infof("forebrain chat turn cancelled session=%s elapsed=%s", sessionID, time.Since(t0))
 			}

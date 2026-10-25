@@ -296,15 +296,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					// every replay of the row draws are one card. Without it a
 					// replay printed the model-facing text as if it were the user's
 					// words, and a live surface that only sees events drew nothing.
-					refused := tool.DeniedToolStep(toolStepID(missing[0]), missing[0].Function.Name, toolInputMap(missing[0].Function.Arguments), resumeAssistant.denyFeedback)
-					denial.display = toolDisplayState(refused)
-					if step := tool.StepHookFromContext(ctx, w.state); step != nil {
-						step(ctx, refused)
-					}
+					denial = w.deniedToolResult(ctx, -1, missing[0], rejectionTextFor(ctx, missing[0], resumeAssistant.denyReason), resumeAssistant.denyFeedback)
 				}
 				fresh = append(fresh, denial)
 			}
 			var gate error
+			denialReplayStopped := false
 			if len(missing) > 1 {
 				// The fence opens here, immediately before the first replayed
 				// call, exactly as an approval's replay does. The replayed
@@ -315,7 +312,11 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					return nil, beginErr
 				}
 				toolCtx := withForkRuntimeSnapshot(ctx, session)
-				for _, result := range w.executeToolCalls(toolCtx, missing[1:], toolMap) {
+				replayResults, stoppedReplay := w.executeToolCalls(toolCtx, missing[1:], toolMap)
+				if stoppedReplay {
+					denialReplayStopped = true
+				}
+				for _, result := range replayResults {
 					fresh = append(fresh, result)
 					if isRequiresActionError(result.err) {
 						if gate == nil {
@@ -341,6 +342,14 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 						})
 					}
 				}
+			}
+			if denialReplayStopped {
+				// A refusal without words stopped the replay itself: record
+				// what ran and end the turn the way 129's refusal does.
+				session = appendToolResultsInAssistantOrder(session, resumeAssistant.pendingMsg, resumeAssistant.completedResults, fresh)
+				partialCapture.Set(session)
+				transcript.flush(context.WithoutCancel(ctx), session, modelForTranscript(), nil)
+				return nil, ErrTurnStoppedByRejection
 			}
 			if gate != nil {
 				// A gate inside the refusal's replay is the same suspension
@@ -462,6 +471,11 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					transcript.flush(ctx, provSession, modelForTranscript(), nil)
 					return withForkRuntimeSnapshot(w.state.ContextWithRuntimeSessionMode(ctx), provSession)
 				},
+				// A refusal without words on a streamed call cancels the model
+				// call itself with the refusal as its cause: the stream stops
+				// mid-word, the settled exchange is persisted, and the turn
+				// ends on ErrTurnStoppedByRejection rather than a plain cancel.
+				stopTurn: func() { abandonCall(ErrTurnStoppedByRejection) },
 			}
 			wrapped := *sink
 			downstream := sink.OnToolCallReady
@@ -506,7 +520,14 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		// transcript before the cancellation returns. The write must survive
 		// the cancellation it is racing, so it runs on an uncancellable
 		// context — the same rule the reasoning recorder follows.
-		if exec != nil && exec.dispatched() && (ctx.Err() != nil || errors.Is(err, context.Canceled)) {
+		//
+		// A refusal without words reaches this the same way — its stopTurn
+		// cancels the model call with the refusal as the cause, and the stream
+		// read can surface that cause itself rather than context.Canceled — so
+		// the refusal is matched on the executor's own marker, not the error's
+		// shape.
+		refused := exec != nil && exec.dispatched() && exec.refusedStop()
+		if exec != nil && exec.dispatched() && (ctx.Err() != nil || errors.Is(err, context.Canceled) || refused) {
 			if err == nil {
 				err = ctx.Err()
 			}
@@ -519,6 +540,13 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			}
 			partialCapture.Set(session)
 			transcript.flush(context.WithoutCancel(ctx), session, modelForTranscript(), nil)
+			if refused {
+				// A streamed call the user refused without words: the stream was
+				// cancelled with the refusal as its cause, the queued calls read
+				// the not-run sentence, and the turn ends the way 129's refusal
+				// does — not as an ordinary cancellation.
+				return nil, ErrTurnStoppedByRejection
+			}
 			return nil, err
 		}
 		if inFlightSteers.Retracted() {
@@ -709,12 +737,25 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		transcript.flush(ctx, session, modelForTranscript(), latestUsage)
 		toolCtx := withForkRuntimeSnapshot(w.state.ContextWithRuntimeSessionMode(ctx), session)
 		var results []orchestratedToolResult
+		stopped := false
 		if exec != nil && exec.dispatched() {
 			// Calls that already ran keep their results; the deferred and the
 			// never-ready ones run now, approvals included.
-			results = exec.finish(toolCtx, res.Message.ToolCalls)
+			results, stopped = exec.finish(toolCtx, res.Message.ToolCalls)
 		} else {
-			results = w.executeToolCalls(toolCtx, res.Message.ToolCalls, toolMap)
+			results, stopped = w.executeToolCalls(toolCtx, res.Message.ToolCalls, toolMap)
+		}
+		if stopped {
+			// The user refused a call without words, answered where it asked:
+			// the refusal is on that call, the calls behind it read the same
+			// sentence under a hidden row, and the turn ends without another
+			// model request — the surface finishes it like a cancel (129).
+			for _, result := range results {
+				session = append(session, toolResultMessage(result))
+			}
+			partialCapture.Set(session)
+			transcript.flush(context.WithoutCancel(ctx), session, modelForTranscript(), latestUsage)
+			return nil, ErrTurnStoppedByRejection
 		}
 		if err := firstControlFlowToolError(results); err != nil {
 			// An approval from a typed/fork child is a suspension point, not a
@@ -1015,8 +1056,18 @@ func (w *toolOrchestrationLLM) replayPendingToolCalls(ctx context.Context, sessi
 		firstCtx = tool.WithApprovedActionID(toolCtx, approvedActionID)
 	}
 	results := []orchestratedToolResult{w.executeOneToolCall(firstCtx, 0, missing[0], toolMap, toolUISuppression{})}
+	replayStopped := false
 	if len(missing) > 1 && !isRequiresActionError(results[0].err) {
-		results = append(results, w.executeToolCalls(toolCtx, missing[1:], toolMap)...)
+		more, stopped := w.executeToolCalls(toolCtx, missing[1:], toolMap)
+		results = append(results, more...)
+		replayStopped = stopped
+	}
+	if replayStopped {
+		// A refusal without words stopped the replay: record what ran — the
+		// not-run sentence for everything behind the refusal — and end the
+		// turn the way 129's refusal does.
+		*session = appendToolResultsInAssistantOrder(*session, assistant, completed, results)
+		return ErrTurnStoppedByRejection
 	}
 	var gate error
 	for _, result := range results {
@@ -1217,12 +1268,53 @@ func (w *toolOrchestrationLLM) applyStopHooks(ctx context.Context, session []llm
 	return res, nil
 }
 
+// toolBatchState is one response's result slots. A concurrent segment's
+// goroutines write their own slot while another goroutine's in-place gate
+// builds its crash-recovery snapshot over the slots that already hold a
+// result, so both go through the lock.
+type toolBatchState struct {
+	mu      sync.Mutex
+	results []orchestratedToolResult
+}
+
+func (b *toolBatchState) set(i int, r orchestratedToolResult) {
+	b.mu.Lock()
+	b.results[i] = r
+	b.mu.Unlock()
+}
+
+// snapshotMessages appends every result the batch has produced so far, in the
+// assistant's own call order, to base. An entry still waiting to be written
+// has no call id, which is what "not yet a result" has always looked like.
+func (b *toolBatchState) snapshotMessages(base []llm.Message) []llm.Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := append([]llm.Message(nil), base...)
+	for _, result := range b.results {
+		if strings.TrimSpace(result.call.ID) == "" {
+			continue
+		}
+		if isRequiresActionError(result.err) {
+			continue
+		}
+		out = append(out, toolResultMessage(result))
+	}
+	return out
+}
+
+// executeToolCalls runs one response's tool calls. Its second return reports
+// that the user refused a call without words and stopped the turn: every call
+// the batch had not started then carries the refusal's not-run result, and the
+// caller must persist the batch and end the turn with
+// ErrTurnStoppedByRejection instead of asking the model again.
 func (w *toolOrchestrationLLM) executeToolCalls(
 	ctx context.Context,
 	calls []llm.ToolCall,
 	toolMap map[string]*llm.Tool,
-) []orchestratedToolResult {
-	results := make([]orchestratedToolResult, len(calls))
+) ([]orchestratedToolResult, bool) {
+	batch := &toolBatchState{results: make([]orchestratedToolResult, len(calls))}
+	results := batch.results
+	assigned := make([]bool, len(calls))
 	// A queued steer takes the turn at the next call boundary: whatever has
 	// not started yet is answered "not run" so the steer goes out now instead
 	// of after the whole batch.
@@ -1233,42 +1325,76 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 		}
 		return preempted
 	}
+	// The crash-recovery snapshot of an in-place gate: the session the batch
+	// runs in, plus every result this response has produced so far.
+	snapshot := func() []llm.Message {
+		base, _ := forkRuntimeSnapshotFromContext(ctx)
+		return batch.snapshotMessages(base)
+	}
+	stopped := false
 	plans := w.state.PartitionToolCallsFor(calls)
 	callIndex := 0
 	for _, plan := range plans {
-		batch := calls[callIndex : callIndex+len(plan.ToolNames)]
-		for _, seg := range w.segmentToolCallPlan(ctx, plan, batch, callIndex) {
+		if stopped {
+			break
+		}
+		batchCalls := calls[callIndex : callIndex+len(plan.ToolNames)]
+		for _, seg := range w.segmentToolCallPlan(ctx, plan, batchCalls, callIndex) {
 			if seg.concurrent {
 				if steerWaiting() {
 					for i, call := range seg.calls {
-						results[seg.offset+i] = steerPreemptedResult(seg.offset+i, call)
+						batch.set(seg.offset+i, steerPreemptedResult(seg.offset+i, call))
+						assigned[seg.offset+i] = true
 					}
 					continue
 				}
 				segResults := results[seg.offset : seg.offset+len(seg.calls)]
 				groups := parallelToolCallSummaryGroups(seg.calls, toolMap)
 				w.emitParallelBatchSummary(ctx, groups, tool.StepKindToolParallelStarted, nil)
-				w.executeConcurrentBatch(ctx, seg.calls, seg.offset, toolMap, results)
+				for i := range seg.calls {
+					assigned[seg.offset+i] = true
+				}
+				if w.executeConcurrentBatch(ctx, seg.calls, seg.offset, toolMap, batch, snapshot) {
+					stopped = true
+				}
 				w.emitParallelBatchSummary(ctx, groups, tool.StepKindToolParallelCompleted, segResults)
 				if w.settleConcurrentGates(segResults) {
-					return results
+					return results, stopped
 				}
 				continue
 			}
 			for i, call := range seg.calls {
+				if stopped {
+					break
+				}
 				if steerWaiting() {
-					results[seg.offset+i] = steerPreemptedResult(seg.offset+i, call)
+					batch.set(seg.offset+i, steerPreemptedResult(seg.offset+i, call))
+					assigned[seg.offset+i] = true
 					continue
 				}
-				results[seg.offset+i] = w.executeOneToolCall(ctx, seg.offset+i, call, toolMap, toolUISuppression{})
-				if isRequiresActionError(results[seg.offset+i].err) {
-					return results
+				res, stop := w.runCallInPlace(ctx, seg.offset+i, call, toolMap, toolUISuppression{}, snapshot)
+				batch.set(seg.offset+i, res)
+				assigned[seg.offset+i] = true
+				stopped = stop
+				if !stop && isRequiresActionError(res.err) {
+					return results, false
 				}
 			}
 		}
 		callIndex += len(plan.ToolNames)
 	}
-	return results
+	if stopped {
+		// Everything the batch never started reads the refusal's own sentence
+		// under a hidden row: the refused call's card already says what
+		// happened, and no step announces a call that never ran.
+		for i := range calls {
+			if assigned[i] {
+				continue
+			}
+			batch.set(i, rejectionStoppedResult(i, calls[i]))
+		}
+	}
+	return results, stopped
 }
 
 // toolCallSegment is a run of one plan's calls that execute together: a
@@ -1287,13 +1413,20 @@ type toolCallSegment struct {
 // gate runs alone: the run has one wait row, and a resume hands its approval
 // to the first call it replays, so two such gates raised side by side would
 // leave the run waiting on one action and spend the approval on another call.
-// A subagent dispatch does not stop the turn that way while the surface
-// answers its children's approvals in place, so consecutive dispatches still
-// start together — they are the calls that take minutes, and running them one
-// after another is what made the model's parallel dispatch serial.
+// A surface that answers the primary agent's gates in place lifts that
+// constraint: the gates no longer stop the turn, and the run's approval slot
+// is what keeps the group asking one question at a time, so the whole
+// concurrency-safe group runs as one segment again. A subagent dispatch does
+// not stop the turn that way while the surface answers its children's
+// approvals in place either, so consecutive dispatches still start together —
+// they are the calls that take minutes, and running them one after another is
+// what made the model's parallel dispatch serial.
 func (w *toolOrchestrationLLM) segmentToolCallPlan(ctx context.Context, plan tool.ToolCallPlan, calls []llm.ToolCall, offset int) []toolCallSegment {
 	if !plan.ConcurrencySafe {
 		return []toolCallSegment{{calls: calls, offset: offset}}
+	}
+	if tool.InlineApprovalHookFromContext(ctx, w.state) != nil {
+		return []toolCallSegment{{calls: calls, offset: offset, concurrent: true}}
 	}
 	if w.state.ActionHook() == nil {
 		return []toolCallSegment{{calls: calls, offset: offset, concurrent: true}}
@@ -1540,13 +1673,18 @@ func pathBaseOrValue(path string) string {
 	return path
 }
 
+// executeConcurrentBatch runs one concurrent segment and reports whether the
+// user refused a call without words (stopped): the segment's other calls are
+// then cancelled — the started ones interrupted, the never-started answered
+// with the refusal's not-run result — and the caller stops the turn.
 func (w *toolOrchestrationLLM) executeConcurrentBatch(
 	ctx context.Context,
 	batch []llm.ToolCall,
 	offset int,
 	toolMap map[string]*llm.Tool,
-	results []orchestratedToolResult,
-) {
+	state *toolBatchState,
+	snapshot func() []llm.Message,
+) bool {
 	limit := tool.MaxToolConcurrencyFromEnv()
 	if limit <= 0 {
 		limit = len(batch)
@@ -1561,6 +1699,10 @@ func (w *toolOrchestrationLLM) executeConcurrentBatch(
 			}
 		}
 	}
+	segCtx, cancelSeg := context.WithCancelCause(ctx)
+	defer cancelSeg(nil)
+	var stopOnce sync.Once
+	stopped := false
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	for i, call := range batch {
@@ -1574,21 +1716,142 @@ func (w *toolOrchestrationLLM) executeConcurrentBatch(
 		go func(index int, tc llm.ToolCall, suppress toolUISuppression) {
 			defer wg.Done()
 			select {
-			case <-ctx.Done():
-				results[index] = orchestratedToolResult{index: index, call: tc, err: ctx.Err()}
+			case <-segCtx.Done():
+				if errors.Is(context.Cause(segCtx), ErrTurnStoppedByRejection) {
+					// Never started, and the turn is being refused: the same
+					// sentence as the refused call, under the hidden row.
+					state.set(index, rejectionStoppedResult(index, tc))
+				} else {
+					state.set(index, orchestratedToolResult{index: index, call: tc, err: segCtx.Err()})
+				}
 				return
 			case sem <- struct{}{}:
 			}
 			defer func() { <-sem }()
-			results[index] = w.executeOneToolCall(ctx, index, tc, toolMap, suppress)
+			res, stop := w.runCallInPlace(segCtx, index, tc, toolMap, suppress, snapshot)
+			state.set(index, res)
+			if stop {
+				stopOnce.Do(func() {
+					stopped = true
+					// The refusal stops the turn: the siblings still executing
+					// are interrupted with the refusal as their cause.
+					cancelSeg(ErrTurnStoppedByRejection)
+				})
+			}
 		}(idx, call, suppress)
 	}
 	wg.Wait()
+	return stopped
 }
 
 type toolUISuppression struct {
 	started   bool
 	completed bool
+}
+
+// deniedToolResult is the refusal result of one call: the instruction text the
+// model reads — the caller shapes it with rejectionTextFor, or writes
+// RejectedStopText for a refusal without words — and the refused call's own
+// step, announced like any settled call's so the card a live surface draws and
+// the card every replay of the row draws are one card. The resume path and an
+// in-place refusal produce it from this same code, so both roads out of a
+// refusal leave the same result and the same card.
+func (w *toolOrchestrationLLM) deniedToolResult(ctx context.Context, index int, call llm.ToolCall, text, feedback string) orchestratedToolResult {
+	refused := tool.DeniedToolStep(toolStepID(call), call.Function.Name, toolInputMap(call.Function.Arguments), feedback)
+	if step := tool.StepHookFromContext(ctx, w.state); step != nil {
+		step(ctx, refused)
+	}
+	return orchestratedToolResult{
+		index:   index,
+		call:    call,
+		parts:   []llm.ContentPart{llm.Text(text)},
+		display: toolDisplayState(refused),
+	}
+}
+
+// runCallInPlace executes one call; when the call raises its own approval gate
+// and the surface can answer it in place, the gate is answered here and the
+// call re-runs approved, or is refused, without ending the turn. snapshot
+// returns the session a crash-recovery resume would replay: the history, this
+// response's assistant message and every result this response has so far.
+func (w *toolOrchestrationLLM) runCallInPlace(
+	ctx context.Context, index int, call llm.ToolCall, toolMap map[string]*llm.Tool,
+	suppress toolUISuppression, snapshot func() []llm.Message,
+) (orchestratedToolResult, bool) {
+	hook := tool.InlineApprovalHookFromContext(ctx, w.state)
+	if hook == nil {
+		return w.executeOneToolCall(ctx, index, call, toolMap, suppress), false
+	}
+	holder := &tool.ApprovalSlotHolder{RunID: tool.RunIDFromContext(ctx)}
+	defer holder.Release()
+	callCtx := tool.WithApprovalSlotHolder(ctx, holder)
+	var prevResume context.Context
+	defer func() {
+		if prevResume != nil {
+			tool.EndApprovalContinuation(prevResume)
+		}
+	}()
+	// Five gates one call cannot pass is a surface answering nothing; failing
+	// the call beats looping the user through the same question forever.
+	for round := 0; round < 5; round++ {
+		res := w.executeOneToolCall(callCtx, index, call, toolMap, suppress)
+		if prevResume != nil {
+			// The approved replay settled above, whatever its result: the
+			// fence covered exactly that replay.
+			tool.EndApprovalContinuation(prevResume)
+			prevResume = nil
+		}
+		var rae *tool.RequiresActionError
+		if !errors.As(res.err, &rae) || rae == nil {
+			return res, false
+		}
+		// A subagent's gate still unwinds — its own in-place answering lives
+		// around the subagent runner — and so does exit_plan_mode, whose
+		// approval carries options only that path can honor.
+		if rae.AgentID != "" || strings.EqualFold(strings.TrimSpace(rae.ActionKind), "exit_plan_mode") {
+			return res, false
+		}
+		// Complete the gate so the surface can find the run, the call, and a
+		// snapshot a crash recovery would replay.
+		if strings.TrimSpace(rae.RunID) == "" {
+			rae.RunID = holder.RunID
+		}
+		if strings.TrimSpace(rae.OriginatingToolCallID) == "" {
+			rae.OriginatingToolCallID = toolStepID(call)
+		}
+		rae.SessionSnapshot = snapshot()
+		resumeCtx, err := hook(ctx, rae)
+		switch {
+		case errors.Is(err, rae):
+			// The surface handed the gate back: the turn unwinds on it.
+			return res, false
+		case errors.Is(err, tool.ErrApprovalRejectedStop):
+			// Refused without words (plan 129's semantics, answered here):
+			// this call reads the stop sentence, the calls behind it never
+			// start, and the turn ends without another model request.
+			return w.deniedToolResult(ctx, index, call, tool.RejectedStopText, ""), true
+		case err != nil:
+			if ctx.Err() != nil {
+				return orchestratedToolResult{index: index, call: call, err: ctx.Err()}, false
+			}
+			return orchestratedToolResult{index: index, call: call, err: err}, false
+		}
+		if st := tool.ToolApprovalResumeFromContext(resumeCtx); st != nil && st.Denied {
+			// Refused with words: only this call is refused, the turn runs on.
+			tool.EndApprovalContinuation(resumeCtx)
+			return w.deniedToolResult(ctx, index, call, rejectionTextFor(ctx, call, st.DenyReason), st.DenyFeedback), false
+		}
+		// Approved: the call re-runs as the approved action, in place, under
+		// the fence that says the replay is the one execution. resumeCtx
+		// itself is never the execution context — it carries the resume
+		// snapshot, which nested orchestration would mistake for a session.
+		if err := tool.BeginApprovalContinuation(resumeCtx); err != nil {
+			return orchestratedToolResult{index: index, call: call, err: err}, false
+		}
+		prevResume = resumeCtx
+		callCtx = tool.WithApprovedActionID(callCtx, rae.ActionID)
+	}
+	return orchestratedToolResult{index: index, call: call, err: fmt.Errorf("tool %s raised too many approval gates in one call", strings.TrimSpace(call.Function.Name))}, false
 }
 
 func (w *toolOrchestrationLLM) executeOneToolCall(

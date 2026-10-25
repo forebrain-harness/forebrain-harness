@@ -1614,6 +1614,21 @@ func (g *PendingApprovalGate) Pending(ctx context.Context, sessionID string) (*T
 	if runID == "" {
 		return nil, nil
 	}
+	return g.PendingForRun(ctx, sessionID, runID)
+}
+
+// PendingForRun builds the approval request of one named run's wait. It is
+// Pending for a caller that already knows which run is parked — an in-place
+// gate names its run directly, where Pending would have to search for it.
+func (g *PendingApprovalGate) PendingForRun(ctx context.Context, sessionID, runID string) (*ToolApprovalRequest, error) {
+	if g == nil || g.Runs == nil {
+		return nil, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, nil
+	}
 	wait, err := g.Runs.GetWaitForRun(ctx, runID)
 	if err != nil || wait == nil {
 		return nil, nil

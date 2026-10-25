@@ -106,6 +106,12 @@ func (s *Server) withDetachedGatewayApprovalHooks(ctx context.Context, sessionID
 	ctx = tool.WithSubagentApprovalHook(ctx, func(approvalCtx context.Context, rae *tool.RequiresActionError) (context.Context, error) {
 		return s.promptGatewaySubagentApproval(approvalCtx, rae, "", sid, writeDetached)
 	})
+	// The primary agent's own gates keep their in-place answering through a
+	// detached continuation too: the wait row's durable events carry them to
+	// whichever surface is watching the conversation.
+	ctx = tool.WithInlineApprovalHook(ctx, func(approvalCtx context.Context, rae *tool.RequiresActionError) (context.Context, error) {
+		return s.promptGatewayInlineApproval(approvalCtx, rae, "", sid, writeDetached)
+	})
 	ctx = tool.WithStepHook(ctx, func(stepCtx context.Context, step tool.StepEvent) {
 		stepRunID := strings.TrimSpace(tool.RunIDFromContext(stepCtx))
 		if stepRunID == "" {
@@ -405,6 +411,112 @@ func (s *Server) promptGatewaySubagentApproval(
 	}
 }
 
+// promptGatewayInlineApproval answers one of the primary agent's own approval
+// gates where the call is, while the turn keeps running (plan 127), and
+// returns the context the call continues under.
+//
+// The shape is promptGatewaySubagentApproval's: claim the wait row's lease,
+// put the request to the websocket, poll until the action resolves, and hand
+// back the resume the waiting call runs on. What differs is whose gate it is:
+// exit_plan_mode and anything raised inside a subagent still unwind, the
+// snapshot is refreshed before the lease is claimed (a crash while the
+// question is open resumes from the truth), and a cancellation is the refusal
+// without words — the call reads the stop sentence and the turn ends.
+func (s *Server) promptGatewayInlineApproval(
+	ctx context.Context, rae *tool.RequiresActionError,
+	requestID, sessionID string, writeMsg func(wsServerMsg),
+) (context.Context, error) {
+	gate, ok := turn.SubagentApprovalGateFromError(rae)
+	if !ok {
+		return nil, fmt.Errorf("not an approval gate")
+	}
+	if strings.EqualFold(strings.TrimSpace(rae.ActionKind), "exit_plan_mode") || strings.TrimSpace(rae.AgentID) != "" {
+		return nil, rae
+	}
+	if s == nil || s.Actions == nil || s.RunRT == nil {
+		// Returning the gate unchanged leaves the caller free to fall back
+		// to the unwind-and-resume path.
+		return nil, rae
+	}
+	if err := s.RunRT.SetWaitSessionSnapshot(context.Background(), gate.RunID, gate.ActionID, gate.Session); err != nil {
+		return nil, rae
+	}
+	owner := s.approvalResumeOwner()
+	if err := s.RunRT.MarkWaitResumeOwner(context.Background(), gate.RunID, gate.ActionID, owner); err != nil {
+		return nil, rae
+	}
+	resolved := false
+	defer func() {
+		if !resolved {
+			_, _ = s.Actions.Cancel(context.Background(), gate.ActionID, "the in-place approval was abandoned before a decision was returned")
+		}
+	}()
+	data := approvalWSData(s.sessionPermissions(ctx, sessionID), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
+	data["action_id"] = gate.ActionID
+	data["action_kind"] = gate.ActionKind
+	data["agent_id"] = gate.AgentID
+	data["subagent_type"] = gate.SubagentType
+	data = withApprovalToolStepID(data, rae)
+	// writeMsg files the canonical approval_requested event from this very
+	// message (canonicalRunEventsFromWS), tool step included, so the web can
+	// hang the approval card on the tool card it belongs to — no second event
+	// is published for it.
+	writeMsg(wsServerMsg{
+		Op: "requires_action", RequestID: requestID, RunID: gate.RunID, SessionID: sessionID,
+		Data: data, Message: "Awaiting approval or authorization to continue",
+	})
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	lastLeaseRefresh := time.Now()
+	for {
+		action, err := s.Actions.Get(ctx, gate.ActionID)
+		if err != nil {
+			return nil, err
+		}
+		if action != nil && action.Status != state.ActionPending {
+			owned, ownErr := s.RunRT.WaitResumeOwnedBy(context.Background(), gate.RunID, gate.ActionID, owner)
+			if ownErr != nil || !owned {
+				if ownErr == nil {
+					ownErr = fmt.Errorf("continuation lease was transferred")
+				}
+				return nil, ownErr
+			}
+			if action.Status == state.ActionCancelled {
+				// The user refused without words: the call reads the stop
+				// sentence, the calls behind it never start, the turn ends.
+				resolved = true
+				return nil, tool.ErrApprovalRejectedStop
+			}
+			resumeCtx, resumeErr := turn.SubagentApprovalResumeContext(
+				ctx, gate, turn.BuildApprovalResume(action, gate.Session, gate.ToolName, false), "the tool call",
+			)
+			if resumeErr != nil {
+				return nil, resumeErr
+			}
+			if resume := tool.ToolApprovalResumeFromContext(resumeCtx); resume != nil {
+				// Answered, so the call is running again: the status no longer
+				// rides on the execution fence, which now covers only the
+				// replay a denial never reaches.
+				_ = s.RunRT.SetStatus(context.Background(), gate.RunID, state.RunStatusRunning)
+				turn.BindApprovalContinuationFence(resume, s.RunRT, gate.RunID, gate.ActionID, owner)
+			}
+			resolved = true
+			return resumeCtx, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if time.Since(lastLeaseRefresh) >= state.WaitResumeLease/3 {
+				if err := s.RunRT.MarkWaitResumeOwner(context.Background(), gate.RunID, gate.ActionID, owner); err != nil {
+					return nil, fmt.Errorf("refresh in-place approval continuation: %w", err)
+				}
+				lastLeaseRefresh = time.Now()
+			}
+		}
+	}
+}
+
 func (s *Server) handleGatewayApprovalMessage(ctx context.Context, message wsClientMsg) error {
 	if s == nil || s.Actions == nil {
 		return fmt.Errorf("approval service is unavailable")
@@ -590,6 +702,17 @@ func (s *Server) expireGatewayApproval(ctx context.Context, actionID string) {
 	))
 	if strings.TrimSpace(runID) == "" || s.RunRT == nil {
 		return
+	}
+	// A live in-place loop owns this gate's continuation — a subagent's
+	// (promptGatewaySubagentApproval) or the primary agent's own
+	// (promptGatewayInlineApproval): it observes the durable expiration on
+	// its next poll and settles the call itself, so expiring the run here
+	// would kill a turn that is still answering. A row this process never
+	// claimed (no owner token, or another process's marker) does not count.
+	if owner := s.approvalResumeOwner(); strings.TrimSpace(owner) != "" {
+		if owned, _ := s.RunRT.WaitResumeOwnedBy(ctx, runID, action.ID, owner); owned {
+			return
+		}
 	}
 	if agentID != "" {
 		if active, ok := s.runController().Get(runID); ok && active.Phase() == run.Running {

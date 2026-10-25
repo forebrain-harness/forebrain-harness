@@ -2072,6 +2072,12 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 					agCtx = tool.WithSubagentApprovalHook(agCtx, func(approvalCtx context.Context, rae *tool.RequiresActionError) (context.Context, error) {
 						return s.promptGatewaySubagentApproval(approvalCtx, rae, m.RequestID, sid, writeMsg)
 					})
+					// The primary agent's own gates are put to this websocket the same
+					// way, answered where the call is while the turn keeps running
+					// (plan 127).
+					agCtx = tool.WithInlineApprovalHook(agCtx, func(approvalCtx context.Context, rae *tool.RequiresActionError) (context.Context, error) {
+						return s.promptGatewayInlineApproval(approvalCtx, rae, m.RequestID, sid, writeMsg)
+					})
 					agCtx = tool.WithStepHook(agCtx, func(stepCtx context.Context, evt tool.StepEvent) {
 						rid := tool.RunIDFromContext(stepCtx)
 						if rid == "" {
@@ -2307,7 +2313,10 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				s.runController().WaitApproval(runID)
 				continue
 			}
-			if errors.Is(agentErr, context.Canceled) {
+			// A refusal without words ends the turn exactly where the user
+			// stopped it (plans 129/127): the refusal results are already
+			// written, so this is a cancel's finish, not an error's.
+			if errors.Is(agentErr, context.Canceled) || errors.Is(agentErr, run.ErrTurnStoppedByRejection) {
 				// Persist already-completed tool calls/results so the
 				// transcript DB stays consistent with what the webchat user
 				// saw during the run. Without this, the next round and

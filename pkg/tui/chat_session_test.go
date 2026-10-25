@@ -8044,23 +8044,23 @@ func TestCharacterizationSteerSurvivesApprovalGate(t *testing.T) {
 	if len(got.Runs) != 1 || got.Runs[0].Status != state.RunStatusDone {
 		t.Fatalf("Runs = %+v, want exactly 1 done run", got.Runs)
 	}
-	wantRoles := []string{"user", "assistant", "tool", "assistant", "user", "assistant"}
+	// With the gate answered in place (plan 127) the turn never stopped, so
+	// the queued steer rides the tool-result boundary of that same run: the
+	// user row lands right after the tool result and one reply covers both.
+	wantRoles := []string{"user", "assistant", "tool", "user", "assistant"}
 	if len(got.Messages) != len(wantRoles) {
-		t.Fatalf("Messages = %d, want %d (user, tool_calls, tool result, post-approval reply, steer-as-user, steer reply): %+v", len(got.Messages), len(wantRoles), got.Messages)
+		t.Fatalf("Messages = %d, want %d (user, tool_calls, tool result, steer-as-user, reply): %+v", len(got.Messages), len(wantRoles), got.Messages)
 	}
 	for i, want := range wantRoles {
 		if got.Messages[i].Role != want {
 			t.Fatalf("Messages[%d].Role = %q, want %q (full transcript: %+v)", i, got.Messages[i].Role, want, got.Messages)
 		}
 	}
-	if got.Messages[3].Content != "Ran it, that's the answer" {
-		t.Fatalf("Messages[3].Content = %q, want the post-approval reply the model gave before the steer reopened the loop", got.Messages[3].Content)
+	if got.Messages[3].Content != "also check disk space" {
+		t.Fatalf("Messages[3].Content = %q, want the steer text delivered at the tool-result boundary", got.Messages[3].Content)
 	}
-	if got.Messages[4].Content != "also check disk space" {
-		t.Fatalf("Messages[4].Content = %q, want the steer text, delivered one round trip after the approval gate rather than right after the tool result", got.Messages[4].Content)
-	}
-	if got.Messages[5].Content != "also checked disk space, that's fine too" {
-		t.Fatalf("Messages[5].Content = %q, want the reply that actually addresses the steer", got.Messages[5].Content)
+	if got.Messages[4].Content != "Ran it, that's the answer" {
+		t.Fatalf("Messages[4].Content = %q, want the reply the model gave with the tool result and the steer in view", got.Messages[4].Content)
 	}
 }
 
@@ -13959,8 +13959,11 @@ func TestPlanReviewStopsWhenTheUserCancelsATooLApproval(t *testing.T) {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
 	err = runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil)
-	if err == nil || !strings.Contains(err.Error(), "cancelled") {
-		t.Fatalf("err = %v, want the review to stop when the user cancels", err)
+	// The reviewer's gate carries no agent id, so a cancel answers it as the
+	// refusal without words (plan 127): the review still stops, its run is
+	// never resumed, and the error names the refusal.
+	if !errors.Is(err, tool.ErrApprovalRejectedStop) {
+		t.Fatalf("err = %v, want the refusal-without-words stop", err)
 	}
 	if len(executor.calls) != 1 {
 		t.Fatal("a cancelled approval must not resume the review run")

@@ -772,3 +772,404 @@ func TestProvisionalAssistantRowIsCompletedNotDuplicated(t *testing.T) {
 		t.Fatalf("final row = %+v", got[4])
 	}
 }
+
+// ---- plan 127: streaming dispatch with an in-place approval hook ----
+
+// A streamed call whose surface answers the primary agent's gates in place
+// asks now instead of deferring: the pending action exists the moment the
+// gate fires.
+func TestStreamingDispatchWithInlineHookAsksInPlace(t *testing.T) {
+	ctx := llm.WithAgentSessionID(context.Background(), "session-stream-inline")
+	db, err := state.OpenStateForTest(ctx, t.TempDir()+"/state.sqlite")
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	defer db.Close()
+	ensureRunSessions(t, db, "session-stream-inline")
+
+	r := &Runner{Deps: &Deps{Actions: &state.ActionService{DB: db}}, permRuntime: safety.NewRuntimeWithStore(safety.NewStore())}
+	hooked := toolpkg.WithInlineApprovalHook(toolpkg.WithStreamingDispatch(ctx), func(context.Context, *toolpkg.RequiresActionError) (context.Context, error) {
+		t.Fatal("the hook is the orchestration's to call, not the action hook's")
+		return nil, nil
+	})
+	id, pending, err := r.actionHook(hooked, "shell", map[string]any{"command": "echo hi"})
+	if err != nil {
+		t.Fatalf("actionHook err = %v, want a pending approval", err)
+	}
+	if !pending || id == "" {
+		t.Fatalf("actionHook id=%q pending=%v, want the in-place approval", id, pending)
+	}
+}
+
+// exit_plan_mode keeps deferring even with an in-place hook: its approval
+// carries options only the unwind path can honor.
+func TestStreamingDispatchWithInlineHookStillDefersExitPlanMode(t *testing.T) {
+	ctx := llm.WithAgentSessionID(toolpkg.WithStreamingDispatch(context.Background()), "session-stream-epm-defer")
+	hooked := toolpkg.WithInlineApprovalHook(ctx, func(context.Context, *toolpkg.RequiresActionError) (context.Context, error) {
+		return nil, nil
+	})
+	r := &Runner{Deps: &Deps{}, permRuntime: safety.NewRuntimeWithStore(safety.NewStore())}
+	_, pending, err := r.actionHook(hooked, "exit_plan_mode", map[string]any{})
+	if !errors.Is(err, toolpkg.ErrDeferToStreamEnd) {
+		t.Fatalf("actionHook err = %v, want ErrDeferToStreamEnd", err)
+	}
+	if pending {
+		t.Fatal("a deferred exit_plan_mode must create nothing")
+	}
+}
+
+// Two gates of one run serialize on the run's approval slot: the second
+// actionHook blocks until the first call released the slot.
+func TestInPlaceSlotSerializesTwoGatesOfOneRun(t *testing.T) {
+	ctx := llm.WithAgentSessionID(context.Background(), "session-stream-slot")
+	db, err := state.OpenStateForTest(ctx, t.TempDir()+"/state.sqlite")
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	defer db.Close()
+	ensureRunSessions(t, db, "session-stream-slot")
+
+	r := &Runner{Deps: &Deps{Actions: &state.ActionService{DB: db}}, permRuntime: safety.NewRuntimeWithStore(safety.NewStore())}
+	// Each call carries its own holder for the same run, the way
+	// runCallInPlace installs one per call.
+	firstHolder := &toolpkg.ApprovalSlotHolder{RunID: "run-slot-hook"}
+	secondHolder := &toolpkg.ApprovalSlotHolder{RunID: "run-slot-hook"}
+	runCtx := toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "session-stream-slot"), "run-slot-hook")
+	first, pending, err := r.actionHook(toolpkg.WithApprovalSlotHolder(runCtx, firstHolder), "shell", map[string]any{"command": "echo one"})
+	if err != nil || !pending || first == "" {
+		t.Fatalf("first gate: id=%q pending=%v err=%v", first, pending, err)
+	}
+	secondDone := make(chan string, 1)
+	go func() {
+		id, p, gerr := r.actionHook(toolpkg.WithApprovalSlotHolder(runCtx, secondHolder), "shell", map[string]any{"command": "echo two"})
+		if gerr != nil || !p {
+			t.Errorf("second gate: pending=%v err=%v", p, gerr)
+		}
+		secondDone <- id
+	}()
+	select {
+	case id := <-secondDone:
+		t.Fatalf("second gate created action %q while the first held the slot", id)
+	case <-time.After(150 * time.Millisecond):
+	}
+	firstHolder.Release()
+	select {
+	case id := <-secondDone:
+		if id == "" {
+			t.Fatal("second gate created no action after the slot was released")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second gate never asked after the slot was released")
+	}
+	secondHolder.Release()
+}
+
+// ---- plan 127: gates asked in place while the stream continues ----
+
+// inlineGateHook is a controllable in-place approval hook: every gate is
+// reported on gates and blocks until the test answers it.
+type inlineGate struct {
+	rae    *toolpkg.RequiresActionError
+	answer chan string
+}
+
+func inlineGateHook() (toolpkg.InlineApprovalHook, chan inlineGate) {
+	gates := make(chan inlineGate, 4)
+	return func(ctx context.Context, rae *toolpkg.RequiresActionError) (context.Context, error) {
+		g := inlineGate{rae: rae, answer: make(chan string, 1)}
+		gates <- g
+		switch <-g.answer {
+		case "approve":
+			return toolpkg.WithApprovedActionID(ctx, rae.ActionID), nil
+		case "deny":
+			return toolpkg.WithToolApprovalResume(ctx, &toolpkg.ToolApprovalResumeState{
+				Denied: true, DenyReason: "not now", DenyFeedback: "not now",
+			}), nil
+		case "refuse":
+			return nil, toolpkg.ErrApprovalRejectedStop
+		}
+		return nil, fmt.Errorf("unknown gate answer")
+	}, gates
+}
+
+func waitInlineGate(t *testing.T, gates chan inlineGate, what string) inlineGate {
+	t.Helper()
+	select {
+	case g := <-gates:
+		return g
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the %s gate never reached the hook", what)
+		return inlineGate{}
+	}
+}
+
+func answerInlineGate(g inlineGate, answer string) {
+	g.answer <- answer
+}
+
+// A refusal without words on a streamed call cancels the stream itself: the
+// model call dies with the refusal as its cause, the refused call reads the
+// stop sentence, and the calls queued behind it never start.
+func TestInPlaceRejectionWithoutWordsStopsTheStream(t *testing.T) {
+	const sid = "streamtools-refuse-stop"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st)
+	hook, gates := inlineGateHook()
+
+	var aRuns int32
+	gated, err := llm.NewTool("gated_a", "asks in place", func(ctx context.Context, _ *struct{}) (string, error) {
+		if hookFn := st.ActionHook(); hookFn != nil {
+			id, pending, hookErr := hookFn(ctx, "gated_a", map[string]any{"tool": "gated_a"})
+			if hookErr != nil {
+				return "", hookErr
+			}
+			if pending && id != "" {
+				return "", &toolpkg.RequiresActionError{ActionID: id, ActionKind: "gated_a", ToolName: "gated_a"}
+			}
+		}
+		atomic.AddInt32(&aRuns, 1)
+		return "a ok", nil
+	})
+	if err != nil {
+		t.Fatalf("gated tool: %v", err)
+	}
+	var cRuns int32
+	queued, err := llm.NewTool("queued_c", "waits behind the unsafe call", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&cRuns, 1)
+		return "c ok", nil
+	})
+	if err != nil {
+		t.Fatalf("queued tool: %v", err)
+	}
+
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("checking")
+			sink.OnTextBlockDone()
+			sink.OnToolCallReady(streamCall("call-a", "gated_a"))
+			g := waitInlineGate(t, gates, "streamed gated")
+			// The stream keeps writing while the question is open, and the
+			// queued call is readied behind the unsafe gated one.
+			sink.OnDelta(" still going")
+			sink.OnToolCallReady(streamCall("call-c", "queued_c"))
+			time.Sleep(150 * time.Millisecond)
+			if got := atomic.LoadInt32(&cRuns); got != 0 {
+				t.Errorf("queued call ran %d times behind the unsafe gated call", got)
+			}
+			answerInlineGate(g, "refuse")
+			// The refusal cancels this very stream.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(10 * time.Second):
+				return nil, fmt.Errorf("the refusal never cancelled the stream")
+			}
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	capture := NewPartialSessionCapture()
+	base := toolpkg.WithInlineApprovalHook(llm.WithAgentSessionID(toolpkg.WithRunID(context.Background(), runID), sid), hook)
+	execCtx := WithPartialSessionCapture(llm.WithStreamSink(base, streamTestSink()), capture)
+	_, err = w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated, queued})
+	if !errors.Is(err, ErrTurnStoppedByRejection) {
+		t.Fatalf("execute err = %v, want ErrTurnStoppedByRejection", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", inner.calls)
+	}
+	if got := atomic.LoadInt32(&cRuns); got != 0 {
+		t.Fatalf("queued call ran %d times, want 0", got)
+	}
+	snap := capture.Snapshot()
+	refused, notRun := 0, 0
+	for _, msg := range snap {
+		if msg.Role != llm.RoleTool {
+			continue
+		}
+		switch {
+		case msg.TextContent() == toolpkg.RejectedStopText && msg.ToolDisplay != nil && msg.ToolDisplay.Body == toolpkg.RejectionStoppedDisplayKey:
+			notRun++
+		case msg.TextContent() == toolpkg.RejectedStopText:
+			refused++
+		}
+	}
+	if refused != 1 || notRun != 1 {
+		t.Fatalf("stopped results: refused=%d notRun=%d, want 1 and 1", refused, notRun)
+	}
+}
+
+// A gate asked in place does not stop the stream: the model keeps writing,
+// and a concurrency-safe sibling readied behind the gated call starts only
+// once the gated call is answered — an unsafe gated call blocks the queue.
+func TestInPlaceGateIsAskedWhileTheStreamContinues(t *testing.T) {
+	const sid = "streamtools-gate-streams"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st, "read_b")
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_b", ReadOnly: true, ConcurrencySafe: true})
+	hook, gates := inlineGateHook()
+
+	gated, aRuns := streamHookTool(t, st, "write_a", func(context.Context) (string, error) { return "a ok", nil })
+	var bRuns int32
+	bDone := make(chan struct{})
+	var bOnce sync.Once
+	safe, err := llm.NewTool("read_b", "safe sibling", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&bRuns, 1)
+		bOnce.Do(func() { close(bDone) })
+		return "b ok", nil
+	})
+	if err != nil {
+		t.Fatalf("safe tool: %v", err)
+	}
+
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("checking")
+			sink.OnTextBlockDone()
+			sink.OnToolCallReady(streamCall("call-a", "write_a"))
+			g := waitInlineGate(t, gates, "streamed gated")
+			// The stream keeps going while the gate is open.
+			sink.OnDelta(" still going")
+			sink.OnToolCallReady(streamCall("call-b", "read_b"))
+			time.Sleep(200 * time.Millisecond)
+			if got := atomic.LoadInt32(&bRuns); got != 0 {
+				t.Errorf("the safe sibling started %d times while the unsafe gated call waited", got)
+			}
+			answerInlineGate(g, "approve")
+			select {
+			case <-bDone:
+			case <-time.After(5 * time.Second):
+				return nil, fmt.Errorf("the safe sibling never started after the gated call ended")
+			}
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("checking still going")},
+				streamCall("call-a", "write_a"), streamCall("call-b", "read_b"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("after approval")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	base := toolpkg.WithInlineApprovalHook(llm.WithAgentSessionID(toolpkg.WithRunID(context.Background(), runID), sid), hook)
+	execCtx := llm.WithStreamSink(base, streamTestSink())
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated, safe})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "after approval" {
+		t.Fatalf("result = %+v, want the turn to continue", res)
+	}
+	if *aRuns != 1 || atomic.LoadInt32(&bRuns) != 1 {
+		t.Fatalf("runs: gated=%d safe=%d, want 1 and 1", *aRuns, atomic.LoadInt32(&bRuns))
+	}
+}
+
+// A gate asked in place does not hold back its concurrency-safe siblings: a
+// safe gated call and a safe ungated call run together, the question open.
+func TestInPlaceSafeGateLetsSafeSiblingsRun(t *testing.T) {
+	const sid = "streamtools-safe-gate"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st, "read_b")
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_a", ReadOnly: true, ConcurrencySafe: true})
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_b", ReadOnly: true, ConcurrencySafe: true})
+	hook, gates := inlineGateHook()
+
+	gated, _ := streamHookTool(t, st, "read_a", func(context.Context) (string, error) { return "a ok", nil })
+	var bRuns int32
+	bDone := make(chan struct{})
+	var bOnce sync.Once
+	safe, err := llm.NewTool("read_b", "safe sibling", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&bRuns, 1)
+		bOnce.Do(func() { close(bDone) })
+		return "b ok", nil
+	})
+	if err != nil {
+		t.Fatalf("safe tool: %v", err)
+	}
+
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnToolCallReady(streamCall("call-a", "read_a"))
+			g := waitInlineGate(t, gates, "safe gated")
+			sink.OnToolCallReady(streamCall("call-b", "read_b"))
+			// The sibling runs while the question is still open.
+			select {
+			case <-bDone:
+			case <-time.After(5 * time.Second):
+				return nil, fmt.Errorf("the safe sibling never ran beside the open gate")
+			}
+			answerInlineGate(g, "approve")
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "read_a"), streamCall("call-b", "read_b"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	base := toolpkg.WithInlineApprovalHook(llm.WithAgentSessionID(toolpkg.WithRunID(context.Background(), runID), sid), hook)
+	execCtx := llm.WithStreamSink(base, streamTestSink())
+	if _, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated, safe}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if atomic.LoadInt32(&bRuns) != 1 {
+		t.Fatalf("safe sibling runs = %d, want 1", bRuns)
+	}
+}
+
+// One question per run: with two gated concurrency-safe calls, the hook sees
+// the first alone; the second asks only after the first was answered and its
+// call finished.
+func TestOnlyOneInPlaceQuestionPerRun(t *testing.T) {
+	const sid = "streamtools-one-question"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st)
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_a", ReadOnly: true, ConcurrencySafe: true})
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_b", ReadOnly: true, ConcurrencySafe: true})
+	hook, gates := inlineGateHook()
+
+	aTool, aRuns := streamHookTool(t, st, "read_a", func(context.Context) (string, error) { return "a ok", nil })
+	bTool, _ := streamHookTool(t, st, "read_b", func(context.Context) (string, error) { return "b ok", nil })
+
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnToolCallReady(streamCall("call-a", "read_a"))
+			first := waitInlineGate(t, gates, "first gated")
+			sink.OnToolCallReady(streamCall("call-b", "read_b"))
+			// B is up and running, but its gate cannot ask yet.
+			time.Sleep(250 * time.Millisecond)
+			select {
+			case second := <-gates:
+				t.Errorf("the second gate asked before the first was answered: %+v", second.rae)
+			default:
+			}
+			answerInlineGate(first, "approve")
+			second := waitInlineGate(t, gates, "second gated")
+			if got := atomic.LoadInt32(aRuns); got != 1 {
+				t.Errorf("first call runs = %d when the second gate asked, want 1", got)
+			}
+			answerInlineGate(second, "approve")
+			msg := llm.AssistantMessage(nil, streamCall("call-a", "read_a"), streamCall("call-b", "read_b"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	base := toolpkg.WithInlineApprovalHook(llm.WithAgentSessionID(toolpkg.WithRunID(context.Background(), runID), sid), hook)
+	execCtx := llm.WithStreamSink(base, streamTestSink())
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{aTool, bTool})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("result = %+v, want the turn to continue", res)
+	}
+}

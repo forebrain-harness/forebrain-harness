@@ -385,7 +385,7 @@ func newUserInteractionTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) 
 			}
 			return out.Answers, nil
 		}
-		if StreamingDispatchFromContext(ctx) {
+		if StreamingDispatchFromContext(ctx) && InlineApprovalHookFromContext(ctx, st) == nil {
 			return nil, ErrDeferToStreamEnd
 		}
 		form, err := humanInputToAskForm(in)
@@ -396,17 +396,24 @@ func newUserInteractionTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) 
 		form.SessionID = strings.TrimSpace(ConversationSessionIDFromContext(ctx))
 		form.AgentID = strings.TrimSpace(HookAgentIDFromContext(ctx))
 		form.SubagentType = strings.TrimSpace(SubagentTypeFromContext(ctx))
-		a, err := rt.Actions.CreateAsk(ctx, form)
-		if err != nil {
-			return nil, err
-		}
+		rid := ""
 		if rt.RunRT != nil {
-			rid := ""
 			if rt.PolicyRunID != nil {
 				rid = strings.TrimSpace(rt.PolicyRunID(ctx))
 			} else {
 				rid = strings.TrimSpace(RunIDFromContext(ctx))
 			}
+		}
+		// One question per run, exactly like the action hook's gates: the
+		// call takes the run's approval slot before its ask exists.
+		if err := AcquireInPlaceApprovalSlot(ctx, rid); err != nil {
+			return nil, err
+		}
+		a, err := rt.Actions.CreateAsk(ctx, form)
+		if err != nil {
+			return nil, err
+		}
+		if rt.RunRT != nil {
 			if rid != "" {
 				if serr := rt.RunRT.SetWaitingAction(context.Background(), rid, state.Wait{
 					RunID:         rid,
