@@ -2605,6 +2605,26 @@ func (s *SessionStore) DeleteSessionMessages(ctx context.Context, sessionID stri
 	return err
 }
 
+// DeleteRunMessageRow removes one row from a run's transcript by its id. It
+// is how a resent attempt's already-written reasoning rows are withdrawn:
+// scoped to the session and the run so a stray id from another conversation
+// can never delete anything.
+func (s *SessionStore) DeleteRunMessageRow(ctx context.Context, sessionID, runID string, rowID int64) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	runID = strings.TrimSpace(runID)
+	if sessionID == "" || runID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM fb_messages WHERE id=? AND session_id=? AND run_id=?`, rowID, sessionID, runID)
+	return err
+}
+
 // SetSessionContextResetToLatest advances the session's context-reset cursor to
 // the latest transcript row id. Rows with id <= the cursor are retained on disk
 // (and remain fully replayable via ListAllMessages) but are excluded from the

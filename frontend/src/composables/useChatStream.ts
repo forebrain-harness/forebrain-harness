@@ -1397,6 +1397,23 @@ function dropOpenStreamedBlocks(blocks: TimelineBlock[]): TimelineBlock[] {
 }
 
 /**
+ * Takes back what the dead attempt showed: the blocks still being streamed
+ * always go, and when the attempt's finished blocks were all thinking the
+ * resend withdraws those too, from the tail inward, stopping at the first
+ * block that is neither. That is a resend's discard — a finish keeps what
+ * completed.
+ */
+function dropDeadAttemptBlocks(blocks: TimelineBlock[], finishedThinking: boolean): TimelineBlock[] {
+  const kept = dropOpenStreamedBlocks(blocks)
+  if (!finishedThinking) return kept
+  const out = [...kept]
+  while (out.length > 0 && out[out.length - 1].kind === 'thinking') {
+    out.pop()
+  }
+  return out
+}
+
+/**
  * subagentIdFromPayload reports which agent an event belongs to, empty for the
  * primary agent. Text-shaped events carry the roster key at the top level;
  * tool steps carry it on the meta, which is where the runtime tags every step a
@@ -3454,13 +3471,26 @@ export function useChatStream() {
         // subagent's transcript: the dead attempt's in-flight text goes — a
         // cleared notice carries the final dead attempt's withdraw when the
         // cap ran out — and the retry itself lives on the tab's status line,
-        // never in the transcript.
+        // never in the transcript. A resend that withdraws finished thinking
+        // drops those blocks too.
         updateSubagent(agentId, (entry) => ({
           ...entry,
-          blocks: dropOpenStreamedBlocks(entry.blocks),
+          blocks: dropDeadAttemptBlocks(entry.blocks, payload.dropFinishedThinking === true),
           retry: payload.cleared ? undefined : transportRetryStatusOf(payload),
         }))
         return true
+      case 'response_notice':
+        // A subagent's answer finished from what completed is a fact of its
+        // own transcript; a stream retried without streaming is a main-
+        // conversation-only warning.
+        if (String(payload.kind ?? '') === 'incomplete') {
+          updateSubagent(agentId, (entry) => ({
+            ...entry,
+            blocks: [...entry.blocks, { kind: 'error', id: evt.id ?? '', text: String(payload.text ?? '') }],
+          }))
+          return true
+        }
+        return false
       case 'usage_delta':
         updateSubagent(agentId, (entry) => ({
           ...entry,
@@ -4145,6 +4175,24 @@ export function useChatStream() {
   }
 
   /**
+   * insertResponseNotice puts a plain one-line notice about the response
+   * itself — the streaming-fallback warning — immediately before the answer
+   * the run is streaming, the position insertImageRejectedNotice uses: the
+   * reader meets it before the answer it explains. The id is derived from the
+   * event's own, so a replayed or repeated report is the same notice, not a
+   * second one.
+   */
+  function insertResponseNoticeMessage(id: string, text: string, assistantMessageId: string) {
+    if (messages.value.some((message) => message.id === id)) return
+    const notice: ChatMessage = { id, role: 'notice', content: text }
+    const list = messages.value
+    const at = list.findIndex((message) => message.id === assistantMessageId)
+    messages.value = at < 0
+      ? [...list, notice]
+      : [...list.slice(0, at), notice, ...list.slice(at)]
+  }
+
+  /**
    * findGateAnchor names the message holding a card-less gate's anchor.
    */
   function findGateAnchor(stepId: string, actionId: string): string | null {
@@ -4772,7 +4820,8 @@ export function useChatStream() {
         // The attempt that was streaming died on the network: its buffered
         // text goes — the retry re-streams from the first token, and a
         // cleared notice (the retry's end) carries the final dead attempt's
-        // withdraw when the cap ran out. The retry itself never enters the
+        // withdraw when the cap ran out. A resend that withdraws finished
+        // thinking drops those blocks too. The retry itself never enters the
         // conversation: the status line above the composer becomes it, and
         // the cleared notice hands that line back. Only the dead tail leaves
         // the composer's answer — words from earlier rounds of this same
@@ -4785,11 +4834,29 @@ export function useChatStream() {
         answer.value = state.fullAnswer
         updateMessageById(assistantMessageId, (message) => ({
           ...message,
-          blocks: dropOpenStreamedBlocks(message.blocks ?? []),
+          blocks: dropDeadAttemptBlocks(message.blocks ?? [], payload.dropFinishedThinking === true),
         }))
         runtimeStatus.value = payload.cleared
           ? { ...runtimeStatus.value, retry: undefined }
           : { ...runtimeStatus.value, retry: transportRetryStatusOf(payload) }
+        return
+      }
+      case 'response_notice': {
+        const kind = String(payload.kind ?? '')
+        const text = String(payload.text ?? '')
+        if (!text) return
+        if (kind === 'incomplete') {
+          // The answer this message holds stops where the stream did: the
+          // sentence naming that is part of the message, appended to it.
+          updateMessageById(assistantMessageId, (message) => ({
+            ...message,
+            blocks: [...(message.blocks ?? []), { kind: 'error' as const, id: evt.id ?? '', text }],
+          }))
+          return
+        }
+        if (kind === 'streaming_fallback') {
+          insertResponseNoticeMessage('response-notice:' + (evt.id ?? ''), text, assistantMessageId)
+        }
         return
       }
       case 'turn_completed': {

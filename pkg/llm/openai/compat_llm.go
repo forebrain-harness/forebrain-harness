@@ -872,7 +872,16 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				break
 			}
 			if err != nil {
+				// The stream died mid-read (a reset, an unexpected EOF): the
+				// thinking that streamed and never turned into answer text
+				// is a finished block at this death — the compat stream has
+				// no boundary of its own, so this is it. Calls stay as the
+				// in-flight boundaries left them: a later index confirmed
+				// what completed, and nothing else is ready.
 				_ = stream.Close()
+				if reasoningAcc.Len() > 0 && sink != nil && sink.OnReasoningDone != nil {
+					sink.OnReasoningDone()
+				}
 				if sink != nil && sink.OnEnd != nil {
 					sink.OnEnd()
 				}
@@ -970,12 +979,30 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		// was cut mid-answer (most often a proxy dropping the SSE
 		// connection): report it instead of returning the partial text as a
 		// success, so the retry layers get a chance to re-send. Zero output
-		// keeps the existing empty-answer path.
+		// with no finish frame either is not an answer at all — the stream
+		// closed before producing a single event, and the request is re-sent
+		// without streaming.
+		//
+		// The death of the stream is also the boundary the compat stream
+		// lacks in flight: the thinking that streamed and never turned into
+		// text is a finished block now, and so is every call a later index
+		// already confirmed complete — a call with no such confirmation keeps
+		// its half-merged arguments to itself instead of being reported
+		// ready at its own death.
 		if lastFinish == "" && (contentAcc.Len() > 0 || reasoningAcc.Len() > 0 || len(toolBuf) > 0) {
+			if reasoningAcc.Len() > 0 && sink != nil && sink.OnReasoningDone != nil {
+				sink.OnReasoningDone()
+			}
 			if sink != nil && sink.OnEnd != nil {
 				sink.OnEnd()
 			}
 			return nil, fmt.Errorf("%s: %w", c.model, llm.ErrStreamTruncated)
+		}
+		if lastFinish == "" {
+			if sink != nil && sink.OnEnd != nil {
+				sink.OnEnd()
+			}
+			return nil, fmt.Errorf("%s: %w", c.model, llm.ErrStreamNoEvents)
 		}
 		// Clean exit without truncation: any call the finish frame did not
 		// cover (a provider that ends [DONE] with zero output) is ready now.

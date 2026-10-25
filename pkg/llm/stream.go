@@ -67,6 +67,10 @@ type StreamSink struct {
 	// across attempts chains this callback explicitly (see orchestration's
 	// reasoning recorder).
 	OnTransportRetry func(TransportRetry)
+	// OnResponseNotice delivers a line about the response itself — an answer
+	// finished from what completed, a stream retried without streaming — that
+	// belongs in the conversation rather than on a status line.
+	OnResponseNotice func(ResponseNotice)
 	OnEnd            func()
 	Streamed         *bool
 }
@@ -89,6 +93,29 @@ type TransportRetry struct {
 	// output, or the retry loop returned (success, exhaustion or cancel). Only
 	// Retry and Total are set on it.
 	Cleared bool
+	// DropFinishedThinking: also withdraw the thinking blocks the dead attempt
+	// finished. A resend only ever follows an attempt whose finished blocks
+	// are all thinking, and Claude Code withdraws them with the unfinished one.
+	DropFinishedThinking bool
+}
+
+// ResponseNoticeKind names the line a surface draws about the response
+// itself, not about a tool or a file.
+type ResponseNoticeKind string
+
+const (
+	ResponseNoticeIncomplete        ResponseNoticeKind = "incomplete"
+	ResponseNoticeStreamingFallback ResponseNoticeKind = "streaming_fallback"
+)
+
+const StreamingFallbackWarning = "Streaming response ended before any complete data was received. Retrying without streaming. If this keeps happening, check any proxy or gateway between forebrain and your model provider."
+
+// ResponseNotice is a line about the response itself that belongs in the
+// conversation: it is delivered once, as a fact the user reads, and the
+// surfaces that persist the conversation keep it there.
+type ResponseNotice struct {
+	Kind ResponseNoticeKind
+	Text string
 }
 
 // NotifyResponseStarted fires the response acknowledgement exactly once for
@@ -148,6 +175,9 @@ func WithMutedForegroundStream(ctx context.Context) context.Context {
 	// A nested call's retries surface no cards and clear no foreground
 	// buffers — it has none; it just retries quietly.
 	muted.OnTransportRetry = nil
+	// A nested call contributes no response notices to the foreground
+	// conversation.
+	muted.OnResponseNotice = nil
 	// Nested internal calls take no part in the foreground request's
 	// progress accounting or its future mid-stream tool execution.
 	muted.OnToolCallReady = nil

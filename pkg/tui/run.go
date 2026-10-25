@@ -348,12 +348,13 @@ func Run(ctx context.Context, opts Options) error {
 		holdFramesForSwitch := strings.TrimSpace(ev.SwitchSessionID) != ""
 		// A transport failure killed the attempt mid-stream: withdraw its live
 		// blocks, so the trailing-block walk still finds them and the retried
-		// attempt's first delta starts a block of its own. Cleared withdraws
+		// attempt's first delta starts a block of its own. A resend whose attempt
+		// had finished thinking blocks withdraws those too. Cleared withdraws
 		// too: at exhaustion it is the only notice the final dead attempt ever
 		// gets, and on success it fires before the retried stream's first
 		// token, when the blocks are already gone — a no-op.
 		if retry, ok := m.(TransportRetryMsg); ok && !retry.turn.isWithdrawn() && renderer != nil {
-			renderer.WithdrawDeadStreamBlocks(retry.AgentID)
+			renderer.WithdrawDeadStreamBlocks(retry.AgentID, retry.DropFinishedThinking)
 		}
 		if !holdFramesForSwitch {
 			for _, frame := range ev.Frames {

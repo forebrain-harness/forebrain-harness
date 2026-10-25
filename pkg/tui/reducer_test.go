@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/mattn/go-runewidth"
@@ -5155,7 +5156,7 @@ func TestWithdrawDeadStreamBlocksRemovesOnlyLiveBlocks(t *testing.T) {
 	r := &Renderer{}
 	r.vm.append(Frame{Kind: FrameThinking, Content: "sealed thought", Final: true})
 	r.vm.append(Frame{Kind: FrameAssistant, Content: "dead half-answer"})
-	r.WithdrawDeadStreamBlocks("")
+	r.WithdrawDeadStreamBlocks("", false)
 	if len(r.vm.blocks) != 1 {
 		t.Fatalf("blocks after withdrawal = %d, want only the finished thinking block", len(r.vm.blocks))
 	}
@@ -5163,7 +5164,7 @@ func TestWithdrawDeadStreamBlocksRemovesOnlyLiveBlocks(t *testing.T) {
 		t.Fatalf("surviving block = %+v, want the sealed thinking kept", got)
 	}
 	// A zero-output death has no live blocks: no-op.
-	r.WithdrawDeadStreamBlocks("")
+	r.WithdrawDeadStreamBlocks("", false)
 	if len(r.vm.blocks) != 1 {
 		t.Fatalf("repeat withdrawal changed the transcript: %d blocks", len(r.vm.blocks))
 	}
@@ -5175,6 +5176,32 @@ func TestWithdrawDeadStreamBlocksRemovesOnlyLiveBlocks(t *testing.T) {
 	fresh := r.vm.blocks[1].frame
 	if fresh.Content != "fresh answer" || fresh.Final {
 		t.Fatalf("the retried delta must start its own live block, got %+v", fresh)
+	}
+}
+
+// A resend that takes the finished thinking blocks with it withdraws them
+// from the view as well; a notice without the flag keeps them — that is the
+// finish path, where what completed stays.
+func TestWithdrawDeadStreamBlocksDropsFinishedThinkingWhenAsked(t *testing.T) {
+	r := &Renderer{}
+	r.vm.append(Frame{Kind: FrameThinking, Content: "finished thought", Final: true})
+	r.vm.append(Frame{Kind: FrameThinking, Content: "half-streamed thought"})
+
+	r.WithdrawDeadStreamBlocks("", true)
+	if len(r.vm.blocks) != 0 {
+		t.Fatalf("blocks = %d after a thinking withdraw, want both gone", len(r.vm.blocks))
+	}
+
+	// Without the flag the finished block stays, and the walk stops there.
+	r.vm.append(Frame{Kind: FrameSystem, Content: "a status line"})
+	r.vm.append(Frame{Kind: FrameThinking, Content: "sealed thought", Final: true})
+	r.vm.append(Frame{Kind: FrameAssistant, Content: "dead half-answer"})
+	r.WithdrawDeadStreamBlocks("", false)
+	if len(r.vm.blocks) != 2 {
+		t.Fatalf("blocks = %d, want the status line and the sealed thought", len(r.vm.blocks))
+	}
+	if r.vm.blocks[1].frame.Kind != FrameThinking || !r.vm.blocks[1].frame.Final {
+		t.Fatalf("surviving block = %+v, want the sealed thinking kept", r.vm.blocks[1].frame)
 	}
 }
 
@@ -5221,5 +5248,71 @@ func TestStartRunClearsAStaleRetry(t *testing.T) {
 	tracker.StartRun("run-2")
 	if tracker.SnapshotActiveRun().Retry.Active() {
 		t.Fatal("StartRun left the previous run's retry status pending")
+	}
+}
+
+// A response notice is a line of the conversation: an answer finished from
+// what completed draws an error frame titled "Response incomplete", and a
+// stream retried without streaming draws a plain system line — both final.
+func TestResponseNoticeMsgDrawsItsFrame(t *testing.T) {
+	var r Reducer
+	incomplete := r.Reduce(ResponseNoticeMsg{Kind: "incomplete", Text: "Connection lost mid-response. The response above may be incomplete."})
+	if len(incomplete.Frames) != 1 {
+		t.Fatalf("frames = %+v, want one", incomplete.Frames)
+	}
+	f := incomplete.Frames[0]
+	if f.Kind != FrameError || f.Title != "Response incomplete" || !f.Final {
+		t.Fatalf("frame = %+v, want a final error frame with the title", f)
+	}
+	if f.Content != "Connection lost mid-response. The response above may be incomplete." {
+		t.Fatalf("frame content = %q", f.Content)
+	}
+
+	fallback := r.Reduce(ResponseNoticeMsg{Kind: "streaming_fallback", Text: llm.StreamingFallbackWarning})
+	if len(fallback.Frames) != 1 {
+		t.Fatalf("frames = %+v, want one", fallback.Frames)
+	}
+	f = fallback.Frames[0]
+	if f.Kind != FrameSystem || f.Title != "" || !f.Final {
+		t.Fatalf("frame = %+v, want a final untitled system frame", f)
+	}
+	if f.Content != llm.StreamingFallbackWarning {
+		t.Fatalf("frame content = %q, want the warning sentence", f.Content)
+	}
+
+	// A notice naming a subagent lands in that agent's view, not the
+	// conversation's.
+	named := r.Reduce(ResponseNoticeMsg{AgentID: "task-7", Kind: "incomplete", Text: "Server error mid-response. The response above may be incomplete."})
+	if len(named.Frames) != 1 || named.Frames[0].AgentID != "task-7" {
+		t.Fatalf("frames = %+v, want one routed to the named agent", named.Frames)
+	}
+}
+
+// The replay path produces the same frame the live conversation saw: one
+// reduction, not a parallel rendering.
+func TestReplayResponseNoticeMessageProducesTheSameFrame(t *testing.T) {
+	var r Reducer
+	live := r.Reduce(ResponseNoticeMsg{Kind: "incomplete", Text: "Connection lost mid-response. The response above may be incomplete."})
+
+	payload, err := json.Marshal(event.ResponseNoticePayload{Kind: "incomplete", Text: "Connection lost mid-response. The response above may be incomplete."})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	evt := event.RunEvent{ID: "evt-1", Type: event.RunEventResponseNotice, Payload: payload}
+	msg, ok := replayResponseNoticeMessage(evt)
+	if !ok {
+		t.Fatal("a response_notice event must replay")
+	}
+	replayed := r.Reduce(msg)
+	if len(replayed.Frames) != len(live.Frames) {
+		t.Fatalf("replay frames = %+v, live = %+v", replayed.Frames, live.Frames)
+	}
+	got, want := replayed.Frames[0], live.Frames[0]
+	if got.Kind != want.Kind || got.Title != want.Title || got.Content != want.Content || got.Final != want.Final {
+		t.Fatalf("replayed frame = %+v, want the live frame %+v", got, want)
+	}
+
+	if _, ok := replayResponseNoticeMessage(event.RunEvent{ID: "evt-2", Type: event.RunEventImageRejected}); ok {
+		t.Fatal("another event type must not replay as a response notice")
 	}
 }

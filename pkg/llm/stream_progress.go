@@ -248,3 +248,23 @@ func StreamProgressFrom(ctx context.Context) *StreamProgress {
 	v, _ := ctx.Value(streamProgressCtxKey{}).(*StreamProgress)
 	return v
 }
+
+// ResendSafe reports whether the request recorded for ctx may be re-sent as
+// a whole: a context with no record produced nothing, so it may; a muted
+// nested request reads as no record for the same reason.
+func ResendSafe(ctx context.Context) bool {
+	p := StreamProgressFrom(ctx)
+	if p == nil {
+		return true
+	}
+	return p.Snapshot().ResendSafe()
+}
+
+// ResetStreamProgress starts a fresh attempt on the request recorded for ctx,
+// when there is one. A resend begins from no progress: what the dead attempt
+// produced must not decide the next failure.
+func ResetStreamProgress(ctx context.Context) {
+	if p := StreamProgressFrom(ctx); p != nil {
+		p.Reset()
+	}
+}

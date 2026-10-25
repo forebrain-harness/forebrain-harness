@@ -21,6 +21,10 @@ const lengthErrorCode = "context_length_exceeded"
 // instead of returning the partial text as a success.
 var ErrStreamTruncated = errors.New("stream ended without a finish frame")
 
+// ErrStreamNoEvents reports a stream that closed cleanly before producing a
+// single event: no output, no finish frame. It is retried without streaming.
+var ErrStreamNoEvents = errors.New("stream closed before any event")
+
 // IsRetryableNetworkError reports whether err is a failure a resend can
 // plausibly fix: transport-level ones (timeouts, resets, aborted/dropped
 // connections, truncated streams, streams that went silent, non-streaming
@@ -43,6 +47,38 @@ func IsRetryableNetworkError(err error) bool {
 	if errors.Is(err, ErrStreamStalled) {
 		return true
 	}
+	if isTransportFailure(err) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var aerr *APIError
+	if errors.As(err, &aerr) && aerr != nil {
+		switch status := aerr.StatusCode; {
+		case status == http.StatusRequestTimeout, status == http.StatusConflict:
+			return true // the server's own "send it again" statuses
+		case status >= 500 && status <= 599 && status != 529:
+			return true // server-side trouble that is not the overload path
+		}
+	}
+	return false
+}
+
+// isTransportFailure reports whether err is a transport-level failure: a
+// network error, an unexpected or bare EOF, a reset or aborted connection, a
+// truncated stream, or a non-streaming request that ran out of its deadline.
+// It is the transport slice of IsRetryableNetworkError. The failures a resend
+// cannot plausibly fix are not transport: cancellation and the caller's own
+// deadlines, DNS NXDOMAIN (a misspelled base_url is permanent), TLS
+// certificate failures (permanent in proxy environments), and the server's
+// own statuses — though a provider error that wraps a transport failure in
+// its Err is the transport failure it wraps, exactly as the retry predicate
+// reads it.
+func isTransportFailure(err error) bool {
+	if err == nil {
+		return false
+	}
 	// The non-streaming deadline expiring is the same kind of trouble, and
 	// arrives as a DeadlineExceeded, so it also has to be read before the
 	// cancellation checks classify it as the user's own deadline.
@@ -52,23 +88,10 @@ func IsRetryableNetworkError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-		return false // NXDOMAIN: base_url spelling errors are permanent.
-	}
-	// TLS certificate failures are permanent (most common in proxied
-	// environments: self-signed or mismatched certificates); retrying only
-	// means waiting for nothing.
-	var uaErr x509.UnknownAuthorityError
-	if errors.As(err, &uaErr) {
+	if isNXDOMAIN(err) {
 		return false
 	}
-	var hErr x509.HostnameError
-	if errors.As(err, &hErr) {
-		return false
-	}
-	var ciErr x509.CertificateInvalidError
-	if errors.As(err, &ciErr) {
+	if isCertificateFailure(err) {
 		return false
 	}
 	var nerr net.Error
@@ -88,16 +111,35 @@ func IsRetryableNetworkError(err error) bool {
 		return true
 	}
 	var aerr *APIError
-	if errors.As(err, &aerr) && aerr != nil {
-		switch status := aerr.StatusCode; {
-		case status == http.StatusRequestTimeout, status == http.StatusConflict:
-			return true // the server's own "send it again" statuses
-		case status >= 500 && status <= 599 && status != 529:
-			return true // server-side trouble that is not the overload path
-		}
-		if aerr.Err != nil {
-			return IsRetryableNetworkError(aerr.Err) // unwrap provider normalizeError wrappers
-		}
+	if errors.As(err, &aerr) && aerr != nil && aerr.Err != nil {
+		return isTransportFailure(aerr.Err) // unwrap provider normalizeError wrappers
+	}
+	return false
+}
+
+// isNXDOMAIN reports whether err is a DNS name-resolution miss: a misspelled
+// base_url is permanent, so it is not a failure a resend can fix.
+func isNXDOMAIN(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
+}
+
+// isCertificateFailure reports whether err is a TLS certificate failure.
+// Such failures are permanent (most common in proxied environments:
+// self-signed or mismatched certificates); retrying only means waiting for
+// nothing.
+func isCertificateFailure(err error) bool {
+	var uaErr x509.UnknownAuthorityError
+	if errors.As(err, &uaErr) {
+		return true
+	}
+	var hErr x509.HostnameError
+	if errors.As(err, &hErr) {
+		return true
+	}
+	var ciErr x509.CertificateInvalidError
+	if errors.As(err, &ciErr) {
+		return true
 	}
 	return false
 }
@@ -225,6 +267,55 @@ func RetryAfterOf(err error) time.Duration {
 
 func isContextLengthCode(code string) bool {
 	return strings.EqualFold(strings.TrimSpace(code), lengthErrorCode)
+}
+
+// PartialResponseError says a request failed after it had produced something
+// that must not be produced twice. The caller finishes from what completed.
+type PartialResponseError struct {
+	Err      error
+	Progress StreamProgressSnapshot
+	Cause    StreamFailureCause
+	// Complete: the response had fully arrived; finish as a success, no notice.
+	Complete bool
+	// Failed: Claude Code's "fail" after output. The completed part stays; the
+	// notice (or the turn's error) is Err itself, not an incomplete sentence.
+	Failed bool
+}
+
+func (e *PartialResponseError) Error() string { return e.Err.Error() }
+func (e *PartialResponseError) Unwrap() error { return e.Err }
+
+func IsPartialResponse(err error) bool { var p *PartialResponseError; return errors.As(err, &p) }
+
+// IncompleteSentence is what the user reads about a response that was cut.
+// shown is true when the user had already seen part of the answer — its text
+// or a tool call starting — and picks the sentence that names what the user
+// is looking at; otherwise the sentence says no answer was produced at all.
+func IncompleteSentence(cause StreamFailureCause, shown bool) string {
+	if shown {
+		switch cause {
+		case CauseStalled:
+			return "The response stopped arriving. The response above may be incomplete."
+		case CauseServerError, CauseOverloaded, CauseTimedOut:
+			return "Server error mid-response. The response above may be incomplete."
+		case CauseMalformed:
+			return "The response stream was malformed. The response above may be incomplete."
+		case CauseSuspended:
+			return "Your computer went to sleep mid-response. The response above may be incomplete."
+		default:
+			return "Connection lost mid-response. The response above may be incomplete."
+		}
+	}
+	switch cause {
+	case CauseStalled:
+		return "The response stalled before a response was produced. Try again."
+	case CauseMalformed:
+		return "The response stream was malformed and no response was produced. Try again."
+	case CauseSuspended:
+		return "Your computer went to sleep before a response was produced. Try again."
+	default:
+		return "Connection lost before a response was produced. Try again."
+	}
 }
 
 func messageSaysContextExceeded(msg string) bool {

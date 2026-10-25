@@ -9564,17 +9564,18 @@ func TestExhaustedRetriesDropTheFinalAttemptsReasoning(t *testing.T) {
 		t.Fatalf("execute error = %q, want the exhaustion sentence", got)
 	}
 
-	// The streaming exhaustion sequence: every retry's Cleared fires at the
-	// retried attempt's first token (retry.go's sink wrapper), the final
-	// attempt streams after its token clear and dies unannounced — until the
-	// engine's catch-up Cleared at the exhaustion return, which is what lets
-	// the wrapped sink drop the final attempt's in-flight reasoning.
+	// The streaming exhaustion sequence (plan 123's decision table): every
+	// retry's Cleared fires at the retried attempt's first token
+	// (stream_retry.go's sink wrapper), the final streaming attempt dies
+	// unannounced — then the withdraw notification that precedes the
+	// non-streaming fallback attempt is what lets the wrapped sink drop the
+	// final attempt's in-flight reasoning.
 	if len(surfaceNotes) != 5 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Cleared ||
 		!surfaceNotes[1].Cleared || surfaceNotes[1].Retry != 1 ||
 		surfaceNotes[2].Retry != 2 || surfaceNotes[2].Cleared ||
 		!surfaceNotes[3].Cleared || surfaceNotes[3].Retry != 2 ||
-		!surfaceNotes[4].Cleared || surfaceNotes[4].Retry != 2 || surfaceNotes[4].Total != 2 {
-		t.Fatalf("surface notifications = %+v, want retry, cleared, retry, cleared, catch-up cleared", surfaceNotes)
+		!surfaceNotes[4].Cleared || surfaceNotes[4].Total != 2 {
+		t.Fatalf("surface notifications = %+v, want retry, cleared, retry, cleared, withdraw cleared", surfaceNotes)
 	}
 
 	rows, err := store.ListAllMessages(context.Background(), sid, 0)
@@ -9623,9 +9624,15 @@ func TestExhaustedSilentRetriesAnnounceTheDeathWithCleared(t *testing.T) {
 		t.Fatal("execute must fail once the retries are exhausted")
 	}
 
-	if len(surfaceNotes) != 3 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Cleared ||
-		surfaceNotes[1].Retry != 2 || surfaceNotes[1].Cleared || !surfaceNotes[2].Cleared {
-		t.Fatalf("surface notifications = %+v, want retry, retry, cleared", surfaceNotes)
+	// The zero-output exhaustion shape under plan 123's decision table: two
+	// live retry notices, the pending retry's Cleared, then the withdraw
+	// notification before the non-streaming fallback attempt — and never a
+	// non-Cleared notice for the final attempt.
+	if len(surfaceNotes) != 4 || surfaceNotes[0].Retry != 1 || surfaceNotes[0].Cleared ||
+		surfaceNotes[1].Retry != 2 || surfaceNotes[1].Cleared ||
+		!surfaceNotes[2].Cleared || surfaceNotes[2].Retry != 2 ||
+		!surfaceNotes[3].Cleared {
+		t.Fatalf("surface notifications = %+v, want retry, retry, cleared, withdraw cleared", surfaceNotes)
 	}
 
 	rows, err := store.ListAllMessages(context.Background(), sid, 0)
@@ -10100,5 +10107,344 @@ func TestNotRunResultPersistsTheDropKey(t *testing.T) {
 	}
 	if dropped != 2 {
 		t.Fatalf("dropped tool rows = %d, want 2", dropped)
+	}
+}
+
+// streamFailLLM scripts one attempt per Execute call against the sink the
+// mounted chain hands it, recording what each attempt's context carried.
+type streamFailLLM struct {
+	attempts []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error)
+	calls    int
+	// per call: the messages the model was handed, and whether the request
+	// was switched to non-streaming.
+	received      [][]llm.Message
+	nonStreaming  []bool
+	nonStreamingC int
+}
+
+func (m *streamFailLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	call := m.calls
+	m.calls++
+	m.received = append(m.received, append([]llm.Message(nil), messages...))
+	if llm.NonStreamingRequestFrom(ctx) {
+		m.nonStreaming = append(m.nonStreaming, true)
+		m.nonStreamingC++
+	} else {
+		m.nonStreaming = append(m.nonStreaming, false)
+	}
+	if call >= len(m.attempts) {
+		return nil, fmt.Errorf("script exhausted at call %d", call+1)
+	}
+	return m.attempts[call](ctx, llm.StreamSinkFrom(ctx))
+}
+
+// runStreamFailure mounts the product chain around a scripted model —
+// orchestration outside, the stream-failure retry inside — over a recording
+// foreground sink, and runs one turn.
+func runStreamFailure(t *testing.T, sid string, attempts ...func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error)) (*llm.Result, error, *streamFailLLM, []llm.ResponseNotice, *state.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	var notices []llm.ResponseNotice
+	var retryNotes []llm.TransportRetry
+	var streamedText []string
+	base := &llm.StreamSink{
+		OnDelta:          func(s string) { streamedText = append(streamedText, s) },
+		OnReasoningDelta: func(string) {},
+		OnReasoningDone:  func() {},
+		OnTextBlockDone:  func() {},
+		OnToolCallReady:  func(llm.ToolCall) {},
+		OnMessageStop:    func() {},
+		OnTransportRetry: func(tr llm.TransportRetry) { retryNotes = append(retryNotes, tr) },
+		OnResponseNotice: func(n llm.ResponseNotice) { notices = append(notices, n) },
+	}
+	inner := &streamFailLLM{attempts: attempts}
+	w := wrapToolOrchestrationLLMWithProgress(wrapNetworkRetryLLM(inner, 3, 0), st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(
+		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
+		base,
+	)
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	return res, err, inner, notices, store
+}
+
+func connDropErr() error {
+	return &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
+}
+
+// Thinking turned into answer text, then the connection dropped: the answer
+// that happened ends the turn — no resend, and the unfinished words never
+// reach the transcript.
+func TestStreamFailureAfterThinkingAndTextEndsTurnWithoutResend(t *testing.T) {
+	res, err, inner, _, store := runStreamFailure(t, "streamfail-thinking-text", func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+		sink.OnReasoningDelta("thinking about it")
+		sink.OnDelta("partial answer that never")
+		return nil, connDropErr()
+	})
+	if err == nil || err.Error() != "Connection lost mid-response. The response above may be incomplete." {
+		t.Fatalf("turn error = %v, want the mid-response sentence", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("model calls = %d, want 1 (no resend after output)", inner.calls)
+	}
+	if res != nil {
+		t.Fatalf("result = %+v, want nil", res)
+	}
+	rows, listErr := store.ListAllMessages(context.Background(), "streamfail-thinking-text", 0)
+	if listErr != nil {
+		t.Fatalf("list rows: %v", listErr)
+	}
+	for _, row := range rows {
+		if strings.Contains(row.Content, "partial answer that never") {
+			t.Fatalf("the unfinished answer reached the transcript: %+v", row)
+		}
+	}
+}
+
+// Only answer text was streaming when the connection dropped: the request is
+// re-sent whole, and the second attempt's answer is the turn's.
+func TestStreamFailureWithOnlyTextIsResent(t *testing.T) {
+	res, err, inner, _, _ := runStreamFailure(t, "streamfail-text-only",
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("partial an")
+			return nil, connDropErr()
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("Worked for the resend")})
+			return &llm.Result{Message: &msg}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "Worked for the resend" {
+		t.Fatalf("result = %+v, want the resent attempt's answer", res)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("model calls = %d, want 2 (dropped + re-sent)", inner.calls)
+	}
+}
+
+// A tool call whose arguments completed before the drop runs as usual and the
+// loop asks the model again — with the completed exchange in the session and
+// one incomplete notice in the conversation.
+func TestStreamFailureAfterCompletedToolCallRunsItAndContinues(t *testing.T) {
+	ctx := context.Background()
+	const sid = "streamfail-tool-call"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe_stream_fail"})
+	toolRuns := 0
+	probe, err := llm.NewTool("probe_stream_fail", "records its run", func(context.Context, *struct{}) (string, error) {
+		toolRuns++
+		return "probe ok", nil
+	})
+	if err != nil {
+		t.Fatalf("probe tool: %v", err)
+	}
+	var notices []llm.ResponseNotice
+	base := &llm.StreamSink{
+		OnDelta:          func(string) {},
+		OnReasoningDelta: func(string) {},
+		OnTextBlockDone:  func() {},
+		OnToolCallReady:  func(llm.ToolCall) {},
+		OnMessageStop:    func() {},
+		OnResponseNotice: func(n llm.ResponseNotice) { notices = append(notices, n) },
+	}
+	call := llm.ToolCall{ID: "call_fail_1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "probe_stream_fail", Arguments: "{}"}}
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("running the probe")
+			sink.OnTextBlockDone()
+			sink.OnToolCallReady(call)
+			return nil, connDropErr()
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("after the tool")})
+			return &llm.Result{Message: &msg}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(wrapNetworkRetryLLM(inner, 3, 0), st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid), base)
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, []*llm.Tool{probe})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "after the tool" {
+		t.Fatalf("result = %+v, want the follow-up answer", res)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("model calls = %d, want 2 (finished call + follow-up)", inner.calls)
+	}
+	if toolRuns != 1 {
+		t.Fatalf("tool runs = %d, want exactly 1", toolRuns)
+	}
+	second := inner.received[1]
+	var sawAssistantCall, sawToolResult bool
+	for _, msg := range second {
+		if msg.Role == llm.RoleAssistant && strings.Contains(msg.TextContent(), "running the probe") && len(msg.ToolCalls) == 1 && msg.ToolCalls[0].ID == call.ID {
+			sawAssistantCall = true
+		}
+		if msg.Role == llm.RoleTool {
+			sawToolResult = true
+		}
+	}
+	if !sawAssistantCall || !sawToolResult {
+		t.Fatalf("second model call = %+v, want the completed exchange (assistant text+call, tool result)", second)
+	}
+	if len(notices) != 1 || notices[0].Kind != llm.ResponseNoticeIncomplete ||
+		notices[0].Text != "Connection lost mid-response. The response above may be incomplete." {
+		t.Fatalf("notices = %+v, want one incomplete notice", notices)
+	}
+}
+
+// Only thinking finished, three times in a row: the first two resends
+// withdraw their finished thinking rows, the third finishes the turn with the
+// no-response sentence — and only the last attempt's block is left on disk.
+func TestThinkingOnlyFailureRetriesTwiceWithdrawingThinkingThenEnds(t *testing.T) {
+	attempt := func(n int) func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+		return func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnReasoningDelta(fmt.Sprintf("thinking #%d", n))
+			sink.OnReasoningDone()
+			return nil, connDropErr()
+		}
+	}
+	res, err, inner, _, store := runStreamFailure(t, "streamfail-thinking-only", attempt(1), attempt(2), attempt(3))
+	if err == nil || err.Error() != "Connection lost before a response was produced. Try again." {
+		t.Fatalf("turn error = %v, want the no-response sentence", err)
+	}
+	if inner.calls != 3 {
+		t.Fatalf("model calls = %d, want 3", inner.calls)
+	}
+	if res != nil {
+		t.Fatalf("result = %+v, want nil", res)
+	}
+	rows, listErr := store.ListAllMessages(context.Background(), "streamfail-thinking-only", 0)
+	if listErr != nil {
+		t.Fatalf("list rows: %v", listErr)
+	}
+	var reasoning []string
+	for _, row := range rows {
+		if row.Role == "reasoning" {
+			reasoning = append(reasoning, row.Content)
+		}
+	}
+	if len(reasoning) != 1 || !strings.Contains(reasoning[0], "thinking #3") {
+		t.Fatalf("reasoning rows = %v, want only the final attempt's", reasoning)
+	}
+}
+
+// A stalled stream that had already finished a block finishes from it, with
+// the stall sentence.
+func TestStalledStreamUsesTheStallSentence(t *testing.T) {
+	_, err, inner, _, _ := runStreamFailure(t, "streamfail-stalled", func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+		sink.OnDelta("the answer that had finished")
+		sink.OnTextBlockDone()
+		return nil, &llm.StreamStallError{After: time.Second}
+	})
+	if err == nil || err.Error() != "The response stopped arriving. The response above may be incomplete." {
+		t.Fatalf("turn error = %v, want the stall sentence", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("model calls = %d, want 1 (no resend after output)", inner.calls)
+	}
+}
+
+// A server error after output keeps the completed part and ends on the
+// server-error sentence.
+func TestServerErrorAfterOutputKeepsPartial(t *testing.T) {
+	_, err, inner, _, store := runStreamFailure(t, "streamfail-server-error", func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+		sink.OnDelta("the partial answer")
+		sink.OnTextBlockDone()
+		return nil, &llm.APIError{StatusCode: 0, Type: "api_error", Message: "provider exploded"}
+	})
+	if err == nil || err.Error() != "Server error mid-response. The response above may be incomplete." {
+		t.Fatalf("turn error = %v, want the server-error sentence", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", inner.calls)
+	}
+	rows, listErr := store.ListAllMessages(context.Background(), "streamfail-server-error", 0)
+	if listErr != nil {
+		t.Fatalf("list rows: %v", listErr)
+	}
+	kept := false
+	for _, row := range rows {
+		if row.Role == llm.RoleAssistant && strings.Contains(row.Content, "the partial answer") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatalf("the completed block did not reach the transcript: %+v", rows)
+	}
+}
+
+// A request-level rejection after output fails the turn with the provider's
+// own error, but the completed text stays in the conversation.
+func TestBadRequestAfterOutputFailsButKeepsTheText(t *testing.T) {
+	bad := &llm.APIError{StatusCode: 400, Message: "unexpected role"}
+	_, err, inner, _, store := runStreamFailure(t, "streamfail-bad-request", func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+		sink.OnDelta("the answer that arrived")
+		sink.OnTextBlockDone()
+		return nil, bad
+	})
+	if !errors.Is(err, bad) {
+		t.Fatalf("turn error = %v, want the original 400", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", inner.calls)
+	}
+	rows, listErr := store.ListAllMessages(context.Background(), "streamfail-bad-request", 0)
+	if listErr != nil {
+		t.Fatalf("list rows: %v", listErr)
+	}
+	kept := false
+	for _, row := range rows {
+		if row.Role == llm.RoleAssistant && strings.Contains(row.Content, "the answer that arrived") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatalf("the completed text did not reach the transcript: %+v", rows)
+	}
+}
+
+// Two truncations in a row hand the request to the non-streaming path, whose
+// replayed answer completes the turn — with one streaming-fallback warning in
+// the conversation.
+func TestTruncatedTwiceFallsBackToNonStreaming(t *testing.T) {
+	truncated := func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+		sink.OnDelta("partial an")
+		return nil, llm.ErrStreamTruncated
+	}
+	res, err, inner, notices, _ := runStreamFailure(t, "streamfail-truncated-twice",
+		truncated, truncated,
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			if !llm.NonStreamingRequestFrom(ctx) {
+				return nil, errors.New("the third attempt was not switched to non-streaming")
+			}
+			llm.ReplayToSink(sink, llm.ReplayedResponse{Text: []string{"after fallback"}, StopReason: "stop"})
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("after fallback")})
+			return &llm.Result{Message: &msg}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "after fallback" {
+		t.Fatalf("result = %+v, want the non-streaming attempt's answer", res)
+	}
+	if inner.calls != 3 || inner.nonStreamingC != 1 {
+		t.Fatalf("model calls = %d non-streaming = %d, want 3 with the third non-streaming", inner.calls, inner.nonStreamingC)
+	}
+	fallbacks := 0
+	for _, n := range notices {
+		if n.Kind == llm.ResponseNoticeStreamingFallback {
+			fallbacks++
+		}
+	}
+	if fallbacks != 1 {
+		t.Fatalf("streaming_fallback notices = %d, want exactly 1 (of %d notices)", fallbacks, len(notices))
 	}
 }

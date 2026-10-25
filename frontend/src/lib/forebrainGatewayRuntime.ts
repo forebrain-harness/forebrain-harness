@@ -48,6 +48,7 @@ export type ForebrainRunEventType =
   | 'auto_continue_cancelled'
   | 'heartbeat_fired'
   | 'transport_retry'
+  | 'response_notice'
 
 export type ForebrainRunEvent = {
   id?: string

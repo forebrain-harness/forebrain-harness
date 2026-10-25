@@ -41,6 +41,11 @@ type retryConfig struct {
 	// network-retry middleware surfaces discard/retry cards; retry chains
 	// that keep no visible state (blank-output retries) leave it unset.
 	notify func(ctx context.Context, tr TransportRetry)
+	// resendGuard refuses a retry the request's stream progress says would
+	// duplicate what the user already has (a finished output block, a
+	// dispatched tool), and resets that progress before each retry it does
+	// make. Layers whose resend re-asks the same question set it.
+	resendGuard bool
 }
 
 // WithShouldRetry replaces the default retry predicate. By default every
@@ -73,6 +78,49 @@ func WithRetryAfter(of func(error) time.Duration, limit time.Duration) RetryOpti
 // rejected never produce a notification.
 func WithRetryNotify(fn func(ctx context.Context, tr TransportRetry)) RetryOption {
 	return func(c *retryConfig) { c.notify = fn }
+}
+
+// WithResendGuard makes the retry loop ask the request's stream progress
+// before re-sending: once the request finished an output block or dispatched
+// a tool, the error is returned instead of retried, and every retry it does
+// make starts from fresh progress.
+func WithResendGuard() RetryOption {
+	return func(c *retryConfig) { c.resendGuard = true }
+}
+
+// waitFor computes the wait before the next attempt from the back-off step
+// and the error that caused the retry: jitter on the step, and the server's
+// own Retry-After when it asked for more — never an unbounded one, which
+// ends the retries instead of parking the turn.
+func (c *retryConfig) waitFor(backoff time.Duration, err error) (sleep time.Duration, giveUp bool) {
+	sleep = backoff
+	if c.upwardJitter {
+		// 0–25% on top of the step: a wait never undershoots it.
+		if quarter := int64(backoff) / 4; quarter > 0 {
+			sleep += time.Duration(rand.Int63n(quarter + 1)) //nolint:gosec
+		}
+	} else if half := int64(backoff) / 2; half > 0 {
+		jitter := time.Duration(rand.Int63n(half)) - backoff/4 //nolint:gosec
+		sleep += jitter
+		if sleep < 0 {
+			sleep = 0
+		}
+	}
+	// The server's own wait wins whenever it asked for more than the
+	// back-off computed — but never an unbounded one: past the limit the
+	// provider is not asking for patience, it is saying not now, and the
+	// caller gets the error instead of a parked turn.
+	if c.retryAfter != nil {
+		if ra := c.retryAfter(err); ra > 0 {
+			if c.maxRetryAfter > 0 && ra > c.maxRetryAfter {
+				return 0, true
+			}
+			if ra > sleep {
+				sleep = ra
+			}
+		}
+	}
+	return sleep, false
 }
 
 // NewRetry returns an LLMMiddleware that automatically retries failed
@@ -173,6 +221,11 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 		}
 		lastErr = err
 
+		if r.cfg.resendGuard && !ResendSafe(ctx) {
+			// Re-sending would duplicate what the user already has; the
+			// caller owns finishing from what completed.
+			return nil, err
+		}
 		if !r.cfg.shouldRetry(err) {
 			return nil, err
 		}
@@ -181,33 +234,9 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 			break
 		}
 
-		sleep := backoff
-		if r.cfg.upwardJitter {
-			// 0–25% on top of the step: a wait never undershoots it.
-			if quarter := int64(backoff) / 4; quarter > 0 {
-				sleep += time.Duration(rand.Int63n(quarter + 1)) //nolint:gosec
-			}
-		} else if half := int64(backoff) / 2; half > 0 {
-			jitter := time.Duration(rand.Int63n(half)) - backoff/4 //nolint:gosec
-			sleep += jitter
-			if sleep < 0 {
-				sleep = 0
-			}
-		}
-
-		// The server's own wait wins whenever it asked for more than the
-		// back-off computed — but never an unbounded one: past the limit the
-		// provider is not asking for patience, it is saying not now, and the
-		// caller gets the error instead of a parked turn.
-		if r.cfg.retryAfter != nil {
-			if ra := r.cfg.retryAfter(err); ra > 0 {
-				if r.cfg.maxRetryAfter > 0 && ra > r.cfg.maxRetryAfter {
-					return nil, err
-				}
-				if ra > sleep {
-					sleep = ra
-				}
-			}
+		sleep, giveUp := r.cfg.waitFor(backoff, err)
+		if giveUp {
+			return nil, err
 		}
 
 		if r.cfg.notify != nil {
@@ -225,6 +254,12 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(sleep):
+		}
+
+		if r.cfg.resendGuard {
+			// The next attempt is a fresh one: what the dead attempt
+			// produced must not decide anything about it.
+			ResetStreamProgress(ctx)
 		}
 
 		backoff *= 2

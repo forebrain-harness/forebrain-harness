@@ -202,6 +202,20 @@ func TestStreamEmptyAnswerKeepsTheEmptyError(t *testing.T) {
 	}
 }
 
+func TestStreamCleanCloseZeroEventsIsNoEvents(t *testing.T) {
+	// A 200 with the event-stream content type and an immediate clean close:
+	// no part, no finish frame. The request is re-sent without streaming.
+	_, err, rec := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	if !errors.Is(err, llm.ErrStreamNoEvents) {
+		t.Fatalf("error = %v, want ErrStreamNoEvents", err)
+	}
+	if !*rec.streamed {
+		t.Error("Streamed was not marked")
+	}
+}
+
 func TestStreamSetsStreamedAndEnds(t *testing.T) {
 	success := func(t *testing.T) {
 		_, err, rec := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

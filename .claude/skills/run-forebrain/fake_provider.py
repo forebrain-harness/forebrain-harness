@@ -478,7 +478,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if MODE == "limit" and self.serve_limit():
             return
 
-        if MODE == "netdrop" and self.serve_netdrop():
+        if MODE == "netdrop" and self.serve_netdrop(body):
             return
 
         if MODE == "hang":
@@ -751,7 +751,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
 
-    def serve_netdrop(self):
+    def serve_netdrop(self, body):
         """Answer request 1 with part of the answer, then close the connection
         cleanly with no finish frame — the shape of a proxy cutting an SSE
         stream mid-answer, which must surface as a truncation and be retried
@@ -761,15 +761,94 @@ class Handler(http.server.BaseHTTPRequestHandler):
         FAKE_NETDROP_EVERY=1 drops every request instead, for driving a
         cancellation mid-backoff or a retry cap exhausting itself.
         FAKE_NETDROP_SILENT=1 drops with no bytes at all, for the zero-output
-        death whose retries must leave the withdraw window open."""
+        death whose retries must leave the withdraw window open.
+        FAKE_NETDROP_THINKING=1 drops request 1 after thinking and the start
+        of an answer, for the keep-partial finish: the thinking stays, the
+        unfinished words go, and the turn ends on the mid-response sentence
+        with no resend.
+        FAKE_NETDROP_THINKING_ONLY=1 drops every streaming request after
+        thinking only (content carries the request number), answering
+        non-streaming requests normally, for the thinking-only resend ladder
+        that withdraws each dead attempt's finished thinking and ends on the
+        no-response sentence.
+        FAKE_NETDROP_TOOL=1 drops request 1 after one complete shell call and
+        the first fragment of a second, for the finish that runs the
+        completed call and continues the turn.
+        FAKE_NETDROP_EMPTY=1 answers every streaming request with a 200 and
+        the event-stream content type, then closes it with zero events, for
+        the non-streaming fallback after a stream that never opened."""
+        if os.environ.get("FAKE_NETDROP_EMPTY") or os.environ.get("FAKE_NETDROP_THINKING_ONLY"):
+            if not _request_is_unary(body):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                if os.environ.get("FAKE_NETDROP_THINKING_ONLY"):
+                    nth = next(REQUESTS) + 1
+                    self.write_event(chunk(delta={"role": "assistant", "reasoning_content": "thinking #%d" % nth}))
+                    # A post-thinking chunk with empty content: it flushes
+                    # the reasoning and keeps the answer itself empty.
+                    self.write_event(chunk(delta={"content": ""}))
+                else:
+                    # Zero events, and the body ends cleanly: the stream the
+                    # client reads closes before producing a single event.
+                    self.write_raw(b"")
+                sys.stderr.write("NETDROP clean close without a finish frame\n")
+                sys.stderr.flush()
+                self.close_connection = True
+                try:
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    self.connection.close()
+                except OSError:
+                    pass
+                return True
+            self._answer_unary("after fallback")
+            return True
         if next(REQUESTS) > 0 and not os.environ.get("FAKE_NETDROP_EVERY"):
+            if os.environ.get("FAKE_NETDROP_TOOL"):
+                # The completed call ran and the turn asks again: this is the
+                # answer it ends on, not the default script's.
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.write_event(chunk(delta={"role": "assistant", "content": "after tool"}))
+                self.write_event(chunk(finish="stop"))
+                self.write_raw(b"data: [DONE]\n\n")
+                self.write_raw(b"")
+                return True
             return False
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
-        if not os.environ.get("FAKE_NETDROP_SILENT"):
-            self.write_event(chunk(delta={"role": "assistant", "content": "partial answer that never"}))
+        silent = os.environ.get("FAKE_NETDROP_SILENT")
+        thinking = os.environ.get("FAKE_NETDROP_THINKING")
+        tool = os.environ.get("FAKE_NETDROP_TOOL")
+        if not silent:
+            if thinking:
+                self.write_event(chunk(delta={"role": "assistant", "reasoning_content": "thinking about it"}))
+            self.write_event(chunk(delta={"content": "partial answer that never"}))
+            if tool:
+                self.write_event(chunk(delta={"tool_calls": [{
+                    "index": 0,
+                    "id": "call_kept_1",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{\"command\":\"echo kept\"}"},
+                }]}))
+                self.write_event(chunk(delta={"tool_calls": [{
+                    "index": 1,
+                    "id": "call_kept_2",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{\"comm"},
+                }]}))
         sys.stderr.write("NETDROP clean close without a finish frame\n")
         sys.stderr.flush()
         self.close_connection = True
@@ -786,6 +865,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             pass
         return True
+
+    def _answer_unary(self, text):
+        """Answer one non-streaming request with a plain JSON completion."""
+        payload = json.dumps({
+            "id": "fake-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "fake-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        self.wfile.flush()
 
     def serve_subagent_net(self, body):
         """Drive the "subagent fails on the network, then the user continues it"

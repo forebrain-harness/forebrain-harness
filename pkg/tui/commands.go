@@ -421,6 +421,9 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 		if rejected, isRejected := imageRejectedMessage(evt); isRejected {
 			msg, ok = rejected, true
 		}
+		if notice, isNotice := replayResponseNoticeMessage(evt); isNotice {
+			msg, ok = notice, true
+		}
 		frames := replayApprovalEventFrames(evt)
 		if migrationFrames := replayMigrationEventFrames(evt); len(migrationFrames) > 0 {
 			frames = append(frames, migrationFrames...)
@@ -747,6 +750,20 @@ type replayEventItem struct {
 	// toolStepID is the call id the tool card is rendered under.
 	toolStepID string
 	frames     []Frame
+}
+
+// replayResponseNoticeMessage is a stored response notice as the message the
+// live surface drew it from, so a reload produces the same frame the live
+// conversation saw — the same reduction, not a parallel rendering.
+func replayResponseNoticeMessage(evt event.RunEvent) (any, bool) {
+	if evt.Type != event.RunEventResponseNotice {
+		return nil, false
+	}
+	var p event.ResponseNoticePayload
+	if json.Unmarshal(evt.Payload, &p) != nil {
+		return nil, false
+	}
+	return ResponseNoticeMsg{AgentID: p.AgentID, Kind: p.Kind, Text: p.Text}, true
 }
 
 // approvalEventAnchorPosition resolves the transcript position an approval

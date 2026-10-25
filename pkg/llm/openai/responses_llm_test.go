@@ -58,8 +58,13 @@ func TestOpenAIResponsesCacheKeyStaysOffCompatibleEndpoints(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, syncResponsesBody("ok"))
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A streamed request answered with no SSE frame at all is a
+		// zero-event stream — ErrStreamNoEvents since plan 123 — so the
+		// mock answers with a minimal real one; the test's subject is the
+		// request body, not the response.
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\",\"sequence_number\":1}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n")
 	}))
 	defer server.Close()
 
@@ -454,6 +459,26 @@ func TestOpenAIResponsesStreamingCompletedOnlySkipsEmptySSEFrames(t *testing.T) 
 
 	if result.Message.TextContent() != "Hello" {
 		t.Errorf("Expected 'Hello', got %q", result.Message.TextContent())
+	}
+}
+
+func TestOpenAIResponsesStreamingCleanCloseZeroEventsIsNoEvents(t *testing.T) {
+	body := strings.Join([]string{
+		// Only telemetry frames, then a clean close: no output item, no
+		// response.completed. The stream produced nothing at all and is
+		// re-sent without streaming.
+		"event: codex.rate_limits",
+		`data: {"type":"codex.rate_limits","rate_limits":{"allowed":true}}`,
+		"",
+		"",
+	}, "\n")
+	testLLM := newTestOpenAIResponsesLLM(t, func(req *http.Request) (*http.Response, error) {
+		return sseResponse(body), nil
+	})
+
+	_, err := testLLM.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("test"))}, nil)
+	if !errors.Is(err, llm.ErrStreamNoEvents) {
+		t.Fatalf("Execute error = %v, want ErrStreamNoEvents", err)
 	}
 }
 

@@ -83,6 +83,12 @@ func (c *agentLLM) executeStreaming(ctx context.Context, raw []byte) (*llm.Resul
 		return nil, fmt.Errorf("google: %w", llm.ErrStreamTruncated)
 	}
 	if len(st.parts) == 0 && len(st.calls) == 0 {
+		if st.finish == "" {
+			// The stream closed cleanly before a single event: no part, no
+			// finish frame. The request is re-sent without streaming, not
+			// finished as an empty answer.
+			return nil, fmt.Errorf("google: %w", llm.ErrStreamNoEvents)
+		}
 		return nil, fmt.Errorf("google: response was empty (finish reason %q)", st.finish)
 	}
 	return &llm.Result{

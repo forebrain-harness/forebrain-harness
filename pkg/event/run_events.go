@@ -84,6 +84,11 @@ const (
 	// streamed text drops it, and both surfaces draw the error/retry cards.
 	// Push-only by design — the retried answer lands in the transcript whole.
 	RunEventTransportRetry = "transport_retry"
+	// RunEventResponseNotice is a line about the response itself — an answer
+	// finished from what completed, a stream retried without streaming — that
+	// belongs in the conversation, so the event is stored with it rather than
+	// pushed only.
+	RunEventResponseNotice = "response_notice"
 )
 
 // IsPushOnlyStreamEvent reports a fragment of a run as it happens — answer and
@@ -617,4 +622,17 @@ type TransportRetryPayload struct {
 	Status  int    `json:"status,omitempty"`
 	AgentID string `json:"agent_id,omitempty"`
 	Cleared bool   `json:"cleared,omitempty"`
+	// DropFinishedThinking: the resend also withdraws the thinking blocks the
+	// dead attempt finished.
+	DropFinishedThinking bool `json:"drop_finished_thinking,omitempty"`
+}
+
+// ResponseNoticePayload mirrors llm.ResponseNotice on the wire. Kind is the
+// stable wire code ("incomplete", "streaming_fallback"); Text is the exact
+// sentence the conversation shows; AgentID routes the event to the subagent
+// whose response it describes, empty meaning the conversation's own.
+type ResponseNoticePayload struct {
+	Kind    string `json:"kind"`
+	Text    string `json:"text"`
+	AgentID string `json:"agent_id,omitempty"`
 }

@@ -5606,3 +5606,166 @@ describe('useChatStream stream_partial', () => {
       })
     }
   })
+
+  it('a response_notice incomplete appends the sentence to the streaming answer', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>, id?: string) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload, ...(id ? { id } : {}) },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('assistant_delta', { text: 'the answer that happened' })
+      runEvent('response_notice', { kind: 'incomplete', text: 'Connection lost mid-response. The response above may be incomplete.' }, 'evt-notice-1')
+
+      const primary = stream.messages.value[stream.messages.value.length - 1]
+      const errorBlocks = (primary?.blocks ?? []).filter((b) => b.kind === 'error')
+      expect(errorBlocks).toHaveLength(1)
+      expect(errorBlocks[0]).toMatchObject({ kind: 'error', text: 'Connection lost mid-response. The response above may be incomplete.' })
+      // The same event replayed is the same notice, not a second one.
+      runEvent('response_notice', { kind: 'incomplete', text: 'Connection lost mid-response. The response above may be incomplete.' }, 'evt-notice-1')
+      const again = (stream.messages.value[stream.messages.value.length - 1]?.blocks ?? []).filter((b) => b.kind === 'error')
+      expect(again).toHaveLength(1)
+      runEvent('turn_completed', { text: 'done' })
+      await pendingSend
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('a streaming_fallback response_notice inserts one warning line before the answer', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>, id?: string) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload, ...(id ? { id } : {}) },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('assistant_delta', { text: 'after fallback' })
+      runEvent('response_notice', { kind: 'streaming_fallback', text: 'Streaming response ended before any complete data was received. Retrying without streaming. If this keeps happening, check any proxy or gateway between forebrain and your model provider.' }, 'evt-fallback-1')
+
+      const messages = stream.messages.value
+      const noticeIndex = messages.findIndex((m) => m.id === 'response-notice:evt-fallback-1')
+      expect(noticeIndex).toBeGreaterThanOrEqual(0)
+      expect(messages[noticeIndex]).toMatchObject({ role: 'notice', content: 'Streaming response ended before any complete data was received. Retrying without streaming. If this keeps happening, check any proxy or gateway between forebrain and your model provider.' })
+      // The line sits before the answer it explains.
+      const assistantIndex = messages.findIndex((m) => (m.blocks ?? []).some((b) => b.kind === 'assistant'))
+      expect(noticeIndex).toBeLessThan(assistantIndex)
+      // The same id never inserts a second line.
+      runEvent('response_notice', { kind: 'streaming_fallback', text: 'Streaming response ended before any complete data was received. Retrying without streaming. If this keeps happening, check any proxy or gateway between forebrain and your model provider.' }, 'evt-fallback-1')
+      expect(stream.messages.value.filter((m) => m.id === 'response-notice:evt-fallback-1')).toHaveLength(1)
+      runEvent('turn_completed', { text: 'done' })
+      await pendingSend
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('a subagent incomplete notice lands in its transcript and a fallback warning stays out of it', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('find the callers')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>, id?: string) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload, ...(id ? { id } : {}) },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('subagent_spawned', {
+        agent_id: 'task-explore-1',
+        agent_type: 'explore',
+        task_id: 'task-explore-1',
+        title: 'Trace callers',
+        task: 'find the callers',
+        execution_id: 'exec-1',
+      })
+      runEvent('assistant_delta', { agent_id: 'task-explore-1', text: 'part of the answer' })
+      runEvent('response_notice', { agent_id: 'task-explore-1', kind: 'incomplete', text: 'Server error mid-response. The response above may be incomplete.' }, 'evt-sub-notice-1')
+
+      let entry = stream.subagents.value.find((row) => row.agentId === 'task-explore-1')
+      expect((entry?.blocks ?? []).some((b) => b.kind === 'error' && b.text === 'Server error mid-response. The response above may be incomplete.')).toBe(true)
+
+      // The fallback warning is a main-conversation line: the subagent's
+      // transcript never sees it, the conversation does.
+      runEvent('response_notice', { agent_id: 'task-explore-1', kind: 'streaming_fallback', text: 'Streaming response ended before any complete data was received. Retrying without streaming. If this keeps happening, check any proxy or gateway between forebrain and your model provider.' }, 'evt-sub-fallback-1')
+      entry = stream.subagents.value.find((row) => row.agentId === 'task-explore-1')
+      expect((entry?.blocks ?? []).some((b) => b.kind === 'error' && b.text?.includes('Retrying without streaming'))).toBe(false)
+      expect(stream.messages.value.some((m) => m.id === 'response-notice:evt-sub-fallback-1')).toBe(true)
+
+      runEvent('subagent_ended', { agent_id: 'task-explore-1', agent_type: 'explore', task_id: 'task-explore-1', status: 'ok', execution_id: 'exec-1' })
+      runEvent('turn_completed', { text: 'done' })
+      await pendingSend
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('a transport_retry with drop_finished_thinking withdraws the finished thinking blocks too', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+
+      runEvent('turn_started', {})
+      runEvent('reasoning_delta', { text: 'finished thought' })
+      runEvent('reasoning_done', {})
+      runEvent('reasoning_delta', { text: 'half-streamed thought' })
+
+      // Without the flag the finished thinking stays: that is a finish, and
+      // what completed stays.
+      runEvent('transport_retry', { retry: 1, total: 2, wait_ms: 0, error: 'read tcp: i/o timeout' })
+      let primary = stream.messages.value[stream.messages.value.length - 1]
+      expect((primary?.blocks ?? []).some((b) => b.kind === 'thinking' && b.text === 'finished thought')).toBe(true)
+      expect((primary?.blocks ?? []).some((b) => b.kind === 'thinking' && b.text === 'half-streamed thought')).toBe(false)
+
+      // With the flag the resend takes the finished thinking with it.
+      runEvent('reasoning_delta', { text: 'another half thought' })
+      runEvent('transport_retry', { retry: 2, total: 2, wait_ms: 0, error: 'read tcp: i/o timeout', drop_finished_thinking: true })
+      primary = stream.messages.value[stream.messages.value.length - 1]
+      expect((primary?.blocks ?? []).some((b) => b.kind === 'thinking')).toBe(false)
+
+      runEvent('turn_error', { error: 'network error, gave up after 2 retries: read tcp: i/o timeout' })
+      await pendingSend
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })

@@ -218,6 +218,40 @@ func TestAnthropicAgentLLMPropagatesStreamingError(t *testing.T) {
 	}
 }
 
+func TestAnthropicAgentLLMStreamCleanCloseZeroEventsIsNoEvents(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	// message_start and a clean close, no content block and no stop reason:
+	// the stream produced nothing at all and is re-sent without streaming.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		writeAnthropicSSEEvent(t, w, "message_start", `{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`)
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 128_000)
+	var streamed bool
+	ended := 0
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		Streamed: &streamed,
+		OnEnd:    func() { ended++ },
+	})
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if !errors.Is(err, llm.ErrStreamNoEvents) {
+		t.Fatalf("Execute error = %v, want ErrStreamNoEvents", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if !streamed {
+		t.Fatal("Streamed was not marked")
+	}
+	if ended != 1 {
+		t.Fatalf("OnEnd calls = %d, want 1", ended)
+	}
+}
+
 // TestAnthropicAgentLLMUsesCacheFieldsFromMessageDelta covers a real bug
 // found via a live third-party Anthropic-compatible endpoint (an Alibaba
 // MaaS gateway proxying Qwen): anthropic-sdk-go's Message.Accumulate only

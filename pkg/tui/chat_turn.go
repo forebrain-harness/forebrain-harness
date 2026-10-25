@@ -506,7 +506,20 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 		// a no-op.
 		OnTransportRetry: func(tr llm.TransportRetry) {
 			accum.Reset()
-			s.notifyUIForSession(sessionID, TransportRetryMsg{turn: foreground, Retry: tr.Retry, Total: tr.Total, Wait: tr.Wait, Err: tr.Err, Status: tr.Status, Cleared: tr.Cleared})
+			s.notifyUIForSession(sessionID, TransportRetryMsg{turn: foreground, Retry: tr.Retry, Total: tr.Total, Wait: tr.Wait, Err: tr.Err, Status: tr.Status, Cleared: tr.Cleared, DropFinishedThinking: tr.DropFinishedThinking})
+		},
+		// A line about the response itself — the answer the run finished from
+		// what completed, a stream retried without streaming — is a fact of
+		// the conversation: it is drawn as its own frame and filed into the
+		// run's events the way a delivered steer is, so a reload draws it
+		// where it happened.
+		OnResponseNotice: func(n llm.ResponseNotice) {
+			if strings.TrimSpace(n.Text) == "" {
+				return
+			}
+			s.notifyUIForSession(sessionID, ResponseNoticeMsg{turn: foreground, Kind: string(n.Kind), Text: n.Text})
+			s.persistRunEvent(context.Background(), event.NewRunEvent("", s.currentTUIRunID(), strings.TrimSpace(sessionID),
+				event.RunEventResponseNotice, event.ResponseNoticePayload{Kind: string(n.Kind), Text: n.Text}, time.Now()))
 		},
 		OnWebSearch: func(id, detail string, completed bool) {
 			if !foreground.acknowledgeResponse() {

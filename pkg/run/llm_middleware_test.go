@@ -118,8 +118,11 @@ func TestNetworkRetryExhaustionMessage(t *testing.T) {
 	if !errors.As(err, &ne) {
 		t.Fatalf("error = %T, want it to still unwrap to the net.Error", err)
 	}
-	if inner.calls != 3 {
-		t.Fatalf("provider calls = %d, want 1 + 2 retries", inner.calls)
+	// The stream-failure decision table (plan 123): the shared budget pays
+	// for the first call plus both streaming retries, then one non-streaming
+	// attempt follows before the loop gives up.
+	if inner.calls != 4 {
+		t.Fatalf("provider calls = %d, want 1 + 2 streaming retries + 1 non-streaming", inner.calls)
 	}
 }
 
@@ -287,8 +290,10 @@ func TestNetworkRetryRetriesServerErrors(t *testing.T) {
 }
 
 // A stream the watchdog aborted for going silent reads as a dropped
-// connection: the network retry layer re-sends the whole request, exactly as
-// it does for a stream cut mid-answer.
+// connection: the network retry layer re-sends the whole request immediately,
+// exactly as it does for a stream cut mid-answer. The stall resend runs with
+// no status line (plan 123), so its only announcement is the withdraw
+// notification that takes the dead attempt's in-flight text back.
 func TestNetworkRetryRetriesAStalledStream(t *testing.T) {
 	inner := &netRetryTestLLM{failure: &llm.StreamStallError{After: time.Second}}
 	wrapped := wrapNetworkRetryLLM(inner, 3, 0)
@@ -308,8 +313,8 @@ func TestNetworkRetryRetriesAStalledStream(t *testing.T) {
 	if inner.calls != 2 {
 		t.Fatalf("provider calls = %d, want 2 (stalled + re-sent)", inner.calls)
 	}
-	if len(notes) != 2 || notes[0].Cleared || !notes[1].Cleared {
-		t.Fatalf("notifications = %+v, want one in-flight retry then its cleared notice", notes)
+	if len(notes) != 1 || !notes[0].Cleared {
+		t.Fatalf("notifications = %+v, want the stall resend's withdraw notice", notes)
 	}
 }
 
@@ -335,5 +340,119 @@ func TestNetworkRetryLeaves529ToRecovery(t *testing.T) {
 	}
 	if len(notes) != 0 {
 		t.Fatalf("transport-retry notifications = %+v, want none — 529 is recovered above this layer", notes)
+	}
+}
+
+// failingLLM returns the same error from every Execute and counts the calls.
+type failingLLM struct {
+	err   error
+	calls int
+}
+
+func (f *failingLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	f.calls++
+	return nil, f.err
+}
+
+// progressCtx builds a context whose stream progress has already reached the
+// given shape.
+func progressCtx(t *testing.T, fire func(sink *llm.StreamSink)) context.Context {
+	t.Helper()
+	sink := &llm.StreamSink{
+		OnResponseStarted: func() {},
+		OnDelta:           func(string) {},
+		OnReasoningDelta:  func(string) {},
+		OnTextBlockDone:   func() {},
+		OnToolCallReady:   func(llm.ToolCall) {},
+		OnMessageStop:     func() {},
+	}
+	ctx, _ := llm.WithStreamProgress(llm.WithStreamSink(context.Background(), sink))
+	fire(llm.StreamSinkFrom(ctx))
+	return ctx
+}
+
+// A request whose progress already shows finished output is never re-sent by
+// the blank-output layer: the error surfaces and the caller finishes from
+// what completed.
+func TestBlankOutputRetryHonoursTheResendGuard(t *testing.T) {
+	inner := &failingLLM{err: &llm.APIError{StatusCode: 200, Message: "completed without output"}}
+	wrapped := wrapBlankOutputRetryLLM(inner)
+
+	ctx := progressCtx(t, func(sink *llm.StreamSink) {
+		sink.OnDelta("the partial answer")
+		sink.OnTextBlockDone()
+	})
+	_, err := wrapped.Execute(ctx, nil, nil)
+	if !errors.Is(err, inner.err) {
+		t.Fatalf("Execute error = %v, want the original blank-output error", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1 (output was already shown)", inner.calls)
+	}
+}
+
+// A partial response is already a decision about how this response ends: the
+// compaction and 529 resends of the recoverable layer must not re-ask the
+// question, not even when the wrapped error looks like theirs.
+func TestRecoverableLayerPassesPartialResponsesThrough(t *testing.T) {
+	partialErr := &llm.PartialResponseError{
+		Err:   &llm.APIError{StatusCode: 400, Message: "context window exceeded: maximum context length"},
+		Cause: llm.CauseBadRequest,
+	}
+	inner := &failingLLM{err: partialErr}
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool) ([]llm.Message, bool, error) {
+		return []llm.Message{llm.UserMessage(llm.Text("compacted"))}, true, nil
+	}}, 3, 0)
+
+	_, err := recoverable.Execute(context.Background(), nil, nil)
+	var partial *llm.PartialResponseError
+	if !errors.As(err, &partial) || partial != partialErr {
+		t.Fatalf("Execute error = %v, want the PartialResponseError untouched", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1 (no compaction or 529 resend)", inner.calls)
+	}
+}
+
+// The 529 recovery re-asks only a request that had produced nothing; one that
+// already showed anything keeps the error. The stream-retry layer inside owns
+// a 529 that arrives mid-flight, so this pins the recoverable layer's own
+// gate directly.
+func TestStatus529AfterStartedOutputIsReturnedAsIs(t *testing.T) {
+	inner := &failingLLM{err: &llm.APIError{StatusCode: 529, Message: "overloaded"}}
+	recoverable := recoverableLLM{inner: inner, compactDeps: &CompactChainDeps{}, runGuard: newCompactRunGuard()}
+
+	ctx := progressCtx(t, func(sink *llm.StreamSink) { sink.OnResponseStarted() })
+	_, err := recoverable.Execute(ctx, nil, nil)
+	var got *llm.APIError
+	if !errors.As(err, &got) || got.StatusCode != 529 {
+		t.Fatalf("Execute error = %v, want the original 529", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1 (529 recovery only handles a request that produced nothing)", inner.calls)
+	}
+}
+
+// A mid-flight compaction resend is refused the same way: a request whose
+// context-length rejection arrived after output stays with its caller.
+func TestCompactionResendHonoursTheResendGuard(t *testing.T) {
+	inner := &failingLLM{err: &llm.APIError{StatusCode: 400, Message: "maximum context length exceeded"}}
+	deps := &CompactChainDeps{
+		TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool) ([]llm.Message, bool, error) {
+			return []llm.Message{llm.UserMessage(llm.Text("compacted"))}, true, nil
+		},
+	}
+	recoverable := WrapRecoverableLLM(inner, nil, deps, 3, 0)
+
+	ctx := progressCtx(t, func(sink *llm.StreamSink) {
+		sink.OnDelta("partial")
+		sink.OnTextBlockDone()
+	})
+	_, err := recoverable.Execute(ctx, nil, nil)
+	if !errors.Is(err, inner.err) {
+		t.Fatalf("Execute error = %v, want the original overflow error", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1 (no compacted resend after output)", inner.calls)
 	}
 }

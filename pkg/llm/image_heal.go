@@ -129,6 +129,12 @@ func (h *imageHealLLM) Execute(ctx context.Context, messages []Message, tools []
 	if err == nil || !IsImageRejection(err) {
 		return result, err
 	}
+	if IsPartialResponse(err) || !ResendSafe(ctx) {
+		// The failed request had already produced something a resend would
+		// duplicate, or an inner layer already decided how it ends: the
+		// caller finishes it from what completed.
+		return result, err
+	}
 	degraded, replaced := DegradeImages(messages, err.Error())
 	if replaced == 0 {
 		// The rejection named an image but this request carries none we can
@@ -142,6 +148,7 @@ func (h *imageHealLLM) Execute(ctx context.Context, messages []Message, tools []
 	reportImageRefusal(ctx, oneLineReason(err.Error()))
 	slog.Warn("provider rejected an image; retrying with the image degraded",
 		"replaced", replaced, "err", err)
+	ResetStreamProgress(ctx)
 	return h.inner.Execute(ctx, degraded, tools)
 }
 

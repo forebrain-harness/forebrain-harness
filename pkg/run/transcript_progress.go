@@ -12,11 +12,13 @@ import (
 )
 
 // transcriptProgressStore is the slice of the session store the progress
-// writer needs: the idempotent sequence append for a run's conversation, and
-// the structured append for a standalone reasoning row.
+// writer needs: the idempotent sequence append for a run's conversation, the
+// structured append for a standalone reasoning row, and the row delete that
+// withdraws one when the attempt that wrote it is re-sent.
 type transcriptProgressStore interface {
 	AppendMessageSequenceForRun(ctx context.Context, sessionID, runID string, messages []llm.Message, model, usageJSON string) error
 	AppendStructuredMessageForRun(ctx context.Context, sessionID, runID, role, content, messageID, partsJSON, model, usageJSON, toolStepID, toolMetaJSON string, exec state.MessageExecTiming) (int64, error)
+	DeleteRunMessageRow(ctx context.Context, sessionID, runID string, rowID int64) error
 }
 
 // transcriptProgress writes a run's conversation into its transcript as it
@@ -37,6 +39,10 @@ type transcriptProgress struct {
 	mu          sync.Mutex
 	reasoning   strings.Builder
 	reasoningAt time.Time
+	// attemptRows are the transcript rows this model call has written so far
+	// (one per finished reasoning block). A resend of the call withdraws
+	// them; a finish keeps them.
+	attemptRows []int64
 }
 
 // newTranscriptProgress builds a progress writer for one session's run, or nil
@@ -77,8 +83,42 @@ func (t *transcriptProgress) reasoningDone(ctx context.Context, text string, sta
 	if spent < 0 {
 		spent = 0
 	}
-	if _, err := t.store.AppendStructuredMessageForRun(ctx, t.sessionID, t.runID, "reasoning", text, "", state.ReasoningPartsJSON(text, spent), "", "", "", "", state.MessageExecTiming{}); err != nil {
+	rowID, err := t.store.AppendStructuredMessageForRun(ctx, t.sessionID, t.runID, "reasoning", text, "", state.ReasoningPartsJSON(text, spent), "", "", "", "", state.MessageExecTiming{})
+	if err != nil {
 		slog.Warn("transcript progress: append reasoning", "session_id", t.sessionID, "run_id", t.runID, "err", err)
+		return
+	}
+	t.mu.Lock()
+	t.attemptRows = append(t.attemptRows, rowID)
+	t.mu.Unlock()
+}
+
+// beginAttempt starts a new model call: rows written by earlier calls of this
+// run are settled history, and only this call's rows may still be withdrawn.
+func (t *transcriptProgress) beginAttempt() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.attemptRows = nil
+	t.mu.Unlock()
+}
+
+// dropFinishedReasoning deletes the reasoning rows this model call wrote:
+// the attempt that produced them is being re-sent, so what it finished
+// leaves the transcript with it.
+func (t *transcriptProgress) dropFinishedReasoning(ctx context.Context) {
+	if t == nil || t.store == nil {
+		return
+	}
+	t.mu.Lock()
+	rows := t.attemptRows
+	t.attemptRows = nil
+	t.mu.Unlock()
+	for _, rowID := range rows {
+		if err := t.store.DeleteRunMessageRow(ctx, t.sessionID, t.runID, rowID); err != nil {
+			slog.Warn("transcript progress: withdraw reasoning row", "session_id", t.sessionID, "run_id", t.runID, "row", rowID, "err", err)
+		}
 	}
 }
 
@@ -115,9 +155,10 @@ func (t *transcriptProgress) takeReasoning() (string, time.Time, bool) {
 }
 
 // dropInFlightReasoning discards the reasoning block still being streamed
-// without writing it: the attempt that streamed it died on the network and the
-// retry re-streams from the first token. Blocks that already ended were written
-// when they ended and stay.
+// without writing it: the attempt that streamed it died on the network and
+// the retry re-streams from the first token. Blocks that already ended were
+// written when they ended: a finish keeps them; a resend withdraws them
+// through dropFinishedReasoning.
 func (t *transcriptProgress) dropInFlightReasoning() {
 	if t == nil {
 		return

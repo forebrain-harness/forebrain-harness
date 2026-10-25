@@ -118,6 +118,21 @@ type TransportRetryMsg struct {
 	// picks the status line's generic reason.
 	Status  int
 	Cleared bool
+	// DropFinishedThinking: the resend also withdraws the thinking blocks the
+	// dead attempt finished, not only the block still being streamed.
+	DropFinishedThinking bool
+}
+
+// ResponseNoticeMsg is one line about the response itself — an answer the run
+// finished from what completed, a stream retried without streaming — that
+// belongs in the conversation. It is a message, not a status: the notice is
+// recorded with the run's events and replays with it. The foreground path
+// fills turn; the event path carries only AgentID.
+type ResponseNoticeMsg struct {
+	turn    *foregroundTurn
+	AgentID string
+	Kind    string
+	Text    string
 }
 type RunStartedMsg struct {
 	RunID string
@@ -906,14 +921,20 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 				err = errors.New(p.Error)
 			}
 			s.notifyUIForSession(evt.SessionID, TransportRetryMsg{
-				AgentID: p.AgentID,
-				Retry:   p.Retry,
-				Total:   p.Total,
-				Wait:    time.Duration(p.WaitMs) * time.Millisecond,
-				Err:     err,
-				Status:  p.Status,
-				Cleared: p.Cleared,
+				AgentID:              p.AgentID,
+				Retry:                p.Retry,
+				Total:                p.Total,
+				Wait:                 time.Duration(p.WaitMs) * time.Millisecond,
+				Err:                  err,
+				Status:               p.Status,
+				Cleared:              p.Cleared,
+				DropFinishedThinking: p.DropFinishedThinking,
 			})
+		}
+	case event.RunEventResponseNotice:
+		var p event.ResponseNoticePayload
+		if json.Unmarshal(evt.Payload, &p) == nil {
+			s.notifyUIForSession(evt.SessionID, ResponseNoticeMsg{AgentID: p.AgentID, Kind: p.Kind, Text: p.Text})
 		}
 	case event.RunEventUsageDelta:
 		var p event.UsageDeltaPayload

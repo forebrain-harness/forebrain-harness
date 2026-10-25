@@ -128,14 +128,18 @@ func (w *toolOrchestrationLLM) recordReasoningBlocks(ctx context.Context, sink *
 	// A transport retry re-sends the whole request from the first token, so
 	// the reasoning block the dead attempt was still streaming is void — it
 	// is dropped here, never written — while blocks that already ended were
-	// written when they ended and stay. The drop runs on every
-	// notification, Cleared included: at exhaustion the final dead attempt
-	// only ever gets Cleared, and on success that notice lands before the
-	// retried stream's first token, when nothing is in flight — a no-op.
-	// The downstream call keeps the surface's own handling alive.
+	// written when they ended: a finish keeps them, and a resend that says
+	// so (DropFinishedThinking) withdraws their rows with it. The drop runs
+	// on every notification, Cleared included: at exhaustion the final dead
+	// attempt only ever gets Cleared, and on success that notice lands
+	// before the retried stream's first token, when nothing is in flight —
+	// a no-op. The downstream call keeps the surface's own handling alive.
 	downstreamTransportRetry := wrapped.OnTransportRetry
 	wrapped.OnTransportRetry = func(tr llm.TransportRetry) {
 		transcript.dropInFlightReasoning()
+		if tr.DropFinishedThinking {
+			transcript.dropFinishedReasoning(sinkCtx)
+		}
 		if downstreamTransportRetry != nil {
 			downstreamTransportRetry(tr)
 		}
@@ -333,6 +337,13 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			inFlightSteers.bindAbort(func() { abandonCall(errSteerRetracted) })
 		}
 		callCtx = withSteerDeliveryResponseStart(callCtx, inFlightSteers)
+		// The failure decisions ride on what this one request had produced
+		// when it died, and a finish is built from what it completed: both
+		// are recorded per model call, so the loop resets them each time it
+		// asks again.
+		callCtx, _ = llm.WithStreamProgress(callCtx)
+		callCtx, collector := withResponseCollector(callCtx)
+		transcript.beginAttempt()
 		res, err := w.inner.Execute(callCtx, session, tools)
 		abandonCall(nil)
 		if err == nil {
@@ -343,6 +354,21 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			// exclusive: a retraction that lands after this commit finds the
 			// steers delivered and fails.
 			inFlightSteers.Commit()
+		}
+		// A response the stream-retry layer finished from its completed part
+		// is the answer that happened: the turn ends on it instead of asking
+		// the model the same thing again. It is settled before the retraction
+		// check because the model had begun answering — the delivery stands.
+		var incomplete *llm.PartialResponseError
+		if errors.As(err, &incomplete) {
+			if incomplete.Complete {
+				collector.sealCurrent()
+			}
+			res, err = collector.result(), nil
+			inFlightSteers.Commit()
+			if incomplete.Complete {
+				incomplete = nil // a response that fully arrived is an ordinary one
+			}
 		}
 		if inFlightSteers.Retracted() {
 			if ctx.Err() == nil {
@@ -444,6 +470,25 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		latestUsage := usageCopy(res)
 		accumulateUsage(&totalUsage, latestUsage)
 		if res == nil || res.Message == nil || len(res.Message.ToolCalls) == 0 {
+			if incomplete != nil {
+				// The turn ends on the answer that happened. The completed
+				// text is kept in the conversation; no further model call, no
+				// steer drain, no end-of-turn hooks — the sentence (or the
+				// error itself) is what the user reads.
+				shown := incomplete.Progress.Kind == llm.ProgressOutput ||
+					incomplete.Progress.Kind == llm.ProgressPartialOutput ||
+					incomplete.Progress.ToolDispatched
+				if strings.TrimSpace(res.Message.TextContent()) != "" {
+					session = append(session, *res.Message)
+					noteResponseCompleted()
+					partialCapture.Set(session)
+					transcript.flush(ctx, session, modelForTranscript(), latestUsage)
+				}
+				if incomplete.Failed {
+					return nil, incomplete.Err
+				}
+				return nil, &responseIncompleteError{sentence: llm.IncompleteSentence(incomplete.Cause, shown), err: incomplete.Err}
+			}
 			if sessionHasToolExecution(session) && isEmptyAssistantResult(res) {
 				return nil, fmt.Errorf("empty assistant response after tool execution")
 			}
@@ -477,6 +522,21 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				transcript.flush(ctx, append(append([]llm.Message(nil), session...), *res.Message), modelForTranscript(), latestUsage)
 			}
 			return endTurn(res, latestUsage)
+		}
+		if incomplete != nil {
+			// The completed tool calls run as usual and the loop asks the
+			// model again — but the conversation first records why this
+			// response stops where it does.
+			shown := incomplete.Progress.Kind == llm.ProgressOutput ||
+				incomplete.Progress.Kind == llm.ProgressPartialOutput ||
+				incomplete.Progress.ToolDispatched
+			text := llm.IncompleteSentence(incomplete.Cause, shown)
+			if incomplete.Failed {
+				text = incomplete.Err.Error()
+			}
+			if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnResponseNotice != nil {
+				sink.OnResponseNotice(llm.ResponseNotice{Kind: llm.ResponseNoticeIncomplete, Text: text})
+			}
 		}
 		session = append(session, *res.Message)
 		noteResponseCompleted()

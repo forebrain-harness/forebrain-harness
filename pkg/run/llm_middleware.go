@@ -306,6 +306,7 @@ func wrapBlankOutputRetryLLM(inner llm.LLM) llm.LLM {
 	retryMW, err := llm.NewRetry(
 		blankOutputRetryAttempts,
 		llm.WithShouldRetry(llm.APIErrorIsBlankModelOutput),
+		llm.WithResendGuard(),
 	)
 	if err != nil {
 		return inner
@@ -313,15 +314,27 @@ func wrapBlankOutputRetryLLM(inner llm.LLM) llm.LLM {
 	return llm.Use(inner, retryMW)
 }
 
-// wrapNetworkRetryLLM attaches the transport-failure retry loop: a stream cut
-// mid-answer (timeout, reset, truncation) is re-sent as the whole original
-// request with exponential back-off capped at 32s plus 0–25% upward jitter,
-// and every retry is announced through the stream sink so each surface can
-// drop the dead attempt's text and show the retry cards. It is applied last
-// of the chain inside WrapRecoverableLLM, making it the outermost retry:
-// transport is the first boundary a request succeeds or dies on, and the
-// recovery layers above (compaction, blank-output, 529) re-enter the whole
-// inner stack on their own retries, inheriting this protection.
+// streamProgressIsNothing reports whether the request recorded for ctx had
+// produced nothing when it failed: no record at all — a muted nested
+// request — reads as nothing too.
+func streamProgressIsNothing(ctx context.Context) bool {
+	p := llm.StreamProgressFrom(ctx)
+	return p == nil || p.Snapshot().Kind == llm.ProgressNothing
+}
+
+// wrapNetworkRetryLLM attaches the stream-failure retry loop. Each failure is
+// decided from what the request had already produced, the way Claude Code
+// decides it: a stream cut before any answer text or tool call finished is
+// re-sent as a stream (exponential back-off capped at 32s plus 0–25% upward
+// jitter), a request the stream cannot serve is re-sent without streaming, a
+// stream cut after output finished is finished from what completed, and a
+// request-level rejection is returned to the layers above. Every retry is
+// announced through the stream sink so each surface can drop the dead
+// attempt's text and show the retry cards. It is applied last of the chain
+// inside WrapRecoverableLLM, making it the outermost retry: transport is the
+// first boundary a request succeeds or dies on, and the recovery layers above
+// (compaction, blank-output, 529) re-enter the whole inner stack on their own
+// retries, inheriting this protection.
 //
 // maxRetries is the retry cap (agents.defaults.network_retry_max, default
 // 10, at most config.MaxNetworkRetryMax). streamIdle is the stream-stall
@@ -342,9 +355,8 @@ func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int, streamIdle time.Duration
 	}
 	retryCore := inner
 	if maxRetries > 0 {
-		retryMW, err := llm.NewRetry(
-			1+maxRetries, // the first call is attempt 0: 1 + N retries
-			llm.WithShouldRetry(llm.IsRetryableNetworkError),
+		retryMW := llm.NewStreamRetry(
+			maxRetries,
 			llm.WithMaxBackoff(32*time.Second),
 			llm.WithUpwardJitter(),
 			// A server that answered with Retry-After sets the wait itself; a
@@ -357,9 +369,6 @@ func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int, streamIdle time.Duration
 				}
 			}),
 		)
-		if err != nil {
-			return networkRetryLLM{inner: inner, maxRetries: 0, streamIdle: streamIdle}
-		}
 		retryCore = llm.Use(inner, retryMW)
 	}
 	return networkRetryLLM{inner: retryCore, maxRetries: maxRetries, streamIdle: streamIdle}
@@ -379,6 +388,11 @@ func (n networkRetryLLM) Execute(ctx context.Context, messages []llm.Message, to
 		ctx = llm.WithStreamWatchdog(ctx, n.streamIdle)
 	}
 	res, err := n.inner.Execute(ctx, messages, tools)
+	if err != nil && llm.IsPartialResponse(err) {
+		// The stream-retry layer already decided how this response ends;
+		// the orchestration above finishes it from what completed.
+		return res, err
+	}
 	// Only a mounted retry loop can exhaust: with maxRetries 0 the inner
 	// chain is the raw LLM, and an exhaustion error bubbling out of it is
 	// another layer's business, not a network give-up.
@@ -423,6 +437,11 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 	if errors.Is(err, context.Canceled) {
 		return nil, err
 	}
+	if llm.IsPartialResponse(err) {
+		// The stream-retry layer already decided how this response ends; the
+		// compaction and 529 resends below must not re-ask the question.
+		return nil, err
+	}
 	lastErr := err
 
 	if isContextWindowExceeded(lastErr) {
@@ -435,6 +454,12 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 		// proactive compaction. Never recover by silently dropping exchanges.
 		if compacted, ok := r.forceCompact(ctx, messages, tail, tools, est); ok {
 			recordCompactionAdoption(ctx, compacted)
+			if !llm.ResendSafe(ctx) {
+				// The failed request had produced something a resend would
+				// duplicate; the caller finishes from it.
+				return nil, lastErr
+			}
+			llm.ResetStreamProgress(ctx)
 			if res2, err2 := r.inner.Execute(ctx, compacted, tools); err2 == nil {
 				r.observeSuccess(ctx, res2, est, llm.EstimateMessagesWith(est, compacted)+estimateToolsTokens(est, tools))
 				return res2, nil
@@ -447,7 +472,10 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 	if llm.APIErrorIsBlankModelOutput(lastErr) {
 		return nil, blankOutputError(lastErr)
 	}
-	if isStatus529(lastErr) && ShouldRetryStatus529(QuerySourceFromContext(ctx)) {
+	// The 529 recovery re-asks a request that had produced nothing; one that
+	// already showed output keeps what it showed (the stream-retry layer
+	// decided), and the error goes up as it is.
+	if isStatus529(lastErr) && streamProgressIsNothing(ctx) && ShouldRetryStatus529(QuerySourceFromContext(ctx)) {
 		for attempt := 1; attempt <= Foreground529RetryCap(); attempt++ {
 			timer := time.NewTimer(RetryDelay(attempt))
 			select {
@@ -456,6 +484,10 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 				return nil, ctx.Err()
 			case <-timer.C:
 			}
+			if !llm.ResendSafe(ctx) {
+				return nil, lastErr
+			}
+			llm.ResetStreamProgress(ctx)
 			if res2, err2 := r.inner.Execute(ctx, messages, tools); err2 == nil {
 				return res2, nil
 			} else {

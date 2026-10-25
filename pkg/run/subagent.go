@@ -1036,13 +1036,25 @@ func EventStreamSink(ctx context.Context, sink event.Sink, runID, sessionID, age
 				errText = tr.Err.Error()
 			}
 			publishEvent(ctx, sink, runID, sessionID, event.RunEventTransportRetry, event.TransportRetryPayload{
-				Retry:   tr.Retry,
-				Total:   tr.Total,
-				WaitMs:  tr.Wait.Milliseconds(),
-				Error:   errText,
-				Status:  tr.Status,
+				Retry:                tr.Retry,
+				Total:                tr.Total,
+				WaitMs:               tr.Wait.Milliseconds(),
+				Error:                errText,
+				Status:               tr.Status,
+				AgentID:              agentID,
+				Cleared:              tr.Cleared,
+				DropFinishedThinking: tr.DropFinishedThinking,
+			})
+		},
+		// A line about the response itself — an answer finished from what
+		// completed, a stream retried without streaming — belongs in the
+		// conversation, so it is published as a stored event the surfaces
+		// replay with it.
+		OnResponseNotice: func(n llm.ResponseNotice) {
+			publishEvent(ctx, sink, runID, sessionID, event.RunEventResponseNotice, event.ResponseNoticePayload{
+				Kind:    string(n.Kind),
+				Text:    n.Text,
 				AgentID: agentID,
-				Cleared: tr.Cleared,
 			})
 		},
 		// Provider-executed web search reaches a surface only through this

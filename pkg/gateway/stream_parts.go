@@ -147,12 +147,15 @@ func (s *streamParts) observe(evt event.RunEvent) {
 		run.textFor(p.AgentID).reasoning = ""
 	case event.RunEventTransportRetry:
 		var p event.TransportRetryPayload
-		if json.Unmarshal(evt.Payload, &p) != nil || p.Cleared {
+		if json.Unmarshal(evt.Payload, &p) != nil {
 			return
 		}
 		if run.ownsPrimaryText(p.AgentID) {
 			return
 		}
+		// Every notice clears the agent's in-flight text, Cleared included:
+		// the catch-up Cleared at a finish or an exhaustion is the only
+		// announcement the final dead attempt ever gets.
 		text := run.textFor(p.AgentID)
 		text.content = ""
 		text.reasoning = ""

@@ -1394,6 +1394,16 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			r.tracker.ObserveTransportRetry(agentID, m.Retry, m.Total, m.Wait, errText, m.Status)
 		}
 		return EventResult{}
+	case ResponseNoticeMsg:
+		agentID := strings.TrimSpace(m.AgentID)
+		// A line about the response itself: an answer finished from what
+		// completed reads as an error frame with a title, a retry without
+		// streaming as a plain system line. Both are final — nothing of the
+		// response they describe is still coming.
+		if m.Kind == string(llm.ResponseNoticeIncomplete) {
+			return EventResult{Frames: r.withFlushedBuffers(r.agentBuf(agentID), Frame{Kind: FrameError, Title: "Response incomplete", Content: m.Text, AgentID: agentID, Final: true})}
+		}
+		return EventResult{Frames: r.withFlushedBuffers(r.agentBuf(agentID), Frame{Kind: FrameSystem, Content: m.Text, AgentID: agentID, Final: true})}
 	case GoalStartedMsg:
 		if r.tracker != nil {
 			r.tracker.ObserveGoalRound(1)
@@ -5237,11 +5247,13 @@ func (r *Renderer) withdrawSubmission(turn *foregroundTurn) {
 // blocks of the stream that just died on the network: the dead attempt's
 // half-streamed words are withdrawn — the retry re-sends the whole request
 // and its first delta starts its own block — while blocks that already
-// finished (Final) stay, sealed as history. A zero-output death holds no live
-// blocks and is a no-op. run.go calls this from its TransportRetryMsg branch
-// on every notice, Cleared included — at exhaustion the final dead attempt
-// only ever gets the Cleared one.
-func (r *Renderer) WithdrawDeadStreamBlocks(agentID string) {
+// finished (Final) stay, sealed as history. finishedThinking also withdraws
+// those finished thinking blocks: a resend only ever follows an attempt whose
+// finished blocks are all thinking, and they leave with the unfinished one. A
+// zero-output death holds no live blocks and is a no-op. run.go calls this
+// from its TransportRetryMsg branch on every notice, Cleared included — at
+// exhaustion the final dead attempt only ever gets the Cleared one.
+func (r *Renderer) WithdrawDeadStreamBlocks(agentID string, finishedThinking bool) {
 	if r == nil {
 		return
 	}
@@ -5258,7 +5270,10 @@ func (r *Renderer) WithdrawDeadStreamBlocks(agentID string) {
 	removed := false
 	for n := len(vm.blocks); n > 0; n-- {
 		f := vm.blocks[n-1].frame
-		if f.Final || (f.Kind != FrameAssistant && f.Kind != FrameThinking) {
+		if f.Kind != FrameAssistant && f.Kind != FrameThinking {
+			break
+		}
+		if f.Final && !finishedThinking {
 			break
 		}
 		vm.blocks[n-1] = nil

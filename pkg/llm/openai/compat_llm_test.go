@@ -392,6 +392,10 @@ func TestOpenAICompatLLMStreamEnablesIncludeUsage(t *testing.T) {
 		}
 		rec := httptestResponseRecorder{header: http.Header{}}
 		rec.Header().Set("Content-Type", "text/event-stream")
+		// Zero output with a finish frame keeps the empty-answer path; a
+		// clean close without one is now ErrStreamNoEvents (plan 123), which
+		// is not what this test is about.
+		_, _ = rec.Write([]byte(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
 		_, _ = rec.Write([]byte("data: [DONE]\n\n"))
 		return rec.response(), nil
 	})
@@ -657,6 +661,17 @@ func (r *httptestResponseRecorder) response() *http.Response {
 		Header:     r.header,
 		Body:       io.NopCloser(strings.NewReader(r.body.String())),
 	}
+}
+
+// responseCut ends the body mid-chunk: the reader's read fails the way a
+// proxy cutting the connection looks to the client.
+func (r *httptestResponseRecorder) responseCut() *http.Response {
+	resp := r.response()
+	// A declared length longer than the body turns the first read past its
+	// end into an unexpected EOF rather than a clean end.
+	resp.ContentLength = int64(r.body.Len()) + 16
+	resp.Uncompressed = true
+	return resp
 }
 
 // TestNormalizeOpenAIStreamUsage pins the stream/stream_options invariant.
@@ -995,15 +1010,36 @@ func TestOpenAICompatLLMStreamCleanCloseAfterOutputIsTruncation(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatLLMStreamCleanCloseZeroOutputIsNotTruncation(t *testing.T) {
+func TestOpenAICompatLLMStreamCleanCloseZeroEventsIsNoEvents(t *testing.T) {
 	t.Parallel()
 
-	// Zero output and a clean close keeps the existing empty-answer path:
-	// endpoints that answer nothing are not truncations.
+	// Zero productive events and a clean close with no finish frame is not an
+	// answer at all: the request is re-sent without streaming (plan 123; the
+	// pre-plan empty-answer behavior this test pinned is replaced by it).
 	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
 		rec := httptestResponseRecorder{header: http.Header{}}
 		rec.Header().Set("Content-Type", "text/event-stream")
 		_, _ = rec.Write([]byte(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		return rec.response(), nil
+	})
+
+	_, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if !errors.Is(err, llm.ErrStreamNoEvents) {
+		t.Fatalf("Execute error = %v, want ErrStreamNoEvents", err)
+	}
+}
+
+func TestOpenAICompatLLMStreamZeroOutputWithFinishFrameStaysAnEmptyAnswer(t *testing.T) {
+	t.Parallel()
+
+	// A finish frame with zero output is the empty-answer path the blank
+	// output layer owns; plan 123 leaves it unchanged.
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		_, _ = rec.Write([]byte(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = rec.Write([]byte(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = rec.Write([]byte("data: [DONE]\n\n"))
 		return rec.response(), nil
 	})
 
@@ -1016,6 +1052,78 @@ func TestOpenAICompatLLMStreamCleanCloseZeroOutputIsNotTruncation(t *testing.T) 
 	}
 	if got := res.Message.TextContent(); got != "" {
 		t.Fatalf("content = %q, want empty", got)
+	}
+}
+
+// A clean close with no finish frame ends whatever the stream had produced:
+// the thinking that never turned into text is a finished block at the death,
+// and a call a later index already confirmed complete is reported ready —
+// while the half-streamed call behind that index stays unreported, its
+// arguments incomplete.
+func TestOpenAICompatLLMStreamCleanCloseFinishesThinkingAndReadyCalls(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		_, _ = rec.Write([]byte(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"the thought"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = rec.Write([]byte(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"running it"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = rec.Write([]byte(`data: {"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_die_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"echo kept\"}"}}]},"finish_reason":null}]}` + "\n\n"))
+		// The first fragment of a second call is what confirms the first one
+		// complete — the same shape a provider that dies mid-answer shows.
+		_, _ = rec.Write([]byte(`data: {"id":"4","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_die_2","type":"function","function":{"name":"shell","arguments":"{\"comm"}}]},"finish_reason":null}]}` + "\n\n"))
+		return rec.response(), nil
+	})
+
+	var reasoningDone, textDone int
+	var ready []llm.ToolCall
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnReasoningDelta: func(string) {},
+		OnReasoningDone:  func() { reasoningDone++ },
+		OnDelta:          func(string) {},
+		OnTextBlockDone:  func() { textDone++ },
+		OnToolCallReady:  func(c llm.ToolCall) { ready = append(ready, c) },
+	})
+	_, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if !errors.Is(err, llm.ErrStreamTruncated) {
+		t.Fatalf("Execute error = %v, want ErrStreamTruncated", err)
+	}
+	if reasoningDone != 1 {
+		t.Fatalf("OnReasoningDone calls = %d, want 1 (the stream's death ends the thinking)", reasoningDone)
+	}
+	if textDone != 1 {
+		t.Fatalf("OnTextBlockDone calls = %d, want 1 (the tool fragment ended the text in flight)", textDone)
+	}
+	if len(ready) != 1 || ready[0].ID != "call_die_1" || ready[0].Function.Arguments != `{"command":"echo kept"}` {
+		t.Fatalf("ready calls = %+v, want only the confirmed call", ready)
+	}
+}
+
+// A mid-read death ends the thinking the stream had produced: the compat
+// stream has no thinking boundary of its own, so the read failure is it.
+func TestOpenAICompatLLMStreamReadErrorFinishesThinking(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		_, _ = rec.Write([]byte(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"the thought"},"finish_reason":null}]}` + "\n\n"))
+		// No chunked terminator: the client's read ends mid-body, the way a
+		// proxy cutting the connection looks.
+		return rec.responseCut(), nil
+	})
+
+	reasoningDone := 0
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnReasoningDelta: func(string) {},
+		OnReasoningDone:  func() { reasoningDone++ },
+	})
+	_, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatal("Execute must fail on the cut stream")
+	}
+	if reasoningDone != 1 {
+		t.Fatalf("OnReasoningDone calls = %d, want 1 (the read failure ends the thinking)", reasoningDone)
 	}
 }
 

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -155,6 +156,38 @@ func TestNewImageHealRetriesOnceWithDegradedImages(t *testing.T) {
 	}
 	if inner.images[0] != 1 || inner.images[1] != 0 {
 		t.Fatalf("images per call = %v want [1 0]", inner.images)
+	}
+}
+
+// TestImageHealRefusesToResendUnsafeRequests pins the plan 123 guard: a
+// refusal that arrives after the request already finished an output block is
+// not retried with the image degraded — the caller finishes from what
+// completed instead.
+func TestImageHealRefusesToResendUnsafeRequests(t *testing.T) {
+	t.Parallel()
+	inner := &imageRejectingLLM{}
+	healed := Use(inner, NewImageHeal())
+
+	sink := &StreamSink{
+		OnDelta:         func(string) {},
+		OnTextBlockDone: func() {},
+	}
+	ctx, _ := WithStreamProgress(WithStreamSink(context.Background(), sink))
+	// Drive the record through the wrapped sink the request itself would use.
+	wrapped := StreamSinkFrom(ctx)
+	wrapped.OnDelta("the answer that arrived")
+	wrapped.OnTextBlockDone()
+
+	messages := []Message{
+		{Role: RoleUser, Parts: []ContentPart{Text("what is this?"), ImageBase64("image/png", strings.Repeat("A", 4096))}},
+	}
+	_, err := healed.Execute(ctx, messages, nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("Execute error = %v, want the original image rejection", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("calls = %d, want 1 (the request was not resend-safe)", inner.calls)
 	}
 }
 

@@ -274,5 +274,8 @@ func TestStreamPartsTransportRetryDropsTheDeadAttempt(t *testing.T) {
 		event.TransportRetryPayload{Retry: 1, Total: 10, Cleared: true, AgentID: "task-1"}, time.Now()))
 	child, ok = parts.snapshotRun("child-run", "task-1")
 	require.True(t, ok)
-	require.Equal(t, "full answer", child.Content)
+	// The Cleared notice clears the agent's in-flight text too (plan 123): at
+	// a finish or an exhaustion it is the only announcement the final dead
+	// attempt ever gets.
+	require.Equal(t, "", child.Content)
 }

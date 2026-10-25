@@ -1332,6 +1332,11 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 	readyEmitted := make(map[string]bool)
 	webSearchIDs := make(map[string]bool)
 	responseStarted := false
+	// A stream that ends with neither an output item nor the completed frame
+	// produced nothing at all: it is re-sent without streaming, not finished
+	// as an empty answer.
+	sawOutputItem := false
+	sawCompleted := false
 
 	if sink != nil && sink.Streamed != nil {
 		*sink.Streamed = true
@@ -1388,6 +1393,7 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			}
 		case "response.output_item.added":
 			added := evt.AsResponseOutputItemAdded()
+			sawOutputItem = true
 			if added.Item.Type == "web_search_call" {
 				llm.NotifyResponseStarted(sink, &responseStarted)
 				llm.NotifyExternalContext(ctx)
@@ -1480,6 +1486,7 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			failed := evt.AsResponseFailed()
 			return nil, newOpenAIResponsesStreamError(evt.Type, string(failed.Response.Error.Code), failed.Response.Error.Message)
 		case "response.completed":
+			sawCompleted = true
 			if evt.Response.Usage.InputTokens > 0 || evt.Response.Usage.OutputTokens > 0 {
 				usage = openAIUsage(
 					evt.Response.Usage.InputTokens,
@@ -1547,6 +1554,12 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 	}
 	if err := stream.Err(); err != nil {
 		return nil, err
+	}
+	if !sawOutputItem && !sawCompleted {
+		// The stream closed cleanly without a single output item and without
+		// its terminal frame: no answer started, none finished. The request
+		// is re-sent without streaming rather than finished as an empty one.
+		return nil, fmt.Errorf("openai responses: %w", llm.ErrStreamNoEvents)
 	}
 	reasoningItems = mergeStreamedReasoningItems(reasoningItems, streamedReasoningByItem)
 	reasoningText := llm.SummaryText(reasoningItems)

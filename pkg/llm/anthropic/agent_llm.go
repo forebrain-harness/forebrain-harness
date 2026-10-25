@@ -200,6 +200,11 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	var res anthropicapi.Message
 	thinkingBlocks := make(map[int64]bool)
 	var reportedInput, reportedOutput int64
+	// A stream that ends without a single content block and without a stop
+	// reason produced nothing at all: it is re-sent without streaming, not
+	// finished as an empty answer.
+	sawContentBlock := false
+	sawStopReason := false
 	// Tracked independently of res.Usage: anthropic-sdk-go's Message.Accumulate
 	// only copies OutputTokens out of a MessageDeltaEvent (messageutil.go),
 	// silently dropping InputTokens/CacheCreationInputTokens/CacheReadInputTokens
@@ -276,10 +281,14 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 				event.Usage.CacheCreationInputTokens,
 				event.Usage.CacheReadInputTokens,
 			)
-			if event.Delta.StopReason != "" && sink != nil && sink.OnStopReason != nil {
-				sink.OnStopReason(string(event.Delta.StopReason))
+			if event.Delta.StopReason != "" {
+				sawStopReason = true
+				if sink != nil && sink.OnStopReason != nil {
+					sink.OnStopReason(string(event.Delta.StopReason))
+				}
 			}
 		case "content_block_start":
+			sawContentBlock = true
 			switch event.ContentBlock.Type {
 			case "text":
 				if event.ContentBlock.Text != "" {
@@ -347,6 +356,12 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	}
 	if err := stream.Err(); err != nil {
 		return nil, err
+	}
+	if !sawContentBlock && !sawStopReason {
+		// The stream closed cleanly having delivered neither a content block
+		// nor a stop reason: no answer started, none finished. The request is
+		// re-sent without streaming rather than finished as an empty one.
+		return nil, fmt.Errorf("anthropic: %w", llm.ErrStreamNoEvents)
 	}
 	msg, err := agentAnthropicMessageFromAPI(&res)
 	if err != nil {

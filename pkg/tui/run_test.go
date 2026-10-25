@@ -6484,7 +6484,7 @@ func TestClearedTransportRetryWithdrawsTheFinalDeadAttempt(t *testing.T) {
 	// The run.go loop, gate for gate: reduce first, then withdraw.
 	reducer.Reduce(m)
 	if !m.turn.isWithdrawn() && renderer != nil {
-		renderer.WithdrawDeadStreamBlocks(m.AgentID)
+		renderer.WithdrawDeadStreamBlocks(m.AgentID, m.DropFinishedThinking)
 	}
 
 	if len(renderer.vm.blocks) != 1 || renderer.vm.blocks[0].frame.Content != "sealed thought" {
