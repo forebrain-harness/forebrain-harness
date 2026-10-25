@@ -165,6 +165,28 @@ TOOL_SCRIPTS = {
     "shell": [("shell", json.dumps(call)) for call in SHELL_CALLS],
     "tool": _scripted_tool_calls(TEXT) if MODE == "tool" else [],
 }
+
+# The "multishell" mode answers its first TURN request with three shell calls
+# in one reply, so the run has a batch to execute: the first call sleeps, and a
+# steer queued while it runs takes the turn at the next call boundary, leaving
+# the two behind it unstarted.
+MULTISHELL_COMMANDS = ["sleep 3; echo one", "echo two", "echo three"]
+MULTISHELL_REPLY = "steer received"
+# The turn counter is separate from the request counter on purpose: the
+# background passes (the memory pipeline's own agents) share this provider, and
+# a request counter would let one of them take the turn's scripted answer.
+MULTISHELL_TURNS = itertools.count()
+# The memory pipeline's phase-one extraction parses its answer as JSON with
+# exactly these three fields, so a background answer carries that shape.
+MEMORY_STAGE1_OUTPUT = '{"raw_memory":"","rollout_summary":"","rollout_slug":null}'
+# The memory pipeline's own passes run under their own system prompt (see
+# pkg/memory/templates), which is what tells them apart from the
+# conversation's turn.
+MEMORY_AGENT_MARK = "Memory Writing Agent"
+# The compaction's summary request closes with this instruction (see
+# pkg/assembly's summaryReplyInstruction); it is what tells that request apart
+# from the conversation's own turn, which carries the same tools.
+COMPACTION_SUMMARY_MARK = "Reply with the summary itself as plain text. Do not call any tools."
 TOOL_SCRIPT = TOOL_SCRIPTS.get(MODE, [])
 REQUESTS = itertools.count()
 DUMPS = itertools.count(1)
@@ -245,6 +267,88 @@ def _has_tool_result(body):
     return any(message.get("role") == "tool" for message in messages)
 
 
+def _request_system(body):
+    """The request's system prompt, as plain text."""
+    try:
+        messages = json.loads(body).get("messages") or []
+    except Exception:
+        return ""
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if not isinstance(content, str):
+            continue
+        if message.get("role") == "system":
+            return content
+    return ""
+
+
+def _request_last_text(body):
+    """The last message's text, as plain text."""
+    try:
+        messages = json.loads(body).get("messages") or []
+    except Exception:
+        return ""
+    for message in reversed(messages):
+        content = message.get("content")
+        if isinstance(content, list):
+            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if isinstance(content, str):
+            return content
+    return ""
+
+
+def _request_tool_count(body):
+    """How many tools the request carries."""
+    try:
+        tools = json.loads(body).get("tools") or []
+    except Exception:
+        return 0
+    return len(tools)
+
+
+def _request_is_unary(body):
+    """Whether the request asks for a plain (non-streamed) answer."""
+    try:
+        return not json.loads(body).get("stream")
+    except Exception:
+        return False
+
+
+def _is_memory_request(body):
+    """Whether the request is one of the memory pipeline's own agents."""
+    return MEMORY_AGENT_MARK in _request_system(body)
+
+
+def _is_compaction_request(body):
+    """Whether the request is a compaction's summary request.
+
+    The summary request carries the conversation's own head and tools, so it
+    looks like a turn; only the instruction it closes with tells them apart
+    (pkg/assembly's summaryReplyInstruction, which every summary request
+    ends on).
+    """
+    return COMPACTION_SUMMARY_MARK in _request_last_text(body)
+
+
+def _is_turn_request(body):
+    """Whether a request is the conversation's own turn.
+
+    The provider serves the background passes on the same wire, and they
+    arrive in whatever order they arrive in: the memory pipeline's stage-one
+    extraction is a unary request with no tool table at all, its phase-two
+    consolidation agent carries file tools under the memory agent's own
+    system prompt, and a compaction's summary request carries the
+    conversation's own tools. None of them is the turn, so none may take a
+    turn's scripted answer. A turn request is the one that carries the
+    agent's tool table under the agent's own system prompt.
+    """
+    if _is_memory_request(body) or _is_compaction_request(body):
+        return False
+    return _request_tool_count(body) > 0
+
+
 def chunk(delta=None, finish=None):
     return {
         "id": "fake-1",
@@ -279,6 +383,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if MODE in TOOL_SCRIPTS:
             self.serve_tool_script(next(REQUESTS))
+            return
+
+        if MODE == "multishell":
+            self.serve_multishell(body)
             return
 
         if MODE == "goal":
@@ -664,6 +772,87 @@ class Handler(http.server.BaseHTTPRequestHandler):
             }],
         }))
         self.write_event(chunk(finish="tool_calls"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_multishell(self, body):
+        """Answer a request: the turn's script for the conversation, a harmless
+        answer for the background passes that share this provider.
+
+        The script is picked per turn, not per request: the background passes
+        (the memory pipeline's own agents) arrive on the same wire in
+        whatever order they arrive in, and a request counter would let one of
+        them take the turn's answer. The turn's first request answers with
+        three shell calls, so the run has a batch to execute: the first call
+        sleeps, and a steer queued while it runs takes the turn at the next
+        call boundary, leaving the two behind it unstarted. The turn's later
+        requests answer with the plain text the steer is waiting for.
+
+        A background request gets an answer of its own that never touches the
+        turn's script: the memory extraction parses its answer as JSON with
+        three named fields, and anything else is answered in plain text.
+        """
+        if not _is_turn_request(body):
+            self.serve_background(body)
+            return
+        nth = next(MULTISHELL_TURNS)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if nth == 0:
+            for index, command in enumerate(MULTISHELL_COMMANDS):
+                self.write_event(chunk(delta={
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "index": index,
+                        "id": "call_multi_%d" % index,
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": json.dumps({"command": command})},
+                    }],
+                }))
+            self.write_event(chunk(finish="tool_calls"))
+        else:
+            self.write_event(chunk(delta={"role": "assistant", "content": MULTISHELL_REPLY}))
+            self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_background(self, body):
+        """Answer a request that is not the conversation's own turn.
+
+        The memory pipeline's extraction is a unary request that reads its
+        answer as JSON with three named fields, so it gets that shape; every
+        other background request is answered in plain text. Neither answer
+        touches the turn's script, and neither interrupts the turn.
+        """
+        if _request_is_unary(body) and _is_memory_request(body):
+            payload = json.dumps({
+                "id": "fake-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "fake-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": MEMORY_STAGE1_OUTPUT},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_event(chunk(delta={"role": "assistant", "content": MULTISHELL_REPLY}))
+        self.write_event(chunk(finish="stop"))
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
 

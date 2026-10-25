@@ -2713,6 +2713,39 @@ func TestReplayDropsTheCallAQueuedMessageTookTheTurnFrom(t *testing.T) {
 	}
 }
 
+// The same rule for a call the exit-plan gate made: it never ran either, so
+// it leaves no card and no gate behind — the gate's wait never opened.
+func TestReplayDropsTheSkippedExitPlanGateCall(t *testing.T) {
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
+		assistantToolCallsRow("planning it",
+			llm.ToolCall{ID: "call-exit", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "exit_plan_mode", Arguments: `{"plan":"do the thing"}`}},
+			llm.ToolCall{ID: "call-shell", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"ls"}`}},
+		),
+		toolRowWithDisplay(3, "call-exit", tool.SteerPreemptedDisplayKey, `{"tool_name":"exit_plan_mode","status":"not_run"}`),
+		toolRowWithDisplay(4, "call-shell", tool.SteerPreemptedDisplayKey, `{"tool_name":"shell","status":"not_run"}`),
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, turns, nil, &Reducer{}, nil)
+
+	cards := 0
+	for i := range renderer.vm.blocks {
+		f := renderer.vm.blocks[i].frame
+		if f.Kind == FrameTool {
+			cards++
+		}
+		if strings.Contains(f.Content, tool.SteerPreemptedDisplayKey) {
+			t.Fatalf("the skipped call's drop key reached the screen: %#v", f)
+		}
+	}
+	if cards != 0 {
+		t.Fatalf("tool cards = %d, want none: the calls never ran", cards)
+	}
+}
+
 // The orphan rebuild the exit gate opted out of still serves every other call:
 // a non-gate call issued but never answered replays as the one canceled card
 // live stamped on it when the run aborted.

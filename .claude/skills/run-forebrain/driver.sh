@@ -108,7 +108,7 @@ PY
   echo "serving: provider=$mode port=$PORT home=$HOME_DIR"
 }
 
-cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
+cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
   local mode="${1:-hang}"
   cmd_serve "$@"
 
@@ -301,10 +301,13 @@ case "${1:-}" in
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
   build                  build the binary into $WORK
-  start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
+  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
                          launch the TUI against a fake provider (default: hang)
                          drip = stream word by word; the only mode that proves
                          streaming actually renders
+                         multishell = three shell calls in one reply, so a
+                         steer queued while the first one runs takes the turn
+                         at the next call boundary
                          tool = call whatever the answer text names, as JSON
                          usage = reply, with a usage report carrying a cache split
                          {"name":...,"arguments":{...}} or an array of them

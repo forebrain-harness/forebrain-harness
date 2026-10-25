@@ -7968,7 +7968,25 @@ func TestCharacterizationSteerSurvivesApprovalGate(t *testing.T) {
 	// dispatching it on a goroutine, so the deferred discardTUITurnInput()
 	// at the top of DispatchSurfaceTurn only fires after the resume —
 	// including any steer delivery — has actually completed.
-	s.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Approved: true}}})
+	sessionID := "char-steer-approval"
+	var steerErr error
+	// The steer is queued while the run sits waiting for the approval
+	// decision. A message already waiting when the tool batch starts takes
+	// the turn instead of it (plan 121), so the steer has to arrive here to
+	// reach the gate at all.
+	s.SetToolApprovalSink(&scriptedApprovalSink{
+		decisions: []turn.ToolApprovalDecision{{Approved: true}},
+		onPrompt: func() {
+			deadline := time.Now().Add(2 * time.Second)
+			for !s.SurfaceInputQueue(sessionID).Steer(run.Input{Parts: []llm.ContentPart{llm.Text("also check disk space")}}) {
+				if time.Now().After(deadline) {
+					steerErr = errors.New("timed out waiting to steer the pre-approval run")
+					return
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		},
+	})
 	toolArgs, err := json.Marshal(map[string]string{
 		"command": "echo hi", "description": "probe",
 		"sandbox_permissions": "require_escalated", "justification": "characterization test",
@@ -7987,21 +8005,6 @@ func TestCharacterizationSteerSurvivesApprovalGate(t *testing.T) {
 	steerReplyMsg := llm.AssistantMessage([]llm.ContentPart{llm.Text("also checked disk space, that's fine too")})
 	llmDouble := &steerInjectingLLM{results: []*llm.Result{{Message: &toolCallMsg}, {Message: &postApprovalMsg}, {Message: &steerReplyMsg}}}
 
-	sessionID := "char-steer-approval"
-	var steerErr error
-	llmDouble.onCall = func(idx int) {
-		if idx != 0 {
-			return
-		}
-		deadline := time.Now().Add(2 * time.Second)
-		for !s.SurfaceInputQueue(sessionID).Steer(run.Input{Parts: []llm.ContentPart{llm.Text("also check disk space")}}) {
-			if time.Now().After(deadline) {
-				steerErr = errors.New("timed out waiting to steer the pre-approval run")
-				return
-			}
-			time.Sleep(2 * time.Millisecond)
-		}
-	}
 	restore := run.SetLLMOverrideForTest(llmDouble)
 	t.Cleanup(restore)
 	if err := s.runner().Load(); err != nil {
@@ -13677,10 +13680,16 @@ func (h *fakeSubagentExecutor) RunSubagentExec(ctx context.Context, req run.Suba
 type scriptedApprovalSink struct {
 	decisions []turn.ToolApprovalDecision
 	requests  []turn.ToolApprovalRequest
+	// onPrompt runs while the run waits for the decision, before the
+	// decision itself is answered.
+	onPrompt func()
 }
 
 func (s *scriptedApprovalSink) PromptToolApproval(_ context.Context, req turn.ToolApprovalRequest) (turn.ToolApprovalDecision, error) {
 	s.requests = append(s.requests, req)
+	if s.onPrompt != nil {
+		s.onPrompt()
+	}
 	idx := len(s.requests) - 1
 	if idx >= len(s.decisions) {
 		return turn.ToolApprovalDecision{}, fmt.Errorf("unexpected approval prompt %d", idx)

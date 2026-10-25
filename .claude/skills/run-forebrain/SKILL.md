@@ -53,6 +53,11 @@ $D messages                         # what the DB holds
 $D stop
 ```
 
+**Rebuild after changing Go code, before you drive it.** `$D start` builds only
+when `$TMPDIR/forebrain-run/forebrain` is missing, so a stale binary runs the
+old build and your change looks like it did nothing at all — `$D build` first
+(`$D reset` does not rebuild it either).
+
 `start` takes the provider mode, which is how you choose where the turn parks:
 
 | Mode | Behaviour | Use it to test |
@@ -63,6 +68,7 @@ $D stop
 | `usage` | like `reply`, and reports usage with a cache split (2000 prompt, 1800 cached, 40 output) | persisted run usage, `/status`'s Usage tab and cache hit rate |
 | `drip` | sends the answer word by word, then finishes | that streamed output actually renders as it arrives |
 | `shell` | the first request answers with a `shell` call running the answer text (a JSON object sets the other shell arguments), later ones with the text | a real shell tool card: `start shell 'echo hello-from-shell'` runs without approval and draws `● Ran echo hello-from-shell` with `└ hello-from-shell` |
+| `multishell` | the first turn request answers with three `shell` calls in one reply (`sleep 3; echo one`, `echo two`, `echo three`), later turn requests with `steer received`; the script is picked per turn request, so background requests (the memory pipeline's own agents) do not take it | a batch of tool calls in one turn: a steer queued while the first call runs takes the turn at the next call boundary, and the two calls behind it never start |
 | `toolcall` | `enter_plan_mode`, then `exit_plan_mode` | a real approval overlay and the action row it leaves |
 | `ask` | one two-question `user_interaction` call | the real question form: tab bar, options, and the Other text field |
 | `netdrop` | request 1 streams part of an answer, then closes the connection cleanly with no finish frame; later requests answer normally. `FAKE_NETDROP_EVERY=1` drops every request, `FAKE_NETDROP_SILENT=1` drops with no bytes; `NETWORK_RETRY_MAX=N` sets `agents.defaults.network_retry_max` | network retry: the Working line's retry status, the dead attempt withdrawn, exhaustion |
@@ -386,7 +392,8 @@ sessions.
   intended mapping, not an off-by-one.
 - **The binary is ~90MB and the build is not fast** (~30s warm). `$D start` reuses
   `$TMPDIR/forebrain-run/forebrain` if it exists — run `$D build` explicitly after
-  changing Go code, or `$D reset` will not rebuild it for you.
+  changing Go code, or `$D reset` will not rebuild it for you. A stale binary
+  shows the old behaviour, so a change that "did nothing" is usually this.
 - **Other sessions may be driving the default instance.** Give your run its own
   work dir, tmux session and port —
   `export FOREBRAIN_RUN_WORK=$TMPDIR/forebrain-run-mine FOREBRAIN_RUN_SESSION=fb-mine FOREBRAIN_RUN_PORT=8761`

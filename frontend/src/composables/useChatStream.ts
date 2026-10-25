@@ -843,6 +843,14 @@ export function conversationFromTranscript(
     for (const call of parseStoredToolCalls(row.partsJson)) {
       if (drawn.has(call.id)) continue
       const answer = toolRowByCall.get(call.id)
+      // A call a queued user message took the turn from never ran: its row is
+      // the drop key, so it draws nothing - no card, and no gate anchor
+      // either, because the gate never opened. The row still belongs to this
+      // call, so it is claimed here.
+      if (answer && isSteerPreemptedRow(answer)) {
+        drawn.add(call.id)
+        continue
+      }
       // The exit-plan gate holds no card while it waits, and none once a run
       // stopped on it or a delivered review closed it: only its settled answers
       // draw. Its anchor always marks where the call sits, because the records
@@ -861,9 +869,6 @@ export function conversationFromTranscript(
       // (from its execution's events): a second, canceled card for the same
       // call would be a card the terminal does not show.
       if (!answer && isSubagentDispatchTool(String(call.name ?? ''))) continue
-      // A call a queued user message took the turn from never ran: its row is
-      // the drop key, so no card is drawn for it.
-      if (answer && isSteerPreemptedRow(answer)) continue
       current.blocks = [...(current.blocks ?? []), {
         kind: 'tool',
         // A call with no tool row never ran: the gate the user canceled, or a
