@@ -716,6 +716,12 @@ describe('ChatView conversation bubbles', () => {
     // /api/chat/model answers — which the server computes as the agent's most
     // recently used model. Here the server names the chain's second entry, so
     // the chip must say deepseek-chat, not the chain's first.
+    //
+    // "New chat" is stated by the state itself: with no session open the
+    // component reads /chat/model (loadSessionModel); with one open it reads
+    // that conversation's own row, which is a different question.
+    const sessionIdRef = (fake as { sessionId: { value: string | null } }).sessionId
+    sessionIdRef.value = null
     const defaultModel = vi.spyOn(forebrainApi, 'chatModelDefault').mockResolvedValue({
       provider: 'deepseek',
       model: 'deepseek-chat',
@@ -739,6 +745,8 @@ describe('ChatView conversation bubbles', () => {
     } finally {
       defaultModel.mockRestore()
       bySession.mockRestore()
+      // The cases after this one read an open conversation.
+      sessionIdRef.value = 's1'
     }
   })
 
