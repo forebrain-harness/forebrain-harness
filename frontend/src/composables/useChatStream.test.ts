@@ -1052,6 +1052,286 @@ describe('useChatStream helpers', () => {
     })
   }
 
+  // The gateway fans every run event out to every subscriber, so a send's
+  // request socket and the session observer both carry the same push-only
+  // fragment. The fragment has no event id to dedup a second copy by — only
+  // the send's own socket may draw it, or the observer's copy says it twice.
+  it('one send draws its answer once even though both sockets carry the delta', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 'web-once' })
+      socket.message({ op: 'run_started', request_id: sent.request_id, run_id: 'run-once', session_id: 'web-once' })
+      socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: {
+          type: 'assistant_delta',
+          run_id: 'run-once',
+          session_id: 'web-once',
+          payload: { text: 'single answer' },
+        },
+      })
+      await Promise.resolve()
+      // The observer is found by what it says, not by where it lands in the
+      // list: it is created after this send's socket bound the session.
+      let observer: FakeChatWebSocket | undefined
+      for (const candidate of FakeChatWebSocket.instances) {
+        if (candidate === socket) continue
+        candidate.open()
+        const frame = JSON.parse(candidate.sent[0] ?? '{}') as Record<string, unknown>
+        if (String(frame.op ?? '') === 'bind_session' && frame.session_id === 'web-once') observer = candidate
+      }
+      expect(observer).toBeTruthy()
+      observer!.message({ op: 'session_bound', session_id: 'web-once' })
+      // A real fragment carries no event id and no sequence: the same
+      // frame the gateway fanned out to this observer, unmatchable to the
+      // copy the request socket already drew.
+      observer!.message({
+        op: 'run_event',
+        data: {
+          type: 'assistant_delta',
+          run_id: 'run-once',
+          session_id: 'web-once',
+          payload: { text: 'single answer' },
+        },
+      })
+      socket.message({
+        op: 'run_completed',
+        request_id: sent.request_id,
+        run_id: 'run-once',
+        session_id: 'web-once',
+        text: 'single answer',
+        finished_at: '2026-06-11T00:00:01.000Z',
+      })
+      await pendingSend.catch(() => {})
+
+      const turn = stream.messages.value.find((m) => m.role === 'assistant')
+      expect(turn?.content).toBe('single answer')
+      expect((turn?.blocks ?? []).filter((b) => b.kind === 'assistant' && b.text?.includes('single answer'))).toHaveLength(1)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  // A spawned child streams under its own run id, but the same rule holds:
+  // the request socket already drew its words into the subagent's view, so
+  // the observer's copy of a fragment must not append them a second time.
+  it('a subagent\'s streamed words are drawn once', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 'web-once' })
+      socket.message({ op: 'run_started', request_id: sent.request_id, run_id: 'run-once', session_id: 'web-once' })
+      const spawned = {
+        id: 'spawn-once',
+        sequence: 2,
+        type: 'subagent_spawned',
+        run_id: 'child-run',
+        session_id: 'web-once',
+        created_at: '2026-06-11T00:00:00.500Z',
+        payload: {
+          agent_id: 'task-1',
+          agent_type: 'explore',
+          task_id: 'task-1',
+          task: 'child work',
+          parent_run_id: 'run-once',
+          execution_id: 'exec-child',
+        },
+      }
+      const childDelta = {
+        type: 'assistant_delta',
+        run_id: 'child-run',
+        session_id: 'web-once',
+        payload: { agent_id: 'task-1', text: 'child says' },
+      }
+      socket.message({ op: 'run_event', request_id: sent.request_id, data: spawned })
+      socket.message({ op: 'run_event', request_id: sent.request_id, data: childDelta })
+      await Promise.resolve()
+      // The observer is found by what it says, not by where it lands in the
+      // list: it is created after this send's socket bound the session.
+      let observer: FakeChatWebSocket | undefined
+      for (const candidate of FakeChatWebSocket.instances) {
+        if (candidate === socket) continue
+        candidate.open()
+        const frame = JSON.parse(candidate.sent[0] ?? '{}') as Record<string, unknown>
+        if (String(frame.op ?? '') === 'bind_session' && frame.session_id === 'web-once') observer = candidate
+      }
+      expect(observer).toBeTruthy()
+      observer!.message({ op: 'session_bound', session_id: 'web-once' })
+      observer!.message({ op: 'run_event', data: spawned })
+      observer!.message({ op: 'run_event', data: childDelta })
+      socket.message({
+        op: 'run_completed',
+        request_id: sent.request_id,
+        run_id: 'run-once',
+        session_id: 'web-once',
+        text: 'parent answer',
+        finished_at: '2026-06-11T00:00:01.000Z',
+      })
+      await pendingSend.catch(() => {})
+
+      const entry = stream.subagents.value.find((row) => row.agentId === 'task-1')
+      expect(entry).toBeTruthy()
+      // The words appear exactly once — the observer's copy of the fragment
+      // must not grow the same block or open a second one.
+      expect((entry?.blocks ?? []).map((b) => (b as { text?: string }).text ?? '').join('\n\n').split('child says').length - 1).toBe(1)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  // A session switch mid-stream retires the switcher's stream state without
+  // stopping its send, so the old send's end can land while a new send is
+  // already streaming. That end must not hand the new run back to the
+  // observer: the new send's request socket stays its only deliverer.
+  it('a send that starts after a session switch keeps its run its own', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 'web-b', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+    } as never)
+    const subagentHistorySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'web-b', records: [] })
+    // Sockets are found by what they say, not by where they land in the list:
+    // a candidate's first frame exists only once it is open. The send's own
+    // socket opens with start_run; an observer with bind_session.
+    const socketsByOp = (op: string, sessionId?: string) => FakeChatWebSocket.instances.filter((candidate) => {
+      candidate.open()
+      const frame = JSON.parse(candidate.sent[0] ?? '{}') as Record<string, unknown>
+      return String(frame.op ?? '') === op && (!sessionId || frame.session_id === sessionId)
+    })
+    try {
+      const stream = useChatStream()
+      const pendingA = stream.send('hello')
+      const socketA = socketsByOp('start_run')[0]
+      expect(socketA).toBeTruthy()
+      const sentA = JSON.parse(socketA!.sent[0] ?? '{}') as Record<string, unknown>
+      socketA!.message({ op: 'session_bound', request_id: sentA.request_id, session_id: 'web-a' })
+      socketA!.message({ op: 'run_started', request_id: sentA.request_id, run_id: 'run-a', session_id: 'web-a' })
+      socketA!.message({
+        op: 'run_event',
+        request_id: sentA.request_id,
+        data: { type: 'assistant_delta', run_id: 'run-a', session_id: 'web-a', payload: { text: 'first answer' } },
+      })
+
+      stream.switchToSession('web-b')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+
+      const pendingB = stream.send('second')
+      const socketB = socketsByOp('start_run').find((candidate) => candidate !== socketA)
+      expect(socketB).toBeTruthy()
+      const sentB = JSON.parse(socketB!.sent[0] ?? '{}') as Record<string, unknown>
+      socketB!.message({ op: 'session_bound', request_id: sentB.request_id, session_id: 'web-b' })
+      socketB!.message({ op: 'run_started', request_id: sentB.request_id, run_id: 'run-b', session_id: 'web-b' })
+      socketB!.message({
+        op: 'run_event',
+        request_id: sentB.request_id,
+        data: { type: 'assistant_delta', run_id: 'run-b', session_id: 'web-b', payload: { text: 'second answer' } },
+      })
+
+      // The old send ends first, while B is still streaming: its finally must
+      // not clear the ownership the new send's run already claimed.
+      socketA!.message({
+        op: 'run_completed',
+        request_id: sentA.request_id,
+        run_id: 'run-a',
+        session_id: 'web-a',
+        text: 'first answer',
+        finished_at: '2026-06-11T00:00:01.000Z',
+      })
+      await pendingA.catch(() => {})
+
+      const observer = socketsByOp('bind_session', 'web-b').find((candidate) => candidate !== socketA && candidate !== socketB)
+      expect(observer).toBeTruthy()
+      observer!.message({ op: 'session_bound', session_id: 'web-b' })
+      observer!.message({
+        op: 'run_event',
+        data: { type: 'assistant_delta', run_id: 'run-b', session_id: 'web-b', payload: { text: 'second answer' } },
+      })
+
+      socketB!.message({
+        op: 'run_completed',
+        request_id: JSON.parse(socketB!.sent[0] ?? '{}').request_id,
+        run_id: 'run-b',
+        session_id: 'web-b',
+        text: 'second answer',
+        finished_at: '2026-06-11T00:00:02.000Z',
+      })
+      await pendingB.catch(() => {})
+
+      const turn = stream.messages.value.find((m) => m.role === 'assistant' && String(m.content ?? '').includes('second answer'))
+      expect(turn?.content).toBe('second answer')
+      expect((turn?.blocks ?? []).filter((b) => b.kind === 'assistant' && b.text?.includes('second answer'))).toHaveLength(1)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      subagentHistorySpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  // A page that is not sending owns no runs: a second tab watching the same
+  // conversation still draws its live answer from the observer alone.
+  it('an observer with no send in flight still draws live deltas', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId: 's1', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
+    ]
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      const observer = FakeChatWebSocket.instances.find((candidate) => {
+        candidate.open()
+        return String(JSON.parse(candidate.sent[0] ?? '{}').op ?? '') === 'bind_session'
+      })
+      expect(observer).toBeTruthy()
+      observer!.message({ op: 'session_bound', session_id: 's1' })
+      observer!.message({
+        op: 'run_event',
+        data: { type: 'assistant_delta', run_id: 'run-tab2', session_id: 's1', payload: { text: 'from the other tab' } },
+      })
+
+      const turn = stream.messages.value.find((m) => m.role === 'assistant')
+      expect(turn?.content).toBeTruthy()
+      expect(String(turn?.content ?? '').split('from the other tab').length - 1).toBe(1)
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
   // The engine pushes the run's first-token wait on its own op, once per run:
   // it rides the running line while the run goes, then the answer's worked line.
   it('shows the first-token wait live, then closes the turn with it', async () => {

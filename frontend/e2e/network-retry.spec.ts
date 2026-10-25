@@ -34,6 +34,10 @@ test('the network retry lives on the status line, never in the conversation', as
   const main = page.locator('.chat-shell main')
   const reply = process.env.E2E_REPLY_OK ?? 'E2E_REPLY_OK'
   await expect(main).toContainText(reply, { timeout: 90_000 })
+  // Exactly once live too: the request socket streams the fourth attempt's
+  // answer, and the observer's copy of the same fragments must not draw it a
+  // second time once the turn settles.
+  expect((await main.innerText()).split(reply).length - 1).toBe(1)
   expect((await main.innerText()).split('partial answer that never').length - 1).toBe(0)
   // No retry card and no transport-error block was ever drawn.
   await expect(page.locator('.transport-retry-card')).toHaveCount(0)
@@ -41,10 +45,7 @@ test('the network retry lives on the status line, never in the conversation', as
   await shot(page, 'network-retry-recovered')
 
   // The persisted transcript a reload replays is the same story: exactly one
-  // answer, and the withdrawn text belongs to no attempt that survived. (The
-  // live page draws a turn's answer twice for every turn — a pre-existing
-  // observer-path double the reload does not carry — so exactly-once lives
-  // here, on the durable record.)
+  // answer, and the withdrawn text belongs to no attempt that survived.
   await page.reload({ waitUntil: 'networkidle' })
   await page.waitForSelector('textarea')
   await expect(main).toContainText(reply)

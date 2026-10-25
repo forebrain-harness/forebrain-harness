@@ -2422,6 +2422,10 @@ export function useChatStream() {
   const bufferedStreamPartials: Record<string, unknown>[] = []
   const appliedEventIDs = new Set<string>()
   const legacyMirroredRunIDs = new Set<string>()
+  // Runs whose live fragments this page's request socket is already
+  // projecting. Push-only fragments (below) have no event id, so the
+  // observer's copy of one cannot be deduped — it must not be applied at all.
+  const sendOwnedRunIds = new Set<string>()
   const eventProjectionByRun = new Map<string, {
     assistantMessageId: string
     planBlocks: PlanBlock[]
@@ -2872,6 +2876,18 @@ export function useChatStream() {
     'tool_output_delta',
   ])
 
+  // The stream fragments the gateway pushes and never stores: they carry no
+  // event id and no sequence (pkg/event/run_events.go IsPushOnlyStreamEvent),
+  // so a second copy of one cannot be deduped — it can only be dropped.
+  const pushOnlyFragmentTypes = new Set([
+    'assistant_delta',
+    'assistant_done',
+    'reasoning_delta',
+    'reasoning_done',
+    'tool_output_delta',
+    'transport_retry',
+  ])
+
   function legacyAlreadyProjected(evt: ForebrainRunEvent): boolean {
     if (isSubagentHistoryEvent(evt)) return false
     if (!legacyMirroredRunIDs.has(String(evt.runId ?? ''))) return false
@@ -2993,6 +3009,17 @@ export function useChatStream() {
     }]
   }
 
+  // While a send owns a run, its request socket is the sole deliverer that
+  // applies that run's fragments: the gateway fans every event out to every
+  // subscriber, and the observer's copy of a fragment has no id to dedup by —
+  // applied at flush it would append the same words a second time. A page not
+  // sending (a second tab, another surface's run) has no owned runs and still
+  // draws live from the observer.
+  function fragmentSuppressedBySend(evt: ForebrainRunEvent): boolean {
+    return pushOnlyFragmentTypes.has(String(evt.type))
+      && sendOwnedRunIds.has(String(evt.runId ?? '').trim())
+  }
+
   function applyObservedEvent(evt: ForebrainRunEvent, historical = false) {
     const sid = String(evt.sessionId ?? '').trim()
     if (sid && sid !== String(sessionId.value ?? '').trim()) return
@@ -3041,6 +3068,7 @@ export function useChatStream() {
       rememberObservedEvent(evt)
       return
     }
+    if (!historical && fragmentSuppressedBySend(evt)) return
     if (!historical && (historyLoadingSession || isStreaming.value)) {
       bufferedSessionEvents.push(evt)
       return
@@ -3186,6 +3214,7 @@ export function useChatStream() {
 	  sessionEventCursor = 0
 	  appliedEventIDs.clear()
 	  legacyMirroredRunIDs.clear()
+	  sendOwnedRunIds.clear()
 	  eventProjectionByRun.clear()
 	  clearSubagentCardState()
 	  bufferedSessionEvents.splice(0, bufferedSessionEvents.length)
@@ -4326,6 +4355,12 @@ export function useChatStream() {
       // The conversation's account of the subagent is its task row on the
       // dispatching call's card — bound here, settled by its end.
       bindSubagentSpawn(evt, payload as Record<string, unknown>, assistantMessageId)
+      // A send owns its run's children too: a spawned child's fragments come
+      // under its own run id, and the observer's copy of them would append the
+      // child's words a second time at flush exactly as the parent's did.
+      if (sendOwnedRunIds.has(String(payload.parentRunId ?? '').trim())) {
+        sendOwnedRunIds.add(String(evt.runId ?? '').trim())
+      }
       return
     }
     if (evt.type === 'subagent_ended') {
@@ -4518,6 +4553,9 @@ export function useChatStream() {
         if (activeRunId) void flushHeldIntoRun(activeRunId)
 		if (activeRunId) {
 		  eventProjectionByRun.set(activeRunId, { assistantMessageId, planBlocks: planBlocksAccumulator, state })
+		  // A resumed request socket never hears the legacy run_started op, so
+		  // this event is the only place its run's ownership is claimed.
+		  sendOwnedRunIds.add(activeRunId)
 		}
         contextSignals.value = { ...contextSignals.value, activeRunId: activeRunId ?? undefined }
         state.runStartedAt = evt.createdAt
@@ -5048,6 +5086,7 @@ export function useChatStream() {
           if (activeRunId) void flushHeldIntoRun(activeRunId)
 		  if (activeRunId) {
 			legacyMirroredRunIDs.add(activeRunId)
+			sendOwnedRunIds.add(activeRunId)
 			eventProjectionByRun.set(activeRunId, { assistantMessageId, planBlocks: planBlocksAccumulator, state: eventState })
 		  }
           contextSignals.value = { ...contextSignals.value, activeRunId: activeRunId ?? undefined }
@@ -5440,7 +5479,8 @@ export function useChatStream() {
       // later send, or a session reset, has replaced the controller, and
       // clearing the state here would end that run's status line, unlock the
       // composer early, and leave cancel() nothing to act on.
-      if (streamAbortController === myController) {
+      const stillMine = streamAbortController === myController
+      if (stillMine) {
         isStreaming.value = false
         clearRuntimeStatus()
         streamAbortController = null
@@ -5448,6 +5488,11 @@ export function useChatStream() {
         contextSignals.value = { ...contextSignals.value, activeRunId: undefined }
       }
 	  flushBufferedSessionEvents()
+      // Only the send that still owns the stream may retire these: a session
+      // switch mid-stream nulls the controller without stopping this send, so
+      // its end can arrive while a later send's run is streaming — clearing
+      // here would hand that run back to the observer and draw it twice.
+      if (stillMine) sendOwnedRunIds.clear()
     }
     // This send's end runs what its run handed back as its next turn — the
     // engine already decided that, listing the messages in next — merged into
