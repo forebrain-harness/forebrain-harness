@@ -60,6 +60,15 @@ cmd_serve() {
   # runtime reads is agents.defaults.enable_subagent (absent means off).
   local subagent=false
   [ -n "${ENABLE_SUBAGENT:-}" ] && subagent=true
+  # FAKE_PROVIDER_KIND swaps the configured provider section: the default is
+  # the deepseek/OpenAI-compat surface; opencode-gemini points the session at
+  # the OpenCode gateway's /google surface via gemini-4-argon-contributor,
+  # which is the surface the fake provider's gemini mode answers.
+  local provider=deepseek model=deepseek-chat
+  if [ "${FAKE_PROVIDER_KIND:-}" = "opencode-gemini" ]; then
+    provider=opencode
+    model=gemini-4-argon-contributor
+  fi
   cat > "$HOME_DIR/forebrain.yaml" <<YAML
 approval_policy: on-request
 agents:
@@ -69,8 +78,8 @@ agents:
     main:
       primary: true
       llm_providers:
-      - provider: deepseek
-        model: deepseek-chat
+      - provider: $provider
+        model: $model
         api_key: \${FAKE_LLM_KEY}
         base_url: http://127.0.0.1:$PORT
 YAML

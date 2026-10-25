@@ -986,7 +986,7 @@ func TestNewLLMFromYAMLOpenCodeRoutesByProtocol(t *testing.T) {
 		{name: "gpt family speaks responses", provider: "opencode", model: "gpt-5.6-luna", apiKey: "sk-test", wantPath: "/openai/v1/responses"},
 		{name: "grok family speaks responses", provider: "opencode", model: "grok-4.7", apiKey: "sk-test", wantPath: "/openai/v1/responses"},
 		{name: "claude family speaks anthropic", provider: "opencode", model: "claude-sonnet-5", apiKey: "sk-test", wantPath: "/anthropic/v1/messages"},
-		{name: "gemini family speaks google", provider: "opencode", model: "gemini-4-flash", apiKey: "sk-test", wantPath: "/google/v1beta/models/gemini-4-flash:generateContent"},
+		{name: "gemini family speaks google", provider: "opencode", model: "gemini-4-flash", apiKey: "sk-test", wantPath: "/google/v1beta/models/gemini-4-flash:streamGenerateContent"},
 		{name: "qwen3.8-max is chat completions on console", provider: "opencode", model: "qwen3.8-max", apiKey: "sk-test", wantPath: "/openai/v1/chat/completions"},
 		{name: "qwen3.8-max is anthropic on the go subscription", provider: "opencode-go", model: "qwen3.8-max", apiKey: "sk-test", wantPath: "/go/anthropic/v1/messages"},
 		{name: "minimax-m3 is chat completions on console", provider: "opencode", model: "minimax-m3", apiKey: "sk-test", wantPath: "/openai/v1/chat/completions"},

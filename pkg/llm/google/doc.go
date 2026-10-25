@@ -7,10 +7,11 @@
 // this package never sees). Nothing else in the wire format changes, so the base
 // URL is the only knob.
 //
-// The client is deliberately non-streaming: it issues one
-// POST /v1beta/models/{model}:generateContent and returns the assembled
-// response. Gemini's server-sent-events variant is not implemented, so a stream
-// sink observes nothing from this provider.
+// The client streams: it issues one
+// POST /v1beta/models/{model}:streamGenerateContent?alt=sse and pushes the
+// answer text, function calls and the finish reason to the stream sink in ctx
+// as they arrive. executeUnary runs the same request in its non-streaming
+// form and observes no sink.
 //
 // Two content shapes are not carried, because generateContent has no equivalent
 // for them:

@@ -80,6 +80,16 @@ Modes:
           then hangs. That delta is what commits the steer's delivery, and the
           hang keeps the execution running, so no execution-end repaint can
           hide a preview that failed to drop the delivered steer.
+  gemini
+          answer generateContent requests the way the Gemini wire format
+          shapes them: the turn's first request streams two text parts, a
+          shell functionCall and the finish event over SSE; a request with
+          the tool result answers "gemini done"; background passes get "ok";
+          the non-streaming :generateContent path gets the same content as
+          one JSON body. Needs FAKE_PROVIDER_KIND=opencode-gemini so the
+          session's provider speaks this protocol. FAKE_GEMINI_SLOW=1 holds
+          the stream 2s after the first text part, which is how a screen
+          taken inside the window shows text arriving before the tool card.
 
 Every request is logged to stderr, which is the only reliable way to know the
 request actually went out: forebrain buffers assistant deltas in the reducer and
@@ -349,6 +359,62 @@ def _is_turn_request(body):
     return _request_tool_count(body) > 0
 
 
+# The "gemini" mode answers generateContent requests. A Gemini body carries
+# contents/systemInstruction/tools[].functionDeclarations instead of the
+# OpenAI messages/tools shape, so the turn/request helpers above each have a
+# generateContent-shaped twin below.
+def _gemini_system(body):
+    """The systemInstruction text of a generateContent request."""
+    try:
+        parts = (json.loads(body).get("systemInstruction") or {}).get("parts") or []
+    except Exception:
+        return ""
+    return " ".join(str(p.get("text", "")) for p in parts if isinstance(p, dict))
+
+
+def _gemini_tool_count(body):
+    """How many functionDeclarations the request carries."""
+    try:
+        tools = json.loads(body).get("tools") or []
+    except Exception:
+        return 0
+    return sum(len(t.get("functionDeclarations") or []) for t in tools if isinstance(t, dict))
+
+
+def _gemini_last_text(body):
+    """The last text part of a generateContent request."""
+    try:
+        contents = json.loads(body).get("contents") or []
+    except Exception:
+        return ""
+    for turn in reversed(contents):
+        for p in reversed(turn.get("parts") or []):
+            if isinstance(p, dict) and p.get("text"):
+                return p["text"]
+    return ""
+
+
+def _gemini_has_function_response(body):
+    """Whether the request already carries a tool result."""
+    try:
+        contents = json.loads(body).get("contents") or []
+    except Exception:
+        return False
+    return any(
+        isinstance(p, dict) and p.get("functionResponse") is not None
+        for turn in contents for p in (turn.get("parts") or [])
+    )
+
+
+def _gemini_is_turn_request(body):
+    """The generateContent-shaped version of _is_turn_request."""
+    if MEMORY_AGENT_MARK in _gemini_system(body):
+        return False
+    if COMPACTION_SUMMARY_MARK in _gemini_last_text(body):
+        return False
+    return _gemini_tool_count(body) > 0
+
+
 def chunk(delta=None, finish=None):
     return {
         "id": "fake-1",
@@ -380,6 +446,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             os.makedirs(dump_dir, exist_ok=True)
             with open(os.path.join(dump_dir, "request-%04d.json" % next(DUMPS)), "wb") as f:
                 f.write(body)
+
+        if MODE == "gemini":
+            self.serve_gemini(body)
+            return
 
         if MODE in TOOL_SCRIPTS:
             self.serve_tool_script(next(REQUESTS))
@@ -459,6 +529,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_event(final)
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")  # terminating zero-length chunk
+
+    def serve_gemini(self, body):
+        """Answer generateContent: the turn's script streamed over SSE, the
+        background passes with a plain "ok", and the non-streaming path with
+        the same content as one JSON body (plans/126's resend path).
+
+        The turn's first request (no functionResponse yet) streams two text
+        parts, then a shell functionCall, then the finish event; a request
+        carrying the tool result answers "gemini done". FAKE_GEMINI_SLOW=1
+        holds the stream for 2s after the first text part, so a screen taken
+        inside the window shows the text but not the tool card - the proof
+        the answer renders as it arrives.
+        """
+        parts = [{"text": "gemini done"}]
+        if not _gemini_is_turn_request(body):
+            parts = [{"text": "ok"}]
+        elif not _gemini_has_function_response(body):
+            parts = [
+                {"text": "checking "},
+                {"text": "the weather"},
+                {"functionCall": {"name": "shell", "args": {"command": "echo gemini-tool", "description": "echo"}}},
+            ]
+        candidate = {"content": {"role": "model", "parts": parts}, "finishReason": "STOP"}
+        usage = {"promptTokenCount": 100, "candidatesTokenCount": 20}
+        if ":streamGenerateContent" not in self.path:
+            payload = json.dumps({"candidates": [candidate], "usageMetadata": usage}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for index, part in enumerate(parts):
+            if index == 1 and os.environ.get("FAKE_GEMINI_SLOW"):
+                time.sleep(2)
+            event = {"candidates": [{"content": {"role": "model", "parts": [part]}}]}
+            self.write_raw(("data: " + json.dumps(event) + "\n\n").encode())
+        # The finish frame carries only the reason and the usage: the parts
+        # above already streamed, and repeating them here would double the
+        # answer on the wire.
+        final = {"candidates": [{"finishReason": "STOP"}], "usageMetadata": usage}
+        self.write_raw(("data: " + json.dumps(final) + "\n\n").encode())
+        self.write_raw(b"")
 
     def serve_limit(self):
         """Refuse the request while the usage window is closed.

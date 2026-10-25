@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,11 +34,25 @@ func weatherTool(t *testing.T) *llm.Tool {
 	return tool
 }
 
+// serveSSE answers one streamGenerateContent call with the given events, each
+// written as a single data line so the client's SSE reader can decode it.
+func serveSSE(w http.ResponseWriter, events ...string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	for _, event := range events {
+		_, _ = io.WriteString(w, "data: "+event+"\n\n")
+	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // The projection in both directions, plus the response assembly: mixed text and
 // functionCall parts, usage with thinking tokens, and the tool declaration.
 func TestExecuteProjectsMessagesAndParsesMixedParts(t *testing.T) {
 	type captured struct {
 		path          string
+		alt           string
+		accept        string
 		authorization string
 		body          map[string]any
 	}
@@ -50,21 +65,12 @@ func TestExecuteProjectsMessagesAndParsesMixedParts(t *testing.T) {
 		}
 		requests <- captured{
 			path:          r.URL.Path,
+			alt:           r.URL.Query().Get("alt"),
+			accept:        r.Header.Get("Accept"),
 			authorization: r.Header.Get("Authorization"),
 			body:          body,
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"candidates": [{
-				"content": {"role": "model", "parts": [
-					{"text": "Hello"},
-					{"functionCall": {"name": "weather", "args": {"city": "Paris"}}},
-					{"text": "world"}
-				]},
-				"finishReason": "STOP"
-			}],
-			"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 7, "thoughtsTokenCount": 3}
-		}`))
+		serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"},{"functionCall":{"name":"weather","args":{"city":"Paris"}}},{"text":"world"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"thoughtsTokenCount":3}}`)
 	}))
 	defer server.Close()
 
@@ -89,8 +95,14 @@ func TestExecuteProjectsMessagesAndParsesMixedParts(t *testing.T) {
 	default:
 		t.Fatal("no request reached the server")
 	}
-	if want := "/v1beta/models/gemini-3.5-pro:generateContent"; req.path != want {
+	if want := "/v1beta/models/gemini-3.5-pro:streamGenerateContent"; req.path != want {
 		t.Fatalf("path = %q, want %q", req.path, want)
+	}
+	if req.alt != "sse" {
+		t.Fatalf("alt = %q, want sse", req.alt)
+	}
+	if req.accept != "text/event-stream" {
+		t.Fatalf("Accept = %q, want text/event-stream", req.accept)
 	}
 	// Bearer, never ?key=: the gateway rejects the query form.
 	if req.authorization != "Bearer test-key" {
@@ -216,8 +228,7 @@ func TestExecuteSendsThroughTheInjectedTransport(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer gateway-token" {
 			t.Errorf("Authorization = %q, want the transport's bearer to win", got)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`))
+		serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`)
 	}))
 	defer server.Close()
 
@@ -291,6 +302,12 @@ func TestExecuteNormalizesProviderErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// A 200 streams: the in-band error arrives as one SSE event. Any
+			// other status is read as a plain error body.
+			if tc.status == http.StatusOK {
+				serveSSE(w, tc.body)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(tc.status)
 			_, _ = w.Write([]byte(tc.body))
@@ -350,8 +367,7 @@ func TestExecuteRefusesImageURLs(t *testing.T) {
 
 func TestExecuteFailsOnAnEmptyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"SAFETY"}]}`))
+		serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"SAFETY"}]}`)
 	}))
 	defer server.Close()
 
@@ -388,5 +404,51 @@ func TestToolResultRequiresACallID(t *testing.T) {
 		[]llm.Message{{Role: llm.RoleTool, Parts: []llm.ContentPart{llm.Text("ok")}}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "tool_call_id") {
 		t.Fatalf("error = %v, want a missing tool_call_id", err)
+	}
+}
+
+// executeUnary keeps the non-streaming shape working on its own: the one-shot
+// JSON answer parses into the same result the streaming path builds.
+func TestExecuteUnaryParsesTheJSONBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1beta/models/gemini-3.5-pro:generateContent"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Errorf("Accept = %q, want application/json", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates": [{
+				"content": {"role": "model", "parts": [
+					{"text": "Hello"},
+					{"functionCall": {"name": "weather", "args": {"city": "Paris"}}},
+					{"text": "world"}
+				]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 7, "thoughtsTokenCount": 3}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "gemini-3.5-pro", 4096, nil).(*agentLLM)
+	result, err := client.executeUnary(context.Background(), []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatalf("executeUnary: %v", err)
+	}
+	if len(result.Message.Parts) != 2 ||
+		result.Message.Parts[0].Text != "Hello" || result.Message.Parts[1].Text != "world" {
+		t.Fatalf("text parts = %#v, want both in order", result.Message.Parts)
+	}
+	if len(result.Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v", result.Message.ToolCalls)
+	}
+	call := result.Message.ToolCalls[0]
+	if call.Function.Name != "weather" || call.Function.Arguments != `{"city":"Paris"}` || call.ID == "" {
+		t.Fatalf("tool call = %#v", call)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 10 {
+		t.Fatalf("usage = %#v, want prompt 10 and candidates+thoughts 10", result.Usage)
 	}
 }

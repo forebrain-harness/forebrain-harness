@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
-	"github.com/google/uuid"
 )
 
 const (
@@ -65,7 +64,8 @@ func NewAgentLLM(apiKey, baseURL, model string, maxTokens int64, transport http.
 	return c
 }
 
-// Execute runs one generateContent call.
+// Execute runs one streamGenerateContent call, streaming the answer to the
+// stream sink in ctx as it arrives.
 func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	if c.model == "" {
 		return nil, errors.New("google: no model configured")
@@ -78,6 +78,13 @@ func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []
 	if err != nil {
 		return nil, fmt.Errorf("google: encode request: %w", err)
 	}
+	return c.executeStreaming(ctx, raw)
+}
+
+// executeUnary runs the same request in its non-streaming form: one
+// generateContent call that returns the assembled response. It is kept for the
+// non-streaming resend path (plans/126) and has no streaming caller.
+func (c *agentLLM) executeUnary(ctx context.Context, raw []byte) (*llm.Result, error) {
 	endpoint := c.baseURL + "/v1beta/models/" + url.PathEscape(c.model) + ":generateContent"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
@@ -352,17 +359,7 @@ func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, 
 	for _, p := range candidate.Content.Parts {
 		switch {
 		case p.FunctionCall != nil:
-			args := "{}"
-			if raw, err := json.Marshal(p.FunctionCall.Args); err == nil && p.FunctionCall.Args != nil {
-				args = string(raw)
-			}
-			msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
-				// generateContent does not name its calls, so one is minted: the
-				// id is what pairs the tool result with this call.
-				ID:       uuid.NewString(),
-				Type:     llm.ToolTypeFunction,
-				Function: llm.FunctionCall{Name: p.FunctionCall.Name, Arguments: args},
-			})
+			msg.ToolCalls = append(msg.ToolCalls, googleToolCallFromPart(p))
 		case p.Text != "":
 			msg.Parts = append(msg.Parts, llm.Text(p.Text))
 		}
