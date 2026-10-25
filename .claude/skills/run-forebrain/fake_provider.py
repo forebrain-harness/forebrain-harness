@@ -182,6 +182,13 @@ TOOL_SCRIPTS = {
 # the two behind it unstarted.
 MULTISHELL_COMMANDS = ["sleep 3; echo one", "echo two", "echo three"]
 MULTISHELL_REPLY = "steer received"
+# The "streamtools" mode proves a tool call runs before its response ends: the
+# first call touches $FAKE_MARKER, the provider waits for the file to appear
+# before it sends the second call, and swaps that call for "echo MARKER
+# MISSING" if the wait times out — only an executor that starts calls inside
+# the stream can make the marker appear while the response is still open.
+STREAMTOOLS_TURNS = itertools.count()
+STREAMTOOLS_MARKER_WAIT = float(os.environ.get("FAKE_MARKER_WAIT") or 10)
 # The turn counter is separate from the request counter on purpose: the
 # background passes (the memory pipeline's own agents) share this provider, and
 # a request counter would let one of them take the turn's scripted answer.
@@ -457,6 +464,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if MODE == "multishell":
             self.serve_multishell(body)
+            return
+
+        if MODE == "streamtools":
+            self.serve_streamtools(body)
             return
 
         if MODE == "goal":
@@ -1034,6 +1045,80 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.write_event(chunk(delta={"role": "assistant", "content": MULTISHELL_REPLY}))
             self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_streamtools(self, body):
+        """Answer a request: the streamed-calls script for the conversation, a
+        harmless answer for the background passes that share this provider.
+
+        The turn's first request streams body text, then tool call 0 (a shell
+        touch of $FAKE_MARKER) with its arguments complete, then the first
+        fragment of call 1 — on the compat surface a new index is what
+        confirms every smaller one, so this fragment is what makes call 0
+        ready while the response is still open. The provider then waits for
+        the marker file to appear before streaming call 1's arguments and the
+        finish frame; the marker is call 0's own side effect, so it can only
+        appear if the executor started the call inside the stream. On timeout
+        call 1's arguments become "echo MARKER MISSING", which the screen then
+        shows. The turn's later requests answer with "done".
+        """
+        if not _is_turn_request(body):
+            self.serve_background(body)
+            return
+        nth = next(STREAMTOOLS_TURNS)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if nth > 0:
+            self.write_event(chunk(delta={"role": "assistant", "content": "done"}))
+            self.write_event(chunk(finish="stop"))
+            self.write_raw(b"data: [DONE]\n\n")
+            self.write_raw(b"")
+            return
+        marker = os.environ.get("FAKE_MARKER") or ""
+        second = "echo two"
+        self.write_event(chunk(delta={"role": "assistant", "content": "running both"}))
+        self.write_event(chunk(delta={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_streamtools_0",
+                "type": "function",
+                "function": {"name": "shell", "arguments": json.dumps({"command": 'touch "%s"' % marker})},
+            }],
+        }))
+        # Call 1 announces itself with empty arguments: its index confirms
+        # call 0 complete, and the command stays undecided until the poll is
+        # over.
+        self.write_event(chunk(delta={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "index": 1,
+                "id": "call_streamtools_1",
+                "type": "function",
+                "function": {"name": "shell", "arguments": ""},
+            }],
+        }))
+        deadline = time.time() + STREAMTOOLS_MARKER_WAIT
+        while time.time() < deadline:
+            if marker and os.path.exists(marker):
+                break
+            time.sleep(0.1)
+        else:
+            second = "echo MARKER MISSING"
+        self.write_event(chunk(delta={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "index": 1,
+                "function": {"arguments": json.dumps({"command": second})},
+            }],
+        }))
+        self.write_event(chunk(finish="tool_calls"))
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
 

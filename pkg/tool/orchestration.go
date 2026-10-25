@@ -12,6 +12,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
@@ -70,6 +71,65 @@ func (s *State) PartitionToolCalls(toolNames []string) []ToolCallPlan {
 		return PartitionToolCalls(toolNames, nil)
 	}
 	return PartitionToolCalls(toolNames, ToolMetaMap(s.ToolMetas()))
+}
+
+// CallConcurrencySafe reports whether this call, with these arguments, may run
+// alongside other concurrency-safe calls. A tool whose metadata says so always
+// may; shell may when its command is provably read-only and it asks for no
+// sandbox override. Arguments that do not parse never may.
+func (s *State) CallConcurrencySafe(call llm.ToolCall) bool {
+	name := strings.TrimSpace(call.Function.Name)
+	if name == "" {
+		return false
+	}
+	if s != nil {
+		if meta, ok := ToolMetaMap(s.ToolMetas())[name]; ok &&
+			meta.ReadOnly && meta.ConcurrencySafe && !meta.Destructive {
+			return true
+		}
+	}
+	if name != "shell" {
+		return false
+	}
+	var in struct {
+		Command               string          `json:"command"`
+		SandboxPermissions    string          `json:"sandbox_permissions"`
+		AdditionalPermissions json.RawMessage `json:"additional_permissions"`
+	}
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &in); err != nil {
+		return false
+	}
+	if strings.TrimSpace(in.SandboxPermissions) != "" && strings.TrimSpace(in.SandboxPermissions) != "use_default" {
+		return false
+	}
+	additional := strings.TrimSpace(string(in.AdditionalPermissions))
+	if additional != "" && additional != "null" && additional != "{}" {
+		return false
+	}
+	return safety.ShellCommandIsKnownSafe(in.Command)
+}
+
+// PartitionToolCallsFor is PartitionToolCalls by call: adjacent calls that are
+// each CallConcurrencySafe form one group.
+func (s *State) PartitionToolCallsFor(calls []llm.ToolCall) []ToolCallPlan {
+	out := make([]ToolCallPlan, 0, len(calls))
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" {
+			continue
+		}
+		safe := s.CallConcurrencySafe(call)
+		last := len(out) - 1
+		if safe && last >= 0 && out[last].ConcurrencySafe {
+			out[last].ToolNames = append(out[last].ToolNames, name)
+			continue
+		}
+		out = append(out, ToolCallPlan{
+			ConcurrencySafe: safe,
+			ToolNames:       []string{name},
+		})
+	}
+	return out
 }
 
 func (s *State) MarkToolInProgress(id string) {

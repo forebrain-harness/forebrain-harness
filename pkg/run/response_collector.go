@@ -136,3 +136,15 @@ func (c *responseCollector) result() *llm.Result {
 	calls := append([]llm.ToolCall(nil), c.ready...)
 	return &llm.Result{Message: &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: calls}}
 }
+
+// completedParts returns the finished answer-text blocks, in order: the body a
+// provisional assistant message written while the stream still runs may carry.
+func (c *responseCollector) completedParts() []llm.ContentPart {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	parts := make([]llm.ContentPart, 0, len(c.completed))
+	for _, block := range c.completed {
+		parts = append(parts, llm.Text(block))
+	}
+	return parts
+}

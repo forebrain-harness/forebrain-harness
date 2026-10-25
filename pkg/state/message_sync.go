@@ -54,8 +54,8 @@ func (s *SessionStore) AppendMessageSequenceForRun(ctx context.Context, sessionI
 	}
 	plan := planTranscriptAppend(storedTranscriptMessages(rows), canonical)
 	for _, completion := range plan.completions {
-		text := completion.message.TextContent()
-		if err := s.UpdateMessageParts(ctx, tx, completion.rowID, MessagePartsJSON(completion.message, text)); err != nil {
+		text := strings.TrimSpace(completion.message.TextContent())
+		if err := s.UpdateMessageContentAndParts(ctx, tx, completion.rowID, text, MessagePartsJSON(completion.message, text)); err != nil {
 			return err
 		}
 	}
@@ -239,7 +239,7 @@ func planTranscriptAppend(stored []storedTranscriptMessage, canonical []llm.Mess
 		row := stored[storedIdx]
 		message := canonical[canonicalIdx]
 		if messagesAlign(row.message, message) {
-			if row.rowID > 0 && assistantGainedToolCalls(row.message, message) {
+			if row.rowID > 0 && assistantRowNeedsCompletion(row.message, message) {
 				plan.completions = append(plan.completions, transcriptCompletion{rowID: row.rowID, message: message})
 			}
 			storedIdx--
@@ -257,11 +257,50 @@ func planTranscriptAppend(stored []storedTranscriptMessage, canonical []llm.Mess
 	return plan
 }
 
-// assistantGainedToolCalls reports an assistant row stored before the calls it
-// was already making were known - the shape every partial writer produces.
-func assistantGainedToolCalls(stored, finished llm.Message) bool {
-	return strings.TrimSpace(stored.Role) == llm.RoleAssistant &&
-		len(stored.ToolCalls) == 0 && len(finished.ToolCalls) > 0
+// assistantRowNeedsCompletion reports an assistant row stored before the
+// response it belongs to was finished - the shape every partial writer
+// produces: the row may predate the calls the finished message made (all of
+// them or a prefix), or carry the same calls with less body text.
+func assistantRowNeedsCompletion(stored, finished llm.Message) bool {
+	if strings.TrimSpace(stored.Role) != llm.RoleAssistant {
+		return false
+	}
+	if len(stored.ToolCalls) == 0 && len(finished.ToolCalls) > 0 {
+		return true
+	}
+	if toolCallIDsArePrefix(stored.ToolCalls, finished.ToolCalls) && len(stored.ToolCalls) < len(finished.ToolCalls) {
+		return true
+	}
+	if sameToolCallIDs(stored.ToolCalls, finished.ToolCalls) && messageText(stored) != messageText(finished) {
+		return true
+	}
+	return false
+}
+
+// toolCallIDsArePrefix reports whether want's call IDs read, in order, as the
+// first ones of have's.
+func toolCallIDsArePrefix(want, have []llm.ToolCall) bool {
+	if len(want) > len(have) {
+		return false
+	}
+	for i := range want {
+		if strings.TrimSpace(want[i].ID) != strings.TrimSpace(have[i].ID) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameToolCallIDs(a, b []llm.ToolCall) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.TrimSpace(a[i].ID) != strings.TrimSpace(b[i].ID) {
+			return false
+		}
+	}
+	return true
 }
 
 // messagesAlign reports whether a stored row and a message in a run's list are

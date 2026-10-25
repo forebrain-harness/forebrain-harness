@@ -385,6 +385,9 @@ func newUserInteractionTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) 
 			}
 			return out.Answers, nil
 		}
+		if StreamingDispatchFromContext(ctx) {
+			return nil, ErrDeferToStreamEnd
+		}
 		form, err := humanInputToAskForm(in)
 		if err != nil {
 			return nil, err

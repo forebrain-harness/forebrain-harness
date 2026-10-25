@@ -117,6 +117,89 @@ func TestAppendMessageSequenceCompletesPartialAssistantRowInsteadOfDuplicatingTh
 	}
 }
 
+// A provisional assistant row written while its response still streamed - body
+// text plus the first of two calls - is completed in place by the finished
+// exchange: both calls in one row, its text grown, the results behind it, and
+// no duplicate turn.
+func TestAppendMessageSequenceCompletesProvisionalAssistantRowWithLaterCallsAndText(t *testing.T) {
+	ctx := context.Background()
+	s := NewSessionStore(openSessionDB(t), "main")
+	_, _ = s.Append(ctx, "s", "user", "hello")
+	provisional := []llm.Message{
+		llm.UserMessage(llm.Text("hello")),
+		assistantCall("checking", "call-1", "shell"),
+	}
+	if err := s.AppendMessageSequence(ctx, "s", provisional, "model", ""); err != nil {
+		t.Fatal(err)
+	}
+	final := assistantCall("checking both files", "call-1", "shell")
+	final.ToolCalls = append(final.ToolCalls, llm.ToolCall{ID: "call-2", Type: "function", Function: llm.FunctionCall{Name: "shell", Arguments: "{}"}})
+	finished := []llm.Message{
+		llm.SystemMessage("instructions"),
+		llm.UserMessage(llm.Text("hello")),
+		final,
+		llm.ToolResultMessage("call-1", llm.Text("one")),
+		llm.ToolResultMessage("call-2", llm.Text("two")),
+	}
+	if err := s.AppendMessageSequence(ctx, "s", finished, "model", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListTranscriptMessages(ctx, "s", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("want the turn stored once, got %d messages: %+v", len(got), got)
+	}
+	if got[1].TextContent() != "checking both files" || len(got[1].ToolCalls) != 2 ||
+		got[1].ToolCalls[0].ID != "call-1" || got[1].ToolCalls[1].ID != "call-2" {
+		t.Fatalf("provisional assistant row was not completed in place: %+v", got[1])
+	}
+	if got[2].ToolCallID != "call-1" || got[2].TextContent() != "one" {
+		t.Fatalf("first result missing: %+v", got[2])
+	}
+	if got[3].ToolCallID != "call-2" || got[3].TextContent() != "two" {
+		t.Fatalf("second result missing: %+v", got[3])
+	}
+}
+
+// The finished message may differ from the stored row only by text: the same
+// call, grown words. The row is rewritten, not duplicated.
+func TestAppendMessageSequenceCompletesAssistantRowWithSameCallsAndGrownText(t *testing.T) {
+	ctx := context.Background()
+	s := NewSessionStore(openSessionDB(t), "main")
+	_, _ = s.Append(ctx, "s", "user", "hello")
+	provisional := []llm.Message{
+		llm.UserMessage(llm.Text("hello")),
+		assistantCall("checking", "call-1", "shell"),
+	}
+	if err := s.AppendMessageSequence(ctx, "s", provisional, "model", ""); err != nil {
+		t.Fatal(err)
+	}
+	finished := []llm.Message{
+		llm.SystemMessage("instructions"),
+		llm.UserMessage(llm.Text("hello")),
+		assistantCall("checking both files", "call-1", "shell"),
+		llm.ToolResultMessage("call-1", llm.Text("ok")),
+	}
+	if err := s.AppendMessageSequence(ctx, "s", finished, "model", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListTranscriptMessages(ctx, "s", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want the turn stored once, got %d messages: %+v", len(got), got)
+	}
+	if got[1].TextContent() != "checking both files" || len(got[1].ToolCalls) != 1 {
+		t.Fatalf("assistant row was not rewritten with the finished text: %+v", got[1])
+	}
+	if got[2].ToolCallID != "call-1" {
+		t.Fatalf("messages=%+v", got)
+	}
+}
+
 func TestAppendMessageSequenceKeepsAlignmentAcrossOutOfBandRow(t *testing.T) {
 	ctx := context.Background()
 	s := NewSessionStore(openSessionDB(t), "main")

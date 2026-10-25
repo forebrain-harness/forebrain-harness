@@ -510,6 +510,12 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 		!granularApprovalPromptEnabled(approvalPolicy.Granular, kind, pay, decision) {
 		return "", false, fmt.Errorf("approval prompt disabled by granular approval policy for %q", kind)
 	}
+	// A call started while its response still streams never asks anyone and
+	// never runs a reviewer: it waits for the stream to end and asks then,
+	// through the ordinary path, with the turn able to stop on it.
+	if tool.StreamingDispatchFromContext(ctx) {
+		return "", false, tool.ErrDeferToStreamEnd
+	}
 	if !exitPlanMode && !isRequestPermissions && r.permissionRequestHookApplies(kind) {
 		hookDecision, hookMessage, hookErr := r.runPermissionRequestHook(ctx, kind, pay)
 		if hookErr != nil {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,10 @@ type orchestratedToolResult struct {
 	// message took the turn at the call boundary. Its result is the model-facing
 	// "not run" answer, and no surface draws a card for it.
 	notRun bool
+	// deferred marks a call that started while its response was still
+	// streaming and reached an approval or a question: nothing was created,
+	// and the call runs again once the stream ends.
+	deferred bool
 }
 
 type capturedToolStepData struct {
@@ -341,8 +346,46 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		// when it died, and a finish is built from what it completed: both
 		// are recorded per model call, so the loop resets them each time it
 		// asks again.
-		callCtx, _ = llm.WithStreamProgress(callCtx)
+		callCtx, progress := llm.WithStreamProgress(callCtx)
 		callCtx, collector := withResponseCollector(callCtx)
+		// A streaming response starts each tool call as soon as the model has
+		// written it (OnToolCallReady): the queue is FIFO, a call starts when
+		// nothing executes or it and everything executing is
+		// concurrency-safe within the cap, and a call that cannot start
+		// blocks the ones behind it. A call that would ask anyone defers to
+		// the end of the stream, and so does everything queued behind it.
+		var exec *streamingToolExecutor
+		if sink := llm.StreamSinkFrom(callCtx); sink != nil {
+			exec = &streamingToolExecutor{
+				w:        w,
+				toolMap:  toolMap,
+				progress: progress,
+				ctx:      ctx,
+				limit:    tool.MaxToolConcurrencyFromEnv(),
+				beforeStart: func(readyUpTo []llm.ToolCall) context.Context {
+					if inFlightSteers != nil {
+						inFlightSteers.Commit()
+						if inFlightSteers.Retracted() {
+							return nil
+						}
+					}
+					prov := llm.AssistantMessage(collector.completedParts(), readyUpTo...)
+					provSession := append(append([]llm.Message(nil), session...), prov)
+					partialCapture.Set(provSession)
+					transcript.flush(ctx, provSession, modelForTranscript(), nil)
+					return withForkRuntimeSnapshot(w.state.ContextWithRuntimeSessionMode(ctx), provSession)
+				},
+			}
+			wrapped := *sink
+			downstream := sink.OnToolCallReady
+			wrapped.OnToolCallReady = func(call llm.ToolCall) {
+				exec.add(call)
+				if downstream != nil {
+					downstream(call)
+				}
+			}
+			callCtx = llm.WithStreamSink(callCtx, &wrapped)
+		}
 		transcript.beginAttempt()
 		res, err := w.inner.Execute(callCtx, session, tools)
 		abandonCall(nil)
@@ -369,6 +412,27 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			if incomplete.Complete {
 				incomplete = nil // a response that fully arrived is an ordinary one
 			}
+		}
+		// A cancelled request whose tools already started settles them here:
+		// the ones that finished keep their results, the rest are interrupted,
+		// and the provisional assistant message with those results reaches the
+		// transcript before the cancellation returns. The write must survive
+		// the cancellation it is racing, so it runs on an uncancellable
+		// context — the same rule the reasoning recorder follows.
+		if exec != nil && exec.dispatched() && (ctx.Err() != nil || errors.Is(err, context.Canceled)) {
+			if err == nil {
+				err = ctx.Err()
+			}
+			results := exec.abort(ctx)
+			prov := collector.result().Message
+			session = append(session, *prov)
+			noteResponseCompleted()
+			for _, result := range results {
+				session = append(session, toolResultMessage(result))
+			}
+			partialCapture.Set(session)
+			transcript.flush(context.WithoutCancel(ctx), session, modelForTranscript(), nil)
+			return nil, err
 		}
 		if inFlightSteers.Retracted() {
 			if ctx.Err() == nil {
@@ -469,6 +533,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		}
 		latestUsage := usageCopy(res)
 		accumulateUsage(&totalUsage, latestUsage)
+		// A response that reports no tool calls cannot have dispatched any; if
+		// one somehow did, the calls it already ran are still its own.
+		if exec != nil && exec.dispatched() && res != nil && res.Message != nil {
+			slog.Error("tools executed in-stream but the response reports no tool calls")
+			res.Message.ToolCalls = exec.reconcile(res.Message.ToolCalls)
+		}
 		if res == nil || res.Message == nil || len(res.Message.ToolCalls) == 0 {
 			if incomplete != nil {
 				// The turn ends on the answer that happened. The completed
@@ -538,6 +608,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				sink.OnResponseNotice(llm.ResponseNotice{Kind: llm.ResponseNoticeIncomplete, Text: text})
 			}
 		}
+		// A dispatched executor holds still here — reconcile freezes it — so
+		// its beforeStart will never again read the session this append
+		// mutates, and the response owns every call it already ran.
+		if exec != nil && exec.dispatched() {
+			res.Message.ToolCalls = exec.reconcile(res.Message.ToolCalls)
+		}
 		session = append(session, *res.Message)
 		noteResponseCompleted()
 		partialCapture.Set(session)
@@ -545,7 +621,14 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		// write it now, so the words survive a process that stops mid-turn.
 		transcript.flush(ctx, session, modelForTranscript(), latestUsage)
 		toolCtx := withForkRuntimeSnapshot(w.state.ContextWithRuntimeSessionMode(ctx), session)
-		results := w.executeToolCalls(toolCtx, res.Message.ToolCalls, toolMap)
+		var results []orchestratedToolResult
+		if exec != nil && exec.dispatched() {
+			// Calls that already ran keep their results; the deferred and the
+			// never-ready ones run now, approvals included.
+			results = exec.finish(toolCtx, res.Message.ToolCalls)
+		} else {
+			results = w.executeToolCalls(toolCtx, res.Message.ToolCalls, toolMap)
+		}
 		if err := firstControlFlowToolError(results); err != nil {
 			// An approval from a typed/fork child is a suspension point, not a
 			// regular tool failure. Preserve the child's exact orchestration
@@ -1040,10 +1123,6 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 	toolMap map[string]*llm.Tool,
 ) []orchestratedToolResult {
 	results := make([]orchestratedToolResult, len(calls))
-	names := make([]string, 0, len(calls))
-	for _, call := range calls {
-		names = append(names, call.Function.Name)
-	}
 	// A queued steer takes the turn at the next call boundary: whatever has
 	// not started yet is answered "not run" so the steer goes out now instead
 	// of after the whole batch.
@@ -1054,7 +1133,7 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 		}
 		return preempted
 	}
-	plans := w.state.PartitionToolCalls(names)
+	plans := w.state.PartitionToolCallsFor(calls)
 	callIndex := 0
 	for _, plan := range plans {
 		batch := calls[callIndex : callIndex+len(plan.ToolNames)]
@@ -1469,6 +1548,11 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 	toolCtx := withToolStepCapture(tool.WithToolUseID(ctx, strings.TrimSpace(call.ID)), stepID)
 	toolCtx = tool.WithToolStepStartedAt(toolCtx, startedAt)
 	rawResult, parts, timing, err := executeToolHandler(toolCtx, toolMap, call)
+	if errors.Is(err, tool.ErrDeferToStreamEnd) {
+		// Not a completion: the call re-runs after the stream. Its started
+		// card stays up and the re-run updates it in place (same step id).
+		return orchestratedToolResult{index: index, call: call, deferred: true}
+	}
 	governedDetails := governToolResultDetails(w.state, call, parts)
 	recordToolResultSpills(ctx, w.state, name, call, governedDetails)
 	output, errText, actionID, actionKind := toolCompletedPayload(toolCtx, rawResult, parts, err, governedDetails)

@@ -105,7 +105,10 @@ PY
     printf 'compact:\n  model_auto_compact_token_limit: %s\n' "$COMPACT_LIMIT" >> "$HOME_DIR/forebrain.yaml"
   fi
 
-  python3 "$REPO/.claude/skills/run-forebrain/fake_provider.py" "$mode" "$PORT" "$text" "$delay" \
+  # FAKE_MARKER rides through to the fake provider untouched (the streamtools
+  # mode's first tool call touches it): the provider inherits this process's
+  # environment, and naming it here keeps that contract visible.
+  FAKE_MARKER="${FAKE_MARKER:-}" python3 "$REPO/.claude/skills/run-forebrain/fake_provider.py" "$mode" "$PORT" "$text" "$delay" \
     > "$WORK/provider.log" 2>&1 &
   echo $! > "$WORK/provider.pid"
   local i
@@ -117,7 +120,7 @@ PY
   echo "serving: provider=$mode port=$PORT home=$HOME_DIR"
 }
 
-cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
+cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
   local mode="${1:-hang}"
   cmd_serve "$@"
 
@@ -310,13 +313,19 @@ case "${1:-}" in
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
   build                  build the binary into $WORK
-  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
+  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
                          launch the TUI against a fake provider (default: hang)
                          drip = stream word by word; the only mode that proves
                          streaming actually renders
                          multishell = three shell calls in one reply, so a
                          steer queued while the first one runs takes the turn
                          at the next call boundary
+                         streamtools = two shell calls streamed one at a time;
+                         the provider waits for the first call's marker file
+                         (FAKE_MARKER, touched by the call) before finishing
+                         the second call's arguments — a run that executes
+                         calls only after the response ends shows
+                         "echo MARKER MISSING"
                          tool = call whatever the answer text names, as JSON
                          usage = reply, with a usage report carrying a cache split
                          {"name":...,"arguments":{...}} or an array of them

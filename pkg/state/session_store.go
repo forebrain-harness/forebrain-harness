@@ -2164,6 +2164,37 @@ func (s *SessionStore) UpdateMessageParts(ctx context.Context, q dbtx, rowID int
 	return s.messageRowOwnershipError(ctx, q, rowID)
 }
 
+// UpdateMessageContentAndParts rewrites a message row's body text together
+// with its parts: the completion of an assistant row a partial writer stored
+// before the response it belongs to was finished. Ownership is re-derived the
+// same way UpdateMessageParts derives it.
+func (s *SessionStore) UpdateMessageContentAndParts(ctx context.Context, q dbtx, rowID int64, content, partsJSON string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if rowID <= 0 {
+		return fmt.Errorf("invalid message row id")
+	}
+	partsJSON = strings.TrimSpace(partsJSON)
+	if partsJSON == "" {
+		partsJSON = "[]"
+	}
+	if !json.Valid([]byte(partsJSON)) {
+		return fmt.Errorf("invalid parts json")
+	}
+	res, err := q.ExecContext(ctx, `UPDATE fb_messages SET content=?, parts=?
+		WHERE id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+		strings.TrimSpace(content), partsJSON, rowID, s.AgentID())
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil || affected > 0 {
+		return err
+	}
+	return s.messageRowOwnershipError(ctx, q, rowID)
+}
+
 // messageRowOwnershipError reports ErrSessionNotOwned when rowID exists but
 // belongs to another primary agent, and nil when there is no such row.
 func (s *SessionStore) messageRowOwnershipError(ctx context.Context, q dbtx, rowID int64) error {
