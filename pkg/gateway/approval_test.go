@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -1057,4 +1058,143 @@ func TestSupersededAbandonedErrorIsNotServed(t *testing.T) {
 	require.Len(t, got, 2)
 	require.Contains(t, string(got[0].Payload), "no such host")
 	require.Equal(t, onlyReap.ID, got[1].RunID)
+}
+
+// rejectedStopExecutor stands where the real run executor does: it records
+// the approval-resume state the dispatch carried and answers the way the
+// orchestration answers a stopped resume — run.ErrTurnStoppedByRejection,
+// verified separately in pkg/run — so no model request stands between the
+// refusal and the run's ending.
+type rejectedStopExecutor struct {
+	mu     sync.Mutex
+	states []rejectedStopResumeRecord
+}
+
+// rejectedStopResumeRecord is the resume state's test-visible half. The state
+// itself carries a sync.Once, so it is read where it lives rather than copied.
+type rejectedStopResumeRecord struct {
+	stopped  bool
+	denied   bool
+	messages int
+}
+
+func (x *rejectedStopExecutor) Run(ctx context.Context, req turn.TurnRequest, started func(string)) (*agent.Result, error) {
+	if started != nil {
+		started(req.ExistingRunID)
+	}
+	x.mu.Lock()
+	if st := tool.ToolApprovalResumeFromContext(ctx); st != nil {
+		x.states = append(x.states, rejectedStopResumeRecord{stopped: st.Stopped, denied: st.Denied, messages: len(st.Session)})
+	}
+	x.mu.Unlock()
+	return nil, run.ErrTurnStoppedByRejection
+}
+
+func (x *rejectedStopExecutor) recorded() []rejectedStopResumeRecord {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return append([]rejectedStopResumeRecord(nil), x.states...)
+}
+
+func newRejectedStopGateway(t *testing.T) (*Server, *state.RunStore, *state.ActionService, *rejectedStopExecutor) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mustGatewaySession(t, db, "s1")
+	sessions := state.NewSessionStore(db, "main")
+	runs := &state.RunStore{DB: db, Owner: "gateway-test"}
+	actions := &state.ActionService{DB: db}
+	executor := &rejectedStopExecutor{}
+	s := &Server{
+		RunRT: runs, Actions: actions, Sessions: sessions,
+		Runner: &run.Runner{Deps: &run.Deps{Home: t.TempDir()}},
+		Core: turn.New(
+			turn.WithRunEventStore(runs), turn.WithSessionStore(sessions),
+			turn.WithRunExecutor(executor),
+		),
+	}
+	return s, runs, actions, executor
+}
+
+// A cancelled gate of the primary agent's own turn records the refusal before
+// the run ends (plan 129): one continuation carries the stopped resume state
+// with the wait's snapshot, the run finishes cancelled, no model request and
+// no error event stand behind it, and the wait row is gone.
+func TestGatewayPrimaryGateCancelRunsTheRejectedStopResume(t *testing.T) {
+	s, runs, actions, executor := newRejectedStopGateway(t)
+	ctx := context.Background()
+	act, err := actions.CreatePending(ctx, "s1", "shell", map[string]any{"command": "ls", "session_id": "s1"})
+	require.NoError(t, err)
+	rn, err := runs.CreateRun(ctx, "s1", "run them")
+	require.NoError(t, err)
+	snapshot := []llm.Message{llm.AssistantMessage(nil, llm.ToolCall{
+		ID: "call-1", Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"ls"}`},
+	})}
+	require.NoError(t, runs.SetWaitingAction(ctx, rn.ID, state.Wait{
+		RunID: rn.ID, ActionID: act.ID, ToolName: "shell",
+		ToolInputJSON: `{"command":"ls"}`, SessionSnapshot: snapshot,
+	}))
+	_, err = actions.Cancel(ctx, act.ID, "not now")
+	require.NoError(t, err)
+	stored, err := actions.Get(ctx, act.ID)
+	require.NoError(t, err)
+
+	s.abortGatewayRunForAction(stored)
+
+	require.Eventually(t, func() bool {
+		got, getErr := runs.GetRun(ctx, rn.ID)
+		return getErr == nil && got.Status == state.RunStatusCancelled
+	}, 2*time.Second, 10*time.Millisecond, "the refusal ends the run as a cancel")
+
+	states := executor.recorded()
+	require.Len(t, states, 1, "exactly one continuation, the stopped resume")
+	require.True(t, states[0].stopped)
+	require.False(t, states[0].denied)
+	require.Equal(t, 1, states[0].messages, "the wait's snapshot travels with the refusal")
+
+	wait, err := runs.GetWaitForRun(ctx, rn.ID)
+	require.NoError(t, err)
+	require.Nil(t, wait, "the run is no longer parked on the refused action")
+	page, err := runs.ListSessionEvents(ctx, "s1", 0, 0, 10)
+	require.NoError(t, err)
+	for _, evt := range page.Events {
+		require.NotEqual(t, event.RunEventTurnError, evt.Type, "a refusal without words is not a failure: %s", evt.Type)
+	}
+}
+
+// A subagent's own gate keeps the direct cancel: there is no primary turn to
+// stop, so no continuation is dispatched at all (plan 129 leaves the child's
+// semantics alone).
+func TestGatewaySubagentGateCancelKeepsTheDirectAbort(t *testing.T) {
+	s, runs, actions, executor := newRejectedStopGateway(t)
+	ctx := context.Background()
+	act, err := actions.CreatePending(ctx, "s1", "shell", map[string]any{
+		"command": "ls", "session_id": "s1", "agent_id": "agent-7", "subagent_type": "explore",
+	})
+	require.NoError(t, err)
+	rn, err := runs.CreateRun(ctx, "s1", "child work")
+	require.NoError(t, err)
+	snapshot := []llm.Message{llm.AssistantMessage(nil, llm.ToolCall{
+		ID: "call-1", Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"ls"}`},
+	})}
+	require.NoError(t, runs.SetWaitingAction(ctx, rn.ID, state.Wait{
+		RunID: rn.ID, ActionID: act.ID, ToolName: "shell",
+		ToolInputJSON: `{"command":"ls"}`, SessionSnapshot: snapshot,
+	}))
+	_, err = actions.Cancel(ctx, act.ID, "not now")
+	require.NoError(t, err)
+	stored, err := actions.Get(ctx, act.ID)
+	require.NoError(t, err)
+
+	s.abortGatewayRunForAction(stored)
+
+	require.Eventually(t, func() bool {
+		got, getErr := runs.GetRun(ctx, rn.ID)
+		return getErr == nil && got.Status == state.RunStatusCancelled
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Empty(t, executor.recorded(), "a subagent's cancel must not dispatch a continuation")
 }

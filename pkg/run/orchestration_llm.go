@@ -221,18 +221,57 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 	resumeAssistant, ok := w.consumeResumeSnapshot(ctx, messages)
 	if ok {
 		session = resumeAssistant.session
-		if resumeAssistant.denied {
-			// User denied the tool call — inject denial results without
-			// re-executing. Keep already-completed tool results in context so
-			// approval resume does not replay or drop earlier tool calls.
+		if resumeAssistant.stopped {
+			// The user refused without words: the refusal is recorded on the
+			// parked call, the calls behind it are answered with the same
+			// sentence under a hidden display, and the turn ends without a
+			// model request — the run's surface finishes it as a cancel.
+			missing := missingToolCalls(resumeAssistant.pendingMsg, resumeAssistant.completedResults)
+			var firstDenied *llm.ToolCall
+			if len(missing) > 0 {
+				first := missing[0]
+				firstDenied = &first
+			}
 			for _, tc := range resumeAssistant.pendingMsg.ToolCalls {
-				if msg, ok := resumeAssistant.completedResults[tc.ID]; ok {
+				if msg, done := resumeAssistant.completedResults[tc.ID]; done {
 					session = append(session, msg)
 					continue
 				}
-				denial := llm.ToolResultMessage(tc.ID, llm.Text(
-					buildDenialMessage(tc.Function.Name, resumeAssistant.denyReason),
-				))
+				if firstDenied != nil && tc.ID == firstDenied.ID {
+					// The asked-about call is the one whose refusal the user
+					// sees: a refused card, announced like any settled call's.
+					denial := llm.ToolResultMessage(tc.ID, llm.Text(tool.RejectedStopText))
+					refused := tool.DeniedToolStep(toolStepID(tc), tc.Function.Name, toolInputMap(tc.Function.Arguments), resumeAssistant.denyFeedback)
+					denial.ToolDisplay = toolDisplayState(refused)
+					if step := tool.StepHookFromContext(ctx, w.state); step != nil {
+						step(ctx, refused)
+					}
+					session = append(session, denial)
+					continue
+				}
+				// The calls behind the gate never started: the same sentence
+				// for the model, a hidden row for every surface, no step.
+				session = append(session, toolResultMessage(rejectionStoppedResult(-1, tc)))
+			}
+			partialCapture.Set(session)
+			transcript.flush(context.WithoutCancel(ctx), session, modelForTranscript(), nil)
+			tool.EndApprovalContinuation(ctx)
+			return nil, ErrTurnStoppedByRejection
+		}
+		if resumeAssistant.denied {
+			// The user refused this one call. The refusal result lands on the
+			// asked-about call alone — the first call still missing a result,
+			// the same one an approval's replay spends itself on — while
+			// already-completed results stay in context and the calls behind
+			// the gate execute as the batch they were.
+			missing := missingToolCalls(resumeAssistant.pendingMsg, resumeAssistant.completedResults)
+			var fresh []orchestratedToolResult
+			if len(missing) > 0 {
+				denial := orchestratedToolResult{
+					index: -1,
+					call:  missing[0],
+					parts: []llm.ContentPart{llm.Text(rejectionTextFor(ctx, missing[0], resumeAssistant.denyReason))},
+				}
 				if resumeAssistant.deliveredReview {
 					// A delivered review closed this gate: the card's body is
 					// the delivery drop key, never "(no output)". The key is
@@ -241,31 +280,79 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					// the row whole. No surface draws it, so no step
 					// announces it either.
 					denialMeta, _ := json.Marshal(map[string]string{
-						"tool_name": strings.TrimSpace(tc.Function.Name),
+						"tool_name": strings.TrimSpace(missing[0].Function.Name),
 						"status":    "denied",
 					})
-					denial.ToolDisplay = &llm.ToolDisplayState{
+					denial.display = &llm.ToolDisplayState{
 						Body:         tool.PlanReviewDeliveredDisplayKey,
 						ToolMetaJSON: string(denialMeta),
 					}
-					session = append(session, denial)
-					continue
+				} else {
+					// The refusal has two halves: the instruction text above is
+					// what the model reads, and the refused call's own step is what
+					// the card says. The step is announced like any completed call's,
+					// and the row it persists to carries the display derived from
+					// that same step, so the card a live surface draws and the card
+					// every replay of the row draws are one card. Without it a
+					// replay printed the model-facing text as if it were the user's
+					// words, and a live surface that only sees events drew nothing.
+					refused := tool.DeniedToolStep(toolStepID(missing[0]), missing[0].Function.Name, toolInputMap(missing[0].Function.Arguments), resumeAssistant.denyFeedback)
+					denial.display = toolDisplayState(refused)
+					if step := tool.StepHookFromContext(ctx, w.state); step != nil {
+						step(ctx, refused)
+					}
 				}
-				// The refusal has two halves: the instruction text above is
-				// what the model reads, and the refused call's own step is what
-				// the card says. The step is announced like any completed call's,
-				// and the row it persists to carries the display derived from
-				// that same step, so the card a live surface draws and the card
-				// every replay of the row draws are one card. Without it a
-				// replay printed the model-facing text as if it were the user's
-				// words, and a live surface that only sees events drew nothing.
-				refused := tool.DeniedToolStep(toolStepID(tc), tc.Function.Name, toolInputMap(tc.Function.Arguments), resumeAssistant.denyFeedback)
-				denial.ToolDisplay = toolDisplayState(refused)
-				if step := tool.StepHookFromContext(ctx, w.state); step != nil {
-					step(ctx, refused)
-				}
-				session = append(session, denial)
+				fresh = append(fresh, denial)
 			}
+			var gate error
+			if len(missing) > 1 {
+				// The fence opens here, immediately before the first replayed
+				// call, exactly as an approval's replay does. The replayed
+				// calls carry no approved action: the user's answer refused
+				// the asked-about call, and each call behind it meets its own
+				// gate if it has one.
+				if beginErr := tool.BeginApprovalContinuation(ctx); beginErr != nil {
+					return nil, beginErr
+				}
+				toolCtx := withForkRuntimeSnapshot(ctx, session)
+				for _, result := range w.executeToolCalls(toolCtx, missing[1:], toolMap) {
+					fresh = append(fresh, result)
+					if isRequiresActionError(result.err) {
+						if gate == nil {
+							gate = result.err
+						}
+						continue
+					}
+					// A call the batch stopped before reaching has no result
+					// to keep.
+					if strings.TrimSpace(result.call.ID) == "" {
+						continue
+					}
+					// Capture the replayed results so the resume caller can
+					// persist them to the session store — the same reason an
+					// approval's replay captures its own.
+					if capture := tool.ReplayResultCaptureFromContext(ctx); capture != nil && result.err == nil {
+						capture.Add(tool.ReplayResultEntry{
+							ToolCallID:  result.call.ID,
+							ToolName:    result.call.Function.Name,
+							Content:     llm.TextContent(result.parts...),
+							Timing:      result.timing,
+							ToolDisplay: result.display,
+						})
+					}
+				}
+			}
+			if gate != nil {
+				// A gate inside the refusal's replay is the same suspension
+				// the first one was: hand the surface the snapshot with every
+				// result this resume produced, the refusal's included.
+				attachSessionSnapshotToRAE(gate, appendToolResultsInAssistantOrder(session, resumeAssistant.pendingMsg, resumeAssistant.completedResults, fresh))
+				return nil, gate
+			}
+			// Completed, refused and replayed results land once each, in the
+			// assistant's own call order, ahead of the model request that
+			// continues the turn.
+			session = appendToolResultsInAssistantOrder(session, resumeAssistant.pendingMsg, resumeAssistant.completedResults, fresh)
 		} else if rerr := w.replayPendingToolCalls(ctx, &session, resumeAssistant.pendingMsg, resumeAssistant.completedResults, toolMap); rerr != nil {
 			return nil, rerr
 		}
@@ -822,6 +909,10 @@ type resumeSnapshot struct {
 	// deliveredReview marks a denial review delivery closed: the display half
 	// says the handoff line, because there are no user words to state.
 	deliveredReview bool
+	// stopped marks a refusal without words: the refusal is recorded on the
+	// parked call and the turn ends there (ErrTurnStoppedByRejection), with
+	// no model request behind it.
+	stopped bool
 }
 
 // consumeResumeSnapshot extracts and clears the resume state, so subsequent
@@ -868,21 +959,30 @@ func (w *toolOrchestrationLLM) consumeResumeSnapshot(ctx context.Context, curren
 	denyReason := state.DenyReason
 	denyFeedback := state.DenyFeedback
 	deliveredReview := state.DeliveredReview
+	stopped := state.Stopped
 	state.Session = nil
-	return resumeSnapshot{session: session, pendingMsg: pending, completedResults: completed, denied: denied, denyReason: denyReason, denyFeedback: denyFeedback, deliveredReview: deliveredReview}, true
+	return resumeSnapshot{session: session, pendingMsg: pending, completedResults: completed, denied: denied, denyReason: denyReason, denyFeedback: denyFeedback, deliveredReview: deliveredReview, stopped: stopped}, true
 }
 
-// buildDenialMessage constructs the tool result message injected when the user
-// denies a tool call. When denyReason is non-empty (e.g. the "No, keep
-// planning" feedback text), it is appended so the LLM sees the user's
-// guidance and can adapt accordingly.
-func buildDenialMessage(toolName, denyReason string) string {
-	base := fmt.Sprintf("Tool approval denied by user: the user rejected this %s tool call. Try a different approach or ask the user for guidance.", toolName)
-	reason := strings.TrimSpace(denyReason)
-	if reason != "" {
-		return base + "\n\nUser feedback: " + reason
+// ErrTurnStoppedByRejection is the resume outcome of a refusal without words:
+// the refusal is recorded on the parked call and the turn ends there, waiting
+// for the user to speak. Surfaces treat it as a user cancel — no error card,
+// the run ends cancelled.
+var ErrTurnStoppedByRejection = errors.New("the user refused a tool call and stopped the turn")
+
+// rejectionTextFor is the model-facing text of one refused call. An
+// exit_plan_mode refusal keeps its composed guidance verbatim — the plan
+// direction the resume composed, not a canned sentence — while every other
+// refusal reads the sentence Claude Code writes, primary and subagent runs
+// apart. A run is a subagent's when the context carries its hook agent ID,
+// the same test the stop hooks use.
+func rejectionTextFor(ctx context.Context, call llm.ToolCall, denyReason string) string {
+	if strings.EqualFold(strings.TrimSpace(call.Function.Name), "exit_plan_mode") {
+		if reason := strings.TrimSpace(denyReason); reason != "" {
+			return reason
+		}
 	}
-	return base
+	return tool.RejectionText(strings.TrimSpace(tool.HookAgentIDFromContext(ctx)) != "", denyReason)
 }
 
 // replayPendingToolCalls re-executes the tool_calls that were attempted before
@@ -1696,6 +1796,22 @@ func steerPreemptedResult(index int, call llm.ToolCall) orchestratedToolResult {
 		call:    call,
 		parts:   []llm.ContentPart{llm.Text(steerPreemptedResultText)},
 		display: &llm.ToolDisplayState{Body: tool.SteerPreemptedDisplayKey, ToolMetaJSON: string(metaJSON)},
+		notRun:  true,
+	}
+}
+
+// rejectionStoppedResult is the result of a call the run never started
+// because a refusal without words stopped the turn: the same sentence the
+// refused call itself received, under the hidden display key no surface
+// renders and with no step announced — the refused call's own card already
+// says what happened.
+func rejectionStoppedResult(index int, call llm.ToolCall) orchestratedToolResult {
+	metaJSON, _ := json.Marshal(map[string]string{"tool_name": strings.TrimSpace(call.Function.Name), "status": "not_run"})
+	return orchestratedToolResult{
+		index:   index,
+		call:    call,
+		parts:   []llm.ContentPart{llm.Text(tool.RejectedStopText)},
+		display: &llm.ToolDisplayState{Body: tool.RejectionStoppedDisplayKey, ToolMetaJSON: string(metaJSON)},
 		notRun:  true,
 	}
 }

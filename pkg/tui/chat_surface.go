@@ -495,6 +495,23 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 	// The surface knows the conversation this gate belongs to, so the cancel
 	// dispatch names it rather than looking it up from the run.
 	abort := func(id string) bool { return s.abortPendingApproval(act.SessionID, id) }
+	// A cancelled gate of the primary agent's own turn does not tear the run
+	// down: the refusal without words is recorded on the parked call and the
+	// turn ends there, finished like a cancel (plan 129). Everything else a
+	// cancel can mean — a subagent's own gate, an inline network question —
+	// keeps the direct abort.
+	cancelDispatch := abort
+	if agentID, _ := turn.ActionSubagent(act); agentID == "" && !actionNetworkInline(act) {
+		cancelDispatch = func(id string) bool {
+			if s.resumeAfterRejectedStop(id) {
+				return true
+			}
+			// No pending state, or a wait row too old to carry a snapshot:
+			// nothing to record the refusal on, so the direct cancel those
+			// rows always had is what ends the run.
+			return abort(id)
+		}
+	}
 	sub := ApprovalSubmit{
 		ActionID:  actionID,
 		Approved:  decision.Approved,
@@ -541,7 +558,7 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 			s.cancelInFlightPlanReview()
 		}
 		if result.Cancelled {
-			s.retryResumeDispatch(actionID, "cancel", abort)
+			s.retryResumeDispatch(actionID, "cancel", cancelDispatch)
 		} else if result.Denied {
 			s.retryResumeDispatch(actionID, "deny", s.resumeAfterDenial)
 		} else {
@@ -591,7 +608,7 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		s.markPendingApprovalClearedContext(actionID)
 	}
 	if result.Cancelled {
-		s.retryResumeDispatch(actionID, "cancel", abort)
+		s.retryResumeDispatch(actionID, "cancel", cancelDispatch)
 	} else if result.Denied {
 		s.retryResumeDispatch(actionID, "deny", s.resumeAfterDenial)
 	} else {
@@ -629,6 +646,19 @@ func (s *ChatSession) retryResumeDispatch(actionID, label string, dispatch func(
 	if s.chatLog != nil {
 		s.chatLog.Errorf("forebrain tui tool_approval %s dispatch failed after %d attempts action_id=%s: run left waiting", label, attempts, actionID)
 	}
+}
+
+// actionNetworkInline reports whether an action is an inline network
+// permission question — the one cancel kind that owns no turn to stop, so a
+// refusal of it stays a plain cancel.
+func actionNetworkInline(act *state.Action) bool {
+	if act == nil {
+		return false
+	}
+	var payload struct {
+		NetworkInline bool `json:"network_inline"`
+	}
+	return json.Unmarshal([]byte(act.PayloadJSON), &payload) == nil && payload.NetworkInline
 }
 
 func approvalChoice(act *state.Action, decision turn.ToolApprovalDecision) string {

@@ -3,6 +3,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -431,21 +434,110 @@ func (s *Server) abortGatewayRunForAction(action *state.Action) {
 	if s == nil || s.RunRT == nil || action == nil || actionPayloadBool(action.PayloadJSON, "network_inline") {
 		return
 	}
-	runID, _, err := s.RunRT.FindRunByAction(context.Background(), action.ID)
+	runID, wait, err := s.RunRT.FindRunByAction(context.Background(), action.ID)
 	if err != nil || strings.TrimSpace(runID) == "" {
 		return
 	}
-	s.runController().Cancel(runID, context.Canceled)
-	ctx := context.Background()
-	_ = s.RunRT.ClearWait(ctx, runID)
-	turn.FinalizeCancel(ctx, s.RunRT, runID)
 	sessionID := ""
-	if runRecord, runErr := s.RunRT.GetRun(ctx, runID); runErr == nil && runRecord != nil {
+	if runRecord, runErr := s.RunRT.GetRun(context.Background(), runID); runErr == nil && runRecord != nil {
 		sessionID = runRecord.SessionID
 	}
+	// The primary agent's own gate records the refusal before the run ends:
+	// one rejection-stopped continuation writes the refusal results onto the
+	// parked calls and ends the turn, and the run then finishes cancelled
+	// exactly as a direct cancel would (plan 129). A subagent's own gate, and
+	// legacy wait rows with no snapshot to record a refusal on, keep the
+	// direct cancel.
+	if agentID, _ := turn.ActionSubagent(action); agentID == "" && wait != nil && len(wait.SessionSnapshot) > 0 && s.Runner != nil && s.Core != nil {
+		go s.resumeGatewayRejectedStop(action.ID, runID, wait)
+		return
+	}
 	// The run was parked on this approval, so nothing else will end it.
+	s.cancelGatewayRunDirect(sessionID, runID)
+}
+
+// cancelGatewayRunDirect is the direct ending a cancelled approval's run has
+// always had: stop the controller entry, clear the wait, record the
+// cancellation, and report it.
+func (s *Server) cancelGatewayRunDirect(sessionID, runID string) {
+	if s == nil || s.RunRT == nil {
+		return
+	}
+	ctx := context.Background()
+	s.runController().Cancel(runID, context.Canceled)
+	_ = s.RunRT.ClearWait(ctx, runID)
+	turn.FinalizeCancel(ctx, s.RunRT, runID)
 	s.finishRun(ctx, sessionID, runID, state.RunStatusCancelled)
 	_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventTurnCancelled, event.TurnCancelledPayload{Message: "cancelled"})
+}
+
+// resumeGatewayRejectedStop is the gateway's refusal-without-words
+// continuation: one resume records the refusal on the parked call — the same
+// session the approved/denied continuations dispatch under — and the turn
+// ends there with run.ErrTurnStoppedByRejection, which finishes the run the
+// way a direct cancel does (plan 129). Structured after resumeGatewayRun.
+func (s *Server) resumeGatewayRejectedStop(actionID, runID string, w *state.Wait) {
+	if s == nil || s.RunRT == nil || s.Runner == nil || w == nil {
+		return
+	}
+	ctx := context.Background()
+	rn, err := s.RunRT.GetRun(ctx, runID)
+	if err != nil || rn == nil {
+		s.cancelGatewayRunDirect("", runID)
+		return
+	}
+	sid := strings.TrimSpace(rn.SessionID)
+	if sid == "" {
+		sid = "default"
+	}
+	claimed, claimErr := s.RunRT.ClaimWaitResume(ctx, runID, actionID, s.approvalResumeOwner())
+	if claimErr != nil || !claimed {
+		return
+	}
+	if !s.runController().ClaimResume(runID, rn.SessionID) {
+		_ = s.RunRT.ReleaseWaitResumeOwner(ctx, runID, actionID, s.approvalResumeOwner())
+		return
+	}
+	_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusRunning)
+
+	resumeCh := "webchat"
+	ctx2 := llm.WithAgentSessionID(ctx, sid)
+	ctx2 = tool.WithConversationSessionID(ctx2, sid)
+	ctx2 = tool.WithRunID(ctx2, runID)
+	if q, _, ok := s.runController().Queue(runID); ok && q.Runtime() != nil {
+		ctx2 = run.WithTurnInputRuntime(ctx2, q.Runtime())
+	}
+	resumeState := turn.ResumeRejectedStop(w.SessionSnapshot)
+	// The fence crosses with the resume itself, exactly as the approved and
+	// denied continuations cross theirs.
+	turn.BindApprovalContinuationFence(resumeState, s.RunRT, runID, actionID, s.approvalResumeOwner())
+	ctx2 = tool.WithToolApprovalResume(ctx2, resumeState)
+	ctx2 = process.AgentContextForProject(ctx2, s.stateRoot(), sid, s.sessionProjectKey(ctx2, sid))
+	ctx2 = s.withDetachedGatewayApprovalHooks(ctx2, sid, runID)
+	var streamed bool
+	ctx2 = s.withAnswerStream(ctx2, runID, sid, &streamed, &turn.StreamPartial{})
+	_, runErr := s.Core.Submit(ctx2, turn.TurnRequest{
+		SessionID:     rn.SessionID,
+		Origin:        turn.Origin{Surface: turn.SurfaceWebChat, ChannelID: resumeCh},
+		Trigger:       "resume",
+		UserText:      rn.InputText,
+		ExistingRunID: runID,
+	}, nil)
+	if runErr != nil {
+		var rae *tool.RequiresActionError
+		if errors.As(runErr, &rae) {
+			// A gate the stopped resume still raised: the turn stays open on
+			// it, the same suspension any continuation's gate is.
+			s.publishDetachedGatewayApprovalRequest(ctx, sid, rae)
+			return
+		}
+		if !errors.Is(runErr, run.ErrTurnStoppedByRejection) {
+			slog.Error("resume rejected stop after action", "run_id", runID, "action_id", actionID, "err", runErr)
+		}
+	}
+	// The refusal is recorded and the turn has ended: close the run the way
+	// a direct cancel always closed it.
+	s.cancelGatewayRunDirect(sid, runID)
 }
 
 // expireGatewayApproval turns TTL expiry into a first-class, replayable

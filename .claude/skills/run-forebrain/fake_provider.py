@@ -1031,6 +1031,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if nth == 0:
             for index, command in enumerate(MULTISHELL_COMMANDS):
+                arguments = {"command": command}
+                if index == 0 and os.environ.get("FAKE_SHELL_ESCALATE"):
+                    # The gate plan 129 exercises: only the first call asks,
+                    # so the two behind it are the batch a refusal must answer.
+                    arguments["sandbox_permissions"] = "require_escalated"
+                    arguments["justification"] = "trigger the approval gate"
                 self.write_event(chunk(delta={
                     "role": "assistant",
                     "content": "",
@@ -1038,7 +1044,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "index": index,
                         "id": "call_multi_%d" % index,
                         "type": "function",
-                        "function": {"name": "shell", "arguments": json.dumps({"command": command})},
+                        "function": {"name": "shell", "arguments": json.dumps(arguments)},
                     }],
                 }))
             self.write_event(chunk(finish="tool_calls"))

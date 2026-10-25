@@ -1744,6 +1744,43 @@ func PendingApprovalToolCall(snapshot []llm.Message, toolName, preferredID strin
 	return llm.ToolCall{}, false
 }
 
+// FirstPendingApprovalToolCall returns the first call of the snapshot's
+// parked assistant message that still has no tool result behind it — the call
+// the engine's refusal lands on (the same judgment an approval's replay makes
+// when it spends the answer on the first pending call alone), so a surface
+// drawing the refusal's card names the same call the persisted result row
+// answers. A batch of same-tool calls otherwise resolves to its last member,
+// which is a different call than the one the refusal settled.
+func FirstPendingApprovalToolCall(snapshot []llm.Message) (llm.ToolCall, bool) {
+	pendingIdx := -1
+	for i := len(snapshot) - 1; i >= 0; i-- {
+		if snapshot[i].Role == llm.RoleAssistant && len(snapshot[i].ToolCalls) > 0 {
+			pendingIdx = i
+			break
+		}
+	}
+	if pendingIdx < 0 {
+		return llm.ToolCall{}, false
+	}
+	answered := make(map[string]struct{})
+	for _, msg := range snapshot[pendingIdx+1:] {
+		if msg.Role != llm.RoleTool {
+			continue
+		}
+		if id := strings.TrimSpace(msg.ToolCallID); id != "" {
+			answered[id] = struct{}{}
+		}
+	}
+	for _, call := range snapshot[pendingIdx].ToolCalls {
+		if id := strings.TrimSpace(call.ID); id != "" {
+			if _, ok := answered[id]; !ok {
+				return call, true
+			}
+		}
+	}
+	return llm.ToolCall{}, false
+}
+
 // PendingApprovalToolStepID finds the pending tool call in a saved LLM state.
 // The snapshot is persisted with a run wait, so this also restores the UI card
 // identity after a process restart.

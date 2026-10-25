@@ -297,12 +297,23 @@ function isPlanReviewDeliveredRow(row: { partsJson?: string | null }): boolean {
 }
 
 /**
- * isSteerPreemptedRow reports whether a stored tool row is the drop key of a
- * call a queued user message took the turn from before it started. The call
- * never ran, so the timeline draws nothing for it.
+ * The body a tool row carries when the run never started that call because a
+ * refusal without words stopped the turn (plan 129). Like a preempted call,
+ * it never ran: every replay projection that meets the key drops the row
+ * whole. Must stay byte-identical with the runtime's
+ * tool.RejectionStoppedDisplayKey.
  */
-function isSteerPreemptedRow(row: { partsJson?: string | null }): boolean {
-  return String(parseToolDisplayPart(row.partsJson).body ?? '').trim() === STEER_PREEMPTED_KEY
+export const REJECTION_STOPPED_KEY = 'Not run — the user refused a call in this response and stopped the turn.'
+
+/**
+ * isHiddenRunRow reports whether a stored tool row is the drop key of a call
+ * the run never started — a queued user message took the turn from it, or a
+ * refusal without words stopped the turn before it. The call never ran, so
+ * the timeline draws nothing for it.
+ */
+export function isHiddenRunRow(row: { partsJson?: string | null }): boolean {
+  const body = String(parseToolDisplayPart(row.partsJson).body ?? '').trim()
+  return body === STEER_PREEMPTED_KEY || body === REJECTION_STOPPED_KEY
 }
 
 /**
@@ -819,7 +830,7 @@ export function conversationFromTranscript(
       if (isCanceledExitRow(row)) return
       // A call a queued user message took the turn from never ran: the row's
       // body is the drop key, so the row draws nothing.
-      if (isSteerPreemptedRow(row)) return
+      if (isHiddenRunRow(row)) return
       const current = openTurn(row, index)
       drawn.add(stepId)
       current.blocks = [...(current.blocks ?? []), { kind: 'tool', step: toolStepFromRow(row, calls.get(stepId)) }]
@@ -847,7 +858,7 @@ export function conversationFromTranscript(
       // the drop key, so it draws nothing - no card, and no gate anchor
       // either, because the gate never opened. The row still belongs to this
       // call, so it is claimed here.
-      if (answer && isSteerPreemptedRow(answer)) {
+      if (answer && isHiddenRunRow(answer)) {
         drawn.add(call.id)
         continue
       }

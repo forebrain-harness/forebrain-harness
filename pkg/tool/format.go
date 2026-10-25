@@ -35,6 +35,44 @@ const PlanReviewDeliveredDisplayKey = "Plan review delivered — the planner is 
 // whole, the same way they drop PlanReviewDeliveredDisplayKey.
 const SteerPreemptedDisplayKey = "Not run — a queued user message took the turn first."
 
+// RejectionStoppedDisplayKey is the display body persisted for a tool call the
+// run never started because a refusal without words stopped the turn. No
+// surface renders it, like SteerPreemptedDisplayKey: the call never ran, and
+// the refusal's own card already says what happened.
+const RejectionStoppedDisplayKey = "Not run — the user refused a call in this response and stopped the turn."
+
+const (
+	// RejectedStopText is what a primary agent's call refused without words
+	// receives: the turn stops here and waits for the user (Claude Code's text).
+	RejectedStopText           = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+	rejectedWithFeedbackPrefix = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+	deniedText                 = "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). Try a different approach or report the limitation to complete your task."
+	deniedWithFeedbackPrefix   = "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). The user said:\n"
+)
+
+// RejectionText is what a refused call's result tells the model. subagent is
+// a refusal of a subagent's own call; feedback is the user's words.
+//
+//	primary + words → rejectedWithFeedbackPrefix + words
+//	primary, none   → deniedText (only a decline option reaches this: a
+//	                  refusal without words otherwise stops the turn and
+//	                  uses RejectedStopText)
+//	subagent + words → deniedWithFeedbackPrefix + words
+//	subagent, none   → deniedText
+func RejectionText(subagent bool, feedback string) string {
+	feedback = strings.TrimSpace(feedback)
+	if subagent {
+		if feedback != "" {
+			return deniedWithFeedbackPrefix + feedback
+		}
+		return deniedText
+	}
+	if feedback != "" {
+		return rejectedWithFeedbackPrefix + feedback
+	}
+	return deniedText
+}
+
 // DeniedToolDisplayBody is the one sentence a refused tool call shows as its
 // card body — live when the refusal lands, and on every replay of the tool
 // result row that recorded it. feedback is the user's own words from the

@@ -543,6 +543,10 @@ type ToolApprovalResumeState struct {
 	// user: there are no user words to show, and the display half says the
 	// handoff line instead of "(no output)".
 	DeliveredReview bool
+	// Stopped marks a resume after the user refused the call without words:
+	// the refusal is recorded on the parked call and the turn ends there,
+	// with no model request behind it.
+	Stopped bool
 	// BeginContinuation atomically crosses the durable execution fence. It is
 	// intentionally runtime-only: the wait row persists the phase, while the
 	// callback binds this process's owner token to the exact continuation.

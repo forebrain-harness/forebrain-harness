@@ -4,6 +4,8 @@ import { setLocale, t } from '@/locales'
 import { forebrainApi } from '@/lib/api'
 import { lastSessionIdValue, persistLastSessionId } from '@/composables/useLastSession'
 import {
+  REJECTION_STOPPED_KEY,
+  STEER_PREEMPTED_KEY,
   applyAssistantRunEventMetadata,
   applyCompactionUpdate,
   appendGoalLine,
@@ -19,6 +21,7 @@ import {
   formatWorkedDurationLabel,
   hasVisibleBlocks,
   imageBytesLabel,
+  isHiddenRunRow,
   isSubagentDispatchTool,
   placeBeforeGateAnchor,
   previewFieldsFromMeta,
@@ -5769,3 +5772,31 @@ describe('useChatStream stream_partial', () => {
       Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
     }
   })
+
+// A stored tool row whose display body is a not-run drop key draws nothing on
+// any timeline: the steer-preempted key always did, and the refusal-stopped
+// key a wordless rejection leaves behind it (plan 129) does too. Any other
+// body stays a visible row.
+describe('isHiddenRunRow', () => {
+  const rowWithBody = (body: string) => ({
+    partsJson: JSON.stringify([{ type: 'tool_display', body }]),
+  })
+
+  it('drops the steer-preempted row', () => {
+    expect(isHiddenRunRow(rowWithBody(STEER_PREEMPTED_KEY))).toBe(true)
+  })
+
+  it('drops the rejection-stopped row', () => {
+    expect(isHiddenRunRow(rowWithBody(REJECTION_STOPPED_KEY))).toBe(true)
+  })
+
+  it('keeps every other row visible', () => {
+    expect(isHiddenRunRow(rowWithBody('Denied'))).toBe(false)
+    expect(isHiddenRunRow({})).toBe(false)
+  })
+
+  it('keeps the runtime keys byte-identical', () => {
+    expect(STEER_PREEMPTED_KEY).toBe('Not run — a queued user message took the turn first.')
+    expect(REJECTION_STOPPED_KEY).toBe('Not run — the user refused a call in this response and stopped the turn.')
+  })
+})

@@ -748,6 +748,10 @@ type resumeVariant struct {
 	// trimming the snapshot when the approval cleared context, and capturing
 	// the replayed tool results.
 	denied bool
+	// stopped is a refusal without words (plan 129): the refusal is recorded
+	// on the parked call, the calls behind it are answered not-run, and the
+	// turn ends without a model request — the run finishes cancelled.
+	stopped bool
 }
 
 func (s *ChatSession) runResumeApprovedTurn(p *chatApprovalResume, actionID string) {
@@ -756,6 +760,10 @@ func (s *ChatSession) runResumeApprovedTurn(p *chatApprovalResume, actionID stri
 
 func (s *ChatSession) runResumeDeniedTurn(p *chatApprovalResume, actionID string) {
 	s.runResumeTurn(p, actionID, resumeVariant{logLabel: "resume-denied", denied: true})
+}
+
+func (s *ChatSession) runResumeRejectedStopTurn(p *chatApprovalResume, actionID string) {
+	s.runResumeTurn(p, actionID, resumeVariant{logLabel: "resume-rejected-stop", stopped: true})
 }
 
 // resumeSessionID returns the AgentSessionID the resumed tool call should run
@@ -811,7 +819,7 @@ func (s *ChatSession) resumeAgentContext(
 		agBase = tool.WithHookAgentID(agBase, agentID)
 	}
 	agBase = tool.WithRunID(agBase, p.RunID)
-	if !v.denied {
+	if !v.denied && !v.stopped {
 		agBase = tool.WithApprovedActionID(agBase, actionID)
 	}
 	resumeSnapshot := p.SessionSnapshot
@@ -853,14 +861,22 @@ func (s *ChatSession) resumeAgentContext(
 		}
 	}
 	if len(resumeSnapshot) > 0 {
-		resumeState := &tool.ToolApprovalResumeState{
-			Session:      resumeSnapshot,
-			Denied:       v.denied,
-			DenyReason:   denyReason,
-			DenyFeedback: resume.Feedback,
-			// A delivered review has no user words: the persisted denial's
-			// display half says the handoff line instead.
-			DeliveredReview: resume.DeliveredReview,
+		var resumeState *tool.ToolApprovalResumeState
+		if v.stopped {
+			// A refusal without words: the refusal is recorded on the parked
+			// call and the turn ends there, with no model request behind it
+			// (plan 129).
+			resumeState = turn.ResumeRejectedStop(resumeSnapshot)
+		} else {
+			resumeState = &tool.ToolApprovalResumeState{
+				Session:      resumeSnapshot,
+				Denied:       v.denied,
+				DenyReason:   denyReason,
+				DenyFeedback: resume.Feedback,
+				// A delivered review has no user words: the persisted denial's
+				// display half says the handoff line instead.
+				DeliveredReview: resume.DeliveredReview,
+			}
 		}
 		// The fence travels with the resume state rather than being crossed
 		// here, so it opens when the replay starts and closes when the replay
@@ -878,8 +894,10 @@ func (s *ChatSession) resumeAgentContext(
 	// The LLM then loses knowledge that the tool was called and approved
 	// (e.g. exit_plan_mode), and may re-invoke it on subsequent turns.
 	// A denial replays nothing, so it has no results to capture.
+	// A denial replays nothing, so it has no results to capture — and a
+	// stopped resume executes nothing either.
 	var replayCapture *tool.ReplayResultCapture
-	if !v.denied {
+	if !v.denied && !v.stopped {
 		replayCapture = tool.NewReplayResultCapture()
 		agBase = tool.WithReplayResultCapture(agBase, replayCapture)
 	}
@@ -924,7 +942,7 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 	if s.chatLog != nil {
 		s.chatLog.Debugf("forebrain chat %s session=%s run_id=%s action_id=%s", v.logLabel, p.SessionID, p.RunID, actionID)
 	}
-	if !v.denied && s.actionSvc() != nil && s.runner() != nil {
+	if !v.denied && !v.stopped && s.actionSvc() != nil && s.runner() != nil {
 		if act, aerr := s.actionSvc().Get(context.Background(), actionID); aerr == nil && act != nil && act.Status == state.ActionApproved {
 			service := turn.ApprovalService{Actions: s.actionSvc(), Policy: s.runner()}
 			if s.Env != nil {
@@ -1026,7 +1044,10 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 				return
 			}
 		}
-		if errors.Is(err, context.Canceled) {
+		// A refusal without words ends the turn exactly where the user
+		// stopped it: the refusal results are already written, so this is a
+		// cancel's finish — no error card, the run ends cancelled (plan 129).
+		if errors.Is(err, context.Canceled) || errors.Is(err, run.ErrTurnStoppedByRejection) {
 			if s.chatLog != nil {
 				s.chatLog.Infof("forebrain chat %s cancelled session=%s elapsed=%s", v.logLabel, p.SessionID, time.Since(t0))
 			}
@@ -1106,6 +1127,51 @@ func (s *ChatSession) resumeAfterDenial(actionID string) bool {
 	return true
 }
 
+// resumeAfterRejectedStop runs the refusal-without-words continuation a
+// cancelled primary-agent gate now takes: the refusal is recorded on the
+// parked call and the turn ends there — one resume, written like a denial,
+// finished like a cancel (plan 129). Structured after resumeAfterDenial.
+func (s *ChatSession) resumeAfterRejectedStop(actionID string) bool {
+	if s == nil {
+		return false
+	}
+	actionID = strings.TrimSpace(actionID)
+	if actionID == "" {
+		return false
+	}
+	p := s.takePendingApprovalForAction(actionID)
+	// No pending state, or a wait row old enough to carry no snapshot, has
+	// nothing to record the refusal on: report false so the dispatch falls
+	// back to the direct cancel those rows always had.
+	if p == nil || len(p.SessionSnapshot) == 0 {
+		if s.chatLog != nil {
+			s.chatLog.DebugForceFlushf("forebrain tui tool_approval resumeAfterRejectedStop skipped action_id=%s (no snapshot to record the refusal on)", actionID)
+		}
+		return false
+	}
+	if !s.tuiController().ClaimResume(p.RunID, p.SessionID) {
+		if p.OwnsDurableFence && s.runSvc() != nil {
+			_ = s.runSvc().ReleaseWaitResumeOwner(context.Background(), p.RunID, p.ActionID, s.approvalResumeOwner())
+		}
+		return false
+	}
+	s.notifyToolApprovalDenied(p, actionID)
+	if s.runSvc() != nil && strings.TrimSpace(p.RunID) != "" {
+		bg := context.Background()
+		_ = s.runSvc().SetStatus(bg, p.RunID, state.RunStatusRunning)
+	}
+	s.clearPendingApproval()
+	if s.runner() == nil || s.pipe() == nil {
+		return true
+	}
+	if s.surfaceSyncResume.Load() {
+		s.runResumeRejectedStopTurn(p, actionID)
+		return true
+	}
+	go s.runResumeRejectedStopTurn(p, actionID)
+	return true
+}
+
 // notifyToolApprovalDenied replaces the pending approval card before the
 // asynchronous denied resume calls back into the model. The orchestration run
 // continues with a denial tool result, but the original UI tool step is done.
@@ -1113,7 +1179,11 @@ func (s *ChatSession) notifyToolApprovalDenied(p *chatApprovalResume, actionID s
 	if s == nil || p == nil {
 		return
 	}
-	call, ok := turn.PendingApprovalToolCall(p.SessionSnapshot, p.ToolName, p.ToolStepID)
+	// The card names the call the refusal lands on — the first still-missing
+	// call of the parked message, the engine's own judgment — rather than the
+	// wait row's step ID, which a batch of same-tool calls resolves to its
+	// last member (plan 129).
+	call, ok := turn.FirstPendingApprovalToolCall(p.SessionSnapshot)
 	if !ok {
 		return
 	}

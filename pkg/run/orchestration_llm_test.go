@@ -4446,20 +4446,24 @@ func (c *captureLLM) Execute(_ context.Context, messages []llm.Message, tools []
 	return &llm.Result{Message: &message}, nil
 }
 
-// TestBuildDenialMessageIncludesFeedback verifies that buildDenialMessage
-// appends the user's feedback when non-empty.
-func TestBuildDenialMessageIncludesFeedback(t *testing.T) {
-	withFeedback := buildDenialMessage("exit_plan_mode", "Please focus on the API design instead")
-	if !strings.Contains(withFeedback, "User feedback: Please focus on the API design instead") {
-		t.Fatalf("expected denial message to include feedback, got: %s", withFeedback)
+// rejectionTextFor keeps an exit_plan_mode refusal's composed guidance
+// verbatim — it is the plan direction the resume composed, not a canned
+// sentence — while every other refusal reads the Claude Code sentence for
+// the run it belongs to (plan 129).
+func TestRejectionTextForKeepsComposedPlanGuidance(t *testing.T) {
+	composed := turn.ComposeDenyFeedback(nil, "改成先写测试")
+	if got := rejectionTextFor(context.Background(), llm.ToolCall{Function: llm.FunctionCall{Name: "exit_plan_mode"}}, composed); got != composed {
+		t.Fatalf("exit_plan_mode + words = %q, want the composed guidance verbatim", got)
 	}
-	if !strings.Contains(withFeedback, "exit_plan_mode") {
-		t.Fatalf("expected denial message to include tool name, got: %s", withFeedback)
+	if got := rejectionTextFor(context.Background(), llm.ToolCall{Function: llm.FunctionCall{Name: "exit_plan_mode"}}, "  "); got != toolpkg.RejectionText(false, "") {
+		t.Fatalf("exit_plan_mode without words = %q, want the fallback sentence", got)
 	}
-
-	withoutFeedback := buildDenialMessage("write_file", "")
-	if strings.Contains(withoutFeedback, "User feedback:") {
-		t.Fatalf("expected denial message without feedback to not include feedback section, got: %s", withoutFeedback)
+	if got := rejectionTextFor(context.Background(), llm.ToolCall{Function: llm.FunctionCall{Name: "shell"}}, "use npm"); got != toolpkg.RejectionText(false, "use npm") {
+		t.Fatalf("primary + words = %q, want the primary sentence with the user's words", got)
+	}
+	subCtx := toolpkg.WithHookAgentID(context.Background(), "agent-7")
+	if got := rejectionTextFor(subCtx, llm.ToolCall{Function: llm.FunctionCall{Name: "shell"}}, "use npm"); got != toolpkg.RejectionText(true, "use npm") {
+		t.Fatalf("subagent + words = %q, want the subagent sentence with the user's words", got)
 	}
 }
 
@@ -4515,25 +4519,25 @@ func TestToolOrchestrationResumeDeniedIncludesFeedback(t *testing.T) {
 		t.Fatalf("resume Execute err=%v", rerr)
 	}
 
-	// The second LLM call should have received the denial message with feedback.
+	// The second LLM call should have received the refusal sentence with the
+	// user's words appended (plan 129: the primary agent's with-words shape).
 	if inner.calls < 2 {
 		t.Fatalf("expected at least 2 LLM calls, got %d", inner.calls)
 	}
 	resumeSession := inner.sessions[1]
+	want := toolpkg.RejectionText(false, feedback)
 	var foundDenial bool
 	for _, msg := range resumeSession {
 		if msg.Role == llm.RoleTool {
 			for _, part := range msg.Parts {
-				if part.Type == llm.ContentTypeText {
-					if strings.Contains(part.Text, "denied by user") && strings.Contains(part.Text, feedback) {
-						foundDenial = true
-					}
+				if part.Type == llm.ContentTypeText && part.Text == want {
+					foundDenial = true
 				}
 			}
 		}
 	}
 	if !foundDenial {
-		t.Fatalf("denial message with feedback not found in resume session messages")
+		t.Fatalf("refusal sentence %q not found in resume session messages", want)
 	}
 }
 
@@ -4558,9 +4562,9 @@ func (m *exitPlanCallLLM) Execute(_ context.Context, messages []llm.Message, _ [
 }
 
 // The denial tool result carries its display half: the model still receives
-// the instruction text buildDenialMessage writes, while the card a replay
-// draws from the persisted row shows the one sentence the live card showed —
-// the user's own words — not the text written for the model.
+// the refusal's instruction text, while the card a replay draws from the
+// persisted row shows the one sentence the live card showed — the user's own
+// words — not the text written for the model.
 func TestDeniedToolResultCarriesItsDisplay(t *testing.T) {
 	st := toolpkg.NewState(t.TempDir())
 	st.RegisterToolMeta(event.ToolMeta{Name: "exit_plan_mode", Destructive: true})
@@ -4614,7 +4618,7 @@ func TestDeniedToolResultCarriesItsDisplay(t *testing.T) {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if part.Type == llm.ContentTypeText && strings.Contains(part.Text, "denied by user") {
+			if part.Type == llm.ContentTypeText && part.Text == composed {
 				denial = &msg
 			}
 		}
@@ -4627,9 +4631,6 @@ func TestDeniedToolResultCarriesItsDisplay(t *testing.T) {
 	}
 	if got := denial.ToolDisplay.Body; got != toolpkg.DeniedToolDisplayBody("exit_plan_mode", "改成先写测试") {
 		t.Fatalf("denial display body = %q, want the sentence the live card shows", got)
-	}
-	if body := denial.ToolDisplay.Body; strings.Contains(body, "Tool approval denied by user") {
-		t.Fatalf("the display half must not show the model-facing instruction: %q", body)
 	}
 	var meta struct {
 		ToolName string `json:"tool_name"`
@@ -4700,7 +4701,7 @@ func TestDeliveredReviewDenialCarriesTheHandoffLine(t *testing.T) {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if part.Type == llm.ContentTypeText && strings.Contains(part.Text, "denied by user") {
+			if part.Type == llm.ContentTypeText && part.Text == turn.ComposeReviewDeliveryGuidance(nil) {
 				denial = &msg
 			}
 		}
@@ -4808,7 +4809,7 @@ func TestDeniedToolCallAnnouncesItsSettledStep(t *testing.T) {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if part.Type == llm.ContentTypeText && strings.Contains(part.Text, "denied by user") {
+			if part.Type == llm.ContentTypeText && part.Text == composed {
 				denial = &msg
 			}
 		}
@@ -4908,7 +4909,7 @@ func TestDeliveredReviewDenialAnnouncesNoStep(t *testing.T) {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if part.Type == llm.ContentTypeText && strings.Contains(part.Text, "denied by user") {
+			if part.Type == llm.ContentTypeText && part.Text == turn.ComposeReviewDeliveryGuidance(nil) {
 				denial = &msg
 			}
 		}
@@ -4983,28 +4984,25 @@ func TestToolOrchestrationResumeDeniedWithoutFeedback(t *testing.T) {
 		t.Fatalf("resume Execute err=%v", rerr)
 	}
 
-	// Verify the denial message exists but does NOT include "User feedback:".
+	// Verify the refusal sentence a primary agent without words receives —
+	// the decline-only shape — and that it carries no user-words slot.
 	if inner.calls < 2 {
 		t.Fatalf("expected at least 2 LLM calls, got %d", inner.calls)
 	}
 	resumeSession := inner.sessions[1]
+	want := toolpkg.RejectionText(false, "")
 	var foundDenial bool
 	for _, msg := range resumeSession {
 		if msg.Role == llm.RoleTool {
 			for _, part := range msg.Parts {
-				if part.Type == llm.ContentTypeText {
-					if strings.Contains(part.Text, "denied by user") {
-						foundDenial = true
-						if strings.Contains(part.Text, "User feedback:") {
-							t.Fatalf("denial message should not include feedback section when DenyReason is empty")
-						}
-					}
+				if part.Type == llm.ContentTypeText && part.Text == want {
+					foundDenial = true
 				}
 			}
 		}
 	}
 	if !foundDenial {
-		t.Fatalf("denial message not found in resume session messages")
+		t.Fatalf("refusal sentence %q not found in resume session messages", want)
 	}
 }
 
@@ -10446,5 +10444,267 @@ func TestTruncatedTwiceFallsBackToNonStreaming(t *testing.T) {
 	}
 	if fallbacks != 1 {
 		t.Fatalf("streaming_fallback notices = %d, want exactly 1 (of %d notices)", fallbacks, len(notices))
+	}
+}
+
+// gatedThenPlainLLM asks for a gated call and a plain call in one answer, the
+// shape a refusal lands on: the gate parks the run before either call has a
+// result, so a resume decides the first and owes the second an execution.
+type gatedThenPlainLLM struct {
+	mu       sync.Mutex
+	calls    int
+	sessions [][]llm.Message
+}
+
+func (m *gatedThenPlainLLM) Execute(_ context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	m.sessions = append(m.sessions, append([]llm.Message(nil), messages...))
+	if m.calls == 1 {
+		msg := llm.AssistantMessage(nil,
+			llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "gated", Arguments: `{}`}},
+			llm.ToolCall{ID: "call-2", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "plain", Arguments: `{}`}},
+		)
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer after the refusal")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+}
+
+func gatedThenPlainTools(t *testing.T) (*llm.Tool, *llm.Tool) {
+	t.Helper()
+	gated, err := llm.NewTool("gated", "gated tool", func(ctx context.Context, _ *struct{}) (string, error) {
+		if toolpkg.ApprovedActionIDFromContext(ctx) == "" {
+			return "", &toolpkg.RequiresActionError{
+				ActionID:   "act-1",
+				ActionKind: "gated",
+				ToolName:   "gated",
+				ToolInput:  map[string]any{},
+			}
+		}
+		return "gated ok", nil
+	})
+	if err != nil {
+		t.Fatalf("gated tool: %v", err)
+	}
+	plain, err := llm.NewTool("plain", "plain tool", func(context.Context, *struct{}) (string, error) {
+		return "plain ran", nil
+	})
+	if err != nil {
+		t.Fatalf("plain tool: %v", err)
+	}
+	return gated, plain
+}
+
+func gatedThenPlainState(t *testing.T) *toolpkg.State {
+	t.Helper()
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "gated", Destructive: true})
+	st.RegisterToolMeta(event.ToolMeta{Name: "plain", ReadOnly: true})
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return "act-1", true, nil
+	})
+	return st
+}
+
+func gatedThenPlainGate(t *testing.T, wrapped llm.LLM, gated, plain *llm.Tool) *toolpkg.RequiresActionError {
+	t.Helper()
+	_, err := wrapped.Execute(
+		context.Background(),
+		[]llm.Message{llm.UserMessage(llm.Text("run them"))},
+		[]*llm.Tool{gated, plain},
+	)
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) || rae == nil {
+		t.Fatalf("expected RequiresActionError, got %T %v", err, err)
+	}
+	return rae
+}
+
+// A refusal with words refuses the asked-about call alone: the model reads
+// the with-words sentence on that call, the call behind the gate still runs,
+// and the turn continues to the model (plan 129).
+func TestResumeDeniedWithWordsRunsTheOtherCalls(t *testing.T) {
+	st := gatedThenPlainState(t)
+	gated, plain := gatedThenPlainTools(t)
+	inner := &gatedThenPlainLLM{}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+	rae := gatedThenPlainGate(t, wrapped, gated, plain)
+
+	ctx := toolpkg.WithToolApprovalResume(context.Background(), &toolpkg.ToolApprovalResumeState{
+		Session:      rae.SessionSnapshot,
+		Denied:       true,
+		DenyReason:   "use echo instead",
+		DenyFeedback: "use echo instead",
+	})
+	if _, rerr := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("ignored"))}, []*llm.Tool{gated, plain}); rerr != nil {
+		t.Fatalf("resume Execute err=%v", rerr)
+	}
+
+	if inner.calls != 2 {
+		t.Fatalf("model calls = %d, want 2: the refusal continues the turn", inner.calls)
+	}
+	second := inner.sessions[1]
+	results := toolResultMessages(second)
+	if len(results) != 2 {
+		t.Fatalf("tool results = %d, want 2: %#v", len(results), second)
+	}
+	if got := results[0].ToolCallID; got != "call-1" {
+		t.Fatalf("first tool result id = %q, want the refused call-1", got)
+	}
+	if want := toolpkg.RejectionText(false, "use echo instead"); results[0].TextContent() != want {
+		t.Fatalf("refused call-1 text = %q, want %q", results[0].TextContent(), want)
+	}
+	if got := results[1].ToolCallID; got != "call-2" {
+		t.Fatalf("second tool result id = %q, want the replayed call-2", got)
+	}
+	if got := results[1].TextContent(); got != "plain ran" {
+		t.Fatalf("replayed call-2 text = %q, want the executed result %q", got, "plain ran")
+	}
+}
+
+// A refusal without words records the refusal and ends the turn: every still
+// missing call is answered with the stop sentence, the calls behind the gate
+// carry the hidden display and announce no step, and no model request is
+// made — the resume returns ErrTurnStoppedByRejection instead (plan 129).
+func TestResumeStoppedAnswersEveryCallAndEndsTheTurn(t *testing.T) {
+	st := gatedThenPlainState(t)
+	var mu sync.Mutex
+	var steps []toolpkg.StepEvent
+	st.SetStepHook(func(_ context.Context, evt toolpkg.StepEvent) {
+		mu.Lock()
+		steps = append(steps, evt)
+		mu.Unlock()
+	})
+	gated, plain := gatedThenPlainTools(t)
+	inner := &gatedThenPlainLLM{}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+	rae := gatedThenPlainGate(t, wrapped, gated, plain)
+
+	capture := NewPartialSessionCapture()
+	res, rerr := wrapped.Execute(
+		WithPartialSessionCapture(toolpkg.WithToolApprovalResume(context.Background(), &toolpkg.ToolApprovalResumeState{
+			Session: rae.SessionSnapshot,
+			Stopped: true,
+		}), capture),
+		[]llm.Message{llm.UserMessage(llm.Text("ignored"))},
+		[]*llm.Tool{gated, plain},
+	)
+	if res != nil {
+		t.Fatalf("resume result = %#v, want none: the turn ends without a model request", res)
+	}
+	if !errors.Is(rerr, ErrTurnStoppedByRejection) {
+		t.Fatalf("resume err = %v, want ErrTurnStoppedByRejection", rerr)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("model calls = %d, want 1: the stopped resume asks the model nothing", inner.calls)
+	}
+
+	// The refusal's own record reached the step queue: one refused card for
+	// the asked-about call, nothing for the rest.
+	mu.Lock()
+	deniedSteps := 0
+	for _, evt := range steps {
+		if evt.Denied {
+			deniedSteps++
+		}
+	}
+	mu.Unlock()
+	if deniedSteps != 1 {
+		t.Fatalf("denied steps = %d, want exactly the asked-about call's card", deniedSteps)
+	}
+
+	// The session the capture holds: the parked assistant row plus a result
+	// for each of its calls — the first the stop sentence with the refused
+	// call's own card, the second the same sentence under the hidden key, so
+	// the assistant row is never left dangling.
+	snap := capture.Snapshot()
+	if len(snap) == 0 {
+		t.Fatal("the stopped resume captured no session")
+	}
+	parked := -1
+	for i := len(snap) - 1; i >= 0; i-- {
+		if snap[i].Role == llm.RoleAssistant && len(snap[i].ToolCalls) > 0 {
+			parked = i
+			break
+		}
+	}
+	if parked < 0 {
+		t.Fatal("the parked assistant row is missing from the captured session")
+	}
+	stopped := snap[parked+1:]
+	if len(stopped) != 2 {
+		t.Fatalf("results behind the parked assistant = %d, want 2", len(stopped))
+	}
+	if stopped[0].ToolCallID != "call-1" || stopped[0].TextContent() != toolpkg.RejectedStopText {
+		t.Fatalf("first stopped result = id %q text %q, want call-1 with the stop sentence", stopped[0].ToolCallID, stopped[0].TextContent())
+	}
+	if stopped[0].ToolDisplay == nil || stopped[0].ToolDisplay.Body == toolpkg.RejectionStoppedDisplayKey {
+		t.Fatalf("first stopped result display = %#v, want the refused call's own card", stopped[0].ToolDisplay)
+	}
+	if stopped[1].ToolCallID != "call-2" || stopped[1].TextContent() != toolpkg.RejectedStopText {
+		t.Fatalf("second stopped result = id %q text %q, want call-2 with the stop sentence", stopped[1].ToolCallID, stopped[1].TextContent())
+	}
+	if stopped[1].ToolDisplay == nil || stopped[1].ToolDisplay.Body != toolpkg.RejectionStoppedDisplayKey {
+		t.Fatalf("second stopped result display = %#v, want the hidden key", stopped[1].ToolDisplay)
+	}
+}
+
+// A subagent's own refusal without words keeps the subagent alive: the model
+// reads the try-another-approach sentence, not the primary agent's stop
+// sentence (plan 129).
+func TestResumeDeniedSubagentWithoutWordsGetsDeniedText(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "gated", Destructive: true})
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return "act-1", true, nil
+	})
+
+	gated, err := llm.NewTool("gated", "gated tool", func(ctx context.Context, _ *struct{}) (string, error) {
+		if toolpkg.ApprovedActionIDFromContext(ctx) == "" {
+			return "", &toolpkg.RequiresActionError{
+				ActionID:   "act-1",
+				ActionKind: "gated",
+				ToolName:   "gated",
+				ToolInput:  map[string]any{},
+			}
+		}
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+
+	inner := &approvalGatedSingleToolLLM{}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+
+	_, err = wrapped.Execute(
+		toolpkg.WithHookAgentID(context.Background(), "agent-7"),
+		[]llm.Message{llm.UserMessage(llm.Text("hi"))},
+		[]*llm.Tool{gated},
+	)
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) || rae == nil {
+		t.Fatalf("expected RequiresActionError, got %T %v", err, err)
+	}
+
+	ctx := toolpkg.WithHookAgentID(toolpkg.WithToolApprovalResume(context.Background(), &toolpkg.ToolApprovalResumeState{
+		Session: rae.SessionSnapshot,
+		Denied:  true,
+	}), "agent-7")
+	if _, rerr := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("ignored"))}, []*llm.Tool{gated}); rerr != nil {
+		t.Fatalf("resume Execute err=%v", rerr)
+	}
+
+	if inner.calls != 2 {
+		t.Fatalf("model calls = %d, want 2: a subagent's refusal continues its run", inner.calls)
+	}
+	results := toolResultMessages(inner.sessions[1])
+	if len(results) != 1 {
+		t.Fatalf("tool results = %d, want 1", len(results))
+	}
+	if want := toolpkg.RejectionText(true, ""); results[0].TextContent() != want {
+		t.Fatalf("subagent refusal text = %q, want %q", results[0].TextContent(), want)
 	}
 }

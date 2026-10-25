@@ -2773,3 +2773,45 @@ func TestFormatUserInteractionResultPrintsOtherUnderTheQuestion(t *testing.T) {
 		t.Fatalf("body = %q, want %q", got, want)
 	}
 }
+
+// RejectionText is the model-facing half of every refusal result this side of
+// a delivered review, and its five shapes are the contract the runtime and
+// both surfaces replay: verbatim, because the words are what the user's
+// decision turns into for the model.
+func TestRejectionTextMatchesClaudeCodeVerbatim(t *testing.T) {
+	t.Parallel()
+	const rejectedWithFeedback = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nuse npm"
+	if got := RejectionText(false, "use npm"); got != rejectedWithFeedback {
+		t.Fatalf("primary + words = %q, want %q", got, rejectedWithFeedback)
+	}
+	const primaryNoWords = "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). Try a different approach or report the limitation to complete your task."
+	if got := RejectionText(false, ""); got != primaryNoWords {
+		t.Fatalf("primary, no words = %q, want %q", got, primaryNoWords)
+	}
+	const subagentWithFeedback = "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). The user said:\nuse npm"
+	if got := RejectionText(true, "use npm"); got != subagentWithFeedback {
+		t.Fatalf("subagent + words = %q, want %q", got, subagentWithFeedback)
+	}
+	if got := RejectionText(true, ""); got != primaryNoWords {
+		t.Fatalf("subagent, no words = %q, want %q", got, primaryNoWords)
+	}
+	// The fifth shape: the user's words are trimmed, never echoed padded.
+	if got := RejectionText(false, "  use npm \n"); got != rejectedWithFeedback {
+		t.Fatalf("padded words = %q, want the trimmed sentence %q", got, rejectedWithFeedback)
+	}
+}
+
+// RejectedStopText is what a primary agent's call refused without words
+// receives, and the hidden key is what the calls behind it carry instead of a
+// card. Both are contract text — asserted verbatim so neither drifts.
+func TestRejectionStopContractText(t *testing.T) {
+	t.Parallel()
+	const stop = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+	if RejectedStopText != stop {
+		t.Fatalf("RejectedStopText = %q, want %q", RejectedStopText, stop)
+	}
+	const hidden = "Not run — the user refused a call in this response and stopped the turn."
+	if RejectionStoppedDisplayKey != hidden {
+		t.Fatalf("RejectionStoppedDisplayKey = %q, want %q", RejectionStoppedDisplayKey, hidden)
+	}
+}

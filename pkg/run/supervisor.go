@@ -72,7 +72,10 @@ func (o Options) settleRunError(runCtx context.Context, runID string, err error)
 		return err
 	}
 	_ = o.RunRT.ClearWait(bg, runID)
-	if errors.Is(err, context.Canceled) {
+	// A refusal without words ends the turn the way a user cancel does: the
+	// refusal is already recorded on the parked call, and the run says
+	// cancelled rather than failed (plan 129).
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrTurnStoppedByRejection) {
 		_ = o.RunRT.SetStatus(bg, runID, state.RunStatusCancelled)
 		_ = o.RunRT.CancelRunningDescendants(bg, runID)
 		return err

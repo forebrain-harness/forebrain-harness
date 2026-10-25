@@ -909,7 +909,7 @@ func isPlanReviewDeliveredDisplay(body string) bool {
 // turn from before it started.
 func isHiddenToolDisplay(body string) bool {
 	body = strings.TrimSpace(body)
-	return body == tool.PlanReviewDeliveredDisplayKey || body == tool.SteerPreemptedDisplayKey
+	return body == tool.PlanReviewDeliveredDisplayKey || body == tool.SteerPreemptedDisplayKey || body == tool.RejectionStoppedDisplayKey
 }
 
 // replayApprovalEventFrames rebuilds the frames an approval record carries that

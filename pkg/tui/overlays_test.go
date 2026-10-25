@@ -565,8 +565,10 @@ func TestApprovalOverlayWheelScrollsTallOverlay(t *testing.T) {
 	if _, err := writeEnd.Write([]byte(seq)); err != nil {
 		t.Fatalf("write wheel event: %v", err)
 	}
-	if _, err := writeEnd.Write([]byte{'\r'}); err != nil {
-		t.Fatalf("write Enter: %v", err)
+	// Esc ends the overlay without a repaint (plan 129's No row would reopen
+	// the editor and re-anchor the scroll the wheel just moved).
+	if _, err := writeEnd.Write([]byte{0x1b}); err != nil {
+		t.Fatalf("write Esc: %v", err)
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("overlay run failed: %v", err)
@@ -637,7 +639,9 @@ func TestApprovalOverlayReopenDropsStaleScrollOffset(t *testing.T) {
 		t.Fatalf("reopened approval overlay should anchor on its option rows (offset %d), got %d", wantOffset, openOffset)
 	}
 
-	if _, err := writeEnd.Write([]byte{'\r'}); err != nil {
+	// The fallback row is the No input row (plan 129): the first Enter opens
+	// its editor, an empty second Enter refuses without words.
+	if _, err := writeEnd.Write([]byte{'\r', '\r'}); err != nil {
 		t.Fatalf("write Enter: %v", err)
 	}
 	if err := <-done; err != nil {
@@ -969,7 +973,7 @@ func TestApprovalFeedbackLayoutTracksHardAndSoftWraps(t *testing.T) {
 }
 
 func TestApprovalFeedbackBuildUsesLayoutCursor(t *testing.T) {
-	o := &approvalOverlay{planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("abcd中文ef\nnext")
 	o.feedbackCursor = len([]rune("abcd中文"))
 
@@ -991,7 +995,7 @@ func TestApprovalFeedbackBuildUsesLayoutCursor(t *testing.T) {
 // it would be carrying are already spelled out in the footer.
 func TestApprovalFeedbackRowsFitTheViewportWidth(t *testing.T) {
 	const width = 80
-	o := &approvalOverlay{planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune(strings.Repeat("feedback ", 40) + "中文内容")
 	o.feedbackCursor = len(o.feedbackBuf)
 
@@ -1007,7 +1011,7 @@ func TestApprovalFeedbackRowsFitTheViewportWidth(t *testing.T) {
 		t.Fatalf("the row above the field is not the whole title, so the title wrapped: %q", title)
 	}
 	footer := stripANSI(lines[len(lines)-1])
-	if !strings.Contains(footer, "newline") || !strings.Contains(footer, "submit feedback") {
+	if !strings.Contains(footer, "newline") || !strings.Contains(footer, "Enter to submit") {
 		t.Fatalf("the footer must carry the newline and submit hints on one row, got %q", footer)
 	}
 }
@@ -1016,7 +1020,7 @@ func TestApprovalFeedbackRowsFitTheViewportWidth(t *testing.T) {
 // must drop the layout with it: a layout left behind describes a buffer that is
 // no longer there.
 func TestApprovalFeedbackLayoutIsClearedWithTheBuffer(t *testing.T) {
-	o := &approvalOverlay{planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("some feedback\nover two rows")
 	o.feedbackCursor = len(o.feedbackBuf)
 	o.buildApprovalContent(40)
@@ -1024,7 +1028,7 @@ func TestApprovalFeedbackLayoutIsClearedWithTheBuffer(t *testing.T) {
 		t.Fatalf("expected the field to occupy several rows, got %d", len(o.feedbackLayout.rows))
 	}
 
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyEscape})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyEscape})
 	if o.feedbackBuf != nil || o.feedbackLayout.rows != nil || o.feedbackLayout.lines != nil {
 		t.Fatalf("cancelling feedback left buf=%q layout=%#v", string(o.feedbackBuf), o.feedbackLayout)
 	}
@@ -1034,24 +1038,24 @@ func TestApprovalFeedbackLayoutIsClearedWithTheBuffer(t *testing.T) {
 }
 
 func TestApprovalFeedbackVerticalNavigationUsesVisualRows(t *testing.T) {
-	o := &approvalOverlay{planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("abcdefghi\nxy")
 	o.feedbackCursor = 4
 
 	o.buildApprovalContent(10)
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyDown})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyDown})
 	if o.feedbackCursor != 9 {
 		t.Fatalf("Down to short soft-wrapped row cursor = %d, want 9", o.feedbackCursor)
 	}
 
 	o.buildApprovalContent(10)
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyDown})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyDown})
 	if o.feedbackCursor != 12 {
 		t.Fatalf("Down across hard newline cursor = %d, want 12", o.feedbackCursor)
 	}
 
 	o.buildApprovalContent(10)
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyUp})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyUp})
 	if o.feedbackCursor != 8 {
 		t.Fatalf("Up from hard line cursor = %d, want 8", o.feedbackCursor)
 	}
@@ -1062,7 +1066,7 @@ func TestApprovalFeedbackVerticalNavigationUsesVisualRows(t *testing.T) {
 // row's first, so a visual-row End would render the caret a row below the key
 // that was pressed.
 func TestApprovalFeedbackHomeEndMoveToTheHardLineEdges(t *testing.T) {
-	o := &approvalOverlay{planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("abcdefghi\nxy\n")
 	wrapped := len([]rune("abcdefghi"))
 
@@ -1072,7 +1076,7 @@ func TestApprovalFeedbackHomeEndMoveToTheHardLineEdges(t *testing.T) {
 	if len(o.feedbackLayout.rows) != 4 {
 		t.Fatalf("expected the fixture to lay out as four rows, got %d", len(o.feedbackLayout.rows))
 	}
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyHome})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyHome})
 	if o.feedbackCursor != 0 {
 		t.Fatalf("Home from a wrapped row = %d, want the hard line start 0", o.feedbackCursor)
 	}
@@ -1081,7 +1085,7 @@ func TestApprovalFeedbackHomeEndMoveToTheHardLineEdges(t *testing.T) {
 		t.Fatalf("Home left the caret at (%d,%d), want the first row at column 2", o.feedbackLayout.cursorRow, o.feedbackLayout.cursorCol)
 	}
 
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyEnd})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyEnd})
 	if o.feedbackCursor != wrapped {
 		t.Fatalf("End from the first row = %d, want the hard line end %d", o.feedbackCursor, wrapped)
 	}
@@ -1095,7 +1099,7 @@ func TestApprovalFeedbackHomeEndMoveToTheHardLineEdges(t *testing.T) {
 	o.feedbackCursor = len(o.feedbackBuf)
 	o.buildApprovalContent(10)
 	for _, key := range []rawKey{rawKeyHome, rawKeyEnd} {
-		o.handlePlanDenyKey(parsedKey{kind: key})
+		o.handleFeedbackKey(parsedKey{kind: key})
 		if o.feedbackCursor != len(o.feedbackBuf) {
 			t.Fatalf("key %v on the trailing empty line moved the caret to %d", key, o.feedbackCursor)
 		}
@@ -1105,11 +1109,11 @@ func TestApprovalFeedbackHomeEndMoveToTheHardLineEdges(t *testing.T) {
 // Esc steps back to the option list while editing feedback, so Ctrl+C is the
 // key that abandons the approval, the same as on every other modal row.
 func TestApprovalFeedbackCtrlCCancelsTheApproval(t *testing.T) {
-	o := &approvalOverlay{planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("half-written feedback")
 	o.feedbackCursor = len(o.feedbackBuf)
 
-	decision, done := o.handlePlanDenyKey(parsedKey{kind: rawKeyCtrlC})
+	decision, done := o.handleFeedbackKey(parsedKey{kind: rawKeyCtrlC})
 	if !done || !decision.Cancelled {
 		t.Fatalf("Ctrl+C while editing feedback = (%#v, done=%v), want a cancelled approval", decision, done)
 	}
@@ -1132,7 +1136,7 @@ func TestApprovalFeedbackPageKeysScrollTheOverlay(t *testing.T) {
 	t.Cleanup(r.DisableViewportMode)
 	o := newApprovalOverlay(context.Background(), io.Discard, newRawSelector(nil, r), editApprovalRequest(t, 57), nil)
 	o.resetFocusForOpen()
-	o.planDenyEditing = true
+	o.feedback = feedbackPlanDeny
 	o.feedbackBuf = []rune("why this plan is wrong")
 	o.feedbackCursor = len(o.feedbackBuf)
 	o.renderViewport()
@@ -1144,7 +1148,7 @@ func TestApprovalFeedbackPageKeysScrollTheOverlay(t *testing.T) {
 		t.Fatalf("the fixture must be tall enough to scroll")
 	}
 
-	if _, done := o.handlePlanDenyKey(parsedKey{kind: rawKeyPageUp}); done {
+	if _, done := o.handleFeedbackKey(parsedKey{kind: rawKeyPageUp}); done {
 		t.Fatal("PageUp ended the overlay")
 	}
 	o.renderViewport()
@@ -1160,7 +1164,7 @@ func TestApprovalFeedbackPageKeysScrollTheOverlay(t *testing.T) {
 	}
 
 	// Typing re-anchors the overlay on the caret and brings it back.
-	if _, done := o.handlePlanDenyKey(parsedKey{kind: rawKeyRune, r: '!'}); done {
+	if _, done := o.handleFeedbackKey(parsedKey{kind: rawKeyRune, r: '!'}); done {
 		t.Fatal("typing ended the overlay")
 	}
 	o.renderViewport()
@@ -1173,7 +1177,7 @@ func TestApprovalFeedbackPageKeysScrollTheOverlay(t *testing.T) {
 }
 
 func TestApprovalFeedbackClickPlacesCaret(t *testing.T) {
-	o := &approvalOverlay{planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("abcdefgh中文")
 	o.feedbackCursor = len(o.feedbackBuf)
 	o.feedbackFirstRow = 7
@@ -2378,7 +2382,7 @@ func TestQuestionOtherSelectionDeletesAWideRuneWhole(t *testing.T) {
 // the selection the way a click does.
 func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
 	r := newComposerRenderer(t, 80, 24)
-	o := &approvalOverlay{rs: newRawSelector(nil, r), planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{rs: newRawSelector(nil, r), feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("please fix the plan")
 	o.feedbackCursor = len(o.feedbackBuf)
 	o.keepOptionsInView = true
@@ -2390,7 +2394,7 @@ func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
 	r.ViewportSelectDrag(endCol, row)
 	r.ViewportSelectEnd(endCol, row)
 
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyBackspace})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyBackspace})
 	if got := string(o.feedbackBuf); got != "please  the plan" {
 		t.Fatalf("Delete over a selection should remove it, got %q", got)
 	}
@@ -2417,7 +2421,7 @@ func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
 // a partly covered wide rune whole too.
 func TestApprovalFeedbackSelectionDeletesAWideRuneWhole(t *testing.T) {
 	r := newComposerRenderer(t, 80, 24)
-	o := &approvalOverlay{rs: newRawSelector(nil, r), planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{rs: newRawSelector(nil, r), feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("原始数据")
 	o.feedbackCursor = len(o.feedbackBuf)
 	o.keepOptionsInView = true
@@ -2429,7 +2433,7 @@ func TestApprovalFeedbackSelectionDeletesAWideRuneWhole(t *testing.T) {
 	r.ViewportSelectDrag(endCol+1, row) // 据's trailing cell
 	r.ViewportSelectEnd(endCol+1, row)
 
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyBackspace})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyBackspace})
 	if got := string(o.feedbackBuf); got != "" {
 		t.Fatalf("Delete over 原始数据 should remove all four runes, got %q", got)
 	}
@@ -2646,13 +2650,13 @@ func TestQuestionOtherForwardDeleteDeletesAtTheCaret(t *testing.T) {
 // selection the key replaces.
 func TestApprovalFeedbackForwardDeleteDeletesAtTheCaret(t *testing.T) {
 	r := newComposerRenderer(t, 80, 24)
-	o := &approvalOverlay{rs: newRawSelector(nil, r), planDenyEditing: true, out: io.Discard}
+	o := &approvalOverlay{rs: newRawSelector(nil, r), feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("please fix")
 	o.feedbackCursor = 7
 	o.keepOptionsInView = true
 	o.renderViewport()
 
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyDelete})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyDelete})
 	if got := string(o.feedbackBuf); got != "please ix" {
 		t.Fatalf("forward delete should remove the rune under the caret, got %q", got)
 	}
@@ -2668,7 +2672,7 @@ func TestApprovalFeedbackForwardDeleteDeletesAtTheCaret(t *testing.T) {
 	r.ViewportSelectDrag(endCol, row)
 	r.ViewportSelectEnd(endCol, row)
 
-	o.handlePlanDenyKey(parsedKey{kind: rawKeyDelete})
+	o.handleFeedbackKey(parsedKey{kind: rawKeyDelete})
 	if got := string(o.feedbackBuf); got != "please " {
 		t.Fatalf("forward delete over a selection should remove it, got %q", got)
 	}

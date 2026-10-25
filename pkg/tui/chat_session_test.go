@@ -3654,7 +3654,9 @@ func TestApprovalOverlay_RunLoopHidesHardwareCursor(t *testing.T) {
 	}()
 
 	out.waitForPaint(t)
-	if _, err := writeEnd.Write([]byte{'\r'}); err != nil {
+	// The no-decisions fallback is the No input row (plan 129): the first
+	// Enter opens its editor, an empty second Enter refuses without words.
+	if _, err := writeEnd.Write([]byte{'\r', '\r'}); err != nil {
 		t.Fatalf("write Enter: %v", err)
 	}
 	if err := <-done; err != nil {
@@ -3717,8 +3719,10 @@ func TestApprovalOverlay_RunLoopAfterNavHidesHardwareCursor(t *testing.T) {
 	}()
 
 	out.waitForPaint(t)
-	// Move down to option 2, then back to option 1, then confirm.
-	if _, err := writeEnd.Write([]byte{'j', 'k', '\r'}); err != nil {
+	// Move down to option 2, then back to option 1, then confirm — the
+	// fallback's only row is the No input row (plan 129), so the confirm
+	// opens its editor and an empty Enter refuses without words.
+	if _, err := writeEnd.Write([]byte{'j', 'k', '\r', '\r'}); err != nil {
 		t.Fatalf("write navigation: %v", err)
 	}
 	if err := <-done; err != nil {
@@ -3944,12 +3948,14 @@ func TestApprovalOverlay_YShortcutApprovesAllowOnce(t *testing.T) {
 
 func TestApprovalOverlay_NShortcutCancels(t *testing.T) {
 	req := turn.ToolApprovalRequest{ToolName: "Bash", ToolInputJSON: `{"command":"echo hi"}`}
-	decision, err := runOverlayWithKeys(t, req, []byte{'n'})
+	// n opens the No row's editor; an empty Enter is the refusal without
+	// words (plan 129).
+	decision, err := runOverlayWithKeys(t, req, []byte{'n', '\r'})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if decision.Denied || !decision.Cancelled {
-		t.Fatalf("expected cancelled via n: %#v", decision)
+		t.Fatalf("expected cancelled via n + empty enter: %#v", decision)
 	}
 }
 
@@ -3969,11 +3975,14 @@ func TestApprovalOverlayWebSearchUsesReadableQueryWithoutJSON(t *testing.T) {
 		"Query: latest Go release notes",
 		"Maximum results: 5",
 		"Yes, search the web",
-		"No, don't search",
+		"No",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("web search overlay missing %q:\n%s", want, plain)
 		}
+	}
+	if strings.Contains(plain, "don't search") {
+		t.Fatalf("the No row is one word now (plan 129):\n%s", plain)
 	}
 	if strings.Contains(plain, `{"query"`) || strings.Contains(plain, `"limit"`) {
 		t.Fatalf("web search overlay exposed raw JSON:\n%s", plain)
@@ -4006,11 +4015,14 @@ func TestApprovalOverlayWebFetchShowsThePageAsTheSubject(t *testing.T) {
 		"Would you like me to fetch this page from the public web?",
 		"https://example.com/pricing",
 		"Yes, fetch the page",
-		"No, don't fetch",
+		"No",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("web fetch overlay missing %q:\n%s", want, plain)
 		}
+	}
+	if strings.Contains(plain, "don't fetch") {
+		t.Fatalf("the No row is one word now (plan 129):\n%s", plain)
 	}
 	for _, forbidden := range []string{
 		"Web fetch approval",
@@ -4230,12 +4242,14 @@ func TestApprovalOverlay_DownArrowThenEnterPersistsSuggestedPrefix(t *testing.T)
 
 func TestApprovalOverlay_NumberKey3Cancels(t *testing.T) {
 	req := turn.ToolApprovalRequest{ToolName: "Bash", ToolInputJSON: `{"command":"ls"}`}
-	decision, err := runOverlayWithKeys(t, req, []byte{'3', '\r'})
+	// Key 3 selects the No input row; Enter opens its editor and an empty
+	// Enter refuses without words (plan 129).
+	decision, err := runOverlayWithKeys(t, req, []byte{'3', '\r', '\r'})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if decision.Denied || !decision.Cancelled {
-		t.Fatalf("expected cancelled via key 2: %#v", decision)
+		t.Fatalf("expected cancelled via key 3: %#v", decision)
 	}
 }
 
@@ -4340,7 +4354,7 @@ func TestApprovalOverlay_FileMutationLabels(t *testing.T) {
 			want := []string{
 				"Yes, proceed",
 				"Yes, and don't ask again for these files",
-				"No, and tell Forebrain Harness what to do differently",
+				"No",
 			}
 			if len(choices) != len(want) {
 				t.Fatalf("choices = %d, want %d", len(choices), len(want))
@@ -4383,7 +4397,7 @@ func TestApprovalOverlay_FileMutationDoesNotOfferRuleAmendment(t *testing.T) {
 	rendered := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"y / Y      Yes, proceed (option 1)",
-		"n / N      No, and tell Forebrain Harness what to do differently (option 3)",
+		"n / N      No (option 3)",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("rendered help missing %q:\n%s", want, rendered)
@@ -4683,8 +4697,8 @@ func TestApprovalOverlay_AlwaysLabelShowsPrefix(t *testing.T) {
 	if choices[1].label != "Yes, and don't ask again for commands that start with `go test`" {
 		t.Fatalf("persistent label = %q, want prefix label", choices[1].label)
 	}
-	if choices[2].label != "No, and tell Forebrain Harness what to do differently" {
-		t.Fatalf("cancel label = %q", choices[2].label)
+	if choices[2].label != "No" || !choices[2].feedbackInput {
+		t.Fatalf("cancel label = %q feedbackInput=%v, want the No input row (plan 129)", choices[2].label, choices[2].feedbackInput)
 	}
 }
 
@@ -5267,7 +5281,7 @@ func TestApprovalOverlay_PlanDenyEditLineHasNoPipeCursor(t *testing.T) {
 		PermissionToolName: "exit_plan_mode",
 	}
 	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, withServiceDecisions(req), nil)
-	overlay.planDenyEditing = true
+	overlay.feedback = feedbackPlanDeny
 	overlay.feedbackBuf = []rune("please revise")
 	overlay.feedbackCursor = len(overlay.feedbackBuf)
 	width, _ := overlay.termSize()
@@ -5378,7 +5392,9 @@ func TestApprovalOverlay_RunHoldsRendererMutexWhileAwaitingInput(t *testing.T) {
 		t.Fatal("approval overlay should hold renderer mutex while waiting for input")
 	}
 
-	f.write([]byte{'\r'})
+	// The fallback row is the No input row (plan 129): the first Enter opens
+	// its editor, an empty second Enter refuses without words.
+	f.write([]byte{'\r', '\r'})
 	select {
 	case err := <-done:
 		if err != nil {
@@ -6991,35 +7007,34 @@ func TestCharacterizationApprovalCancel(t *testing.T) {
 		t.Fatalf("Actions[0].Status = %q, want cancelled", got.Actions[0].Status)
 	}
 	if len(got.Runs) != 1 || got.Runs[0].Status != state.RunStatusCancelled {
-		t.Fatalf("Runs = %+v, want exactly 1 cancelled run: cancel aborts rather than resumes", got.Runs)
+		t.Fatalf("Runs = %+v, want exactly 1 cancelled run: the refusal without words ends it (plan 129)", got.Runs)
 	}
-	// Cancel must not resume the agent loop, so there is no further assistant
-	// reply. The call itself is answered though: a cancelled call that kept no
-	// result left the transcript illegal to re-send and forced the next turn's
-	// repair to delete the call from the stored row - which is the row a resume
-	// replays, so the canceled card the user was looking at disappeared with it.
+	// The refusal must not ask the model anything, so there is no further
+	// assistant reply. The call itself is answered though — one continuation
+	// records the refusal on the parked call (plan 129), so the row a resume
+	// replays keeps the card the user is looking at.
 	if len(got.Messages) != 3 {
-		t.Fatalf("Messages = %d, want 3 (user, tool_calls, the cancelled result): %+v", len(got.Messages), got.Messages)
+		t.Fatalf("Messages = %d, want 3 (user, tool_calls, the refused result): %+v", len(got.Messages), got.Messages)
 	}
 	answer := got.Messages[2]
 	if answer.Role != "tool" || answer.ToolStepID != "call-1" {
 		t.Fatalf("Messages[2] = %+v, want the tool row answering call-1", answer)
 	}
-	if answer.Content != turn.CancelledToolCallNote {
-		t.Fatalf("the cancelled result says %q, want the one sentence the model is told", answer.Content)
+	if answer.Content != tool.RejectedStopText {
+		t.Fatalf("the refused result says %q, want the stop sentence the model is told", answer.Content)
 	}
 	display, ok := state.ParseToolDisplayPart(answer.PartsJSON)
 	if !ok {
-		t.Fatalf("the cancelled result carries no display half: %+v", answer)
+		t.Fatalf("the refused result carries no display half: %+v", answer)
 	}
 	if strings.TrimSpace(display.Body) != "" {
-		t.Fatalf("a canceled card claims output it never produced: %q", display.Body)
+		t.Fatalf("a refused card claims output it never produced: %q", display.Body)
 	}
 	if strings.HasPrefix(display.Summary, "ran ") {
-		t.Fatalf("a canceled card claims the call ran: %q", display.Summary)
+		t.Fatalf("a refused card claims the call ran: %q", display.Summary)
 	}
-	if !strings.Contains(display.ToolMetaJSON, `"status":"canceled"`) {
-		t.Fatalf("the cancelled result does not carry the canceled status: %q", display.ToolMetaJSON)
+	if !strings.Contains(display.ToolMetaJSON, `"status":"denied"`) {
+		t.Fatalf("the refused result does not carry the denied status: %q", display.ToolMetaJSON)
 	}
 }
 
@@ -11188,7 +11203,7 @@ func TestExitPlanOverlayFeedbackSaysTheReviewIsSentAlong(t *testing.T) {
 	req := exitPlanReviewRequest(t, "# Plan\n")
 	req.PlanReviews = []turn.PlanReviewNote{{Provider: "openai", Model: "gpt-5.1", Text: "Verdict: rework."}}
 	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
-	overlay.planDenyEditing = true
+	overlay.feedback = feedbackPlanDeny
 
 	lines, _ := overlay.buildApprovalContent(100)
 	plain := stripANSI(strings.Join(lines, "\n"))
@@ -31698,4 +31713,227 @@ func TestPanelMCPInventoryReadsTheConversationRunner(t *testing.T) {
 	inv, err := s.PanelMCPInventory()
 	require.NoError(t, err)
 	require.NotNil(t, inv.Entry("global-srv"), "the panel's inventory comes from the conversation's runner")
+}
+
+// escalatedShellCall builds the assistant message that asks for one
+// escalated shell call — the approval gate every refusal test here lands on.
+func escalatedShellCall(callID string) llm.Message {
+	toolArgs, err := json.Marshal(map[string]string{
+		"command": "echo hi", "description": "probe",
+		"sandbox_permissions": "require_escalated", "justification": "characterization test",
+	})
+	if err != nil {
+		panic(err)
+	}
+	return llm.AssistantMessage(nil, llm.ToolCall{
+		ID: callID, Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "shell", Arguments: string(toolArgs)},
+	})
+}
+
+// A refusal without words (plan 129) records the refusal on the parked call
+// and stops the turn: the transcript keeps the assistant tool_calls row with
+// a RejectedStopText result beside it — nothing is stripped — the run ends
+// cancelled, and the model is never asked anything else.
+func TestCharacterizationRefusalWithoutWordsStopsTheTurn(t *testing.T) {
+	s := newCharacterizationSession(t, nil)
+	s.runner().ProjectRoot = s.home()
+	sessionID := "char-reject-stop"
+	s.SetToolApprovalSink(&scriptedApprovalSink{
+		decisions: []turn.ToolApprovalDecision{{Cancelled: true}},
+	})
+	toolCallMsg := escalatedShellCall("call-1")
+	llmDouble := &steerInjectingLLM{results: []*llm.Result{{Message: &toolCallMsg}}}
+	restore := run.SetLLMOverrideForTest(llmDouble)
+	t.Cleanup(restore)
+	if err := s.runner().Load(); err != nil {
+		t.Fatalf("Runner.Load: %v", err)
+	}
+
+	dispatchErr := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{
+		SessionID: sessionID,
+		UserText:  "run echo hi with escalated permissions",
+	})
+	if dispatchErr != nil {
+		t.Fatalf("DispatchSurfaceTurn = %v, want nil (the refusal ends the turn inside the dispatch)", dispatchErr)
+	}
+
+	got := awaitResumedRun(t, s, sessionID)
+	if len(got.Runs) != 1 || got.Runs[0].Status != state.RunStatusCancelled {
+		t.Fatalf("Runs = %+v, want exactly 1 cancelled run (the refusal stopped the turn)", got.Runs)
+	}
+	wantRoles := []string{"user", "assistant", "tool"}
+	if len(got.Messages) != len(wantRoles) {
+		t.Fatalf("Messages = %d, want %d and no model reply behind them: %+v", len(got.Messages), len(wantRoles), got.Messages)
+	}
+	for i, want := range wantRoles {
+		if got.Messages[i].Role != want {
+			t.Fatalf("Messages[%d].Role = %q, want %q (full transcript: %+v)", i, got.Messages[i].Role, want, got.Messages)
+		}
+	}
+	if got.Messages[2].Content != tool.RejectedStopText {
+		t.Fatalf("refused call result = %q, want RejectedStopText (RepairDanglingToolResults must keep the assistant row it answers)", got.Messages[2].Content)
+	}
+}
+
+// A refusal with words refuses that one call and keeps the turn going (plan
+// 129): the refusal result carries the user's words, the model answers after
+// it, and the run completes.
+func TestCharacterizationRefusalWithWordsContinuesTheTurn(t *testing.T) {
+	s := newCharacterizationSession(t, nil)
+	s.runner().ProjectRoot = s.home()
+	sessionID := "char-reject-words"
+	s.SetToolApprovalSink(&scriptedApprovalSink{
+		decisions: []turn.ToolApprovalDecision{{Denied: true, DenyReason: "use echo instead"}},
+	})
+	final := llm.AssistantMessage([]llm.ContentPart{llm.Text("skipped it as asked")})
+	toolCallMsg := escalatedShellCall("call-1")
+	llmDouble := &steerInjectingLLM{results: []*llm.Result{
+		{Message: &toolCallMsg},
+		{Message: &final},
+	}}
+	restore := run.SetLLMOverrideForTest(llmDouble)
+	t.Cleanup(restore)
+	if err := s.runner().Load(); err != nil {
+		t.Fatalf("Runner.Load: %v", err)
+	}
+
+	dispatchErr := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{
+		SessionID: sessionID,
+		UserText:  "run echo hi with escalated permissions",
+	})
+	if dispatchErr != nil {
+		t.Fatalf("DispatchSurfaceTurn = %v, want nil", dispatchErr)
+	}
+
+	got := awaitResumedRun(t, s, sessionID)
+	if len(got.Runs) != 1 || got.Runs[0].Status != state.RunStatusDone {
+		t.Fatalf("Runs = %+v, want exactly 1 done run (the refusal continues the turn)", got.Runs)
+	}
+	wantRoles := []string{"user", "assistant", "tool", "assistant"}
+	if len(got.Messages) != len(wantRoles) {
+		t.Fatalf("Messages = %d, want %d: %+v", len(got.Messages), len(wantRoles), got.Messages)
+	}
+	for i, want := range wantRoles {
+		if got.Messages[i].Role != want {
+			t.Fatalf("Messages[%d].Role = %q, want %q (full transcript: %+v)", i, got.Messages[i].Role, want, got.Messages)
+		}
+	}
+	if want := tool.RejectionText(false, "use echo instead"); got.Messages[2].Content != want {
+		t.Fatalf("refused call result = %q, want %q", got.Messages[2].Content, want)
+	}
+	if got.Messages[3].Content != "skipped it as asked" {
+		t.Fatalf("Messages[3].Content = %q, want the model's post-refusal answer", got.Messages[3].Content)
+	}
+}
+
+// The No row is an input field (plan 129): n opens its editor, and what Enter
+// submits depends on whether anything was written — the primary agent's empty
+// refusal stops the turn, a written one refuses that call alone, a subagent's
+// empty refusal denies its own call and carries on. Esc is the refusal
+// without words wherever the editor is open.
+func TestApprovalOverlayNoRowRefusalSemantics(t *testing.T) {
+	req := turn.ToolApprovalRequest{ToolName: "Bash", ToolInputJSON: `{"command":"echo hi"}`}
+
+	// Empty Enter on the primary agent's No row: refuse without words.
+	decision, err := runOverlayWithKeys(t, req, []byte{'n', '\r'})
+	if err != nil || decision.Denied || !decision.Cancelled {
+		t.Fatalf("empty refusal = %+v err=%v, want cancelled without words", decision, err)
+	}
+	// Written Enter: refuse that one call with the words attached.
+	decision, err = runOverlayWithKeys(t, req, []byte{'n', 'u', 's', 'e', ' ', 'e', 'c', 'h', 'o', '\r'})
+	if err != nil || !decision.Denied || decision.Cancelled || decision.DenyReason != "use echo" {
+		t.Fatalf("written refusal = %+v err=%v, want denied with the words", decision, err)
+	}
+	// Esc in the editor: the refusal without words.
+	decision, err = runOverlayWithKeys(t, req, []byte{'n', 0x1b})
+	if err != nil || decision.Denied || !decision.Cancelled {
+		t.Fatalf("esc refusal = %+v err=%v, want cancelled without words", decision, err)
+	}
+
+	// A subagent's own gate: the empty refusal denies its call and the
+	// subagent carries on; Esc aborts it.
+	subReq := req
+	subReq.AgentID = "agent-7"
+	subReq.SubagentType = "explore"
+	decision, err = runOverlayWithKeys(t, subReq, []byte{'n', '\r'})
+	if err != nil || !decision.Denied || decision.Cancelled || decision.DenyReason != "" {
+		t.Fatalf("subagent empty refusal = %+v err=%v, want a wordless denial", decision, err)
+	}
+	decision, err = runOverlayWithKeys(t, subReq, []byte{'n', 0x1b})
+	if err != nil || decision.Denied || !decision.Cancelled {
+		t.Fatalf("subagent esc = %+v err=%v, want cancelled (the subagent stops)", decision, err)
+	}
+}
+
+// keep planning requires words (plan 129): an empty Enter submits nothing and
+// stays in the editor, a written Enter denies with them, and Esc in the editor
+// is the refusal without words that stops the turn.
+func TestApprovalOverlayKeepPlanningRequiresWords(t *testing.T) {
+	req := turn.ToolApprovalRequest{ToolName: "exit_plan_mode", ToolInputJSON: `{}`}
+
+	// Enter on "No, keep planning" opens the editor; an empty Enter keeps it
+	// open — done=false, no decision.
+	f := newFakeRawSelector(t)
+	out := &strings.Builder{}
+	overlay := newApprovalOverlay(context.Background(), out, f.rs, withServiceDecisions(req), nil)
+	decision, done := overlay.handleKey(parsedKey{kind: rawKeyRune, r: '3'})
+	if done || decision.Denied || decision.Cancelled {
+		t.Fatalf("keep planning opened with decision=%+v done=%v", decision, done)
+	}
+	decision, done = overlay.handleKey(parsedKey{kind: rawKeyEnter})
+	if done || decision.Denied || decision.Cancelled {
+		t.Fatalf("empty enter must not submit: decision=%+v done=%v", decision, done)
+	}
+	if overlay.feedback != feedbackPlanDeny {
+		t.Fatalf("feedback kind = %v, want the editor still open", overlay.feedback)
+	}
+	// Words, then Enter: the denial carries them.
+	for _, r := range "write tests first" {
+		overlay.handleKey(parsedKey{kind: rawKeyRune, r: r})
+	}
+	decision, done = overlay.handleKey(parsedKey{kind: rawKeyEnter})
+	if !done || !decision.Denied || decision.DenyReason != "write tests first" {
+		t.Fatalf("written enter = %+v done=%v, want denied with the words", decision, done)
+	}
+
+	// Esc in the editor stops the turn without words.
+	overlay = newApprovalOverlay(context.Background(), out, f.rs, withServiceDecisions(req), nil)
+	overlay.handleKey(parsedKey{kind: rawKeyRune, r: '3'})
+	decision, done = overlay.handleKey(parsedKey{kind: rawKeyEscape})
+	if !done || decision.Denied || !decision.Cancelled {
+		t.Fatalf("editor esc = %+v done=%v, want cancelled without words", decision, done)
+	}
+}
+
+// The No row renders as its label alone until selected; selected, it shows
+// the invitation its editor opens with (plan 129), and the empty editor shows
+// the same placeholder dimmed as its field.
+func TestApprovalOverlayNoRowShowsThePlaceholder(t *testing.T) {
+	req := withServiceDecisions(turn.ToolApprovalRequest{ToolName: "Bash", ToolInputJSON: `{"command":"echo hi"}`})
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+
+	lines, _ := overlay.buildApprovalContent(100)
+	plain := stripANSI(strings.Join(lines, "\n"))
+	if !strings.Contains(plain, "\n  3. No\n") {
+		t.Fatalf("the unselected No row must read as its label alone:\n%s", plain)
+	}
+	if strings.Contains(plain, approvalRefusalPlaceholder) {
+		t.Fatalf("the placeholder belongs to the selected row only:\n%s", plain)
+	}
+
+	overlay.cursor = feedbackInputChoiceIndex(overlay.options)
+	lines, _ = overlay.buildApprovalContent(100)
+	plain = stripANSI(strings.Join(lines, "\n"))
+	if !strings.Contains(plain, "No "+approvalRefusalPlaceholder) {
+		t.Fatalf("the selected No row must show the invitation:\n%s", plain)
+	}
+
+	// The open editor states the same invitation as its empty field.
+	overlay.enterFeedbackMode(feedbackRefusal)
+	lines, _ = overlay.buildApprovalContent(100)
+	plain = stripANSI(strings.Join(lines, "\n"))
+	if !strings.Contains(plain, "> "+approvalRefusalPlaceholder) {
+		t.Fatalf("the empty editor must show the placeholder:\n%s", plain)
+	}
 }

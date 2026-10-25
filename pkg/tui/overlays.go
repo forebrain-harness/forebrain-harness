@@ -48,9 +48,9 @@ type approvalOverlay struct {
 	showHelp       bool
 	feedbackBuf    []rune
 	feedbackCursor int
-	// planDenyEditing is true when the user is entering feedback after choosing
-	// to keep planning. feedbackBuf/feedbackCursor hold that text.
-	planDenyEditing bool
+	// feedback is which flow the feedback editor is open for (see
+	// feedbackKind); feedbackBuf/feedbackCursor hold its text.
+	feedback feedbackKind
 	// feedbackFirstRow is the index, within the lines the overlay last built,
 	// of the first row of the feedback field. feedbackLayout is the exact visual
 	// layout rendered there, shared by cursor placement, vertical movement and
@@ -121,7 +121,11 @@ type overlayChoice struct {
 	cancel      bool
 	ruleContent string
 	isPlanDeny  bool
-	// isPlanReview opens the reviewer picker instead of deciding the approval.
+	// feedbackInput marks the "No" row: selecting it opens the feedback
+	// editor rather than deciding, the way Claude Code's own No row is an
+	// input field — empty Enter refuses without words, written Enter refuses
+	// with them (plan 129).
+	feedbackInput          bool
 	isPlanReview           bool
 	clearContext           bool
 	strictReview           bool
@@ -131,6 +135,26 @@ type overlayChoice struct {
 	// stores, which replaces ruleContent when the row carries one.
 	commandRules []safety.PermissionRuleValue
 }
+
+// approvalRefusalPlaceholder is what the No row's input field shows before the
+// user has typed anything: the invitation to say what to do differently.
+const approvalRefusalPlaceholder = "and tell Forebrain Harness what to do differently"
+
+// feedbackKind names which flow the feedback editor is open for. The closed
+// value means the option list is what is on screen.
+type feedbackKind int
+
+const (
+	feedbackClosed feedbackKind = iota
+	// feedbackRefusal is the No row of an ordinary approval: Enter with words
+	// refuses with them, empty Enter refuses without words, Esc refuses
+	// without words too (plan 129).
+	feedbackRefusal
+	// feedbackPlanDeny is exit-plan's "keep planning": the words are required
+	// — empty Enter submits nothing — while Esc refuses without words and
+	// stops the turn (plan 129).
+	feedbackPlanDeny
+)
 
 // rememberCommandLabel words the persistent command choice from the scope the
 // service derived for it. The engine decides what the choice covers; this
@@ -264,17 +288,14 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 			}
 			choices = append(choices, overlayChoice{label: label, denyOnce: true})
 		case safety.DecisionCancel:
-			label := "No, and tell Forebrain Harness what to do differently"
-			if isApprovalWebSearch(req) {
-				label = "No, don't search"
-			} else if isApprovalWebFetch(req) {
-				label = "No, don't fetch"
-			}
-			choices = append(choices, overlayChoice{label: label, cancel: true})
+			// The No row is the input field Claude Code's is (plan 129): the
+			// label says no, the placeholder says the words are optional, and
+			// selecting the row opens the editor instead of deciding.
+			choices = append(choices, overlayChoice{label: "No", cancel: true, feedbackInput: true})
 		}
 	}
 	if len(choices) == 0 {
-		return []overlayChoice{{label: "No, and tell Forebrain Harness what to do differently", cancel: true}}
+		return []overlayChoice{{label: "No", cancel: true, feedbackInput: true}}
 	}
 	return choices
 }
@@ -376,7 +397,7 @@ func (o *approvalOverlay) Run() (turn.ToolApprovalDecision, error) {
 	o.renderViewport()
 	defer o.rs.withCaretPlacer(o.placeFeedbackCaret)()
 	for {
-		key, err := o.rs.readKeyWithMode(o.planDenyEditing)
+		key, err := o.rs.readKeyWithMode(o.feedback != feedbackClosed)
 		if err != nil {
 			return turn.ToolApprovalDecision{}, err
 		}
@@ -425,7 +446,7 @@ func (o *approvalOverlay) resetFocusForOpen() {
 	o.keepOptionsInView = true
 	o.showExplain = false
 	o.showHelp = false
-	o.planDenyEditing = false
+	o.feedback = feedbackClosed
 	o.exitPlanReviewMode()
 	o.clearFeedback()
 }
@@ -640,18 +661,32 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 	writeLine("")
 
 	switch {
-	case o.planDenyEditing:
-		if len(o.req.PlanReviews) > 0 {
-			writeLine("\x1b[2mThe review above is sent to Forebrain Harness with your feedback.\x1b[0m")
+	case o.feedback != feedbackClosed:
+		if o.feedback == feedbackPlanDeny {
+			if len(o.req.PlanReviews) > 0 {
+				writeLine("\x1b[2mThe review above is sent to Forebrain Harness with your feedback.\x1b[0m")
+			}
+			// The newline shortcut lives in the footer with the other key
+			// hints: spelled out here too, this title runs past 80 columns
+			// and wraps. Esc is the refusal without words: it stops the turn
+			// (plan 129).
+			writeLine("Feedback for Forebrain Harness (Enter to send, Esc to refuse without words):")
+		} else {
+			writeLine("No (Enter to refuse; write first to tell Forebrain Harness what to do differently):")
 		}
-		// The newline shortcut lives in the footer with the other key hints:
-		// spelled out here too, this title runs past 80 columns and wraps.
-		writeLine("Feedback for Forebrain Harness (Enter to send, Esc to cancel):")
 		o.feedbackFirstRow = lineCount
 		o.feedbackLayout = layoutApprovalFeedback(string(o.feedbackBuf), o.feedbackCursor, width)
-		for _, line := range o.feedbackLayout.lines {
-			lines = append(lines, line)
+		if len(o.feedbackBuf) == 0 && o.feedback == feedbackRefusal {
+			// The empty No field states its own invitation, dimmed; the first
+			// keystroke replaces it. The layout still describes the empty
+			// field, so the caret sits where the text will start.
+			lines = append(lines, approvalFeedbackPrompt+"\x1b[2m"+approvalRefusalPlaceholder+"\x1b[0m")
 			lineCount++
+		} else {
+			for _, line := range o.feedbackLayout.lines {
+				lines = append(lines, line)
+				lineCount++
+			}
 		}
 		cursorLine = o.feedbackFirstRow + o.feedbackLayout.cursorRow
 	case o.planReviewPicking:
@@ -676,11 +711,17 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 	default:
 		for i, opt := range o.options {
 			marker := "  "
+			label := opt.label
 			if i == o.cursor {
 				marker = "\x1b[1m> \x1b[0m"
 				o.focusStart = lineCount
+				if opt.feedbackInput {
+					// The No row is an input field: selected, it shows the
+					// invitation its editor opens with (plan 129).
+					label += " \x1b[2m" + approvalRefusalPlaceholder + "\x1b[0m"
+				}
 			}
-			writeLine("%s%d. %s", marker, i+1, opt.label)
+			writeLine("%s%d. %s", marker, i+1, label)
 			if i == o.cursor {
 				o.focusEnd = lineCount
 			}
@@ -785,8 +826,8 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 
 	writeLine("")
 	switch {
-	case o.planDenyEditing:
-		writeLine("\x1b[2mEsc to cancel · Ctrl+J/Alt+Enter for newline · Enter to submit feedback\x1b[0m")
+	case o.feedback != feedbackClosed:
+		writeLine("\x1b[2mEsc to refuse without words · Ctrl+J/Alt+Enter for newline · Enter to submit\x1b[0m")
 	case o.planReviewPicking:
 		writeLine("\x1b[2mEsc to go back · Enter to request the review\x1b[0m")
 	default:
@@ -811,7 +852,7 @@ func (o *approvalOverlay) renderViewport() {
 	width, _ := o.termSize()
 	lines, cursorLine := o.buildApprovalContent(width)
 	cursorCol := 0
-	if cursorLine >= 0 && o.planDenyEditing {
+	if cursorLine >= 0 && o.feedback != feedbackClosed {
 		cursorCol = o.feedbackLayout.cursorCol
 	}
 	if o.rs != nil && o.rs.inViewportOverlay() {
@@ -845,8 +886,8 @@ func (o *approvalOverlay) renderViewport() {
 }
 
 func (o *approvalOverlay) handleKey(key parsedKey) (turn.ToolApprovalDecision, bool) {
-	if o.planDenyEditing {
-		return o.handlePlanDenyKey(key)
+	if o.feedback != feedbackClosed {
+		return o.handleFeedbackKey(key)
 	}
 	if o.planReviewPicking {
 		return o.handlePlanReviewKey(key)
@@ -875,7 +916,14 @@ func (o *approvalOverlay) handleKey(key parsedKey) (turn.ToolApprovalDecision, b
 		// If the selected option is a "keep planning" deny, enter feedback
 		// text input mode instead of immediately denying.
 		if o.cursor < len(o.options) && o.options[o.cursor].isPlanDeny {
-			o.enterPlanDenyMode()
+			o.enterFeedbackMode(feedbackPlanDeny)
+			return turn.ToolApprovalDecision{}, false
+		}
+		// The No row is an input field (plan 129): Enter opens its feedback
+		// editor rather than deciding, so an empty Enter that follows is the
+		// refusal without words.
+		if o.cursor < len(o.options) && o.options[o.cursor].feedbackInput {
+			o.enterFeedbackMode(feedbackRefusal)
 			return turn.ToolApprovalDecision{}, false
 		}
 		// The review row is not a verdict: it opens the reviewer picker and
@@ -901,6 +949,13 @@ func (o *approvalOverlay) handleKey(key parsedKey) (turn.ToolApprovalDecision, b
 			o.cursor = 0
 			return o.commit(), true
 		case 'n', 'N':
+			// The No row opens its editor when there is one; a request whose
+			// only refusal is a decline keeps the one-key deny it always had.
+			if idx := feedbackInputChoiceIndex(o.options); idx >= 0 {
+				o.cursor = idx
+				o.enterFeedbackMode(feedbackRefusal)
+				return turn.ToolApprovalDecision{}, false
+			}
 			o.cursor = denyChoiceIndex(o.options)
 			return o.commit(), true
 		case 'r', 'R':
@@ -953,6 +1008,17 @@ func (o *approvalOverlay) dismissDecision() turn.ToolApprovalDecision {
 	return turn.ToolApprovalDecision{Cancelled: true}
 }
 
+// feedbackInputChoiceIndex finds the No row — the one whose answer is typed
+// rather than chosen — when the request offers one.
+func feedbackInputChoiceIndex(options []overlayChoice) int {
+	for i, option := range options {
+		if option.feedbackInput {
+			return i
+		}
+	}
+	return -1
+}
+
 func denyChoiceIndex(options []overlayChoice) int {
 	for i, option := range options {
 		if option.denyOnce {
@@ -979,7 +1045,7 @@ func (o *approvalOverlay) insertEditText(text string) {
 // composer, so its layout's own row table (feedbackLayout.rows) resolves both
 // anchors, exactly as placeFeedbackCaret resolves a click.
 func (o *approvalOverlay) cutFeedbackSelection() bool {
-	if !o.planDenyEditing || o.rs == nil || !o.rs.inViewportOverlay() {
+	if o.feedback == feedbackClosed || o.rs == nil || !o.rs.inViewportOverlay() {
 		return false
 	}
 	startLine, startCol, endLine, endCol, ok := o.rs.renderer.OverlaySelection()
@@ -1074,7 +1140,7 @@ func (o *approvalOverlay) moveFeedbackCursorToLineEdge(toEnd bool) {
 // line and col are overlay-relative, as the renderer resolved them; the same
 // row table that rendered the field maps the click back into feedbackBuf.
 func (o *approvalOverlay) placeFeedbackCaret(line, col int) {
-	if !o.planDenyEditing {
+	if o.feedback == feedbackClosed {
 		return
 	}
 	row := line - o.feedbackFirstRow
@@ -1110,30 +1176,48 @@ func (o *approvalOverlay) scrollOverlay(delta int) {
 	}
 }
 
-func (o *approvalOverlay) enterPlanDenyMode() {
-	o.planDenyEditing = true
+// enterFeedbackMode opens the feedback editor for one flow: the No row of an
+// ordinary approval, or exit-plan's keep-planning row.
+func (o *approvalOverlay) enterFeedbackMode(kind feedbackKind) {
+	o.feedback = kind
 	o.clearFeedback()
 }
 
-// handlePlanDenyKey handles feedback for a "No, keep planning" decision.
-func (o *approvalOverlay) handlePlanDenyKey(key parsedKey) (turn.ToolApprovalDecision, bool) {
+// handleFeedbackKey drives the feedback editor both flows share — the input,
+// caret, paste and newline handling are one field. What a key means when the
+// field is empty is the flow's own: the No row refuses without words (a
+// subagent's own refusal denies its call and carries on), while keep-planning
+// requires words and leaves an empty Enter in the editor (plan 129).
+func (o *approvalOverlay) handleFeedbackKey(key parsedKey) (turn.ToolApprovalDecision, bool) {
 	o.keepOptionsInView = true
 	switch key.kind {
 	case rawKeyEscape:
-		// Cancel feedback input, return to option list.
-		o.planDenyEditing = false
+		// Esc is the refusal without words, whichever editor is open: the
+		// turn stops and waits for the user (plan 129).
+		o.feedback = feedbackClosed
 		o.clearFeedback()
-		return turn.ToolApprovalDecision{}, false
+		return turn.ToolApprovalDecision{Cancelled: true}, true
 	case rawKeyCtrlC:
-		// Esc steps back to the option list, so Ctrl+C is what abandons the
-		// approval outright, exactly as it does on every other modal row.
 		return turn.ToolApprovalDecision{Cancelled: true}, true
 	case rawKeyEnter:
-		// Submit denial with the feedback text as DenyReason.
 		feedback := strings.TrimSpace(string(o.feedbackBuf))
-		o.planDenyEditing = false
+		if o.feedback == feedbackPlanDeny && feedback == "" {
+			// Keep planning needs the words: an empty Enter submits nothing.
+			return turn.ToolApprovalDecision{}, false
+		}
+		kind := o.feedback
+		o.feedback = feedbackClosed
 		o.clearFeedback()
-		return turn.ToolApprovalDecision{Denied: true, DenyReason: feedback}, true
+		if feedback != "" {
+			return turn.ToolApprovalDecision{Denied: true, DenyReason: feedback}, true
+		}
+		if kind == feedbackRefusal && strings.TrimSpace(o.req.AgentID) != "" {
+			// A subagent's own call refused without words denies that call
+			// and the subagent carries on with the try-another-approach text.
+			return turn.ToolApprovalDecision{Denied: true}, true
+		}
+		// The primary agent's refusal without words stops the turn.
+		return turn.ToolApprovalDecision{Cancelled: true}, true
 	case rawKeyBackspace:
 		if !o.cutFeedbackSelection() && o.feedbackCursor > 0 {
 			o.feedbackBuf = append(o.feedbackBuf[:o.feedbackCursor-1], o.feedbackBuf[o.feedbackCursor:]...)
