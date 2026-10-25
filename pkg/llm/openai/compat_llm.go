@@ -1043,6 +1043,45 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 	if err != nil {
 		return nil, err
 	}
+	if llm.NonStreamingRequestFrom(ctx) {
+		// The request context switched this call to one non-streaming
+		// attempt: run it under the non-streaming deadline and replay the
+		// whole answer to the sink in stream order.
+		req.Stream = false
+		req.StreamOptions = nil
+		ctx, cancel := llm.WithNonStreamingDeadline(ctx)
+		defer cancel()
+		sink := llm.StreamSinkFrom(ctx)
+		if sink != nil && sink.OnEnd != nil {
+			defer sink.OnEnd()
+		}
+		openMsg, finishReason, usage, err := c.executeChatCompletionUnaryParts(ctx, req)
+		if err != nil {
+			err = llm.NonStreamingError(ctx, err)
+			result := finish(nil)
+			prefix.Finish(nil)
+			return result, err
+		}
+		msg := compatMessageFromOpenAI(openMsg)
+		result := &llm.Result{Message: &msg, Usage: usage}
+		result = finish(result)
+		prefix.Finish(resultUsage(result))
+		if sink != nil && result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
+			if sink.OnUsage != nil {
+				sink.OnUsage(result.Usage.InputTokens, result.Usage.OutputTokens)
+			}
+			if sink.OnUsageSnapshot != nil {
+				sink.OnUsageSnapshot(result.Usage.InputTokens, result.Usage.OutputTokens)
+			}
+		}
+		llm.ReplayToSink(sink, llm.ReplayedResponse{
+			Reasoning:  openMsg.ReasoningContent,
+			Text:       []string{openMsg.Content},
+			ToolCalls:  result.Message.ToolCalls,
+			StopReason: string(finishReason),
+		})
+		return result, nil
+	}
 	if req.Stream {
 		result, err := c.executeChatCompletionStream(ctx, req)
 		result = finish(result)
@@ -1108,6 +1147,19 @@ func (s rawJSONSchema) MarshalJSON() ([]byte, error) {
 }
 
 func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req openaiclient.ChatCompletionRequest) (*llm.Result, error) {
+	openMsg, _, usage, err := c.executeChatCompletionUnaryParts(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	msg := compatMessageFromOpenAI(openMsg)
+	return &llm.Result{Message: &msg, Usage: usage}, nil
+}
+
+// executeChatCompletionUnaryParts runs the length-continue loop of one
+// non-streaming chat completion and returns the assembled OpenAI message, the
+// last finish reason and the summed usage — the pieces a sink replay of the
+// whole answer needs on top of the Result.
+func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, req openaiclient.ChatCompletionRequest) (openaiclient.ChatCompletionMessage, openaiclient.FinishReason, *llm.Usage, error) {
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
 	var reasoningAcc, contentAcc strings.Builder
 	var toolBuf []openaiclient.ToolCall
@@ -1119,10 +1171,10 @@ func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req op
 		req.Messages = baseMsgs
 		resp, err := c.client.CreateChatCompletion(ctx, req)
 		if err != nil {
-			return nil, err
+			return openaiclient.ChatCompletionMessage{}, "", nil, err
 		}
 		if len(resp.Choices) == 0 {
-			return nil, errOpenAINoChoices
+			return openaiclient.ChatCompletionMessage{}, "", nil, errOpenAINoChoices
 		}
 		ch := resp.Choices[0]
 		lastFinish = ch.FinishReason
@@ -1166,11 +1218,7 @@ func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req op
 	if len(toolBuf) > 0 {
 		openMsg.ToolCalls = toolBuf
 	}
-	msg := compatMessageFromOpenAI(openMsg)
-	return &llm.Result{
-		Message: &msg,
-		Usage:   openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)),
-	}, nil
+	return openMsg, lastFinish, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), nil
 }
 
 // compatMessagesToOpenAI projects the conversation for the wire.

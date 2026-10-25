@@ -23,7 +23,8 @@ var ErrStreamTruncated = errors.New("stream ended without a finish frame")
 
 // IsRetryableNetworkError reports whether err is a failure a resend can
 // plausibly fix: transport-level ones (timeouts, resets, aborted/dropped
-// connections, truncated streams, streams that went silent) and the server's
+// connections, truncated streams, streams that went silent, non-streaming
+// requests that ran out of NonStreamingTimeout) and the server's
 // transient statuses (408,
 // 409 and 5xx except 529, which has its own recovery layer). It is the retry
 // predicate of the network-retry middleware; everything else — cancellation,
@@ -40,6 +41,12 @@ func IsRetryableNetworkError(err error) bool {
 	// Canceled check, because the watchdog's abort arrives as a canceled
 	// derived context and must not read as the user cancelling.
 	if errors.Is(err, ErrStreamStalled) {
+		return true
+	}
+	// The non-streaming deadline expiring is the same kind of trouble, and
+	// arrives as a DeadlineExceeded, so it also has to be read before the
+	// cancellation checks classify it as the user's own deadline.
+	if errors.Is(err, ErrNonStreamingTimeout) {
 		return true
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

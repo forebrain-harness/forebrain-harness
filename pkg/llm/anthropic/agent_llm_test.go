@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -356,5 +357,164 @@ func TestAnthropicStreamStopReasonWithoutMessageStop(t *testing.T) {
 	want := []string{"text_block_done", "ready", "stop_reason:tool_use"}
 	if !reflect.DeepEqual(order, want) {
 		t.Fatalf("callback order = %v\nwant             %v", order, want)
+	}
+}
+
+// anthropicNonStreamingBody is one whole message carrying every piece a replay
+// must deliver: two thinking blocks, a text block, a tool call, the stop
+// reason and usage with both cache buckets. The 64k maxTokens used by these
+// tests is production-shaped: without an explicit request timeout the SDK
+// locally rejects a non-streaming call whose maxTokens implies more than ten
+// minutes of work, so these tests only pass with the stated timeout.
+const anthropicNonStreamingBody = `{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-6","content":[{"type":"thinking","thinking":"Think it "},{"type":"thinking","thinking":"through"},{"type":"text","text":"Hello there"},{"type":"tool_use","id":"toolu_test","name":"weather","input":{"city":"Paris"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":9,"cache_creation_input_tokens":3,"cache_read_input_tokens":2}}`
+
+// anthropicReplayTrace records the sink callbacks in firing order; usage and
+// snapshots sit beside the trace because the non-streaming path reports them
+// before replaying the answer.
+type anthropicReplayTrace struct {
+	trace     []string
+	streamed  *bool
+	ends      int
+	ready     []llm.ToolCall
+	usage     [][2]int
+	snapshots [][2]int
+}
+
+func newAnthropicReplayTrace() *anthropicReplayTrace {
+	return &anthropicReplayTrace{streamed: new(bool)}
+}
+
+func (r *anthropicReplayTrace) sink() *llm.StreamSink {
+	return &llm.StreamSink{
+		OnResponseStarted: func() { r.trace = append(r.trace, "started") },
+		OnReasoningDelta:  func(s string) { r.trace = append(r.trace, "reasoning:"+s) },
+		OnReasoningDone:   func() { r.trace = append(r.trace, "reasoning-done") },
+		OnDelta:           func(s string) { r.trace = append(r.trace, "delta:"+s) },
+		OnTextBlockDone:   func() { r.trace = append(r.trace, "text-block-done") },
+		OnToolCallReady: func(c llm.ToolCall) {
+			r.ready = append(r.ready, c)
+			r.trace = append(r.trace, "ready:"+c.Function.Name)
+		},
+		OnStopReason:    func(reason string) { r.trace = append(r.trace, "stop:"+reason) },
+		OnMessageStop:   func() { r.trace = append(r.trace, "message-stop") },
+		OnUsage:         func(in, out int) { r.usage = append(r.usage, [2]int{in, out}) },
+		OnUsageSnapshot: func(in, out int) { r.snapshots = append(r.snapshots, [2]int{in, out}) },
+		OnEnd:           func() { r.ends++ },
+		Streamed:        r.streamed,
+	}
+}
+
+func TestAnthropicAgentLLMNonStreamingRequestUsesTheUnaryEndpoint(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(anthropicNonStreamingBody))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if stream, ok := body["stream"].(bool); ok && stream {
+		t.Fatalf("request stream = %#v, want absent or false", body["stream"])
+	}
+	if got := result.Message.TextContent(); got != "Hello there" {
+		t.Fatalf("message text = %q, want Hello there", got)
+	}
+	if len(result.Message.ToolCalls) != 1 ||
+		result.Message.ToolCalls[0].ID != "toolu_test" ||
+		result.Message.ToolCalls[0].Function.Name != "weather" ||
+		result.Message.ToolCalls[0].Function.Arguments != `{"city":"Paris"}` {
+		t.Fatalf("tool calls = %#v", result.Message.ToolCalls)
+	}
+	if result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 9 ||
+		result.Usage.CacheCreationInputTokens != 3 || result.Usage.CacheReadInputTokens != 2 {
+		t.Fatalf("usage = %#v", result.Usage)
+	}
+}
+
+func TestAnthropicAgentLLMNonStreamingResultIsReplayedToTheSink(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(anthropicNonStreamingBody))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	rec := newAnthropicReplayTrace()
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), rec.sink()))
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	want := []string{
+		"started",
+		"reasoning:Think it through",
+		"reasoning-done",
+		"delta:Hello there",
+		"text-block-done",
+		"ready:weather",
+		"stop:tool_use",
+		"message-stop",
+	}
+	if !reflect.DeepEqual(rec.trace, want) {
+		t.Fatalf("sink trace = %v\nwant           %v", rec.trace, want)
+	}
+	// Usage follows the streaming path's conversion: input plus both cache
+	// buckets counts as occupied context.
+	if len(rec.usage) != 1 || rec.usage[0] != [2]int{15, 9} {
+		t.Fatalf("usage deltas = %v, want one 15/9", rec.usage)
+	}
+	if len(rec.snapshots) != 1 || rec.snapshots[0] != [2]int{15, 9} {
+		t.Fatalf("usage snapshots = %v, want one 15/9", rec.snapshots)
+	}
+	if len(rec.ready) != 1 || len(result.Message.ToolCalls) != 1 ||
+		!reflect.DeepEqual(rec.ready[0], result.Message.ToolCalls[0]) {
+		t.Fatalf("ready = %+v, final = %+v, want identical", rec.ready, result.Message.ToolCalls)
+	}
+	if !*rec.streamed {
+		t.Fatal("Streamed was not set")
+	}
+	if rec.ends != 1 {
+		t.Fatalf("OnEnd calls = %d, want 1", rec.ends)
+	}
+}
+
+func TestAnthropicAgentLLMNonStreamingTimeoutIsRetryable(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	orig := llm.NonStreamingTimeout
+	llm.NonStreamingTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { llm.NonStreamingTimeout = orig })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(anthropicNonStreamingBody))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatalf("Execute returned result %#v, want the non-streaming timeout", result)
+	}
+	if !errors.Is(err, llm.ErrNonStreamingTimeout) {
+		t.Fatalf("error = %v, want ErrNonStreamingTimeout", err)
+	}
+	if !llm.IsRetryableNetworkError(err) {
+		t.Fatalf("IsRetryableNetworkError(%v) = false, want true", err)
 	}
 }

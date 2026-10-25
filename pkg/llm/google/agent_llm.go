@@ -65,7 +65,9 @@ func NewAgentLLM(apiKey, baseURL, model string, maxTokens int64, transport http.
 }
 
 // Execute runs one streamGenerateContent call, streaming the answer to the
-// stream sink in ctx as it arrives.
+// stream sink in ctx as it arrives — unless ctx carries the non-streaming
+// switch, in which case it runs one bounded generateContent call and replays
+// the whole answer through the sink.
 func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	if c.model == "" {
 		return nil, errors.New("google: no model configured")
@@ -78,17 +80,55 @@ func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []
 	if err != nil {
 		return nil, fmt.Errorf("google: encode request: %w", err)
 	}
+	if llm.NonStreamingRequestFrom(ctx) {
+		// The request context switched this call to one non-streaming
+		// attempt: run it under the non-streaming deadline and replay the
+		// whole answer to the sink in stream order.
+		ctx, cancel := llm.WithNonStreamingDeadline(ctx)
+		defer cancel()
+		sink := llm.StreamSinkFrom(ctx)
+		if sink != nil && sink.OnEnd != nil {
+			defer sink.OnEnd()
+		}
+		result, finishReason, err := c.executeUnary(ctx, raw)
+		if err != nil {
+			return nil, llm.NonStreamingError(ctx, err)
+		}
+		if sink != nil && result.Usage != nil &&
+			(result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
+			if sink.OnUsage != nil {
+				sink.OnUsage(result.Usage.InputTokens, result.Usage.OutputTokens)
+			}
+			if sink.OnUsageSnapshot != nil {
+				sink.OnUsageSnapshot(result.Usage.InputTokens, result.Usage.OutputTokens)
+			}
+		}
+		var texts []string
+		for _, p := range result.Message.Parts {
+			if p.Type == llm.ContentTypeText {
+				texts = append(texts, p.Text)
+			}
+		}
+		llm.ReplayToSink(sink, llm.ReplayedResponse{
+			Text:       texts,
+			ToolCalls:  result.Message.ToolCalls,
+			StopReason: finishReason,
+		})
+		return result, nil
+	}
 	return c.executeStreaming(ctx, raw)
 }
 
 // executeUnary runs the same request in its non-streaming form: one
-// generateContent call that returns the assembled response. It is kept for the
-// non-streaming resend path (plans/126) and has no streaming caller.
-func (c *agentLLM) executeUnary(ctx context.Context, raw []byte) (*llm.Result, error) {
+// generateContent call that returns the assembled response, plus the
+// candidate's finish reason for the sink replay. It is the non-streaming
+// resend path (plans/126): Execute picks it when the request context carries
+// the non-streaming switch.
+func (c *agentLLM) executeUnary(ctx context.Context, raw []byte) (*llm.Result, string, error) {
 	endpoint := c.baseURL + "/v1beta/models/" + url.PathEscape(c.model) + ":generateContent"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("google: build request: %w", err)
+		return nil, "", fmt.Errorf("google: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -97,18 +137,18 @@ func (c *agentLLM) executeUnary(ctx context.Context, raw []byte) (*llm.Result, e
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("google: send request: %w", err)
+		return nil, "", fmt.Errorf("google: send request: %w", err)
 	}
 	defer resp.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("google: read response: %w", err)
+		return nil, "", fmt.Errorf("google: read response: %w", err)
 	}
 	if len(payload) > maxResponseBytes {
-		return nil, fmt.Errorf("google: response exceeds %d bytes", maxResponseBytes)
+		return nil, "", fmt.Errorf("google: response exceeds %d bytes", maxResponseBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, newAPIError(resp.StatusCode, payload, resp.Header.Get("Retry-After"))
+		return nil, "", newAPIError(resp.StatusCode, payload, resp.Header.Get("Retry-After"))
 	}
 	return parseResponse(resp.StatusCode, payload, resp.Header.Get("Retry-After"))
 }
@@ -340,17 +380,19 @@ type generateContentResponse struct {
 	Error json.RawMessage `json:"error"`
 }
 
-// parseResponse turns a generateContent response into a result.
-func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, error) {
+// parseResponse turns a generateContent response into a result, also
+// returning the candidate's finish reason so the non-streaming replay can
+// report it as the stop reason.
+func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, string, error) {
 	var parsed generateContentResponse
 	if err := json.Unmarshal(payload, &parsed); err != nil {
-		return nil, fmt.Errorf("google: decode response: %w", err)
+		return nil, "", fmt.Errorf("google: decode response: %w", err)
 	}
 	if len(parsed.Error) > 0 && string(parsed.Error) != "null" {
-		return nil, newAPIError(status, payload, retryAfter)
+		return nil, "", newAPIError(status, payload, retryAfter)
 	}
 	if len(parsed.Candidates) == 0 {
-		return nil, fmt.Errorf("google: response has no candidates: %s", truncateMessage(strings.TrimSpace(string(payload))))
+		return nil, "", fmt.Errorf("google: response has no candidates: %s", truncateMessage(strings.TrimSpace(string(payload))))
 	}
 	candidate := parsed.Candidates[0]
 	msg := &llm.Message{Role: llm.RoleAssistant}
@@ -368,7 +410,7 @@ func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, 
 		// An empty turn is a refusal to answer (safety, recitation, a filtered
 		// prompt). Returning it as a silent empty message would look like a
 		// successful turn that said nothing.
-		return nil, fmt.Errorf("google: response was empty (finish reason %q)", candidate.FinishReason)
+		return nil, candidate.FinishReason, fmt.Errorf("google: response was empty (finish reason %q)", candidate.FinishReason)
 	}
 	result := &llm.Result{Message: msg}
 	usage := parsed.UsageMetadata
@@ -380,7 +422,7 @@ func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, 
 			OutputTokens: usage.CandidatesTokenCount + usage.ThoughtsTokenCount,
 		}
 	}
-	return result, nil
+	return result, candidate.FinishReason, nil
 }
 
 // errorInfo is a provider error after extraction.

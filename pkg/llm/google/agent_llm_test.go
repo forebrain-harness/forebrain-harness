@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
@@ -433,9 +435,12 @@ func TestExecuteUnaryParsesTheJSONBody(t *testing.T) {
 	defer server.Close()
 
 	client := NewAgentLLM("test-key", server.URL, "gemini-3.5-pro", 4096, nil).(*agentLLM)
-	result, err := client.executeUnary(context.Background(), []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
+	result, finish, err := client.executeUnary(context.Background(), []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
 	if err != nil {
 		t.Fatalf("executeUnary: %v", err)
+	}
+	if finish != "STOP" {
+		t.Fatalf("finish reason = %q, want STOP", finish)
 	}
 	if len(result.Message.Parts) != 2 ||
 		result.Message.Parts[0].Text != "Hello" || result.Message.Parts[1].Text != "world" {
@@ -450,5 +455,139 @@ func TestExecuteUnaryParsesTheJSONBody(t *testing.T) {
 	}
 	if result.Usage == nil || result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 10 {
 		t.Fatalf("usage = %#v, want prompt 10 and candidates+thoughts 10", result.Usage)
+	}
+}
+
+// googleUnaryResponseBody is one generateContent answer carrying every piece
+// a replay must deliver: two text parts around a function call, usage with
+// thinking tokens and the finish reason.
+const googleUnaryResponseBody = `{
+	"candidates": [{
+		"content": {"role": "model", "parts": [
+			{"text": "Hello"},
+			{"functionCall": {"name": "weather", "args": {"city": "Paris"}}},
+			{"text": "world"}
+		]},
+		"finishReason": "STOP"
+	}],
+	"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 7, "thoughtsTokenCount": 3}
+}`
+
+// The non-streaming switch sends the request to :generateContent without the
+// SSE query, and the result parses exactly as the streaming path's would.
+func TestExecuteNonStreamingRequestUsesTheUnaryEndpoint(t *testing.T) {
+	type captured struct {
+		path string
+		alt  string
+	}
+	requests := make(chan captured, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- captured{path: r.URL.Path, alt: r.URL.Query().Get("alt")}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(googleUnaryResponseBody))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "gemini-3.5-pro", 4096, nil)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var req captured
+	select {
+	case req = <-requests:
+	default:
+		t.Fatal("no request reached the server")
+	}
+	if !strings.HasSuffix(req.path, ":generateContent") {
+		t.Fatalf("path = %q, want it to end with :generateContent", req.path)
+	}
+	if req.alt != "" {
+		t.Fatalf("alt = %q, want no alt=sse on a non-streaming request", req.alt)
+	}
+	if len(result.Message.Parts) != 2 ||
+		result.Message.Parts[0].Text != "Hello" || result.Message.Parts[1].Text != "world" {
+		t.Fatalf("text parts = %#v, want both in order", result.Message.Parts)
+	}
+	if len(result.Message.ToolCalls) != 1 ||
+		result.Message.ToolCalls[0].Function.Name != "weather" ||
+		result.Message.ToolCalls[0].Function.Arguments != `{"city":"Paris"}` {
+		t.Fatalf("tool calls = %#v", result.Message.ToolCalls)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 10 {
+		t.Fatalf("usage = %#v, want prompt 10 and candidates+thoughts 10", result.Usage)
+	}
+}
+
+func TestExecuteNonStreamingResultIsReplayedToTheSink(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(googleUnaryResponseBody))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "gemini-3.5-pro", 4096, nil)
+	rec := newRecordingSink()
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), rec.sink()))
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	want := []string{
+		"started",
+		"delta:Hello",
+		"text-block-done",
+		"delta:world",
+		"text-block-done",
+		"tool-ready:weather",
+		"stop:STOP",
+		"message-stop",
+	}
+	if !reflect.DeepEqual(rec.trace, want) {
+		t.Fatalf("sink trace = %v\nwant           %v", rec.trace, want)
+	}
+	if len(rec.usage) != 1 || rec.usage[0] != [2]int{10, 10} {
+		t.Fatalf("usage deltas = %v, want one 10/10", rec.usage)
+	}
+	if len(rec.snapshots) != 1 || rec.snapshots[0] != [2]int{10, 10} {
+		t.Fatalf("usage snapshots = %v, want one 10/10", rec.snapshots)
+	}
+	if rec.ready == nil || len(result.Message.ToolCalls) != 1 ||
+		!reflect.DeepEqual(*rec.ready, result.Message.ToolCalls[0]) {
+		t.Fatalf("ready = %+v, final = %+v, want identical", rec.ready, result.Message.ToolCalls)
+	}
+	if !*rec.streamed {
+		t.Fatal("Streamed was not set")
+	}
+	if rec.ends != 1 {
+		t.Fatalf("OnEnd calls = %d, want 1", rec.ends)
+	}
+}
+
+func TestExecuteNonStreamingTimeoutIsRetryable(t *testing.T) {
+	orig := llm.NonStreamingTimeout
+	llm.NonStreamingTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { llm.NonStreamingTimeout = orig })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(googleUnaryResponseBody))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "gemini-3.5-pro", 4096, nil)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatalf("Execute returned result %#v, want the non-streaming timeout", result)
+	}
+	if !errors.Is(err, llm.ErrNonStreamingTimeout) {
+		t.Fatalf("error = %v, want ErrNonStreamingTimeout", err)
+	}
+	if !llm.IsRetryableNetworkError(err) {
+		t.Fatalf("IsRetryableNetworkError(%v) = false, want true", err)
 	}
 }

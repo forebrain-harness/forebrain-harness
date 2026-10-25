@@ -179,6 +179,9 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	// caches the tool definitions with it, so the tools have to be part of the
 	// request the markers describe.
 	ApplyPromptCache(params.System, params.Messages)
+	if llm.NonStreamingRequestFrom(ctx) {
+		return c.executeUnary(ctx, params)
+	}
 	ctx = llm.WithStreamingRequest(ctx)
 	stream := c.client.Messages.NewStreaming(ctx, params)
 	defer func() { _ = stream.Close() }()
@@ -358,6 +361,69 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 			CacheReadInputTokens:     int(latestUsage.CacheReadInputTokens),
 		},
 	}, nil
+}
+
+// executeUnary runs the same request as one non-streaming Messages call under
+// the non-streaming deadline and replays the whole response to the stream
+// sink in stream order, so every consumer sees it as it would a streamed one.
+func (c *anthropicAgentLLM) executeUnary(ctx context.Context, params anthropicapi.MessageNewParams) (*llm.Result, error) {
+	ctx, cancel := llm.WithNonStreamingDeadline(ctx)
+	defer cancel()
+	sink := llm.StreamSinkFrom(ctx)
+	if sink != nil && sink.OnEnd != nil {
+		defer sink.OnEnd()
+	}
+	// The SDK refuses non-streaming calls whose maxTokens imply more than
+	// ten minutes of work unless the caller states a request timeout;
+	// NonStreamingTimeout is the same bound WithNonStreamingDeadline already
+	// puts on this attempt, so stating it explicitly replaces the SDK's
+	// estimate.
+	msg, err := c.client.Messages.New(ctx, params, option.WithRequestTimeout(llm.NonStreamingTimeout))
+	if err != nil {
+		return nil, llm.NonStreamingError(ctx, err)
+	}
+	message, err := agentAnthropicMessageFromAPI(msg)
+	if err != nil {
+		return nil, err
+	}
+	result := &llm.Result{
+		Message: message,
+		// The same accounting the streaming path keeps from the raw events:
+		// input plus both cache buckets, output as reported.
+		Usage: &llm.Usage{
+			InputTokens:              int(msg.Usage.InputTokens),
+			OutputTokens:             int(msg.Usage.OutputTokens),
+			CacheCreationInputTokens: int(msg.Usage.CacheCreationInputTokens),
+			CacheReadInputTokens:     int(msg.Usage.CacheReadInputTokens),
+		},
+	}
+	if sink != nil {
+		totalInput := result.Usage.InputTokens + result.Usage.CacheCreationInputTokens + result.Usage.CacheReadInputTokens
+		if totalInput > 0 || result.Usage.OutputTokens > 0 {
+			if sink.OnUsage != nil {
+				sink.OnUsage(totalInput, result.Usage.OutputTokens)
+			}
+			if sink.OnUsageSnapshot != nil {
+				sink.OnUsageSnapshot(totalInput, result.Usage.OutputTokens)
+			}
+		}
+	}
+	var reasoning, texts []string
+	for _, b := range msg.Content {
+		switch b.Type {
+		case "thinking":
+			reasoning = append(reasoning, b.Thinking)
+		case "text":
+			texts = append(texts, b.Text)
+		}
+	}
+	llm.ReplayToSink(sink, llm.ReplayedResponse{
+		Reasoning:  strings.Join(reasoning, ""),
+		Text:       texts,
+		ToolCalls:  result.Message.ToolCalls,
+		StopReason: string(msg.StopReason),
+	})
+	return result, nil
 }
 
 func agentAnthropicMessagesToAPI(messages []llm.Message) ([]anthropicapi.TextBlockParam, []anthropicapi.MessageParam, error) {

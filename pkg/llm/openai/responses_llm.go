@@ -614,9 +614,48 @@ func (c *openAIResponsesLLM) Execute(ctx context.Context, messages []llm.Message
 	defer func() { outErr = normalizeError(outErr) }()
 	ctx, finish := llm.WithRawCacheUsage(ctx)
 	params := c.newResponseParams(ctx, messages, tools, false)
-	if c.stream {
+	if c.stream && !llm.NonStreamingRequestFrom(ctx) {
 		result, err := c.executeStreaming(ctx, params)
 		return finish(result), err
+	}
+	if c.stream {
+		// Streaming was switched off for this one attempt by the
+		// non-streaming request switch: run it under the non-streaming
+		// deadline and replay the whole answer to the sink in stream order.
+		// A client configured non-streaming keeps its original behavior.
+		ctx, cancel := llm.WithNonStreamingDeadline(ctx)
+		defer cancel()
+		sink := llm.StreamSinkFrom(ctx)
+		if sink != nil && sink.OnEnd != nil {
+			defer sink.OnEnd()
+		}
+		result, content, reasoningItems, status, err := c.executeSyncDetail(ctx, params)
+		if err != nil {
+			err = llm.NonStreamingError(ctx, err)
+			return finish(nil), err
+		}
+		result = finish(result)
+		if sink != nil && result != nil && result.Usage != nil &&
+			(result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
+			totalInput := result.Usage.InputTokens + result.Usage.CacheReadInputTokens
+			if sink.OnUsage != nil {
+				sink.OnUsage(totalInput, result.Usage.OutputTokens)
+			}
+			if sink.OnUsageSnapshot != nil {
+				sink.OnUsageSnapshot(totalInput, result.Usage.OutputTokens)
+			}
+		}
+		var texts []string
+		if content != "" {
+			texts = []string{content}
+		}
+		llm.ReplayToSink(sink, llm.ReplayedResponse{
+			Reasoning:  llm.SummaryText(reasoningItems),
+			Text:       texts,
+			ToolCalls:  result.Message.ToolCalls,
+			StopReason: string(status),
+		})
+		return result, nil
 	}
 	result, err := c.executeSync(ctx, params)
 	return finish(result), err
@@ -1154,9 +1193,18 @@ func compactUTF8SuffixStart(text string, budget int) int {
 }
 
 func (c *openAIResponsesLLM) executeSync(ctx context.Context, params responses.ResponseNewParams) (*llm.Result, error) {
+	result, _, _, _, err := c.executeSyncDetail(ctx, params)
+	return result, err
+}
+
+// executeSyncDetail is executeSync plus the pieces a sink replay of the whole
+// answer needs: the extracted answer text (before the reasoning-only thinking
+// fence is synthesized into the message), the reasoning carry items and the
+// response status.
+func (c *openAIResponsesLLM) executeSyncDetail(ctx context.Context, params responses.ResponseNewParams) (*llm.Result, string, []llm.Item, responses.ResponseStatus, error) {
 	resp, err := c.client.Responses.New(ctx, params)
 	if err != nil {
-		return nil, err
+		return nil, "", nil, "", err
 	}
 
 	var content string
@@ -1208,7 +1256,7 @@ func (c *openAIResponsesLLM) executeSync(ctx context.Context, params responses.R
 		resp.Usage.InputTokensDetails.CachedTokens,
 	)
 	if resp.Status == responses.ResponseStatusCompleted && len(parts) == 0 && len(toolCalls) == 0 {
-		return nil, llm.WithUsageError(fmt.Errorf(
+		return nil, "", nil, "", llm.WithUsageError(fmt.Errorf(
 			"openai responses completed without output: id=%s model=%s status=%s input_tokens=%d output_tokens=%d",
 			strings.TrimSpace(resp.ID),
 			strings.TrimSpace(string(resp.Model)),
@@ -1217,7 +1265,7 @@ func (c *openAIResponsesLLM) executeSync(ctx context.Context, params responses.R
 			resp.Usage.OutputTokens,
 		), result.Usage)
 	}
-	return result, nil
+	return result, content, reasoningItems, resp.Status, nil
 }
 
 // toolResultImageParts returns the non-text parts of a message: a tool

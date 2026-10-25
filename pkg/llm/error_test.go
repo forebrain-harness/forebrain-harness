@@ -171,6 +171,7 @@ func TestIsRetryableNetworkErrorClassification(t *testing.T) {
 		{name: "stream truncated", err: ErrStreamTruncated, want: true},
 		{name: "stream stalled on headers", err: &StreamStallError{Headers: true, After: time.Second}, want: true},
 		{name: "stream stalled on body", err: fmt.Errorf("wrap: %w", &StreamStallError{After: time.Second}), want: true},
+		{name: "non-streaming timeout", err: fmt.Errorf("wrap: %w", ErrNonStreamingTimeout), want: true},
 		{name: "wrapped transport inside api error", err: wrappedTransport, want: true},
 		{name: "408 request timeout", err: requestTimeout, want: true},
 		{name: "409 conflict", err: conflict, want: true},

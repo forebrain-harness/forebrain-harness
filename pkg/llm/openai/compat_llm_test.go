@@ -1142,3 +1142,168 @@ func TestCompatStreamToolCallReadySynthesizesStableID(t *testing.T) {
 		t.Fatalf("ready = %+v", ready[0])
 	}
 }
+
+// replayTraceSink records the sink callbacks in firing order; usage and
+// snapshots are kept beside the trace because the non-streaming replay
+// reports them before replaying the answer.
+type replayTraceSink struct {
+	trace     []string
+	streamed  *bool
+	ends      int
+	ready     []llm.ToolCall
+	usage     [][2]int
+	snapshots [][2]int
+}
+
+func newReplayTraceSink() *replayTraceSink {
+	return &replayTraceSink{streamed: new(bool)}
+}
+
+func (r *replayTraceSink) sink() *llm.StreamSink {
+	return &llm.StreamSink{
+		OnResponseStarted: func() { r.trace = append(r.trace, "started") },
+		OnReasoningDelta:  func(s string) { r.trace = append(r.trace, "reasoning:"+s) },
+		OnReasoningDone:   func() { r.trace = append(r.trace, "reasoning-done") },
+		OnDelta:           func(s string) { r.trace = append(r.trace, "delta:"+s) },
+		OnTextBlockDone:   func() { r.trace = append(r.trace, "text-block-done") },
+		OnToolCallReady: func(c llm.ToolCall) {
+			r.ready = append(r.ready, c)
+			r.trace = append(r.trace, "ready:"+c.Function.Name)
+		},
+		OnStopReason:    func(reason string) { r.trace = append(r.trace, "stop:"+reason) },
+		OnMessageStop:   func() { r.trace = append(r.trace, "message-stop") },
+		OnUsage:         func(in, out int) { r.usage = append(r.usage, [2]int{in, out}) },
+		OnUsageSnapshot: func(in, out int) { r.snapshots = append(r.snapshots, [2]int{in, out}) },
+		OnEnd:           func() { r.ends++ },
+		Streamed:        r.streamed,
+	}
+}
+
+func (r *replayTraceSink) assertTrace(t *testing.T, want []string) {
+	t.Helper()
+	if !reflect.DeepEqual(r.trace, want) {
+		t.Fatalf("sink trace = %v\nwant           %v", r.trace, want)
+	}
+}
+
+// compatNonStreamingBody is one chat completion carrying every piece a replay
+// must deliver: reasoning, answer text, a tool call, usage and a finish
+// reason.
+const compatNonStreamingBody = `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"test","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"Think it through","content":"Hello there","tool_calls":[{"id":"call_1","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":7,"completion_tokens":5,"total_tokens":12}}`
+
+func compatNonStreamingResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     http.StatusText(http.StatusOK),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(compatNonStreamingBody)),
+	}
+}
+
+// The non-streaming switch overrides even a "stream": true operator overlay:
+// the server must see a plain unary request with no stream_options.
+func TestOpenAICompatLLMNonStreamingRequestUsesTheUnaryEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var body map[string]any
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return nil, err
+		}
+		return compatNonStreamingResponse(), nil
+	})
+
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if stream, ok := body["stream"].(bool); ok && stream {
+		t.Fatalf("request stream = %#v, want absent or false", body["stream"])
+	}
+	if _, has := body["stream_options"]; has {
+		t.Fatalf("request stream_options = %#v, want absent", body["stream_options"])
+	}
+	if got := result.Message.TextContent(); got != "Hello there" {
+		t.Fatalf("message text = %q, want Hello there", got)
+	}
+	if len(result.Message.ToolCalls) != 1 ||
+		result.Message.ToolCalls[0].ID != "call_1" ||
+		result.Message.ToolCalls[0].Function.Name != "weather" ||
+		result.Message.ToolCalls[0].Function.Arguments != `{"city":"Paris"}` {
+		t.Fatalf("tool calls = %#v", result.Message.ToolCalls)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 5 {
+		t.Fatalf("usage = %#v, want 7/5", result.Usage)
+	}
+}
+
+func TestOpenAICompatLLMNonStreamingResultIsReplayedToTheSink(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(*http.Request) (*http.Response, error) {
+		return compatNonStreamingResponse(), nil
+	})
+	rec := newReplayTraceSink()
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), rec.sink()))
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	rec.assertTrace(t, []string{
+		"started",
+		"reasoning:Think it through",
+		"reasoning-done",
+		"delta:Hello there",
+		"text-block-done",
+		"ready:weather",
+		"stop:tool_calls",
+		"message-stop",
+	})
+	if len(rec.usage) != 1 || rec.usage[0] != [2]int{7, 5} {
+		t.Fatalf("usage deltas = %v, want one 7/5", rec.usage)
+	}
+	if len(rec.snapshots) != 1 || rec.snapshots[0] != [2]int{7, 5} {
+		t.Fatalf("usage snapshots = %v, want one 7/5", rec.snapshots)
+	}
+	if len(rec.ready) != 1 || len(result.Message.ToolCalls) != 1 ||
+		!reflect.DeepEqual(rec.ready[0], result.Message.ToolCalls[0]) {
+		t.Fatalf("ready = %+v, final = %+v, want identical", rec.ready, result.Message.ToolCalls)
+	}
+	if !*rec.streamed {
+		t.Fatal("Streamed was not set")
+	}
+	if rec.ends != 1 {
+		t.Fatalf("OnEnd calls = %d, want 1", rec.ends)
+	}
+}
+
+func TestOpenAICompatLLMNonStreamingTimeoutIsRetryable(t *testing.T) {
+	orig := llm.NonStreamingTimeout
+	llm.NonStreamingTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { llm.NonStreamingTimeout = orig })
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		select {
+		case <-time.After(1 * time.Second):
+			return compatNonStreamingResponse(), nil
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+	})
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatalf("Execute returned result %#v, want the non-streaming timeout", result)
+	}
+	if !errors.Is(err, llm.ErrNonStreamingTimeout) {
+		t.Fatalf("error = %v, want ErrNonStreamingTimeout", err)
+	}
+	if !llm.IsRetryableNetworkError(err) {
+		t.Fatalf("IsRetryableNetworkError(%v) = false, want true", err)
+	}
+}

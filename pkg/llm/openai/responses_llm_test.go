@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1881,5 +1882,127 @@ func TestOpenAIResponsesStreamToolReadyFallsBackToItemDone(t *testing.T) {
 	}
 	if ready[0].ID != "call_9" || ready[0].Function.Name != "noop" || ready[0].Function.Arguments != "{}" {
 		t.Fatalf("ready call = %+v", ready[0])
+	}
+}
+
+// responsesNonStreamingBody is one completed response carrying every piece a
+// replay must deliver: a reasoning summary, answer text, a function call and
+// usage with a cached share.
+const responsesNonStreamingBody = `{"id":"resp_test","object":"response","status":"completed","model":"gpt-test","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Thinking it over."}]},{"type":"message","id":"msg_test","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello there"}]},{"type":"function_call","id":"fc_1","call_id":"call_test","name":"weather","arguments":"{\"city\":\"Paris\"}"}],"usage":{"input_tokens":10,"output_tokens":5,"input_tokens_details":{"cached_tokens":4}}}`
+
+func responsesNonStreamingResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     http.StatusText(http.StatusOK),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(responsesNonStreamingBody)),
+	}
+}
+
+// A streaming-configured client asked to go non-streaming must send a plain
+// unary request: no "stream" in the body.
+func TestOpenAIResponsesLLMNonStreamingRequestUsesTheUnaryEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var body map[string]any
+	testLLM := newTestOpenAIResponsesLLMWithStream(t, true, func(r *http.Request) (*http.Response, error) {
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return nil, err
+		}
+		return responsesNonStreamingResponse(), nil
+	})
+
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if stream, ok := body["stream"].(bool); ok && stream {
+		t.Fatalf("request stream = %#v, want absent or false", body["stream"])
+	}
+	if got := result.Message.TextContent(); got != "Hello there" {
+		t.Fatalf("message text = %q, want Hello there", got)
+	}
+	if len(result.Message.ToolCalls) != 1 ||
+		result.Message.ToolCalls[0].ID != "call_test" ||
+		result.Message.ToolCalls[0].Function.Name != "weather" ||
+		result.Message.ToolCalls[0].Function.Arguments != `{"city":"Paris"}` {
+		t.Fatalf("tool calls = %#v", result.Message.ToolCalls)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 6 || result.Usage.OutputTokens != 5 ||
+		result.Usage.CacheReadInputTokens != 4 {
+		t.Fatalf("usage = %#v, want input 6 (uncached) + 4 cached, output 5", result.Usage)
+	}
+}
+
+func TestOpenAIResponsesLLMNonStreamingResultIsReplayedToTheSink(t *testing.T) {
+	t.Parallel()
+
+	testLLM := newTestOpenAIResponsesLLMWithStream(t, true, func(*http.Request) (*http.Response, error) {
+		return responsesNonStreamingResponse(), nil
+	})
+	rec := newReplayTraceSink()
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), rec.sink()))
+	result, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	rec.assertTrace(t, []string{
+		"started",
+		"reasoning:Thinking it over.",
+		"reasoning-done",
+		"delta:Hello there",
+		"text-block-done",
+		"ready:weather",
+		"stop:completed",
+		"message-stop",
+	})
+	// Usage follows the streaming path's conversion: uncached input plus the
+	// cached share counts as occupied context (6 + 4 of 10 raw input tokens).
+	if len(rec.usage) != 1 || rec.usage[0] != [2]int{10, 5} {
+		t.Fatalf("usage deltas = %v, want one 10/5", rec.usage)
+	}
+	if len(rec.snapshots) != 1 || rec.snapshots[0] != [2]int{10, 5} {
+		t.Fatalf("usage snapshots = %v, want one 10/5", rec.snapshots)
+	}
+	if len(rec.ready) != 1 || len(result.Message.ToolCalls) != 1 ||
+		!reflect.DeepEqual(rec.ready[0], result.Message.ToolCalls[0]) {
+		t.Fatalf("ready = %+v, final = %+v, want identical", rec.ready, result.Message.ToolCalls)
+	}
+	if !*rec.streamed {
+		t.Fatal("Streamed was not set")
+	}
+	if rec.ends != 1 {
+		t.Fatalf("OnEnd calls = %d, want 1", rec.ends)
+	}
+}
+
+func TestOpenAIResponsesLLMNonStreamingTimeoutIsRetryable(t *testing.T) {
+	orig := llm.NonStreamingTimeout
+	llm.NonStreamingTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { llm.NonStreamingTimeout = orig })
+
+	testLLM := newTestOpenAIResponsesLLMWithStream(t, true, func(r *http.Request) (*http.Response, error) {
+		select {
+		case <-time.After(1 * time.Second):
+			return responsesNonStreamingResponse(), nil
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+	})
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatalf("Execute returned result %#v, want the non-streaming timeout", result)
+	}
+	if !errors.Is(err, llm.ErrNonStreamingTimeout) {
+		t.Fatalf("error = %v, want ErrNonStreamingTimeout", err)
+	}
+	if !llm.IsRetryableNetworkError(err) {
+		t.Fatalf("IsRetryableNetworkError(%v) = false, want true", err)
 	}
 }
