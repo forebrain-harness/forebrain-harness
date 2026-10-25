@@ -355,7 +355,13 @@ interface TableRow {
 
 const tableRows = computed<TableRow[]>(() =>
   rows.value.map((row) => {
-    const status = mcpStatus(row)
+    const status = mcpStatus(row, {
+      // The settings and agent pages answer configuration only — the base
+      // runner hosts no servers — and the project page's rows carry live
+      // state only while its project has a runner.
+      configOnly: props.view !== 'project',
+      notStartedWhenIdle: props.view === 'project',
+    })
     return {
       key: rowKey(row),
       row,

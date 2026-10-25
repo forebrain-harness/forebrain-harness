@@ -365,6 +365,32 @@ describe('McpServersTable', () => {
     expect(rowOf(wrapper, 'global:b').text()).not.toContain('已连接')
   })
 
+  it('shows configuration only on the settings and agent pages', async () => {
+    // The base runner hosts no servers, so a runtime state on those pages
+    // would describe a runner that never started anything: an enabled entry
+    // says 已启用, whatever the row's stale runtime fields carry.
+    const settings = await mountTable({ view: 'global' }, [
+      row({ name: 'a', running: true, toolCount: 4, connStatus: 'connected' }),
+    ])
+    expect(rowOf(settings, 'global:a').text()).toContain('已启用')
+    expect(rowOf(settings, 'global:a').text()).not.toContain('已连接')
+
+    const agent = await mountTable({ view: 'agent' }, [
+      row({ name: 'a', scope: 'agent', connStatus: 'connecting' }),
+    ])
+    expect(rowOf(agent, 'agent:a').text()).toContain('已启用')
+    expect(rowOf(agent, 'agent:a').text()).not.toContain('连接中')
+  })
+
+  it('says a project row without runtime behind it is not started', async () => {
+    // The project page reads its project's runner: a row that carries no
+    // state (the project has no runner) says 未启动, not 未运行.
+    const wrapper = await mountTable({ view: 'project', projectId: 'proj-1' }, [
+      row({ name: 'a', running: false }),
+    ])
+    expect(rowOf(wrapper, 'global:a').text()).toContain('未启动')
+  })
+
   it('switches the next session’s list through the disable store', async () => {
     const wrapper = await mountTable({ view: 'global' }, [row({ name: 'a' })])
 

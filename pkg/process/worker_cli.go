@@ -20,11 +20,18 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	if env == nil {
 		return nil, hook.PreHookResult{}, errors.New("nil environment")
 	}
-	// A child reuses the primary Runner (see the scope note on h.Runner), so its
-	// MCP generation is the parent's: this waits for that one generation to
-	// settle rather than starting another, and a required server that did not
-	// come up stops the child the same way it stops any unattended run.
-	if err := awaitRequiredMCP(ctx, env.Runner); err != nil {
+	// A child rides the dispatching conversation's runner: every conversation
+	// runs on its project's (see RunnerPool), so the child's MCP generation is
+	// the parent's — this waits for that one generation to settle rather than
+	// starting another, and a required server that did not come up stops the
+	// child the same way it stops any unattended run. The base runner is the
+	// fallback: it hosts no MCP, so a session with no project runs a child
+	// with no MCP rather than borrowing another project's servers.
+	runner := env.Runner
+	if resolved, err := env.RunnerForTurn(ctx, strings.TrimSpace(req.SessionID)); err == nil && resolved != nil {
+		runner = resolved
+	}
+	if err := awaitRequiredMCP(ctx, runner); err != nil {
 		return nil, hook.PreHookResult{}, err
 	}
 	task := req.Task
@@ -113,7 +120,7 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	agBase = run.WithPartialSessionCapture(agBase, capture)
 	opts := run.Options{
 		RunRT:        env.Deps.RunRT,
-		Runner:       env.Runner,
+		Runner:       runner,
 		Hooks:        env.Hooks,
 		AgBase:       agBase,
 		HC:           hc,

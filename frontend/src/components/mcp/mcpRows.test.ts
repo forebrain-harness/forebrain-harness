@@ -117,6 +117,32 @@ describe('mcpStatus', () => {
     expect(mcpStatus(row())).toEqual({ tone: 'gray', label: '未运行', tip: '' })
   })
 
+  it('stops at the configuration on a configuration-only page', () => {
+    // The settings and agent pages read no runner: an enabled entry says so,
+    // and no connection state can follow — the base runner hosts no servers.
+    expect(mcpStatus(row({ running: true, toolCount: 4 }), { configOnly: true })).toEqual({
+      tone: 'ok',
+      label: '已启用',
+      tip: '',
+    })
+    expect(mcpStatus(row({ connStatus: 'error', error: 'boom' }), { configOnly: true }).label).toBe('已启用')
+    expect(mcpStatus(row({ connStatus: 'connecting' }), { configOnly: true }).label).toBe('已启用')
+    // The configuration facts ahead of it still rule: a disabled entry is
+    // disabled on every page.
+    expect(mcpStatus(row({ disabledByConfig: true }), { configOnly: true }).label).toBe('配置里已禁用')
+    expect(mcpStatus(row({ disabledNextSession: true }), { configOnly: true }).label).toBe('已禁用')
+  })
+
+  it('says a project row with no runtime behind it is not started', () => {
+    // The project page's rows carry live state only while the project has a
+    // runner; a row with none says the project is not started — different
+    // from a live runner whose server simply is not running.
+    expect(mcpStatus(row(), { notStartedWhenIdle: true })).toEqual({ tone: 'gray', label: '未启动', tip: '' })
+    // A runtime that did answer keeps its own words.
+    expect(mcpStatus(row({ connStatus: 'connecting' }), { notStartedWhenIdle: true }).label).toBe('连接中')
+    expect(mcpStatus(row({ connStatus: 'cancelled' }), { notStartedWhenIdle: true }).label).toBe('未运行')
+  })
+
   it('keeps a declined project entry visible, with the way back in its tip', () => {
     // A declined entry no longer loads, but the row stays: 允许 on it records a
     // new decision, and the badge is what says the entry is not simply off.

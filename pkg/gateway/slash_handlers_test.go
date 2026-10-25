@@ -380,16 +380,26 @@ func TestSandboxReportShowsUnavailableReason(t *testing.T) {
 // TestMCPServerToggleSharesTheTerminalsAction pins the web's Disable/Enable:
 // it records the choice in the serving Runner's agent store exactly as the
 // terminal panel does, refuses a required server with its own sentence, and
-// the servers list then shows a server the store kept out of the session as
-// not running, so it can be re-enabled from the web too.
+// the servers list then shows a server the store kept out of every new session
+// as not running, so it can be re-enabled from the web too. The rows come from
+// the resolved configuration — the base runner hosts no servers — so the store
+// is the one live fact the listing adds to the config.
 func TestMCPServerToggleSharesTheTerminalsAction(t *testing.T) {
 	ws := t.TempDir()
-	running := []appcfg.MCPServerConfig{{Name: "docs", Transport: "stdio", Command: "docs"}, {Name: "must", Command: "must", Required: true}}
-	kept := []appcfg.MCPServerConfig{{Name: "paused", Transport: "stdio", Command: "paused"}}
 	cfg := &appcfg.Root{}
+	cfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{
+		{Name: "docs", Transport: "stdio", Command: "docs"},
+		{Name: "must", Command: "must", Required: true},
+		{Name: "paused", Transport: "stdio", Command: "paused"},
+	}
+	// "paused" is already switched off in the store, the way the terminal
+	// panel leaves it.
+	if _, err := turn.SetMCPServerDisabled(ws, cfg.Agents.Defaults.MCPServers, nil, "paused", true); err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{
 		Home:   t.TempDir(),
-		Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: ws, MCPServers: running, MCPDisabled: kept}},
+		Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: ws}},
 		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}},
 	}
 	post := func(path, body string) *httptest.ResponseRecorder {
@@ -422,9 +432,12 @@ func TestMCPServerToggleSharesTheTerminalsAction(t *testing.T) {
 	for _, row := range body.Servers {
 		byName[row["name"].(string)] = row
 	}
-	require.Equal(t, true, byName["docs"]["running"])
+	// The store is the one live fact: a switched-off entry drops out of the
+	// resolved list (not running) and says so for the next session; the
+	// re-enabled one is back in the list.
+	require.Equal(t, false, byName["docs"]["running"])
 	require.Equal(t, true, byName["docs"]["disabled_next_session"])
-	require.Equal(t, false, byName["paused"]["running"])
+	require.Equal(t, true, byName["paused"]["running"])
 	require.Equal(t, false, byName["paused"]["disabled_next_session"])
 	require.Equal(t, true, byName["must"]["required"])
 }

@@ -1066,3 +1066,60 @@ func TestEnvironmentBindConversationBuildsTheProjectRunner(t *testing.T) {
 		t.Fatalf("project runner MCPServers = %+v, want the global entry", r.MCPServers)
 	}
 }
+
+// TestRunnerPoolLatestRunnerForProjectPicksTheNewestGeneration pins what the
+// project pages read: the project's most recently used live runner, whichever
+// generation it belongs to — a settings edit moves new sessions to a fresh
+// generation while the old one still serves its bound session — and a project
+// with no entry answers false without building one.
+func TestRunnerPoolLatestRunnerForProjectPicksTheNewestGeneration(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "gens", Root: "/tmp/pool-gens", ProjectKey: "-tmp-pool-gens"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No entry yet: the read answers false and builds nothing.
+	if r, ok := pool.LatestRunnerForProject(proj.ID); ok || r != nil {
+		t.Fatalf("a project with no entry answered (%v, %v)", r, ok)
+	}
+
+	ensurePoolSessions(t, env, "sess-old", "sess-new")
+	if err := projects.BindSession(ctx, "sess-old", proj.ID); err != nil {
+		t.Fatal(err)
+	}
+	old := pool.RunnerForSession(ctx, "sess-old")
+	if old == nil {
+		t.Fatal("first generation runner missing")
+	}
+	// An instructions edit changes the project's fingerprint: the next session
+	// resolves to a fresh generation while the first keeps its runner.
+	instructions := "answer with care"
+	proj, err = projects.Update(ctx, proj.ID, state.UpdateProjectInput{Instructions: &instructions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "sess-new", proj.ID); err != nil {
+		t.Fatal(err)
+	}
+	fresh := pool.RunnerForSession(ctx, "sess-new")
+	if fresh == nil || fresh == old {
+		t.Fatalf("the edit must mint a new generation: %v", fresh)
+	}
+
+	got, ok := pool.LatestRunnerForProject(proj.ID)
+	if !ok || got != fresh {
+		t.Fatalf("LatestRunnerForProject = (%v, %v), want the newest generation", got, ok)
+	}
+	// Another project's answer is unaffected, and the read never builds.
+	other, err := projects.Create(ctx, state.CreateProjectInput{Name: "other", Root: "/tmp/pool-other", ProjectKey: "-tmp-pool-other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := pool.LatestRunnerForProject(other.ID); ok || r != nil {
+		t.Fatalf("an untouched project answered (%v, %v)", r, ok)
+	}
+}

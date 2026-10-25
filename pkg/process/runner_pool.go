@@ -1176,6 +1176,35 @@ func (p *RunnerPool) Runners() []*run.Runner {
 	return out
 }
 
+// LatestRunnerForProject returns the project's most recently used live runner,
+// whichever generation it belongs to, without building one or touching
+// lastUsed. It is the runner a page that reports "what this project's servers
+// are doing" reads; a project with no live runner has nothing running.
+func (p *RunnerPool) LatestRunnerForProject(projectID string) (*run.Runner, bool) {
+	if p == nil {
+		return nil, false
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var best *poolEntry
+	for _, entry := range p.entries {
+		if entry == nil || entry.runner == nil || strings.TrimSpace(entry.project.ID) != projectID {
+			continue
+		}
+		if best == nil || entry.lastUsed.After(best.lastUsed) {
+			best = entry
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	return best.runner, true
+}
+
 // RunnersForProject returns the live runners built for one project, every
 // generation still in the pool included, so a surface that changed that
 // project's settings on disk can have its running sessions read them again.

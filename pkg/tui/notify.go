@@ -1541,10 +1541,7 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 		// that subdirectory's project, never the enclosing repository.
 		LaunchDir:       cwd,
 		ExactLaunchRoot: true,
-		// A conversation's MCP servers live on its project's runner (see
-		// RunnerPool), so the base runner hosts none.
-		AgentRunnerWithoutMCP: true,
-		SessionSource:         memory.SessionSourceTUI,
+		SessionSource:   memory.SessionSourceTUI,
 	})
 	if err != nil {
 		return nil, err

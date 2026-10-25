@@ -18,6 +18,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -578,6 +579,39 @@ func mcpServerRow(t *testing.T, body map[string]any, name string) map[string]any
 	return nil
 }
 
+// TestFindMCPServerMergedReadsTheResolvedLayers pins the OAuth lookups' source
+// now that the base runner hosts no MCP list: the entry is found by resolving
+// what a launch with no project resolves — the shared list plus the primary
+// agent's own — with the base runner's own lists reading empty.
+func TestFindMCPServerMergedReadsTheResolvedLayers(t *testing.T) {
+	cfg := &appcfg.Root{}
+	cfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{
+		{Name: "docs", Transport: "stdio", Command: "/bin/docs"},
+	}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
+		"main": {MCPServers: []appcfg.MCPServerConfig{
+			{Name: "agenttool", Transport: "stdio", Command: "/bin/agenttool"},
+		}},
+	}
+	// A base runner with no MCP lists of its own — its shape since it stopped
+	// hosting servers — still names the workspace and agent the layers read.
+	primary := &run.Runner{Deps: &run.Deps{Home: t.TempDir(), AgentName: "main"}}
+	s := newMCPServersTestServer(t, cfg, primary)
+
+	for _, name := range []string{"docs", "agenttool", "Docs"} {
+		srv, err := s.findMCPServerMerged(name)
+		if err != nil {
+			t.Fatalf("findMCPServerMerged(%q): %v", name, err)
+		}
+		if mcp.SameServerName(srv.Name, name) != true {
+			t.Fatalf("findMCPServerMerged(%q) = %q", name, srv.Name)
+		}
+	}
+	if _, err := s.findMCPServerMerged("nope"); err == nil {
+		t.Fatal("an unknown name must not be found")
+	}
+}
+
 // TestMCPServersV1ReportsConfiguredServersWithNoRuntimeView pins the shape a UI
 // gets when there is no Runner to ask: the configured entries, and an explicit
 // statement that no runtime state answered.
@@ -600,8 +634,11 @@ func TestMCPServersV1ReportsConfiguredServersWithNoRuntimeView(t *testing.T) {
 	if body["runtime_available"] != false {
 		t.Fatalf("runtime_available = %v, want false with no Runner to ask", body["runtime_available"])
 	}
-	if body["runtime_scope"] != "primary" {
-		t.Fatalf("runtime_scope = %v, want the answering scope named", body["runtime_scope"])
+	// The base runner hosts no servers, so a request that names no session has
+	// no runtime to quote at all: the scope says "none" rather than dressing
+	// a runner that never started anything up as an answer.
+	if body["runtime_scope"] != "none" {
+		t.Fatalf("runtime_scope = %v, want none: the base runner reports nothing", body["runtime_scope"])
 	}
 	// The configured entries are still reported: a client with no runtime to show
 	// still has a configuration to show.
@@ -633,9 +670,10 @@ func newMCPServersTestServer(t *testing.T, cfg *appcfg.Root, primary *run.Runner
 }
 
 // TestMCPServersV1RuntimeScopeFollowsTheRequest pins the one thing a client
-// cannot infer: which Runner answered. A session-scoped request is answered
-// against that session's Runner, and a request naming a session that resolves to
-// no worker falls back to the primary Runner and says so.
+// cannot infer: which Runner answered. The base runner hosts no servers, so a
+// request that names no session — or one whose session resolves to no project
+// worker — is answered with scope "none": presenting the base runner's
+// emptiness as a session's state would read as "nothing is running".
 func TestMCPServersV1RuntimeScopeFollowsTheRequest(t *testing.T) {
 	cfg := &appcfg.Root{}
 	cfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{Name: "docs", Transport: "stdio", Command: "/bin/docs"}}
@@ -646,12 +684,12 @@ func TestMCPServersV1RuntimeScopeFollowsTheRequest(t *testing.T) {
 		query     string
 		wantScope string
 	}{
-		// No session named: the primary Runner is the only candidate and the
-		// response says so.
-		{name: "no session", wantScope: "primary"},
-		// A session named with no worker to resolve it: still the primary
-		// Runner, still stated, rather than presented as this session's state.
-		{name: "session with no worker", query: "?session_id=s-1", wantScope: "primary"},
+		// No session named: the base runner is the only candidate and it
+		// reports nothing.
+		{name: "no session", wantScope: "none"},
+		// A session named with no worker to resolve it: still nothing to
+		// quote, still stated, rather than presented as this session's state.
+		{name: "session with no worker", query: "?session_id=s-1", wantScope: "none"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -667,6 +705,10 @@ func TestMCPServersV1RuntimeScopeFollowsTheRequest(t *testing.T) {
 			body := decodeMCPServersBody(t, rec)
 			if body["runtime_scope"] != tc.wantScope {
 				t.Fatalf("runtime_scope = %v, want %q", body["runtime_scope"], tc.wantScope)
+			}
+			// "none" means no runtime view rode along either.
+			if body["runtime_available"] != false {
+				t.Fatalf("runtime_available = %v, want false under scope none", body["runtime_available"])
 			}
 		})
 	}

@@ -13,6 +13,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -1070,9 +1071,27 @@ func (s *Server) mcpRowsContext(lc *appcfg.Root, runtimeRunner *run.Runner) mcpR
 			rc.disabledNext = next
 		}
 	} else if lc != nil {
-		// A Server assembled without a Runner has only the configuration to
-		// show: no session, no runtime, no store.
-		rc.inv = turn.BuildMCPInventory(turn.MCPInventorySource{Servers: lc.Agents.Defaults.MCPServers})
+		// No runtime to quote — the base runner hosts no servers — but "what
+		// a session here would load" is still a real question: the inventory
+		// comes from resolving the shared list plus this agent's own, exactly
+		// the layers a runner freeze used to hold, only the live state is
+		// absent. A Server assembled without a Runner at all has only the
+		// configuration to show: no session, no runtime, no store.
+		if s.Runner != nil {
+			res := process.ResolveSessionMCP(s.Home, s.Runner.WorkspaceRoot, lc.Agents, s.Runner.AgentName, safety.ProjectContext{})
+			src := turn.MCPInventorySource{
+				Servers:      res.Servers,
+				Disabled:     res.Disabled,
+				GlobalSource: turn.GlobalMCPSource(lc),
+			}
+			if next, err := mcp.DisabledForNextSession(s.Runner.WorkspaceRoot); err == nil {
+				src.DisabledNext = next
+				rc.disabledNext = next
+			}
+			rc.inv = turn.BuildMCPInventory(src)
+		} else {
+			rc.inv = turn.BuildMCPInventory(turn.MCPInventorySource{Servers: lc.Agents.Defaults.MCPServers})
+		}
 	}
 	rc.runtimeByName = map[string]mcp.ServerRecord{}
 	if rc.runtime != nil {

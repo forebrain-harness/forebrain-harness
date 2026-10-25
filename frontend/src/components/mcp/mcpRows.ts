@@ -76,7 +76,21 @@ function oauthNote(row: McpServerRow): string {
  * The failures and the OAuth state are what the tip is for: the column carries a
  * badge, and the words behind it are one hover away.
  */
-export function mcpStatus(row: McpServerRow): McpStatus {
+/** The badge options a page picks by what it can honestly report:
+ *
+ *   - `configOnly` — the settings and agent pages: the base runner hosts no
+ *     servers any more, so those pages show configuration only, never a
+ *     connection state.
+ *   - `notStartedWhenIdle` — the project page: its rows carry live state only
+ *     while the project has a runner, so a row with none says the project is
+ *     not started rather than that the server is not running.
+ */
+export interface McpStatusOptions {
+  configOnly?: boolean
+  notStartedWhenIdle?: boolean
+}
+
+export function mcpStatus(row: McpServerRow, opts: McpStatusOptions = {}): McpStatus {
   const tip = withOAuth(row)
   if (awaitingDecision(row)) return { tone: 'warn', label: t('mcp.status.pending'), tip: '' }
   // A declined entry does not load, and the row stays: allowing it later is the
@@ -91,6 +105,9 @@ export function mcpStatus(row: McpServerRow): McpStatus {
   }
   if (row.disabledByConfig === true) return { tone: 'gray', label: t('mcp.status.disabledByConfig'), tip: withOAuth(row, 'enabled: false') }
   if (row.disabledNextSession === true) return { tone: 'gray', label: t('mcp.status.disabledNextSession'), tip: withOAuth(row, t('mcp.status.disabledNextSessionTip')) }
+  // A configuration-only page stops here: what follows is runtime state a
+  // runner that hosts no servers can never have reported.
+  if (opts.configOnly === true) return { tone: 'ok', label: t('mcp.status.enabled'), tip }
   // The runtime spells a failed connection `error`; `failed` is tolerated for
   // any older payload still in flight.
   if (row.connStatus === 'error' || row.connStatus === 'failed' || (row.error ?? '').trim() !== '') {
@@ -105,6 +122,12 @@ export function mcpStatus(row: McpServerRow): McpStatus {
   const state = row.connStatus ?? ''
   if (row.running === true && (state === '' || state === 'connected')) {
     return { tone: 'ok', label: `${t('mcp.status.connected')}${toolSuffix(row)}`, tip }
+  }
+  // A project page whose rows carry no runtime at all says why: the project is
+  // not started, so nothing could report — different from a live runner whose
+  // server simply is not running.
+  if (opts.notStartedWhenIdle === true && state === '' && row.running !== true) {
+    return { tone: 'gray', label: t('mcp.status.notStarted'), tip }
   }
   return { tone: 'gray', label: t('mcp.status.idle'), tip }
 }

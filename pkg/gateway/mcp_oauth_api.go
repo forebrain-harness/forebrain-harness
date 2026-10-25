@@ -13,6 +13,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -52,6 +53,19 @@ func (s *Server) mcpPKCETake(state string) (gatewayMcpPKCE, bool) {
 	return e, ok
 }
 
+// resolvedBaseMCPLayers answers with the layers the base runner used to freeze
+// before it stopped hosting servers: the shared list plus this primary agent's
+// own, resolved against no launch project. Nil lists mean "no config to read" —
+// callers fall back to whatever they hold.
+func (s *Server) resolvedBaseMCPLayers() (running, kept []appcfg.MCPServerConfig) {
+	lc := s.liveCfg()
+	if lc == nil || s.Runner == nil {
+		return nil, nil
+	}
+	res := process.ResolveSessionMCP(s.Home, s.Runner.WorkspaceRoot, lc.Agents, s.Runner.AgentName, safety.ProjectContext{})
+	return res.Servers, res.Disabled
+}
+
 func (s *Server) findMCPServerMerged(name string) (appcfg.MCPServerConfig, error) {
 	if s == nil {
 		return appcfg.MCPServerConfig{}, fmt.Errorf("nil server")
@@ -63,9 +77,16 @@ func (s *Server) findMCPServerMerged(name string) (appcfg.MCPServerConfig, error
 	nm := strings.TrimSpace(name)
 	// A server the disable store kept out of this session can still be
 	// authenticated for the next one.
+	//
+	// The base runner holds no MCP list any more: the entry is found by
+	// resolving what a launch with no project resolves — the shared list plus
+	// this primary agent's own, the very layers the base runner used to hold.
+	// Servers and kept-out entries both answer, so a disabled entry can still
+	// be authenticated ahead of the session that will load it.
 	list := lc.Agents.Defaults.MCPServers
 	if s.Runner != nil {
-		list = append(append([]appcfg.MCPServerConfig(nil), s.Runner.MCPServers...), s.Runner.MCPDisabled...)
+		servers, disabled := s.resolvedBaseMCPLayers()
+		list = append(append([]appcfg.MCPServerConfig(nil), servers...), disabled...)
 	}
 	for _, srv := range list {
 		if mcp.SameServerName(srv.Name, nm) {
@@ -78,12 +99,14 @@ func (s *Server) findMCPServerMerged(name string) (appcfg.MCPServerConfig, error
 // handleMCPServersV1 reports the configured servers and, with them, what each
 // one is doing right now.
 //
-// The runtime half is what makes this endpoint answer the question a UI has:
-// "why are this server\'s tools missing". It is read from the Runner that serves
-// the request — the session\'s own Runner when ?session_id= names one, the
-// primary Runner otherwise — because the process-wide mirror only knows what the
-// last Runner to publish happened to see. Which of the two answered is stated in
-// the response rather than left for the client to guess.
+// The runtime half answers a UI's question — "why are this server's tools
+// missing" — and can only come from a Runner that actually started servers.
+// The base runner hosts none, so a caller that names no session (or whose
+// session rides the base runner) gets runtime_scope "none": a runner that
+// could never have started anything reports nothing. A session that named a
+// project runner reports the servers its own generation started, and the
+// response says which of the two answered rather than leaving the client to
+// guess.
 func (s *Server) handleMCPServersV1(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -99,24 +122,18 @@ func (s *Server) handleMCPServersV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []map[string]any
-	// The runtime source is the session\'s Runner when the caller named one, so a
-	// project session reports the servers its own generation started.
-	//
-	// A session name that resolves to no worker (a channel session, a stale id)
-	// falls back to the primary Runner, and the response says so through
-	// runtime_scope: reporting a different Runner\'s state as this session\'s
-	// would be worse than saying which Runner answered.
+	// The runtime source is the session's Runner when the caller named one
+	// and it is not the base runner; anything else reports no runtime. A
+	// session name that resolves to no worker (a channel session, a stale
+	// id) or to the base runner is "none": its state would describe servers
+	// that were never started.
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
-	runtimeRunner := s.Runner
-	runtimeScope := "primary"
+	var runtimeRunner *run.Runner
+	runtimeScope := "none"
 	if sessionID != "" {
-		if resolved := s.runnerFor(r.Context(), sessionID); resolved != nil {
+		if resolved := s.runnerFor(r.Context(), sessionID); resolved != nil && resolved != s.Runner {
 			runtimeRunner = resolved
-			if resolved != s.Runner {
-				runtimeScope = "session"
-			}
-		} else {
-			runtimeScope = "primary"
+			runtimeScope = "session"
 		}
 	}
 	var runtime *turn.MCPRuntimeView
@@ -402,7 +419,18 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 		// in pending_consent alone.
 		rows := make([]map[string]any, 0, len(res.Servers)+len(pending)+len(declined))
 		lc := s.liveCfg()
-		rc := s.mcpRowsContext(lc, s.Runner)
+		// The live half of these rows is this project's own runner, never the
+		// base one (it hosts no servers): a project with no live runner shows
+		// rows with no runtime state, which the page renders as "not started".
+		var projectRunner *run.Runner
+		if s.Env != nil {
+			if pool := s.Env.RunnerPool(); pool != nil {
+				if r, ok := pool.LatestRunnerForProject(p.ID); ok {
+					projectRunner = r
+				}
+			}
+		}
+		rc := s.mcpRowsContext(lc, projectRunner)
 		source := turn.GlobalMCPSource(lc)
 		for _, row := range mcpConsentPreviewRows(pending, launch, "pending") {
 			rows = append(rows, row)
@@ -659,11 +687,205 @@ func (s *Server) handleMCPServerToggle(w http.ResponseWriter, r *http.Request, d
 		http.Error(w, "no runner", http.StatusServiceUnavailable)
 		return
 	}
-	reply, err := turn.SetMCPServerDisabled(runner.WorkspaceRoot, runner.MCPServers, runner.MCPDisabled, name, disable)
+	// A session's toggle touches its own runner's frozen lists. The base
+	// runner hosts no servers, so a session-less toggle validates names
+	// against the resolved layers instead — the lists it used to freeze.
+	running, kept := runner.MCPServers, runner.MCPDisabled
+	if runner == s.Runner {
+		if servers, disabled := s.resolvedBaseMCPLayers(); servers != nil || disabled != nil {
+			running, kept = servers, disabled
+		}
+	}
+	reply, err := turn.SetMCPServerDisabled(runner.WorkspaceRoot, running, kept, name, disable)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "reply": reply})
+}
+
+// projectServerChoice is one row of the session consent dialog's answer: the
+// entry as the dialog showed it — an MCP server name or a language-server id,
+// with the fingerprint it had — and whether it was left checked.
+type projectServerChoice struct {
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+	Allow       bool   `json:"allow"`
+}
+
+// handleProjectServersPending is the one-screen confirmation the web session
+// view opens: the project's undecided MCP and language-server entries in two
+// groups, plus the project's "always allow" switch. A dialog that gets two
+// empty groups has nothing to ask and stays closed.
+func (s *Server) handleProjectServersPending(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	if err != nil {
+		http.Error(w, "project could not be resolved", http.StatusBadRequest)
+		return
+	}
+	workspace := ""
+	if s.Runner != nil {
+		workspace = s.Runner.WorkspaceRoot
+	}
+	mcpRows := make([]map[string]string, 0)
+	for _, item := range process.PendingProjectMCPConsents(workspace, launch) {
+		mcpRows = append(mcpRows, map[string]string{
+			"name": item.Name, "detail": item.Detail, "fingerprint": item.Fingerprint,
+		})
+	}
+	lspRows := make([]map[string]string, 0)
+	for _, item := range process.PendingProjectLSPConsents(workspace, launch) {
+		// The dialog names a language server by its id; it is the same name
+		// the consent answer has to send back.
+		lspRows = append(lspRows, map[string]string{
+			"name": item.ID, "detail": item.Detail, "fingerprint": item.Fingerprint,
+		})
+	}
+	writeJSON(w, map[string]any{
+		"mcp":        mcpRows,
+		"lsp":        lspRows,
+		"auto_allow": process.ProjectServersAutoAllowed(workspace, launch),
+	})
+}
+
+// handleProjectServersConsent records the session dialog's answer: every entry
+// it lists is decided — checked means allow, unchecked means deny — and
+// always_allow turns the project's switch on as well. Each choice carries the
+// fingerprint the dialog showed, so a project file that moved under the
+// operator is refused whole with 409 and nothing recorded; the surface reloads
+// and asks again about what is still pending.
+func (s *Server) handleProjectServersConsent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		MCP []projectServerChoice `json:"mcp"`
+		LSP []projectServerChoice `json:"lsp"`
+		// AlwaysAllow turns the project's "always allow" switch on once both
+		// kinds of the same answer were recorded.
+		AlwaysAllow bool `json:"always_allow"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	if err != nil {
+		http.Error(w, "project could not be resolved", http.StatusBadRequest)
+		return
+	}
+	workspace := ""
+	if s.Runner != nil {
+		workspace = s.Runner.WorkspaceRoot
+	}
+	if err := process.DecideProjectServers(workspace, launch, process.ProjectServersDecision{
+		MCP:         projectServerChoices(body.MCP),
+		LSP:         projectServerChoices(body.LSP),
+		AlwaysAllow: body.AlwaysAllow,
+	}); err != nil {
+		var stale interface{ StaleNames() []string }
+		if errors.As(err, &stale) {
+			writeStaleConsent(w, stale)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// A consent changes what a project's sessions would load, so the pooled
+	// runners for it are rebuilt rather than reused.
+	if s.Env != nil {
+		if pool := s.Env.RunnerPool(); pool != nil {
+			pool.RebindAgent(s.Runner.AgentName)
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleProjectServersAutoAllow turns the project's "always allow" switch: the
+// project page's toolbar toggle. On, undecided entries load without asking;
+// off, new and changed entries ask again.
+func (s *Server) handleProjectServersAutoAllow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		On bool `json:"on"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	if err != nil {
+		http.Error(w, "project could not be resolved", http.StatusBadRequest)
+		return
+	}
+	workspace := ""
+	if s.Runner != nil {
+		workspace = s.Runner.WorkspaceRoot
+	}
+	if err := process.SetProjectServersAutoAllow(workspace, launch, body.On); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The switch changes what a project's sessions would load, so the pooled
+	// runners for it are rebuilt rather than reused.
+	if s.Env != nil {
+		if pool := s.Env.RunnerPool(); pool != nil {
+			pool.RebindAgent(s.Runner.AgentName)
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true, "on": body.On})
+}
+
+// projectServerChoices re-words one kind's rows into the process package's own
+// choice type. A row without a name carries no entry to bind a decision to and
+// is dropped by the process layer, not here.
+func projectServerChoices(rows []projectServerChoice) []process.ProjectServerChoice {
+	choices := make([]process.ProjectServerChoice, 0, len(rows))
+	for _, row := range rows {
+		choices = append(choices, process.ProjectServerChoice{
+			Name:        row.Name,
+			Fingerprint: row.Fingerprint,
+			Allow:       row.Allow,
+		})
+	}
+	return choices
 }

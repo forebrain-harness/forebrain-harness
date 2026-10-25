@@ -116,6 +116,32 @@ func envWithMCPServers(t *testing.T, mcpSection string) (*Environment, *counting
 	return env, counter
 }
 
+// bindSessionToProject registers a fresh project and binds sessionID to it, so
+// the session's turn resolves to that project's runner — the shape every real
+// conversation has (the gateway refuses project-less sessions; the TUI binds
+// at startup). Project runners host the configured global servers; the base
+// runner hosts none (plans/111 and /114).
+func bindSessionToProject(t *testing.T, env *Environment, sessionID string) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := env.Deps.SessionStore.Ensure(ctx, sessionID, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	projects := state.NewProjectStore(env.SQL, env.Deps.AgentName)
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "proj-" + sessionID, Root: root, ProjectKey: state.ProjectKeyForRoot(root)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, sessionID, proj.ID); err != nil {
+		t.Fatalf("bind %s to its project: %v", sessionID, err)
+	}
+	env.EnsureRunnerPool()
+	if err := env.RunnerPool().BindSession(ctx, sessionID, proj.ID); err != nil {
+		t.Fatalf("pre-build %s's project runner: %v", sessionID, err)
+	}
+}
+
 // TestRunExecutorFailsBeforeTheModelWhenARequiredServerDidNotStart pins the
 // unattended-run contract at the entry point the gateway uses.
 //
@@ -125,6 +151,7 @@ func envWithMCPServers(t *testing.T, mcpSection string) (*Environment, *counting
 // and keeps the underlying text, and the provider is never asked.
 func TestRunExecutorFailsBeforeTheModelWhenARequiredServerDidNotStart(t *testing.T) {
 	env, counter := envWithMCPServers(t, mcpServerEntry("required-docs", true))
+	bindSessionToProject(t, env, "s-required")
 
 	executor := env.NewRunExecutor("webchat", RunExecutorOptions{FailOnRequiredMCP: true})
 	_, err := executor.Run(context.Background(), turn.TurnRequest{SessionID: "s-required", UserText: "hello"}, func(string) {})
@@ -164,11 +191,12 @@ func TestRunExecutorRunsWhenOnlyAnOptionalServerFailed(t *testing.T) {
 	}
 }
 
-// TestSubagentFailsWhenThePrimaryRunnersRequiredServerDidNotStart pins that a
-// child cannot quietly outlive a required-server failure: a subagent reuses the
-// primary Runner's generation, so it meets the same barrier.
-func TestSubagentFailsWhenThePrimaryRunnersRequiredServerDidNotStart(t *testing.T) {
+// TestSubagentFailsWhenTheProjectsRequiredServerDidNotStart pins that a
+// child cannot quietly outlive a required-server failure: a subagent rides the
+// dispatching conversation's runner, so it meets that project's barrier.
+func TestSubagentFailsWhenTheProjectsRequiredServerDidNotStart(t *testing.T) {
 	env, counter := envWithMCPServers(t, mcpServerEntry("required-docs", true))
+	bindSessionToProject(t, env, "s-1")
 
 	_, _, err := RunSubagentSupervised(context.Background(), env, run.SubagentExecRequest{Task: "do the thing", SessionID: "s-1", WorkerSessionID: "worker-1"})
 	if err == nil {

@@ -472,48 +472,32 @@ func TestGatewayEnvironmentHasNoLaunchProject(t *testing.T) {
 	}
 }
 
-// TestOpenAgentRunnerWithoutMCPHostsNoServer pins the transitional switch the
-// interactive surface opens (plans/111): the environment's own runner is the
-// primary agent's and serves no conversation, so it hosts no MCP servers and
-// offers no re-resolution — every conversation's servers live on its project
-// runner. The default stays exactly as it was until plans/114 flips the
-// gateway and the switch is removed.
-func TestOpenAgentRunnerWithoutMCPHostsNoServer(t *testing.T) {
+// TestOpenBaseRunnerHostsNoMCP pins the unconditional behavior the transitional
+// switch of plans/111 became: the environment's own runner is the primary
+// agent's and serves no conversation, so it hosts no MCP servers and offers no
+// re-resolution — every conversation's servers live on its project runner.
+func TestOpenBaseRunnerHostsNoMCP(t *testing.T) {
 	ctx := context.Background()
-	open := func(t *testing.T, withoutMCP bool) *Environment {
-		t.Helper()
-		home := t.TempDir()
-		project := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("OPENAI_API_KEY", "test-key")
-		cfg := activeAgentTestConfig()
-		cfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
-			Name: "global-srv", Transport: "stdio", Command: "/usr/bin/true",
-		}}
-		env, err := Open(ctx, OpenOptions{
-			Home: home, LaunchDir: project, Config: &cfg,
-			SessionSource: memory.SessionSourceTUI, AgentRunnerWithoutMCP: withoutMCP,
-		})
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		t.Cleanup(func() { env.Close() })
-		return env
+	home := t.TempDir()
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-
-	// The contrast that keeps this test honest: the default Open still serves
-	// the configured global entry, so the switch — not a config that never
-	// carried the entry — is what removes it below.
-	withServers := open(t, false)
-	if len(withServers.Runner.MCPServers) == 0 {
-		t.Fatal("default Open must still serve the configured global entry")
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	cfg := activeAgentTestConfig()
+	cfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
+		Name: "global-srv", Transport: "stdio", Command: "/usr/bin/true",
+	}}
+	env, err := Open(ctx, OpenOptions{
+		Home: home, LaunchDir: project, Config: &cfg,
+		SessionSource: memory.SessionSourceTUI,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
 	}
-
-	env := open(t, true)
+	t.Cleanup(func() { env.Close() })
 	if len(env.Runner.MCPServers) != 0 {
-		t.Fatalf("base runner MCPServers = %+v, want none", env.Runner.MCPServers)
+		t.Fatalf("base runner MCPServers = %+v, want none even with a configured global entry", env.Runner.MCPServers)
 	}
 	if env.Deps.MCPResolve != nil {
 		t.Fatal("MCPResolve must be nil: no conversation ever re-resolves on the base runner")
