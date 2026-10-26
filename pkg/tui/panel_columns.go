@@ -58,9 +58,10 @@ func (l panelLine) chipRows(width int) []string {
 
 // columnRows lays one two-column row: the name in its own column, the
 // description panelColumnGap cells right of it, each left-aligned and the
-// description wrapping inside its column. A name too wide for the column takes
-// rows of its own and the description starts under the column, so the
-// description column stays put whatever the names look like. A row without a
+// description wrapping inside its column. A name too wide for the column
+// turns the row into a stacked pair instead: the name on its own rows, the
+// description hung under the name — never indented to the description
+// column, which would float it in the middle of the panel. A row without a
 // description is laid out exactly like a plain row.
 func (l panelLine) columnRows(width int) []string {
 	if strings.TrimSpace(l.text) == "" {
@@ -86,16 +87,35 @@ func (l panelLine) columnRows(width int) []string {
 		}
 		return rows
 	}
-	rows := make([]string, 0, len(texts)+1)
+	return l.columnRowsStacked(width)
+}
+
+// columnRowsStacked lays a two-column row that ran out of column as a
+// vertical pair: the name wrapped at the row's width, the description wrapped
+// the same way directly under it, both hung at the name's left edge. A row
+// without a description is laid out exactly like a plain row.
+func (l panelLine) columnRowsStacked(width int) []string {
+	if strings.TrimSpace(l.text) == "" {
+		return panelLine{lead: l.lead, text: l.col}.rows(width)
+	}
+	leadW := displayLineWidth(l.lead)
+	hang := strings.Repeat(" ", leadW)
+	render := func(chunk string) string {
+		if l.style != nil && chunk != "" {
+			return l.style.Render(chunk)
+		}
+		return chunk
+	}
+	rows := make([]string, 0, 4)
 	for i, chunk := range wrapPanelWords(l.col, maxInt(1, width-leadW)) {
 		if i == 0 {
 			rows = append(rows, l.lead+chunk)
 			continue
 		}
-		rows = append(rows, strings.Repeat(" ", leadW)+chunk)
+		rows = append(rows, hang+chunk)
 	}
-	for _, chunk := range texts {
-		rows = append(rows, pad+render(chunk))
+	for _, chunk := range wrapPanelWords(strings.TrimSpace(l.text), maxInt(1, width-leadW)) {
+		rows = append(rows, hang+render(chunk))
 	}
 	return rows
 }

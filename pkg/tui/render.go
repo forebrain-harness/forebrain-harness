@@ -6746,10 +6746,20 @@ type panelLine struct {
 
 // rows wraps the line at width.
 func (l panelLine) rows(width int) []string {
+	return l.rowsStacks(width, false)
+}
+
+// rowsStacks wraps the line at width, forcing a two-column row that has a
+// column into its stacked form when stack is set: a list lays out all its
+// rows at one rhythm, decided once by slashPanel.layout.
+func (l panelLine) rowsStacks(width int, stack bool) []string {
 	if len(l.chips) > 0 {
 		return l.chipRows(width)
 	}
 	if l.colWidth > 0 {
+		if stack {
+			return l.columnRowsStacked(width)
+		}
 		return l.columnRows(width)
 	}
 	leadWidth := displayLineWidth(l.lead)
@@ -6944,13 +6954,29 @@ func (p slashPanel) layout(width, rows, top int, follow bool) panelLayout {
 	}
 	out.lines = append(out.lines, "")
 
+	// A list picks one rhythm: when any row's name cannot fit its column at
+	// this width, every row stacks, so the left edge of each row is the same
+	// edge.
+	stackColumns := false
+	for _, l := range p.body {
+		if l.colWidth <= 0 || l.col == "" {
+			continue
+		}
+		leadW := displayLineWidth(l.lead)
+		colW := min(l.colWidth, maxInt(1, (width-leadW)*2/5))
+		if displayLineWidth(l.col) > colW {
+			stackColumns = true
+			break
+		}
+	}
+
 	var body []string
 	focusStart, focusEnd := 0, 0
 	for i, l := range p.body {
 		if i == p.focusStart {
 			focusStart = len(body)
 		}
-		body = append(body, l.rows(width)...)
+		body = append(body, l.rowsStacks(width, stackColumns)...)
 		if i == p.focusEnd-1 {
 			focusEnd = len(body)
 		}

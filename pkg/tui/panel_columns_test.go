@@ -45,28 +45,86 @@ func TestPanelColumnsWrapInsideTheDescriptionColumn(t *testing.T) {
 	}
 }
 
-// A name wider than the narrowed column takes rows of its own and the
-// description starts under the column, so the column edge stays put at every
-// width.
-func TestPanelColumnsLongNameTakesItsOwnRow(t *testing.T) {
+// A name that does not fit its column turns the row into a stacked pair: the
+// name on its own rows, the description hung under the NAME — never indented
+// to the description column, which would float it in the middle of the panel.
+func TestPanelColumnsLongNameStacksUnderTheName(t *testing.T) {
 	rows := panelLine{
 		lead:     "  ",
-		col:      "beta-long-name",
-		colWidth: 14,
-		text:     "A description long enough to wrap onto a second row at this width.",
-	}.rows(30)
-	if got := stripANSI(rows[0]); got != "  beta-long-name" {
-		t.Fatalf("row 0 = %q", got)
+		col:      "Standard API Key for China (pay-as-you-go)",
+		colWidth: 29,
+		text:     "dashscope.aliyuncs.com",
+	}.rows(75)
+	want := []string{
+		"  Standard API Key for China (pay-as-you-go)",
+		"  dashscope.aliyuncs.com",
 	}
-	if got := stripANSI(rows[1]); !strings.HasPrefix(got, strings.Repeat(" ", 15)+"A description") {
-		t.Fatalf("row 1 = %q", got)
+	if len(rows) != len(want) {
+		t.Fatalf("got %d rows, want %d: %q", len(rows), len(want), rows)
 	}
-	for i, row := range rows[1:] {
-		if !strings.HasPrefix(stripANSI(row), strings.Repeat(" ", 15)) {
-			t.Fatalf("row %d not hung under the description column: %q", i+1, stripANSI(row))
+	for i := range want {
+		if got := stripANSI(rows[i]); got != want[i] {
+			t.Fatalf("row %d = %q, want %q", i, got, want[i])
 		}
 	}
-	assertRowsFit(t, rows, 30)
+	assertRowsFit(t, rows, 75)
+}
+
+// The whole list stacks when any name cannot fit: a list must not mix a
+// two-column row with a stacked one, or its left edge stops being one edge.
+func TestPanelColumnsStackAsOneList(t *testing.T) {
+	p := slashPanel{body: []panelLine{
+		{lead: "  ", col: "Standard API Key for China (pay-as-you-go)", colWidth: 40, text: "dashscope.aliyuncs.com"},
+		{lead: "  ", col: "Coding Plan · Global", colWidth: 40, text: "coding-intl.dashscope.aliyuncs.com"},
+	}}
+	layout := p.layout(75, 0, 0, false)
+	want := []string{
+		"",
+		"  Standard API Key for China (pay-as-you-go)",
+		"  dashscope.aliyuncs.com",
+		"  Coding Plan · Global",
+		"  coding-intl.dashscope.aliyuncs.com",
+		"",
+	}
+	if len(layout.lines) != len(want) {
+		t.Fatalf("got %d lines, want %d: %q", len(layout.lines), len(want), layout.lines)
+	}
+	for i := range want {
+		if got := stripANSI(layout.lines[i]); got != want[i] {
+			t.Fatalf("line %d = %q, want %q", i, got, want[i])
+		}
+	}
+	for i, line := range layout.lines {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(stripANSI(line), "  ") {
+			t.Fatalf("line %d not hung under the name: %q", i, stripANSI(line))
+		}
+	}
+	assertRowsFit(t, layout.lines, 75)
+}
+
+// Short names keep the two columns untouched at the same width.
+func TestPanelColumnsKeepColumnsWhenEveryNameFits(t *testing.T) {
+	p := slashPanel{body: []panelLine{
+		{lead: "  ", col: "Standard API Key for China (pay-as-you-go)", colWidth: 42, text: "dashscope.aliyuncs.com"},
+	}}
+	layout := p.layout(120, 0, 0, false)
+	want := []string{
+		"",
+		"  Standard API Key for China (pay-as-you-go)  dashscope.aliyuncs.com",
+		"",
+	}
+	if len(layout.lines) != len(want) {
+		t.Fatalf("got %d lines, want %d: %q", len(layout.lines), len(want), layout.lines)
+	}
+	for i := range want {
+		if got := stripANSI(layout.lines[i]); got != want[i] {
+			t.Fatalf("line %d = %q, want %q", i, got, want[i])
+		}
+	}
+	assertRowsFit(t, layout.lines, 120)
 }
 
 // A two-column row without a description is laid out exactly like a plain

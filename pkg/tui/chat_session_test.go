@@ -14266,12 +14266,12 @@ func TestPromptMainLLMSetupQwenMethodsUseDistinctEndpoints(t *testing.T) {
 	}{
 		{
 			name:    "standard cn",
-			method:  "Standard API Key for China (pay-as-you-go) — Endpoint: dashscope.aliyuncs.com",
+			method:  "Standard · China — dashscope.aliyuncs.com",
 			wantURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 		},
 		{
 			name:    "coding global",
-			method:  "Coding Plan API Key for Global/Intl (subscription) — Endpoint: coding-intl.dashscope.aliyuncs.com",
+			method:  "Coding Plan · Global — coding-intl.dashscope.aliyuncs.com",
 			wantURL: "https://coding-intl.dashscope.aliyuncs.com/v1",
 		},
 	}
@@ -28941,8 +28941,8 @@ func TestSetupBackOnProvidersOpensOnTheChoiceMade(t *testing.T) {
 		want    []string
 	}{
 		{"single way in", []string{"OpenAI", "OpenAI"}, []string{"", "OpenAI"}},
-		{"by plan", []string{"Qwen Cloud", "Coding Plan API Key for Global/Intl (subscription)", "Qwen Cloud", "Coding Plan API Key for Global/Intl (subscription)"},
-			[]string{"", "", "Qwen Cloud", "Coding Plan API Key for Global/Intl (subscription)"}},
+		{"by plan", []string{"Qwen Cloud", "Coding Plan · Global", "Qwen Cloud", "Coding Plan · Global"},
+			[]string{"", "", "Qwen Cloud", "Coding Plan · Global"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			title := "OpenAI API key"

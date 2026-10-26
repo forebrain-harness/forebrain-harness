@@ -382,8 +382,8 @@ var providerGroups = []providerGroup{
 		Options: []providerChoice{
 			{
 				Group:           "Qwen Cloud",
-				Label:           "Standard API Key for China (pay-as-you-go)",
-				Hint:            "Endpoint: dashscope.aliyuncs.com",
+				Label:           "Standard · China",
+				Hint:            "dashscope.aliyuncs.com",
 				Provider:        "alibaba",
 				DefaultBaseURL:  "https://dashscope.aliyuncs.com/compatible-mode/v1",
 				SupportsAPIPath: true,
@@ -391,8 +391,8 @@ var providerGroups = []providerGroup{
 			},
 			{
 				Group:           "Qwen Cloud",
-				Label:           "Standard API Key for Global/Intl (pay-as-you-go)",
-				Hint:            "Endpoint: dashscope-intl.aliyuncs.com",
+				Label:           "Standard · Global",
+				Hint:            "dashscope-intl.aliyuncs.com",
 				Provider:        "alibaba",
 				DefaultBaseURL:  "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
 				SupportsAPIPath: true,
@@ -400,8 +400,8 @@ var providerGroups = []providerGroup{
 			},
 			{
 				Group:           "Qwen Cloud",
-				Label:           "Coding Plan API Key for China (subscription)",
-				Hint:            "Endpoint: coding.dashscope.aliyuncs.com",
+				Label:           "Coding Plan · China",
+				Hint:            "coding.dashscope.aliyuncs.com",
 				Provider:        "alibaba",
 				DefaultBaseURL:  "https://coding.dashscope.aliyuncs.com/v1",
 				SupportsAPIPath: true,
@@ -409,8 +409,8 @@ var providerGroups = []providerGroup{
 			},
 			{
 				Group:           "Qwen Cloud",
-				Label:           "Coding Plan API Key for Global/Intl (subscription)",
-				Hint:            "Endpoint: coding-intl.dashscope.aliyuncs.com",
+				Label:           "Coding Plan · Global",
+				Hint:            "coding-intl.dashscope.aliyuncs.com",
 				Provider:        "alibaba",
 				DefaultBaseURL:  "https://coding-intl.dashscope.aliyuncs.com/v1",
 				SupportsAPIPath: true,
@@ -724,7 +724,9 @@ func (s *llmSetup) pickProvider() (bool, error) {
 				method = i
 			}
 		}
-		idx, ok, err = s.cfg.Selector.SelectRich(group.Label+"\nWhich plan and region?", methods, method)
+		idx, ok, err = s.cfg.Selector.SelectRich(
+			group.Label+"\nStandard is pay-as-you-go; Coding Plan is a subscription.\nThe endpoint is shown under each.",
+			methods, method)
 		if err != nil {
 			return false, err
 		}
