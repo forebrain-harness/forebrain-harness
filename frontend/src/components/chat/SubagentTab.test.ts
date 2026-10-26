@@ -126,6 +126,16 @@ describe('SubagentTab', () => {
     expect(wrapper.find('[data-testid="subagent-working"]').exists()).toBe(false)
   })
 
+  it('carries the execution’s first token wait on the working line once measured', async () => {
+    const { wrapper } = mountTab({ record: record({ firstTokenMs: 1234 }) })
+    const working = wrapper.get('[data-testid="subagent-working"]')
+    expect(working.text()).toContain('first token 1.2s')
+
+    // An execution that has not produced output yet shows no wait, not "0s".
+    await wrapper.setProps({ record: record({ firstTokenMs: undefined }) })
+    expect(wrapper.get('[data-testid="subagent-working"]').text()).not.toContain('first token')
+  })
+
   it('draws a composer only while the subagent runs, and a bar that reads it when idle', async () => {
     const { wrapper } = mountTab()
     // Running: the tab's own input box, its queue, its stop and its send.

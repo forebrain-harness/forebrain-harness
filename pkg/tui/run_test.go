@@ -6921,3 +6921,27 @@ func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
 		t.Fatalf("conversation working line = %q, want the ordinary line with no retry status", conv)
 	}
 }
+
+// A subagent's Working line carries its execution's first-token wait once the
+// engine has measured it, the same segment the conversation's own Working line
+// shows for the turn — and an execution that produced no output shows none,
+// not a "0s".
+func TestSubagentWorkingLineShowsFirstToken(t *testing.T) {
+	tracker := NewTracker()
+	tracker.ObserveAgent("task-ft", "exec-ft", time.Now())
+	tracker.ObserveAgentFirstToken("task-ft", 1200*time.Millisecond)
+	// A resumed attempt's later, shorter wait does not overwrite the first —
+	// the same once rule the conversation's run keeps.
+	tracker.ObserveAgentFirstToken("task-ft", 300*time.Millisecond)
+	tracker.ObserveAgent("task-silent", "exec-silent", time.Now())
+
+	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
+	sub := formatter(time.Second, 0, "task-ft")
+	if !strings.Contains(sub, "first token 1.2s") {
+		t.Fatalf("subagent working line = %q, want its first-token wait", sub)
+	}
+	silent := formatter(time.Second, 0, "task-silent")
+	if strings.Contains(silent, "first token") {
+		t.Fatalf("silent subagent working line = %q, must show no first-token wait", silent)
+	}
+}

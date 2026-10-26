@@ -612,6 +612,7 @@ type endMsg struct {
 	ParentToolCallID                          string
 	TaskIndex                                 int
 	FinishedAtMs                              int64
+	FirstTokenMs                              int64
 }
 
 func (c *collectingUINotify) Publish(_ context.Context, evt event.RunEvent) error {
@@ -630,7 +631,7 @@ func (c *collectingUINotify) Publish(_ context.Context, evt event.RunEvent) erro
 			return nil
 		}
 		msg = endMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error,
-			ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, FinishedAtMs: p.FinishedAtMs}
+			ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, FinishedAtMs: p.FinishedAtMs, FirstTokenMs: p.FirstTokenMs}
 	default:
 		return nil
 	}
@@ -2037,6 +2038,7 @@ type streamProbe struct {
 	toolStarted    []event.ToolCallStartedPayload
 	toolCompleted  []event.ToolCallCompletedPayload
 	transportRetry []event.TransportRetryPayload
+	firstToken     []event.FirstTokenPayload
 }
 
 func (p *streamProbe) Publish(_ context.Context, evt event.RunEvent) error {
@@ -2070,6 +2072,11 @@ func (p *streamProbe) Publish(_ context.Context, evt event.RunEvent) error {
 		var m event.ToolCallCompletedPayload
 		if json.Unmarshal(evt.Payload, &m) == nil {
 			p.toolCompleted = append(p.toolCompleted, m)
+		}
+	case event.RunEventFirstToken:
+		var m event.FirstTokenPayload
+		if json.Unmarshal(evt.Payload, &m) == nil {
+			p.firstToken = append(p.firstToken, m)
 		}
 	}
 	return nil
@@ -2109,6 +2116,110 @@ func TestSubagentProviderWebSearchIsPublishedAsATaggedToolStep(t *testing.T) {
 	}
 	if done.ToolMeta.AgentID != "task-search-1" || done.Description != "Searched the web for forebrain subagent routing" {
 		t.Fatalf("completed = %#v, want the tagged, query-bearing summary", done)
+	}
+}
+
+// TestSubagentFirstTokenIsMeasuredOnce pins the wait a subagent view shows: the
+// execution's stream sink stamps it when the model first begins answering, and
+// a later turn of the same execution must not overwrite it — a resumed attempt
+// keeps the wait its first answer had, the rule the main turn's FirstTokenStore
+// applies. The window itself belongs to the execution: a new one starts its own
+// clock and the old execution's wait is no longer readable.
+func TestSubagentFirstTokenIsMeasuredOnce(t *testing.T) {
+	record := agent.HistoryEntry{
+		TaskID: "task-ft-once", AgentType: "general-purpose",
+		WorkerSessionID: "ws-ft-once-1", SessionID: "session-1",
+	}
+	owner := &Runner{Deps: &Deps{}}
+	fac := Factory{AgentName: "main", Home: t.TempDir(), Owner: owner}
+	ch := subagentChannelFor(fac, record)
+	ch.openFirstTokenWindow("exec-ft-once-1")
+	probe := &streamProbe{}
+	ctx := subagentRunContext(context.Background(), owner, probe, "child-run-ft-1", "session-1", record)
+	sink := llm.StreamSinkFrom(ctx)
+	if sink == nil || sink.OnResponseStarted == nil {
+		t.Fatal("subagent stream sink must observe the model's first output")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	firstTurn := false
+	llm.NotifyResponseStarted(sink, &firstTurn)
+	time.Sleep(2 * time.Millisecond)
+	// A second turn of the same execution answers again; the wait stays the
+	// first answer's.
+	secondTurn := false
+	llm.NotifyResponseStarted(sink, &secondTurn)
+
+	wait := ch.firstTokenWaitOf("exec-ft-once-1")
+	if wait <= 0 {
+		t.Fatalf("first-token wait = %v, want a positive wait", wait)
+	}
+	if want := 2 * time.Millisecond; wait >= 4*want {
+		t.Fatalf("first-token wait = %v, want the first answer's wait, not a later overwrite", wait)
+	}
+	if len(probe.firstToken) != 1 {
+		t.Fatalf("first_token events = %#v, want exactly one for the execution", probe.firstToken)
+	}
+	ft := probe.firstToken[0]
+	if ft.AgentID != subagentRosterKey(record) {
+		t.Fatalf("first_token agent id = %q, want the roster key %q", ft.AgentID, subagentRosterKey(record))
+	}
+	if ft.FirstTokenMs != wait.Milliseconds() {
+		t.Fatalf("first_token ms = %d, want the stamped wait %d", ft.FirstTokenMs, wait.Milliseconds())
+	}
+
+	// The next execution of the same channel opens its own window: the old
+	// execution's wait is gone, and the new one measures from its own start.
+	ch.openFirstTokenWindow("exec-ft-once-2")
+	if got := ch.firstTokenWaitOf("exec-ft-once-1"); got != 0 {
+		t.Fatalf("previous execution's wait = %v, want 0 once the window moved on", got)
+	}
+	if _, ok := ch.observeFirstToken(); !ok {
+		t.Fatal("a fresh window must stamp a first token again")
+	}
+}
+
+// TestSubagentEndedCarriesFirstToken pins the durable half: the ended payload
+// carries the wait its channel measured, and an execution that produced no
+// model output carries none — the views show no "0s" for it.
+func TestSubagentEndedCarriesFirstToken(t *testing.T) {
+	record := agent.HistoryEntry{
+		TaskID: "task-ft-ended", AgentType: "general-purpose",
+		WorkerSessionID: "ws-ft-ended-1", SessionID: "session-1", RunID: "child-run-ft-2",
+		ExecutionID: "exec-ft-e1",
+	}
+	owner := &Runner{Deps: &Deps{}, Events: &collectingUINotify{}}
+	fac := Factory{AgentName: "main", Home: t.TempDir(), Owner: owner}
+	ch := subagentChannelFor(fac, record)
+	ch.openFirstTokenWindow("exec-ft-e1")
+	time.Sleep(2 * time.Millisecond)
+	wait, ok := ch.observeFirstToken()
+	if !ok || wait <= 0 {
+		t.Fatalf("observeFirstToken = (%v, %v), want a stamped wait", wait, ok)
+	}
+
+	notifySubagentEndedDirect(fac, record)
+	notifier := owner.Events.(*collectingUINotify)
+	ends := notifier.endMsgs()
+	if len(ends) != 1 {
+		t.Fatalf("ended events = %d, want one", len(ends))
+	}
+	if ends[0].FirstTokenMs != wait.Milliseconds() {
+		t.Fatalf("ended FirstTokenMs = %d, want the measured %d", ends[0].FirstTokenMs, wait.Milliseconds())
+	}
+
+	// An execution with no model output carries no wait, and a later
+	// execution's window never leaks into another execution's payload.
+	silent := record
+	silent.ExecutionID = "exec-ft-e2"
+	ch.openFirstTokenWindow("exec-ft-e2")
+	notifySubagentEndedDirect(fac, silent)
+	ends = notifier.endMsgs()
+	if len(ends) != 2 {
+		t.Fatalf("ended events = %d, want two", len(ends))
+	}
+	if ends[1].FirstTokenMs != 0 {
+		t.Fatalf("silent execution FirstTokenMs = %d, want 0", ends[1].FirstTokenMs)
 	}
 }
 

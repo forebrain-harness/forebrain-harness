@@ -161,6 +161,7 @@ import RunStatusLine from '@/components/chat/RunStatusLine.vue'
 import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import {
+  formatFirstTokenDuration,
   formatRuntimeDuration,
   formatTransportRetryLine,
   type PendingInputPreview,
@@ -277,9 +278,15 @@ const retryLine = computed(() =>
 
 // What the tab's status line says: the retry owns it while one is pending,
 // and the ordinary working label — with its checklist and its task — returns
-// once the retry is over.
+// once the retry is over. The label carries this execution's first-token wait
+// once the engine has measured it, the same suffix the conversation's own
+// working line shows for the turn.
+const firstTokenSuffix = computed(() => {
+  const wait = formatFirstTokenDuration(props.record.firstTokenMs)
+  return wait ? ` · ${t('chat.firstToken', { duration: wait })}` : ''
+})
 const workingLabel = computed(() =>
-  retryLine.value ? retryLine.value.label : t('chat.subagentWorking', { duration: duration.value }))
+  retryLine.value ? retryLine.value.label : t('chat.subagentWorking', { duration: duration.value }) + firstTokenSuffix.value)
 
 /** A command picked in the "+" menu lands in this tab's composer, not sent. */
 function insertCommand(text: string) {

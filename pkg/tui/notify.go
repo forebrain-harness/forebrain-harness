@@ -147,10 +147,13 @@ type RunStartedMsg struct {
 // the one wait the engine measured once for that run. The reducer holds it on
 // the run so the live "Working" line can show it before the turn is over; the
 // run's own "Worked for" line carries it too, read from the same value, once
-// the turn ends.
+// the turn ends. AgentID names the subagent execution the wait belongs to —
+// held on that agent's own tally instead — and is empty for the
+// conversation's run.
 type FirstTokenMsg struct {
-	RunID string
-	Wait  time.Duration
+	RunID   string
+	AgentID string
+	Wait    time.Duration
 }
 type RunEndedMsg struct {
 	turn           *foregroundTurn
@@ -989,6 +992,15 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		var p event.SubagentInputDeliveredPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.AgentID) != "" && strings.TrimSpace(p.Text) != "" {
 			s.notifyUIForSession(evt.SessionID, SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text)})
+		}
+	case event.RunEventFirstToken:
+		// One subagent execution's wait for its model's first output, measured
+		// once by the engine the same way the conversation's own wait is. The
+		// agent id routes it to that subagent's tally, so its Working line and
+		// Worked-for line show the wait the conversation's lines already do.
+		var p event.FirstTokenPayload
+		if json.Unmarshal(evt.Payload, &p) == nil && p.FirstTokenMs > 0 {
+			s.notifyUIForSession(evt.SessionID, FirstTokenMsg{RunID: evt.RunID, AgentID: strings.TrimSpace(p.AgentID), Wait: time.Duration(p.FirstTokenMs) * time.Millisecond})
 		}
 	case event.CompactEventBudgetUpdated:
 		// A per-agent context budget — the gauge that opens a subagent's view

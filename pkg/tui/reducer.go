@@ -1253,11 +1253,17 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		}
 		return EventResult{}
 	case FirstTokenMsg:
-		// The run's one first-token wait, measured by the engine. Held on the
-		// run so the live "Working" line can show it without waiting for the
-		// turn to end; the "Worked for" line reads it back from the same run.
+		// The one first-token wait, measured by the engine. The conversation's
+		// run holds it so the live "Working" line can show it without waiting
+		// for the turn to end, and the "Worked for" line reads it back from the
+		// same run; a wait that names a subagent is that execution's own, held
+		// on the agent's tally its own two lines read.
 		if r.tracker != nil {
-			r.tracker.ObserveFirstToken(strings.TrimSpace(m.RunID), m.Wait)
+			if agentID := strings.TrimSpace(m.AgentID); agentID != "" {
+				r.tracker.ObserveAgentFirstToken(agentID, m.Wait)
+			} else {
+				r.tracker.ObserveFirstToken(strings.TrimSpace(m.RunID), m.Wait)
+			}
 		}
 		return EventResult{}
 	case NewMessageMsg:
@@ -2160,6 +2166,11 @@ func (r *Reducer) subagentWorkedFrames(agentID string) []Frame {
 	title := workedForLabel(snap.Elapsed)
 	if counters := formatWorkingCounters(snap.Counters); counters != "" {
 		title += " · " + counters
+	}
+	// The wait this execution's own model cost before its first output, the
+	// same segment the conversation's closing line carries for the turn.
+	if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
+		title += " · " + wait
 	}
 	title += " · " + workedCompletionTime(time.Now())
 	return []Frame{{
@@ -7970,6 +7981,25 @@ func (t *Tracker) ObserveFirstToken(runID string, wait time.Duration) {
 	if c.FirstToken == 0 {
 		c.FirstToken = wait
 		t.runUsage[runID] = c
+	}
+	t.mu.Unlock()
+}
+
+// ObserveAgentFirstToken records how long one subagent execution waited for
+// the model's first output, on that agent's own tally. Written once, by the
+// same rule ObserveFirstToken applies to the conversation's run — a resumed
+// attempt keeps the wait its first answer had.
+func (t *Tracker) ObserveAgentFirstToken(agentID string, wait time.Duration) {
+	if t == nil || wait <= 0 {
+		return
+	}
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return
+	}
+	t.mu.Lock()
+	if run := t.agentRunLocked(agentID); run.counters.FirstToken == 0 {
+		run.counters.FirstToken = wait
 	}
 	t.mu.Unlock()
 }

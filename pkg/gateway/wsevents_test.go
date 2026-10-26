@@ -621,6 +621,60 @@ func TestHandleChatWSStreamsSubagentRunEvents(t *testing.T) {
 	require.Equal(t, "Three callers, all in pkg/run.", deltaPayload.Text)
 }
 
+// A subagent execution's first-token wait reaches the browser on the same
+// first_token op the conversation's own wait uses, with the agent id naming
+// whose execution waited — and the push-only event itself never travels as a
+// run_event, exactly like the conversation's wait it stays out of the session
+// log.
+func TestFirstTokenPushCarriesAgentIDForSubagents(t *testing.T) {
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := &Server{Home: home, Sessions: state.NewSessionStore(db, "main")}
+	require.NoError(t, s.Sessions.Ensure(context.Background(), "session-ws", "session-ws"))
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	require.Equal(t, "connected", connected.Op)
+
+	require.NoError(t, conn.WriteJSON(wsClientMsg{Op: "bind_session", RequestID: "req-bind", SessionID: "session-ws"}))
+	var bound wsServerMsg
+	require.NoError(t, conn.ReadJSON(&bound))
+	require.Equal(t, "session_bound", bound.Op)
+
+	// What the engine stamps when a subagent's model first begins answering.
+	require.NoError(t, s.RunEvents().Publish(context.Background(), event.NewRunEvent("",
+		"child-run", "session-ws", event.RunEventFirstToken,
+		event.FirstTokenPayload{AgentID: "task-ft-1", FirstTokenMs: 1234}, time.Now())))
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	var frame wsServerMsg
+	for {
+		require.NoError(t, conn.ReadJSON(&frame))
+		if frame.Op == "first_token" {
+			break
+		}
+		if frame.Op == "run_event" {
+			t.Fatalf("the subagent's first-token wait must ride the first_token op, not a run_event frame: %#v", frame)
+		}
+	}
+	require.Equal(t, "child-run", frame.RunID)
+	require.Equal(t, "session-ws", frame.SessionID)
+	data, ok := frame.Data.(map[string]any)
+	require.True(t, ok, "first_token data = %#v", frame.Data)
+	require.Equal(t, float64(1234), data["first_token_ms"])
+	require.Equal(t, "task-ft-1", data["agent_id"],
+		"without the agent id the client would file the wait under the conversation instead of the subagent's execution")
+}
+
 func TestHandleChatWSRejectsSessionOwnedByAnotherPrimaryAgent(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

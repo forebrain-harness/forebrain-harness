@@ -196,6 +196,33 @@ func TestFirstTokenIsKeptOncePerRun(t *testing.T) {
 	}
 }
 
+// A subagent execution's own first-token wait closes that subagent's view: a
+// FirstTokenMsg naming the agent lands on its tally, and its "Worked for"
+// line carries the wait the conversation's closing line carries for a turn.
+// A wait that names no agent keeps writing the run's, never an agent's.
+func TestSubagentWorkedFrameShowsFirstToken(t *testing.T) {
+	tracker := NewTracker()
+	r := (&Reducer{}).WithTracker(tracker)
+	tracker.ObserveAgent("task-ft-2", "exec-ft-2", time.Now().Add(-5*time.Second))
+	_ = r.Reduce(FirstTokenMsg{AgentID: "task-ft-2", Wait: 950 * time.Millisecond})
+	frames := r.subagentWorkedFrames("task-ft-2")
+	if len(frames) != 1 {
+		t.Fatalf("worked frames = %#v, want the closing line alone", frames)
+	}
+	if !strings.Contains(frames[0].Title, "first token 0.9s") {
+		t.Fatalf("worked title = %q, want the execution's first-token wait", frames[0].Title)
+	}
+	if snap, ok := tracker.SnapshotAgentRun("task-ft-2"); !ok || snap.Counters.FirstToken != 950*time.Millisecond {
+		t.Fatalf("agent counters = %+v, want the wait on that agent's tally", snap)
+	}
+	// The conversation's own wait stays off every agent's tally.
+	_ = r.Reduce(RunStartedMsg{RunID: "r2"})
+	_ = r.Reduce(FirstTokenMsg{RunID: "r2", Wait: 700 * time.Millisecond})
+	if snap, _ := tracker.SnapshotAgentRun("task-ft-2"); snap.Counters.FirstToken != 950*time.Millisecond {
+		t.Fatalf("agent counters after the run's own wait = %+v, must keep the agent's 0.9s", snap)
+	}
+}
+
 // A sub-second wait reads to a tenth of a second; a slow start reads in the
 // worked line's own minutes format; an unmeasured one reads as nothing.
 func TestFirstTokenLabelFormatsTenthsAndMinutes(t *testing.T) {

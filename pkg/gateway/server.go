@@ -1248,6 +1248,24 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 					runEventBindingMu.Unlock()
 					continue
 				}
+				if queued.event.Type == event.RunEventFirstToken {
+					// The subagent twin of the op the turn's own OnFirstToken
+					// callback sends: the same live wait, on the same op, with the
+					// agent id naming whose execution waited. Like the
+					// conversation's it is live state only — the push-only event
+					// never reaches the session log, and the durable copy rides the
+					// subagent_ended payload.
+					var p event.FirstTokenPayload
+					_ = json.Unmarshal(queued.event.Payload, &p)
+					writeMsg(wsServerMsg{
+						Op:        "first_token",
+						RunID:     strings.TrimSpace(queued.event.RunID),
+						SessionID: strings.TrimSpace(queued.event.SessionID),
+						Data:      map[string]any{"first_token_ms": p.FirstTokenMs, "agent_id": p.AgentID},
+					})
+					runEventBindingMu.Unlock()
+					continue
+				}
 				// writeMsg stamps the connection's current trace id.
 				writeMsg(runEventToWSMessage("", "", s.withToolHeader(context.Background(), queued.event)))
 				runEventBindingMu.Unlock()

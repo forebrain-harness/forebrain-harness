@@ -1416,9 +1416,10 @@ export type TimelineBlock =
   /**
    * One execution's closing line: how long it ran, when it finished, and the
    * checklist state it ended with — the same line the conversation closes its
-   * own runs with, drawn by the same component.
+   * own runs with, drawn by the same component. firstTokenMs is how long that
+   * execution's model took to start answering, measured once by the engine.
    */
-  | { kind: 'worked'; id: string; durationMs: number; finishedAt: string; plan?: WorkedPlanProgress }
+  | { kind: 'worked'; id: string; durationMs: number; finishedAt: string; plan?: WorkedPlanProgress; firstTokenMs?: number }
   | {
       kind: 'approval'
       id: string
@@ -1486,6 +1487,12 @@ export interface SubagentTranscript {
   tokenBudget?: TokenBudgetData
   startedAt?: string
   finishedAt?: string
+  /**
+   * This execution's first-token wait — how long its model took to start
+   * answering, measured once by the engine. Live it arrives on its own
+   * `first_token` op; a reload reads it from the execution's worked row.
+   */
+  firstTokenMs?: number
   /**
    * The model this execution's spawn announced — the one the run actually
    * uses, as the engine resolved it once. Absent when the spawn predates
@@ -4626,6 +4633,9 @@ export function useChatStream() {
         status: 'running',
 		error: undefined,
         startedAt: evt.createdAt ?? entry.startedAt,
+        // A new execution has not waited for its model yet; the wait that
+        // closed the previous one belongs to that one's worked row.
+        firstTokenMs: undefined,
         // The model is the engine's own resolution, read — not derived here.
         modelProvider: String(payload.modelProvider ?? '').trim() || undefined,
         model: String(payload.model ?? '').trim() || undefined,
@@ -4708,9 +4718,12 @@ export function useChatStream() {
 		  // Every execution closes with its own worked line — how long this
 		  // one ran, from its own spawn to this end, and the checklist state
 		  // it ended with. A redelivered end is one delivery too many, not a
-		  // second execution.
+		  // second execution. The engine's first-token wait for this execution
+		  // rides the payload, the durable copy a reload reads.
 		  const startRaw = executionId ? entry.executionStarts?.[executionId] : undefined
 		  const startedAtMs = startRaw ? Date.parse(startRaw) : NaN
+		  const firstTokenMsRaw = Number(payload.firstTokenMs)
+		  const executionFirstTokenMs = Number.isFinite(firstTokenMsRaw) && firstTokenMsRaw > 0 ? firstTokenMsRaw : undefined
 		  if (executionId && Number.isFinite(startedAtMs) &&
 		      !blocks.some((block) => block.kind === 'worked' && block.id === `worked:${executionId}`)) {
 			blocks = [...blocks, {
@@ -4718,6 +4731,7 @@ export function useChatStream() {
 			  id: `worked:${executionId}`,
 			  durationMs: Math.max(0, finishedAtMs - startedAtMs),
 			  finishedAt: new Date(finishedAtMs).toISOString(),
+			  ...(executionFirstTokenMs != null ? { firstTokenMs: executionFirstTokenMs } : {}),
 			  ...(entry.plan && entry.plan.total > 0 ? { plan: entry.plan } : {}),
 			}]
 		  }
@@ -5440,17 +5454,24 @@ export function useChatStream() {
           return
         }
         if (op === 'first_token') {
-          // The run's first output just began answering this turn: how long it
-          // waited. Live state, never persisted — the durable copy is on the
-          // run's "worked" row, which the reload reads. It rides the running
-          // status line and the answer's own worked line.
+          // The model just began answering: how long it waited. Live state,
+          // never persisted — the durable copy is on the run's "worked" row
+          // (a subagent's, on its subagent_ended payload), which the reload
+          // reads. It rides the running status line and the answer's own
+          // worked line; a wait naming an agent is that subagent's
+          // execution's, never the conversation's.
           const data = (payload.data && typeof payload.data === 'object')
             ? toCamelCase(payload.data as Record<string, unknown>)
             : payload
           const waitMs = Number(data.firstTokenMs)
           if (Number.isFinite(waitMs) && waitMs > 0) {
-            runtimeStatus.value = { ...runtimeStatus.value, firstTokenMs: waitMs }
-            updateMessageById(answerId(), (message) => ({ ...message, firstTokenMs: waitMs }))
+            const agentId = String(data.agentId ?? '').trim()
+            if (agentId) {
+              updateSubagent(agentId, (entry) => ({ ...entry, firstTokenMs: waitMs }))
+            } else {
+              runtimeStatus.value = { ...runtimeStatus.value, firstTokenMs: waitMs }
+              updateMessageById(answerId(), (message) => ({ ...message, firstTokenMs: waitMs }))
+            }
           }
           return
         }

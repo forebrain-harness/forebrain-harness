@@ -89,6 +89,12 @@ const (
 	// belongs in the conversation, so the event is stored with it rather than
 	// pushed only.
 	RunEventResponseNotice = "response_notice"
+	// RunEventFirstToken reports how long the model took to start answering —
+	// one subagent execution's wait; AgentID names whose. Push-only by design:
+	// the wait is live state about a run in flight, and the durable copy for a
+	// subagent is on its subagent_ended payload, so the event is pushed to
+	// whoever is watching and never stored.
+	RunEventFirstToken = "first_token"
 )
 
 // IsPushOnlyStreamEvent reports a fragment of a run as it happens — answer and
@@ -98,7 +104,7 @@ const (
 // pushed to whoever is watching and never stored.
 func IsPushOnlyStreamEvent(eventType string) bool {
 	switch eventType {
-	case RunEventAssistantDelta, RunEventAssistantDone, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta, RunEventTransportRetry:
+	case RunEventAssistantDelta, RunEventAssistantDone, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta, RunEventTransportRetry, RunEventFirstToken:
 		return true
 	}
 	return false
@@ -412,6 +418,14 @@ type InputDeliveredPayload struct {
 	MentionImages []string `json:"mention_images,omitempty"`
 }
 
+// FirstTokenPayload reports how long one run waited for the model's first
+// output, as the engine measured it once. AgentID names the subagent
+// execution the wait belongs to; empty is the conversation's own run.
+type FirstTokenPayload struct {
+	AgentID      string `json:"agent_id,omitempty"`
+	FirstTokenMs int64  `json:"first_token_ms"`
+}
+
 type SubagentEndedPayload struct {
 	AgentID          string `json:"agent_id,omitempty"`
 	AgentType        string `json:"agent_type,omitempty"`
@@ -428,6 +442,10 @@ type SubagentEndedPayload struct {
 	// surface stops its task clock there; a reaped execution's is when its
 	// process was last seen, not when it was reaped.
 	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+	// FirstTokenMs is how long this execution waited for the model's first
+	// output; 0 when it never produced one. The subagent views draw it on the
+	// "Worked for" line, and a reload reads it from here.
+	FirstTokenMs int64 `json:"first_token_ms,omitempty"`
 }
 
 // PlanReviewStartedPayload opens one plan review: the user asked a model of

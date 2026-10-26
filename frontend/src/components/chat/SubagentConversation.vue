@@ -107,7 +107,7 @@
 
           <RunWorkedLine
             v-else-if="run.item.kind === 'worked'"
-            :line="formatWorkedDurationLabel(run.item.durationMs, t, run.item.finishedAt, run.item.plan)"
+            :line="formatWorkedDurationLabel(run.item.durationMs, t, run.item.finishedAt, run.item.plan, run.item.firstTokenMs)"
           />
 
           <RunErrorBlock

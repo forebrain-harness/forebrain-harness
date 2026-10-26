@@ -1383,6 +1383,72 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  // A first-token wait that names an agent is that subagent execution's own:
+  // it lands on the subagent's tally its working line reads, never on the
+  // conversation's running status or its answer, and its durable copy rides
+  // the execution's worked row, which a reload reads.
+  it('files a first-token wait that names an agent under that subagent only', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('find the callers')
+      void pendingSend.catch(() => {})
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+
+      runEvent('subagent_spawned', {
+        agent_id: 'task-ft-1',
+        agent_type: 'explore',
+        task_id: 'task-ft-1',
+        title: 'Trace first token',
+        task: 'find the wait',
+        execution_id: 'exec-ft-1',
+      })
+      socket.message({
+        op: 'first_token',
+        request_id: sent.request_id,
+        run_id: 'run-1',
+        session_id: 's1',
+        data: { first_token_ms: 1234, agent_id: 'task-ft-1' },
+      })
+
+      const entry = stream.subagents.value.find((row) => row.agentId === 'task-ft-1')
+      expect(entry?.firstTokenMs).toBe(1234)
+      // The conversation's own wait stays untouched: a subagent's execution
+      // is not the turn.
+      expect(stream.runtimeStatus.value.firstTokenMs).toBeUndefined()
+
+      runEvent('subagent_ended', {
+        agent_id: 'task-ft-1',
+        agent_type: 'explore',
+        task_id: 'task-ft-1',
+        status: 'ok',
+        execution_id: 'exec-ft-1',
+        finished_at_ms: Date.parse('2026-06-14T00:00:05.000Z'),
+        first_token_ms: 1234,
+      })
+      const worked = (stream.subagents.value.find((row) => row.agentId === 'task-ft-1')?.blocks ?? [])
+        .find((b) => b.kind === 'worked')
+      expect(worked).toMatchObject({ firstTokenMs: 1234 })
+      // The ended payload's wait is the durable copy a reload reads on the
+      // worked row.
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
   // A run that said nothing still ran: however it ended, its turn stays to
   // carry the worked line that closes it, with no placeholder text.
   for (const ending of ['run_completed', 'run_cancelled', 'run_error'] as const) {

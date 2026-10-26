@@ -589,6 +589,15 @@ type subagentChannel struct {
 	mu      sync.Mutex
 	running *subagentExecution
 	surface SubagentSurface
+	// firstTokenExecID/firstTokenStarted/firstTokenWait (mu-guarded) are the
+	// first-token window of the execution that currently holds the channel's
+	// exec slot: the window opens when the execution starts, the execution's
+	// stream sink stamps the wait on the model's first output, and the ended
+	// notification reads it back by execution id. The slot is single because
+	// the exec semaphore already runs one execution at a time per channel.
+	firstTokenExecID  string
+	firstTokenStarted time.Time
+	firstTokenWait    time.Duration
 	// queueHookMu guards onQueueChanged apart from mu: the queue's change hook
 	// fires from queue operations that run while mu is held (withdraw), so it
 	// must not take mu.
@@ -697,6 +706,52 @@ func (ch *subagentChannel) setRunning(ex *subagentExecution) {
 	ch.mu.Lock()
 	ch.running = ex
 	ch.mu.Unlock()
+}
+
+// openFirstTokenWindow starts the first-token clock of the execution taking
+// the channel's exec slot: the wait is measured from this moment to the
+// model's first output, the same window the main turn's FirstTokenStore
+// measures for a user turn. Called with the execution id the ended payload
+// will read the wait back by.
+func (ch *subagentChannel) openFirstTokenWindow(executionID string) {
+	ch.mu.Lock()
+	ch.firstTokenExecID = strings.TrimSpace(executionID)
+	ch.firstTokenStarted = time.Now()
+	ch.firstTokenWait = 0
+	ch.mu.Unlock()
+}
+
+// observeFirstToken stamps the wait of the model's first output, once for the
+// execution that opened the window. ok is false when there is no window or it
+// already carries a wait — a resumed attempt is the same execution and keeps
+// the wait its first answer had.
+func (ch *subagentChannel) observeFirstToken() (time.Duration, bool) {
+	if ch == nil {
+		return 0, false
+	}
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if ch.firstTokenExecID == "" || ch.firstTokenWait > 0 || ch.firstTokenStarted.IsZero() {
+		return 0, false
+	}
+	ch.firstTokenWait = time.Since(ch.firstTokenStarted)
+	return ch.firstTokenWait, true
+}
+
+// firstTokenWaitOf returns the wait stamped for one execution, 0 when this
+// execution never produced a first output or the window has since moved on to
+// a later execution of the same channel.
+func (ch *subagentChannel) firstTokenWaitOf(executionID string) time.Duration {
+	if ch == nil {
+		return 0
+	}
+	executionID = strings.TrimSpace(executionID)
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if executionID == "" || ch.firstTokenExecID != executionID || ch.firstTokenWait <= 0 {
+		return 0
+	}
+	return ch.firstTokenWait
 }
 
 // beginAttempt opens one attempt of an execution: its own cancellation, and a
@@ -875,6 +930,10 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 		executionID = uuid.NewString()
 	}
 	ex := &subagentExecution{executionID: executionID}
+	// The first-token window opens where the execution does — the same moment
+	// the spawned notification announced it — so the wait a subagent view
+	// shows is measured from the start its "Worked for" clock counts.
+	ch.openFirstTokenWindow(executionID)
 	attempt := run
 	started := false
 	for {
@@ -979,9 +1038,12 @@ func subagentExecutorOf(fac Factory) SubagentExecutor {
 // events, the only form the surfaces route per agent. The parent-owned
 // callbacks are deliberately dropped rather than forwarded: Streamed (a child
 // marking the parent's turn as streamed suppresses the parent's own final
-// message), OnResponseCompleted (the child does not own the text the parent
-// has buffered), and OnResponseStarted (nothing here acts on the child
-// beginning to answer).
+// message) and OnResponseCompleted (the child does not own the text the parent
+// has buffered). OnResponseStarted is replaced rather than dropped: it opens
+// no parent state, and it is the moment the child's first-token wait ends —
+// stamped once on the channel's execution window and published so the
+// subagent views show the wait live, the same beat the main turn's callback
+// reports for the conversation.
 // OnUsageSnapshot is replaced, not dropped: the child's own usage
 // snapshot is published tagged with its roster key, so the gauge in its view
 // shows its context — the parent's footer never sees it.
@@ -991,8 +1053,21 @@ func subagentRunContext(ctx context.Context, own *Runner, sink event.Sink, runID
 	if sink == nil || rosterKey == "" {
 		return ctx
 	}
+	// The window lives on the channel; a test runner with no owner has none,
+	// and a nil channel observes nothing.
+	var ch *subagentChannel
+	if own != nil {
+		ch = subagentChannelFor(own.subagentFactory(), record)
+	}
 	var streamed bool
-	stream := EventStreamSink(ctx, sink, runID, sessionID, rosterKey, &streamed)
+	stream := EventStreamSink(ctx, sink, runID, sessionID, rosterKey, &streamed, func() {
+		if wait, ok := ch.observeFirstToken(); ok {
+			publishEvent(ctx, sink, runID, sessionID, event.RunEventFirstToken, event.FirstTokenPayload{
+				AgentID:      rosterKey,
+				FirstTokenMs: wait.Milliseconds(),
+			})
+		}
+	})
 	stream.OnUsage = func(inputTokens, outputTokens int) {
 		if inputTokens <= 0 && outputTokens <= 0 {
 			return
@@ -1832,6 +1907,23 @@ func notifySubagentSpawnedDirect(fac Factory, entry agent.HistoryEntry, origin s
 	})
 }
 
+// subagentFirstTokenWaitMs is the first-token wait one execution's ended
+// payload carries, read from its channel's window. 0 when the execution
+// produced no model output or its channel is unknown here.
+func subagentFirstTokenWaitMs(entry agent.HistoryEntry) int64 {
+	workerSessionID := strings.TrimSpace(entry.WorkerSessionID)
+	if workerSessionID == "" {
+		return 0
+	}
+	subagentChannelsMu.Lock()
+	ch := subagentChannels[workerSessionID]
+	subagentChannelsMu.Unlock()
+	if ch == nil {
+		return 0
+	}
+	return ch.firstTokenWaitOf(strings.TrimSpace(entry.ExecutionID)).Milliseconds()
+}
+
 func notifySubagentEndedDirect(fac Factory, entry agent.HistoryEntry) {
 	if fac.Owner == nil {
 		return
@@ -1842,6 +1934,7 @@ func notifySubagentEndedDirect(fac Factory, entry agent.HistoryEntry) {
 		WorkerSessionID: entry.WorkerSessionID, ParentRunID: entry.ParentRunID,
 		ParentToolCallID: entry.ParentToolCallID, TaskIndex: entry.TaskIndex, ExecutionID: entry.ExecutionID,
 		FinishedAtMs: time.Now().UnixMilli(),
+		FirstTokenMs: subagentFirstTokenWaitMs(entry),
 	})
 }
 

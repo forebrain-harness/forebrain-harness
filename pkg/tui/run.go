@@ -4280,6 +4280,11 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 			if counters := formatWorkingCounters(snap.Counters); counters != "" {
 				title += " · " + counters
 			}
+			// The wait this execution's model cost before its first output, live
+			// here the way the conversation's own Working line shows the turn's.
+			if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
+				title += " · " + wait
+			}
 			return title
 		}
 		counters := Counters{}
