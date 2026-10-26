@@ -378,7 +378,23 @@ func SingleDisplayLine(s string) string {
 	return strings.Join(out, " ")
 }
 
-// truncateForDisplay shortens s to at most maxLen terminal columns, ending it
+// DisplayLine normalizes a value for a tool header: one logical line, valid
+// UTF-8, and no length cap.
+//
+// A header segment that carries the call's own arguments must use this rather
+// than TruncateForDisplay. wrapToolDisplayLine already folds a long header onto
+// continuation rows, so there is nothing to gain from cutting the tail off —
+// and a reader who cannot see the last of the arguments cannot tell what the
+// call actually asked for.
+func DisplayLine(s string) string {
+	s = SingleDisplayLine(strings.TrimSpace(s))
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "�")
+	}
+	return s
+}
+
+// TruncateForDisplay shortens s to at most maxLen terminal columns, ending it
 // with an ellipsis when it had to cut.
 //
 // Every caller spends maxLen as a column budget (a task title beside a fixed
@@ -392,22 +408,6 @@ func SingleDisplayLine(s string) string {
 // these strings come from tool output and model text that something upstream
 // may have byte-sliced, and runewidth measures a stray byte as zero columns,
 // which would silently skew the budget it is asked to enforce.
-// DisplayLine normalizes a value for a tool header: one logical line, valid
-// UTF-8, and no length cap.
-//
-// A header segment that carries the call's own arguments must use this rather
-// than truncateForDisplay. wrapToolDisplayLine already folds a long header onto
-// continuation rows, so there is nothing to gain from cutting the tail off —
-// and a reader who cannot see the last of the arguments cannot tell what the
-// call actually asked for.
-func DisplayLine(s string) string {
-	s = SingleDisplayLine(strings.TrimSpace(s))
-	if !utf8.ValidString(s) {
-		s = strings.ToValidUTF8(s, "�")
-	}
-	return s
-}
-
 func TruncateForDisplay(s string, maxLen int) string {
 	return runewidth.Truncate(DisplayLine(s), maxLen, "…")
 }
