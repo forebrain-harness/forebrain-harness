@@ -53,8 +53,12 @@ type streamingToolExecutor struct {
 type streamedCall struct {
 	call llm.ToolCall
 	safe bool
-	// started is set once, under the executor's lock, when the call moves to
-	// executing: dispatched reports it even after the call settles.
+	// started is set once, under the executor's lock, when the call is handed to
+	// beforeStart — the provider has already been told this call exists
+	// (progress.MarkToolDispatched), so a resend must not repeat it. It therefore
+	// stays true for a call that never ran: a retracted steer makes beforeStart
+	// return nil and the call goes back to queued. dispatched() reads it as "this
+	// response dispatched anything", not as "a tool executed".
 	started bool
 	state   int // queued, executing, done, deferred, notRun
 	result  orchestratedToolResult
@@ -178,6 +182,10 @@ func (e *streamingToolExecutor) pump() {
 		e.progress.MarkToolDispatched()
 		baseCtx := e.beforeStart(readyUpTo)
 		if baseCtx == nil {
+			// beforeStart refused to start this call (a retracted steer):
+			// nothing behind it may start in-stream. started stays set on
+			// purpose — see its comment — and finish runs the call after the
+			// stream, or drops it with the retracted response.
 			e.mu.Lock()
 			call.state = streamedCallQueued
 			e.halted = true

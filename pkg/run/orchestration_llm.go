@@ -684,10 +684,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		}
 		latestUsage := usageCopy(res)
 		accumulateUsage(&totalUsage, latestUsage)
-		// A response that reports no tool calls cannot have dispatched any; if
-		// one somehow did, the calls it already ran are still its own.
+		// A response can report fewer calls than its stream announced — a compat
+		// adapter synthesizes them from its final frame. The calls that already
+		// ran are still this response's own: append the ones it left out so each
+		// is answered. Self-healing, so it is a warning, never an error.
 		if exec != nil && exec.dispatched() && res != nil && res.Message != nil {
-			slog.Error("tools executed in-stream but the response reports no tool calls")
+			slog.Warn("tools executed in-stream but the response reports no tool calls")
 			res.Message.ToolCalls = exec.reconcile(res.Message.ToolCalls)
 		}
 		if res == nil || res.Message == nil || len(res.Message.ToolCalls) == 0 {

@@ -1,10 +1,13 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -708,6 +711,163 @@ func TestCallsNotSeenAsReadyRunAfterTheStream(t *testing.T) {
 	results := toolResultMessages(inner.received[1])
 	if len(results) != 1 || results[0].TextContent() != "late ok" {
 		t.Fatalf("tool results = %+v", results)
+	}
+}
+
+// A provider whose final frame lists fewer calls than its stream reported ready:
+// the call that already ran must still be answered, and the self-healed case is a
+// warning, not an error — nothing is broken when this happens.
+func TestACallTheResponseDroppedStillGetsItsResult(t *testing.T) {
+	ctx := context.Background()
+	const sid = "streamtools-reconcile"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	// Both probes must start inside the stream: without concurrency-safe
+	// metadata the second one waits for the first and never reaches started,
+	// which is not the branch under test here.
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe_a", ReadOnly: true, ConcurrencySafe: true})
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe_b", ReadOnly: true, ConcurrencySafe: true})
+
+	var runsA, runsB int32
+	probeA, err := llm.NewTool("probe_a", "first", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&runsA, 1)
+		return "a ok", nil
+	})
+	if err != nil {
+		t.Fatalf("probe_a: %v", err)
+	}
+	probeB, err := llm.NewTool("probe_b", "second", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&runsB, 1)
+		return "b ok", nil
+	})
+	if err != nil {
+		t.Fatalf("probe_b: %v", err)
+	}
+	callA := streamCall("call-a", "probe_a")
+	callB := streamCall("call-b", "probe_b")
+
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("working")
+			sink.OnTextBlockDone()
+			sink.OnToolCallReady(callA)
+			sink.OnToolCallReady(callB)
+			// The final response lists only A: B already ran in the stream.
+			msg := llm.AssistantMessage(nil, callA)
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid), streamTestSink())
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{probeA, probeB})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("result = %+v", res)
+	}
+	if runsA != 1 || runsB != 1 {
+		t.Fatalf("runs = %d/%d, want 1/1", runsA, runsB)
+	}
+
+	// The second request must carry both tool results, including the call B
+	// the response dropped.
+	results := toolResultMessages(inner.received[1])
+	if len(results) != 2 {
+		t.Fatalf("tool results = %+v, want one per call", results)
+	}
+	joined := logs.String()
+	if !strings.Contains(joined, "appending the call it ran") {
+		t.Fatalf("the self-healed call must be logged: %s", joined)
+	}
+	if strings.Contains(joined, "level=ERROR") {
+		t.Fatalf("a self-healed response must not log at ERROR: %s", joined)
+	}
+}
+
+// retractDuringTheStreamLLM answers the first call with a tool call, so the
+// turn continues and the queued steer is taken for the second call to carry.
+// On that second call it emits output, then retracts the in-flight steer, then
+// ignores the abort the retraction caused and reports a call ready anyway: the
+// branch that refuses to start a call must keep the call from running at all.
+type retractDuringTheStreamLLM struct {
+	queue *InputQueue
+	calls int
+}
+
+func (m *retractDuringTheStreamLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	switch m.calls {
+	case 1:
+		msg := llm.AssistantMessage(nil, streamCall("call-first", "probe_first"))
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	case 2:
+		if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnDelta != nil {
+			sink.OnDelta("starting")
+		}
+		_, _ = m.queue.Recall()
+		if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnToolCallReady != nil {
+			sink.OnToolCallReady(streamCall("call-retracted", "probe_retracted"))
+		}
+		msg := llm.AssistantMessage(nil, streamCall("call-retracted", "probe_retracted"))
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	default:
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+}
+
+// A call reported ready after the user retracted the in-flight steer — a
+// provider that ignored the retraction's abort — must never start, and the
+// turn still ends on the re-send's answer.
+func TestRetractedCallNeverStartsAndNeverRuns(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "also do X", Parts: []llm.ContentPart{llm.Text("also do X")}})
+
+	var runs int32
+	// The opening call is scaffolding only: a queued steer preempts it ("Not
+	// run"), which is what hands the second model call the steer to carry.
+	probeFirst, err := llm.NewTool("probe_first", "opens the steer-carrying call", func(context.Context, *struct{}) (string, error) {
+		return "first ok", nil
+	})
+	if err != nil {
+		t.Fatalf("probe first: %v", err)
+	}
+	probe, err := llm.NewTool("probe_retracted", "must never run", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&runs, 1)
+		return "ran", nil
+	})
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	inner := &retractDuringTheStreamLLM{queue: q}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		llm.WithStreamSink(WithTurnInputRuntime(context.Background(), rt), streamTestSink()),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		[]*llm.Tool{probeFirst, probe},
+	)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if runs != 0 {
+		t.Fatalf("a call that could not start must not run: runs = %d", runs)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("result = %+v", res)
 	}
 }
 
