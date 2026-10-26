@@ -345,6 +345,27 @@ func (e *streamingToolExecutor) finish(ctx context.Context, finalCalls []llm.Too
 		restAt = append(restAt, i)
 	}
 	e.mu.Unlock()
+	// A refusal without words can land after the response body ended: the
+	// call was streamed, it was started in-stream, and it waited on its
+	// approval while the rest of the stream arrived. By the time it answers,
+	// the stream-end check above (orchestration_llm's refusedStop read) has
+	// already run, so this is the only place left that can report it. Nothing
+	// behind the refused call may start — that is what "refuses and stops"
+	// means (plan 129) — and the caller ends the turn on this bool without
+	// asking the model again.
+	if e.refusedStop() {
+		for i, call := range finalCalls {
+			c, ok := byID[call.ID]
+			if ok && (c.state == streamedCallDone || c.state == streamedCallNotRun) {
+				result := c.result
+				result.index = i
+				results[i] = result
+				continue
+			}
+			results[i] = rejectionStoppedResult(i, call)
+		}
+		return results, true
+	}
 	if len(rest) > 0 {
 		restResults, stopped := e.w.executeToolCalls(ctx, rest, e.toolMap)
 		for j, result := range restResults {

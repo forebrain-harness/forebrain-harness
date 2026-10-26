@@ -999,6 +999,111 @@ func TestInPlaceRejectionWithoutWordsStopsTheStream(t *testing.T) {
 	}
 }
 
+// A refusal without words can land after the response body already ended:
+// the streamed call was still waiting on its approval when the stream
+// finished, so the stream-end refusal read had already passed with
+// refused=false. The settlement after the stream is the last place that can
+// report the refusal: the turn still ends on it, nothing behind the refused
+// call starts, and the model is never asked again.
+func TestRejectionAfterTheStreamEndsStillStopsTheTurn(t *testing.T) {
+	const sid = "streamtools-refuse-after-stream-end"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st)
+	hook, gates := inlineGateHook()
+
+	var aRuns int32
+	gated, err := llm.NewTool("gated_a", "asks in place", func(ctx context.Context, _ *struct{}) (string, error) {
+		if hookFn := st.ActionHook(); hookFn != nil {
+			id, pending, hookErr := hookFn(ctx, "gated_a", map[string]any{"tool": "gated_a"})
+			if hookErr != nil {
+				return "", hookErr
+			}
+			if pending && id != "" {
+				return "", &toolpkg.RequiresActionError{ActionID: id, ActionKind: "gated_a", ToolName: "gated_a"}
+			}
+		}
+		atomic.AddInt32(&aRuns, 1)
+		return "a ok", nil
+	})
+	if err != nil {
+		t.Fatalf("gated tool: %v", err)
+	}
+	var bRuns int32
+	queued, err := llm.NewTool("queued_b", "waits behind the unsafe call", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&bRuns, 1)
+		return "b ok", nil
+	})
+	if err != nil {
+		t.Fatalf("queued tool: %v", err)
+	}
+
+	// The response ends with the gated call still waiting on its approval;
+	// streamDone tells the test body the stream is over.
+	streamDone := make(chan struct{})
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("checking")
+			sink.OnTextBlockDone()
+			sink.OnToolCallReady(streamCall("call-a", "gated_a"))
+			// The stream keeps writing while the question is open, and the
+			// queued call is readied behind the unsafe gated one.
+			sink.OnDelta(" still going")
+			sink.OnToolCallReady(streamCall("call-b", "queued_b"))
+			close(streamDone)
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("checking still going")},
+				streamCall("call-a", "gated_a"), streamCall("call-b", "queued_b"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	capture := NewPartialSessionCapture()
+	base := toolpkg.WithInlineApprovalHook(llm.WithAgentSessionID(toolpkg.WithRunID(context.Background(), runID), sid), hook)
+	execCtx := WithPartialSessionCapture(llm.WithStreamSink(base, streamTestSink()), capture)
+	execDone := make(chan error, 1)
+	go func() {
+		_, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated, queued})
+		execDone <- err
+	}()
+	// The gated call started and is waiting on its approval.
+	g := waitInlineGate(t, gates, "streamed gated")
+	<-streamDone
+	// The refusal lands only after the stream ended and the loop walked past
+	// the stream-end refusal read — the user thought about it for a few
+	// seconds.
+	time.Sleep(100 * time.Millisecond)
+	answerInlineGate(g, "refuse")
+	err = <-execDone
+	if !errors.Is(err, ErrTurnStoppedByRejection) {
+		t.Fatalf("execute err = %v, want ErrTurnStoppedByRejection", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", inner.calls)
+	}
+	if got := atomic.LoadInt32(&bRuns); got != 0 {
+		t.Fatalf("queued call ran %d times, want 0", got)
+	}
+	if got := atomic.LoadInt32(&aRuns); got != 0 {
+		t.Fatalf("refused call ran %d times, want 0", got)
+	}
+	snap := capture.Snapshot()
+	refused, notRun := 0, 0
+	for _, msg := range snap {
+		if msg.Role != llm.RoleTool {
+			continue
+		}
+		switch {
+		case msg.TextContent() == toolpkg.RejectedStopText && msg.ToolDisplay != nil && msg.ToolDisplay.Body == toolpkg.RejectionStoppedDisplayKey:
+			notRun++
+		case msg.TextContent() == toolpkg.RejectedStopText:
+			refused++
+		}
+	}
+	if refused != 1 || notRun != 1 {
+		t.Fatalf("stopped results: refused=%d notRun=%d, want 1 and 1", refused, notRun)
+	}
+}
+
 // A gate asked in place does not stop the stream: the model keeps writing,
 // and a concurrency-safe sibling readied behind the gated call starts only
 // once the gated call is answered — an unsafe gated call blocks the queue.
