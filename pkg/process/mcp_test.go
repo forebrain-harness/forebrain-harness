@@ -966,6 +966,62 @@ func TestDecideProjectServersStale(t *testing.T) {
 	}
 }
 
+// The confirmation is one answer about one dialog: when a language-server entry
+// moved under the operator, the MCP half of the same answer must not be
+// recorded either — the surface told the user nothing was.
+func TestDecideProjectServersRecordsNothingWhenOneKindWentStale(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n")
+	writeProjectLSPFile(t, dir, "servers:\n  one: {command: /bin/one}\n")
+	mcpFP := pendingMCPFingerprint(t, ws, launch, "one")
+	lspFP := pendingLSPFingerprint(t, ws, launch, "one")
+
+	// 只有 LSP 那份文件变了：MCP 的指纹仍然有效。
+	writeProjectLSPFile(t, dir, "servers:\n  one: {command: /bin/changed}\n")
+
+	err := DecideProjectServers(ws, launch, ProjectServersDecision{
+		MCP: []ProjectServerChoice{{Name: "one", Fingerprint: mcpFP, Allow: true}},
+		LSP: []ProjectServerChoice{{Name: "one", Fingerprint: lspFP, Allow: true}},
+	})
+	var stale *StaleConsentError
+	if !errors.As(err, &stale) {
+		t.Fatalf("err = %v, want *StaleConsentError", err)
+	}
+	if !slices.Equal(stale.StaleNames(), []string{"one"}) {
+		t.Fatalf("stale names = %v, want [one]", stale.StaleNames())
+	}
+	if _, statErr := os.Stat(mcp.ProjectConsentPath(ws)); !os.IsNotExist(statErr) {
+		t.Fatalf("a stale language-server list must leave the MCP consents unwritten: %v", statErr)
+	}
+}
+
+// Both kinds fresh is the ordinary case and must still record both.
+func TestDecideProjectServersRecordsBothKindsWhenNothingMoved(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n")
+	writeProjectLSPFile(t, dir, "servers:\n  one: {command: /bin/one}\n")
+
+	err := DecideProjectServers(ws, launch, ProjectServersDecision{
+		MCP: []ProjectServerChoice{{Name: "one", Fingerprint: pendingMCPFingerprint(t, ws, launch, "one"), Allow: true}},
+		LSP: []ProjectServerChoice{{Name: "one", Fingerprint: pendingLSPFingerprint(t, ws, launch, "one"), Allow: true}},
+	})
+	if err != nil {
+		t.Fatalf("DecideProjectServers: %v", err)
+	}
+	if _, statErr := os.Stat(mcp.ProjectConsentPath(ws)); statErr != nil {
+		t.Fatalf("the MCP decision must be recorded: %v", statErr)
+	}
+	if _, statErr := os.Stat(lsp.ProjectConsentPath(ws)); statErr != nil {
+		t.Fatalf("the language-server decision must be recorded: %v", statErr)
+	}
+}
+
 // The pending lists carry a name-free description of what runs, for surfaces
 // that show the name and the command as separate columns.
 func TestPendingProjectConsentDetails(t *testing.T) {

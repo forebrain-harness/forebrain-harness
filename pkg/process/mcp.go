@@ -394,16 +394,63 @@ type ProjectServersDecision struct {
 	AlwaysAllow bool
 }
 
-// DecideProjectServers records the answer. Each kind is bound to the
-// fingerprints the operator was shown: an entry that changed since makes that
-// kind's call fail with its *StaleConsentError before anything of that kind
-// is recorded (MCP is recorded first; a stale LSP list leaves the MCP answers
-// in place, and the caller asks again about what is still pending). The switch
-// is turned on last, only when both kinds were recorded.
+// staleProjectServerChoices lists every entry this answer names whose current
+// fingerprint is not the one the surface showed — both kinds, from one read of
+// each file. Nothing is written before this returns empty, so a dialog whose
+// project files moved under the operator records no decision at all: that is
+// what both surfaces tell the user a 409 means.
+func staleProjectServerChoices(agentWorkspace string, launch safety.ProjectContext, d ProjectServersDecision) []string {
+	root := safety.TrustedRoot(launch)
+	var stale []string
+	if len(d.MCP) > 0 {
+		entries, _ := mcp.LoadProjectMCPServers(root)
+		current := make(map[string]string, len(entries))
+		for _, srv := range entries {
+			current[strings.ToLower(strings.TrimSpace(srv.Name))] = mcp.ServerFingerprint(srv)
+		}
+		stale = append(stale, staleChoiceNames(d.MCP, current)...)
+	}
+	if len(d.LSP) > 0 {
+		stale = append(stale, staleChoiceNames(d.LSP, ProjectLSPFingerprints(agentWorkspace, launch))...)
+	}
+	return stale
+}
+
+// staleChoiceNames compares one kind's choices with the fingerprints the files
+// hold now. A name the file no longer has is stale in the same way a moved
+// fingerprint is: the operator confirmed an entry as it was shown.
+func staleChoiceNames(choices []ProjectServerChoice, current map[string]string) []string {
+	var stale []string
+	seen := make(map[string]struct{}, len(choices))
+	for _, choice := range choices {
+		key := strings.ToLower(strings.TrimSpace(choice.Name))
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if fp, ok := current[key]; !ok || fp != choice.Fingerprint {
+			stale = append(stale, key)
+		}
+	}
+	return stale
+}
+
+// DecideProjectServers records the answer. Both kinds are bound to the
+// fingerprints the operator was shown, and both are checked before either is
+// recorded: an entry that changed since makes the whole answer fail with this
+// package's *StaleConsentError and nothing of it is kept — that is what the
+// surfaces promise a refusal means. The switch is turned on last, only when
+// both kinds were recorded.
 func DecideProjectServers(agentWorkspace string, launch safety.ProjectContext, d ProjectServersDecision) error {
 	root := safety.TrustedRoot(launch)
 	if root == "" {
 		return nil
+	}
+	// Both kinds are checked before either is recorded: the dialog is one
+	// answer about one file state, and a 409 promises the user that nothing of
+	// it was kept.
+	if stale := staleProjectServerChoices(agentWorkspace, launch, d); len(stale) > 0 {
+		return &StaleConsentError{Names: stale}
 	}
 	if len(d.MCP) > 0 {
 		names, allowed, fps := splitProjectServerChoices(d.MCP)
