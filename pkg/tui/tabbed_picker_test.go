@@ -198,13 +198,16 @@ func TestTabbedPickerSingleTabHasNoTabBar(t *testing.T) {
 	if got := stripANSI(lines[1]); got != "  Skills written by memory consolidation." {
 		t.Fatalf("subtitle = %q", got)
 	}
-	// The head is followed by the blank row above the filter bar — no tab bar
-	// between them.
-	if got := stripANSI(lines[2]); got != "" {
-		t.Fatalf("line 2 = %q, want the air above the filter with no tab bar before it", got)
+	// The head is followed straight by the filter bar's one row — no tab bar
+	// between them — then the blank under it and the list.
+	if got := stripANSI(lines[2]); !strings.Contains(got, "Type to filter") {
+		t.Fatalf("line 2 = %q, want the filter's text row right under the head", got)
 	}
-	if got := stripANSI(lines[4]); !strings.Contains(got, "Type to filter") {
-		t.Fatalf("line 4 = %q, want the filter's text row", got)
+	if got := stripANSI(lines[3]); got != "" {
+		t.Fatalf("line 3 = %q, want the blank under the bar", got)
+	}
+	if got := stripANSI(lines[4]); !strings.Contains(got, "release-check") {
+		t.Fatalf("line 4 = %q, want the list's first row", got)
 	}
 	for _, line := range lines {
 		if got := stripANSI(line); strings.Contains(got, "Tab to switch") || strings.Contains(got, "Memory "+fmt.Sprint(len(items))) {
@@ -214,7 +217,8 @@ func TestTabbedPickerSingleTabHasNoTabBar(t *testing.T) {
 }
 
 // The tabbed picker's filter shows under the tab bar once the list is long
-// enough to need one, its text row after the air and the bar's padded row.
+// enough to need one: its one row straight under the tabs, then the blank and
+// the list.
 func TestTabbedPickerFilterBarGolden(t *testing.T) {
 	items := manyItems()
 	for i := range items {
@@ -223,11 +227,11 @@ func TestTabbedPickerFilterBarGolden(t *testing.T) {
 	items[len(items)-1].Category = "More"
 	p := newTabbedPickerState(items, TabbedSelectOptions{}, false, "")
 	lines := p.panel("Skills").layout(40, 0, 0, false).lines
-	got := make([]string, 0, 8)
-	for _, line := range lines[:8] {
+	got := make([]string, 0, 5)
+	for _, line := range lines[:5] {
 		got = append(got, stripANSI(line))
 	}
-	got[7] = strings.TrimRight(got[7], " ") // a row's own trailing pad is not the point
+	got[4] = strings.TrimRight(got[4], " ") // a row's own trailing pad is not the point
 	want := append([]string{"  Skills", "  All 9   More 1"}, filterBarPlain(40, "⌕", "Type to filter")...)
 	want = append(want, "", "❯ alpha")
 	if !reflect.DeepEqual(got, want) {

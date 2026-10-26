@@ -6772,6 +6772,9 @@ func (l panelLine) rows(width int) []string {
 // picker's filter, a form's answer — with the caret inside it. An empty field
 // shows its placeholder.
 //
+// A picker's bar is one row: its height is a property of the widget, never of
+// the rows left over.
+//
 // It is drawn as a bar on the composer card's own background, from the panel's
 // margin to its right edge, with its glyph in front: a bar rather than a
 // prompt marker, so the field never reads as one more row of the list under
@@ -6826,11 +6829,6 @@ const (
 	// purpose, so the text sits in the bar rather than against its edge.
 	panelFieldPad = "  "
 	panelFieldGap = "  "
-	// panelFieldRoomyBodyRows is how many rows of the body a panel must keep for
-	// its field to take the roomy form — a blank row above the bar and a padded
-	// row above and below its text. A terminal too short to keep that many
-	// shows the one-row bar instead, so the list is never squeezed out by it.
-	panelFieldRoomyBodyRows = 6
 )
 
 // textCol is the display column the field's text starts at: the panel's
@@ -6860,13 +6858,6 @@ func (f panelField) row(width int) string {
 	}
 	pad := strings.Repeat(" ", maxInt(0, width-f.textCol()-shown))
 	return panelIndent + bg + panelFieldPad + glyphStyle + f.glyphText() + panelFieldGap + body + pad + sharedBlockReset
-}
-
-// padRow is a row of the bar with nothing on it, the air above and below the
-// text of the roomy form.
-func (f panelField) padRow(width int) string {
-	bg, _, _ := f.colours()
-	return panelIndent + bg + strings.Repeat(" ", maxInt(0, width-displayLineWidth(panelIndent))) + sharedBlockReset
 }
 
 // caretCol is the display column the caret stands at on the field's row.
@@ -6914,46 +6905,23 @@ func (p slashPanel) hintRows(width int) int {
 	return len(panelLine{lead: panelIndent, text: p.hint, style: &panelHintStyle}.rows(width))
 }
 
-// fieldRoomy reports whether the field takes its roomy form in rows screen rows
-// at width: a blank row above the bar and a padded row on each side of its text,
-// three rows taller than the plain bar. It does so only while the body keeps
-// panelFieldRoomyBodyRows rows after them, and always when the panel is not
-// pinned in a fixed height (rows <= 0).
-func (p slashPanel) fieldRoomy(width, rows int) bool {
-	if p.field == nil {
-		return false
-	}
-	if rows <= 0 {
-		return true
-	}
-	// The plain frame: head, the bar's one row, the blank under it, the scroll
-	// note and the hint; the roomy form adds three rows to it.
-	room := rows - p.headRows(width) - 1 - 1 - 1 - p.hintRows(width)
-	return room-3 >= panelFieldRoomyBodyRows
-}
-
-// fieldRow is the row the field's text sits on at width in rows screen rows
-// (see layout), -1 without a field.
+// fieldRow is the row the field's text sits on at width: the row after the
+// head, whatever height the panel is laid out at. rows is kept for the callers
+// that know the panel's height; the bar no longer depends on it. -1 without a
+// field.
 func (p slashPanel) fieldRow(width, rows int) int {
 	if p.field == nil {
 		return -1
 	}
-	row := p.headRows(width)
-	if p.fieldRoomy(width, rows) {
-		row += 2 // the blank row and the bar's padded row above the text
-	}
-	return row
+	return p.headRows(width)
 }
 
-// fieldBar is the first and last row of the field's bar, a click anywhere on it
-// being a click on the field; -1, -1 without a field.
+// fieldBar is the first and last row of the field's bar — the same row, a
+// click anywhere on it being a click on the field; -1, -1 without a field.
 func (p slashPanel) fieldBar(width, rows int) (first, last int) {
 	text := p.fieldRow(width, rows)
 	if text < 0 {
 		return -1, -1
-	}
-	if p.fieldRoomy(width, rows) {
-		return text - 1, text + 1
 	}
 	return text, text
 }
@@ -6969,18 +6937,10 @@ func (p slashPanel) layout(width, rows, top int, follow bool) panelLayout {
 		out.lines = append(out.lines, l.rows(width)...)
 	}
 	if p.field != nil {
-		roomy := p.fieldRoomy(width, rows)
-		if roomy {
-			// Air between the head and the bar, then the bar's own padding.
-			out.lines = append(out.lines, "", p.field.padRow(width))
-		}
 		if !p.field.blurred {
 			out.caretRow, out.caretCol = len(out.lines), p.field.caretCol()
 		}
 		out.lines = append(out.lines, p.field.row(width))
-		if roomy {
-			out.lines = append(out.lines, p.field.padRow(width))
-		}
 	}
 	out.lines = append(out.lines, "")
 

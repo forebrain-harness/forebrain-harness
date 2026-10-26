@@ -16648,11 +16648,11 @@ func TestInputPanelShowsQuestionFieldAndKeys(t *testing.T) {
 	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("panel = %q, want %q", plain, want)
 	}
-	// The text row is the title, the air above the bar and its padded row down;
-	// the text starts after the margin, the padding, the glyph and its gap — 7
-	// columns — and the caret is after "A界", 3 cells in.
-	if layout.caretRow != 3 || layout.caretCol != 10 {
-		t.Fatalf("field row %d, cursor column %d; want 3, 10", layout.caretRow, layout.caretCol)
+	// The text row is the row under the title; the text starts after the
+	// margin, the padding, the glyph and its gap — 7 columns — and the caret
+	// is after "A界", 3 cells in.
+	if layout.caretRow != 1 || layout.caretCol != 10 {
+		t.Fatalf("field row %d, cursor column %d; want 1, 10", layout.caretRow, layout.caretCol)
 	}
 }
 

@@ -1709,16 +1709,14 @@ func pickerKeys(t *testing.T, keys string) *rawSelector {
 	return newRawSelector(r, nil)
 }
 
-// filterBarPlain is how a panel's field shows, as plain text, in its roomy form
-// laid out at width: a blank row above, the bar's padded row, the row with the
-// glyph and the text — the bar's margin and padding before the glyph, a gap
-// after it, the rest of the row filled — and the padded row below. Layout tests
-// use it to spell out a whole panel without repeating the bar's whitespace.
+// filterBarPlain is how a panel's field shows, as plain text, laid out at
+// width: the one row with the bar's margin and padding before the glyph, a gap
+// after it, and the rest of the row filled. Layout tests use it to spell out a
+// whole panel without repeating the bar's whitespace.
 func filterBarPlain(width int, glyph, text string) []string {
-	pad := strings.Repeat(" ", width)
 	row := "    " + glyph + "  " + text
 	row += strings.Repeat(" ", max(0, width-displayLineWidth(row)))
-	return []string{"", pad, row, pad}
+	return []string{row}
 }
 
 // withFilterBar puts the filter bar's rows into a panel's expected lines after
@@ -1941,43 +1939,67 @@ func TestShortMultiSelectSpaceAlwaysToggles(t *testing.T) {
 	}
 }
 
-// The filter bar takes its roomy form — air above it and a padded row on each
-// side of its text — only where the list under it keeps its room, so a short
-// terminal is not left with a bar and no list.
-func TestFilterBarIsRoomyOnlyWhereTheListKeepsItsRoom(t *testing.T) {
+// The filter bar is one row in every panel, at every height, on every path:
+// its height is a property of the widget, not of how many rows are left over.
+func TestFilterBarIsOneRowWhateverThePanelHeight(t *testing.T) {
 	st := &selectState{options: manyOptions(), label: "pick", inFilter: true}
 	st.applyFilter()
 	panel := st.panel()
 	const width = 60
-	// One head row and one hint row; the plain frame also holds the bar's row,
-	// the blank under it and the scroll note, 3 rows, and the roomy form adds 3.
-	need := 1 + 3 + 1 + 3 + panelFieldRoomyBodyRows
-	for _, tc := range []struct {
-		rows  int
-		roomy bool
-	}{{need, true}, {need - 1, false}, {0, true}, {11, false}, {19, true}} {
-		if got := panel.fieldRoomy(width, tc.rows); got != tc.roomy {
-			t.Errorf("rows %d: roomy = %v, want %v", tc.rows, got, tc.roomy)
+	// 0 lays the panel out for a terminal it is not pinned in a height of.
+	for _, rows := range []int{11, 14, 19, 24, 36, 0} {
+		first, last := panel.fieldBar(width, rows)
+		if first < 0 || last != first {
+			t.Fatalf("rows %d: bar spans %d-%d, want exactly one row", rows, first, last)
 		}
-		layout := panel.layout(width, tc.rows, 0, false)
-		if want := panel.fieldRow(width, tc.rows); layout.caretRow != want {
-			t.Errorf("rows %d: caret on row %d, fieldRow says %d", tc.rows, layout.caretRow, want)
+		layout := panel.layout(width, rows, 0, false)
+		if layout.caretRow != first {
+			t.Fatalf("rows %d: caret on %d, bar on %d", rows, layout.caretRow, first)
 		}
-		if tc.rows > 0 && len(layout.lines) != tc.rows {
-			t.Errorf("rows %d: laid out %d rows, the panel must fill the height it is given", tc.rows, len(layout.lines))
+		if rows > 0 && len(layout.lines) != rows {
+			t.Fatalf("rows %d: laid out %d rows, the panel must fill the height it is given", rows, len(layout.lines))
 		}
-		first, last := panel.fieldBar(width, tc.rows)
-		if tc.roomy && (last-first != 2 || layout.caretRow != first+1) || !tc.roomy && first != last {
-			t.Errorf("rows %d (roomy %v): bar spans rows %d-%d, caret row %d", tc.rows, tc.roomy, first, last, layout.caretRow)
+		// The row under the bar keeps its blank — a rule the one-row bar
+		// keeps too — and the row above it is the head, not a padded row.
+		if rows > 0 && first+1 < len(layout.lines) && layout.lines[first+1] != "" {
+			t.Fatalf("rows %d: the row under the bar must stay blank, got %q", rows, stripANSI(layout.lines[first+1]))
 		}
-	}
-	if (slashPanel{}).fieldRoomy(width, 0) {
-		t.Error("a panel with no field has no roomy form")
 	}
 }
 
-// A click on any row of the bar — the padded rows around the text included —
-// is a click on the field, and one beside it is not.
+// Two command panels opened in the same terminal show the same bar: the tab bar
+// a picker adds to its head must not change the field's height.
+func TestEveryPanelShowsTheSameFilterBar(t *testing.T) {
+	const width, rows = 60, 19
+	plain := &selectState{options: manyOptions(), label: "Model\nWhich model", inFilter: true}
+	plain.applyFilter()
+	tabbedItems := manyItems()
+	for i := range tabbedItems {
+		tabbedItems[i].Category = "All"
+	}
+	tabbedItems[len(tabbedItems)-1].Category = "More"
+	tabbed := newTabbedPickerState(tabbedItems, TabbedSelectOptions{}, false, "")
+	tabbed.inFilter = true
+	for _, tc := range []struct {
+		name  string
+		panel slashPanel
+	}{
+		{"plain picker", plain.panel()},
+		{"tabbed picker", tabbed.panel("Skills")},
+	} {
+		first, last := tc.panel.fieldBar(width, rows)
+		if first < 0 || first != last {
+			t.Errorf("%s: bar spans %d-%d, want exactly one row", tc.name, first, last)
+		}
+		layout := tc.panel.layout(width, rows, 0, false)
+		if layout.caretRow != first || first != tc.panel.headRows(width) {
+			t.Errorf("%s: bar on %d, caret on %d, head rows %d", tc.name, first, layout.caretRow, tc.panel.headRows(width))
+		}
+	}
+}
+
+// A click on the bar's one row is a click on the field, and one on the row
+// above it — the head's last row now, not a padded row of the bar — is not.
 func TestClickAnywhereOnTheFilterBarReachesTheFilter(t *testing.T) {
 	forcedTermWidth, forcedTermHeight = 100, 40
 	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
@@ -1986,8 +2008,8 @@ func TestClickAnywhereOnTheFilterBarReachesTheFilter(t *testing.T) {
 	st.filter = filterField{text: "abc", cursor: 3}
 	sel := &rawSelector{}
 	first, last := st.panel().fieldBar(sel.panelWidth(), sel.panelRows())
-	if last-first != 2 {
-		t.Fatalf("a 40-row terminal must give the roomy bar, spanning %d-%d", first, last)
+	if first < 0 || last != first {
+		t.Fatalf("the bar is one row on a 40-row terminal, spanning %d-%d", first, last)
 	}
 	col := st.filter.panelField().textCol() + 1
 	for line := first - 2; line <= last+2; line++ {

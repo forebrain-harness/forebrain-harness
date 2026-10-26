@@ -3630,7 +3630,7 @@ func TestRefreshSessionFooterKeepsTheBudgetWhenTheStoreCannotAnswer(t *testing.T
 	require.True(t, before.Active)
 
 	session.mu.Lock()
-	session.model = "deepseek/deepseek-chat" // the label moves, so the refresh reads…
+	session.model = "deepseek/deepseek-chat"                   // the label moves, so the refresh reads…
 	session.activeContextErr = errors.New("store unavailable") // …and the read fails
 	session.mu.Unlock()
 	refreshSessionFooter(renderer, session, "s1")
