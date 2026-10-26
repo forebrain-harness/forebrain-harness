@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -150,4 +151,129 @@ func TestApprovalSlotReentrantAcquireAndIdempotentRelease(t *testing.T) {
 		t.Fatalf("slot must be free after release: %v", err)
 	}
 	fresh.Release()
+}
+
+// A waiter that gives up while the holder still holds must leave the slot in
+// place — deleting a held slot would let the next acquire build a second one
+// and break the run's mutex. The last party to leave (here: the release)
+// drops the entry.
+func TestCancelledWaiterLeavesNoSlotBehind(t *testing.T) {
+	const runID = "run-cancel-waiter"
+	holder := &ApprovalSlotHolder{RunID: runID}
+	if err := AcquireInPlaceApprovalSlot(WithApprovalSlotHolder(context.Background(), holder), runID); err != nil {
+		t.Fatalf("holder acquire: %v", err)
+	}
+	waiterCtx, cancelWaiter := context.WithCancel(WithApprovalSlotHolder(context.Background(), &ApprovalSlotHolder{RunID: runID}))
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- AcquireInPlaceApprovalSlot(waiterCtx, runID) }()
+	// 让等待者完成注册（waiters == 1）。
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		approvalSlotMu.Lock()
+		waiters := approvalSlots[runID].waiters
+		approvalSlotMu.Unlock()
+		if waiters == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the waiter never registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// 持有者仍持槽时取消：等待者的 send 被 full channel 挡住，ctx.Done 是唯一就绪分支 ⇒ 确定性 !took。
+	cancelWaiter()
+	if err := <-waitErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter err = %v, want context.Canceled", err)
+	}
+	approvalSlotMu.Lock()
+	slot, still := approvalSlots[runID]
+	held := still && len(slot.ch) == 1
+	approvalSlotMu.Unlock()
+	if !held {
+		t.Fatal("a waiter's exit dropped the slot its holder still holds; the next acquire would build a second one")
+	}
+	// 最后离开的一方（这里是 release）删掉条目。
+	holder.Release()
+	approvalSlotMu.Lock()
+	_, still = approvalSlots[runID]
+	approvalSlotMu.Unlock()
+	if still {
+		t.Fatal("the last party to leave must drop the entry")
+	}
+}
+
+// dropApprovalSlotLocked is the one deletion point: its contract is "nobody
+// waits, nobody holds, and the entry is still this slot" — each clause guards
+// one failure (a leak, a broken mutex, a stale release).
+func TestDropApprovalSlotLockedContract(t *testing.T) {
+	const runID = "run-drop-contract"
+	free := &runApprovalSlot{ch: make(chan struct{}, 1)}
+	approvalSlotMu.Lock()
+	approvalSlots[runID] = free
+	approvalSlotMu.Unlock()
+	dropApprovalSlotLocked(runID, free)
+	approvalSlotMu.Lock()
+	_, still := approvalSlots[runID]
+	approvalSlotMu.Unlock()
+	if still {
+		t.Fatal("a free slot with no waiters must be dropped")
+	}
+
+	held := &runApprovalSlot{ch: make(chan struct{}, 1)}
+	held.ch <- struct{}{}
+	approvalSlotMu.Lock()
+	approvalSlots[runID] = held
+	approvalSlotMu.Unlock()
+	dropApprovalSlotLocked(runID, held)
+	approvalSlotMu.Lock()
+	_, still = approvalSlots[runID]
+	approvalSlotMu.Unlock()
+	if !still {
+		t.Fatal("a held slot must survive: the next acquire would build a second one")
+	}
+
+	fresh := &runApprovalSlot{ch: make(chan struct{}, 1)}
+	approvalSlotMu.Lock()
+	approvalSlots[runID] = fresh
+	approvalSlotMu.Unlock()
+	dropApprovalSlotLocked(runID, held) // 迟到的持有者：身份不符
+	approvalSlotMu.Lock()
+	current := approvalSlots[runID]
+	approvalSlotMu.Unlock()
+	if current != fresh {
+		t.Fatal("a stale drop must not touch the live slot")
+	}
+	// 收尾：把 fresh 摘掉，别把状态留给别的用例。
+	approvalSlotMu.Lock()
+	delete(approvalSlots, runID)
+	approvalSlotMu.Unlock()
+}
+
+// A release that arrives after the entry was re-created must not delete the new
+// slot: two live callers would then both believe they hold it.
+func TestLateReleaseLeavesTheNewSlotAlone(t *testing.T) {
+	const runID = "run-late-release"
+	first := &ApprovalSlotHolder{RunID: runID}
+	if err := AcquireInPlaceApprovalSlot(WithApprovalSlotHolder(context.Background(), first), runID); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	// Simulate "the entry was dropped after a waiter gave up, then a fresh
+	// acquire built a new slot":
+	firstSlot := first.slot // remember the old object (same package)
+	first.Release()         // a normal release (this one drops the entry)
+	second := &ApprovalSlotHolder{RunID: runID}
+	if err := AcquireInPlaceApprovalSlot(WithApprovalSlotHolder(context.Background(), second), runID); err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	if second.slot == firstSlot {
+		t.Fatal("the second acquire must build a new slot")
+	}
+	releaseApprovalSlot(runID, firstSlot) // a late release
+	approvalSlotMu.Lock()
+	still := approvalSlots[runID] == second.slot
+	approvalSlotMu.Unlock()
+	if !still {
+		t.Fatal("a stale release deleted the live slot; the run's mutex is gone")
+	}
+	second.Release()
 }

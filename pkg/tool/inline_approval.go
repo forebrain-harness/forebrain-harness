@@ -99,6 +99,10 @@ func AcquireInPlaceApprovalSlot(ctx context.Context, runID string) error {
 	approvalSlotMu.Lock()
 	slot.waiters--
 	if !took {
+		// The last party to leave cleans up: the holder may already have
+		// released while this waiter was still registered, so this is the
+		// only place left that can drop the entry.
+		dropApprovalSlotLocked(runID, slot)
 		approvalSlotMu.Unlock()
 		return ctx.Err()
 	}
@@ -144,7 +148,24 @@ func releaseApprovalSlot(runID string, slot *runApprovalSlot) {
 	case <-slot.ch: // give the token back
 	default:
 	}
-	if slot.waiters == 0 {
-		delete(approvalSlots, strings.TrimSpace(runID))
+	dropApprovalSlotLocked(runID, slot)
+}
+
+// dropApprovalSlotLocked removes runID's entry when it is still slot, nobody
+// waits on it and nobody holds its token. Locked by approvalSlotMu. The entry
+// is matched by identity, not by key: a waiter that gave up may have caused
+// the entry to be re-created, and deleting whatever the key now holds would
+// hand the run's mutex to two callers at once. A held slot survives a
+// waiter's exit for the same reason — deleting it would let the next acquire
+// build a second slot while the holder still runs. len(ch) is stable under
+// the mutex here: registration happens under it, release's receive happens
+// under it, and with waiters == 0 no registered sender can be in flight.
+func dropApprovalSlotLocked(runID string, slot *runApprovalSlot) {
+	if slot == nil || slot.waiters != 0 || len(slot.ch) != 0 {
+		return
+	}
+	key := strings.TrimSpace(runID)
+	if current, ok := approvalSlots[key]; ok && current == slot {
+		delete(approvalSlots, key)
 	}
 }
