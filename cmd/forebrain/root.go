@@ -9,6 +9,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -32,17 +33,23 @@ var rootCmd = &cobra.Command{
 func Execute() {
 	rootCmd.Version = home.Version
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
-	if err := rootCmd.Execute(); err != nil {
-		if errors.Is(err, tui.ErrCancelled) {
-			return
-		}
-		rh := ""
-		if root, derr := home.Root(); derr == nil {
-			rh = root
-		}
-		telemetry.ErrorThenFprintln(rh, os.Stderr, err, "cmd/forebrain rootCmd.Execute")
-		os.Exit(1)
+	err := rootCmd.Execute()
+	// The shell diff capture keeps a private git repository per work tree for
+	// the process's lifetime; releasing it here is what keeps a CLI run from
+	// leaving one behind (the sweep only covers crashed processes).
+	tool.CloseShellDiffRepos()
+	if err == nil {
+		return
 	}
+	if errors.Is(err, tui.ErrCancelled) {
+		return
+	}
+	rh := ""
+	if root, derr := home.Root(); derr == nil {
+		rh = root
+	}
+	telemetry.ErrorThenFprintln(rh, os.Stderr, err, "cmd/forebrain rootCmd.Execute")
+	os.Exit(1)
 }
 
 func init() {

@@ -1151,9 +1151,26 @@ func shellCommandMovesGitTree(command string) bool {
 	return false
 }
 
-// forgetShellDiffRepo is the test helper that detaches a repository's watcher
-// (removing its private directory) so one test's registry state cannot leak
-// into the next.
+// CloseShellDiffRepos detaches every watcher and removes its private repository
+// directory, then leaves the registry empty. It runs once as the process exits
+// (cmd/forebrain's Execute): without it a run that captured one shell command
+// leaves a private git dir — with a copy of the user's index — behind until some
+// other process's 24-hour sweep finds it. Safe to call more than once.
+func CloseShellDiffRepos() {
+	shellDiffRepos.Lock()
+	tops := make([]string, 0, len(shellDiffRepos.m))
+	for top := range shellDiffRepos.m {
+		tops = append(tops, top)
+	}
+	shellDiffRepos.Unlock()
+	for _, top := range tops {
+		forgetShellDiffRepo(top)
+	}
+}
+
+// forgetShellDiffRepo detaches one repository's watcher and removes its private
+// directory. The test fixtures call it between cases; CloseShellDiffRepos calls
+// it for every repository at exit.
 func forgetShellDiffRepo(top string) {
 	shellDiffRepos.Lock()
 	r := shellDiffRepos.m[top]

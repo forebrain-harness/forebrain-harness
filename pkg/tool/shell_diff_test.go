@@ -390,6 +390,39 @@ func TestShellEditDiffGivesUpAfterTwoFailures(t *testing.T) {
 	}
 }
 
+// The private repository holds a copy of the user's index; a process that ran one
+// shell command must not leave it behind for the 24-hour sweep.
+func TestCloseShellDiffReposRemovesThePrivateDirectories(t *testing.T) {
+	ctx := context.Background()
+	root := newShellDiffRepo(t)
+	repo := shellDiffRepoFor(ctx, root)
+	if repo == nil {
+		t.Fatal("repository not registered")
+	}
+	repo.mu.Lock()
+	_, err := repo.snapshot(ctx)
+	repo.mu.Unlock()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if strings.TrimSpace(repo.private) == "" {
+		t.Fatal("a snapshot must set up the private repository")
+	}
+	if _, err := os.Stat(repo.private); err != nil {
+		t.Fatalf("the private directory must exist before the release: %v", err)
+	}
+
+	CloseShellDiffRepos()
+
+	if _, err := os.Stat(repo.private); !os.IsNotExist(err) {
+		t.Fatalf("the private directory must be gone after the release, stat err = %v", err)
+	}
+	if _, ok := shellDiffRepos.m[root]; ok {
+		t.Fatal("the registry entry must be dropped as well")
+	}
+	CloseShellDiffRepos() // safe to call more than once
+}
+
 func TestShellExitIsFailure(t *testing.T) {
 	cases := []struct {
 		command string
