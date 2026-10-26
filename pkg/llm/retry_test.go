@@ -622,3 +622,16 @@ func TestNewRetry_ResendsTheSameMessages(t *testing.T) {
 		}
 	}
 }
+
+// ExampleNewRetry is the live copy of NewRetry's doc example: it is compiled by
+// `go test`, so the API the comment names must exist.
+func ExampleNewRetry() {
+	inner := &stubLLM{fn: func(context.Context, []Message, []*Tool) (*Result, error) {
+		return okResult("hi")
+	}}
+	mw, err := NewRetry(3, WithMaxBackoff(8*time.Second))
+	if err != nil {
+		return
+	}
+	_, _ = Use(inner, mw).Execute(context.Background(), []Message{UserMessage(Text("hi"))}, nil)
+}

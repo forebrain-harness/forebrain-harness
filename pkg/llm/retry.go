@@ -129,9 +129,17 @@ func (c *retryConfig) waitFor(backoff time.Duration, err error) (sleep time.Dura
 // Context cancellation is honoured between retries: if ctx is cancelled while
 // sleeping before a retry, the middleware returns immediately.
 //
-//	mw, err := middleware.NewRetry(3, middleware.WithInitialBackoff(200*time.Millisecond))
-//	if err != nil { ... }
-//	client := Use(base, mw)
+//	base := someLLM()                       // the LLM being wrapped
+//	mw, err := NewRetry(3, WithMaxBackoff(8*time.Second))
+//	if err != nil {
+//		return err
+//	}
+//	client := Use(base, mw)                 // every Execute now retries
+//
+// The first wait is fixed at 500ms and doubles per attempt (capped by
+// WithMaxBackoff); it is deliberately not configurable — an option nothing
+// sets is an option nobody tests. WithRetryNotify reports each wait to the
+// caller, which is how the surfaces draw the retry line.
 func NewRetry(maxAttempts int, opts ...RetryOption) (LLMMiddleware, error) {
 	if maxAttempts < 1 {
 		return nil, ErrInvalidMaxAttempts
