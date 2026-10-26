@@ -50,8 +50,11 @@ func newRunStats(agentName string) *runStats {
 	}
 }
 
-func (s *runStats) recordLLM(duration time.Duration, usage *llm.Usage) {
-	s.llmCalls++
+// recordLLM records one logical LLM call. attempts is the number of physical
+// model requests that call took (every retry counts as its own attempt); 0
+// means unknown and counts as one.
+func (s *runStats) recordLLM(duration time.Duration, usage *llm.Usage, attempts int) {
+	s.llmCalls += max(1, attempts)
 	s.llmDuration += duration
 	if usage == nil {
 		return

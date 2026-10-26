@@ -60,7 +60,8 @@ type RunSummary struct {
 	AgentName string
 	// Iterations is the number of agent loop iterations executed.
 	Iterations int
-	// LLMCalls is the number of model requests issued during the run.
+	// LLMCalls is the number of physical model requests issued during the
+	// run: each retry of a request counts as its own request.
 	LLMCalls int
 	// ToolCalls is the total number of tool invocations during the run.
 	ToolCalls int

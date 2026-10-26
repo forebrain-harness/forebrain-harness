@@ -193,6 +193,39 @@ func TestStreamCutMidBodyKeepsTheReadError(t *testing.T) {
 	}
 }
 
+// A stream that already reported usageMetadata and then dies mid-event must
+// leave that usage readable off the returned error: the retry loop adds it to
+// the request's total, so a retried attempt's tokens are not silently lost.
+func TestStreamFailedAttemptCarriesItsUsage(t *testing.T) {
+	_, err, _ := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("the httptest writer must support hijacking")
+			return
+		}
+		conn, brw, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+		_, _ = brw.WriteString("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}]}}],\"usageMetadata\":{\"promptTokenCount\":210,\"candidatesTokenCount\":9}}\n\n")
+		_, _ = brw.WriteString("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":")
+		_ = brw.Flush()
+	}))
+	if err == nil {
+		t.Fatal("a cut stream must fail")
+	}
+	usage := llm.UsageFromError(err)
+	if usage == nil {
+		t.Fatalf("error = %v, want the attempt's usage readable off it", err)
+	}
+	if usage.InputTokens != 210 || usage.OutputTokens != 9 {
+		t.Fatalf("usage = %+v, want the usageMetadata the stream reported", usage)
+	}
+}
+
 func TestStreamEmptyAnswerKeepsTheEmptyError(t *testing.T) {
 	_, err, _ := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"SAFETY"}]}`)

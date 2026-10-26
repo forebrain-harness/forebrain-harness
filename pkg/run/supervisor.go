@@ -341,6 +341,10 @@ func PersistRunUsageFromError(rt *state.RunStore, runID string, err error) {
 		CompletionTokens: usage.OutputTokens,
 		CacheReadTokens:  usage.CacheReadInputTokens,
 		CacheWriteTokens: usage.CacheCreationInputTokens,
+		// Physical model requests, the same unit the successful path's
+		// persistRunUsage writes: every retry of the failed run's requests
+		// counts as its own request.
+		LLMCalls: llm.AttemptsFromError(err),
 	})
 }
 

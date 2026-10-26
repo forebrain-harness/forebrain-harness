@@ -635,3 +635,65 @@ func ExampleNewRetry() {
 	}
 	_, _ = Use(inner, mw).Execute(context.Background(), []Message{UserMessage(Text("hi"))}, nil)
 }
+
+// The non-streaming loop carries the same attempt accounting as the stream
+// retry: a retried call's Result keeps the settled attempt's own usage while
+// Attempts counts the physical requests, and an exhausted request's error
+// carries the merged usage, the count, and the last attempt's own usage.
+func TestRetryAttemptAccounting(t *testing.T) {
+	t.Run("counted not merged", func(t *testing.T) {
+		calls := 0
+		inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
+			calls++
+			if calls == 1 {
+				return nil, NewExecuteError(errors.New("transient"), &Usage{InputTokens: 100, OutputTokens: 10})
+			}
+			res, _ := okResult("done")
+			res.Usage = &Usage{InputTokens: 120, OutputTokens: 8}
+			return res, nil
+		}}
+		mw, err := NewRetry(3, WithMaxBackoff(0))
+		if err != nil {
+			t.Fatalf("NewRetry: %v", err)
+		}
+		res, execErr := Use(inner, mw).Execute(context.Background(), nil, nil)
+		if execErr != nil {
+			t.Fatalf("Execute: %v", execErr)
+		}
+		if res.Usage == nil || res.Usage.InputTokens != 120 || res.Usage.OutputTokens != 8 {
+			t.Fatalf("res.Usage = %+v, want the settled attempt's own usage", res.Usage)
+		}
+		if res.Attempts != 2 {
+			t.Fatalf("res.Attempts = %d, want 2", res.Attempts)
+		}
+	})
+	t.Run("exhausted carries every attempt", func(t *testing.T) {
+		usages := []Usage{{InputTokens: 100, OutputTokens: 10}, {InputTokens: 110, OutputTokens: 12}, {InputTokens: 120, OutputTokens: 14}}
+		calls := 0
+		inner := &stubLLM{fn: func(_ context.Context, _ []Message, _ []*Tool) (*Result, error) {
+			u := usages[calls]
+			calls++
+			return nil, NewExecuteError(errors.New("transient"), &u)
+		}}
+		mw, err := NewRetry(3, WithMaxBackoff(0))
+		if err != nil {
+			t.Fatalf("NewRetry: %v", err)
+		}
+		_, execErr := Use(inner, mw).Execute(context.Background(), nil, nil)
+		var exhausted *MaxAttemptsExceededError
+		if !errors.As(execErr, &exhausted) {
+			t.Fatalf("Execute error = %v, want MaxAttemptsExceededError", execErr)
+		}
+		usage := UsageFromError(execErr)
+		if usage == nil || usage.InputTokens != 330 || usage.OutputTokens != 36 {
+			t.Fatalf("UsageFromError = %+v, want the sum of every attempt (330/36)", usage)
+		}
+		if n := AttemptsFromError(execErr); n != 3 {
+			t.Fatalf("AttemptsFromError = %d, want 3", n)
+		}
+		last := LastAttemptUsageFromError(execErr)
+		if last == nil || last.InputTokens != 120 || last.OutputTokens != 14 {
+			t.Fatalf("LastAttemptUsageFromError = %+v, want the last attempt's own usage (120/14)", last)
+		}
+	})
+}

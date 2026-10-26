@@ -1127,6 +1127,34 @@ func TestOpenAICompatLLMStreamReadErrorFinishesThinking(t *testing.T) {
 	}
 }
 
+// A stream that already reported usage and then dies mid-body must leave that
+// usage readable off the returned error: the retry loop adds it to the
+// request's total, so a retried attempt's tokens are not silently lost.
+func TestOpenAICompatLLMFailedAttemptCarriesItsUsage(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		_, _ = rec.Write([]byte(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":{"prompt_tokens":180,"completion_tokens":6,"total_tokens":186}}` + "\n\n"))
+		// No chunked terminator: the client's read ends mid-body, the way a
+		// proxy cutting the connection looks.
+		return rec.responseCut(), nil
+	})
+
+	_, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatal("a cut stream must fail")
+	}
+	usage := llm.UsageFromError(err)
+	if usage == nil {
+		t.Fatalf("error = %v, want the attempt's usage readable off it", err)
+	}
+	if usage.InputTokens != 180 || usage.OutputTokens != 6 {
+		t.Fatalf("usage = %+v, want the usage chunk the stream delivered", usage)
+	}
+}
+
 func TestCompatStreamToolCallReadyFollowsIndexBoundaries(t *testing.T) {
 	t.Parallel()
 

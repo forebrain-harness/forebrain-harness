@@ -94,14 +94,17 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 	// finish hands the caller the completed part of a response that failed
 	// mid-flight: what the user keeps is what had finished. The catch-up
 	// Cleared withdraws the in-flight blocks of the dead attempt when its
-	// own first token never consumed a pending notice.
+	// own first token never consumed a pending notice. The error carries
+	// the whole attempt accounting: the dead attempts' tokens are spent
+	// whether the response is kept or not.
+	acct := attemptAccounting{}
 	finish := func(p *PartialResponseError) (*Result, error) {
 		spent := pendingRetry.Load() == 0
 		clearPending()
 		if r.cfg.notify != nil && spent {
 			r.cfg.notify(notifyCtx, TransportRetry{Total: maxRetries, Cleared: true})
 		}
-		return nil, p
+		return nil, acct.fail(p)
 	}
 	// withdraw takes back everything the dead attempt showed before a
 	// resend: the block still being streamed, and — when all it finished was
@@ -143,7 +146,7 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, acct.fail(err)
 		}
 		attemptCtx := ctx
 		if nonStreaming {
@@ -152,15 +155,21 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 			// one is streamed again — and back under the watchdog.
 			nonStreaming = false
 		}
+		acct.attempts++
 		result, err := r.inner.Execute(attemptCtx, messages, tools)
 		if err == nil {
+			// The settled attempt's own usage stays as Result.Usage; the
+			// every-attempt billing lives on the accounting path. What the
+			// caller learns here is how many physical requests it took.
+			result.Attempts = acct.attempts
 			return result, nil
 		}
+		acct.note(err)
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-			return nil, err // cancellation is returned exactly as it arrived
+			return nil, acct.fail(err) // cancellation is returned exactly as it arrived
 		}
 		if IsPartialResponse(err) {
-			return nil, err // an inner layer already finished this response
+			return nil, acct.fail(err) // an inner layer already finished this response
 		}
 		snap := snapshot()
 
@@ -168,7 +177,7 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 		var dec streamDecision
 		if d, pass, ok := requestLevelDecision(err, snap, counts, policy); ok {
 			if pass {
-				return nil, err // the layers above own this error
+				return nil, acct.fail(err) // the layers above own this error
 			}
 			dec = d
 		} else {
@@ -189,9 +198,9 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 			}
 			if counts.retries > 0 {
 				clearPending()
-				return nil, &MaxAttemptsExceededError{Attempts: 1 + counts.retries, Err: err}
+				return nil, &MaxAttemptsExceededError{Attempts: 1 + counts.retries, Err: acct.fail(err)}
 			}
-			return nil, err
+			return nil, acct.fail(err)
 		case DecideKeepPartial:
 			return finish(&PartialResponseError{Err: err, Progress: snap, Cause: cause})
 		case DecideRetryWithoutStreaming:
@@ -214,10 +223,10 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 				case CauseServerError, CauseTimedOut, CauseOverloaded:
 					sleep, giveUp := r.cfg.waitFor(backoff, err)
 					if giveUp {
-						return nil, err
+						return nil, acct.fail(err)
 					}
 					if werr := wait(sleep); werr != nil {
-						return nil, werr
+						return nil, acct.fail(werr)
 					}
 					backoff *= 2
 					if backoff > r.cfg.maxBackoff {
@@ -227,7 +236,7 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 					// Connection-class: a short fixed wait per thinking-only
 					// retry, the way Claude Code waits between them.
 					if werr := wait(100 * time.Millisecond * time.Duration(counts.afterThinkingOnly)); werr != nil {
-						return nil, werr
+						return nil, acct.fail(werr)
 					}
 				}
 				ResetStreamProgress(ctx)
@@ -241,7 +250,7 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 			default:
 				sleep, giveUp := r.cfg.waitFor(backoff, err)
 				if giveUp {
-					return nil, err
+					return nil, acct.fail(err)
 				}
 				if r.cfg.notify != nil {
 					r.cfg.notify(notifyCtx, TransportRetry{
@@ -254,7 +263,7 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 					pendingRetry.Store(int64(counts.retries))
 				}
 				if werr := wait(sleep); werr != nil {
-					return nil, werr
+					return nil, acct.fail(werr)
 				}
 				ResetStreamProgress(ctx)
 				backoff *= 2

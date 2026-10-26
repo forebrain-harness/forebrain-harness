@@ -177,6 +177,10 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 	var lastErr error
 	backoff := r.cfg.initialBackoff
 	maxRetries := r.cfg.maxAttempts - 1
+	// A retried attempt's tokens are still spent: the failure returns carry
+	// every attempt's usage and the physical attempt count out to the
+	// accounting layers.
+	acct := attemptAccounting{}
 
 	// Notifications ride the caller's own context: the callback must never
 	// observe the wrapped sink installed below.
@@ -220,22 +224,27 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 
 	for attempt := 0; attempt < r.cfg.maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, acct.fail(err)
 		}
 
+		acct.attempts++
 		result, err := r.inner.Execute(ctx, messages, tools)
 		if err == nil {
+			// The settled attempt's own usage stays as Result.Usage; what
+			// the caller learns here is how many physical requests it took.
+			result.Attempts = acct.attempts
 			return result, nil
 		}
+		acct.note(err)
 		lastErr = err
 
 		if r.cfg.resendGuard && !ResendSafe(ctx) {
 			// Re-sending would duplicate what the user already has; the
 			// caller owns finishing from what completed.
-			return nil, err
+			return nil, acct.fail(err)
 		}
 		if !r.cfg.shouldRetry(err) {
-			return nil, err
+			return nil, acct.fail(err)
 		}
 
 		if attempt == r.cfg.maxAttempts-1 {
@@ -244,7 +253,7 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 
 		sleep, giveUp := r.cfg.waitFor(backoff, err)
 		if giveUp {
-			return nil, err
+			return nil, acct.fail(err)
 		}
 
 		if r.cfg.notify != nil {
@@ -260,7 +269,7 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, acct.fail(ctx.Err())
 		case <-time.After(sleep):
 		}
 
@@ -290,7 +299,7 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 			r.cfg.notify(notifyCtx, TransportRetry{Retry: maxRetries, Total: maxRetries, Cleared: true})
 		}
 	}
-	return nil, &MaxAttemptsExceededError{Attempts: r.cfg.maxAttempts, Err: lastErr}
+	return nil, &MaxAttemptsExceededError{Attempts: r.cfg.maxAttempts, Err: acct.fail(lastErr)}
 }
 
 const Prefix = "!!FOREBRAIN_RCv1!!"

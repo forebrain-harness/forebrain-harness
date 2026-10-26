@@ -119,8 +119,9 @@ func (m *ledgerOverloadedLLM) Execute(_ context.Context, _ []llm.Message, _ []*l
 // TestLLMAttemptLedgerFillsFromASupervisedRun runs a whole supervised turn —
 // the real chain Load builds, a real run row, a provider that refuses once —
 // and reads the ledger back the way the cost summary does. The run's own
-// usage keeps counting logical calls (1), while the ledger holds the physical
-// attempts (2): the two figures together, not in contradiction.
+// usage_llm_calls counts physical attempts (2), the same unit the ledger
+// holds; the token columns count only what the provider billed (the refusal
+// died before any usage was reported), which here is the answer that landed.
 func TestLLMAttemptLedgerFillsFromASupervisedRun(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
@@ -190,18 +191,19 @@ func TestLLMAttemptLedgerFillsFromASupervisedRun(t *testing.T) {
 		rows[1].InputTokens == nil || *rows[1].InputTokens != 80 || rows[1].OutputTokens == nil || *rows[1].OutputTokens != 12 {
 		t.Fatalf("second row = %+v, want attempt 2 success with the answer's usage", rows[1])
 	}
-	// Not in contradiction with the run's own figures: one logical call, two
-	// physical attempts, and only the answer that landed counted.
+	// Not in contradiction with the run's own figures: two physical
+	// attempts, of which only the answer that landed billed anything (the
+	// 503 died before the provider reported usage).
 	var llmCalls, promptTokens, completionTokens int
 	if err := db.QueryRowContext(ctx,
 		`SELECT usage_llm_calls, usage_prompt_tokens, usage_completion_tokens FROM fb_runs WHERE id=?`, runID).
 		Scan(&llmCalls, &promptTokens, &completionTokens); err != nil {
 		t.Fatalf("read run usage: %v", err)
 	}
-	if llmCalls != 1 {
-		t.Fatalf("usage_llm_calls = %d, want 1 logical call", llmCalls)
+	if llmCalls != 2 {
+		t.Fatalf("usage_llm_calls = %d, want 2 physical attempts", llmCalls)
 	}
 	if promptTokens != 80 || completionTokens != 12 {
-		t.Fatalf("run usage = %d/%d, want 80/12 — only the answer that landed", promptTokens, completionTokens)
+		t.Fatalf("run usage = %d/%d, want 80/12 — only the answer that billed", promptTokens, completionTokens)
 	}
 }

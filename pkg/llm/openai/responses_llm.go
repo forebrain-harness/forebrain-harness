@@ -1481,10 +1481,20 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			}
 		case "error":
 			streamErr := evt.AsError()
-			return nil, newOpenAIResponsesStreamError(evt.Type, streamErr.Code, streamErr.Message)
+			return nil, llm.NewExecuteError(newOpenAIResponsesStreamError(evt.Type, streamErr.Code, streamErr.Message), usage)
 		case "response.failed":
 			failed := evt.AsResponseFailed()
-			return nil, newOpenAIResponsesStreamError(evt.Type, string(failed.Response.Error.Code), failed.Response.Error.Message)
+			// The failed response carries its own billing: the attempt was
+			// real, and its tokens belong on the bill.
+			failedUsage := usage
+			if failedUsage == nil {
+				failedUsage = openAIUsage(
+					failed.Response.Usage.InputTokens,
+					failed.Response.Usage.OutputTokens,
+					failed.Response.Usage.InputTokensDetails.CachedTokens,
+				)
+			}
+			return nil, llm.NewExecuteError(newOpenAIResponsesStreamError(evt.Type, string(failed.Response.Error.Code), failed.Response.Error.Message), failedUsage)
 		case "response.completed":
 			sawCompleted = true
 			if evt.Response.Usage.InputTokens > 0 || evt.Response.Usage.OutputTokens > 0 {
@@ -1553,13 +1563,13 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return nil, err
+		return nil, llm.NewExecuteError(err, usage)
 	}
 	if !sawOutputItem && !sawCompleted {
 		// The stream closed cleanly without a single output item and without
 		// its terminal frame: no answer started, none finished. The request
 		// is re-sent without streaming rather than finished as an empty one.
-		return nil, fmt.Errorf("openai responses: %w", llm.ErrStreamNoEvents)
+		return nil, llm.NewExecuteError(fmt.Errorf("openai responses: %w", llm.ErrStreamNoEvents), usage)
 	}
 	reasoningItems = mergeStreamedReasoningItems(reasoningItems, streamedReasoningByItem)
 	reasoningText := llm.SummaryText(reasoningItems)

@@ -295,9 +295,16 @@ type Usage struct {
 // Result represents the output of an LLM execution, including the assistant message and any tool calls.
 type Result struct {
 	Message *Message
-	// Usage holds token counts for this call. May be nil when the provider does
-	// not return usage information.
+	// Usage holds token counts for the settled attempt of this call. May be
+	// nil when the provider does not return usage information. The billing
+	// view that includes every retried attempt lives on the
+	// UsageAccumulator (and, for a failed request, on the merged total the
+	// error carries) — not here.
 	Usage *Usage
+	// Attempts is the number of physical model requests this call took:
+	// every retry of the same logical request counts as its own attempt.
+	// 0 means unknown; callers that count requests treat it as 1.
+	Attempts int
 	// Session, when non-nil, carries the full message array accumulated by an
 	// orchestration wrapper (e.g. toolOrchestrationLLM) that runs its own
 	// internal tool-calling loop. The agent uses this to replace its session so

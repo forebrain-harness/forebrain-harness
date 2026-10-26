@@ -7826,7 +7826,10 @@ func (t *Tracker) ObserveRunEndForRun(runID string, inputTokens, outputTokens in
 	// (final - streamed-so-far). Clamping the negative keeps the footer
 	// monotonic across turns: a streaming overshoot that exceeds the final is
 	// left in place instead of subtracting prior turns' totals away and
-	// collapsing the footer onto the current run's final.
+	// collapsing the footer onto the current run's final. The streamed
+	// deltas and the final are the same measurement now — both include every
+	// retried attempt — so the clamp is a tiebreaker for rounding, not a
+	// reconciliation of two different accountings.
 	deltaIn := inputTokens - prev.InputTokens
 	deltaOut := outputTokens - prev.OutputTokens
 	if deltaIn < 0 {
@@ -7839,14 +7842,12 @@ func (t *Tracker) ObserveRunEndForRun(runID string, inputTokens, outputTokens in
 	t.outputTokens += deltaOut
 	// The per-run in/out counters are NOT modified here. They are driven
 	// entirely by ObserveUsageDelta streaming accumulation - the same value
-	// the "Working" line shows during the turn. When a streaming LLM call
-	// fails mid-stream and recoverableLLM retries it, the failed attempt's
-	// OnUsage delta has already irreversibly folded into the per-run counter,
-	// but its usage never reached the UsageAccumulator that feeds
-	// Summary.Usage (the "final" passed in here). Overwriting - or even taking
-	// max - with that potentially-lower final would make "Worked for" diverge
-	// from "Working". Keeping the streamed value verbatim makes the post-turn
-	// "Worked for" line reuse the exact "Working" total the user already saw.
+	// the "Working" line shows during the turn. The final passed in here and
+	// the streamed deltas now count the same attempts (a failed attempt's
+	// usage reaches both its OnUsage delta and the UsageAccumulator that
+	// feeds Summary.Usage), so keeping the streamed value verbatim is now a
+	// display choice — the "Worked for" line reuses the exact "Working"
+	// total the user already saw — not a divergence patch.
 	t.runUsage[runID] = prev
 	t.mu.Unlock()
 }

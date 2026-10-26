@@ -55,7 +55,10 @@ func (c *agentLLM) executeStreaming(ctx context.Context, raw []byte) (*llm.Resul
 	for {
 		line, eof, err := readSSELine(reader, maxResponseBytes)
 		if err != nil {
-			return nil, fmt.Errorf("google: read stream: %w", err)
+			// The attempt was already billed for whatever usageMetadata it
+			// delivered, so that billing rides the error into the retry
+			// loop's accounting.
+			return nil, llm.NewExecuteError(fmt.Errorf("google: read stream: %w", err), st.usage)
 		}
 		if payload, ok := sseDataLine(line); ok {
 			if payload == "[DONE]" {
@@ -63,7 +66,7 @@ func (c *agentLLM) executeStreaming(ctx context.Context, raw []byte) (*llm.Resul
 			}
 			if payload != "" {
 				if err := consumeSSEEvent(sink, &st, []byte(payload)); err != nil {
-					return nil, err
+					return nil, llm.NewExecuteError(err, st.usage)
 				}
 			}
 		}
@@ -80,16 +83,16 @@ func (c *agentLLM) executeStreaming(ctx context.Context, raw []byte) (*llm.Resul
 		st.text.Reset()
 	}
 	if st.finish == "" && (len(st.parts) > 0 || len(st.calls) > 0) {
-		return nil, fmt.Errorf("google: %w", llm.ErrStreamTruncated)
+		return nil, llm.NewExecuteError(fmt.Errorf("google: %w", llm.ErrStreamTruncated), st.usage)
 	}
 	if len(st.parts) == 0 && len(st.calls) == 0 {
 		if st.finish == "" {
 			// The stream closed cleanly before a single event: no part, no
 			// finish frame. The request is re-sent without streaming, not
 			// finished as an empty answer.
-			return nil, fmt.Errorf("google: %w", llm.ErrStreamNoEvents)
+			return nil, llm.NewExecuteError(fmt.Errorf("google: %w", llm.ErrStreamNoEvents), st.usage)
 		}
-		return nil, fmt.Errorf("google: response was empty (finish reason %q)", st.finish)
+		return nil, llm.NewExecuteError(fmt.Errorf("google: response was empty (finish reason %q)", st.finish), st.usage)
 	}
 	return &llm.Result{
 		Message: &llm.Message{Role: llm.RoleAssistant, Parts: st.parts, ToolCalls: st.calls},

@@ -525,6 +525,50 @@ func TestAnthropicAgentLLMNonStreamingResultIsReplayedToTheSink(t *testing.T) {
 	}
 }
 
+// A stream that already delivered its billing frame (message_start carries
+// the attempt's input usage) and then dies mid-event must leave that usage
+// readable off the returned error: the retry loop adds it to the request's
+// total, so a retried attempt's tokens are not silently lost.
+func TestAnthropicAgentLLMFailedAttemptCarriesItsUsage(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("the httptest writer must support hijacking")
+			return
+		}
+		conn, brw, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+		_, _ = brw.WriteString("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-6\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":120,\"cache_creation_input_tokens\":7,\"cache_read_input_tokens\":30,\"output_tokens\":4}}}\n\n")
+		// Half an event, then the connection ends: the client's read fails
+		// the way a cut connection looks.
+		_, _ = brw.WriteString("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Answ")
+		_ = brw.Flush()
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 128_000)
+	_, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatal("a cut stream must fail")
+	}
+	usage := llm.UsageFromError(err)
+	if usage == nil {
+		t.Fatalf("error = %v, want the attempt's usage readable off it", err)
+	}
+	// input stays separate from both cache buckets — fb_runs keeps four columns.
+	if usage.InputTokens != 120 || usage.CacheCreationInputTokens != 7 ||
+		usage.CacheReadInputTokens != 30 || usage.OutputTokens != 4 {
+		t.Fatalf("usage = %+v, want the usage message_start reported", usage)
+	}
+}
+
 func TestAnthropicAgentLLMNonStreamingTimeoutIsRetryable(t *testing.T) {
 	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
 

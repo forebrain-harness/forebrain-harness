@@ -380,6 +380,32 @@ func TestExecuteFailsOnAnEmptyResponse(t *testing.T) {
 	}
 }
 
+// A non-streaming response that arrived with usageMetadata but no answer the
+// client can use (an empty turn) must leave that usage readable off the
+// returned error: the failed attempt's tokens still belong on the bill.
+func TestExecuteFailedAttemptCarriesItsUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The non-streaming endpoint: one JSON body, empty turn with billing.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":140,"candidatesTokenCount":2}}`)
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	_, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatal("an empty turn must fail")
+	}
+	usage := llm.UsageFromError(err)
+	if usage == nil {
+		t.Fatalf("error = %v, want the attempt's usage readable off it", err)
+	}
+	if usage.InputTokens != 140 || usage.OutputTokens != 2 {
+		t.Fatalf("usage = %+v, want the usageMetadata the response carried", usage)
+	}
+}
+
 func TestExecuteRequiresAModelAndAKnownRole(t *testing.T) {
 	if _, err := NewAgentLLM("", "", "", 0, nil).Execute(context.Background(), nil, nil); err == nil {
 		t.Fatal("Execute accepted an empty model")

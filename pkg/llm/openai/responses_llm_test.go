@@ -597,6 +597,35 @@ func TestOpenAIResponsesStreamingReturnsResponseFailedError(t *testing.T) {
 	}
 }
 
+// A response.failed frame that carries usage must leave that usage readable
+// off the returned error: the failed attempt's tokens still belong on the
+// bill, and the retry loop adds them to the request's total.
+func TestOpenAIResponsesFailedAttemptCarriesItsUsage(t *testing.T) {
+	body := strings.Join([]string{
+		"event: response.failed",
+		`data: {"type":"response.failed","response":{"id":"resp_test","object":"response","model":"gpt-test","status":"failed","output":[],"error":{"code":"server_error","message":"boom"},"usage":{"input_tokens":95,"input_tokens_details":{"cached_tokens":20},"output_tokens":3,"total_tokens":98}}}`,
+		"",
+		"",
+	}, "\n")
+	testLLM := newTestOpenAIResponsesLLM(t, func(req *http.Request) (*http.Response, error) {
+		return sseResponse(body), nil
+	})
+
+	_, err := testLLM.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatal("a failed response must fail")
+	}
+	usage := llm.UsageFromError(err)
+	if usage == nil {
+		t.Fatalf("error = %v, want the attempt's usage readable off it", err)
+	}
+	// Cached input is a disjoint bucket in llm.Usage (openAIUsage subtracts
+	// it from input), so input is 75 and cache-read is 20.
+	if usage.InputTokens != 75 || usage.CacheReadInputTokens != 20 || usage.OutputTokens != 3 {
+		t.Fatalf("usage = %+v, want the usage the failed response carried", usage)
+	}
+}
+
 func TestOpenAIResponsesStreamingReturnsErrorEvent(t *testing.T) {
 	body := strings.Join([]string{
 		"event: error",

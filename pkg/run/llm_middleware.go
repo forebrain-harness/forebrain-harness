@@ -601,7 +601,9 @@ func (r recoverableLLM) observeSuccess(ctx context.Context, res *llm.Result, est
 func (r recoverableLLM) observeOverflow(ctx context.Context, err error, estimated int) {
 	provider, model := r.compactDeps.activeModel(ctx)
 	realInput := 0
-	if usage := llm.UsageFromError(err); usage != nil {
+	// The last attempt's input is the measurement: a retried request's error
+	// carries the sum over dead attempts, which would inflate the bound.
+	if usage := llm.LastAttemptUsageFromError(err); usage != nil {
 		realInput = usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
 	}
 	llm.RecordOverflow(provider, model, realInput, estimated)

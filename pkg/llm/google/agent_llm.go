@@ -388,11 +388,23 @@ func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, 
 	if err := json.Unmarshal(payload, &parsed); err != nil {
 		return nil, "", fmt.Errorf("google: decode response: %w", err)
 	}
+	// usageMetadata is parsed before the response is judged usable, so the
+	// failures below can still carry the billing the attempt already had.
+	usage := parsed.UsageMetadata
+	var billed *llm.Usage
+	if usage.PromptTokenCount > 0 || usage.CandidatesTokenCount > 0 || usage.ThoughtsTokenCount > 0 {
+		billed = &llm.Usage{
+			InputTokens: usage.PromptTokenCount,
+			// Thinking tokens are billed output, so they count towards the
+			// output figure.
+			OutputTokens: usage.CandidatesTokenCount + usage.ThoughtsTokenCount,
+		}
+	}
 	if len(parsed.Error) > 0 && string(parsed.Error) != "null" {
 		return nil, "", newAPIError(status, payload, retryAfter)
 	}
 	if len(parsed.Candidates) == 0 {
-		return nil, "", fmt.Errorf("google: response has no candidates: %s", truncateMessage(strings.TrimSpace(string(payload))))
+		return nil, "", llm.NewExecuteError(fmt.Errorf("google: response has no candidates: %s", truncateMessage(strings.TrimSpace(string(payload)))), billed)
 	}
 	candidate := parsed.Candidates[0]
 	msg := &llm.Message{Role: llm.RoleAssistant}
@@ -410,18 +422,10 @@ func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, 
 		// An empty turn is a refusal to answer (safety, recitation, a filtered
 		// prompt). Returning it as a silent empty message would look like a
 		// successful turn that said nothing.
-		return nil, candidate.FinishReason, fmt.Errorf("google: response was empty (finish reason %q)", candidate.FinishReason)
+		return nil, candidate.FinishReason, llm.NewExecuteError(fmt.Errorf("google: response was empty (finish reason %q)", candidate.FinishReason), billed)
 	}
 	result := &llm.Result{Message: msg}
-	usage := parsed.UsageMetadata
-	if usage.PromptTokenCount > 0 || usage.CandidatesTokenCount > 0 || usage.ThoughtsTokenCount > 0 {
-		result.Usage = &llm.Usage{
-			InputTokens: usage.PromptTokenCount,
-			// Thinking tokens are billed output, so they count towards the
-			// output figure.
-			OutputTokens: usage.CandidatesTokenCount + usage.ThoughtsTokenCount,
-		}
-	}
+	result.Usage = billed
 	return result, candidate.FinishReason, nil
 }
 

@@ -860,7 +860,9 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 			if sink != nil && sink.OnEnd != nil {
 				sink.OnEnd()
 			}
-			return nil, err
+			// Earlier length-continue rounds were already billed; that
+			// billing rides the error into the retry loop's accounting.
+			return nil, llm.NewExecuteError(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
 		}
 		if sink != nil && sink.Streamed != nil && round == 0 {
 			*sink.Streamed = true
@@ -885,7 +887,10 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				if sink != nil && sink.OnEnd != nil {
 					sink.OnEnd()
 				}
-				return nil, err
+				// The usage chunks that arrived before the cut were billed;
+				// that billing rides the error into the retry loop's
+				// accounting.
+				return nil, llm.NewExecuteError(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
 			}
 			if len(resp.Choices) > 0 {
 				delta := resp.Choices[0].Delta
@@ -996,13 +1001,13 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 			if sink != nil && sink.OnEnd != nil {
 				sink.OnEnd()
 			}
-			return nil, fmt.Errorf("%s: %w", c.model, llm.ErrStreamTruncated)
+			return nil, llm.NewExecuteError(fmt.Errorf("%s: %w", c.model, llm.ErrStreamTruncated), openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
 		}
 		if lastFinish == "" {
 			if sink != nil && sink.OnEnd != nil {
 				sink.OnEnd()
 			}
-			return nil, fmt.Errorf("%s: %w", c.model, llm.ErrStreamNoEvents)
+			return nil, llm.NewExecuteError(fmt.Errorf("%s: %w", c.model, llm.ErrStreamNoEvents), openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
 		}
 		// Clean exit without truncation: any call the finish frame did not
 		// cover (a provider that ends [DONE] with zero output) is ready now.
@@ -1198,10 +1203,18 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		req.Messages = baseMsgs
 		resp, err := c.client.CreateChatCompletion(ctx, req)
 		if err != nil {
-			return openaiclient.ChatCompletionMessage{}, "", nil, err
+			// Earlier length-continue rounds were already billed; that
+			// billing rides the error into the retry loop's accounting.
+			return openaiclient.ChatCompletionMessage{}, "", nil, llm.NewExecuteError(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
 		}
 		if len(resp.Choices) == 0 {
-			return openaiclient.ChatCompletionMessage{}, "", nil, errOpenAINoChoices
+			// A 200 with usage but no choice was still billed for its
+			// prompt, on this round and any earlier one.
+			cached := 0
+			if resp.Usage.PromptTokensDetails != nil {
+				cached = resp.Usage.PromptTokensDetails.CachedTokens
+			}
+			return openaiclient.ChatCompletionMessage{}, "", nil, llm.NewExecuteError(errOpenAINoChoices, openAIUsage(int64(tokIn+resp.Usage.PromptTokens), int64(tokOut+resp.Usage.CompletionTokens), int64(tokCached+cached)))
 		}
 		ch := resp.Choices[0]
 		lastFinish = ch.FinishReason

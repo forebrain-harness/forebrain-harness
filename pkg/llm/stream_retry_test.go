@@ -472,6 +472,74 @@ func TestRetryGivesUpAfterOneNonStreamingAttempt(t *testing.T) {
 	}
 }
 
+// A retried logical request reports the settled attempt's own usage as
+// Result.Usage — the every-attempt billing is the accumulator's business —
+// while Attempts says how many physical requests it took.
+func TestRetriedAttemptsAreCountedNotMergedIntoUsage(t *testing.T) {
+	result, err, inner, _ := runStreamRetry(t, 10,
+		func(ctx context.Context) (*Result, error) {
+			streamFire(ctx, func(sink *StreamSink) { sink.OnDelta("partial an") })
+			return nil, NewExecuteError(connDropped(), &Usage{InputTokens: 100, OutputTokens: 10})
+		},
+		func(ctx context.Context) (*Result, error) {
+			res, _ := okResult("Worked for the resend")
+			res.Usage = &Usage{InputTokens: 120, OutputTokens: 8}
+			return res, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want success on the second attempt", err)
+	}
+	if result == nil || result.Usage == nil {
+		t.Fatalf("result = %#v, want the settled attempt's usage", result)
+	}
+	if result.Usage.InputTokens != 120 || result.Usage.OutputTokens != 8 {
+		t.Fatalf("result.Usage = %+v, want the settled attempt's own usage (120/8), not a merged total", result.Usage)
+	}
+	if result.Attempts != 2 {
+		t.Fatalf("result.Attempts = %d, want 2 (the dead attempt still happened)", result.Attempts)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("inner calls = %d, want 2", inner.calls)
+	}
+}
+
+// Every attempt of an exhausted request rides its error out: the merged
+// usage of all of them, the physical count, and the last attempt's own
+// usage (which is not the merged total).
+func TestExhaustedRetryCarriesEveryAttempt(t *testing.T) {
+	usages := []Usage{
+		{InputTokens: 100, OutputTokens: 10},
+		{InputTokens: 110, OutputTokens: 12},
+		{InputTokens: 120, OutputTokens: 14},
+	}
+	drop := func(i int) func(ctx context.Context) (*Result, error) {
+		return func(ctx context.Context) (*Result, error) {
+			return nil, NewExecuteError(connDropped(), &usages[i])
+		}
+	}
+	// maxRetries=1: two stream attempts plus the non-streaming fallback.
+	_, err, inner, _ := runStreamRetry(t, 1, drop(0), drop(1), drop(2))
+	var exhausted *MaxAttemptsExceededError
+	if !errors.As(err, &exhausted) {
+		t.Fatalf("error = %v, want MaxAttemptsExceededError", err)
+	}
+	if inner.calls != 3 {
+		t.Fatalf("inner calls = %d, want 3", inner.calls)
+	}
+	usage := UsageFromError(err)
+	if usage == nil || usage.InputTokens != 330 || usage.OutputTokens != 36 {
+		t.Fatalf("UsageFromError = %+v, want the sum of every attempt (330/36)", usage)
+	}
+	if n := AttemptsFromError(err); n != 3 {
+		t.Fatalf("AttemptsFromError = %d, want 3", n)
+	}
+	last := LastAttemptUsageFromError(err)
+	if last == nil || last.InputTokens != 120 || last.OutputTokens != 14 {
+		t.Fatalf("LastAttemptUsageFromError = %+v, want the last attempt's own usage (120/14)", last)
+	}
+}
+
 // The waitFor computation is shared with the plain retry loop.
 func TestWaitForComputesJitterAndRetryAfter(t *testing.T) {
 	t.Parallel()

@@ -217,6 +217,23 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	// trusting the SDK's accumulated Usage, which real production traffic can
 	// silently zero out.
 	var latestUsage anthropicapi.Usage
+	// attemptUsage is the usage this attempt had already been billed when it
+	// failed: nil until the first usage-bearing event (message_start, or a
+	// message_delta carrying the final accounting) arrived, so a failure
+	// from before that point keeps its original error — the provider never
+	// billed that attempt.
+	attemptUsage := func() *llm.Usage {
+		if latestUsage.InputTokens <= 0 && latestUsage.OutputTokens <= 0 &&
+			latestUsage.CacheCreationInputTokens <= 0 && latestUsage.CacheReadInputTokens <= 0 {
+			return nil
+		}
+		return &llm.Usage{
+			InputTokens:              int(latestUsage.InputTokens),
+			OutputTokens:             int(latestUsage.OutputTokens),
+			CacheCreationInputTokens: int(latestUsage.CacheCreationInputTokens),
+			CacheReadInputTokens:     int(latestUsage.CacheReadInputTokens),
+		}
+	}
 	responseStarted := false
 	reportUsage := func(input, output, cacheCreationInput, cacheReadInput int64) {
 		if sink == nil {
@@ -336,7 +353,7 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 			}
 		}
 		if err := res.Accumulate(event); err != nil {
-			return nil, err
+			return nil, llm.NewExecuteError(err, attemptUsage())
 		}
 		// Accumulate has filled the block's final state by now, so a call
 		// reported ready here is byte-identical to the one the final message
@@ -355,13 +372,15 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return nil, err
+		return nil, llm.NewExecuteError(err, attemptUsage())
 	}
 	if !sawContentBlock && !sawStopReason {
 		// The stream closed cleanly having delivered neither a content block
 		// nor a stop reason: no answer started, none finished. The request is
 		// re-sent without streaming rather than finished as an empty one.
-		return nil, fmt.Errorf("anthropic: %w", llm.ErrStreamNoEvents)
+		// The attempt was still billed when message_start carried usage, so
+		// that billing rides the error into the retry loop's accounting.
+		return nil, llm.NewExecuteError(fmt.Errorf("anthropic: %w", llm.ErrStreamNoEvents), attemptUsage())
 	}
 	msg, err := agentAnthropicMessageFromAPI(&res)
 	if err != nil {

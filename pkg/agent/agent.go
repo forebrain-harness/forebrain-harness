@@ -333,10 +333,10 @@ func (a *Agent) handleAgentIteration(ctx context.Context, session []llm.Message,
 	msg, err := tracedLLM.Execute(ctx, session, a.tools)
 	duration := time.Since(start)
 	if err != nil {
-		stats.recordLLM(duration, nil)
+		stats.recordLLM(duration, nil, llm.AttemptsFromError(err))
 		return agentIteration{session: session}, err
 	}
-	stats.recordLLM(duration, msg.Usage)
+	stats.recordLLM(duration, msg.Usage, msg.Attempts)
 
 	// When an orchestration wrapper (e.g. toolOrchestrationLLM) ran its own
 	// internal tool-calling loop, it returns the full accumulated session via

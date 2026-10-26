@@ -185,8 +185,23 @@ func (e *ToolArgumentParseError) Unwrap() error {
 }
 
 type ExecuteError struct {
-	err   error
+	err error
+	// usage is the measurement this wrapper was created to carry. From the
+	// retry loop up it is the merged total of every attempt the logical
+	// request burned; an adapter's wrapper carries the one attempt it died
+	// on.
 	usage *Usage
+	// attempts is the number of physical model requests the failed logical
+	// request had made when this wrapper was created. 0 means unknown.
+	// NewExecuteError inherits it from an existing wrapper on the chain, so
+	// a layer re-wrapping the error with its own usage total (the runner's
+	// mergeErrorUsageTotal) cannot shadow the count.
+	attempts int
+	// lastAttempt is the usage of the single attempt the error itself came
+	// from — unlike usage, which from the retry loop up is a sum over dead
+	// attempts. Overflow calibration reads this one: it wants the rejected
+	// attempt's input, not a total. 0/nil means unknown.
+	lastAttempt *Usage
 }
 
 func (e *ExecuteError) Error() string {
@@ -212,6 +227,12 @@ func (e *ExecuteError) Unwrap() error {
 // twice — and usage accounting feeds the cache hit rate, which this project
 // will not let drift silently. Callers that are recording the usage of the
 // attempt they just made want this one.
+//
+// When err already carries an *ExecuteError (the attempt accounting the retry
+// loop or an adapter attached), the new wrapper inherits its attempts and
+// lastAttempt: usage may legitimately be re-measured by a layer above, but
+// the physical request count and the failing attempt's own usage must
+// survive the re-wrap.
 func NewExecuteError(err error, usage *Usage) error {
 	if err == nil {
 		return nil
@@ -219,7 +240,93 @@ func NewExecuteError(err error, usage *Usage) error {
 	if usage == nil {
 		return err
 	}
-	return &ExecuteError{err: err, usage: usage}
+	return &ExecuteError{err: err, usage: usage, attempts: AttemptsFromError(err), lastAttempt: LastAttemptUsageFromError(err)}
+}
+
+// newRetriedExecuteError is the retry loops' failure wrapper. It carries the
+// merged usage of every attempt the logical request burned (usage, nil when
+// none reported any), the physical attempt count, and the failing attempt's
+// own usage (lastAttempt) — everything the accounting layers read off a
+// failed request. Unlike NewExecuteError it wraps even without usage, so the
+// attempt count rides the error out.
+func newRetriedExecuteError(err error, usage, lastAttempt *Usage, attempts int) error {
+	if err == nil {
+		return nil
+	}
+	return &ExecuteError{err: err, usage: usage, attempts: attempts, lastAttempt: lastAttempt}
+}
+
+// AttemptsFromError returns the physical model request count carried by the
+// nearest accounting wrapper on err's chain, taking the maximum when more
+// than one is present (a re-wrap inherits rather than supersedes, so equal
+// counts are the norm). 0 when err carries none.
+func AttemptsFromError(err error) int {
+	best := 0
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if x, ok := e.(*ExecuteError); ok && x != nil && x.attempts > best {
+			best = x.attempts
+		}
+	}
+	return best
+}
+
+// LastAttemptUsageFromError returns the usage of the single attempt the error
+// itself came from — the input the rejected request sent, not the sum over
+// dead attempts. nil when err carries none.
+func LastAttemptUsageFromError(err error) *Usage {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if x, ok := e.(*ExecuteError); ok && x != nil && x.lastAttempt != nil {
+			cp := *x.lastAttempt
+			return &cp
+		}
+	}
+	return nil
+}
+
+// mergeUsage returns the sum of two usages, field by field.
+func mergeUsage(into, extra Usage) Usage {
+	return Usage{
+		InputTokens:              into.InputTokens + extra.InputTokens,
+		OutputTokens:             into.OutputTokens + extra.OutputTokens,
+		CacheCreationInputTokens: into.CacheCreationInputTokens + extra.CacheCreationInputTokens,
+		CacheReadInputTokens:     into.CacheReadInputTokens + extra.CacheReadInputTokens,
+	}
+}
+
+// attemptAccounting is the retry loops' tally of a logical request's attempts:
+// how many physical requests were made, the usage the dead ones burned, and
+// the usage of the attempt the current error came from. A dead attempt's
+// tokens are still spent, so every failure return carries the tally out for
+// the accounting layers.
+type attemptAccounting struct {
+	attempts int
+	dead     Usage
+	last     *Usage
+}
+
+// note records one failed attempt: what it burned, when its error carries
+// usage, and that it is now the failing attempt.
+func (a *attemptAccounting) note(err error) {
+	if u := UsageFromError(err); u != nil {
+		a.dead = mergeUsage(a.dead, *u)
+		a.last = u
+	}
+}
+
+// fail wraps a terminal error with the request's whole attempt accounting:
+// the merged usage of every attempt it burned, the physical attempt count,
+// and the failing attempt's own usage. It wraps even when no attempt
+// reported usage, so the attempt count still rides the error out.
+func (a *attemptAccounting) fail(err error) error {
+	if err == nil {
+		return nil
+	}
+	var merged *Usage
+	if a.dead != (Usage{}) {
+		cp := a.dead
+		merged = &cp
+	}
+	return newRetriedExecuteError(err, merged, a.last, a.attempts)
 }
 
 func WithUsageError(err error, usage *Usage) error {
