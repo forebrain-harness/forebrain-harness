@@ -44,8 +44,10 @@ func TestTurnRequestJSONRoundTrip(t *testing.T) {
 
 // fakeStatusRunStore is the run-store slice BuildStatusReport reads.
 type fakeStatusRunStore struct {
-	session state.SessionUsage
-	last    state.LastRunUsage
+	session    state.SessionUsage
+	last       state.LastRunUsage
+	rateTokens int
+	rateMs     int64
 }
 
 func (f *fakeStatusRunStore) SessionUsageForSession(context.Context, string) (state.SessionUsage, error) {
@@ -54,6 +56,10 @@ func (f *fakeStatusRunStore) SessionUsageForSession(context.Context, string) (st
 
 func (f *fakeStatusRunStore) LastRunUsageForSession(context.Context, string) (state.LastRunUsage, error) {
 	return f.last, nil
+}
+
+func (f *fakeStatusRunStore) SessionOutputRate(context.Context, string) (int, int64, error) {
+	return f.rateTokens, f.rateMs, nil
 }
 
 // TestBuildStatusReportAssemblesThePanel pins that /status is assembled in one
@@ -169,6 +175,67 @@ func TestStatusCustomPermissionsNeverShowPlaceholders(t *testing.T) {
 	}
 	if got := RenderPermissionsLine(StatusPermissions{Approval: "never", Sandbox: "read-only", Rules: 1}); got != "Custom · never · read-only · 1 rule" {
 		t.Fatalf("custom line = %q", got)
+	}
+}
+
+// TestOutputTokensPerSecondRoundsToOneDecimal pins the one rate computation
+// both surfaces share: completion tokens over model-call time, one decimal,
+// and zero rather than a division when either side is missing.
+func TestOutputTokensPerSecondRoundsToOneDecimal(t *testing.T) {
+	if got := OutputTokensPerSecond(1000, 3000); got != 333.3 {
+		t.Fatalf("1000 tokens over 3000 ms = %v, want 333.3", got)
+	}
+	if got := OutputTokensPerSecond(1000, 0); got != 0 {
+		t.Fatalf("no time = %v, want 0", got)
+	}
+	if got := OutputTokensPerSecond(0, 3000); got != 0 {
+		t.Fatalf("no tokens = %v, want 0", got)
+	}
+}
+
+// TestUsageFactsCarriesTheOutputRate pins the Session row's rate segment and
+// the assembly that fills it: the paired rate query feeds the one algorithm,
+// the fact carries the result when there is one, and a session with no
+// recorded model-call time shows no rate at all — "0.0 tok/s" is not a speed
+// anyone wants to read.
+func TestUsageFactsCarriesTheOutputRate(t *testing.T) {
+	rep := BuildStatusReport(context.Background(), StatusSource{
+		StateRoot: t.TempDir(),
+		SessionID: "s1",
+		RunStore: &fakeStatusRunStore{
+			session:    state.SessionUsage{CompletionTokens: 3000, LLMCalls: 4},
+			rateTokens: 3000,
+			rateMs:     16_000,
+		},
+	})
+	var sessionLine string
+	for _, fact := range UsageFacts(rep) {
+		if fact.Label == "Session" {
+			sessionLine = fact.Value
+		}
+	}
+	if !strings.Contains(sessionLine, "187.5 tok/s") {
+		t.Fatalf("Session fact = %q, want it to carry 187.5 tok/s (3000 tokens over 16 s)", sessionLine)
+	}
+	if rep.Session.GenerationMs != 16_000 {
+		t.Fatalf("GenerationMs = %d, want 16000", rep.Session.GenerationMs)
+	}
+
+	// No run recorded a time: the segment stays out, not zero.
+	without := BuildStatusReport(context.Background(), StatusSource{
+		StateRoot: t.TempDir(),
+		SessionID: "s1",
+		RunStore: &fakeStatusRunStore{
+			session: state.SessionUsage{CompletionTokens: 3000, LLMCalls: 4},
+		},
+	})
+	for _, fact := range UsageFacts(without) {
+		if fact.Label == "Session" && strings.Contains(fact.Value, "tok/s") {
+			t.Fatalf("Session fact = %q, want no rate segment without a recorded time", fact.Value)
+		}
+	}
+	if without.Session.OutputTokensPerSecond != 0 {
+		t.Fatalf("OutputTokensPerSecond = %v, want 0", without.Session.OutputTokensPerSecond)
 	}
 }
 

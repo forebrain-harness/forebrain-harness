@@ -262,6 +262,109 @@ func TestSessionUsageSumsTheRunTreeOnceAndLastTurnIsTopLevel(t *testing.T) {
 	}
 }
 
+// TestRunUsageStoresModelCallTime pins that the run's aggregated usage row
+// carries the model-call time beside the tokens: the successful path's
+// persistRunUsage writes it from the summary's latency, and both reads (the
+// last-turn one and the session total) hand it back.
+func TestRunUsageStoresModelCallTime(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rt := &RunStore{DB: db}
+	ensureSessionsForRuns(t, db, "s1")
+
+	run, err := rt.CreateRun(ctx, "s1", "turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.SetRunUsage(ctx, run.ID, LastRunUsage{
+		PromptTokens: 100, CompletionTokens: 42, LLMCalls: 2, LLMMs: 8_500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.SetStatus(ctx, run.ID, RunStatusDone); err != nil {
+		t.Fatal(err)
+	}
+
+	var raw int
+	if err := db.QueryRowContext(ctx, `SELECT usage_llm_ms FROM fb_runs WHERE id=?`, run.ID).Scan(&raw); err != nil {
+		t.Fatalf("read usage_llm_ms: %v", err)
+	}
+	if raw != 8_500 {
+		t.Fatalf("usage_llm_ms = %d, want 8500", raw)
+	}
+	last, err := rt.LastRunUsageForSession(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last.LLMMs != 8_500 {
+		t.Fatalf("last turn LLMMs = %d, want 8500", last.LLMMs)
+	}
+	totals, err := rt.SessionUsageForSession(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals.LLMMs != 8_500 {
+		t.Fatalf("session LLMMs = %d, want 8500", totals.LLMMs)
+	}
+}
+
+// TestSessionOutputRateIgnoresRunsWithoutTime pins the rate query's pairing
+// rule: only runs that recorded a model-call time contribute, so a run with
+// tokens but no time (a failed one, or a row older than the column) stays out
+// of both the numerator and the denominator.
+func TestSessionOutputRateIgnoresRunsWithoutTime(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rt := &RunStore{DB: db}
+	ensureSessionsForRuns(t, db, "s1")
+
+	timed, err := rt.CreateRun(ctx, "s1", "timed turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	untimed, err := rt.CreateRun(ctx, "s1", "untimed turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, u := range map[string]LastRunUsage{
+		timed.ID:   {CompletionTokens: 300, LLMCalls: 1, LLMMs: 6_000},
+		untimed.ID: {CompletionTokens: 9_999, LLMCalls: 1},
+	} {
+		if err := rt.SetRunUsage(ctx, id, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tokens, ms, err := rt.SessionOutputRate(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 300 || ms != 6_000 {
+		t.Fatalf("SessionOutputRate = %d tokens / %d ms, want 300 / 6000 (only the timed run)", tokens, ms)
+	}
+
+	// A session whose no run recorded the time answers zero on both sides:
+	// no denominator, no rate.
+	if _, err := db.ExecContext(ctx, `UPDATE fb_runs SET usage_llm_ms=0 WHERE id=?`, timed.ID); err != nil {
+		t.Fatal(err)
+	}
+	tokens, ms, err = rt.SessionOutputRate(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 0 || ms != 0 {
+		t.Fatalf("SessionOutputRate with no timed runs = %d / %d, want 0 / 0", tokens, ms)
+	}
+}
+
 // TestSQLiteBuildServesTheStateSchema pins that the test build (cgo on, fts5
 // tag on) satisfies the probe guarding every state open: under the documented
 // build the linked SQLite engine reports FTS5 and requireSQLiteBuild passes.

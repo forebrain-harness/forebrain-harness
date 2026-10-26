@@ -455,7 +455,8 @@ describe('ChatView subagent drawer', () => {
     })
     vi.spyOn(forebrainApi, 'sessionCostSummary').mockResolvedValue({
       sessionId: 's1', inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWritten: 0,
-      uncached: 0, requests: 0, cacheHitPercent: 0, toolCalls: 0, byTool: {},
+      uncached: 0, requests: 0, cacheHitPercent: 0, outputTokensPerSecond: 0, generationMs: 0,
+      toolCalls: 0, byTool: {},
     })
   }
 

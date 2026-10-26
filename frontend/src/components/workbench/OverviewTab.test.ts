@@ -2,7 +2,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import OverviewTab from './OverviewTab.vue'
-import type { AgentRosterRow, ActionRecord } from '@/lib/api'
+import type { AgentRosterRow, ActionRecord, SessionCostSummary } from '@/lib/api'
 import { forebrainApi } from '@/lib/api'
 import { setLocale } from '@/locales'
 
@@ -14,7 +14,7 @@ async function flush() {
   await new Promise((resolve) => setTimeout(resolve, 0))
 }
 
-function stubApi(overrides: { plans?: unknown[]; asks?: ActionRecord[] } = {}) {
+function stubApi(overrides: { plans?: unknown[]; asks?: ActionRecord[]; cost?: Partial<SessionCostSummary> } = {}) {
   vi.spyOn(forebrainApi, 'sessionTodos').mockResolvedValue({ items: [] })
   vi.spyOn(forebrainApi, 'sessionPlans').mockResolvedValue((overrides.plans ?? []) as never)
   vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue(overrides.asks ?? [])
@@ -35,8 +35,11 @@ function stubApi(overrides: { plans?: unknown[]; asks?: ActionRecord[] } = {}) {
     uncached: 1000,
     requests: 2,
     cacheHitPercent: 50,
+    outputTokensPerSecond: 0,
+    generationMs: 0,
     toolCalls: 0,
     byTool: {},
+    ...overrides.cost,
   })
 }
 
@@ -183,5 +186,22 @@ describe('OverviewTab', () => {
     // The plan's text is not printed here at all: the card carries the row and
     // its progress, and the document belongs to the drawer's plan tab.
     expect(wrapper.find('pre').exists()).toBe(false)
+  })
+
+  // The rate the engine computed, straight from the cost summary: shown with
+  // one decimal when there is one, and the whole row stays out when the
+  // session recorded no model-call time — "0.0 tok/s" is not a speed.
+  it('shows the output rate the engine computed, and hides it without a denominator', async () => {
+    stubApi({ cost: { outputTokensPerSecond: 18.4, generationMs: 4_300 } })
+    const wrapper = mountTab()
+    await flush()
+    expect(wrapper.text()).toContain('输出速率')
+    expect(wrapper.text()).toContain('18.4 tok/s')
+
+    stubApi()
+    const without = mountTab()
+    await flush()
+    expect(without.text()).not.toContain('tok/s')
+    expect(without.text()).not.toContain('输出速率')
   })
 })

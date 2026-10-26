@@ -3424,8 +3424,15 @@ func (s *Server) handleSessionCostSummary(w http.ResponseWriter, r *http.Request
 	}
 	// What the session spent, in the same figures /status reports: the
 	// requests' input and output, the cache split and its hit rate, and the
-	// tool calls made.
+	// tool calls made. The output rate comes from the same paired query and
+	// the same algorithm /status uses, so the two surfaces cannot disagree.
 	totals := turn.SessionUsageTotalsOf(usage)
+	var rate float64
+	var generationMs int64
+	if tokens, ms, rerr := s.RunRT.SessionOutputRate(r.Context(), sid); rerr == nil {
+		generationMs = ms
+		rate = turn.OutputTokensPerSecond(tokens, ms)
+	}
 	// The latest turn's attempt ledger (plan 165 prototype): every physical
 	// model request its run made, failures and the settling attempt alike, so
 	// "how many times did this answer try" outlives the stream that showed it.
@@ -3444,17 +3451,19 @@ func (s *Server) handleSessionCostSummary(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, map[string]any{
-		"session_id":        sid,
-		"input_tokens":      totals.InputTokens,
-		"output_tokens":     totals.OutputTokens,
-		"cache_read":        totals.CacheRead,
-		"cache_written":     totals.CacheWritten,
-		"uncached":          totals.Uncached,
-		"requests":          totals.Requests,
-		"cache_hit_percent": totals.CacheHitPercent,
-		"tool_calls":        total,
-		"by_tool":           byTool,
-		"attempts":          attempts,
+		"session_id":               sid,
+		"input_tokens":             totals.InputTokens,
+		"output_tokens":            totals.OutputTokens,
+		"cache_read":               totals.CacheRead,
+		"cache_written":            totals.CacheWritten,
+		"uncached":                 totals.Uncached,
+		"requests":                 totals.Requests,
+		"cache_hit_percent":        totals.CacheHitPercent,
+		"output_tokens_per_second": rate,
+		"generation_ms":            generationMs,
+		"tool_calls":               total,
+		"by_tool":                  byTool,
+		"attempts":                 attempts,
 	})
 }
 

@@ -3,9 +3,13 @@ package run
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // failedUsageLLM fails every call with the usage of that attempt attached,
@@ -87,5 +91,55 @@ func TestObserveOverflowLearnsTheRejectedAttemptNotTheMergedTotal(t *testing.T) 
 	}
 	if obs.RejectedInput != 210 {
 		t.Fatalf("RejectedInput = %d, want the rejected attempt's own input (210), not the merged total (330)", obs.RejectedInput)
+	}
+}
+
+// The successful path's persistRunUsage writes the summary's model-call time
+// beside the tokens: the denominator of the output rate, from the same run
+// the tokens describe. The failed path writes no time (it has no Result),
+// which leaves that run on the "no denominator" side of the rate query.
+func TestPersistRunUsageWritesTheModelCallTime(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	rt := &state.RunStore{DB: db}
+	if err := state.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"); err != nil {
+		t.Fatal(err)
+	}
+	rr, err := rt.CreateRun(ctx, "sid", "turn")
+	if err != nil {
+		t.Fatalf("CreateRun error: %v", err)
+	}
+
+	persistRunUsage(rt, rr.ID, &agent.Result{Summary: &agent.RunSummary{
+		LLMCalls: 3,
+		Usage:    agent.UsageSummary{InputTokens: 90, OutputTokens: 120},
+		Latency:  agent.LatencySummary{LLM: 12_345 * time.Millisecond},
+	}})
+	if err := rt.SetStatus(ctx, rr.ID, state.RunStatusDone); err != nil {
+		t.Fatal(err)
+	}
+
+	last, err := rt.LastRunUsageForSession(ctx, "sid")
+	if err != nil {
+		t.Fatalf("LastRunUsageForSession error: %v", err)
+	}
+	if last.LLMMs != 12_345 {
+		t.Fatalf("usage_llm_ms = %d, want the summary's Latency.LLM (12345 ms)", last.LLMMs)
+	}
+	if last.CompletionTokens != 120 || last.LLMCalls != 3 {
+		t.Fatalf("tokens beside the time = %+v, want 120 tokens over 3 calls", last)
+	}
+
+	// The rate pairs the two: this run alone yields 120 tokens / 12.345 s.
+	tokens, ms, err := rt.SessionOutputRate(ctx, "sid")
+	if err != nil {
+		t.Fatalf("SessionOutputRate error: %v", err)
+	}
+	if tokens != 120 || ms != 12_345 {
+		t.Fatalf("SessionOutputRate = %d / %d, want 120 / 12345", tokens, ms)
 	}
 }

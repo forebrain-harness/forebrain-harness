@@ -263,6 +263,10 @@ CREATE TABLE fb_runs (
   usage_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
   usage_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
   usage_llm_calls INTEGER NOT NULL DEFAULT 0,
+  -- Wall-clock time spent waiting on model requests during this run. The
+  -- denominator of the output rate; 0 for a run that never wrote one (an
+  -- older row, or a run that failed before any call returned).
+  usage_llm_ms INTEGER NOT NULL DEFAULT 0,
   started_at_ms INTEGER,
   finished_at_ms INTEGER,
   worked_ms INTEGER,

@@ -40,6 +40,8 @@ function stubApi() {
     uncached: 0,
     requests: 0,
     cacheHitPercent: 0,
+    outputTokensPerSecond: 0,
+    generationMs: 0,
     toolCalls: 0,
     byTool: {},
   })

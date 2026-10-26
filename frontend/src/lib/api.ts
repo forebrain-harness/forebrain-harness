@@ -1375,6 +1375,10 @@ export interface SessionCostSummary {
   uncached: number
   requests: number
   cacheHitPercent: number
+  /** Completion tokens per second of model-call time; 0 when no run recorded a time. */
+  outputTokensPerSecond: number
+  /** The model-call time the rate's denominator came from, in milliseconds. */
+  generationMs: number
   toolCalls: number
   byTool: Record<string, number>
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strconv"
@@ -673,6 +674,11 @@ type StatusUsageTotals struct {
 	Uncached        int
 	Requests        int
 	CacheHitPercent int // read / (read + written + uncached)
+	// GenerationMs is the model-call time the session's runs recorded, and
+	// OutputTokensPerSecond the completion rate over it. Both stay zero for
+	// a session whose no run recorded a time — no denominator, no rate.
+	GenerationMs          int64
+	OutputTokensPerSecond float64
 }
 
 // StatusLastTurn is the most recent completed turn's usage.
@@ -728,6 +734,7 @@ type StatusReport struct {
 type StatusRunStore interface {
 	SessionUsageForSession(ctx context.Context, sessionID string) (state.SessionUsage, error)
 	LastRunUsageForSession(ctx context.Context, sessionID string) (state.LastRunUsage, error)
+	SessionOutputRate(ctx context.Context, sessionID string) (completionTokens int, llmMs int64, err error)
 }
 
 // StatusSource carries the surface-specific data /status needs. The assembly
@@ -844,13 +851,22 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 				CacheHitPercent: CacheHitPercent(last.CacheReadTokens, last.CacheWriteTokens, last.PromptTokens),
 			}
 		}
+		// The rate's numerator and denominator come from the paired query,
+		// not the totals above: only runs that recorded a model-call time
+		// count, so a failed run's tokens cannot inflate the speed.
+		if tokens, ms, err := src.RunStore.SessionOutputRate(ctx, sid); err == nil {
+			rep.Session.GenerationMs = ms
+			rep.Session.OutputTokensPerSecond = OutputTokensPerSecond(tokens, ms)
+		}
 	}
 	return rep
 }
 
 // SessionUsageTotalsOf reads a session's stored usage the way every surface
 // reports it: input is everything the requests sent, and the cache split beside
-// it is what the hit rate is computed from.
+// it is what the hit rate is computed from. The output rate is not filled
+// here — it needs the paired rate query, which BuildStatusReport runs — so
+// this projection stays a pure function of the totals row.
 func SessionUsageTotalsOf(totals state.SessionUsage) StatusUsageTotals {
 	return StatusUsageTotals{
 		InputTokens:     totals.PromptTokens + totals.CacheReadTokens + totals.CacheWriteTokens,
@@ -861,6 +877,16 @@ func SessionUsageTotalsOf(totals state.SessionUsage) StatusUsageTotals {
 		Requests:        totals.LLMCalls,
 		CacheHitPercent: CacheHitPercent(totals.CacheReadTokens, totals.CacheWriteTokens, totals.PromptTokens),
 	}
+}
+
+// OutputTokensPerSecond is completion tokens per second of model-call time:
+// the one place this rate is computed, so the terminal's Usage page and the
+// web's overview card cannot disagree. Zero when no run recorded a duration.
+func OutputTokensPerSecond(completionTokens int, llmMs int64) float64 {
+	if llmMs <= 0 || completionTokens <= 0 {
+		return 0
+	}
+	return math.Round(float64(completionTokens)*1000/float64(llmMs)*10) / 10
 }
 
 // CacheHitPercent is the provider-level cache-hit rate: read / (read + written
@@ -1014,6 +1040,9 @@ func UsageFacts(rep StatusReport) []StatusFact {
 	}
 	if rep.Session.Requests > 0 {
 		session = append(session, countNoun(rep.Session.Requests, "request"))
+	}
+	if rep.Session.OutputTokensPerSecond > 0 {
+		session = append(session, fmt.Sprintf("%.1f tok/s", rep.Session.OutputTokensPerSecond))
 	}
 	add("Session", strings.Join(session, " · "))
 	if rep.Session.CacheRead > 0 || rep.Session.CacheWritten > 0 {

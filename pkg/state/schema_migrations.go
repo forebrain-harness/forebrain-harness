@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 18
+const stateSchemaVersion = 19
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -57,6 +57,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 16, apply: migrateStateV15ToV16},
 	{version: 17, apply: migrateStateV16ToV17},
 	{version: 18, apply: migrateStateV17ToV18},
+	{version: 19, apply: migrateStateV18ToV19},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -790,6 +791,26 @@ CREATE TABLE IF NOT EXISTS fb_llm_attempts (
 	if _, err := conn.ExecContext(ctx,
 		`CREATE INDEX IF NOT EXISTS idx_fb_llm_attempts_run ON fb_llm_attempts(run_id, id)`); err != nil {
 		return fmt.Errorf("create idx_fb_llm_attempts_run: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV18ToV19 adds fb_runs.usage_llm_ms, the wall-clock time a run
+// spent waiting on model requests: the denominator of the output rate. It is
+// a plain ADD COLUMN, so a database that already carries it (a fixture built
+// from the current schema.sql with a lowered user_version) skips the ALTER
+// instead of failing on a duplicate. A run stored before this version never
+// measured the time, so it reads as 0 — no duration, no rate — which is the
+// truth rather than a guess.
+func migrateStateV18ToV19(ctx context.Context, conn *sql.Conn) error {
+	var llmMsCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_runs') WHERE name='usage_llm_ms'`).Scan(&llmMsCol); err != nil {
+		return err
+	}
+	if llmMsCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_runs ADD COLUMN usage_llm_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add fb_runs.usage_llm_ms: %w", err)
+		}
 	}
 	return nil
 }

@@ -325,6 +325,7 @@ func persistRunUsage(rt *state.RunStore, runID string, res *agent.Result) {
 		CacheReadTokens:  res.Summary.Usage.CacheReadInputTokens,
 		CacheWriteTokens: res.Summary.Usage.CacheCreationInputTokens,
 		LLMCalls:         res.Summary.LLMCalls,
+		LLMMs:            int(res.Summary.Latency.LLM.Milliseconds()),
 	})
 }
 

@@ -99,7 +99,7 @@ type Run struct {
 
 // runColumns is the one fb_runs column list; scanRun is its one reader.
 // parent_run_id is the only nullable column in it and reads as "".
-const runColumns = `id, session_id, parent_run_id, input_text, status, usage_prompt_tokens, usage_completion_tokens, usage_cache_read_tokens, usage_cache_creation_tokens, usage_llm_calls, created_at, updated_at`
+const runColumns = `id, session_id, parent_run_id, input_text, status, usage_prompt_tokens, usage_completion_tokens, usage_cache_read_tokens, usage_cache_creation_tokens, usage_llm_calls, usage_llm_ms, created_at, updated_at`
 
 // prefixedRunColumns is runColumns under one table alias, for the queries
 // that join fb_sessions.
@@ -114,8 +114,8 @@ func prefixedRunColumns(alias string) string {
 func scanRun(scanner interface{ Scan(...any) error }) (Run, error) {
 	var r Run
 	var parent sql.NullString
-	var cacheRead, cacheWrite, llmCalls int
-	if err := scanner.Scan(&r.ID, &r.SessionID, &parent, &r.InputText, &r.Status, &r.UsagePromptTokens, &r.UsageCompletionTokens, &cacheRead, &cacheWrite, &llmCalls, &r.CreatedAt, &r.UpdatedAt); err != nil {
+	var cacheRead, cacheWrite, llmCalls, llmMs int
+	if err := scanner.Scan(&r.ID, &r.SessionID, &parent, &r.InputText, &r.Status, &r.UsagePromptTokens, &r.UsageCompletionTokens, &cacheRead, &cacheWrite, &llmCalls, &llmMs, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return Run{}, err
 	}
 	r.ParentRunID = parent.String
@@ -432,6 +432,10 @@ type SessionUsage struct {
 	CacheReadTokens  int
 	CacheWriteTokens int
 	LLMCalls         int
+	// LLMMs is the model-call time the runs recorded. Only successful runs
+	// write it, so a session whose runs all failed can hold tokens here with
+	// no time — the rate query pairs them, this total does not.
+	LLMMs int
 }
 
 // LastRunUsage is one run's own usage. PromptTokens is the uncached input
@@ -443,6 +447,9 @@ type LastRunUsage struct {
 	CacheReadTokens  int
 	CacheWriteTokens int
 	LLMCalls         int
+	// LLMMs is the model-call time the run's summary carried; 0 for a run
+	// stored before the column existed or one that never wrote it.
+	LLMMs int
 }
 
 // SessionUsageForSession sums usage over the session's run tree. Every run
@@ -466,12 +473,12 @@ WITH RECURSIVE run_tree(id) AS (
 )
 SELECT IFNULL(SUM(usage_prompt_tokens),0), IFNULL(SUM(usage_completion_tokens),0),
        IFNULL(SUM(usage_cache_read_tokens),0), IFNULL(SUM(usage_cache_creation_tokens),0),
-       IFNULL(SUM(usage_llm_calls),0)
+       IFNULL(SUM(usage_llm_calls),0), IFNULL(SUM(usage_llm_ms),0)
 FROM fb_runs WHERE id IN (SELECT id FROM run_tree)`,
 		sid).Scan(
 		&out.PromptTokens, &out.CompletionTokens,
 		&out.CacheReadTokens, &out.CacheWriteTokens,
-		&out.LLMCalls)
+		&out.LLMCalls, &out.LLMMs)
 	return out, err
 }
 
@@ -491,14 +498,38 @@ func (s *RunStore) LastRunUsageForSession(ctx context.Context, sessionID string)
 	err := s.DB.QueryRowContext(ctx, `
 SELECT usage_prompt_tokens, usage_completion_tokens,
        usage_cache_read_tokens, usage_cache_creation_tokens,
-       usage_llm_calls
+       usage_llm_calls, usage_llm_ms
 FROM fb_runs WHERE session_id=? AND status=? AND parent_run_id IS NULL
 ORDER BY updated_at DESC LIMIT 1`,
 		sid, string(RunStatusDone)).Scan(
 		&out.PromptTokens, &out.CompletionTokens,
 		&out.CacheReadTokens, &out.CacheWriteTokens,
-		&out.LLMCalls)
+		&out.LLMCalls, &out.LLMMs)
 	return out, err
+}
+
+// SessionOutputRate returns the completion tokens and model-call time of the
+// runs in this session's tree that recorded a model-call time, so the rate's
+// numerator and denominator describe the same runs: a failed run that spent
+// tokens but never wrote a duration must not inflate it.
+func (s *RunStore) SessionOutputRate(ctx context.Context, sessionID string) (completionTokens int, llmMs int64, err error) {
+	if s == nil || s.DB == nil {
+		return 0, 0, fmt.Errorf("nil db")
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return 0, 0, fmt.Errorf("empty session id")
+	}
+	err = s.DB.QueryRowContext(ctx, `
+WITH RECURSIVE run_tree(id) AS (
+  SELECT id FROM fb_runs WHERE session_id=?
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT IFNULL(SUM(usage_completion_tokens),0), IFNULL(SUM(usage_llm_ms),0)
+FROM fb_runs WHERE id IN (SELECT id FROM run_tree) AND usage_llm_ms > 0`,
+		sid).Scan(&completionTokens, &llmMs)
+	return completionTokens, llmMs, err
 }
 
 // SetRunUsage persists a run's aggregated provider usage, cache traffic
@@ -528,14 +559,17 @@ func (s *RunStore) SetRunUsage(ctx context.Context, runID string, usage LastRunU
 	if usage.LLMCalls < 0 {
 		usage.LLMCalls = 0
 	}
+	if usage.LLMMs < 0 {
+		usage.LLMMs = 0
+	}
 	now := time.Now().Unix()
 	_, err := s.DB.ExecContext(ctx, `
 UPDATE fb_runs SET usage_prompt_tokens=?, usage_completion_tokens=?,
   usage_cache_read_tokens=?, usage_cache_creation_tokens=?, usage_llm_calls=?,
-  updated_at=? WHERE id=?`,
+  usage_llm_ms=?, updated_at=? WHERE id=?`,
 		usage.PromptTokens, usage.CompletionTokens,
 		usage.CacheReadTokens, usage.CacheWriteTokens, usage.LLMCalls,
-		now, runID)
+		usage.LLMMs, now, runID)
 	return err
 }
 

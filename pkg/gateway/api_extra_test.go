@@ -4219,6 +4219,37 @@ func TestSessionCostSummaryReportsWhatTheSessionSpent(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "note")
 }
 
+// The cost summary carries the output rate /status computes: the same paired
+// query (a run with tokens but no recorded time stays out of both sides) and
+// the same one-decimal algorithm. A session with no recorded model-call time
+// answers zero, which the card reads as "show no rate row".
+func TestCostSummaryCarriesOutputRate(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	seedRun(t, s.RunRT, "s1", "r1")
+	seedRun(t, s.RunRT, "s1", "r2")
+	require.NoError(t, s.RunRT.SetRunUsage(ctx, "r1", state.LastRunUsage{CompletionTokens: 500, LLMMs: 25_000}))
+	require.NoError(t, s.RunRT.SetRunUsage(ctx, "r2", state.LastRunUsage{CompletionTokens: 9_999}))
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/cost-summary", nil, s.handleSessionCostSummary, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, float64(20), got["output_tokens_per_second"])
+	require.Equal(t, float64(25_000), got["generation_ms"])
+
+	// No run recorded a time: the fields answer their zero values.
+	seedRun(t, s.RunRT, "s2", "r3")
+	require.NoError(t, s.RunRT.SetRunUsage(ctx, "r3", state.LastRunUsage{CompletionTokens: 700}))
+	rec = cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s2/cost-summary", nil, s.handleSessionCostSummary, "id", "s2")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got = nil
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, float64(0), got["output_tokens_per_second"])
+	require.Equal(t, float64(0), got["generation_ms"])
+}
+
 // The cost summary carries the latest turn's attempt ledger (plan 165): what
 // the run tried, in the order it happened — the 503 with its wait, then the
 // attempt that answered.

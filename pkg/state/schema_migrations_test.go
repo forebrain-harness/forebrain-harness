@@ -661,6 +661,68 @@ func TestStateV17UpgradesToV18AddsLLMAttempts(t *testing.T) {
 	}
 }
 
+func TestStateV18UpgradesToV19AddsRunLLMTime(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s','main','s',10,10,'/repo/s')`,
+		`INSERT INTO fb_runs(id, session_id, input_text, status, usage_completion_tokens, created_at, updated_at)
+		 VALUES('r','s','turn','done',500,10,10)`,
+		`ALTER TABLE fb_runs DROP COLUMN usage_llm_ms`,
+		`PRAGMA user_version = 18`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v18 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	// The column is back with its declared shape, and the run that predates
+	// it reads as 0 — no duration recorded, so no rate from its tokens.
+	var declared int
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_runs') WHERE name='usage_llm_ms' AND dflt_value='0' AND "notnull"=1`).Scan(&declared); err != nil || declared != 1 {
+		t.Fatalf("usage_llm_ms declared DEFAULT 0 NOT NULL = %d err=%v, want 1", declared, err)
+	}
+	runs := &RunStore{DB: migrated}
+	var legacy int
+	if err := migrated.QueryRowContext(ctx, `SELECT usage_llm_ms FROM fb_runs WHERE id='r'`).Scan(&legacy); err != nil {
+		t.Fatalf("read usage_llm_ms of a pre-v19 run: %v", err)
+	}
+	if legacy != 0 {
+		t.Fatalf("usage_llm_ms of a pre-v19 run = %d, want 0 (no backfill)", legacy)
+	}
+	if tokens, ms, err := runs.SessionOutputRate(ctx, "s"); err != nil || tokens != 0 || ms != 0 {
+		t.Fatalf("SessionOutputRate of a pre-v19 run = %d / %d err=%v, want 0 / 0", tokens, ms, err)
+	}
+	if err := runs.SetRunUsage(ctx, "r", LastRunUsage{CompletionTokens: 500, LLMMs: 2_500}); err != nil {
+		t.Fatalf("set usage on a v19 store: %v", err)
+	}
+	if tokens, ms, err := runs.SessionOutputRate(ctx, "s"); err != nil || tokens != 500 || ms != 2_500 {
+		t.Fatalf("SessionOutputRate after a write = %d / %d err=%v, want 500 / 2500", tokens, ms, err)
+	}
+}
+
 func TestStateV15UpgradesToV16AddsImageRefusals(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")

@@ -135,6 +135,10 @@
         <span class="k">{{ t('chat.benchUsageRequests') }}</span>
         <span class="v">{{ t('chat.benchUsageRequestsValue', { count: cost?.requests ?? 0 }) }}</span>
       </div>
+      <div v-if="cost?.outputTokensPerSecond" class="bench-kvs">
+        <span class="k">{{ t('chat.benchUsageRate') }}</span>
+        <span class="v">{{ t('chat.benchUsageRateValue', { rate: cost.outputTokensPerSecond.toFixed(1) }) }}</span>
+      </div>
       <div class="bench-kvs">
         <span class="k">{{ t('chat.benchUsageCache') }}</span>
         <span class="v">{{ cacheLabel }}</span>
