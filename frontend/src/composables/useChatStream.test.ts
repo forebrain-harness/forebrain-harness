@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest'
+import { effectScope } from 'vue'
 
 import { setLocale, t } from '@/locales'
 import { toCamelCase } from '@/lib/case'
@@ -6003,6 +6004,67 @@ describe('useChatStream stream_partial', () => {
       Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
     }
   })
+
+// The composable holds live network resources — a send socket, a session
+// observer, an in-flight AbortController and two clocks. A view that unmounts
+// keeps no keep-alive route, so ending its scope must close all of them.
+describe('the stream releases what it holds', () => {
+  beforeAll(() => setLocale('en'))
+  afterAll(() => setLocale('en'))
+
+  it('closes the session observer when its scope ends', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const scope = effectScope()
+      const stream = scope.run(() => useChatStream())!
+      stream.switchToSession('release-me')
+      await vi.waitFor(() => {
+        expect(FakeChatWebSocket.instances.length).toBeGreaterThan(0)
+      })
+      const observer = FakeChatWebSocket.instances[FakeChatWebSocket.instances.length - 1]!
+      observer.open()
+      await vi.waitFor(() => {
+        expect(observer.sent.some((frame) => {
+          try { return String((JSON.parse(frame) as Record<string, unknown>).op ?? '') === 'bind_session' } catch { return false }
+        })).toBe(true)
+      })
+      scope.stop()
+      expect(FakeChatWebSocket.instances.every((ws) => ws.readyState === FakeChatWebSocket.CLOSED)).toBe(true)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('aborts the send it has in flight and can be released twice', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      const pending = stream.send('hello').catch(() => { /* the release is the point */ })
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket!.open()
+      expect(stream.runtimeStatus.value.kind).toBe('working')
+      stream.dispose()
+      expect(socket!.readyState).toBe(FakeChatWebSocket.CLOSED)
+      stream.dispose()
+      await pending
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+})
 
 // A stored tool row whose display body is a not-run drop key draws nothing on
 // any timeline: the steer-preempted key always did, and the refusal-stopped

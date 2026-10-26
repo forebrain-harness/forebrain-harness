@@ -1,4 +1,4 @@
-import { computed, reactive, ref, shallowRef } from 'vue'
+import { computed, getCurrentScope, onScopeDispose, reactive, ref, shallowRef } from 'vue'
 import { toCamelCase } from '@/lib/case'
 import {
   formatProviderError,
@@ -2967,6 +2967,46 @@ export function useChatStream() {
       runtimeTimer = null
     }
   }
+
+  // dispose releases everything this instance holds: the send in flight, the
+  // two sockets and both clocks. A view that unmounts keeps no keep-alive
+  // route, so without this every visit would leave a bound WebSocket behind —
+  // the gateway fans every session event out to every subscriber — and a send
+  // that was streaming would keep appending to a view nobody looks at.
+  // Idempotent: a release may come from the scope and from a test.
+  function dispose() {
+    if (streamAbortController) {
+      streamAbortController.abort()
+      streamAbortController = null
+    }
+    if (activeSocket) {
+      try {
+        activeSocket.close()
+      } catch {
+        // already closing
+      }
+      activeSocket = null
+    }
+    if (sessionObserver) {
+      try {
+        sessionObserver.close()
+      } catch {
+        // already closing
+      }
+      sessionObserver = null
+    }
+    observerSessionId = ''
+    observerReady = null
+    activeRunId = null
+    stopRuntimeTimer()
+    if (subagentClockTimer != null) {
+      clearInterval(subagentClockTimer)
+      subagentClockTimer = null
+    }
+  }
+  // A test that calls useChatStream() outside a component has no scope; the
+  // guard keeps Vue from warning there. dispose is exported for exactly that.
+  if (getCurrentScope()) onScopeDispose(dispose)
 
   function startRuntimeStatus(kind: RuntimeStatusKind, startedAt = Date.now(), attempt?: number) {
     stopRuntimeTimer()
@@ -6096,6 +6136,7 @@ export function useChatStream() {
     editLastQueuedMessage,
     sendPendingSteersAfterInterrupt,
     cancel,
+    dispose,
     fetchModels,
     loadMessages,
     switchToSession,
