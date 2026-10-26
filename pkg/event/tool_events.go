@@ -60,17 +60,21 @@ type ToolCallOutputDeltaPayload struct {
 }
 
 type ToolCallMeta struct {
-	ToolName   string         `json:"tool_name,omitempty"`
-	Status     string         `json:"status,omitempty"`
-	Purpose    string         `json:"purpose,omitempty"`
-	Invocation string         `json:"invocation,omitempty"`
-	Input      map[string]any `json:"input,omitempty"`
-	AgentID    string         `json:"agent_id,omitempty"`
-	AgentType  string         `json:"agent_type,omitempty"`
-	AgentKind  string         `json:"agent_kind,omitempty"`
-	Category   string         `json:"category,omitempty"`
-	SkillName  string         `json:"skill_name,omitempty"`
-	SkillPath  string         `json:"skill_path,omitempty"`
+	ToolName string `json:"tool_name,omitempty"`
+	Status   string `json:"status,omitempty"`
+	// DenyFeedback is the user's own words when they refused this call, for
+	// the card that shows the refusal (plan 154). Empty on every call the user
+	// did not refuse with words.
+	DenyFeedback string         `json:"deny_feedback,omitempty"`
+	Purpose      string         `json:"purpose,omitempty"`
+	Invocation   string         `json:"invocation,omitempty"`
+	Input        map[string]any `json:"input,omitempty"`
+	AgentID      string         `json:"agent_id,omitempty"`
+	AgentType    string         `json:"agent_type,omitempty"`
+	AgentKind    string         `json:"agent_kind,omitempty"`
+	Category     string         `json:"category,omitempty"`
+	SkillName    string         `json:"skill_name,omitempty"`
+	SkillPath    string         `json:"skill_path,omitempty"`
 	// ResultLines and ResultOffset are the engine-observed extent of a paging
 	// read: how many content lines the engine returned and the 0-based line it
 	// started at. A surface labels the card with the returned page (lines

@@ -120,6 +120,32 @@ func formatToolContent(title, content, cwd string) string {
 	return formatToolContentWithInput(title, content, cwd, nil)
 }
 
+// A refusal with words draws them as the card's body: a refused call never
+// ran, so its Content is empty (the shell-refusal reality) and the words
+// riding the meta are the only sentence the card has. A refusal without
+// words keeps the card it always had — the placeholder, and nothing new
+// (plan 154).
+func TestDeniedToolCardBodyCarriesTheUsersWords(t *testing.T) {
+	withWords := stripANSI(strings.Join(renderFrameLines(Frame{
+		Kind: FrameTool, Title: "shell", Final: true,
+		ToolMeta: tool.ToolMeta{Status: "denied", DenyFeedback: "改成移到 trash/"},
+	}, 100, DiffThemeDark, 0), "\n"))
+	if !strings.Contains(withWords, "改成移到 trash/") {
+		t.Fatalf("denied card body lost the user's words:\n%s", withWords)
+	}
+	if strings.Contains(withWords, "(no output)") {
+		t.Fatalf("denied card with words still shows the placeholder:\n%s", withWords)
+	}
+
+	withoutWords := stripANSI(strings.Join(renderFrameLines(Frame{
+		Kind: FrameTool, Title: "shell", Final: true,
+		ToolMeta: tool.ToolMeta{Status: "denied"},
+	}, 100, DiffThemeDark, 0), "\n"))
+	if !strings.Contains(withoutWords, "(no output)") {
+		t.Fatalf("denied card without words lost its placeholder:\n%s", withoutWords)
+	}
+}
+
 // mcpOutputSectionText extracts the fenced block following an "output:" heading
 // and unwraps a recognized MCP envelope. Unrecognized bodies remain verbatim so
 // callers can show tool output that does not use MCP content blocks.

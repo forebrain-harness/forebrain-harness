@@ -1235,7 +1235,14 @@ func (s *ChatSession) notifyToolApprovalDenied(p *chatApprovalResume, actionID s
 		return
 	}
 	content := tool.DeniedToolDisplayBody(toolName, feedback)
-	meta.Status = status
+	if status == "denied" {
+		// The refused call's card comes from the same constructor the runtime's
+		// own denied step and the in-place answer's card use, so the live card,
+		// a reload and the web all carry the user's words on the meta (plan 154).
+		meta = tool.BuildToolMeta(tool.DeniedToolStep(stepID, toolName, input, feedback))
+	} else {
+		meta.Status = status
+	}
 	s.notifyUI(NewMessageMsg{Msg: Message{
 		Kind:      MsgKindTool,
 		StepID:    stepID,

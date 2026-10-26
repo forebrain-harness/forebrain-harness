@@ -2036,7 +2036,15 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 					_, _ = fmt.Fprintln(r.out)
 					return
 				}
-				content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
+				// A refused call never ran, so an empty body is its norm: the
+				// refusal's own words riding the meta are the body when the user
+				// wrote any (plan 154), and the faint placeholder stands in only
+				// for a refusal without words.
+				if words := strings.TrimSpace(f.ToolMeta.DenyFeedback); toolStatusDenied(f) && words != "" {
+					content = words
+				} else {
+					content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
+				}
 				content = wrapCardContent(content, maxCardContentWidth()-2)
 				_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
 			}

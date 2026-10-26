@@ -1375,10 +1375,14 @@ func (s *ChatSession) notifyInPlaceRefusedCard(gate turn.SubagentApprovalGate, r
 			input = map[string]any{"raw": raw}
 		}
 	}
-	meta := tool.BuildToolMeta(tool.StepEvent{
-		Kind: tool.StepKindToolCompleted, StepID: stepID, ToolName: toolName, Input: input,
-	})
-	meta.Status = "denied"
+	refused := tool.DeniedToolStep(stepID, toolName, input, decision.DenyReason)
+	meta := tool.BuildToolMeta(refused)
+	// BuildToolMeta reads Denied/DenyFeedback off the event, so the card and
+	// its meta are the same refusal the runtime draws on the parked path —
+	// no second, differently-shaped card for the in-place answer.
+	if meta.Status == "" {
+		meta.Status = "denied"
+	}
 	s.notifyUI(NewMessageMsg{Msg: Message{
 		Kind:      MsgKindTool,
 		StepID:    stepID,

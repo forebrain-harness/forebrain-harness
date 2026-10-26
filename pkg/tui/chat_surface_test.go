@@ -1387,6 +1387,30 @@ func TestInlineApprovalRefusalWithoutWordsStopsInPlace(t *testing.T) {
 	}
 }
 
+// A refusal written with words draws its card in place, and the card's meta
+// carries the user's own sentence — the same words the runtime's denied step
+// records for replay, so the live card and every replay of the refusal show
+// them (plan 154).
+func TestInlineApprovalRefusedCardCarriesTheUsersWords(t *testing.T) {
+	cs, _, _, runID, rae := inlineGateSession(t, "shell")
+	cards := make(chan NewMessageMsg, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			cards <- m
+		}
+	})
+
+	gate, ok := turn.SubagentApprovalGateFromError(rae)
+	require.True(t, ok)
+	cs.notifyInPlaceRefusedCard(gate, turn.ToolApprovalRequest{
+		SessionID: "s1", RunID: runID, ToolName: "shell",
+		ToolStepID: "call-inline", ToolInputJSON: `{"command":"echo hi"}`,
+	}, turn.ToolApprovalDecision{Denied: true, DenyReason: "改成移到 trash/"})
+
+	card := requireUIMessage(t, cards)
+	require.Equal(t, "改成移到 trash/", card.Msg.ToolMeta.DenyFeedback)
+}
+
 // A user_interaction question answered in place records the answer on the
 // action and dispatches no resume: the waiting call reads it on its re-run.
 func TestInlineApprovalAnswersAUserInteractionInPlace(t *testing.T) {

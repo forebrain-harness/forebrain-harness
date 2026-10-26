@@ -342,3 +342,24 @@ func TestRunEventFromStepCarriesTheSubagentCall(t *testing.T) {
 		t.Fatalf("canonical subagent call =\n%+v\nwant the meta's own\n%+v", payload.ToolMeta.SubagentCall, want)
 	}
 }
+
+// TestRunEventFromStepCarriesTheDenyFeedback pins that the canonical event —
+// what the web, a subagent's view and a reload read — carries the refusal's
+// own words. ToolMeta already derives them (plan 135); the projection below
+// is the only hop between the two field tables, and dropping the field there
+// left every surface reading events drawing the refusal without the sentence
+// the user wrote (plan 154).
+func TestRunEventFromStepCarriesTheDenyFeedback(t *testing.T) {
+	evtRun, ok := RunEventFromStep(context.Background(), "sess", "run", "webchat",
+		DeniedToolStep("call-1", "shell", map[string]any{"command": "rm -rf x"}, "改成移到 trash/"))
+	if !ok {
+		t.Fatal("denied step produced no run event")
+	}
+	var payload event.ToolCallCompletedPayload
+	if err := json.Unmarshal(evtRun.Payload, &payload); err != nil {
+		t.Fatalf("decode completed payload: %v", err)
+	}
+	if payload.ToolMeta.DenyFeedback != "改成移到 trash/" {
+		t.Fatalf("canonical deny_feedback = %q, want the refusal's own words", payload.ToolMeta.DenyFeedback)
+	}
+}

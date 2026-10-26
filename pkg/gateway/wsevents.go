@@ -489,6 +489,7 @@ func toolCallMetaFromWS(top map[string]any, nested map[string]any) event.ToolCal
 	if metaMap != nil {
 		meta.ToolName = strings.TrimSpace(stringOr(metaMap["tool_name"]))
 		meta.Status = strings.TrimSpace(stringOr(metaMap["status"]))
+		meta.DenyFeedback = strings.TrimSpace(stringOr(metaMap["deny_feedback"]))
 		meta.Purpose = strings.TrimSpace(stringOr(metaMap["purpose"]))
 		meta.Invocation = strings.TrimSpace(stringOr(metaMap["invocation"]))
 		meta.Input = mapFieldWS(metaMap, "input")

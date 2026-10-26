@@ -13539,6 +13539,42 @@ func TestDeniedExitPlanCardShowsOnlyTheUsersWords(t *testing.T) {
 	}
 }
 
+// The parked refusal's card message carries the user's words on its meta —
+// the same field the runtime's own denied step records and the in-place
+// answer's card already carries — so the live card, a reload and the web all
+// draw the refusal's sentence from one place (plan 154).
+func TestDeniedApprovalCardMetaCarriesTheUsersWords(t *testing.T) {
+	ctx := context.Background()
+	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{})
+	if _, err := actions.Deny(ctx, actionID, "改成移到 trash/"); err != nil {
+		t.Fatalf("deny: %v", err)
+	}
+	act, err := actions.Get(ctx, actionID)
+	if err != nil {
+		t.Fatalf("Get action: %v", err)
+	}
+	p := &chatApprovalResume{
+		ActionID: actionID, RunID: "run-1", SessionID: "session-1",
+		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
+	}
+	toolCards := make(chan Message, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			toolCards <- m.Msg
+		}
+	})
+	t.Cleanup(cs.stopUINotificationDispatcher)
+	cs.notifyToolApprovalDenied(p, actionID)
+	select {
+	case got := <-toolCards:
+		if got.ToolMeta.DenyFeedback != act.Error {
+			t.Fatalf("denied card meta words = %q, want the action's own %q", got.ToolMeta.DenyFeedback, act.Error)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the denied card")
+	}
+}
+
 // An approval retry that converges on the already-committed decision is still
 // an approval: the in-flight review the first response should have stopped
 // must not outlive it just because the retry took the idempotent path.

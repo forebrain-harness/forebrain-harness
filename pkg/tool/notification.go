@@ -29,8 +29,10 @@ func RunEventFromStep(ctx context.Context, sessionID, runID, channel string, evt
 	}
 	meta := EnrichToolMeta(ctx, BuildToolMeta(evt))
 	eventMeta := event.ToolCallMeta{
-		ToolName: meta.ToolName, Status: meta.Status, Purpose: meta.Purpose,
-		Invocation: meta.Invocation, Input: meta.Input, AgentID: meta.AgentID,
+		ToolName: meta.ToolName, Status: meta.Status,
+		DenyFeedback: meta.DenyFeedback,
+		Purpose:      meta.Purpose,
+		Invocation:   meta.Invocation, Input: meta.Input, AgentID: meta.AgentID,
 		AgentType: meta.AgentType, AgentKind: meta.AgentKind, Category: meta.Category,
 		SkillName: meta.SkillName, SkillPath: meta.SkillPath,
 		ResultLines: meta.ResultLines, ResultOffset: meta.ResultOffset,

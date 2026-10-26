@@ -431,6 +431,39 @@ func TestCanonicalRunEventsKeepTheSubagentCallFacts(t *testing.T) {
 	}
 }
 
+// TestCanonicalRunEventsKeepTheDenyFeedback pins the conversion hop a refused
+// primary-agent call's step takes on the web: the gateway writes the ws "step"
+// op, canonicalRunEventsFromWS rebuilds the canonical event from it, and the
+// refusal's own words must ride its tool_meta. A rebuild that drops them
+// leaves the web card showing the refusal without the sentence the user wrote
+// (plan 154).
+func TestCanonicalRunEventsKeepTheDenyFeedback(t *testing.T) {
+	events := canonicalRunEventsFromWS(wsServerMsg{
+		Op: "step",
+		Data: map[string]any{
+			"kind":        event.RunEventToolCompleted,
+			"step_id":     "call-1",
+			"description": "tool shell",
+			"tool_name":   "shell",
+			"tool_meta": map[string]any{
+				"tool_name":     "shell",
+				"status":        "denied",
+				"deny_feedback": "改成移到 trash/",
+			},
+		},
+	})
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	var completed event.ToolCallCompletedPayload
+	if err := json.Unmarshal(events[0].Payload, &completed); err != nil {
+		t.Fatalf("decode completed payload: %v", err)
+	}
+	if completed.ToolMeta.DenyFeedback != "改成移到 trash/" {
+		t.Fatalf("canonical tool meta lost the refusal's words: %+v", completed.ToolMeta)
+	}
+}
+
 func TestRunEventBusDeliversOnlyToTheBoundSession(t *testing.T) {
 	bus := newRunEventBus()
 	mine := make(chan event.RunEvent, 4)
