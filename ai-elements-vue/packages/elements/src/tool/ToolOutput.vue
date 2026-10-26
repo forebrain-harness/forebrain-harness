@@ -83,8 +83,10 @@ const formattedOutput = computed(() => {
   font-size: 13px;
   line-height: 1.6;
   color: var(--forebrain-text);
-  /* A long result is read in place: bounded, and scrolled rather than cut. */
-  max-height: 208px;
+  /* A long result is read in place: bounded, and scrolled rather than cut.
+     The bound is the prototype's one panel height (app-preview.html :345),
+     the same height a shell card's output panel scrolls at (plan 137). */
+  max-height: 360px;
   overflow: auto;
 }
 

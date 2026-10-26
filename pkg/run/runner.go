@@ -1213,6 +1213,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		RunAgentHook: r.RunAgentHook,
 		SessionID:    llm.AgentSessionIDFromContext,
 		ToolUseID:    tool.ToolUseIDFromContext,
+		ToolResponse: tool.HookToolResponse,
 		PermissionMode: func() string {
 			if r == nil {
 				return "on-request"

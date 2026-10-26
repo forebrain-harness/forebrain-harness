@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -128,6 +129,10 @@ func TestDispatchSubagentReportsFailureAndStillClosesTheRow(t *testing.T) {
 	}
 	if len(probe.ended) != 1 || !strings.EqualFold(probe.ended[0].Status, string(agent.StatusFailed)) {
 		t.Fatalf("end notifications = %#v", probe.ended)
+	}
+	var failed *subagentFailure
+	if !errors.As(err, &failed) || failed.record.TaskID != "task-fail" || failed.record.Status != agent.StatusFailed {
+		t.Fatalf("err = %#v, want the failed execution's record carried with it", err)
 	}
 }
 
@@ -1542,6 +1547,170 @@ func TestSubagentToolResultsKeepTheirShape(t *testing.T) {
 	}
 	if _, ok := cont["record"]; !ok {
 		t.Fatalf("subagent_continue result is missing \"record\": %v", mapKeys(cont))
+	}
+}
+
+// failingSubagentExecutor is the fixed executor whose next runs fail with the
+// queued errors, the way a provider refusal stops a real subagent; once the
+// queue is empty its runs succeed.
+type failingSubagentExecutor struct {
+	*fixedSubagentExecutor
+	mu   sync.Mutex
+	errs []error
+}
+
+func (f *failingSubagentExecutor) RunSubagentExec(ctx context.Context, req SubagentExecRequest) (string, error) {
+	f.mu.Lock()
+	var err error
+	if len(f.errs) > 0 {
+		err, f.errs = f.errs[0], f.errs[1:]
+	}
+	f.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return f.fixedSubagentExecutor.RunSubagentExec(ctx, req)
+}
+
+func (f *failingSubagentExecutor) failNext(errs ...error) {
+	f.mu.Lock()
+	f.errs = append(f.errs, errs...)
+	f.mu.Unlock()
+}
+
+func newFailingSubagentTools(t *testing.T) (*agent.Agent, *failingSubagentExecutor, context.Context) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	runSvc := &state.RunStore{DB: db}
+	ensureRunSessions(t, db, "session-1")
+	parent, err := runSvc.CreateRun(ctx, "session-1", "parent")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	home := t.TempDir()
+	exec := &failingSubagentExecutor{fixedSubagentExecutor: &fixedSubagentExecutor{output: "probe answered"}}
+	owner := &Runner{Deps: &Deps{Home: home, RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: exec, Control: NewController(), Events: &collectingUINotify{}}
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, Factory{Home: home, Owner: owner}); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	return a, exec, toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID)
+}
+
+// usageLimitError is a provider's spent-allowance refusal with a known reset.
+func usageLimitError(resetAt time.Time) error {
+	return &llm.APIError{
+		StatusCode: 429,
+		Message:    "您已达到每周/每月使用上限，您的限额将在 2026-11-01 06:09:05 重置。",
+		RateLimit:  &llm.RateLimit{Quota: true, Reason: "usage_limit_reached", ResetAt: resetAt},
+	}
+}
+
+// A subagent that ran and then failed is handed to the agent that awaited it
+// as an account it can act on — which task, how long it ran, why it stopped —
+// and the task_id in that account is the one subagent_continue resumes.
+func TestSubagentRunTellsTheDispatcherHowItsSubagentFailed(t *testing.T) {
+	a, exec, callCtx := newFailingSubagentTools(t)
+	resetAt := time.Date(2026, 10, 31, 22, 9, 5, 0, time.UTC)
+	limit := usageLimitError(resetAt)
+	exec.failNext(limit)
+
+	runTool, ok := aToolByName(a, "subagent_run")
+	if !ok {
+		t.Fatal("subagent_run not registered")
+	}
+	_, err := runTool.Handle(callCtx, `{"title":"Probe","task":"answer briefly","subagent_type":"general-purpose"}`)
+	if err == nil {
+		t.Fatal("subagent_run succeeded, want the failure reported")
+	}
+	text := err.Error()
+	for _, want := range []string{
+		subagentFailedLead,
+		"\nsubagent_type: general-purpose\n",
+		"\ntitle: Probe\n",
+		"\nran_for: ",
+		"\nerror: " + strings.Join(strings.Fields(llm.ExplainError(limit)), " ") + "\n",
+		"\nresets_at: 2026-10-31T22:09:05Z\n",
+		subagentWorkKept,
+		subagentContinueAdvice + " " + subagentResetAdvice,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the dispatcher's account lacks %q:\n%s", want, text)
+		}
+	}
+	m := regexp.MustCompile(`\ntask_id: (subagent-[0-9a-f-]+)\n`).FindStringSubmatch(text)
+	if m == nil {
+		t.Fatalf("the dispatcher's account names no task_id:\n%s", text)
+	}
+	taskID := m[1]
+
+	contTool, ok := aToolByName(a, "subagent_continue")
+	if !ok {
+		t.Fatal("subagent_continue not registered")
+	}
+	// A continuation that fails again is accounted for the same way, under
+	// the same task.
+	exec.failNext(limit)
+	_, err = contTool.Handle(callCtx, `{"task_id":"`+taskID+`","message":"keep going"}`)
+	if err == nil || !strings.Contains(err.Error(), subagentFailedLead) ||
+		!strings.Contains(err.Error(), "\ntask_id: "+taskID+"\n") {
+		t.Fatalf("failed continuation = %v, want the same account for %s", err, taskID)
+	}
+	// Once the limit is gone, the same task_id picks the subagent up.
+	out, err := contTool.Handle(callCtx, `{"task_id":"`+taskID+`","message":"keep going"}`)
+	if err != nil {
+		t.Fatalf("continuing the failed subagent: %v", err)
+	}
+	if !strings.Contains(out.(string), "probe answered") {
+		t.Fatalf("continuation result = %s, want the subagent's answer", out)
+	}
+}
+
+// subagent_fanout gives each task that ran and failed the same facts, and a
+// fail_fast stop on such a task is that task's account.
+func TestFanoutTellsTheDispatcherHowEachSubagentFailed(t *testing.T) {
+	a, exec, callCtx := newFailingSubagentTools(t)
+	resetAt := time.Date(2026, 10, 31, 22, 9, 5, 0, time.UTC)
+	limit := usageLimitError(resetAt)
+	fanTool, ok := aToolByName(a, "subagent_fanout")
+	if !ok {
+		t.Fatal("subagent_fanout not registered")
+	}
+	args := `{"tasks":[{"title":"Probe","prompt":"answer briefly","subagent_type":"general-purpose"}],"max_parallel":1}`
+
+	exec.failNext(limit)
+	out, err := fanTool.Handle(callCtx, args)
+	if err != nil {
+		t.Fatalf("subagent_fanout: %v", err)
+	}
+	var summary struct {
+		Results []FanoutResult `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(out.(string)), &summary); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(summary.Results) != 1 {
+		t.Fatalf("results = %+v", summary.Results)
+	}
+	got := summary.Results[0]
+	if got.OK || got.Error != strings.Join(strings.Fields(llm.ExplainError(limit)), " ") ||
+		!strings.HasPrefix(got.TaskID, "subagent-") || got.RanFor == "" ||
+		got.ResetsAt != "2026-10-31T22:09:05Z" || got.Next != subagentContinueAdvice+" "+subagentResetAdvice {
+		t.Fatalf("failed task result = %+v", got)
+	}
+
+	exec.failNext(limit)
+	_, err = fanTool.Handle(callCtx, `{"tasks":[{"title":"Probe","prompt":"answer briefly","subagent_type":"general-purpose"}],"max_parallel":1,"fail_fast":true}`)
+	if err == nil || !strings.Contains(err.Error(), subagentFailedLead) {
+		t.Fatalf("fail_fast error = %v, want the failed task's account", err)
 	}
 }
 
@@ -3904,6 +4073,72 @@ func TestForkContinuationReplaysItsOwnPrefixByteForByte(t *testing.T) {
 	}
 }
 
+// A continuation whose message selected a skill loads it: the fork goes through
+// RunFork rather than the runner's RunContent, so the activation has to be put
+// in front of the message here. It stays out of the stored transcript — it is
+// rebuilt from its selection, never replayed from the database.
+func TestForkContinuationLoadsTheSkillItsMessageSelected(t *testing.T) {
+	skillPath := writeProbeSkill(t)
+	fix := newPersistenceFixture(t, "worker system", "continuing")
+	workerID := "main:conv-forkskill:worker:dddddddd-5555-6666-7777-888888888888"
+	fix.seedWorker(t, "conv-forkskill", workerID, []llm.Message{
+		llm.UserMessage(llm.Text("forked directive")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("fork finding")}),
+	})
+	if _, _, err := fix.store.FreezeSessionPromptState(context.Background(), workerID, forkSystemPromptKey, "frozen fork system"); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.AppendHistory(fix.fac.subagentScopeRoot(), agent.HistoryEntry{
+		TaskID:          "task-forkskill",
+		AgentID:         "fork-skill-agent",
+		RunID:           "seed-run",
+		ParentRunID:     "parent-1",
+		SessionID:       "conv-forkskill",
+		WorkerSessionID: workerID,
+		Task:            "forked directive",
+		Status:          agent.StatusOK,
+		Output:          "fork finding",
+		AgentType:       "fork",
+		AgentKind:       "fork",
+		RuntimeKind:     "fork_subagent",
+		Continuable:     true,
+		StartedAt:       10,
+		UpdatedAt:       20,
+		FinishedAt:      20,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := toolpkg.WithToolUseID(toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "conv-forkskill"), "parent-1"), "call-1")
+	ctx = WithExplicitSkillSelection(ctx, "probe-skill", skillPath)
+	if _, err := continueSubagentExecution(ctx, fix.fac, &SubagentContinueInput{TaskID: "task-forkskill", Message: "go on"}); err != nil {
+		t.Fatalf("continueSubagentExecution: %v", err)
+	}
+	requests := fix.llm.gotRequests()
+	if len(requests) == 0 {
+		t.Fatal("the continuation sent no request")
+	}
+	request := requests[len(requests)-1]
+	if len(request) < 2 {
+		t.Fatalf("fork continuation request = %v, want the activation and the message", messageTexts(request))
+	}
+	activation, message := request[len(request)-2], request[len(request)-1]
+	if !activation.IsMeta || !strings.Contains(activation.TextContent(), probeSkillBody) {
+		t.Fatalf("message before the continuation = %q, want the skill activation", activation.TextContent())
+	}
+	if message.Role != llm.RoleUser || message.TextContent() != "go on" {
+		t.Fatalf("last request row = %q, want the continuation's message", message.TextContent())
+	}
+	stored, err := fix.store.ListTranscriptMessages(context.Background(), workerID, 200)
+	if err != nil {
+		t.Fatalf("stored transcript: %v", err)
+	}
+	for _, msg := range stored {
+		if strings.Contains(msg.TextContent(), probeSkillBody) {
+			t.Fatalf("the activation was persisted: %q", msg.TextContent())
+		}
+	}
+}
+
 // TestForkSubagentContinuationCompactsFirstWhenItNoLongerFits is the fork half
 // of the pre-turn compaction: a fork whose worker session has crossed the
 // auto-compact threshold compacts before its new user message is written, so
@@ -4011,45 +4246,6 @@ func TestForkSubagentContinuationCompactsFirstWhenItNoLongerFits(t *testing.T) {
 	}
 }
 
-// TestSubagentCompactTargetRefusesARunningSubagent pins the guard: a manual
-// compaction rewrites history, so it is refused while an execution of that
-// subagent is still appending to it — the same stance /compact takes on the
-// conversation's own running turn.
-func TestSubagentCompactTargetRefusesARunningSubagent(t *testing.T) {
-	fix := newPersistenceFixture(t, "worker system")
-	if err := agent.AppendHistory(fix.fac.subagentScopeRoot(), agent.HistoryEntry{
-		TaskID:          "task-busy",
-		RunID:           "seed-run",
-		ParentRunID:     "parent-1",
-		SessionID:       "conv-refuse",
-		WorkerSessionID: "main:conv-refuse:worker:11111111-2222-3333-4444-555555555555",
-		Task:            "busy work",
-		Status:          agent.StatusRunning,
-		AgentType:       "explore",
-		AgentKind:       "typed",
-		RuntimeKind:     "typed_subagent",
-		StartedAt:       10,
-		UpdatedAt:       20,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// "Running" is the channel executing now: the guard reads the channel, not
-	// the registry handle, so a user-driven execution is refused too.
-	record, ok, err := agent.GetMerged(fix.fac.subagentScopeRoot(), agent.Query{SessionID: "conv-refuse", TaskID: "task-busy"})
-	if err != nil || !ok {
-		t.Fatalf("seed record: ok=%v err=%v", ok, err)
-	}
-	ch := subagentChannelFor(fix.fac, record)
-	ex := &subagentExecution{}
-	ch.setRunning(ex)
-	t.Cleanup(func() { ch.mu.Lock(); ch.running = nil; ch.mu.Unlock() })
-
-	_, _, err = SubagentCompactTarget(context.Background(), fix.fac.Owner, "conv-refuse", "task-busy")
-	if !errors.Is(err, ErrSubagentRunning) {
-		t.Fatalf("err = %v, want ErrSubagentRunning", err)
-	}
-}
-
 // compactSummaryInstruction is the closing instruction assembly appends to
 // every summary request; pinned here so the byte-for-byte comparison below
 // states the whole request.
@@ -4097,14 +4293,15 @@ func TestSubagentManualCompactionReusesTheSubagentsPrefix(t *testing.T) {
 	}
 	lastRun := requests[len(requests)-1]
 
-	subCtx, worker, err := SubagentCompactTarget(context.Background(), fix.fac.Owner, "conv-tmanual", "task-tmanual")
-	if err != nil {
-		t.Fatalf("SubagentCompactTarget: %v", err)
+	record, ok, err := agent.GetMerged(fix.fac.subagentScopeRoot(), agent.Query{SessionID: "conv-tmanual", TaskID: "task-tmanual"})
+	if err != nil || !ok {
+		t.Fatalf("seed record: ok=%v err=%v", ok, err)
 	}
-	if worker != workerID {
+	subCtx := subagentRecordContext(context.Background(), fix.fac, record)
+	if worker := record.WorkerSessionID; worker != workerID {
 		t.Fatalf("worker session = %q, want %q", worker, workerID)
 	}
-	if _, err := CompactionService(fix.fac.Owner, fix.store).ManualCompactSession(subCtx, worker, "manual"); err != nil {
+	if _, err := CompactionService(fix.fac.Owner, fix.store).ManualCompactSession(subCtx, workerID, "manual"); err != nil {
 		t.Fatalf("ManualCompactSession: %v", err)
 	}
 
@@ -4179,10 +4376,12 @@ func TestForkSubagentManualCompactionReusesItsFrozenPrefix(t *testing.T) {
 	// the frozen system is pinned on the summary request below, where the
 	// summarizer's head carries it explicitly.
 
-	subCtx, worker, err := SubagentCompactTarget(context.Background(), fix.fac.Owner, "conv-fmanual", "task-fmanual")
-	if err != nil {
-		t.Fatalf("SubagentCompactTarget: %v", err)
+	record, ok, err := agent.GetMerged(fix.fac.subagentScopeRoot(), agent.Query{SessionID: "conv-fmanual", TaskID: "task-fmanual"})
+	if err != nil || !ok {
+		t.Fatalf("seed record: ok=%v err=%v", ok, err)
 	}
+	subCtx := subagentRecordContext(context.Background(), fix.fac, record)
+	worker := workerID
 	// The fork executor persists its answer, so the summary request is the
 	// fork's last request plus that answer and the instruction. The answer
 	// row is taken from the store before the compaction replaces it — the
@@ -4505,25 +4704,21 @@ func (p *channelEventProbe) ofType(typ string) []event.RunEvent {
 
 // channelTestExecutor is a SubagentExecutor double close enough to the
 // composition root's executor for the channel tests: it writes the execution's
-// user message as a real worker-session row and reports its id through the
-// request, can answer or not, can hold until released — so a test can talk to a
-// running execution — and records how many executions overlapped.
+// user message as a real worker-session row, can hold until released — so a test
+// can talk to a running execution — and records how many executions overlapped.
 type channelTestExecutor struct {
-	store     *state.SessionStore
-	answer    string
-	runErr    error
-	hold      bool
-	responded bool
-	release   chan struct{}
-	started   chan struct{}
+	store   *state.SessionStore
+	answer  string
+	runErr  error
+	hold    bool
+	release chan struct{}
+	started chan struct{}
 
-	mu       sync.Mutex
-	active   int
-	max      int
-	tasks    []string
-	rows     []int64
-	execCtx  context.Context
-	answered chan struct{}
+	mu      sync.Mutex
+	active  int
+	max     int
+	tasks   []string
+	execCtx context.Context
 }
 
 func (e *channelTestExecutor) RunSubagentExec(ctx context.Context, req SubagentExecRequest) (string, error) {
@@ -4547,27 +4742,9 @@ func (e *channelTestExecutor) RunSubagentExec(ctx context.Context, req SubagentE
 		}
 	}
 	if e.store != nil {
-		rowID, err := e.store.AppendStructuredMessageForRun(ctx, req.WorkerSessionID, req.SuperviseRunID, "user",
-			req.Task, "", state.MessagePartsJSON(llm.UserMessage(llm.Text(req.Task)), req.Task), "", "", "", "", state.MessageExecTiming{})
-		if err != nil {
+		if _, err := e.store.AppendStructuredMessageForRun(ctx, req.WorkerSessionID, req.SuperviseRunID, "user",
+			req.Task, "", state.MessagePartsJSON(llm.UserMessage(llm.Text(req.Task)), req.Task), "", "", "", "", state.MessageExecTiming{}); err != nil {
 			return "", err
-		}
-		if req.OnUserTurn != nil {
-			req.OnUserTurn(rowID)
-		}
-		e.mu.Lock()
-		e.rows = append(e.rows, rowID)
-		e.mu.Unlock()
-	}
-	if e.responded {
-		if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnResponseStarted != nil {
-			sink.OnResponseStarted()
-		}
-		if e.answered != nil {
-			select {
-			case e.answered <- struct{}{}:
-			default:
-			}
 		}
 	}
 	if e.hold {
@@ -4591,16 +4768,27 @@ func (e *channelTestExecutor) maxConcurrent() int {
 	return e.max
 }
 
-func (e *channelTestExecutor) rowIDs() []int64 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return append([]int64(nil), e.rows...)
-}
-
 func (e *channelTestExecutor) contextSeen() context.Context {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.execCtx
+}
+
+// taskCount and taskAt report the tasks this executor was asked to run, in
+// order — one entry per attempt of the execution that drove it.
+func (e *channelTestExecutor) taskCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.tasks)
+}
+
+func (e *channelTestExecutor) taskAt(i int) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if i < 0 || i >= len(e.tasks) {
+		return ""
+	}
+	return e.tasks[i]
 }
 
 // steerableSubagentExecutor drives the real tool-orchestration wrapper over the
@@ -4702,11 +4890,11 @@ func waitSubagentRecordSettled(t *testing.T, fac Factory, conversationSessionID,
 	return agent.HistoryEntry{}
 }
 
-// TestModelContinuationWaitsForTheUsersExecutionOfTheSameSubagent pins the
+// TestModelContinuationWaitsForTheRunningExecutionOfTheSameSubagent pins the
 // channel's serialization: a model's subagent_continue never starts a second
-// execution of a subagent while a user's message is driving one — it waits, so
-// the two never write the worker session at once or interleave their rows.
-func TestModelContinuationWaitsForTheUsersExecutionOfTheSameSubagent(t *testing.T) {
+// execution of a subagent while an auto-continuation is driving one — it waits,
+// so the two never write the worker session at once or interleave their rows.
+func TestModelContinuationWaitsForTheRunningExecutionOfTheSameSubagent(t *testing.T) {
 	fix := newPersistenceFixture(t, "worker system", "model answer")
 	owner := fix.fac.Owner
 	owner.Control = NewController()
@@ -4722,9 +4910,8 @@ func TestModelContinuationWaitsForTheUsersExecutionOfTheSameSubagent(t *testing.
 	ex := &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "user answer"}
 	owner.SubagentExecutor = ex
 
-	delivery, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-serial", Input{Text: "user"}, TurnInputModeSteer)
-	if err != nil || delivery != SubagentDeliveryStarted {
-		t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-serial", Input{Text: "resume"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
 	}
 	waitSubagentBusy(t, owner, conv, "task-serial")
 
@@ -4802,64 +4989,6 @@ func TestSubagentReceivesASteerAtItsNextToolBoundary(t *testing.T) {
 	}
 }
 
-// TestUserMessageContinuesAFailedSubagent pins the whole point of the channel:
-// a subagent that failed can be continued from a message the user sends it,
-// and the new execution's first request is the failed execution's whole
-// history plus that message.
-func TestUserMessageContinuesAFailedSubagent(t *testing.T) {
-	fix := newPersistenceFixture(t, "worker system", "picked it up")
-	owner := fix.fac.Owner
-	owner.Control = NewController()
-	probe := &channelEventProbe{}
-	owner.Events = probe
-	conv := "conv-failed"
-	worker := "main:conv-failed:worker:00000000-0000-0000-0000-0000000000bb"
-	fix.seedWorker(t, conv, worker, []llm.Message{
-		llm.UserMessage(llm.Text("investigate")),
-		llm.AssistantMessage([]llm.ContentPart{llm.Text("partial finding")}),
-	})
-	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
-		TaskID: "task-failed", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
-		Task: "investigate", Status: agent.StatusFailed, Output: "partial finding", Error: "network",
-		AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent", Continuable: true,
-		StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
-	})
-
-	delivery, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-failed", Input{Text: "continue"}, TurnInputModeSteer)
-	if err != nil || delivery != SubagentDeliveryStarted {
-		t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
-	}
-	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
-	waitSubagentIdle(t, owner, conv, "task-failed")
-
-	requests := fix.llm.gotRequests()
-	if len(requests) == 0 {
-		t.Fatal("the user's execution sent no request")
-	}
-	want := []string{
-		llm.RoleSystem + "|worker system",
-		llm.RoleUser + "|investigate",
-		llm.RoleAssistant + "|partial finding",
-		llm.RoleUser + "|continue",
-	}
-	if got := messageTexts(requests[0]); len(got) != len(want) {
-		t.Fatalf("user execution request = %v, want the failed history plus continue", got)
-	} else {
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("user execution request row %d = %q, want %q", i, got[i], want[i])
-			}
-		}
-	}
-	record := waitSubagentRecordSettled(t, fix.fac, conv, "task-failed")
-	if record.Status != agent.StatusOK {
-		t.Fatalf("record status = %q, want ok", record.Status)
-	}
-	if !strings.Contains(record.Output, "picked it up") {
-		t.Fatalf("record output = %q, want the new conclusion", record.Output)
-	}
-}
-
 // recordingSchedulerExecutor wraps the fixture's executor and records the
 // start/end reports runSubagentExecution makes to whatever schedules a
 // subagent's continuations.
@@ -4891,8 +5020,8 @@ func (e *recordingSchedulerExecutor) reports() ([]string, []SubagentExecutionEnd
 // TestEverySubagentExecutionIsReportedToItsScheduler pins that a subagent's
 // continuation scheduler hears about all three ways one of its executions can
 // begin and end — the model's dispatch, the model's continuation, and the
-// user's own message — because that is what lets a usage limit stop one of them
-// and be continued the same way the primary conversation's is.
+// scheduler's own auto-continuation — because that is what lets a usage limit
+// stop one of them and be continued the same way the primary conversation's is.
 func TestEverySubagentExecutionIsReportedToItsScheduler(t *testing.T) {
 	fix := newPersistenceFixture(t, "worker system", "first answer", "second answer", "third answer")
 	owner := fix.fac.Owner
@@ -4911,8 +5040,8 @@ func TestEverySubagentExecutionIsReportedToItsScheduler(t *testing.T) {
 	if _, err := continueSubagentExecution(context.Background(), fix.fac, &SubagentContinueInput{TaskID: "task-report", Message: "keep going"}); err != nil {
 		t.Fatalf("model continuation: %v", err)
 	}
-	if _, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-report", Input{Text: "and then"}, TurnInputModeSteer); err != nil {
-		t.Fatalf("user message: %v", err)
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-report", Input{Text: "and then"}); err != nil {
+		t.Fatalf("auto-continuation: %v", err)
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -4939,87 +5068,69 @@ func TestEverySubagentExecutionIsReportedToItsScheduler(t *testing.T) {
 			t.Fatalf("end %d worker = %q, want the worker the same execution started as %q", i, end.WorkerSessionID, starts[i])
 		}
 	}
+	// The model's dispatch and its continuation were awaited by the call that
+	// made them; the scheduler's auto-continuation was not.
+	if !ends[0].AwaitedByDispatcher || !ends[1].AwaitedByDispatcher || ends[2].AwaitedByDispatcher {
+		t.Fatalf("awaited = %v %v %v, want true true false",
+			ends[0].AwaitedByDispatcher, ends[1].AwaitedByDispatcher, ends[2].AwaitedByDispatcher)
+	}
 }
 
-// TestUserCanTalkToEveryKindOfSubagent pins decision D2: the user can drive any
-// kind of subagent from its view — a one-shot type, a reserved internal type,
-// or a fork — not only the ones the model may continue.
-func TestUserCanTalkToEveryKindOfSubagent(t *testing.T) {
+// TestUserCannotStartAnIdleSubagent pins the owner's rule (2026-10-26): an
+// idle subagent takes no messages. A subagent is the dispatching agent's; the
+// user's words only steer it while it works, and once it has handed its result
+// back the dispatching agent decides what happens next. So the engine refuses
+// the message for every kind of subagent — one-shot, reserved internal, or
+// fork — and starts nothing.
+func TestUserCannotStartAnIdleSubagent(t *testing.T) {
 	cases := []struct {
 		name      string
 		agentType string
 		agentKind string
-		oneShot   bool
 	}{
-		{"one-shot explore", "explore", "typed", true},
-		{"plan reviewer", "plan-reviewer", "typed", true},
-		{"goal evaluator", "goal-evaluator", "typed", true},
-		{"general purpose", "general-purpose", "typed", false},
+		{"one-shot explore", "explore", "typed"},
+		{"plan reviewer", "plan-reviewer", "typed"},
+		{"general purpose", "general-purpose", "typed"},
+		{"fork", "fork", "fork"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fix := newPersistenceFixture(t, "worker system", "answered")
 			owner := fix.fac.Owner
 			owner.Control = NewController()
-			probe := &channelEventProbe{}
-			owner.Events = probe
-			owner.SubagentExecutor = &channelTestExecutor{store: fix.store, answer: "answered"}
-			conv := "conv-kind-" + tc.name
+			owner.Events = &channelEventProbe{}
+			ex := &channelTestExecutor{store: fix.store, answer: "answered", started: make(chan struct{}, 1)}
+			owner.SubagentExecutor = ex
+			conv := fmt.Sprintf("conv-idle-%02d", i)
 			worker := fmt.Sprintf("main:%s:worker:00000000-0000-0000-0000-0000000001%02d", conv, i)
 			fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
 			seedChannelRecord(t, fix.fac, agent.HistoryEntry{
-				TaskID: "task-" + tc.name, RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+				TaskID: "task-idle", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
 				Task: "work", Status: agent.StatusOK, Output: "old", AgentType: tc.agentType, AgentKind: tc.agentKind,
-				RuntimeKind: "typed_subagent", OneShot: tc.oneShot, Continuable: !tc.oneShot,
-				StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+				RuntimeKind: "typed_subagent", OneShot: tc.agentKind == "typed" && tc.agentType != "general-purpose",
+				Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
 			})
-			delivery, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-"+tc.name, Input{Text: "keep going"}, TurnInputModeSteer)
-			if err != nil || delivery != SubagentDeliveryStarted {
-				t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
+			delivery, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-idle", Input{Text: "keep going"})
+			if delivery != "" {
+				t.Fatalf("SendToSubagent delivered %q to an idle subagent, want a refusal", delivery)
 			}
-			waitSubagentIdle(t, owner, conv, "task-"+tc.name)
-			if record := waitSubagentRecordSettled(t, fix.fac, conv, "task-"+tc.name); record.Status != agent.StatusOK {
-				t.Fatalf("record = %+v, want ok", record)
+			if !errors.Is(err, ErrSubagentNotRunning) {
+				t.Fatalf("SendToSubagent err = %v, want ErrSubagentNotRunning", err)
+			}
+			select {
+			case <-ex.started:
+				t.Fatal("an idle subagent took the message and started an execution")
+			case <-time.After(100 * time.Millisecond):
 			}
 		})
 	}
-
-	t.Run("fork", func(t *testing.T) {
-		fix := newPersistenceFixture(t, "worker system", "fork answered")
-		owner := fix.fac.Owner
-		owner.Control = NewController()
-		probe := &channelEventProbe{}
-		owner.Events = probe
-		conv := "conv-kind-fork"
-		worker := "main:conv-kind-fork:worker:00000000-0000-0000-0000-0000000002ff"
-		fix.seedWorker(t, conv, worker, []llm.Message{
-			llm.UserMessage(llm.Text("fork seed")),
-			llm.AssistantMessage([]llm.ContentPart{llm.Text("fork prior")}),
-		})
-		if _, _, err := fix.store.FreezeSessionPromptState(context.Background(), worker, forkSystemPromptKey, "frozen fork system"); err != nil {
-			t.Fatalf("freeze fork system: %v", err)
-		}
-		seedChannelRecord(t, fix.fac, agent.HistoryEntry{
-			TaskID: "task-fork", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
-			Task: "fork work", Status: agent.StatusOK, Output: "fork prior", AgentKind: "fork",
-			RuntimeKind: "fork_subagent", Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
-		})
-		delivery, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-fork", Input{Text: "keep forking"}, TurnInputModeSteer)
-		if err != nil || delivery != SubagentDeliveryStarted {
-			t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
-		}
-		waitSubagentIdle(t, owner, conv, "task-fork")
-		if record := waitSubagentRecordSettled(t, fix.fac, conv, "task-fork"); record.Status != agent.StatusOK {
-			t.Fatalf("fork record = %+v, want ok", record)
-		}
-	})
 }
 
-// TestUserSubagentExecutionNeverTouchesThePrimaryConversation pins decision D3:
-// a user-driven execution writes only the subagent's own worker session; the
-// primary conversation gains no row, and the dispatching agent reads the result
-// back through the registry.
-func TestUserSubagentExecutionNeverTouchesThePrimaryConversation(t *testing.T) {
+// TestSubagentContinuationNeverTouchesThePrimaryConversation pins decision D3:
+// an execution of the subagent writes only its own worker session; the primary
+// conversation gains no row, and the dispatching agent reads the result back
+// through the registry.
+func TestSubagentContinuationNeverTouchesThePrimaryConversation(t *testing.T) {
 	fix := newPersistenceFixture(t, "worker system")
 	owner := fix.fac.Owner
 	owner.Control = NewController()
@@ -5035,9 +5146,8 @@ func TestUserSubagentExecutionNeverTouchesThePrimaryConversation(t *testing.T) {
 		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
 	})
 	before := countConversationMessages(t, fix.store, conv)
-	delivery, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-d3", Input{Text: "hello"}, TurnInputModeSteer)
-	if err != nil || delivery != SubagentDeliveryStarted {
-		t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-d3", Input{Text: "resume"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
 	}
 	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
 	waitSubagentIdle(t, owner, conv, "task-d3")
@@ -5046,22 +5156,29 @@ func TestUserSubagentExecutionNeverTouchesThePrimaryConversation(t *testing.T) {
 	}
 }
 
-// TestInterruptSubagentToSendRunsThePendingSteersNext pins Esc's second meaning
-// (D1): a running subagent with steers queued behind it is interrupted so those
-// steers are sent next, and the surface is handed exactly those messages.
-func TestInterruptSubagentToSendRunsThePendingSteersNext(t *testing.T) {
+// TestInterruptToSendContinuesInTheSameExecution pins Esc's meaning in a
+// subagent's view (owner, 2026-10-26): "interrupt and send" stops the step that
+// is running, and the messages queued behind it continue inside the same
+// execution. Whoever awaits that execution — the dispatching tool call above
+// all — still gets its answer, and the conversation keeps the one card it
+// opened, because no second execution is started for the steers.
+func TestInterruptToSendContinuesInTheSameExecution(t *testing.T) {
 	fix := newPersistenceFixture(t, "worker system")
 	owner := fix.fac.Owner
 	owner.Control = NewController()
 	probe := &channelEventProbe{}
 	owner.Events = probe
 	release := make(chan struct{})
-	var gotSend, gotRestore []Input
-	var gotKey string
-	surface := SubagentSurface{OnBoundary: func(key string, send, restore []Input) {
-		gotKey, gotSend, gotRestore = key, send, restore
+	var mu sync.Mutex
+	var returnedKey string
+	var returned []Input
+	surface := SubagentSurface{OnReturned: func(key string, got []Input) {
+		mu.Lock()
+		returnedKey, returned = key, got
+		mu.Unlock()
 	}}
-	owner.SubagentExecutor = &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
+	ex := &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "continued"}
+	owner.SubagentExecutor = ex
 	conv := "conv-interrupt"
 	worker := "main:conv-interrupt:worker:00000000-0000-0000-0000-0000000004aa"
 	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
@@ -5070,29 +5187,152 @@ func TestInterruptSubagentToSendRunsThePendingSteersNext(t *testing.T) {
 		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
 		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
 	})
-	delivery, err := SendToSubagent(context.Background(), owner, surface, conv, "task-int", Input{Text: "start"}, TurnInputModeSteer)
-	if err != nil || delivery != SubagentDeliveryStarted {
-		t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
+	if err := StartSubagentAutoContinue(context.Background(), owner, surface, conv, "task-int", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
 	}
 	waitSubagentBusy(t, owner, conv, "task-int")
 	for _, text := range []string{"one", "two"} {
-		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-int", Input{Text: text}, TurnInputModeSteer); err != nil || got != SubagentDeliverySteered {
+		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-int", Input{Text: text}); err != nil || got != SubagentDeliverySteered {
 			t.Fatalf("steer %q = %q, %v; want steered", text, got, err)
 		}
 	}
 	if !InterruptSubagentToSend(owner, conv, "task-int") {
 		t.Fatal("InterruptSubagentToSend = false, want true with steers pending")
 	}
+	close(release)
 	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
-	if gotKey != "task-int" {
-		t.Fatalf("OnBoundary key = %q, want the roster key", gotKey)
+	waitSubagentIdle(t, owner, conv, "task-int")
+
+	if n := probe.count(event.RunEventSubagentSpawned); n != 1 {
+		t.Fatalf("subagent_spawned published %d times, want 1: the steers continued the same execution", n)
 	}
-	if len(gotSend) != 2 || gotSend[0].Text != "one" || gotSend[1].Text != "two" {
-		t.Fatalf("OnBoundary send = %+v, want [one two] in order", gotSend)
+	if n := probe.count(event.RunEventSubagentEnded); n != 1 {
+		t.Fatalf("subagent_ended published %d times, want 1", n)
 	}
-	if len(gotRestore) != 0 {
-		t.Fatalf("OnBoundary restore = %+v, want empty", gotRestore)
+	var spawned event.SubagentSpawnedPayload
+	if err := json.Unmarshal(probe.ofType(event.RunEventSubagentSpawned)[0].Payload, &spawned); err != nil {
+		t.Fatal(err)
 	}
+	var ended event.SubagentEndedPayload
+	if err := json.Unmarshal(probe.ofType(event.RunEventSubagentEnded)[0].Payload, &ended); err != nil {
+		t.Fatal(err)
+	}
+	if spawned.ExecutionID == "" || spawned.ExecutionID != ended.ExecutionID {
+		t.Fatalf("spawned execution %q, ended execution %q: want one execution", spawned.ExecutionID, ended.ExecutionID)
+	}
+	if ex.taskCount() != 2 {
+		t.Fatalf("executor ran %d times, want 2 attempts inside the one execution", ex.taskCount())
+	}
+	if got := ex.taskAt(1); got != "one\n\ntwo" {
+		t.Fatalf("second attempt's task = %q, want the steers as the user wrote them", got)
+	}
+	mu.Lock()
+	key, rest := returnedKey, append([]Input(nil), returned...)
+	mu.Unlock()
+	if key != "" || len(rest) != 0 {
+		t.Fatalf("OnReturned = %q %+v, want nothing: the steers were taken", key, rest)
+	}
+	if SubagentRunning(owner, conv, "task-int") {
+		t.Fatal("SubagentRunning = true after the execution ended")
+	}
+}
+
+// TestExecutionEndHandsUnsentMessagesBack pins what happens to a message the
+// user sent that the subagent never took: the execution's end hands it back to
+// the surface, in the order it was written, and no new execution is started for
+// it — the subagent is idle then, and an idle subagent takes no messages.
+func TestExecutionEndHandsUnsentMessagesBack(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	probe := &channelEventProbe{}
+	owner.Events = probe
+	release := make(chan struct{})
+	returnedCh := make(chan struct{}, 1)
+	var mu sync.Mutex
+	var returnedKey string
+	var returned []Input
+	surface := SubagentSurface{OnReturned: func(key string, got []Input) {
+		mu.Lock()
+		returnedKey, returned = key, append([]Input(nil), got...)
+		mu.Unlock()
+		select {
+		case returnedCh <- struct{}{}:
+		default:
+		}
+	}}
+	owner.SubagentExecutor = &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
+	conv := "conv-unsent"
+	worker := "main:conv-unsent:worker:00000000-0000-0000-0000-0000000004dd"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-unsent", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	if err := StartSubagentAutoContinue(context.Background(), owner, surface, conv, "task-unsent", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
+	waitSubagentBusy(t, owner, conv, "task-unsent")
+	if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-unsent", Input{Text: "never taken"}); err != nil || got != SubagentDeliverySteered {
+		t.Fatalf("send = %q, %v; want steered", got, err)
+	}
+	// The executor returns without ever reaching a tool boundary, so the steer
+	// is still queued when the execution ends.
+	close(release)
+	select {
+	case <-returnedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the execution's end never handed the unsent message back")
+	}
+	waitSubagentIdle(t, owner, conv, "task-unsent")
+	mu.Lock()
+	key, rest := returnedKey, returned
+	mu.Unlock()
+	if key != "task-unsent" {
+		t.Fatalf("OnReturned key = %q, want the roster key", key)
+	}
+	if len(rest) != 1 || rest[0].Text != "never taken" {
+		t.Fatalf("OnReturned = %+v, want the one unsent message", rest)
+	}
+	if n := probe.count(event.RunEventSubagentSpawned); n != 1 {
+		t.Fatalf("subagent_spawned published %d times, want 1: nothing runs the unsent message", n)
+	}
+}
+
+// TestSubagentViewOnlySteers pins that a running subagent's view has one way to
+// deliver a message: as a steer, at the execution's next tool boundary. There
+// is no "queue it for after" lane any more, because an execution ends with
+// nothing queued behind it.
+func TestSubagentViewOnlySteers(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	owner.Events = &channelEventProbe{}
+	release := make(chan struct{})
+	surface := SubagentSurface{OnReturned: func(string, []Input) {}}
+	owner.SubagentExecutor = &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
+	conv := "conv-only-steer"
+	worker := "main:conv-only-steer:worker:00000000-0000-0000-0000-0000000004ee"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-only", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	if err := StartSubagentAutoContinue(context.Background(), owner, surface, conv, "task-only", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
+	waitSubagentBusy(t, owner, conv, "task-only")
+	delivery, err := SendToSubagent(context.Background(), owner, surface, conv, "task-only", Input{Text: "adjust"})
+	if err != nil || delivery != SubagentDeliverySteered {
+		t.Fatalf("SendToSubagent = %q, %v; want steered", delivery, err)
+	}
+	if p := SubagentInputPreview(owner, conv, "task-only"); len(p.Steers) != 1 || p.Steers[0] != "adjust" {
+		t.Fatalf("preview = %+v, want the steer shown as queued", p)
+	}
+	close(release)
+	waitSubagentIdle(t, owner, conv, "task-only")
 }
 
 // TestSubagentViewQueueQuestionsAnswerFromTheLiveChannel pins where a
@@ -5109,7 +5349,7 @@ func TestSubagentViewQueueQuestionsAnswerFromTheLiveChannel(t *testing.T) {
 	owner.Events = &channelEventProbe{}
 	release := make(chan struct{})
 	owner.SubagentExecutor = &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
-	surface := SubagentSurface{OnBoundary: func(string, []Input, []Input) {}}
+	surface := SubagentSurface{OnReturned: func(string, []Input) {}}
 	conv := "conv-live-channel"
 	worker := "main:conv-live-channel:worker:00000000-0000-0000-0000-0000000004bb"
 	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
@@ -5118,12 +5358,12 @@ func TestSubagentViewQueueQuestionsAnswerFromTheLiveChannel(t *testing.T) {
 		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
 		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
 	})
-	if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-live", Input{Text: "start"}, TurnInputModeSteer); err != nil || got != SubagentDeliveryStarted {
-		t.Fatalf("SendToSubagent = %q, %v; want started", got, err)
+	if err := StartSubagentAutoContinue(context.Background(), owner, surface, conv, "task-live", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
 	}
 	waitSubagentBusy(t, owner, conv, "task-live")
 	for _, text := range []string{"one", "two"} {
-		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-live", Input{Text: text}, TurnInputModeSteer); err != nil || got != SubagentDeliverySteered {
+		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-live", Input{Text: text}); err != nil || got != SubagentDeliverySteered {
 			t.Fatalf("steer %q = %q, %v; want steered", text, got, err)
 		}
 	}
@@ -5189,7 +5429,7 @@ func TestSubagentQueueChangesReachTheSurface(t *testing.T) {
 	var previews []QueuePreview
 	boundary := make(chan struct{}, 1)
 	surface := SubagentSurface{
-		OnBoundary: func(string, []Input, []Input) { boundary <- struct{}{} },
+		OnReturned: func(string, []Input) { boundary <- struct{}{} },
 		OnQueueChanged: func(agentKey string, preview QueuePreview) {
 			if agentKey != "task-hook" {
 				t.Errorf("OnQueueChanged key = %q, want the roster key", agentKey)
@@ -5215,16 +5455,18 @@ func TestSubagentQueueChangesReachTheSurface(t *testing.T) {
 		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
 		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
 	})
-	send := func(text string, mode TurnInputMode, want SubagentDelivery) {
+	send := func(text string, want SubagentDelivery) {
 		t.Helper()
-		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-hook", Input{Text: text}, mode); err != nil || got != want {
+		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-hook", Input{Text: text}); err != nil || got != want {
 			t.Fatalf("send %q = %q, %v; want %q", text, got, err, want)
 		}
 	}
-	send("start", TurnInputModeSteer, SubagentDeliveryStarted)
+	if err := StartSubagentAutoContinue(context.Background(), owner, surface, conv, "task-hook", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
 	waitSubagentBusy(t, owner, conv, "task-hook")
-	send("one", TurnInputModeSteer, SubagentDeliverySteered)
-	send("two", TurnInputModeSteer, SubagentDeliverySteered)
+	send("one", SubagentDeliverySteered)
+	send("two", SubagentDeliverySteered)
 	if got := strings.Join(last().Steers, ","); got != "one,two" {
 		t.Fatalf("surface preview steers = %q, want one,two", got)
 	}
@@ -5238,9 +5480,11 @@ func TestSubagentQueueChangesReachTheSurface(t *testing.T) {
 		t.Fatalf("after delivery the surface still shows %v as queued", p.Steers)
 	}
 
-	send("later", TurnInputModeFollowUp, SubagentDeliveryQueued)
-	if got := strings.Join(last().FollowUp, ","); got != "later" {
-		t.Fatalf("surface preview follow-ups = %q, want later", got)
+	// Recall takes back the message the model has not taken yet: it leaves the
+	// queue, and the view stops showing it.
+	send("later", SubagentDeliverySteered)
+	if got := strings.Join(last().Steers, ","); got != "later" {
+		t.Fatalf("surface preview steers = %q, want later", got)
 	}
 	if in, ok := RecallSubagentInput(owner, conv, "task-hook"); !ok || in.Text != "later" {
 		t.Fatalf("RecallSubagentInput = %+v, %v; want later", in, ok)
@@ -5249,8 +5493,8 @@ func TestSubagentQueueChangesReachTheSurface(t *testing.T) {
 		t.Fatalf("after recall the surface still shows %+v", p)
 	}
 
-	// A follow-up the execution's end settles leaves the view as well.
-	send("after", TurnInputModeFollowUp, SubagentDeliveryQueued)
+	// A message the execution's end settles leaves the view as well.
+	send("after", SubagentDeliverySteered)
 	close(release)
 	select {
 	case <-boundary:
@@ -5274,8 +5518,7 @@ func TestSubagentQueueKeepsNoDeliveredSteers(t *testing.T) {
 	owner.Events = &channelEventProbe{}
 	release := make(chan struct{})
 	owner.SubagentExecutor = &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
-	boundary := make(chan struct{}, 1)
-	surface := SubagentSurface{OnBoundary: func(string, []Input, []Input) { boundary <- struct{}{} }}
+	surface := SubagentSurface{}
 	conv := "conv-delivered"
 	worker := "main:conv-delivered:worker:00000000-0000-0000-0000-0000000005cc"
 	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
@@ -5286,11 +5529,13 @@ func TestSubagentQueueKeepsNoDeliveredSteers(t *testing.T) {
 	})
 	send := func(text string, want SubagentDelivery) {
 		t.Helper()
-		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-delivered", Input{Text: text}, TurnInputModeSteer); err != nil || got != want {
+		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-delivered", Input{Text: text}); err != nil || got != want {
 			t.Fatalf("send %q = %q, %v; want %q", text, got, err, want)
 		}
 	}
-	send("start", SubagentDeliveryStarted)
+	if err := StartSubagentAutoContinue(context.Background(), owner, surface, conv, "task-delivered", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
 	waitSubagentBusy(t, owner, conv, "task-delivered")
 	send("steer", SubagentDeliverySteered)
 
@@ -5303,101 +5548,17 @@ func TestSubagentQueueKeepsNoDeliveredSteers(t *testing.T) {
 		t.Fatalf("the subagent's queue still holds %d delivered steer(s)", len(left))
 	}
 
+	// The model took the steer, so the execution's end has nothing to hand
+	// back; it only has to end.
 	close(release)
-	select {
-	case <-boundary:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the execution never reached its boundary")
-	}
 	waitSubagentIdle(t, owner, conv, "task-delivered")
 }
 
-// TestWithdrawBeforeTheSubagentAnswers pins Esc's first meaning (D1): a message
-// the user just sent a subagent can be taken back before its model answers —
-// the worker row is hidden and no result is written — but not after. The
-// withdrawal still reports its end (as a cancellation): the spawn announced a
-// lifecycle card and a roster row, and the surface has no other way to retire
-// them.
-func TestWithdrawBeforeTheSubagentAnswers(t *testing.T) {
-	fix := newPersistenceFixture(t, "worker system")
-	owner := fix.fac.Owner
-	owner.Control = NewController()
-	probe := &channelEventProbe{}
-	owner.Events = probe
-	release := make(chan struct{})
-	ex := &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
-	owner.SubagentExecutor = ex
-	conv := "conv-withdraw"
-	worker := "main:conv-withdraw:worker:00000000-0000-0000-0000-0000000005aa"
-	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
-	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
-		TaskID: "task-wd", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
-		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
-		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
-	})
-	delivery, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-wd", Input{Text: "hurry"}, TurnInputModeSteer)
-	if err != nil || delivery != SubagentDeliveryStarted {
-		t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
-	}
-	waitSubagentBusy(t, owner, conv, "task-wd")
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && len(ex.rowIDs()) == 0 {
-		time.Sleep(2 * time.Millisecond)
-	}
-	if len(ex.rowIDs()) == 0 {
-		t.Fatal("the execution never wrote its user row")
-	}
-	withdrawn, ok := WithdrawSubagentInput(owner, conv, "task-wd")
-	if !ok || len(withdrawn) != 1 || withdrawn[0].Text != "hurry" {
-		t.Fatalf("WithdrawSubagentInput = %+v, %v; want the message back", withdrawn, ok)
-	}
-	waitSubagentIdle(t, owner, conv, "task-wd")
-	time.Sleep(50 * time.Millisecond)
-	var visibility string
-	if err := fix.store.DB().QueryRow(`SELECT visibility FROM fb_messages WHERE id=?`, ex.rowIDs()[0]).Scan(&visibility); err != nil {
-		t.Fatal(err)
-	}
-	if visibility != "withdrawn" {
-		t.Fatalf("worker row visibility = %q, want withdrawn", visibility)
-	}
-	// The spawn opened a card and a roster row before the message was taken
-	// back; the end event retires them, reported as a cancellation. The worker
-	// row still carries no answer.
-	ends := probe.ofType(event.RunEventSubagentEnded)
-	if len(ends) != 1 {
-		t.Fatalf("subagent_ended published %d times for a withdrawn execution, want 1 (a cancellation)", len(ends))
-	}
-	var withdrawnEnd event.SubagentEndedPayload
-	if err := json.Unmarshal(ends[0].Payload, &withdrawnEnd); err != nil {
-		t.Fatal(err)
-	}
-	if withdrawnEnd.Status != string(agent.StatusCancelled) {
-		t.Fatalf("withdrawn end status = %q, want %q", withdrawnEnd.Status, agent.StatusCancelled)
-	}
-
-	// Past the answer boundary the window has closed.
-	answered := make(chan struct{}, 1)
-	release2 := make(chan struct{})
-	ex2 := &channelTestExecutor{store: fix.store, hold: true, release: release2, responded: true, answer: "answered", answered: answered}
-	owner.SubagentExecutor = ex2
-	if _, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-wd", Input{Text: "second"}, TurnInputModeSteer); err != nil {
-		t.Fatalf("second SendToSubagent: %v", err)
-	}
-	waitSubagentBusy(t, owner, conv, "task-wd")
-	<-answered
-	if _, ok := WithdrawSubagentInput(owner, conv, "task-wd"); ok {
-		t.Fatal("WithdrawSubagentInput succeeded after the model answered")
-	}
-	close(release2)
-	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 2)
-	waitSubagentIdle(t, owner, conv, "task-wd")
-}
-
-// TestUserMessageReusesTheSubagentsPrefix pins the cache contract: the message
-// the user sends a subagent appends to the worker session's own history, so the
-// new execution's first request is the previous request plus the previous
-// answer plus that message.
-func TestUserMessageReusesTheSubagentsPrefix(t *testing.T) {
+// TestSubagentContinuationReusesTheSubagentsPrefix pins the cache contract: a
+// continuation appends to the worker session's own history, so the new
+// execution's first request is the previous request plus the previous answer
+// plus that message.
+func TestSubagentContinuationReusesTheSubagentsPrefix(t *testing.T) {
 	fix := newPersistenceFixture(t, "worker system", "follow up answer")
 	owner := fix.fac.Owner
 	owner.Control = NewController()
@@ -5414,9 +5575,8 @@ func TestUserMessageReusesTheSubagentsPrefix(t *testing.T) {
 		Task: "q1", Status: agent.StatusOK, Output: "a1", AgentType: "explore", AgentKind: "typed",
 		RuntimeKind: "typed_subagent", Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
 	})
-	delivery, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-prefix", Input{Text: "follow up"}, TurnInputModeSteer)
-	if err != nil || delivery != SubagentDeliveryStarted {
-		t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-prefix", Input{Text: "follow up"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
 	}
 	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
 	waitSubagentIdle(t, owner, conv, "task-prefix")
@@ -5456,16 +5616,15 @@ func TestSubagentOfAnotherConversationIsNotFound(t *testing.T) {
 		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
 		StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
 	})
-	if _, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, "conv-other", "task-tenant", Input{Text: "hi"}, TurnInputModeSteer); !errors.Is(err, ErrSubagentNotFound) {
+	if _, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, "conv-other", "task-tenant", Input{Text: "hi"}); !errors.Is(err, ErrSubagentNotFound) {
 		t.Fatalf("SendToSubagent err = %v, want ErrSubagentNotFound", err)
 	}
 }
 
-// A skill command the user types in a subagent's own view rides on the message
-// as a trusted explicit skill selection, so the execution the message starts
-// activates that skill — the subagent's counterpart of a skill turn in the
-// conversation (plan 007 §1).
-func TestUserSkillCommandActivatesTheSkillInTheSubagent(t *testing.T) {
+// A continuation carries a trusted explicit skill selection, so the execution
+// it starts activates that skill — the subagent's counterpart of a skill turn in
+// the conversation (plan 007 §1).
+func TestSubagentContinuationActivatesTheSkillItSelected(t *testing.T) {
 	fix := newPersistenceFixture(t, "worker system", "done")
 	owner := fix.fac.Owner
 	owner.Control = NewController()
@@ -5481,8 +5640,8 @@ func TestUserSkillCommandActivatesTheSkillInTheSubagent(t *testing.T) {
 	owner.SubagentExecutor = ex
 
 	in := Input{Text: "/my-skill", SkillName: "my-skill", SkillPath: "/skills/my-skill/SKILL.md"}
-	if _, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-skill", in, TurnInputModeSteer); err != nil {
-		t.Fatalf("SendToSubagent: %v", err)
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-skill", in); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
 	}
 	select {
 	case <-ex.started:
@@ -5525,8 +5684,8 @@ func TestUserDrivenExecutionEndsWithTheSpawnIdentity(t *testing.T) {
 	ex := &channelTestExecutor{store: fix.store, answer: "done"}
 	owner.SubagentExecutor = ex
 
-	if _, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-id", Input{Text: "go"}, TurnInputModeSteer); err != nil {
-		t.Fatalf("SendToSubagent: %v", err)
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-id", Input{Text: "go"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
 	}
 	waitSubagentIdle(t, owner, conv, "task-id")
 	waitProbeEvent(t, probe, event.RunEventSubagentSpawned, 1)
@@ -5550,53 +5709,6 @@ func TestUserDrivenExecutionEndsWithTheSpawnIdentity(t *testing.T) {
 	}
 	if ended.ParentToolCallID != spawned.ParentToolCallID || ended.TaskIndex != spawned.TaskIndex {
 		t.Fatalf("ended identity = (%q,%d), want the spawn's (%q,%d)", ended.ParentToolCallID, ended.TaskIndex, spawned.ParentToolCallID, spawned.TaskIndex)
-	}
-}
-
-// A withdrawn user-driven execution still reports its end, as a cancellation.
-// The spawn announced a lifecycle card and a roster row; without an end event
-// the surface would show that subagent running forever after Esc took the
-// message back (plan 007 §4, found on the real device).
-func TestWithdrawnUserExecutionPublishesItsEndSoTheSurfaceRetiresIt(t *testing.T) {
-	fix := newPersistenceFixture(t, "worker system", "done")
-	owner := fix.fac.Owner
-	owner.Control = NewController()
-	probe := &channelEventProbe{}
-	owner.Events = probe
-	conv := "conv-withdraw"
-	worker := "main:conv-withdraw:worker:00000000-0000-0000-0000-0000000000dd"
-	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
-	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
-		TaskID: "task-wd", RunID: "seed-run", SessionID: conv, WorkerSessionID: worker,
-		Task: "orig", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed",
-		RuntimeKind: "typed_subagent", Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
-		ParentToolCallID: "call_original", TaskIndex: 0,
-	})
-	release := make(chan struct{})
-	ex := &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
-	owner.SubagentExecutor = ex
-
-	if _, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-wd", Input{Text: "hurry"}, TurnInputModeSteer); err != nil {
-		t.Fatalf("SendToSubagent: %v", err)
-	}
-	waitSubagentBusy(t, owner, conv, "task-wd")
-	if _, ok := WithdrawSubagentInput(owner, conv, "task-wd"); !ok {
-		t.Fatal("withdraw should have taken the message back")
-	}
-	close(release)
-	waitSubagentIdle(t, owner, conv, "task-wd")
-	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
-
-	ends := probe.ofType(event.RunEventSubagentEnded)
-	var ended event.SubagentEndedPayload
-	if err := json.Unmarshal(ends[len(ends)-1].Payload, &ended); err != nil {
-		t.Fatal(err)
-	}
-	if ended.Status != string(agent.StatusCancelled) {
-		t.Fatalf("ended status = %q, want %q", ended.Status, agent.StatusCancelled)
-	}
-	if ended.ParentToolCallID != "" {
-		t.Fatalf("withdrawn end named a dispatching call %q, want none", ended.ParentToolCallID)
 	}
 }
 
@@ -6209,9 +6321,8 @@ func newCustomSubagentSend(t *testing.T, subagents []appcfg.SubagentConfig) cust
 // ran under.
 func (s customSubagentSend) startedContext(t *testing.T) context.Context {
 	t.Helper()
-	delivery, err := SendToSubagent(context.Background(), s.owner, SubagentSurface{}, s.conv, "task-x", Input{Text: "hello"}, TurnInputModeSteer)
-	if err != nil || delivery != SubagentDeliveryStarted {
-		t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
+	if err := StartSubagentAutoContinue(context.Background(), s.owner, SubagentSurface{}, s.conv, "task-x", Input{Text: "hello"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
 	}
 	select {
 	case <-s.ex.started:
@@ -6227,19 +6338,16 @@ func (s customSubagentSend) startedContext(t *testing.T) context.Context {
 // there is no longer any to hold the run to.
 func TestUserMessageToDeletedCustomSubagentIsRefused(t *testing.T) {
 	s := newCustomSubagentSend(t, nil)
-	delivery, err := SendToSubagent(context.Background(), s.owner, SubagentSurface{}, s.conv, "task-x", Input{Text: "hello"}, TurnInputModeSteer)
+	err := StartSubagentAutoContinue(context.Background(), s.owner, SubagentSurface{}, s.conv, "task-x", Input{Text: "hello"})
 	if err == nil {
-		t.Fatalf("SendToSubagent = %q, nil; want a refusal", delivery)
+		t.Fatalf("StartSubagentAutoContinue = nil; want a refusal")
 	}
 	if !strings.Contains(err.Error(), `subagent type "repo-scout" no longer exists for this agent`) {
 		t.Fatalf("refusal = %v", err)
 	}
-	if delivery != "" {
-		t.Fatalf("delivery = %q, want none", delivery)
-	}
 	select {
 	case <-s.ex.started:
-		t.Fatal("a refused message started an execution")
+		t.Fatal("a refused continuation started an execution")
 	default:
 	}
 	record, ok, gerr := agent.GetMerged(s.fac.subagentScopeRoot(), agent.Query{SessionID: s.conv, TaskID: "task-x"})

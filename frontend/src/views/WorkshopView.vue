@@ -18,26 +18,48 @@
               {{ t('workshop.emptyConversation') }}
             </div>
             <div v-for="message in stream.messages.value" :key="message.id" class="mb-3" :data-workshop-message="message.role">
+              <!-- The workshop is the conversation page's superset (owner
+                   2026-10-25): the same activity line, the same cards, the
+                   same one-line heads. The candidates a search produced follow
+                   the sentence they answer, inside the same step on the line. -->
               <div
                 v-if="message.role === 'assistant' && hasVisibleBlocks(message.blocks)"
-                class="max-w-[85%] rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-2.5 text-[13px] leading-relaxed text-[var(--forebrain-text)]"
+                class="workshop-blocks"
               >
-                <template v-for="(block, blockIdx) in message.blocks" :key="`${message.id}-block-${blockIdx}`">
-                  <ThinkingCard v-if="block.kind === 'thinking'" :block="block" />
-                  <template v-else-if="block.kind === 'assistant'">
-                    <MessageResponse :content="candidateText(block.text)" />
-                    <CandidateCards
-                      v-if="candidateList(block.text).length"
-                      :candidates="candidateList(block.text)"
-                      :installed="installedNames"
-                      :busy="installingSkill"
-                      @install="installCandidate"
-                    />
+                <ActivityLine>
+                  <template v-for="(block, blockIdx) in message.blocks" :key="`${message.id}-block-${blockIdx}`">
+                    <ActivityStep v-if="block.kind === 'thinking'" node="think">
+                      <ThinkingCard :block="block" />
+                    </ActivityStep>
+                    <ActivityStep v-else-if="block.kind === 'assistant'" node="say" class="al-say">
+                      <MessageResponse :content="candidateText(block.text)" />
+                      <CandidateCards
+                        v-if="candidateList(block.text).length"
+                        :candidates="candidateList(block.text)"
+                        :installed="installedNames"
+                        :busy="installingSkill"
+                        @install="installCandidate"
+                      />
+                    </ActivityStep>
+                    <ActivityStep
+                      v-else-if="block.kind === 'tool'"
+                      :node="{ status: statusOf(block.step) }"
+                    >
+                      <ToolCallCard
+                        :step="block.step"
+                        :scope="workbenchScope"
+                        :default-open="false"
+                        :pending-action="gatePendingOf(message, block.step.stepId)"
+                      />
+                    </ActivityStep>
+                    <ActivityStep v-else-if="block.kind === 'approval'" :node="null">
+                      <ApprovalCard :block="block" />
+                    </ActivityStep>
+                    <ActivityStep v-else-if="block.kind === 'error'" :node="null">
+                      <RunErrorBlock :text="block.text" :detail="block.detail" />
+                    </ActivityStep>
                   </template>
-                  <ToolCallCard v-else-if="block.kind === 'tool'" class="my-2" :step="block.step" :scope="workbenchScope" :default-open="false" />
-                  <ApprovalCard v-else-if="block.kind === 'approval'" class="my-2" :block="block" />
-                  <RunErrorBlock v-else-if="block.kind === 'error'" class="my-2" :text="block.text" :detail="block.detail" />
-                </template>
+                </ActivityLine>
               </div>
               <div
                 v-else-if="message.role !== 'assistant' || String(message.content ?? '').trim()"
@@ -51,20 +73,30 @@
             <div v-for="name in installedNames" :key="name" class="sys-line text-[12px] text-[var(--forebrain-text-2)]" data-testid="workshop-installed-line">
               {{ t('workshop.installedLine', { name }) }}
             </div>
-            <ApprovalCard
-              :session-id="activeSessionId || null"
-              :version="stream.pendingActionsVersion.value"
-              :context-used-percent="contextUsedPercent"
-            />
+            <!-- The tail the conversation's own thread keeps (plan 138): the
+                 questions, and the requests no tool card above carries. -->
+            <ApprovalCard :anchored-action-ids="anchoredActionIds" can-open-agent />
             <p v-if="stream.error.value" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-error">{{ stream.error.value }}</p>
           </ConversationContent>
           <ConversationScrollButton :label="t('chat.scrollToLatest')" />
         </Conversation>
 
-        <!-- The chat page's composer, reused. -->
+        <!-- The chat page's composer, reused. While the workshop's own planner
+             waits on a plan approval, the plan takes the input's place here
+             exactly as it does there (plan 138) — the input, its draft and its
+             attachments, hidden whole underneath. -->
         <div class="z-10 shrink-0 border-t border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-4 sm:px-5">
           <p v-if="notice" class="mb-2 rounded-lg bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-notice">{{ notice }}</p>
-          <PromptInputProvider :max-files="4" accept="image/*,application/pdf" @submit="handleSubmit">
+          <PlanApprovalDock
+            v-if="exitPlanPending"
+            :action="exitPlanPending"
+            :session-id="activeSessionId"
+            :can-open-plan="false"
+          />
+          <!-- The provider's own root is a bare slot, so the hide that keeps
+               the composer's state alive sits on a real element around it. -->
+          <div v-show="!exitPlanPending" class="contents">
+            <PromptInputProvider :max-files="4" accept="image/*,application/pdf" @submit="handleSubmit">
             <!-- Relative, so the composer's "+" sheet hangs off the input area
                  rather than off its own 28px button. -->
             <div class="relative w-full" data-testid="workshop-composer">
@@ -119,7 +151,8 @@
                 {{ t(starter.label) }}
               </button>
             </div>
-          </PromptInputProvider>
+            </PromptInputProvider>
+          </div>
         </div>
       </main>
 
@@ -182,6 +215,7 @@
       :project-id="projectId"
       :from="compareFrom"
       :to="compareTo"
+      :initial-path="compareInitialPath"
       @cancel="compareOpen = false"
     />
   </div>
@@ -213,6 +247,9 @@ import {
 } from '@repo/elements/prompt-input'
 import ForebrainPromptTextarea from '@/components/ForebrainPromptTextarea.vue'
 import ChatWorkbench from '@/components/chat/ChatWorkbench.vue'
+import ActivityLine from '@/components/chat/ActivityLine.vue'
+import ActivityStep from '@/components/chat/ActivityStep.vue'
+import PlanApprovalDock from '@/components/chat/PlanApprovalDock.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
 import ComposerPlusMenu from '@/components/chat/ComposerPlusMenu.vue'
@@ -222,7 +259,7 @@ import ModeChip from '@/components/chat/ModeChip.vue'
 import ModelChip from '@/components/chat/ModelChip.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
-import ToolCallCard from '@/components/chat/ToolCallCard.vue'
+import ToolCallCard, { statusOf } from '@/components/chat/ToolCallCard.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import WorkshopTopbar from '@/components/workshop/WorkshopTopbar.vue'
 import CasesTab from '@/components/workshop/CasesTab.vue'
@@ -234,7 +271,9 @@ import CandidateCards from '@/components/workshop/CandidateCards.vue'
 import PublishDialog from '@/components/workshop/PublishDialog.vue'
 import CompareDialog from '@/components/workshop/CompareDialog.vue'
 import { useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, hasVisibleBlocks } from '@/composables/useChatStream'
+import { useChatStream, hasVisibleBlocks, type TimelineBlock } from '@/composables/useChatStream'
+import { usePendingActions } from '@/composables/usePendingActions'
+import { providePendingActions } from '@/composables/providePendingActions'
 import { useTopbar } from '@/composables/useTopbar'
 import { useWorkbench } from '@/composables/useWorkbench'
 import forebrainApi, {
@@ -332,6 +371,42 @@ const contextUsedPercent = computed(() => {
   return null
 })
 
+// The workshop's one pending-actions store (plan 138), provided down its tree
+// so a waiting tool card hangs its gate the same way the conversation's does.
+const pendingActions = providePendingActions(usePendingActions({
+  sessionId: computed(() => activeSessionId.value || null),
+  version: computed(() => stream.pendingActionsVersion.value),
+  contextUsedPercent,
+}))
+
+/** The request one of the workshop's tool cards is parked on. */
+function gatePendingOf(message: { blocks?: TimelineBlock[] }, stepId: string) {
+  const blocks = (message.blocks ?? []).filter(
+    (block): block is Extract<TimelineBlock, { kind: 'approval' }> => block.kind === 'approval',
+  )
+  return pendingActions.pendingForStep(stepId, blocks)
+}
+
+/** The ids whose gates hang on a card above — plus the plan approval while it
+ *  waits where the input is — so the tail answers the rest. */
+const anchoredActionIds = computed(() => {
+  const ids: string[] = []
+  for (const message of stream.messages.value) {
+    for (const block of message.blocks ?? []) {
+      if (block.kind !== 'tool') continue
+      const found = gatePendingOf(message, block.step.stepId)
+      if (found) ids.push(found.id)
+    }
+  }
+  if (exitPlanPending.value) ids.push(exitPlanPending.value.id)
+  return ids
+})
+
+/** The plan approval taking the workshop's input, when its own planner waits. */
+const exitPlanPending = computed(() => (
+  pendingActions.pendingApprovals.value.find((a) => !a.agentId && pendingActions.isExitPlan(a)) ?? null
+))
+
 const sessionModelData = ref<SessionModelResponse | null>(null)
 let modelGeneration = 0
 async function loadSessionModel(sid: string | null) {
@@ -390,9 +465,11 @@ function reloadAfterChange() {
 const compareOpen = ref(false)
 const compareFrom = ref('')
 const compareTo = ref('')
-function openCompare(payload: { from: string; to: string }) {
+const compareInitialPath = ref('')
+function openCompare(payload: { from: string; to: string; path?: string }) {
   compareFrom.value = payload.from
   compareTo.value = payload.to
+  compareInitialPath.value = payload.path ?? ''
   compareOpen.value = true
 }
 
@@ -660,3 +737,18 @@ onUnmounted(() => {
   workbenchMq?.removeEventListener('change', syncWorkbenchOverlay)
 })
 </script>
+
+<style scoped>
+/* The workshop's message column reads like the conversation's (owner
+   2026-10-25): the activity line carries the turn, no box around it, the
+   assistant's own words a size up from the cards. */
+.workshop-blocks {
+  display: grid;
+}
+
+.workshop-blocks :deep(.al-say) {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--forebrain-text);
+}
+</style>

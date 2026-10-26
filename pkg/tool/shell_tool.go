@@ -230,12 +230,17 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 					return "", fmt.Errorf("shell command requires approval: %q", cmd)
 				}
 			}
+			// The working-tree changes this command makes are shown under its output
+			// (Claude Code's bashEditDiff): snapshot before, compare after. Always on.
+			editDiff := beginShellEditDiff(ctx, cmd, wdAbs, readOnlyCommand)
+			defer editDiff.release()
 			out, err := runSandboxedShellCommand(ctx, st, rt, sandboxedShellRequest{
 				command: cmd, timeoutMs: in.TimeoutMs, sandboxPermissions: in.SandboxPermissions,
 				additionalPermissions: in.AdditionalPermissions,
 				prefixRule:            append([]string(nil), in.PrefixRule...),
 				profile:               profile, profileElevation: profileElevation,
 				cwd: wdAbs, toolName: "shell", toolDescription: shellToolDescription,
+				editDiff: editDiff,
 			})
 			// The command finished either way; files it changed outside the
 			// edit tools still have to be re-synced. DidRunShell returns
@@ -270,6 +275,10 @@ type sandboxedShellRequest struct {
 	cwd                    string
 	toolName               string
 	toolDescription        string
+	// editDiff watches the working tree this request's command changes, so
+	// the completion output can show it as diff blocks. nil for read-only or
+	// unwritable commands.
+	editDiff *shellEditDiffRun
 }
 
 func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRuntime, req sandboxedShellRequest) (string, error) {
@@ -557,10 +566,13 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	if runErr != nil && exitCode == 0 {
 		exitCode = 1
 	}
-	// Token-saving output compression (Boost-style, fail-open): compress the
-	// final stdout on the return path before it enters the model context. The
-	// original is kept recoverable via retrieve_output. Only stdout is touched;
-	// stderr stays verbatim because errors carry dense signal.
+	// Token-saving output compression (Boost-style, fail-open) is for the model
+	// only: the result it receives carries the compressed stdout, while the
+	// completion output the surfaces draw the card from keeps what the command
+	// printed (owner 2026-10-25). The original also stays recoverable via
+	// retrieve_output. Only stdout is touched; stderr stays verbatim because
+	// errors carry dense signal.
+	rawStdout := stdout
 	compression := shellCompression{}
 	if res.StdoutOmittedBytes == 0 && res.StderrOmittedBytes == 0 {
 		compression = compressShellOutput(ctx, rt, req.command, stdout)
@@ -593,7 +605,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	}
 	b, _ := json.Marshal(resultPayload)
 	completionOutput := map[string]any{
-		"stdout":                     stdout,
+		"stdout":                     rawStdout,
 		"stderr":                     stderr,
 		"exit_code":                  exitCode,
 		"stdout_bytes":               stdoutBytes,
@@ -640,6 +652,11 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		slog.Error("sandbox denied shell command", "command", req.command, "reason", denialReason, "err", runErr)
 		captureCompletion()
 		return "", sandboxDeniedCommandError(res, denialReason)
+	}
+	// The snapshot diff is display-only: it rides the completion output the
+	// surfaces render from, never the model-facing result payload.
+	if diff := req.editDiff.finish(ctx, req.command, exitCode, runErr); diff != nil {
+		completionOutput["shell_edit_diff"] = *diff
 	}
 	captureCompletion()
 	return string(b), nil

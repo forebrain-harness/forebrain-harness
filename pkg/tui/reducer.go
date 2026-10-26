@@ -881,8 +881,28 @@ func (r *Reducer) emitFanoutFrame(fs *fanoutState) Frame {
 		Summary:          fanoutCardHeader(fs),
 		Duration:         duration,
 		FanoutQuery:      fs.Query,
-		FanoutCallError:  fs.CallError,
+		FanoutCallError:  fanoutDrawnCallError(fs),
 	}
+}
+
+// fanoutDrawnCallError is the call failure the card draws under its header.
+// On a dispatch card whose task row already says why it failed, the call
+// failed because that task did, and the row's reason is the described one —
+// the call's text is the same failure again, as the raw error the tool
+// returned — so the card says it once, on the row. The header still reads
+// the call's failure from fs.CallError. A query card's rows are a snapshot of
+// other executions, never the reason its own call failed, so it always draws
+// the call's error.
+func fanoutDrawnCallError(fs *fanoutState) string {
+	if fs.CallError == "" || fs.Query {
+		return fs.CallError
+	}
+	for _, t := range fs.Tasks {
+		if t.Status == "failed" && strings.TrimSpace(t.Error) != "" {
+			return ""
+		}
+	}
+	return fs.CallError
 }
 
 // fanoutCardSettled reports whether the card has nothing left in flight: its
@@ -2756,6 +2776,26 @@ func toolSpecificMaxLines(title string) int {
 	return toolOutputMaxLines
 }
 
+// shellFrameHasDiffBlocks reports whether a shell frame's body carries the
+// file-change diff blocks a mutating command produced. Those frames render as
+// diff cards, so they fold like one.
+func shellFrameHasDiffBlocks(f Frame) bool {
+	return f.Kind == FrameTool &&
+		strings.EqualFold(strings.TrimSpace(f.Title), "shell") &&
+		!toolStatusFailed(f) &&
+		tool.HasDiffBlocks(f.Content)
+}
+
+// toolFrameMaxLines is toolSpecificMaxLines with the frames that need it: a
+// shell card with diff blocks gets the same 30-row budget an edit card's
+// diff does, so its changes stay visible without a click-to-expand.
+func toolFrameMaxLines(f Frame) int {
+	if shellFrameHasDiffBlocks(f) {
+		return 30
+	}
+	return toolSpecificMaxLines(f.Title)
+}
+
 // toolPreviewUsesRenderedBody reports whether a tool's collapsed preview must
 // be sliced from the already-rendered body lines instead of being reconstructed
 // from logical/plain output lines. These tools have rich renderers in
@@ -2770,7 +2810,8 @@ func toolPreviewUsesRenderedBody(f Frame) bool {
 		strings.EqualFold(title, "memories_add_ad_hoc_note") ||
 		strings.EqualFold(title, "retrieve_output") ||
 		isMemoryQueryTool(title) ||
-		isMCPToolTitle(title) || isDiffTool(title)
+		isMCPToolTitle(title) || isDiffTool(title) ||
+		shellFrameHasDiffBlocks(f)
 }
 
 func foldBlock(b *viewBlock, full []string, width int, spinnerPhase int, cwdOpt ...string) (lines []string, headerLocal int) {
@@ -2906,7 +2947,7 @@ func foldBlock(b *viewBlock, full []string, width int, spinnerPhase int, cwdOpt 
 		out = append(out, body[len(body)-liveToolOutputMaxLines:]...)
 		return out, 0
 	}
-	maxLines := toolSpecificMaxLines(b.frame.Title)
+	maxLines := toolFrameMaxLines(b.frame)
 	if b.frame.Kind == FrameMemoryCompact {
 		maxLines = toolOutputMaxLines
 	}
@@ -3539,6 +3580,9 @@ func (r *Renderer) buildComposerBlock(cs ComposerRenderState, termWidth int) com
 	statusText := strings.TrimSpace(r.transientStatusTextLocked())
 
 	footerText := r.composerFooterText(termWidth)
+	if cs.ReadOnly {
+		return r.buildReadOnlyComposerBlock(cs, statusText, footerText, termWidth)
+	}
 	previewLines := formatComposerPendingInputPreview(cs.PendingInput, termWidth)
 
 	slashMode := strings.HasPrefix(composerText, "/")
@@ -3546,6 +3590,44 @@ func (r *Renderer) buildComposerBlock(cs ComposerRenderState, termWidth int) com
 		return r.buildSlashComposerBlock(cs, composerText, statusText, footerText, previewLines, cs.OverlayRows, termWidth)
 	}
 	return r.buildNormalComposerBlock(cs, composerText, statusText, footerText, previewLines, cs.OverlayRows, cs.AgentRoster, termWidth)
+}
+
+// buildReadOnlyComposerBlock lays out a composer that takes no input: the status
+// row while something is running, the footer, and the roster when it is up —
+// and no input box, because there is nothing to type into it. A subagent's view
+// is read-only exactly while that subagent is idle (owner, 2026-10-26): an idle
+// subagent belongs to the agent that dispatched it, and the view still has to
+// say which one it shows and how to leave.
+func (r *Renderer) buildReadOnlyComposerBlock(cs ComposerRenderState, statusText, footerText string, termWidth int) composerBlock {
+	rosterVisible := len(cs.OverlayRows) == 0 && agentRosterHasRunningSubagent(cs.AgentRoster)
+	rosterLines := []string(nil)
+	if rosterVisible {
+		marked := agentRosterMarkedIndex(cs.AgentRoster, cs.RosterFocused, r.rosterCursorIndex(cs.AgentRoster))
+		rosterLines = formatAgentRosterLines(cs.AgentRoster, cs.RosterFocused, marked, termWidth)
+	}
+	lines := make([]string, 0, len(rosterLines)+4)
+	if statusText != "" {
+		// Keep the live status visually separate from the transcript's last
+		// retained row, the way the editable composer does.
+		lines = append(lines, "")
+		lines = append(lines, r.renderComposerStatusLine(statusText, termWidth))
+		lines = append(lines, "")
+	}
+	if len(cs.OverlayRows) == 0 {
+		lines = append(lines, sharedBlockFooterStyle+footerText+sharedBlockReset)
+	}
+	if rosterVisible {
+		lines = append(lines, "")
+		lines = append(lines, rosterLines...)
+	}
+	if len(cs.OverlayRows) > 0 {
+		lines = append(lines, r.composerMenuLines(cs.OverlayRows, termWidth)...)
+	}
+	for i := range lines {
+		lines[i] = stripTerminalBells(lines[i])
+	}
+	// No caret: there is no text to place it in.
+	return composerBlock{lines: lines, cursorRow: -1}
 }
 
 func (r *Renderer) composerFooterText(termWidth int) string {

@@ -98,19 +98,13 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 		if _, _, cerr := run.CompactionService(env.Runner, env.Deps.SessionStore).AutoCompactSession(ctx, sid, ""); cerr != nil {
 			slog.Warn("subagent pre-turn compaction skipped", "session_id", sid, "err", cerr)
 		}
-		rowID, err := turn.PersistUserTurn(ctx, env.Deps.SessionStore, turn.UserTurn{
+		if _, err := turn.PersistUserTurn(ctx, env.Deps.SessionStore, turn.UserTurn{
 			SessionID:  sid,
 			RunID:      runID,
 			ModelInput: strings.TrimSpace(task),
 			Parts:      req.Parts,
-		})
-		if err != nil {
+		}); err != nil {
 			return nil, hook.PreHookResult{}, err
-		}
-		// Tell the channel which row this execution's user message is, so a
-		// user-driven execution can be withdrawn before the model answers.
-		if req.OnUserTurn != nil {
-			req.OnUserTurn(rowID)
 		}
 	}
 	// The worker session's own partial capture: a cancelled execution

@@ -25,6 +25,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
@@ -1905,17 +1906,256 @@ func TestToolEventPayloadLeavesOtherEventsAlone(t *testing.T) {
 	require.Equal(t, "not json", string(toolEventPayloadWithHeader("/p", event.RunEventToolStarted, json.RawMessage("not json"))))
 }
 
+// TestToolHeadersCarryTheirParts: a tool event payload carries the header in
+// its four parts as well, and they are DisplayHeaderParts' own — so a surface
+// that lays the header out itself draws the same words the joined header
+// spells.
+func TestToolHeadersCarryTheirParts(t *testing.T) {
+	root := "/work/proj"
+	payload := map[string]any{
+		"tool_name": "shell", "summary": "ran ls plans/",
+		"tool_meta":        map[string]any{"tool_name": "shell", "status": "completed", "input": map[string]any{"command": "ls plans/"}},
+		"duration_seconds": 1.2,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	var out struct {
+		Header string `json:"header"`
+		Parts  struct {
+			Action   string `json:"action"`
+			Target   string `json:"target"`
+			Suffix   string `json:"suffix"`
+			Duration string `json:"duration"`
+		} `json:"header_parts"`
+	}
+	require.NoError(t, json.Unmarshal(toolEventPayloadWithHeader(root, event.RunEventToolCompleted, raw), &out))
+	require.Equal(t, "Ran ls plans/ 1.2s", out.Header)
+	want := tool.DisplayHeaderParts(tool.DisplayFrame{
+		Title: "shell", Summary: "ran ls plans/",
+		Meta:  tool.ToolMeta{ToolName: "shell", Status: "completed", Input: map[string]any{"command": "ls plans/"}},
+		Final: true, Duration: 1200 * time.Millisecond,
+	}, root)
+	require.Equal(t, want, tool.HeaderParts{
+		Action: out.Parts.Action, Target: out.Parts.Target,
+		Suffix: out.Parts.Suffix, Duration: out.Parts.Duration,
+	})
+	require.Equal(t, "Ran", out.Parts.Action)
+	require.Equal(t, "ls plans/", out.Parts.Target)
+	require.Equal(t, "1.2s", out.Parts.Duration)
+}
+
+// TestCanceledCallHeaderListKeepsTheCallIDs: the per-call headers of an
+// assistant row ride as a list with the call id verbatim — the web
+// camel-cases response keys deeply, which would rewrite "call_a_1" used as a
+// map key into "callA1" and strand the header.
+func TestCanceledCallHeaderListKeepsTheCallIDs(t *testing.T) {
+	assistant := `[{"type":"tool_calls","tool_calls":[{"id":"call_a_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"go test ./...\"}"}},{"id":"toolu_01X","type":"function","function":{"name":"read_file","arguments":"{\"file_path\":\"/work/proj/x.go\"}"}}]}]`
+	got := canceledCallHeaderList(func() string { return "/work/proj" }, assistant)
+	require.Len(t, got, 2)
+	require.Equal(t, "call_a_1", got[0].CallID)
+	require.Equal(t, "Canceled go test ./...", got[0].Header)
+	require.Equal(t, tool.HeaderParts{Action: "Canceled", Target: "go test ./..."}, got[0].Parts)
+	require.Equal(t, "toolu_01X", got[1].CallID)
+	require.Equal(t, "Canceled x.go", got[1].Header)
+	require.Nil(t, canceledCallHeaderList(func() string { return "/work/proj" }, `[{"text":"hi","type":"text"}]`))
+}
+
 // TestStoredToolRowsAndCanceledCallsGetTheSameWording: a reloaded tool row is
 // worded from what it kept, and a call the run never answered reads "Canceled
 // ..." — never "denied", nobody was asked.
 func TestStoredToolRowsAndCanceledCallsGetTheSameWording(t *testing.T) {
 	parts := `[{"text":"{}","type":"text"},{"type":"tool_display","body":"x","summary":"ran read /work/proj/a.md · lines 1-9","tool_meta_json":"{\"tool_name\":\"read_file\",\"status\":\"completed\",\"input\":{\"file_path\":\"/work/proj/a.md\"},\"result_lines\":9}"}]`
 	require.Equal(t, "Read a.md lines 1-9 · 2.0s", storedToolRowHeader("/work/proj", parts, "", 2*time.Second))
+	header, headerParts, body, toolName := storedToolRowHeaderParts("/work/proj", parts, "", 2*time.Second)
+	require.Equal(t, "Read a.md lines 1-9 · 2.0s", header)
+	require.Equal(t, tool.HeaderParts{Action: "Read", Target: "a.md", Suffix: "lines 1-9", Duration: "2.0s"}, headerParts)
+	require.Equal(t, "x", body)
+	require.Equal(t, "read_file", toolName)
 	require.Equal(t, "", storedToolRowHeader("/work/proj", `[{"text":"x","type":"text"}]`, "", 0), "a row with no tool facts has no header of its own")
 
 	assistant := `[{"type":"tool_calls","tool_calls":[{"id":"c1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"go test ./...\"}"}},{"id":"c2","type":"function","function":{"name":"read_file","arguments":"{\"file_path\":\"/work/proj/x.go\"}"}}]}]`
-	got := canceledCallHeaders(func() string { return "/work/proj" }, assistant)
-	require.Equal(t, "Canceled go test ./...", got["c1"])
-	require.Equal(t, "Canceled x.go", got["c2"])
-	require.Nil(t, canceledCallHeaders(func() string { return "/work/proj" }, `[{"text":"hi","type":"text"}]`))
+	got := canceledCallHeaderList(func() string { return "/work/proj" }, assistant)
+	require.Len(t, got, 2)
+	require.Equal(t, "c1", got[0].CallID)
+	require.Equal(t, "Canceled go test ./...", got[0].Header)
+	require.Equal(t, "c2", got[1].CallID)
+	require.Equal(t, "Canceled x.go", got[1].Header)
+	require.Nil(t, canceledCallHeaderList(func() string { return "/work/proj" }, `[{"text":"hi","type":"text"}]`))
+}
+
+// seedToolRow writes one stored tool row carrying a tool_display part with the
+// given body and meta, the shape the engine persists for a completed call.
+func seedToolRow(ctx context.Context, sessions *state.SessionStore, sessionID, toolName, body string, meta tool.ToolMeta) error {
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	type part struct {
+		Type         string `json:"type"`
+		Body         string `json:"body"`
+		Summary      string `json:"summary"`
+		ToolMetaJSON string `json:"tool_meta_json"`
+	}
+	partsJSON, err := json.Marshal([]part{{
+		Type: "tool_display", Body: body, Summary: "ran " + toolName, ToolMetaJSON: string(metaJSON),
+	}})
+	if err != nil {
+		return err
+	}
+	_, err = sessions.AppendStructuredMessageForRun(ctx, sessionID, "", "tool", "", "",
+		string(partsJSON), "", "", "", string(metaJSON), state.MessageExecTiming{DurationMs: 1000})
+	return err
+}
+
+// TestShellCardRidesTheStepTheEventAndTheStoredRow: one shell completion body
+// yields one set of card facts on all three roads it travels — the live step,
+// the canonical tool event, and the reloaded history row — because all three
+// read the one body back; a row that is not a shell card carries none.
+func TestShellCardRidesTheStepTheEventAndTheStoredRow(t *testing.T) {
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Input:    map[string]any{"command": "go test ./..."},
+		Output:   map[string]any{"stdout": "ok  pkg/tool", "exit_code": 0},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	meta := tool.BuildToolMeta(evt)
+
+	// The live step.
+	stepData := gatewayToolCompletedStepData("call-1", "tool shell", "shell", evt.Output, "", body, "", "", meta)
+	stepCard, ok := stepData["shell_card"].(*tool.ShellCard)
+	require.True(t, ok, "the live step carries no shell_card: %v", stepData)
+	want, err := json.Marshal(stepCard)
+	require.NoError(t, err)
+
+	// The canonical tool event.
+	raw, err := json.Marshal(map[string]any{
+		"tool_name": "shell", "summary": "ran go test ./...", "display_body": body,
+		"duration_seconds": 1.0,
+		"tool_meta": map[string]any{"tool_name": "shell", "status": "completed",
+			"input": map[string]any{"command": "go test ./..."}},
+	})
+	require.NoError(t, err)
+	var eventOut struct {
+		ShellCard json.RawMessage `json:"shell_card"`
+	}
+	require.NoError(t, json.Unmarshal(toolEventPayloadWithHeader("/w", event.RunEventToolCompleted, raw), &eventOut))
+	require.JSONEq(t, string(want), string(eventOut.ShellCard))
+
+	// The reloaded history row.
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	require.NoError(t, seedToolRow(ctx, sessions, "s1", "shell", body, meta))
+	s := &Server{Sessions: sessions}
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var rows []struct {
+		Role        string          `json:"role"`
+		ShellCard   json.RawMessage `json:"shell_card"`
+		Header      string          `json:"header"`
+		HeaderParts *struct {
+			Action   string `json:"action"`
+			Target   string `json:"target"`
+			Duration string `json:"duration"`
+		} `json:"header_parts"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	require.Equal(t, "tool", rows[0].Role)
+	require.JSONEq(t, string(want), string(rows[0].ShellCard))
+	// The row's header arrives in parts as well (this seeded row carries no
+	// execution timing, so no duration rides either form).
+	require.NotNil(t, rows[0].HeaderParts)
+	require.Equal(t, "Ran go test ./...", rows[0].Header)
+	require.Equal(t, "Ran", rows[0].HeaderParts.Action)
+	require.Equal(t, "go test ./...", rows[0].HeaderParts.Target)
+	require.Equal(t, "", rows[0].HeaderParts.Duration)
+
+	// A card that is not a shell card carries none.
+	other := tool.StepEvent{
+		Kind: event.RunEventToolCompleted, ToolName: "read_file",
+		Input:  map[string]any{"file_path": "/w/a.go"},
+		Output: map[string]any{"content": "x"},
+	}
+	otherBody, _ := tool.FormatToolStepResult(other, tool.DefaultMaxFormattedBody)
+	otherData := gatewayToolCompletedStepData("call-2", "tool read_file", "read_file", other.Output, "", otherBody, "", "", tool.BuildToolMeta(other))
+	require.NotContains(t, otherData, "shell_card")
+}
+
+// TestFileDiffRidesTheStepTheEventAndTheStoredRow: an edit's turn diff rides
+// the same three roads with the same facts, and a shell row carries none.
+func TestFileDiffRidesTheStepTheEventAndTheStoredRow(t *testing.T) {
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "edit_file",
+		Input:    map[string]any{"file_path": "/w/a.go"},
+		Output: map[string]any{
+			"turn_diff": event.Summary{Path: "a.go", Added: 2, Deleted: 1, UnifiedDiff: "@@ -1 +1 @@\n-a\n+b"},
+		},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	meta := tool.BuildToolMeta(evt)
+
+	stepData := gatewayToolCompletedStepData("call-1", "tool edit_file", "edit_file", evt.Output, "", body, "", "", meta)
+	stepDiff, ok := stepData["file_diff"].(*tool.FileDiff)
+	require.True(t, ok, "the live step carries no file_diff: %v", stepData)
+	want, err := json.Marshal(stepDiff)
+	require.NoError(t, err)
+
+	raw, err := json.Marshal(map[string]any{
+		"tool_name": "edit_file", "summary": "edited a.go", "display_body": body,
+		"tool_meta": map[string]any{"tool_name": "edit_file", "status": "completed",
+			"input": map[string]any{"file_path": "/w/a.go"}},
+	})
+	require.NoError(t, err)
+	var eventOut struct {
+		FileDiff json.RawMessage `json:"file_diff"`
+	}
+	require.NoError(t, json.Unmarshal(toolEventPayloadWithHeader("/w", event.RunEventToolCompleted, raw), &eventOut))
+	require.JSONEq(t, string(want), string(eventOut.FileDiff))
+
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	require.NoError(t, seedToolRow(ctx, sessions, "s1", "edit_file", body, meta))
+	s := &Server{Sessions: sessions}
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var rows []struct {
+		Role     string          `json:"role"`
+		FileDiff json.RawMessage `json:"file_diff"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	require.JSONEq(t, string(want), string(rows[0].FileDiff))
+
+	// A shell row carries a shell_card, never a file_diff.
+	shellEvt := tool.StepEvent{
+		Kind: event.RunEventToolCompleted, ToolName: "shell",
+		Input:  map[string]any{"command": "ls"},
+		Output: map[string]any{"stdout": "x", "exit_code": 0},
+	}
+	shellBody, _ := tool.FormatToolStepResult(shellEvt, tool.DefaultMaxFormattedBody)
+	shellData := gatewayToolCompletedStepData("call-2", "tool shell", "shell", shellEvt.Output, "", shellBody, "", "", tool.BuildToolMeta(shellEvt))
+	require.NotContains(t, shellData, "file_diff")
+	require.Contains(t, shellData, "shell_card")
+}
+
+// TestGatewayToolMetaPayloadCarriesTheRefusalWords: the live step's tool_meta
+// is a field whitelist, so the refusal's own words must be named in it — the
+// reloaded rows carry the whole meta and would otherwise know more than the
+// live card does.
+func TestGatewayToolMetaPayloadCarriesTheRefusalWords(t *testing.T) {
+	out := gatewayToolMetaPayload(tool.ToolMeta{
+		ToolName: "write_file", Status: "denied", DenyFeedback: "复用 http_server.go",
+	})
+	require.Equal(t, "复用 http_server.go", out["deny_feedback"])
+	require.NotContains(t, gatewayToolMetaPayload(tool.ToolMeta{ToolName: "shell", Status: "completed"}), "deny_feedback")
 }

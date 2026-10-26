@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
+	"github.com/pmezard/go-difflib/difflib"
 )
 
 // The two hidden directories a skill root carries beside its skill
@@ -120,12 +121,17 @@ func (st SkillVersionState) StateLabel() string {
 
 // FileDiff is one file's place in a version-to-version comparison. Added and
 // Removed are line counts; a file whose pair is missing counts every line it
-// has.
+// has. UnifiedDiff is filled only by DiffFile — the compare view lists files
+// from Diff and asks for the selected one's lines — and stays empty when
+// Binary or TooLarge says why it has none.
 type FileDiff struct {
-	Path    string `json:"path"`
-	Status  string `json:"status"` // added | removed | modified
-	Added   int    `json:"added"`
-	Removed int    `json:"removed"`
+	Path        string `json:"path"`
+	Status      string `json:"status"` // added | removed | modified; DiffFile also answers unchanged
+	Added       int    `json:"added"`
+	Removed     int    `json:"removed"`
+	UnifiedDiff string `json:"unified_diff,omitempty"`
+	Binary      bool   `json:"binary,omitempty"`
+	TooLarge    bool   `json:"too_large,omitempty"`
 }
 
 // VersionStore addresses the versions and drafts of the skills under one
@@ -568,21 +574,74 @@ func (v VersionStore) Diff(name string, from, to string) ([]FileDiff, error) {
 	for path := range paths {
 		oldLines, hadOld := before[path]
 		newLines, hadNew := after[path]
-		switch {
-		case hadOld && !hadNew:
-			out = append(out, FileDiff{Path: path, Status: "removed", Removed: len(oldLines)})
-		case !hadOld && hadNew:
-			out = append(out, FileDiff{Path: path, Status: "added", Added: len(newLines)})
-		default:
-			added, removed := lineDiffCounts(oldLines, newLines)
-			if added == 0 && removed == 0 {
-				continue
-			}
-			out = append(out, FileDiff{Path: path, Status: "modified", Added: added, Removed: removed})
+		if row, changed := compareFile(path, oldLines, hadOld, newLines, hadNew); changed {
+			out = append(out, row)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+// compareFile is one path's row in a comparison. Diff lists these and
+// DiffFile answers one, so the counts the list shows and the counts an open
+// file shows are the same numbers by construction. changed is false when the
+// path reads the same on both sides.
+func compareFile(path string, oldLines []string, hadOld bool, newLines []string, hadNew bool) (row FileDiff, changed bool) {
+	switch {
+	case hadOld && !hadNew:
+		return FileDiff{Path: path, Status: "removed", Removed: len(oldLines)}, true
+	case !hadOld && hadNew:
+		return FileDiff{Path: path, Status: "added", Added: len(newLines)}, true
+	}
+	added, removed := lineDiffCounts(oldLines, newLines)
+	if added == 0 && removed == 0 {
+		return FileDiff{}, false
+	}
+	return FileDiff{Path: path, Status: "modified", Added: added, Removed: removed}, true
+}
+
+// DiffFile is Diff narrowed to one file, with that file's unified diff. path
+// is a key of the same tree walk Diff compares — slash-separated, relative to
+// the skill — and is only ever looked up there, never joined onto the
+// filesystem, so a dot file, a symlink or a path that climbs out of the skill
+// is simply absent. A path neither side holds is ErrDiffFileNotFound; a path
+// that reads the same on both sides answers status "unchanged".
+func (v VersionStore) DiffFile(name, from, to, path string) (FileDiff, error) {
+	fromDir, err := v.snapshotDir(name, from)
+	if err != nil {
+		return FileDiff{}, err
+	}
+	toDir, err := v.snapshotDir(name, to)
+	if err != nil {
+		return FileDiff{}, err
+	}
+	before, err := readTreeLines(fromDir)
+	if err != nil {
+		return FileDiff{}, err
+	}
+	after, err := readTreeLines(toDir)
+	if err != nil {
+		return FileDiff{}, err
+	}
+	path = strings.TrimSpace(path)
+	oldLines, hadOld := before[path]
+	newLines, hadNew := after[path]
+	if !hadOld && !hadNew {
+		return FileDiff{}, fmt.Errorf("%w: %q", ErrDiffFileNotFound, path)
+	}
+	row, changed := compareFile(path, oldLines, hadOld, newLines, hadNew)
+	if !changed {
+		return FileDiff{Path: path, Status: "unchanged"}, nil
+	}
+	switch {
+	case linesLookBinary(oldLines) || linesLookBinary(newLines):
+		row.Binary = true
+	case tooLargeToDiff(oldLines, newLines):
+		row.TooLarge = true
+	default:
+		row.UnifiedDiff = unifiedLineDiff(path, oldLines, newLines)
+	}
+	return row, nil
 }
 
 func (v VersionStore) snapshotDir(name, ref string) (string, error) {
@@ -833,6 +892,11 @@ var (
 	// would promise a change no session can observe. Publishing is what
 	// makes a skill loadable, and publishing enables it.
 	ErrDraftNotPublished = errors.New("a draft has no published version to enable: publish it first")
+
+	// ErrDiffFileNotFound is the answer when a compare asks for a file that
+	// neither snapshot holds — a path the listing never offered, or one that
+	// a dot file, a symlink or a path outside the skill can only ever be.
+	ErrDiffFileNotFound = errors.New("the file is in neither snapshot")
 )
 
 // DraftTarget is where a write aimed at a skill lands: the draft path, and
@@ -1077,4 +1141,94 @@ func equalLines(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// maxDiffTextBytes bounds the text a compare draws: a side larger than this
+// answers TooLarge rather than shipping megabytes of rows to a dialog.
+const maxDiffTextBytes = 2 << 20
+
+// linesLookBinary is git's own test for a binary file — a NUL byte — applied
+// to the lines the tree walk already read.
+func linesLookBinary(lines []string) bool {
+	for _, line := range lines {
+		if strings.IndexByte(line, 0) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// tooLargeToDiff reports whether a pair is past what a compare draws: the
+// same table bound past which lineDiffCounts stops counting exactly, a side
+// longer than lineDiffLimit lines (an added or removed file has no table to
+// bound), or a side larger than maxDiffTextBytes.
+func tooLargeToDiff(oldLines, newLines []string) bool {
+	if len(oldLines) > lineDiffLimit || len(newLines) > lineDiffLimit {
+		return true
+	}
+	if len(oldLines)*len(newLines) > lineDiffLimit*lineDiffLimit/64 {
+		return true
+	}
+	return linesBytes(oldLines) > maxDiffTextBytes || linesBytes(newLines) > maxDiffTextBytes
+}
+
+func linesBytes(lines []string) int {
+	n := 0
+	for _, line := range lines {
+		n += len(line) + 1
+	}
+	return n
+}
+
+// unifiedLineDiff writes the unified diff of one file with three lines of
+// context, the shape the web's parseUnifiedDiff reads. The matcher runs with
+// autojunk off: with it on, a file of 200 lines or more would treat its
+// blank lines as junk and draw needlessly large hunks. Each line is written
+// with its own newline, so a file's final newline never shows up as a
+// phantom empty row.
+func unifiedLineDiff(path string, oldLines, newLines []string) string {
+	groups := difflib.NewMatcherWithJunk(oldLines, newLines, false, nil).GetGroupedOpCodes(3)
+	if len(groups) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("--- a/" + path + "\n+++ b/" + path + "\n")
+	for _, group := range groups {
+		first, last := group[0], group[len(group)-1]
+		fmt.Fprintf(&b, "@@ -%s +%s @@\n", unifiedRange(first.I1, last.I2), unifiedRange(first.J1, last.J2))
+		for _, op := range group {
+			if op.Tag == 'e' {
+				for _, line := range oldLines[op.I1:op.I2] {
+					b.WriteString(" " + line + "\n")
+				}
+				continue
+			}
+			if op.Tag == 'r' || op.Tag == 'd' {
+				for _, line := range oldLines[op.I1:op.I2] {
+					b.WriteString("-" + line + "\n")
+				}
+			}
+			if op.Tag == 'r' || op.Tag == 'i' {
+				for _, line := range newLines[op.J1:op.J2] {
+					b.WriteString("+" + line + "\n")
+				}
+			}
+		}
+	}
+	return b.String()
+}
+
+// unifiedRange is a hunk header's "start,length" (difflib keeps its own
+// spelling unexported): one line is just its number, and an empty range
+// names the line before it.
+func unifiedRange(start, stop int) string {
+	beginning := start + 1
+	length := stop - start
+	if length == 1 {
+		return fmt.Sprintf("%d", beginning)
+	}
+	if length == 0 {
+		beginning--
+	}
+	return fmt.Sprintf("%d,%d", beginning, length)
 }

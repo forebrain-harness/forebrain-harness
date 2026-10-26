@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -860,5 +861,147 @@ func TestMigrationReplayFrameCarriesNoStepID(t *testing.T) {
 	}
 	if migrationReportFrame("  ", "x").Title != "Migration complete" {
 		t.Fatal("replay frame must default its title")
+	}
+}
+
+func TestShellDiffCardShowsOutputThenFiles(t *testing.T) {
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Output: map[string]any{
+			"stdout":    "done\n",
+			"exit_code": 0,
+			"shell_edit_diff": tool.ShellEditDiff{
+				Files: []tool.ShellEditDiffFile{
+					{
+						Path: "/repo/a.txt", DisplayPath: "a.txt", Status: "updated",
+						Added: 1, Deleted: 1, UnifiedDiff: "--- a:before\n+++ a:after\n@@ -1,3 +1,3 @@\n ctx\n-old\n+new\n",
+					},
+					{
+						Path: "/repo/new.py", DisplayPath: "new.py", Status: "created",
+						Added: 1, Deleted: 0, UnifiedDiff: "--- n:before\n+++ n:after\n@@ -1 +1,2 @@\n+print()\n",
+					},
+				},
+				MoreFiles: 1,
+				Shared:    true,
+			},
+		},
+	}
+	body, trunc := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	if trunc {
+		t.Fatal("unexpected truncation")
+	}
+	block, ok := renderShellDiffCard(body, DiffThemeDark)
+	if !ok {
+		t.Fatalf("renderShellDiffCard rejected a body with diff blocks:\n%s", body)
+	}
+	lines := strings.Split(stripANSI(block), "\n")
+	if !strings.HasPrefix(lines[0], "  └ ") || !strings.Contains(lines[0], "done") {
+		t.Fatalf("first line = %q, want the stdout under the tree prefix", lines[0])
+	}
+	wantInOrder := []string{
+		"Updated a.txt (+1 -1)",
+		"- old",
+		"+ new",
+		"Created new.py (+1 -0)",
+		"+ print()",
+		"… 1 more file changed",
+		"(another command ran in this repository at the same time; a change made by either may show under either result)",
+	}
+	cursor := 1
+	for _, want := range wantInOrder {
+		found := -1
+		for i := cursor; i < len(lines); i++ {
+			if strings.Contains(lines[i], want) {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			t.Fatalf("line %q missing after line %d:\n%s", want, cursor, block)
+		}
+		cursor = found + 1
+	}
+	for _, line := range lines[1:] {
+		if !strings.HasPrefix(line, "    ") {
+			t.Fatalf("row outside the tree prefix: %q", line)
+		}
+	}
+}
+
+func TestShellDiffCardWithoutStdoutStartsWithTheFirstFile(t *testing.T) {
+	updated, err := event.Build("/repo/a.txt", []byte("a\n"), []byte("b\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Output: map[string]any{
+			"apply_patch": true,
+			"files": []map[string]any{
+				{"abs_path": "/repo/a.txt", "display_path": "a.txt", "operation": "update", "turn_diff": updated},
+			},
+		},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	block, ok := renderShellDiffCard(body, DiffThemeDark)
+	if !ok {
+		t.Fatalf("renderShellDiffCard rejected an apply_patch body:\n%s", body)
+	}
+	first := strings.Split(stripANSI(block), "\n")[0]
+	if !strings.HasPrefix(first, "  └ Updated a.txt") {
+		t.Fatalf("first line = %q, want the first file header under the tree prefix", first)
+	}
+}
+
+func TestShellCardWithoutDiffBlocksIsUnchanged(t *testing.T) {
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Output:   map[string]any{"stdout": "plain output\n", "exit_code": 0},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	if _, ok := renderShellDiffCard(body, DiffThemeDark); ok {
+		t.Fatalf("renderShellDiffCard accepted an ordinary shell body:\n%s", body)
+	}
+}
+
+func TestShellDiffFrameFoldsLikeAnEditCard(t *testing.T) {
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Output: map[string]any{
+			"stdout":    "done\n",
+			"exit_code": 0,
+			"shell_edit_diff": tool.ShellEditDiff{
+				Files: []tool.ShellEditDiffFile{{
+					Path: "/repo/a.txt", DisplayPath: "a.txt", Status: "created",
+					Added: 1, Deleted: 0, UnifiedDiff: "@@ -1 +1,2 @@\n+line\n",
+				}},
+			},
+		},
+	}
+	withBlocks, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	plainEvt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Output:   map[string]any{"stdout": "plain\n", "exit_code": 0},
+	}
+	withoutBlocks, _ := tool.FormatToolStepResult(plainEvt, tool.DefaultMaxFormattedBody)
+
+	diffFrame := Frame{Kind: FrameTool, Title: "shell", Content: withBlocks}
+	if got := toolFrameMaxLines(diffFrame); got != 30 {
+		t.Fatalf("toolFrameMaxLines(shell with diff blocks) = %d, want 30", got)
+	}
+	if !toolPreviewUsesRenderedBody(diffFrame) {
+		t.Fatal("toolPreviewUsesRenderedBody(shell with diff blocks) = false, want true")
+	}
+	plainFrame := Frame{Kind: FrameTool, Title: "shell", Content: withoutBlocks}
+	if got := toolFrameMaxLines(plainFrame); got != toolOutputMaxLines {
+		t.Fatalf("toolFrameMaxLines(shell without diff blocks) = %d, want %d", got, toolOutputMaxLines)
+	}
+	if toolPreviewUsesRenderedBody(plainFrame) {
+		t.Fatal("toolPreviewUsesRenderedBody(shell without diff blocks) = true, want false")
 	}
 }

@@ -181,3 +181,186 @@ test('every approval family asks its own question, with its own facts and decisi
   await expect(main).not.toContainText('拒绝并中断本轮')
   await shot(page, 'approval-families')
 })
+
+/** A stored assistant row that issued the given calls. */
+function gateAssistantRow(session: string, runId: string, calls: { id: string; name: string; args: unknown }[], atSec: number): string {
+  const parts = [{
+    type: 'tool_calls',
+    tool_calls: calls.map((call) => ({
+      id: call.id,
+      type: 'function',
+      function: { name: call.name, arguments: JSON.stringify(call.args) },
+    })),
+  }]
+  return `INSERT INTO fb_messages(session_id, run_id, role, content, parts, created_at)
+    VALUES('${session}', '${runId}', 'assistant', '', '${sqlJson(parts)}', ${atSec});`
+}
+
+/** A stored tool row holding a call open on the reader (the engine's own
+ *  awaiting record), so the reload draws the waiting card the live page had.
+ *  Its meta carries the call's input, as the engine's rows do — the card head
+ *  reads the object of the sentence from there (pkg/tool DisplayHeaderParts). */
+function gateAwaitingRow(
+  session: string,
+  runId: string,
+  callId: string,
+  toolName: string,
+  summary: string,
+  input: Record<string, unknown> | undefined,
+  atSec: number,
+): string {
+  const meta = { tool_name: toolName, status: 'awaiting approval', ...(input ? { input } : {}) }
+  const parts = [
+    { tool_call_id: callId, type: 'tool_result_meta' },
+    { type: 'tool_display', summary, body: '', tool_meta_json: JSON.stringify(meta) },
+  ]
+  return `INSERT INTO fb_messages(session_id, run_id, role, content, parts, tool_step_id, tool_meta_json, created_at)
+    VALUES('${session}', '${runId}', 'tool', '${sqlJson({})}', '${sqlJson(parts)}', '${callId}', '${sqlJson(meta)}', ${atSec});`
+}
+
+/** One session event, at a moment given in epoch ms. */
+function gateEvent(session: string, runId: string, eventId: string, type: string, payload: unknown, atMs: number): string {
+  return `INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms)
+    VALUES('${session}', '${runId}', '${eventId}', '${type}', '${sqlJson(payload)}', ${atMs});`
+}
+
+/**
+ * The waiting gate hangs on the call it holds (plan 138): one card on the
+ * activity line — the clock for its node, the facts as its panel, the question
+ * and its answers closing it — never a second box at the thread's end. The
+ * refusal follows the family: the cancel family opens the words field, the
+ * decline family acts at once; written words refuse this one call and settle
+ * the card on its own words.
+ */
+test('a waiting gate hangs on its own call, and the refusal follows the family', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-approval-gated')
+  const now = Math.floor(Date.now() / 1000)
+  const runId = 'run-e2e-gated'
+  const rmAction = 'act-e2e-gated-rm'
+  const permsAction = 'act-e2e-gated-perms'
+  sqlite(`
+    INSERT INTO fb_runs (id, session_id, input_text, status, created_at, updated_at)
+      VALUES ('${runId}', '${session}', 'clean the build', 'waiting_action', ${now - 60}, ${now - 60});
+    INSERT INTO fb_messages(session_id, run_id, role, content, created_at)
+      VALUES('${session}', '${runId}', 'user', 'clean the build', ${now - 60});
+    ${gateAssistantRow(session, runId, [
+      { id: 'call-rm', name: 'shell', args: { command: 'rm -rf build/ && go build ./...' } },
+      { id: 'call-perms', name: 'request_permissions', args: { request_permissions: true } },
+    ], now - 55)}
+    ${gateAwaitingRow(session, runId, 'call-rm', 'shell', 'running rm -rf build/ && go build ./...', { command: 'rm -rf build/ && go build ./...' }, now - 50)}
+    ${gateAwaitingRow(session, runId, 'call-perms', 'request_permissions', 'requesting permissions', { request_permissions: true }, now - 49)}
+    ${gateEvent(session, runId, 'e2e-rm-start', 'tool_call_started', {
+      step_id: 'call-rm', tool_name: 'shell',
+      header_parts: { action: 'Running', target: 'rm -rf build/ && go build ./...' },
+      tool_meta: { tool_name: 'shell', status: 'awaiting approval', input: { command: 'rm -rf build/ && go build ./...' } },
+    }, (now - 50) * 1000)}
+    ${gateEvent(session, runId, 'e2e-perms-start', 'tool_call_started', {
+      step_id: 'call-perms', tool_name: 'request_permissions',
+      header_parts: { action: 'Requesting permissions' },
+      tool_meta: { tool_name: 'request_permissions', status: 'awaiting approval', input: { request_permissions: true } },
+    }, (now - 49) * 1000)}
+    ${gateEvent(session, runId, 'e2e-rm-gate', 'approval_requested', {
+      action_id: rmAction, action_kind: 'shell', tool_step_id: 'call-rm',
+      message: 'Awaiting approval or authorization to continue',
+    }, (now - 48) * 1000)}
+    ${gateEvent(session, runId, 'e2e-perms-gate', 'approval_requested', {
+      action_id: permsAction, action_kind: 'request_permissions', tool_step_id: 'call-perms',
+      message: 'Awaiting approval or authorization to continue',
+    }, (now - 47) * 1000)}
+    INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+      VALUES('${rmAction}', '${session}', 'shell', 'pending', '${sqlJson({
+        command: 'rm -rf build/ && go build ./...', approval_reason: 'dangerous_shell_syntax',
+        force_tool_approval: true, dangerous_rule: 'forced_rm',
+      })}', ${now - 48}, ${now - 48});
+    INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+      VALUES('${permsAction}', '${session}', 'request_permissions', 'pending', '${sqlJson({
+        request_permissions: true, reason: 'run the acceptance suite',
+        permissions: { file_system: { entries: [{ path: { type: 'path', path: '/tmp/out' }, access: 'write' }] } },
+      })}', ${now - 47}, ${now - 47});
+  `)
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+
+  // The gate is the call's own card: the footer lives inside the tool card,
+  // and nothing waits at the thread's end.
+  const rmCard = page.locator('.tool-card').filter({ has: page.locator('[data-testid="approval-gate-shell"]') })
+  await expect(rmCard).toBeVisible()
+  await expect(page.locator('[data-testid="pending-approval"]')).toHaveCount(0)
+  // The node says the call is waiting on the reader — the clock, named for a
+  // reader who cannot see it: both waiting calls' nodes say 等待批准, never the
+  // sentence the head already speaks.
+  await expect(page.locator('.activity-step .tool-status--awaiting svg')).toHaveCount(2)
+  await expect(page.locator('.activity-step .tool-status--awaiting')).toContainText(['等待批准', '等待批准'])
+  await expect(rmCard.locator('.ttl')).toContainText('正在运行')
+  await expect(rmCard.locator('.ttl')).toContainText('rm -rf build/ && go build ./...')
+  // The panel carries what the decision turns on; the footer asks.
+  await expect(rmCard.locator('[data-testid="approval-gate-fact"]')).toHaveText([
+    '强制删除文件（rm -f），引擎把这类命令列为危险命令',
+  ])
+  await expect(rmCard).toContainText('要运行这条命令吗？')
+
+  // The cancel family's refusal opens the words field, focused, with the send
+  // naming what an empty send does.
+  const refusal = rmCard.locator('[data-testid="pending-decision-cancel"]')
+  await expect(refusal).toHaveText('不要运行')
+  await refusal.click()
+  const field = rmCard.locator('[data-testid="gate-feedback-input"]')
+  await expect(field).toBeFocused()
+  await expect(field).toHaveAttribute('placeholder', '告诉它该怎么做（可不填）')
+  await expect(rmCard.locator('[data-testid="gate-feedback-send"]')).toHaveText('拒绝并停下')
+
+  // Written words change the send's name and its verdict: only this call is
+  // refused, and the words reach the model as the user's own.
+  await field.fill('改成移到 trash/')
+  await expect(rmCard.locator('[data-testid="gate-feedback-send"]')).toHaveText('发送')
+  const deny = page.waitForRequest((req) => req.url().includes(`/actions/${rmAction}/approve`) && req.method() === 'POST')
+  await rmCard.locator('[data-testid="gate-feedback-send"]').click()
+  expect(await (await deny).postDataJSON()).toEqual({ decision: 'deny', reason: '改成移到 trash/' })
+
+  // The settled refusal is one sentence plus the user's own words, on the card
+  // the gate hung on. A reload draws a finished call from its transcript row
+  // (a historical tool_call_completed replays nothing: useChatStream treats it
+  // as transcript-backed), so the seeded run records the denial the way the
+  // engine's own completion row carries it: the row's meta turns denied and
+  // keeps the user's words (pkg/run toolDisplayState → BuildToolMeta).
+  const deniedMeta = {
+    tool_name: 'shell',
+    status: 'denied',
+    deny_feedback: '改成移到 trash/',
+    input: { command: 'rm -rf build/ && go build ./...' },
+  }
+  sqlite(`
+    UPDATE fb_messages
+       SET tool_meta_json = '${sqlJson(deniedMeta)}',
+           parts = '${sqlJson([
+             { tool_call_id: 'call-rm', type: 'tool_result_meta' },
+             { type: 'tool_display', summary: 'running rm -rf build/ && go build ./...', body: '', tool_meta_json: JSON.stringify(deniedMeta) },
+           ])}'
+     WHERE session_id = '${session}' AND tool_step_id = 'call-rm';
+  `)
+  await page.reload({ waitUntil: 'networkidle' })
+  // A settled card reloads folded (the conversation's default), so it is found
+  // by its head and opened the way a reader opens any finished call; the
+  // refusal body is what opening it shows.
+  const settled = page.locator('.tool-card').filter({ hasText: /已拒绝\s*rm -rf build\// })
+  await expect(settled).toBeVisible()
+  await settled.locator('.tool-head').click()
+  await expect(settled.locator('[data-testid="tool-refused"]')).toBeVisible()
+  await expect(settled.locator('[data-testid="tool-refused"] .say')).toHaveText('你拒绝了这条命令，它没有运行。')
+  await expect(settled.locator('[data-testid="tool-refused"] .said')).toHaveText('改成移到 trash/')
+  await expect(settled.locator('[data-testid="approval-gate-shell"]')).toHaveCount(0)
+
+  // The decline family acts at once: no field ever opens, the decision goes
+  // straight out, and the turn carries on.
+  const permsCard = page.locator('.tool-card').filter({ has: page.locator('[data-testid="approval-gate-request_permissions"]') })
+  await expect(permsCard).toBeVisible()
+  const decline = page.waitForRequest((req) => req.url().includes(`/actions/${permsAction}/approve`) && req.method() === 'POST')
+  await permsCard.locator('[data-testid="pending-decision-decline"]').click()
+  expect(await (await decline).postDataJSON()).toEqual({ decision: 'decline', reason: 'web:decline' })
+  await expect(permsCard.locator('[data-testid="gate-feedback"]')).toHaveCount(0)
+  await shot(page, 'approval-gated-card')
+})

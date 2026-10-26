@@ -23,10 +23,13 @@
           :view-mode="viewMode"
           @fold-change="(value) => emit('fold-change', value)"
           @open-agent="(agentId) => emit('open-agent', agentId)"
+          @open-doc="(tab) => emit('open-doc', tab)"
         />
       </ConversationContent>
-      <!-- The drawer's own control sits above its composer, not over it. -->
-      <ConversationScrollButton class="!bottom-[128px]" :label="t('chat.scrollToLatest')" />
+      <!-- The drawer's own control sits above its composer, not over it. The
+           composer lives outside the conversation's scroll box, so the
+           prototype's 12px above the fold line is the button's own bottom. -->
+      <ConversationScrollButton :label="t('chat.scrollToLatest')" />
     </Conversation>
 
     <!-- The terminal's working line sits above the composer, never in the
@@ -50,10 +53,14 @@
           <AlertTitle>{{ notice.title }}</AlertTitle>
           <AlertDescription class="whitespace-pre-line">{{ notice.detail }}</AlertDescription>
         </Alert>
-        <AutoContinueBanner :state="autoContinue" @cancel="emit('cancel-auto-continue')" />
+        <AutoContinueBanner
+          :state="autoContinue"
+          :typing-cancels="active"
+          @cancel="emit('cancel-auto-continue')"
+        />
         <!-- Relative, so the model-and-context card opens against the composer
              rather than against the pill. -->
-        <div class="relative">
+        <div v-if="active" class="relative">
           <PendingInputQueuePopover
             :preview="pendingInput"
             @edit-last-queued="emit('edit-last-queued')"
@@ -74,10 +81,8 @@
                 attach-save
                 class="min-h-[2.75rem] max-h-40 md:min-h-[2.75rem]"
                 @files-picked="(files) => emit('files-picked', files)"
-                @queue-follow-up="emit('queue-follow-up')"
                 @edit-last-queued="emit('edit-last-queued')"
                 @typed="emit('typed')"
-                @escape="emit('cancel-auto-continue')"
                 @interrupt-run="emit('escape-key')"
               />
             </PromptInputBody>
@@ -102,6 +107,15 @@
             </PromptInputFooter>
           </PromptInput>
         </div>
+        <!-- An idle subagent takes no messages: the agent that dispatched it
+             decides what it does next, so its view draws no input box at all.
+             What is left where the composer's bar was is what only reads the
+             run it finished — the reading mode and the model/context pill, in
+             the bar's own order (plan 143, the terminal's rule). -->
+        <div v-else class="subagent-idle-bar" data-testid="subagent-idle-bar">
+          <ViewModeChip v-model="viewMode" />
+          <SubagentRunPill :record="record" />
+        </div>
       </PromptInputProvider>
     </div>
   </div>
@@ -110,9 +124,14 @@
 <script setup lang="ts">
 /**
  * One subagent, as a tab of the conversation's right-hand drawer: its
- * transcript, its own working line, and a composer of its own that holds the
- * same controls as the conversation's — attachments, skills, @ references and
- * the commands that view may run.
+ * transcript, its own working line, and — while it runs — a composer of its
+ * own that holds the same controls as the conversation's: attachments, skills,
+ * @ references and the commands that view may run.
+ *
+ * A subagent takes a message only while it runs (plan 143): the agent that
+ * dispatched it decides what it does next, so an idle tab draws no input box at
+ * all, just the reading mode and the pill that read the run it finished — the
+ * same rule the terminal's subagent view follows.
  *
  * Every tab keeps its own composer state, so opening another subagent never
  * moves a draft: ChatView mounts each open tab and shows one at a time.
@@ -188,10 +207,10 @@ const emit = defineEmits<{
   (e: 'submit', message: { text: string; files?: unknown[] }): void
   (e: 'fold-change', value: { id: string; open: boolean }): void
   (e: 'open-agent', agentId: string): void
+  (e: 'open-doc', tab: import('@/composables/useDocTabs').DocTab): void
   (e: 'stop'): void
   (e: 'edit-last-queued'): void
   (e: 'interrupt-run'): void
-  (e: 'queue-follow-up'): void
   (e: 'typed'): void
   (e: 'escape-key'): void
   (e: 'files-picked', files: PickedFile[]): void
@@ -203,6 +222,8 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
 
+// Still in progress — running, or waiting on the operator. Only then does this
+// tab take a message; when it goes idle its composer is gone (plan 143).
 const active = computed(() => subagentPhase(props.record.status) === 'active')
 
 /**
@@ -294,6 +315,17 @@ defineExpose({
 .subagent-composer-input :deep([data-slot='input-group']) {
   border-radius: 10px;
   min-height: 0;
+}
+
+/* The bar an idle tab keeps where its composer's footer was: the reading mode
+   on the left, the model-and-context pill on the right, in the footer's own
+   padding — no border, no fill, nothing to type into. */
+.subagent-idle-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+  padding: 0 0.75rem 0.75rem;
 }
 
 .subagent-stop {

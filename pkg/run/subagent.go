@@ -279,6 +279,13 @@ type FanoutResult struct {
 	Output       string `json:"output,omitempty"`
 	Error        string `json:"error,omitempty"`
 	OK           bool   `json:"ok"`
+	// TaskID, RanFor, ResetsAt and Next are set when the task's subagent
+	// started and then failed: the account subagent_run gives, so the
+	// dispatching agent continues that subagent instead of starting over.
+	TaskID   string `json:"task_id,omitempty"`
+	RanFor   string `json:"ran_for,omitempty"`
+	ResetsAt string `json:"resets_at,omitempty"`
+	Next     string `json:"next,omitempty"`
 }
 
 type subagentExecResult struct {
@@ -365,6 +372,10 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 			taskID := newSubagentTaskID()
 			execRes, err := execGeneralSubagent(ctx, fac, taskID, title, task, subType)
 			if err != nil {
+				var failed *subagentFailure
+				if errors.As(err, &failed) {
+					return "", errors.New(subagentFailureForModel(failed))
+				}
 				return "", err
 			}
 			governed := governSubagentOutput(fac, "subagent_run", taskID, execRes.Output)
@@ -495,47 +506,6 @@ func guardSubagentTool(ctx context.Context, fac Factory, name string) error {
 	return tool.GuardToolNameOnly(ctx, name)
 }
 
-// subagentUserTurnFromContext returns the hook a channel installed for the
-// execution running under ctx, or nil. It carries the worker-session row id of
-// the user message an execution wrote, from the executor back to the channel.
-func subagentUserTurnFromContext(ctx context.Context) func(rowID int64) {
-	if ctx == nil {
-		return nil
-	}
-	fn, _ := ctx.Value(subagentUserTurnKey{}).(func(int64))
-	return fn
-}
-
-type subagentUserTurnKey struct{}
-
-func withSubagentUserTurn(ctx context.Context, fn func(rowID int64)) context.Context {
-	if fn == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, subagentUserTurnKey{}, fn)
-}
-
-// subagentResponseStartedFromContext returns the callback a channel installed
-// for the execution running under ctx, or nil: it fires the moment that
-// execution's model begins producing output, which is the point its message can
-// no longer be withdrawn.
-func subagentResponseStartedFromContext(ctx context.Context) func() {
-	if ctx == nil {
-		return nil
-	}
-	fn, _ := ctx.Value(subagentResponseStartedKey{}).(func())
-	return fn
-}
-
-type subagentResponseStartedKey struct{}
-
-func withSubagentResponseStarted(ctx context.Context, fn func()) context.Context {
-	if fn == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, subagentResponseStartedKey{}, fn)
-}
-
 func executeSubagent(ctx context.Context, fac Factory, record agent.HistoryEntry, task string, parts []llm.ContentPart, superviseExistingRunID, parentRunID, sessionID, workerSessionID, subagentType string) (string, error) {
 	own := fac.Owner
 	if own == nil || own.SubagentExecutor == nil {
@@ -556,9 +526,6 @@ func executeSubagent(ctx context.Context, fac Factory, record agent.HistoryEntry
 	// child's identity — the model it runs on above all, which its own context
 	// gauge is sized by — and the supervised run id is the child's own run.
 	ctx = subagentRunContext(ctx, own, own.Events, superviseExistingRunID, sessionID, record)
-	// The user-row hook is installed by the channel that owns this execution:
-	// a user-driven dispatch reports the row it writes so the channel can
-	// withdraw it before the model answers.
 	return own.SubagentExecutor.RunSubagentExec(ctx, SubagentExecRequest{
 		Task:            task,
 		Parts:           parts,
@@ -568,32 +535,25 @@ func executeSubagent(ctx context.Context, fac Factory, record agent.HistoryEntry
 		WorkerSessionID: workerSessionID,
 		SubagentType:    subagentType,
 		Model:           strings.TrimSpace(record.Model),
-		OnUserTurn:      subagentUserTurnFromContext(ctx),
 	})
 }
 
-// errSubagentInputWithdrawn marks a user-driven execution the user took back
-// before it answered. The execution that receives it publishes no ended event
-// and writes no result, the way an Esc withdrawal on the primary conversation
-// leaves no trace.
-var errSubagentInputWithdrawn = errors.New("subagent input withdrawn")
-
 // errSubagentInterruptedToSend marks an execution stopped only so the steers
 // queued behind it could be sent now; the channel's boundary carries that
-// decision and the surface sends what Next released.
+// decision and the same execution resumes with them.
 var errSubagentInterruptedToSend = errors.New("subagent interrupted to send")
 
 // SubagentSurface is how the surface the user is talking to a subagent from
 // takes part in that conversation.
 type SubagentSurface struct {
-	// Frame is applied to the context of every execution the user starts: the
-	// step hook and approval hooks the surface uses for its own turns.
+	// Frame is applied to the context of every execution the surface starts:
+	// the step hook and approval hooks the surface uses for its own turns.
 	Frame func(ctx context.Context) context.Context
-	// OnBoundary receives, when an execution of the subagent ends, what its
-	// queue decided: send is the user's queued input to run next (the surface
-	// merges it and calls SendToSubagent), restore is the input to give back
-	// to the subagent's composer.
-	OnBoundary func(agentKey string, send, restore []Input)
+	// OnReturned receives, when an execution of the subagent ends, every
+	// message the user sent it that it never took, in the order they were
+	// written. The subagent is idle then and takes no messages, so the surface
+	// gives them back to the user — in the conversation's own composer.
+	OnReturned func(agentKey string, returned []Input)
 	// OnQueueChanged receives the subagent's queue preview after every change
 	// to it — a message queued, recalled, handed to the model, discarded, or
 	// settled when an execution ends — so a surface that does not read the
@@ -636,23 +596,16 @@ type subagentChannel struct {
 	onQueueChanged func(agentKey string, preview QueuePreview)
 }
 
-// subagentExecution is one run of a subagent while it is in flight.
+// subagentExecution is one run of a subagent while it is in flight: one or more
+// attempts on the subagent's own conversation, decided by how each attempt was
+// stopped.
 type subagentExecution struct {
 	executionID string
-	// byUser is true when a message the user sent started this execution: only
-	// such an execution may be withdrawn before it answers.
-	byUser bool
-	// responded is set once the execution's model has produced output; past
-	// that point its message can no longer be withdrawn.
-	responded bool
-	// withdrawn is set when the user took the message back before it answered.
-	withdrawn bool
-	cancel    context.CancelCauseFunc
-	// boundary is how the execution is being stopped, when it is; the zero
-	// value means it ran to its end.
-	boundary  Boundary
-	input     Input
-	userRowID int64
+	// cancel stops the attempt running now; it is replaced at every attempt.
+	cancel context.CancelCauseFunc
+	// boundary is how the current attempt is being stopped, when it is; the
+	// zero value means it ran to its end.
+	boundary Boundary
 }
 
 var (
@@ -746,23 +699,21 @@ func (ch *subagentChannel) setRunning(ex *subagentExecution) {
 	ch.mu.Unlock()
 }
 
-// markResponded records that the execution's model has begun answering.
-func (ch *subagentChannel) markResponded(ex *subagentExecution) {
+// beginAttempt opens one attempt of an execution: its own cancellation, and a
+// fresh steer runtime attached to the channel's queue for its duration. A long
+// execution makes several attempts — the user's interrupt-to-send ends one and
+// starts the next — and each takes its own runtime, so a steer queued between
+// two attempts is never delivered into the attempt it was not queued for.
+func (ch *subagentChannel) beginAttempt(ctx context.Context, fac Factory, ex *subagentExecution) (context.Context, context.CancelCauseFunc) {
+	execCtx, cancel := context.WithCancelCause(ctx)
+	rt := NewTurnInputRuntime()
+	ch.queue.Attach(rt)
+	rt.AddChangeHook(func(delivered []TurnInputEntry) { ch.publishInputDelivered(fac, ex, delivered) })
+	execCtx = WithTurnInputRuntime(execCtx, rt)
 	ch.mu.Lock()
-	if ch.running == ex {
-		ex.responded = true
-	}
+	ex.cancel = cancel
 	ch.mu.Unlock()
-}
-
-// setUserRow records the worker-session row of the user message the execution
-// wrote, so a withdrawal can name the exact row to hide.
-func (ch *subagentChannel) setUserRow(ex *subagentExecution, rowID int64) {
-	ch.mu.Lock()
-	if ch.running == ex {
-		ex.userRowID = rowID
-	}
-	ch.mu.Unlock()
+	return execCtx, cancel
 }
 
 // publishInputDelivered draws each steer the runtime handed the model as a
@@ -788,10 +739,10 @@ func (ch *subagentChannel) publishInputDelivered(fac Factory, ex *subagentExecut
 	}
 }
 
-// interruptToSend stops a running execution precisely to flush the steers
-// queued behind it: the boundary says the surface sends those next. It does
-// nothing unless an execution is running and a steer is waiting to be
-// delivered, so a surface can tell Esc's two meanings apart.
+// interruptToSend stops the attempt running now, precisely so the steers queued
+// behind it are sent next: the boundary says the same execution resumes with
+// them. It does nothing unless an execution is running and a steer is waiting
+// to be delivered, so a surface can tell whether Esc has work for the subagent.
 func (ch *subagentChannel) interruptToSend() bool {
 	ch.mu.Lock()
 	ex := ch.running
@@ -808,46 +759,110 @@ func (ch *subagentChannel) interruptToSend() bool {
 	return true
 }
 
-// withdraw takes a user's just-sent message back out of the subagent before
-// its model answered: it stops the execution, hides the message's worker-
-// session row, and returns that message plus everything queued after it, in
-// the order the user wrote them. Past the answer boundary, or for an execution
-// the user did not start, it does nothing.
-func (ch *subagentChannel) withdraw() ([]Input, bool) {
-	ch.mu.Lock()
-	ex := ch.running
-	if ex == nil || !ex.byUser || ex.responded || ex.withdrawn {
-		ch.mu.Unlock()
-		return nil, false
+// steerEntries is how steers released by an interrupt are reported delivered:
+// the entries the queue would have handed the runtime at a tool boundary, skill
+// selection included.
+func steerEntries(steers []Input) []TurnInputEntry {
+	out := make([]TurnInputEntry, 0, len(steers))
+	for _, in := range steers {
+		parts := append([]llm.ContentPart(nil), in.Parts...)
+		if len(parts) == 0 {
+			parts = []llm.ContentPart{llm.Text(in.Text)}
+		}
+		out = append(out, TurnInputEntry{
+			Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq,
+			SkillName: strings.TrimSpace(in.SkillName), SkillPath: strings.TrimSpace(in.SkillPath),
+		})
 	}
-	ex.withdrawn = true
-	ex.boundary = BoundaryInterrupted
-	rest := ch.queue.TakeAll()
-	withdrawn := ex.input
-	userRowID := ex.userRowID
-	cancel := ex.cancel
-	ch.mu.Unlock()
-	if ch.store != nil && userRowID > 0 {
-		_ = ch.store.WithdrawUserTurn(context.Background(), ch.workerSessionID, userRowID)
+	return out
+}
+
+// mergeSteers is the one message an interrupt resumes the subagent with — the
+// steers in the order the user wrote them, joined by a blank line — and every
+// skill they selected.
+func mergeSteers(steers []Input) (Input, []SkillSelection) {
+	texts := make([]string, 0, len(steers))
+	var selections []SkillSelection
+	merged := Input{}
+	for i, in := range steers {
+		text := strings.TrimSpace(in.Text)
+		if text == "" {
+			text = strings.Join(strings.Fields(llm.TextContent(in.Parts...)), " ")
+		}
+		if text != "" {
+			texts = append(texts, text)
+		}
+		if i == 0 {
+			merged = in
+			continue
+		}
+		// Attachments and images of every steer travel with the one message
+		// they are now part of.
+		merged.Attachments = append(merged.Attachments, in.Attachments...)
+		merged.MentionImages = append(merged.MentionImages, in.MentionImages...)
 	}
-	if cancel != nil {
-		cancel(errSubagentInputWithdrawn)
+	if name, path := strings.TrimSpace(merged.SkillName), strings.TrimSpace(merged.SkillPath); name != "" && path != "" {
+		selections = append(selections, SkillSelection{Name: name, Path: path})
 	}
-	out := make([]Input, 0, len(rest)+1)
-	out = append(out, withdrawn)
-	out = append(out, rest...)
-	return out, true
+	for _, in := range steers[1:] {
+		if name, path := strings.TrimSpace(in.SkillName), strings.TrimSpace(in.SkillPath); name != "" && path != "" {
+			selections = append(selections, SkillSelection{Name: name, Path: path})
+		}
+	}
+	merged.Text = strings.Join(texts, "\n\n")
+	merged.Parts = []llm.ContentPart{llm.Text(merged.Text)}
+	merged.Payload = nil
+	merged.SkillName = ""
+	merged.SkillPath = ""
+	return merged, selections
+}
+
+// subagentResumeAttempt runs a subagent once more on its own conversation,
+// starting from in: a fork on its frozen system and worker transcript, a typed
+// subagent through the executor with its worker session. skills are the
+// explicit skills the message selected; both paths load them (plan 141).
+func subagentResumeAttempt(fac Factory, record agent.HistoryEntry, in Input, skills []SkillSelection) func(context.Context) (string, error) {
+	text := strings.TrimSpace(in.Text)
+	if text == "" {
+		text = strings.Join(strings.Fields(llm.TextContent(in.Parts...)), " ")
+	}
+	parts := append([]llm.ContentPart(nil), in.Parts...)
+	subagentType := ""
+	if strings.TrimSpace(record.AgentKind) == "typed" {
+		subagentType = strings.TrimSpace(record.AgentType)
+	}
+	return func(execCtx context.Context) (string, error) {
+		if len(skills) > 0 {
+			execCtx = WithExplicitSkillSelections(execCtx, skills)
+		}
+		approve := tool.SubagentApprovalHookFromContext(execCtx, factoryToolsState(fac))
+		return runAcrossApprovals(execCtx, approve, record.RunID, "subagent", func(attemptCtx context.Context, superviseRunID string) (string, error) {
+			if strings.TrimSpace(record.AgentKind) == "fork" {
+				return continueForkSubagent(attemptCtx, fac, record, text)
+			}
+			return executeSubagent(attemptCtx, fac, record, text, parts, superviseRunID, record.ParentRunID, record.SessionID, record.WorkerSessionID, subagentType)
+		})
+	}
 }
 
 // runSubagentExecution runs one execution of a subagent through its channel: it
-// waits for the subagent to be free, attaches the channel's steer runtime for
-// the execution's duration, and settles the channel's queue at the end. Every
-// path that executes a subagent goes through it, so a user's steer always
-// reaches the subagent — this installs the subagent's own runtime where the
-// dispatching agent's would otherwise be inherited — and the model and the user
-// never write the same worker session at once.
-func runSubagentExecution(ctx context.Context, fac Factory, record agent.HistoryEntry, byUser bool, input Input,
+// waits for the subagent to be free, attaches the channel's steer runtime while
+// the execution runs, and settles the channel's queue at the end. Every path
+// that executes a subagent goes through it, so a user's steer always reaches the
+// subagent — this installs the subagent's own runtime where the dispatching
+// agent's would otherwise be inherited — and the model and the user never write
+// the same worker session at once.
+//
+// An execution is one or more attempts. The user's interrupt-to-send stops the
+// running attempt, and the steers queued behind it start the next one on the
+// subagent's own conversation inside this same execution, so whoever awaits it —
+// the dispatching tool call above all — still gets its answer (owner,
+// 2026-10-26). When the execution ends, every message the user sent that the
+// subagent never took goes back to the user: the subagent is idle then, and an
+// idle subagent takes no messages.
+func runSubagentExecution(ctx context.Context, fac Factory, record agent.HistoryEntry,
 	run func(execCtx context.Context) (string, error)) (string, error) {
+	awaited := subagentAwaitedFromContext(ctx)
 	ch := subagentChannelFor(fac, record)
 	select {
 	case ch.exec <- struct{}{}:
@@ -855,47 +870,49 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	execCtx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
 	executionID := strings.TrimSpace(record.ExecutionID)
 	if executionID == "" {
 		executionID = uuid.NewString()
 	}
-	ex := &subagentExecution{executionID: executionID, byUser: byUser, cancel: cancel, input: input}
-	rt := NewTurnInputRuntime()
-	ch.queue.Attach(rt)
-	execCtx = WithTurnInputRuntime(execCtx, rt)
-	execCtx = withSubagentResponseStarted(execCtx, func() { ch.markResponded(ex) })
-	execCtx = withSubagentUserTurn(execCtx, func(rowID int64) { ch.setUserRow(ex, rowID) })
-	rt.AddChangeHook(func(delivered []TurnInputEntry) { ch.publishInputDelivered(fac, ex, delivered) })
-	ch.setRunning(ex)
-	// The execution has taken the slot: any continuation the subagent was
-	// waiting on is superseded, because the conversation has moved on.
-	reportSubagentExecutionStarting(fac, record)
-	out, err := run(execCtx)
-	ch.queue.Detach()
-	// Settle under the lock so a concurrent withdrawal sees either a running
-	// execution or none, never both: whichever reaches the lock first wins.
-	ch.mu.Lock()
-	withdrawn := ex.withdrawn
-	boundary := ex.boundary
-	surface := ch.surface
-	if ch.running == ex {
-		ch.running = nil
+	ex := &subagentExecution{executionID: executionID}
+	attempt := run
+	started := false
+	for {
+		execCtx, cancel := ch.beginAttempt(ctx, fac, ex)
+		if !started {
+			started = true
+			ch.setRunning(ex)
+			// The execution has taken the slot: any continuation the subagent
+			// was waiting on is superseded, because the conversation moved on.
+			reportSubagentExecutionStarting(fac, record)
+		}
+		out, err := attempt(execCtx)
+		cancel(nil)
+		ch.queue.Detach()
+		ch.mu.Lock()
+		boundary := ex.boundary
+		ex.boundary = BoundaryCompleted
+		surface := ch.surface
+		ch.mu.Unlock()
+		if boundary == BoundaryInterruptToSend && ch.store != nil {
+			if steers, _ := ch.queue.Next(BoundaryInterruptToSend); len(steers) > 0 {
+				ch.publishInputDelivered(fac, ex, steerEntries(steers))
+				in, skills := mergeSteers(steers)
+				attempt = subagentResumeAttempt(fac, record, in, skills)
+				continue
+			}
+		}
+		ch.mu.Lock()
+		if ch.running == ex {
+			ch.running = nil
+		}
+		ch.mu.Unlock()
+		if _, returned := ch.queue.Next(BoundaryInterrupted); len(returned) > 0 && surface.OnReturned != nil {
+			surface.OnReturned(ch.agentKey, returned)
+		}
+		reportSubagentExecutionEnded(fac, record, err, awaited)
+		return out, err
 	}
-	ch.mu.Unlock()
-	if withdrawn {
-		// A withdrawn execution ended without a usage limit, so it closes the
-		// subagent's run of continuations like any other non-limit ending.
-		reportSubagentExecutionEnded(fac, record, errSubagentInputWithdrawn)
-		return out, errSubagentInputWithdrawn
-	}
-	send, restore := ch.queue.Next(boundary)
-	if surface.OnBoundary != nil {
-		surface.OnBoundary(ch.agentKey, send, restore)
-	}
-	reportSubagentExecutionEnded(fac, record, err)
-	return out, err
 }
 
 // reportSubagentExecutionStarting tells the composition root that one execution
@@ -913,8 +930,10 @@ func reportSubagentExecutionStarting(fac Factory, record agent.HistoryEntry) {
 // reportSubagentExecutionEnded tells the composition root how one execution of
 // the subagent in record finished. err is the execution's own error, so a
 // usage-limit failure is recognized by the scheduler the same way a primary
-// turn's is.
-func reportSubagentExecutionEnded(fac Factory, record agent.HistoryEntry, err error) {
+// turn's is. awaited says the execution was run for a blocking call of the
+// dispatching agent, which receives the failure and continues the subagent
+// itself.
+func reportSubagentExecutionEnded(fac Factory, record agent.HistoryEntry, err error, awaited bool) {
 	exec := subagentExecutorOf(fac)
 	if exec == nil {
 		return
@@ -925,6 +944,7 @@ func reportSubagentExecutionEnded(fac Factory, record agent.HistoryEntry, err er
 		AgentKey:              subagentRosterKey(record),
 		RunID:                 strings.TrimSpace(record.RunID),
 		Err:                   err,
+		AwaitedByDispatcher:   awaited,
 	})
 }
 
@@ -959,10 +979,9 @@ func subagentExecutorOf(fac Factory) SubagentExecutor {
 // events, the only form the surfaces route per agent. The parent-owned
 // callbacks are deliberately dropped rather than forwarded: Streamed (a child
 // marking the parent's turn as streamed suppresses the parent's own final
-// message) and OnResponseCompleted (the child does not own the text the parent
-// has buffered). OnResponseStarted is replaced, not dropped: the child's
-// channel installs its own acknowledgement boundary, which is how it learns an
-// execution has begun answering and can no longer be withdrawn.
+// message), OnResponseCompleted (the child does not own the text the parent
+// has buffered), and OnResponseStarted (nothing here acts on the child
+// beginning to answer).
 // OnUsageSnapshot is replaced, not dropped: the child's own usage
 // snapshot is published tagged with its roster key, so the gauge in its view
 // shows its context — the parent's footer never sees it.
@@ -973,7 +992,7 @@ func subagentRunContext(ctx context.Context, own *Runner, sink event.Sink, runID
 		return ctx
 	}
 	var streamed bool
-	stream := EventStreamSink(ctx, sink, runID, sessionID, rosterKey, &streamed, subagentResponseStartedFromContext(ctx))
+	stream := EventStreamSink(ctx, sink, runID, sessionID, rosterKey, &streamed)
 	stream.OnUsage = func(inputTokens, outputTokens int) {
 		if inputTokens <= 0 && outputTokens <= 0 {
 			return
@@ -1002,8 +1021,7 @@ func subagentRunContext(ctx context.Context, own *Runner, sink event.Sink, runID
 // the web's conversation. agentID tags a subagent's stream and is empty for
 // the primary agent's. streamed is set once anything was streamed.
 // onResponseStarted, when given, fires the moment this sink's model begins
-// producing output: a subagent's channel uses it to learn the execution has
-// answered and its message can no longer be withdrawn.
+// producing output.
 func EventStreamSink(ctx context.Context, sink event.Sink, runID, sessionID, agentID string, streamed *bool, onResponseStarted ...func()) *llm.StreamSink {
 	agentID = strings.TrimSpace(agentID)
 	stream := &llm.StreamSink{
@@ -1680,7 +1698,7 @@ func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, 
 			// model it was announced with; the wrapper below installs it in
 			// place of the parent's.
 			execCtx := subagentExecContext(prep)
-			return runSubagentExecution(execCtx, fac, prep.entry, false, Input{}, func(execCtx context.Context) (string, error) {
+			return runSubagentExecution(withSubagentAwaited(execCtx), fac, prep.entry, func(execCtx context.Context) (string, error) {
 				if prep.agentKind == "fork" {
 					return runAcrossApprovals(execCtx, approve, prep.superviseRunID, label,
 						func(attemptCtx context.Context, _ string) (string, error) {
@@ -1740,7 +1758,7 @@ func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, s
 		hostCtx := subagentExecContext(prep)
 		approve := tool.SubagentApprovalHookFromContext(hostCtx, factoryToolsState(fac))
 		label := "subagent " + strings.TrimSpace(prep.entry.AgentType)
-		outText, runErr := runSubagentExecution(hostCtx, fac, prep.entry, false, Input{}, func(execCtx context.Context) (string, error) {
+		outText, runErr := runSubagentExecution(hostCtx, fac, prep.entry, func(execCtx context.Context) (string, error) {
 			return runAcrossApprovals(execCtx, approve, prep.superviseRunID, label,
 				func(attemptCtx context.Context, superviseRunID string) (string, error) {
 					if prep.agentKind == "fork" {
@@ -1922,8 +1940,9 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	return hostCtx
 }
 
-// ErrSubagentRunning refuses an operation that rewrites a subagent's history
-// while one of its executions is still appending to it.
+// ErrSubagentRunning refuses a second execution of a subagent while one is
+// still appending to its history: the continuation would then land behind that
+// work rather than resume the stopped execution.
 var ErrSubagentRunning = errors.New("subagent is running")
 
 // ErrSubagentNotFound refuses an operation on an agent key this conversation
@@ -1931,27 +1950,10 @@ var ErrSubagentRunning = errors.New("subagent is running")
 // is not found here.
 var ErrSubagentNotFound = errors.New("subagent not found")
 
-// SubagentCompactTarget names what /compact compacts when it is run from a
-// subagent's view: that subagent's worker session, under the context its own
-// requests are made in. It refuses while the subagent is running, the way
-// /compact is refused while the conversation's own run is.
-func SubagentCompactTarget(ctx context.Context, r *Runner, conversationSessionID, agentKey string) (context.Context, string, error) {
-	fac := r.subagentFactory()
-	scopeRoot := fac.subagentScopeRoot()
-	record, ok, err := agent.GetMerged(scopeRoot, agent.Query{SessionID: conversationSessionID, TaskID: agentKey})
-	if err != nil {
-		return nil, "", err
-	}
-	if !ok {
-		return nil, "", ErrSubagentNotFound
-	}
-	// "Running" has one definition now: the channel is executing. It covers a
-	// user-driven execution the registry handle would not show.
-	if SubagentRunning(r, conversationSessionID, agentKey) {
-		return nil, "", ErrSubagentRunning
-	}
-	return subagentRecordContext(ctx, fac, record), record.WorkerSessionID, nil
-}
+// ErrSubagentNotRunning refuses a message to a subagent that is not running.
+// An idle subagent takes no messages: the agent that dispatched it decides what
+// it does next (owner, 2026-10-26).
+var ErrSubagentNotRunning = errors.New("subagent is not running")
 
 // subagentChannelForConversation resolves an agent key to its channel in this
 // conversation, or ErrSubagentNotFound. The lookup filters by conversation, so
@@ -2004,25 +2006,24 @@ func liveSubagentChannel(r *Runner, conversationSessionID, agentKey string) *sub
 type SubagentDelivery string
 
 const (
-	// SubagentDeliveryStarted: the subagent was idle; the message started its
-	// next execution.
-	SubagentDeliveryStarted SubagentDelivery = "started"
 	// SubagentDeliverySteered: it is running; the message reaches it at its
 	// next tool boundary.
 	SubagentDeliverySteered SubagentDelivery = "steered"
-	// SubagentDeliveryQueued: it is running and the message waits for the
-	// execution after this one.
+	// SubagentDeliveryQueued: it is running and the message waits in the queue
+	// for the attempt that will take it. No runtime is attached between two
+	// attempts of an execution, so a message sent then is kept here and the
+	// execution's end hands it back if no attempt took it.
 	SubagentDeliveryQueued SubagentDelivery = "queued"
 )
 
 // SendToSubagent delivers a message the user sent a subagent through its
-// channel. When the subagent is executing, the message steers (mode steer) or
-// queues behind this execution (mode follow_up); when it is idle, the message
-// starts a fresh user-driven execution in the background and the call returns
-// Started at once. The surface is the one the user is talking from; the first
-// call installs it, and a later call replaces it so a reconnected surface
-// takes over.
-func SendToSubagent(ctx context.Context, r *Runner, surface SubagentSurface, conversationSessionID, agentKey string, in Input, mode TurnInputMode) (SubagentDelivery, error) {
+// channel: it steers the execution running now, and an idle subagent refuses it
+// with ErrSubagentNotRunning — the subagent is the dispatching agent's, and
+// once it has handed its result back, what it does next is that agent's
+// decision, not the user's. The surface is the one the user is talking from;
+// the first call installs it, and a later call replaces it so a reconnected
+// surface takes over.
+func SendToSubagent(ctx context.Context, r *Runner, surface SubagentSurface, conversationSessionID, agentKey string, in Input) (SubagentDelivery, error) {
 	ch, record, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
 	if err != nil {
 		return "", err
@@ -2034,16 +2035,45 @@ func SendToSubagent(ctx context.Context, r *Runner, surface SubagentSurface, con
 	ch.mu.Lock()
 	running := ch.running
 	ch.mu.Unlock()
+	if running == nil {
+		return "", ErrSubagentNotRunning
+	}
+	// A subagent's view only steers: an execution ends with nothing queued
+	// behind it, so there is no "after" to queue a message for.
+	if ch.queue.Steer(in) {
+		return SubagentDeliverySteered, nil
+	}
+	// No runtime is attached between two attempts of an execution: the queue
+	// keeps the message, and the execution's end hands it back if no attempt
+	// took it.
+	return SubagentDeliveryQueued, nil
+}
+
+// StartSubagentAutoContinue starts an execution of one subagent for its
+// auto-continue prompt after a usage limit. It is the only way an execution
+// begins that neither a tool call nor a message the user typed started: the
+// scheduler that watched the failed execution resumes it, and no surface is
+// asked. A running execution means the continuation would land behind that
+// work rather than resume the stopped one, so it is refused with
+// ErrSubagentRunning.
+func StartSubagentAutoContinue(ctx context.Context, r *Runner, surface SubagentSurface, conversationSessionID, agentKey string, in Input) error {
+	ch, record, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
+	if err != nil {
+		return err
+	}
+	if err := refuseGoneCustomSubagent(r.subagentFactory(), record); err != nil {
+		return err
+	}
+	ch.setSurface(surface)
+	ch.mu.Lock()
+	running := ch.running
+	ch.mu.Unlock()
 	if running != nil {
-		if mode == TurnInputModeSteer && ch.queue.Steer(in) {
-			return SubagentDeliverySteered, nil
-		}
-		ch.queue.FollowUp(in)
-		return SubagentDeliveryQueued, nil
+		return ErrSubagentRunning
 	}
 	fac := r.subagentFactory()
-	go startUserSubagentExecution(ctx, fac, ch, record, in)
-	return SubagentDeliveryStarted, nil
+	go startSubagentContinuation(ctx, fac, ch, record, in)
+	return nil
 }
 
 // SubagentInputPreview is the subagent's queued input as its view shows it.
@@ -2077,17 +2107,6 @@ func InterruptSubagentToSend(r *Runner, conversationSessionID, agentKey string) 
 		return false
 	}
 	return ch.interruptToSend()
-}
-
-// WithdrawSubagentInput takes a just-sent user message back before the subagent
-// answers — Esc's first meaning. It returns the withdrawn message plus
-// everything queued after it, or false when the window has closed.
-func WithdrawSubagentInput(r *Runner, conversationSessionID, agentKey string) ([]Input, bool) {
-	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
-	if ch == nil {
-		return nil, false
-	}
-	return ch.withdraw()
 }
 
 // DiscardSubagentInput empties the subagent's queue and returns how many
@@ -2132,32 +2151,32 @@ func (ch *subagentChannel) cancelRunning(cause error) bool {
 	return true
 }
 
-// startUserSubagentExecution runs one message the user sent a subagent as its
+// startSubagentContinuation runs one auto-continue prompt as the subagent's
 // next execution: on the surface's own context, through the channel, with the
 // lifecycle of any other execution. It publishes the spawn so the roster and
-// the card exist while it runs, and — unless the user withdrew the message —
-// writes its result and publishes its end. It never injects anything into the
-// primary conversation (decision D3): the dispatching agent reads the result
-// back through subagent_status/wait/list.
-func startUserSubagentExecution(ctx context.Context, fac Factory, ch *subagentChannel, record agent.HistoryEntry, in Input) {
+// the card exist while it runs, writes its result, and publishes its end. It
+// never injects anything into the primary conversation (decision D3): the
+// dispatching agent reads the result back through subagent_status/wait/list.
+func startSubagentContinuation(ctx context.Context, fac Factory, ch *subagentChannel, record agent.HistoryEntry, in Input) {
 	own := fac.Owner
 	if own == nil || own.SubagentExecutor == nil {
 		return
 	}
 	// The surface's own hooks frame this execution, then the record rebuilds
 	// the identity its requests run under. A fresh background context: the
-	// message outlives the request that delivered it.
+	// continuation outlives the request that started it.
 	base := context.Background()
 	if surface := ch.surfaceFor(); surface.Frame != nil {
 		base = surface.Frame(base)
 	}
 	hostCtx := subagentRecordContext(base, fac, record)
-	// A skill command the user typed in this subagent's view carries its
-	// trusted explicit selection here; the execution activates that skill the
-	// same way a dispatched turn does. It is threaded before the model call,
-	// so the skill's activation is injected ahead of the first request.
-	if name := strings.TrimSpace(in.SkillName); name != "" || strings.TrimSpace(in.SkillPath) != "" {
-		hostCtx = WithExplicitSkillSelection(hostCtx, name, strings.TrimSpace(in.SkillPath))
+	// A skill command carries its trusted explicit selection here; the
+	// execution activates that skill the same way a dispatched turn does. It is
+	// threaded before the model call, so the skill's activation is injected
+	// ahead of the first request.
+	var skills []SkillSelection
+	if name := strings.TrimSpace(in.SkillName); name != "" && strings.TrimSpace(in.SkillPath) != "" {
+		skills = append(skills, SkillSelection{Name: name, Path: strings.TrimSpace(in.SkillPath)})
 	}
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
@@ -2169,7 +2188,7 @@ func startUserSubagentExecution(ctx context.Context, fac Factory, ch *subagentCh
 	lifecycle.Status = agent.StatusRunning
 	lifecycle.Error = ""
 	lifecycle.Task = text
-	// A user-driven execution has no dispatching tool call and one task.
+	// This execution has no dispatching tool call and one task.
 	lifecycle.ParentToolCallID = ""
 	lifecycle.TaskIndex = 0
 	now := time.Now().Unix()
@@ -2184,69 +2203,15 @@ func startUserSubagentExecution(ctx context.Context, fac Factory, ch *subagentCh
 	if own.RunRT != nil && strings.TrimSpace(record.RunID) != "" {
 		_ = own.RunRT.SetStatus(ctx, record.RunID, state.RunStatusRunning)
 	}
-	subagentType := ""
-	if strings.TrimSpace(record.AgentKind) == "typed" {
-		subagentType = strings.TrimSpace(record.AgentType)
-	}
-	approve := tool.SubagentApprovalHookFromContext(hostCtx, factoryToolsState(fac))
-	var runFork func(attemptCtx context.Context, _ string) (string, error)
-	if strings.TrimSpace(record.AgentKind) == "fork" {
-		runFork = func(attemptCtx context.Context, _ string) (string, error) {
-			return continueForkSubagent(attemptCtx, fac, record, text)
-		}
-	}
-	outText, runErr := runSubagentExecution(hostCtx, fac, lifecycle, true, in, func(execCtx context.Context) (string, error) {
-		return runAcrossApprovals(execCtx, approve, record.RunID, "subagent", func(attemptCtx context.Context, superviseRunID string) (string, error) {
-			if runFork != nil {
-				return runFork(attemptCtx, superviseRunID)
-			}
-			return executeSubagent(attemptCtx, fac, record, text, in.Parts, superviseRunID, record.ParentRunID, record.SessionID, record.WorkerSessionID, subagentType)
-		})
-	})
-	if errors.Is(runErr, errSubagentInputWithdrawn) {
-		// The user took the message back before it answered: write no result —
-		// the way Esc does on the primary conversation — and return the record
-		// to the state it had before the message, so the ledger keeps no
-		// execution that is forever running.
-		//
-		// The execution still reports its end, as a cancellation. The spawn
-		// announced a lifecycle card and a roster row before the message was
-		// taken back; without an end event the surface would show that subagent
-		// running forever. A cancelled end writes no output and injects nothing
-		// into the conversation — it only retires what the spawn opened.
-		restored := record
-		restored.ExecutionID = executionID
-		restored.UpdatedAt = time.Now().Unix()
-		if restored.FinishedAt <= 0 {
-			restored.FinishedAt = restored.UpdatedAt
-		}
-		restored = normalizeSubagentFinal(restored)
-		if handle != nil {
-			handle.Finish(restored)
-		}
-		if scopeRoot != "" {
-			_ = agent.AppendHistory(scopeRoot, restored)
-		}
-		syncGeneralSubagentRunState(fac, hostCtx, restored)
-		// The event carries the spawn's identity, not the original record's: a
-		// user-driven execution has no dispatching tool call, so the surface's
-		// card binding retires the card the spawn opened and not the one the
-		// original subagent_run/send call owns.
-		ended := lifecycle
-		ended.Status = agent.StatusCancelled
-		ended.UpdatedAt = restored.UpdatedAt
-		ended.FinishedAt = restored.FinishedAt
-		notifySubagentEndedDirect(fac, ended)
-		return
-	}
+	outText, runErr := runSubagentExecution(hostCtx, fac, lifecycle, subagentResumeAttempt(fac, record, in, skills))
 	now = time.Now().Unix()
 	// The ended event must carry the identity the spawn announced, not the
-	// original record's: a user-driven execution has no dispatching tool call,
-	// so its ParentToolCallID is empty and its TaskIndex is 0. Reusing the
-	// original record here would name the subagent_send/run call that first
-	// dispatched this subagent, and the surface's card binding would settle that
-	// (already finished) call instead — leaving this execution's own card stuck
-	// running in the conversation.
+	// original record's: this execution has no dispatching tool call, so its
+	// ParentToolCallID is empty and its TaskIndex is 0. Reusing the original
+	// record here would name the subagent_send/run call that first dispatched
+	// this subagent, and the surface's card binding would settle that (already
+	// finished) call instead — leaving this execution's own card stuck running
+	// in the conversation.
 	final := lifecycle
 	final.UpdatedAt = now
 	final.FinishedAt = now
@@ -2448,6 +2413,9 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	lifecycle.Task = msg
 	lifecycle.Status = agent.StatusRunning
 	lifecycle.Error = ""
+	// The continuation's clock starts where its card row's does: at the
+	// spawned notification below.
+	started := time.Now()
 	notifySubagentSpawnedDirect(fac, lifecycle, "")
 	if fac.Owner != nil && fac.Owner.RunRT != nil && strings.TrimSpace(record.RunID) != "" {
 		_ = fac.Owner.RunRT.SetStatus(ctx, record.RunID, state.RunStatusRunning)
@@ -2468,7 +2436,7 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 			return continueForkSubagent(attemptCtx, fac, record, input)
 		}
 	}
-	outText, runErr := runSubagentExecution(hostCtx, fac, lifecycle, false, Input{}, func(execCtx context.Context) (string, error) {
+	outText, runErr := runSubagentExecution(withSubagentAwaited(hostCtx), fac, lifecycle, func(execCtx context.Context) (string, error) {
 		return runAcrossApprovals(execCtx, approve, record.RunID, "subagent continuation",
 			func(attemptCtx context.Context, superviseRunID string) (string, error) {
 				if runFork != nil {
@@ -2505,6 +2473,11 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	notifySubagentEndedDirect(fac, ended)
 	publishSubagentContextBudget(fac, final)
 	if runErr != nil {
+		// A gate is a suspension and a cancellation was asked for; only an
+		// execution that ran and failed is the dispatcher's to pick up.
+		if !isRequiresActionError(runErr) && !errors.Is(runErr, context.Canceled) {
+			return final, &subagentFailure{record: final, elapsed: time.Since(started), err: runErr}
+		}
 		return final, runErr
 	}
 	return final, nil
@@ -2579,6 +2552,23 @@ func continueForkSubagent(ctx context.Context, fac Factory, record agent.History
 	}
 	capture := NewPartialSessionCapture()
 	agentCtx = WithPartialSessionCapture(agentCtx, capture)
+	prompt := []llm.Message{llm.UserMessage(llm.Text(input))}
+	// A fork continues through RunFork, not the runner's RunContent, so the
+	// explicit skills its message selected are loaded here — the same load,
+	// card and activation a typed subagent's execution gets.
+	if _, selected := explicitSkillSelectionsFromContext(agentCtx); selected {
+		preloaded, perr := own.preloadExplicitSkills(agentCtx)
+		if perr != nil {
+			return "", perr
+		}
+		agentCtx = preloaded
+		activations, _ := explicitSkillActivationsFromContext(agentCtx)
+		head := make([]llm.Message, 0, len(activations)+1)
+		for _, activation := range activations {
+			head = append(head, explicitSkillActivationMessage(activation))
+		}
+		prompt = append(head, prompt...)
+	}
 	outcome, runErr := RunFork(agentCtx, RunParams{
 		LLM: llmClient,
 		CacheSafe: &CacheSafeParams{
@@ -2586,7 +2576,7 @@ func continueForkSubagent(ctx context.Context, fac Factory, record agent.History
 			RenderedSystemPrompt: frozen,
 			ParentMessages:       history,
 		},
-		PromptMessages: []llm.Message{llm.UserMessage(llm.Text(input))},
+		PromptMessages: prompt,
 		CanUseTool:     func(string) bool { return true },
 		Tools:          own.tools,
 		AgentBaseName:  "subagent",
@@ -2722,6 +2712,18 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 							fanoutCancel()
 						}
 						mu.Unlock()
+						var failed *subagentFailure
+						if errors.As(err, &failed) {
+							results[i] = FanoutResult{
+								Index: i, Task: task, SubagentType: subType, OK: false,
+								Error:    failed.reason(),
+								TaskID:   failed.record.TaskID,
+								RanFor:   tool.FormatDuration(failed.elapsed),
+								ResetsAt: failed.resetsAt(),
+								Next:     failed.advice(),
+							}
+							return
+						}
 						results[i] = FanoutResult{Index: i, Task: task, SubagentType: subType, Error: err.Error(), OK: false}
 						return
 					}
@@ -2743,6 +2745,10 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 				return "", suspended
 			}
 			if in.FailFast && firstErr != nil {
+				var failed *subagentFailure
+				if errors.As(firstErr, &failed) {
+					return buildFanoutSummary(results), errors.New(subagentFailureForModel(failed))
+				}
 				return buildFanoutSummary(results), firstErr
 			}
 			return buildFanoutSummary(results), nil
@@ -2924,6 +2930,10 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			}
 			record, err := continueSubagentExecution(ctx, fac, in)
 			if err != nil {
+				var failed *subagentFailure
+				if errors.As(err, &failed) {
+					return "", errors.New(subagentFailureForModel(failed))
+				}
 				return "", err
 			}
 			b, _ := json.Marshal(map[string]any{"record": record})
@@ -3105,6 +3115,109 @@ func subagentTaskIndexFromContext(ctx context.Context) int {
 	return 0
 }
 
+type subagentAwaitedKey struct{}
+
+// withSubagentAwaited marks an execution a blocking tool call of the
+// dispatching agent is waiting for: subagent_run, subagent_fanout,
+// subagent_continue. That agent receives the execution's failure as the
+// call's result and continues the subagent itself, so a usage limit that
+// stops the execution arms no continuation of the subagent's own (owner,
+// 2026-10-26): one would resume the subagent beside the agent about to
+// continue it, and its result would reach no one.
+func withSubagentAwaited(ctx context.Context) context.Context {
+	return context.WithValue(ctx, subagentAwaitedKey{}, true)
+}
+
+func subagentAwaitedFromContext(ctx context.Context) bool {
+	awaited, _ := ctx.Value(subagentAwaitedKey{}).(bool)
+	return awaited
+}
+
+// subagentFailure is a subagent execution that started and then failed, as
+// the call that awaited it receives it: the execution's record as it ended,
+// how long it ran, and the error it stopped on. Error() is that error's own
+// text, so a caller that only passes it on — plan review, the goal check —
+// reads what it always read; the dispatching tools turn it into the account
+// the model needs to pick the task up again (subagentFailureForModel).
+type subagentFailure struct {
+	record  agent.HistoryEntry
+	elapsed time.Duration
+	err     error
+}
+
+func (f *subagentFailure) Error() string { return f.err.Error() }
+
+func (f *subagentFailure) Unwrap() error { return f.err }
+
+// What a dispatching agent reads when a subagent it awaited failed partway.
+// It is runtime text that reaches the model, so it is constant and
+// byte-stable.
+const (
+	subagentFailedLead     = "The subagent started and then failed before it finished its task."
+	subagentWorkKept       = "Its conversation and every change it already made (file edits, commands it ran) are kept."
+	subagentChangesKept    = "The changes it already made (file edits, commands it ran) are kept."
+	subagentContinueAdvice = "To finish the task, call subagent_continue with this task_id and a message saying what is left to do. Do not dispatch a new subagent for it: a new one starts from nothing and would redo or overwrite this one's work."
+	subagentResetAdvice    = "Continuing before resets_at fails the same way."
+	subagentOneShotAdvice  = "Its subagent_type is one-shot and cannot be continued. Check the workspace for the changes it already made before dispatching the task again."
+)
+
+// reason is the failure as every surface describes it, on one line.
+func (f *subagentFailure) reason() string {
+	return strings.Join(strings.Fields(llm.ExplainError(f.err)), " ")
+}
+
+// resetsAt is when the provider said its limit resets, empty when it did not.
+func (f *subagentFailure) resetsAt() string {
+	if explanation, ok := llm.Explain(f.err); ok && !explanation.ResetAt.IsZero() {
+		return explanation.ResetAt.UTC().Format(time.RFC3339)
+	}
+	return ""
+}
+
+// continuable mirrors the refusal in continueSubagentExecution.
+func (f *subagentFailure) continuable() bool {
+	return !(f.record.OneShot && !f.record.Continuable)
+}
+
+// advice is what the dispatching agent should do next.
+func (f *subagentFailure) advice() string {
+	if !f.continuable() {
+		return subagentOneShotAdvice
+	}
+	if f.resetsAt() != "" {
+		return subagentContinueAdvice + " " + subagentResetAdvice
+	}
+	return subagentContinueAdvice
+}
+
+// subagentFailureForModel is the account a dispatching agent receives when a
+// subagent it awaited started and then failed: which task, how long it ran,
+// why it stopped, and how to pick it up. With only the provider's raw error
+// the agent concluded the subagent never ran, and dispatched a fresh one that
+// redid — and overwrote — the work this one had done.
+func subagentFailureForModel(f *subagentFailure) string {
+	var b strings.Builder
+	b.WriteString(subagentFailedLead)
+	line := func(key, value string) {
+		if value = strings.TrimSpace(value); value != "" {
+			b.WriteString("\n" + key + ": " + value)
+		}
+	}
+	line("task_id", f.record.TaskID)
+	line("subagent_type", f.record.AgentType)
+	line("title", f.record.Title)
+	line("ran_for", tool.FormatDuration(f.elapsed))
+	line("error", f.reason())
+	line("resets_at", f.resetsAt())
+	if f.continuable() {
+		b.WriteString("\n" + subagentWorkKept)
+	} else {
+		b.WriteString("\n" + subagentChangesKept)
+	}
+	b.WriteString("\n" + f.advice())
+	return b.String()
+}
+
 // finishSubagent turns a run's outcome into the subagent's terminal state:
 // status and output on the history entry, the run-state sync that closes its
 // child run, the registry handle's completion, and the end notification that
@@ -3161,6 +3274,9 @@ func dispatchSubagent(
 	if err != nil {
 		return preparedSubagent{}, "", err
 	}
+	// The execution's clock starts where its card row's does: at the spawned
+	// notification startSubagent has just published.
+	started := time.Now()
 	defer prep.cancel()
 	defer prep.detach()
 	defer func() {
@@ -3176,6 +3292,11 @@ func dispatchSubagent(
 	output, runErr := d.run(ctx, fac, prep)
 	final := finishSubagent(fac, d, prep, handle, output, runErr)
 	if runErr != nil {
+		// A gate is a suspension, not a failure, and a cancelled execution was
+		// stopped on purpose: both travel on as they are.
+		if final.Status == agent.StatusFailed && !isRequiresActionError(runErr) {
+			return prep, "", &subagentFailure{record: final, elapsed: time.Since(started), err: runErr}
+		}
 		return prep, "", runErr
 	}
 	return prep, final.Output, nil
@@ -3438,11 +3559,6 @@ type SubagentExecRequest struct {
 	// instead of resolving a model again: an execution announced with one
 	// model must not be written under another.
 	Model string
-	// OnUserTurn, when set, receives the row id of the user message this
-	// execution wrote to its worker session, as soon as it is written. It is
-	// how a user-driven execution tells its channel which row to withdraw
-	// before the model answers. A dispatch the model made leaves it nil.
-	OnUserTurn func(rowID int64)
 }
 
 type SubagentExecutor interface {
@@ -3483,6 +3599,11 @@ type SubagentExecutionEnd struct {
 	RunID string
 	// Err is how the execution ended; nil when it succeeded.
 	Err error
+	// AwaitedByDispatcher is true when a blocking call of the dispatching
+	// agent was waiting for this execution (subagent_run, subagent_fanout,
+	// subagent_continue). That agent receives the failure and owns the
+	// continuation, so the scheduler arms none for the subagent itself.
+	AwaitedByDispatcher bool
 }
 
 // SubagentTurn is what one subagent execution produced, handed to the
@@ -3600,7 +3721,7 @@ func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID
 		resolve: agent.ResolveSubtype,
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			approve := tool.SubagentApprovalHookFromContext(runCtx, factoryToolsState(fac))
-			return runSubagentExecution(subagentExecContext(prep), fac, prep.entry, false, Input{}, func(execCtx context.Context) (string, error) {
+			return runSubagentExecution(subagentExecContext(prep), fac, prep.entry, func(execCtx context.Context) (string, error) {
 				return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "goal check",
 					func(attemptCtx context.Context, superviseRunID string) (string, error) {
 						return executeSubagent(
@@ -3622,7 +3743,7 @@ func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID
 func (r *Runner) runPlanReviewAcrossApprovals(
 	ctx context.Context, fac Factory, prep preparedSubagent, approve PlanReviewApprovalFunc,
 ) (string, error) {
-	return runSubagentExecution(ctx, fac, prep.entry, false, Input{}, func(execCtx context.Context) (string, error) {
+	return runSubagentExecution(ctx, fac, prep.entry, func(execCtx context.Context) (string, error) {
 		return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "plan review",
 			func(runCtx context.Context, superviseRunID string) (string, error) {
 				return executeSubagent(

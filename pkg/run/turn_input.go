@@ -24,6 +24,11 @@ type TurnInputEntry struct {
 	// Seq is the queue's shared enqueue clock, carried into the runtime so the
 	// queue can reconcile its own lanes when the runtime reports a delivery.
 	Seq int
+	// SkillName and SkillPath carry the trusted explicit skill selection of a
+	// steer typed as a skill command in a subagent's view: delivering the
+	// steer activates that skill. Empty for every other entry.
+	SkillName string
+	SkillPath string
 }
 
 type TurnInputRuntime struct {
@@ -52,7 +57,7 @@ func (r *TurnInputRuntime) enqueueEntry(entry TurnInputEntry) {
 	}
 	cloned := append([]llm.ContentPart(nil), entry.Parts...)
 	r.mu.Lock()
-	r.pending = append(r.pending, TurnInputEntry{Mode: entry.Mode, Parts: cloned, Seq: entry.Seq})
+	r.pending = append(r.pending, TurnInputEntry{Mode: entry.Mode, Parts: cloned, Seq: entry.Seq, SkillName: entry.SkillName, SkillPath: entry.SkillPath})
 	r.mu.Unlock()
 }
 
@@ -85,9 +90,11 @@ func (r *TurnInputRuntime) takeSteersLocked(ctx context.Context) []TurnInputEntr
 	for _, entry := range r.pending {
 		if entry.Mode == TurnInputModeSteer {
 			out = append(out, TurnInputEntry{
-				Mode:  entry.Mode,
-				Parts: append([]llm.ContentPart(nil), entry.Parts...),
-				Seq:   entry.Seq,
+				Mode:      entry.Mode,
+				Parts:     append([]llm.ContentPart(nil), entry.Parts...),
+				Seq:       entry.Seq,
+				SkillName: entry.SkillName,
+				SkillPath: entry.SkillPath,
 			})
 			continue
 		}
@@ -318,9 +325,11 @@ func (r *TurnInputRuntime) DrainAll() []TurnInputEntry {
 	out := make([]TurnInputEntry, 0, len(r.pending))
 	for _, entry := range r.pending {
 		out = append(out, TurnInputEntry{
-			Mode:  entry.Mode,
-			Parts: append([]llm.ContentPart(nil), entry.Parts...),
-			Seq:   entry.Seq,
+			Mode:      entry.Mode,
+			Parts:     append([]llm.ContentPart(nil), entry.Parts...),
+			Seq:       entry.Seq,
+			SkillName: entry.SkillName,
+			SkillPath: entry.SkillPath,
 		})
 	}
 	r.pending = nil
@@ -369,9 +378,11 @@ func (r *TurnInputRuntime) Snapshot() []TurnInputEntry {
 	out := make([]TurnInputEntry, 0, len(r.pending))
 	for _, entry := range r.pending {
 		out = append(out, TurnInputEntry{
-			Mode:  entry.Mode,
-			Parts: append([]llm.ContentPart(nil), entry.Parts...),
-			Seq:   entry.Seq,
+			Mode:      entry.Mode,
+			Parts:     append([]llm.ContentPart(nil), entry.Parts...),
+			Seq:       entry.Seq,
+			SkillName: entry.SkillName,
+			SkillPath: entry.SkillPath,
 		})
 	}
 	return out
@@ -608,7 +619,10 @@ func (q *InputQueue) Steer(in Input) bool {
 		parts = []llm.ContentPart{llm.Text(in.Text)}
 	}
 	q.steers = append(q.steers, in)
-	q.rt.enqueueEntry(TurnInputEntry{Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq})
+	q.rt.enqueueEntry(TurnInputEntry{
+		Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq,
+		SkillName: strings.TrimSpace(in.SkillName), SkillPath: strings.TrimSpace(in.SkillPath),
+	})
 	hook := q.hook
 	q.mu.Unlock()
 	if hook != nil {

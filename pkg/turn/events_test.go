@@ -354,3 +354,87 @@ func TestLastPlanProgressOfRun(t *testing.T) {
 	// No store at all is the same silence rather than a nil dereference.
 	require.Equal(t, event.PlanProgress{}, LastPlanProgressOfRun(context.Background(), nil, "run-1"))
 }
+
+func TestExtractTurnDiffPayloadCoversApplyPatchFiles(t *testing.T) {
+	payload, ok := ExtractTurnDiffPayload(map[string]any{
+		"output": map[string]any{
+			"apply_patch": true,
+			"files": []any{
+				map[string]any{
+					"abs_path":  "/repo/b.txt",
+					"operation": "add",
+					"turn_diff": map[string]any{
+						"path":         "/repo/b.txt",
+						"added":        2,
+						"deleted":      0,
+						"unified_diff": "--- b:before\n+++ b:after\n@@ -1 +1,3 @@\n+x\n+y\n",
+					},
+				},
+				map[string]any{
+					"abs_path":  "/repo/a.txt",
+					"operation": "update",
+					"turn_diff": map[string]any{
+						"path":         "/repo/a.txt",
+						"added":        1,
+						"deleted":      1,
+						"unified_diff": "--- a:before\n+++ a:after\n@@ -1 +1 @@\n-old\n+new\n",
+					},
+				},
+			},
+		},
+	})
+	require.True(t, ok)
+	require.Len(t, payload.Files, 2)
+	require.Equal(t, "/repo/b.txt", payload.Files[0].Path)
+	require.Equal(t, "added", payload.Files[0].Status)
+	require.Equal(t, "/repo/a.txt", payload.Files[1].Path)
+	require.Equal(t, "modified", payload.Files[1].Status)
+	for _, f := range payload.Files {
+		require.NotEmpty(t, f.Hunks, "each file must carry parsed hunks")
+	}
+	require.Equal(t, "2 files (+3/-1)", payload.Summary)
+}
+
+func TestExtractTurnDiffPayloadCoversShellEditDiff(t *testing.T) {
+	payload, ok := ExtractTurnDiffPayload(map[string]any{
+		"output": map[string]any{
+			"shell_edit_diff": map[string]any{
+				"files": []any{
+					map[string]any{
+						"path":         "/repo/a.txt",
+						"display_path": "a.txt",
+						"status":       "created",
+						"added":        2,
+						"deleted":      0,
+						"unified_diff": "--- a:before\n+++ a:after\n@@ -1 +1,3 @@\n+x\n+y\n",
+					},
+					map[string]any{
+						"path":    "/repo/old.txt",
+						"status":  "deleted",
+						"added":   0,
+						"deleted": 1,
+					},
+				},
+			},
+		},
+	})
+	require.True(t, ok)
+	require.Len(t, payload.Files, 2)
+	require.Equal(t, "added", payload.Files[0].Status)
+	require.Equal(t, "deleted", payload.Files[1].Status)
+	require.Equal(t, "2 files (+2/-1)", payload.Summary)
+
+	// A skipped or empty watch produces no turn-diff event.
+	_, ok = ExtractTurnDiffPayload(map[string]any{
+		"output": map[string]any{
+			"shell_edit_diff": map[string]any{"skipped": true},
+		},
+	})
+	require.False(t, ok)
+	_, ok = ExtractTurnDiffPayload(map[string]any{
+		"output": map[string]any{
+			"shell_edit_diff": map[string]any{"files": []any{}},
+		},
+	})
+	require.False(t, ok)
+}

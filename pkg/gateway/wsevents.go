@@ -876,21 +876,48 @@ func toolHeaderFor(root, toolName, summary, body string, meta tool.ToolMeta, fin
 	}, root)
 }
 
-// withStepHeader adds the card's header to a live step's data.
-func withStepHeader(data map[string]any, header string) map[string]any {
+// toolHeaderPartsFor is the same header in its four parts, for a surface that
+// lays the header out itself (the web draws the duration in its own column and
+// words the action in the reader's language).
+func toolHeaderPartsFor(root, toolName, summary, body string, meta tool.ToolMeta, final bool, took time.Duration) tool.HeaderParts {
+	if strings.TrimSpace(meta.ToolName) == "" {
+		meta.ToolName = toolName
+	}
+	title := strings.TrimSpace(toolName)
+	if title == "" {
+		title = strings.TrimSpace(meta.ToolName)
+	}
+	return tool.DisplayHeaderParts(tool.DisplayFrame{
+		Title:    title,
+		Summary:  summary,
+		Meta:     meta,
+		Final:    final,
+		Content:  body,
+		Duration: took,
+	}, root)
+}
+
+// withStepHeader adds the card's header to a live step's data, in one piece
+// and in the four parts a surface that lays the header out itself reads.
+func withStepHeader(data map[string]any, header string, parts tool.HeaderParts) map[string]any {
 	if data == nil {
 		return nil
 	}
 	if h := strings.TrimSpace(header); h != "" {
 		data["header"] = h
 	}
+	if parts.Action != "" {
+		data["header_parts"] = parts
+	}
 	return data
 }
 
-// storedToolRowHeader is the header of one stored tool row, rebuilt from what
-// the row kept — its display part and tool meta — so a reloaded card reads
-// exactly as the live one did, however old the row is.
-func storedToolRowHeader(root, partsJSON, toolMetaJSON string, took time.Duration) string {
+// storedToolRowHeaderParts is the header of one stored tool row, rebuilt from
+// what the row kept — its display part and tool meta — so a reloaded card
+// reads exactly as the live one did, however old the row is: the joined
+// header, its four parts, and the facts the row kept that a card's structured
+// data is read back from (the display body and the tool name).
+func storedToolRowHeaderParts(root, partsJSON, toolMetaJSON string, took time.Duration) (string, tool.HeaderParts, string, string) {
 	display, _ := state.ParseToolDisplayPart(partsJSON)
 	var meta tool.ToolMeta
 	for _, raw := range []string{display.ToolMetaJSON, toolMetaJSON} {
@@ -902,16 +929,34 @@ func storedToolRowHeader(root, partsJSON, toolMetaJSON string, took time.Duratio
 		}
 	}
 	if strings.TrimSpace(meta.ToolName) == "" {
-		return ""
+		return "", tool.HeaderParts{}, "", ""
 	}
-	return toolHeaderFor(root, meta.ToolName, display.Summary, display.Body, meta, true, took)
+	return toolHeaderFor(root, meta.ToolName, display.Summary, display.Body, meta, true, took),
+		toolHeaderPartsFor(root, meta.ToolName, display.Summary, display.Body, meta, true, took),
+		display.Body, meta.ToolName
 }
 
-// canceledCallHeaders is, for an assistant row that issued tool calls, the
+// storedToolRowHeader is storedToolRowHeaderParts' joined header alone.
+func storedToolRowHeader(root, partsJSON, toolMetaJSON string, took time.Duration) string {
+	header, _, _, _ := storedToolRowHeaderParts(root, partsJSON, toolMetaJSON, took)
+	return header
+}
+
+// callHeaderEntry is one call's header on an assistant row, as a list entry
+// rather than a map key: the web camel-cases response keys deeply, which
+// rewrites a call id used as a key ("call_abc" → "callAbc").
+type callHeaderEntry struct {
+	CallID string           `json:"call_id"`
+	Header string           `json:"header"`
+	Parts  tool.HeaderParts `json:"parts"`
+}
+
+// canceledCallHeaderList is, for an assistant row that issued tool calls, the
 // header each call would carry if it never ran ("Canceled go test ./...") —
-// what the card of a call with no result of its own reads. The page uses one
-// only for a call the transcript never answered.
-func canceledCallHeaders(root func() string, partsJSON string) map[string]string {
+// what the card of a call with no result of its own reads — as that list,
+// keeping the calls in the order the parts name them. The page uses one only
+// for a call the transcript never answered.
+func canceledCallHeaderList(root func() string, partsJSON string) []callHeaderEntry {
 	raw := strings.TrimSpace(partsJSON)
 	if raw == "" || !strings.Contains(raw, state.PartTypeToolCalls) {
 		return nil
@@ -929,7 +974,7 @@ func canceledCallHeaders(root func() string, partsJSON string) map[string]string
 	if json.Unmarshal([]byte(raw), &parts) != nil {
 		return nil
 	}
-	out := map[string]string{}
+	var out []callHeaderEntry
 	for _, part := range parts {
 		if part.Type != state.PartTypeToolCalls {
 			continue
@@ -944,13 +989,43 @@ func canceledCallHeaders(root func() string, partsJSON string) map[string]string
 				_ = json.Unmarshal([]byte(args), &input)
 			}
 			meta := tool.ToolMeta{ToolName: name, Status: "canceled", Input: input}
-			out[call.ID] = toolHeaderFor(root(), name, "", "", meta, true, 0)
+			out = append(out, callHeaderEntry{
+				CallID: call.ID,
+				Header: toolHeaderFor(root(), name, "", "", meta, true, 0),
+				Parts:  toolHeaderPartsFor(root(), name, "", "", meta, true, 0),
+			})
 		}
 	}
-	if len(out) == 0 {
+	return out
+}
+
+// shellCardFor is a shell card's facts, read back from the very body the card
+// shows (the rendered display body, never a re-derivation from the step's
+// output — live and reloaded must come from the same text). nil for anything
+// that is not a shell card.
+func shellCardFor(toolName, body string) *tool.ShellCard {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "shell") {
 		return nil
 	}
-	return out
+	card, ok := tool.ParseShellCard(body)
+	if !ok {
+		return nil
+	}
+	return &card
+}
+
+// fileDiffFor is a file tool card's turn diff, read back from the body the
+// card shows — nil for anything that is not an edit_file or write_file card.
+func fileDiffFor(toolName, body string) *tool.FileDiff {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if name != "edit_file" && name != "write_file" {
+		return nil
+	}
+	diff, ok := tool.ParseFileDiff(body)
+	if !ok {
+		return nil
+	}
+	return &diff
 }
 
 // toolEventPayloadWithHeader adds the card header to a tool call's event
@@ -983,6 +1058,15 @@ func toolEventPayloadWithHeader(root, eventType string, payload json.RawMessage)
 		return payload
 	}
 	fields["header"] = header
+	fields["header_parts"] = toolHeaderPartsFor(root, name, summary, body, meta, final, took)
+	if final {
+		if card := shellCardFor(name, body); card != nil {
+			fields["shell_card"] = card
+		}
+		if diff := fileDiffFor(name, body); diff != nil {
+			fields["file_diff"] = diff
+		}
+	}
 	out, err := json.Marshal(fields)
 	if err != nil {
 		return payload

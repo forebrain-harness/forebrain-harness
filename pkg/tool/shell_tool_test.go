@@ -1414,3 +1414,186 @@ func TestShellToolAsksToLeaveTheSandboxWhenTheNetworkIsBlocked(t *testing.T) {
 		t.Fatalf("approval reason = %q, want the resolver failure line", reason)
 	}
 }
+
+func TestShellToolShowsTheFilesACommandChanged(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Not parallel: the run chdirs and the shell-diff registry is process-wide.
+	root := t.TempDir()
+	t.Chdir(root)
+	gitRun := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	gitRun("init", "-q")
+	gitRun("config", "user.email", "t@t")
+	gitRun("config", "user.name", "t")
+	mustWriteFile(t, filepath.Join(root, "a.txt"), "a\n")
+	gitRun("add", "-A")
+	gitRun("commit", "-qm", "init")
+	topOut, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve toplevel: %v", err)
+	}
+	t.Cleanup(func() { forgetShellDiffRepo(strings.TrimSpace(string(topOut))) })
+
+	st := NewState(root)
+	shellTool, err := NewShellTool(st, &AgentToolRuntime{
+		Home: t.TempDir(),
+		Cfg:  &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithToolCompletionCapture(context.Background())
+
+	heredoc := "cat > note.txt <<'EOF'\nhello\nEOF"
+	out, err := shellTool.Handle(ctx, `{"command":`+mustJSON(t, heredoc)+`}`)
+	if err != nil {
+		t.Fatalf("heredoc command: %v", err)
+	}
+	if strings.Contains(out.(string), "shell_edit_diff") {
+		t.Fatal("the model-facing result must not carry the snapshot diff")
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("shell completion was not captured")
+	}
+	diff, ok := DecodeShellEditDiff(completion.Output["shell_edit_diff"])
+	if !ok || len(diff.Files) != 1 {
+		t.Fatalf("shell_edit_diff = %#v ok=%v, want one file", completion.Output["shell_edit_diff"], ok)
+	}
+	if f := diff.Files[0]; f.Status != "created" || filepath.Base(f.Path) != "note.txt" || f.DisplayPath != "note.txt" {
+		t.Fatalf("note.txt entry = %+v", f)
+	}
+	body, trunc := FormatToolStepResult(StepEvent{
+		Kind: StepKindToolCompleted, ToolName: "shell", Output: completion.Output,
+	}, DefaultMaxFormattedBody)
+	if trunc {
+		t.Fatal("unexpected truncation")
+	}
+	if !strings.Contains(body, "Created `note.txt` (+1 -0)") || !strings.Contains(body, "```diff") {
+		t.Fatalf("card body missing the diff block:\n%s", body)
+	}
+	if idx := strings.Index(body, "output:"); idx >= 0 && strings.Contains(body[idx:], "shell_edit_diff") {
+		t.Fatalf("output JSON must not replay the snapshot diff:\n%s", body)
+	}
+
+	writeCmd := `python3 -c "open('a.txt','w').write('a\nB\n')"`
+	if _, err := exec.LookPath("python3"); err != nil {
+		writeCmd = `printf 'a\nB\n' > a.txt`
+	}
+	if _, err := shellTool.Handle(ctx, `{"command":`+mustJSON(t, writeCmd)+`}`); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	completion, ok = ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("second shell completion was not captured")
+	}
+	diff, ok = DecodeShellEditDiff(completion.Output["shell_edit_diff"])
+	if !ok || len(diff.Files) != 1 {
+		t.Fatalf("second shell_edit_diff = %#v ok=%v, want one file", completion.Output["shell_edit_diff"], ok)
+	}
+	if f := diff.Files[0]; f.Status != "updated" || filepath.Base(f.Path) != "a.txt" {
+		t.Fatalf("a.txt entry = %+v", f)
+	}
+
+	// A read-only command never watches the repository.
+	if _, err := shellTool.Handle(ctx, `{"command":`+mustJSON(t, "cat note.txt")+`}`); err != nil {
+		t.Fatalf("read-only command: %v", err)
+	}
+	completion, ok = ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("read-only completion was not captured")
+	}
+	if _, has := completion.Output["shell_edit_diff"]; has {
+		t.Fatalf("read-only command must not carry shell_edit_diff: %#v", completion.Output["shell_edit_diff"])
+	}
+}
+
+// The model's copy of a shell result is compressed to save its context, while
+// the completion output the surfaces draw the card from keeps what the command
+// actually printed (owner 2026-10-25). The make filter strips the make[N]:
+// progress lines, so a make run is where the two copies visibly diverge: at
+// the moment the card settles it must not swap the streamed lines for the
+// compressed text.
+func TestShellToolCardKeepsTheOriginalOutputWhenTheModelGetsItCompressed(t *testing.T) {
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skipf("make not available: %v", err)
+	}
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "Makefile"), "all:\n"+
+		"\t@echo \"make[1]: Entering directory '/tmp/app'\"\n"+
+		"\t@for i in $$(seq 1 400); do echo \"make[2]: progress step xxxxxxxxxxxxxxxx [ OK ]\"; done\n"+
+		"\t@echo \"ERROR: src/api.c:42:18: error: expected ';' before '}' token\"\n"+
+		"\t@echo \"make[1]: Leaving directory '/tmp/app'\"\n")
+	t.Chdir(root)
+	ResetCompressors()
+	defer ResetCompressors()
+
+	shellTool, err := NewShellTool(NewState(root), &AgentToolRuntime{
+		WorkspaceRoot: root,
+		Cfg:           &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithToolCompletionCapture(context.Background())
+	out, err := shellTool.Handle(ctx, `{"command":"make"}`)
+	if err != nil {
+		t.Fatalf("tool handle: %v", err)
+	}
+
+	// The model's result is the compressed one: noise gone, error kept.
+	var model map[string]any
+	if err := json.Unmarshal([]byte(out.(string)), &model); err != nil {
+		t.Fatalf("decode model result: %v", err)
+	}
+	modelStdout, _ := model["stdout"].(string)
+	if strings.Contains(modelStdout, "progress step") {
+		t.Fatalf("model stdout must not carry the compressed-away noise:\n%s", modelStdout)
+	}
+	if !strings.Contains(modelStdout, "ERROR: src/api.c:42:18") {
+		t.Fatalf("model stdout must keep the error line:\n%s", modelStdout)
+	}
+	if _, ok := model["output_compression"]; !ok {
+		t.Fatalf("model result must carry output_compression: %#v", model)
+	}
+
+	// The completion output keeps the original stdout for the card.
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("shell completion was not captured")
+	}
+	surfaceStdout, _ := completion.Output["stdout"].(string)
+	if !strings.Contains(surfaceStdout, "progress step") || !strings.Contains(surfaceStdout, "ERROR: src/api.c:42:18") {
+		t.Fatalf("completion stdout must be the original output:\n%s", surfaceStdout)
+	}
+	if _, ok := completion.Output["output_compression"]; !ok {
+		t.Fatalf("completion must still carry output_compression: %#v", completion.Output)
+	}
+	compressedBytes, _ := completion.Output["stdout_compressed_bytes"].(int)
+	if compressedBytes >= len(surfaceStdout) {
+		t.Fatalf("stdout_compressed_bytes = %d, want < len(original) = %d", compressedBytes, len(surfaceStdout))
+	}
+
+	// The card body the surfaces draw comes from the completion output, so it
+	// shows the original lines too.
+	body, truncated := FormatToolStepResult(StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "shell",
+		Input:    map[string]any{"command": "make"},
+		Output:   completion.Output,
+	}, DefaultMaxFormattedBody)
+	if truncated {
+		t.Fatal("unexpected truncation of the card body")
+	}
+	if !strings.Contains(body, "progress step") {
+		t.Fatalf("card body must show the original output:\n%s", body)
+	}
+}

@@ -87,7 +87,7 @@ function parkExitPlan(session: string, suffix: string): { runId: string; actionI
   return { runId, actionId }
 }
 
-test('a parked exit-plan approval shows its plan and choices, not raw ids', async ({ page }) => {
+test('a parked exit-plan approval takes the input\'s place, with no card in the thread', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
@@ -101,30 +101,32 @@ test('a parked exit-plan approval shows its plan and choices, not raw ids', asyn
   expect(String((await plan.json())?.markdown ?? '')).toContain('再对照计划逐条检查')
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
-  const card = page.locator('[data-testid="exit-plan-approval"]')
-  await expect(card).toBeVisible()
+  const dock = page.locator('[data-testid="exit-plan-approval"]')
+  await expect(dock).toBeVisible()
 
   const main = page.locator('.chat-shell main')
-  // The card names itself and carries the plan itself — never the tool name,
-  // an action id, or a path.
-  await expect(card).toContainText('退出计划模式')
-  // That it is waiting on the reader is the head's status word, not a second
-  // sentence beside the name.
-  await expect(card).toContainText('等待批准')
+  // The plan approval is where the input was: the composer — its words, its
+  // attachments — is gone from sight, the dock standing in its place.
+  await expect(page.locator('.chat-composer textarea')).toBeHidden()
+  await expect(dock).toContainText('计划')
+  // The plan itself is the dock's body, never the tool name, an action id or
+  // a path outside its head.
   await expect(page.locator('[data-testid="exit-plan-text"]')).toContainText('再对照计划逐条检查')
   const text = await main.innerText()
   expect(text).not.toContain('exit_plan_mode')
   expect(text).not.toContain('act-e2e-exitplan-idle')
   // The four choices, in the overlay's order. The feedback field waits for
-  // its own verdict: it appears only after「继续规划」is chosen.
+  // its own verdict: it appears only after「继续规划」is chosen, and its send
+  // stays disabled until there are words to send.
   await expect(page.locator('[data-testid="exit-plan-approve-clear"]')).toBeVisible()
   await expect(page.locator('[data-testid="exit-plan-approve"]')).toBeVisible()
   await expect(page.locator('[data-testid="exit-plan-keep-planning"]')).toBeVisible()
   await expect(page.locator('[data-testid="exit-plan-ask-review"]')).toBeVisible()
-  await expect(card.locator('[data-testid="exit-plan-feedback"]')).toHaveCount(0)
+  await expect(dock.locator('[data-testid="exit-plan-feedback"]')).toHaveCount(0)
   await page.locator('[data-testid="exit-plan-keep-planning"]').click()
-  await expect(card.locator('[data-testid="exit-plan-feedback"] input')).toHaveAttribute('placeholder', '告诉规划模型要改什么')
-  await shot(page, 'exit-plan-approval-card')
+  await expect(dock.locator('[data-testid="exit-plan-feedback"] input')).toHaveAttribute('placeholder', '告诉规划模型要改什么')
+  await expect(dock.locator('[data-testid="exit-plan-send-feedback"]')).toBeDisabled()
+  await shot(page, 'exit-plan-approval-dock')
 })
 
 test('a review in flight is an event away: the card says so and the reviewer has its own view', async ({ page }) => {
@@ -171,7 +173,9 @@ test('a review in flight is an event away: the card says so and the reviewer has
   const drawer = page.locator('[data-testid="subagent-drawer"]')
   await expect(drawer).toBeVisible()
   await expect(drawer).toContainText('review the plan against the README')
-  await expect(drawer).toContainText('reading the README')
+  // The reviewer's own calls are its cards here, head worded the engine's way
+  // (136): the read it is running reads 正在读取 in a Chinese interface.
+  await expect(drawer).toContainText('正在读取')
   await shot(page, 'exit-plan-reviewer-view')
 })
 
@@ -209,7 +213,7 @@ test('asking for a review hands it to the planner: the card closes silently', as
   await shot(page, 'exit-plan-approval-delivered')
 })
 
-test('approving with the context cleared says so on the wire and closes the card', async ({ page }) => {
+test('approving with the context cleared says so on the wire and brings the input back', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
@@ -225,6 +229,8 @@ test('approving with the context cleared says so on the wire and closes the card
   await page.locator('[data-testid="exit-plan-approve-clear"]').click()
   const approveBody = await (await approve).postDataJSON()
   expect(approveBody?.clear_context).toBe(true)
+  // The decision made, the input is back where the dock stood.
   await expect(page.locator('[data-testid="exit-plan-approval"]')).toHaveCount(0, { timeout: 30_000 })
+  await expect(page.locator('.chat-composer textarea')).toBeVisible()
   await shot(page, 'exit-plan-approval-approved')
 })

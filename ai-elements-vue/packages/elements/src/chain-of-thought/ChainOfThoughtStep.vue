@@ -4,12 +4,17 @@ import { cn } from '@repo/shadcn-vue/lib/utils'
 
 const props = withDefaults(
   defineProps<{
-    label: string
+    /**
+     * The step's caption beside the icon column. Optional (plan 136): a step
+     * on the activity line carries its card, not a caption of its own.
+     */
+    label?: string
     description?: string
     status?: 'complete' | 'active' | 'pending'
     class?: HTMLAttributes['class']
   }>(),
   {
+    label: undefined,
     status: 'complete',
     description: undefined,
   },
@@ -36,12 +41,16 @@ const statusStyles = {
   >
     <div class="relative mt-0.5">
       <slot name="icon" />
+      <!-- The line this step hangs on, drawn from under the icon to the step's
+           own bottom. A parent that chains steps into one line (the activity
+           line) finds it by its data-slot and extends it across the gap. -->
       <div
+        data-slot="chain-of-thought-line"
         class="-mx-px absolute top-7 bottom-0 left-1/2 w-px bg-border"
       />
     </div>
     <div class="flex-1 space-y-2">
-      <div>{{ props.label }}</div>
+      <div v-if="props.label">{{ props.label }}</div>
       <div
         v-if="props.description"
         class="text-muted-foreground text-xs"

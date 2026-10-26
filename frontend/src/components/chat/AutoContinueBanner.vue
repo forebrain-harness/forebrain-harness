@@ -11,7 +11,16 @@ import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { formatAutoContinueNotice, type AutoContinueState } from '@/lib/autoContinue'
 import { useI18n } from '@/locales'
 
-const props = defineProps<{ state: AutoContinueState | null }>()
+const props = withDefaults(defineProps<{
+  state: AutoContinueState | null
+  /**
+   * Whether typing in the composer ahead of this one also cancels the wait. It
+   * does wherever there is a composer to type in; a view that draws none (an
+   * idle subagent's tab, plan 143) offers the button alone, and its hint says
+   * so rather than naming a box that is not there.
+   */
+  typingCancels?: boolean
+}>(), { typingCancels: true })
 const emit = defineEmits<{ (e: 'cancel'): void }>()
 
 const { t, locale } = useI18n()
@@ -34,6 +43,7 @@ onBeforeUnmount(() => {
 })
 
 const notice = computed(() => (props.state ? formatAutoContinueNotice(props.state, locale.value, now.value) : ''))
+const cancelHint = computed(() => t(props.typingCancels ? 'autoContinue.cancelHint' : 'autoContinue.cancelHintEscOnly'))
 </script>
 
 <template>
@@ -49,7 +59,7 @@ const notice = computed(() => (props.state ? formatAutoContinueNotice(props.stat
     <Button
       type="button"
       class="forebrain-btn forebrain-btn-ghost h-7 shrink-0 px-3 text-[12px]"
-      v-tip:top="t('autoContinue.cancelHint')"
+      v-tip:top="cancelHint"
       data-testid="auto-continue-cancel"
       @click="emit('cancel')"
     >

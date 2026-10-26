@@ -4,6 +4,8 @@ import { mount } from '@vue/test-utils'
 import { setLocale } from '@/locales'
 import type { SubagentTranscript } from '@/composables/useChatStream'
 import RunWorkedLine from './RunWorkedLine.vue'
+import ActivityLine from './ActivityLine.vue'
+import ActivityStep from './ActivityStep.vue'
 import SubagentConversation from './SubagentConversation.vue'
 import SubagentCallCard from './SubagentCallCard.vue'
 
@@ -149,5 +151,42 @@ describe('SubagentConversation', () => {
     const rows = wrapper.findAllComponents(SubagentCallCard).flatMap((card) => card.findAll('[data-testid="subagent-task-row"]'))
     expect(rows).toHaveLength(1)
     expect(rows[0].attributes('aria-current')).toBe('true')
+  })
+
+  /**
+   * The subagent's own run hangs on the same activity line the conversation
+   * draws (owner 2026-10-25) — with the robot as the speaker's node and a
+   * call's state as the call's node. The task it was handed stays off the
+   * line: it is the frame, not a step.
+   */
+  it('hangs its blocks on one activity line, the robot speaking', () => {
+    const wrapper = mount(SubagentConversation, {
+      props: {
+        record: record({
+          status: 'done',
+          blocks: [
+            { kind: 'prompt', text: 'answer briefly' },
+            { kind: 'thinking', text: 'weighing it', open: false, startedAt: 0, durationMs: 1000 },
+            { kind: 'assistant', text: 'here is the answer', open: false },
+            { kind: 'tool', step: { stepId: 'c1', toolName: 'shell', summary: 'ran ls', header: 'Ran ls', status: 'completed' } },
+            { kind: 'worked', id: 'worked:exec-1', durationMs: 60_000, finishedAt: new Date().toISOString() },
+          ],
+        }),
+      },
+    })
+    expect(wrapper.findAllComponents(ActivityLine)).toHaveLength(1)
+    const steps = wrapper.findAllComponents(ActivityStep)
+    expect(steps).toHaveLength(3)
+    // The speaker's node is the robot on the brand tint, not the brand mark.
+    expect(wrapper.find('.activity-node--sub').exists()).toBe(true)
+    expect(wrapper.find('.activity-node--say').exists()).toBe(false)
+    expect(wrapper.find('.activity-node--think').exists()).toBe(true)
+    // The call's node is its state.
+    const statusNode = wrapper.find('.tool-status.tool-status--node')
+    expect(statusNode.exists()).toBe(true)
+    expect(statusNode.classes()).toContain('tool-status--done')
+    // The task card and the worked line stay off the line.
+    expect(wrapper.find('[data-testid="subagent-task-card"]').exists()).toBe(true)
+    expect(wrapper.findComponent(RunWorkedLine).exists()).toBe(true)
   })
 })

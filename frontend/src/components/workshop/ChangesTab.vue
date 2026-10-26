@@ -11,7 +11,7 @@
       <div v-for="file in files" :key="file.path" class="flex items-center justify-between rounded-md border border-[var(--forebrain-divider)] p-2">
         <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--forebrain-text)]">{{ file.path }}</span>
         <span class="shrink-0 pl-2 text-[11px] text-[var(--forebrain-muted-text)]">{{ counts(file) }}</span>
-        <Button v-if="base" type="button" class="forebrain-btn forebrain-btn-ghost ml-1 h-auto text-xs" @click="emit('compare', { from: `v${base}`, to: 'draft' })">{{ t('workshop.compare') }}</Button>
+        <Button v-if="base && file.status !== 'added'" type="button" data-testid="workshop-change-compare" class="forebrain-btn forebrain-btn-ghost ml-1 h-auto text-xs" @click="emit('compare', { from: `v${base}`, to: 'draft', path: file.path })">{{ t('workshop.compare') }}</Button>
       </div>
     </div>
     <span class="block truncate font-mono text-[11px] text-[var(--forebrain-muted-text)]" v-tip:top.trunc="draftDir">{{ draftDir }}</span>
@@ -30,7 +30,7 @@ import forebrainApi, { getErrorMessage, type SkillFileDiff } from '@/lib/api'
 import { useI18n } from '@/locales'
 
 const props = withDefaults(defineProps<{ skillName: string; projectId?: string; editable: boolean }>(), { projectId: '' })
-const emit = defineEmits<{ compare: [payload: { from: string; to: string }] }>()
+const emit = defineEmits<{ compare: [payload: { from: string; to: string; path?: string }] }>()
 const { t } = useI18n()
 
 const files = ref<SkillFileDiff[]>([])

@@ -37,16 +37,23 @@ test('the workshop opens as the chat page: greeting, composer, workbench', async
   await expect(page.locator('[data-testid="workshop-greeting"]')).toHaveText(/想做一个什么技能|What skill do you want to build/)
   await expect(page.locator('[data-testid="workshop-composer"] textarea')).toBeVisible()
 
-  // The composer's "+" opens one sheet across the whole input area, exactly as
-  // it does on the chat page and in a subagent's tab: the composer is the
-  // sheet's anchor, not the 28px button that opens it.
+  // The composer's "+" opens the add sheet as a menu off the button itself
+  // (the 2026-10-23 redesign): its own width, never past the composer that
+  // holds it, its left edge on the button's.
   const plus = page.locator('[data-testid="workshop-composer"] [data-testid="composer-plus"]')
   await plus.click()
   const sheet = page.locator('[data-testid="workshop-composer"] .forebrain-plus-pop')
   await expect(sheet).toBeVisible()
   const sheetBox = await sheet.boundingBox()
   const composerBox = await page.locator('[data-testid="workshop-composer"] [data-slot="input-group"]').boundingBox()
-  expect(Math.abs((sheetBox?.width ?? 0) - (composerBox?.width ?? 0))).toBeLessThanOrEqual(2)
+  const plusBox = await plus.boundingBox()
+  expect((sheetBox?.width ?? 0)).toBeGreaterThanOrEqual(260)
+  expect((sheetBox?.width ?? 0)).toBeLessThanOrEqual(440)
+  expect((sheetBox?.width ?? 0)).toBeLessThanOrEqual(composerBox?.width ?? 0)
+  expect(Math.abs((sheetBox?.x ?? 0) - (plusBox?.x ?? 0))).toBeLessThanOrEqual(2)
+  expect((sheetBox?.x ?? 0)).toBeGreaterThanOrEqual((composerBox?.x ?? 0) - 2)
+  expect((sheetBox?.x ?? 0) + (sheetBox?.width ?? 0))
+    .toBeLessThanOrEqual((composerBox?.x ?? 0) + (composerBox?.width ?? 0) + 2)
   await plus.click()
   await expect(sheet).toHaveCount(0)
 
@@ -134,6 +141,14 @@ test('a draft shows unpublished changes and the versions tab compares', async ({
     await expect(page.locator('[data-testid="workshop-version-draft"]')).toBeVisible()
     await page.click('[data-testid="workshop-draft-compare"]')
     await expect(page.locator('[role="dialog"]')).toContainText('SKILL.md')
+    // The compare draws the selected file's lines in the one diff style
+    // (plan 144): removed and added rows, not a line count.
+    const pane = page.locator('[data-testid="workshop-compare-pane"]')
+    await expect(pane.locator('[data-testid="diff-block"]')).toBeVisible()
+    await expect(pane.locator('.dr.del')).toHaveCount(1)
+    await expect(pane.locator('.dr.del')).toContainText('e2e offline install fixture')
+    await expect(pane.locator('.dr.add')).toHaveCount(3)
+    await expect(pane.locator('.dr.add').last()).toContainText('more')
     await shot(page, 'workshop-draft')
   } finally {
     // Restore demo-e2e for the tests that follow.
@@ -155,4 +170,21 @@ test('a from-scratch task gets a model answer (real LLM)', async ({ page }) => {
   await expect(page.locator('[data-workshop-message="assistant"]').last()).toContainText(/[^.…\s]{2,}/, { timeout: 150_000 })
   await expect(page.locator('[data-testid="workshop-error"]')).toHaveCount(0)
   await shot(page, 'workshop-real-llm')
+})
+
+test('a workshop turn hangs on the activity line, not in a box', async ({ page }) => {
+  test.skip(realLLM, 'the fake provider answers the turn deterministically')
+  await signIn(page)
+  await page.goto('/workshop?mode=create&scope=agent', { waitUntil: 'networkidle' })
+  const composer = page.locator('[data-testid="workshop-composer"] textarea')
+  await composer.fill('做一个检查发布的技能')
+  await composer.press('Enter')
+
+  // The answer hangs on the activity line — the same line the conversation
+  // draws — on the brand mark's node, with no box around the turn (owner
+  // 2026-10-25: the workshop is the conversation page's superset).
+  const thread = page.locator('[data-workshop-message="assistant"]').last()
+  await expect(thread.locator('.activity-line')).toHaveCount(1, { timeout: 30_000 })
+  await expect(thread.locator('.activity-node--say')).toHaveCount(1)
+  await shot(page, 'workshop-activity-line')
 })

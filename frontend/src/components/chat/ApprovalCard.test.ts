@@ -1,8 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { ref } from 'vue'
 
-import { forebrainApi, type ActionRecord, type SessionApprovalRequest } from '@/lib/api'
+import { forebrainApi, type ActionRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { usePendingActions } from '@/composables/usePendingActions'
+import { PendingActionsKey } from '@/composables/providePendingActions'
 import ApprovalCard from './ApprovalCard.vue'
 
 /**
@@ -10,10 +13,11 @@ import ApprovalCard from './ApprovalCard.vue'
  * a card with a line shows the line and never the stored reason; a card
  * without one prints nothing.
  *
- * The requests it hosts in the conversation's flow are the run's own questions.
- * A fetch gate is the question the terminal asks - which page, and what to do
- * about it - so it says the page and the three ways out, never the tool's name
- * or the action's id.
+ * The thread's tail is what no tool card carries (plan 138): a request with
+ * no card of its own answers in the waiting card's own frame — the question as
+ * its head, the facts as its panel, the decision footer closing it — and the
+ * agent's questions read exactly as they always did. The store is the page's
+ * own, provided the way the page provides it.
  */
 describe('ApprovalCard', () => {
   beforeAll(() => setLocale('en'))
@@ -29,6 +33,16 @@ describe('ApprovalCard', () => {
   }) {
     const wrapper = mount(ApprovalCard, { props: { block } })
     return { wrapper, text: wrapper.text() }
+  }
+
+  /** The tail card under the page's own store, with the actions list mocked. */
+  function mountTail(props: Record<string, unknown> = {}) {
+    const store = usePendingActions({ sessionId: ref('s1'), version: ref(0), contextUsedPercent: ref(null) })
+    const wrapper = mount(ApprovalCard, {
+      props,
+      global: { provide: { [PendingActionsKey]: store } },
+    })
+    return wrapper
   }
 
   it('replays the line the surface printed for the decision', () => {
@@ -54,7 +68,7 @@ describe('ApprovalCard', () => {
     expect(got.wrapper.find('[data-approval-status]').exists()).toBe(false)
   })
 
-  it('asks about the page a fetch needs, and offers the three answers', async () => {
+  it('asks a card-less request in the waiting card\'s own frame', async () => {
     vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
       {
         id: 'act-fetch',
@@ -71,31 +85,29 @@ describe('ApprovalCard', () => {
         },
       } as ActionRecord,
     ])
-    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+    const wrapper = mountTail()
     await flushPromises()
 
-    const gate = wrapper.find('[data-testid="web-fetch-approval"]')
-    expect(gate.exists()).toBe(true)
-    expect(gate.text()).toContain('Fetch this page?')
-    expect(wrapper.find('[data-testid="web-fetch-page"]').text()).toBe('https://example.com/pricing')
-    // Every answer says what it does, and the one that remembers names its scope.
-    expect(gate.findAll('button').map((b) => b.text())).toEqual([
+    const frame = wrapper.find('[data-testid="pending-approval"][data-action-id="act-fetch"]')
+    expect(frame.exists()).toBe(true)
+    // The frame's head is the gate's own question; the facts and the decisions
+    // are the ones the gated cards carry.
+    expect(frame.find('.gate-fallback-head').text()).toBe('Fetch this page?')
+    expect(frame.findAll('[data-testid^="pending-decision-"]').map((b) => b.text())).toEqual([
       'Fetch the page',
       "Don't ask again for example.com",
       "Don't fetch",
     ])
-    // Nothing on the card is the tool's own name or an action id, and a card
-    // whose button states the scope does not explain it again in a box.
-    expect(gate.text()).not.toContain('web_fetch')
-    expect(gate.text()).not.toContain('act-fetch')
-    expect(gate.text()).not.toContain('Permission memory')
+    // Nothing on the card is the tool's own name or an action id.
+    expect(frame.text()).not.toContain('web_fetch')
+    expect(frame.text()).not.toContain('act-fetch')
     wrapper.unmount()
   })
 
   // The two routing facts the engine writes into the payload are the only
   // place the card can learn them: a plain fetch says nothing extra, and a
   // routed one says who fetches and whether private space was opened.
-  it('draws the fetch gate\'s routing facts only when the payload carries them', async () => {
+  it('draws the routing facts only when the payload carries them', async () => {
     const mountFetch = async (payload: Record<string, unknown>) => {
       vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
         {
@@ -113,7 +125,7 @@ describe('ApprovalCard', () => {
           },
         } as ActionRecord,
       ])
-      const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+      const wrapper = mountTail()
       await flushPromises()
       return wrapper
     }
@@ -124,7 +136,7 @@ describe('ApprovalCard', () => {
       routed_provider: 'deepseek',
       allow_private_ip: true,
     })
-    expect(routed.findAll('[data-testid="web-fetch-fact"]').map((row) => row.text())).toEqual([
+    expect(routed.findAll('[data-testid="approval-gate-fact"]').map((row) => row.text())).toEqual([
       'Fetched server-side by deepseek',
       'Private addresses are allowed',
     ])
@@ -132,8 +144,25 @@ describe('ApprovalCard', () => {
 
     // A plain fetch is the card it always was: no fact row at all.
     const plain = await mountFetch({ url: 'https://example.com/pricing', rule_content: 'domain:example.com' })
-    expect(plain.findAll('[data-testid="web-fetch-fact"]')).toHaveLength(0)
+    expect(plain.findAll('[data-testid="approval-gate-fact"]')).toHaveLength(0)
     plain.unmount()
+  })
+
+  it('holds no request a tool card above carries, and no subagent\'s', async () => {
+    vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
+      { id: 'act-anchored', kind: 'shell', status: 'pending', payloadJson: '{}', createdAt: 1, updatedAt: 1 } as ActionRecord,
+      { id: 'act-subagent', kind: 'shell', status: 'pending', payloadJson: '{}', createdAt: 1, updatedAt: 1, agentId: 'agent-1' } as ActionRecord,
+      { id: 'act-loose', kind: 'shell', status: 'pending', payloadJson: '{}', createdAt: 1, updatedAt: 1 } as ActionRecord,
+      { id: 'act-exit', kind: 'exit_plan_mode', status: 'pending', payloadJson: '{}', createdAt: 1, updatedAt: 1 } as ActionRecord,
+    ])
+    const wrapper = mountTail({ anchoredActionIds: ['act-anchored', 'act-exit'] })
+    await flushPromises()
+
+    // The conversation's tail holds its own loose requests only: what hangs on
+    // a card, what a subagent raised (its own view carries it), and the plan
+    // approval (it waits where the input is) never appear here.
+    expect(wrapper.findAll('[data-testid="pending-approval"]').map((c) => c.attributes('data-action-id'))).toEqual(['act-loose'])
+    wrapper.unmount()
   })
 
   // One row per family the engine can park a run on, in the shapes its
@@ -270,7 +299,7 @@ describe('ApprovalCard', () => {
       // the only grounded thing that card has to say.
       id: 'act-fallback', kind: 'lsp', payload: { operation: 'workspace_symbols', query: 'Gateway', justification: 'The runtime asked for this read.' },
       decisions: ['accept', 'cancel'],
-      question: '要允许这次调用吗？', facts: ['The runtime asked for this read.'], buttons: ['允许', '不要'],
+      question: '要允许这次调用吗？', facts: ['The runtime asked for this read.'], buttons: ['允许', '不允许'],
     },
   ]
 
@@ -289,7 +318,7 @@ describe('ApprovalCard', () => {
         availableDecisions: row.decisions,
       },
     })) as ActionRecord[])
-    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+    const wrapper = mountTail()
     await flushPromises()
 
     for (const row of familyRows) {
@@ -336,7 +365,7 @@ describe('ApprovalCard', () => {
       } as ActionRecord,
     ])
     const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
-    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+    const wrapper = mountTail()
     await flushPromises()
 
     const card = wrapper.find('[data-testid="ask-card"]')
@@ -365,7 +394,7 @@ describe('ApprovalCard', () => {
       } as ActionRecord,
     ])
     const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
-    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+    const wrapper = mountTail()
     await flushPromises()
 
     await wrapper.find('[data-testid="ask-chat-about"]').trigger('click')
@@ -374,51 +403,6 @@ describe('ApprovalCard', () => {
     // to put the caret in the composer.
     expect(approve).toHaveBeenCalledWith('act-ask', { decision: 'cancel' })
     expect(wrapper.emitted('focus-composer')).toHaveLength(1)
-    wrapper.unmount()
-  })
-
-  it('keeps the exit-plan approval its own card', async () => {
-    setLocale('zh')
-    vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
-      { id: 'act-exit', kind: 'exit_plan_mode', status: 'pending', payloadJson: JSON.stringify({ session_id: 's1' }), createdAt: 1, updatedAt: 1 } as ActionRecord,
-    ])
-    vi.spyOn(forebrainApi, 'sessionApprovalRequest').mockResolvedValue({
-      actionId: 'act-exit', kind: 'exit_plan_mode', planText: '# 计划', planReviewModels: [], planReviews: [], planReviewActive: null,
-    } as SessionApprovalRequest)
-    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
-    await flushPromises()
-
-    const card = wrapper.find('[data-testid="exit-plan-approval"]')
-    expect(card.exists()).toBe(true)
-    expect(card.text()).toContain('退出计划模式')
-    // The feedback field is not on the card before its verdict is chosen.
-    expect(card.find('[data-testid="exit-plan-feedback"]').exists()).toBe(false)
-    wrapper.unmount()
-    setLocale('en')
-  })
-
-  it('opens the plan feedback field only after「继续规划」, and folds it on「批准」', async () => {
-    vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
-      { id: 'act-exit', kind: 'exit_plan_mode', status: 'pending', payloadJson: JSON.stringify({ session_id: 's1' }), createdAt: 1, updatedAt: 1 } as ActionRecord,
-    ])
-    vi.spyOn(forebrainApi, 'sessionApprovalRequest').mockResolvedValue({
-      actionId: 'act-exit', kind: 'exit_plan_mode', planText: '# 计划', planReviewModels: [], planReviews: [], planReviewActive: null,
-    } as SessionApprovalRequest)
-    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
-    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
-    await flushPromises()
-
-    const card = wrapper.find('[data-testid="exit-plan-approval"]')
-    expect(card.find('input').exists()).toBe(false)
-
-    await wrapper.find('[data-testid="exit-plan-keep-planning"]').trigger('click')
-    await flushPromises()
-    expect(card.find('input').exists()).toBe(true)
-
-    await wrapper.find('[data-testid="exit-plan-approve"]').trigger('click')
-    await flushPromises()
-    expect(approve).toHaveBeenCalledWith('act-exit', {})
-    expect(card.find('input').exists()).toBe(false)
     wrapper.unmount()
   })
 })

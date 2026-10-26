@@ -25,7 +25,6 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
     subagents: unknown
     subagentPendingInput: unknown
     subagentReturnedDraft: unknown
-    withdrawSubagentInput: unknown
     interruptSubagentToSend: unknown
     sendToSubagent: unknown
     recallSubagentInput: unknown
@@ -44,7 +43,6 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
   f.subagentPendingInput = ref({})
   f.subagentReturnedDraft = ref({})
   f.runtimeStatus = ref({ kind: 'idle', elapsedMs: 0 })
-  f.withdrawSubagentInput = vi.fn()
   f.interruptSubagentToSend = vi.fn()
   f.sendToSubagent = vi.fn()
   f.recallSubagentInput = vi.fn()
@@ -88,8 +86,6 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       sendToSubagent: f.sendToSubagent,
       recallSubagentInput: f.recallSubagentInput,
       interruptSubagentToSend: f.interruptSubagentToSend,
-      withdrawSubagentInput: f.withdrawSubagentInput,
-      compactSubagent: vi.fn(),
       loadSubagentContext: vi.fn(),
       loadSubagentBudget: f.loadSubagentBudget,
       returnedDraft: ref(null),
@@ -109,6 +105,8 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
 })
 
 import ChatView from './ChatView.vue'
+import ActivityLine from '@/components/chat/ActivityLine.vue'
+import ActivityStep from '@/components/chat/ActivityStep.vue'
 
 // The app registers `tip` once (main.ts); mounting here does the same, so an
 // element that names itself with it resolves instead of warning.
@@ -258,36 +256,31 @@ describe('ChatView subagent drawer', () => {
     wrapper.unmount()
   })
 
-  it('takes a just-sent message back into the tab’s composer on Escape, keeping the drawer', async () => {
+  it('cancels the tab’s own waiting continuation on Escape, keeping the drawer', async () => {
     seedSubagent()
     seedCard()
-    const restore = vi.fn()
-    const withdraw = (fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput
-    withdraw.mockResolvedValue([{ text: 'continue', attachments: [], mentionImages: [] }])
     ;(fake as { interruptSubagentToSend: { mockResolvedValue: (v: unknown) => void } }).interruptSubagentToSend
       .mockResolvedValue(false)
-    const wrapper = await mountView({
-      SubagentTab: { name: 'SubagentTab', template: '<div class="subagent-tab-stub" />', methods: { restoreSubmission: restore } },
-    })
+    ;(fake as { autoContinueForView: { mockImplementation: (fn: (v: string) => unknown) => void } }).autoContinueForView
+      .mockImplementation((view: string) => (view === 'task-1' ? { continueAt: '2026-09-30T02:10:05Z', code: 'rate_limit_quota' } : null))
+    const wrapper = await mountView()
     await nextTick()
     await openDrawer(wrapper)
 
+    // Esc's order is the terminal's: interrupt to send, else cancel what this
+    // subagent waits to continue, else leave. Nothing is taken back any more:
+    // a message that left the composer is the subagent's (plan 142).
     await tabs(wrapper)[0].vm.$emit('escape-key')
-    await nextTick()
-    await nextTick()
-    expect(fake.withdrawSubagentInput).toHaveBeenCalledWith('task-1')
-    // Nothing was left to interrupt: the withdrawn message is the draft again.
-    expect(fake.interruptSubagentToSend).not.toHaveBeenCalled()
-    expect(restore).toHaveBeenCalledWith({ text: 'continue', attachments: [], mentionImages: [] })
+    await vi.waitFor(() => expect(fake.cancelAutoContinue).toHaveBeenCalledWith('task-1'))
     expect(drawer(wrapper).exists()).toBe(true)
+    ;(fake as { autoContinueForView: { mockImplementation: (fn: () => null) => void } }).autoContinueForView
+      .mockImplementation(() => null)
     wrapper.unmount()
   })
 
-  it('collapses the drawer on Escape when there is nothing to take back or interrupt', async () => {
+  it('collapses the drawer on Escape when there is nothing to interrupt or continue', async () => {
     seedSubagent()
     seedCard()
-    ;(fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput
-      .mockResolvedValue([])
     ;(fake as { interruptSubagentToSend: { mockResolvedValue: (v: unknown) => void } }).interruptSubagentToSend
       .mockResolvedValue(false)
     const wrapper = await mountView()
@@ -299,6 +292,7 @@ describe('ChatView subagent drawer', () => {
     await vi.waitFor(() => expect(drawer(wrapper).exists()).toBe(false))
     // The subagent is still running: a shut drawer is not a stop.
     expect(subagentsRef().value[0]).toMatchObject({ status: 'running' })
+    expect(fake.cancelAutoContinue).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -392,23 +386,21 @@ describe('ChatView subagent drawer', () => {
     seedCard()
     const slash = vi.spyOn(forebrainApi, 'slashCommands')
       .mockResolvedValue({ surface: 'webchat', query: '', options: { duringRun: false, sideConversation: false }, records: [] })
-    ;(fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput
-      .mockResolvedValue([{ text: 'continue', attachments: [], mentionImages: [] }])
     ;(fake as { interruptSubagentToSend: { mockResolvedValue: (v: unknown) => void } }).interruptSubagentToSend
-      .mockResolvedValue(false)
+      .mockResolvedValue(true)
     try {
       const wrapper = await mountView({ SubagentTab: false })
       await nextTick()
       await openDrawer(wrapper)
 
       // The keydown rises from the tab's own textarea through the tab (which
-      // spends it) to the drawer (which must then stand down): one take-back,
+      // spends it) to the drawer (which must then stand down): one interrupt,
       // and the drawer stays where it is.
       await wrapper.find('[data-testid="subagent-drawer"] textarea').trigger('keydown', { key: 'Escape' })
       await nextTick()
       await nextTick()
-      expect(fake.withdrawSubagentInput).toHaveBeenCalledTimes(1)
-      expect(fake.withdrawSubagentInput).toHaveBeenCalledWith('task-1')
+      expect(fake.interruptSubagentToSend).toHaveBeenCalledTimes(1)
+      expect(fake.interruptSubagentToSend).toHaveBeenCalledWith('task-1')
       expect(drawer(wrapper).exists()).toBe(true)
     } finally {
       slash.mockRestore()
@@ -1471,6 +1463,53 @@ describe('ChatView project servers consent', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="project-servers-consent"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('ChatView activity line', () => {
+  afterEach(() => {
+    setLocale('en')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = []
+  })
+
+  /**
+   * One turn — a thought, its words, two calls — hangs on one activity line,
+   * each block on a node: the brain for the thought, the brand mark for the
+   * words, the call's own state for each call. A compaction card breaks the
+   * line (owner 2026-10-25).
+   */
+  it('hangs one turn’s blocks on one line, one node each', async () => {
+    setLocale('en')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      { id: 'u1', role: 'user', content: 'go' },
+      {
+        id: 'a1', role: 'assistant', content: '',
+        blocks: [
+          { kind: 'thinking', text: 'weighing the options', open: false, startedAt: 0, durationMs: 12000 },
+          { kind: 'assistant', text: 'here is the answer', open: false },
+          { kind: 'tool', step: { stepId: 'c1', toolName: 'shell', summary: 'ran ls', header: 'Ran ls', status: 'completed' } },
+          { kind: 'tool', step: { stepId: 'c2', toolName: 'read_file', summary: 'read a.go', header: 'Read a.go lines 1-9', status: 'failed', error: 'boom' } },
+          { kind: 'compaction', id: 'compaction:k1', compaction: {} },
+        ],
+      },
+    ]
+    const wrapper = await mountView()
+    await flushPromises()
+
+    // One line for the turn; the compaction card is off it.
+    const lines = wrapper.findAllComponents(ActivityLine)
+    expect(lines).toHaveLength(1)
+    const steps = wrapper.findAllComponents(ActivityStep)
+    expect(steps).toHaveLength(4)
+    // The nodes: the brain, the brand mark, and each call's state — the
+    // failed one drawn as the cross, the done one as the tick.
+    const statusNodes = wrapper.findAll('.tool-status.tool-status--node')
+    expect(statusNodes).toHaveLength(2)
+    expect(statusNodes[0]!.classes()).toContain('tool-status--done')
+    expect(statusNodes[1]!.classes()).toContain('tool-status--error')
+    expect(wrapper.find('.activity-node--think').exists()).toBe(true)
+    expect(wrapper.find('.activity-node--say').exists()).toBe(true)
     wrapper.unmount()
   })
 })

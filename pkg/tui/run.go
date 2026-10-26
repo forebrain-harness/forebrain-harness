@@ -292,10 +292,10 @@ func Run(ctx context.Context, opts Options) error {
 				drawUIPanel(renderer, &state)
 			}
 			return
-		case SubagentInputBoundaryMsg:
-			// A subagent's queue decided what follows one of its executions, in a
-			// background goroutine; apply it on the main loop.
-			handleSubagentInputBoundaryMsg(opts.Session, renderer, &state, msg)
+		case SubagentInputReturnedMsg:
+			// One execution of a subagent ended without taking everything the
+			// user sent it, in a background goroutine; apply it on the main loop.
+			handleSubagentInputReturnedMsg(renderer, &state, msg)
 			return
 		case SubagentQueueChangedMsg:
 			handleSubagentQueueChangedMsg(renderer, &state, msg)
@@ -2336,6 +2336,17 @@ func (s *streamState) applyComposerDraft(d composerDraft) {
 	s.seedReader(s.composer.DraftText, seedCursorEnd)
 }
 
+// subagentViewRunning reports whether the subagent whose view is open has an
+// execution in flight — the one thing that lets that view take input. A state
+// with no session cannot answer, and keeps the composer: hiding it would be a
+// claim it has no basis for.
+func (s *streamState) subagentViewRunning(view string) bool {
+	if s == nil || s.session == nil {
+		return true
+	}
+	return s.session.SubagentRunning(s.sessionID, view)
+}
+
 func (s *streamState) composerPendingInputPreview() ComposerPendingInputPreview {
 	if s == nil {
 		return ComposerPendingInputPreview{}
@@ -2401,7 +2412,7 @@ func subagentViewLine(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 		renderComposerWithState(renderer, state)
 	default:
 		if submittable {
-			sendSubagentViewSubmission(ctx, session, renderer, state, view, submission, false)
+			sendSubagentViewSubmission(ctx, session, renderer, state, view, submission)
 		}
 	}
 }
@@ -2411,8 +2422,10 @@ func subagentViewLine(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, view, line string) {
 	fields := strings.Fields(strings.TrimSpace(line))
 	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
-	builtin, isBuiltin := turn.Find(name)
-	if !isBuiltin {
+	// The registry lists skill commands beside the built-ins, so a name it
+	// finds may still be a skill: only the built-in table itself says
+	// otherwise.
+	if !turn.IsBuiltinName(name) {
 		// A skill command acts on the subagent: it is expanded through the
 		// shared slash path and sent to the subagent with the skill explicitly
 		// activated.
@@ -2421,17 +2434,16 @@ func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-cha
 			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.UnknownCommandReply(turn.SurfaceTUI, name, turn.DiscoveryOptions{SubagentView: true, FastAvailable: sessionFastAvailable(session)}), AgentID: view, Final: true})
 			return
 		}
-		sendSubagentViewSubmission(ctx, session, renderer, state, view, submission, false)
+		sendSubagentViewSubmission(ctx, session, renderer, state, view, submission)
 		return
 	}
+	builtin, _ := turn.Find(name)
 	switch builtin.SubagentView {
 	case turn.SubagentViewGlobal:
 		// Runs exactly as it does in the conversation's view.
 		dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line)
 	case turn.SubagentViewActs:
 		switch name {
-		case "compact":
-			dispatchSubagentCompactSlash(ctx, sigCh, events, notifyCh, processNotify, cmds, renderer, state, view, line)
 		case "context":
 			reply, ok := session.SubagentContextReport(state.sessionID, view)
 			if ok && strings.TrimSpace(reply) != "" {
@@ -2469,13 +2481,21 @@ func expandSubagentSkillCommand(ctx context.Context, session Session, state *str
 }
 
 // sendSubagentViewSubmission hands one submission to the subagent whose view it
-// was typed in, and keeps the composer honest: cleared on success, restored on
-// a refusal so nothing is lost.
-func sendSubagentViewSubmission(ctx context.Context, session Session, renderer *Renderer, state *streamState, view string, submission ComposerSubmission, followUp bool) {
+// was typed in, and keeps the composer honest: cleared on success. A refusal
+// because the subagent has just finished is not a failure — the execution ended
+// before it could take the message, so the text goes where the user can still
+// use it, the conversation's composer.
+func sendSubagentViewSubmission(ctx context.Context, session Session, renderer *Renderer, state *streamState, view string, submission ComposerSubmission) {
 	if state == nil || renderer == nil {
 		return
 	}
-	if _, err := session.SendToSubagent(state.sessionID, view, submission, followUp); err != nil {
+	if _, err := session.SendToSubagent(state.sessionID, view, submission); err != nil {
+		if errors.Is(err, run.ErrSubagentNotRunning) {
+			state.resetComposerAfterQueue()
+			returnToMainComposer(renderer, state, view, []ComposerSubmission{submission})
+			renderComposerWithState(renderer, state)
+			return
+		}
 		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "subagent", Content: "Could not send this to the subagent: " + err.Error(), AgentID: view, Final: true})
 		state.restoreDraftSubmission(submission)
 		renderComposerWithState(renderer, state)
@@ -2483,67 +2503,6 @@ func sendSubagentViewSubmission(ctx context.Context, session Session, renderer *
 	}
 	state.resetComposerAfterQueue()
 	renderComposerWithState(renderer, state)
-}
-
-// dispatchSubagentCompactSlash runs /compact for a subagent's own context on the
-// same cancelable path the conversation's /compact uses: the loop keeps
-// processing input and notifications while the compaction runs, and Ctrl+C/Esc
-// cancels the real operation.
-func dispatchSubagentCompactSlash(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), cmds *commandController, renderer *Renderer, state *streamState, view, line string) {
-	if cmds == nil || cmds.session == nil || state == nil {
-		return
-	}
-	opCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	resultCh := make(chan string, 1)
-	sessionID := state.sessionID
-	go func() {
-		reply, _ := cmds.session.CompactSubagent(opCtx, sessionID, view)
-		resultCh <- reply
-	}()
-	ctxDone := ctx.Done()
-	cancelRequested := false
-	requestCancel := func() {
-		if cancelRequested {
-			return
-		}
-		cancelRequested = true
-		cancel()
-	}
-	for {
-		select {
-		case reply := <-resultCh:
-			// The compaction's own events draw its card; here only a one-line
-			// refusal or failure is said, in the subagent's view.
-			drainNotifications(notifyCh, processNotify)
-			if r := strings.TrimSpace(reply); r != "" {
-				renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "compact", Content: r, AgentID: view, Final: true})
-			}
-			return
-		case <-ctxDone:
-			ctxDone = nil
-			requestCancel()
-		case <-sigCh:
-			requestCancel()
-		case m, ok := <-notifyCh:
-			if !ok {
-				notifyCh = nil
-				continue
-			}
-			if processNotify != nil {
-				processNotify(m)
-			}
-		case ev, ok := <-events:
-			if !ok || ev.kind == inputEventDone {
-				events = nil
-				requestCancel()
-				continue
-			}
-			if handleBlockingSlashInput(cmds.session, renderer, state, ev) {
-				requestCancel()
-			}
-		}
-	}
 }
 
 // dispatchActiveRunInput routes one input event received during a running turn.
@@ -2563,21 +2522,13 @@ func dispatchActiveRunInput(ctx context.Context, sigCh <-chan os.Signal, events 
 	handleActiveRunInput(ctx, session, renderer, tracker, state, clipboard, ev, cmds)
 }
 
-// handleSubagentViewEsc is Esc's behavior in a subagent's view (D1): take back a
-// just-sent message, else interrupt to send the queued steers, else cancel the
-// subagent's own pending continuation, else return to the conversation. Esc
-// never cancels the subagent itself.
+// handleSubagentViewEsc is Esc's behavior in a subagent's view (D1): interrupt
+// to send the queued steers, else cancel the subagent's own pending
+// continuation, else return to the conversation. Esc never cancels the subagent
+// itself, and a message that has already left the composer is the subagent's to
+// take — there is no withdrawing it (plan 142).
 func handleSubagentViewEsc(session Session, renderer *Renderer, state *streamState, view string) {
 	if state == nil || renderer == nil {
-		return
-	}
-	if restored, ok := session.WithdrawSubagentInput(state.sessionID, view); ok {
-		items := append([]ComposerSubmission(nil), restored...)
-		if draft, ok := state.currentDraftSubmission(); ok {
-			items = append(items, draft)
-		}
-		state.restoreDraftSubmission(mergeComposerSubmissions(items))
-		renderComposerWithState(renderer, state)
 		return
 	}
 	if session.InterruptSubagentToSend(state.sessionID, view) {
@@ -2595,34 +2546,47 @@ func handleSubagentViewEsc(session Session, renderer *Renderer, state *streamSta
 	renderComposerWithState(renderer, state)
 }
 
-// handleSubagentInputBoundaryMsg applies what a subagent's queue decided when one
-// of its executions ended: a Send starts its next execution, a Restore goes back
-// into that subagent's composer (or is kept for its view).
-func handleSubagentInputBoundaryMsg(session Session, renderer *Renderer, state *streamState, m SubagentInputBoundaryMsg) {
+// subagentUnsentReply is the line a subagent's view keeps when an execution
+// ended before it took what the user had sent it: the text is not lost, and the
+// sentence says where it went.
+const subagentUnsentReply = "The subagent finished; your unsent text is in the main composer."
+
+// handleSubagentInputReturnedMsg applies what an execution of a subagent ended
+// without taking: the messages go back to the conversation's composer, in the
+// order they were written, and the subagent's view says so.
+func handleSubagentInputReturnedMsg(renderer *Renderer, state *streamState, m SubagentInputReturnedMsg) {
 	view := strings.TrimSpace(m.AgentKey)
-	if state == nil || renderer == nil || view == "" {
+	if state == nil || renderer == nil || view == "" || len(m.Returned) == 0 {
 		return
 	}
-	if len(m.Send) > 0 {
-		merged := mergeComposerSubmissions(m.Send)
-		if _, err := session.SendToSubagent(state.sessionID, view, merged, false); err != nil {
-			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "subagent", Content: "Could not continue the subagent: " + err.Error(), AgentID: view, Final: true})
-		}
-		renderComposerWithState(renderer, state)
+	returnToMainComposer(renderer, state, view, m.Returned)
+	renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "subagent", Content: subagentUnsentReply, AgentID: view, Final: true})
+	renderComposerWithState(renderer, state)
+}
+
+// returnToMainComposer puts input a subagent never took into the conversation's
+// composer. The conversation's own input box is on screen when its view is, so
+// the text joins the draft the user already had; otherwise the draft waits for
+// that view, ahead of whatever it holds. Either way it is one draft in written
+// order, the shape the composer can edit and send.
+//
+// It is also where a message addressed to a subagent that has just finished
+// goes, and where a draft left in an idle subagent's view ends up: an idle
+// subagent takes no messages, and the user decides whether the dispatching agent
+// hears about what they wrote.
+func returnToMainComposer(renderer *Renderer, state *streamState, view string, items []ComposerSubmission) {
+	if state == nil || len(items) == 0 {
 		return
 	}
-	if len(m.Restore) > 0 {
-		if strings.TrimSpace(renderer.ActiveView()) == view {
-			items := append([]ComposerSubmission(nil), m.Restore...)
-			if draft, ok := state.currentDraftSubmission(); ok {
-				items = append(items, draft)
-			}
-			state.restoreDraftSubmission(mergeComposerSubmissions(items))
-		} else {
-			state.prependRestoredToViewDraft(view, m.Restore)
+	if renderer != nil && strings.TrimSpace(renderer.ActiveView()) == "" && strings.TrimSpace(state.composerView) == "" {
+		merged := append([]ComposerSubmission(nil), items...)
+		if draft, ok := state.currentDraftSubmission(); ok {
+			merged = append(merged, draft)
 		}
-		renderComposerWithState(renderer, state)
+		state.restoreDraftSubmission(mergeComposerSubmissions(merged))
+		return
 	}
+	state.prependRestoredToViewDraft("", items)
 }
 
 // handleSubagentQueueChangedMsg repaints the composer when the subagent whose
@@ -3281,6 +3245,22 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 	// natural moment to move the per-view draft and the view's own footer gauge
 	// (plan 007 §2). It is a no-op while the view has not changed.
 	state.syncComposerToView(renderer)
+	// A subagent's view takes input only while that subagent has an execution
+	// running. An idle subagent is the dispatching agent's again — it takes no
+	// messages (run.ErrSubagentNotRunning) — so its view draws no input box, the
+	// raw reader accepts no edits, and anything typed there before it went idle
+	// moves to the conversation's composer rather than being stranded.
+	idle := ""
+	if view := strings.TrimSpace(renderer.ActiveView()); view != "" && !state.subagentViewRunning(view) {
+		idle = view
+	}
+	composerReadOnly.Store(idle != "")
+	if idle != "" {
+		if draft, ok := state.currentDraftSubmission(); ok {
+			state.resetComposerAfterQueue()
+			returnToMainComposer(renderer, state, idle, []ComposerSubmission{draft})
+		}
+	}
 	overlay := state.composer.SlashOverlay
 	mentionOv := state.composer.MentionOverlay
 	slashOverlayActive.Store(overlay != nil && overlay.Active)
@@ -3319,6 +3299,7 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 			RosterFocused: state.agentRosterFocused,
 			ArgumentHint:  hint,
 			OverlayRows:   rows,
+			ReadOnly:      idle != "",
 		})
 		return
 	}
@@ -3331,6 +3312,7 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 		AgentRoster:   state.agentRoster,
 		RosterFocused: state.agentRosterFocused,
 		SlashMenu:     &menu,
+		ReadOnly:      idle != "",
 	})
 }
 
@@ -4647,15 +4629,16 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 		}
 		if ev.hotkey == hotkeyQueueFollowUp {
 			state.resetActiveRunCtrlCSequence()
-			// In a subagent's view the message is queued on that subagent's own
-			// channel, not the conversation's (plan 007 §3).
+			// In a subagent's view the two send keys mean the same thing: the
+			// message steers that subagent's running execution. There is no
+			// "after this one" to queue it for (plan 142).
 			if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
 				state.commitDraftForSubmission()
 				submission, ok := state.submissionFromCurrentDraft()
 				if !ok {
 					return
 				}
-				sendSubagentViewSubmission(ctx, session, renderer, state, view, submission, true)
+				sendSubagentViewSubmission(ctx, session, renderer, state, view, submission)
 				return
 			}
 			state.commitDraftForSubmission()
@@ -4919,8 +4902,8 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 	case hotkeyQueueFollowUp:
 		state.agentControlPrefixArmed = false
 		// Queueing a follow-up needs something to follow. In a subagent's view
-		// that something is the subagent's own execution, which is alive
-		// whether or not the conversation's turn is (plan 007 §3). In the
+		// the message steers that subagent's running execution instead: no
+		// execution of a subagent has work queued behind it (plan 142). In the
 		// conversation's view there is no run behind an idle composer, so the
 		// key stays a no-op there, exactly as before.
 		if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
@@ -4929,7 +4912,7 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 			if !ok {
 				return true
 			}
-			sendSubagentViewSubmission(ctx, session, renderer, state, view, submission, true)
+			sendSubagentViewSubmission(ctx, session, renderer, state, view, submission)
 			return true
 		}
 		return true

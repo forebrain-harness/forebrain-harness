@@ -70,8 +70,13 @@ describe('approvalGates', () => {
     expect(approvalQuestion('file_write', 'write_file', { existing_lines: 0 })).toBe('要新建这个文件吗？')
     expect(approvalFacts('file_write', { content: 'x\n'.repeat(12), existing_lines: 3 }, null).facts).toEqual(['+12 −3 行'])
     expect(approvalQuestion('file_write', 'write_file', { existing_lines: 41 })).toBe('要覆盖这个文件吗？')
-    // The diff of a full write is every line added.
-    expect(approvalFacts('file_write', { content: 'a\nb' }, null).diff).toEqual([['+', 'a'], ['+', 'b']])
+    // The panel belongs to the overwrite: every line added, the new file's own
+    // numbers. A new file has no panel — its size is the fact line (①).
+    expect(approvalFacts('file_write', { content: 'a\nb', existing_lines: 0 }, null).diff).toEqual([])
+    expect(approvalFacts('file_write', { content: 'a\nb', existing_lines: 2 }, null).diff).toEqual([
+      { mark: '+', line: 1, text: 'a' },
+      { mark: '+', line: 2, text: 'b' },
+    ])
   })
 
   it('draws the edit the engine diffed, and the old texts only when it could not', () => {
@@ -87,15 +92,27 @@ describe('approvalGates', () => {
     expect(engineDiffed.facts).toEqual(['+1 −1 行'])
     expect(engineDiffed.added).toBe(1)
     expect(engineDiffed.removed).toBe(1)
-    // The @@ header is a context row, not a body row: its sign slot is empty.
-    expect(engineDiffed.diff).toEqual([['', '@@ -1,3 +1,3 @@'], ['', ' a'], ['-', 'b'], ['+', 'B'], ['', ' c']])
+    // The hunk's own counters number the rows; the @@ header itself is not one.
+    expect(engineDiffed.diff).toEqual([
+      { mark: ' ', line: 1, text: 'a' },
+      { mark: '-', line: 2, text: 'b' },
+      { mark: '+', line: 2, text: 'B' },
+      { mark: ' ', line: 3, text: 'c' },
+    ])
     expect(approvalQuestion('file_edit', 'edit_file', {})).toBe('要改这个文件吗？')
 
     // A historical action has neither field: the two texts are all there is, and
-    // the card falls back to them without throwing.
+    // the card falls back to them without throwing. No numbers exist for the
+    // fallback shape, so its rows carry none.
     const historical = approvalFacts('file_edit', { file_path: 'a.go', old_string: 'one\ntwo', new_string: 'one\nnew\nextra' }, null)
     expect(historical.facts).toEqual(['+3 −2 行'])
-    expect(historical.diff).toEqual([['-', 'one'], ['-', 'two'], ['+', 'one'], ['+', 'new'], ['+', 'extra']])
+    expect(historical.diff).toEqual([
+      { mark: '-', line: null, text: 'one' },
+      { mark: '-', line: null, text: 'two' },
+      { mark: '+', line: null, text: 'one' },
+      { mark: '+', line: null, text: 'new' },
+      { mark: '+', line: null, text: 'extra' },
+    ])
 
     // A written 0 is the engine saying nothing changed — a fact, not a missing
     // value, so the card reads 0/0 rather than falling back to the texts and
@@ -107,7 +124,7 @@ describe('approvalGates', () => {
     expect(noop.facts.join(' ')).not.toContain('NaN')
   })
 
-  it('counts a patch from its resolved paths and body, and shows its first hunk verbatim', () => {
+  it('counts a patch from its resolved paths and body, lists its files, shows one hunk', () => {
     const payload = {
       apply_patch: true,
       resolved_paths: ['/w/pkg/a.go', '/w/pkg/b.go', '/w/frontend/c.ts'],
@@ -116,17 +133,35 @@ describe('approvalGates', () => {
     const facts = approvalFacts('apply_patch', payload, null)
     // One line of facts, the way the prototype prints them (:3503).
     expect(facts.facts).toEqual(['3 个文件 · +2 −2'])
-    expect(facts.diff).toEqual([['', '@@'], ['', ' ctx'], ['-', 'old'], ['+', 'new'], ['', ' ctx']])
     expect(approvalQuestion('apply_patch', 'apply_patch', payload)).toBe('要应用这个补丁吗？')
+    // Several files: one row each, with its own verb and counts, read from the
+    // patch body itself; the representative hunk carries no numbers — the
+    // patch's bare @@ has none to give.
+    expect(facts.patchFiles).toEqual([
+      { verb: 'updated', path: 'pkg/a.go', added: 1, deleted: 1 },
+      { verb: 'updated', path: 'pkg/b.go', added: 1, deleted: 1 },
+    ])
+    expect(facts.diff).toEqual([
+      { mark: ' ', line: null, text: ' ctx' },
+      { mark: '-', line: null, text: 'old' },
+      { mark: '+', line: null, text: 'new' },
+      { mark: ' ', line: null, text: ' ctx' },
+    ])
     // Eight body rows is all a patch card shows; the bound belongs to the
     // caller and did not move when the reader learned a second bound.
     const wide = approvalFacts('apply_patch', {
       apply_patch: true,
       patch: '*** Begin Patch\n*** Update File: pkg/a.go\n@@\n' + Array.from({ length: 20 }, (_, i) => `+row-${i}`).join('\n'),
     }, null)
-    expect(wide.diff).toHaveLength(9)
-    expect(wide.diff![0]).toEqual(['', '@@'])
-    expect(wide.diff![8]).toEqual(['+', 'row-7'])
+    expect(wide.diff).toHaveLength(8)
+    expect(wide.diff![0]).toEqual({ mark: '+', line: null, text: 'row-0' })
+    expect(wide.diff![7]).toEqual({ mark: '+', line: null, text: 'row-7' })
+    // One file only: no file rows, the hunk stands for the patch.
+    const single = approvalFacts('apply_patch', {
+      apply_patch: true,
+      patch: '*** Begin Patch\n*** Update File: only.go\n@@\n-a\n+b\n',
+    }, null)
+    expect(single.patchFiles).toBeUndefined()
   })
 
   it('says what the one dangerous rule does, and nothing when the engine named no rule', () => {

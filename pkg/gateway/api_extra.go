@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -191,6 +192,8 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/todos", s.handleSessionTodos)
 	chatSessions.Get("/:id/plan-md", s.handleSessionPlanMarkdown)
 	chatSessions.Get("/:id/plans", s.handleSessionPlans)
+	chatSessions.Get("/:id/tool-output/:retrieve", s.handleChatToolOutput)
+	chatSessions.Get("/:id/subagents/:agent/tool-output/:retrieve", s.handleSubagentToolOutput)
 	chatSessions.Get("/:id/approval-request", s.handleSessionApprovalRequest)
 	chatSessions.Get("/:id/mode", s.handleSessionMode)
 	// The conversation's own model choice, session-scoped like /model's live
@@ -210,13 +213,13 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/file-changes/diff", s.handleSessionFileChangesDiff)
 	// A subagent's own view talks to that subagent through these — the same
 	// semantics the terminal's subagent view has (plan 007), decided in the
-	// engine (plan 005): send, recall, Esc's two meanings, compact, context,
-	// and the budget it opens with.
+	// engine (plan 005): steer, recall, interrupt-and-send, context, and the
+	// budget it opens with. There is no withdraw (a view only steers a running
+	// execution) and no compact (a subagent's own summary is not the user's to
+	// run) — plan 142.
 	chatSessions.Post("/:id/subagents/:agent/input", s.handleSubagentInput)
 	chatSessions.Post("/:id/subagents/:agent/queued-input", s.handleSubagentQueuedInput)
 	chatSessions.Post("/:id/subagents/:agent/interrupt-send", s.handleSubagentInterruptSend)
-	chatSessions.Post("/:id/subagents/:agent/withdraw", s.handleSubagentWithdraw)
-	chatSessions.Post("/:id/subagents/:agent/compact", s.handleSubagentCompact)
 	chatSessions.Get("/:id/subagents/:agent/context", s.handleSubagentContext)
 	chatSessions.Get("/:id/subagents/:agent/budget", s.handleSubagentBudget)
 
@@ -2055,11 +2058,22 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		RunID        string             `json:"run_id,omitempty"`
 		Origin       string             `json:"origin,omitempty"`
 		Attachments  []chatAttachment   `json:"attachments,omitempty"`
-		// Header is a tool row's card header and CallHeaders the header each
-		// call an assistant row issued would carry if it never ran, both worded
-		// by the engine exactly as the terminal words them (tool.DisplayHeader).
-		Header      string            `json:"header,omitempty"`
-		CallHeaders map[string]string `json:"call_headers,omitempty"`
+		// Header is a tool row's card header, worded by the engine exactly as the
+		// terminal words it (tool.DisplayHeader).
+		Header string `json:"header,omitempty"`
+		// HeaderParts is the same header in its four parts, for a surface that
+		// lays the header out itself; CallHeaderList is, on an assistant row, the
+		// header each call it issued would carry if it never ran, as a list —
+		// the web camel-cases response keys deeply, which rewrites a call id
+		// used as a map key, so new fields carry ids as list entries.
+		HeaderParts    *tool.HeaderParts `json:"header_parts,omitempty"`
+		CallHeaderList []callHeaderEntry `json:"call_header_list,omitempty"`
+		// ShellCard is a shell row's facts (streams, exit code, truncation
+		// counts, changed files), read back by the engine from the same body
+		// the live card rendered; FileDiff is a file tool row's turn diff,
+		// read the same way.
+		ShellCard *tool.ShellCard `json:"shell_card,omitempty"`
+		FileDiff  *tool.FileDiff  `json:"file_diff,omitempty"`
 		// SubagentCall is a tool row's card facts: what the subagent_* call
 		// it answered was about, derived once by the engine so the reloaded
 		// card says what the live one said. Transport only; the derivation
@@ -2157,9 +2171,19 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			switch strings.ToLower(strings.TrimSpace(t.Role)) {
 			case "tool":
-				m.Header = storedToolRowHeader(displayRoot(), t.PartsJSON, t.ToolMetaJSON, time.Duration(t.ExecDurationMs)*time.Millisecond)
+				header, parts, body, toolName := storedToolRowHeaderParts(displayRoot(), t.PartsJSON, t.ToolMetaJSON, time.Duration(t.ExecDurationMs)*time.Millisecond)
+				m.Header = header
+				if parts.Action != "" {
+					m.HeaderParts = &parts
+				}
+				if card := shellCardFor(toolName, body); card != nil {
+					m.ShellCard = card
+				}
+				if diff := fileDiffFor(toolName, body); diff != nil {
+					m.FileDiff = diff
+				}
 			case "assistant":
-				m.CallHeaders = canceledCallHeaders(displayRoot, t.PartsJSON)
+				m.CallHeaderList = canceledCallHeaderList(displayRoot, t.PartsJSON)
 			}
 			m.Origin = state.MessageOrigin(t.PartsJSON)
 			if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
@@ -2504,6 +2528,93 @@ func (s *Server) handleSessionPlans(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"plans": rows})
 }
 
+// handleChatToolOutput serves a shell call's full spooled output — the whole
+// text a truncated card's "open the output" drawer shows — for the
+// conversation that ran it. Another conversation's output is not this
+// reader's, and reads as not found.
+func (s *Server) handleChatToolOutput(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if sid == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if s.Sessions != nil {
+		owned, err := s.Sessions.HasSession(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !owned {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	s.serveToolOutput(w, r, s.runnerFor(r.Context(), sid), ParamsFromContext(r.Context()).ByName("retrieve"), sid)
+}
+
+// serveToolOutput answers one spooled output read: the retrieval id from the
+// URL, the runner whose state root holds the spool, and the session the entry
+// must belong to — a spool recorded by another session is never served here.
+func (s *Server) serveToolOutput(w http.ResponseWriter, r *http.Request, runner *run.Runner, retrieve, sessionID string) {
+	id, err := strconv.ParseInt(strings.TrimSpace(retrieve), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "retrieve id", http.StatusBadRequest)
+		return
+	}
+	if runner == nil {
+		http.NotFound(w, r)
+		return
+	}
+	entry, err := tool.CompressorFor(runner.StateRoot()).Store().Get(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if strings.TrimSpace(entry.SessionID) != strings.TrimSpace(sessionID) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"command":             entry.Command,
+		"text":                entry.OriginalOutput,
+		"spool_omitted_bytes": entry.SpoolOmittedBytes,
+	})
+}
+
+// handleSubagentToolOutput is serveToolOutput from a subagent's own view: the
+// spool belongs to the subagent's worker session, so that is the session the
+// entry must name.
+func (s *Server) handleSubagentToolOutput(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "context unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	workerSessionID, _, _, _, _, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveToolOutput(w, r, runner, ParamsFromContext(r.Context()).ByName("retrieve"), workerSessionID)
+}
+
 func (s *Server) handleSessionMode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -2577,7 +2688,7 @@ func compactResultBody(res assembly.Result) map[string]any {
 // each into one sentence in the viewer's language; the gateway never writes a
 // sentence for the page.
 const (
-	subagentRunningCode      = "subagent_running"
+	subagentNotRunningCode   = "subagent_not_running"
 	subagentViewCommandCode  = "subagent_view_command"
 	useDedicatedEndpointCode = "use_dedicated_endpoint"
 )
@@ -2623,9 +2734,9 @@ func (s *Server) subagentRunner(ctx context.Context, sid string) *run.Runner {
 }
 
 // subagentNamed reports whether this conversation names the agent key. The
-// recall, withdraw and interrupt engine calls answer false for a key that is
-// not there, so their routes check tenancy here — the same lookup the engine's
-// channel resolution does, another conversation's subagent being not found.
+// recall and interrupt engine calls answer false for a key that is not there,
+// so their routes check tenancy here — the same lookup the engine's channel
+// resolution does, another conversation's subagent being not found.
 func (s *Server) subagentNamed(sid, agentKey string) bool {
 	if s == nil {
 		return false
@@ -2645,8 +2756,8 @@ func (s *Server) subagentConversationSurface(sid string) run.SubagentSurface {
 		Frame: func(ctx context.Context) context.Context {
 			return s.withDetachedGatewayApprovalHooks(ctx, sid, "")
 		},
-		OnBoundary: func(agentKey string, send, restore []run.Input) {
-			s.publishSubagentQueuedInputReleased(sid, agentKey, send, restore)
+		OnReturned: func(agentKey string, returned []run.Input) {
+			s.publishSubagentQueuedInputReleased(sid, agentKey, nil, returned)
 		},
 		// Every change to the subagent's queue reaches its open views: the
 		// web reads the queue only from these events, so a message the model
@@ -2658,9 +2769,10 @@ func (s *Server) subagentConversationSurface(sid string) run.SubagentSurface {
 	}
 }
 
-// publishSubagentQueuedInputReleased hands a subagent's queue boundary decision
-// to every open page of the conversation: what runs next is sent, the rest go
-// back to that subagent's composer.
+// publishSubagentQueuedInputReleased hands back to every open page of the
+// conversation the messages a subagent's execution ended without taking; the
+// payload's Inputs carries them, and Next is always empty now that an execution
+// cannot be followed by another one on the subagent's own initiative.
 func (s *Server) publishSubagentQueuedInputReleased(sid, agentKey string, send, restore []run.Input) {
 	if s == nil || s.RunEvents() == nil || (len(send) == 0 && len(restore) == 0) {
 		return
@@ -2714,9 +2826,6 @@ type subagentInputRequest struct {
 	Message       string   `json:"message"`
 	Attachments   []string `json:"attachments"`
 	MentionImages []string `json:"mention_images"`
-	// Mode is "steer" (the default) or "follow_up": where the message goes when
-	// the subagent is already running.
-	Mode string `json:"mode"`
 }
 
 func (s *Server) handleSubagentInput(w http.ResponseWriter, r *http.Request) {
@@ -2751,17 +2860,18 @@ func (s *Server) handleSubagentInput(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "empty message", http.StatusBadRequest)
 		return
 	}
-	mode := run.TurnInputModeSteer
-	if reqMode := strings.ToLower(strings.TrimSpace(req.Mode)); reqMode == "follow_up" || reqMode == "queue" {
-		mode = run.TurnInputModeFollowUp
-	}
-	delivery, err := run.SendToSubagent(r.Context(), runner, s.subagentConversationSurface(sid), sid, agentKey, in, mode)
+	delivery, err := run.SendToSubagent(r.Context(), runner, s.subagentConversationSurface(sid), sid, agentKey, in)
 	if err != nil {
-		if errors.Is(err, run.ErrSubagentNotFound) {
+		switch {
+		case errors.Is(err, run.ErrSubagentNotFound):
 			http.NotFound(w, r)
-			return
+		case errors.Is(err, run.ErrSubagentNotRunning):
+			// The subagent is idle: its view takes no messages, because the
+			// agent that dispatched it decides what it does next.
+			writeSubagentViewError(w, subagentNotRunningCode, "the subagent is not running", http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.publishSubagentPendingInputUpdated(r.Context(), sid, agentKey, runner)
@@ -2776,12 +2886,14 @@ func (s *Server) subagentCommandInput(in *run.Input) (code string, ok bool) {
 	fields := strings.Fields(strings.TrimSpace(in.Text))
 	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
 	switch name {
-	case "compact", "context":
+	case "context":
 		return useDedicatedEndpointCode, false
 	}
-	if _, isBuiltin := turn.Find(name); isBuiltin {
-		// A built-in that acts on the conversation (hidden, or global) is not
-		// sent here; the page runs it in the main view instead.
+	// The registry lists skill commands beside the built-ins, so a name it
+	// finds may still be a skill: only the built-in table itself says
+	// otherwise. A built-in that acts on the conversation (hidden, or global)
+	// is not sent here; the page runs it in the main view instead.
+	if turn.IsBuiltinName(name) {
 		return subagentViewCommandCode, false
 	}
 	outcome := parseSlashCommandWithOptions(s, "", "webchat", in.Text, turn.Context{}, nil)
@@ -2860,72 +2972,6 @@ func (s *Server) handleSubagentInterruptSend(w http.ResponseWriter, r *http.Requ
 	}
 	interrupted := run.InterruptSubagentToSend(runner, sid, agentKey)
 	writeJSON(w, map[string]any{"interrupted": interrupted})
-}
-
-func (s *Server) handleSubagentWithdraw(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
-	sid, agentKey, ok := s.subagentRoute(w, r)
-	if !ok {
-		return
-	}
-	runner := s.subagentRunner(r.Context(), sid)
-	if runner == nil {
-		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if !s.subagentNamed(sid, agentKey) {
-		http.NotFound(w, r)
-		return
-	}
-	inputs, withdrawn := run.WithdrawSubagentInput(runner, sid, agentKey)
-	s.publishSubagentPendingInputUpdated(r.Context(), sid, agentKey, runner)
-	msgs := make([]map[string]any, 0, len(inputs))
-	for _, in := range inputs {
-		msgs = append(msgs, map[string]any{"message": in.Text, "attachments": in.Attachments, "mention_images": in.MentionImages})
-	}
-	writeJSON(w, map[string]any{"withdrawn": msgs, "any": withdrawn, "preview": subagentInputPreview(runner, sid, agentKey)})
-}
-
-func (s *Server) handleSubagentCompact(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
-	if s == nil || s.Sessions == nil {
-		http.Error(w, "session store unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	sid, agentKey, ok := s.subagentRoute(w, r)
-	if !ok {
-		return
-	}
-	runner := s.subagentRunner(r.Context(), sid)
-	if runner == nil {
-		http.Error(w, "subagent compact unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	subCtx, workerSessionID, err := run.SubagentCompactTarget(r.Context(), runner, sid, agentKey)
-	if err != nil {
-		switch {
-		case errors.Is(err, run.ErrSubagentRunning):
-			writeSubagentViewError(w, subagentRunningCode, "the subagent is running", http.StatusConflict)
-		case errors.Is(err, run.ErrSubagentNotFound):
-			http.NotFound(w, r)
-		default:
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		}
-		return
-	}
-	svc := run.CompactionService(runner, s.Sessions)
-	res, err := svc.ManualCompactSession(subCtx, workerSessionID, "manual")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, compactResultBody(res))
 }
 
 func (s *Server) handleSubagentContext(w http.ResponseWriter, r *http.Request) {

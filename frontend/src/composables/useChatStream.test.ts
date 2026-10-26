@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest'
 
 import { setLocale, t } from '@/locales'
-import { forebrainApi } from '@/lib/api'
+import { toCamelCase } from '@/lib/case'
+import { forebrainApi, GatewayHttpError } from '@/lib/api'
 import { lastSessionIdValue, persistLastSessionId } from '@/composables/useLastSession'
 import {
   REJECTION_STOPPED_KEY,
@@ -2705,6 +2706,35 @@ describe('conversation tool and approval timeline', () => {
     await pendingSend
   }))
 
+  // A running call streams its output as it happens: the fragments append to
+  // the live card's output (the shell body reads their tail), and the
+  // completion's own facts replace them (plan 137).
+  it('accumulates a running call’s output deltas until its completion lands', withFakeWebSocket(async () => {
+    const { stream, socket, pendingSend } = await startLiveStream('live-delta', 'run-delta')
+
+    runEvent(socket, 'evt-1', 1, 'run-delta', 'live-delta', 'tool_call_started', { toolName: 'shell', stepId: 'call-d', summary: 'running go test' })
+    runEvent(socket, 'evt-2', 2, 'run-delta', 'live-delta', 'tool_output_delta', { stepId: 'call-d', text: '=== RUN TestA\n' })
+    runEvent(socket, 'evt-3', 3, 'run-delta', 'live-delta', 'tool_output_delta', { stepId: 'call-d', text: '--- PASS: TestA\n' })
+
+    const host = stream.messages.value.find((message) => message.runId === 'run-delta')
+    expect(host?.blocks?.[0]).toMatchObject({
+      kind: 'tool',
+      step: { stepId: 'call-d', output: '=== RUN TestA\n--- PASS: TestA\n' },
+    })
+
+    // The completion carries the whole body; the fragments are not kept twice.
+    runEvent(socket, 'evt-4', 4, 'run-delta', 'live-delta', 'tool_call_completed', {
+      toolName: 'shell', stepId: 'call-d', summary: 'ran go test', displayBody: '**shell**\n\nok',
+      shellCard: { stdout: 'ok', stderr: '', files: [], notes: [] },
+    })
+    expect(stream.messages.value.find((message) => message.runId === 'run-delta')?.blocks?.[0]).toMatchObject({
+      kind: 'tool',
+      step: { status: 'completed', output: '**shell**\n\nok', shellCard: { stdout: 'ok' } },
+    })
+    endTurn(socket, 'evt-5', 5, 'run-delta', 'live-delta')
+    await pendingSend
+  }))
+
   it('draws a steer the run handed its model as its own message between two answers', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-delivered', 'run-delivered')
 
@@ -3889,11 +3919,112 @@ describe('the engine header of a tool card', () => {
       { id: 'u1', rowId: 1, role: 'user', content: 'go' },
       {
         id: 'a1', rowId: 2, role: 'assistant', content: '', partsJson: issued('c1', 'shell', '{"command":"go test ./..."}'),
-        callHeaders: { c1: 'Canceled go test ./...' },
+        callHeaderList: [{ callId: 'c1', header: 'Canceled go test ./...', parts: { action: 'Canceled', target: 'go test ./...' } }],
       },
     ] as never)
     const tool = messages.flatMap((m) => m.blocks ?? []).find((b) => b.kind === 'tool')
-    expect(tool).toMatchObject({ kind: 'tool', step: { stepId: 'c1', status: 'canceled', header: 'Canceled go test ./...' } })
+    expect(tool).toMatchObject({ kind: 'tool', step: { stepId: 'c1', status: 'canceled', header: 'Canceled go test ./...', headerParts: { action: 'Canceled', target: 'go test ./...' } } })
+  })
+
+  it('matches a never-run call by its id in the call_header_list — the id a camel-cased map would have lost', () => {
+    // The responses pass through toCamelCase, which camel-cases keys deeply:
+    // a map keyed by a call id has its key rewritten ("call_a_1" → "callA1"),
+    // so the header never reaches the call it belongs to. This is exactly why
+    // the gateway sends a list and the page reads one.
+    const camelized = toCamelCase({ call_headers: { call_a_1: 'Canceled ls' } } as Record<string, unknown>)
+    expect(Object.keys((camelized as { callHeaders: Record<string, string> }).callHeaders)).not.toContain('call_a_1')
+
+    const messages = conversationFromTranscript([
+      { id: 'u1', rowId: 1, role: 'user', content: 'go' },
+      {
+        id: 'a1', rowId: 2, role: 'assistant', content: '', partsJson: issued('call_a_1', 'shell', '{"command":"ls"}'),
+        callHeaderList: [{ callId: 'call_a_1', header: 'Canceled ls', parts: { action: 'Canceled', target: 'ls' } }],
+      },
+    ] as never)
+    const tool = messages.flatMap((m) => m.blocks ?? []).find((b) => b.kind === 'tool')
+    expect(tool).toMatchObject({ kind: 'tool', step: { stepId: 'call_a_1', header: 'Canceled ls' } })
+  })
+
+  it('carries the header parts, the input and the refusal words a step or a row records', () => {
+    // A live started step: the parts ride with it, and the input the engine
+    // recorded does too — a completed step carries none, and must not wipe it.
+    const started = toolStepFromPayload({
+      stepId: 's1', toolName: 'shell', summary: 'ran ls',
+      headerParts: { action: 'Ran', target: 'ls', suffix: 'lines 1-2', duration: '0.3s' },
+      input: { command: 'ls -la' },
+    }, false, 'x')
+    expect(started.headerParts).toEqual({ action: 'Ran', target: 'ls', suffix: 'lines 1-2', duration: '0.3s' })
+    expect(started.input).toEqual({ command: 'ls -la' })
+    const completed = toolStepFromPayload({ stepId: 's1', toolName: 'shell', summary: 'ran ls', displayBody: 'ok' }, true, 'x')
+    expect({ ...started, ...completed }.input).toEqual({ command: 'ls -la' })
+    expect(toolStepFromPayload({ stepId: 's2', toolName: 'shell', summary: 'ran ls', headerParts: { target: 'ls' } }, false, 'x').headerParts).toBeUndefined()
+
+    // A stored row: the parts from the row, the input and the refusal words
+    // from the tool meta the row kept.
+    const meta = JSON.stringify({ tool_name: 'shell', status: 'denied', input: { command: 'rm -rf /' }, deny_feedback: '别删' })
+    const row = toolStepFromRow({ toolStepId: 'c9', toolMetaJson: meta, header: 'Denied rm -rf /', headerParts: { action: 'Denied', target: 'rm -rf /' } })
+    expect(row.headerParts).toEqual({ action: 'Denied', target: 'rm -rf /' })
+    expect(row.input).toEqual({ command: 'rm -rf /' })
+    expect(row.denyFeedback).toBe('别删')
+
+    // A live refused step reads its refusal words from the tool meta the same way.
+    const refused = toolStepFromPayload({
+      stepId: 's3', toolName: 'shell', summary: 'ran rm', status: 'denied',
+      toolMeta: { tool_name: 'shell', status: 'denied', deny_feedback: '别删' },
+    }, true, 'x')
+    expect(refused.denyFeedback).toBe('别删')
+  })
+})
+
+describe('shell card and file diff facts', () => {
+  beforeAll(() => setLocale('en'))
+  afterAll(() => setLocale('en'))
+
+  it('rides a live completion payload, whole and untouched', () => {
+    const step = toolStepFromPayload({
+      stepId: 'sh-1', toolName: 'shell', summary: 'ran go test', displayBody: '**shell**',
+      shellCard: {
+        stdout: 'ok  pkg/tool\t0.5s', stderr: 'fail pkg/gateway', exitCode: 1,
+        stdoutOmittedBytes: 421888, stderrOmittedBytes: 0, omittedBytes: 0,
+        retrieveId: 7, spoolOmittedBytes: 0,
+        files: [{ verb: 'Updated', path: 'a.go', added: 2, deleted: 1, unifiedDiff: '@@ -1 +1 @@\n-x\n+y' }],
+        notes: ['… 7 more files changed'],
+      },
+    }, true, 'x')
+    expect(step.shellCard).toEqual({
+      stdout: 'ok  pkg/tool\t0.5s', stderr: 'fail pkg/gateway', exitCode: 1,
+      stdoutOmittedBytes: 421888, stderrOmittedBytes: 0, omittedBytes: 0,
+      retrieveId: 7, spoolOmittedBytes: 0,
+      files: [{ verb: 'Updated', path: 'a.go', added: 2, deleted: 1, unifiedDiff: '@@ -1 +1 @@\n-x\n+y' }],
+      notes: ['… 7 more files changed'],
+    })
+    // The facts ride the completion only: a started step carries none, and a
+    // merge over it must not see a present-but-empty key.
+    expect(toolStepFromPayload({ stepId: 'sh-1', toolName: 'shell', summary: 'ran go test' }, false, 'x').shellCard).toBeUndefined()
+  })
+
+  it('rides a stored row a reload reads, shell and file tool alike', () => {
+    const shellCard = {
+      stdout: 'M a.go', stderr: '', stdoutOmittedBytes: 0, stderrOmittedBytes: 0,
+      omittedBytes: 0, retrieveId: 0, spoolOmittedBytes: 0,
+      files: [{ verb: 'Created', path: 'b.go', added: 3, deleted: 0 }], notes: [],
+    }
+    const shell = toolStepFromRow({
+      toolStepId: 'c-sh', partsJson: '[]',
+      toolMetaJson: JSON.stringify({ tool_name: 'shell', status: 'completed' }),
+      shellCard,
+    })
+    expect(shell.shellCard).toEqual(shellCard)
+
+    const edit = toolStepFromRow({
+      toolStepId: 'c-edit', partsJson: '[]',
+      toolMetaJson: JSON.stringify({ tool_name: 'edit_file', status: 'completed' }),
+      fileDiff: { path: 'a.go', added: 1, deleted: 2, unifiedDiff: '@@ -1,2 +1 @@\n-a\n-b\n+c', rest: '' },
+    })
+    expect(edit.fileDiff).toEqual({ path: 'a.go', added: 1, deleted: 2, unifiedDiff: '@@ -1,2 +1 @@\n-a\n-b\n+c', rest: '' })
+    // A row that carries neither keeps neither — an old row stays on its body.
+    expect(toolStepFromRow({ toolStepId: 'c-old', partsJson: '[]' }).shellCard).toBeUndefined()
+    expect(toolStepFromRow({ toolStepId: 'c-old', partsJson: '[]' }).fileDiff).toBeUndefined()
   })
 })
 
@@ -4522,6 +4653,33 @@ describe('subagent_* call cards', () => {
     expect(view.rows[1].clock).toBeUndefined()
   })
 
+  it('says why a dispatched subagent failed once, on its row', () => {
+    const raw = 'tool subagent_run: error, status code: 429, status: 429 Too Many Requests, message: {"error":{}}'
+    const described = 'The usage limit has been reached (HTTP 429 Too Many Requests)'
+    const view = subagentCallView({
+      stepId: 'call-run-137', toolName: 'subagent_run', summary: 'run 执行计划 137', status: 'failed', error: raw,
+      subagentCall: {
+        verb: 'run',
+        tasks: [
+          { index: 0, title: '执行计划 137 shell 正文', agentType: 'general-purpose', status: 'failed', error: described, executionId: 'e1', startedAt: 1_799_223_000, finishedAt: 1_799_223_754 },
+        ],
+      },
+    })
+    // The header still says the call failed.
+    expect(view.headerKey).toBe('subagentCard.run.failed')
+    // The row says why; the call's raw text is the same failure again.
+    expect(view.callError).toBeUndefined()
+    expect(view.rows[0]).toMatchObject({ status: 'failed', error: described })
+
+    // With no reason on any row, the call's own failure is the only account.
+    const bare = subagentCallView({
+      stepId: 'call-run-x', toolName: 'subagent_run', summary: 'run x', status: 'failed', error: 'unknown tool "subagent_run"',
+      subagentCall: { verb: 'run', tasks: [{ index: 0, title: 'x', agentType: 'general-purpose', status: 'waiting' }] },
+    })
+    expect(bare.headerKey).toBe('subagentCard.run.failed')
+    expect(bare.callError).toBe('unknown tool "subagent_run"')
+  })
+
   it('opens one card for a plan review and binds its reviewer without a dispatch call', async () => {
     const { stream, runEvent, finish } = liveStream()
     const before = stream.messages.value.length
@@ -5069,7 +5227,7 @@ describe('a subagent talked to from its own view', () => {
       await Promise.resolve()
       const socketsBefore = FakeChatWebSocket.instances.length
       await stream.sendToSubagent('task-1', { text: 'continue', attachments: [], mentionImages: [] })
-      expect(input).toHaveBeenCalledWith('s1', 'task-1', expect.objectContaining({ message: 'continue', mode: 'steer' }))
+      expect(input).toHaveBeenCalledWith('s1', 'task-1', expect.objectContaining({ message: 'continue' }))
       // No new request socket and no turn: the conversation was never involved.
       expect(FakeChatWebSocket.instances.length).toBe(socketsBefore)
       expect(stream.isStreaming.value).toBe(false)
@@ -5153,7 +5311,7 @@ describe('a subagent talked to from its own view', () => {
     }
   })
 
-  it('a subagent boundary sends its next message and returns the rest to its own composer', async () => {
+  it('a subagent boundary returns every message it never took to the conversation’s composer', async () => {
     const restore = installFakeSocket()
     const input = vi.spyOn(forebrainApi, 'subagentInput').mockResolvedValue({ delivery: 'steered', preview: emptyPendingInputPreview() })
     try {
@@ -5163,21 +5321,62 @@ describe('a subagent talked to from its own view', () => {
       socket.open()
       const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
       socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 's1' })
+      // The execution ended with a message the user had sent it: the subagent
+      // is idle now and takes nothing, so the page does not send it again and
+      // does not keep it in the tab — it goes back to the conversation's own
+      // composer, with the code that says why (plan 143).
       socket.message({
         op: 'run_event',
         request_id: sent.request_id,
         data: {
           type: 'queued_input_released', run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z',
-          payload: { agent_id: 'task-1', next: [{ text: 'go on' }], inputs: [{ text: 'hold this' }] },
+          payload: { agent_id: 'task-1', next: [], inputs: [{ text: 'hold this' }] },
         },
       })
       await vi.waitFor(() => {
-        expect(input).toHaveBeenCalledWith('s1', 'task-1', expect.objectContaining({ message: 'go on' }))
+        expect(stream.returnedDraft.value).toMatchObject({ text: 'hold this' })
       })
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(stream.takeSubagentReturnedDraft('task-1')).toMatchObject({ text: 'hold this' })
+      expect(stream.takeReturnedNoticeCode()).toBe('subagent_ended')
+      expect(stream.takeSubagentReturnedDraft('task-1')).toBeNull()
+      expect(input).not.toHaveBeenCalled()
       socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
       await pending
+    } finally {
+      input.mockRestore(); restore()
+    }
+  })
+
+  it('a message the subagent ended before it took goes back to the conversation’s composer', async () => {
+    const restore = installFakeSocket()
+    // The gateway's answer for an idle subagent: 409, its code in the body.
+    const input = vi.spyOn(forebrainApi, 'subagentInput')
+      .mockRejectedValue(new GatewayHttpError(409, 'the subagent is not running'))
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await Promise.resolve()
+      await stream.sendToSubagent('task-1', { text: 'continue', attachments: [], mentionImages: [] })
+      // Not left in the tab's own composer: the tab takes no messages now, so
+      // the words wait where they can be sent.
+      expect(stream.takeSubagentReturnedDraft('task-1')).toBeNull()
+      expect(stream.returnedDraft.value).toMatchObject({ text: 'continue' })
+      expect(stream.takeReturnedNoticeCode()).toBe('subagent_ended')
+    } finally {
+      input.mockRestore(); restore()
+    }
+  })
+
+  it('any other refusal keeps the message in that subagent’s own composer', async () => {
+    const restore = installFakeSocket()
+    const input = vi.spyOn(forebrainApi, 'subagentInput')
+      .mockRejectedValue(new GatewayHttpError(400, "Run this from the main view's composer."))
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await Promise.resolve()
+      await stream.sendToSubagent('task-1', { text: '/compact', attachments: [], mentionImages: [] })
+      expect(stream.takeSubagentReturnedDraft('task-1')).toMatchObject({ text: '/compact' })
+      expect(stream.returnedDraft.value).toBeNull()
     } finally {
       input.mockRestore(); restore()
     }

@@ -411,6 +411,11 @@ type SubagentExecutionEnd struct {
 	Origin Origin
 	// Err is how the execution ended; nil when it succeeded.
 	Err error
+	// AwaitedByDispatcher is true when a blocking call of the dispatching
+	// agent was waiting for this execution (subagent_run, subagent_fanout,
+	// subagent_continue). That agent receives the failure and owns the
+	// continuation, so the scheduler arms none for the subagent itself.
+	AwaitedByDispatcher bool
 }
 
 // SubagentExecutionStarting supersedes a subagent's pending continuation: a
@@ -425,7 +430,9 @@ func (s *Service) SubagentExecutionStarting(ctx context.Context, workerSessionID
 
 // SubagentExecutionEnded arms a subagent's continuation when its execution
 // stopped on a usage limit with a known reset, by the same rules a primary
-// turn is armed by, and otherwise closes the subagent's run of continuations.
+// turn is armed by, and otherwise closes the subagent's run of continuations —
+// except for an execution its dispatching agent awaited, whose failure that
+// agent continues.
 func (s *Service) SubagentExecutionEnded(ctx context.Context, end SubagentExecutionEnd) {
 	if s == nil || s.autoContinue == nil {
 		return
@@ -547,6 +554,13 @@ func (a *autoContinuer) subagentExecutionStarting(ctx context.Context, workerSes
 // continuations in a row.
 func (a *autoContinuer) subagentExecutionEnded(ctx context.Context, end SubagentExecutionEnd) {
 	if a == nil {
+		return
+	}
+	if end.AwaitedByDispatcher {
+		// The agent that dispatched and awaited this execution was handed its
+		// failure and continues the subagent itself; a continuation of the
+		// subagent's own would resume it beside that one.
+		a.closeRun(strings.TrimSpace(end.WorkerSessionID))
 		return
 	}
 	plan, ok := a.continuationFor(strings.TrimSpace(end.ConversationSessionID), end.RunID, end.Origin, end.Err)

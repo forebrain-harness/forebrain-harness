@@ -5578,6 +5578,151 @@ func TestRetractedInFlightSteerIsResentWithoutIt(t *testing.T) {
 	}
 }
 
+// writeProbeSkill writes a real SKILL.md whose body a test can look for in the
+// request the model receives.
+func writeProbeSkill(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "probe-skill", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	body := "---\nname: probe-skill\ndescription: probe\n---\n" + probeSkillBody + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	return path
+}
+
+const probeSkillBody = "PROBE-SKILL-BODY-7f3a"
+
+// toolThenAnswerLLM calls one tool on its first sampling — which is where a
+// queued steer is delivered — and answers on every sampling after it. It keeps
+// what each request carried, which is the only place a skill activation shows.
+type toolThenAnswerLLM struct {
+	calls [][]llm.Message
+}
+
+func (m *toolThenAnswerLLM) Execute(_ context.Context, msgs []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls = append(m.calls, append([]llm.Message(nil), msgs...))
+	if len(m.calls) == 1 {
+		msg := llm.AssistantMessage(nil, llm.ToolCall{ID: "call-read", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"server.go"}`}})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+}
+
+// A steer typed as a skill command in a subagent's view activates that skill:
+// the request carrying the steer also carries the skill's instructions, with a
+// Skill card to show the load happened.
+func TestSteerTypedAsASkillCommandActivatesTheSkill(t *testing.T) {
+	skillPath := writeProbeSkill(t)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "tighten it", Parts: []llm.ContentPart{llm.Text("tighten it")},
+		SkillName: "probe-skill", SkillPath: skillPath})
+
+	var steps []toolpkg.StepEvent
+	ctx := toolpkg.WithStepHook(WithTurnInputRuntime(context.Background(), rt),
+		func(_ context.Context, evt toolpkg.StepEvent) { steps = append(steps, evt) })
+
+	inner := &toolThenAnswerLLM{}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{readFileTestTool(t)})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+	if len(inner.calls) != 2 {
+		t.Fatalf("model calls=%d want 2 (tool call, then the answer with the steer)", len(inner.calls))
+	}
+	second := inner.calls[1]
+	if len(second) < 2 {
+		t.Fatalf("second request = %v, want the activation and the steer", roles(second))
+	}
+	activation, steer := second[len(second)-2], second[len(second)-1]
+	if activation.Role != llm.RoleUser || !activation.IsMeta {
+		t.Fatalf("message before the steer = %v, want the skill activation as a meta message", roles(second))
+	}
+	if !strings.Contains(activation.TextContent(), "The user selected the `probe-skill` skill") ||
+		!strings.Contains(activation.TextContent(), probeSkillBody) {
+		t.Fatalf("activation does not carry the skill: %q", activation.TextContent())
+	}
+	if steer.Role != llm.RoleUser || steer.IsMeta || steer.TextContent() != "tighten it" {
+		t.Fatalf("last message = %v, want the steer's own words", roles(second))
+	}
+	var started, completed []toolpkg.StepEvent
+	for _, evt := range steps {
+		if evt.ToolName != "skill" || evt.SkillName != "probe-skill" {
+			continue
+		}
+		switch evt.Kind {
+		case event.RunEventToolStarted:
+			started = append(started, evt)
+		case event.RunEventToolCompleted:
+			completed = append(completed, evt)
+		}
+	}
+	if len(started) != 1 || len(completed) != 1 {
+		t.Fatalf("skill cards = %d started / %d completed, want one of each", len(started), len(completed))
+	}
+	if completed[0].Error != "" {
+		t.Fatalf("skill card completed with error %q", completed[0].Error)
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 1 || delivered[0].Text != "tighten it" {
+		t.Fatalf("delivered = %#v, want the steer that was answered", delivered)
+	}
+}
+
+// A steer whose skill fails to load still reaches the model: the failure shows
+// as the skill's own failed card, not as a lost message.
+func TestSteerWhoseSkillFailsToLoadIsStillDelivered(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "tighten it", Parts: []llm.ContentPart{llm.Text("tighten it")},
+		SkillName: "probe-skill", SkillPath: filepath.Join(t.TempDir(), "gone", "SKILL.md")})
+
+	var steps []toolpkg.StepEvent
+	ctx := toolpkg.WithStepHook(WithTurnInputRuntime(context.Background(), rt),
+		func(_ context.Context, evt toolpkg.StepEvent) { steps = append(steps, evt) })
+
+	inner := &toolThenAnswerLLM{}
+	if _, err := wrapToolOrchestrationLLM(inner, st).Execute(ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{readFileTestTool(t)}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(inner.calls) != 2 {
+		t.Fatalf("model calls=%d want 2 (tool call, then the answer with the steer)", len(inner.calls))
+	}
+	second := inner.calls[1]
+	if last := second[len(second)-1]; last.Role != llm.RoleUser || last.TextContent() != "tighten it" {
+		t.Fatalf("second request must end with the steer, got %v", roles(second))
+	}
+	for _, msg := range second {
+		if msg.IsMeta || strings.Contains(msg.TextContent(), probeSkillBody) {
+			t.Fatalf("a skill that failed to load was still activated: %q", msg.TextContent())
+		}
+	}
+	var failed *toolpkg.StepEvent
+	for i, evt := range steps {
+		if evt.ToolName == "skill" && evt.Kind == event.RunEventToolCompleted {
+			failed = &steps[i]
+		}
+	}
+	if failed == nil || failed.Error == "" {
+		t.Fatalf("the failed load drew no failed skill card: %#v", steps)
+	}
+}
+
 // retractAtAnswerLLM ends the turn without a tool call — the branch that
 // reopens it for a queued steer — and then, on the sampling that carries the
 // steer, recalls it the way the user's recall key would.

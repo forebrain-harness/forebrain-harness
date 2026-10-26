@@ -126,13 +126,32 @@ describe('SubagentTab', () => {
     expect(wrapper.find('[data-testid="subagent-working"]').exists()).toBe(false)
   })
 
-  it('hands Escape to the tab’s own three-step rule, once', async () => {
+  it('draws a composer only while the subagent runs, and a bar that reads it when idle', async () => {
+    const { wrapper } = mountTab()
+    // Running: the tab's own input box, its queue, its stop and its send.
+    expect(wrapper.find('textarea').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="subagent-idle-bar"]').exists()).toBe(false)
+
+    // Idle: an idle subagent takes no message (the gateway refuses one with
+    // 409), so there is nothing to type into — what is left where the bar was
+    // is the reading mode and the model-and-context pill, and nothing else.
+    await wrapper.setProps({ record: record({ status: 'done' }) })
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="subagent-stop"]').exists()).toBe(false)
+    expect(wrapper.find(`button[aria-label="${t('chat.sendAria')}"]`).exists()).toBe(false)
+    const bar = wrapper.get('[data-testid="subagent-idle-bar"]')
+    expect(bar.find('[data-testid="view-mode-chip"]').exists()).toBe(true)
+    expect(bar.findComponent(SubagentRunPill).exists()).toBe(true)
+  })
+
+  it('hands Escape to the tab’s own rule, once', async () => {
+    // Idle there is no composer to spend the key, so the tab itself reports it
+    // upward exactly once and the page's order (interrupt, cancel the
+    // continuation, leave) is what acts on it.
     const { wrapper } = mountTab({ record: record({ status: 'done' }) })
-    await wrapper.get('textarea').trigger('keydown', { key: 'Escape' })
-    // Idle: an Escape also cancels a continuation waiting on a usage limit,
-    // and the tab reports the key upward exactly once.
-    expect(wrapper.emitted('cancel-auto-continue')).toHaveLength(1)
+    await wrapper.trigger('keydown', { key: 'Escape' })
     expect(wrapper.emitted('escape-key')).toHaveLength(1)
+    expect(wrapper.emitted('cancel-auto-continue')).toBeUndefined()
   })
 
   it('reports a running composer’s Escape upward once, not twice', async () => {

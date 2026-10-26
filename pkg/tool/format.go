@@ -250,6 +250,11 @@ func BuildToolMeta(evt StepEvent) ToolMeta {
 	if call, ok := SubagentCallFromStep(evt); ok {
 		meta.SubagentCall = call
 	}
+	// The refusal's own words ride the meta so the card that shows the refusal
+	// can show them (plan 135); every other call keeps the field empty.
+	if evt.Denied {
+		meta.DenyFeedback = strings.TrimSpace(evt.DenyFeedback)
+	}
 	return meta
 }
 
@@ -740,10 +745,27 @@ func trimBlankEdgeLines(s string) string {
 	return strings.Join(out, "\n")
 }
 
+// fenceFor is the shortest backtick fence longer than any backtick run at the
+// start of a line in text, never shorter than three — so a fence it opens
+// cannot be closed early by the very text it wraps.
+func fenceFor(text string) string {
+	longest := 3
+	for _, line := range strings.Split(text, "\n") {
+		if n := diffFenceLen(strings.TrimLeft(line, " \t")); n >= longest {
+			longest = n + 1
+		}
+	}
+	return strings.Repeat("`", longest)
+}
+
 func formatShellStep(evt StepEvent, maxBytes int) (string, bool) {
 	sb := strings.Builder{}
 	sb.WriteString("**shell**\n\n")
-	if len(evt.Input) > 0 {
+	applyPatch := boolFromAny(evt.Output["apply_patch"])
+	// An apply_patch card never shows the command: the patch itself is the
+	// change, and it is shown below as diff blocks. The full command still
+	// rides the card header.
+	if len(evt.Input) > 0 && !applyPatch {
 		if b, err := json.MarshalIndent(evt.Input, "", "  "); err == nil {
 			sb.WriteString("input:\n\n```json\n")
 			sb.WriteString(string(b))
@@ -754,20 +776,39 @@ func formatShellStep(evt StepEvent, maxBytes int) (string, bool) {
 		stdout := trimBlankEdgeLines(stringFromAny(evt.Output["stdout"]))
 		stderr := trimBlankEdgeLines(stringFromAny(evt.Output["stderr"]))
 		if stdout != "" {
-			sb.WriteString("stdout:\n\n```")
+			fence := fenceFor(stdout)
+			sb.WriteString("stdout:\n\n")
+			sb.WriteString(fence)
 			sb.WriteString(shellOutputLang(evt, stdout))
 			sb.WriteString("\n")
 			sb.WriteString(stdout)
-			sb.WriteString("\n```\n\n")
+			sb.WriteString("\n")
+			sb.WriteString(fence)
+			sb.WriteString("\n\n")
 		}
 		if stderr != "" {
-			sb.WriteString("stderr:\n\n```text\n")
+			fence := fenceFor(stderr)
+			sb.WriteString("stderr:\n\n")
+			sb.WriteString(fence)
+			sb.WriteString("text\n")
 			sb.WriteString(stderr)
-			sb.WriteString("\n```\n\n")
+			sb.WriteString("\n")
+			sb.WriteString(fence)
+			sb.WriteString("\n\n")
 		}
 		if note := omittedBytesNote(evt.Output); note != "" {
 			sb.WriteString(note)
 			sb.WriteString("\n\n")
+		}
+		if blocks, ok := shellDiffBlocks(evt.Output); ok {
+			budget := maxBytes - sb.Len() - 4096 // leave room for the metadata block and the diagnostics
+			if budget <= 0 {
+				budget = 1 // headers only
+			}
+			if section := diffBlocksMarkdown(blocks, budget); section != "" {
+				sb.WriteString(section)
+				sb.WriteString("\n\n")
+			}
 		}
 		renderOutput := shellOutputMetadataOnly(evt.Output)
 		if len(renderOutput) > 0 {
@@ -3446,12 +3487,15 @@ func turnDiffSection(output map[string]any) string {
 	sb := strings.Builder{}
 	sb.WriteString(fmt.Sprintf("turn diff: `%s` (+%d/-%d)", summary.Path, summary.Added, summary.Deleted))
 	if strings.TrimSpace(summary.UnifiedDiff) != "" {
-		sb.WriteString("\n\n```diff\n")
+		fence := fenceFor(summary.UnifiedDiff)
+		sb.WriteString("\n\n")
+		sb.WriteString(fence)
+		sb.WriteString("diff\n")
 		sb.WriteString(summary.UnifiedDiff)
 		if !strings.HasSuffix(summary.UnifiedDiff, "\n") {
 			sb.WriteString("\n")
 		}
-		sb.WriteString("```")
+		sb.WriteString(fence)
 	}
 	return sb.String()
 }
@@ -3585,7 +3629,13 @@ func shellOutputMetadataOnly(output map[string]any) map[string]any {
 		}
 		dup[k] = v
 	}
-	return outputWithout(dup, "turn_diff", "lsp_diagnostics")
+	// apply_patch's files travel as diff blocks instead; every other shell
+	// card keeps its metadata JSON but never replays the snapshot diff.
+	drop := []string{"turn_diff", "lsp_diagnostics", "shell_edit_diff"}
+	if boolFromAny(output["apply_patch"]) {
+		drop = append(drop, "files")
+	}
+	return outputWithout(dup, drop...)
 }
 
 func extractTurnDiff(v any) (event.Summary, bool) {

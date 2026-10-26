@@ -74,9 +74,8 @@ func (env *Environment) ContinueSubagent(r *run.Runner, surface run.SubagentSurf
 	if sessionID == "" || agentKey == "" || text == "" {
 		return turn.ErrAutoContinueUnavailable
 	}
-	delivery, err := run.SendToSubagent(context.Background(), r, surface, sessionID, agentKey,
-		run.Input{Text: text, Parts: []llm.ContentPart{llm.Text(text)}}, run.TurnInputModeSteer)
-	if err != nil || delivery != run.SubagentDeliveryStarted {
+	if err := run.StartSubagentAutoContinue(context.Background(), r, surface, sessionID, agentKey,
+		run.Input{Text: text, Parts: []llm.ContentPart{llm.Text(text)}}); err != nil {
 		return turn.ErrAutoContinueUnavailable
 	}
 	return nil

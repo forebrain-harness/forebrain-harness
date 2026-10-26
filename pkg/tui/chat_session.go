@@ -1517,20 +1517,21 @@ func (s *ChatSession) SurfaceInputQueue(sessionID string) *run.InputQueue {
 	return s.tuiController().SessionQueue(strings.TrimSpace(sessionID))
 }
 
+// SubagentRunning reports whether this subagent has an execution in flight. It
+// only reads the channel this process holds, so a view may ask on every paint.
+func (s *ChatSession) SubagentRunning(sessionID, agentKey string) bool {
+	return run.SubagentRunning(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+}
+
 // SendToSubagent hands what the user typed in a subagent's own view to that
-// subagent through the engine's channel: it starts the subagent's next
-// execution when it is idle, and reaches it at its next tool boundary (or waits
-// for the execution after it) when it is running. The surface frames each
-// execution it drives with the same tool-audit step hook a turn installs, and
-// forwards the queue's boundary decision back to the loop as a UI message.
-func (s *ChatSession) SendToSubagent(sessionID, agentKey string, submission ComposerSubmission, followUp bool) (run.SubagentDelivery, error) {
+// subagent through the engine's channel: a steer that reaches it at its next
+// tool boundary. An idle subagent refuses it (run.ErrSubagentNotRunning). The
+// surface frames each execution it starts with the same tool-audit step hook a
+// turn installs, and turns what an execution never took into a UI message.
+func (s *ChatSession) SendToSubagent(sessionID, agentKey string, submission ComposerSubmission) (run.SubagentDelivery, error) {
 	r := s.runner()
 	if r == nil {
 		return "", errors.New("no runner")
-	}
-	mode := run.TurnInputModeSteer
-	if followUp {
-		mode = run.TurnInputModeFollowUp
 	}
 	in := run.Input{
 		Text:      composerSubmissionPreview(submission),
@@ -1542,7 +1543,7 @@ func (s *ChatSession) SendToSubagent(sessionID, agentKey string, submission Comp
 	if in.Text == "" {
 		in.Text = strings.Join(strings.Fields(llm.TextContent(submission.Parts...)), " ")
 	}
-	return run.SendToSubagent(context.Background(), r, s.subagentSurface(sessionID), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey), in, mode)
+	return run.SendToSubagent(context.Background(), r, s.subagentSurface(sessionID), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey), in)
 }
 
 // SubagentInputPreview is the subagent's queued input as its own view shows it.
@@ -1571,48 +1572,11 @@ func (s *ChatSession) InterruptSubagentToSend(sessionID, agentKey string) bool {
 	return run.InterruptSubagentToSend(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
 }
 
-// WithdrawSubagentInput takes a just-sent message back before the subagent
-// answered, returning it plus everything queued after it.
-func (s *ChatSession) WithdrawSubagentInput(sessionID, agentKey string) ([]ComposerSubmission, bool) {
-	inputs, ok := run.WithdrawSubagentInput(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
-	if !ok {
-		return nil, false
-	}
-	return subagentSubmissions(inputs), true
-}
-
 // DiscardSubagentInput empties the subagent's queued input and returns how many
 // messages were dropped — the same discard the conversation's own queue gets
 // when its conversation is left.
 func (s *ChatSession) DiscardSubagentInput(sessionID, agentKey string) int {
 	return run.DiscardSubagentInput(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
-}
-
-// CompactSubagent compacts the subagent's own context from its view: it runs
-// against that subagent's worker session, on the model that subagent runs on,
-// and refuses while the subagent is running (the way /compact is refused while
-// the conversation's own run is).
-func (s *ChatSession) CompactSubagent(ctx context.Context, sessionID, agentKey string) (string, bool) {
-	r := s.runner()
-	if r == nil {
-		return "compact: unavailable", true
-	}
-	subCtx, workerSessionID, err := run.SubagentCompactTarget(ctx, r, strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
-	if err != nil {
-		if errors.Is(err, run.ErrSubagentRunning) {
-			return "Wait for this subagent to finish before compacting it.", true
-		}
-		return "compact: " + err.Error(), true
-	}
-	result := turn.ExecuteCompact(subCtx, workerSessionID, run.CompactionService(r, s.sessStore()))
-	s.tuiMu.Lock()
-	hasTUI := s.uiNotify != nil
-	s.tuiMu.Unlock()
-	if hasTUI {
-		// The compaction's own events draw its card in this subagent's view.
-		return "", true
-	}
-	return result.Reply, true
 }
 
 // SubagentContextReport answers /context for the subagent whose view it is run
@@ -1664,11 +1628,10 @@ func (s *ChatSession) subagentSurface(sessionID string) run.SubagentSurface {
 			}
 			return tool.WithStepHook(ctx, hook)
 		},
-		OnBoundary: func(agentKey string, send, restore []run.Input) {
-			s.notifyUI(SubagentInputBoundaryMsg{
+		OnReturned: func(agentKey string, returned []run.Input) {
+			s.notifyUI(SubagentInputReturnedMsg{
 				AgentKey: strings.TrimSpace(agentKey),
-				Send:     subagentSubmissions(send),
-				Restore:  subagentSubmissions(restore),
+				Returned: subagentSubmissions(returned),
 			})
 		},
 		// The view reads the queue itself on every paint, so the preview the

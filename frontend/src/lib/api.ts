@@ -134,7 +134,21 @@ export interface ChatMessageRecord {
    * terminal words them, paths relative to the conversation's directory.
    */
   header?: string
-  callHeaders?: Record<string, string> | null
+  /** The tool row's header in the engine's four parts, for a surface that lays the head out itself. */
+  headerParts?: import('@/composables/useChatStream').HeaderParts | null
+  /**
+   * The header each call an assistant row issued would carry if it never ran,
+   * as a list. The web camel-cases response keys deeply, which rewrites a call
+   * id used as a map key ("call_a_1" → "callA1"), so the ids ride as entries.
+   */
+  callHeaderList?: { callId: string; header: string; parts: import('@/composables/useChatStream').HeaderParts }[] | null
+  /**
+   * A tool row's shell card facts and file-tool diff (plan 135), read back by
+   * the engine from the same body the card rendered — the reloaded card says
+   * what the live one said.
+   */
+  shellCard?: import('@/composables/useChatStream').ShellCard | null
+  fileDiff?: import('@/composables/useChatStream').FileDiffFacts | null
   memoryCitation?: MemoryCitation | null
 }
 
@@ -156,6 +170,13 @@ export interface PendingInputPreview {
   queuedMessages: string[]
 }
 
+/** A shell call's full spooled output, as the tool-output endpoints serve it. */
+export interface ChatToolOutput {
+  command: string
+  text: string
+  spoolOmittedBytes: number
+}
+
 export interface RunInputResponse {
   accepted: boolean
   message?: string
@@ -169,19 +190,6 @@ export type SubagentDelivery = 'started' | 'steered' | 'queued'
 
 export interface SubagentInputResponse {
   delivery: SubagentDelivery
-  preview: PendingInputPreview
-}
-
-/** A message taken back out of a subagent before it answered, whole. */
-export interface SubagentWithdrawnInput {
-  message?: string
-  attachments?: string[]
-  mentionImages?: string[]
-}
-
-export interface SubagentWithdrawResponse {
-  withdrawn: SubagentWithdrawnInput[]
-  any?: boolean
   preview: PendingInputPreview
 }
 
@@ -1201,7 +1209,10 @@ export interface ActionApprovalBody {
   reason?: string
   update?: PermissionUpdateBody
   clearContext?: boolean
-  decision?: import('./approvalSuggestions').ApprovalDecisionName
+  /** The reply choice the endpoint resolves: an option the engine offered
+   *  (ApprovalDecisionName), or `deny` — a refusal in the user's own words,
+   *  a choice no option list carries (plan 129's refuse-with-words). */
+  decision?: import('./approvalSuggestions').ApprovalDecisionName | 'deny'
   execpolicyAmendment?: string[]
   networkPolicyAmendment?: import('./approvalSuggestions').NetworkPolicyAmendment
   requestPermissionsResponse?: RequestPermissionsResponse
@@ -1521,12 +1532,17 @@ export interface SkillVersionResponse {
   state: SkillVersionState
 }
 
-/** One file's line-level diff between two snapshots. */
+/** One file's place in a comparison of two snapshots; the one-file answer
+ *  (skillDiffFile) also carries the file's unified diff. */
 export interface SkillFileDiff {
   path: string
-  status: 'added' | 'removed' | 'modified'
+  status: 'added' | 'removed' | 'modified' | 'unchanged'
   added: number
   removed: number
+  unifiedDiff?: string
+  /** Why a one-file answer has no unifiedDiff. */
+  binary?: boolean
+  tooLarge?: boolean
 }
 
 export interface SkillDiffResponse {
@@ -2250,6 +2266,25 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
+  /**
+   * A shell call's full spooled output — the whole text a truncated card's
+   * "open the output" drawer page reads (plan 137). `command` is the command
+   * as it ran, `text` the uncut output, `spoolOmittedBytes` what was never
+   * kept past the spool's cap.
+   */
+  chatToolOutput(sessionId: string, retrieveId: number): Promise<ChatToolOutput> {
+    return api
+      .get<ChatToolOutput>(`/chat/sessions/${encodeURIComponent(sessionId)}/tool-output/${encodeURIComponent(String(retrieveId))}`)
+      .then((res) => res.data)
+  },
+
+  /** The same spooled output, from a subagent's own view of its worker's run. */
+  subagentToolOutput(sessionId: string, agentId: string, retrieveId: number): Promise<ChatToolOutput> {
+    return api
+      .get<ChatToolOutput>(`/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/tool-output/${encodeURIComponent(String(retrieveId))}`)
+      .then((res) => res.data)
+  },
+
   sessionEvents(sessionId: string, params?: { cursor?: number; highWater?: number; limit?: number }) {
     return api
       .get<SessionEventPage>(`/chat/sessions/${encodeURIComponent(sessionId)}/events`, {
@@ -2395,12 +2430,13 @@ export const forebrainApi = {
   /**
    * A subagent's own view, talked to through the conversation it belongs to.
    * The engine owns every decision (plan 005); these calls are its transport.
+   * A subagent takes a message only while it runs: an idle one is refused with
+   * 409 `subagent_not_running` (plan 142), so there is no mode to pick here.
    */
   subagentInput(sessionId: string, agentId: string, body: {
     message: string
     attachments?: string[]
     mentionImages?: string[]
-    mode?: 'steer' | 'follow_up'
   }) {
     return postJson<SubagentInputResponse, typeof body>(
       `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/input`,
@@ -2418,21 +2454,6 @@ export const forebrainApi = {
   subagentInterruptSend(sessionId: string, agentId: string) {
     return postJson<{ interrupted: boolean }, Record<string, never>>(
       `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/interrupt-send`,
-      {},
-    )
-  },
-
-  subagentWithdraw(sessionId: string, agentId: string) {
-    return postJson<SubagentWithdrawResponse, Record<string, never>>(
-      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/withdraw`,
-      {},
-    )
-  },
-
-  /** Compact the subagent's own context; its events draw the card in its view. */
-  subagentCompact(sessionId: string, agentId: string) {
-    return postJson<Record<string, unknown>, Record<string, never>>(
-      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/compact`,
       {},
     )
   },
@@ -2751,6 +2772,15 @@ export const forebrainApi = {
     const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
     const query = new URLSearchParams({ from, to })
     return api.get<SkillDiffResponse>(`${base}/${encodeURIComponent(name)}/diff?${query.toString()}`).then((res) => res.data)
+  },
+
+  /** One file of a comparison, with its unified diff (the compare dialog's right pane). */
+  skillDiffFile(name: string, from: string, to: string, path: string, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    const query = new URLSearchParams({ from, to, path })
+    return api
+      .get<{ name: string; from: string; to: string; file: SkillFileDiff }>(`${base}/${encodeURIComponent(name)}/diff?${query.toString()}`)
+      .then((res) => res.data.file)
   },
 
   // The URL a version's zip streams from, for a plain anchor/fetch download.

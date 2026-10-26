@@ -15,12 +15,13 @@
   >
     <span class="min-w-0 whitespace-pre-wrap">{{ line }}</span>
   </div>
-  <!-- Pending requests, in the conversation's message flow where the run is
-       parked on them - the same place the terminal's approval card sits, so
-       the decision is made where the work stopped. Everything carries over
-       from the panel the workshop still uses: same composable, same
-       endpoints, same testids. -->
-  <div v-else-if="!block && (loadError || pendingAsk.length || pendingApprovals.length)" class="my-2 space-y-2">
+  <!-- What the thread's tail still holds (plan 138): the agent's questions,
+       answered here as they always were, and — for a request no tool card of
+       this conversation carries — the waiting card's own frame, so nothing
+       that parks the run is ever left without a way to answer it. The gates
+       that belong to calls hang on their cards in the timeline; the plan
+       approval waits where the input is. -->
+  <div v-else-if="!block && store && (loadError || pendingAsk.length || fallbackApprovals.length)" class="my-2 space-y-2">
     <Alert v-if="loadError" variant="destructive" data-testid="pending-load-error">
       <CircleAlert class="size-4" />
       <AlertTitle>{{ t('chat.approvalsLoadFailed') }}</AlertTitle>
@@ -29,204 +30,33 @@
         <Button
           type="button"
           class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
-          :disabled="loading || !sessionId"
+          :disabled="loading"
           @click="load"
         >{{ t('chat.retry') }}</Button>
       </AlertDescription>
     </Alert>
-    <div v-for="a in pendingApprovals" :key="a.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2" data-testid="pending-approval" :data-action-id="a.id">
-      <template v-if="isExitPlan(a)">
-        <div data-testid="exit-plan-approval">
-          <!-- The prototype's gate head (:1267): the gate's own name on the
-               left in the tool card's header shape, and the state — that it is
-               waiting on the reader — on the right. Nothing else: the reviews
-               are their own subagent cards in the thread. -->
-          <div class="xp-head">
-            <ClipboardCheck class="xp-head-icon" aria-hidden="true" />
-            <span class="xp-head-title">{{ t('chat.exitPlanMode') }}</span>
-            <span class="tool-status tool-status--awaiting">{{ t('chat.toolStatusAwaiting') }}</span>
-          </div>
-          <div class="xp">
-          <div
-            v-if="exitPlanRequest(a)?.planText?.trim()"
-            class="xp-doc"
-            data-testid="exit-plan-text"
-          >
-            <MessageResponse :content="exitPlanRequest(a)!.planText!.trim()" />
-          </div>
-          <div>
-            <div v-if="exitPlanRequest(a)?.planReviewActive" class="space-y-1">
-              <div class="flex items-center gap-2 text-[13px] text-[var(--forebrain-text)]">
-                <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--forebrand-1,var(--forebrain-brand-1))]" />
-                <span>{{ t('chat.exitPlanReviewRunning', { model: activeReviewLabel(a) }) }}</span>
-                <span class="flex-1" />
-                <Button
-                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
-                  type="button"
-                  data-testid="exit-plan-stop-review"
-                  @click="stopReview(a)"
-                >{{ t('chat.exitPlanReviewStop') }}</Button>
-              </div>
-              <div class="text-xs text-[var(--forebrain-muted-text)]">{{ t('chat.exitPlanReviewHint') }}</div>
-            </div>
-            <div v-else class="space-y-2">
-              <div class="flex flex-wrap gap-2">
-                <Button
-                  class="forebrain-btn forebrain-btn-primary h-auto text-xs"
-                  type="button"
-                  :disabled="submitting[a.id]"
-                  data-testid="exit-plan-approve-clear"
-                  @click="approveExitPlan(a, true)"
-                >{{ clearContextLabel }}</Button>
-                <Button
-                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
-                  type="button"
-                  :disabled="submitting[a.id]"
-                  data-testid="exit-plan-approve"
-                  @click="approveExitPlan(a, false)"
-                >{{ t('chat.exitPlanApprove') }}</Button>
-                <Button
-                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
-                  type="button"
-                  :disabled="submitting[a.id]"
-                  data-testid="exit-plan-keep-planning"
-                  :aria-expanded="!!planFeedbackOpen[a.id]"
-                  @click="keepPlanningChosen(a)"
-                >{{ t('chat.exitPlanKeepPlanning') }}</Button>
-                <Button
-                  v-if="(exitPlanRequest(a)?.planReviewModels ?? []).length"
-                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
-                  type="button"
-                  :disabled="submitting[a.id]"
-                  data-testid="exit-plan-ask-review"
-                  @click="askReviewChosen(a)"
-                >{{ t('chat.exitPlanAskReview') }}</Button>
-              </div>
-              <!-- The feedback field appears only after「继续规划」is chosen —
-                   the verdict comes first, the words for the planner after —
-                   and folds away with its draft on any other decision. -->
-              <div v-if="planFeedbackOpen[a.id]" class="flex flex-wrap items-center gap-2" data-testid="exit-plan-feedback">
-                <Input
-                  :ref="(el) => setFeedbackInput(a.id, el)"
-                  v-model="denyFeedback[a.id]"
-                  class="min-w-[12rem] h-auto flex-1 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)] shadow-none"
-                  :disabled="submitting[a.id]"
-                  :placeholder="t('chat.exitPlanFeedbackPlaceholder')"
-                  @keydown.enter.prevent="keepPlanning(a)"
-                  @keydown.esc.prevent="closePlanFeedback(a)"
-                />
-                <Button
-                  class="forebrain-btn forebrain-btn-primary h-auto text-xs"
-                  type="button"
-                  :disabled="submitting[a.id]"
-                  @click="keepPlanning(a)"
-                >{{ t('chat.exitPlanSendFeedback') }}</Button>
-                <Button
-                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
-                  type="button"
-                  :disabled="submitting[a.id]"
-                  @click="closePlanFeedback(a)"
-                >{{ t('common.cancel') }}</Button>
-              </div>
-              <div
-                v-if="modelPicking[a.id]"
-                class="overflow-hidden rounded-lg border border-[var(--forebrain-divider)]"
-              >
-                <div class="forebrain-chip-menu-cap">{{ t('chat.exitPlanReviewChoose') }}</div>
-                <button
-                  v-for="model in exitPlanRequest(a)?.planReviewModels ?? []"
-                  :key="`${a.id}-model-${model.provider}-${model.model}`"
-                  type="button"
-                  class="flex w-full items-center justify-between border-t border-[var(--forebrain-divider)] px-3 py-1.5 text-left text-[13px] text-[var(--forebrain-text)] first:border-t-0 hover:bg-[var(--forebrain-bg-alt)] disabled:opacity-60"
-                  :disabled="submitting[a.id]"
-                  data-testid="plan-review-model"
-                  @click="requestReview(a, model)"
-                >
-                  <span>{{ modelLabel(model) }}</span>
-                  <span v-if="model.current" class="text-xs text-[var(--forebrain-muted-text)]">{{ t('chat.exitPlanReviewCurrent') }}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-          <div v-if="errors[a.id]" class="text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
-          </div>
-        </div>
-      </template>
-      <template v-else-if="isWebFetchAction(a)">
-        <!-- A fetch gate asks one thing about one page, so the card is the
-             question, the page, and the three ways out - no title layer, no
-             second line falling back to an id, no permission-memory box: the
-             button that remembers this approval already names the host it
-             remembers. -->
-        <div data-testid="web-fetch-approval">
-          <!-- The shell is the library's confirmation, as on every other gate:
-               it decides when the request is on screen and draws the title and
-               the verdict row; the question and the three answers are ours. -->
-          <Confirmation
-            :state="'approval-requested'"
-            :approval="{ id: a.id }"
-            class="!gap-0 !rounded-lg !p-0"
-          >
-            <ConfirmationRequest>
-              <ConfirmationActions class="!mt-0 !w-full !justify-between !self-stretch !gap-3">
-                <ConfirmationTitle class="min-w-0 !text-sm !font-medium !text-[var(--forebrain-text)]">
-                  {{ t('chat.webFetchQuestion') }}
-                </ConfirmationTitle>
-                <div class="flex shrink-0 items-center gap-2">
-                  <ConfirmationAction
-                    v-for="(option, index) in approvalDecisionOptions(a)"
-                    :key="`${a.id}-${option.decision}-${index}`"
-                    :class="option.decision === 'accept' ? 'forebrain-btn forebrain-btn-primary text-xs' : 'forebrain-btn forebrain-btn-ghost text-xs'"
-                    :disabled="submitting[a.id]"
-                    :data-testid="`pending-decision-${option.decision}`"
-                    @click="submitApprovalDecision(a, option)"
-                  >
-                    {{ approvalDecisionLabel(option, a) }}
-                  </ConfirmationAction>
-                </div>
-              </ConfirmationActions>
-          <button
-            v-if="requesterLabel(a) && canOpenAgent"
-            type="button"
-            class="mt-1 block max-w-full truncate text-left text-xs text-[var(--forebrain-text-2)] hover:text-[var(--forebrain-brand-1)] disabled:pointer-events-none"
-            :disabled="!a.agentId"
-            @click="a.agentId && emit('open-agent', a.agentId)"
-          >{{ requesterLabel(a) }}</button>
-          <div v-else-if="requesterLabel(a)" class="mt-1 truncate text-xs text-[var(--forebrain-text-2)]">{{ requesterLabel(a) }}</div>
-          <div class="mt-2 break-all pl-4 font-mono text-[12px] text-[var(--forebrain-text-2)]" data-testid="web-fetch-page">{{ webFetchPage(a) }}</div>
-          <!-- The engine's own routing facts, drawn in the shared gate's fact
-               row (ApprovalGateCard.vue:44-49): which provider fetches the page
-               and whether private addresses were opened. The list is empty for
-               a plain fetch, so this card looks exactly as it did. -->
-          <div
-            v-for="(fact, index) in approvalGate(a).facts.facts"
-            :key="`${a.id}-fact-${index}`"
-            class="mt-1 break-words pl-4 text-[12px] text-[var(--forebrain-text-2)]"
-            data-testid="web-fetch-fact"
-          >{{ fact }}</div>
-            </ConfirmationRequest>
-          </Confirmation>
-        </div>
-      </template>
-      <template v-else>
-        <!-- Every family that asks — files, commands, the sandbox, hosts,
-             permissions, plan mode, MCP, protected reads, search, memory,
-             and the fallback no other family claimed — is the one shared
-             gate card: its own question, its own facts, the engine's own
-             decision options. -->
-        <ApprovalGateCard
-          :action="a"
-          :options="approvalDecisionOptions(a)"
-          :decision-label="(option) => approvalDecisionLabel(option, a, approvalGate(a).facts)"
-          :submit="(option) => submitApprovalDecision(a, option)"
-          :submitting="!!submitting[a.id]"
-          :error="errors[a.id] ?? ''"
-          :requester="requesterLabel(a)"
-          :can-open-agent="canOpenAgent"
-          @open-agent="(agentId) => emit('open-agent', agentId)"
-        />
-      </template>
-      <div v-if="errors[a.id] && isWebFetchAction(a)" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
+    <div v-for="a in fallbackApprovals" :key="a.id" class="gate-fallback" data-testid="pending-approval" :data-action-id="a.id">
+      <!-- The frame of a waiting card for a call this conversation draws no
+           card for: the brand border, the question as the head, the facts and
+           the footer the gated cards carry — one shape for one ask. -->
+      <div class="gate-fallback-head">{{ approvalGate(a).question }}</div>
+      <ToolGateFacts
+        :action="a"
+        :gate="approvalGate(a)"
+        :requester="requesterLabel(a)"
+        :can-open-agent="canOpenAgent"
+        @open-agent="(agentId) => emit('open-agent', agentId)"
+      />
+      <ToolGateFooter
+        :action="a"
+        :options="approvalDecisionOptions(a)"
+        :decision-label="(option) => approvalDecisionLabel(option, a, approvalGate(a).facts)"
+        :submit="(option) => submitApprovalDecision(a, option)"
+        :refuse-with-words="refuseWithWords"
+        :refuse-and-stop="refuseAndStop"
+        :submitting="!!submitting[a.id]"
+        :error="errors[a.id] ?? ''"
+      />
     </div>
     <div v-for="qa in pendingAsk" :key="qa.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 space-y-2" data-testid="pending-question" :data-action-id="qa.id">
       <!-- The ask card's head (:3299, :1270⑤): what the card is doing. The
@@ -272,26 +102,25 @@
  * - a decided record replays the one status line the terminal printed under
  *   the call it gated, verbatim - deliberately not a card of its own, because
  *   in the terminal the gate *is* the tool call;
- * - the requests the run is parked on, answered in the message flow itself:
- *   tool approvals with their permission-memory suggestions, the agent's
- *   questions, and the exit-plan approval with its review flow, loaded and
- *   submitted through the same pending-actions composable the workshop's
- *   panel uses.
+ * - the thread's tail holds what no tool card carries (plan 138): the agent's
+ *   questions, and a request with no card of its own in the waiting card's
+ *   own frame. Everything reads the one pending-actions store the page
+ *   provides, so a gate answered here is answered on the card it belongs to
+ *   and everywhere else it shows.
  */
-import { computed, nextTick, ref } from 'vue'
-import { CircleAlert, ClipboardCheck, MessageSquareText } from 'lucide-vue-next'
+import { computed } from 'vue'
+import { CircleAlert, MessageSquareText } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
-import { Input } from '@repo/shadcn-vue/components/ui/input'
-import { MessageResponse } from '@repo/elements/message'
-import {
-  Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequest, ConfirmationTitle,
-} from '@repo/elements/confirmation'
 import { normalizeApprovalDecision } from '@/composables/useChatStream'
-import { usePendingActions, type ActionRow } from '@/composables/usePendingActions'
-import { useI18n } from '@/locales'
-import ApprovalGateCard from './ApprovalGateCard.vue'
+import { injectPendingActions } from '@/composables/providePendingActions'
+import type { ActionRow } from '@/composables/usePendingActions'
+import type { ApprovalFacts } from '@/lib/approvalGates'
+import type { ApprovalDecisionOption } from '@/lib/approvalSuggestions'
+import ToolGateFacts from './ToolGateFacts.vue'
+import ToolGateFooter from './ToolGateFooter.vue'
 import AskTabs from './AskTabs.vue'
+import { useI18n } from '@/locales'
 
 const props = withDefaults(defineProps<{
   /** A decided approval record from the timeline; a card holding one renders
@@ -303,17 +132,15 @@ const props = withDefaults(defineProps<{
     confirmation?: string
     message?: string
   }
-  /** The conversation whose pending requests this card answers. Without a
-   *  block prop, the card hosts them in the thread. */
-  sessionId?: string | null
-  /** Bumped by the stream whenever the set of pending requests changed. */
-  version?: number
+  /** The ids whose gates hang on a tool card of this view: the tail's frame
+   *  holds only what is not one of them and belongs to this view's agent. */
+  anchoredActionIds?: string[] | Set<string>
   /** Whether a subagent's request can open that subagent's own view here. */
   canOpenAgent?: boolean
-  /** How full the context window is; the clear-context choice says what it
-   *  would free. Null when unknown. */
-  contextUsedPercent?: number | null
-}>(), { block: undefined, sessionId: null, version: 0, canOpenAgent: false, contextUsedPercent: null })
+  /** Which agent's tail this is: the conversation's own (empty) or one
+   *  subagent's — the fallback frame then holds only that agent's requests. */
+  agentId?: string
+}>(), { block: undefined, anchoredActionIds: () => [], canOpenAgent: false, agentId: '' })
 
 const emit = defineEmits<{
   (e: 'open-agent', agentId: string): void
@@ -339,51 +166,81 @@ const toneClass = computed(() => {
   }
 })
 
-const {
-  pendingApprovals,
-  pendingAsk,
-  answers,
-  others,
-  submitting,
-  errors,
-  denyFeedback,
-  modelPicking,
-  planFeedbackOpen,
-  loading,
-  loadError,
-  load,
-  exitPlanRequest,
-  isExitPlan,
-  modelLabel,
-  activeReviewLabel,
-  clearContextLabel,
-  submitAsk,
-  cancelAsk,
-  setAskAnswer,
-  setAskOther,
-  submitApprovalDecision,
-  approveExitPlan,
-  keepPlanning,
-  openPlanFeedback,
-  closePlanFeedback,
-  toggleModelPicker,
-  requestReview,
-  stopReview,
-  approvalDecisionOptions,
-  approvalDecisionLabel,
-  approvalGate,
-  isWebFetchAction,
-  webFetchPage,
-  requesterLabel,
-} = usePendingActions({
-  sessionId: computed(() => props.sessionId ?? null),
-  version: computed(() => props.version ?? 0),
-  contextUsedPercent: computed(() => props.contextUsedPercent ?? null),
-})
+// The page's one store; a card drawn outside a provider keeps the decided
+// line, which needs none of it. The tail's bindings unwrap it here, so the
+// template reads plain values and a missing store reads as "nothing pending".
+const store = injectPendingActions()
 
-/** The feedback inputs, by action id, so the field can take focus the moment
- *  the verdict that opens it lands. */
-const feedbackInputs = ref<Record<string, HTMLInputElement | null>>({})
+const pendingAsk = computed(() => store?.pendingAsk.value ?? [])
+const answers = computed(() => store?.answers.value ?? {})
+const others = computed(() => store?.others.value ?? {})
+const submitting = computed(() => store?.submitting.value ?? {})
+const errors = computed(() => store?.errors.value ?? {})
+const loading = computed(() => store?.loading.value ?? false)
+const loadError = computed(() => store?.loadError.value ?? null)
+
+function load() {
+  void store?.load()
+}
+
+function submitAsk(actionId: string) {
+  if (store) void store.submitAsk(actionId)
+}
+
+function cancelAsk(actionId: string) {
+  if (store) void store.cancelAsk(actionId)
+}
+
+function setAskAnswer(actionId: string, questionId: string, value: string | string[]) {
+  store?.setAskAnswer(actionId, questionId, value)
+}
+
+function setAskOther(actionId: string, questionId: string, value: string) {
+  store?.setAskOther(actionId, questionId, value)
+}
+
+function submitApprovalDecision(action: ActionRow, option: ApprovalDecisionOption) {
+  if (store) void store.submitApprovalDecision(action, option)
+}
+
+function refuseWithWords(action: ActionRow, words: string) {
+  if (store) void store.refuseWithWords(action, words)
+}
+
+function refuseAndStop(action: ActionRow) {
+  if (store) void store.refuseAndStop(action)
+}
+
+function approvalDecisionOptions(action: ActionRow): ApprovalDecisionOption[] {
+  return store?.approvalDecisionOptions(action) ?? []
+}
+
+function approvalDecisionLabel(option: ApprovalDecisionOption, action?: ActionRow, facts?: ApprovalFacts | null): string {
+  return store?.approvalDecisionLabel(option, action, facts) ?? ''
+}
+
+function approvalGate(action: ActionRow) {
+  return store?.approvalGate(action) ?? { facts: { family: 'fallback' as const, facts: [] }, question: '' }
+}
+
+function requesterLabel(a: Pick<ActionRow, 'agentId' | 'subagentType'>): string {
+  return store?.requesterLabel(a) ?? ''
+}
+
+/** The requests this view's tail answers: not one anchored to a card above,
+ *  and this view's own — the conversation's own tail holds its own requests
+ *  (its plan approval waits where the input is, never here), a subagent's
+ *  tail holds that subagent's, plan approval included. */
+const fallbackApprovals = computed<ActionRow[]>(() => {
+  if (!store) return []
+  const anchored = new Set(props.anchoredActionIds)
+  return store.pendingApprovals.value.filter((a) => {
+    if (anchored.has(a.id)) return false
+    if (props.agentId) return String(a.agentId ?? '').trim() === props.agentId
+    if (store.isExitPlan(a)) return false
+    return !String(a.agentId ?? '').trim()
+  })
+})
 
 /** 「和它聊聊」: the question is withdrawn, and the composer takes the turn. One
  *  gesture, two halves — the run must stop waiting before the reader can say
@@ -391,29 +248,6 @@ const feedbackInputs = ref<Record<string, HTMLInputElement | null>>({})
 function chatAboutQuestion(actionId: string) {
   void cancelAsk(actionId)
   emit('focus-composer')
-}
-
-function setFeedbackInput(actionId: string, el: unknown) {
-  // The library's Input is a component: the ref hands over the instance, and
-  // the field to focus is the instance's root element.
-  const field = el as { $el?: unknown } | null
-  feedbackInputs.value[actionId] = (field?.$el as HTMLInputElement | undefined) ?? null
-}
-
-/** 「继续规划」first opens the field for the planner's words; the same verdict
- *  again sends them. Any other decision folds it away (in the composable). */
-function keepPlanningChosen(a: ActionRow) {
-  if (planFeedbackOpen.value[a.id]) {
-    void keepPlanning(a)
-    return
-  }
-  openPlanFeedback(a)
-  void nextTick(() => feedbackInputs.value[a.id]?.focus())
-}
-
-function askReviewChosen(a: ActionRow) {
-  closePlanFeedback(a)
-  toggleModelPicker(a)
 }
 </script>
 
@@ -446,25 +280,26 @@ function askReviewChosen(a: ActionRow) {
   color: var(--forebrain-text-2);
 }
 
-/* The gate's own column: the plan, then the verdicts, 10px apart. */
-.xp {
+/* The waiting card's own frame for a request no card carries (plan 138,
+   Step 1.3): the brand border of a waiting call, the question as its head,
+   the facts as its panel, the footer closing it — the same three parts a
+   gated call's card draws, in one frame. */
+.gate-fallback {
+  border: 1px solid var(--forebrain-brand-border);
+  border-radius: 10px;
+  background: var(--forebrain-page-bg);
   display: grid;
-  gap: 10px;
-  padding-top: 10px;
 }
 
-/* A plan is long and read in place, so it scrolls inside its own box and the
-   bottom edge fades (prototype .xp-doc, :292). */
-.xp-doc {
-  border: 1px solid var(--forebrain-divider);
-  border-radius: 8px;
-  background: var(--forebrain-bg-alt);
-  padding: 9px 12px;
-  max-height: 216px;
-  overflow: auto;
-  mask-image: linear-gradient(#000 calc(100% - 20px), transparent);
+.gate-fallback-head {
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--forebrain-divider);
   font-size: 13px;
-  line-height: 1.6;
+  font-weight: 500;
+  color: var(--forebrain-text);
+}
+
+.gate-fallback > :deep(.gate-ask) {
+  border-radius: 0 0 9px 9px;
 }
 </style>
-

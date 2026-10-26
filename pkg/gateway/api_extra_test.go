@@ -5157,7 +5157,9 @@ func newSubagentViewTestServer(t *testing.T) (*Server, string) {
 	require.NoError(t, sessions.Ensure(context.Background(), "sid", "sid"))
 	cfg := &appcfg.Root{}
 	cfg.Compact.ModelAutoCompactTokenLimit = 200_000
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main"}}
+	// A production runner always carries the controller: a subagent's channel
+	// keeps its queue there, and a steer is only deliverable through it.
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main"}, Control: run.NewController()}
 	s := &Server{Home: home, RunRT: &state.RunStore{DB: db}, Sessions: sessions, Runner: runner}
 	return s, filepath.Join(home, "workspace")
 }
@@ -5203,8 +5205,6 @@ func subagentViewRequests(sid, agentKey string) map[string]*http.Request {
 		"input":        subagentViewRequest(http.MethodPost, sid, agentKey, `{"message":"continue"}`),
 		"queued-input": subagentViewRequest(http.MethodPost, sid, agentKey, `{"action":"edit_last"}`),
 		"interrupt":    subagentViewRequest(http.MethodPost, sid, agentKey, ""),
-		"withdraw":     subagentViewRequest(http.MethodPost, sid, agentKey, ""),
-		"compact":      subagentViewRequest(http.MethodPost, sid, agentKey, ""),
 		"context":      subagentViewRequest(http.MethodGet, sid, agentKey, ""),
 		"budget":       subagentViewRequest(http.MethodGet, sid, agentKey, ""),
 	}
@@ -5218,10 +5218,6 @@ func (s *Server) dispatchSubagentViewRoute(name string, w http.ResponseWriter, r
 		s.handleSubagentQueuedInput(w, r)
 	case "interrupt":
 		s.handleSubagentInterruptSend(w, r)
-	case "withdraw":
-		s.handleSubagentWithdraw(w, r)
-	case "compact":
-		s.handleSubagentCompact(w, r)
 	case "context":
 		s.handleSubagentContext(w, r)
 	case "budget":
@@ -5257,7 +5253,9 @@ func TestSubagentInputRefusesConversationCommands(t *testing.T) {
 	}{
 		{"/new", subagentViewCommandCode},
 		{"/rename x", subagentViewCommandCode},
-		{"/compact", useDedicatedEndpointCode},
+		// /compact is a built-in hidden from a subagent's view (plan 142): it
+		// answers like any other command that belongs to the conversation.
+		{"/compact", subagentViewCommandCode},
 		{"/context", useDedicatedEndpointCode},
 	} {
 		req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":`+strconv.Quote(tc.message)+`}`)
@@ -5272,19 +5270,98 @@ func TestSubagentInputRefusesConversationCommands(t *testing.T) {
 	}
 }
 
-func TestSubagentInputStartsAnIdleSubagent(t *testing.T) {
+// A skill command typed in a subagent's web view is sent to that subagent as a
+// steer with its skill selected. The registry lists skills beside the built-ins,
+// so finding the name is not what tells the two apart: a registered skill was
+// once refused as a conversation command.
+func TestSubagentInputSendsARegisteredSkillCommand(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+	release := holdSubagentRunning(t, s)
+
+	turn.ResetDynamic()
+	t.Cleanup(turn.ResetDynamic)
+	require.NoError(t, turn.ReplaceDynamicSource("gw-test", []turn.DynamicCommand{{
+		// The shape a real skill registers with: it takes the request inline.
+		Command: turn.Command{
+			Name: "probe-skill", Description: "probe", Category: turn.SkillCategory,
+			AllowedSurfaces:    []turn.Surface{turn.SurfaceTUI, turn.SurfaceWebChat},
+			SupportsInlineArgs: true, ArgumentHint: "[request]", Visibility: turn.VisibilityPublic,
+		},
+		SkillPath: "/skills/probe-skill/SKILL.md",
+		Handler: func(turn.Context, string, []string) turn.Result {
+			return turn.Result{Handled: true, ShouldContinueRun: true, ContinueInput: "use probe-skill: go", SkillName: "probe-skill", SkillPath: "/skills/probe-skill/SKILL.md"}
+		},
+	}}))
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"/probe-skill go"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out struct {
+		Delivery string                   `json:"delivery"`
+		Preview  turn.PendingInputPreview `json:"preview"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.Equal(t, string(run.SubagentDeliverySteered), out.Delivery)
+	require.Equal(t, []string{"use probe-skill: go"}, out.Preview.PendingSteers,
+		"the skill's expansion is what the subagent is sent")
+	close(release)
+	require.Eventually(t, func() bool {
+		return !run.SubagentRunning(s.Runner, "sid", "agent-1")
+	}, 5*time.Second, 20*time.Millisecond, "the held execution never ended")
+}
+
+// holdSubagentRunning starts one execution of the seeded subagent and holds it
+// open, so the endpoint tests talk to a subagent that is actually working — the
+// only state in which its view takes input. The returned channel closes the
+// execution.
+func holdSubagentRunning(t *testing.T, s *Server) chan struct{} {
+	t.Helper()
+	hold := &holdingSubagentExecutor{release: make(chan struct{})}
+	s.Runner.SubagentExecutor = hold
+	require.NoError(t, run.StartSubagentAutoContinue(context.Background(), s.Runner, run.SubagentSurface{}, "sid", "agent-1", run.Input{Text: "start"}))
+	require.Eventually(t, func() bool {
+		return run.SubagentRunning(s.Runner, "sid", "agent-1")
+	}, 5*time.Second, 20*time.Millisecond, "the subagent never started running")
+	return hold.release
+}
+
+// holdingSubagentExecutor blocks one execution until its release channel
+// closes, so a test can observe a subagent between its start and its first tool
+// boundary.
+type holdingSubagentExecutor struct{ release chan struct{} }
+
+func (h *holdingSubagentExecutor) RunSubagentExec(ctx context.Context, _ run.SubagentExecRequest) (string, error) {
+	select {
+	case <-h.release:
+		return "done", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func (h *holdingSubagentExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
+func (h *holdingSubagentExecutor) SubagentExecutionStarting(context.Context, string)     {}
+func (h *holdingSubagentExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {
+}
+
+// An idle subagent takes no messages: its view has no composer then, and a page
+// that still sends one is refused with 409 so it can put the text where it
+// belongs — in the conversation's composer — instead of losing it.
+func TestSubagentInputRefusesAnIdleSubagent(t *testing.T) {
 	s, ws := newSubagentViewTestServer(t)
 	seedSubagentRecord(t, ws, "sid", "agent-1")
 
 	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"continue"}`)
 	w := httptest.NewRecorder()
 	s.handleSubagentInput(w, req)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
 	var out struct {
-		Delivery string `json:"delivery"`
+		Code string `json:"code"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
-	require.Equal(t, string(run.SubagentDeliveryStarted), out.Delivery)
+	require.Equal(t, subagentNotRunningCode, out.Code)
 }
 
 func TestSubagentQueuedInputRecallWithAnEmptyQueue(t *testing.T) {
@@ -5313,54 +5390,6 @@ func TestSubagentBudgetIsItsOwnWindow(t *testing.T) {
 	var out event.TokenBudgetUpdatedPayload
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
 	require.Equal(t, agent.RosterKey("agent-1", "general-purpose"), out.AgentID)
-}
-
-// blockingSubagentExecutor holds one execution open until its context is
-// cancelled, so a test can observe a subagent mid-run.
-type blockingSubagentExecutor struct{ entered chan struct{} }
-
-func (b *blockingSubagentExecutor) RunSubagentExec(ctx context.Context, _ run.SubagentExecRequest) (string, error) {
-	select {
-	case b.entered <- struct{}{}:
-	default:
-	}
-	<-ctx.Done()
-	return "", ctx.Err()
-}
-
-func (b *blockingSubagentExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
-func (b *blockingSubagentExecutor) SubagentExecutionStarting(context.Context, string)     {}
-func (b *blockingSubagentExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {
-}
-
-func TestSubagentCompactRefusesWhileRunning(t *testing.T) {
-	s, ws := newSubagentViewTestServer(t)
-	seedSubagentRecord(t, ws, "sid", "agent-1")
-	blocking := &blockingSubagentExecutor{entered: make(chan struct{}, 1)}
-	s.Runner.SubagentExecutor = blocking
-
-	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"go"}`)
-	w := httptest.NewRecorder()
-	s.handleSubagentInput(w, req)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-
-	require.Eventually(t, func() bool {
-		return run.SubagentRunning(s.Runner, "sid", "agent-1")
-	}, 5*time.Second, 20*time.Millisecond, "the user-driven execution must be running")
-
-	compactReq := subagentViewRequest(http.MethodPost, "sid", "agent-1", "")
-	cw := httptest.NewRecorder()
-	s.handleSubagentCompact(cw, compactReq)
-	require.Equal(t, http.StatusConflict, cw.Code, cw.Body.String())
-	var out struct {
-		Code string `json:"code"`
-	}
-	require.NoError(t, json.Unmarshal(cw.Body.Bytes(), &out))
-	require.Equal(t, subagentRunningCode, out.Code)
-
-	// Let the execution finish so the goroutine does not outlive the test.
-	run.InterruptSubagentToSend(s.Runner, "sid", "agent-1")
-	<-time.After(50 * time.Millisecond)
 }
 
 // The delivered-review handoff is only as durable as the field copy that
@@ -8610,4 +8639,104 @@ func TestProjectServersAutoAllowRoundTrip(t *testing.T) {
 		rec := doJSON(t, s, method, path, map[string]any{})
 		require.Equal(t, http.StatusNotFound, rec.Code, method+" "+path)
 	}
+}
+
+// TestChatToolOutputServesItsOwnSessionOnly pins the full-output read: a
+// truncated shell card's spool is served whole to the conversation that ran
+// it, and to nobody else — a foreign session, an unknown id and a malformed
+// id read as 404/404/400, never as another conversation's output.
+func TestChatToolOutputServesItsOwnSessionOnly(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	spool := filepath.Join(root, "spool-1.txt")
+	full := strings.Repeat("throughput line\n", 4000)
+	require.NoError(t, os.WriteFile(spool, []byte(full), 0o644))
+	store, err := tool.OpenStore(filepath.Join(root, "state", "outfilter", "history.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	id, err := store.Save(tool.Entry{
+		Kind: tool.KindShell, Command: "go test ./...",
+		FilteredOutput: "preview", OriginalBytes: len(full), FilteredBytes: len("preview"),
+		SessionID: "s1", SpoolPath: spool,
+	})
+	require.NoError(t, err)
+
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	require.NoError(t, sessions.Ensure(ctx, "s2", "s2"))
+
+	s := &Server{Sessions: sessions, Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root}}}
+	get := func(sid, retrieve string) *httptest.ResponseRecorder {
+		return cronRequest(t, s, http.MethodGet, "/api/chat/sessions/"+sid+"/tool-output/"+retrieve, nil,
+			s.handleChatToolOutput, "id", sid, "retrieve", retrieve)
+	}
+	rec := get("s1", strconv.FormatInt(id, 10))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body struct {
+		Command           string `json:"command"`
+		Text              string `json:"text"`
+		SpoolOmittedBytes int64  `json:"spool_omitted_bytes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "go test ./...", body.Command)
+	require.Equal(t, full, body.Text)
+	require.Equal(t, int64(0), body.SpoolOmittedBytes)
+
+	require.Equal(t, http.StatusNotFound, get("s2", strconv.FormatInt(id, 10)).Code, "another session's spool is not found")
+	require.Equal(t, http.StatusNotFound, get("s1", "999999").Code)
+	require.Equal(t, http.StatusBadRequest, get("s1", "abc").Code)
+}
+
+// TestSubagentToolOutputServesItsWorkersSessionOnly: from a subagent's own
+// view the spool must belong to that subagent's worker session — the session
+// its shell calls ran under — not to the conversation or any other worker.
+func TestSubagentToolOutputServesItsWorkersSessionOnly(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	full := "worker session's own output\n"
+	mine := filepath.Join(ws, "spool-mine.txt")
+	require.NoError(t, os.WriteFile(mine, []byte(full), 0o644))
+	conversation := filepath.Join(ws, "spool-conversation.txt")
+	require.NoError(t, os.WriteFile(conversation, []byte("primary session output"), 0o644))
+	store, err := tool.OpenStore(filepath.Join(ws, "state", "outfilter", "history.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	mineID, err := store.Save(tool.Entry{
+		Kind: tool.KindShell, Command: "grep -r x .",
+		FilteredOutput: "preview", SessionID: "worker-1", SpoolPath: mine,
+	})
+	require.NoError(t, err)
+	conversationID, err := store.Save(tool.Entry{
+		Kind: tool.KindShell, Command: "ls",
+		FilteredOutput: "preview", SessionID: "sid", SpoolPath: conversation,
+	})
+	require.NoError(t, err)
+
+	get := func(sid, agentKey, retrieve string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sid+"/subagents/"+agentKey+"/tool-output/"+retrieve, nil)
+		ctx := context.WithValue(req.Context(), ParamsKey, Params{
+			{Key: "id", Value: sid}, {Key: "agent", Value: agentKey}, {Key: "retrieve", Value: retrieve},
+		})
+		w := httptest.NewRecorder()
+		s.handleSubagentToolOutput(w, req.WithContext(ctx))
+		return w
+	}
+	rec := get("sid", "agent-1", strconv.FormatInt(mineID, 10))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body struct {
+		Command string `json:"command"`
+		Text    string `json:"text"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "grep -r x .", body.Command)
+	require.Equal(t, full, body.Text)
+
+	require.Equal(t, http.StatusNotFound, get("sid", "agent-1", strconv.FormatInt(conversationID, 10)).Code,
+		"a spool of the conversation's own session is not the worker's")
+	require.Equal(t, http.StatusNotFound, get("sid", "ghost", strconv.FormatInt(mineID, 10)).Code)
+	require.Equal(t, http.StatusBadRequest, get("sid", "agent-1", "abc").Code)
 }

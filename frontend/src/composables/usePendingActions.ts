@@ -1,6 +1,6 @@
 import { computed, ref, watch, type Ref } from 'vue'
 import { GatewayHttpError, getErrorMessage, forebrainApi, type PlanReviewModelOption, type SessionApprovalRequest } from '@/lib/api'
-import { approvalFacts, approvalFamily, approvalQuestion, parseApprovalPayload, type ApprovalFacts } from '@/lib/approvalGates'
+import { approvalGateOf, type ApprovalFacts } from '@/lib/approvalGates'
 import { useI18n } from '@/locales'
 import {
   approvalDecisions,
@@ -329,6 +329,44 @@ export function usePendingActions(options: {
     }))
   }
 
+  /** A refusal with the user's words: this one call is refused, the turn
+   *  carries on, and the words reach the model (plan 129). The engine stores
+   *  the reason on the denial and the resume composes it into the refusal the
+   *  model reads (`To tell you how to proceed, the user said:`), so the words
+   *  typed here are the words that steer the turn. */
+  async function refuseWithWords(action: ActionRow, words: string) {
+    const reason = String(words ?? '').trim()
+    if (!reason) return
+    await submitAction(action.id, () => forebrainApi.actionsApprove(action.id, { decision: 'deny', reason }))
+  }
+
+  /** A refusal without words (empty send, or Esc): the call is refused and the
+   *  turn stops, waiting for the user (plan 129's cancel). The refused call
+   *  reads the engine's stop sentence; calls behind it never start. */
+  async function refuseAndStop(action: ActionRow) {
+    await submitAction(action.id, () => forebrainApi.actionsApprove(action.id, { decision: 'cancel', reason: 'web:cancel' }))
+  }
+
+  /**
+   * The pending request one tool card is waiting on, or null. The timeline's
+   * `approval` block names the call the gate holds (`toolStepId`); the action
+   * it names must still be pending — a decided gate leaves its block behind
+   * while its card settles, and re-offering a settled question would answer
+   * nothing. The blocks are the caller's own: the conversation collects them
+   * from its messages, a subagent from its own transcript, so a subagent's
+   * gate never matches a card of the conversation's.
+   */
+  function pendingForStep(stepId: string, approvalBlocks: { actionId: string; toolStepId?: string }[]): ActionRow | null {
+    const id = String(stepId ?? '').trim()
+    if (!id) return null
+    for (const block of approvalBlocks) {
+      if (String(block.toolStepId ?? '').trim() !== id) continue
+      const found = pendingApprovals.value.find((a) => a.id === block.actionId)
+      if (found) return found
+    }
+    return null
+  }
+
   /** The exit-plan card's two approvals: with and without clearing context.
    *  Either one is a decision, so the feedback field folds away with its
    *  draft. */
@@ -387,10 +425,7 @@ export function usePendingActions(options: {
   // Both surfaces ask through here, so a gate reads identically in the thread
   // and above the workshop's composer.
   function approvalGate(a: ActionRow): { facts: ApprovalFacts; question: string } {
-    const payload = parseApprovalPayload(a.payloadJson)
-    const suggestion = permissionSuggestionFromAction(a)
-    const family = approvalFamily(a.kind, payload, suggestion)
-    return { facts: approvalFacts(family, payload, suggestion), question: approvalQuestion(family, a.kind, payload) }
+    return approvalGateOf(a)
   }
 
   // A fetch gate is about one page on the public web, and the engine already
@@ -508,6 +543,9 @@ export function usePendingActions(options: {
     setAskAnswer,
     setAskOther,
     submitApprovalDecision,
+    refuseWithWords,
+    refuseAndStop,
+    pendingForStep,
     approveExitPlan,
     keepPlanning,
     openPlanFeedback,

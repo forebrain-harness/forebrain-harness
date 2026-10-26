@@ -31,19 +31,20 @@ const { t } = useI18n()
 </script>
 
 <style scoped>
-/* The prototype's .think, in this app's tokens: --line is
-   --forebrain-divider, --muted is --forebrain-muted-text, --text-2 is
-   --forebrain-text-2. */
+/* The prototype's .think on the activity line (:405): a quiet row — no box of
+   its own (the line's node is the card's mark), the caption on the row, and
+   the reasoning itself the panel once the reader opens it. */
 .think {
   margin-bottom: 0;
-  border: 1px solid var(--forebrain-divider);
-  border-radius: 8px;
-  padding: 6px 10px;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
 }
 
 .think-l {
   width: 100%;
   gap: 6px;
+  padding: 5px 0;
   font-size: 12px;
   color: var(--forebrain-muted-text);
   text-align: left;
@@ -67,10 +68,13 @@ const { t } = useI18n()
   transform: rotate(90deg);
 }
 
-/* The body is the reasoning verbatim: 12px at 1.65, muted, its own lines
-   kept. */
+/* The body is the reasoning verbatim, drawn as the row's one panel
+   (prototype .al-run > .think > p). */
 .think-body {
-  margin-top: 6px;
+  margin: 2px 0 0;
+  padding: 9px 12px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 10px;
   font-size: 12px;
   line-height: 1.65;
   color: var(--forebrain-muted-text);

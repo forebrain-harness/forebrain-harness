@@ -1,5 +1,4 @@
 import { execFileSync } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
 
 import { seedSessionInRoot, signIn, shot } from './support'
@@ -9,24 +8,12 @@ import { seedSessionInRoot, signIn, shot } from './support'
  * conversation's right-hand drawer, the composer there talks to that subagent
  * (never to the conversation), its tab names the model and the context it runs
  * on, a message the user sends it is drawn as the user's own, a command that
- * belongs to the conversation answers with one sentence, and Escape collapses
- * the drawer — the same semantics the terminal's subagent view has.
+ * belongs to the conversation answers with one sentence, Escape collapses the
+ * drawer and an idle subagent takes no input at all — the same semantics the
+ * terminal's subagent view has (plan 143).
  */
 
 const realLLM = process.env.E2E_REAL_LLM === '1'
-
-/**
- * The flaky proxy's control file. web_e2e.sh sets it only when a real run
- * routes the provider through the proxy (FOREBRAIN_E2E_REAL_LLM=1); it is
- * absent in fake mode, where the disconnect case has nothing to talk to.
- */
-const flakyControl = process.env.E2E_FLAKY_CONTROL
-
-/** Flip the flaky proxy's policy; the proxy re-reads this file per request. */
-function setProxyPolicy(policy: 'pass' | 'drop-subagent' | 'drop-all'): void {
-  if (!flakyControl) throw new Error('E2E_FLAKY_CONTROL must point at the flaky proxy control file')
-  writeFileSync(flakyControl, `${policy}\n`)
-}
 
 /** The gateway's state database, by name under E2E_HOME. */
 function stateDb(): string {
@@ -78,35 +65,52 @@ test('a subagent view talks to its own subagent', async ({ page }) => {
   await expect(budget).toHaveText(/^\d+%$/)
   await shot(page, 'subagent-conversation-view')
 
+  // A command hidden in a subagent's tab answers with one sentence, and no
+  // request leaves the page. The slash menu owns Enter while it is open (it
+  // picks a command), so a slash line is submitted with the submit button.
+  // /compact is one of them now: a subagent compacts nothing, and its own
+  // compaction card is never drawn (plan 142 deleted the endpoint, plan 143
+  // the page's call to it).
+  const tabInput = drawer.locator('textarea')
+  await tabInput.fill('/compact')
+  await drawer.locator('button[aria-label="Send"]').click()
+  await expect(drawer).toContainText('Run this from the main view')
+  await expect(drawer.locator('.compaction-card')).toHaveCount(0)
+  await shot(page, 'subagent-conversation-hidden-command')
+
+  await tabInput.fill('/new')
+  await drawer.locator('button[aria-label="Send"]').click()
+  await expect(drawer).toContainText('Run this from the main view')
+
   // A message sent from this tab reaches the subagent, and only the subagent.
   const reply = process.env.E2E_REPLY_OK ?? 'E2E_REPLY_OK'
-  const tabInput = drawer.locator('textarea')
   await tabInput.fill('continue')
   await tabInput.press('Enter')
+  // The probe's subagent is still resending its dropped first request (the
+  // run's own network retry: ten attempts, backoff up to 32s), and a queued
+  // steer only rides the NEXT model call — waiting the retry out takes
+  // minutes. The queue's printed way out is the interrupt: it abandons the
+  // in-flight resend and delivers the queue at once.
+  await drawer.locator('[data-testid="queue-interrupt"]').click()
   await expect(drawer).toContainText(reply, { timeout: 90_000 })
   await expect(drawer.locator('[data-testid="subagent-user-message"]').last()).toContainText('continue')
   // Nothing that happened in the drawer leaked into the conversation.
   await expect(page.locator('.chat-shell main')).not.toContainText(reply)
   await shot(page, 'subagent-conversation-continued')
 
-  // A command hidden in a subagent's tab answers with one sentence, and no
-  // request leaves the page. The slash menu owns Enter while it is open (it
-  // picks a command), so a slash line is submitted with the submit button.
-  await tabInput.fill('/new')
-  await drawer.locator('button[aria-label="Send"]').click()
-  await expect(drawer).toContainText('Run this from the main view')
-  await shot(page, 'subagent-conversation-hidden-command')
-
-  // /compact acts on the subagent, and its own card is drawn in its tab.
-  await tabInput.fill('/compact')
-  await drawer.locator('button[aria-label="Send"]').click()
-  await expect(drawer.locator('.compaction-card').first()).toBeVisible({ timeout: 90_000 })
-  await shot(page, 'subagent-conversation-compacted')
+  // Its execution ended: an idle subagent takes no messages — the agent that
+  // dispatched it decides what it does next — so the tab has no input box at
+  // all, and what is left where the composer's bar was reads the run it
+  // finished (the reading mode and the pill).
+  await expect(drawer.locator('[data-testid="subagent-idle-bar"]')).toBeVisible({ timeout: 30_000 })
+  await expect(drawer.locator('textarea')).toHaveCount(0)
+  await expect(drawer.locator('[data-testid="subagent-idle-bar"] [data-testid="view-mode-chip"]')).toBeVisible()
+  await shot(page, 'subagent-conversation-idle')
 
   // Escape in the drawer collapses it, and the subagent's answer is not in the
   // conversation it shares the page with.
-  await tabInput.click()
-  await tabInput.press('Escape')
+  await drawer.locator('[data-testid="subagent-idle-bar"] [data-testid="view-mode-chip"]').focus()
+  await page.keyboard.press('Escape')
   await expect(page.locator('[data-testid="subagent-drawer"]')).toHaveCount(0)
   await expect(page.locator('.chat-shell main')).not.toContainText(reply)
   await shot(page, 'subagent-conversation-back')
@@ -154,73 +158,6 @@ test('a steer the subagent takes at its tool boundary leaves its queue at once',
   await shot(page, 'subagent-steer-delivered')
 })
 
-/**
- * The real-model counterpart of the drawer test above: the provider is reached
- * through the flaky proxy, so the test can cut the subagent's own request
- * mid-stream (a live provider will not do that on request) and then continue
- * it from its own tab. It needs a real provider behind the proxy, so it skips
- * in fake mode — the CI gate, where no proxy is running.
- */
-test('a subagent that lost the network is continued from its own tab', async ({ page }) => {
-  test.skip(!realLLM || !flakyControl, 'needs a real provider cut mid-stream through the flaky proxy')
-  test.info().setTimeout(300_000)
-  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
-  await signIn(page)
-  setProxyPolicy('pass')
-  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-subagent')
-  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
-  await page.waitForSelector('textarea')
-
-  // The main agent dispatches a general-purpose subagent and waits for it; the
-  // dispatch's card is the way into its tab.
-  await page.fill(
-    'textarea',
-    'Dispatch one general-purpose subagent to read README.md and summarize it in three sentences, then wait for its result.',
-  )
-  await page.press('textarea', 'Enter')
-  await page.waitForSelector('[data-testid="subagent-call-card"]', { timeout: 180_000 })
-  await shot(page, 'subagent-conversation-net-card')
-
-  // The network dies on the subagent's own request: its card must fail.
-  setProxyPolicy('drop-subagent')
-  const failedCard = page.locator('[data-testid="subagent-call-card"]').filter({ hasText: /failed|Failed/i }).first()
-  await expect(failedCard).toBeVisible({ timeout: 180_000 })
-  await shot(page, 'subagent-conversation-net-failed')
-
-  // The network is back; the subagent's own tab is where it is continued.
-  setProxyPolicy('pass')
-  await page.locator('[data-testid="subagent-task-row"]').first().click()
-  const drawer = page.locator('[data-testid="subagent-drawer"]')
-  await expect(drawer).toBeVisible()
-  await expect(drawer.locator('[data-testid="subagent-run-pill"]')).toBeVisible({ timeout: 30_000 })
-
-  const answers = drawer.locator('[role="log"] .is-assistant')
-  const before = await answers.allInnerTexts()
-  const tabInput = drawer.locator('textarea')
-  await tabInput.fill('continue')
-  await tabInput.press('Enter')
-
-  // A real model's words are unknown, so the answer's text is not asserted —
-  // but where it lands is. Wait for a fresh non-empty reply in THIS tab,
-  // remember it, then prove the same text never reaches the conversation.
-  await expect
-    .poll(async () => (await answers.allInnerTexts()).slice(before.length).map((text) => text.trim()).filter(Boolean).join('\n'), {
-      timeout: 180_000,
-    })
-    .not.toBe('')
-  await expect(drawer.locator('[data-testid="subagent-user-message"]').last()).toContainText('continue')
-  const answer = (await answers.allInnerTexts()).slice(before.length).map((text) => text.trim()).filter(Boolean).join('\n')
-  expect(answer.length).toBeGreaterThan(0)
-  await shot(page, 'subagent-conversation-net-continued')
-
-  // Escape collapses the drawer, and the subagent's answer is not there.
-  await tabInput.click()
-  await tabInput.press('Escape')
-  await expect(page.locator('[data-testid="subagent-drawer"]')).toHaveCount(0)
-  await expect(page.locator('.chat-shell main')).not.toContainText(answer)
-  await shot(page, 'subagent-conversation-net-back')
-})
-
 test('a plan-reviewer tab opens with its own review model and budget', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
@@ -260,4 +197,62 @@ test('a plan-reviewer tab opens with its own review model and budget', async ({ 
   await expect(card).toContainText('zhipuai/glm-5.3-flash')
   await expect(card.locator('[data-testid="subagent-context-window"]')).toHaveText('1M')
   await shot(page, 'subagent-conversation-plan-reviewer')
+})
+
+test('a subagent run hangs on the activity line, and its cut head opens in the drawer', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-subagent')
+  const now = Math.floor(Date.now() / 1000)
+  const command = 'go vet -tags fts5 $(go list ./pkg/... | grep -v third_party) && go test -tags fts5 -count=1 -race ./pkg/tool ./pkg/tui ./pkg/safety ./pkg/gateway'
+  sqlite(`
+    INSERT INTO fb_runs (id, session_id, input_text, status, created_at, updated_at)
+      VALUES ('run-e2e-sub-line', '${session}', 'check the tree', 'done', ${now - 60}, ${now - 60});
+    ${event(session, 'run-e2e-sub-line', 'e2e-sub-line-spawn', 'subagent_spawned', {
+      agent_id: 'subagent-e2e-line', agent_type: 'explore', task_id: 'subagent-e2e-line',
+      title: 'check the tree', task: 'run the checks', execution_id: 'exec-sub-line',
+    }, (now - 40) * 1000)}
+    ${event(session, 'run-e2e-sub-line', 'e2e-sub-line-tool-start', 'tool_call_started', {
+      step_id: 'call-sub-line', tool_name: 'shell', summary: `ran ${command}`,
+      input: { command },
+      tool_meta: { tool_name: 'shell', status: 'running', agent_id: 'subagent-e2e-line' },
+    }, (now - 25) * 1000)}
+    ${event(session, 'run-e2e-sub-line', 'e2e-sub-line-tool-done', 'tool_call_completed', {
+      step_id: 'call-sub-line', tool_name: 'shell', summary: `ran ${command}`, display_body: 'ok',
+      duration_seconds: 4.2,
+      tool_meta: { tool_name: 'shell', status: 'completed', agent_id: 'subagent-e2e-line' },
+    }, (now - 20) * 1000)}
+    ${event(session, 'run-e2e-sub-line', 'e2e-sub-line-end', 'subagent_ended', {
+      agent_id: 'subagent-e2e-line', agent_type: 'explore', task_id: 'subagent-e2e-line',
+      status: 'ok', execution_id: 'exec-sub-line', finished_at_ms: (now - 15) * 1000,
+    }, (now - 15) * 1000)}
+  `)
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  const toggle = page.locator('[data-testid="subagent-drawer-toggle"]')
+  await expect(toggle).toBeVisible({ timeout: 30_000 })
+  await toggle.click()
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+  await expect(drawer.locator('[data-testid="subagent-tab-subagent-e2e-line"]')).toBeVisible()
+
+  // The subagent's own run hangs on the activity line; its call's state is
+  // the call's node.
+  const view = drawer.locator('[role="log"]')
+  await expect(view.locator('.activity-line')).toHaveCount(1)
+  await expect(view.locator('.tool-status--node.tool-status--done')).toHaveCount(1)
+
+  // The one-line head is cut in the drawer's narrow column: the eye opens the
+  // whole command as a document tab of this same drawer.
+  const eye = view.locator('[data-testid="tool-show-all"]').first()
+  await expect(eye).toBeVisible()
+  await eye.click()
+  // (The tab element alone: its close button's testid shares the prefix.)
+  const docTab = drawer.locator('.subagent-drawer-tab[data-testid^="doc-tab-"]')
+  await expect(docTab).toHaveCount(1)
+  await expect(docTab).toContainText(`命令 · ${command.slice(0, 20)}`)
+  await expect(drawer.locator('[data-testid="tool-doc-command"]')).toBeVisible()
+  await shot(page, 'subagent-conversation-doc-tab')
 })

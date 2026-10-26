@@ -387,8 +387,11 @@ func TestLSPCommandTables(t *testing.T) {
 func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
 	want := map[string]SubagentViewScope{
 		// Acts on the subagent whose view it is typed in.
-		"compact": SubagentViewActs,
 		"context": SubagentViewActs,
+		// Hidden: a subagent's context is not the user's to rewrite, and a
+		// view that is only open while the subagent works has no idle moment
+		// to compact in.
+		"compact": SubagentViewHidden,
 		// Runs exactly as it does in the conversation's view.
 		"status":      SubagentViewGlobal,
 		"mcp":         SubagentViewGlobal,
@@ -440,12 +443,12 @@ func TestSubagentViewHidesConversationCommands(t *testing.T) {
 	for _, cmd := range VisibleWithOptions(SurfaceTUI, DiscoveryOptions{SubagentView: true}) {
 		listed[cmd.Name] = true
 	}
-	for _, hidden := range []string{"new", "resume", "fork", "rename", "init", "clear", "plan", "agent", "model", "fast", "goal"} {
+	for _, hidden := range []string{"new", "resume", "fork", "rename", "init", "clear", "plan", "agent", "model", "fast", "goal", "compact"} {
 		if listed[hidden] {
 			t.Fatalf("the subagent view must hide /%s", hidden)
 		}
 	}
-	for _, shown := range []string{"compact", "context", "status", "mcp", "lsp", "permissions", "sandbox", "exit", "subagents", "skills", "connect", "memories", "migrate"} {
+	for _, shown := range []string{"context", "status", "mcp", "lsp", "permissions", "sandbox", "exit", "subagents", "skills", "connect", "memories", "migrate"} {
 		if !listed[shown] {
 			t.Fatalf("the subagent view must keep /%s", shown)
 		}

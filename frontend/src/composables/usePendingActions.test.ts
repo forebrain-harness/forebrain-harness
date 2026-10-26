@@ -82,7 +82,7 @@ describe('usePendingActions approvalDecisionLabel', () => {
       ['memory_note', 'decline', '不要记'],
       // Everything else.
       ['fallback', 'accept', '允许'],
-      ['fallback', 'cancel', '不要'],
+      ['fallback', 'cancel', '不允许'],
     ]
     for (const [family, decision, expected, extra] of table) {
       expect(label(decision, family, extra), `${family}/${decision}`).toBe(expected)
@@ -141,6 +141,41 @@ describe('usePendingActions approvalDecisionLabel', () => {
     expect(label('accept_for_session', 'network_host')).toBe('Allow all this session')
     expect(label('cancel', 'protected_read')).toBe("Don't read")
     expect(label('decline', 'memory_note')).toBe("Don't keep it")
-    expect(label('cancel', 'fallback')).toBe('No')
+    expect(label('cancel', 'fallback')).toBe("Don't allow")
+  })
+})
+
+describe('usePendingActions pendingForStep', () => {
+  beforeAll(() => setLocale('zh'))
+
+  function storeWith(actions: ActionRow[]) {
+    const { pendingApprovals, pendingForStep } = usePendingActions({
+      sessionId: ref(null),
+      version: ref(0),
+      contextUsedPercent: ref(null),
+    })
+    pendingApprovals.value = actions
+    return { pendingForStep }
+  }
+
+  function row(id: string): ActionRow {
+    return { id, kind: 'shell', status: 'pending', payloadJson: '{}', createdAt: 1, updatedAt: 1 }
+  }
+
+  it('matches the request the timeline block names for this step', () => {
+    const { pendingForStep } = storeWith([row('act-1'), row('act-2')])
+    expect(pendingForStep('call-write', [{ actionId: 'act-2', toolStepId: 'call-write' }])?.id).toBe('act-2')
+  })
+
+  it('finds nothing when no block names this step', () => {
+    const { pendingForStep } = storeWith([row('act-1')])
+    expect(pendingForStep('call-write', [{ actionId: 'act-1', toolStepId: 'call-read' }])).toBeNull()
+    expect(pendingForStep('call-write', [{ actionId: 'act-1' }])).toBeNull()
+    expect(pendingForStep('', [{ actionId: 'act-1', toolStepId: '' }])).toBeNull()
+  })
+
+  it('finds nothing when the named request is no longer pending', () => {
+    const { pendingForStep } = storeWith([row('act-other')])
+    expect(pendingForStep('call-write', [{ actionId: 'act-settled', toolStepId: 'call-write' }])).toBeNull()
   })
 })

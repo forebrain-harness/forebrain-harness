@@ -48,13 +48,13 @@
     <p v-else class="bench-hint">{{ t('chat.changesEmpty') }}</p>
   </div>
 
-  <!-- Compare: the conversation's unified diff for one file. -->
+  <!-- Compare: the conversation's unified diff for one file, in the one
+       diff style every surface draws (plan 137); the modal's own body
+       scrolls, so the panel is not bounded a second time. -->
   <ForebrainModal :open="diffOpen" size="xl" :title="diffTitle" @close="diffOpen = false">
     <p v-if="diffLoading" class="bench-hint">{{ t('common.loading') }}</p>
     <p v-else-if="diffError" class="bench-hint bench-hint--error">{{ diffError }}</p>
-    <div v-else class="chg-diff font-mono">
-      <div v-for="(line, idx) in diffLines" :key="idx" :class="diffLineClass(line)">{{ line || ' ' }}</div>
-    </div>
+    <DiffBlock v-else :rows="diffRows" :max-height="null" class="chg-diff-block" />
   </ForebrainModal>
 
   <!-- Edit: the shared file editor. -->
@@ -85,9 +85,11 @@ import { Button } from '@repo/shadcn-vue/components/ui/button'
 
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import DiffBlock from '@/components/chat/DiffBlock.vue'
 import FileEditDialog from '@/components/workbench/FileEditDialog.vue'
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
 import { getErrorMessage, forebrainApi, type RewindChangedFile, type WorkspaceScope } from '@/lib/api'
+import { parseUnifiedDiff } from '@/lib/unifiedDiff'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{ scope: WorkspaceScope }>()
@@ -111,7 +113,7 @@ const editPath = ref('')
 const revertTarget = ref<RewindChangedFile | null>(null)
 
 const diffTitle = computed(() => t('chat.changesDiffTitle', { path: diffPath.value }))
-const diffLines = computed(() => (diffText.value ? diffText.value.replace(/\n$/, '').split('\n') : []))
+const diffRows = computed(() => (diffText.value ? parseUnifiedDiff(diffText.value) : []))
 
 const revertTitle = computed(() => {
   const file = revertTarget.value
@@ -127,14 +129,6 @@ const revertMessage = computed(() => {
 function basename(path: string): string {
   const slash = path.lastIndexOf('/')
   return slash >= 0 ? path.slice(slash + 1) : path
-}
-
-function diffLineClass(line: string): string {
-  if (line.startsWith('@@')) return 'chg-diff-hunk'
-  if (line.startsWith('+++') || line.startsWith('---')) return 'chg-diff-hunk'
-  if (line.startsWith('+')) return 'chg-diff-add'
-  if (line.startsWith('-')) return 'chg-diff-del'
-  return 'chg-diff-ctx'
 }
 
 let generation = 0
@@ -276,32 +270,8 @@ watch(sessionId, () => void load(), { immediate: true })
   gap: 4px;
   margin-left: auto;
 }
-.chg-diff {
-  border: 1px solid var(--forebrain-divider);
+.chg-diff-block {
   border-radius: 6px;
-  background: var(--forebrain-code-bg);
-  font-size: 11px;
-  line-height: 1.6;
-  padding: 4px 0;
-  overflow-x: auto;
-  white-space: pre;
-}
-.chg-diff > div {
-  padding: 0 8px;
-}
-.chg-diff-add {
-  background: var(--forebrain-success-soft);
-  color: var(--forebrain-success);
-}
-.chg-diff-del {
-  background: var(--forebrain-bg-alt);
-  color: var(--forebrain-danger);
-}
-.chg-diff-hunk {
-  color: var(--forebrain-muted-text);
-}
-.chg-diff-ctx {
-  color: var(--forebrain-text-2);
 }
 .bench-hint {
   font-size: 12px;

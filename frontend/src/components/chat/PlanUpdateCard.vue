@@ -79,17 +79,13 @@ function planStatusClass(status: string): string {
   font-size: 13px;
 }
 
+/* No leading bullet on the head: on the activity line the node's checklist
+   is the card's mark (the prototype hides .plan-card .hd::before there). */
 .plan-card-head {
   display: flex;
   align-items: center;
   gap: 7px;
   padding: 0;
-}
-
-.plan-card-head::before {
-  content: "•";
-  font-size: 15px;
-  line-height: 1;
 }
 
 .plan-card-title {

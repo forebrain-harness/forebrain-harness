@@ -5,18 +5,16 @@ import { seedSessionInRoot, signIn, shot } from './support'
 
 /**
  * The web's fetch gate, proven on the real page: a run parked on a web_fetch
- * approval is asked the question the terminal's block asks - which page, and
- * what to do about it - so the card carries the question, the page itself and
- * the three answers, and never the tool's name or an action id.
+ * approval is asked on the call it holds — the card's head says what page it
+ * is fetching, the gate's footer asks the question the terminal's block asks,
+ * and the three answers say what they do — never the tool's name or an action
+ * id, and never a second box at the thread's end (plan 138).
  *
- * The parked actions are seeded straight into the gateway's state database, the
- * same rows a real gated tool call leaves behind; the permission facts
- * (permission_input, prefix_rule_content, available_decisions) are derived by
- * the gateway from those rows, exactly as they are for a live gate.
- *
- * A web_search gate is parked beside it in the same conversation: search rides
- * the shared approval card now, so it is asserted as that card draws it — the
- * semantic question, the fact line, and never the tool's internal name.
+ * The gated call, its events and the parked action are seeded straight into
+ * the gateway's state database, the same rows a live gated fetch leaves
+ * behind; the permission facts (permission_input, prefix_rule_content,
+ * available_decisions) are derived by the gateway from those rows, exactly as
+ * they are for a live gate.
  */
 
 /** The gateway's state database, by name under E2E_HOME. */
@@ -49,44 +47,100 @@ function parkAction(session: string, kind: string, actionId: string, payload: un
   return actionId
 }
 
-test('a fetch gate asks about the page, and a search gate asks its own question', async ({ page }) => {
+/** A waiting call and its gate: the assistant row that issued it, the started
+ *  step (awaiting the reader), and the approval naming the call it holds. */
+function parkGatedCall(
+  session: string,
+  runId: string,
+  callId: string,
+  toolName: string,
+  _args: Record<string, unknown>,
+  actionId: string,
+  header: { action: string; target?: string },
+  actionPayload: Record<string, unknown>,
+): void {
+  const now = Math.floor(Date.now() / 1000)
+  const parts = [{
+    type: 'tool_calls',
+    tool_calls: [{
+      id: callId,
+      type: 'function',
+      function: { name: toolName, arguments: JSON.stringify(_args) },
+    }],
+  }]
+  // The engine's rows carry the call's input in its meta; the head reads the
+  // object of its sentence (the page's URL) from there.
+  const meta = { tool_name: toolName, status: 'awaiting approval', input: _args }
+  sqlite(`
+    INSERT INTO fb_runs (id, session_id, input_text, status, created_at, updated_at)
+      VALUES ('${runId}', '${session}', 'read the pricing page', 'waiting_action', ${now - 60}, ${now - 60});
+    INSERT INTO fb_messages(session_id, run_id, role, content, created_at)
+      VALUES('${session}', '${runId}', 'user', 'read the pricing page', ${now - 60});
+    INSERT INTO fb_messages(session_id, run_id, role, content, parts, created_at)
+      VALUES('${session}', '${runId}', 'assistant', '', '${sqlJson(parts)}', ${now - 55});
+    INSERT INTO fb_messages(session_id, run_id, role, content, parts, tool_step_id, tool_meta_json, created_at)
+      VALUES('${session}', '${runId}', 'tool', '${sqlJson({})}', '${sqlJson([
+        { tool_call_id: callId, type: 'tool_result_meta' },
+        { type: 'tool_display', summary: 'fetching', body: '', tool_meta_json: JSON.stringify(meta) },
+      ])}', '${callId}', '${sqlJson(meta)}', ${now - 50});
+    INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms)
+      VALUES('${session}', '${runId}', 'e2e-${callId}-start', 'tool_call_started', '${sqlJson({
+        step_id: callId,
+        tool_name: toolName,
+        header_parts: header,
+        tool_meta: { tool_name: toolName, status: 'awaiting approval' },
+      })}', ${now - 50} * 1000);
+    INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms)
+      VALUES('${session}', '${runId}', 'e2e-${callId}-gate', 'approval_requested', '${sqlJson({
+        action_id: actionId,
+        action_kind: toolName,
+        tool_step_id: callId,
+        message: 'Awaiting approval or authorization to continue',
+      })}', ${now - 49} * 1000);
+  `)
+  parkAction(session, toolName, actionId, actionPayload)
+}
+
+test('a fetch gate hangs on the fetching call and asks about its page', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
   const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-web-fetch')
   const url = 'https://example.com/pricing'
-  const fetchId = parkAction(session, 'web_fetch', 'act-e2e-webfetch', { url, rule_content: 'domain:example.com' })
-  const searchId = parkAction(session, 'web_search', 'act-e2e-websearch', { query: 'gateway session cookie' })
+  parkGatedCall(session, 'run-e2e-webfetch', 'call-fetch', 'web_fetch', { url }, 'act-e2e-webfetch',
+    { action: 'Fetching', target: url }, { url, rule_content: 'domain:example.com' })
+  parkAction(session, 'web_search', 'act-e2e-websearch', { query: 'gateway session cookie' })
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
 
-  const gate = page.locator('[data-testid="web-fetch-approval"]')
+  // The gate is the call's own card: its head says what page it is fetching,
+  // the footer asks the question, and nothing waits at the thread's end.
+  const gate = page.locator('.tool-card').filter({ has: page.locator('[data-testid="approval-gate-web_fetch"]') })
   await expect(gate).toBeVisible()
-  // The question, then the page itself on its own line, unshortened. The
-  // question names no access route: a fetch may be served by a routed provider,
-  // so promising "the public web" here would be a claim the card cannot keep.
+  await expect(gate.locator('.ttl')).toContainText('正在抓取')
+  await expect(gate.locator('.ttl')).toContainText(url)
   await expect(gate).toContainText('要我去取这个页面吗？')
-  await expect(page.locator('[data-testid="web-fetch-page"]')).toHaveText(url)
+  await expect(page.locator('[data-testid="pending-approval"][data-action-id="act-e2e-webfetch"]')).toHaveCount(0)
   // The three answers, each saying what it does; the one that remembers names
   // the host it remembers, so the card never explains that a second time.
   await expect(gate.locator('[data-testid="pending-decision-accept"]')).toContainText('取这个页面')
   await expect(gate.locator('[data-testid="pending-decision-accept_and_remember"]')).toContainText('不再询问 example.com')
   await expect(gate.locator('[data-testid="pending-decision-cancel"]')).toContainText('不要取')
   await expect(gate).not.toContainText('权限记忆')
-  // A plain fetch carries neither routing fact in its payload, so the card
-  // draws no fact row at all: it is the card it always was.
-  await expect(gate.locator('[data-testid="web-fetch-fact"]')).toHaveCount(0)
+  // The node says the call waits on the reader — the clock.
+  await expect(page.locator('.activity-step .tool-status--awaiting .lucide-clock')).toHaveCount(1)
 
   const main = page.locator('.chat-shell main')
   const text = await main.innerText()
-  expect(text).not.toContain(fetchId)
+  expect(text).not.toContain('act-e2e-webfetch')
   expect(text).not.toContain('web_fetch')
 
-  // A search gate is the shared approval card now (prototype :1275, :3418): the
-  // semantic question, the fact line naming the query and the cap, no
-  // permission-memory box, and never the tool's internal name.
-  const searchCard = page.locator(`[data-testid="pending-approval"][data-action-id="${searchId}"]`)
+  // A search gate with no card of its own answers in the thread's tail frame
+  // (prototype :1275, :3418): the semantic question, the fact line naming the
+  // query and the cap, no permission-memory box, and never the tool's
+  // internal name.
+  const searchCard = page.locator(`[data-testid="pending-approval"][data-action-id="act-e2e-websearch"]`)
   await expect(searchCard).toBeVisible()
   await expect(searchCard).toContainText('要我搜一下公开网络吗？')
   await expect(searchCard).toContainText('“gateway session cookie” · 最多 5 条')
@@ -100,9 +154,10 @@ test('a fetch gate asks about the page, and a search gate asks its own question'
  * The routed fetch's two facts reach the screen. A run whose web_fetch was
  * routed at a provider leaves a payload naming the route and — when the
  * operator opened loopback space — the flag, which are the only two things the
- * card cannot learn from the URL. Seeded the same way as the gate above: the
- * payload is the row a live routed gate writes (pkg/tool/web_tools.go
- * writes routed_provider / allow_private_ip into the gate payload).
+ * card cannot learn from the URL. Seeded with no card of its own, so the
+ * thread's tail frame carries it: the question as its head, the facts as its
+ * panel (pkg/tool/web_tools.go writes routed_provider / allow_private_ip into
+ * the gate payload).
  */
 test('a routed fetch gate says who fetches it and that private space is open', async ({ page }) => {
   test.info().setTimeout(120_000)
@@ -120,10 +175,10 @@ test('a routed fetch gate says who fetches it and that private space is open', a
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
 
-  const gate = page.locator('[data-testid="web-fetch-approval"]')
+  const gate = page.locator('[data-testid="pending-approval"][data-action-id="act-e2e-webfetch-routed"]')
   await expect(gate).toBeVisible()
   await expect(gate).toContainText('要我去取这个页面吗？')
-  await expect(gate.locator('[data-testid="web-fetch-fact"]')).toHaveText([
+  await expect(gate.locator('[data-testid="approval-gate-fact"]')).toHaveText([
     '由 deepseek 在服务端取回',
     '私网地址已放开',
   ])

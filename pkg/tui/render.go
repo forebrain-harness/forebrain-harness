@@ -2064,6 +2064,13 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 				return
 			}
 		}
+		if strings.EqualFold(title, "shell") && !toolStatusFailed(f) {
+			if block, ok := renderShellDiffCard(f.Content, r.diffTheme); ok {
+				_, _ = fmt.Fprintln(r.out, block)
+				_, _ = fmt.Fprintln(r.out)
+				return
+			}
+		}
 		// MCP tool results carry their payload as a JSON transport envelope whose
 		// text blocks are Markdown. Extract every text block from the RAW frame
 		// content once and render it as Markdown here, before the generic
@@ -3515,6 +3522,10 @@ type ComposerRenderState struct {
 	// OverlayRows is the @ mention menu under the composer.
 	OverlayRows  []OverlayRow
 	ArgumentHint string
+	// ReadOnly draws the composer with no input box and no caret: the view it
+	// belongs to takes no typing. It is a subagent's view while that subagent
+	// is idle — the raw reader takes no edits there either (composerReadOnly).
+	ReadOnly bool
 }
 
 // ComposerPendingInputPreview mirrors the active-run input queues shown above
@@ -5994,12 +6005,36 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 	if strings.TrimSpace(fence) == "" {
 		return "", false
 	}
+	rows, f, ok := diffHunkRowsFor(path, fence, theme)
+	if !ok {
+		return "", false
+	}
+	out := make([]string, 0, 16)
+	out = append(out, "  └ "+turnDiffSummaryLine(f.Added, f.Deleted))
+	for _, row := range rows {
+		out = append(out, "    "+row)
+	}
+	out = append(out, lspDiagnosticsCardRows(content)...)
+	return strings.Join(out, "\n"), true
+}
+
+// diffHunkRows renders one file's unified diff as the unprefixed card rows the
+// turn-diff card and the shell diff blocks share: colour-highlighted hunk
+// lines joined by a faint ⋮ separator.
+func diffHunkRows(path, unifiedDiff string, theme DiffTheme) ([]string, bool) {
+	rows, _, ok := diffHunkRowsFor(path, unifiedDiff, theme)
+	return rows, ok
+}
+
+// diffHunkRowsFor is diffHunkRows with the parsed file stats, which the
+// turn-diff card's summary line is built from.
+func diffHunkRowsFor(path, unifiedDiff string, theme DiffTheme) ([]string, event.FileStat, bool) {
 	// event.Parse keys off a "diff --git" header; the difflib body only has
 	// "--- path:before" / "+++ path:after". Prepend a synthetic header so the
 	// existing hunk/line parsing applies.
-	doc := event.Parse("diff --git a/" + path + " b/" + path + "\n" + fence)
+	doc := event.Parse("diff --git a/" + path + " b/" + path + "\n" + unifiedDiff)
 	if len(doc.Files) == 0 {
-		return "", false
+		return nil, event.FileStat{}, false
 	}
 	f := doc.Files[0]
 
@@ -6011,21 +6046,73 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 		bandW = 20
 	}
 
-	out := make([]string, 0, 16)
-	out = append(out, "  └ "+turnDiffSummaryLine(f.Added, f.Deleted))
-
+	rows := make([]string, 0, 16)
 	for hi, hunk := range f.Hunks {
 		if hi > 0 {
-			out = append(out, "    "+p.meta("⋮"))
+			rows = append(rows, p.meta("⋮"))
 		}
 		for _, line := range hunk.Lines {
 			for _, row := range renderDiffLine(line, p, gutterW, bandW, lexer, style) {
-				out = append(out, "    "+row)
+				rows = append(rows, row)
 			}
 		}
 	}
-	out = append(out, lspDiagnosticsCardRows(content)...)
-	return strings.Join(out, "\n"), true
+	return rows, f, true
+}
+
+// shellDiffCardOutputText is the stdout/stderr text of a shell body — the
+// same extraction formatShellOutput performs for a normal shell card, minus
+// its raw-body fallback: a diff-blocks body without stdout (apply_patch) must
+// start at its first file header, not replay the diff markdown as text.
+func shellDiffCardOutputText(content string) string {
+	sections := toolOutputSections(content)
+	if len(sections) == 0 {
+		return ""
+	}
+	return strings.TrimRight(stripToolOutputInlineNotes(strings.Join(sections, "\n")), "\n\t\r ")
+}
+
+// renderShellDiffCard renders a shell card body that carries diff blocks:
+// its stdout/stderr text first, then one header plus hunk rows per file, then
+// the notes — all under the tool-card prefix. Returns false for ordinary
+// shell bodies so the generic shell renderer stays in charge.
+func renderShellDiffCard(content string, theme DiffTheme) (string, bool) {
+	blocks, ok := tool.ParseDiffBlocks(content)
+	if !ok {
+		return "", false
+	}
+	text := shellDiffCardOutputText(content)
+	var rows []string
+	if text != "" {
+		rows = append(rows, strings.Split(formatToolOutputBlock(text), "\n")...)
+	}
+	for _, f := range blocks.Files {
+		header := f.Verb + " " + f.Path + " " + lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("(+%d -%d)", f.Added, f.Deleted))
+		rows = append(rows, "    "+header)
+		if f.UnifiedDiff == "" {
+			continue
+		}
+		// A moved file's header names both ends; the diff is about the new one.
+		path := f.Path
+		if i := strings.LastIndex(path, " → "); i >= 0 {
+			path = path[i+len(" → "):]
+		}
+		if hunkRows, ok := diffHunkRows(path, f.UnifiedDiff, theme); ok {
+			for _, row := range hunkRows {
+				rows = append(rows, "    "+row)
+			}
+		}
+	}
+	for _, note := range blocks.Notes {
+		rows = append(rows, "    "+lipgloss.NewStyle().Faint(true).Render(note))
+	}
+	if len(rows) == 0 {
+		return "", false
+	}
+	if text == "" {
+		rows[0] = "  └ " + strings.TrimPrefix(rows[0], "    ")
+	}
+	return strings.Join(rows, "\n"), true
 }
 
 // lspDiagnosticsCardRows parses the "lsp diagnostics:" section a tool body

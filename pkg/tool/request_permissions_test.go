@@ -228,7 +228,7 @@ PATCH`
 	if err != nil {
 		t.Fatalf("encode args: %v", err)
 	}
-	ctx := context.Background()
+	ctx := WithToolCompletionCapture(context.Background())
 	out, err := tool.Handle(ctx, string(args))
 	if err != nil {
 		t.Fatalf("tool handle: %v", err)
@@ -245,6 +245,28 @@ PATCH`
 	}
 	if got := mustReadFile(t, root+"/added.txt"); got != "alpha\nbeta\n" {
 		t.Fatalf("added content = %q", got)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("apply_patch completion was not captured")
+	}
+	files := sliceFromAny(completion.Output["files"])
+	if len(files) != 2 {
+		t.Fatalf("completion files = %#v", completion.Output["files"])
+	}
+	gotDisplay := make([]string, 0, len(files))
+	for _, raw := range files {
+		entry := mapFromAny(raw)
+		display, _ := entry["display_path"].(string)
+		if filepath.IsAbs(display) {
+			t.Fatalf("completion files display_path = %q, want a path relative to the working directory", display)
+		}
+		gotDisplay = append(gotDisplay, display)
+	}
+	sort.Strings(gotDisplay)
+	want := []string{"added.txt", "existing.txt"}
+	if !reflect.DeepEqual(gotDisplay, want) {
+		t.Fatalf("completion files display_path = %#v, want %#v", gotDisplay, want)
 	}
 }
 

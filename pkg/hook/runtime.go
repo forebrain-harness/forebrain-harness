@@ -49,6 +49,10 @@ type Runtime struct {
 	SessionID             func(context.Context) string
 	ToolUseID             func(context.Context) string
 	PermissionMode        func() string
+	// ToolResponse shapes the tool_response a PostToolUse hook receives from the
+	// tool's raw result. Nil hands the raw result over unchanged. It never
+	// changes what the model receives.
+	ToolResponse func(ctx context.Context, toolName string, out any) any
 }
 
 type PromptRun func(context.Context, string) (string, error)

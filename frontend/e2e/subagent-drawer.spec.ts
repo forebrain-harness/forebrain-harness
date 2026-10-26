@@ -274,7 +274,7 @@ test("a running subagent's own tab carries its working line and its context pill
   await expect(page.locator('[data-testid="subagent-working"]')).toHaveCount(0)
 })
 
-test("a tab's + is the composer's own, and its sheet is as wide as the composer", async ({ page }) => {
+test("a tab's + is the composer's own, and its sheet is a menu off the button", async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
   await signIn(page)
@@ -307,15 +307,30 @@ test("a tab's + is the composer's own, and its sheet is as wide as the composer"
       + ` conversation sheet ${mainSheet?.width} vs conversation composer ${mainComposer?.width}`,
   })
 
+  // The sheet is a menu that hangs off the "+" itself (the 2026-10-23
+  // redesign): its own width — never the composer's, never past the column —
+  // its left edge on the button's, opening above the input area.
+  const drawerPlusBox = await drawer.locator('[data-testid="composer-plus"]').boundingBox()
   expect(drawerSheet).not.toBeNull()
   expect(drawerComposer).not.toBeNull()
-  expect(Math.abs((drawerSheet?.width ?? 0) - (drawerComposer?.width ?? 0))).toBeLessThanOrEqual(2)
-  // The sheet hangs off the composer, and opens above it rather than over it.
-  expect(Math.abs((drawerSheet?.x ?? 0) - (drawerComposer?.x ?? 0))).toBeLessThanOrEqual(2)
-  expect((drawerSheet?.y ?? 0) + (drawerSheet?.height ?? 0)).toBeLessThanOrEqual(drawerComposer?.y ?? 0)
-  // The conversation's composer anchors its own sheet the same way.
-  expect(Math.abs((mainSheet?.width ?? 0) - (mainComposer?.width ?? 0))).toBeLessThanOrEqual(2)
-  expect(Math.abs((mainSheet?.x ?? 0) - (mainComposer?.x ?? 0))).toBeLessThanOrEqual(2)
+  expect((drawerSheet?.width ?? 0)).toBeGreaterThanOrEqual(260)
+  expect((drawerSheet?.width ?? 0)).toBeLessThanOrEqual(440)
+  expect((drawerSheet?.width ?? 0)).toBeLessThanOrEqual(drawerComposer?.width ?? 0)
+  expect(Math.abs((drawerSheet?.x ?? 0) - (drawerPlusBox?.x ?? 0))).toBeLessThanOrEqual(2)
+  expect((drawerSheet?.x ?? 0)).toBeGreaterThanOrEqual((drawerComposer?.x ?? 0) - 2)
+  expect((drawerSheet?.x ?? 0) + (drawerSheet?.width ?? 0))
+    .toBeLessThanOrEqual((drawerComposer?.x ?? 0) + (drawerComposer?.width ?? 0) + 2)
+  // It opens above the "+" — over the composer's own input area, which the
+  // button's row sits inside — never below the button that opened it.
+  expect((drawerSheet?.y ?? 0) + (drawerSheet?.height ?? 0)).toBeLessThanOrEqual(drawerPlusBox?.y ?? 0)
+  // The conversation's own "+" opens the same sheet from the same component:
+  // the same menu width, anchored the same way.
+  const mainPlusBox = await page.locator('.chat-shell main [data-testid="composer-plus"]').boundingBox()
+  expect((mainSheet?.width ?? 0)).toBeGreaterThanOrEqual(260)
+  expect((mainSheet?.width ?? 0)).toBeLessThanOrEqual(440)
+  expect((mainSheet?.width ?? 0)).toBeLessThanOrEqual(mainComposer?.width ?? 0)
+  expect(Math.abs((mainSheet?.x ?? 0) - (mainPlusBox?.x ?? 0))).toBeLessThanOrEqual(2)
+  expect((mainSheet?.y ?? 0) + (mainSheet?.height ?? 0)).toBeLessThanOrEqual(mainPlusBox?.y ?? 0)
 })
 
 test("a tab's own composer adds attachments and @ references, and closing it is not a stop", async ({ page }) => {

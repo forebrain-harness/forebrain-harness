@@ -209,7 +209,8 @@ func (s *Server) handleSkillPullWith(launch safety.ProjectContext, projectID str
 }
 
 // handleSkillDiff compares two snapshots of a skill: from and to each name a
-// published version ("v3") or the draft ("draft").
+// published version ("v3") or the draft ("draft"). With path set, the answer
+// is that one file with its unified diff.
 func (s *Server) handleSkillDiff(w http.ResponseWriter, r *http.Request) {
 	s.handleSkillDiffWith(agentSkillScope(), w, r)
 }
@@ -234,6 +235,27 @@ func (s *Server) handleSkillDiffWith(launch safety.ProjectContext, w http.Respon
 	svc, err := s.skillLifecycleService(launch)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	// One file, with its lines: the compare view lists files from the plain
+	// answer below and asks for the selected one here.
+	if path := strings.TrimSpace(q.Get("path")); path != "" {
+		file, err := svc.DiffSkillFile(name, from, to, path)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, skill.ErrDiffFileNotFound) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": name,
+			"from": from,
+			"to":   to,
+			"file": file,
+		})
 		return
 	}
 	files, err := svc.DiffSkill(name, from, to)

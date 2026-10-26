@@ -504,9 +504,10 @@ func explicitSkillActivationMessage(activation explicitSkillActivation) llm.Mess
 // phase owns everything the user used to miss: the running card while the file
 // is read, the true duration, and a failure card instead of a generic error.
 //
-// The load lives here and nowhere else. Surfaces cannot be trusted to read
-// skill files — they would race the skill being replaced on disk and they have
-// no place to show the load happening — so they submit only the selections.
+// The load lives in loadExplicitSkill and nowhere else. Surfaces cannot be
+// trusted to read skill files — they would race the skill being replaced on
+// disk and they have no place to show the load happening — so they submit only
+// the selections.
 //
 // On success the activation contents are seeded into the returned context,
 // where the transcript builder picks them up. A load failure ends the turn
@@ -518,61 +519,74 @@ func (r *Runner) preloadExplicitSkills(ctx context.Context) (context.Context, er
 	if !ok || r == nil {
 		return ctx, nil
 	}
-	step := tool.StepHookFromContext(ctx, r.tools)
+	var activations []explicitSkillActivation
+	for i, selection := range selections {
+		stepID := "skill-explicit-" + strconv.Itoa(i) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		activation, err := loadExplicitSkill(ctx, r.tools, selection, stepID)
+		if err != nil {
+			return ctx, &ExplicitSkillLoadError{SkillName: selection.SkillName, SkillPath: selection.SkillPath, Err: err}
+		}
+		activations = append(activations, activation)
+	}
+	return WithExplicitSkillActivations(ctx, activations), nil
+}
+
+// loadExplicitSkill runs one explicit skill's real load: the Skill card while
+// the file is read, the true duration, and a failure card instead of a generic
+// error. It is the one load both a turn's explicit skills and a skill-carrying
+// steer go through, so the two are indistinguishable to the user and the
+// model.
+func loadExplicitSkill(ctx context.Context, st *tool.State, selection explicitSkillSelection, stepID string) (explicitSkillActivation, error) {
+	step := tool.StepHookFromContext(ctx, st)
 	emit := func(evt tool.StepEvent) {
 		if step != nil {
 			step(ctx, evt)
 		}
 	}
-	var activations []explicitSkillActivation
-	for i, selection := range selections {
-		stepID := "skill-explicit-" + strconv.Itoa(i) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-		// The pinned copy when this session's loaded catalog carries the skill:
-		// an explicit invocation reads the same version every other load in
-		// this session does. A skill outside the catalog (a cross-tool
-		// directory, a built-in) keeps the path the slash command registered.
-		skillPath := strings.TrimSpace(selection.SkillPath)
-		if item, ok := loadedSkillByName(r.tools, selection.SkillName); ok && item.Version > 0 {
-			skillPath = item.PinnedSkillFile()
-		}
-		identity := tool.StepEvent{
-			StepID:    stepID,
-			ToolName:  "skill",
-			Category:  "skill",
-			SkillName: selection.SkillName,
-			SkillPath: skillPath,
-			Origin:    "explicit",
-		}
-		emit(tool.StepEvent{Kind: event.RunEventToolStarted, StepID: identity.StepID,
-			ToolName: identity.ToolName, Category: identity.Category,
-			SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin})
-		started := time.Now()
-		activation, err := skill.LoadActivation(skillPath)
-		if err == nil {
-			if item, ok := loadedSkillByName(r.tools, selection.SkillName); ok && item.Version > 0 {
-				if _, statErr := os.Stat(skillPath); statErr != nil {
-					err = fmt.Errorf("skill %q v%d no longer exists; its version directory was removed — start a new session to load the skill's current version", item.Name, item.Version)
-				}
+	// The pinned copy when this session's loaded catalog carries the skill: an
+	// explicit invocation reads the same version every other load in this
+	// session does. A skill outside the catalog (a cross-tool directory, a
+	// built-in) keeps the path the slash command registered.
+	skillPath := strings.TrimSpace(selection.SkillPath)
+	if item, ok := loadedSkillByName(st, selection.SkillName); ok && item.Version > 0 {
+		skillPath = item.PinnedSkillFile()
+	}
+	identity := tool.StepEvent{
+		StepID:    stepID,
+		ToolName:  "skill",
+		Category:  "skill",
+		SkillName: selection.SkillName,
+		SkillPath: skillPath,
+		Origin:    "explicit",
+	}
+	emit(tool.StepEvent{Kind: event.RunEventToolStarted, StepID: identity.StepID,
+		ToolName: identity.ToolName, Category: identity.Category,
+		SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin})
+	started := time.Now()
+	activation, err := skill.LoadActivation(skillPath)
+	if err == nil {
+		if item, ok := loadedSkillByName(st, selection.SkillName); ok && item.Version > 0 {
+			if _, statErr := os.Stat(skillPath); statErr != nil {
+				err = fmt.Errorf("skill %q v%d no longer exists; its version directory was removed — start a new session to load the skill's current version", item.Name, item.Version)
 			}
 		}
-		duration := time.Since(started)
-		if err == nil && !strings.EqualFold(skill.NormalizeToken(activation.Name), skill.NormalizeToken(selection.SkillName)) {
-			err = fmt.Errorf("skill file at %s now names %q", selection.SkillPath, activation.Name)
-		}
-		if err != nil {
-			emit(tool.StepEvent{Kind: event.RunEventToolCompleted, StepID: identity.StepID,
-				ToolName: identity.ToolName, Category: identity.Category,
-				SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin,
-				Duration: duration, Error: err.Error()})
-			return ctx, &ExplicitSkillLoadError{SkillName: selection.SkillName, SkillPath: selection.SkillPath, Err: err}
-		}
+	}
+	duration := time.Since(started)
+	if err == nil && !strings.EqualFold(skill.NormalizeToken(activation.Name), skill.NormalizeToken(selection.SkillName)) {
+		err = fmt.Errorf("skill file at %s now names %q", selection.SkillPath, activation.Name)
+	}
+	if err != nil {
 		emit(tool.StepEvent{Kind: event.RunEventToolCompleted, StepID: identity.StepID,
 			ToolName: identity.ToolName, Category: identity.Category,
 			SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin,
-			Duration: duration})
-		activations = append(activations, explicitSkillActivation{SkillName: selection.SkillName, Content: activation.Content})
+			Duration: duration, Error: err.Error()})
+		return explicitSkillActivation{}, err
 	}
-	return WithExplicitSkillActivations(ctx, activations), nil
+	emit(tool.StepEvent{Kind: event.RunEventToolCompleted, StepID: identity.StepID,
+		ToolName: identity.ToolName, Category: identity.Category,
+		SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin,
+		Duration: duration})
+	return explicitSkillActivation{SkillName: selection.SkillName, Content: activation.Content}, nil
 }
 
 // SkillCommandHooks lets the turn-owned slash command registry stay in sync

@@ -68,8 +68,9 @@ function toolRow(
   summary: string,
   body: string,
   atSec: number,
+  input?: Record<string, unknown>,
 ): string {
-  const meta = { tool_name: toolName, status: 'completed' }
+  const meta = { tool_name: toolName, status: 'completed', ...(input ? { input } : {}) }
   const parts = [
     { tool_call_id: callId, type: 'tool_result_meta' },
     { type: 'tool_display', summary, body, tool_meta_json: JSON.stringify(meta) },
@@ -89,7 +90,7 @@ function event(session: string, runId: string, eventId: string, type: string, pa
 const headers = (page: import('@playwright/test').Page) =>
   page.locator('.chat-shell main [data-slot="collapsible-trigger"]')
 
-test('a long call keeps a one-line header and carries the whole command in its body', async ({ page }) => {
+test('a long call keeps a one-line header; the whole command opens from the eye', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
@@ -111,34 +112,60 @@ test('a long call keeps a one-line header and carries the whole command in its b
       { id: 'call-long', name: 'shell', args: { command } },
       { id: 'call-short', name: 'shell', args: { command: 'ls' } },
     ], now - 45)}
-    ${toolRow(session, 'run-e2e-cards-head', 'call-long', 'shell', longSummary, 'ok', now - 40)}
-    ${toolRow(session, 'run-e2e-cards-head', 'call-short', 'shell', shortSummary, 'README.md', now - 39)}
+    ${toolRow(session, 'run-e2e-cards-head', 'call-long', 'shell', longSummary, 'ok', now - 40, { command })}
+    ${toolRow(session, 'run-e2e-cards-head', 'call-short', 'shell', shortSummary, 'README.md', now - 39, { command: 'ls' })}
   `)
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await expect(headers(page)).toHaveCount(2)
 
-  // The two headers are exactly as tall as each other: the long call is not
-  // allowed to stretch the card head, whatever its command says.
-  const longBox = await headers(page).nth(0).boundingBox()
-  const shortBox = await headers(page).nth(1).boundingBox()
-  expect(longBox?.height).toBe(shortBox?.height)
+  // The head stays one line however long the command is: the title area of
+  // the long call is exactly as tall as the short one's — one line, cut with
+  // an ellipsis, never wrapped into a paragraph. (The head row itself may be
+  // taller on the long card: the eye that opens the whole command is a 24px
+  // square beside the title, as in the prototype's .tt-all.)
+  const longTitle = headers(page).nth(0).locator('.ttl')
+  const shortTitle = headers(page).nth(1).locator('.ttl')
+  await expect(longTitle).toHaveCSS('white-space', 'nowrap')
+  expect((await longTitle.boundingBox())?.height).toBeCloseTo((await shortTitle.boundingBox())?.height ?? 0, 1)
 
-  // The truncated header still holds the whole call, for the hover tooltip and
-  // for assistive tech.
-  const longTitle = headers(page).nth(0).locator('span[title]').first()
-  await expect(longTitle).toHaveAttribute('title', longSummary)
-  await expect(longTitle).toHaveText(longSummary)
+  // A Chinese interface words the head in Chinese: the action word is 已运行,
+  // the command itself stays as it ran.
+  await expect(headers(page).nth(0).locator('.verb')).toHaveText('已运行')
+  await expect(headers(page).nth(0).locator('.tgt')).toContainText('go vet')
 
-  // Opening the card puts the command itself at the top of the body, verbatim.
+  // The body is the result only: no command block under any head, and no
+  // native tooltip on the cut line — the eye is the way to see the whole.
   await headers(page).nth(0).click()
-  const full = page.locator('.cmd-full')
-  await expect(full).toHaveCount(1)
-  await expect(full).toHaveText(longSummary)
-  // A short summary is not repeated under itself: one card, one header line.
-  await headers(page).nth(1).click()
-  await expect(page.locator('.cmd-full')).toHaveCount(1)
+  await expect(page.locator('.cmd-full')).toHaveCount(0)
+  await expect(headers(page).nth(0).locator('span[title]')).toHaveCount(0)
+  await expect(page.locator('.tool-card-body').first()).not.toContainText(command)
+
+  // The truncated head carries the eye; it opens the command as a document
+  // tab of the drawer, labeled 命令 · <first line>, and the tab's page holds
+  // the steps of the chain.
+  const eye = headers(page).nth(0).locator('[data-testid="tool-show-all"]')
+  await expect(eye).toBeVisible()
+  await eye.click()
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+  // (The tab element alone: its close button's testid shares the prefix.)
+  const docTab = drawer.locator('.subagent-drawer-tab[data-testid^="doc-tab-"]')
+  await expect(docTab).toContainText(`命令 · ${command.slice(0, 20)}`)
+  await expect(drawer.locator('[data-testid="tool-doc-command"]')).toBeVisible()
+  // The chain reads one step per row: the pipe inside $( ), then the &&.
+  await expect(drawer.locator('[data-testid="tool-doc-command"] .step')).toHaveCount(3)
   await shot(page, 'message-cards-tool-head')
+
+  // In English the head says what the engine said: Ran, not a translation.
+  // (A fresh page rather than a reload: this page's init script puts the
+  // interface back into Chinese on every navigation, and the new page — same
+  // context, so the same sign-in — reads the locale the storage now holds.)
+  await page.evaluate(() => localStorage.setItem('forebrain-locale', 'en'))
+  const enPage = await page.context().newPage()
+  await enPage.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await expect(enPage.locator('.chat-shell main [data-slot="collapsible-trigger"]').first().locator('.verb')).toHaveText('Ran')
+  await enPage.close()
 })
 
 test('the todo card says 更新待办 in a Chinese interface', async ({ page }) => {
@@ -383,8 +410,12 @@ test('the composer’s view mode keeps the answers and hides the run’s cards, 
   const chip = page.locator('[data-testid="view-mode-chip"]')
   const main = page.locator('.chat-shell main')
   await expect(chip).toContainText('默认')
-  // The head is the engine's header — the terminal's words: a shell call is "Ran ls".
-  await expect(main).toContainText('Ran ls')
+  // The head speaks the interface's language (owner 2026-10-25): the engine's
+  // action word reads 已运行 here, and the command itself stays as it ran. The
+  // words are the head's own — the node beside it names the state, never the
+  // sentence the head already says.
+  await expect(main).toContainText('已运行')
+  await expect(page.locator('.tool-head .tgt')).toContainText('ls')
   await expect(main).toContainText('the listing is empty')
 
   // Reading mode, not a delete: the run's cards step out, the answer stays.
@@ -400,4 +431,142 @@ test('the composer’s view mode keeps the answers and hides the run’s cards, 
   await expect(page.locator('.chat-shell main')).not.toContainText('Ran ls')
   await expect(page.locator('.chat-shell main')).toContainText('the listing is empty')
   await shot(page, 'message-cards-view-concise')
+})
+
+// A shell card's body is the result only (plan 137): the streams as rows,
+// stderr red, the exit on the head, the truncation footer with the eye that
+// opens the whole output in the drawer — and an edit's card opens with the
+// unified diff rows. The rows are seeded in the engine's own card format
+// (formatShellStep / turnDiffSection), so the gateway reads the same facts
+// back a live card would carry.
+test('a shell card shows only its output, and a truncated one opens the whole of it', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const session = await seedProjectSession(page, 'message-cards-shell')
+  const now = Math.floor(Date.now() / 1000)
+  const command = 'go vet -tags fts5 ./pkg/gateway/... && go test -tags fts5 ./pkg/gateway/... -run Session'
+  // What formatShellStep writes for a failed, truncated run: the two streams
+  // in fences, the truncation note, then the output JSON carrying the exit
+  // and the retrieval id.
+  const shellBody = [
+    '**shell**',
+    '',
+    'input:',
+    '',
+    '```json',
+    `{"command": ${JSON.stringify(command)}}`,
+    '```',
+    '',
+    'stdout:',
+    '',
+    '```text',
+    'ok  github.com/forebrain-harness/forebrain-harness/pkg/gateway	1.204s',
+    '```',
+    '',
+    'stderr:',
+    '',
+    '```text',
+    'pkg/gateway/ws.go:81:15: too many arguments in call to ControlPlaneTokenFromRequest',
+    '```',
+    '',
+    'preview truncated: stdout omitted 421888 bytes',
+    '',
+    'output:',
+    '',
+    '```json',
+    '{',
+    '  "exit_code": 1,',
+    '  "stdout_omitted_bytes": 421888,',
+    '  "retrieve_id": 31',
+    '}',
+    '```',
+  ].join('\n')
+  const editBody = [
+    'turn diff: `frontend/src/lib/api.ts` (+1/-1)',
+    '',
+    '```diff',
+    '--- frontend/src/lib/api.ts:before',
+    '+++ frontend/src/lib/api.ts:after',
+    '@@ -39,2 +39,2 @@',
+    ' export async function request(path: string, init: RequestInit = {}) {',
+    '-  const headers: Record<string, string> = {}',
+    '+  const headers: Record<string, string> = {}',
+    '```',
+  ].join('\n')
+  sqlite(`
+    INSERT INTO fb_runs (id, session_id, input_text, status, created_at, updated_at)
+      VALUES ('run-e2e-cards-shell', '${session}', 'check the gateway', 'done', ${now - 60}, ${now - 60});
+    INSERT INTO fb_messages(session_id, run_id, role, content, created_at)
+      VALUES('${session}', 'run-e2e-cards-shell', 'user', 'check the gateway', ${now - 60});
+    ${assistantRow(session, 'run-e2e-cards-shell', [
+      { id: 'call-shell', name: 'shell', args: { command } },
+      { id: 'call-edit', name: 'edit_file', args: { path: 'frontend/src/lib/api.ts' } },
+    ], now - 50)}
+    ${toolRow(session, 'run-e2e-cards-shell', 'call-shell', 'shell', `ran ${command}`, shellBody, now - 45, { command })}
+    ${toolRow(session, 'run-e2e-cards-shell', 'call-edit', 'edit_file', 'edited frontend/src/lib/api.ts', editBody, now - 44)}
+  `)
+
+  // The whole output lives behind the spool: the drawer's page reads it from
+  // the tool-output route, answered here with a fixed text.
+  const fullText = ['ok  pkg/gateway	0.012s', '--- FAIL: TestSession', Array.from({ length: 40 }, (_, i) => `log line ${i + 1}`).join('\n')].join('\n')
+  await page.route(/\/api\/chat\/sessions\/.+\/tool-output\/31$/, async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ command, text: fullText, spool_omitted_bytes: 0 }),
+    })
+  })
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await expect(headers(page)).toHaveCount(2)
+  const shellCard = page.locator('.tool-card').nth(0)
+  await headers(page).nth(0).click()
+  const body = shellCard.locator('.tool-card-body')
+  await expect(body).toBeVisible()
+
+  // The body is the result only: none of the Markdown the card once rendered.
+  const bodyText = await body.innerText()
+  expect(bodyText).not.toContain('**shell**')
+  expect(bodyText).not.toContain('input:')
+  expect(bodyText).not.toContain('output:')
+  expect(bodyText).not.toContain('stdout:')
+  expect(bodyText).not.toContain('stderr:')
+  expect(bodyText).not.toContain('sandbox_backend')
+  expect(bodyText).not.toContain('"command"')
+
+  // stdout is grey mono, the stderr row red (prototype .ol.err).
+  await expect(body.locator('.ol').filter({ hasText: 'too many arguments' })).toHaveCSS('color', 'rgb(180, 35, 24)')
+
+  // The output panel scrolls inside itself at the prototype's 360px bound.
+  await expect(body.locator('.out-scroll')).toHaveCSS('max-height', '360px')
+
+  // The non-zero exit rides the head, and the footer names what the middle
+  // omitted with the eye beside it.
+  await expect(headers(page).nth(0)).toContainText('退出码 1')
+  await expect(body.locator('[data-testid="shell-foot"]')).toContainText('中间 412 KB 已省略')
+  const eye = body.locator('[data-testid="shell-open-output"]')
+  await expect(eye).toBeVisible()
+  await eye.click()
+
+  // The whole output opens as a document tab of the drawer.
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+  await expect(drawer.locator('.subagent-drawer-tab[data-testid^="doc-tab-"]')).toContainText('输出 · go vet')
+  const doc = drawer.locator('[data-testid="tool-doc-output"]')
+  await expect(doc).toBeVisible()
+  await expect(doc.locator('pre')).toContainText('log line 40')
+  await shot(page, 'message-cards-shell-body')
+
+  // The edit's card opens with the unified diff rows, the added one
+  // announced for screen readers.
+  await headers(page).nth(1).click()
+  const editBody2 = page.locator('.tool-card').nth(1).locator('.tool-card-body')
+  await expect(editBody2.locator('[data-testid="diff-block"]')).toBeVisible()
+  await expect(editBody2.locator('.dr.add')).toHaveCount(1)
+  await expect(editBody2.locator('.dr.del')).toHaveCount(1)
+  // The rows announce themselves for screen readers: 新增 / 删除.
+  await expect(editBody2.locator('.sr-only').filter({ hasText: '新增' })).toHaveCount(1)
+  await expect(editBody2.locator('.sr-only').filter({ hasText: '删除' })).toHaveCount(1)
+  await shot(page, 'message-cards-edit-diff')
 })

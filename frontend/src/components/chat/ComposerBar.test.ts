@@ -1,11 +1,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { config, flushPromises, mount } from '@vue/test-utils'
 import tip from '@/directives/tip'
-import { h } from 'vue'
+import { h, ref } from 'vue'
 
 import { PromptInputProvider } from '@repo/elements/prompt-input'
 import { forebrainApi } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { usePendingActions } from '@/composables/usePendingActions'
+import { PendingActionsKey } from '@/composables/providePendingActions'
 import ComposerPlusMenu from './ComposerPlusMenu.vue'
 import ModeChip from './ModeChip.vue'
 import EffortChip from './EffortChip.vue'
@@ -147,7 +149,10 @@ describe('ApprovalCard hosting the pending set', () => {
       }])
       .mockResolvedValue([])
     const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
-    const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
+    // The card reads the page's one store, provided the way the page provides
+    // it (plan 138) — the tail frame is its fallback surface.
+    const store = usePendingActions({ sessionId: ref('s1'), version: ref(0), contextUsedPercent: ref(null) })
+    const wrapper = mount(ApprovalCard, { global: { provide: { [PendingActionsKey]: store } } })
     await flushPromises()
 
     const card = wrapper.find('[data-testid="pending-approval"]')

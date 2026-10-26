@@ -150,78 +150,112 @@
                   </template>
                   <Message v-if="msg.role !== 'notice' && messageHasBubble(msg)" :from="messageBubbleRole(msg.role)" class="max-w-full overflow-visible">
                     <MessageContent :class="messageContentClass(msg.role)">
-                      <!-- One checklist card per turn, holding what the list looks
-                           like now: the earlier updates are history, and history
-                           is the workbench's business (prototype :1272). -->
-                      <div
-                        v-if="msg.role === 'assistant' && latestPlanUpdate(msg) && viewMode === 'default'"
-                      >
-                        <PlanUpdateCard :plan="latestPlanUpdate(msg)!" />
-                      </div>
-                      <!-- What the turn said and did, in the order it happened:
-                           prose, thinking, the calls it made and the gates it was
-                           stopped at. A live turn and a reloaded one build this
-                           same list, so a refresh shows the conversation the user
-                           was just watching. -->
+                      <!-- What the turn said and did, in the order it happened,
+                           on one activity line (owner 2026-10-25): a turn's
+                           action cards hang on one vertical line, each on a
+                           node that says what it is — the brand mark for the
+                           agent's own words, the brain for a thought, the
+                           checklist for the todo card, the robot for a
+                           subagent, a call's state for a call. Anything else
+                           (a compaction, a goal line, an error) breaks the
+                           line. -->
                       <div v-if="hasVisibleBlocks(msg.blocks) && drawnBlocks(msg.blocks).length" class="msg-blocks">
-                        <template v-for="(block, blockIdx) in drawnBlocks(msg.blocks)" :key="`${msg.id ?? idx}-block-${blockIdx}`">
-                          <!-- The prototype's .think, folded to one line: the
-                               same card the subagent tab and the workshop draw,
-                               so a block reads the same wherever it is shown. -->
-                          <ThinkingCard v-if="block.kind === 'thinking'" :block="block" />
-                          <MessageResponse
-                            v-else-if="block.kind === 'assistant'"
-                            :key="`${msg.id ?? idx}-said-${blockIdx}`"
-                            :content="block.text"
-                          />
-                          <ToolCallCard
-                            v-else-if="block.kind === 'tool' && !block.step.subagentCall"
-                            :step="block.step"
-                            :scope="workbenchScope"
-                            :default-open="false"
-                          />
-                          <!-- A subagent_* call is one card: the call's own
-                               facts and the tasks it dispatched, checked,
-                               waited for or stopped — its prompt and its
-                               result JSON stay out of the conversation. -->
-                          <SubagentCallCard
-                            v-else-if="block.kind === 'tool'"
-                            :step="block.step"
-                            :live="subagentCallTasks.get(block.step.stepId)"
-                            :now="subagentNow"
-                            :active-agent-id="drawerVisible ? shownActive : ''"
-                            @open="openSubagentTab"
-                          />
-                          <!-- An execution dispatched with no call of its own
-                               — a plan review, a runtime dispatch — is the
-                               same card, keyed by its execution. -->
-                          <SubagentCallCard
-                            v-else-if="block.kind === 'subagent'"
-                            :step="block.step"
-                            :live="subagentCallTasks.get(block.stepId)"
-                            :now="subagentNow"
-                            :active-agent-id="drawerVisible ? shownActive : ''"
-                            @open="openSubagentTab"
-                          />
-                          <ApprovalCard
-                            v-else-if="block.kind === 'approval'"
-                            :block="block"
-                          />
+                        <template v-for="(run, runIdx) in activityRunsOf(msg)" :key="`${msg.id ?? idx}-run-${runIdx}`">
+                          <ActivityLine v-if="run.line">
+                            <!-- One checklist card per turn, holding what the
+                                 list looks like now: the earlier updates are
+                                 history, and history is the workbench's
+                                 business (prototype :1272). It opens the line:
+                                 the todo the turn works through comes first. -->
+                            <ActivityStep v-if="runIdx === firstLineRunIndexOf(msg) && planUpdateOf(msg)" node="todo">
+                              <PlanUpdateCard :plan="planUpdateOf(msg)!" />
+                            </ActivityStep>
+                            <template v-for="(block, blockIdx) in run.items" :key="`${msg.id ?? idx}-block-${blockIdx}`">
+                              <!-- The prototype's .think: a quiet row, the
+                                   same card the subagent tab and the workshop
+                                   draw, so a block reads the same wherever it
+                                   is shown. -->
+                              <ActivityStep v-if="block.kind === 'thinking'" node="think">
+                                <ThinkingCard :block="block" />
+                              </ActivityStep>
+                              <!-- The agent's own words hang on the brand mark,
+                                   a size up from the cards (14px / 1.75). -->
+                              <ActivityStep v-else-if="block.kind === 'assistant'" node="say" class="al-say">
+                                <MessageResponse :content="block.text" />
+                              </ActivityStep>
+                              <!-- The node names the call's state (a clock while
+                                   it waits on the reader); the head already
+                                   carries the words, so the node never repeats
+                                   them. -->
+                              <ActivityStep
+                                v-else-if="block.kind === 'tool' && !block.step.subagentCall"
+                                :node="{ status: statusOf(block.step) }"
+                              >
+                                <ToolCallCard
+                                  :step="block.step"
+                                  :scope="workbenchScope"
+                                  :default-open="false"
+                                  :pending-action="gatePendingOf(msg, block.step.stepId)"
+                                  @open-doc="openDocTab"
+                                  @open-agent="openSubagentTab"
+                                />
+                              </ActivityStep>
+                              <!-- A subagent_* call is one card: the call's own
+                                   facts and the tasks it dispatched, checked,
+                                   waited for or stopped — its prompt and its
+                                   result JSON stay out of the conversation. -->
+                              <ActivityStep v-else-if="block.kind === 'tool'" node="subagent">
+                                <SubagentCallCard
+                                  :step="block.step"
+                                  :live="subagentCallTasks.get(block.step.stepId)"
+                                  :now="subagentNow"
+                                  :active-agent-id="drawerVisible ? shownActive : ''"
+                                  @open="openSubagentTab"
+                                />
+                              </ActivityStep>
+                              <!-- An execution dispatched with no call of its own
+                                   — a plan review, a runtime dispatch — is the
+                                   same card, keyed by its execution. -->
+                              <ActivityStep v-else-if="block.kind === 'subagent'" node="subagent">
+                                <SubagentCallCard
+                                  :step="block.step"
+                                  :live="subagentCallTasks.get(block.stepId)"
+                                  :now="subagentNow"
+                                  :active-agent-id="drawerVisible ? shownActive : ''"
+                                  @open="openSubagentTab"
+                                />
+                              </ActivityStep>
+                              <!-- A settled approval is one line on the line,
+                                   with no node of its own. -->
+                              <ActivityStep v-else-if="block.kind === 'approval'" :node="null">
+                                <ApprovalCard :block="block" />
+                              </ActivityStep>
+                            </template>
+                          </ActivityLine>
+                          <!-- Off the line: the cards the lifecycle owns, each
+                               in its own place. -->
                           <CompactionCard
-                            v-else-if="block.kind === 'compaction'"
-                            :data="block.compaction"
+                            v-else-if="run.item.kind === 'compaction'"
+                            :data="run.item.compaction"
                           />
                           <GoalLine
-                            v-else-if="block.kind === 'goal'"
-                            :goal="block.goal"
+                            v-else-if="run.item.kind === 'goal'"
+                            :goal="run.item.goal"
                             @open-check="openSubagentTab"
                           />
                           <RunErrorBlock
-                            v-else-if="block.kind === 'error'"
-                            :text="block.text"
-                            :detail="block.detail"
+                            v-else-if="run.item.kind === 'error'"
+                            :text="run.item.text"
+                            :detail="run.item.detail"
                           />
                         </template>
+                        <!-- A turn that only updated the todo still draws its
+                             one-card line. -->
+                        <ActivityLine v-if="firstLineRunIndexOf(msg) < 0 && planUpdateOf(msg)">
+                          <ActivityStep node="todo">
+                            <PlanUpdateCard :plan="planUpdateOf(msg)!" />
+                          </ActivityStep>
+                        </ActivityLine>
                       </div>
                       <!-- What the user sent reads exactly as they wrote it, the way
                            the terminal shows it: never reinterpreted as Markdown.
@@ -283,7 +317,9 @@
                           :total-lines="msg.turnDiffs.reduce((s, d) => s + (d.added ?? 0) + (d.deleted ?? 0), 0)"
                         />
                       </div>
-                      <RunWorkedLine :line="workedLineOf(msg, t)" />
+                      <!-- The run's closing line, off the line's end but in
+                           its column (prototype .actline .a > .worked). -->
+                      <RunWorkedLine class="ml-8" :line="workedLineOf(msg, t)" />
                     </MessageContent>
                   </Message>
                 </template>
@@ -304,15 +340,14 @@
               <span>{{ rewindLine.text }}</span>
               <button type="button" class="rewind-undo" data-testid="rewind-undo" @click="undoRewind">{{ t('chat.rewindUndo') }}</button>
             </div>
-            <!-- A run parked on an approval or a question is answered here, in
-                 the thread it stopped: the card carries the plan, the
-                 questions and the permission decisions, anchored after the
-                 last turn the way the terminal's approval card sits in the
-                 transcript. -->
+            <!-- What the thread's own tail still holds (plan 138): the agent's
+                 questions, and the requests no tool card of this conversation
+                 carries — an old session's rows, a gate with no card — in the
+                 waiting card's own frame. The gates that belong to calls hang
+                 on their cards above; the plan approval waits where the input
+                 is. -->
             <ApprovalCard
-              :session-id="sessionId"
-              :version="pendingActionsVersion"
-              :context-used-percent="contextUsedPercent"
+              :anchored-action-ids="anchoredActionIds"
               can-open-agent
               @open-agent="openSubagentTab"
               @focus-composer="focusComposer"
@@ -345,7 +380,26 @@
             :plan="runLine.plan"
             :tail="runLine.tail"
           />
-          <PromptInputProvider :max-files="composerMaxFiles" accept="image/*,application/pdf" @submit="handleSubmit" @error="handleComposerError">
+          <!-- The plan approval takes the input's place while the planner
+               waits (plan 138, as the terminal's overlay takes its composer):
+               no card in the thread, the plan and its verdicts here, the input
+               — draft, attachments, queue — hidden whole underneath, so it
+               returns exactly as it was left. -->
+          <PlanApprovalDock
+            v-if="exitPlanPending"
+            :action="exitPlanPending"
+            :session-id="sessionId ?? ''"
+            :on-open-plan="openPlanTab"
+          />
+          <!-- The provider's own root is a bare slot, so the hide that keeps
+               the composer's state alive sits on a real element around it. -->
+          <div v-show="!exitPlanPending" class="contents">
+            <PromptInputProvider
+              :max-files="composerMaxFiles"
+              accept="image/*,application/pdf"
+              @submit="handleSubmit"
+              @error="handleComposerError"
+            >
             <Alert v-if="composerNotice" variant="destructive" class="mb-2">
               <CircleAlert class="size-4" />
               <AlertTitle>{{ composerNotice.title }}</AlertTitle>
@@ -441,7 +495,8 @@
                 </PromptInputFooter>
               </PromptInput>
             </div>
-          </PromptInputProvider>
+            </PromptInputProvider>
+          </div>
           <!-- The quick starts, under the composer, exactly as the new-chat
                page's prototype draws them. -->
           <div v-if="isFreshChat" class="starters" data-testid="chat-starters">
@@ -472,14 +527,18 @@
         :now="subagentNow"
         :plan-tabs="planTabs"
         :active-plan="planActive"
+        :doc-tabs="docTabs"
+        :active-doc="docActive"
         :order="drawerTabOrder"
         @select="selectSubagentTab"
         @close-tab="closeSubagentTab"
         @open="openSubagentTab"
         @collapse="collapseSubagentDrawer"
-        @escape-key="planActive ? collapseSubagentDrawer() : handleSubagentEscape(shownActive)"
+        @escape-key="planActive || docActive ? collapseSubagentDrawer() : handleSubagentEscape(shownActive)"
         @select-plan="selectPlanTab"
         @close-plan="closePlanTab"
+        @select-doc="selectDocTab"
+        @close-doc="closeDocTab"
       >
         <!-- The open plan documents: their own tabs beside the subagents', and
              the subagents stay mounted underneath so a draft, an attachment or
@@ -494,9 +553,31 @@
           :total="tab.total"
           :markdown="tab.markdown"
         />
+        <!-- The documents a card head opened — a whole command, a whole title,
+             a whole output — in the same drawer, beside everything else. -->
+        <template v-for="tab in docTabs">
+          <ToolDocCommand
+            v-if="tab.kind === 'command'"
+            v-show="tab.id === docActive && !planActive"
+            :key="tab.id"
+            :command="tab.command ?? tab.text"
+          />
+          <ToolDocOutput
+            v-else-if="tab.kind === 'output' && outputSourceOf(tab)"
+            v-show="tab.id === docActive && !planActive"
+            :key="tab.id"
+            :source="outputSourceOf(tab)!"
+          />
+          <ToolDocTitle
+            v-else-if="tab.kind === 'title'"
+            v-show="tab.id === docActive && !planActive"
+            :key="tab.id"
+            :text="tab.text"
+          />
+        </template>
         <SubagentTab
           v-for="record in drawerRecords"
-          v-show="!planActive && record.agentId === shownActive"
+          v-show="!planActive && !docActive && record.agentId === shownActive"
           :key="record.agentId"
           :ref="(el) => setSubagentTabRef(record.agentId, el)"
           :record="record"
@@ -512,10 +593,10 @@
           @submit="(m) => handleSubagentSubmit(record.agentId, m)"
           @fold-change="(v) => updateAgentFold(record.agentId, v)"
           @open-agent="openSubagentTab"
+          @open-doc="openDocTab"
           @stop="stopSubagent(record.agentId)"
           @edit-last-queued="recallIntoTab(record.agentId)"
           @interrupt-run="interruptSubagentToSend(record.agentId)"
-          @queue-follow-up="subagentDisposition[record.agentId] = 'queue'"
           @typed="cancelAutoContinue(record.agentId)"
           @escape-key="handleSubagentEscape(record.agentId)"
           @files-picked="(files) => onFilesPicked(files, record.agentId)"
@@ -605,10 +686,16 @@ import SubagentDrawer from '@/components/chat/SubagentDrawer.vue'
 import SubagentTab from '@/components/chat/SubagentTab.vue'
 import RunStatusLine from '@/components/chat/RunStatusLine.vue'
 import SlashPickerCard from '@/components/chat/SlashPickerCard.vue'
+import ActivityLine from '@/components/chat/ActivityLine.vue'
+import ActivityStep from '@/components/chat/ActivityStep.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
-import ToolCallCard from '@/components/chat/ToolCallCard.vue'
+import ToolCallCard, { statusOf } from '@/components/chat/ToolCallCard.vue'
+import ToolDocCommand from '@/components/chat/ToolDocCommand.vue'
+import ToolDocOutput from '@/components/chat/ToolDocOutput.vue'
+import ToolDocTitle from '@/components/chat/ToolDocTitle.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
+import PlanApprovalDock from '@/components/chat/PlanApprovalDock.vue'
 import McpNotice from '@/components/chat/McpNotice.vue'
 import ComposerPlusMenu from '@/components/chat/ComposerPlusMenu.vue'
 import ModeChip from '@/components/chat/ModeChip.vue'
@@ -661,7 +748,11 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript } from '@/composables/useChatStream'
+import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
+import { usePendingActions } from '@/composables/usePendingActions'
+import { providePendingActions } from '@/composables/providePendingActions'
+import type { DocTab } from '@/composables/useDocTabs'
+import { blockOnActivityLine, groupActivityRuns } from '@/lib/activityRuns'
 import { subagentPhase } from '@/lib/subagentStatus'
 import { blockVisibleIn } from '@/lib/viewMode'
 import { useViewMode } from '@/composables/useViewMode'
@@ -1309,8 +1400,6 @@ const {
   sendToSubagent,
   recallSubagentInput,
   interruptSubagentToSend,
-  withdrawSubagentInput,
-  compactSubagent,
   loadSubagentContext,
   loadSubagentBudget,
   returnedDraft,
@@ -1357,6 +1446,25 @@ const { viewMode } = useViewMode(() => String(sessionId.value ?? ''))
  */
 function drawnBlocks(blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['blocks']> {
   return (blocks ?? []).filter((block) => blockVisibleIn(viewMode.value, block.kind))
+}
+
+/**
+ * The turn's blocks folded into activity-line runs (owner 2026-10-25): the
+ * turn's own action cards hang on one line, everything else keeps its place.
+ */
+function activityRunsOf(msg: ChatMessage) {
+  return groupActivityRuns(drawnBlocks(msg.blocks), blockOnActivityLine)
+}
+
+/** Where the turn's first on-line run sits, or -1 when nothing hangs on it. */
+function firstLineRunIndexOf(msg: ChatMessage): number {
+  return activityRunsOf(msg).findIndex((run) => run.line)
+}
+
+/** The turn's todo card, when this mode draws it (it opens the line). */
+function planUpdateOf(msg: ChatMessage) {
+  if (msg.role !== 'assistant' || viewMode.value !== 'default') return undefined
+  return latestPlanUpdate(msg)
 }
 
 /**
@@ -1491,7 +1599,12 @@ const drawerRecords = computed(() => drawerTabs.value
 // while a subagent's tab is.
 const planTabs = ref<PlanTab[]>([])
 const planActive = ref('')
-// The order the tabs were opened in, across both kinds. The drawer is one
+// The documents a card head opened, in the same drawer (owner 2026-10-25): a
+// whole command or a whole title that its one-line head could not hold. The
+// same content is the same tab — docTabFor digests it — so re-opening focuses.
+const docTabs = ref<DocTab[]>([])
+const docActive = ref('')
+// The order the tabs were opened in, across all kinds. The drawer is one
 // surface: a plan document opened between two subagents sits between them, the
 // way the prototype's single tab array does (:4740). The list only records
 // opens — what is actually drawn is derived below, so a stale entry can never
@@ -1501,6 +1614,7 @@ const drawerTabOrder = computed(() => {
   const alive = new Set<string>([
     ...drawerTabs.value,
     ...planTabs.value.map((tab) => tab.id),
+    ...docTabs.value.map((tab) => tab.id),
   ])
   const ordered = drawerOrder.value.filter((key) => alive.has(key))
   const known = new Set(ordered)
@@ -1516,10 +1630,16 @@ const drawerTabOrder = computed(() => {
       ordered.push(tab.id)
     }
   }
+  for (const tab of docTabs.value) {
+    if (!known.has(tab.id)) {
+      known.add(tab.id)
+      ordered.push(tab.id)
+    }
+  }
   return ordered
 })
 const drawerVisible = computed(() => drawerOpen.value
-  && (drawerRecords.value.length > 0 || planTabs.value.length > 0)
+  && (drawerRecords.value.length > 0 || planTabs.value.length > 0 || docTabs.value.length > 0)
   && !isFreshChat.value)
 /** The tab in front; a closed or unknown id falls back to the first one open. */
 const shownActive = computed(() => (
@@ -1552,8 +1672,6 @@ function subagentComposer(agentId: string): SubagentComposer | null {
 
 /** A refusal or note for one tab, in that tab's own composer. */
 const subagentNotices = ref<Record<string, { title: string; detail: string } | null>>({})
-/** Whether the next message to a subagent steers or queues behind its run. */
-const subagentDisposition = ref<Record<string, 'steer' | 'queue'>>({})
 
 // The updatedSeq each subagent was at when the user last looked at it, so the
 // drawer can mark the tabs that have said something since.
@@ -1791,6 +1909,7 @@ function selectSubagentTab(agentId: string) {
   drawerOpen.value = true
   drawerActive.value = id
   planActive.value = ''
+  docActive.value = ''
   markAgentSeen(id)
   void loadSubagentBudget(id)
   scheduleBrowsePersist()
@@ -1828,6 +1947,7 @@ function selectPlanTab(id: string) {
   if (!planTabs.value.some((tab) => tab.id === id)) return
   drawerOpen.value = true
   planActive.value = id
+  docActive.value = ''
   scheduleBrowsePersist()
 }
 
@@ -1844,7 +1964,60 @@ function closePlanTab(id: string) {
   planTabs.value = rest
   drawerOrder.value = drawerOrder.value.filter((key) => key !== id)
   if (planActive.value === id) planActive.value = rest[rest.length - 1]?.id ?? ''
-  if (!rest.length && !drawerRecords.value.length) drawerOpen.value = false
+  if (!rest.length && !drawerRecords.value.length && !docTabs.value.length) drawerOpen.value = false
+  scheduleBrowsePersist()
+}
+
+/**
+ * An output tab's read source, with its retrieval id present — an output tab
+ * is only ever opened with one, but the tab type keeps the field optional.
+ */
+function outputSourceOf(tab: DocTab): { sessionId: string; agentId?: string; retrieveId: number } | undefined {
+  const source = tab.source
+  if (!source?.sessionId || !source.retrieveId) return undefined
+  return source as { sessionId: string; agentId?: string; retrieveId: number }
+}
+
+/**
+ * Opens one document a card head worded: a whole command, a whole title. The
+ * same content is the same tab, so opening it again only brings it to the
+ * front. It opens in the conversation's own drawer — from the conversation's
+ * cards and from a subagent's alike.
+ */
+function openDocTab(tab: DocTab) {
+  if (!docTabs.value.some((open) => open.id === tab.id)) {
+    docTabs.value = [...docTabs.value, tab]
+  }
+  if (!drawerOrder.value.includes(tab.id)) drawerOrder.value = [...drawerOrder.value, tab.id]
+  docActive.value = tab.id
+  planActive.value = ''
+  drawerOpen.value = true
+  scheduleBrowsePersist()
+}
+
+/** Brings an already open document tab to the front. */
+function selectDocTab(id: string) {
+  if (!docTabs.value.some((tab) => tab.id === id)) return
+  drawerOpen.value = true
+  docActive.value = id
+  planActive.value = ''
+  scheduleBrowsePersist()
+}
+
+/**
+ * Closes a document tab; the document is only put away. The tab to its left
+ * takes the front, and the last tab out of an otherwise empty drawer closes
+ * the drawer.
+ */
+function closeDocTab(id: string) {
+  const open = docTabs.value
+  const index = open.findIndex((tab) => tab.id === id)
+  if (index < 0) return
+  const rest = open.filter((tab) => tab.id !== id)
+  docTabs.value = rest
+  drawerOrder.value = drawerOrder.value.filter((key) => key !== id)
+  if (docActive.value === id) docActive.value = rest[rest.length - 1]?.id ?? ''
+  if (!rest.length && !drawerRecords.value.length && !planTabs.value.length) drawerOpen.value = false
   scheduleBrowsePersist()
 }
 
@@ -1862,12 +2035,16 @@ function closeSubagentTab(agentId: string) {
   drawerTabs.value = rest
   drawerOrder.value = drawerOrder.value.filter((key) => key !== id)
   if (drawerActive.value === id) drawerActive.value = rest[index] ?? rest[index - 1] ?? ''
-  // The drawer is one surface with two kinds of tab: closing the last subagent
-  // while a plan document is still open puts the plan in front instead of
-  // hiding what the reader was reading (prototype :4745).
+  // The drawer is one surface with three kinds of tab: closing the last
+  // subagent while a document is still open puts the document in front
+  // instead of hiding what the reader was reading (prototype :4745).
   if (!rest.length) {
-    if (!planTabs.value.length) drawerOpen.value = false
-    else if (!planActive.value) planActive.value = planTabs.value[planTabs.value.length - 1]?.id ?? ''
+    if (!planTabs.value.length && !docTabs.value.length) drawerOpen.value = false
+    else if (!planActive.value && !docActive.value) {
+      planActive.value = planTabs.value[planTabs.value.length - 1]?.id
+        ?? docTabs.value[docTabs.value.length - 1]?.id
+        ?? ''
+    }
   }
   scheduleBrowsePersist()
 }
@@ -1879,7 +2056,7 @@ function toggleSubagentDrawer() {
     collapseSubagentDrawer()
     return
   }
-  if (drawerTabs.value.length || planTabs.value.length) {
+  if (drawerTabs.value.length || planTabs.value.length || docTabs.value.length) {
     drawerOpen.value = true
     workbench.close()
     scheduleBrowsePersist()
@@ -1928,30 +2105,28 @@ watch(sessionId, (sid, previousSid) => {
   // the tabs close with it rather than showing another conversation's file.
   planTabs.value = []
   planActive.value = ''
-  // One conversation's notices, steer/queue choices and /context report are
-  // not the next one's.
+  // One conversation's notices and /context report are not the next one's.
   subagentNotices.value = {}
-  subagentDisposition.value = {}
   subagentContextTarget.value = ''
   subagentContextDebug.value = null
   void restoreCurrentBrowseState()
 }, { flush: 'sync' })
 
 /**
- * Esc in a subagent's tab (D1): take a just-sent message back before it
- * answered; otherwise interrupt it to send what is queued behind it;
- * otherwise collapse the drawer — the web's way of leaving the subagent's
- * view, the same three meanings in the same order as the terminal.
+ * Esc in a subagent's tab (D1): interrupt it to send what is queued behind it;
+ * otherwise cancel its own pending continuation; otherwise collapse the drawer
+ * — the web's way of leaving the subagent's view, the same meanings in the same
+ * order as the terminal. A message that has already left the composer is the
+ * subagent's to take: there is no withdrawing it (plan 142).
  */
 async function handleSubagentEscape(agentId: string) {
   const id = String(agentId ?? '').trim()
   if (!id) return
-  const withdrawn = await withdrawSubagentInput(id)
-  if (withdrawn.length) {
-    for (const submission of withdrawn) subagentComposer(id)?.restoreSubmission(submission)
+  if (await interruptSubagentToSend(id)) return
+  if (autoContinueForView(id)) {
+    cancelAutoContinue(id)
     return
   }
-  if (await interruptSubagentToSend(id)) return
   collapseSubagentDrawer()
 }
 
@@ -2003,6 +2178,49 @@ const contextUsedPercent = computed(() => {
     }
   }
   return null
+})
+
+// The conversation's one pending-actions store (plan 138), provided down the
+// tree: the waiting tool cards read the same loaded requests and answer
+// through the same endpoints the thread's tail surface does, so a gate is one
+// state wherever it is decided.
+const pendingActions = providePendingActions(usePendingActions({
+  sessionId: computed(() => sessionId.value),
+  version: computed(() => pendingActionsVersion.value),
+  contextUsedPercent,
+}))
+
+/**
+ * The request a tool card is parked on: the timeline's approval block names
+ * the call the gate holds, and the store's pending list says whether it is
+ * still asking. Null on every settled call.
+ */
+function gatePendingOf(msg: ChatMessage, stepId: string) {
+  const blocks = (msg.blocks ?? []).filter((block): block is Extract<TimelineBlock, { kind: 'approval' }> => block.kind === 'approval')
+  return pendingActions.pendingForStep(stepId, blocks)
+}
+
+/** The ids whose gates hang on a tool card of this conversation — plus the
+ *  plan approval while it waits where the input is — so the tail's own
+ *  fallback list holds every request that is not one of them. */
+const anchoredActionIds = computed(() => {
+  const ids = new Set<string>()
+  for (const message of messages.value) {
+    for (const block of message.blocks ?? []) {
+      if (block.kind !== 'tool') continue
+      const found = gatePendingOf(message, block.step.stepId)
+      if (found) ids.add(found.id)
+    }
+  }
+  if (exitPlanPending.value) ids.add(exitPlanPending.value.id)
+  return ids
+})
+
+/** The exit-plan approval taking the input's place, when the conversation's
+ *  own planner is the one waiting (a subagent's gate waits in its own view). */
+const exitPlanPending = computed(() => {
+  const approvals = pendingActions.pendingApprovals.value
+  return approvals.find((a) => !a.agentId && pendingActions.isExitPlan(a)) ?? null
 })
 
 // The conversation's workspace facts now live behind the workbench's own
@@ -2168,9 +2386,10 @@ function isAllowedAttachmentType(mediaType: string, filename: string): boolean {
 /**
  * Sends what the composer submitted in a subagent's own view to that subagent.
  * Everything typed there belongs to the subagent: ordinary text runs its next
- * execution, a skill command is sent to it, /compact and /context act on it,
- * a command that acts on the conversation runs there, and the ones hidden
- * answer with one sentence — plan 007's D4, in this surface.
+ * execution, a skill command is sent to it, /context acts on it, a command that
+ * acts on the conversation runs there, and the ones hidden there answer with one
+ * sentence — plan 007's D4, in this surface. /compact is one of the hidden ones:
+ * it compacts the conversation, never a subagent (plan 142).
  */
 async function handleSubagentSubmit(agentId: string, message: { text: string; files?: unknown[] }) {
   const id = String(agentId ?? '').trim()
@@ -2190,10 +2409,6 @@ async function handleSubagentSubmit(agentId: string, message: { text: string; fi
   }
   if (text.startsWith('/')) {
     const name = slashCommandName(text)
-    if (name === 'compact') {
-      await compactSubagentIn(id)
-      return
-    }
     if (name === 'context') {
       await openSubagentContext(id)
       return
@@ -2215,25 +2430,10 @@ async function handleSubagentSubmit(agentId: string, message: { text: string; fi
   await waitForPendingAttachUpload()
   const attached = composer?.takeAttached() ?? { attachments: [], mentionImages: [] }
   subagentNotices.value = { ...subagentNotices.value, [id]: null }
-  const queued = subagentDisposition.value[id] === 'queue'
-  subagentDisposition.value = { ...subagentDisposition.value, [id]: 'steer' }
   // Attachments were saved into the project when they were added (the "save to"
   // dialog), so the submission just carries what the composer already holds.
   const submission: ComposerSubmission = { text, attachments: attached.attachments, mentionImages: attached.mentionImages }
-  await sendToSubagent(id, submission, queued)
-}
-
-/** /compact in a subagent's tab: its own context, refused while it runs. */
-async function compactSubagentIn(agentId: string) {
-  const id = String(agentId ?? '').trim()
-  if (!id) return
-  const outcome = await compactSubagent(id)
-  if (outcome === 'running') {
-    subagentNotices.value = {
-      ...subagentNotices.value,
-      [id]: { title: t('chat.messageNotSent'), detail: t('chat.subagentCompactRunning') },
-    }
-  }
+  await sendToSubagent(id, submission)
 }
 
 /** /context in a subagent's view, drawn with the conversation's own panel. */
@@ -2323,7 +2523,11 @@ watch(returnedDraft, () => {
     busyNotice.value = noticeCode
     return
   }
-  if (notice) composerNotice.value = { title: t('chat.messageNotSent'), detail: notice, ...(noticeCode ? { detailCode: noticeCode } : {}) }
+  // A refusal may arrive as the stable code alone (a subagent that ended before
+  // it took the message, plan 143): its sentence is written where it is drawn.
+  if (notice || noticeCode) {
+    composerNotice.value = { title: t('chat.messageNotSent'), detail: notice ?? '', ...(noticeCode ? { detailCode: noticeCode } : {}) }
+  }
 })
 
 /** What the composer has to tell the user about a message or file it kept. */
@@ -2576,6 +2780,15 @@ onUnmounted(() => {
 .msg-blocks {
   display: grid;
   gap: 10px;
+}
+
+/* The prototype's .al-say: the assistant's own words hang on the brand mark,
+   a size up from the cards (14px / 1.75), aligned with the line's content
+   column. */
+.msg-blocks :deep(.al-say) {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--forebrain-text);
 }
 
 /* New-conversation page (plan 029): the greeting above the composer, the

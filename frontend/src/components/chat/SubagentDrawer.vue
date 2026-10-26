@@ -56,18 +56,49 @@
             <X aria-hidden="true" />
           </button>
         </div>
+        <!-- A document a card head opened (owner 2026-10-25): the whole text a
+             one-line head could not hold, in the same drawer as everything
+             else. Its glyph says what it holds: a command, a title, an
+             output. -->
+        <div
+          v-else-if="entry.doc"
+          class="subagent-drawer-tab"
+          :class="{ 'is-on': entry.key === activeDoc }"
+          :data-testid="`doc-tab-${entry.key}`"
+        >
+          <button
+            type="button"
+            role="tab"
+            class="subagent-drawer-tab-main"
+            :aria-selected="entry.key === activeDoc"
+            @click="emit('select-doc', entry.key)"
+          >
+            <component :is="docIcon(entry.doc)" aria-hidden="true" />
+            <span class="subagent-drawer-tab-label" v-tip:bottom.trunc="entry.doc.label">{{ entry.doc.label }}</span>
+          </button>
+          <button
+            type="button"
+            class="subagent-drawer-tab-close"
+            :aria-label="t('chat.subagentTabCloseAria', { name: entry.doc.label })"
+            v-tip:bottom="t('chat.subagentTabClose')"
+            :data-testid="`doc-tab-close-${entry.key}`"
+            @click="emit('close-doc', entry.key)"
+          >
+            <X aria-hidden="true" />
+          </button>
+        </div>
         <div
           v-else-if="entry.agent"
           :key="entry.key"
           class="subagent-drawer-tab"
-          :class="{ 'is-on': !activePlan && entry.key === active }"
+          :class="{ 'is-on': !activePlan && !activeDoc && entry.key === active }"
           :data-testid="`subagent-tab-${entry.key}`"
         >
           <button
             type="button"
             role="tab"
             class="subagent-drawer-tab-main"
-            :aria-selected="!activePlan && entry.key === active"
+            :aria-selected="!activePlan && !activeDoc && entry.key === active"
             @click="emit('select', entry.key)"
           >
             <Loader2 v-if="entry.agent && phaseOf(entry.agent) === 'active'" class="is-run" aria-hidden="true" />
@@ -154,10 +185,11 @@
  * It shares the right-hand column with the workbench, so it draws itself the
  * same way: a column on a wide screen, an overlay on a narrow one.
  */
-import { computed, onUnmounted, ref, watch } from 'vue'
-import { CheckCircle2, Loader2, Map as MapIcon, PanelRightClose, Plus, X, XCircle } from 'lucide-vue-next'
+import { computed, onUnmounted, ref, watch, type Component } from 'vue'
+import { CheckCircle2, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
 import { usePanelWidth } from '@/composables/usePanelWidth'
 import { formatRuntimeDuration, type SubagentTranscript } from '@/composables/useChatStream'
+import type { DocTab } from '@/composables/useDocTabs'
 import type { PlanTab } from '@/composables/useSessionPlans'
 import { subagentPhase, subagentStatusLabel, subagentTabLabel } from '@/lib/subagentStatus'
 import { useI18n } from '@/locales'
@@ -178,6 +210,10 @@ const props = withDefaults(defineProps<{
   planTabs?: PlanTab[]
   /** The plan tab in front; empty while a subagent tab is. */
   activePlan?: string
+  /** The documents a card head opened, in the same drawer. */
+  docTabs?: DocTab[]
+  /** The document tab in front; empty while a subagent tab is. */
+  activeDoc?: string
   /**
    * The order the tabs were opened in, across both kinds. Absent (or naming
    * nothing that is still open) falls back to the subagents, then the plans.
@@ -187,6 +223,8 @@ const props = withDefaults(defineProps<{
   now: undefined,
   planTabs: () => [],
   activePlan: '',
+  docTabs: () => [],
+  activeDoc: '',
   order: () => [],
 })
 
@@ -198,6 +236,8 @@ const emit = defineEmits<{
   (e: 'escape-key'): void
   (e: 'select-plan', id: string): void
   (e: 'close-plan', id: string): void
+  (e: 'select-doc', id: string): void
+  (e: 'close-doc', id: string): void
 }>()
 
 const { t } = useI18n()
@@ -223,16 +263,27 @@ const openIds = computed(() => props.tabs.map((tab) => tab.agentId))
 /** The tab bar, one entry per open tab, in the order they were opened. */
 const orderedTabs = computed(() => {
   const plans = new globalThis.Map(props.planTabs.map((tab) => [tab.id, tab]))
+  const docs = new globalThis.Map(props.docTabs.map((tab) => [tab.id, tab]))
   const agents = new globalThis.Map(props.tabs.map((tab) => [tab.agentId, tab]))
-  const keys = props.order.filter((key) => plans.has(key) || agents.has(key))
+  const keys = props.order.filter((key) => plans.has(key) || agents.has(key) || docs.has(key))
   for (const id of agents.keys()) if (!keys.includes(id)) keys.push(id)
   for (const id of plans.keys()) if (!keys.includes(id)) keys.push(id)
+  for (const id of docs.keys()) if (!keys.includes(id)) keys.push(id)
   return keys.map((key) => {
     const plan = plans.get(key)
-    if (plan) return { key, kind: 'plan' as const, plan, agent: undefined }
-    return { key, kind: 'agent' as const, plan: undefined, agent: agents.get(key) }
+    if (plan) return { key, kind: 'plan' as const, plan, agent: undefined, doc: undefined }
+    const doc = docs.get(key)
+    if (doc) return { key, kind: 'doc' as const, plan: undefined, agent: undefined, doc }
+    return { key, kind: 'agent' as const, plan: undefined, agent: agents.get(key), doc: undefined }
   })
 })
+
+/** A document tab's glyph says what it holds (prototype tabIcon). */
+function docIcon(tab: DocTab): Component {
+  if (tab.kind === 'command') return Terminal
+  if (tab.kind === 'output') return ScrollText
+  return TextIcon
+}
 
 function phaseOf(record: SubagentTranscript) {
   return subagentPhase(record.status)

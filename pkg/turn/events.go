@@ -139,22 +139,83 @@ func ExtractTurnDiffPayload(payload any) (event.TurnDiffUpdatedPayload, bool) {
 	if output == nil {
 		return event.TurnDiffUpdatedPayload{}, false
 	}
-	diffMap := mapField(output, "turn_diff")
-	if diffMap == nil {
+	var files []event.TurnDiffFile
+	// ① an edit tool's own diff
+	if diffMap := mapField(output, "turn_diff"); diffMap != nil {
+		path := strings.TrimSpace(eventString(diffMap, "path"))
+		added := intField(diffMap, "added")
+		deleted := intField(diffMap, "deleted")
+		status := strings.TrimSpace(eventString(diffMap, "status"))
+		if status == "" {
+			status = inferTurnDiffStatus(added, deleted)
+		}
+		files = append(files, turnDiffFile(path, status, added, deleted, eventString(diffMap, "unified_diff")))
+	}
+	// ② the per-file diffs apply_patch computed
+	if truthy, isBool := output["apply_patch"].(bool); isBool && truthy {
+		if entries, isSlice := output["files"].([]any); isSlice {
+			for _, raw := range entries {
+				entry, isMap := raw.(map[string]any)
+				if !isMap {
+					continue
+				}
+				status := "modified"
+				switch eventString(entry, "operation") {
+				case "add":
+					status = "added"
+				case "delete":
+					status = "deleted"
+				}
+				added, deleted := 0, 0
+				diffText := ""
+				if turnDiff := mapField(entry, "turn_diff"); turnDiff != nil {
+					added = intField(turnDiff, "added")
+					deleted = intField(turnDiff, "deleted")
+					diffText = eventString(turnDiff, "unified_diff")
+				}
+				files = append(files, turnDiffFile(eventString(entry, "abs_path"), status, added, deleted, diffText))
+			}
+		}
+	}
+	// ③ the working-tree changes a shell command made
+	if diff, decoded := tool.DecodeShellEditDiff(output["shell_edit_diff"]); decoded {
+		for _, f := range diff.Files {
+			status := "modified"
+			switch f.Status {
+			case "created":
+				status = "added"
+			case "deleted":
+				status = "deleted"
+			}
+			files = append(files, turnDiffFile(f.Path, status, f.Added, f.Deleted, f.UnifiedDiff))
+		}
+	}
+	if len(files) == 0 {
 		return event.TurnDiffUpdatedPayload{}, false
 	}
-	path := strings.TrimSpace(eventString(diffMap, "path"))
-	added := intField(diffMap, "added")
-	deleted := intField(diffMap, "deleted")
-	diffText := eventString(diffMap, "unified_diff")
-	status := strings.TrimSpace(eventString(diffMap, "status"))
-	if status == "" {
-		status = inferTurnDiffStatus(added, deleted)
+	summary := ""
+	if len(files) == 1 {
+		summary = strings.TrimSpace(files[0].Path)
+		if summary != "" || files[0].Added > 0 || files[0].Deleted > 0 {
+			summary = fmt.Sprintf("%s (+%d/-%d)", files[0].Path, files[0].Added, files[0].Deleted)
+		}
+	} else {
+		added, deleted := 0, 0
+		for _, f := range files {
+			added += f.Added
+			deleted += f.Deleted
+		}
+		summary = fmt.Sprintf("%d files (+%d/-%d)", len(files), added, deleted)
 	}
-	summary := strings.TrimSpace(path)
-	if summary != "" || added > 0 || deleted > 0 {
-		summary = fmt.Sprintf("%s (+%d/-%d)", path, added, deleted)
-	}
+	return event.TurnDiffUpdatedPayload{
+		Files:   files,
+		Summary: summary,
+	}, true
+}
+
+// turnDiffFile builds one wire diff entry, parsing the unified diff into
+// hunks (or a synthetic hunk when the text carries no recognizable header).
+func turnDiffFile(path, status string, added, deleted int, diffText string) event.TurnDiffFile {
 	file := event.TurnDiffFile{
 		Path:    path,
 		Status:  status,
@@ -173,10 +234,7 @@ func ExtractTurnDiffPayload(payload any) (event.TurnDiffUpdatedPayload, bool) {
 			file.Hunks = rawTextHunks(diffText)
 		}
 	}
-	return event.TurnDiffUpdatedPayload{
-		Files:   []event.TurnDiffFile{file},
-		Summary: summary,
-	}, true
+	return file
 }
 
 // toProtoHunks converts diffview hunks to the protocol wire type.

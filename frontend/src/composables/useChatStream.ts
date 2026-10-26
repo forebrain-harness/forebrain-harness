@@ -167,6 +167,56 @@ function slashPickerOf(raw: unknown): SlashPicker | undefined {
 }
 
 /**
+ * The card header in the engine's own four parts (plan 135): the action word
+ * ("Read", "Ran"), the object it names (a path, a command, a query), a suffix
+ * such as "lines 15-20", and the duration apart. A surface lays these out
+ * itself and words the action in the reader's language; the target is never
+ * translated.
+ */
+export interface HeaderParts {
+  action: string
+  target?: string
+  suffix?: string
+  duration?: string
+}
+
+/**
+ * A shell call's card facts (plan 135), as the gateway sends them — read back
+ * by the engine from the very body the card rendered, so a reloaded card and
+ * a live one agree by construction. Absent facts are zero.
+ */
+export interface ShellCardFile {
+  verb: string
+  path: string
+  added: number
+  deleted: number
+  unifiedDiff?: string
+}
+
+export interface ShellCard {
+  stdout: string
+  stderr: string
+  /** A non-zero exit, when the streams carried one; 0 and absent are the same. */
+  exitCode?: number
+  stdoutOmittedBytes: number
+  stderrOmittedBytes: number
+  omittedBytes: number
+  retrieveId: number
+  spoolOmittedBytes: number
+  files: ShellCardFile[]
+  notes: string[]
+}
+
+/** A file tool's diff (plan 135): edit_file / write_file. */
+export interface FileDiffFacts {
+  path: string
+  added: number
+  deleted: number
+  unifiedDiff?: string
+  rest?: string
+}
+
+/**
  * One tool call a subagent made, including the provider-executed web search
  * that has no client-side call of its own. A skill step (`category: 'skill'`)
  * carries the same shape plus the structured skill identity, so the card can
@@ -183,6 +233,18 @@ export interface SubagentToolStep {
    * lacks it.
    */
   header?: string
+  /**
+   * The header in parts (plan 135): the page lays them out and words the
+   * action in the reader's language. Absent on a payload older than that.
+   */
+  headerParts?: HeaderParts
+  /**
+   * The call's input as the engine recorded it (the full shell command is
+   * input.command); read from the started step or the stored tool meta.
+   */
+  input?: Record<string, unknown>
+  /** The user's words when they refused this call (tool_meta.deny_feedback). */
+  denyFeedback?: string
   status: string
   output?: string
   error?: string
@@ -212,6 +274,10 @@ export interface SubagentToolStep {
    * its stored display body stay out of the conversation.
    */
   subagentCall?: SubagentCall
+  /** A shell call's card facts (plan 135), from the gateway. */
+  shellCard?: ShellCard
+  /** A file tool's diff (plan 135): edit_file / write_file. */
+  fileDiff?: FileDiffFacts
   /** The call's own execution time in seconds, when it settled. */
   durationSeconds?: number
 }
@@ -574,13 +640,14 @@ export function isSubagentDispatchTool(name: string): boolean {
  * call was aimed at; the state word says it was canceled — never "denied",
  * because nobody was asked (a YOLO conversation asks for nothing).
  */
-export function canceledToolStep(call: StoredToolCall, header?: string): SubagentToolStep {
+export function canceledToolStep(call: StoredToolCall, header?: string, parts?: HeaderParts): SubagentToolStep {
   const target = toolCallTarget(call.name, call.arguments)
   return {
     stepId: call.id,
     toolName: call.name,
     summary: target || String(call.name ?? '').trim(),
     ...(header ? { header } : {}),
+    ...(parts ? { headerParts: parts } : {}),
     status: 'canceled',
   }
 }
@@ -630,9 +697,92 @@ function firstLine(text: string): string {
 }
 
 /**
+ * headerPartsFromPayload reads the gateway's header_parts off a live step
+ * payload. An object with a non-empty action is the shape the engine sends; a
+ * payload older than plan 135 carries none, and the card then words itself
+ * from the joined header alone.
+ */
+function headerPartsFromPayload(payload: Record<string, unknown>): HeaderParts | undefined {
+  const raw = payload.headerParts
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const parts = raw as Record<string, unknown>
+  const action = String(parts.action ?? '').trim()
+  if (!action) return undefined
+  return {
+    action,
+    ...(String(parts.target ?? '').trim() ? { target: String(parts.target).trim() } : {}),
+    ...(String(parts.suffix ?? '').trim() ? { suffix: String(parts.suffix).trim() } : {}),
+    ...(String(parts.duration ?? '').trim() ? { duration: String(parts.duration).trim() } : {}),
+  }
+}
+
+/**
+ * shellCardFromPayload reads the shell_card a live completion or a stored row
+ * carries (camel-cased on both paths). The gateway derives it from the same
+ * body the card shows, so this only shapes what arrived — an object that is
+ * not the engine's shape is not a shell card.
+ */
+function shellCardFromPayload(payload: Record<string, unknown>): ShellCard | undefined {
+  const raw = payload.shellCard
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const card = raw as Record<string, unknown>
+  const exitCode = Number(card.exitCode)
+  const files = Array.isArray(card.files)
+    ? card.files.map((file) => {
+      const f = (file && typeof file === 'object' ? file : {}) as Record<string, unknown>
+      return {
+        verb: String(f.verb ?? ''),
+        path: String(f.path ?? ''),
+        added: Number(f.added) || 0,
+        deleted: Number(f.deleted) || 0,
+        ...(stringOrUndefined(f.unifiedDiff) ? { unifiedDiff: String(f.unifiedDiff) } : {}),
+      }
+    })
+    : []
+  return {
+    stdout: String(card.stdout ?? ''),
+    stderr: String(card.stderr ?? ''),
+    ...(Number.isFinite(exitCode) && exitCode !== 0 ? { exitCode } : {}),
+    stdoutOmittedBytes: Number(card.stdoutOmittedBytes) || 0,
+    stderrOmittedBytes: Number(card.stderrOmittedBytes) || 0,
+    omittedBytes: Number(card.omittedBytes) || 0,
+    retrieveId: Number(card.retrieveId) || 0,
+    spoolOmittedBytes: Number(card.spoolOmittedBytes) || 0,
+    files,
+    notes: Array.isArray(card.notes) ? card.notes.map((note) => String(note)) : [],
+  }
+}
+
+/**
+ * fileDiffFromPayload reads the file_diff an edit_file / write_file row or
+ * completion carries: the turn diff the card opens with, and the rest of the
+ * body after it (diagnostics and the like) for the surface to render as it
+ * always has.
+ */
+function fileDiffFromPayload(payload: Record<string, unknown>): FileDiffFacts | undefined {
+  const raw = payload.fileDiff
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const diff = raw as Record<string, unknown>
+  const path = String(diff.path ?? '').trim()
+  if (!path) return undefined
+  return {
+    path,
+    added: Number(diff.added) || 0,
+    deleted: Number(diff.deleted) || 0,
+    ...(stringOrUndefined(diff.unifiedDiff) ? { unifiedDiff: String(diff.unifiedDiff) } : {}),
+    ...(stringOrUndefined(diff.rest) ? { rest: String(diff.rest) } : {}),
+  }
+}
+
+/**
  * toolStepFromPayload builds one card from a live tool step event. Both the
  * conversation and a subagent read the same runtime payload, so they label the
  * same call the same way.
+ *
+ * A completed step carries no input of its own, so the key is omitted rather
+ * than set to undefined: the completion merges over the started card
+ * (`{ ...block.step, ...step }`), and a present-but-undefined key would wipe
+ * the input the started step did carry.
  */
 export function toolStepFromPayload(
   payload: Record<string, unknown>,
@@ -641,11 +791,25 @@ export function toolStepFromPayload(
 ): SubagentToolStep {
   const meta = subagentStepMeta(payload)
   const durationSeconds = Number(payload.durationSeconds)
+  const denyFeedback = metaString(meta, 'deny_feedback')
+  const input = payload.input && typeof payload.input === 'object' && !Array.isArray(payload.input)
+    ? payload.input as Record<string, unknown>
+    : undefined
+  const headerParts = headerPartsFromPayload(payload)
+  // The card facts ride the completion only (plan 135): the gateway reads
+  // them from the finished body, so a started step carries none and must not
+  // have them set — a present-but-undefined key would wipe nothing here, but
+  // the merge in upsert spreads this object over the started card.
+  const shellCard = completed ? shellCardFromPayload(payload) : undefined
+  const fileDiff = completed ? fileDiffFromPayload(payload) : undefined
   return {
     stepId: String(payload.stepId ?? '').trim() || fallbackStepId,
     toolName: String(payload.toolName ?? '').trim(),
     summary: subagentStepSummary(payload),
     ...(String(payload.header ?? '').trim() ? { header: String(payload.header).trim() } : {}),
+    ...(headerParts ? { headerParts } : {}),
+    ...(input ? { input } : {}),
+    ...(denyFeedback ? { denyFeedback } : {}),
     status: subagentStepStatus(payload, completed),
     output: completed ? String(payload.displayBody ?? '').trim() || undefined : undefined,
     error: String(payload.error ?? '').trim() || undefined,
@@ -655,6 +819,8 @@ export function toolStepFromPayload(
     skillPath: metaString(meta, 'skill_path') || undefined,
     ...previewFieldsFromMeta(meta),
     subagentCall: subagentCallFromMeta(meta),
+    ...(shellCard ? { shellCard } : {}),
+    ...(fileDiff ? { fileDiff } : {}),
     durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : undefined,
   }
 }
@@ -685,18 +851,28 @@ function stepHoldsNoCard(step: { toolName: string; status: string }): boolean {
  * When a row carries none, the card is left without a body rather than
  * falling back to the model-facing result, which was never meant to be read.
  */
-export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?: string | null; partsJson?: string | null; subagentCall?: SubagentCall | null; header?: string }, call?: StoredToolCall): SubagentToolStep {
+export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?: string | null; partsJson?: string | null; subagentCall?: SubagentCall | null; header?: string; headerParts?: HeaderParts | null; shellCard?: ShellCard | null; fileDiff?: FileDiffFacts | null }, call?: StoredToolCall): SubagentToolStep {
   const display = parseToolDisplayPart(row.partsJson)
   const meta = { ...toolMetaRecord(row.toolMetaJson), ...toolMetaRecord(display.toolMetaJson) }
   const toolName = metaString(meta, 'tool_name') || String(call?.name ?? '').trim()
   const summary = String(display.summary ?? '').trim() || metaString(meta, 'invocation') || toolName
   const status = metaString(meta, 'status') || 'completed'
   const header = String(row.header ?? '').trim()
+  const headerParts = row.headerParts && String(row.headerParts.action ?? '').trim()
+    ? row.headerParts
+    : undefined
+  const input = meta.input && typeof meta.input === 'object' && !Array.isArray(meta.input)
+    ? meta.input as Record<string, unknown>
+    : undefined
+  const denyFeedback = metaString(meta, 'deny_feedback')
   return {
     stepId: String(row.toolStepId ?? '').trim() || String(call?.id ?? '').trim(),
     toolName,
     summary,
     ...(header ? { header } : {}),
+    ...(headerParts ? { headerParts } : {}),
+    ...(input ? { input } : {}),
+    ...(denyFeedback ? { denyFeedback } : {}),
     status,
     output: display.body,
     category: metaString(meta, 'category') || undefined,
@@ -704,6 +880,8 @@ export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?
     skillPath: metaString(meta, 'skill_path') || undefined,
     ...previewFieldsFromMeta(meta),
     subagentCall: row.subagentCall ?? undefined,
+    ...(row.shellCard ? { shellCard: row.shellCard } : {}),
+    ...(row.fileDiff ? { fileDiff: row.fileDiff } : {}),
   }
 }
 
@@ -880,12 +1058,16 @@ export function conversationFromTranscript(
       // (from its execution's events): a second, canceled card for the same
       // call would be a card the terminal does not show.
       if (!answer && isSubagentDispatchTool(String(call.name ?? ''))) continue
+      // The header a never-run call reads comes from the assistant row's
+      // call_header_list — a list, not a map, because the camel-casing the
+      // responses pass through rewrites a call id used as a map key.
+      const canceledHeader = row.callHeaderList?.find((entry) => entry.callId === call.id)
       current.blocks = [...(current.blocks ?? []), {
         kind: 'tool',
         // A call with no tool row never ran: the gate the user canceled, or a
         // call an interruption stopped. It is a card all the same, and a
         // canceled one - the same thing the terminal shows for it.
-        step: answer ? toolStepFromRow(answer, call) : canceledToolStep(call, row.callHeaders?.[call.id]),
+        step: answer ? toolStepFromRow(answer, call) : canceledToolStep(call, canceledHeader?.header, canceledHeader?.parts),
       }]
     }
     applyTranscriptRowMetadata(current, row, renderPlan)
@@ -1350,6 +1532,15 @@ function responseStatus(error: unknown): number | undefined {
   return Number.isFinite(status) && status > 0 ? status : undefined
 }
 
+/**
+ * The gateway's answer when the subagent has already ended: a 409 on its input
+ * route is that refusal and only that one (an idle subagent takes no messages,
+ * plan 142), so the message it writes needs no reading here.
+ */
+function subagentEndedRefusal(error: unknown): boolean {
+  return error instanceof GatewayHttpError && error.status === 409
+}
+
 function appendStreamedText(
   blocks: TimelineBlock[],
   kind: 'assistant' | 'thinking',
@@ -1543,7 +1734,7 @@ export function emptyContextRuntimeSignals(): ContextRuntimeSignals {
   return { compactVersion: 0, budgetVersion: 0, activeRunId: undefined }
 }
 
-import { getErrorMessage, forebrainApi, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse, type SessionContextDebug } from '@/lib/api'
+import { getErrorMessage, forebrainApi, GatewayHttpError, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse, type SessionContextDebug } from '@/lib/api'
 import { persistLastSessionId } from '@/composables/useLastSession'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { currentLocale, t as translate, type I18nKey } from '@/locales'
@@ -2247,12 +2438,22 @@ export function subagentCallView(
     if (tally.failed + tally.cancelled + tally.skipped > 0) breakdown = tally
   }
 
+  // A dispatch card whose row already says why its task failed draws no call
+  // error: the call failed because that task did, and the row carries the
+  // described reason — the call's text is the same failure again, raw. The
+  // phase still reads callError, so the header keeps saying it failed. A
+  // query card's rows are a snapshot of other executions, so it keeps its
+  // call error. Mirrors the terminal's fanoutDrawnCallError.
+  const drawnCallError = callError && !query && rows.some((row) => row.status === 'failed' && row.error)
+    ? undefined
+    : callError
+
   return {
     headerKey: phase === 'canceled' ? 'subagentCard.canceled' : `subagentCard.${verb}.${phase}`,
     headerCount,
     headerDuration,
     ...(phase === 'canceled' ? { canceledLabel: String(step.summary ?? '').trim() || step.toolName } : {}),
-    ...(callError ? { callError } : {}),
+    ...(drawnCallError ? { callError: drawnCallError } : {}),
     ...(breakdown ? { breakdown } : {}),
     rows,
     empty: rows.length === 0 && (call.tasks?.length ?? 0) === 0,
@@ -3589,6 +3790,10 @@ export function useChatStream() {
                 actionKind: String(payload.actionKind ?? '').trim(),
                 status: 'pending',
                 message: String(payload.message ?? '').trim() || undefined,
+                // The call this gate holds, named the way the conversation's
+                // own blocks name it, so a subagent's waiting card hangs its
+                // gate on itself (plan 138).
+                toolStepId: String(payload.toolStepId ?? '').trim() || undefined,
               }]
             : entry.blocks,
         }))
@@ -3656,19 +3861,15 @@ export function useChatStream() {
         return true
       }
       case 'queued_input_released': {
-        // The subagent's execution ended and its queue decided what follows:
-        // the next messages are sent to it, the rest go back to its composer.
-        const next = releasedNextInputs(payload)
-        const back = releasedInputs(payload)
-        if (back.length) {
-          void Promise.all(back.map(releasedSubmission)).then((subs) => {
-            for (const sub of subs) returnSubagentDraft(agentId, sub)
-          })
-        }
-        if (next.length) {
-          void Promise.all(next.map(releasedSubmission)).then((subs) => {
-            const merged = subs.reduce((acc, sub) => (acc ? mergeSubmissions(acc, sub) : sub), null as ComposerSubmission | null)
-            if (merged) void sendToSubagent(agentId, merged, false)
+        // The subagent's execution ended with messages the user had sent it but
+        // it never took. It is idle now and accepts nothing (plan 142, owner
+        // 2026-10-26), so every one of them — the rest of its queue and what
+        // the engine had planned to send next — goes back to the conversation's
+        // composer, in the order it was written, with the code that says why.
+        const released = [...releasedInputs(payload), ...releasedNextInputs(payload)]
+        if (released.length) {
+          void Promise.all(released.map(releasedSubmission)).then((subs) => {
+            for (const sub of subs) giveBack(sub, '', 'subagent_ended')
           })
         }
         return true
@@ -3875,12 +4076,15 @@ export function useChatStream() {
    * composer takes it is one draft, in the order it was written. A refusal
    * travels as the runtime's sentence plus, when it sent one, the stable code
    * behind it — the code is what lets the notice say the sentence in the
-   * viewer's language when it is drawn, the way a run's error block does.
+   * viewer's language when it is drawn, the way a run's error block does. The
+   * code can also stand on its own, when this surface is the one that knows
+   * what happened and the page writes the sentence itself.
    */
   function giveBack(submission: ComposerSubmission, notSentBecause = '', notSentBecauseCode = '') {
-    if (notSentBecause) {
+    const code = notSentBecauseCode.trim()
+    if (notSentBecause || code) {
       returnedNotice.value = notSentBecause
-      returnedNoticeCode.value = notSentBecauseCode.trim() || null
+      returnedNoticeCode.value = code || null
     }
     returnedDraft.value = returnedDraft.value ? mergeSubmissions(returnedDraft.value, submission) : submission
   }
@@ -3999,25 +4203,16 @@ export function useChatStream() {
     return draft
   }
 
-  /** A message the engine handed back, whole, its attachments described. */
-  async function subagentReturnedSubmission(input: { message?: string; attachments?: string[]; mentionImages?: string[] }): Promise<ComposerSubmission | null> {
-    const attachmentIds = Array.isArray(input.attachments) ? input.attachments.filter(Boolean) : []
-    const submission: ComposerSubmission = {
-      text: String(input.message ?? '').trim(),
-      attachments: await Promise.all(attachmentIds.map(submittedAttachment)),
-      mentionImages: Array.isArray(input.mentionImages) ? input.mentionImages.filter(Boolean) : [],
-    }
-    if (!submission.text && submission.attachments.length === 0 && submission.mentionImages.length === 0) return null
-    return submission
-  }
-
   /**
    * Sends a message the user typed in a subagent's own view to that subagent.
    * It never touches the primary conversation's send path: the whole exchange
-   * belongs to the subagent (rule 9). A refusal never loses the message — it
+   * belongs to the subagent (rule 9). A refusal never loses the message: a
+   * subagent that ended before it took the message (409 `subagent_not_running`)
+   * gives it back to the conversation's composer with the code that says why —
+   * an idle subagent takes no messages (plan 142) — and every other refusal
    * waits in that view's composer.
    */
-  async function sendToSubagent(agentId: string, submission: ComposerSubmission, followUp = false): Promise<void> {
+  async function sendToSubagent(agentId: string, submission: ComposerSubmission): Promise<void> {
     const id = String(agentId ?? '').trim()
     if (!id) return
     const sid = String(sessionId.value ?? '').trim()
@@ -4034,10 +4229,13 @@ export function useChatStream() {
         message: text,
         attachments: attachmentIds.length ? attachmentIds : undefined,
         mentionImages: imagePaths.length ? imagePaths : undefined,
-        mode: followUp ? 'follow_up' : 'steer',
       })
       applyPendingInputPreview(resp.preview, id)
-    } catch {
+    } catch (err) {
+      if (subagentEndedRefusal(err)) {
+        giveBack(submission, '', 'subagent_ended')
+        return
+      }
       returnSubagentDraft(id, submission)
     }
   }
@@ -4067,38 +4265,6 @@ export function useChatStream() {
       return Boolean(resp.interrupted)
     } catch {
       return false
-    }
-  }
-
-  /** Esc's first meaning: take the just-sent message back before it answered. */
-  async function withdrawSubagentInput(agentId: string): Promise<ComposerSubmission[]> {
-    const id = String(agentId ?? '').trim()
-    const sid = String(sessionId.value ?? '').trim()
-    if (!id || !sid) return []
-    try {
-      const resp = await forebrainApi.subagentWithdraw(sid, id)
-      applyPendingInputPreview(resp.preview, id)
-      const out: ComposerSubmission[] = []
-      for (const item of resp.withdrawn ?? []) {
-        const sub = await subagentReturnedSubmission(item)
-        if (sub) out.push(sub)
-      }
-      return out
-    } catch {
-      return []
-    }
-  }
-
-  /** /compact in a subagent's view. 'running' is the 409 the gateway sends. */
-  async function compactSubagent(agentId: string): Promise<'ok' | 'running' | 'error'> {
-    const id = String(agentId ?? '').trim()
-    const sid = String(sessionId.value ?? '').trim()
-    if (!id || !sid) return 'error'
-    try {
-      await forebrainApi.subagentCompact(sid, id)
-      return 'ok'
-    } catch (err) {
-      return responseStatus(err) === 409 ? 'running' : 'error'
     }
   }
 
@@ -4658,6 +4824,31 @@ export function useChatStream() {
         updateMessageById(assistantMessageId, (message) => ({
           ...message,
           turnDiffs: [...(message.turnDiffs ?? []), ...turnDiffs],
+        }))
+        return
+      }
+      case 'tool_output_delta': {
+        // A running call streams its output as it happens (owner 2026-10-25):
+        // the fragment is never stored — the completed step carries the whole
+        // body — so it only ever appends to the live card, whose shell body
+        // reads the tail of it until the completion's own facts arrive. The
+        // call's card may sit on an earlier answer than the one now streaming
+        // (a steer opened a new one), so the message that holds the step is
+        // the one updated.
+        const stepId = String(payload.stepId ?? '').trim()
+        const text = String(payload.text ?? '')
+        if (!stepId || !text) return
+        const owner = messages.value.find((message) => (message.blocks ?? []).some(
+          (block) => block.kind === 'tool' && block.step.stepId === stepId,
+        ))
+        if (!owner?.id) return
+        updateMessageById(owner.id, (message) => ({
+          ...message,
+          blocks: (message.blocks ?? []).map((block) => (
+            block.kind === 'tool' && block.step.stepId === stepId
+              ? { ...block, step: { ...block.step, output: `${block.step.output ?? ''}${text}` } }
+              : block
+          )),
         }))
         return
       }
@@ -5885,8 +6076,6 @@ export function useChatStream() {
     sendToSubagent,
     recallSubagentInput,
     interruptSubagentToSend,
-    withdrawSubagentInput,
-    compactSubagent,
     loadSubagentContext,
     loadSubagentBudget,
     pendingInputPreview,

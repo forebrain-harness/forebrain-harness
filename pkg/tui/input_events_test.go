@@ -1622,6 +1622,60 @@ func TestRawReaderAdoptsRequestedCaretAndInsertsThere(t *testing.T) {
 	}
 }
 
+// TestReaderTakesNoEditsWhileTheComposerIsReadOnly pins the reader half of a
+// view that takes no input (a subagent's view while it is idle): typed text, a
+// paste and the arrow keys change nothing, while Esc and Ctrl+C still reach the
+// loop, since those are the keys that leave or stop things.
+func TestReaderTakesNoEditsWhileTheComposerIsReadOnly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe error: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+
+	composerReadOnly.Store(true)
+	t.Cleanup(func() { composerReadOnly.Store(false) })
+
+	events := readRawInputEvents(ctx, pr, io.Discard, stubRawInputController{}, nil)
+	if _, err := pw.Write([]byte("abc")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := pw.Write([]byte("\x1b[200~xyz\x1b[201~")); err != nil {
+		t.Fatalf("write paste: %v", err)
+	}
+	if _, err := pw.Write([]byte("\x1b[A")); err != nil {
+		t.Fatalf("write arrow: %v", err)
+	}
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatal("the reader stopped")
+			}
+			if ev.kind == inputEventDraft && strings.Contains(ev.draft, "abc") {
+				t.Fatalf("a read-only composer took a draft: %q", ev.draft)
+			}
+			if ev.kind == inputEventPaste && strings.Contains(ev.paste, "xyz") {
+				t.Fatalf("a read-only composer took a paste: %q", ev.paste)
+			}
+		case <-deadline:
+			// Esc is not an edit: it still reaches the loop.
+			if _, err := pw.Write([]byte{0x1b}); err != nil {
+				t.Fatalf("write esc: %v", err)
+			}
+			got := nextNonDraftEvent(t, events)
+			if got.kind != inputEventHotkey || got.hotkey != hotkeyEscapeInterrupt {
+				t.Fatalf("Esc while read-only = %#v, want the interrupt hotkey", got)
+			}
+			return
+		}
+	}
+}
+
 // TestRawReaderClampsRequestedCaretToItsBuffer covers the race the request is
 // designed for: the click was resolved against a painted buffer, so a position
 // past the buffer the reader holds now is clamped instead of trusted.

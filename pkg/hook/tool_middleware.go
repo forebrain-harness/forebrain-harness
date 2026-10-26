@@ -90,6 +90,10 @@ func NewToolMiddleware(opts ToolMiddlewareOptions) llm.ToolMiddleware {
 				}
 				return nil, err
 			}
+			response := out
+			if rt.ToolResponse != nil {
+				response = rt.ToolResponse(ctx, toolName, out)
+			}
 			post, err := rt.ExecutePostToolUse(hookCtx, PostToolUseInput{
 				BaseInput: BaseInput{
 					HookEventName:  EventPostToolUse,
@@ -101,7 +105,7 @@ func NewToolMiddleware(opts ToolMiddlewareOptions) llm.ToolMiddleware {
 				ToolName:     toolName,
 				ToolUseID:    toolUseID,
 				ToolInput:    inputMap,
-				ToolResponse: out,
+				ToolResponse: response,
 			})
 			if err != nil {
 				return nil, err

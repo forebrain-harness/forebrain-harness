@@ -1,11 +1,14 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { h } from 'vue'
 import { config, mount } from '@vue/test-utils'
 
 import tip from '@/directives/tip'
 import { setLocale } from '@/locales'
+import type { DocTab } from '@/composables/useDocTabs'
 import type { PlanTab } from '@/composables/useSessionPlans'
 import type { SubagentTranscript } from '@/composables/useChatStream'
 import SubagentDrawer from './SubagentDrawer.vue'
+import ToolDocCommand from './ToolDocCommand.vue'
 
 config.global.directives = { tip }
 
@@ -187,6 +190,65 @@ describe('SubagentDrawer', () => {
     expect(wrapper.get('[data-testid="plan-tab-close-plan:a.md"]').attributes('aria-label')).toBe('Close Plan · Add auth')
     // Closing the plan tab asks for nothing from the subagent tabs.
     expect(wrapper.emitted('close-tab')).toBeUndefined()
+  })
+
+  // A document a card head opened (owner 2026-10-25) is a tab of this same
+  // drawer: the whole command or title a one-line head could not hold.
+  it('opens a command document as a tab, selectable and closable like the rest', async () => {
+    const doc: DocTab = {
+      id: 'doc:command:x1',
+      kind: 'command',
+      label: '命令 · cat <<\'EOF\'',
+      text: 'cat <<\'EOF\' > /tmp/x\nbody\nEOF',
+      command: 'cat <<\'EOF\' > /tmp/x\nbody\nEOF',
+    }
+    const wrapper = mountDrawer({ docTabs: [doc], activeDoc: doc.id, order: ['task-1', doc.id, 'task-2'] })
+    // The tab sits where it was opened, among the subagent tabs, and in front.
+    const tabEls = wrapper.findAll('[role="tab"]')
+    expect(tabEls.map((tab) => tab.text())).toEqual([
+      'general-purpose · task task-1',
+      doc.label,
+      'general-purpose · task task-2',
+    ])
+    expect(tabEls[1]!.attributes('aria-selected')).toBe('true')
+    // Its glyph says it holds a command.
+    expect(wrapper.get(`[data-testid="doc-tab-${doc.id}"]`).find('.lucide-terminal-icon').exists()).toBe(true)
+
+    await tabEls[1]!.trigger('click')
+    expect(wrapper.emitted('select-doc')).toEqual([[doc.id]])
+
+    await wrapper.get(`[data-testid="doc-tab-close-${doc.id}"]`).trigger('click')
+    expect(wrapper.emitted('close-doc')).toEqual([[doc.id]])
+  })
+
+  it('shows the opened command document: its steps, and copy of what ran', async () => {
+    const command = 'cat <<\'PATCH\' > /tmp/x\nbody\nPATCH\necho done'
+    const doc: DocTab = {
+      id: 'doc:command:x2',
+      kind: 'command',
+      label: '命令 · cat',
+      text: command,
+      command,
+    }
+    // The page the drawer's slot holds in a real view is mounted here the
+    // same way, so the tab and what it opens are tested together.
+    const clipboard = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText: clipboard } })
+    const wrapper = mount(SubagentDrawer, {
+      props: { tabs, active: 'task-1', records, seen: {}, overlay: false, docTabs: [doc], activeDoc: doc.id },
+      slots: { default: () => h(ToolDocCommand, { command }) },
+    })
+    const page = wrapper.get('[data-testid="tool-doc-command"]')
+    // The tab says what it holds: the kind, then the first line.
+    expect(wrapper.get(`[data-testid="doc-tab-${doc.id}"]`).text()).toContain(doc.label)
+    // The steps are there: the heredoc block and the line after its marker.
+    expect(page.find('.steps.multi').exists()).toBe(true)
+    expect(page.find('.hd-body').exists()).toBe(true)
+    expect(page.text()).toContain('echo done')
+    // Copy gives the command exactly as it ran, not the laid-out form.
+    await page.get('[data-testid="doc-copy"]').trigger('click')
+    expect(clipboard).toHaveBeenCalledWith(command)
+    vi.unstubAllGlobals()
   })
 
   // The drawer's width is dragged by the edge it shares with the conversation

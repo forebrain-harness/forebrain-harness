@@ -1,5 +1,5 @@
 <template>
-  <div class="diff-view text-[12px] font-mono leading-5">
+  <div class="diff-view" data-testid="diff-view">
     <!-- summary header -->
     <div
       v-if="summary"
@@ -9,85 +9,54 @@
     </div>
 
     <div
-      v-for="(file, fileIdx) in views"
+      v-for="(file, fileIdx) in files"
       :key="fileIdx"
-      class="mb-2 overflow-hidden rounded-lg border border-[var(--forebrain-divider)]"
+      class="diff-file"
     >
-      <!-- file header -->
+      <!-- file header: the changed-file row every diff shares (plan 137) —
+           colour-block icon, grey directory with the dark file name, counts. -->
       <button
         type="button"
-        class="flex w-full items-center gap-2 bg-[var(--forebrain-bg-alt)] px-3 py-1.5 text-left text-[11px] font-semibold hover:bg-[var(--forebrain-bg-alt)] focus:outline-none"
+        class="fc-h"
         :aria-expanded="expandedFiles.has(fileIdx)"
+        :data-testid="`diff-file-${fileIdx}`"
         @click="toggleFile(fileIdx)"
       >
-        <span class="text-[var(--forebrain-muted-text)] transition-transform" :class="expandedFiles.has(fileIdx) ? 'rotate-90' : ''">▶</span>
-        <span class="flex-1 truncate text-[var(--forebrain-text)]">{{ displayPath(file) }}</span>
-        <span class="shrink-0 text-[var(--forebrain-muted-text)]">
-          <span class="diff-add-label">+{{ file.added ?? 0 }}</span>
-          <span class="mx-0.5 opacity-50">−</span>
-          <span class="diff-del-label">{{ file.deleted ?? 0 }}</span>
+        <span class="fc-ic" :class="kindOf(file)" role="img" :aria-label="wordOf(file)">
+          <Plus v-if="kindOf(file) === 'add'" aria-hidden="true" />
+          <Minus v-else-if="kindOf(file) === 'del'" aria-hidden="true" />
+          <Pencil v-else aria-hidden="true" />
         </span>
-        <span v-if="file.binary" class="ml-1 rounded bg-[var(--forebrain-bg-alt)] px-1 text-[10px] text-[var(--forebrain-muted-text)]">binary</span>
-        <span v-else-if="file.status === 'mode-only'" class="ml-1 text-[10px] text-[var(--forebrain-muted-text)]">mode only</span>
+        <span class="fc-p">
+          <span v-if="dirOf(file)" class="fc-dir"><bdi>{{ dirOf(file) }}</bdi></span>
+          <span class="fc-fn">{{ nameOf(file) }}</span>
+        </span>
+        <span v-if="file.added || file.deleted" class="fc-n">
+          <span v-if="file.added" class="na">+{{ file.added }}</span>
+          <span v-if="file.deleted" class="nd">−{{ file.deleted }}</span>
+        </span>
+        <span v-if="file.binary" class="fc-tag">binary</span>
+        <span v-else-if="file.status === 'mode-only'" class="fc-tag">mode only</span>
+        <span class="fc-chev" :class="{ open: expandedFiles.has(fileIdx) }" aria-hidden="true">▶</span>
       </button>
 
-      <!-- hunk content -->
-      <div v-if="expandedFiles.has(fileIdx) && !file.binary && file.hunks?.length" class="overflow-x-auto">
-        <table class="w-full border-collapse">
-          <tbody>
-            <template v-for="(hunk, hunkIdx) in file.hunks" :key="hunkIdx">
-              <!-- hunk separator -->
-              <tr v-if="hunkIdx > 0">
-                <td colspan="3" class="h-px bg-[var(--forebrain-divider)]" />
-              </tr>
-              <tr
-                v-for="(line, lineIdx) in hunk.lines"
-                :key="lineIdx"
-                :class="lineRowClass(line.kind)"
-              >
-                <!-- old line number — user-select:none -->
-                <td
-                  class="diff-gutter select-none py-0 pr-2 text-right align-top text-[var(--forebrain-muted-text)] opacity-60"
-                  aria-hidden="true"
-                >{{ line.old_no || '' }}</td>
-                <!-- new line number — user-select:none -->
-                <td
-                  class="diff-gutter select-none py-0 pr-2 text-right align-top text-[var(--forebrain-muted-text)] opacity-60"
-                  aria-hidden="true"
-                >{{ line.new_no || '' }}</td>
-                <!-- marker — user-select:none -->
-                <td
-                  class="diff-marker select-none py-0 px-1 align-top font-bold"
-                  :class="lineMarkerClass(line.kind)"
-                  aria-hidden="true"
-                >{{ lineMarker(line.kind) }}</td>
-                <!-- code — selectable, copies clean -->
-                <td class="diff-code w-full whitespace-pre py-0 pl-1 pr-2 align-top">
-                  <template v-if="line.tokens">
-                    <span
-                      v-for="(token, tokenIdx) in line.tokens"
-                      :key="tokenIdx"
-                      :style="token.htmlStyle"
-                    >{{ token.content }}</span>
-                  </template>
-                  <template v-else>{{ line.text }}</template>
-                </td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-      </div>
+      <!-- hunk content: the one diff row component every surface draws. -->
+      <DiffBlock
+        v-if="expandedFiles.has(fileIdx) && !file.binary && file.hunks?.length"
+        :rows="diffRowsFromLines(file.hunks)"
+        :plain="String(file.status ?? '').toLowerCase() === 'added'"
+      />
 
       <!-- binary / empty-hunk message -->
       <div
         v-else-if="expandedFiles.has(fileIdx) && file.binary"
-        class="px-3 py-2 text-[11px] italic text-[var(--forebrain-muted-text)]"
+        class="diff-fallback"
       >
         Binary file changed.
       </div>
       <div
         v-else-if="expandedFiles.has(fileIdx) && !file.hunks?.length"
-        class="px-3 py-2 text-[11px] italic text-[var(--forebrain-muted-text)]"
+        class="diff-fallback"
       >
         No line-level diff available.
       </div>
@@ -96,7 +65,7 @@
     <!-- empty state -->
     <div
       v-if="!files.length"
-      class="py-2 text-[11px] italic text-[var(--forebrain-muted-text)]"
+      class="diff-fallback"
     >
       No changes since last commit.
     </div>
@@ -104,10 +73,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, shallowRef, watch } from 'vue'
-import { highlightCode, languageForPath } from '@repo/elements/code-block'
-import type { HighlightLanguage, TokenizedCode } from '@repo/elements/code-block'
+/**
+ * The turn diff a message ends with, drawn in the one unified style every
+ * diff shares (plan 137): the same changed-file row the shell card’s files
+ * use, the same DiffBlock rows beneath. The per-file fold and the small-diff
+ * auto-expand stay; the old two-gutter table with its own colours is gone.
+ */
+import { reactive } from 'vue'
+import { Minus, Pencil, Plus } from 'lucide-vue-next'
 import type { DiffHunk } from '@/lib/forebrainGatewayRuntime'
+import { diffRowsFromLines } from '@/lib/unifiedDiff'
+import { t } from '@/locales'
+import DiffBlock from '@/components/chat/DiffBlock.vue'
 
 export interface DiffViewFile {
   path?: string
@@ -140,152 +117,159 @@ const expandedFiles = reactive<Set<number>>(
   })(),
 )
 
-type CodeToken = TokenizedCode['tokens'][number][number]
-
-interface HighlightTarget {
-  key: string
-  language: HighlightLanguage
-  code: string
+function toggleFile(fileIdx: number) {
+  if (expandedFiles.has(fileIdx)) expandedFiles.delete(fileIdx)
+  else expandedFiles.add(fileIdx)
 }
 
-/**
- * Diff rows are syntax-highlighted with the same Monokai pair as every other
- * code surface. Shiki tokenises a file's rows as one document rather than line
- * by line, so a string or a comment that runs across rows keeps its colour;
- * the rows are joined in render order, which makes the token row at index i
- * the diff row at index i.
- */
-const tokensByKey = shallowRef(new Map<string, TokenizedCode['tokens']>())
-
-function highlightTarget(file: DiffViewFile): HighlightTarget | null {
-  if (file.binary || !file.hunks?.length) {
-    return null
-  }
-  const code = file.hunks.flatMap(hunk => hunk.lines.map(line => line.text)).join('\n')
-  if (!code.trim()) {
-    return null
-  }
-  const language = languageForPath(file.path)
-  return { key: `${language}\u0000${code}`, language, code }
+/** The row’s kind: added is add, deleted is del, everything else updated. */
+function kindOf(file: DiffViewFile): 'add' | 'upd' | 'del' {
+  const status = String(file.status ?? '').trim().toLowerCase()
+  if (status === 'added' || status === 'created') return 'add'
+  if (status === 'deleted' || status === 'removed') return 'del'
+  return 'upd'
 }
 
-function rememberTokens(key: string, tokens: TokenizedCode['tokens']) {
-  const next = new Map(tokensByKey.value)
-  next.set(key, tokens)
-  tokensByKey.value = next
+function wordOf(file: DiffViewFile): string {
+  const kind = kindOf(file)
+  return kind === 'add' ? t('chat.fileCreated') : kind === 'del' ? t('chat.fileDeleted') : t('chat.fileUpdated')
 }
 
-/** One target per file, rebuilt only when the diff itself changes. */
-const targets = computed(() => props.files.map(highlightTarget))
-
-watch(
-  targets,
-  (list) => {
-    for (const target of list) {
-      if (!target || tokensByKey.value.has(target.key)) {
-        continue
-      }
-      const ready = highlightCode(target.code, target.language, result =>
-        rememberTokens(target.key, result.tokens))
-      if (ready) {
-        rememberTokens(target.key, ready.tokens)
-      }
-    }
-  },
-  { immediate: true },
-)
-
-/**
- * The files as rendered: every row carries the tokens for its own text, or
- * none while Shiki is still loading, in which case the row shows plain text
- * and gains its colours on the frame after.
- */
-const views = computed(() =>
-  props.files.map((file, fileIdx) => {
-    const target = targets.value[fileIdx]
-    const tokens = target ? tokensByKey.value.get(target.key) : undefined
-    let row = 0
-    return {
-      ...file,
-      hunks: (file.hunks ?? []).map(hunk => ({
-        ...hunk,
-        lines: hunk.lines.map(line => ({
-          ...line,
-          tokens: tokens?.[row++] as CodeToken[] | undefined,
-        })),
-      })),
-    }
-  }),
-)
-
-function toggleFile(idx: number) {
-  if (expandedFiles.has(idx)) {
-    expandedFiles.delete(idx)
-  } else {
-    expandedFiles.add(idx)
-  }
+/** The path’s directory half, with its slash; empty at the root. */
+function dirOf(file: DiffViewFile): string {
+  const path = String(file.path ?? '')
+  const cut = path.lastIndexOf('/')
+  return cut >= 0 ? path.slice(0, cut + 1) : ''
 }
 
-function displayPath(file: DiffViewFile): string {
-  if (file.old_path && file.old_path !== file.path) {
-    return `${file.old_path} → ${file.path}`
-  }
-  return file.path ?? ''
-}
-
-function lineRowClass(kind: string): string {
-  switch (kind) {
-    case 'add': return 'diff-row-add'
-    case 'del': return 'diff-row-del'
-    default: return 'diff-row-ctx'
-  }
-}
-
-function lineMarkerClass(kind: string): string {
-  switch (kind) {
-    case 'add': return 'diff-marker-add'
-    case 'del': return 'diff-marker-del'
-    default: return 'opacity-0'
-  }
-}
-
-function lineMarker(kind: string): string {
-  switch (kind) {
-    case 'add': return '+'
-    case 'del': return '−'
-    default: return ' '
-  }
+function nameOf(file: DiffViewFile): string {
+  const path = String(file.path ?? '')
+  const cut = path.lastIndexOf('/')
+  return cut >= 0 ? path.slice(cut + 1) : path
 }
 </script>
 
 <style scoped>
-/* Gutter columns: fixed-width, non-selectable via user-select:none */
-.diff-gutter {
-  min-width: 2.8em;
-  user-select: none;
-  -webkit-user-select: none;
+.diff-view {
+  font-size: 12px;
 }
 
-/* Marker column: non-selectable */
-.diff-marker {
-  width: 1.2em;
-  user-select: none;
-  -webkit-user-select: none;
+.diff-file + .diff-file {
+  border-top: 1px solid var(--forebrain-divider);
 }
 
-/* Row tints: added lines sit on the success tint, removed lines stay on the
-   neutral alt ground with danger text (no pink-family fill). */
-.diff-row-add {
-  background-color: var(--forebrain-success-soft);
+/* The changed-file row, the same one FileChangeList draws (the prototype’s
+   .fc-h, :359-370); its styles are repeated here because this head is a
+   button with a fold, which FileChangeList’s row is not. */
+.fc-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 0;
+  background: transparent;
+  border: 0;
+  text-align: left;
 }
-.diff-row-del {
-  background-color: var(--forebrain-bg-alt);
+
+.fc-ic {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
 }
-.diff-row-ctx {
-  background-color: transparent;
+
+.fc-ic :deep(svg) {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.5;
 }
-.diff-marker-add { color: var(--forebrain-success); }
-.diff-marker-del { color: var(--forebrain-danger); }
-.diff-add-label { color: var(--forebrain-success); }
-.diff-del-label { color: var(--forebrain-danger); }
+
+.fc-ic.add {
+  background: #ecfdf3;
+  color: #067647;
+}
+
+.fc-ic.upd {
+  background: var(--forebrain-brand-soft);
+  color: var(--forebrain-brand-1);
+}
+
+.fc-ic.del {
+  background: #fef3f2;
+  color: #b42318;
+}
+
+.fc-p {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  white-space: nowrap;
+  font: 13px var(--forebrain-ui-font);
+}
+
+.fc-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  color: var(--forebrain-muted-text);
+}
+
+.fc-dir bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.fc-fn {
+  flex: none;
+  color: var(--forebrain-text);
+  font-weight: 500;
+}
+
+.fc-n {
+  flex: none;
+  font: 500 12px var(--forebrain-ui-font);
+  font-variant-numeric: tabular-nums;
+}
+
+.fc-n .na {
+  color: #067647;
+}
+
+.fc-n .nd {
+  color: #b42318;
+}
+
+.fc-n .na + .nd {
+  margin-left: 8px;
+}
+
+.fc-tag {
+  flex: none;
+  font-size: 10px;
+  color: var(--forebrain-muted-text);
+}
+
+.fc-chev {
+  flex: none;
+  font-size: 10px;
+  color: var(--forebrain-muted-text);
+  transition: transform 0.15s;
+}
+
+.fc-chev.open {
+  transform: rotate(90deg);
+}
+
+.diff-fallback {
+  padding: 8px 0;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--forebrain-muted-text);
+}
 </style>

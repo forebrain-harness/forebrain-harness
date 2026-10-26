@@ -130,6 +130,11 @@ export function formatProviderError(
   if (detail.code === 'session_running') {
     return tr('runError.sessionRunning')
   }
+  // A message the user sent a subagent that had already ended: the engine
+  // refused it, and the page gave it back to the composer (plan 143).
+  if (detail.code === 'subagent_ended') {
+    return tr('runError.subagentEnded')
+  }
   const runKey = RUN_ERROR_KEYS[detail.code]
   if (runKey) {
     return tr(runKey)

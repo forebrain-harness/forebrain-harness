@@ -842,6 +842,33 @@ func TestSubagentUsageLimitArmsItsOwnContinuation(t *testing.T) {
 	}
 }
 
+// An execution its dispatching agent awaited reports its failure to that
+// agent, which continues the subagent itself: the scheduler arms nothing for
+// the subagent, and the conversation's own plans are untouched.
+func TestAwaitedSubagentUsageLimitArmsNoContinuation(t *testing.T) {
+	h := newAutoContinueHarness(t)
+	resetAt := h.clock.Now().Add(3 * time.Hour)
+	h.svc.SubagentExecutionEnded(context.Background(), SubagentExecutionEnd{
+		ConversationSessionID: "s1",
+		WorkerSessionID:       "worker-a",
+		AgentKey:              "task-a",
+		RunID:                 "subrun-worker-a",
+		Origin:                Origin{Surface: SurfaceTUI},
+		Err:                   quotaError(resetAt, "pro"),
+		AwaitedByDispatcher:   true,
+	})
+	if plan, ok := h.svc.PendingAutoContinue("worker-a"); ok {
+		t.Fatalf("an awaited subagent armed its own continuation: %+v", plan)
+	}
+	if plans := h.svc.PendingAutoContinuePlans("s1"); len(plans) != 0 {
+		t.Fatalf("pending plans = %+v, want none", plans)
+	}
+	h.clock.Advance(3*time.Hour + defaultAutoContinueGrace)
+	if got := h.continuations(); len(got) != 0 {
+		t.Fatalf("continuations = %+v, want none", got)
+	}
+}
+
 func TestSubagentContinuationIsSupersededByItsNextExecution(t *testing.T) {
 	h := newAutoContinueHarness(t)
 	h.endSubagent(quotaError(h.clock.Now().Add(time.Hour), ""), "worker-a", "task-a")

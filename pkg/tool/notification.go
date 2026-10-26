@@ -331,6 +331,9 @@ type ToolMeta struct {
 	// once from the call's input and result so the terminal and the web draw
 	// the same card from the same facts.
 	SubagentCall *event.SubagentCall `json:"subagent_call,omitempty"`
+	// DenyFeedback is the user's own words when they refused this call, for
+	// the card that shows the refusal; empty for every other call.
+	DenyFeedback string `json:"deny_feedback,omitempty"`
 }
 
 // RunningFor reports how long an executing call has been running as of now,

@@ -993,9 +993,14 @@ func TestAutoContinueUIMessageFromEvents(t *testing.T) {
 
 func TestAutoContinueHeadlineNamesAThrottle(t *testing.T) {
 	now := time.Date(2026, 9, 29, 23, 0, 0, 0, time.UTC)
-	got := autoContinueTranscriptText(string(llm.ExplainRateLimitThrottle), now.Add(2*time.Minute), now)
+	got := autoContinueTranscriptText(string(llm.ExplainRateLimitThrottle), now.Add(2*time.Minute), now, true)
 	if got != "Rate limited · continuing automatically at 11:02pm · esc or type to cancel" {
 		t.Fatalf("transcript line = %q", got)
+	}
+	// A view with no input box can only be left, not typed out of.
+	got = autoContinueTranscriptText(string(llm.ExplainRateLimitThrottle), now.Add(2*time.Minute), now, false)
+	if got != "Rate limited · continuing automatically at 11:02pm · esc to cancel" {
+		t.Fatalf("transcript line without typing = %q", got)
 	}
 }
 

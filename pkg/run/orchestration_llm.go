@@ -152,6 +152,36 @@ func (w *toolOrchestrationLLM) recordReasoningBlocks(ctx context.Context, sink *
 	return &wrapped
 }
 
+// steerMessages turns delivered steers into the messages the model reads. A
+// steer typed as a skill command in a subagent's view first loads that skill,
+// with its own Skill card, and the skill's instructions go in just ahead of
+// the steer — the same activation a turn that starts with the command gets.
+// Every message lands after the delivery's start, so the rollback and the
+// steer count of an abandoned call cover the activation with its steer. A
+// skill that fails to load shows its failure card and the steer is still
+// delivered: the user's words reach the model either way.
+//
+// The activation is a persisted meta message, not an ephemeral one: the steer
+// that brought it is persisted at that point of the conversation, and a
+// mid-turn compaction counts the delivery's messages by position.
+func (w *toolOrchestrationLLM) steerMessages(ctx context.Context, entries []TurnInputEntry) []llm.Message {
+	out := make([]llm.Message, 0, len(entries))
+	for i, entry := range entries {
+		name, path := strings.TrimSpace(entry.SkillName), strings.TrimSpace(entry.SkillPath)
+		if name != "" && path != "" {
+			stepID := fmt.Sprintf("skill-steer-%d-%d", i, time.Now().UnixNano())
+			selection := explicitSkillSelection{SkillName: name, SkillPath: path}
+			if activation, err := loadExplicitSkill(ctx, w.state, selection, stepID); err == nil {
+				msg := explicitSkillActivationMessage(activation)
+				msg.Ephemeral = false
+				out = append(out, msg)
+			}
+		}
+		out = append(out, llm.UserMessage(entry.Parts...))
+	}
+	return out
+}
+
 // WrapToolOrchestrationLLM exposes the canonical execution-chain wrapper used
 // by Forebrain Harness product runtimes when tool results must be governed before they are
 // replayed into model context.
@@ -575,9 +605,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				if delivery := TurnInputRuntimeFromContext(ctx).BeginSteerDelivery(ctx); delivery != nil {
 					inFlightSteers = delivery
 					sessionBeforeSteers = len(session)
-					for _, entry := range delivery.Entries() {
-						session = append(session, llm.UserMessage(entry.Parts...))
-					}
+					session = append(session, w.steerMessages(ctx, delivery.Entries())...)
 					continue
 				}
 				if heldAnswer != nil {
@@ -692,9 +720,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					noteResponseCompleted()
 					heldAnswer = res
 					sessionBeforeSteers = len(session)
-					for _, entry := range delivery.Entries() {
-						session = append(session, llm.UserMessage(entry.Parts...))
-					}
+					session = append(session, w.steerMessages(ctx, delivery.Entries())...)
 					inFlightSteers = delivery
 					partialCapture.Set(session)
 					continue
@@ -803,9 +829,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		if delivery := TurnInputRuntimeFromContext(ctx).BeginSteerDelivery(ctx); delivery != nil {
 			inFlightSteers = delivery
 			sessionBeforeSteers = len(session)
-			for _, entry := range delivery.Entries() {
-				session = append(session, llm.UserMessage(entry.Parts...))
-			}
+			session = append(session, w.steerMessages(ctx, delivery.Entries())...)
 			partialCapture.Set(session)
 		}
 	}

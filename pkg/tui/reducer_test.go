@@ -1895,6 +1895,53 @@ func TestFanoutCardShowsWhyTheCallFailed(t *testing.T) {
 	}
 }
 
+// A dispatched subagent that ran and then failed: its row carries the
+// described reason, and the call's own failure — the same failure, as the raw
+// error text the tool returned — must not be said a second time under the
+// header. The header still says the call failed.
+func TestFailedDispatchCardSaysWhyOnceOnTheTaskRow(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	input := map[string]any{
+		"title": "执行计划 137 shell 正文", "task": "执行 plans/137",
+		"subagent_type": "general-purpose",
+	}
+	const described = "The usage limit has been reached (HTTP 429 Too Many Requests)"
+	const raw = `tool subagent_run: error, status code: 429, status: 429 Too Many Requests, message: {"error":{"message":"The usage limit has been reached"}}`
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("run-fail", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run", Input: input,
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-137", AgentType: "general-purpose", TaskID: "subagent-137",
+		Title: "执行计划 137 shell 正文", Task: "执行 plans/137",
+		ParentToolCallID: "run-fail", TaskIndex: 0, ExecutionID: "exec-137", Timestamp: t0,
+	})
+	_ = r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-137", AgentType: "general-purpose", TaskID: "subagent-137",
+		Status: "failed", Error: described,
+		ParentToolCallID: "run-fail", TaskIndex: 0, ExecutionID: "exec-137",
+		FinishedAt: t0.Add(754 * time.Second), Timestamp: t0.Add(754 * time.Second),
+	})
+	card := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("run-fail", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_run", Input: input, Error: raw,
+		Duration: 754 * time.Second,
+	})}))
+
+	if card.Summary != "Failed to run 1 general-purpose task" {
+		t.Fatalf("summary = %q, want the call still reported as failed", card.Summary)
+	}
+	if card.FanoutCallError != "" {
+		t.Fatalf("call error = %q, want none: the task row already says why", card.FanoutCallError)
+	}
+	painted := strings.Join(renderFanoutForTest(card), "\n")
+	if strings.Contains(painted, "status code: 429") {
+		t.Fatalf("the raw call error is still painted:\n%s", painted)
+	}
+	if n := strings.Count(painted, "The usage limit has been reached"); n != 1 {
+		t.Fatalf("the reason is painted %d times, want exactly once:\n%s", n, painted)
+	}
+}
+
 func TestCancelledTasksAreCountedOnTheCard(t *testing.T) {
 	t0 := time.Unix(1790000000, 0).UTC()
 	input := map[string]any{"tasks": []any{

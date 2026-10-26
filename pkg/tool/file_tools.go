@@ -1802,9 +1802,11 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 			outputPath = plan.MoveAbs
 		}
 		entry := map[string]any{"abs_path": outputPath, "operation": string(plan.Kind)}
+		entry["display_path"] = displayPathFor(ctx, outputPath)
 		if plan.MoveAbs != "" {
 			entry["source_abs_path"] = abs
 			entry["move_path"] = plan.MoveOpPath
+			entry["source_display_path"] = displayPathFor(ctx, abs)
 		}
 		attachTurnDiff(entry, outputPath, plan.Before, plan.After)
 		files = append(files, entry)

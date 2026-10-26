@@ -925,6 +925,15 @@ func (s *Service) DiffSkill(name, from, to string) ([]FileDiff, error) {
 	return store.Diff(strings.TrimSpace(name), from, to)
 }
 
+// DiffSkillFile is DiffSkill for one file, with its line diff.
+func (s *Service) DiffSkillFile(name, from, to, path string) (FileDiff, error) {
+	store, _, ok := s.resolveVersionedSkill(name)
+	if !ok {
+		return FileDiff{}, fmt.Errorf("skill %q not found", strings.TrimSpace(name))
+	}
+	return store.DiffFile(strings.TrimSpace(name), from, to, path)
+}
+
 // PullUpdate fetches the skill's upstream content into its draft. The source
 // and the subpath it installs from are the ones the workspace lock recorded
 // at install time; an existing draft is replaced only when replaceDraft says

@@ -125,6 +125,57 @@ test('the changed-files tab draws its own card for a conversation with no change
   await expect(page.locator('[data-testid="chat-workbench"]')).toContainText('本会话还没有改过文件')
 })
 
+// The compare dialog draws the one unified diff every surface draws (plan
+// 137): the colour-bar rows on pale tints, one faint line-number column, a
+// new file as plain code. The ledger and its diff are answered by the routes
+// themselves, the same shapes the rewind endpoints serve.
+test('the compare dialog draws the unified diff style', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+  seedFixture()
+  const sid = await seedSessionInRoot(page, projectRoot, 'e2e-bench-diff')
+  const path = 'notes/a.txt'
+  const diff = [
+    '--- a/notes/a.txt',
+    '+++ b/notes/a.txt',
+    '@@ -1,2 +1,3 @@',
+    ' hello-bench-content',
+    '-old line',
+    '+new line',
+    '+added line',
+    '@@ -9 +10 @@',
+    '-tail',
+    '+tail changed',
+  ].join('\n')
+  await page.route(/\/api\/chat\/sessions\/.+\/file-changes$/, async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ files: [{ path, added: 3, removed: 2, created: false }] }),
+    })
+  })
+  await page.route(/\/api\/chat\/sessions\/.+\/file-changes\/diff/, async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ path, diff }) })
+  })
+
+  await page.goto(`/?session=${sid}`, { waitUntil: 'networkidle' })
+  await page.click('[data-testid="workbench-toggle"]')
+  await page.click('[data-testid="bench-tab-changes"]')
+  await expect(page.locator(`[data-testid="chg-diff-${path}"]`)).toBeVisible()
+  await page.click(`[data-testid="chg-diff-${path}"]`)
+
+  // The dialog's rows are the shared DiffBlock: added rows on the green
+  // tint with the 3px bar, removed rows on the red one, one fold between
+  // the two hunks, the line numbers in the faint column.
+  const rows = page.locator('.forebrain-modal [data-testid="diff-block"] .dr')
+  await expect(rows).toHaveCount(7)
+  await expect(rows.filter({ hasText: 'new line' }).first()).toHaveCSS('background-color', 'rgb(237, 251, 242)')
+  await expect(rows.filter({ hasText: 'old line' })).toHaveCSS('background-color', 'rgb(255, 241, 240)')
+  await expect(rows.filter({ hasText: '⋯' })).toHaveCount(1)
+  await expect(rows.first().locator('.g')).toHaveText('1')
+  await shot(page, 'workbench-compare-diff')
+})
+
 test('the column is resized by its left edge, for this session only', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))

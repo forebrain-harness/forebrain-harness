@@ -120,7 +120,7 @@ PY
   echo "serving: provider=$mode port=$PORT home=$HOME_DIR"
 }
 
-cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
+cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer] [answer-text] [drip-delay]
   local mode="${1:-hang}"
   cmd_serve "$@"
 
@@ -313,7 +313,7 @@ case "${1:-}" in
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
   build                  build the binary into $WORK
-  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
+  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer] [answer-text] [drip-delay]
                          launch the TUI against a fake provider (default: hang)
                          drip = stream word by word; the only mode that proves
                          streaming actually renders
@@ -333,16 +333,16 @@ usage: driver.sh <command>
                          real approval overlay appears
                          ask = a two-question user_interaction call, so the real
                          question form with its Other field appears
-                        subagent-net = the main agent dispatches a general-purpose
-                        probe (needs ENABLE_SUBAGENT=1); the subagent's own
-                        request is dropped on the wire until the user sends it
-                        "continue" from its view, when it answers with the
-                        answer text
                         subagent-limit = the main agent dispatches a
                         general-purpose probe (needs ENABLE_SUBAGENT=1); the
                         subagent's own request is refused with a usage-limit 429
-                        for FAKE_LIMIT_SECONDS (default 20) and then answers,
-                        so the subagent's automatic continuation is what runs
+                        for FAKE_LIMIT_SECONDS (default 20) and then answers.
+                        Dispatched with subagent_run (the default) the main
+                        agent gets the failure account (task_id, ran_for, error,
+                        resets_at) and the subagent arms no continuation of its
+                        own; FAKE_SUBAGENT_DISPATCH=send uses subagent_send
+                        instead, so the subagent's automatic continuation is
+                        what runs the answer text
                         subagent-steer = the main agent dispatches a
                         general-purpose probe (needs ENABLE_SUBAGENT=1) that
                         runs a shell call (the answer text, default sleep 8);

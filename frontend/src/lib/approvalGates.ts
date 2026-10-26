@@ -1,5 +1,8 @@
 import { t, type I18nKey } from '@/locales'
 import type { PermissionSuggestionRecord } from '@/lib/approvalSuggestions'
+import { permissionSuggestionFromAction } from '@/lib/approvalSuggestions'
+import { parseUnifiedDiff, type DiffRow } from '@/lib/unifiedDiff'
+import type { ShellCardFile } from '@/composables/useChatStream'
 
 /**
  * The families of question an approval can ask, in the engine's own order of
@@ -28,8 +31,14 @@ export type ApprovalFamily =
 
 export interface ApprovalFacts {
   family: ApprovalFamily
-  /** The diff rows an edit-shaped family shows (sign, text); absent = no diff. */
-  diff?: ['' | '+' | '-', string][]
+  /** The diff rows an edit-shaped family shows; absent = no diff. The rows
+   *  are the same shape every card's diff draws (DiffBlock), line numbers
+   *  only where the source carried them — a patch's bare `@@` carries none,
+   *  and numbers invented there would be numbers nobody counted. */
+  diff?: DiffRow[]
+  /** The files an apply_patch touches, one row each (the changed-files list
+   *  every card shares); present only for a multi-file patch. */
+  patchFiles?: ShellCardFile[]
   /** The one or two facts this decision turns on, as plain lines in order. */
   facts: string[]
   /** Lines added / removed, when the engine can count them. */
@@ -117,58 +126,97 @@ function engineLineCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-/** The diff rows of a full-content write: every line is an added line. */
-function writeDiff(content: string): ['+' | '-', string][] {
-  if (content === '') return []
+/** The diff rows of a full-content write: every line is an added line, and
+ *  the new file's numbers are the only ones there are. Only an overwrite
+ *  shows them — a new file's size is the fact line's own sentence (prototype
+ *  ① draws no panel), an overwrite's body is what would replace what is there
+ *  (②). */
+function writeDiff(content: string, overwrite: boolean): DiffRow[] {
+  if (!overwrite || content === '') return []
   const lines = content.split('\n')
   if (lines[lines.length - 1] === '') lines.pop()
-  return lines.map((line) => ['+', line] as ['+' | '-', string])
+  return lines.map((line, index) => ({ mark: '+' as const, line: index + 1, text: line }))
 }
 
 /** The diff rows of a replacement with no unified diff to hand: all the old
  * lines, then all the new ones — the shape the terminal's overlay falls back to
- * when its own diff build fails. Only a historical action reaches this: one
- * recorded before the engine put its hunk in the payload. */
-function editDiff(oldText: string, newText: string): ['+' | '-', string][] {
-  const rows: ['+' | '-', string][] = []
+ * when its own diff build fails. No line numbers exist for this shape. Only a
+ * historical action reaches this: one recorded before the engine put its hunk
+ * in the payload. */
+function editDiff(oldText: string, newText: string): DiffRow[] {
+  const rows: DiffRow[] = []
   for (const text of [oldText, newText]) {
     if (text === '') continue
     const lines = text.split('\n')
     if (lines[lines.length - 1] === '') lines.pop()
-    for (const line of lines) rows.push([text === oldText ? '-' : '+', line])
+    for (const line of lines) rows.push({ mark: text === oldText ? '-' : '+', line: null, text: line })
   }
   return rows
 }
 
-/** The body rows an edit card draws, matching the card's own forty-row box
- * (ApprovalGateCard.vue): the payload carries exactly what can be shown. */
+/** The body rows an edit card draws: the payload carries exactly what can be
+ * shown. */
 const editHunkBodyRows = 40
 
 /** The body rows a patch card draws: one representative place in the patch,
  * not the whole patch. */
 const patchHunkBodyRows = 8
 
-/** The first hunk of a unified diff or patch, verbatim: its @@ header plus at
- * most maxBodyRows body rows. The bound is the caller's because the two cards
- * read different amounts; everything else about the shape is the same, which is
- * why there is one reader and not two. */
-function patchHunk(text: string, maxBodyRows: number): ['' | '+' | '-', string][] {
-  const lines = text.split('\n')
+/** The first hunk of a real unified diff, as at most maxBodyRows rows. The
+ *  engine's file_edit hunk carries its counters, so the rows carry the line
+ *  numbers the diff itself counted — the same rows every card's diff draws. */
+function unifiedHunk(text: string, maxBodyRows: number): DiffRow[] {
+  const rows = parseUnifiedDiff(text)
+  const fold = rows.findIndex((row) => row.mark === '…')
+  return (fold >= 0 ? rows.slice(0, fold) : rows).slice(0, maxBodyRows)
+}
+
+/** The first hunk of an apply_patch body: its bare `@@` carries no counters,
+ *  so the rows carry no line numbers rather than numbers invented here.
+ *  Section headers (`***`) end the hunk; so does the caller's bound. */
+function bareHunk(text: string, maxBodyRows: number): DiffRow[] {
+  const lines = String(text ?? '').split('\n')
   const start = lines.findIndex((line) => line.startsWith('@@'))
   if (start < 0) return []
-  const rows: ['' | '+' | '-', string][] = [['', lines[start]]]
+  const rows: DiffRow[] = []
   for (const line of lines.slice(start + 1)) {
     if (line.startsWith('***') || line.startsWith('@@')) break
-    if (rows.length - 1 >= maxBodyRows) break
-    // The sign lives in the row's own slot; the text is the line without it,
-    // the same shape a write's diff rows carry. A `+++`/`---` file header is
-    // never reached here — the scan starts at the hunk header, which comes after
-    // them — so a header can never be read as a body row.
-    if (line.startsWith('+')) rows.push(['+', line.slice(1)])
-    else if (line.startsWith('-')) rows.push(['-', line.slice(1)])
-    else rows.push(['', line])
+    if (rows.length >= maxBodyRows) break
+    if (line.startsWith('+')) rows.push({ mark: '+', line: null, text: line.slice(1) })
+    else if (line.startsWith('-')) rows.push({ mark: '-', line: null, text: line.slice(1) })
+    else rows.push({ mark: ' ', line: null, text: line })
   }
   return rows
+}
+
+/** The files an apply_patch touches, one row each with its own verb and its
+ *  own +/− counts, read from the patch body the engine wrote. A `*** Move to:`
+ *  retargets the section in force, the way the engine reads it. */
+function patchFileRows(patch: string): ShellCardFile[] {
+  const files: ShellCardFile[] = []
+  let index = -1
+  for (const raw of String(patch ?? '').split('\n')) {
+    const section = /^\*\*\* (Update|Add|Delete) File: (.*)$/.exec(raw)
+    if (section) {
+      files.push({
+        verb: section[1] === 'Add' ? 'created' : section[1] === 'Delete' ? 'deleted' : 'updated',
+        path: section[2].trim(),
+        added: 0,
+        deleted: 0,
+      })
+      index = files.length - 1
+      continue
+    }
+    const move = /^\*\*\* Move to: (.*)$/.exec(raw)
+    if (move && index >= 0) {
+      files[index] = { ...files[index], path: move[1].trim() }
+      continue
+    }
+    if (index < 0) continue
+    if (raw.startsWith('+')) files[index].added++
+    else if (raw.startsWith('-')) files[index].deleted++
+  }
+  return files
 }
 
 /** Added / removed line counts across a whole patch body. The section headers
@@ -329,7 +377,8 @@ function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>, s
         added,
         removed,
         facts: [removed > 0 ? t('chat.approvalFactsLines', { added, removed }) : t('chat.approvalFactsNewLines', { added })],
-        diff: writeDiff(content),
+        // The panel is the overwrite's; a new file's size is the fact line.
+        diff: writeDiff(content, removed > 0),
       }
     }
     case 'file_edit': {
@@ -343,7 +392,7 @@ function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>, s
       // thousand-row wall a diff.
       const added = engineLineCount(payload.added_lines)
       const removed = engineLineCount(payload.removed_lines)
-      const hunk = patchHunk(String(payload.unified_diff ?? ''), editHunkBodyRows)
+      const hunk = unifiedHunk(String(payload.unified_diff ?? ''), editHunkBodyRows)
       return {
         family,
         added: added ?? textLines(newText),
@@ -359,6 +408,7 @@ function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>, s
       const patch = String(payload.patch ?? '')
       const paths = stringList(payload.resolved_paths)
       const delta = patchDelta(patch)
+      const fileRows = patchFileRows(patch)
       return {
         family,
         added: delta.added,
@@ -370,7 +420,10 @@ function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>, s
           paths.length ? t('chat.approvalFactsFiles', { count: paths.length }) : '',
           `+${delta.added} −${delta.removed}`,
         ].filter(Boolean).join(' · ')],
-        diff: patchHunk(patch, patchHunkBodyRows),
+        // Several files: one row each (the changed-files list every card
+        // shares), then one representative hunk.
+        ...(fileRows.length > 1 ? { patchFiles: fileRows } : {}),
+        diff: bareHunk(patch, patchHunkBodyRows),
       }
     }
     case 'shell': {
@@ -490,8 +543,7 @@ function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>, s
 }
 
 /** The one-line question a family asks, in the card's own header. */
-export function approvalQuestion(family: ApprovalFamily, kind: string, payload: Record<string, unknown>): string {
-  switch (family) {
+export function approvalQuestion(family: ApprovalFamily, kind: string, payload: Record<string, unknown>): string {  switch (family) {
     case 'file_write':
       return (Number(payload.existing_lines ?? 0) || 0) > 0
         ? t('chat.approvalWriteOverQuestion')
@@ -522,7 +574,27 @@ export function approvalQuestion(family: ApprovalFamily, kind: string, payload: 
       return t('chat.approvalMemoryQuestion')
     case 'protected_read':
       return t('chat.approvalProtectedReadQuestion')
+    case 'web_fetch':
+      return t('chat.webFetchQuestion')
+    case 'exit_plan_mode':
+      // The plan approval asks the one question it always asked, wherever it
+      // is drawn — the dock where the input is, a subagent's fallback frame.
+      return t('chat.exitPlanQuestion')
     default:
       return t('chat.approvalFallbackQuestion')
   }
+}
+
+/**
+ * One pending action's family, facts, and question, read from the action row
+ * alone — the payload is the engine's own record of what it wants, and the
+ * suggestion carries the network approval the payload alone cannot name. The
+ * pure reader behind the store's `approvalGate`, so the card that hangs on the
+ * gated call reads the same gate wherever it is drawn, provider or none.
+ */
+export function approvalGateOf(action: { kind: string; payloadJson: string; permissionSuggestion?: unknown }): { facts: ApprovalFacts; question: string } {
+  const payload = parseApprovalPayload(action.payloadJson)
+  const suggestion = permissionSuggestionFromAction(action as Parameters<typeof permissionSuggestionFromAction>[0])
+  const family = approvalFamily(action.kind, payload, suggestion)
+  return { facts: approvalFacts(family, payload, suggestion), question: approvalQuestion(family, action.kind, payload) }
 }

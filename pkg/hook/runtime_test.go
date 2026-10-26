@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -272,6 +273,76 @@ func TestToolMiddlewareBlocksRealToolExecution(t *testing.T) {
 	callCtx := llm.WithAgentSessionID(context.Background(), "s1")
 	if _, err := testTool.Handle(callCtx, `{}`); err == nil || !strings.Contains(err.Error(), "stop tool") {
 		t.Fatalf("expected blocked tool execution, got err=%v", err)
+	}
+}
+
+func TestToolMiddlewarePostToolUseGetsTheShapedResponse(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	defer db.Close()
+	sess := state.NewSessionStore(db, "main")
+
+	run := func(shape func(context.Context, string, any) any) (map[string]any, any) {
+		inPath := filepath.Join(t.TempDir(), "in.json")
+		rt := &Runtime{
+			Home: home,
+			Sess: sess,
+			Cfg: &config.Root{
+				Hooks: config.HooksSettings{
+					EventPostToolUse: {{
+						Matcher: "demo_tool",
+						Hooks: []config.HookCommand{{
+							Type:    config.HookTypeCommand,
+							Command: "cat > " + strconv.Quote(inPath),
+						}},
+					}},
+				},
+			},
+			ToolResponse: shape,
+		}
+		testTool, err := llm.NewTool("demo_tool", "demo", func(context.Context, *struct{}) (string, error) {
+			return "ok", nil
+		})
+		if err != nil {
+			t.Fatalf("NewTool: %v", err)
+		}
+		testTool.Use(NewToolMiddleware(ToolMiddlewareOptions{Runtime: rt}))
+		result, err := testTool.Handle(llm.WithAgentSessionID(ctx, "s1"), `{}`)
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		raw, err := os.ReadFile(inPath)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("Unmarshal hook input: %v\n%s", err, raw)
+		}
+		return payload, result
+	}
+
+	payload, result := run(func(_ context.Context, _ string, out any) any {
+		return map[string]any{"shaped": out}
+	})
+	shaped, ok := payload["tool_response"].(map[string]any)
+	if !ok || shaped["shaped"] != "ok" {
+		t.Fatalf("tool_response=%#v", payload["tool_response"])
+	}
+	if result != "ok" {
+		t.Fatalf("Handle result=%v, want the raw result unchanged", result)
+	}
+
+	payload, result = run(nil)
+	if payload["tool_response"] != "ok" {
+		t.Fatalf("tool_response=%#v, want the raw string", payload["tool_response"])
+	}
+	if result != "ok" {
+		t.Fatalf("Handle result=%v, want the raw result unchanged", result)
 	}
 }
 

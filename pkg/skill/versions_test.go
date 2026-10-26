@@ -415,6 +415,129 @@ func TestDiffBetweenVersionsAndDraft(t *testing.T) {
 	}
 }
 
+// TestDiffFileCarriesTheLineDiff covers the one-file answer the compare view
+// draws: the same counts Diff lists, plus the unified diff the web renders —
+// and the reasons a file can have none (unchanged, binary, too large,
+// missing).
+func TestDiffFileCarriesTheLineDiff(t *testing.T) {
+	root := t.TempDir()
+	dir := writeVersionedSkill(t, root, "gateway-ops", "line one\nline two\nline three")
+	if err := os.WriteFile(filepath.Join(dir, "old.txt"), []byte("kept\nremoved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "same.txt"), []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := VersionStore{Root: root}
+	store.Bootstrap("gateway-ops", VersionRecord{Kind: VersionKindCreated})
+
+	draft, _ := store.EnsureDraft("gateway-ops")
+	if err := os.WriteFile(filepath.Join(draft, "SKILL.md"), []byte("---\nname: gateway-ops\ndescription: d\n---\n\nline one\nline two changed\nline three\nline four\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(draft, "new.txt"), []byte("brand new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(draft, "blob.bin"), []byte("a\x00b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(draft, "big.txt"), []byte(strings.Repeat("x\n", 20001)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(draft, ".hidden"), []byte("h\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(draft, "old.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	skilled, err := store.DiffFile("gateway-ops", "v1", "draft", "SKILL.md")
+	if err != nil {
+		t.Fatalf("DiffFile SKILL.md: %v", err)
+	}
+	if skilled.Status != "modified" || skilled.Added != 3 || skilled.Removed != 2 {
+		t.Fatalf("SKILL.md diff: %+v", skilled)
+	}
+	if want := "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,8 +1,9 @@\n ---\n name: gateway-ops\n-description: test skill gateway-ops\n+description: d\n ---\n \n line one\n-line two\n+line two changed\n line three\n+line four\n"; skilled.UnifiedDiff != want {
+		t.Fatalf("SKILL.md unified diff:\n got %q\nwant %q", skilled.UnifiedDiff, want)
+	}
+
+	added, err := store.DiffFile("gateway-ops", "v1", "draft", "new.txt")
+	if err != nil {
+		t.Fatalf("DiffFile new.txt: %v", err)
+	}
+	if added.Status != "added" || added.Added != 1 {
+		t.Fatalf("new.txt diff: %+v", added)
+	}
+	if want := "--- a/new.txt\n+++ b/new.txt\n@@ -0,0 +1 @@\n+brand new\n"; added.UnifiedDiff != want {
+		t.Fatalf("new.txt unified diff:\n got %q\nwant %q", added.UnifiedDiff, want)
+	}
+
+	removed, err := store.DiffFile("gateway-ops", "v1", "draft", "old.txt")
+	if err != nil {
+		t.Fatalf("DiffFile old.txt: %v", err)
+	}
+	if removed.Status != "removed" || removed.Removed != 2 {
+		t.Fatalf("old.txt diff: %+v", removed)
+	}
+	if want := "--- a/old.txt\n+++ b/old.txt\n@@ -1,2 +0,0 @@\n-kept\n-removed\n"; removed.UnifiedDiff != want {
+		t.Fatalf("old.txt unified diff:\n got %q\nwant %q", removed.UnifiedDiff, want)
+	}
+
+	same, err := store.DiffFile("gateway-ops", "v1", "draft", "same.txt")
+	if err != nil {
+		t.Fatalf("DiffFile same.txt: %v", err)
+	}
+	if same.Status != "unchanged" || same.UnifiedDiff != "" {
+		t.Fatalf("same.txt diff: %+v", same)
+	}
+
+	blob, err := store.DiffFile("gateway-ops", "v1", "draft", "blob.bin")
+	if err != nil {
+		t.Fatalf("DiffFile blob.bin: %v", err)
+	}
+	if blob.Status != "added" || !blob.Binary || blob.UnifiedDiff != "" {
+		t.Fatalf("blob.bin diff: %+v", blob)
+	}
+
+	big, err := store.DiffFile("gateway-ops", "v1", "draft", "big.txt")
+	if err != nil {
+		t.Fatalf("DiffFile big.txt: %v", err)
+	}
+	if big.Status != "added" || !big.TooLarge || big.UnifiedDiff != "" {
+		t.Fatalf("big.txt diff: %+v", big)
+	}
+
+	for _, path := range []string{".hidden", "../gateway-ops/SKILL.md", "nope.md"} {
+		if _, err := store.DiffFile("gateway-ops", "v1", "draft", path); !errors.Is(err, ErrDiffFileNotFound) {
+			t.Fatalf("DiffFile %q: err=%v", path, err)
+		}
+	}
+	if _, err := store.DiffFile("gateway-ops", "v9", "draft", "SKILL.md"); err == nil || errors.Is(err, ErrDiffFileNotFound) {
+		t.Fatalf("DiffFile against a missing version: err=%v", err)
+	}
+}
+
+// TestUnifiedLineDiffSplitsDistantChangesIntoHunks pins the hunk shape the
+// web's parser reads: two edits far apart become two hunks with three lines
+// of context each, and the web draws one gap row between them.
+func TestUnifiedLineDiffSplitsDistantChangesIntoHunks(t *testing.T) {
+	oldLines := make([]string, 20)
+	newLines := make([]string, 20)
+	for i := range oldLines {
+		oldLines[i] = fmt.Sprintf("l%d", i+1)
+		newLines[i] = oldLines[i]
+	}
+	newLines[1] = "L2"
+	newLines[17] = "L18"
+
+	got := unifiedLineDiff("f", oldLines, newLines)
+	want := "--- a/f\n+++ b/f\n@@ -1,5 +1,5 @@\n l1\n-l2\n+L2\n l3\n l4\n l5\n@@ -15,6 +15,6 @@\n l15\n l16\n l17\n-l18\n+L18\n l19\n l20\n"
+	if got != want {
+		t.Fatalf("unified diff:\n got %q\nwant %q", got, want)
+	}
+}
+
 // TestResolveDraftTarget pins the redirection every write into a formal skill
 // directory goes through: formal paths land in the draft, .versions is
 // refused, .drafts passes through, and unrelated paths are not claimed.

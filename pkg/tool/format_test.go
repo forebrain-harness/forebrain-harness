@@ -624,6 +624,155 @@ func TestFormatToolStepResult_shellShowsEllipsisForTruncatedPreview(t *testing.T
 	}
 }
 
+func TestFormatToolStepResult_applyPatchShowsDiffBlocks(t *testing.T) {
+	t.Parallel()
+	updated, err := event.Build("/repo/a.txt", []byte("a\n"), []byte("b\n"))
+	if err != nil {
+		t.Fatalf("build update diff: %v", err)
+	}
+	created, err := event.Build("/repo/b.txt", nil, []byte("x\ny\n"))
+	if err != nil {
+		t.Fatalf("build create diff: %v", err)
+	}
+	files := []map[string]any{
+		{"abs_path": "/repo/a.txt", "display_path": "a.txt", "operation": "update", "turn_diff": updated},
+		{"abs_path": "/repo/b.txt", "display_path": "b.txt", "operation": "add", "turn_diff": created},
+	}
+	evt := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Input:    map[string]any{"command": "apply_patch <<'PATCH'\n*** End Patch\nPATCH"},
+		Output: map[string]any{
+			"stdout": "Applied patch to 2 file(s).\n", "stderr": "", "exit_code": 0,
+			"apply_patch": true, "files": files,
+		},
+	}
+	assertBody := func(body string) {
+		t.Helper()
+		if !strings.Contains(body, "Updated `a.txt` (+1 -1)") {
+			t.Fatalf("expected update header, got:\n%s", body)
+		}
+		if !strings.Contains(body, "Created `b.txt` (+2 -0)") {
+			t.Fatalf("expected create header, got:\n%s", body)
+		}
+		if !strings.Contains(body, "```diff") {
+			t.Fatalf("expected diff fence, got:\n%s", body)
+		}
+		if strings.Contains(body, "unified_diff") {
+			t.Fatalf("body must not replay the raw diff JSON, got:\n%s", body)
+		}
+		if strings.Contains(body, `"files"`) {
+			t.Fatalf("body must not replay the files JSON, got:\n%s", body)
+		}
+		if strings.Contains(body, "input:") {
+			t.Fatalf("apply_patch body must not show the input JSON, got:\n%s", body)
+		}
+		blocks, ok := ParseDiffBlocks(body)
+		if !ok || len(blocks.Files) != 2 {
+			t.Fatalf("ParseDiffBlocks = %+v ok=%v, want 2 files", blocks, ok)
+		}
+	}
+	body, trunc := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	if trunc {
+		t.Fatal("unexpected truncation")
+	}
+	assertBody(body)
+	// A replayed step carries the files as a plain JSON slice.
+	var replayed []any
+	b, err := json.Marshal(files)
+	if err != nil {
+		t.Fatalf("marshal files: %v", err)
+	}
+	if err := json.Unmarshal(b, &replayed); err != nil {
+		t.Fatalf("unmarshal files: %v", err)
+	}
+	replay := evt
+	replay.Output = map[string]any{
+		"stdout": "Applied patch to 2 file(s).\n", "stderr": "", "exit_code": 0,
+		"apply_patch": true, "files": replayed,
+	}
+	body, trunc = FormatToolStepResult(replay, DefaultMaxFormattedBody)
+	if trunc {
+		t.Fatal("unexpected truncation on replay")
+	}
+	assertBody(body)
+}
+
+func TestFormatToolStepResult_shellEditDiffNotes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		diff  ShellEditDiff
+		notes []string
+	}{
+		{"skipped", ShellEditDiff{Skipped: true}, []string{diffNoteSkipped}},
+		{"unavailable", ShellEditDiff{Unavailable: true, MoreFiles: 2}, []string{diffUnavailableNote(2)}},
+		{"shared", ShellEditDiff{Shared: true}, []string{diffNoteShared}},
+		{"full", ShellEditDiff{
+			Files: []ShellEditDiffFile{{
+				Path: "/repo/a.txt", DisplayPath: "a.txt", Status: "updated",
+				Added: 1, Deleted: 1, UnifiedDiff: "@@ -1 +1 @@\n-a\n+b\n",
+			}},
+			MoreFiles: 3, Unavailable: true, TreeMoved: true, Shared: true,
+		}, []string{
+			diffMoreFilesNote(true, 3, true),
+			diffNoteTreeMoved,
+			diffNoteShared,
+		}},
+	}
+	assertBody := func(t *testing.T, body string, notes []string, hasFiles bool) {
+		t.Helper()
+		lastDiff := strings.Index(body, "```diff")
+		for i, note := range notes {
+			idx := strings.Index(body, note)
+			if idx < 0 {
+				t.Fatalf("body missing note %q:\n%s", note, body)
+			}
+			if hasFiles && idx < lastDiff {
+				t.Fatalf("note %d appears before the diff block:\n%s", i, body)
+			}
+		}
+		blocks, ok := ParseDiffBlocks(body)
+		if !ok {
+			t.Fatalf("ParseDiffBlocks ok=false:\n%s", body)
+		}
+		if !reflect.DeepEqual(blocks.Notes, notes) {
+			t.Fatalf("parsed notes = %#v, want %#v", blocks.Notes, notes)
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			live := StepEvent{
+				Kind:     event.RunEventToolCompleted,
+				ToolName: "shell",
+				Output:   map[string]any{"stdout": "done\n", "exit_code": 0, "shell_edit_diff": tc.diff},
+			}
+			body, trunc := FormatToolStepResult(live, DefaultMaxFormattedBody)
+			if trunc {
+				t.Fatal("unexpected truncation")
+			}
+			assertBody(t, body, tc.notes, len(tc.diff.Files) > 0)
+			// A replayed step carries the diff as plain JSON.
+			encoded, err := json.Marshal(live.Output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var replayed map[string]any
+			if err := json.Unmarshal(encoded, &replayed); err != nil {
+				t.Fatal(err)
+			}
+			body, trunc = FormatToolStepResult(StepEvent{
+				Kind: event.RunEventToolCompleted, ToolName: "shell", Output: replayed,
+			}, DefaultMaxFormattedBody)
+			if trunc {
+				t.Fatal("unexpected truncation on replay")
+			}
+			assertBody(t, body, tc.notes, len(tc.diff.Files) > 0)
+		})
+	}
+}
+
 func TestFormatToolStepResult_editFileNoOpHasEmptyDisplayBody(t *testing.T) {
 	t.Parallel()
 	for _, turnDiff := range []any{
@@ -2426,6 +2575,37 @@ func TestFormatShellStepKeepsFirstLineIndent(t *testing.T) {
 	assertPayloadLinesShareColumn(t, stderrBody, "/api/chat/sessions", 3)
 }
 
+// A stdout or stderr line of ``` would close the three-backtick fence the
+// card wraps it in, and everything after it would read as Markdown. The fence
+// grows instead: the wrapper is longer than any backtick run inside.
+func TestFormatShellStepFencesOutputThatHasFences(t *testing.T) {
+	t.Parallel()
+	evt := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Input:    map[string]any{"command": "cat doc.md"},
+		Output:   map[string]any{"stdout": "a\n```\nb", "stderr": "w\n```\n````\nx", "exit_code": 0},
+	}
+	body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	want := "stdout:\n\n````text\n" +
+		"a\n" +
+		"```\n" +
+		"b\n" +
+		"````"
+	if !strings.Contains(body, want) {
+		t.Fatalf("stdout block did not wrap its own fence in a longer one:\n%q", body)
+	}
+	wantStderr := "stderr:\n\n`````text\n" +
+		"w\n" +
+		"```\n" +
+		"````\n" +
+		"x\n" +
+		"`````"
+	if !strings.Contains(body, wantStderr) {
+		t.Fatalf("stderr block did not out-grow its longest fence run:\n%q", body)
+	}
+}
+
 // Every multi-line payload that is drawn line by line hit the same TrimSpace
 // defect: only the first line lost its indent. One case per surface.
 func TestToolBodiesKeepFirstLineIndent(t *testing.T) {
@@ -2813,5 +2993,29 @@ func TestRejectionStopContractText(t *testing.T) {
 	const hidden = "Not run — the user refused a call in this response and stopped the turn."
 	if RejectionStoppedDisplayKey != hidden {
 		t.Fatalf("RejectionStoppedDisplayKey = %q, want %q", RejectionStoppedDisplayKey, hidden)
+	}
+}
+
+// A refused call's card shows the user's own words under the refusal; the
+// words must survive the step → ToolMeta persistence, and stay empty for
+// every call that was not refused.
+func TestBuildToolMetaKeepsTheRefusalWords(t *testing.T) {
+	t.Parallel()
+	input := map[string]any{"file_path": "/w/a.go"}
+	denied := DeniedToolStep("s1", "write_file", input, "复用 http_server.go")
+	if !denied.Denied {
+		t.Fatal("DeniedToolStep must mark the step denied")
+	}
+	if got := BuildToolMeta(denied).DenyFeedback; got != "复用 http_server.go" {
+		t.Fatalf("DenyFeedback = %q, want the user's words verbatim", got)
+	}
+	ran := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "write_file",
+		Input:    input,
+		Output:   map[string]any{"turn_diff": map[string]any{"path": "/w/a.go", "added": 1, "deleted": 0}},
+	}
+	if got := BuildToolMeta(ran).DenyFeedback; got != "" {
+		t.Fatalf("a call that ran carries no refusal words, got %q", got)
 	}
 }

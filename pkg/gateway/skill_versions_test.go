@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,6 +119,60 @@ func TestSkillVersionRoutesServeStatePublishDiffDownload(t *testing.T) {
 	s.handleSkillDraftDiscard(rr, versionRouteReq(http.MethodPost, "/api/skills/gateway-ops/draft/discard",
 		map[string]string{"name": "gateway-ops"}, ""))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+// TestSkillDiffServesOneFileWithItsLines covers the same route with path set:
+// the compare view's right pane asks for the selected file and gets its
+// unified diff, while the plain listing answer stays free of line text.
+func TestSkillDiffServesOneFileWithItsLines(t *testing.T) {
+	home := t.TempDir()
+	s, skillsRoot := newSkillVersionsServer(t, home)
+	skillDir := filepath.Join(skillsRoot, "gateway-ops")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: gateway-ops\ndescription: runbook\n---\n\nv1 body\n"), 0o644))
+	store := skill.VersionStore{Root: skillsRoot}
+	_, err := store.Bootstrap("gateway-ops", skill.VersionRecord{Kind: skill.VersionKindCreated})
+	require.NoError(t, err)
+	draft, err := store.EnsureDraft("gateway-ops")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(draft, "SKILL.md"),
+		[]byte("---\nname: gateway-ops\ndescription: runbook\n---\n\nv2 body\n"), 0o644))
+
+	// One file, with its lines.
+	rr := httptest.NewRecorder()
+	s.handleSkillDiff(rr, versionRouteReq(http.MethodGet, "/api/skills/gateway-ops/diff?from=v1&to=draft&path=SKILL.md",
+		map[string]string{"name": "gateway-ops"}, ""))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var one struct {
+		File struct {
+			Status      string `json:"status"`
+			Added       int    `json:"added"`
+			Removed     int    `json:"removed"`
+			UnifiedDiff string `json:"unified_diff"`
+		} `json:"file"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &one))
+	require.Equal(t, "modified", one.File.Status)
+	require.Equal(t, 1, one.File.Added)
+	require.Equal(t, 1, one.File.Removed)
+	require.Contains(t, one.File.UnifiedDiff, "-v1 body\n+v2 body\n")
+
+	// A file neither snapshot holds is a 404, not a bad request.
+	for _, path := range []string{"nope.md", "../x"} {
+		rr := httptest.NewRecorder()
+		s.handleSkillDiff(rr, versionRouteReq(http.MethodGet,
+			"/api/skills/gateway-ops/diff?from=v1&to=draft&path="+url.QueryEscape(path),
+			map[string]string{"name": "gateway-ops"}, ""))
+		require.Equal(t, http.StatusNotFound, rr.Code, path)
+	}
+
+	// Without path the answer is the file list, still without line text.
+	rr = httptest.NewRecorder()
+	s.handleSkillDiff(rr, versionRouteReq(http.MethodGet, "/api/skills/gateway-ops/diff?from=v1&to=draft",
+		map[string]string{"name": "gateway-ops"}, ""))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NotContains(t, rr.Body.String(), "unified_diff")
 }
 
 // TestSkillListCarriesVersionStateAndDraftRows pins the listing contract: a

@@ -750,23 +750,20 @@ type fakeSession struct {
 	recallSubagentCalls  int
 	interruptToSend      bool
 	interruptSentCalls   int
-	withdrawResult       []ComposerSubmission
-	withdrawOK           bool
-	withdrawCalls        int
 	discardSubagentCalls int
 	discardSubagentCount int
-	compactSubagentReply string
-	compactSubagentOK    bool
-	contextReportReply   string
-	contextReportOK      bool
-	subagentTokenStats   ComposerTokenStats
+	// subagentRunning answers SubagentRunning per agent key; an absent key
+	// reads as running, the state a view takes input in.
+	subagentRunning    map[string]bool
+	contextReportReply string
+	contextReportOK    bool
+	subagentTokenStats ComposerTokenStats
 }
 
 type subagentSendCall struct {
 	SessionID  string
 	AgentKey   string
 	Submission ComposerSubmission
-	FollowUp   bool
 }
 
 type recordingSelector struct {
@@ -1308,17 +1305,30 @@ func (f *fakeSession) enqueueFollowUp(sessionID string, submission ComposerSubmi
 // The subagent-conversation seams (plan 007). Each records the call and answers
 // with the canned value the test set.
 
-func (f *fakeSession) SendToSubagent(sessionID, agentKey string, submission ComposerSubmission, followUp bool) (runpkg.SubagentDelivery, error) {
+func (f *fakeSession) SendToSubagent(sessionID, agentKey string, submission ComposerSubmission) (runpkg.SubagentDelivery, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.subagentSent = append(f.subagentSent, subagentSendCall{SessionID: sessionID, AgentKey: agentKey, Submission: submission, FollowUp: followUp})
+	f.subagentSent = append(f.subagentSent, subagentSendCall{SessionID: sessionID, AgentKey: agentKey, Submission: submission})
 	if f.subagentSendErr != nil {
 		return "", f.subagentSendErr
 	}
 	if f.subagentDelivery == "" {
-		return runpkg.SubagentDeliveryStarted, nil
+		return runpkg.SubagentDeliverySteered, nil
 	}
 	return f.subagentDelivery, nil
+}
+
+func (f *fakeSession) SubagentRunning(_ string, agentKey string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	running, ok := f.subagentRunning[agentKey]
+	if !ok {
+		// A fixture that never says otherwise has a subagent at work: that is
+		// the state in which a view takes input, which is what the older tests
+		// assume.
+		return true
+	}
+	return running
 }
 
 func (f *fakeSession) SubagentInputPreview(_ string, _ string) ComposerPendingInputPreview {
@@ -1341,24 +1351,11 @@ func (f *fakeSession) InterruptSubagentToSend(_ string, _ string) bool {
 	return f.interruptToSend
 }
 
-func (f *fakeSession) WithdrawSubagentInput(_ string, _ string) ([]ComposerSubmission, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.withdrawCalls++
-	return f.withdrawResult, f.withdrawOK
-}
-
 func (f *fakeSession) DiscardSubagentInput(_ string, _ string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.discardSubagentCalls++
 	return f.discardSubagentCount
-}
-
-func (f *fakeSession) CompactSubagent(_ context.Context, _ string, _ string) (string, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.compactSubagentReply, f.compactSubagentOK
 }
 
 func (f *fakeSession) SubagentContextReport(_ string, _ string) (string, bool) {
@@ -5690,37 +5687,10 @@ func TestOpeningASubagentViewWithoutALiveBudgetSeedsPersistedStats(t *testing.T)
 	}
 }
 
-// Esc in a subagent's view takes back the message it just started, before the
-// subagent has answered (D1 step 1). It does not leave the view.
-func TestEscInASubagentViewWithdrawsTheMessageItJustStarted(t *testing.T) {
-	session := &fakeSession{withdrawOK: true, withdrawResult: []ComposerSubmission{mustComposerSubmission("hurry")}}
-	renderer := NewRenderer(nil, nil)
-	renderer.viewportMode = true
-	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
-	renderer.SetActiveView("task-b")
-	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
-
-	handleSubagentViewEsc(session, renderer, state, "task-b")
-
-	if session.withdrawCalls != 1 {
-		t.Fatalf("withdraw consulted %d times, want 1", session.withdrawCalls)
-	}
-	if state.composer.DraftText != "hurry" {
-		t.Fatalf("withdrawn message not restored: %q", state.composer.DraftText)
-	}
-	if !state.holdComposer {
-		t.Fatal("a restored draft must be held, not auto-submitted")
-	}
-	if renderer.ActiveView() != "task-b" {
-		t.Fatal("a withdrawal must not leave the subagent's view")
-	}
-	if session.interruptSentCalls != 0 {
-		t.Fatal("a withdrawal must not reach the interrupt-to-send step")
-	}
-}
-
-// With pending steers and no withdrawal window, Esc stops the subagent
-// precisely to send them now (D1 step 2).
+// With pending steers, Esc stops the subagent precisely to send them now (D1
+// step 2) — and that is the first thing Esc does in a subagent's view: a
+// message that has already left the composer is the subagent's to take, there
+// is no withdrawing it (plan 142).
 func TestEscInASubagentViewWithPendingSteersInterruptsAndSends(t *testing.T) {
 	session := &fakeSession{interruptToSend: true}
 	renderer := NewRenderer(nil, nil)
@@ -5731,9 +5701,6 @@ func TestEscInASubagentViewWithPendingSteersInterruptsAndSends(t *testing.T) {
 
 	handleSubagentViewEsc(session, renderer, state, "task-b")
 
-	if session.withdrawCalls != 1 {
-		t.Fatalf("withdraw must be tried first (%d calls)", session.withdrawCalls)
-	}
 	if !session.interruptToSend || session.interruptSentCalls != 1 {
 		t.Fatalf("interrupt-to-send calls = %d, want 1", session.interruptSentCalls)
 	}
@@ -5812,8 +5779,8 @@ func TestSubagentViewQueueAndRecallHotkeys(t *testing.T) {
 	drainInteractiveInputSeedQueue()
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
 		inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}, nil)
-	if len(session.subagentSent) != 1 || !session.subagentSent[0].FollowUp || session.subagentSent[0].Submission.Text != "one more" {
-		t.Fatalf("queue key sent %#v, want a follow-up of one more", session.subagentSent)
+	if len(session.subagentSent) != 1 || session.subagentSent[0].Submission.Text != "one more" {
+		t.Fatalf("queue key sent %#v, want the steer one more", session.subagentSent)
 	}
 	// The subagent's queue takes the text the same way the conversation's does,
 	// so it must empty the raw reader's buffer too — otherwise the queued
@@ -5867,12 +5834,12 @@ func TestIdleRecallTargetsTheSubagentViewsQueue(t *testing.T) {
 		t.Fatalf("recalled draft = %q, want the subagent's newest queued message", state.composer.DraftText)
 	}
 
-	// Tab still queues a follow-up on that subagent at idle.
+	// Tab still sends to that subagent — as the steer it now is.
 	state.composer.DraftText = "next thing"
 	state.composer.Cursor = len("next thing")
 	handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyQueueFollowUp)
-	if len(session.subagentSent) != 1 || !session.subagentSent[0].FollowUp || session.subagentSent[0].Submission.Text != "next thing" {
-		t.Fatalf("queue key sent %#v, want a follow-up of next thing", session.subagentSent)
+	if len(session.subagentSent) != 1 || session.subagentSent[0].Submission.Text != "next thing" {
+		t.Fatalf("queue key sent %#v, want the steer next thing", session.subagentSent)
 	}
 
 	// The conversation's own view is unchanged: recall reads the
@@ -5899,10 +5866,10 @@ func TestIdleRecallTargetsTheSubagentViewsQueue(t *testing.T) {
 }
 
 // Slash commands in a subagent's view follow the D4 table: /context reports the
-// subagent, a hidden command answers with one sentence, and /compact runs
-// against the subagent.
+// subagent, and a hidden command answers with one sentence — /compact among
+// them, since a subagent's own summary is not the user's to run (plan 142).
 func TestSubagentViewSlashCommandClasses(t *testing.T) {
-	session := &fakeSession{contextReportReply: "context of the subagent", compactSubagentOK: true}
+	session := &fakeSession{contextReportReply: "context of the subagent"}
 	renderer := NewRenderer(nil, nil)
 	renderer.viewportMode = true
 	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
@@ -5922,12 +5889,58 @@ func TestSubagentViewSlashCommandClasses(t *testing.T) {
 		t.Fatal("/context must render its report in the subagent's view")
 	}
 
+	// /compact is hidden there now: it answers with the one sentence that points
+	// back to the conversation instead of running.
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/compact")
+	if vm := renderer.ensurePerAgentVM("task-b"); vm == nil || !blockSays(vm.blocks, subagentViewMainOnlyReply) {
+		t.Fatal("/compact must answer as a conversation command in a subagent's view")
+	}
+
 	// A shell line is refused, with the draft kept.
 	state.composer.DraftText = ""
 	subagentViewLine(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "!echo hi")
 	if !strings.Contains(state.composer.DraftText, "!echo hi") {
 		t.Fatalf("a refused shell line must keep the draft: %q", state.composer.DraftText)
 	}
+}
+
+// A skill command typed in a subagent's view goes to that subagent with its
+// skill selected. The command registry lists skills alongside the built-ins,
+// so finding a name is not what tells the two apart: a real, registered skill
+// once fell through to "Run this from the main view".
+func TestSubagentViewSendsARegisteredSkillCommandToTheSubagent(t *testing.T) {
+	registerTUISkill(t, "probe-skill")
+	session := &fakeSession{streamSlashReply: map[string]SlashOutcome{
+		"/probe-skill tighten it": {ShouldContinueRun: true, ContinueInput: "use probe-skill: tighten it", SkillName: "probe-skill", SkillPath: "/skills/probe-skill/SKILL.md"},
+	}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/probe-skill tighten it")
+
+	if len(session.subagentSent) != 1 {
+		t.Fatalf("sent to the subagent %d times, want once", len(session.subagentSent))
+	}
+	sent := session.subagentSent[0]
+	if sent.AgentKey != "task-b" || sent.Submission.SkillName != "probe-skill" || sent.Submission.SkillPath != "/skills/probe-skill/SKILL.md" {
+		t.Fatalf("sent %+v, want the skill selected for task-b", sent)
+	}
+	if vm := renderer.ensurePerAgentVM("task-b"); vm != nil && blockSays(vm.blocks, subagentViewMainOnlyReply) {
+		t.Fatal("the skill command was answered as a main-view command")
+	}
+}
+
+// blockSays reports whether any frame drawn in a view carries text.
+func blockSays(blocks []*viewBlock, text string) bool {
+	for _, b := range blocks {
+		if b != nil && strings.Contains(b.frame.Content, text) {
+			return true
+		}
+	}
+	return false
 }
 
 // The subagent's own footer shows its own N%/window, from its own budget,
@@ -5999,9 +6012,10 @@ func TestDeliveredSteerIsDrawnInTheSubagentsView(t *testing.T) {
 	}
 }
 
-// Input the subagent's queue gives back at a boundary goes into that subagent's
-// composer when its view is on screen, and is kept for its view otherwise.
-func TestRestoredInputGoesBackToItsOwnViewsComposer(t *testing.T) {
+// Input an execution of the subagent never took goes into the conversation's
+// composer — the one place the user can still do something with it — and the
+// subagent's view says where it went.
+func TestReturnedSubagentInputGoesToTheMainComposer(t *testing.T) {
 	session := &fakeSession{}
 	renderer := NewRenderer(nil, nil)
 	renderer.viewportMode = true
@@ -6009,35 +6023,148 @@ func TestRestoredInputGoesBackToItsOwnViewsComposer(t *testing.T) {
 	renderer.SetActiveView("task-b")
 	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
 
-	handleSubagentInputBoundaryMsg(session, renderer, state, SubagentInputBoundaryMsg{
+	handleSubagentInputReturnedMsg(renderer, state, SubagentInputReturnedMsg{
 		AgentKey: "task-b",
-		Restore:  []ComposerSubmission{mustComposerSubmission("try again")},
+		Returned: []ComposerSubmission{mustComposerSubmission("try again")},
 	})
-	if state.composer.DraftText != "try again" {
-		t.Fatalf("restored draft = %q, want try again", state.composer.DraftText)
+	// The subagent's view is on screen: the text waits in the conversation's
+	// own draft, which is empty here, and the view says so.
+	if got := state.viewDrafts[""].DraftText; got != "try again" {
+		t.Fatalf("main composer draft = %q, want try again", got)
+	}
+	if vm := renderer.ensurePerAgentVM("task-b"); vm == nil || !blockSays(vm.blocks, subagentUnsentReply) {
+		t.Fatal("the subagent's view must say where the unsent text went")
 	}
 
-	// The view is not on screen: the input waits in its own view's draft.
-	offscreen := &streamState{sessionID: "conv", session: session}
+	// The conversation's view is on screen: the text joins the draft there.
+	main := &streamState{sessionID: "conv", session: session}
 	renderer.SetActiveView("")
-	offscreen.syncComposerToView(renderer)
-	handleSubagentInputBoundaryMsg(session, renderer, offscreen, SubagentInputBoundaryMsg{
+	main.syncComposerToView(renderer)
+	main.composer.DraftText = "typed meanwhile"
+	main.composer.Cursor = len("typed meanwhile")
+	handleSubagentInputReturnedMsg(renderer, main, SubagentInputReturnedMsg{
 		AgentKey: "task-b",
-		Restore:  []ComposerSubmission{mustComposerSubmission("later")},
+		Returned: []ComposerSubmission{mustComposerSubmission("later")},
 	})
-	if offscreen.viewDrafts["task-b"].DraftText != "later" {
-		t.Fatalf("off-screen restore = %#v, want later", offscreen.viewDrafts["task-b"])
+	if !strings.Contains(main.composer.DraftText, "later") || !strings.Contains(main.composer.DraftText, "typed meanwhile") {
+		t.Fatalf("main draft = %q, want the returned text before what the user typed", main.composer.DraftText)
+	}
+	if len(session.subagentSent) != 0 {
+		t.Fatalf("the returned text was sent somewhere: %#v", session.subagentSent)
+	}
+}
+
+// A message the subagent finished before it could take is not lost and is not
+// an error the user has to read: it moves to the conversation's composer.
+func TestSendRefusedBecauseTheSubagentEndedMovesTheTextToTheMainComposer(t *testing.T) {
+	session := &fakeSession{subagentSendErr: runpkg.ErrSubagentNotRunning}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	sendSubagentViewSubmission(context.Background(), session, renderer, state, "task-b", mustComposerSubmission("too late"))
+
+	if state.composer.DraftText != "" {
+		t.Fatalf("the subagent's composer kept %q", state.composer.DraftText)
+	}
+	if got := state.viewDrafts[""].DraftText; got != "too late" {
+		t.Fatalf("main composer draft = %q, want too late", got)
+	}
+	if vm := renderer.ensurePerAgentVM("task-b"); vm != nil && blockSays(vm.blocks, "Could not send this to the subagent") {
+		t.Fatal("a finished subagent must not answer with a send failure")
+	}
+}
+
+// A subagent's view takes input only while that subagent has an execution
+// running (owner, 2026-10-26): idle, it draws no input box, no caret, and the
+// footer that says which subagent it is and how to leave it stays.
+func TestIdleSubagentViewHasNoInputBox(t *testing.T) {
+	session := &fakeSession{subagentRunning: map[string]bool{"task-b": false}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	t.Cleanup(func() { composerReadOnly.Store(false) })
+
+	renderComposerWithState(renderer, state)
+	if !composerReadOnly.Load() {
+		t.Fatal("an idle subagent's view must take no edits")
+	}
+	block := renderer.buildComposerBlock(renderer.composerState, 100)
+	if block.cursorRow != -1 {
+		t.Fatalf("idle composer cursorRow = %d, want no caret", block.cursorRow)
+	}
+	lines := stripANSI(strings.Join(block.lines, "\n"))
+	if !strings.Contains(lines, "viewing") {
+		t.Fatalf("idle composer = %q, want the subagent's footer", lines)
+	}
+	if strings.Contains(lines, "─") || strings.Contains(lines, composerPromptMarker) {
+		t.Fatalf("idle composer still draws an input box: %q", lines)
 	}
 
-	// A Send at the boundary starts the subagent's next execution.
-	session = &fakeSession{}
-	state = &streamState{sessionID: "conv", session: session, composerView: "task-b"}
-	handleSubagentInputBoundaryMsg(session, renderer, state, SubagentInputBoundaryMsg{
-		AgentKey: "task-b",
-		Send:     []ComposerSubmission{mustComposerSubmission("go on")},
-	})
-	if len(session.subagentSent) != 1 || session.subagentSent[0].Submission.Text != "go on" {
-		t.Fatalf("boundary send = %#v, want go on", session.subagentSent)
+	// The subagent starts working: the input box comes back, and so do edits.
+	session.mu.Lock()
+	session.subagentRunning["task-b"] = true
+	session.mu.Unlock()
+	renderComposerWithState(renderer, state)
+	if composerReadOnly.Load() {
+		t.Fatal("a running subagent's view must take edits")
+	}
+	block = renderer.buildComposerBlock(renderer.composerState, 100)
+	if block.cursorRow < 0 {
+		t.Fatal("a running subagent's view must have a caret again")
+	}
+	if joined := stripANSI(strings.Join(block.lines, "\n")); !strings.Contains(joined, "─") || !strings.Contains(joined, composerPromptMarker) {
+		t.Fatalf("running composer = %q, want its input box back", joined)
+	}
+}
+
+// The follow-up key sends in a subagent's view: with no execution to queue
+// behind, both send keys mean "steer the one that is running" (plan 142).
+func TestFollowUpKeyInASubagentViewSendsASteer(t *testing.T) {
+	session := &fakeSession{}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	state.composer.Text = "switch approach"
+	state.composer.DraftText = "switch approach"
+	state.composer.Cursor = len("switch approach")
+	drainInteractiveInputSeedQueue()
+
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
+		inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}, nil)
+
+	if len(session.subagentSent) != 1 {
+		t.Fatalf("SendToSubagent calls = %d, want 1", len(session.subagentSent))
+	}
+	if got := session.subagentSent[0]; got.AgentKey != "task-b" || got.Submission.Text != "switch approach" {
+		t.Fatalf("sent %#v, want the steer switch approach", got)
+	}
+}
+
+// A subagent's wait for a usage limit cannot be typed out of — its view has no
+// input box while that execution is stopped — so its line offers only Esc.
+func TestAutoContinueNoticeInASubagentViewSaysEscOnly(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	state := &streamState{sessionID: "s1", session: &fakeSession{}}
+	at := time.Now().Add(time.Hour)
+	state.setAutoContinue("", &autoContinueView{sessionID: "s1", continueAt: at, code: string(llm.ExplainRateLimitQuota)})
+	state.setAutoContinue("task-b", &autoContinueView{sessionID: "s1", continueAt: at, code: string(llm.ExplainRateLimitQuota)})
+
+	state.announceAutoContinue(renderer)
+
+	if got := statusLinesFor(renderer, ""); !strings.HasSuffix(got, "· esc or type to cancel") {
+		t.Fatalf("conversation notice = %q, want typing to cancel it", got)
+	}
+	if got := statusLinesFor(renderer, "task-b"); !strings.HasSuffix(got, "· esc to cancel") || strings.Contains(got, "type to cancel") {
+		t.Fatalf("subagent notice = %q, want Esc alone", got)
 	}
 }
 

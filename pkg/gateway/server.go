@@ -366,6 +366,11 @@ func gatewayToolMetaPayload(meta tool.ToolMeta) map[string]any {
 	if meta.SubagentCall != nil {
 		out["subagent_call"] = meta.SubagentCall
 	}
+	// The refusal's own words, for the card that shows the refusal (plan 135);
+	// they ride the same meta the history rows carry.
+	if v := strings.TrimSpace(meta.DenyFeedback); v != "" {
+		out["deny_feedback"] = v
+	}
 	if v := strings.TrimSpace(meta.AgentID); v != "" {
 		out["agent_id"] = v
 	}
@@ -460,6 +465,15 @@ func gatewayToolCompletedStepData(stepID, description, toolName string, output m
 	}
 	if toolMeta := gatewayToolMetaPayload(meta); len(toolMeta) > 0 {
 		data["tool_meta"] = toolMeta
+	}
+	// A shell card's facts ride its own body, read back by the engine, so the
+	// page draws them without parsing Markdown (plan 135); an edit's turn
+	// diff rides the same way.
+	if card := shellCardFor(toolName, displayBody); card != nil {
+		data["shell_card"] = card
+	}
+	if diff := fileDiffFor(toolName, displayBody); diff != nil {
+		data["file_diff"] = diff
 	}
 	return data
 }
@@ -2135,7 +2149,8 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 								Data: withStepHeader(withStepSummary(
 									gatewayToolStartedStepData(stepID, fmt.Sprintf("tool %s", evt.ToolName), evt.ToolName, evt.Input, meta),
 									tool.SummarizeToolStep(evt),
-								), toolHeaderFor(s.sessionDisplayRoot(stepCtx, sid), evt.ToolName, tool.SummarizeToolStep(evt), "", meta, false, 0)),
+								), toolHeaderFor(s.sessionDisplayRoot(stepCtx, sid), evt.ToolName, tool.SummarizeToolStep(evt), "", meta, false, 0),
+									toolHeaderPartsFor(s.sessionDisplayRoot(stepCtx, sid), evt.ToolName, tool.SummarizeToolStep(evt), "", meta, false, 0)),
 							})
 							return
 						}
@@ -2168,7 +2183,8 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 										rendered.ToolMeta,
 									),
 									tool.SummarizeToolStep(evt),
-								), toolHeaderFor(s.sessionDisplayRoot(stepCtx, sid), evt.ToolName, tool.SummarizeToolStep(evt), rendered.DisplayBody, rendered.ToolMeta, true, evt.Duration)),
+								), toolHeaderFor(s.sessionDisplayRoot(stepCtx, sid), evt.ToolName, tool.SummarizeToolStep(evt), rendered.DisplayBody, rendered.ToolMeta, true, evt.Duration),
+									toolHeaderPartsFor(s.sessionDisplayRoot(stepCtx, sid), evt.ToolName, tool.SummarizeToolStep(evt), rendered.DisplayBody, rendered.ToolMeta, true, evt.Duration)),
 							})
 							return
 						}

@@ -180,6 +180,7 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 				RunID:                 end.RunID,
 				Origin:                turn.Origin{Surface: turn.SurfaceWebChat},
 				Err:                   end.Err,
+				AwaitedByDispatcher:   end.AwaitedByDispatcher,
 			})
 		},
 	}

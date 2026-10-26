@@ -1123,6 +1123,12 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 							pasteBuf.Reset()
 							collectingPaste = false
 							pasteBurst.clearAfterExplicitPaste()
+							// A read-only composer takes no paste either; the
+							// bytes are still consumed, so nothing of the
+							// sequence leaks into the next keystroke.
+							if composerReadOnly.Load() {
+								continue
+							}
 							if content != "" {
 								// A paste replaces a selection: the selected text
 								// leaves first, and the main loop merges the
@@ -1247,7 +1253,7 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 							}
 							if direction := historyBrowseDirection(pendingEscape); direction != 0 {
 								pendingEscape = pendingEscape[:0]
-								if slashOverlayActive.Load() || mentionOverlayActive.Load() || agentRosterFocused.Load() || uiPanelActive.Load() {
+								if slashOverlayActive.Load() || mentionOverlayActive.Load() || agentRosterFocused.Load() || uiPanelActive.Load() || composerReadOnly.Load() {
 									if direction < 0 {
 										ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyOverlayUp}
 									} else {
@@ -1395,6 +1401,13 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 					}
 					if len(pendingUTF8) > 0 && b < 0x80 {
 						pendingUTF8 = pendingUTF8[:0]
+					}
+					if composerReadOnly.Load() && b != 0x1b && b != 0x03 {
+						// Nothing typed reaches a read-only composer, and nothing
+						// typed shows up in it either: the bytes are dropped before
+						// they can join the line buffer or a pending escape.
+						pendingUTF8 = pendingUTF8[:0]
+						continue
 					}
 					if uiPanelActive.Load() && b != 0x1b && b != 0x03 && b != '\t' {
 						// A slash panel is the key target: Enter confirms its
@@ -2499,6 +2512,13 @@ func nextLargePastePlaceholderForCount(count int, existing []PendingPaste) strin
 	}
 	return fmt.Sprintf("%s #%d", base, maxSuffix+1)
 }
+
+// composerReadOnly marks the composer as taking no input: a subagent's view
+// while that subagent is idle, where there is no input box to type into. The raw
+// reader accepts no edits then — a character typed there would otherwise appear
+// in a composer the user cannot see — and only Esc and Ctrl+C get through, which
+// are the keys that leave or stop things.
+var composerReadOnly atomic.Bool
 
 // uiPanelActive marks the main-loop-owned panel (slash /status, /mcp) as the
 // current key target while it is open: the raw reader forwards arrows, tab

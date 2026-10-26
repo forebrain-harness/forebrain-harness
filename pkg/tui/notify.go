@@ -471,14 +471,14 @@ type SubagentInputDeliveredMsg struct {
 	Text    string
 }
 
-// SubagentInputBoundaryMsg is what a subagent's queue decided when one of its
-// executions ended. Send is the queued input to run next, as one message the
-// surface hands back to SendToSubagent; Restore is the input to give back to
-// that subagent's composer. At most one is non-empty.
-type SubagentInputBoundaryMsg struct {
+// SubagentInputReturnedMsg carries what an execution of a subagent ended
+// without taking: every message the user sent it that it never read, in the
+// order they were written. The subagent is idle then and takes no messages, so
+// the surface gives them back to the user — in the conversation's composer,
+// where the user decides whether to tell the dispatching agent about them.
+type SubagentInputReturnedMsg struct {
 	AgentKey string
-	Send     []ComposerSubmission
-	Restore  []ComposerSubmission
+	Returned []ComposerSubmission
 }
 
 // SubagentQueueChangedMsg reports that a subagent's input queue changed on the
@@ -1685,6 +1685,7 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 				RunID:                 end.RunID,
 				Origin:                turn.Origin{Surface: turn.SurfaceTUI},
 				Err:                   end.Err,
+				AwaitedByDispatcher:   end.AwaitedByDispatcher,
 			})
 		},
 	}
@@ -1841,11 +1842,14 @@ type Session interface {
 	// so it outlives any one turn.
 	SurfaceInputQueue(sessionID string) *run.InputQueue
 	// SendToSubagent hands what the user typed in a subagent's own view to that
-	// subagent: it starts its next execution when the subagent is idle, and
-	// reaches it at its next tool boundary (or waits for the execution after
-	// it) when it is running. followUp forces the queued lane while a run is in
-	// flight.
-	SendToSubagent(sessionID, agentKey string, submission ComposerSubmission, followUp bool) (run.SubagentDelivery, error)
+	// subagent as a steer: it reaches the running execution at its next tool
+	// boundary. An idle subagent refuses it with run.ErrSubagentNotRunning —
+	// its view only exists while it works.
+	SendToSubagent(sessionID, agentKey string, submission ComposerSubmission) (run.SubagentDelivery, error)
+	// SubagentRunning reports whether this subagent has an execution in flight,
+	// the one definition of "running" for a subagent. A subagent's view asks it
+	// on every paint: an idle subagent has no composer.
+	SubagentRunning(sessionID, agentKey string) bool
 	// SubagentInputPreview is the subagent's queued input as its own view shows it.
 	SubagentInputPreview(sessionID, agentKey string) ComposerPendingInputPreview
 	// RecallSubagentInput pulls the subagent's newest queued message back out
@@ -1855,16 +1859,10 @@ type Session interface {
 	// steers queued behind it (Esc's second meaning in its view); false when
 	// there is nothing to flush.
 	InterruptSubagentToSend(sessionID, agentKey string) bool
-	// WithdrawSubagentInput takes a just-sent message back before the subagent
-	// answered, returning it plus everything queued after it.
-	WithdrawSubagentInput(sessionID, agentKey string) ([]ComposerSubmission, bool)
 	// DiscardSubagentInput empties the subagent's queued input and returns how
 	// many messages were dropped, the way the conversation's own queue is
 	// discarded when its conversation is left.
 	DiscardSubagentInput(sessionID, agentKey string) int
-	// CompactSubagent compacts the subagent's own worker context from its view;
-	// it refuses while the subagent is running.
-	CompactSubagent(ctx context.Context, sessionID, agentKey string) (string, bool)
 	// SubagentContextReport answers /context for the subagent whose view it is
 	// run from.
 	SubagentContextReport(sessionID, agentKey string) (string, bool)
@@ -2343,8 +2341,9 @@ func (s *streamState) announceAutoContinue(renderer *Renderer) {
 		}
 		entry.announced = true
 		renderer.RenderFrame(Frame{
-			Kind:    FrameStatus,
-			Title:   autoContinueTranscriptText(entry.code, entry.continueAt, time.Now()),
+			Kind: FrameStatus,
+			// Only the conversation's own view can be cancelled by typing.
+			Title:   autoContinueTranscriptText(entry.code, entry.continueAt, time.Now(), strings.TrimSpace(view) == ""),
 			AgentID: strings.TrimSpace(view),
 			Final:   true,
 		})
@@ -2443,9 +2442,16 @@ func autoContinueHeadline(code string) string {
 	return "Usage limit reached"
 }
 
-// autoContinueTranscriptText is the line the transcript keeps.
-func autoContinueTranscriptText(code string, at, now time.Time) string {
-	return autoContinueHeadline(code) + " · continuing automatically at " + autoContinueClock(at, now) + " · esc or type to cancel"
+// autoContinueTranscriptText is the line the transcript keeps. typingCancels
+// says whether typing would cancel the wait, which is true only where there is
+// an input box to type into: a subagent's view has one only while that subagent
+// is running, and an execution waiting out a usage limit is not running.
+func autoContinueTranscriptText(code string, at, now time.Time, typingCancels bool) string {
+	hint := " · esc to cancel"
+	if typingCancels {
+		hint = " · esc or type to cancel"
+	}
+	return autoContinueHeadline(code) + " · continuing automatically at " + autoContinueClock(at, now) + hint
 }
 
 func autoContinueUnavailableText(detail string) string {

@@ -1,9 +1,17 @@
 <template>
-  <div class="forebrain-subagent-call-card overflow-hidden rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]" data-testid="subagent-call-card">
-    <div class="flex w-full items-center gap-2.5 px-3 py-2 text-left">
-      <Loader2 v-if="running" class="size-4 shrink-0 animate-spin text-[var(--forebrain-brand-1)]" aria-hidden="true" />
-      <Bot v-else class="size-4 shrink-0" :class="failed ? 'text-[var(--forebrain-danger)]' : 'text-[var(--forebrain-brand-1)]'" aria-hidden="true" />
-      <span class="min-w-0 flex-1 text-[13px] font-semibold leading-snug text-[var(--forebrain-text)]">{{ header }}</span>
+  <div
+    class="forebrain-subagent-call-card"
+    :class="onLine ? 'sa-card--on-line overflow-visible' : 'overflow-hidden rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]'"
+    data-testid="subagent-call-card"
+  >
+    <!-- On the activity line the head carries no box and no icon of its own:
+         the line's node is the card's mark (owner 2026-10-25), so the spinner
+         and the robot are drawn only off the line. -->
+    <div class="sa-hd flex w-full items-center gap-2.5 text-left" :class="onLine ? 'py-1.5' : 'px-3 py-2'">
+      <Loader2 v-if="!onLine && running" class="size-4 shrink-0 animate-spin text-[var(--forebrain-brand-1)]" aria-hidden="true" />
+      <Bot v-else-if="!onLine" class="size-4 shrink-0" :class="failed ? 'text-[var(--forebrain-danger)]' : 'text-[var(--forebrain-brand-1)]'" aria-hidden="true" />
+      <span class="min-w-0 flex-1 truncate text-[13px] font-semibold leading-snug text-[var(--forebrain-text)]"
+        v-tip:top.trunc="header">{{ header }}</span>
       <span v-if="view.headerDuration" class="shrink-0 text-xs tabular-nums text-[var(--forebrain-muted-text)]">{{ view.headerDuration }}</span>
     </div>
     <p v-if="view.callError" class="whitespace-pre-wrap px-3 pb-2 pl-9 text-xs leading-relaxed text-[var(--forebrain-danger)]">{{ view.callError }}</p>
@@ -65,10 +73,16 @@ const props = withDefaults(defineProps<{
   now?: number
   /** The subagent its drawer has in front: that task's row is marked as here. */
   activeAgentId?: string
+  /**
+   * Whether the card hangs on the activity line (the default): the head then
+   * carries no box of its own and the robot lives on the line's node.
+   */
+  onLine?: boolean
 }>(), {
   live: undefined,
   now: undefined,
   activeAgentId: '',
+  onLine: true,
 })
 
 const emit = defineEmits<{ (e: 'open', agentId: string): void }>()
@@ -161,5 +175,26 @@ function detailOf(row: SubagentCallRowView): string {
 .forebrain-subagent-row:focus-visible {
   outline: 2px solid var(--forebrain-brand-1);
   outline-offset: -2px;
+}
+
+/* On the activity line the row carries no box (prototype .al-run > .sa-card,
+   :441): the head is bare, everything it produced sits in one bordered,
+   10px-corner panel under it. */
+.sa-card--on-line {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sa-card--on-line > *:not(.sa-hd) {
+  margin-top: 2px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 10px;
+  background: var(--forebrain-page-bg);
+}
+
+/* The head's own inner top divider is the panel's border now. */
+.sa-card--on-line > *:not(.sa-hd) > .forebrain-subagent-row:first-child {
+  border-top: 0;
 }
 </style>

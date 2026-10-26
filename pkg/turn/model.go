@@ -158,7 +158,7 @@ const (
 	// catches a new command that does not.
 	SubagentViewUnset SubagentViewScope = ""
 	// SubagentViewActs acts on the subagent whose view it is typed in
-	// (/compact, /context), or, for a skill command, is sent to that subagent.
+	// (/context), or, for a skill command, is sent to that subagent.
 	SubagentViewActs SubagentViewScope = "acts"
 	// SubagentViewGlobal runs exactly as it does in the conversation's view.
 	SubagentViewGlobal SubagentViewScope = "global"
