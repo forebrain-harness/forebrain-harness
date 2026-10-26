@@ -146,7 +146,12 @@ func withoutStreaming(c streamRetryCounts, p streamRetryPolicy) streamDecision {
 	if !p.allowNonStreaming {
 		return failWith(c)
 	}
-	if c.triedWithoutStreaming && c.retries >= p.maxRetries {
+	if c.triedWithoutStreaming {
+		// The fallback is one attempt, not a mode. A non-streaming request has
+		// no idle watchdog (stream_watchdog skips it by design), so repeating
+		// the fallback multiplies a wait nothing bounds: every attempt gets its
+		// own NonStreamingTimeout. After the blind attempt failed, the error
+		// goes back to the caller instead.
 		return failWith(c)
 	}
 	c.retries = min(c.retries+1, p.maxRetries)

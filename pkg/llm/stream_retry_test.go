@@ -3,8 +3,10 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -421,6 +423,52 @@ func TestConnectionLostAtNothingSpendsTheBudgetThenFallsBack(t *testing.T) {
 	}
 	if !inner.nonStreaming[2] || inner.nonStreaming[0] || inner.nonStreaming[1] {
 		t.Fatalf("nonStreaming per call = %v, want [false false true]", inner.nonStreaming)
+	}
+}
+
+// After the fallback attempt fails, the next attempt streams again: a
+// non-streaming request has no watchdog, so staying on it multiplies a
+// 5-minute blind wait by the retry budget.
+func TestNonStreamingFallbackReturnsToStreamingAfterOneAttempt(t *testing.T) {
+	_, err, inner, _ := runStreamRetry(t, 10,
+		func(ctx context.Context) (*Result, error) {
+			return nil, &APIError{StatusCode: http.StatusNotFound} // picks the fallback
+		},
+		func(ctx context.Context) (*Result, error) {
+			return nil, fmt.Errorf("%w: %v", ErrNonStreamingTimeout, context.DeadlineExceeded)
+		},
+		func(ctx context.Context) (*Result, error) { return okResult("streamed again") },
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v (a streaming attempt after the fallback should succeed)", err)
+	}
+	want := []bool{false, true, false}
+	if !reflect.DeepEqual(inner.nonStreaming, want) {
+		t.Fatalf("non-streaming per attempt = %v, want %v", inner.nonStreaming, want)
+	}
+}
+
+// Even when everything fails, there is only one non-streaming blind wait:
+// the decision table never asks for the fallback twice.
+func TestRetryGivesUpAfterOneNonStreamingAttempt(t *testing.T) {
+	fail := func(ctx context.Context) (*Result, error) {
+		return nil, fmt.Errorf("%w: %v", ErrNonStreamingTimeout, context.DeadlineExceeded)
+	}
+	_, err, inner, _ := runStreamRetry(t, 10,
+		func(ctx context.Context) (*Result, error) {
+			return nil, &APIError{StatusCode: http.StatusNotFound}
+		}, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail)
+	if err == nil {
+		t.Fatal("every attempt failed: an error is expected")
+	}
+	n := 0
+	for _, nonStreaming := range inner.nonStreaming {
+		if nonStreaming {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("non-streaming attempts = %d, want exactly 1 (each one is a 5-minute blind wait)", n)
 	}
 }
 

@@ -148,6 +148,9 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 		attemptCtx := ctx
 		if nonStreaming {
 			attemptCtx = WithNonStreamingRequest(ctx)
+			// One attempt, not a mode: consumed here so the attempt after this
+			// one is streamed again — and back under the watchdog.
+			nonStreaming = false
 		}
 		result, err := r.inner.Execute(attemptCtx, messages, tools)
 		if err == nil {
