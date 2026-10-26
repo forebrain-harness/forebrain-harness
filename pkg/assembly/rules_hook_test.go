@@ -56,3 +56,17 @@ func TestRulesHookReadsWorkingDirFromContext(t *testing.T) {
 		t.Fatalf("rules injection read the process directory: %q", out.SystemAddendum)
 	}
 }
+
+// A rule file whose name starts with ".." is inside the working directory, so
+// the rules list names it relatively — the absolute path never reaches the
+// prompt for a file that lives in the project.
+func TestDisplayRulePathKeepsDotDotNamesRelative(t *testing.T) {
+	wd := t.TempDir()
+	path := filepath.Join(wd, "..env")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := displayRulePath(path, wd); got != "..env" {
+		t.Fatalf("displayRulePath(..env) = %q, want %q", got, "..env")
+	}
+}

@@ -1173,8 +1173,9 @@ func IsProtectedMetadataPath(path string) bool {
 }
 
 // isWithinDir reports whether absPath is a regular file located directly
-// inside dir (one level deep, no subdirectories, no ".." traversal). dir and
-// absPath must already be filepath.Clean'd.
+// inside dir (one level deep, no subdirectories, no ".." traversal — a
+// sibling whose *name* starts with ".." is not traversal). dir and absPath
+// must already be filepath.Clean'd.
 func isWithinDir(absPath, dir string) bool {
 	if absPath == "" || dir == "" {
 		return false
@@ -1186,7 +1187,8 @@ func isWithinDir(absPath, dir string) bool {
 	if rel == "." || rel == "" {
 		return false // the directory itself
 	}
-	if strings.HasPrefix(rel, "..") || strings.ContainsRune(rel, os.PathSeparator) {
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) ||
+		strings.ContainsRune(rel, os.PathSeparator) {
 		return false // escapes the dir or reaches into a subdirectory
 	}
 	return true

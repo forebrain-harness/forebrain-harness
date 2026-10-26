@@ -223,7 +223,8 @@ func (p *PreHook) buildRules(wd string) rulesBuild {
 func displayRulePath(path, wd string) string {
 	// resolvePath evals symlinks, so the comparison baseline matches the
 	// project root the walker produced (both may live behind /var → /private/var).
-	if rel, err := filepath.Rel(resolvePath(wd), resolvePath(path)); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, err := filepath.Rel(resolvePath(wd), resolvePath(path)); err == nil &&
+		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return filepath.ToSlash(rel)
 	}
 	return path

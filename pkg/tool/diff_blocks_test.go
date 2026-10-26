@@ -2,6 +2,7 @@ package tool
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -156,4 +157,18 @@ func TestDiffBlocksNoteTexts(t *testing.T) {
 		},
 	}
 	diffBlocksRoundTrip(t, blocks)
+}
+
+// A sibling whose name starts with ".." is still inside the directory: the
+// card names it relative to the project, like any other file there.
+func TestDisplayPathRelativeToKeepsDotDotNamesRelative(t *testing.T) {
+	dir := t.TempDir()
+	if got := displayPathRelativeTo(dir, filepath.Join(dir, "..env")); got != "..env" {
+		t.Fatalf("displayPathRelativeTo(..env) = %q, want %q", got, "..env")
+	}
+	// 真正的目录外仍然给绝对路径。
+	outside := filepath.Join(t.TempDir(), "other.txt")
+	if got := displayPathRelativeTo(dir, outside); got != outside {
+		t.Fatalf("displayPathRelativeTo(outside) = %q, want the absolute path %q", got, outside)
+	}
 }

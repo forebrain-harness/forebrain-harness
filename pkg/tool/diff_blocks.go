@@ -278,7 +278,7 @@ func displayPathRelativeTo(dir, abs string) string {
 	if dir == "" {
 		return abs
 	}
-	if rel, err := filepath.Rel(dir, abs); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, err := filepath.Rel(dir, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return rel
 	}
 	// The same directory can be spelled two ways when it sits behind a
@@ -286,7 +286,7 @@ func displayPathRelativeTo(dir, abs string) string {
 	// tree root but the caller's working directory stays logical). Resolve
 	// and retry once before falling back to the absolute path.
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != dir {
-		if rel, err := filepath.Rel(resolved, abs); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(resolved, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return rel
 		}
 	}

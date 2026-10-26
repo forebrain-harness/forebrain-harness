@@ -398,3 +398,16 @@ func TestCustomSubagentPolicyMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestIsWithinDirAcceptsDotDotNames(t *testing.T) {
+	dir := t.TempDir()
+	if !isWithinDir(filepath.Join(dir, "..idea.md"), dir) {
+		t.Fatal("a file named ..idea.md directly inside the plan directory is a sanctioned plan write")
+	}
+	if isWithinDir(filepath.Join(dir, "sub", "..idea.md"), dir) {
+		t.Fatal("a subdirectory must stay out")
+	}
+	if isWithinDir(dir, dir) {
+		t.Fatal("the directory itself is not a file inside it")
+	}
+}
