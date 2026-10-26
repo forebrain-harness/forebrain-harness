@@ -1,0 +1,136 @@
+{
+  "denied_with_words": {
+    "header": "Denied rm -rf vendor",
+    "header_parts": {
+      "action": "Denied",
+      "target": "rm -rf vendor"
+    },
+    "kind": "tool_call_completed",
+    "step_id": "step-deny-1",
+    "summary": "refused rm -rf vendor",
+    "tool_meta": {
+      "tool_name": "shell",
+      "status": "denied",
+      "purpose": "Run a shell command requested by the agent.",
+      "invocation": "rm -rf vendor",
+      "input": {
+        "command": "rm -rf vendor"
+      },
+      "deny_feedback": "use git clean instead"
+    },
+    "tool_name": "shell"
+  },
+  "file_edit": {
+    "display_body": "turn diff: `a.go` (+2/-1)\n\n```diff\n@@ -1 +1 @@\n-a\n+b\n```\n\n",
+    "duration_seconds": 0.4,
+    "file_diff": {
+      "path": "a.go",
+      "added": 2,
+      "deleted": 1,
+      "unified_diff": "@@ -1 +1 @@\n-a\n+b"
+    },
+    "header": "Edited a.go 0.4s",
+    "header_parts": {
+      "action": "Edited",
+      "target": "a.go",
+      "duration": "0.4s"
+    },
+    "kind": "tool_call_completed",
+    "step_id": "step-edit-a",
+    "summary": "edited a.go",
+    "tool_meta": {
+      "tool_name": "edit_file",
+      "status": "completed",
+      "purpose": "Apply an exact text replacement to a file.",
+      "invocation": "edit /w/a.go",
+      "input": {
+        "file_path": "/w/a.go"
+      }
+    },
+    "tool_name": "edit_file"
+  },
+  "shell_failed": {
+    "display_body": "**shell**\n\ninput:\n\n```json\n{\n  \"command\": \"make\"\n}\n```\n\nstdout:\n\n```text\npartial\n```\n\nstderr:\n\n```text\nno rule to make target 'x'\n```\n\noutput:\n\n```json\n{\n  \"exit_code\": 2\n}\n```",
+    "duration_seconds": 0.3,
+    "header": "Ran make 0.3s",
+    "header_parts": {
+      "action": "Ran",
+      "target": "make",
+      "duration": "0.3s"
+    },
+    "kind": "tool_call_completed",
+    "shell_card": {
+      "stdout": "partial",
+      "stderr": "no rule to make target 'x'",
+      "exit_code": 2
+    },
+    "step_id": "step-shell-fail",
+    "summary": "ran make",
+    "tool_meta": {
+      "tool_name": "shell",
+      "status": "completed",
+      "purpose": "Run a shell command requested by the agent.",
+      "invocation": "make",
+      "input": {
+        "command": "make"
+      }
+    },
+    "tool_name": "shell"
+  },
+  "shell_local": {
+    "display_body": "**shell**\n\ninput:\n\n```json\n{\n  \"command\": \"make\"\n}\n```\n\nstdout:\n\n```text\nhello\n```\n\noutput:\n\n```json\n{\n  \"exit_code\": 0\n}\n```",
+    "duration_seconds": 1.5,
+    "header": "Ran make 1.5s",
+    "header_parts": {
+      "action": "Ran",
+      "target": "make",
+      "duration": "1.5s"
+    },
+    "kind": "tool_call_completed",
+    "shell_card": {
+      "stdout": "hello",
+      "exit_code": 0
+    },
+    "step_id": "step-shell-ok",
+    "summary": "ran make",
+    "tool_meta": {
+      "tool_name": "shell",
+      "status": "completed",
+      "purpose": "Run a shell command requested by the agent.",
+      "invocation": "make",
+      "input": {
+        "command": "make"
+      }
+    },
+    "tool_name": "shell"
+  },
+  "shell_truncated": {
+    "display_body": "**shell**\n\ninput:\n\n```json\n{\n  \"command\": \"make\"\n}\n```\n\nstdout:\n\n```text\nx\n```\n\npreview truncated: stdout omitted 412000 bytes\n\noutput:\n\n```json\n{\n  \"exit_code\": 0,\n  \"retrieve_id\": 7,\n  \"stdout_omitted_bytes\": 412000\n}\n```",
+    "duration_seconds": 2,
+    "header": "Ran make 2.0s",
+    "header_parts": {
+      "action": "Ran",
+      "target": "make",
+      "duration": "2.0s"
+    },
+    "kind": "tool_call_completed",
+    "shell_card": {
+      "stdout": "x",
+      "exit_code": 0,
+      "stdout_omitted_bytes": 412000,
+      "retrieve_id": 7
+    },
+    "step_id": "step-shell-trunc",
+    "summary": "ran make",
+    "tool_meta": {
+      "tool_name": "shell",
+      "status": "completed",
+      "purpose": "Run a shell command requested by the agent.",
+      "invocation": "make",
+      "input": {
+        "command": "make"
+      }
+    },
+    "tool_name": "shell"
+  }
+}
