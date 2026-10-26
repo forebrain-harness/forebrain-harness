@@ -258,7 +258,10 @@ func (in ctxGoalContinuationInput) roundEnded(round int, err error) {
 		return
 	}
 	status := event.GoalStatusFailed
-	if errors.Is(err, context.Canceled) {
+	// A refusal without words is the user stopping the turn, the same way a
+	// cancel is (supervisor.settleRunError draws the same line): the round did
+	// not fail on its own.
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrTurnStoppedByRejection) {
 		status = event.GoalStatusInterrupted
 	}
 	in.endGoal(round, status, "", "")

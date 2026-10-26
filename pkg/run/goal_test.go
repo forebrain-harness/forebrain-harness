@@ -424,6 +424,7 @@ func TestGoalWhoseFirstRoundEndsEarlyIsRecordedEnded(t *testing.T) {
 	}{
 		{"cancelled", context.Canceled, event.GoalStatusInterrupted},
 		{"failed", errors.New("provider unreachable"), event.GoalStatusFailed},
+		{"refused without words", ErrTurnStoppedByRejection, event.GoalStatusInterrupted},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rt := openGoalRunStore(t)

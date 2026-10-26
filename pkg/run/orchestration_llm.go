@@ -562,6 +562,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				err = ctx.Err()
 			}
 			results := exec.abort(ctx)
+			// abort joined every call that was still in flight, so a refusal
+			// that landed while it waited is recorded now — and this is the
+			// only place left that can report it. Read it again: the value
+			// above is what decided to enter this branch, not what happened
+			// inside it.
+			refused = exec != nil && exec.dispatched() && exec.refusedStop()
 			prov := collector.result().Message
 			session = append(session, *prov)
 			noteResponseCompleted()
@@ -574,7 +580,9 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				// A streamed call the user refused without words: the stream was
 				// cancelled with the refusal as its cause, the queued calls read
 				// the not-run sentence, and the turn ends the way 129's refusal
-				// does — not as an ordinary cancellation.
+				// does — not as an ordinary cancellation. refused was re-read
+				// after abort joined the in-flight calls: the refusal can land
+				// inside that very wait.
 				return nil, ErrTurnStoppedByRejection
 			}
 			return nil, err

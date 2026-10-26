@@ -1104,6 +1104,62 @@ func TestRejectionAfterTheStreamEndsStillStopsTheTurn(t *testing.T) {
 	}
 }
 
+// A refusal without words can land inside the cancel settlement window: the
+// model call already returned its cancellation while the streamed call was
+// still waiting on its approval, so the refusal read that decided to settle
+// had already passed with refused=false. abort joins the in-flight call —
+// that wait is exactly where the refusal lands — so the settlement reads the
+// marker again after the join and the turn still ends on the refusal, not as
+// an ordinary cancellation.
+func TestRefusalRecordedWhileAbortJoinsStillStopsTheTurn(t *testing.T) {
+	const sid = "streamtools-refuse-in-abort-join"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	streamHookRunner(t, sid, st)
+	hook, gates := inlineGateHook()
+
+	gated, aRuns := streamHookTool(t, st, "gated_a", func(context.Context) (string, error) {
+		return "a ok", nil
+	})
+
+	streamReturned := make(chan struct{})
+	var g inlineGate
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("checking")
+			sink.OnTextBlockDone()
+			sink.OnToolCallReady(streamCall("call-a", "gated_a"))
+			// The streamed call started and is waiting on its approval.
+			g = waitInlineGate(t, gates, "streamed gated")
+			close(streamReturned)
+			// The stream dies as a plain cancellation while the gate is still
+			// open — the refusal has not landed yet.
+			return nil, context.Canceled
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	capture := NewPartialSessionCapture()
+	base := toolpkg.WithInlineApprovalHook(llm.WithAgentSessionID(toolpkg.WithRunID(context.Background(), runID), sid), hook)
+	execCtx := WithPartialSessionCapture(llm.WithStreamSink(base, streamTestSink()), capture)
+	// Let the settling loop walk past its first refusal read (the buggy one)
+	// before the refusal lands: it arrives while abort is joining the call.
+	go func() {
+		<-streamReturned
+		time.Sleep(300 * time.Millisecond)
+		answerInlineGate(g, "refuse")
+	}()
+	_, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{gated})
+	if !errors.Is(err, ErrTurnStoppedByRejection) {
+		t.Fatalf("execute err = %v, want ErrTurnStoppedByRejection", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", inner.calls)
+	}
+	if got := atomic.LoadInt32(aRuns); got != 0 {
+		t.Fatalf("refused call ran %d times, want 0", got)
+	}
+}
+
 // A gate asked in place does not stop the stream: the model keeps writing,
 // and a concurrency-safe sibling readied behind the gated call starts only
 // once the gated call is answered — an unsafe gated call blocks the queue.
