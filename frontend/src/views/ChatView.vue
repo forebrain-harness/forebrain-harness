@@ -170,7 +170,7 @@
                             <ActivityStep v-if="runIdx === firstLineRunIndexOf(msg) && planUpdateOf(msg)" node="todo">
                               <PlanUpdateCard :plan="planUpdateOf(msg)!" />
                             </ActivityStep>
-                            <template v-for="(block, blockIdx) in run.items" :key="`${msg.id ?? idx}-block-${blockIdx}`">
+                            <template v-for="(block, blockIdx) in run.items" :key="timelineBlockKey(block, blockIdx)">
                               <!-- The prototype's .think: a quiet row, the
                                    same card the subagent tab and the workshop
                                    draw, so a block reads the same wherever it
@@ -748,7 +748,7 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
+import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, timelineBlockKey, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { providePendingActions } from '@/composables/providePendingActions'
 import type { DocTab } from '@/composables/useDocTabs'

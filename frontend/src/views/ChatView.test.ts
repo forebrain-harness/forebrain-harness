@@ -10,6 +10,7 @@ import { forebrainApi, type ProjectRecord } from '@/lib/api'
 import { useTopbarContent } from '@/composables/useTopbar'
 import { persistLastSessionId } from '@/composables/useLastSession'
 import { useWorkbench } from '@/composables/useWorkbench'
+import type { TimelineBlock } from '@/composables/useChatStream'
 
 // The stream the component talks to, filled in by the module mock below and
 // driven by the test. useChatStream is the only module replaced: the
@@ -858,6 +859,55 @@ describe('ChatView conversation bubbles', () => {
       }
     })
   }
+})
+
+/**
+ * A card's open state lives in its own instance (`:default-open`, plan 161):
+ * the v-for key must come from the block, not its position, or a record
+ * inserted in the middle — the approval landing before the card it gates —
+ * hands the open card's instance to a different call.
+ */
+describe('ChatView timeline block keys', () => {
+  afterEach(() => {
+    ;(fake as { messages: { value: unknown[] } }).messages.value = []
+  })
+
+  it('keeps a card open when an approval record lands before it', async () => {
+    const tool = (stepId: string, header: string): TimelineBlock => ({
+      kind: 'tool',
+      step: { stepId, toolName: 'read_file', summary: '', header, status: 'done' },
+    })
+    const message = {
+      id: 'm1', role: 'assistant', content: '',
+      blocks: [tool('step-a', 'Read a.txt'), tool('step-b', 'Read b.txt')],
+    }
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [message]
+    // mountView 默认把 ToolCallCard stub 掉（stubs: { ToolCallCard: true }）——必须显式
+    // 关掉这个 stub 才有 .tool-card 可找；un-stub 的写法照抄同文件 `mountView({ SubagentTab: false })`。
+    const wrapper = await mountView({ ToolCallCard: false })
+    const cardOf = (header: string) => wrapper.findAll('.tool-card')
+      .find((card) => card.text().includes(header))!
+
+    // 展开 B。
+    await cardOf('Read b.txt').find('button').trigger('click')
+    expect(cardOf('Read b.txt').attributes('data-state')).toBe('open')
+
+    // 一条审批记录落到 A 前面：A 与 B 的下标都 +1。
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [{
+      ...message,
+      blocks: [
+        { kind: 'approval', id: 'act-1', actionId: 'act-1', actionKind: 'shell', status: 'allowed' } as TimelineBlock,
+        tool('step-a', 'Read a.txt'),
+        tool('step-b', 'Read b.txt'),
+      ],
+    }]
+    await nextTick()
+    await nextTick()
+
+    expect(cardOf('Read b.txt').attributes('data-state')).toBe('open')
+    expect(cardOf('Read a.txt').attributes('data-state')).toBe('closed')
+    wrapper.unmount()
+  })
 })
 
 /**

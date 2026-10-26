@@ -1374,6 +1374,21 @@ export function hasVisibleBlocks(blocks?: TimelineBlock[]): boolean {
 }
 
 /**
+ * timelineBlockKey is the v-for key of one block on the activity line. It must
+ * come from the block itself: a record inserted in the middle (an approval
+ * landing before the card it gates, upsertApprovalBlock) shifts every later
+ * block's index, and a positional key would then hand a card's component
+ * instance — its open state, the refusal draft in its footer — to a different
+ * card. A tool block is identified by its step id and every other kind by its
+ * own id; only a block that carries neither falls back to the position.
+ */
+export function timelineBlockKey(block: TimelineBlock, index: number): string {
+  if (block.kind === 'tool') return `tool:${block.step.stepId}`
+  if ('id' in block && block.id) return `${block.kind}:${block.id}`
+  return `${block.kind}-at-${index}`
+}
+
+/**
  * One block of a transcript, in the order it happened. One model serves the
  * conversation and every subagent, because they are the same thing: the
  * terminal retains frames in arrival order — thinking, text, and tool calls

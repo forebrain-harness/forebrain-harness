@@ -32,6 +32,7 @@ import {
   workedLineText,
   skillCardTitle,
   thinkingBlockLabel,
+  timelineBlockKey,
   toolStepFromPayload,
   toolStepFromRow,
   type ChatMessage,
@@ -4112,6 +4113,25 @@ describe('approval anchoring on the conversation timeline', () => {
       sessionEventsSpy.mockRestore()
       legacySpy.mockRestore()
     }
+  })
+})
+
+describe('timeline block key', () => {
+  it('follows the block, not its position', () => {
+    const tool = (stepId: string): TimelineBlock => ({
+      kind: 'tool',
+      step: { stepId, toolName: 'read_file', summary: stepId, status: 'done' },
+    })
+    const a = tool('step-a')
+    const b = tool('step-b')
+    // 同一个块在插入别的东西之后仍然给同一个 key。
+    expect(timelineBlockKey(a, 0)).toBe(timelineBlockKey(a, 3))
+    expect(timelineBlockKey(a, 0)).not.toBe(timelineBlockKey(b, 0))
+    // 带 id 的块同理。
+    const approval: TimelineBlock = { kind: 'approval', id: 'act-1', actionId: 'act-1', actionKind: 'shell', status: 'allowed' }
+    expect(timelineBlockKey(approval, 0)).toBe(timelineBlockKey(approval, 5))
+    // 两者的 id 都缺时只能退回位置（最后手段）。
+    expect(timelineBlockKey({ kind: 'assistant', text: 'x', open: false }, 2)).toBe('assistant-at-2')
   })
 })
 
