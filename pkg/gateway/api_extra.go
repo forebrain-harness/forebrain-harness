@@ -3344,6 +3344,23 @@ func (s *Server) handleSessionCostSummary(w http.ResponseWriter, r *http.Request
 	// requests' input and output, the cache split and its hit rate, and the
 	// tool calls made.
 	totals := turn.SessionUsageTotalsOf(usage)
+	// The latest turn's attempt ledger (plan 165 prototype): every physical
+	// model request its run made, failures and the settling attempt alike, so
+	// "how many times did this answer try" outlives the stream that showed it.
+	attempts := []state.LLMAttempt{}
+	if runID, aerr := s.RunRT.LatestPrimaryRunIDForSession(r.Context(), sid); aerr != nil {
+		http.Error(w, aerr.Error(), http.StatusInternalServerError)
+		return
+	} else if runID != "" {
+		rows, aerr := s.RunRT.ListLLMAttempts(r.Context(), runID, 200)
+		if aerr != nil {
+			http.Error(w, aerr.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(rows) > 0 {
+			attempts = rows
+		}
+	}
 	writeJSON(w, map[string]any{
 		"session_id":        sid,
 		"input_tokens":      totals.InputTokens,
@@ -3355,6 +3372,7 @@ func (s *Server) handleSessionCostSummary(w http.ResponseWriter, r *http.Request
 		"cache_hit_percent": totals.CacheHitPercent,
 		"tool_calls":        total,
 		"by_tool":           byTool,
+		"attempts":          attempts,
 	})
 }
 

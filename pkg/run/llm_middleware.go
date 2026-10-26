@@ -280,6 +280,7 @@ func WrapRecoverableLLM(
 	compactDeps *CompactChainDeps,
 	networkRetryMax int,
 	streamIdle time.Duration,
+	withLedger ...*llmAttemptLedger,
 ) llm.LLM {
 	if inner == nil {
 		return nil
@@ -293,7 +294,7 @@ func WrapRecoverableLLM(
 	// The network retry goes on last, i.e. outermost: it is the boundary a
 	// request first succeeds or dies on, and it owns the discard/retry
 	// notification every surface renders.
-	inner = wrapNetworkRetryLLM(inner, networkRetryMax, streamIdle)
+	inner = wrapNetworkRetryLLM(inner, networkRetryMax, streamIdle, withLedger...)
 	return recoverableLLM{
 		inner:       inner,
 		snapshot:    snapshot,
@@ -343,9 +344,13 @@ func streamProgressIsNothing(ctx context.Context) bool {
 // and reported as a dropped connection. 0 disables the watchdog. maxRetries
 // 0 disables the retry loop but keeps the wrapper — the watchdog still fires,
 // the stall simply surfaces as the call's error.
-func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int, streamIdle time.Duration) llm.LLM {
+func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int, streamIdle time.Duration, withLedger ...*llmAttemptLedger) llm.LLM {
 	if inner == nil {
 		return nil
+	}
+	var ledger *llmAttemptLedger
+	if len(withLedger) > 0 {
+		ledger = withLedger[0]
 	}
 	if maxRetries < 0 {
 		maxRetries = 0
@@ -364,6 +369,11 @@ func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int, streamIdle time.Duration
 			// park on, and the error surfaces instead.
 			llm.WithRetryAfter(llm.RetryAfterOf, 5*time.Minute),
 			llm.WithRetryNotify(func(ctx context.Context, tr llm.TransportRetry) {
+				// The attempt ledger reads the failure before anything else:
+				// a muted stream suppresses the cards, not the record.
+				if ledger != nil {
+					ledger.noteFailure(ctx, tr)
+				}
 				if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnTransportRetry != nil {
 					sink.OnTransportRetry(tr)
 				}
@@ -371,7 +381,7 @@ func wrapNetworkRetryLLM(inner llm.LLM, maxRetries int, streamIdle time.Duration
 		)
 		retryCore = llm.Use(inner, retryMW)
 	}
-	return networkRetryLLM{inner: retryCore, maxRetries: maxRetries, streamIdle: streamIdle}
+	return networkRetryLLM{inner: retryCore, maxRetries: maxRetries, streamIdle: streamIdle, ledger: ledger}
 }
 
 // networkRetryLLM arms the stream-stall watchdog on every call and rewrites
@@ -381,13 +391,19 @@ type networkRetryLLM struct {
 	inner      llm.LLM
 	maxRetries int
 	streamIdle time.Duration
+	// ledger, when set, records each physical attempt this boundary sees:
+	// failures as the retry loop announces them, and the settling attempt on
+	// return. Nil leaves the chain exactly as it was.
+	ledger *llmAttemptLedger
 }
 
 func (n networkRetryLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	if n.streamIdle > 0 {
 		ctx = llm.WithStreamWatchdog(ctx, n.streamIdle)
 	}
+	ctx = n.ledger.arm(ctx)
 	res, err := n.inner.Execute(ctx, messages, tools)
+	n.ledger.settle(ctx, res, err)
 	if err != nil && llm.IsPartialResponse(err) {
 		// The stream-retry layer already decided how this response ends;
 		// the orchestration above finishes it from what completed.

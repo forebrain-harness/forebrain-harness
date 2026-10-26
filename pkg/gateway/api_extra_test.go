@@ -4014,6 +4014,42 @@ func TestSessionCostSummaryReportsWhatTheSessionSpent(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "note")
 }
 
+// The cost summary carries the latest turn's attempt ledger (plan 165): what
+// the run tried, in the order it happened — the 503 with its wait, then the
+// attempt that answered.
+func TestSessionCostSummaryIncludesTheLatestRunAttempts(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	seedRun(t, s.RunRT, "s1", "r1")
+	input, output := int64(120), int64(30)
+	require.NoError(t, s.RunRT.InsertLLMAttempt(ctx, state.LLMAttempt{
+		RunID: "r1", Call: 1, Attempt: 1, Status: 503, Error: "model overloaded",
+		WaitMs: 1000, ElapsedMs: 240, Outcome: state.LLMAttemptFailed,
+	}))
+	require.NoError(t, s.RunRT.InsertLLMAttempt(ctx, state.LLMAttempt{
+		RunID: "r1", Call: 1, Attempt: 2, ElapsedMs: 1800,
+		InputTokens: &input, OutputTokens: &output, Outcome: state.LLMAttemptSuccess,
+	}))
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/cost-summary", nil, s.handleSessionCostSummary, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		Attempts []state.LLMAttempt `json:"attempts"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	if len(got.Attempts) != 2 {
+		t.Fatalf("attempts = %+v, want the failed try and the success", got.Attempts)
+	}
+	first, second := got.Attempts[0], got.Attempts[1]
+	if first.Attempt != 1 || first.Status != 503 || first.Outcome != state.LLMAttemptFailed || first.WaitMs != 1000 {
+		t.Fatalf("first attempt = %+v, want attempt 1 status 503 failed wait 1000", first)
+	}
+	if second.Attempt != 2 || second.Outcome != state.LLMAttemptSuccess || second.InputTokens == nil || *second.InputTokens != 120 {
+		t.Fatalf("second attempt = %+v, want attempt 2 success with the response's usage", second)
+	}
+}
+
 // lspControlDouble records the actions the /v1/lsp endpoints run and answers
 // a fixed snapshot.
 type lspControlDouble struct {

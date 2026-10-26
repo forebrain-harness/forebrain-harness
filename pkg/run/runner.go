@@ -1060,7 +1060,12 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if v := r.AppCfg.Agents.Defaults.NetworkRetryMax; v != nil && *v > appcfg.MaxNetworkRetryMax {
 		slog.Warn("agents.defaults.network_retry_max above the limit; running with the limit", "configured", *v, "limit", appcfg.MaxNetworkRetryMax)
 	}
-	summaryChain := wrapNetworkRetryLLM(withImageHeal(llmClient), networkRetryMax, r.AppCfg.Agents.Defaults.StreamIdleTimeout())
+	// One attempt ledger for both chains a Runner builds, so the conversation's
+	// requests and the compaction summary's number together under the run that
+	// made them (plan 165's vertical slice). Nil without a RunStore, leaving
+	// every record a no-op.
+	attemptLedger := newLLMAttemptLedger(r.RunRT)
+	summaryChain := wrapNetworkRetryLLM(withImageHeal(llmClient), networkRetryMax, r.AppCfg.Agents.Defaults.StreamIdleTimeout(), attemptLedger)
 	r.summaryLLM = summaryChain
 	// The reminder planModeLLM injects is not written here. It reaches the
 	// transcript through the run's own message sequence, which the orchestration
@@ -1146,6 +1151,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		compactDeps,
 		networkRetryMax,
 		r.AppCfg.Agents.Defaults.StreamIdleTimeout(),
+		attemptLedger,
 	)
 	// The dedup lives inside the wrapper this hands it to, which is rebuilt on
 	// every Load along with it, so the Runner has no reason to keep a

@@ -342,6 +342,34 @@ CREATE TABLE fb_run_waits (
 ) STRICT;
 CREATE INDEX idx_fb_run_waits_subagent_run ON fb_run_waits(subagent_run_id) WHERE subagent_run_id IS NOT NULL;
 
+-- One row per physical model request a run made: the attempt ledger behind
+-- "how many times did this answer try, and what did each one cost". A logical
+-- request (one pass through the network-retry wrapper) spans N physical
+-- attempts; call orders the logical requests, attempt the physical tries
+-- within one, and the two together name one row. Transport failures report no
+-- usage — the usage frame arrives with a response that never came — so the
+-- token columns are nullable rather than zero: NULL means "not reported",
+-- never an estimate. streaming is NULL where the run layer cannot observe it
+-- (see the prototype notes); status is the HTTP status, 0 for transport
+-- errors. The row follows its run: deleting the session or the run takes the
+-- ledger with it, the same cascade fb_runs already owns.
+CREATE TABLE fb_llm_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES fb_runs(id) ON DELETE CASCADE,
+  call INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  streaming INTEGER,
+  status INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  wait_ms INTEGER NOT NULL DEFAULT 0,
+  elapsed_ms INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failed', 'kept-partial', 'cancelled')),
+  created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_fb_llm_attempts_run ON fb_llm_attempts(run_id, id);
+
 CREATE TABLE fb_files (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,

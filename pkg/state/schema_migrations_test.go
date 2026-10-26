@@ -573,6 +573,94 @@ func TestStateV16UpgradesToV17AddsPermissionState(t *testing.T) {
 	}
 }
 
+// TestStateV17UpgradesToV18AddsLLMAttempts pins the table this version adds:
+// the attempt ledger. A database that predates it — modelled by dropping the
+// table from the current schema and lowering the version — gains it on the
+// next open, with the row shape the ledger writes. Nothing existing is
+// rewritten, and no backfill runs: runs that predate the ledger have no
+// attempt rows, which is the truth.
+func TestStateV17UpgradesToV18AddsLLMAttempts(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s','main','s',10,10,'/repo/s')`,
+		`DROP TABLE fb_llm_attempts`,
+		`PRAGMA user_version = 17`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v17 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	want := map[string]bool{"id": true, "run_id": true, "call": true, "attempt": true, "streaming": true,
+		"status": true, "error": true, "wait_ms": true, "elapsed_ms": true,
+		"input_tokens": true, "output_tokens": true, "outcome": true, "created_at_ms": true}
+	rows, err := migrated.QueryContext(ctx, `SELECT name FROM pragma_table_info('fb_llm_attempts')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		got[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("fb_llm_attempts columns = %v, want %v", got, want)
+	}
+	for name := range want {
+		if !got[name] {
+			t.Fatalf("fb_llm_attempts is missing column %q", name)
+		}
+	}
+	// The index reads a run's rows in the order they happened.
+	var idx int
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_fb_llm_attempts_run'`).Scan(&idx); err != nil || idx != 1 {
+		t.Fatalf("idx_fb_llm_attempts_run present = %d err=%v, want 1", idx, err)
+	}
+
+	// Old data survives untouched; the new table starts empty and writes.
+	var sessions int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE id='s'`).Scan(&sessions); err != nil || sessions != 1 {
+		t.Fatalf("sessions after upgrade = %d err=%v, want 1", sessions, err)
+	}
+	runs := &RunStore{DB: migrated}
+	if err := runs.InsertLLMAttempt(ctx, LLMAttempt{RunID: "no-such-run", Call: 1, Attempt: 1, Outcome: LLMAttemptFailed}); err == nil {
+		t.Fatal("insert with an unknown run id = accepted, want the foreign key to refuse it")
+	}
+	var rows18 int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_llm_attempts`).Scan(&rows18); err != nil || rows18 != 0 {
+		t.Fatalf("fb_llm_attempts after migration has %d rows err=%v, want 0 (no backfill)", rows18, err)
+	}
+}
+
 func TestStateV15UpgradesToV16AddsImageRefusals(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")

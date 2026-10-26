@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 17
+const stateSchemaVersion = 18
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -56,6 +56,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 15, apply: migrateStateV14ToV15},
 	{version: 16, apply: migrateStateV15ToV16},
 	{version: 17, apply: migrateStateV16ToV17},
+	{version: 18, apply: migrateStateV17ToV18},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -758,6 +759,37 @@ CREATE TABLE IF NOT EXISTS fb_session_permission_state (
   PRIMARY KEY (session_id)
 ) STRICT, WITHOUT ROWID`); err != nil {
 		return fmt.Errorf("create fb_session_permission_state: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV17ToV18 adds fb_llm_attempts, the attempt ledger: one row per
+// physical model request a run made. Pure addition — a database already at
+// v18 or a fixture built from the current schema.sql is untouched (CREATE
+// TABLE/INDEX IF NOT EXISTS), nothing existing is rewritten, and no backfill
+// runs: runs that predate the ledger have no attempt rows, which is the truth.
+func migrateStateV17ToV18(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_llm_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES fb_runs(id) ON DELETE CASCADE,
+  call INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  streaming INTEGER,
+  status INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  wait_ms INTEGER NOT NULL DEFAULT 0,
+  elapsed_ms INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failed', 'kept-partial', 'cancelled')),
+  created_at_ms INTEGER NOT NULL
+) STRICT`); err != nil {
+		return fmt.Errorf("create fb_llm_attempts: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_fb_llm_attempts_run ON fb_llm_attempts(run_id, id)`); err != nil {
+		return fmt.Errorf("create idx_fb_llm_attempts_run: %w", err)
 	}
 	return nil
 }
