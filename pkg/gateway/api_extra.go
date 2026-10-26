@@ -5659,6 +5659,41 @@ func providerEntryIdentity(item config.AgentLLMProviderConfig) string {
 	}, "\x00")
 }
 
+// storedKeyForRow is the key the stored list already carries for this request
+// row's models, matched by providerEntryIdentity — provider+model at one
+// endpoint. A second entry of the same provider at another endpoint therefore
+// never inherits the first one's key: the key the user typed for b.example is
+// the only one that may be sent there. Empty means "no stored entry for these
+// models at this endpoint", and the caller's own api_key validation refuses the
+// write rather than guessing; two stored keys that disagree for one row are the
+// same "do not guess".
+func storedKeyForRow(stored []config.AgentLLMProviderConfig, row providerPutRow, models []string) string {
+	byIdentity := make(map[string]string, len(stored))
+	for _, item := range stored {
+		if key := strings.TrimSpace(item.APIKey); key != "" {
+			byIdentity[providerEntryIdentity(item)] = key
+		}
+	}
+	key := ""
+	for _, model := range models {
+		want := providerEntryIdentity(config.AgentLLMProviderConfig{
+			Provider: strings.TrimSpace(row.Provider),
+			Model:    strings.TrimSpace(model),
+			BaseURL:  strings.TrimSpace(row.BaseURL),
+			APIPath:  strings.TrimSpace(row.APIPath),
+		})
+		got := byIdentity[want]
+		if got == "" {
+			continue
+		}
+		if key != "" && key != got {
+			return ""
+		}
+		key = got
+	}
+	return key
+}
+
 // providerListHasEntry reports whether the expanded list carries the
 // provider+model pair, matching the way the engine resolves a default.
 func providerListHasEntry(entries []config.AgentLLMProviderConfig, provider, model string) bool {
@@ -5922,17 +5957,10 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			cfg.Agents.Definitions = map[string]config.AgentDefinition{}
 		}
 		def := cfg.Agents.Definitions[active.ID]
-		// A key the request leaves empty is a key the user did not touch:
-		// carry the stored one for that provider forward instead of clearing
-		// it — the DTO never held the old value to send back.
-		oldKeyByProvider := map[string]string{}
-		for _, item := range def.LLMProviders {
-			if key := strings.TrimSpace(item.APIKey); key != "" {
-				if _, seen := oldKeyByProvider[strings.TrimSpace(item.Provider)]; !seen {
-					oldKeyByProvider[strings.TrimSpace(item.Provider)] = key
-				}
-			}
-		}
+		// The expanded list as it stands on disk: the base the merge below works
+		// on, and the source of the keys a request row without one carries
+		// forward (storedKeyForRow).
+		stored := config.ResolvedLLMConfigs(def)
 		entries := make([]config.AgentLLMProviderConfig, 0, len(req.Providers))
 		mergeRows := make([]providerMergeRow, 0, len(req.Providers))
 		for _, row := range req.Providers {
@@ -5969,7 +5997,10 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 				apiKey = strings.TrimSpace(*row.APIKey)
 				cleared = apiKey == ""
 			} else {
-				apiKey = oldKeyByProvider[strings.TrimSpace(row.Provider)]
+				// No key on the wire means the user did not touch it: carry the
+				// stored key of this entry — the same provider+model at this
+				// endpoint — never another endpoint's.
+				apiKey = storedKeyForRow(stored, row, models)
 			}
 			start := len(entries)
 			for _, model := range models {
@@ -5996,7 +6027,6 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		// stays an edit of that row. Without this, a page opened before some
 		// other surface appended a row would write its stale snapshot back
 		// and both rewind the order and swallow the new row.
-		stored := config.ResolvedLLMConfigs(def)
 		prevDefault := effectiveNonPlaceholderDefault(def)
 		prevSlot := -1
 		if prevDefault != nil {

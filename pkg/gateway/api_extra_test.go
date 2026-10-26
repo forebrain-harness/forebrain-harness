@@ -3225,6 +3225,50 @@ func TestProvidersDTORoundTripStoresKeyAsEnvReference(t *testing.T) {
 	require.NotContains(t, string(raw), "[REDACTED]")
 }
 
+func TestProviderKeyBackfillFollowsTheEntryNotTheProvider(t *testing.T) {
+	s, home := providersDTOServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".env"),
+		[]byte("ZHIPUAI_A_KEY=sk-aaaa-1111\nZHIPUAI_B_KEY=sk-bbbb-2222\n"), 0o600))
+	created := providersPut(t, s, `{"providers":[
+		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://a.example","api_key":"${ZHIPUAI_A_KEY}"},
+		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://b.example","api_key":"${ZHIPUAI_B_KEY}"}
+	]}`)
+	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+
+	// 同两行再存一次，api_key 都不在线上 —— "用户没动 key"。
+	untouched := providersPut(t, s, `{"providers":[
+		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://a.example"},
+		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://b.example"}
+	]}`)
+	require.Equal(t, http.StatusOK, untouched.Code, untouched.Body.String())
+
+	rows := providersGet(t, s)
+	require.Len(t, rows, 2)
+	require.Equal(t, "https://a.example", rows[0]["base_url"])
+	require.Equal(t, "https://b.example", rows[1]["base_url"])
+	require.Equal(t, "1111", rows[0]["api_key_hint"], "a.example 必须还是 A 的 key")
+	require.Equal(t, "2222", rows[1]["api_key_hint"], "b.example 不许继承 A 的 key")
+}
+
+func TestProviderKeyBackfillNeverCrossesEndpoints(t *testing.T) {
+	s, home := providersDTOServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".env"),
+		[]byte("ZHIPUAI_A_KEY=sk-aaaa-1111\n"), 0o600))
+	created := providersPut(t, s, `{"providers":[
+		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://a.example","api_key":"${ZHIPUAI_A_KEY}"}
+	]}`)
+	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+
+	// 同一批请求里再加一个**新 endpoint**，仍然不带 key：它没有任何已存身份可继承。
+	added := providersPut(t, s, `{"providers":[
+		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://a.example"},
+		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://c.example"}
+	]}`)
+	require.Equal(t, http.StatusBadRequest, added.Code,
+		"a new endpoint must not inherit another endpoint's key; the write is refused instead: %s", added.Body.String())
+	require.Contains(t, added.Body.String(), "needs api_key")
+}
+
 // params keys are the provider's own request fields: the GET hands them back
 // as JSON text so no client-side key normalization can rename them, and the
 // PUT refuses anything but an object.
