@@ -651,6 +651,8 @@ type fakeSession struct {
 	sessionEvents            []event.RunEvent
 	sessionEventsErr         error
 	activeContextTurns       []statepkg.Message
+	activeContextErr         error
+	occupancyReads           int
 	transcriptTurnsErr       error
 	recent                   []SessionSummary
 	titles                   map[string]string
@@ -934,10 +936,27 @@ func (f *fakeSession) SurfaceComposerTokenStats(_ string, usage int) ComposerTok
 }
 
 func (f *fakeSession) SurfaceActiveContextMessages(ctx context.Context, sessionID string) ([]statepkg.Message, error) {
+	if f.activeContextErr != nil {
+		return nil, f.activeContextErr
+	}
 	if f.activeContextTurns != nil {
 		return append([]statepkg.Message(nil), f.activeContextTurns...), nil
 	}
 	return f.SurfaceTranscriptMessages(ctx, sessionID)
+}
+
+// SurfaceContextOccupancy mirrors production: the active-context projection's
+// last server-reported usage. Reads are counted so a test can prove the
+// steady-state turn path performs none.
+func (f *fakeSession) SurfaceContextOccupancy(sessionID string) (int, bool) {
+	f.mu.Lock()
+	f.occupancyReads++
+	f.mu.Unlock()
+	turns, err := f.SurfaceActiveContextMessages(context.Background(), sessionID)
+	if err != nil {
+		return 0, false
+	}
+	return statepkg.TokenCountFromLastAPIResponse(turns), true
 }
 
 func (f *fakeSession) SurfaceSessionEvents(context.Context, string) ([]event.RunEvent, error) {
@@ -3532,30 +3551,201 @@ func TestSummarizeComposerReasoningEffortTrimsValue(t *testing.T) {
 	}
 }
 
-func TestInitialComposerTokenStatsSeedsFullBudget(t *testing.T) {
-	// A fresh/just-resumed session has no usage yet. The footer must show
-	// "100%" from the first frame, not the
-	// "compact pending" placeholder that PercentLeft==0 renders.
+func TestMeasuredComposerTokenStatsSeedsFullBudgetForAFreshConversation(t *testing.T) {
+	// The fake conversation holds no rows, so its measured occupancy is 0 and
+	// the reset branch is the truth: the footer shows "100%" from the first
+	// frame, not the "compact pending" placeholder that PercentLeft==0 renders.
 	session := &fakeSession{model: "deepseek/deepseek-v4-flash"}
-	stats := initialComposerTokenStats(session, "s1")
+	stats := measuredComposerTokenStats(session, "s1")
 	if !stats.Active {
-		t.Fatalf("initialComposerTokenStats() Active=false, want true")
+		t.Fatalf("measuredComposerTokenStats() Active=false, want true")
 	}
 	if stats.PercentLeft != 100 {
-		t.Fatalf("initialComposerTokenStats() PercentLeft=%d, want 100", stats.PercentLeft)
+		t.Fatalf("measuredComposerTokenStats() PercentLeft=%d, want 100", stats.PercentLeft)
 	}
 	if stats.ContextWindow <= 0 {
-		t.Fatalf("initialComposerTokenStats() ContextWindow=%d, want >0", stats.ContextWindow)
+		t.Fatalf("measuredComposerTokenStats() ContextWindow=%d, want >0", stats.ContextWindow)
 	}
 	if got := formatComposerTokenStats(stats); !strings.Contains(got, "100%") {
 		t.Fatalf("formatComposerTokenStats()=%q, want it to contain %q", got, "100%")
 	}
 }
 
-func TestInitialComposerTokenStatsUnknownModelStaysInactive(t *testing.T) {
+func TestMeasuredComposerTokenStatsUnknownModelStaysInactive(t *testing.T) {
 	session := &fakeSession{model: ""}
-	if stats := initialComposerTokenStats(session, "s1"); stats.Active {
-		t.Fatalf("initialComposerTokenStats() Active=true for empty model, want false")
+	if stats := measuredComposerTokenStats(session, "s1"); stats.Active {
+		t.Fatalf("measuredComposerTokenStats() Active=true for empty model, want false")
+	}
+}
+
+func TestChatSessionSurfaceContextOccupancyReadsTheStoredUsage(t *testing.T) {
+	ctx := context.Background()
+	db, err := statepkg.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+	store := statepkg.NewSessionStore(db, "main")
+	require.NoError(t, store.Ensure(ctx, "sid-occ", "sid-occ"))
+	runSvc := &statepkg.RunStore{DB: db}
+	run, err := runSvc.CreateRun(ctx, "sid-occ", "probe")
+	require.NoError(t, err)
+	_, err = store.AppendStructuredMessageForRun(ctx, "sid-occ", run.ID, "assistant",
+		"answer", "", "", "deepseek-chat",
+		`{"input_tokens":1200,"cache_read_input_tokens":300,"output_tokens":50}`,
+		"", "", statepkg.MessageExecTiming{})
+	require.NoError(t, err)
+
+	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir()}}
+	s := sessionEnv{SessStore: store, Runner: runner}.session()
+
+	usage, ok := s.SurfaceContextOccupancy("sid-occ")
+	require.True(t, ok, "a session holding a usage row must answer")
+	require.Equal(t, 1550, usage, "input 1200 + cache read 300 + output 50")
+}
+
+func TestMeasuredComposerTokenStatsReadsTheConversationsOccupancy(t *testing.T) {
+	session := &fakeSession{
+		model: "deepseek/deepseek-v4-flash",
+		activeContextTurns: []statepkg.Message{{
+			Role:      "assistant",
+			RunID:     "run-1",
+			UsageJSON: `{"input_tokens":152500,"output_tokens":500}`,
+		}},
+	}
+	want := session.SurfaceComposerTokenStats("s1", 153000)
+	got := measuredComposerTokenStats(session, "s1")
+	if got != want {
+		t.Fatalf("measuredComposerTokenStats()=%+v, want the measured budget %+v", got, want)
+	}
+	if got.PercentLeft == 100 {
+		t.Fatalf("measuredComposerTokenStats() read 100%% for a conversation holding 153000 tokens")
+	}
+}
+
+func TestRefreshSessionFooterKeepsTheBudgetWhenTheStoreCannotAnswer(t *testing.T) {
+	session := &fakeSession{model: "deepseek/deepseek-v4-flash"}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	refreshSessionFooter(renderer, session, "s1") // settle: model empty→set, seeds full window
+	before := renderer.ComposerTokenStats("")
+	require.True(t, before.Active)
+
+	session.mu.Lock()
+	session.model = "deepseek/deepseek-chat" // the label moves, so the refresh reads…
+	session.activeContextErr = errors.New("store unavailable") // …and the read fails
+	session.mu.Unlock()
+	refreshSessionFooter(renderer, session, "s1")
+
+	if got := renderer.ComposerTokenStats(""); got != before {
+		t.Fatalf("a failed read rewrote the budget: %+v, want the kept %+v", got, before)
+	}
+	if got := formatComposerTokenStats(renderer.ComposerTokenStats("")); !strings.Contains(got, "100%") {
+		t.Fatalf("the kept budget should still be the fresh window, got %q", got)
+	}
+}
+
+func TestStartingATurnKeepsTheMeasuredContextBudget(t *testing.T) {
+	dispatchStarted := make(chan struct{})
+	dispatchWait := make(chan struct{})
+	session := &fakeSession{
+		model: "deepseek/deepseek-v4-flash",
+		activeContextTurns: []statepkg.Message{{
+			Role:      "assistant",
+			RunID:     "run-1",
+			UsageJSON: `{"input_tokens":152500,"output_tokens":500}`,
+		}},
+		dispatchStarted: dispatchStarted,
+		dispatchWait:    dispatchWait,
+	}
+	state := &streamState{sessionID: "s1", session: session}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	// Settle the footer's model first: the turn-start repaint must then leave
+	// the budget store alone instead of recomputing or resetting it.
+	refreshSessionFooter(renderer, session, "s1")
+	before := renderer.ComposerTokenStats("")
+	require.True(t, before.Active)
+	require.NotEqual(t, 100, before.PercentLeft)
+
+	events := make(chan inputEvent, 1)
+	done := make(chan runTurnDisposition, 1)
+	go func() {
+		disposition, _ := runTurn(context.Background(), nil, events, nil, nil, session, renderer, nil, state, "hello", "hello", "", nil, "", nil, nil, nil)
+		done <- disposition
+	}()
+	<-dispatchStarted // the request is out; the model has not answered
+
+	if got := renderer.ComposerTokenStats(""); got != before {
+		t.Fatalf("turn start repainted the budget as %+v, want the previous reading %+v", got, before)
+	}
+	session.mu.Lock()
+	reads := session.occupancyReads
+	session.mu.Unlock()
+	if reads != 1 { // only the settle call above
+		t.Fatalf("turn start performed %d occupancy reads, want the 1 from the settle", reads)
+	}
+
+	close(dispatchWait)
+	<-done
+}
+
+func TestStartingATurnOnAMovedModelRecomputesTheMeasuredBudget(t *testing.T) {
+	dispatchStarted := make(chan struct{})
+	dispatchWait := make(chan struct{})
+	session := &fakeSession{
+		model: "deepseek/deepseek-v4-flash",
+		activeContextTurns: []statepkg.Message{{
+			Role:      "assistant",
+			RunID:     "run-1",
+			UsageJSON: `{"input_tokens":152500,"output_tokens":500}`,
+		}},
+		dispatchStarted: dispatchStarted,
+		dispatchWait:    dispatchWait,
+	}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	refreshSessionFooter(renderer, session, "s1") // settle on v4-flash
+
+	// Another surface's /model moved the conversation's model between turns.
+	session.mu.Lock()
+	session.model = "deepseek/deepseek-chat"
+	session.mu.Unlock()
+
+	state := &streamState{sessionID: "s1", session: session}
+	events := make(chan inputEvent, 1)
+	done := make(chan runTurnDisposition, 1)
+	go func() {
+		disposition, _ := runTurn(context.Background(), nil, events, nil, nil, session, renderer, nil, state, "hello", "hello", "", nil, "", nil, nil, nil)
+		done <- disposition
+	}()
+	<-dispatchStarted
+
+	want := session.SurfaceComposerTokenStats("s1", 153000) // measured for the new model's window
+	if got := renderer.ComposerTokenStats(""); got != want {
+		t.Fatalf("turn start on a moved model = %+v, want the measured %+v", got, want)
+	}
+	if got := renderer.ComposerTokenStats(""); got.PercentLeft == 100 || !got.Active {
+		t.Fatalf("turn start on a moved model reset the budget: %+v", got)
+	}
+
+	close(dispatchWait)
+	<-done
+}
+
+func TestSwitchStreamSessionBlanksTheBudgetWhenTheStoreCannotAnswer(t *testing.T) {
+	session := &fakeSession{model: "deepseek/deepseek-v4-flash", activeContextErr: errors.New("store unavailable")}
+	state := &streamState{sessionID: "s1", session: session}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	renderer.SetComposerTokenStats("", ComposerTokenStats{Active: true, PercentLeft: 7, ContextWindow: 1000000})
+
+	if _, _, err := switchStreamSession(context.Background(), state, renderer, NewTracker(), "s2"); err != nil {
+		t.Fatalf("switchStreamSession: %v", err)
+	}
+	if got := renderer.ComposerTokenStats(""); got.Active {
+		t.Fatalf("a failed switch read carried the outgoing conversation's budget across: %+v", got)
+	}
+	if text := formatComposerTokenStats(renderer.ComposerTokenStats("")); text != "" {
+		t.Fatalf("a failed switch read must leave the gauge empty, got %q", text)
 	}
 }
 

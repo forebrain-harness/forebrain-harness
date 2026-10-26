@@ -3400,6 +3400,18 @@ func (r *Renderer) SetComposerFooter(footer ComposerFooter) {
 	r.footer = footer
 }
 
+// ComposerFooterSnapshot returns a copy of the footer the composer currently
+// shows, under the renderer's lock. Refresh logic reads the model it is about
+// to replace through this rather than the bare field.
+func (r *Renderer) ComposerFooterSnapshot() ComposerFooter {
+	if r == nil {
+		return ComposerFooter{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.footer
+}
+
 // SetPlanMode says whether the conversation is in Plan mode, which the footer
 // shows for as long as it lasts.
 func (r *Renderer) SetPlanMode(on bool) {

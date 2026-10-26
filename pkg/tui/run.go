@@ -121,7 +121,7 @@ func Run(ctx context.Context, opts Options) error {
 		ReasoningEffort: summarizeComposerReasoningEffort(opts.Session),
 		Directory:       startupWorkingDirectoryDisplay(opts.WorkingDirectory),
 	})
-	renderer.SetComposerTokenStats("", initialComposerTokenStats(opts.Session, initialSessionID))
+	renderer.SetComposerTokenStats("", measuredComposerTokenStats(opts.Session, initialSessionID))
 	startupInfo := StartupInfo{
 		Version:   strings.TrimSpace(opts.Version),
 		Directory: startupWorkingDirectoryDisplay(opts.WorkingDirectory),
@@ -1122,13 +1122,23 @@ func summarizeComposerReasoningEffort(session Session) string {
 	return strings.TrimSpace(session.CurrentModelReasoningEffort())
 }
 
-func initialComposerTokenStats(session Session, sessionID string) ComposerTokenStats {
+// measuredComposerTokenStats is the footer's budget for the conversation as the
+// store measures it: the whole prompt of its last API response, the count every
+// gauge (this footer, /status, /context, the web) is computed from. A context
+// that has measured nothing yet — a new conversation, or one just cleared —
+// reads as the full window, so a fresh screen still opens on "100%". A read
+// that failed measured nothing: whether that keeps the figure already on
+// screen or clears it is the caller's call, because only the caller knows
+// which conversation the on-screen figure belongs to.
+func measuredComposerTokenStats(session Session, sessionID string) ComposerTokenStats {
 	if session == nil {
 		return ComposerTokenStats{}
 	}
-	// A fresh session holds nothing yet, so the footer shows the full budget
-	// from the first frame rather than the "compact pending" placeholder.
-	return session.SurfaceComposerTokenStats(sessionID, 0)
+	usage, ok := session.SurfaceContextOccupancy(sessionID)
+	if !ok {
+		return ComposerTokenStats{}
+	}
+	return session.SurfaceComposerTokenStats(sessionID, usage)
 }
 
 func abbreviateHomePath(path string, home string) string {
@@ -1838,10 +1848,12 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 		tracker.Reset()
 	}
 	if renderer != nil {
-		// A newly selected session has no usage yet, but its footer must still
-		// show the current model's full context budget immediately. This also
-		// clears prior-session in/out usage without waiting for a provider update.
-		renderer.SetComposerTokenStats("", initialComposerTokenStats(state.session, state.sessionID))
+		// The gauge belongs to the conversation on screen: a switch adopts the
+		// target conversation's own measured occupancy — a fresh conversation
+		// reads the full window — whatever the model labels are. The write is
+		// unconditional for the same reason: on a failed read the footer shows
+		// nothing rather than the outgoing conversation's number.
+		renderer.SetComposerTokenStats("", measuredComposerTokenStats(state.session, state.sessionID))
 		// A session switch invalidates every line that was on screen: the MCP
 		// startup, a migration and the previous session's working line all
 		// belonged to the session that just went away.
@@ -4761,17 +4773,33 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 }
 
 // refreshSessionFooter redraws what the footer says about the session: its
-// model and effort, the subagents' models, and the context budget.
+// model and effort, the subagents' models, and — when the model the footer
+// names has moved — the context budget, recomputed from the conversation's
+// measured occupancy. An unchanged model leaves the budget exactly where the
+// last response's live update left it: a turn is not a context reset, and the
+// gauge must not flash a fresh "100%" while the request the turn started is
+// still in flight. The budget is sized by the model's window, which is why it
+// follows the model and nothing else.
 func refreshSessionFooter(renderer *Renderer, session Session, sessionID string) {
 	if renderer == nil || session == nil {
 		return
 	}
+	model := summarizeComposerModel(session)
+	footer := renderer.ComposerFooterSnapshot()
+	modelMoved := strings.TrimSpace(model) != strings.TrimSpace(footer.Model)
 	renderer.SetComposerFooter(ComposerFooter{
-		Model:           summarizeComposerModel(session),
+		Model:           model,
 		ReasoningEffort: summarizeComposerReasoningEffort(session),
-		Directory:       renderer.footer.Directory,
+		Directory:       footer.Directory,
 	})
-	renderer.SetComposerTokenStats("", initialComposerTokenStats(session, sessionID))
+	if !modelMoved {
+		return
+	}
+	// The figure on screen belongs to this conversation, so a read that failed
+	// keeps it rather than fabricating a full window.
+	if stats := measuredComposerTokenStats(session, sessionID); stats.Active {
+		renderer.SetComposerTokenStats("", stats)
+	}
 }
 
 func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, title string, rawLine string, outcome SlashOutcome) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {

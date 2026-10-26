@@ -1554,6 +1554,19 @@ func tokenBudgetMsgFromPayload(payload event.TokenBudgetUpdatedPayload) TokenBud
 	}
 }
 
+// SurfaceContextOccupancy is how much of its context window the conversation
+// fills right now: the whole prompt of its last API response — the engine's one
+// reading, so the footer cannot disagree with /status, /context or the web. The
+// read carries no caller context on purpose: a footer repaint outlives the turn
+// that triggered it, and an interrupted turn must not blank a gauge the store
+// can still answer.
+func (s *ChatSession) SurfaceContextOccupancy(sessionID string) (int, bool) {
+	if s == nil {
+		return 0, false
+	}
+	return run.ContextOccupancy(context.Background(), s.sessStore(), sessionID)
+}
+
 // SurfaceComposerTokenStats is the footer's budget for a context holding
 // usage tokens — the configured auto-compact limit included — so the footer
 // reads the same at startup, on resume and after every response.

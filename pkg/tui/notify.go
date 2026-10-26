@@ -1741,6 +1741,11 @@ type Session interface {
 	// SurfaceTranscriptMessages this honors compaction and context-reset floors, so
 	// visually replaying full history never restores cleared token usage.
 	SurfaceActiveContextMessages(ctx context.Context, sessionID string) ([]state.Message, error)
+	// SurfaceContextOccupancy is how much of its context window the conversation
+	// fills right now: the whole prompt of its last API response, the reading
+	// every gauge is computed from. A context nothing has measured yet — a new
+	// conversation, or one just cleared — reads zero.
+	SurfaceContextOccupancy(sessionID string) (int, bool)
 	// SurfaceComposerTokenStats is the footer's budget for a context holding
 	// usage tokens, computed the way every live budget update computes it.
 	SurfaceComposerTokenStats(sessionID string, usage int) ComposerTokenStats

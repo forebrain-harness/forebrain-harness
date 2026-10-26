@@ -1576,12 +1576,7 @@ func (c *commandController) refreshComposerModelFooter(sessionID string) {
 	if c == nil || c.renderer == nil || c.session == nil {
 		return
 	}
-	c.renderer.SetComposerFooter(ComposerFooter{
-		Model:           summarizeComposerModel(c.session),
-		ReasoningEffort: summarizeComposerReasoningEffort(c.session),
-		Directory:       c.renderer.footer.Directory,
-	})
-	c.renderer.SetComposerTokenStats("", initialComposerTokenStats(c.session, sessionID))
+	refreshSessionFooter(c.renderer, c.session, sessionID)
 }
 
 func connectCurrentBaseURL(cfg *appcfg.Root, agentName string) string {
