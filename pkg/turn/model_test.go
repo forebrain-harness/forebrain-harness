@@ -267,6 +267,11 @@ type modelSelectionFixture struct {
 	cfgPath string
 	ctx     Context
 	store   *fakeNewSessionStore
+
+	// live is what the runtime publishes when the session has no row of its own;
+	// nil means "the same as selection", which is what every existing fixture
+	// assumes.
+	live *ModelSelectionState
 }
 
 func newModelSelectionFixture(t *testing.T, selection ModelSelectionState) *modelSelectionFixture {
@@ -302,7 +307,11 @@ func (f *modelSelectionFixture) modelSettings(_ string) (ModelSettings, error) {
 	if err != nil {
 		return ModelSettings{}, err
 	}
-	return ModelSettings{Config: &cfg, AgentName: "main", Selection: f.handler.selection, LiveSelection: f.handler.selection}, nil
+	live := f.handler.selection
+	if f.live != nil {
+		live = *f.live
+	}
+	return ModelSettings{Config: &cfg, AgentName: "main", Selection: f.handler.selection, LiveSelection: live}, nil
 }
 
 // choiceLabel names a configured model the way /model's picker does.
@@ -371,6 +380,43 @@ func TestChooseModelSameSelectionIsNoOp(t *testing.T) {
 	res := Choose(f.ctx, SlashChoice{Command: "model", Value: label})
 	require.True(t, res.Handled)
 	require.Equal(t, -1, slices.Index(f.calls(), "select("), "a repeat selection applied a live switch: %v", f.calls())
+	require.Equal(t, "Still using deepseek/deepseek-chat.", res.Reply)
+}
+
+func newNoRowDeepseekFixture(t *testing.T) *modelSelectionFixture {
+	t.Helper()
+	f := newModelSelectionFixture(t, ModelSelectionState{}) // 会话没有自己的行
+	live := ModelSelectionState{Provider: "deepseek", Model: "deepseek-chat", Set: true}
+	f.live = &live
+	return f
+}
+
+// The picker marks what the conversation actually runs on — the effort picker's
+// rule — not the config's order-based default.
+func TestExecModelMarksWhatTheRuntimeCarries(t *testing.T) {
+	f := newNoRowDeepseekFixture(t)
+	res := execModel(f.ctx)
+	require.NotNil(t, res.Picker)
+	current := -1
+	for i, item := range res.Picker.Items {
+		if item.Current {
+			require.Equal(t, -1, current, "more than one current item")
+			current = i
+		}
+	}
+	require.NotEqual(t, -1, current, "no current item: %v", res.Picker.Items)
+	require.Contains(t, res.Picker.Items[current].Value, "deepseek-chat", "current = %s", res.Picker.Items[current].Value)
+}
+
+func TestChooseModelInForceModelIsNotASwitch(t *testing.T) {
+	f := newNoRowDeepseekFixture(t)
+	label := f.choiceLabel(t, "deepseek", "deepseek-chat")
+	res := Choose(f.ctx, SlashChoice{Command: "model", Value: label})
+	require.True(t, res.Handled)
+	// calls() 的记录形状是 "select(<sessionID>,<provider/model>)"（recordingSlashHandlers.record），
+	// 所以这里必须匹配完整串——`slices.Index(f.calls(), "select(")` 是精确等值匹配，恒为 -1，
+	// 那是空断言（既有 :373/:665 就带着这个弱点，不要照抄；:536 的完整串才是有效写法）。
+	require.Equal(t, -1, slices.Index(f.calls(), "select(s1,deepseek/deepseek-chat)"), "a repeat selection applied a live switch: %v", f.calls())
 	require.Equal(t, "Still using deepseek/deepseek-chat.", res.Reply)
 }
 

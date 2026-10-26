@@ -809,11 +809,14 @@ func execModel(ctx Context) Result {
 	// The effective default (default_model, else the first) is what an empty
 	// selection resolves to; index zero only matches it by coincidence.
 	defaultAt := defaultModelIndex(settings.Config, settings.AgentName, choices)
+	currentSel := currentSelection(settings)
 	items := make([]PickerItem, len(choices))
 	for i, choice := range choices {
-		// The live selection marks the current model; the effective default
-		// is only the fallback for a runtime that has never published one.
-		items[i] = PickerItem{Value: choice.Label, Label: choice.Label, Current: !settings.Selection.Set && i == defaultAt || selectionMatches(settings.Selection, choice)}
+		// The session's own row marks the current model; a session without one
+		// marks what its runtime carries (the effort picker's rule); the config
+		// default is only the fallback for a runtime that published nothing.
+		items[i] = PickerItem{Value: choice.Label, Label: choice.Label,
+			Current: selectionMatches(currentSel, choice) || (!currentSel.Set && i == defaultAt)}
 	}
 	return Result{Handled: true, Picker: &Picker{Command: "model", Title: "Model", Hint: "The model this agent runs on", Items: items}}
 }
@@ -826,6 +829,21 @@ func selectionMatches(sel ModelSelectionState, choice ModelChoice) bool {
 	}
 	return strings.EqualFold(strings.TrimSpace(sel.Provider), strings.TrimSpace(choice.Provider)) &&
 		strings.EqualFold(strings.TrimSpace(sel.Model), strings.TrimSpace(choice.Model))
+}
+
+// currentSelection is the selection a picker marks as current: the session's own
+// row when it has one, otherwise what the runtime actually carries. The config's
+// order-based default is only the last resort, for a runtime that has published
+// nothing — asking the config instead is what let the model picker mark a model
+// the conversation was not running on.
+func currentSelection(settings ModelSettings) ModelSelectionState {
+	if settings.Selection.Set {
+		return settings.Selection
+	}
+	if settings.LiveSelection.Set {
+		return settings.LiveSelection
+	}
+	return ModelSelectionState{}
 }
 
 // modelSelectionFailureReply words a live-apply failure by how far it got,
@@ -867,6 +885,8 @@ func chooseModel(ctx Context, label string) Result {
 	changed := false
 	if settings.Selection.Set {
 		changed = !selectionMatches(settings.Selection, chosen)
+	} else if live := currentSelection(settings); live.Set {
+		changed = !selectionMatches(live, chosen)
 	} else {
 		changed = at != defaultModelIndex(settings.Config, settings.AgentName, choices)
 	}
