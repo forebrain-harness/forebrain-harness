@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newShellDiffRepo builds a committed scratch repository and returns its
@@ -130,6 +131,87 @@ func TestShellEditDiffCapturesModifyCreateDelete(t *testing.T) {
 	}
 	if diff.MoreFiles != 0 || diff.Unavailable || diff.Skipped || diff.Shared || diff.TreeMoved {
 		t.Fatalf("unexpected diff flags: %+v", diff)
+	}
+}
+
+// The card reports what THIS command changed. A path another tool wrote inside
+// the same window is not this command's work — parallel tool calls are normal
+// (plan 124), so the window alone cannot decide it.
+func TestShellCardDoesNotClaimAFileAnotherToolWrote(t *testing.T) {
+	ctx := context.Background()
+	root := newShellDiffRepo(t)
+	run := beginShellEditDiff(ctx, "go test ./...", root, false)
+	if run == nil {
+		t.Fatal("beginShellEditDiff returned nil in a git work tree")
+	}
+	file := filepath.Join(root, "plans", "177-x.md")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("# plan\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	noteToolFileWrite(file, time.Now()) // another tool just wrote it
+	diff := run.finish(ctx, "go test ./...", 0, nil)
+	if diff != nil && len(diff.Files) > 0 {
+		t.Fatalf("the card claimed another tool's write: %+v", diff.Files)
+	}
+}
+
+// …and it still reports the file the command itself wrote, so the fix is not a
+// blanket suppression.
+func TestShellCardStillClaimsWhatTheCommandWrote(t *testing.T) {
+	ctx := context.Background()
+	root := newShellDiffRepo(t)
+	run := beginShellEditDiff(ctx, "printf hi > made.txt", root, false)
+	if run == nil {
+		t.Fatal("beginShellEditDiff returned nil in a git work tree")
+	}
+	file := filepath.Join(root, "made.txt")
+	if err := os.WriteFile(file, []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No noteToolFileWrite: the command itself is the only writer here.
+	diff := run.finish(ctx, "printf hi > made.txt", 0, nil)
+	if diff == nil || len(diff.Files) != 1 {
+		t.Fatalf("diff = %+v, want exactly one file", diff)
+	}
+	if diff.Files[0].Status != "created" {
+		t.Fatalf("status = %q, want created", diff.Files[0].Status)
+	}
+}
+
+// End to end over the real snapshots: a command that creates a file counts
+// every line it wrote and no deleted one — the empty before-side must not
+// become a phantom "-" row (plan 180).
+func TestShellCardCountsACreatedFileWithNoDeletedLine(t *testing.T) {
+	ctx := context.Background()
+	root := newShellDiffRepo(t)
+	run := beginShellEditDiff(ctx, "printf 'l1\nl2\nl3' > three.txt", root, false)
+	if run == nil {
+		t.Fatal("beginShellEditDiff returned nil in a git work tree")
+	}
+	file := filepath.Join(root, "three.txt")
+	// No trailing newline: that is the case whose phantom "-" row used to show.
+	if err := os.WriteFile(file, []byte("l1\nl2\nl3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diff := run.finish(ctx, "printf 'l1\nl2\nl3' > three.txt", 0, nil)
+	if diff == nil || len(diff.Files) != 1 {
+		t.Fatalf("diff = %+v, want exactly one file", diff)
+	}
+	f := diff.Files[0]
+	if f.Status != "created" {
+		t.Fatalf("status = %q, want created", f.Status)
+	}
+	if f.Added != 3 {
+		t.Fatalf("added = %d, want 3", f.Added)
+	}
+	if f.Deleted != 0 {
+		t.Fatalf("deleted = %d, want 0", f.Deleted)
+	}
+	if strings.Contains(f.UnifiedDiff, "\n-\n") {
+		t.Fatalf("created file carries a phantom deleted row: %q", f.UnifiedDiff)
 	}
 }
 

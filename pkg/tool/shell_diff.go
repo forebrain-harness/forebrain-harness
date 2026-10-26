@@ -982,6 +982,10 @@ type shellEditDiffRun struct {
 	cwd         string
 	left        bool
 	shared      bool
+	startedAt   time.Time
+	// externalWrites is the seam a test injects to name the sibling-tool
+	// writes inside its window; nil means the process-wide tool-write ledger.
+	externalWrites func(from, to time.Time) map[string]struct{}
 }
 
 // enter registers a token as in flight; a second registration marks every
@@ -1029,7 +1033,7 @@ func beginShellEditDiff(ctx context.Context, command, cwd string, readOnly bool)
 	if repo == nil {
 		return nil
 	}
-	run := &shellEditDiffRun{repo: repo, token: &shellDiffToken{}, cwd: cwd}
+	run := &shellEditDiffRun{repo: repo, token: &shellDiffToken{}, cwd: cwd, startedAt: time.Now()}
 	repo.enter(run.token)
 	repo.mu.Lock()
 	before, err := repo.snapshot(ctx)
@@ -1066,6 +1070,16 @@ func (r *shellEditDiffRun) finish(ctx context.Context, command string, exitCode 
 	if err != nil {
 		return &ShellEditDiff{Files: []ShellEditDiffFile{}, Unavailable: true, Shared: r.shared}
 	}
+	if diff != nil {
+		external := r.externalWrites
+		if external == nil {
+			external = toolWritesBetween
+		}
+		// The snapshot pair answers "what changed on disk during the window",
+		// not "what did this command change": subtract the paths sibling
+		// tools announced inside it (plan 180).
+		diff = dropExternalWrites(diff, external(r.startedAt, time.Now()))
+	}
 	if diff == nil {
 		if r.shared {
 			return &ShellEditDiff{Files: []ShellEditDiffFile{}, Shared: true}
@@ -1074,6 +1088,48 @@ func (r *shellEditDiffRun) finish(ctx context.Context, command string, exitCode 
 	}
 	diff.Shared = r.shared
 	diff.TreeMoved = shellCommandMovesGitTree(command)
+	return diff
+}
+
+// dropExternalWrites removes the paths other tools wrote from a shell diff. A
+// snapshot pair cannot tell who made a change, so anything the tool-write
+// ledger claims from the window is not this command's work. A diff left with
+// no file of its own becomes nil — the card then shows the command output
+// alone, which is the truth of a command like `go test`.
+func dropExternalWrites(diff *ShellEditDiff, external map[string]struct{}) *ShellEditDiff {
+	if diff == nil || len(external) == 0 {
+		return diff
+	}
+	droppedFromFiles := 0
+	files := make([]ShellEditDiffFile, 0, len(diff.Files))
+	for _, f := range diff.Files {
+		if _, hit := external[resolveForLedger(f.Path)]; hit {
+			droppedFromFiles++
+			continue
+		}
+		files = append(files, f)
+	}
+	changed := make([]string, 0, len(diff.ChangedFiles))
+	dropped := 0
+	for _, p := range diff.ChangedFiles {
+		if _, hit := external[resolveForLedger(p)]; hit {
+			dropped++
+			continue
+		}
+		changed = append(changed, p)
+	}
+	// MoreFiles counts the records that did not fit in Files, so only the
+	// dropped paths that were not already shown add to it.
+	more := diff.MoreFiles - (dropped - droppedFromFiles)
+	if more < 0 {
+		more = 0
+	}
+	if len(files) == 0 && len(changed) == 0 && more == 0 {
+		return nil
+	}
+	diff.Files = files
+	diff.ChangedFiles = changed
+	diff.MoreFiles = more
 	return diff
 }
 

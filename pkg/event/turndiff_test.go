@@ -25,6 +25,48 @@ func TestBuildSummarizesDiff(t *testing.T) {
 	}
 }
 
+// A file that did not exist before cannot have deleted lines: difflib used to
+// turn the empty side into one empty line and every created file reported a
+// phantom "-1" (plan 180). The content ends without a newline on purpose: when
+// it ends with one, the phantom matches the phantom difflib also appends to the
+// non-empty side and the counts happen to come out right.
+func TestBuildOfANewFileCountsNoDeletion(t *testing.T) {
+	sum, err := Build("x.md", nil, []byte("a\nb"))
+	if err != nil {
+		t.Fatalf("build diff: %v", err)
+	}
+	if sum.Added != 2 {
+		t.Fatalf("added = %d, want 2", sum.Added)
+	}
+	if sum.Deleted != 0 {
+		t.Fatalf("deleted = %d, want 0", sum.Deleted)
+	}
+	for _, line := range strings.Split(sum.UnifiedDiff, "\n") {
+		if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			t.Fatalf("new file must not carry a deleted row: %q", sum.UnifiedDiff)
+		}
+	}
+}
+
+// …and a deleted file cannot gain rows (the mirror of the phantom above).
+func TestBuildOfADeletedFileCountsNoAddition(t *testing.T) {
+	sum, err := Build("x.md", []byte("a\nb"), nil)
+	if err != nil {
+		t.Fatalf("build diff: %v", err)
+	}
+	if sum.Added != 0 {
+		t.Fatalf("added = %d, want 0", sum.Added)
+	}
+	if sum.Deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", sum.Deleted)
+	}
+	for _, line := range strings.Split(sum.UnifiedDiff, "\n") {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			t.Fatalf("deleted file must not carry an added row: %q", sum.UnifiedDiff)
+		}
+	}
+}
+
 // A caller that can only show one hunk asks for one hunk: the `@@` header and
 // no more body rows than it can draw. Everything else — the second hunk, the
 // file headers — stays out of the payload.

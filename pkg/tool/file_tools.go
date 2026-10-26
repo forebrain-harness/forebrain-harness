@@ -1773,6 +1773,10 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 					return "", err
 				}
 				st.RememberWrite(abs, time.Now(), 0, nil)
+				// The moved-from path never reaches attachTurnDiff — the entry
+				// below carries only the destination — so announce it here: a
+				// concurrent shell card must not claim this deletion (plan 180).
+				noteToolFileWrite(abs, time.Now())
 				changes = append(changes, FileChange{AbsPath: abs, Before: plan.Before})
 				changes = append(changes, FileChange{AbsPath: plan.MoveAbs, Before: plan.MoveBefore, After: plan.After})
 				st.recordFileChange(ctx, state.FileChange{

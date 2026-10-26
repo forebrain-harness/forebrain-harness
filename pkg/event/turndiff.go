@@ -13,10 +13,31 @@ type Summary struct {
 	UnifiedDiff string `json:"unified_diff,omitempty"`
 }
 
+// splitDiffSide splits a side of the diff into its real rows. difflib's
+// SplitLines is not used: it appends one phantom empty row to every input —
+// and one to the empty input — which made a created file report a deleted row
+// and draw a phantom "1 -" whenever the other side ended without a newline,
+// and made an empty side leak a phantom into the other side's count (plan
+// 180). An empty side has no rows; a side has exactly the rows it shows.
+func splitDiffSide(b []byte) []string {
+	if len(b) == 0 {
+		return nil
+	}
+	lines := strings.SplitAfter(string(b), "\n")
+	last := len(lines) - 1
+	if lines[last] == "" {
+		return lines[:last]
+	}
+	// An unterminated final row is still a row; the newline is only for the
+	// writer, which emits every row as one terminated line.
+	lines[last] += "\n"
+	return lines
+}
+
 func Build(path string, before, after []byte) (Summary, error) {
 	diffText, _ := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-		A:        difflib.SplitLines(string(before)),
-		B:        difflib.SplitLines(string(after)),
+		A:        splitDiffSide(before),
+		B:        splitDiffSide(after),
 		FromFile: path + ":before",
 		ToFile:   path + ":after",
 		Context:  3,
