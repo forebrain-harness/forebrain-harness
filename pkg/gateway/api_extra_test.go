@@ -1932,6 +1932,71 @@ func TestChatMessagesToolImageRowCarriesNoBase64(t *testing.T) {
 	require.Equal(t, "image/png", user.Attachments[0].MediaType)
 }
 
+// TestChatMessagesOmitToolContent pins the history DTO's tool rows: the row's
+// model-facing content — for a shell, the JSON map with its stdout — is not
+// sent, because the page draws the row from parts_json and shell_card and the
+// model payload would be a second and third copy of the same bytes. The rows
+// around it keep their content word for word.
+func TestChatMessagesOmitToolContent(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	require.NoError(t, s.Sessions.Ensure(ctx, "s1", "s1"))
+
+	// A shell row persisted the way the engine persists it: the model-facing
+	// payload as content, the formatted card body as the display part.
+	evt := tool.StepEvent{
+		Kind:     tool.StepKindToolCompleted,
+		ToolName: "shell",
+		Input:    map[string]any{"command": "printf hello"},
+		Output:   map[string]any{"stdout": "hello\n", "stderr": "", "exit_code": 0},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	metaJSON, err := json.Marshal(tool.BuildToolMeta(evt))
+	require.NoError(t, err)
+	call := llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"printf hello"}`}}
+	toolMsg := llm.ToolResultMessage("call-1", llm.Text(`{"stdout":"hello\n","stderr":"","exit_code":0}`))
+	toolMsg.ToolDisplay = &llm.ToolDisplayState{Body: body, Summary: tool.SummarizeToolStep(evt), ToolMetaJSON: string(metaJSON)}
+	require.NoError(t, s.Sessions.AppendMessageSequence(ctx, "s1", []llm.Message{
+		llm.UserMessage(llm.Text("typed by hand")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("running it")}, call),
+		toolMsg,
+	}, "", ""))
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var rows []struct {
+		Role      string `json:"role"`
+		Content   string `json:"content"`
+		PartsJSON string `json:"parts_json"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+
+	var toolRow, userRow, assistantRow *struct {
+		Role      string `json:"role"`
+		Content   string `json:"content"`
+		PartsJSON string `json:"parts_json"`
+	}
+	for i := range rows {
+		switch rows[i].Role {
+		case "tool":
+			toolRow = &rows[i]
+		case "user":
+			userRow = &rows[i]
+		case "assistant":
+			assistantRow = &rows[i]
+		}
+	}
+	require.NotNil(t, toolRow, "tool row missing: %s", rec.Body.String())
+	require.NotNil(t, userRow, "user row missing: %s", rec.Body.String())
+	require.NotNil(t, assistantRow, "assistant row missing: %s", rec.Body.String())
+
+	require.Empty(t, toolRow.Content, "a tool row's model-facing content must not be sent")
+	require.NotEmpty(t, toolRow.PartsJSON, "the tool row's display copy must stay")
+	require.Equal(t, "typed by hand", userRow.Content)
+	require.Equal(t, "running it", assistantRow.Content)
+}
+
 // TestChatMessagesPlacesEachCompactionAsItsOwnRow pins the web history's
 // account of compactions: every finished one is a row of its own, where the
 // live conversation drew it — a manual one right after the checkpoint it
@@ -2321,7 +2386,10 @@ func TestChatSurfacesRenderTheSessionFactSpread(t *testing.T) {
 	require.Equal(t, []string{"user", "assistant", "tool", "assistant"},
 		[]string{transcript[0].Role, transcript[1].Role, transcript[2].Role, transcript[3].Role})
 	require.Equal(t, "review the diff", transcript[0].Content)
-	require.Equal(t, "file body", transcript[2].Content)
+	// A tool row's model-facing content is not part of the history DTO (plan
+	// 171): the surface draws the row from its parts and card facts, so the
+	// same bytes are not sent a second and third time.
+	require.Empty(t, transcript[2].Content)
 	require.Equal(t, "done", transcript[3].Content)
 	require.Equal(t, parent.ID, transcript[1].RunID)
 	require.Equal(t, 1, goalRows, "the goal event must render as its own row")

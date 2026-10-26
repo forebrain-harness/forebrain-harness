@@ -704,6 +704,29 @@ describe('ChatView conversation bubbles', () => {
     wrapper.unmount()
   })
 
+  it('draws a tool row from its card alone, with no bubble for the model payload', async () => {
+    // The history DTO stopped sending a tool row's model-facing content (plan
+    // 171), and the stream never copied it either: the row means its card.
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        content: '',
+        blocks: [{ kind: 'tool', step: { stepId: 's1', toolName: 'shell', summary: '', header: 'Ran cat big.txt', status: 'completed' } }],
+      },
+    ]
+    const wrapper = await mountView()
+    await flushPromises()
+    const card = wrapper.findComponent({ name: 'ToolCallCard' })
+    expect(card.exists()).toBe(true)
+    expect(card.props('step').header).toBe('Ran cat big.txt')
+    // The row carries no words of its own: no markdown bubble for a content
+    // string, and none of a bubble's message actions.
+    expect(wrapper.findAllComponents({ name: 'MessageResponse' })).toHaveLength(0)
+    expect(wrapper.findAll('[data-testid="message-copy"]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
   it('shows the server-computed most recently used model on a new chat', async () => {
     // The new-chat page never decides a model itself: the chip shows whatever
     // /api/chat/model answers — which the server computes as the agent's most

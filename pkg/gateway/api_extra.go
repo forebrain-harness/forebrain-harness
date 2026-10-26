@@ -2151,7 +2151,6 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 				ID:            t.MessageID,
 				RowID:         t.RowID,
 				Role:          t.Role,
-				Content:       t.Content,
 				RunStartedAt:  runStartedAt,
 				RunFinishedAt: runFinishedAt,
 				WorkedMs:      workedMs,
@@ -2184,6 +2183,14 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 				}
 			case "assistant":
 				m.CallHeaderList = canceledCallHeaderList(displayRoot, t.PartsJSON)
+			}
+			// A tool row's Content is the model-facing result — for a shell,
+			// the JSON map with its stdout — and the page draws that row from
+			// parts_json and shell_card instead. Sending it here repeated the
+			// same bytes a second and third time, so the history DTO carries the
+			// display copy only.
+			if !strings.EqualFold(strings.TrimSpace(t.Role), "tool") {
+				m.Content = t.Content
 			}
 			m.Origin = state.MessageOrigin(t.PartsJSON)
 			if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
