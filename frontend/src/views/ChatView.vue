@@ -22,7 +22,7 @@
             ref="conversationRef"
             class="relative h-full overscroll-contain"
             :aria-label="t('chat.threadAria')"
-            @scroll.passive="recordCurrentBrowseState"
+            @scroll.passive="onThreadScroll"
           >
             <ConversationContent class="chat-thread-col gap-4 px-0 pt-6 pb-2">
             <!-- A new conversation whose first message created its project
@@ -1411,6 +1411,9 @@ const {
   editLastQueuedMessage,
   sendPendingSteersAfterInterrupt,
   loadMessages,
+  loadOlderMessages,
+  olderLoading,
+  olderExhausted,
   switchToSession,
   resetForNewChat,
   rebindSessionObserver,
@@ -1805,6 +1808,25 @@ async function restoreCurrentBrowseState() {
   restoringBrowseState = true
   el.scrollTop = state.follow ? el.scrollHeight : Math.min(state.scrollTop, Math.max(0, el.scrollHeight - el.clientHeight))
   window.setTimeout(() => { restoringBrowseState = false }, 0)
+}
+
+// Scrolling the thread to its top pages in the conversation's earlier rows
+// (plan 173). The viewport is anchored through the same conversation element
+// the browse state reads — its height is measured before the page lands and
+// the difference restored after it renders — so the rows the reader was
+// looking at stay under the viewport instead of jumping a page up.
+async function onThreadScroll() {
+  recordCurrentBrowseState()
+  const el = conversationElement()
+  if (!el || el.scrollTop > 32) return
+  if (olderExhausted.value || olderLoading.value || historyLoading.value) return
+  const priorHeight = el.scrollHeight
+  const priorTop = el.scrollTop
+  const added = await loadOlderMessages()
+  if (added <= 0) return
+  await nextTick()
+  el.scrollTop = el.scrollHeight - priorHeight + priorTop
+  el.scrollTop = el.scrollHeight - priorHeight + priorTop
 }
 
 function updateAgentFold(agentId: string, value: { id: string; open: boolean }) {

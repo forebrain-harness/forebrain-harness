@@ -1615,6 +1615,98 @@ func (s *SessionStore) ListAllMessages(ctx context.Context, sessionID string, li
 	return out, nil
 }
 
+// ListMessagesBefore returns up to limit visible rows strictly older than
+// beforeRowID (0 = the newest page), in chronological order, plus whether an
+// older visible row exists. Paging is by row id, not by offset: the transcript
+// is append-only, so a row id is a stable cursor while an offset shifts under
+// a session that is still being written.
+func (s *SessionStore) ListMessagesBefore(ctx context.Context, sessionID string, beforeRowID int64, limit int) ([]Message, bool, error) {
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return nil, false, err
+	}
+	rows, hasOlder, err := s.listStoredMessagesBefore(ctx, s.db, sessionID, beforeRowID, limit)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make([]Message, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, messageFromStored(row))
+	}
+	return out, hasOlder, nil
+}
+
+// listStoredMessagesBefore reads one backwards page of visible rows — those
+// with id strictly below beforeRowID, 0 meaning from the newest — newest-first
+// from SQLite and returned in chronological order. Whether an older visible
+// row exists is answered inside the same statement, by a correlated EXISTS
+// probe carried on each row: fetching one extra row to find out (LIMIT n+1,
+// then dropping it) would read a whole extra row of body columns. Rows arrive
+// newest-first, so the last flag read is the page's oldest row's — the one
+// that says whether anything older remains.
+func (s *SessionStore) listStoredMessagesBefore(ctx context.Context, q dbtx, sessionID string, beforeRowID int64, limit int) ([]storedMessage, bool, error) {
+	if s == nil || s.db == nil {
+		return nil, false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return []storedMessage{}, false, nil
+	}
+	query := `SELECT ` + messageColumnsJoined + `,
+		EXISTS(SELECT 1 FROM fb_messages older
+			WHERE older.session_id = m.session_id
+			  AND older.visibility = 'visible'
+			  AND older.id < m.id)
+		FROM fb_messages m LEFT JOIN fb_runs r ON r.id = m.run_id
+		WHERE m.session_id = ?
+		  AND m.visibility = 'visible'`
+	args := []any{sessionID}
+	if beforeRowID > 0 {
+		query += ` AND m.id < ?`
+		args = append(args, beforeRowID)
+	}
+	query += ` ORDER BY m.id DESC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	rev := make([]storedMessage, 0, 32)
+	hasOlder := false
+	for rows.Next() {
+		var olderExists bool
+		row, err := scanMessageWithRun(trailingColumnScanner{rows, &olderExists})
+		if err != nil {
+			return nil, false, err
+		}
+		rev = append(rev, row)
+		hasOlder = olderExists
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	out := make([]storedMessage, 0, len(rev))
+	for i := len(rev) - 1; i >= 0; i-- {
+		out = append(out, rev[i])
+	}
+	return out, hasOlder, nil
+}
+
+// trailingColumnScanner forwards scanMessageWithRun's column destinations to
+// the underlying row plus one extra trailing destination of the caller's, for
+// statements that append a computed column after messageColumnsJoined.
+type trailingColumnScanner struct {
+	row  interface{ Scan(...any) error }
+	last any
+}
+
+func (s trailingColumnScanner) Scan(dest ...any) error {
+	return s.row.Scan(append(dest, s.last)...)
+}
+
 func (s *SessionStore) listProjectedMessageRows(ctx context.Context, q dbtx, sessionID string, boundaryID int64, limit int) ([]storedMessage, bool, error) {
 	boundaryRow, ok, err := s.loadStoredMessageByRowID(ctx, boundaryID)
 	if err != nil || !ok {

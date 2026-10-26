@@ -433,7 +433,7 @@ describe('useChatStream helpers', () => {
       expect(stream.error.value).toBeNull()
 
       await Promise.resolve()
-      expect(chatMessagesSpy).toHaveBeenLastCalledWith('new-session', 0)
+      expect(chatMessagesSpy).toHaveBeenLastCalledWith('new-session', 200)
       expect(sessionModeSpy).toHaveBeenLastCalledWith('new-session')
     } finally {
       chatMessagesSpy.mockRestore()
@@ -515,7 +515,7 @@ describe('useChatStream helpers', () => {
       expect(stream.answer.value).toBe('')
       expect(stream.isStreaming.value).toBe(false)
       expect(stream.runtimeStatus.value.kind).toBe('idle')
-      expect(chatMessagesSpy).toHaveBeenLastCalledWith('new-session', 0)
+      expect(chatMessagesSpy).toHaveBeenLastCalledWith('new-session', 200)
       expect(sessionModeSpy).toHaveBeenLastCalledWith('new-session')
     } finally {
       chatMessagesSpy.mockRestore()
@@ -2082,13 +2082,71 @@ describe('useChatStream helpers', () => {
       const stream = useChatStream()
       await stream.loadMessages('s1')
 
-      expect(chatMessagesSpy).toHaveBeenCalledWith('s1', 0)
+      expect(chatMessagesSpy).toHaveBeenCalledWith('s1', 200)
       expect(stream.messages.value).toHaveLength(1)
       expect(stream.messages.value[0]).toMatchObject({ role: 'assistant', content: 'done' })
       expect(stream.messages.value[0]?.blocks).toEqual([
         { kind: 'thinking', text: 'line 01\nline 02\nline 03', open: false, startedAt: 0 },
         { kind: 'assistant', text: 'done', open: false },
       ])
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
+  // Plan 173: the main conversation loads one newest page and pages earlier
+  // rows in by keyset — before = the oldest row id on screen — while a
+  // subagent worker's session keeps its full read: the contract the worker
+  // replay relies on, which nobody may "fix" along with the main view.
+  it('pages the main session one page at a time and keeps worker reads full', async () => {
+    const spawnEvent = {
+      id: 'spawn-1', sequence: 1, schemaVersion: 1, sessionId: 's1', runId: 'child-1',
+      type: 'subagent_spawned', createdAt: '2026-09-06T00:00:01Z',
+      payload: {
+        agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', task: 'inspect history',
+        parentRunId: 'parent-1', executionId: 'exec-1', workerSessionId: 'worker-1',
+      },
+    }
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockImplementation(async (sessionId: string, _limit?: number, before?: number) => {
+      if (sessionId === 'worker-1') return [] as never
+      if (before === 11) return [{ rowId: 10, id: 'm0', role: 'user', content: 'first' }] as never
+      return [
+        { rowId: 11, id: 'm1', role: 'user', content: 'second' },
+        { rowId: 12, id: 'a1', role: 'assistant', content: 'the answer' },
+      ] as never
+    })
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's1', nextCursor: 1, highWater: 1, hasMore: false, schemaVersion: 1, events: [spawnEvent],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 's1'
+      await stream.loadMessages('s1')
+      // The main view asks for one newest page, not the whole transcript;
+      // the worker session is a different contract and reads everything.
+      expect(chatMessagesSpy).toHaveBeenCalledWith('s1', 200)
+      expect(chatMessagesSpy).toHaveBeenCalledWith('worker-1', 0)
+      // Two transcript rows, plus the spawn event's own projected card.
+      expect(stream.messages.value).toHaveLength(3)
+
+      // Paging backwards rides the keyset cursor and prepends the page.
+      const added = await stream.loadOlderMessages()
+      expect(added).toBe(1)
+      expect(chatMessagesSpy).toHaveBeenLastCalledWith('s1', 200, 11)
+      expect(stream.messages.value).toHaveLength(4)
+      expect(stream.messages.value[0]).toMatchObject({ role: 'user', content: 'first' })
+      expect(stream.olderExhausted.value).toBe(false)
+
+      // An empty page ends the paging for good: no further requests.
+      chatMessagesSpy.mockResolvedValue([] as never)
+      chatMessagesSpy.mockResolvedValueOnce([] as never)
+      await stream.loadOlderMessages()
+      expect(stream.olderExhausted.value).toBe(true)
+      await stream.loadOlderMessages()
+      expect(chatMessagesSpy).toHaveBeenCalledTimes(4)
     } finally {
       chatMessagesSpy.mockRestore()
       sessionEventsSpy.mockRestore()

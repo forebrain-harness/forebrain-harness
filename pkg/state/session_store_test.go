@@ -2250,3 +2250,75 @@ func TestLastAssistantTextForRunReadsTheFinalAnswer(t *testing.T) {
 		t.Fatalf("an unknown run = %q (%v), want empty", text, err)
 	}
 }
+
+// TestListMessagesBeforePagesWithoutGapsOrRepeats pins the keyset contract of
+// plan 173: paging backwards by row id returns every visible row exactly once,
+// each page in chronological order, never a hidden one, and the page that
+// reaches the start of the transcript says so.
+func TestListMessagesBeforePagesWithoutGapsOrRepeats(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+	if err := store.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(role, visibility, content string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`,
+			"s1", role, visibility, content, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The repaired row sits between visible ones so a page cursor has to step
+	// over it, and a broken implementation would either return it or lose the
+	// row behind it.
+	seed("user", "visible", "one")
+	seed("user", "visible", "two")
+	seed("user", "repaired", "the hidden repair")
+	seed("user", "visible", "three")
+	seed("user", "visible", "four")
+	seed("user", "visible", "five")
+
+	var collected []string
+	seenRowIDs := map[int64]bool{}
+	before := int64(0)
+	pages := 0
+	for {
+		page, hasOlder, err := store.ListMessagesBefore(ctx, "s1", before, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		// Pages arrive newest-first; prefixing keeps the whole walk in
+		// chronological order so the no-gaps claim reads left to right.
+		var pageContents []string
+		for i, m := range page {
+			if seenRowIDs[m.RowID] {
+				t.Fatalf("row %d returned twice across pages", m.RowID)
+			}
+			seenRowIDs[m.RowID] = true
+			if i > 0 && page[i-1].RowID >= m.RowID {
+				t.Fatalf("page not in chronological order: %v", page)
+			}
+			pageContents = append(pageContents, m.Content)
+		}
+		collected = append(pageContents, collected...)
+		if !hasOlder {
+			break
+		}
+		if len(page) == 0 {
+			t.Fatal("hasOlder=true on an empty page: paging would never end")
+		}
+		before = page[0].RowID
+		if pages > 10 {
+			t.Fatal("paging did not converge")
+		}
+	}
+	want := []string{"one", "two", "three", "four", "five"}
+	if !slices.Equal(collected, want) {
+		t.Fatalf("pages collected %v, want %v", collected, want)
+	}
+	if pages != 3 {
+		t.Fatalf("pages = %d, want three pages of two at most", pages)
+	}
+}

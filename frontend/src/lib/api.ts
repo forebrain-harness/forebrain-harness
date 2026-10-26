@@ -2258,10 +2258,16 @@ export const forebrainApi = {
     return api.get<ChatSessionsResponse>('/chat/sessions', { params }).then((res) => res.data)
   },
 
-  chatMessages(sessionId: string, limit = 0) {
+  /**
+   * One conversation's transcript. No limit is the whole conversation (the
+   * subagent worker view and any external consumer); a limit returns the
+   * newest page, and `before` — a row id — the page directly above it
+   * (plan 173's keyset contract; the response stays a plain array).
+   */
+  chatMessages(sessionId: string, limit = 0, before?: number) {
     return api
       .get<ChatMessageRecord[]>(`/chat/sessions/${sessionId}/messages`, {
-        params: { limit },
+        params: before && before > 0 ? { limit, before } : { limit },
       })
       .then((res) => res.data)
   },

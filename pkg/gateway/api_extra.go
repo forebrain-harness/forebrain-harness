@@ -1980,7 +1980,31 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	if limit > 5000 {
+	before := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("before")); raw != "" {
+		if v, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil && v > 0 {
+			before = v
+		}
+	}
+	// The paging contract (plan 173): no parameters is the whole
+	// conversation — the subagent worker view and any external consumer rely
+	// on it — while a limit or a before cursor asks for one page, 200 rows
+	// by default and 1000 at most: the newest visible rows strictly below
+	// the cursor. The cursor is a row id, so a session still being written
+	// cannot shift what the next page returns. hasMore rides along with the
+	// page but stays on the server: the response remains the plain array the
+	// contract froze, and the client reads exhaustion off the page's own
+	// length. A limit on the store-less Core fallback keeps its old meaning
+	// below — the last N projected rows — because that store has no keyset.
+	paged := s.Sessions != nil && (before > 0 || limit > 0)
+	if paged {
+		if limit <= 0 {
+			limit = 200
+		}
+		if limit > 1000 {
+			limit = 1000
+		}
+	} else if limit > 5000 {
 		limit = 5000
 	}
 	var (
@@ -1992,7 +2016,9 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	// response limit. Otherwise a limit boundary that starts at the final
 	// assistant row would lose its Worked-for eligibility.
 	const historyLimit = 5000
-	if s.Sessions != nil {
+	if paged {
+		turns, _, err = s.Sessions.ListMessagesBefore(r.Context(), sid, before, limit)
+	} else if s.Sessions != nil {
 		turns, err = s.Sessions.ListAllMessages(r.Context(), sid, 0)
 	} else if s.Core != nil {
 		turns, err = s.Core.ListSessionMessages(r.Context(), sid, historyLimit)
@@ -2003,36 +2029,24 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	// Each finished compaction is a row of its own, at the position the live
 	// conversation drew it — the rule the terminal's replay uses too.
-	compactionsBefore := map[int][]chatCompactionRow{}
+	var compactionEvents []event.RunEvent
 	if s.RunRT != nil {
-		compactions, cerr := s.sessionCompactionEvents(r.Context(), sid)
+		events, cerr := s.sessionCompactionEvents(r.Context(), sid)
 		if cerr != nil {
 			http.Error(w, cerr.Error(), http.StatusInternalServerError)
 			return
 		}
-		for _, evt := range compactions {
-			if pos, placed := turn.CompactionPosition(turns, evt); placed {
-				if row, ok := chatCompactionRowFromEvent(evt); ok {
-					compactionsBefore[pos] = append(compactionsBefore[pos], row)
-				}
-			}
-		}
+		compactionEvents = events
 	}
 	// A goal's lines, at the positions the terminal's replay draws them.
-	goalsBefore := map[int][]chatGoalRow{}
+	var goalEvents []event.RunEvent
 	if s.RunRT != nil {
-		goals, gerr := s.sessionEventsOfTypes(r.Context(), sid, event.RunEventGoalStarted, event.RunEventGoalRoundStarted, event.RunEventGoalCompleted)
+		events, gerr := s.sessionEventsOfTypes(r.Context(), sid, event.RunEventGoalStarted, event.RunEventGoalRoundStarted, event.RunEventGoalCompleted)
 		if gerr != nil {
 			http.Error(w, gerr.Error(), http.StatusInternalServerError)
 			return
 		}
-		for _, evt := range goals {
-			if pos, placed := turn.GoalPosition(turns, evt); placed {
-				if row, ok := chatGoalRowFromEvent(evt); ok {
-					goalsBefore[pos] = append(goalsBefore[pos], row)
-				}
-			}
-		}
+		goalEvents = events
 	}
 	type msg struct {
 		ID             string              `json:"id,omitempty"`
@@ -2101,7 +2115,7 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		visibleIndexes = append(visibleIndexes, i)
 	}
-	if limit > 0 && len(visibleIndexes) > limit {
+	if limit > 0 && !paged && len(visibleIndexes) > limit {
 		visibleIndexes = visibleIndexes[len(visibleIndexes)-limit:]
 	}
 	visible := make(map[int]struct{}, len(visibleIndexes))
@@ -2113,17 +2127,62 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	if len(visibleIndexes) > 0 {
 		firstVisible = visibleIndexes[0]
 	}
-	emitCompactions := func(pos int) {
-		if pos < firstVisible {
-			return
+	// Display rows place by row id (plan 173): an index into turns only
+	// means something on the page that computed it, while a row id names
+	// the same row on every page. An event the positioner anchors before the
+	// page's first visible row belongs to an older page — it is that page's
+	// tail — and on a paged request an event anchored at index 0 hangs off a
+	// row below the page entirely; the page is not widened by one row to go
+	// find that anchor, so both stay unplaced here.
+	compactionsBefore := map[int64][]chatCompactionRow{}
+	compactionsTail := []chatCompactionRow{}
+	goalsBefore := map[int64][]chatGoalRow{}
+	goalsTail := []chatGoalRow{}
+	// anchorRow resolves "drawn before index pos" to the visible row that
+	// carries the event — the first visible row at or after pos, because an
+	// anchor on a hidden row shows ahead of the next row a surface draws —
+	// or to the page's tail when no visible row follows.
+	anchorRow := func(pos int) (int, bool, bool) {
+		if pos < firstVisible || (paged && pos == 0) {
+			return 0, false, false
 		}
-		for i := range compactionsBefore[pos] {
-			row := compactionsBefore[pos][i]
-			out = append(out, msg{Role: "compaction", Compaction: &row})
+		for _, i := range visibleIndexes {
+			if i >= pos {
+				return i, true, false
+			}
 		}
-		for i := range goalsBefore[pos] {
-			row := goalsBefore[pos][i]
-			out = append(out, msg{Role: "goal", Goal: &row})
+		return 0, false, true
+	}
+	for _, evt := range compactionEvents {
+		pos, placed := turn.CompactionPosition(turns, evt)
+		if !placed {
+			continue
+		}
+		row, ok := chatCompactionRowFromEvent(evt)
+		if !ok {
+			continue
+		}
+		if i, onRow, atTail := anchorRow(pos); onRow {
+			key := turns[i].RowID
+			compactionsBefore[key] = append(compactionsBefore[key], row)
+		} else if atTail {
+			compactionsTail = append(compactionsTail, row)
+		}
+	}
+	for _, evt := range goalEvents {
+		pos, placed := turn.GoalPosition(turns, evt)
+		if !placed {
+			continue
+		}
+		row, ok := chatGoalRowFromEvent(evt)
+		if !ok {
+			continue
+		}
+		if i, onRow, atTail := anchorRow(pos); onRow {
+			key := turns[i].RowID
+			goalsBefore[key] = append(goalsBefore[key], row)
+		} else if atTail {
+			goalsTail = append(goalsTail, row)
 		}
 	}
 	// Every run closes with its "Worked for" line after the last row it wrote
@@ -2137,7 +2196,12 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	// It is looked up once, and only if a row has a card to head.
 	displayRoot := sync.OnceValue(func() string { return s.sessionDisplayRoot(r.Context(), sid) })
 	for i, t := range turns {
-		emitCompactions(i)
+		for _, row := range compactionsBefore[t.RowID] {
+			out = append(out, msg{Role: "compaction", Compaction: &row})
+		}
+		for _, row := range goalsBefore[t.RowID] {
+			out = append(out, msg{Role: "goal", Goal: &row})
+		}
 		if _, ok := visible[i]; ok {
 			// A row's own execution window — a tool call, a `!cmd` — is its
 			// timing; the run's clock belongs to the worked row below.
@@ -2201,7 +2265,13 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			out = append(out, m)
 		}
-		if line, ok := workedLines[i]; ok && i >= firstVisible {
+		// On a paged request below the newest page (before > 0), a run whose
+		// last in-page row is the page's newest row runs on past the page
+		// boundary: its ending — and the Worked row that closes it — is on
+		// the newer page above, the only page that holds the run's actual
+		// last row. The newest page has nothing above it, so its top run
+		// really does end there.
+		if line, ok := workedLines[i]; ok && i >= firstVisible && !(paged && before > 0 && i == len(turns)-1) {
 			worked := msg{
 				ID:            "worked-" + line.RunID,
 				Role:          "worked",
@@ -2218,7 +2288,12 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			out = append(out, worked)
 		}
 	}
-	emitCompactions(len(turns))
+	for _, row := range compactionsTail {
+		out = append(out, msg{Role: "compaction", Compaction: &row})
+	}
+	for _, row := range goalsTail {
+		out = append(out, msg{Role: "goal", Goal: &row})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }

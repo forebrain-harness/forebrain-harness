@@ -2659,6 +2659,15 @@ export function useChatStream() {
   let historyGeneration = 0
   let sessionEventCursor = 0
   let historyLoadingSession = ''
+  // Backwards paging over the same transcript (plan 173): the main view loads
+  // one page at a time and pages older rows in as the reader reaches the top
+  // of the thread. The cursor is the oldest row id already on screen — a
+  // keyset, so a session still being written cannot shift what the next page
+  // returns — and an empty page means the transcript's start is reached.
+  const HISTORY_PAGE_SIZE = 200
+  let oldestLoadedRowId = 0
+  const olderLoading = ref(false)
+  const olderExhausted = ref(false)
   const bufferedSessionEvents: ForebrainRunEvent[] = []
   // In-flight text and tool output the gateway pushed while the history was
   // still loading: its target message does not exist yet, so it is applied once
@@ -5916,6 +5925,9 @@ export function useChatStream() {
     const generation = historyGeneration
     const snapshotEpoch = sendEpoch
     historyLoadingSession = target
+	// A fresh snapshot restarts backwards paging from the newest page.
+	oldestLoadedRowId = 0
+	olderExhausted.value = false
 	if (generation === historyGeneration && sessionId.value === target) {
 	  historyLoading.value = true
 	  historyError.value = null
@@ -5957,7 +5969,9 @@ export function useChatStream() {
 		.catch((error: unknown) => ({ value: { sessionId: target, records: [] }, error }))
 	  const [{ events, highWater, error: eventHistoryError }, list, legacySubagents] = await Promise.all([
 		eventHistory,
-		forebrainApi.chatMessages(target, 0),
+		// The main conversation reads one newest page (plan 173); a subagent
+		// worker's session keeps its full read below.
+		forebrainApi.chatMessages(target, HISTORY_PAGE_SIZE),
 		legacyHistory,
 	  ])
 	  // A 404 is the explicit compatibility signal for a pre-event-log server.
@@ -5969,6 +5983,11 @@ export function useChatStream() {
 		throw legacySubagents.error
 	  }
 	  if (generation !== historyGeneration || (sessionId.value != null && sessionId.value !== target)) return
+      // The backwards-paging cursor: the oldest row this page put on screen.
+      // Rows without a row id (compaction, goal and worked lines) read as
+      // Infinity and never win the minimum.
+      const oldestRowId = Math.min(...(Array.isArray(list) ? list : []).map((row) => Number(row.rowId) || Infinity))
+      if (Number.isFinite(oldestRowId)) oldestLoadedRowId = oldestRowId
       const transcript = conversationFromTranscript(Array.isArray(list) ? list : [], shouldRenderPlan)
       const streamedIntoTarget = (lastSendEpochBySession.get(target) ?? 0) > snapshotEpoch
       if (streamedIntoTarget) {
@@ -6089,6 +6108,37 @@ export function useChatStream() {
     }
   }
 
+  // One page of earlier rows, prepended to the loaded history when the reader
+  // reaches the top of the thread (plan 173). Returns how many message rows
+  // landed, so the view can anchor its viewport on the content it was already
+  // showing; an empty page marks the transcript's start and stops the paging.
+  async function loadOlderMessages(): Promise<number> {
+    const target = sessionId.value?.trim() ?? ''
+    if (!target || olderLoading.value || olderExhausted.value || oldestLoadedRowId <= 0) return 0
+    const generation = historyGeneration
+    const before = oldestLoadedRowId
+    olderLoading.value = true
+    try {
+      const rows = await forebrainApi.chatMessages(target, HISTORY_PAGE_SIZE, before)
+      if (generation !== historyGeneration || (sessionId.value != null && sessionId.value !== target)) return 0
+      const list = Array.isArray(rows) ? rows : []
+      if (list.length === 0) {
+        olderExhausted.value = true
+        return 0
+      }
+      const oldestRowId = Math.min(...list.map((row) => Number(row.rowId) || Infinity))
+      if (Number.isFinite(oldestRowId)) oldestLoadedRowId = Math.min(oldestLoadedRowId, oldestRowId)
+      const page = conversationFromTranscript(list, shouldRenderPlan)
+      messages.value = [...page, ...messages.value]
+      return page.length
+    } catch {
+      // The page stays unloadable; the next scroll to the top retries it.
+      return 0
+    } finally {
+      olderLoading.value = false
+    }
+  }
+
   function switchToSession(sid: string) {
     applySessionReset({ sid, loadMessages: true, loadMode: true })
   }
@@ -6154,6 +6204,9 @@ export function useChatStream() {
     dispose,
     fetchModels,
     loadMessages,
+    loadOlderMessages,
+    olderLoading,
+    olderExhausted,
     switchToSession,
     resetForNewChat,
     rebindSessionObserver,

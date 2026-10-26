@@ -35,6 +35,9 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
     cancelAutoContinue: unknown
     resetForNewChat: unknown
     rebindSessionObserver: unknown
+    loadOlderMessages: unknown
+    olderLoading: unknown
+    olderExhausted: unknown
     send: unknown
     runtimeStatus: unknown
   }
@@ -54,6 +57,9 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
   f.cancelAutoContinue = vi.fn()
   f.resetForNewChat = vi.fn()
   f.rebindSessionObserver = vi.fn()
+  f.loadOlderMessages = vi.fn(async () => 0)
+  f.olderLoading = ref(false)
+  f.olderExhausted = ref(false)
   return {
     ...actual,
     useChatStream: () => ({
@@ -97,6 +103,9 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       editLastQueuedMessage: vi.fn(),
       sendPendingSteersAfterInterrupt: vi.fn(),
       loadMessages: vi.fn(),
+      loadOlderMessages: f.loadOlderMessages,
+      olderLoading: f.olderLoading,
+      olderExhausted: f.olderExhausted,
       switchToSession: vi.fn(),
       resetForNewChat: f.resetForNewChat,
       rebindSessionObserver: f.rebindSessionObserver,
@@ -1583,6 +1592,77 @@ describe('ChatView activity line', () => {
     expect(statusNodes[1]!.classes()).toContain('tool-status--error')
     expect(wrapper.find('.activity-node--think').exists()).toBe(true)
     expect(wrapper.find('.activity-node--say').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+// Plan 173: reaching the top of the thread pages the conversation's earlier
+// rows in under the reader's viewport — the rows being read stay on screen,
+// anchored by the height the new page added.
+describe('ChatView loads older rows at the top of the thread', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    ;(fake as { messages: { value: unknown[] } }).messages.value = []
+    ;(fake as { olderLoading: { value: boolean } }).olderLoading.value = false
+    ;(fake as { olderExhausted: { value: boolean } }).olderExhausted.value = false
+    useWorkbench().open.value = false
+  })
+
+  it('pages older rows in and anchors the viewport on the added height', async () => {
+    const messages = (fake as { messages: { value: { id: string; role: string; content: string }[] } }).messages
+    messages.value = [
+      { id: 'm2', role: 'user', content: 'second question' },
+      { id: 'a2', role: 'assistant', content: 'the second answer' },
+    ]
+    const loadOlder = (fake as { loadOlderMessages: ReturnType<typeof vi.fn> }).loadOlderMessages
+    const wrapper = await mountView()
+    await flushPromises()
+
+    const thread = wrapper.find('[aria-label="Conversation transcript"]')
+    expect(thread.exists()).toBe(true)
+    // jsdom reports 0 for both, so the scroll heights are simulated: the
+    // thread holds 1000px before the page lands and 1200px after it.
+    const el = thread.element as HTMLElement
+    let height = 1000
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => height })
+    el.scrollTop = 0
+    loadOlder.mockImplementationOnce(async () => {
+      messages.value = [{ id: 'm1', role: 'user', content: 'the earliest question' }, ...messages.value]
+      // The page lands: the thread grew by the new rows' height.
+      height = 1200
+      return 1
+    })
+
+    await thread.trigger('scroll')
+    await flushPromises()
+
+    expect(loadOlder).toHaveBeenCalledTimes(1)
+    expect(messages.value).toHaveLength(3)
+    expect(messages.value[0]).toMatchObject({ id: 'm1', content: 'the earliest question' })
+    // The anchor: scrollTop moves down by exactly the height the page added.
+    expect(el.scrollTop).toBe(200)
+    wrapper.unmount()
+  })
+
+  it('does not page again while a page is already loading', async () => {
+    const messages = (fake as { messages: { value: unknown[] } }).messages
+    messages.value = [{ id: 'm2', role: 'user', content: 'second question' }]
+    const loadOlder = (fake as { loadOlderMessages: ReturnType<typeof vi.fn> }).loadOlderMessages
+    const wrapper = await mountView()
+    await flushPromises()
+
+    const thread = wrapper.find('[aria-label="Conversation transcript"]')
+    const el = thread.element as HTMLElement
+    let height = 1000
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => height })
+    el.scrollTop = 0
+    ;(fake as { olderLoading: { value: boolean } }).olderLoading.value = true
+
+    await thread.trigger('scroll')
+    await flushPromises()
+
+    expect(loadOlder).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

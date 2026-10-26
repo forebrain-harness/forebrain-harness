@@ -2067,6 +2067,143 @@ func TestChatMessagesPlacesEachCompactionAsItsOwnRow(t *testing.T) {
 	}
 }
 
+// TestChatMessagesPagesBackwards pins plan 173's paging contract: a limit
+// returns the newest page, a before cursor the page directly above it, and
+// together the pages tile the conversation with no repeats and no gaps —
+// including the two rows that live on a page boundary. A compaction anchored
+// at the boundary row shows on one page only (the older page's tail). A run
+// that straddles the boundary closes with its Worked row on the newer page,
+// the only page that holds its last row.
+func TestChatMessagesPagesBackwards(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	seedRun(t, s.RunRT, "s1", "r1")
+	seedRun(t, s.RunRT, "s1", "r2")
+	base := time.Unix(1_700_000_000, 0)
+	appendRow := func(role, content, runID string, at time.Duration) int64 {
+		t.Helper()
+		id, err := s.Sessions.AppendMessageForRun(ctx, "s1", runID, role, content, "", "", state.MessageExecTiming{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Env.SQL.ExecContext(ctx, `UPDATE fb_messages SET created_at = ? WHERE id = ?`, base.Add(at).Unix(), id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	// Six visible rows, pages of three. r1 straddles the page boundary: its
+	// first row is the older page's newest row, its last row the newer
+	// page's oldest. The compaction fires between the two — anchored at the
+	// boundary row, drawn right after it.
+	rowOne := appendRow("user", "one", "", 0)
+	rowTwo := appendRow("user", "two", "", time.Second)
+	rowThree := appendRow("assistant", "three", "r1", 2*time.Second)
+	rowFour := appendRow("assistant", "four", "r1", 3*time.Second)
+	rowFive := appendRow("assistant", "five", "r2", 4*time.Second)
+	rowSix := appendRow("assistant", "six", "r2", 5*time.Second)
+	// A finished clock per run, so each closes with a Worked row.
+	for _, r := range []struct {
+		id         string
+		start, end time.Duration
+	}{{"r1", 2 * time.Second, 3*time.Second + 500*time.Millisecond}, {"r2", 4 * time.Second, 6 * time.Second}} {
+		if _, err := s.Env.SQL.ExecContext(ctx,
+			`UPDATE fb_runs SET started_at_ms = ?, finished_at_ms = ?, worked_ms = ? WHERE id = ?`,
+			base.Add(r.start).UnixMilli(), base.Add(r.end).UnixMilli(), (r.end - r.start).Milliseconds(), r.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.RunRT.AppendSessionEvent(ctx, sessionEventRecord(event.NewRunEvent("", "", "s1", event.RunEventContextCompacted, event.ContextCompactedPayload{CompactionID: "c1", Trigger: "manual", TokensBefore: 900, TokensAfter: 100}, base.Add(2500*time.Millisecond)))); err != nil {
+		t.Fatal(err)
+	}
+
+	type row struct {
+		Role       string `json:"role"`
+		Content    string `json:"content"`
+		RowID      int64  `json:"row_id"`
+		RunID      string `json:"run_id"`
+		Compaction *struct {
+			CompactionID string `json:"compaction_id"`
+		} `json:"compaction"`
+	}
+	page := func(target string) []row {
+		t.Helper()
+		rec := cronRequest(t, s, http.MethodGet, target, nil, s.handleChatMessages, "id", "s1")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d %s", target, rec.Code, rec.Body.String())
+		}
+		var rows []row
+		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	render := func(rows []row) string {
+		parts := make([]string, 0, len(rows))
+		for _, r := range rows {
+			name := r.Role
+			if r.RunID != "" {
+				name += "-" + r.RunID
+			}
+			if r.Compaction != nil {
+				name += "-" + r.Compaction.CompactionID
+			}
+			parts = append(parts, name)
+		}
+		return strings.Join(parts, ",")
+	}
+
+	// a) The newest page is the three newest rows; before = the page's
+	// oldest row id returns the three rows directly above it, and the two
+	// pages' message rows together are the whole conversation exactly once.
+	newer := page("/api/chat/sessions/s1/messages?limit=3")
+	if got := render(newer); got != "assistant-r1,worked-r1,assistant-r2,assistant-r2,worked-r2" {
+		t.Fatalf("newest page = %s", got)
+	}
+	older := page(fmt.Sprintf("/api/chat/sessions/s1/messages?limit=3&before=%d", newer[0].RowID))
+	if got := render(older); got != "user,user,assistant-r1,compaction-c1" {
+		t.Fatalf("older page = %s", got)
+	}
+	if newer[0].RowID != rowFour {
+		t.Fatalf("the cursor row = %d, want four's row %d", newer[0].RowID, rowFour)
+	}
+	var gotIDs []int64
+	for _, r := range append(append([]row{}, older...), newer...) {
+		if r.Role == "user" || r.Role == "assistant" {
+			gotIDs = append(gotIDs, r.RowID)
+		}
+	}
+	wantIDs := []int64{rowOne, rowTwo, rowThree, rowFour, rowFive, rowSix}
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("pages tiled %v, want %v (no repeats, no gaps)", gotIDs, wantIDs)
+	}
+
+	// b) The compaction anchored at the boundary row (three) appears once,
+	// on the older page's tail; the newer page does not repeat it at its
+	// head.
+	compactions := 0
+	for _, r := range append(append([]row{}, older...), newer...) {
+		if r.Compaction != nil {
+			compactions++
+		}
+	}
+	if compactions != 1 || older[len(older)-1].Compaction == nil {
+		t.Fatalf("the boundary compaction must close the older page once: %s | %s", render(older), render(newer))
+	}
+
+	// c) r1 straddles the boundary, so its Worked row is on the newer page,
+	// right after its actual last row; the older page, which cannot know
+	// where r1 ended, does not close it a second time.
+	for _, r := range older {
+		if r.Role == "worked" && r.RunID == "r1" {
+			t.Fatalf("the older page closed the straddling run: %s", render(older))
+		}
+	}
+	if newer[1].Role != "worked" || newer[1].RunID != "r1" {
+		t.Fatalf("the newer page must close r1 after its last row: %s", render(newer))
+	}
+}
+
 // TestChatMessagesPlacesAGoalsLinesWhereTheTerminalDrawsThem pins the web
 // history's account of a /goal to the terminal's: the goal opens right after
 // the message that asked for it, each round's line comes before that round's
