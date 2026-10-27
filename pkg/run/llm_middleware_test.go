@@ -379,7 +379,7 @@ func progressCtx(t *testing.T, fire func(sink *llm.StreamSink)) context.Context 
 // what completed.
 func TestBlankOutputRetryHonoursTheResendGuard(t *testing.T) {
 	inner := &failingLLM{err: &llm.APIError{StatusCode: 200, Message: "completed without output"}}
-	wrapped := wrapBlankOutputRetryLLM(inner)
+	wrapped := wrapBlankOutputRetryLLM(inner, nil)
 
 	ctx := progressCtx(t, func(sink *llm.StreamSink) {
 		sink.OnDelta("the partial answer")

@@ -17,6 +17,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -1509,5 +1510,72 @@ func TestTurnOnStoredRowRefreshesRecency(t *testing.T) {
 	// And the reading surfaces share: NewSessionModel answers the refreshed row.
 	if got := NewSessionModel(r, store); !got.Set || got.Model != "gpt-a" {
 		t.Fatalf("NewSessionModel = %+v, want gpt-a after its session's turn", got)
+	}
+}
+
+// TestPublishContextBudget pins the numbers of the turn-end record the engine
+// files for a conversation — the row every surface's reload reads and the
+// broadcast every footer's final refresh follows, inherited unchanged from the
+// socket payload the gateway used to build itself: a session whose last
+// assistant response measured a known usage on a known model must yield this
+// exact payload, and a session with nothing measured stays silent.
+func TestPublishContextBudget(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ensureRunSessions(t, db, "session-1", "session-fresh")
+	sess := state.NewSessionStore(db, "main")
+	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, "session-1", "seed")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := sess.AppendStructuredMessageForRun(
+		ctx, "session-1", seedRun.ID, "assistant", "answer", "msg-1",
+		state.ContentPartsJSON(nil, "answer"), "glm-5.3",
+		`{"input_tokens":150000,"output_tokens":2500}`, "", "", state.MessageExecTiming{},
+	); err != nil {
+		t.Fatalf("AppendStructuredMessageForRun: %v", err)
+	}
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
+		}},
+	}}}
+	probe := &budgetEventProbe{}
+	r := &Runner{Deps: &Deps{SessionStore: sess, AppCfg: cfg}, Events: probe}
+
+	if !PublishContextBudget(r, "run-1", "session-1") {
+		t.Fatal("PublishContextBudget returned false for a measured session")
+	}
+	events := probe.budgetEvents()
+	if len(events) != 1 {
+		t.Fatalf("budget events = %d, want exactly one turn-end record", len(events))
+	}
+	if events[0].RunID != "run-1" || events[0].SessionID != "session-1" || events[0].Type != event.CompactEventBudgetUpdated {
+		t.Fatalf("budget event routing = %+v", events[0])
+	}
+	payloads := probe.budgets()
+	want := event.TokenBudgetUpdatedPayload{
+		Model:                "glm-5.3",
+		TokenUsage:           152500,
+		PercentLeft:          83,
+		ContextWindow:        1000000,
+		EffectiveWindow:      1000000,
+		AutoCompactThreshold: 900000,
+	}
+	if payloads[0] != want {
+		t.Fatalf("budget payload = %+v, want %+v", payloads[0], want)
+	}
+
+	// A session with nothing measured has nothing to say: no record, no false
+	// promise of one.
+	if PublishContextBudget(r, "run-2", "session-fresh") {
+		t.Fatal("PublishContextBudget returned true for an unmeasured session")
+	}
+	if got := probe.budgetEvents(); len(got) != 1 {
+		t.Fatalf("budget events after the unmeasured call = %d, want still one", len(got))
 	}
 }

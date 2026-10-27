@@ -160,13 +160,14 @@ type imageRefusalObserverKey struct{}
 // meets, before the degraded retry. It is how a caller that does know the
 // provider and model learns a fact this package cannot name itself: the heal
 // answers "what do I do about the refusal", the observer answers "who should be
-// told".
+// told". fn receives the request's own context, so a caller with per-call
+// state on it (the attempt ledger) can record the refusal against the call.
 //
 // The observer is a report, not a decision: it cannot change the request or the
 // result, and it runs on the request's own goroutine before the retry. It must
 // return quickly — a caller that has to write something does so on a context of
 // its own, without blocking the retry.
-func WithImageRefusalObserver(ctx context.Context, fn func(reason string)) context.Context {
+func WithImageRefusalObserver(ctx context.Context, fn func(ctx context.Context, reason string)) context.Context {
 	if ctx == nil || fn == nil {
 		return ctx
 	}
@@ -175,20 +176,21 @@ func WithImageRefusalObserver(ctx context.Context, fn func(reason string)) conte
 
 // ImageRefusalObserverFromContext returns the observer installed by
 // WithImageRefusalObserver, or nil when nobody asked to be told.
-func ImageRefusalObserverFromContext(ctx context.Context) func(reason string) {
+func ImageRefusalObserverFromContext(ctx context.Context) func(ctx context.Context, reason string) {
 	if ctx == nil {
 		return nil
 	}
-	fn, _ := ctx.Value(imageRefusalObserverKey{}).(func(reason string))
+	fn, _ := ctx.Value(imageRefusalObserverKey{}).(func(ctx context.Context, reason string))
 	return fn
 }
 
-// reportImageRefusal hands one refusal to the installed observer. A nil observer
-// is the ordinary case — nothing installed, nothing to do — and the call is the
-// only thing between the refusal and the retry.
+// reportImageRefusal hands one refusal to the installed observer, with the
+// request's own context. A nil observer is the ordinary case — nothing
+// installed, nothing to do — and the call is the only thing between the
+// refusal and the retry.
 func reportImageRefusal(ctx context.Context, reason string) {
 	if fn := ImageRefusalObserverFromContext(ctx); fn != nil {
-		fn(reason)
+		fn(ctx, reason)
 	}
 }
 

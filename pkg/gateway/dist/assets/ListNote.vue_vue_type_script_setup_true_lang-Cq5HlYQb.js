@@ -1,0 +1,1 @@
+import{d as o,q as t,N as s,o as n}from"./index-CoeTbMJA.js";const r={class:"forebrain-list-note"},l=o({__name:"ListNote",setup(a){return(e,_)=>(n(),t("p",r,[s(e.$slots,"default")]))}});export{l as _};

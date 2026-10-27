@@ -853,6 +853,12 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	responseStarted := false
 
 	for round := 0; round < openAILengthContinueMax; round++ {
+		// Each round is its own request, and Chat Completions reports usage as
+		// that request's running total rather than as a per-chunk increment:
+		// the same object can arrive on more than one chunk (stepfun /
+		// opencode-go sends it on every one). Snapshot inside the round and sum
+		// across rounds — adding each chunk up reported N x prompt.
+		roundIn, roundOut, roundCached := 0, 0, 0
 		req.Messages = baseMsgs
 		ctx = llm.WithStreamingRequest(ctx)
 		stream, err := c.client.CreateChatCompletionStream(ctx, req)
@@ -899,22 +905,28 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				}
 			}
 			if resp.Usage != nil {
-				tokIn += resp.Usage.PromptTokens
-				tokOut += resp.Usage.CompletionTokens
+				// Usage is the request's total, not this chunk's increment, so
+				// it replaces the round's snapshot instead of adding to it.
+				roundIn = resp.Usage.PromptTokens
+				roundOut = resp.Usage.CompletionTokens
 				if resp.Usage.PromptTokensDetails != nil {
-					tokCached += resp.Usage.PromptTokensDetails.CachedTokens
+					roundCached = resp.Usage.PromptTokensDetails.CachedTokens
 				}
+				totalIn, totalOut := tokIn+roundIn, tokOut+roundOut
+				// OnUsage stays incremental (its consumers add the deltas up):
+				// the difference against the cross-round total keeps that sum
+				// right while the absolute numbers stop compounding.
 				if sink != nil && sink.OnUsage != nil {
-					deltaIn := tokIn - reportedIn
-					deltaOut := tokOut - reportedOut
+					deltaIn := totalIn - reportedIn
+					deltaOut := totalOut - reportedOut
 					if deltaIn > 0 || deltaOut > 0 {
 						sink.OnUsage(deltaIn, deltaOut)
-						reportedIn = tokIn
-						reportedOut = tokOut
+						reportedIn = totalIn
+						reportedOut = totalOut
 					}
 				}
 				if sink != nil && sink.OnUsageSnapshot != nil {
-					sink.OnUsageSnapshot(tokIn, tokOut)
+					sink.OnUsageSnapshot(totalIn, totalOut)
 				}
 			}
 			if len(resp.Choices) == 0 {
@@ -979,6 +991,13 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 			}
 		}
 		_ = stream.Close()
+
+		// The round is over: fold its own total into the cross-round sum.
+		// Length-continue re-sends the request, so each round is its own billed
+		// request with its own usage and the sum across rounds is the truth.
+		tokIn += roundIn
+		tokOut += roundOut
+		tokCached += roundCached
 
 		// A clean close with no finish frame after output means the stream
 		// was cut mid-answer (most often a proxy dropping the SSE

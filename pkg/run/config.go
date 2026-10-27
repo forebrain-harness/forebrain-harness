@@ -2264,3 +2264,25 @@ func ContextBudget(r *Runner, conversationSessionID string, subagent *agent.Hist
 	}
 	return payload, true
 }
+
+// PublishContextBudget files the conversation's measured context budget at a
+// turn's end — one record per turn, the primary agent's twin of a subagent's
+// execution-end gauge. The engine owns the write: every surface reads the same
+// row (a reload's context figure) and the same broadcast (the footer's final
+// refresh); none of them files its own. It returns false when there is nothing
+// measured to say.
+func PublishContextBudget(r *Runner, runID, sessionID string) bool {
+	if r == nil || r.SessionStore == nil {
+		return false
+	}
+	usage, ok := ContextOccupancy(context.Background(), r.SessionStore, sessionID)
+	if !ok || usage <= 0 {
+		return false
+	}
+	payload, ok := ContextBudget(r, sessionID, nil, usage)
+	if !ok {
+		return false
+	}
+	publishEvent(context.Background(), r.Events, runID, sessionID, event.CompactEventBudgetUpdated, payload)
+	return true
+}

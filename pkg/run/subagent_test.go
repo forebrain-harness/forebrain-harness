@@ -4572,14 +4572,35 @@ func (p *budgetEventProbe) budgets() []event.TokenBudgetUpdatedPayload {
 }
 
 // snapshotReportingSubagentExecutor stands in for a child run's model: it
-// reports one absolute usage snapshot the way a provider does mid-response.
+// reports absolute usage snapshots the way a provider does mid-response —
+// one per entry in snapshots, or a single input/output pair when snapshots
+// is empty — then fires the request's end callbacks (OnResponseCompleted,
+// OnEnd) the way a real provider's Execute does, so a gauge archived at the
+// boundary is still filed.
 type snapshotReportingSubagentExecutor struct {
 	input, output int
+	snapshots     [][2]int
 }
 
 func (e *snapshotReportingSubagentExecutor) RunSubagentExec(ctx context.Context, _ SubagentExecRequest) (string, error) {
-	if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnUsageSnapshot != nil {
-		sink.OnUsageSnapshot(e.input, e.output)
+	sink := llm.StreamSinkFrom(ctx)
+	if sink == nil {
+		return "done", nil
+	}
+	fired := e.snapshots
+	if len(fired) == 0 {
+		fired = [][2]int{{e.input, e.output}}
+	}
+	for _, snap := range fired {
+		if sink.OnUsageSnapshot != nil {
+			sink.OnUsageSnapshot(snap[0], snap[1])
+		}
+	}
+	if sink.OnResponseCompleted != nil {
+		sink.OnResponseCompleted()
+	}
+	if sink.OnEnd != nil {
+		sink.OnEnd()
 	}
 	return "done", nil
 }
@@ -4690,6 +4711,60 @@ func TestSubagentUsageSnapshotIsPublishedForItsOwnView(t *testing.T) {
 	}
 	if opened.ContextWindow != 131072 || opened.Model != "glm-4.5" || opened.PercentLeft != 100 || opened.TokenUsage != 0 {
 		t.Fatalf("reviewer view-open budget = %+v, want the same 131072 window, fresh context", opened)
+	}
+}
+
+// TestSubagentBudgetEventFiledOncePerResponse pins the archive half of the
+// gauge's unified contract: a provider may carry its cumulative usage on
+// every chunk, but the child files exactly one token_budget_updated per
+// response — the last snapshot's occupancy — flushed at the request's end
+// boundary, not one row per callback.
+func TestSubagentBudgetEventFiledOncePerResponse(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	runSvc := &state.RunStore{DB: db}
+	ensureRunSessions(t, db, "session-1")
+	parent, err := runSvc.CreateRun(ctx, "session-1", "parent")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
+		}},
+		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"},
+		}},
+	}}}
+	probe := &budgetEventProbe{}
+	owner := &Runner{
+		Deps: &Deps{RunRT: runSvc, AppCfg: cfg},
+		SubagentExecutor: &snapshotReportingSubagentExecutor{snapshots: [][2]int{
+			{28000, 800}, {28000, 1600}, {28000, 2400},
+		}},
+		Control: NewController(),
+		Events:  probe,
+	}
+	parentCtx := llm.WithStreamSink(toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID), &llm.StreamSink{})
+	if _, err := execGeneralSubagent(parentCtx, Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}, "task-budget-once", "title", "do work", "explore"); err != nil {
+		t.Fatal(err)
+	}
+	events := probe.budgetEvents()
+	if len(events) != 1 {
+		t.Fatalf("token_budget_updated events = %d, want exactly one for the whole response: %#v", len(events), events)
+	}
+	got := probe.budgets()[0]
+	if got.AgentID != "task-budget-once" {
+		t.Fatalf("budget AgentID = %q, want the roster key task-budget-once", got.AgentID)
+	}
+	// 30400 = the LAST snapshot's 28000+2400 occupancy of the 115200
+	// autocompact threshold: (115200-30400)/115200 rounds to 74% left.
+	if got.TokenUsage != 30400 || got.PercentLeft != 74 {
+		t.Fatalf("budget numbers = %+v, want the last snapshot's occupancy 30400 at 74%%", got)
 	}
 }
 

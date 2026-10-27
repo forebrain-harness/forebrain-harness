@@ -1,1 +1,0 @@
-import{d as t,o as n,q as r,s as p,I as c,e as d,aJ as l}from"./index-Cdpt_3T8.js";const f=t({__name:"BadgeComponent",props:{variant:{default:"default"}},setup(a){const e=a,o=d(()=>`forebrain-badge--${e.variant}`);return(s,i)=>(n(),r("span",{class:p(["forebrain-badge",o.value])},[c(s.$slots,"default",{},void 0,!0)],2))}}),u=l(f,[["__scopeId","data-v-bb153f7f"]]);export{u as B};

@@ -2440,9 +2440,6 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			AssistantResult: res,
 			AppendAssistant: true,
 		})
-		if budgetMsg, ok := s.tokenBudgetWSMessageFromSession(r.Context(), m.RequestID, runID, sid); ok {
-			writeMsg(budgetMsg)
-		}
 		if out != "" && !streamed {
 			// An answer that was not streamed — the provider sent it whole, or
 			// the output guardrail had to see it whole — reaches the page once,

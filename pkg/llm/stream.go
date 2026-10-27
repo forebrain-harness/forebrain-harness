@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,7 +27,10 @@ type StreamSink struct {
 	OnUsage func(inputTokens int, outputTokens int)
 	// OnUsageSnapshot receives the current LLM response's absolute context
 	// occupancy. Unlike OnUsage, repeated snapshots replace the composer
-	// footer budget instead of being added together.
+	// footer budget instead of being added together. It is a live gauge,
+	// fired once per event that carries usage — a consumer that also files
+	// it durably must use UsageSnapshotRecord, or it writes one row per
+	// chunk.
 	OnUsageSnapshot func(inputTokens int, outputTokens int)
 	// OnResponseCompleted fires when a completed assistant response has been
 	// appended to the orchestration session, meaning its text is now covered by
@@ -97,6 +101,12 @@ type TransportRetry struct {
 	// finished. A resend only ever follows an attempt whose finished blocks
 	// are all thinking, and Claude Code withdraws them with the unfinished one.
 	DropFinishedThinking bool
+	// NonStreaming marks that the attempt this failure came from was sent
+	// without streaming (the one-shot fallback plan 156 allows, or a retry
+	// chain running under a non-streaming request). Informational only: the
+	// retry decisions never read it; the attempt ledger does, to fill its
+	// streaming column.
+	NonStreaming bool
 }
 
 // ResponseNoticeKind names the line a surface draws about the response
@@ -116,6 +126,45 @@ const StreamingFallbackWarning = "Streaming response ended before any complete d
 type ResponseNotice struct {
 	Kind ResponseNoticeKind
 	Text string
+}
+
+// UsageSnapshotRecord keeps the last absolute usage snapshot of one request,
+// so a consumer that also files the gauge durably writes one record per
+// request instead of one per callback. OnUsageSnapshot is a live gauge: a
+// provider may fire it once per chunk (a compatible stream carrying its
+// cumulative usage on every chunk does), and filing each one wrote 209 rows
+// for one response. Observe from the snapshot callback, Take from the
+// request's end boundary (OnResponseCompleted, and OnEnd so a cancelled
+// request is still recorded). Take drains: calling it at both boundaries
+// yields one record.
+type UsageSnapshotRecord struct {
+	mu    sync.Mutex
+	in    int
+	out   int
+	state bool
+}
+
+// Observe stores the latest snapshot, replacing any earlier one.
+func (r *UsageSnapshotRecord) Observe(inputTokens, outputTokens int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.in, r.out, r.state = inputTokens, outputTokens, true
+	r.mu.Unlock()
+}
+
+// Take returns the latest observed snapshot and drains the record; a second
+// Take reports ok=false until a new snapshot is observed.
+func (r *UsageSnapshotRecord) Take() (int, int, bool) {
+	if r == nil {
+		return 0, 0, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	in, out, ok := r.in, r.out, r.state
+	r.state = false
+	return in, out, ok
 }
 
 // NotifyResponseStarted fires the response acknowledgement exactly once for

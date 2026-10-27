@@ -4252,7 +4252,8 @@ func TestCostSummaryCarriesOutputRate(t *testing.T) {
 
 // The cost summary carries the latest turn's attempt ledger (plan 165): what
 // the run tried, in the order it happened — the 503 with its wait, then the
-// attempt that answered.
+// attempt that answered. The turn's tree (plan 182) counts the subagents the
+// answer dispatched, each row's run_id naming whose request it was.
 func TestSessionCostSummaryIncludesTheLatestRunAttempts(t *testing.T) {
 	ctx := context.Background()
 	s := cronTestServer(t)
@@ -4283,6 +4284,37 @@ func TestSessionCostSummaryIncludesTheLatestRunAttempts(t *testing.T) {
 	}
 	if second.Attempt != 2 || second.Outcome != state.LLMAttemptSuccess || second.InputTokens == nil || *second.InputTokens != 120 {
 		t.Fatalf("second attempt = %+v, want attempt 2 success with the response's usage", second)
+	}
+
+	// The ledger counts the agents the answer dispatched: a subagent run
+	// under the same primary run contributes its own row, run_id naming
+	// whose request it was. seedRun leaves updated_at at 0 and this session
+	// holds a single primary run, so no same-second tie enters the pick.
+	sub, err := s.RunRT.CreateSubagentRun(ctx, "r1", "s1", "verify the diff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.NoError(t, s.RunRT.InsertLLMAttempt(ctx, state.LLMAttempt{
+		RunID: sub.ID, Call: 1, Attempt: 1, Status: 500, Error: "provider 500",
+		ElapsedMs: 90, Outcome: state.LLMAttemptFailed,
+	}))
+	rec = cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/cost-summary", nil, s.handleSessionCostSummary, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got = struct {
+		Attempts []state.LLMAttempt `json:"attempts"`
+	}{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	if len(got.Attempts) != 3 {
+		t.Fatalf("attempts = %+v, want the run's two rows plus the subagent's", got.Attempts)
+	}
+	wantRunIDs := []string{"r1", "r1", sub.ID}
+	for i, row := range got.Attempts {
+		if row.RunID != wantRunIDs[i] {
+			t.Fatalf("attempt %d run_id = %s, want %s: rows carry whose request they were", i, row.RunID, wantRunIDs[i])
+		}
+	}
+	if third := got.Attempts[2]; third.Status != 500 || third.Outcome != state.LLMAttemptFailed {
+		t.Fatalf("third attempt = %+v, want the subagent's failed try", third)
 	}
 }
 

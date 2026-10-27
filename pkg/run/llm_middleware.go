@@ -285,12 +285,16 @@ func WrapRecoverableLLM(
 	if inner == nil {
 		return nil
 	}
+	var ledger *llmAttemptLedger
+	if len(withLedger) > 0 {
+		ledger = withLedger[0]
+	}
 	// Below the blank-output retry and the orchestration wrapper (which is what
 	// builds Result.Session): a provider that refuses an image gets one retry
 	// with that image degraded to text, and the degraded request is this call
 	// only — the transcript keeps its images.
 	inner = withImageHeal(inner)
-	inner = wrapBlankOutputRetryLLM(inner)
+	inner = wrapBlankOutputRetryLLM(inner, ledger)
 	// The network retry goes on last, i.e. outermost: it is the boundary a
 	// request first succeeds or dies on, and it owns the discard/retry
 	// notification every surface renders.
@@ -303,11 +307,19 @@ func WrapRecoverableLLM(
 	}
 }
 
-func wrapBlankOutputRetryLLM(inner llm.LLM) llm.LLM {
+func wrapBlankOutputRetryLLM(inner llm.LLM, ledger *llmAttemptLedger) llm.LLM {
 	retryMW, err := llm.NewRetry(
 		blankOutputRetryAttempts,
 		llm.WithShouldRetry(llm.APIErrorIsBlankModelOutput),
 		llm.WithResendGuard(),
+		llm.WithRetryNotify(func(ctx context.Context, tr llm.TransportRetry) {
+			// Ledger only: blank-output resends stay invisible to the user
+			// (plan 175's transparency contract); the row is where the
+			// double-billed input of a discarded attempt becomes explainable.
+			if ledger != nil {
+				ledger.noteFailure(ctx, tr)
+			}
+		}),
 	)
 	if err != nil {
 		return inner

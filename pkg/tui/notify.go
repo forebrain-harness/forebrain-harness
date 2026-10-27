@@ -1003,10 +1003,9 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 			s.notifyUIForSession(evt.SessionID, FirstTokenMsg{RunID: evt.RunID, AgentID: strings.TrimSpace(p.AgentID), Wait: time.Duration(p.FirstTokenMs) * time.Millisecond})
 		}
 	case event.CompactEventBudgetUpdated:
-		// A per-agent context budget — the gauge that opens a subagent's view
-		// and follows each of its responses. It carries the roster key, so the
-		// reducer routes it to that subagent's own footer, never the
-		// conversation's.
+		// A per-agent context budget (it carries the roster key) routes to
+		// that subagent's own footer. The engine's turn-end primary record
+		// (no agent id) refreshes the conversation's.
 		var p event.TokenBudgetUpdatedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
 			s.notifyUIForSession(evt.SessionID, tokenBudgetMsgFromPayload(p))

@@ -13,7 +13,6 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
-	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -118,13 +117,6 @@ func canonicalRunEventsFromWS(m wsServerMsg) []event.RunEvent {
 		typeName = event.RunEventPendingInputUpdated
 		if pendingPayload, ok := pendingInputUpdatedPayload(m.Data); ok {
 			payload = pendingPayload
-		} else {
-			payload = m.Data
-		}
-	case "token_budget_updated":
-		typeName = event.CompactEventBudgetUpdated
-		if budgetPayload, ok := tokenBudgetUpdatedPayload(m.Data); ok {
-			payload = budgetPayload
 		} else {
 			payload = m.Data
 		}
@@ -336,22 +328,6 @@ func stringSliceField(v map[string]any, key string) []string {
 	}
 }
 
-func tokenBudgetUpdatedPayload(v any) (event.TokenBudgetUpdatedPayload, bool) {
-	asMap, ok := v.(map[string]any)
-	if !ok {
-		return event.TokenBudgetUpdatedPayload{}, false
-	}
-	return event.TokenBudgetUpdatedPayload{
-		AgentID:              strings.TrimSpace(stringOr(asMap["agent_id"])),
-		Model:                strings.TrimSpace(stringOr(asMap["model"])),
-		TokenUsage:           int(int64Field(asMap, "token_usage")),
-		PercentLeft:          int(int64Field(asMap, "percent_left")),
-		ContextWindow:        int(int64Field(asMap, "context_window")),
-		EffectiveWindow:      int(int64Field(asMap, "effective_window")),
-		AutoCompactThreshold: int(int64Field(asMap, "auto_compact_threshold")),
-	}, true
-}
-
 func boolField(v map[string]any, key string) bool {
 	raw, ok := v[key]
 	if !ok {
@@ -365,26 +341,6 @@ func boolField(v map[string]any, key string) bool {
 	default:
 		return false
 	}
-}
-
-func (s *Server) tokenBudgetWSMessageFromSession(ctx context.Context, requestID, runID, sessionID string) (wsServerMsg, bool) {
-	// The engine's one copy of the gauge: the session's occupancy, budgeted
-	// on the conversation's own model.
-	usage, ok := run.ContextOccupancy(ctx, s.Sessions, sessionID)
-	if !ok || usage <= 0 {
-		return wsServerMsg{}, false
-	}
-	payload, ok := run.ContextBudget(s.Runner, sessionID, nil, usage)
-	if !ok {
-		return wsServerMsg{}, false
-	}
-	return wsServerMsg{
-		Op:        event.CompactEventBudgetUpdated,
-		RequestID: strings.TrimSpace(requestID),
-		RunID:     strings.TrimSpace(runID),
-		SessionID: strings.TrimSpace(sessionID),
-		Data:      payload,
-	}, true
 }
 
 func stepRunEventPayload(v any) (string, any, bool) {

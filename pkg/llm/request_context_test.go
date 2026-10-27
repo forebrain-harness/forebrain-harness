@@ -100,6 +100,96 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+// usageSinkStream sends body as one event stream through the transport and
+// returns what the sink ended up holding. A provider reports usage as its
+// request's total, so the transport must fold one response into a snapshot
+// rather than add every event up (that multiplied a 390,286-token prompt by the
+// 209 chunks repeating it, and the inflated figure then drove auto-compaction
+// on every single call).
+func usageSinkStream(t *testing.T, sink *CacheUsageSink, body string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(WithCacheUsageSink(context.Background(), sink), http.MethodPost, "https://example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &CacheUsageTransport{Next: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCacheUsageTransportCountsRepeatedCumulativeUsageOnce(t *testing.T) {
+	sink := NewCacheUsageSink()
+	body := `data: {"choices":[{"delta":{"content":"a"}}],"usage":{"prompt_tokens":1000,"completion_tokens":10}}` + "\n\n" +
+		`data: {"choices":[{"delta":{"content":"b"}}],"usage":{"prompt_tokens":1000,"completion_tokens":20}}` + "\n\n" +
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":30}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	usageSinkStream(t, sink, body)
+	got, ok := sink.Usage()
+	want := Usage{InputTokens: 1000, OutputTokens: 30}
+	if !ok || got != want {
+		t.Fatalf("usage = %#v, %v; want %#v (the request's total, not a chunk's increment)", got, ok, want)
+	}
+}
+
+func TestCacheUsageTransportCountsRepeatedUsageObjectsOnce(t *testing.T) {
+	// A provider may repeat the same total on the finish frame and again on a
+	// usage-only frame sent after it, with [DONE] last.
+	sink := NewCacheUsageSink()
+	total := `"usage":{"prompt_tokens":700,"completion_tokens":40,"prompt_tokens_details":{"cached_tokens":200}}`
+	body := `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}],` + total + "}\n\n" +
+		`data: {"choices":[],` + total + "}\n\n" +
+		"data: [DONE]\n\n"
+	usageSinkStream(t, sink, body)
+	got, ok := sink.Usage()
+	want := Usage{InputTokens: 500, OutputTokens: 40, CacheReadInputTokens: 200}
+	if !ok || got != want {
+		t.Fatalf("usage = %#v, %v; want %#v", got, ok, want)
+	}
+}
+
+func TestCacheUsageTransportMergesUsageSplitAcrossEvents(t *testing.T) {
+	// An event that reports only the output must not erase the prompt an
+	// earlier event of the same response reported.
+	sink := NewCacheUsageSink()
+	body := `data: {"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":900,"cache_read_input_tokens":400}}` + "\n\n" +
+		`data: {"choices":[{"delta":{},"finish_reason":"end_turn"}],"usage":{"completion_tokens":37}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	usageSinkStream(t, sink, body)
+	got, ok := sink.Usage()
+	want := Usage{InputTokens: 500, OutputTokens: 37, CacheReadInputTokens: 400}
+	if !ok || got != want {
+		t.Fatalf("usage = %#v, %v; want %#v", got, ok, want)
+	}
+}
+
+func TestCacheUsageTransportSumsSeparateResponses(t *testing.T) {
+	// A length-continue round and a retry each send their own request, so the
+	// sink sums responses even though it snapshots within one.
+	sink := NewCacheUsageSink()
+	for _, output := range []string{"10", "20"} {
+		usageSinkStream(t, sink, `data: {"usage":{"prompt_tokens":300,"completion_tokens":`+output+`}}`+"\n\ndata: [DONE]\n\n")
+	}
+	got, ok := sink.Usage()
+	want := Usage{InputTokens: 600, OutputTokens: 30}
+	if !ok || got != want {
+		t.Fatalf("usage = %#v, %v; want %#v", got, ok, want)
+	}
+}
+
 func TestFastIsFalseOnBareContext(t *testing.T) {
 	ctx := context.Background()
 	if Fast(ctx) {

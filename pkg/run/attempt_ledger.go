@@ -44,9 +44,19 @@ func newLLMAttemptLedger(store *state.RunStore) *llmAttemptLedger {
 type llmAttemptCall struct {
 	runID string
 	call  int
-	// lastFailureRetry is the retry ordinal of the last failure that
-	// announced itself; the attempt that settles the request is the next one.
-	lastFailureRetry int
+	// nextAttempt numbers the physical requests of this call, monotonically,
+	// whatever layer made them: a transport failure, a blank-output resend or
+	// an image-heal discard each take the next number, so (call, attempt)
+	// names one physical request with no collisions across the nested retry
+	// chains. Every writer runs on the request's own goroutine — the retry
+	// loops fire their notifications synchronously — so no locking is needed.
+	nextAttempt int
+}
+
+// takeAttempt hands out the next physical-request number of this call.
+func (c *llmAttemptCall) takeAttempt() int {
+	c.nextAttempt++
+	return c.nextAttempt
 }
 
 type llmAttemptCallKey struct{}
@@ -85,17 +95,42 @@ func (l *llmAttemptLedger) noteFailure(ctx context.Context, tr llm.TransportRetr
 	if l == nil || l.store == nil || call == nil || tr.Cleared || tr.Retry <= 0 {
 		return
 	}
-	call.lastFailureRetry = tr.Retry
+	streamed := !tr.NonStreaming
 	rec := state.LLMAttempt{
-		RunID:   call.runID,
-		Call:    call.call,
-		Attempt: tr.Retry,
-		Status:  tr.Status,
-		WaitMs:  tr.Wait.Milliseconds(),
-		Outcome: state.LLMAttemptFailed,
+		RunID:     call.runID,
+		Call:      call.call,
+		Attempt:   call.takeAttempt(),
+		Status:    tr.Status,
+		WaitMs:    tr.Wait.Milliseconds(),
+		Outcome:   state.LLMAttemptFailed,
+		Streaming: &streamed,
 	}
 	if tr.Err != nil {
 		rec.Error = tr.Err.Error()
+	}
+	if p := llm.StreamProgressFrom(ctx); p != nil {
+		rec.ElapsedMs = p.Snapshot().Elapsed.Milliseconds()
+	}
+	l.record(ctx, rec)
+}
+
+// noteDiscarded records a request a recovery layer threw away before asking
+// again — today an image the provider refused, healed by degrading it. The
+// row explains a resend the transport layer never announced: status 0 (no
+// HTTP answer to record), the refusal text as the error.
+func (l *llmAttemptLedger) noteDiscarded(ctx context.Context, reason string) {
+	call := llmAttemptCallFrom(ctx)
+	if l == nil || l.store == nil || call == nil || strings.TrimSpace(reason) == "" {
+		return
+	}
+	streamed := !llm.NonStreamingRequestFrom(ctx)
+	rec := state.LLMAttempt{
+		RunID:     call.runID,
+		Call:      call.call,
+		Attempt:   call.takeAttempt(),
+		Error:     reason,
+		Outcome:   state.LLMAttemptFailed,
+		Streaming: &streamed,
 	}
 	if p := llm.StreamProgressFrom(ctx); p != nil {
 		rec.ElapsedMs = p.Snapshot().Elapsed.Milliseconds()
@@ -113,10 +148,16 @@ func (l *llmAttemptLedger) settle(ctx context.Context, res *llm.Result, err erro
 	if l == nil || l.store == nil || call == nil {
 		return
 	}
+	// The terminal row's streaming reads the request-level switch: the layers
+	// below may run one attempt under a derived non-streaming context (the
+	// stream-retry fallback), which this boundary cannot see — the failure
+	// rows around such an attempt carry the attempt-level bit instead.
+	streamed := !llm.NonStreamingRequestFrom(ctx)
 	rec := state.LLMAttempt{
-		RunID:   call.runID,
-		Call:    call.call,
-		Attempt: call.lastFailureRetry + 1,
+		RunID:     call.runID,
+		Call:      call.call,
+		Attempt:   call.takeAttempt(),
+		Streaming: &streamed,
 	}
 	if p := llm.StreamProgressFrom(ctx); p != nil {
 		rec.ElapsedMs = p.Snapshot().Elapsed.Milliseconds()

@@ -3435,20 +3435,15 @@ func (s *Server) handleSessionCostSummary(w http.ResponseWriter, r *http.Request
 	}
 	// The latest turn's attempt ledger (plan 165 prototype): every physical
 	// model request its run made, failures and the settling attempt alike, so
-	// "how many times did this answer try" outlives the stream that showed it.
+	// "how many times did this answer try" outlives the stream that showed
+	// it. The tree includes the subagents' runs; each row's run_id names
+	// whose request it was.
 	attempts := []state.LLMAttempt{}
-	if runID, aerr := s.RunRT.LatestPrimaryRunIDForSession(r.Context(), sid); aerr != nil {
+	if rows, aerr := s.RunRT.LatestPrimaryRunTreeAttempts(r.Context(), sid, 200); aerr != nil {
 		http.Error(w, aerr.Error(), http.StatusInternalServerError)
 		return
-	} else if runID != "" {
-		rows, aerr := s.RunRT.ListLLMAttempts(r.Context(), runID, 200)
-		if aerr != nil {
-			http.Error(w, aerr.Error(), http.StatusInternalServerError)
-			return
-		}
-		if len(rows) > 0 {
-			attempts = rows
-		}
+	} else if len(rows) > 0 {
+		attempts = rows
 	}
 	writeJSON(w, map[string]any{
 		"session_id":               sid,

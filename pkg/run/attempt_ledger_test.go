@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,5 +206,234 @@ func TestLLMAttemptLedgerFillsFromASupervisedRun(t *testing.T) {
 	}
 	if promptTokens != 80 || completionTokens != 12 {
 		t.Fatalf("run usage = %d/%d, want 80/12 — only the answer that billed", promptTokens, completionTokens)
+	}
+}
+
+// blankThenAnswerLLM answers nothing once — the blank-output shape the retry
+// chain re-sends — then answers with usage.
+type blankThenAnswerLLM struct{ calls int }
+
+func (m *blankThenAnswerLLM) Execute(_ context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	if m.calls == 1 {
+		return nil, &llm.APIError{StatusCode: 200, Message: "completed without output"}
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("the actual answer")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 60, OutputTokens: 9}}, nil
+}
+
+// ledgerCallContext builds the call context the real chain runs with: the
+// run's id, a stream sink and the progress record it installs.
+func ledgerCallContext(t *testing.T, ctx context.Context, runID string) context.Context {
+	t.Helper()
+	callCtx := tool.WithRunID(ctx, runID)
+	// A sink is what makes WithStreamProgress install its record on the
+	// context — the same shape the real chain runs with.
+	callCtx = llm.WithStreamSink(callCtx, &llm.StreamSink{})
+	callCtx, _ = llm.WithStreamProgress(callCtx)
+	return callCtx
+}
+
+// TestBlankOutputResendLeavesALedgerRow pins plan 181's first blind spot: a
+// blank-output resend happens inside the transport layer and was never
+// announced anywhere, so the ledger had no row for the request whose full
+// input the discarded attempt had already billed. The chain is driven whole —
+// the network retry arms the ledger, the blank-output layer announces to it
+// alone and stays invisible to the user.
+func TestBlankOutputResendLeavesALedgerRow(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const sid = "ledger-blank-resend"
+	if err := state.NewSessionStore(db, "main").Ensure(ctx, sid, sid); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	runs := &state.RunStore{DB: db}
+	rr, err := runs.CreateRun(ctx, sid, "hi")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	inner := &blankThenAnswerLLM{}
+	ledger := newLLMAttemptLedger(runs)
+	wrapped := wrapNetworkRetryLLM(wrapBlankOutputRetryLLM(inner, ledger), 3, 0, ledger)
+
+	res, err := wrapped.Execute(ledgerCallContext(t, ctx, rr.ID), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "the actual answer" {
+		t.Fatalf("result = %+v, want the resent attempt's answer", res)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2 (blank + re-sent)", inner.calls)
+	}
+
+	rows, err := runs.ListLLMAttempts(ctx, rr.ID, 0)
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("attempt rows = %d, want 2 (the discarded blank and the answer):\n%+v", len(rows), rows)
+	}
+	discarded, ok := rows[0], rows[1]
+	if discarded.Call != 1 || discarded.Attempt != 1 || discarded.Outcome != state.LLMAttemptFailed {
+		t.Fatalf("blank row = %+v, want call 1 attempt 1 failed", discarded)
+	}
+	if !strings.Contains(discarded.Error, "completed without output") {
+		t.Fatalf("blank row error = %q, want the APIError text", discarded.Error)
+	}
+	if ok.Attempt != 2 || ok.Outcome != state.LLMAttemptSuccess {
+		t.Fatalf("success row = %+v, want attempt 2 success", ok)
+	}
+	for _, row := range rows {
+		if row.Streaming == nil || !*row.Streaming {
+			t.Fatalf("row attempt %d streaming = %v, want non-NULL true", row.Attempt, row.Streaming)
+		}
+	}
+}
+
+// stackedRetryLLM stacks the resend kinds one call can meet: a transport 503
+// first, then a blank output, then the answer.
+type stackedRetryLLM struct{ calls int }
+
+func (m *stackedRetryLLM) Execute(_ context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	switch m.calls {
+	case 1:
+		return nil, &llm.APIError{StatusCode: 503, Message: "model overloaded"}
+	case 2:
+		return nil, &llm.APIError{StatusCode: 200, Message: "completed without output"}
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("third try")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 40, OutputTokens: 6}}, nil
+}
+
+// TestLedgerNumbersInnerResendsWithoutCollision pins the counter contract: a
+// transport failure, a blank-output resend and the settling attempt of one
+// call number 1, 2, 3 — dense, no collisions — now that the ledger hands out
+// the numbers itself instead of trusting the retry chains' own ordinals,
+// which restart inside each layer.
+func TestLedgerNumbersInnerResendsWithoutCollision(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const sid = "ledger-no-collision"
+	if err := state.NewSessionStore(db, "main").Ensure(ctx, sid, sid); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	runs := &state.RunStore{DB: db}
+	rr, err := runs.CreateRun(ctx, sid, "hi")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	inner := &stackedRetryLLM{}
+	ledger := newLLMAttemptLedger(runs)
+	wrapped := wrapNetworkRetryLLM(wrapBlankOutputRetryLLM(inner, ledger), 3, 0, ledger)
+
+	if _, err := wrapped.Execute(ledgerCallContext(t, ctx, rr.ID), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if inner.calls != 3 {
+		t.Fatalf("provider calls = %d, want 3 (503 + blank + answer)", inner.calls)
+	}
+
+	rows, err := runs.ListLLMAttempts(ctx, rr.ID, 0)
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("attempt rows = %d, want 3:\n%+v", len(rows), rows)
+	}
+	seen := map[int]bool{}
+	for i, row := range rows {
+		if row.Call != 1 || row.Attempt != i+1 {
+			t.Fatalf("row %d = %+v, want call 1 attempt %d", i, row, i+1)
+		}
+		if seen[row.Attempt] {
+			t.Fatalf("attempt %d appears twice: %+v", row.Attempt, rows)
+		}
+		seen[row.Attempt] = true
+	}
+	if rows[0].Status != 503 || rows[1].Outcome != state.LLMAttemptFailed ||
+		!strings.Contains(rows[1].Error, "completed without output") || rows[2].Outcome != state.LLMAttemptSuccess {
+		t.Fatalf("rows = %+v, want [503 failed, blank failed, success]", rows)
+	}
+}
+
+// TestImageRefusalLeavesALedgerRow pins plan 181's second blind spot: the
+// image-heal resend was visible only as a refusal note, never as a ledger
+// row, although the refused request billed its full input. The observer the
+// run layer registers records the discarded request; the degraded resend
+// then settles the call. The provider is image_input_test.go's
+// imageRefusingLLM: the field refusal sentence, then text.
+func TestImageRefusalLeavesALedgerRow(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const sid = "ledger-image-refusal"
+	if err := state.NewSessionStore(db, "main").Ensure(ctx, sid, sid); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	runs := &state.RunStore{DB: db}
+	rr, err := runs.CreateRun(ctx, sid, "hi")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	inner := &imageRefusingLLM{}
+	ledger := newLLMAttemptLedger(runs)
+	wrapped := wrapNetworkRetryLLM(withImageHeal(inner), 3, 0, ledger)
+
+	// The observer rides the call context, the way withImageRefusalRecorder
+	// installs it on the turn's own context; the heal hands it the request's
+	// context, an ancestor of which carries the armed ledger state.
+	callCtx := llm.WithImageRefusalObserver(ledgerCallContext(t, ctx, rr.ID),
+		func(ctx context.Context, reason string) { ledger.noteDiscarded(ctx, reason) })
+	messages := []llm.Message{llm.UserMessage(llm.Text("what is this?"),
+		llm.ImageBase64("image/png", strings.Repeat("A", 4096)))}
+	res, err := wrapped.Execute(callCtx, messages, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "I answered without the picture." {
+		t.Fatalf("result = %+v, want the degraded retry's answer", res)
+	}
+	if calls := len(inner.callImages()); calls != 2 {
+		t.Fatalf("provider calls = %d, want 2 (refused + degraded)", calls)
+	}
+
+	rows, err := runs.ListLLMAttempts(ctx, rr.ID, 0)
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("attempt rows = %d, want 2 (the discarded request and the degraded answer):\n%+v", len(rows), rows)
+	}
+	discarded, ok := rows[0], rows[1]
+	if discarded.Call != 1 || discarded.Attempt != 1 || discarded.Outcome != state.LLMAttemptFailed {
+		t.Fatalf("discard row = %+v, want call 1 attempt 1 failed", discarded)
+	}
+	if !strings.Contains(discarded.Error, "unsupported image") {
+		t.Fatalf("discard row error = %q, want the refusal reason", discarded.Error)
+	}
+	if discarded.Status != 0 || discarded.WaitMs != 0 {
+		t.Fatalf("discard row status/wait = %d/%d, want 0/0 (no HTTP answer, no announced wait)", discarded.Status, discarded.WaitMs)
+	}
+	if discarded.Streaming == nil || !*discarded.Streaming {
+		t.Fatalf("discard row streaming = %v, want non-NULL true", discarded.Streaming)
+	}
+	if ok.Attempt != 2 || ok.Outcome != state.LLMAttemptSuccess {
+		t.Fatalf("success row = %+v, want attempt 2 success", ok)
 	}
 }

@@ -164,12 +164,18 @@ type Runner struct {
 	transcript transcriptSession
 	// summaryLLM is the model chain up to the wrappers that shape a request's
 	// prefix, which a compaction's summary request is sent through.
-	summaryLLM   llm.LLM
-	mainCfg      AgentConfigYAML
-	forkLLM      llm.LLM
-	FileResolver FileReferenceResolver
-	tools        *tool.State
-	mu           runnerLocks
+	summaryLLM llm.LLM
+	// attemptLedger is the run's attempt ledger: the same instance serves the
+	// conversation's chain, the compaction summary's chain and the image
+	// refusal recorder, so the call numbers stay continuous across all three.
+	// It is set once inside the load transaction (with the chains that hold
+	// it) and only read afterwards — a turn never overlaps a Load.
+	attemptLedger *llmAttemptLedger
+	mainCfg       AgentConfigYAML
+	forkLLM       llm.LLM
+	FileResolver  FileReferenceResolver
+	tools         *tool.State
+	mu            runnerLocks
 	// sessionPerm is the applied-preset tracker injectSessionPermission
 	// consults: session id -> the updated_at of the stored approval-preset
 	// row this process already applied. A zero Map means nothing applied
@@ -1065,6 +1071,9 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// made them (plan 165's vertical slice). Nil without a RunStore, leaving
 	// every record a no-op.
 	attemptLedger := newLLMAttemptLedger(r.RunRT)
+	// Held on the Runner so the image-refusal recorder shares the same
+	// instance as both chains: one counter, continuous call numbers.
+	r.attemptLedger = attemptLedger
 	summaryChain := wrapNetworkRetryLLM(withImageHeal(llmClient), networkRetryMax, r.AppCfg.Agents.Defaults.StreamIdleTimeout(), attemptLedger)
 	r.summaryLLM = summaryChain
 	// The reminder planModeLLM injects is not written here. It reaches the

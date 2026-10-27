@@ -164,7 +164,13 @@ func withImageRefusalRecorder(ctx context.Context, r *Runner, sessionID string) 
 	provider, model := r.effectiveModelFor(ctx)
 	provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
 	runID := strings.TrimSpace(tool.RunIDFromContext(ctx))
-	return llm.WithImageRefusalObserver(ctx, func(reason string) {
+	return llm.WithImageRefusalObserver(ctx, func(ctx context.Context, reason string) {
+		// The ledger row comes first, as everywhere else: the discarded
+		// request is a physical model request this run paid for, and it is
+		// the row that explains the degraded resend beside it. The ctx the
+		// heal hands in is the request's own — the per-call ledger state
+		// rides it, so the row lands on the right call.
+		r.attemptLedger.noteDiscarded(ctx, reason)
 		// The write outlives a cancelled turn on purpose: the refusal happened,
 		// and the record is what stops the next turn paying for it again.
 		storeCtx := context.WithoutCancel(ctx)

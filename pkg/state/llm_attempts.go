@@ -114,6 +114,8 @@ FROM fb_llm_attempts WHERE run_id=? ORDER BY id ASC LIMIT ?`, runID, limit)
 // LatestPrimaryRunIDForSession names the session's most recent top-level run,
 // whatever its status: a failed or cancelled run's attempts are exactly the
 // rows a reader wants after a bad turn. Empty when the session has none.
+// updated_at is second-granularity, so same-second ties break by insertion
+// order — the later-created run wins, never the storage engine's pick.
 func (s *RunStore) LatestPrimaryRunIDForSession(ctx context.Context, sessionID string) (string, error) {
 	if s == nil || s.DB == nil {
 		return "", fmt.Errorf("nil db")
@@ -125,11 +127,78 @@ func (s *RunStore) LatestPrimaryRunIDForSession(ctx context.Context, sessionID s
 	var runID string
 	err := s.DB.QueryRowContext(ctx, `
 SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL
-ORDER BY updated_at DESC LIMIT 1`, sid).Scan(&runID)
+ORDER BY updated_at DESC, rowid DESC LIMIT 1`, sid).Scan(&runID)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	return runID, err
+}
+
+// LatestPrimaryRunTreeAttempts returns the attempt rows of the session's
+// latest primary run and every run below it — its subagents' runs included,
+// each row carrying its own run id. The owner's ruling on plan 165's fourth
+// open question: "how many times did this answer try" must count the agents
+// the answer dispatched. Oldest first, insertion order preserved; limit caps
+// the rows (0 means the 500 default ListLLMAttempts applies).
+func (s *RunStore) LatestPrimaryRunTreeAttempts(ctx context.Context, sessionID string, limit int) ([]LLMAttempt, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return nil, fmt.Errorf("empty session id")
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	// One statement, one snapshot: the latest primary run's choice and the
+	// run-tree recursion live in the same query, so no run can slip between
+	// the two reads.
+	rows, err := s.DB.QueryContext(ctx, `
+WITH RECURSIVE latest AS (
+  SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL
+  ORDER BY updated_at DESC, rowid DESC LIMIT 1
+), run_tree(id) AS (
+  SELECT id FROM latest
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT id, run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms,
+       input_tokens, output_tokens, outcome, created_at_ms
+FROM fb_llm_attempts WHERE run_id IN (SELECT id FROM run_tree)
+ORDER BY id ASC LIMIT ?`, sid, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LLMAttempt
+	for rows.Next() {
+		var a LLMAttempt
+		var streaming, inputTokens, outputTokens sql.NullInt64
+		var occurred int64
+		if err := rows.Scan(&a.ID, &a.RunID, &a.Call, &a.Attempt, &streaming, &a.Status, &a.Error,
+			&a.WaitMs, &a.ElapsedMs, &inputTokens, &outputTokens, &a.Outcome, &occurred); err != nil {
+			return nil, err
+		}
+		if streaming.Valid {
+			v := streaming.Int64 != 0
+			a.Streaming = &v
+		}
+		if inputTokens.Valid {
+			v := inputTokens.Int64
+			a.InputTokens = &v
+		}
+		if outputTokens.Valid {
+			v := outputTokens.Int64
+			a.OutputTokens = &v
+		}
+		a.CreatedAt = time.UnixMilli(occurred).UTC()
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func boolPtrToInt(b *bool) any {

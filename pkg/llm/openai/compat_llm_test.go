@@ -455,6 +455,62 @@ func TestOpenAICompatLLMStreamReportsUsageImmediately(t *testing.T) {
 	}
 }
 
+// A provider may repeat the same cumulative usage object on more than one
+// chunk (stepfun/opencode-go does it on every chunk). Chat Completions usage is
+// the request's total, not a per-chunk increment, so the response must report
+// it once — summing gave 209 x prompt (81,569,565 tokens for a 390,286 prompt).
+// It runs against a real server on purpose: the production client also wraps
+// every response in llm.CacheUsageTransport, whose raw figure overrides the one
+// computed here, and a test that builds its own transport cannot see that.
+func TestOpenAICompatLLMStreamCountsCumulativeUsageOnce(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		var body bytes.Buffer
+		body.WriteString(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"a"},"finish_reason":null}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"total_tokens":1010}}` + "\n\n")
+		body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"b"},"finish_reason":null}],"usage":{"prompt_tokens":1000,"completion_tokens":20,"total_tokens":1020}}` + "\n\n")
+		body.WriteString(`data: {"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":30,"total_tokens":1030}}` + "\n\n")
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = w.Write(body.Bytes())
+	}))
+	t.Cleanup(server.Close)
+
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "fake-cumulative-usage", 0, 16, "", []byte(`{"stream":true}`))
+
+	var deltas [][2]int
+	var snapshots [][2]int
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnUsage: func(in, out int) { deltas = append(deltas, [2]int{in, out}) },
+		OnUsageSnapshot: func(in, out int) {
+			snapshots = append(snapshots, [2]int{in, out})
+		},
+	})
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if res == nil || res.Usage == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if res.Usage.InputTokens != 1000 || res.Usage.OutputTokens != 30 {
+		t.Fatalf("usage = %d/%d, want 1000/30 (the request's total, not three chunks summed)",
+			res.Usage.InputTokens, res.Usage.OutputTokens)
+	}
+	if len(snapshots) != 3 || snapshots[2] != [2]int{1000, 30} {
+		t.Fatalf("snapshots = %v, want three, ending 1000/30", snapshots)
+	}
+	sumIn, sumOut := 0, 0
+	for _, d := range deltas {
+		sumIn += d[0]
+		sumOut += d[1]
+	}
+	if sumIn != 1000 || sumOut != 30 {
+		t.Fatalf("deltas sum = %d/%d, want 1000/30 (deltas stay incremental)", sumIn, sumOut)
+	}
+}
+
 func TestOpenAICompatLLMStreamsThroughTelemetryBeforeServerCompletes(t *testing.T) {
 	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
 

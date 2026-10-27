@@ -271,12 +271,23 @@ type usageBody struct {
 	io.ReadCloser
 	sink *CacheUsageSink
 	line []byte
+	// usage is this response's own snapshot. The sink sums responses (a
+	// length-continue round and a retried request are each billed on their
+	// own), so publishing per event would multiply a cumulative usage by the
+	// number of events that repeat it.
+	usage     responseUsage
+	published bool
 }
 
 func (r *usageBody) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	if n > 0 {
 		r.feed(p[:n])
+	}
+	if err != nil {
+		// End of the response, or its death: either way nothing else is
+		// coming, so this is the last chance to report what it carried.
+		r.publish()
 	}
 	return n, err
 }
@@ -285,13 +296,7 @@ func (r *usageBody) Read(p []byte) (int, error) {
 // closes the provider response. Providers are allowed to end a stream this
 // way; dropping that line would hide its only usage event.
 func (r *usageBody) Close() error {
-	if len(r.line) > 0 {
-		line := bytes.TrimSuffix(r.line, []byte{'\r'})
-		r.line = nil
-		if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			observeUsage(r.sink, bytes.TrimSpace(data))
-		}
-	}
+	r.publish()
 	return r.ReadCloser.Close()
 }
 
@@ -305,22 +310,112 @@ func (r *usageBody) feed(data []byte) {
 		line := bytes.TrimSuffix(r.line[:i], []byte{'\r'})
 		r.line = r.line[i+1:]
 		if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			observeUsage(r.sink, bytes.TrimSpace(data))
+			r.usage.merge(bytes.TrimSpace(data))
 		}
 	}
+}
+
+// publish reports the response's snapshot to the sink, once.
+func (r *usageBody) publish() {
+	if r.published {
+		return
+	}
+	r.published = true
+	// A stream may end without a trailing newline, and its last line may be
+	// the only usage event it has.
+	if len(r.line) > 0 {
+		line := bytes.TrimSuffix(r.line, []byte{'\r'})
+		r.line = nil
+		if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			r.usage.merge(bytes.TrimSpace(data))
+		}
+	}
+	if use, ok := r.usage.usage(); ok {
+		r.sink.add(use)
+	}
+}
+
+// responseUsage folds every usage event of one HTTP response into a snapshot.
+// Provider usage is the request's total, and one response may repeat it — a
+// compatible stream that carries the same cumulative object on every chunk
+// (stepfun/opencode-go does it on all of them) — or split it, as Anthropic
+// does with the prompt at message_start and the output at message_delta.
+// Summing the events multiplied the prompt by the number of chunks; keeping
+// only the last event would drop the half that arrived first. So each event
+// replaces the figures it reports, and the response is reported once.
+type responseUsage struct {
+	prompt, read, created, output int
+	seen                          bool
+}
+
+func (r *responseUsage) merge(raw []byte) {
+	n, ok := parseCacheUsageNumbers(raw)
+	if !ok {
+		return
+	}
+	if n.hasInput {
+		// The prompt group moves as a whole: a generation that reports a
+		// fresh prompt must not keep an earlier generation's cached subset
+		// on top of it, which would count those tokens twice.
+		r.prompt, r.read, r.created = n.prompt, n.read, n.created
+	}
+	if n.hasOutput {
+		r.output = n.output
+	}
+	r.seen = true
+}
+
+func (r *responseUsage) usage() (Usage, bool) {
+	if !r.seen {
+		return Usage{}, false
+	}
+	uncached := r.prompt - r.read - r.created
+	if uncached < 0 {
+		uncached = 0
+	}
+	return Usage{
+		InputTokens:              uncached,
+		OutputTokens:             r.output,
+		CacheReadInputTokens:     r.read,
+		CacheCreationInputTokens: r.created,
+	}, true
+}
+
+// cacheUsageNumbers is one usage object as reported: prompt covers every input
+// token and read/created are the cached subsets of it.
+type cacheUsageNumbers struct {
+	prompt, read, created, output int
+	hasInput, hasOutput           bool
 }
 
 // ParseCacheUsage parses either a provider response or its usage object.
 // Cached input is kept separate from uncached input for stable accounting.
 func ParseCacheUsage(raw []byte) (Usage, bool) {
+	n, ok := parseCacheUsageNumbers(raw)
+	if !ok {
+		return Usage{}, false
+	}
+	uncached := n.prompt - n.read - n.created
+	if uncached < 0 {
+		uncached = 0
+	}
+	return Usage{
+		InputTokens:              uncached,
+		OutputTokens:             n.output,
+		CacheReadInputTokens:     n.read,
+		CacheCreationInputTokens: n.created,
+	}, true
+}
+
+func parseCacheUsageNumbers(raw []byte) (cacheUsageNumbers, bool) {
 	var root map[string]json.RawMessage
 	if json.Unmarshal(raw, &root) != nil {
-		return Usage{}, false
+		return cacheUsageNumbers{}, false
 	}
 	use := root
 	if nested, ok := root["usage"]; ok {
 		if json.Unmarshal(nested, &use) != nil {
-			return Usage{}, false
+			return cacheUsageNumbers{}, false
 		}
 	}
 	prompt, hasPrompt := number(use, "prompt_tokens")
@@ -344,17 +439,15 @@ func ParseCacheUsage(raw []byte) (Usage, bool) {
 	}
 	created, hasCreated := number(use, "cache_creation_input_tokens")
 	if !hasPrompt && !hasRead && !hasCreated && !hasOutput {
-		return Usage{}, false
+		return cacheUsageNumbers{}, false
 	}
-	uncached := prompt - read - created
-	if uncached < 0 {
-		uncached = 0
-	}
-	return Usage{
-		InputTokens:              uncached,
-		OutputTokens:             output,
-		CacheReadInputTokens:     read,
-		CacheCreationInputTokens: created,
+	return cacheUsageNumbers{
+		prompt:    prompt,
+		read:      read,
+		created:   created,
+		output:    output,
+		hasInput:  hasPrompt || hasRead || hasCreated,
+		hasOutput: hasOutput,
 	}, true
 }
 

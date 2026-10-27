@@ -365,6 +365,105 @@ func TestSessionOutputRateIgnoresRunsWithoutTime(t *testing.T) {
 	}
 }
 
+// TestLatestPrimaryRunTreeAttemptsIncludesSubagentRows pins the reading-end
+// contract of plan 182: the attempts of a turn include its subagents' — the
+// latest primary run's tree, every row carrying its own run id so a reader
+// can tell whose request it was. The latest primary run's choice is
+// deterministic even when two turns share updated_at's second: the
+// later-inserted run wins.
+func TestLatestPrimaryRunTreeAttemptsIncludesSubagentRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rt := &RunStore{DB: db}
+	ensureSessionsForRuns(t, db, "s1", "s2")
+
+	// Two primary runs in s1: r1 (an older turn) and r2 (the latest turn).
+	// Direct inserts, not CreateRun — the session-exclusivity check refuses a
+	// second live primary run — and updated_at must differ explicitly: both
+	// are second-granularity, and at equal values "latest" is the storage
+	// engine's coin flip, not a fact.
+	seedPrimaryRun := func(sessionID, runID string, updatedAt int64) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,'',?,?,?)`,
+			runID, sessionID, string(RunStatusDone), updatedAt, updatedAt); err != nil {
+			t.Fatalf("create run %s: %v", runID, err)
+		}
+	}
+	seedPrimaryRun("s1", "r1", 100)
+	seedPrimaryRun("s1", "r2", 200)
+	sub, err := rt.CreateSubagentRun(ctx, "r2", "s1", "sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := func(runID string, call int) {
+		t.Helper()
+		if err := rt.InsertLLMAttempt(ctx, LLMAttempt{
+			RunID: runID, Call: call, Attempt: 1, Outcome: LLMAttemptSuccess,
+		}); err != nil {
+			t.Fatalf("insert attempt for %s call %d: %v", runID, call, err)
+		}
+	}
+	// r1's row lands first so a leak would head the answer; r2's two rows
+	// sandwich the subagent's, in the order the requests happened.
+	attempt("r1", 1)
+	attempt("r2", 1)
+	attempt(sub.ID, 1)
+	attempt("r2", 2)
+
+	rows, err := rt.LatestPrimaryRunTreeAttempts(ctx, "s1", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("attempts = %+v, want r2's two rows and the subagent's one, r1's excluded", rows)
+	}
+	wantRun := []string{"r2", sub.ID, "r2"}
+	wantCall := []int{1, 1, 2}
+	for i, row := range rows {
+		if row.RunID != wantRun[i] || row.Call != wantCall[i] {
+			t.Fatalf("row %d = run %s call %d, want run %s call %d", i, row.RunID, row.Call, wantRun[i], wantCall[i])
+		}
+	}
+
+	// Two primary runs sharing updated_at's second: the later insertion wins,
+	// for the id query and the tree query alike — the tiebreak is insertion
+	// order, never the storage engine's pick.
+	seedPrimaryRun("s2", "rA", 300)
+	seedPrimaryRun("s2", "rB", 300)
+	attempt("rA", 1)
+	attempt("rB", 1)
+	latest, err := rt.LatestPrimaryRunIDForSession(ctx, "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != "rB" {
+		t.Fatalf("latest primary run = %s, want rB: same-second ties break by insertion order", latest)
+	}
+	rows, err = rt.LatestPrimaryRunTreeAttempts(ctx, "s2", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].RunID != "rB" {
+		t.Fatalf("s2 attempts = %+v, want only the later-inserted rB's row", rows)
+	}
+
+	// A session with no runs answers no rows and no error — nil, the
+	// ListLLMAttempts convention; the handler's len>0 guard keeps the JSON []
+	// contract, so the state layer must not manufacture an empty slice.
+	rows, err = rt.LatestPrimaryRunTreeAttempts(ctx, "s3", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows != nil {
+		t.Fatalf("empty session attempts = %+v, want nil", rows)
+	}
+}
+
 // TestSQLiteBuildServesTheStateSchema pins that the test build (cgo on, fts5
 // tag on) satisfies the probe guarding every state open: under the documented
 // build the linked SQLite engine reports FTS5 and requireSQLiteBuild passes.

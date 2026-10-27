@@ -1039,11 +1039,13 @@ func subagentExecutorOf(fac Factory) SubagentExecutor {
 // callbacks are deliberately dropped rather than forwarded: Streamed (a child
 // marking the parent's turn as streamed suppresses the parent's own final
 // message) and OnResponseCompleted (the child does not own the text the parent
-// has buffered). OnResponseStarted is replaced rather than dropped: it opens
-// no parent state, and it is the moment the child's first-token wait ends —
-// stamped once on the channel's execution window and published so the
-// subagent views show the wait live, the same beat the main turn's callback
-// reports for the conversation.
+// has buffered; the OnResponseCompleted set below is this sink's own request
+// boundary, not a forwarding of the parent's — it archives the child's gauge
+// at one record per response). OnResponseStarted is replaced rather than
+// dropped: it opens no parent state, and it is the moment the child's
+// first-token wait ends — stamped once on the channel's execution window and
+// published so the subagent views show the wait live, the same beat the main
+// turn's callback reports for the conversation.
 // OnUsageSnapshot is replaced, not dropped: the child's own usage
 // snapshot is published tagged with its roster key, so the gauge in its view
 // shows its context — the parent's footer never sees it.
@@ -1074,18 +1076,34 @@ func subagentRunContext(ctx context.Context, own *Runner, sink event.Sink, runID
 		}
 		publishEvent(ctx, sink, runID, sessionID, event.RunEventUsageDelta, event.UsageDeltaPayload{AgentID: rosterKey, InputTokens: inputTokens, OutputTokens: outputTokens})
 	}
-	// The child's context gauge, live: each response's absolute occupancy,
-	// budgeted on the model the record says this subagent runs on. The event
-	// carries the roster key and the child's run id, so it lands in the
-	// subagent's view and nowhere else.
+	// The child's context gauge: each response's absolute occupancy, budgeted
+	// on the model the record says this subagent runs on. The event carries
+	// the roster key and the child's run id, so it lands in the subagent's
+	// view and nowhere else. OnUsageSnapshot is a live gauge a provider may
+	// fire once per chunk, so the snapshot is only observed here and the
+	// event is filed once at the request's end boundary — one record per
+	// response, the unified token_budget_updated contract.
+	budget := &llm.UsageSnapshotRecord{}
+	flushBudget := func() {
+		in, out, ok := budget.Take()
+		if !ok {
+			return
+		}
+		if payload, ok := ContextBudget(own, sessionID, &record, in+out); ok {
+			publishEvent(ctx, sink, runID, sessionID, event.CompactEventBudgetUpdated, payload)
+		}
+	}
 	stream.OnUsageSnapshot = func(inputTokens, outputTokens int) {
 		if inputTokens <= 0 && outputTokens <= 0 {
 			return
 		}
-		if payload, ok := ContextBudget(own, sessionID, &record, inputTokens+outputTokens); ok {
-			publishEvent(ctx, sink, runID, sessionID, event.CompactEventBudgetUpdated, payload)
-		}
+		budget.Observe(inputTokens, outputTokens)
 	}
+	// This sink's own request boundaries: OnResponseCompleted files the
+	// completed response's gauge, OnEnd also covers a cancelled request. Take
+	// drains, so a response that hits both boundaries still yields one record.
+	stream.OnResponseCompleted = func() { flushBudget() }
+	stream.OnEnd = func() { flushBudget() }
 	return llm.WithStreamSink(ctx, stream)
 }
 
@@ -2387,7 +2405,7 @@ func SubagentContextGauge(ctx context.Context, r *Runner, conversationSessionID,
 
 // publishSubagentContextBudget pushes the gauge of a subagent's own context
 // once an execution of it has finished appending to its worker session — the
-// subagent's counterpart of the turn-end notifyTokenBudget the primary
+// subagent's counterpart of the turn-end PublishContextBudget the primary
 // session's footer gets. The event carries the roster key and the child's run
 // id, so it lands in the subagent's view and nowhere else.
 func publishSubagentContextBudget(fac Factory, record agent.HistoryEntry) {

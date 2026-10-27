@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/stretchr/testify/require"
@@ -100,32 +101,20 @@ func TestTurnLifecycleIsRecordedLikeTheGateway(t *testing.T) {
 // surface publishes and the error record it persists both carry the same facts
 // the completed turn does.
 // TestTUIStateEventsAreRecordedLikeTheGateway pins the other main-agent facts
-// the terminal now files alongside its cards: the context budget, the queue
-// preview, a delivered steer and a mode switch. None of them draws anything
-// itself — the terminal still paints from its own messages — but each is what
-// a reload reads, so the conversation reads the same on either surface.
+// the terminal now files alongside its cards: a delivered steer and a mode
+// switch. None of them draws anything itself — the terminal still paints from
+// its own messages — but each is what a reload reads, so the conversation
+// reads the same on either surface. (The turn-end context budget is the
+// engine's own record now; pkg/process files it once per turn.)
 func TestTUIStateEventsAreRecordedLikeTheGateway(t *testing.T) {
 	_, s, runSvc, runID := turnLifecycleRig(t)
 	s.noteTUIRunID(runID)
 	require.Equal(t, runID, s.currentTUIRunID())
 
-	// A per-response context budget, filed under the run that produced it.
-	s.persistTokenBudget("sid", s.currentTUIRunID(), event.TokenBudgetUpdatedPayload{
-		Model: "glm-5.3", TokenUsage: 152500, PercentLeft: 83,
-	})
-
 	// A steer the model has received, filed where the model got it.
 	s.recordDeliveredSteers("sid", []ComposerSubmission{{DisplayText: "also run lint"}})
 
 	events := turnLifecycleEvents(t, runSvc, "sid")
-
-	budgets := turnLifecycleEventsOfType(events, event.CompactEventBudgetUpdated)
-	require.Len(t, budgets, 1)
-	require.Equal(t, runID, budgets[0].RunID)
-	var budget event.TokenBudgetUpdatedPayload
-	require.NoError(t, json.Unmarshal(budgets[0].Payload, &budget))
-	require.Equal(t, 83, budget.PercentLeft)
-	require.Equal(t, 152500, budget.TokenUsage)
 
 	delivered := turnLifecycleEventsOfType(events, event.RunEventInputDelivered)
 	require.Len(t, delivered, 1)
@@ -133,6 +122,53 @@ func TestTUIStateEventsAreRecordedLikeTheGateway(t *testing.T) {
 	var input event.InputDeliveredPayload
 	require.NoError(t, json.Unmarshal(delivered[0].Payload, &input))
 	require.Equal(t, "also run lint", input.Text)
+}
+
+// TestTUIPrimaryBudgetIsNotFiledPerResponse pins the unified contract's
+// primary half: OnUsageSnapshot is a live gauge a provider may fire once per
+// chunk, so the terminal refreshes the footer from each snapshot but files
+// nothing — the durable budget is the one measured record at turn end, filed
+// by the engine (run.PublishContextBudget), and a reload recomputes the
+// footer from persisted usage rows.
+func TestTUIPrimaryBudgetIsNotFiledPerResponse(t *testing.T) {
+	ctx, s, runSvc, runID := turnLifecycleRig(t)
+	s.noteTUIRunID(runID)
+
+	budgetCh := make(chan TokenBudgetUpdatedMsg, 4)
+	s.PrependUINotify(func(msg any) {
+		if m, ok := msg.(TokenBudgetUpdatedMsg); ok {
+			budgetCh <- m
+		}
+	})
+
+	agentCtx, _, cleanupStream := s.prepareTUIAgentBase("sid", ctx)
+	defer cleanupStream()
+	sink := llm.StreamSinkFrom(agentCtx)
+	require.NotNil(t, sink)
+	require.NotNil(t, sink.OnUsageSnapshot)
+
+	// A compatible stream carrying its cumulative usage on every chunk: three
+	// snapshots, one response, then the request's end boundaries.
+	sink.OnUsageSnapshot(1000, 10)
+	sink.OnUsageSnapshot(1000, 20)
+	sink.OnUsageSnapshot(1000, 30)
+	if sink.OnResponseCompleted != nil {
+		sink.OnResponseCompleted()
+	}
+	if sink.OnEnd != nil {
+		sink.OnEnd()
+	}
+
+	// The footer still follows every snapshot live.
+	for i, want := range []int{1010, 1020, 1030} {
+		m := requireUIMessage(t, budgetCh)
+		require.Equal(t, want, m.TokenUsage, "footer message %d", i)
+	}
+
+	// Nothing is filed: no per-response budget row exists at all.
+	events := turnLifecycleEvents(t, runSvc, "sid")
+	require.Empty(t, turnLifecycleEventsOfType(events, event.CompactEventBudgetUpdated),
+		"a mid-response snapshot must not file a durable budget row")
 }
 
 // TestTUIQueuePreviewIsRecordedLikeTheGateway files the conversation queue's

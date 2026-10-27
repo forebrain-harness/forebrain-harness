@@ -561,10 +561,13 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			// callback is an absolute snapshot: usage deltas are unsuitable
 			// here because Anthropic emits input at message_start and the
 			// remaining output at message_delta.
+			// The footer message is in-process only: a provider may fire this
+			// callback once per chunk, so nothing is filed here. The durable
+			// budget is one measured record at turn end, filed by the engine
+			// (run.PublishContextBudget) — the same one row per turn every
+			// surface reads — and the footer's final refresh follows that event
+			// back in; a reload recomputes the footer from persisted usage rows.
 			if payload, ok := s.tokenBudgetPayloadFromUsage(sessionID, inputTokens+outputTokens); ok {
-				// The same numbers the footer shows are filed for a reload, one
-				// record per response, exactly as the gateway files its own.
-				s.persistTokenBudget(sessionID, s.currentTUIRunID(), payload)
 				s.notifyUIForSession(sessionID, tokenBudgetMsgFromPayload(payload))
 			}
 		},
@@ -618,7 +621,6 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 	if strings.TrimSpace(runID) != "" {
 		s.persistRunEvent(context.Background(), s.turnCompletedEvent(sessionID, runID, completion.Duration))
 	}
-	s.notifyTokenBudget(context.Background(), sessionID, runID)
 	hideFromForeground := false
 	elapsed := completion.Duration
 	if s.chatLog != nil {
@@ -1481,33 +1483,10 @@ func (s *ChatSession) recordModeChanged(sessionID, mode, phase string) {
 		event.RunEventModeChanged, event.ModeChangedPayload{Mode: strings.TrimSpace(mode), Phase: strings.TrimSpace(phase)}, time.Now()))
 }
 
-func (s *ChatSession) notifyTokenBudget(ctx context.Context, sessionID, runID string) {
-	if s == nil {
-		return
-	}
-	usage, ok := run.ContextOccupancy(ctx, s.sessStore(), sessionID)
-	if !ok {
-		return
-	}
-	payload, ok := s.tokenBudgetPayloadFromUsage(sessionID, usage)
-	if !ok {
-		return
-	}
-	s.persistTokenBudget(sessionID, runID, payload)
-	s.notifyUI(tokenBudgetMsgFromPayload(payload))
-}
-
-// persistTokenBudget files the conversation's context budget in the event log.
-// The terminal draws the same numbers from its own message; this row is what a
-// reload reads, so the budget the footer shows survives a restart.
-func (s *ChatSession) persistTokenBudget(sessionID, runID string, payload event.TokenBudgetUpdatedPayload) {
-	s.persistRunEvent(context.Background(), event.NewRunEvent("", runID, strings.TrimSpace(sessionID),
-		event.CompactEventBudgetUpdated, payload, time.Now()))
-}
-
 // tokenBudgetPayloadFromUsage is the engine's one budget computation for a raw
-// context-occupancy token count of sessionID's conversation: the payload both
-// the footer message and the durable budget event are built from.
+// context-occupancy token count of sessionID's conversation: the payload the
+// live footer message is built from. The durable turn-end record is the
+// engine's own, not built here.
 func (s *ChatSession) tokenBudgetPayloadFromUsage(sessionID string, usage int) (event.TokenBudgetUpdatedPayload, bool) {
 	if s == nil || usage <= 0 {
 		return event.TokenBudgetUpdatedPayload{}, false

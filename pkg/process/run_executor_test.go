@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -615,4 +616,211 @@ func eventTypes(events []event.RunEvent) []string {
 		out = append(out, e.Type)
 	}
 	return out
+}
+
+// envWithLLMServer is envWithFakeLLMForSource for a caller that owns the fake
+// provider's server and launch directory: the turn-end budget tests need a
+// server that gates or hangs on demand, and a workspace file a turn's tool
+// call can read.
+func envWithLLMServer(t *testing.T, srv *httptest.Server, launchDir string) *Environment {
+	t.Helper()
+	t.Setenv("FOREBRAIN_EXECUTOR_TEST_KEY", "test-key")
+	home := t.TempDir()
+	// The background memory pipeline is off for these tests, for the same
+	// lifecycle reason envWithFakeLLMForSource documents.
+	cfg := "features:\n" +
+		"  memories: false\n" +
+		"agents:\n" +
+		"  definitions:\n" +
+		"    main:\n" +
+		"      llm_providers:\n" +
+		"        - provider: openai\n" +
+		"          model: gpt-test\n" +
+		"          api_key: ${FOREBRAIN_EXECUTOR_TEST_KEY}\n" +
+		"          base_url: " + srv.URL + "/v1\n" +
+		"          params:\n" +
+		"            stream: false\n"
+	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := Open(context.Background(), OpenOptions{
+		Home:          home,
+		ConfigPath:    filepath.Join(home, "forebrain.yaml"),
+		LaunchDir:     launchDir,
+		SessionSource: "tui",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(env.Close)
+	return env
+}
+
+// hangingSecondRoundLLMServer answers the first request with a read_file tool
+// call (a read inside the workspace runs unasked) and then holds the second
+// request open until its context dies, so a test can cancel the turn mid-flight
+// — after one response's usage was flushed, before the turn completed.
+func hangingSecondRoundLLMServer(t *testing.T, target string) (*httptest.Server, chan struct{}) {
+	t.Helper()
+	var rounds int32
+	secondRound := make(chan struct{})
+	// The held request is released by a cleanup registered after this one, so
+	// it runs before srv.Close (cleanups are LIFO): cancelling the client's
+	// context does not always tear the keep-alive connection down, and Close
+	// would otherwise wait on the held handler forever.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := map[string]any{
+			"id": "chatcmpl-test", "object": "chat.completion", "created": 1, "model": "gpt-test",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "done"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+		}
+		if atomic.AddInt32(&rounds, 1) == 1 {
+			body["choices"] = []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role": "assistant", "content": "",
+					"tool_calls": []map[string]any{{
+						"id": "call-1", "type": "function",
+						"function": map[string]any{
+							"name":      "read_file",
+							"arguments": `{"file_path":"` + target + `"}`,
+						},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}}
+			_ = json.NewEncoder(w).Encode(body)
+			return
+		}
+		close(secondRound)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	return srv, secondRound
+}
+
+func budgetEventsOf(events []event.RunEvent) []event.RunEvent {
+	var out []event.RunEvent
+	for _, e := range events {
+		if e.Type == event.CompactEventBudgetUpdated {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestRunExecutorFilesTheOneTurnEndBudgetRecord pins the unified contract's
+// writer: the engine files the conversation's context budget exactly once at a
+// turn's end — for a turn that completed, for one cancelled mid-flight (the
+// usage already flushed is the measurement), and never for one paused at an
+// approval gate, whose run has not ended.
+func TestRunExecutorFilesTheOneTurnEndBudgetRecord(t *testing.T) {
+	t.Run("completed turn files one record measured from the last response", func(t *testing.T) {
+		env := envWithFakeLLM(t, "hello from the model")
+		probe := &collectingSink{}
+		env.Runner.Events = probe
+		svc := turn.New(
+			turn.WithSessionStore(env.Deps.SessionStore),
+			turn.WithForegroundLocker(env.Foreground),
+			turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
+		)
+		ensureExecutorSession(t, env, "s-budget")
+		out, err := svc.Submit(context.Background(), turn.TurnRequest{SessionID: "s-budget", UserText: "hi"}, nil)
+		if err != nil || out.Status != turn.TurnCompleted {
+			t.Fatalf("Submit: status=%q err=%v, want completed", out.Status, err)
+		}
+		budgets := budgetEventsOf(probe.events())
+		if len(budgets) != 1 {
+			t.Fatalf("budget events = %d, want exactly one turn-end record (events: %v)", len(budgets), eventTypes(probe.events()))
+		}
+		if budgets[0].RunID != out.RunID || budgets[0].SessionID != "s-budget" {
+			t.Fatalf("budget event routing = %+v", budgets[0])
+		}
+		var payload event.TokenBudgetUpdatedPayload
+		if err := json.Unmarshal(budgets[0].Payload, &payload); err != nil {
+			t.Fatalf("decode budget payload: %v", err)
+		}
+		if payload.TokenUsage != 5 {
+			t.Fatalf("TokenUsage = %d, want 5 — the last response's input 3 + output 2", payload.TokenUsage)
+		}
+		if payload.AgentID != "" {
+			t.Fatalf("AgentID = %q, want the conversation's own record with no agent id", payload.AgentID)
+		}
+	})
+
+	t.Run("turn paused at an approval gate files none", func(t *testing.T) {
+		srv := toolCallLLMServer(t)
+		env := envWithLLMServer(t, srv, t.TempDir())
+		probe := &collectingSink{}
+		env.Runner.Events = probe
+		svc := turn.New(
+			turn.WithSessionStore(env.Deps.SessionStore),
+			turn.WithForegroundLocker(env.Foreground),
+			turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
+		)
+		ensureExecutorSession(t, env, "s-budget-gate")
+		out, _ := svc.Submit(context.Background(), turn.TurnRequest{SessionID: "s-budget-gate", UserText: "delete it"}, nil)
+		if out.Status != turn.TurnWaitingApproval {
+			t.Fatalf("status = %q (error %v), want waiting_approval", out.Status, out.Error)
+		}
+		if budgets := budgetEventsOf(probe.events()); len(budgets) != 0 {
+			t.Fatalf("budget events = %d, want none: the gated run has not ended and the resume path owns its record", len(budgets))
+		}
+	})
+
+	t.Run("cancelled turn files the usage already flushed", func(t *testing.T) {
+		launchDir := t.TempDir()
+		target := filepath.Join(launchDir, "note.txt")
+		if err := os.WriteFile(target, []byte("read me"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		srv, secondRound := hangingSecondRoundLLMServer(t, target)
+		env := envWithLLMServer(t, srv, launchDir)
+		probe := &collectingSink{}
+		env.Runner.Events = probe
+		svc := turn.New(
+			turn.WithSessionStore(env.Deps.SessionStore),
+			turn.WithForegroundLocker(env.Foreground),
+			turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
+		)
+		ensureExecutorSession(t, env, "s-budget-cancel")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := svc.Submit(ctx, turn.TurnRequest{SessionID: "s-budget-cancel", UserText: "read it"}, nil)
+			done <- err
+		}()
+		select {
+		case <-secondRound:
+		case <-time.After(20 * time.Second):
+			t.Fatal("the second model request never arrived; the tool call did not run")
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("Submit did not return after the cancel")
+		}
+		budgets := budgetEventsOf(probe.events())
+		if len(budgets) != 1 {
+			t.Fatalf("budget events = %d, want one record for the cancelled turn (events: %v)", len(budgets), eventTypes(probe.events()))
+		}
+		var payload event.TokenBudgetUpdatedPayload
+		if err := json.Unmarshal(budgets[0].Payload, &payload); err != nil {
+			t.Fatalf("decode budget payload: %v", err)
+		}
+		if payload.TokenUsage != 5 {
+			t.Fatalf("TokenUsage = %d, want 5 — the flushed first response's input 3 + output 2", payload.TokenUsage)
+		}
+	})
 }

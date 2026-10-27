@@ -201,7 +201,7 @@ func TestImageHealReportsTheRefusalOnce(t *testing.T) {
 	healed := Use(inner, NewImageHeal())
 
 	var reasons []string
-	ctx := WithImageRefusalObserver(context.Background(), func(reason string) { reasons = append(reasons, reason) })
+	ctx := WithImageRefusalObserver(context.Background(), func(_ context.Context, reason string) { reasons = append(reasons, reason) })
 	messages := []Message{
 		{Role: RoleUser, Parts: []ContentPart{Text("what is this?"), ImageBase64("image/png", strings.Repeat("A", 4096))}},
 	}

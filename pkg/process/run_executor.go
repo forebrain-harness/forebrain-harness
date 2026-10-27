@@ -225,6 +225,15 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 			x.env.Control.Finish(runID)
 		}
 	}
+	// The turn's measured context budget, filed once by the engine: the one row
+	// every surface's reload reads and the one broadcast every footer's final
+	// refresh follows (the terminal repaints from the event; the web receives it
+	// as a run_event). Filed for every ended turn — completed, cancelled or
+	// failed — but not for one paused at an approval gate: its run has not ended,
+	// and the resume path files it when it does.
+	if !run.IsRequiresAction(err) {
+		run.PublishContextBudget(runner, runID, sid)
+	}
 	// Only persist what this executor owns. A caller that supplied its own
 	// capture is persisting from it too, and doing both would write the same
 	// partial turn to the transcript twice.

@@ -92,24 +92,6 @@ func TestCanonicalRunEventFromWS(t *testing.T) {
 			wantValue: nil,
 		},
 		{
-			name: "token budget updated",
-			msg: wsServerMsg{
-				Op: "token_budget_updated",
-				Data: map[string]any{
-					"model":                  "gpt-5",
-					"token_usage":            4096,
-					"percent_left":           98,
-					"context_window":         200000,
-					"effective_window":       180000,
-					"auto_compact_threshold": 167000,
-				},
-			},
-			wantType:  event.CompactEventBudgetUpdated,
-			wantOK:    true,
-			needField: "percent_left",
-			wantValue: float64(98),
-		},
-		{
 			name: "mode changed",
 			msg: wsServerMsg{
 				Op:   "mode_changed",
@@ -266,9 +248,6 @@ func TestRunEventWSMessageAndPayloadFallbacks(t *testing.T) {
 	if _, ok := modeChangedPayload("bad"); ok {
 		t.Fatal("non-map mode payload should not parse")
 	}
-	if _, ok := tokenBudgetUpdatedPayload("bad"); ok {
-		t.Fatal("non-map token budget payload should not parse")
-	}
 }
 
 func TestPlanUpdatedUsesRunEventWSMessage(t *testing.T) {
@@ -307,58 +286,38 @@ func TestPlanUpdatedUsesRunEventWSMessage(t *testing.T) {
 	}
 }
 
-func TestTokenBudgetWSMessageFromSessionUsesLastAPIResponseUsage(t *testing.T) {
-	ctx := context.Background()
-	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+// TestBudgetEventRidesTheRunEventFrame pins how the web receives the
+// conversation's turn-end budget now that the engine files it: not a
+// dedicated socket op, but the same run_event frame every canonical event
+// rides, so the page's existing projection is the only consumer.
+func TestBudgetEventRidesTheRunEventFrame(t *testing.T) {
+	src := wsServerMsg{RequestID: "req", RunID: "run", SessionID: "s", TraceID: "trace"}
+	payload := event.TokenBudgetUpdatedPayload{
+		Model: "glm-5.3", TokenUsage: 152500, PercentLeft: 83,
+		ContextWindow: 1000000, EffectiveWindow: 1000000, AutoCompactThreshold: 900000,
+	}
+	evt := event.NewRunEvent("evt-budget", "run", "s", event.CompactEventBudgetUpdated, payload, time.Now())
+	msg := runEventWSMessage(src, evt)
+	if msg.Op != "run_event" || msg.RequestID != "req" || msg.TraceID != "trace" || msg.Data == nil {
+		t.Fatalf("ws msg=%+v", msg)
+	}
+	raw, err := json.Marshal(msg.Data)
 	if err != nil {
-		t.Fatalf("OpenStateForTest: %v", err)
+		t.Fatalf("marshal run event: %v", err)
 	}
-	defer db.Close()
-	sess := state.NewSessionStore(db, "main")
-	_, _ = sess.Append(ctx, "session-1", "user", "first")
-	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, "session-1", "seed")
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
+	var got event.RunEvent
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal run event: %v", err)
 	}
-	_, _ = sess.AppendStructuredMessageForRun(
-		ctx,
-		"session-1",
-		seedRun.ID,
-		"assistant",
-		"answer",
-		"msg-1",
-		state.ContentPartsJSON(nil, "answer"),
-		"gpt-5",
-		`{"input_tokens":4090,"output_tokens":6}`,
-		"",
-		"",
-		state.MessageExecTiming{},
-	)
-	_, _ = sess.Append(ctx, "session-1", "user", "tail message after response")
-
-	srv := &Server{Sessions: sess}
-	msg, ok := srv.tokenBudgetWSMessageFromSession(ctx, "req-1", "run-1", "session-1")
-	if !ok {
-		t.Fatalf("expected ws message")
+	if got.Type != event.CompactEventBudgetUpdated {
+		t.Fatalf("event type=%q want %q", got.Type, event.CompactEventBudgetUpdated)
 	}
-	if msg.Op != event.CompactEventBudgetUpdated {
-		t.Fatalf("unexpected op: %q", msg.Op)
+	var gotPayload event.TokenBudgetUpdatedPayload
+	if err := json.Unmarshal(got.Payload, &gotPayload); err != nil {
+		t.Fatalf("unmarshal budget payload: %v", err)
 	}
-	if msg.RequestID != "req-1" || msg.RunID != "run-1" || msg.SessionID != "session-1" {
-		t.Fatalf("unexpected routing fields: %+v", msg)
-	}
-	payload, ok := msg.Data.(event.TokenBudgetUpdatedPayload)
-	if !ok {
-		t.Fatalf("expected typed payload, got %T", msg.Data)
-	}
-	if payload.TokenUsage != 4096 {
-		t.Fatalf("unexpected token usage: %+v", payload)
-	}
-	if payload.PercentLeft != 98 {
-		t.Fatalf("unexpected percent left: %+v", payload)
-	}
-	if payload.ContextWindow != 200000 || payload.EffectiveWindow != 200000 || payload.AutoCompactThreshold != 180000 {
-		t.Fatalf("unexpected context budget fields: %+v", payload)
+	if gotPayload != payload {
+		t.Fatalf("budget payload=%+v want %+v", gotPayload, payload)
 	}
 }
 
@@ -1862,66 +1821,6 @@ func TestCanonicalRunEndingsCarryPlanFacts(t *testing.T) {
 		var got event.RunPlanFacts
 		require.NoError(t, json.Unmarshal(raw, &got))
 		require.Equal(t, facts, got, op)
-	}
-}
-
-// TestPrimaryFooterBudgetIsUnchangedByTheEngineMove pins the web's budget
-// numbers across the same engine move the terminal's footer went through: the
-// payload the socket pushes after a turn must keep these exact values for a
-// session whose last assistant response measured a known usage on a known
-// model. A change here is a change to what the page's gauge says, not just to
-// where the computation lives.
-func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
-	ctx := context.Background()
-	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
-	if err != nil {
-		t.Fatalf("OpenStateForTest: %v", err)
-	}
-	defer db.Close()
-	sess := state.NewSessionStore(db, "main")
-	_, _ = sess.Append(ctx, "session-1", "user", "first")
-	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, "session-1", "seed")
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	_, _ = sess.AppendStructuredMessageForRun(
-		ctx,
-		"session-1",
-		seedRun.ID,
-		"assistant",
-		"answer",
-		"msg-1",
-		state.ContentPartsJSON(nil, "answer"),
-		"glm-5.3",
-		`{"input_tokens":150000,"output_tokens":2500}`,
-		"",
-		"",
-		state.MessageExecTiming{},
-	)
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
-		}},
-	}}}
-	srv := &Server{Sessions: sess, Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg}}}
-	msg, ok := srv.tokenBudgetWSMessageFromSession(ctx, "req-1", "run-1", "session-1")
-	if !ok {
-		t.Fatalf("expected a budget ws message")
-	}
-	payload, ok := msg.Data.(event.TokenBudgetUpdatedPayload)
-	if !ok {
-		t.Fatalf("expected typed payload, got %T", msg.Data)
-	}
-	want := event.TokenBudgetUpdatedPayload{
-		Model:                "glm-5.3",
-		TokenUsage:           152500,
-		PercentLeft:          83,
-		ContextWindow:        1000000,
-		EffectiveWindow:      1000000,
-		AutoCompactThreshold: 900000,
-	}
-	if payload != want {
-		t.Fatalf("budget payload = %+v, want %+v", payload, want)
 	}
 }
 

@@ -448,6 +448,44 @@ func TestNonStreamingFallbackReturnsToStreamingAfterOneAttempt(t *testing.T) {
 	}
 }
 
+// Every announced failure carries whether the attempt that died was sent
+// without streaming — the attempt ledger's streaming column reads it. The
+// sequence below (a streaming failure, the one-shot fallback's failure, then
+// another streaming failure) pins the capture at the top of the loop: taken
+// inside the fallback branch instead, the last announcement would report a
+// stale true.
+func TestTransportRetryCarriesTheNonStreamingBit(t *testing.T) {
+	_, err, inner, rec := runStreamRetry(t, 4,
+		func(ctx context.Context) (*Result, error) {
+			return nil, connDropped() // streamed failure, retried as a stream
+		},
+		func(ctx context.Context) (*Result, error) {
+			return nil, &APIError{StatusCode: http.StatusNotFound} // picks the fallback
+		},
+		func(ctx context.Context) (*Result, error) {
+			return nil, connDropped() // the non-streaming fallback attempt dies
+		},
+		func(ctx context.Context) (*Result, error) {
+			return nil, connDropped() // back on a stream, and it dies too
+		},
+		func(ctx context.Context) (*Result, error) { return okResult("fifth time lucky") },
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v (the fifth attempt should succeed)", err)
+	}
+	wantAttempts := []bool{false, false, true, false, false}
+	if !reflect.DeepEqual(inner.nonStreaming, wantAttempts) {
+		t.Fatalf("non-streaming per attempt = %v, want %v", inner.nonStreaming, wantAttempts)
+	}
+	var bits []bool
+	for _, tr := range rec.live() {
+		bits = append(bits, tr.NonStreaming)
+	}
+	if !reflect.DeepEqual(bits, []bool{false, true, false}) {
+		t.Fatalf("NonStreaming per announced failure = %v, want [false true false]", bits)
+	}
+}
+
 // Even when everything fails, there is only one non-streaming blind wait:
 // the decision table never asks for the fallback twice.
 func TestRetryGivesUpAfterOneNonStreamingAttempt(t *testing.T) {

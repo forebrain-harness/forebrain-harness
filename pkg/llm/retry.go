@@ -258,11 +258,12 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 
 		if r.cfg.notify != nil {
 			r.cfg.notify(notifyCtx, TransportRetry{
-				Retry:  attempt + 1,
-				Total:  maxRetries,
-				Wait:   sleep,
-				Err:    err,
-				Status: HTTPStatusOf(err),
+				Retry:        attempt + 1,
+				Total:        maxRetries,
+				Wait:         sleep,
+				Err:          err,
+				Status:       HTTPStatusOf(err),
+				NonStreaming: NonStreamingRequestFrom(notifyCtx),
 			})
 			pendingRetry.Store(int64(attempt + 1))
 		}

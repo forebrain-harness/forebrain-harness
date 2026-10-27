@@ -393,8 +393,8 @@ func TestImageRefusalRecorderIsIdempotent(t *testing.T) {
 		t.Fatal("the run layer installed no observer")
 	}
 	// A tool loop can meet several refusals in one turn.
-	observer("first refusal")
-	observer("second refusal")
+	observer(runCtx, "first refusal")
+	observer(runCtx, "second refusal")
 
 	reported := sink.byType(event.RunEventImageRejected)
 	if len(reported) != 2 {

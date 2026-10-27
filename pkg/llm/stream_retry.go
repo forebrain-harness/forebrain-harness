@@ -148,6 +148,11 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 		if err := ctx.Err(); err != nil {
 			return nil, acct.fail(err)
 		}
+		// Captured before the fallback consumes its flag below: this is the
+		// "this attempt goes out without streaming" decision of the attempt
+		// about to run, so a later streaming attempt's failure does not
+		// announce a stale true.
+		attemptNonStreaming := nonStreaming
 		attemptCtx := ctx
 		if nonStreaming {
 			attemptCtx = WithNonStreamingRequest(ctx)
@@ -254,11 +259,12 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 				}
 				if r.cfg.notify != nil {
 					r.cfg.notify(notifyCtx, TransportRetry{
-						Retry:  counts.retries,
-						Total:  maxRetries,
-						Wait:   sleep,
-						Err:    err,
-						Status: statusOf(err),
+						Retry:        counts.retries,
+						Total:        maxRetries,
+						Wait:         sleep,
+						Err:          err,
+						Status:       statusOf(err),
+						NonStreaming: attemptNonStreaming,
 					})
 					pendingRetry.Store(int64(counts.retries))
 				}
