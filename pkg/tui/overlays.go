@@ -3899,21 +3899,24 @@ func keyEditsTextField(k rawKey) bool {
 	return false
 }
 
-// fieldSelection takes the part of a panel's single-row field the mouse
-// selection covers, for the edit key that is about to run, and consumes that
-// selection: the range is returned, the painted anchors are dropped. A key that
-// does not edit the field drops the selection without returning a range, because
-// the anchors are columns of the row as it was painted and any other edit makes
-// them address other characters.
+// fieldSelection takes the part of a panel's field the mouse selection covers,
+// for the edit key that is about to run, and consumes that selection: the range
+// is returned, the painted anchors are dropped. A key that does not edit the
+// field drops the selection without returning a range, because the anchors are
+// columns of the rows as they were painted and any other edit makes them
+// address other characters.
 //
-// A selection that reaches past the field's row is clamped to it, so a drag that
+// A selection that reaches past the field's bar is clamped to it, so a drag that
 // started in the panel's head or ran on into the list still deletes the field's
-// part of it. runes is the field's own buffer — the same slice the field's click
-// mapping measures against, which for a secret field is the unmasked value (the
-// row paints dots, but the rune count and the caret math are the value's own).
-// The field's row is the panel's own row index, which for a panel overlay equals
-// the logical line OverlaySelection reports (the panel path's row refs are the
-// identity, reducer.go's vpOverlayRefs build in paintViewportLocked).
+// part of it. Every row of the bar — the padded rows as well as the text's —
+// is measured in the text row's columns, so a drag that starts on the bar's top
+// row begins at the cell it started on. runes is the field's own buffer — the
+// same slice the field's click mapping measures against, which for a secret
+// field is the unmasked value (the row paints dots, but the rune count and the
+// caret math are the value's own). The field's rows are the panel's own row
+// indices, which for a panel overlay equal the logical lines OverlaySelection
+// reports (the panel path's row refs are the identity, reducer.go's
+// vpOverlayRefs build in paintViewportLocked).
 func (s *rawSelector) fieldSelection(k rawKey, p slashPanel, runes []rune) *[2]int {
 	switch {
 	case k == rawKeyMouse || k == rawKeyNone:
@@ -3929,16 +3932,16 @@ func (s *rawSelector) fieldSelection(k rawKey, p slashPanel, runes []rune) *[2]i
 	if !ok {
 		return nil
 	}
-	line := p.fieldRow(s.panelWidth(), s.panelRows())
-	if line < 0 || startLine > line || endLine < line {
+	first, last := p.fieldBar(s.panelWidth(), s.panelRows())
+	if first < 0 || startLine > last || endLine < first {
 		return nil
 	}
 	textCol := p.field.textCol()
 	start, end := 0, len(runes)
-	if startLine == line {
+	if startLine >= first {
 		start = caretIndexForClick(runes, textCol, startCol)
 	}
-	if endLine == line {
+	if endLine <= last {
 		end = selectionEndIndexForClick(runes, textCol, endCol)
 	}
 	if end <= start {

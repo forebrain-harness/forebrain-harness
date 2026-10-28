@@ -6803,8 +6803,10 @@ func (l panelLine) rowsStacks(width int, stack bool) []string {
 // picker's filter, a form's answer — with the caret inside it. An empty field
 // shows its placeholder.
 //
-// A picker's bar is one row: its height is a property of the widget, never of
-// the rows left over.
+// A picker's bar is three rows — a padded row, the text's row, a padded row —
+// with a blank row above it between the head and the bar. Its height is a
+// property of the widget, never of the rows left over: every panel at every
+// terminal size shows the same shape.
 //
 // It is drawn as a bar on the composer card's own background, from the panel's
 // margin to its right edge, with its glyph in front: a bar rather than a
@@ -6897,6 +6899,15 @@ func (f panelField) caretCol() int {
 	return f.textCol() + runewidth.StringWidth(string(f.text[:cursor]))
 }
 
+// padRow is a row of the bar with nothing on it, the air above and below the
+// text. Its cells are real spaces on the bar's background to the panel's full
+// width: an erase would take whatever background the terminal has in effect,
+// eating the neighbouring cell on some of them.
+func (f panelField) padRow(width int) string {
+	bg, _, _ := f.colours()
+	return panelIndent + bg + strings.Repeat(" ", maxInt(0, width-displayLineWidth(panelIndent))) + sharedBlockReset
+}
+
 // slashPanel is one panel's content.
 type slashPanel struct {
 	head  []panelLine
@@ -6936,25 +6947,26 @@ func (p slashPanel) hintRows(width int) int {
 	return len(panelLine{lead: panelIndent, text: p.hint, style: &panelHintStyle}.rows(width))
 }
 
-// fieldRow is the row the field's text sits on at width: the row after the
-// head, whatever height the panel is laid out at. rows is kept for the callers
-// that know the panel's height; the bar no longer depends on it. -1 without a
-// field.
+// fieldRow is the row the field's text sits on at width: one blank row and the
+// bar's top padded row after the head, whatever height the panel is laid out
+// at. rows is kept for the callers that know the panel's height; the bar does
+// not depend on it. -1 without a field.
 func (p slashPanel) fieldRow(width, rows int) int {
 	if p.field == nil {
 		return -1
 	}
-	return p.headRows(width)
+	return p.headRows(width) + 2
 }
 
-// fieldBar is the first and last row of the field's bar — the same row, a
-// click anywhere on it being a click on the field; -1, -1 without a field.
+// fieldBar is the first and last row of the field's bar — the blank row above
+// it belongs to neither, a click anywhere on the bar being a click on the
+// field; -1, -1 without a field.
 func (p slashPanel) fieldBar(width, rows int) (first, last int) {
 	text := p.fieldRow(width, rows)
 	if text < 0 {
 		return -1, -1
 	}
-	return text, text
+	return text - 1, text + 1
 }
 
 // layout lays the panel out at width in rows screen rows: the head, a blank
@@ -6968,10 +6980,13 @@ func (p slashPanel) layout(width, rows, top int, follow bool) panelLayout {
 		out.lines = append(out.lines, l.rows(width)...)
 	}
 	if p.field != nil {
+		// Air between the head and the bar, then the bar: a padded row, the
+		// text's row, a padded row.
+		out.lines = append(out.lines, "")
 		if !p.field.blurred {
-			out.caretRow, out.caretCol = len(out.lines), p.field.caretCol()
+			out.caretRow, out.caretCol = len(out.lines)+1, p.field.caretCol()
 		}
-		out.lines = append(out.lines, p.field.row(width))
+		out.lines = append(out.lines, p.field.padRow(width), p.field.row(width), p.field.padRow(width))
 	}
 	out.lines = append(out.lines, "")
 

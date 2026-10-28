@@ -30,11 +30,12 @@ const (
 	tuiSkillVersionsDir = ".versions"
 )
 
-// skillUpdateProbeTimeout bounds the one network step the panel can trigger:
-// the cached upstream-head probe behind "update available". The probe is
-// cached for an hour upstream, and a source that cannot be reached leaves the
-// skill without a marker rather than stalling the panel.
-const skillUpdateProbeTimeout = 2 * time.Second
+// skillPullTimeout bounds the one network step a panel action can trigger: the
+// shallow clone behind "Pull the update". The pull runs on the event-loop
+// goroutine, so without a deadline an unreachable source froze the whole
+// terminal for as long as git's own retries lasted. A package-level variable
+// only so tests can shorten it.
+var skillPullTimeout = 2 * time.Minute
 
 // SkillFileDiff is one file's place in a draft/version comparison the panel
 // shows: the store's counts plus the unified-diff body itself, which the store
@@ -89,7 +90,14 @@ func (s *ChatSession) SkillVersionState(entry skill.Entry) (skill.SkillVersionSt
 // own withUpdate does: a git-installed skill whose source advertises a newer
 // revision than the one its current version recorded. It is duplicated here
 // rather than reached through the service because the panel needs the state
-// without paying for a whole listing, and the probe is cached.
+// without paying for a whole listing.
+//
+// The marker never waits on the network. This runs on the event-loop goroutine
+// for every listed row, so a probe here froze the whole terminal until it
+// returned — measured at 68 s for one offline source, and minutes when the
+// deadline itself was defeated (see gitOut's WaitDelay). A cold repository
+// therefore draws no marker and starts a background probe; the answer is read
+// on the next listing, the way the /mcp and /lsp panels refresh.
 func (s *ChatSession) skillUpdateMarker(name string, state skill.SkillVersionState) *skill.SkillUpdate {
 	if state.Current == 0 || len(state.Versions) == 0 {
 		return nil
@@ -109,9 +117,14 @@ func (s *ChatSession) skillUpdateMarker(name string, state skill.SkillVersionSta
 	if repo == "" || rev == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), skillUpdateProbeTimeout)
-	defer cancel()
-	remote, ok := skill.RemoteHead(ctx, repo)
+	remote, ok, cached := skill.CachedRemoteHead(repo)
+	if !cached {
+		// The panel is drawn on the event-loop goroutine, so it must never
+		// wait on the network: ask for a probe and let the next listing read
+		// the answer.
+		skill.PrimeRemoteHead(repo)
+		return nil
+	}
 	if !ok || remote == "" || remote == rev {
 		return nil
 	}
@@ -146,12 +159,16 @@ func (s *ChatSession) RestoreSkillVersion(entry skill.Entry, version int, replac
 	return s.skillLifecycleService().RestoreVersionAsDraft(strings.TrimSpace(entry.Name), version, replaceDraft)
 }
 
-// PullSkillUpdate fetches the entry's upstream content into its draft.
+// PullSkillUpdate fetches the entry's upstream content into its draft. The
+// clone is bounded by skillPullTimeout: a failed pull is a message in the
+// panel, never a terminal that stops answering.
 func (s *ChatSession) PullSkillUpdate(entry skill.Entry, replaceDraft bool) error {
 	if s == nil || strings.TrimSpace(s.home()) == "" {
 		return fmt.Errorf("skills: unavailable")
 	}
-	return s.skillLifecycleService().PullUpdate(context.Background(), strings.TrimSpace(entry.Name), replaceDraft)
+	ctx, cancel := context.WithTimeout(context.Background(), skillPullTimeout)
+	defer cancel()
+	return s.skillLifecycleService().PullUpdate(ctx, strings.TrimSpace(entry.Name), replaceDraft)
 }
 
 // SkillDiff compares two snapshots of one entry — published versions by number

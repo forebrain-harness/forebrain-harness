@@ -16732,11 +16732,11 @@ func TestInputPanelShowsQuestionFieldAndKeys(t *testing.T) {
 	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("panel = %q, want %q", plain, want)
 	}
-	// The text row is the row under the title; the text starts after the
-	// margin, the padding, the glyph and its gap — 7 columns — and the caret
-	// is after "A界", 3 cells in.
-	if layout.caretRow != 1 || layout.caretCol != 10 {
-		t.Fatalf("field row %d, cursor column %d; want 1, 10", layout.caretRow, layout.caretCol)
+	// The text row is the bar's middle row, two rows under the title; the text
+	// starts after the margin, the padding, the glyph and its gap — 7 columns
+	// — and the caret is after "A界", 3 cells in.
+	if layout.caretRow != 3 || layout.caretCol != 10 {
+		t.Fatalf("field row %d, cursor column %d; want 3, 10", layout.caretRow, layout.caretCol)
 	}
 }
 
@@ -16758,11 +16758,11 @@ func TestStandalonePromptPaintsASetupPage(t *testing.T) {
 			t.Fatalf("page is missing %q:\n%s", want, stripANSI(got))
 		}
 	}
-	// Four rows of page chrome, then the title: a page this short keeps the
-	// one-row bar, so the field is on row 6, its caret after the 7 columns of
-	// margin, padding, glyph and gap and the 3 cells of "A界" — column 10,
-	// one-based 11 in the escape.
-	if want := "\x1b[6;11H\x1b[?25h"; !strings.HasSuffix(got, want) {
+	// Four rows of page chrome, then the title: under it the blank row and the
+	// bar's padded row, so the field's text is on row 8, its caret after the 7
+	// columns of margin, padding, glyph and gap and the 3 cells of "A界" —
+	// column 10, one-based 11 in the escape.
+	if want := "\x1b[8;11H\x1b[?25h"; !strings.HasSuffix(got, want) {
 		t.Fatalf("page = %q, want the caret placed with %q", got, want)
 	}
 }

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/stretchr/testify/require"
 )
@@ -131,5 +134,117 @@ func TestSkillChangesBodyKeepsDiffMarkers(t *testing.T) {
 	}
 	if strings.TrimSpace(stripANSI(skillChangesBody(r, nil))) != "No changes." {
 		t.Fatalf("empty diff body = %q", skillChangesBody(r, nil))
+	}
+}
+
+// tuiFakeGit puts a shell script named git at the front of PATH: the panel's
+// paths must never run the real one.
+func tuiFakeGit(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// skillStateWithSource is a published skill whose current version came from
+// repo at revision rev.
+func skillStateWithSource(repo, rev string) skill.SkillVersionState {
+	return skill.SkillVersionState{
+		Name:    "demo",
+		Current: 1,
+		Versions: []skill.VersionRecord{
+			{V: 1, Kind: "installed", Source: repo, UpstreamRev: rev},
+		},
+	}
+}
+
+// TestSkillUpdateMarkerNeverWaitsOnTheNetwork pins the freeze plan 184 fixes:
+// the marker is computed for every listed row on the event-loop goroutine, so
+// an unanswered probe must return at once and start a background one instead.
+func TestSkillUpdateMarkerNeverWaitsOnTheNetwork(t *testing.T) {
+	tuiFakeGit(t, "sleep 5")
+	skill.ForgetRemoteHeadCache()
+	t.Cleanup(skill.ForgetRemoteHeadCache)
+
+	start := time.Now()
+	got := (&ChatSession{}).skillUpdateMarker("demo", skillStateWithSource("https://example.invalid/x.git", "deadbeef"))
+	elapsed := time.Since(start)
+	if got != nil {
+		t.Fatalf("marker without a cached answer = %+v, want nil", got)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("skillUpdateMarker blocked %v; the panel must never wait on the probe", elapsed)
+	}
+}
+
+// TestSkillUpdateMarkerReadsTheCachedAnswer pins the positive side: once a
+// probe has answered, the marker is drawn from the cache alone.
+func TestSkillUpdateMarkerReadsTheCachedAnswer(t *testing.T) {
+	repo := "file://" + t.TempDir()
+	tuiFakeGit(t, "echo "+strings.Repeat("a", 40))
+	skill.ForgetRemoteHeadCache()
+	t.Cleanup(skill.ForgetRemoteHeadCache)
+
+	// Fill the cache the way a background probe would.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rev, ok := skill.RemoteHead(ctx, repo)
+	if !ok || rev == "" {
+		t.Fatalf("RemoteHead(%q) = %q, %v", repo, rev, ok)
+	}
+
+	got := (&ChatSession{}).skillUpdateMarker("demo", skillStateWithSource(repo, "deadbeef"))
+	require.NotNil(t, got, "a cached newer revision must draw the marker")
+	require.Equal(t, rev, got.Rev)
+
+	if got := (&ChatSession{}).skillUpdateMarker("demo", skillStateWithSource(repo, rev)); got != nil {
+		t.Fatalf("marker at the current revision = %+v, want nil", got)
+	}
+}
+
+// TestPullSkillUpdateUsesItsDeadline pins plan 185: "Pull the update" clones on
+// the event-loop goroutine, so an upstream that never answers must fail at the
+// pull's own deadline instead of stalling the terminal for as long as git
+// retries.
+//
+// The verdict is the elapsed time rather than a side effect of the child: a
+// child killed the moment the deadline lands may not have run its first line
+// yet, so reading a marker it writes would make this test race. The window says
+// what the contract is — the call waited for its deadline (so it reached the
+// clone instead of failing early) and then returned rather than hanging for the
+// script's 30 s.
+func TestPullSkillUpdateUsesItsDeadline(t *testing.T) {
+	tuiFakeGit(t, "exec sleep 30")
+
+	home := t.TempDir()
+	skills := filepath.Join(home, "workspace", "skills")
+	skillDir := filepath.Join(skills, "demo")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: d\n---\n\nx\n"), 0o644))
+	versions := filepath.Join(skills, ".versions", "demo")
+	require.NoError(t, os.MkdirAll(versions, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(versions, "manifest.json"), []byte(
+		`{"name":"demo","current":1,"versions":[{"v":1,"at":"2026-10-01T00:00:00Z",`+
+			`"kind":"installed","source":"https://example.invalid/x.git","upstream_rev":"deadbeef"}]}`), 0o644))
+
+	previous := skillPullTimeout
+	skillPullTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { skillPullTimeout = previous })
+
+	s := &ChatSession{Env: &process.Environment{Deps: run.Deps{Home: home}}}
+	start := time.Now()
+	err := s.PullSkillUpdate(skill.Entry{Name: "demo", Path: skillDir}, true)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "a pull that never answers must fail at its deadline")
+	require.NotContains(t, err.Error(), "not found", "the pull never resolved the skill, so it never reached the clone")
+	if elapsed < 400*time.Millisecond {
+		t.Fatalf("PullSkillUpdate returned after %v, before its 500 ms deadline: the timing proves nothing", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("PullSkillUpdate returned after %v: the panel's pull is not bounded", elapsed)
 	}
 }

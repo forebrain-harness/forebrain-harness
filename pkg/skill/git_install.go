@@ -101,12 +101,24 @@ func LookupLockEntry(workspace string, key string) (LockEntry, bool) {
 	return entry, true
 }
 
+// gitKillGrace bounds the wait for a killed git's orphaned children to release
+// the output pipes (exec.Cmd.WaitDelay). Killing git alone does not end the
+// command: git spawns helpers (git-remote-https) that inherit stdout/stderr,
+// and os/exec reads those pipes through its own goroutines, so cmd.Wait blocks
+// until every holder exits. Measured on one machine: a 2 s deadline against an
+// unreachable host took 1m15s to return, freezing whatever goroutine made the
+// call. A package-level variable only so tests can shorten it.
+var gitKillGrace = 2 * time.Second
+
 // gitOut runs one git command under ctx. Installs run on a background
 // goroutine while the surface stays interactive, so a clone must die with the
 // context that owns it rather than outliving the session that started it.
+// Once ctx is done the call returns within gitKillGrace, even when a helper
+// git spawned still holds the output pipes.
 func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	cmd.WaitDelay = gitKillGrace
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -251,6 +263,69 @@ func RemoteHead(ctx context.Context, repo string) (string, bool) {
 	remoteHeadCache.m[repo] = remoteHeadEntry{at: now, rev: rev, ok: ok}
 	remoteHeadCache.Unlock()
 	return rev, ok
+}
+
+// CachedRemoteHead reports what a finished probe knows about repo without
+// touching the network. cached=false means no probe has answered yet, or the
+// last answer is older than remoteHeadTTL — which is not the same as "no
+// update": a surface that must stay interactive draws nothing for it and asks
+// for a probe with PrimeRemoteHead, reading the answer on a later listing.
+func CachedRemoteHead(repo string) (rev string, ok bool, cached bool) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return "", false, false
+	}
+	remoteHeadCache.Lock()
+	defer remoteHeadCache.Unlock()
+	entry, found := remoteHeadCache.m[repo]
+	if !found || time.Since(entry.at) >= remoteHeadTTL {
+		return "", false, false
+	}
+	return entry.rev, entry.ok, true
+}
+
+// remoteHeadPrimeTimeout bounds one background probe. A package-level variable
+// only so tests can shorten it.
+var remoteHeadPrimeTimeout = 2 * time.Second
+
+// remoteHeadPrimeInflight holds the repositories a probe is already running
+// for, so a listing that asks repeatedly starts one probe per repository.
+var remoteHeadPrimeInflight = struct {
+	sync.Mutex
+	m map[string]bool
+}{m: map[string]bool{}}
+
+// PrimeRemoteHead asks for a fresh probe without waiting for it. The answer
+// lands in the cache the next call reads. It is how a surface that must stay
+// interactive — the terminal's modal panels, which draw on the event-loop
+// goroutine — asks for a hint instead of blocking on one.
+func PrimeRemoteHead(repo string) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return
+	}
+	if _, _, cached := CachedRemoteHead(repo); cached {
+		return
+	}
+	remoteHeadPrimeInflight.Lock()
+	if remoteHeadPrimeInflight.m[repo] {
+		remoteHeadPrimeInflight.Unlock()
+		return
+	}
+	remoteHeadPrimeInflight.m[repo] = true
+	remoteHeadPrimeInflight.Unlock()
+	go func() {
+		defer func() {
+			remoteHeadPrimeInflight.Lock()
+			delete(remoteHeadPrimeInflight.m, repo)
+			remoteHeadPrimeInflight.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), remoteHeadPrimeTimeout)
+		defer cancel()
+		// RemoteHead records a failed probe as well, so a source that is
+		// offline costs one attempt per remoteHeadTTL, not one per listing.
+		_, _ = RemoteHead(ctx, repo)
+	}()
 }
 
 // ForgetRemoteHeadCache drops the cached upstream probes, so a test or an

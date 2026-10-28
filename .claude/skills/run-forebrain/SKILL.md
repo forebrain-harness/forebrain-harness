@@ -396,6 +396,18 @@ sessions.
   `$TMPDIR/forebrain-run/forebrain` if it exists — run `$D build` explicitly after
   changing Go code, or `$D reset` will not rebuild it for you. A stale binary
   shows the old behaviour, so a change that "did nothing" is usually this.
+- **Never `$D build` in a bare `git worktree`.** `third_party/libtokenizers/` is
+  gitignored, so a fresh worktree has no `libtokenizers.a` and the build's first
+  step (`scripts/fetch-libtokenizers.sh`) downloads 39MB from the GitHub release
+  CDN — measured at **15.8 KB/s** here, i.e. ~41 minutes, during which `go build`
+  has not started at all (the Go cache stays untouched, which is how to tell).
+  To drive a build of the working tree while another session is editing files you
+  must not touch, build the **main tree** with `go build -overlay`: save HEAD's
+  copy of each such file under `$TMPDIR` and pass
+  `{"Replace": {"<abs path in repo>": "<copy>"}}`, then
+  `CGO_ENABLED=1 go build -tags fts5 -overlay <map> -o "$WORK/forebrain" ./cmd/forebrain`
+  (~8s warm) — `$D start` reuses that binary and never rebuilds. If a worktree is
+  genuinely needed, symlink the main tree's `third_party/libtokenizers` into it first.
 - **Other sessions may be driving the default instance.** Give your run its own
   work dir, tmux session and port —
   `export FOREBRAIN_RUN_WORK=$TMPDIR/forebrain-run-mine FOREBRAIN_RUN_SESSION=fb-mine FOREBRAIN_RUN_PORT=8761`

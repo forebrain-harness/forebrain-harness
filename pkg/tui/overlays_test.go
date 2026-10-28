@@ -839,8 +839,9 @@ func TestSelectorInputClickInsertsAtTheClickedPosition(t *testing.T) {
 	}()
 
 	// The panel is bottom-pinned in its fixed height: the rule, the
-	// question, then the field.
-	row := 24 - slashPanelHeight(24) + 2
+	// question, the blank row, then the field's bar, whose text's row the
+	// click must land on.
+	row := 24 - slashPanelHeight(24) + 4
 	col := (&panelField{}).textCol() + 2 // between "he" and "llo"
 	writeMouseClick(t, pw, col, row)
 	time.Sleep(50 * time.Millisecond)
@@ -1476,7 +1477,10 @@ func TestPickersShowEveryRowWhole(t *testing.T) {
 	}
 	st.applyFilter()
 	st.cursor = 2
-	const width, rows = 38, 9
+	// The panel's fixed frame here is the head, the blank under it, the bar's
+	// three rows, the blank under them, the scroll note and the two-row hint:
+	// nine rows, and the body needs three more to show the wrapped option.
+	const width, rows = 38, 12
 	layout := st.panel().layout(width, rows, 0, true)
 	plain := make([]string, len(layout.lines))
 	for i, line := range layout.lines {
@@ -1529,7 +1533,8 @@ func TestPickersShowEveryRowWhole(t *testing.T) {
 	pickerHead(b, "Migrate\nImport another agent's history, memories and skills")
 	long2.head = b.head
 	head := long2.layout(40, 0, 0, false)
-	if head.caretRow != long2.fieldRow(40, 0) || head.caretRow < 2 || !strings.Contains(stripAnsi(head.lines[head.caretRow]), "Type to filter") {
+	if headRows := long2.headRows(40); headRows < 2 || head.caretRow != headRows+2 ||
+		!strings.Contains(stripAnsi(head.lines[head.caretRow]), "Type to filter") {
 		t.Fatalf("long label head = %q", head.lines)
 	}
 }
@@ -1710,19 +1715,22 @@ func pickerKeys(t *testing.T, keys string) *rawSelector {
 }
 
 // filterBarPlain is how a panel's field shows, as plain text, laid out at
-// width: the one row with the bar's margin and padding before the glyph, a gap
-// after it, and the rest of the row filled. Layout tests use it to spell out a
-// whole panel without repeating the bar's whitespace.
+// width: the bar's padded row, the row holding the bar's margin and padding
+// before the glyph, a gap after it and the rest of the row filled, then the
+// bar's other padded row. Layout tests use it to spell out a whole panel
+// without repeating the bar's whitespace.
 func filterBarPlain(width int, glyph, text string) []string {
+	pad := strings.Repeat(" ", width)
 	row := "    " + glyph + "  " + text
 	row += strings.Repeat(" ", max(0, width-displayLineWidth(row)))
-	return []string{row}
+	return []string{pad, row, pad}
 }
 
-// withFilterBar puts the filter bar's rows into a panel's expected lines after
-// the first head rows.
+// withFilterBar puts the blank row above the field and the filter bar's three
+// rows into a panel's expected lines after the first head rows.
 func withFilterBar(head int, lines []string, bar []string) []string {
 	out := append([]string(nil), lines[:head]...)
+	out = append(out, "")
 	out = append(out, bar...)
 	return append(out, lines[head:]...)
 }
@@ -1939,9 +1947,10 @@ func TestShortMultiSelectSpaceAlwaysToggles(t *testing.T) {
 	}
 }
 
-// The filter bar is one row in every panel, at every height, on every path:
-// its height is a property of the widget, not of how many rows are left over.
-func TestFilterBarIsOneRowWhateverThePanelHeight(t *testing.T) {
+// The filter bar is three rows, with a blank row above it, in every panel, at
+// every height, on every path: its height is a property of the widget, not of
+// how many rows are left over.
+func TestFilterBarIsThreeRowsWhateverThePanelHeight(t *testing.T) {
 	st := &selectState{options: manyOptions(), label: "pick", inFilter: true}
 	st.applyFilter()
 	panel := st.panel()
@@ -1949,20 +1958,25 @@ func TestFilterBarIsOneRowWhateverThePanelHeight(t *testing.T) {
 	// 0 lays the panel out for a terminal it is not pinned in a height of.
 	for _, rows := range []int{11, 14, 19, 24, 36, 0} {
 		first, last := panel.fieldBar(width, rows)
-		if first < 0 || last != first {
-			t.Fatalf("rows %d: bar spans %d-%d, want exactly one row", rows, first, last)
+		if first < 0 || last-first != 2 {
+			t.Fatalf("rows %d: bar spans %d-%d, want three rows", rows, first, last)
+		}
+		if headRows := panel.headRows(width); first != headRows+1 {
+			t.Fatalf("rows %d: the bar starts on %d, want the row after the blank under the head's %d", rows, first, headRows)
 		}
 		layout := panel.layout(width, rows, 0, false)
-		if layout.caretRow != first {
-			t.Fatalf("rows %d: caret on %d, bar on %d", rows, layout.caretRow, first)
+		if layout.caretRow != first+1 {
+			t.Fatalf("rows %d: caret on %d, want the bar's middle row %d", rows, layout.caretRow, first+1)
 		}
 		if rows > 0 && len(layout.lines) != rows {
 			t.Fatalf("rows %d: laid out %d rows, the panel must fill the height it is given", rows, len(layout.lines))
 		}
-		// The row under the bar keeps its blank — a rule the one-row bar
-		// keeps too — and the row above it is the head, not a padded row.
-		if rows > 0 && first+1 < len(layout.lines) && layout.lines[first+1] != "" {
-			t.Fatalf("rows %d: the row under the bar must stay blank, got %q", rows, stripANSI(layout.lines[first+1]))
+		// The bar is held off the head above it and the body below it.
+		if layout.lines[first-1] != "" {
+			t.Fatalf("rows %d: the row above the bar must be blank, got %q", rows, stripANSI(layout.lines[first-1]))
+		}
+		if last+1 < len(layout.lines) && layout.lines[last+1] != "" {
+			t.Fatalf("rows %d: the row under the bar must stay blank, got %q", rows, stripANSI(layout.lines[last+1]))
 		}
 	}
 }
@@ -1988,18 +2002,20 @@ func TestEveryPanelShowsTheSameFilterBar(t *testing.T) {
 		{"tabbed picker", tabbed.panel("Skills")},
 	} {
 		first, last := tc.panel.fieldBar(width, rows)
-		if first < 0 || first != last {
-			t.Errorf("%s: bar spans %d-%d, want exactly one row", tc.name, first, last)
+		headRows := tc.panel.headRows(width)
+		if first < 0 || first != headRows+1 || last != headRows+3 {
+			t.Errorf("%s: bar spans %d-%d, want %d-%d under the head's %d rows", tc.name, first, last, headRows+1, headRows+3, headRows)
 		}
 		layout := tc.panel.layout(width, rows, 0, false)
-		if layout.caretRow != first || first != tc.panel.headRows(width) {
-			t.Errorf("%s: bar on %d, caret on %d, head rows %d", tc.name, first, layout.caretRow, tc.panel.headRows(width))
+		if layout.caretRow != first+1 {
+			t.Errorf("%s: bar on %d, caret on %d, head rows %d", tc.name, first, layout.caretRow, headRows)
 		}
 	}
 }
 
-// A click on the bar's one row is a click on the field, and one on the row
-// above it — the head's last row now, not a padded row of the bar — is not.
+// A click on any of the bar's three rows is a click on the field, and one on
+// the blank row above it or the blank under it — neither of which is part of
+// the bar — is not.
 func TestClickAnywhereOnTheFilterBarReachesTheFilter(t *testing.T) {
 	forcedTermWidth, forcedTermHeight = 100, 40
 	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
@@ -2008,8 +2024,8 @@ func TestClickAnywhereOnTheFilterBarReachesTheFilter(t *testing.T) {
 	st.filter = filterField{text: "abc", cursor: 3}
 	sel := &rawSelector{}
 	first, last := st.panel().fieldBar(sel.panelWidth(), sel.panelRows())
-	if first < 0 || last != first {
-		t.Fatalf("the bar is one row on a 40-row terminal, spanning %d-%d", first, last)
+	if first < 0 || last-first != 2 {
+		t.Fatalf("the bar is three rows on a 40-row terminal, spanning %d-%d", first, last)
 	}
 	col := st.filter.panelField().textCol() + 1
 	for line := first - 2; line <= last+2; line++ {
@@ -2017,6 +2033,106 @@ func TestClickAnywhereOnTheFilterBarReachesTheFilter(t *testing.T) {
 		if want := line >= first && line <= last; hit != want {
 			t.Errorf("click on row %d: reached the filter = %v, want %v", line, hit, want)
 		}
+	}
+}
+
+// Every panel's field is one widget, so every panel shows the same shape: a
+// blank row under the head, then three rows of bar with the text in the middle,
+// at every height a panel is laid out at. This is the gate that keeps a future
+// panel from drawing a field of its own.
+func TestEveryPanelFieldIsThreeRows(t *testing.T) {
+	sel := &selectState{options: manyOptions(), label: "pick", inFilter: true}
+	sel.applyFilter()
+	rich := &richPickerState{items: manyItems(), inFilter: true}
+	rich.rebuildSelectable()
+	tabbedItems := manyItems()
+	for i := range tabbedItems {
+		tabbedItems[i].Category = "All"
+	}
+	tabbedItems[len(tabbedItems)-1].Category = "More"
+	tabbed := newTabbedPickerState(tabbedItems, TabbedSelectOptions{}, false, "")
+	tabbed.inFilter = true
+
+	for _, tc := range []struct {
+		name   string
+		panel  slashPanel
+		secret bool
+	}{
+		{"select", sel.panel(), false},
+		{"rich picker", rich.panel("pick"), false},
+		{"tabbed picker", tabbed.panel("Skills"), false},
+		{"form answer", inputPanel("Base URL", []rune("abc"), 3, false, "Esc to cancel"), false},
+		{"form secret", inputPanel("API key", []rune("sk-1"), 4, true, "Esc to cancel"), true},
+	} {
+		if tc.panel.field == nil {
+			t.Fatalf("%s: the panel has no field to lay out", tc.name)
+		}
+		const width = 60
+		for _, rows := range []int{11, 14, 19, 24, 36, 0} {
+			first, last := tc.panel.fieldBar(width, rows)
+			if first < 0 || last-first != 2 {
+				t.Fatalf("%s at %d rows: bar spans %d-%d, want three rows", tc.name, rows, first, last)
+			}
+			if first < 1 {
+				t.Fatalf("%s at %d rows: the bar starts on %d, with no blank row above it", tc.name, rows, first)
+			}
+			layout := tc.panel.layout(width, rows, 0, false)
+			if layout.lines[first-1] != "" {
+				t.Fatalf("%s at %d rows: the row above the bar must be blank, got %q", tc.name, rows, stripANSI(layout.lines[first-1]))
+			}
+			if layout.caretRow != first+1 {
+				t.Fatalf("%s at %d rows: caret on %d, want the bar's middle row %d", tc.name, rows, layout.caretRow, first+1)
+			}
+			if rows > 0 && len(layout.lines) != rows {
+				t.Fatalf("%s at %d rows: laid out %d rows, the panel must fill its height", tc.name, rows, len(layout.lines))
+			}
+		}
+	}
+}
+
+// A drag that starts on the bar's top padded row starts at the cell it started
+// on: every row of the bar addresses the text row's columns, so a selection
+// taken from the padding must not swallow the field's first characters. A drag
+// inside the blank row above the bar names no part of the field at all.
+func TestFieldSelectionStartsOnAnyBarRow(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	sel := &rawSelector{renderer: r}
+	value := []rune("abcd")
+
+	// The panel as the picker draws it: the filter filled in, the keyboard in
+	// it, the layout the terminal's own size gives.
+	outline := func() slashPanel {
+		st := &selectState{options: manyOptions(), label: "pick", inFilter: true}
+		st.applyFilter()
+		st.filter = filterField{text: string(value), cursor: len(value)}
+		return st.panel()
+	}
+	panel := outline()
+	r.SetOverlayPanel(panel, false, true)
+
+	first, _ := panel.fieldBar(sel.panelWidth(), sel.panelRows())
+	textCol := panel.field.textCol()
+	// The block is bottom-pinned with a separator row on top of it, so the
+	// panel's own line i is painted at this screen row.
+	screenRow := func(line int) int { return r.vpBodyHeight + 1 + line }
+	drag := func(from, to int) *[2]int {
+		r.ViewportSelectStart(textCol+1, screenRow(from))
+		r.ViewportSelectDrag(textCol+3, screenRow(to))
+		r.ViewportSelectEnd(textCol+3, screenRow(to))
+		return sel.fieldSelection(rawKeyBackspace, outline(), value)
+	}
+
+	// The same drag, taken from the bar's top padded row and from its text
+	// row, lands on the same runes.
+	want := [2]int{1, 3}
+	for _, from := range []int{first, first + 1} {
+		got := drag(from, first+1)
+		if got == nil || *got != want {
+			t.Fatalf("a drag from the bar's row %d = %v, want %v", from, got, want)
+		}
+	}
+	if got := drag(first-1, first-1); got != nil {
+		t.Fatalf("a drag inside the blank row above the bar took %v, want nothing", got)
 	}
 }
 

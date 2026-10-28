@@ -198,16 +198,20 @@ func TestTabbedPickerSingleTabHasNoTabBar(t *testing.T) {
 	if got := stripANSI(lines[1]); got != "  Skills written by memory consolidation." {
 		t.Fatalf("subtitle = %q", got)
 	}
-	// The head is followed straight by the filter bar's one row — no tab bar
-	// between them — then the blank under it and the list.
-	if got := stripANSI(lines[2]); !strings.Contains(got, "Type to filter") {
-		t.Fatalf("line 2 = %q, want the filter's text row right under the head", got)
+	// The head is followed by the blank row that holds the field off it, then
+	// the filter bar's three rows — no tab bar between them — then the blank
+	// under the bar and the list.
+	if got := stripANSI(lines[2]); got != "" {
+		t.Fatalf("line 2 = %q, want the blank row under the head", got)
 	}
-	if got := stripANSI(lines[3]); got != "" {
-		t.Fatalf("line 3 = %q, want the blank under the bar", got)
+	if got := stripANSI(lines[4]); !strings.Contains(got, "Type to filter") {
+		t.Fatalf("line 4 = %q, want the filter's text row in the bar's middle", got)
 	}
-	if got := stripANSI(lines[4]); !strings.Contains(got, "release-check") {
-		t.Fatalf("line 4 = %q, want the list's first row", got)
+	if got := stripANSI(lines[6]); got != "" {
+		t.Fatalf("line 6 = %q, want the blank under the bar", got)
+	}
+	if got := stripANSI(lines[7]); !strings.Contains(got, "release-check") {
+		t.Fatalf("line 7 = %q, want the list's first row", got)
 	}
 	for _, line := range lines {
 		if got := stripANSI(line); strings.Contains(got, "Tab to switch") || strings.Contains(got, "Memory "+fmt.Sprint(len(items))) {
@@ -217,7 +221,7 @@ func TestTabbedPickerSingleTabHasNoTabBar(t *testing.T) {
 }
 
 // The tabbed picker's filter shows under the tab bar once the list is long
-// enough to need one: its one row straight under the tabs, then the blank and
+// enough to need one: a blank row, its three rows, the blank under the bar and
 // the list.
 func TestTabbedPickerFilterBarGolden(t *testing.T) {
 	items := manyItems()
@@ -227,12 +231,12 @@ func TestTabbedPickerFilterBarGolden(t *testing.T) {
 	items[len(items)-1].Category = "More"
 	p := newTabbedPickerState(items, TabbedSelectOptions{}, false, "")
 	lines := p.panel("Skills").layout(40, 0, 0, false).lines
-	got := make([]string, 0, 5)
-	for _, line := range lines[:5] {
+	got := make([]string, 0, 8)
+	for _, line := range lines[:8] {
 		got = append(got, stripANSI(line))
 	}
-	got[4] = strings.TrimRight(got[4], " ") // a row's own trailing pad is not the point
-	want := append([]string{"  Skills", "  All 9   More 1"}, filterBarPlain(40, "⌕", "Type to filter")...)
+	want := append([]string{"  Skills", "  All 9   More 1"}, "")
+	want = append(want, filterBarPlain(40, "⌕", "Type to filter")...)
 	want = append(want, "", "❯ alpha")
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("panel head =\n%q\nwant\n%q", got, want)
