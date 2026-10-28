@@ -141,7 +141,17 @@ type CommandRequest struct {
 	//
 	// This narrows what the request may write. Denials are unaffected: the
 	// protected-path deny list is not a grant that needs narrowing.
-	ExclusiveWritablePaths  bool
+	ExclusiveWritablePaths bool
+	// ExclusiveReadablePaths declares AdditionalReadablePaths to be this
+	// command's complete application-data read set. Configured allow-read roots
+	// are not added on top. IncludePlatformDefaults and explicit deny rules are
+	// independent: the first supplies the OS runtime, the second still narrows.
+	//
+	// It exists for the unattended request whose promise is "this workspace, the
+	// shared skills and nothing else the user owns" (plans/150). The configured
+	// read set is "/" by default, so narrowing it path by path cannot express
+	// that promise -- only replacing it can.
+	ExclusiveReadablePaths  bool
 	DeniedWritablePaths     []string
 	AdditionalReadablePaths []string
 	DeniedReadablePaths     []string

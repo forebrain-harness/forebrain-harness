@@ -39,6 +39,7 @@ function mountDock(
   record: ActionRow,
   request: Partial<SessionApprovalRequest> = {},
   onOpenPlan?: (plan: SessionPlan) => void,
+  extra: { sessionType?: string } = {},
 ) {
   vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([record as ActionRecord])
   vi.spyOn(forebrainApi, 'sessionApprovalRequest').mockResolvedValue({
@@ -59,6 +60,7 @@ function mountDock(
       action: record,
       sessionId: 's1',
       ...(onOpenPlan ? { onOpenPlan } : {}),
+      ...(extra.sessionType ? { sessionType: extra.sessionType } : {}),
     },
     global: { provide: { [PendingActionsKey]: store } },
     attachTo: document.body,
@@ -156,5 +158,66 @@ describe('PlanApprovalDock', () => {
     const models = withModels.wrapper.findAll('[data-testid="plan-review-model"]')
     expect(models.map((m) => m.text())).toEqual(['deepseek/deepseek-v4-flash当前', 'zhipuai/glm-5.3-flash'])
     withModels.wrapper.unmount()
+  })
+
+  // plan 153 A9: an office conversation answers its plan in the office's own
+  // four words. "Running it" is the plain approval, "revising it" is the same
+  // keep-planning refusal coding uses (words required), and "keep the plan
+  // only" grants the approval with plan_only — the plan becomes this turn's
+  // deliverable and the work does not start.
+  it('answers an office plan with its own four verdicts', async () => {
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const { wrapper } = mountDock(exitPlanAction(), {}, undefined, { sessionType: 'office' })
+    await flushPromises()
+
+    expect(wrapper.get('.gate-ask .q').text()).toBe('计划写好了，怎么处理？')
+    expect(wrapper.get('[data-testid="office-plan-execute"]').text()).toBe('按计划执行')
+    expect(wrapper.get('[data-testid="office-plan-revise"]').text()).toBe('修改计划')
+    expect(wrapper.get('[data-testid="office-plan-keep-only"]').text()).toBe('只要计划，先不执行')
+    // No clear-context verdict and no coding wording: the office dock is its
+    // own four, not the coding four with new labels.
+    expect(wrapper.find('[data-testid="exit-plan-approve-clear"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="exit-plan-approve"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="exit-plan-keep-planning"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="office-plan-keep-only"]').trigger('click')
+    await flushPromises()
+    expect(approve).toHaveBeenCalledWith('act-exit', { planOnly: true })
+    wrapper.unmount()
+  })
+
+  it('revises an office plan through the required words, and runs it plainly', async () => {
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const deny = vi.spyOn(forebrainApi, 'actionsDeny').mockResolvedValue({} as never)
+    const { wrapper } = mountDock(exitPlanAction(), {}, undefined, { sessionType: 'office' })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="office-plan-revise"]').trigger('click')
+    await nextTick()
+    const send = wrapper.get('[data-testid="exit-plan-send-feedback"]')
+    expect(send.attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="exit-plan-feedback-input"]').setValue('分工那一节加上存货监盘')
+    await wrapper.get('[data-testid="exit-plan-send-feedback"]').trigger('click')
+    await flushPromises()
+    expect(deny).toHaveBeenCalledWith('act-exit', { reason: '分工那一节加上存货监盘' })
+
+    // "Run the plan" is the approval without either coding extra.
+    await wrapper.get('[data-testid="office-plan-execute"]').trigger('click')
+    await flushPromises()
+    expect(approve).toHaveBeenCalledWith('act-exit', {})
+    wrapper.unmount()
+  })
+
+  it('leaves a coding plan on the four verdicts it always had', async () => {
+    const { wrapper } = mountDock(exitPlanAction(), {}, undefined, { sessionType: 'coding' })
+    await flushPromises()
+
+    expect(wrapper.get('.gate-ask .q').text()).toBe('要开始执行吗？')
+    expect(wrapper.get('[data-testid="exit-plan-approve-clear"]').text()).toBe('批准并清空上下文（已用 72%）')
+    expect(wrapper.get('[data-testid="exit-plan-approve"]').text()).toBe('批准')
+    expect(wrapper.get('[data-testid="exit-plan-keep-planning"]').text()).toBe('继续规划')
+    expect(wrapper.find('[data-testid="office-plan-execute"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="office-plan-keep-only"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 })

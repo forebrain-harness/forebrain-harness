@@ -93,6 +93,49 @@ func LastPlanProgressOfRun(ctx context.Context, runs RunPlanEventLister, runID s
 	return event.PlanProgressOf(last.Items, last.Completed, last.Total, last.Explanation)
 }
 
+// RunArtifactLister is the slice of the session store the run's delivered
+// files are read through.
+type RunArtifactLister interface {
+	ListArtifactsForRun(ctx context.Context, runID string) ([]state.Artifact, error)
+}
+
+// RunArtifactsOf is every file the run delivered, in delivery order, as the
+// run's end carries it. Both surfaces close a run with it. A nil store, an
+// empty run id or a read that fails reads as no deliverables — the run still
+// ends; the files were already recorded where they were presented.
+func RunArtifactsOf(ctx context.Context, store RunArtifactLister, runID string) event.RunArtifacts {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || store == nil {
+		return event.RunArtifacts{}
+	}
+	rows, err := store.ListArtifactsForRun(ctx, runID)
+	if err != nil {
+		return event.RunArtifacts{}
+	}
+	out := event.RunArtifacts{Artifacts: make([]event.Artifact, 0, len(rows))}
+	for _, row := range rows {
+		out.Artifacts = append(out.Artifacts, event.Artifact{
+			ID:          row.ID,
+			SessionID:   row.SessionID,
+			RunID:       row.RunID,
+			ToolCallID:  row.ToolCallID,
+			Name:        row.Name,
+			Title:       row.Title,
+			Description: row.Description,
+			Path:        row.Path,
+			RelPath:     row.RelPath,
+			MIME:        row.MIME,
+			Kind:        row.Kind,
+			Preview:     row.Preview,
+			Size:        row.Size,
+			SHA256:      row.SHA256,
+			Origin:      row.Origin,
+			CreatedAt:   row.CreatedAt,
+		})
+	}
+	return out
+}
+
 // CanonicalEventsFromStep turns one user-visible tool step into the canonical
 // events every surface records for it: the step's own event, and — when the
 // step's output carries a turn diff — the diff companion event the surfaces

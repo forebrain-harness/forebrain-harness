@@ -187,3 +187,68 @@ func TestDenyWriteOverridesWriteGrantForSamePath(t *testing.T) {
 		t.Fatalf("deny-write path must remain readable: %s", joined)
 	}
 }
+
+// mountArgIndex is the position of a "--flag value" mount argument, or -1.
+func mountArgIndex(args []string, flag, value string) int {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestDeniedDirWithNestedBindDefersRemount pins the ordering bwrap needs
+// (plans/150): a denied directory that holds a nested write or read grant is
+// made a tmpfs first, the nested mounts are created inside it, and only then is
+// the parent remounted read-only. Remounting first leaves nowhere to create the
+// nested mount points.
+func TestDeniedDirWithNestedBindDefersRemount(t *testing.T) {
+	denied := filepath.Join(t.TempDir(), "project")
+	workspace := filepath.Join(denied, "tasks", "T", "1")
+	skillRoot := filepath.Join(denied, ".agents", "skills")
+	for _, dir := range []string{workspace, skillRoot} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	args := appendFilesystemPolicyArgs(nil, CommandRequest{
+		AdditionalWritablePaths: []string{workspace},
+		AdditionalReadablePaths: []string{skillRoot},
+		DeniedReadablePaths:     []string{denied},
+	})
+	tmpfs := mountArgIndex(args, "--tmpfs", denied)
+	writeBind := mountArgIndex(args, "--bind", workspace)
+	readBind := mountArgIndex(args, "--ro-bind", skillRoot)
+	remount := mountArgIndex(args, "--remount-ro", denied)
+	if tmpfs < 0 {
+		t.Fatalf("denied directory must become a tmpfs: %v", args)
+	}
+	if writeBind < 0 || readBind < 0 {
+		t.Fatalf("nested grants must still be mounted: %v", args)
+	}
+	if remount < 0 {
+		t.Fatalf("denied directory must still be remounted read-only: %v", args)
+	}
+	if tmpfs > writeBind || tmpfs > readBind {
+		t.Fatalf("the tmpfs must come before the nested mounts: %v", args)
+	}
+	if remount < writeBind || remount < readBind {
+		t.Fatalf("the read-only remount must come after the nested mounts: %v", args)
+	}
+}
+
+// TestDeniedDirWithoutNestedRuleRemountsImmediately keeps the ordinary shape: a
+// denied directory with nothing granted inside it is read-only at once.
+func TestDeniedDirWithoutNestedRuleRemountsImmediately(t *testing.T) {
+	denied := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(denied, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", denied, err)
+	}
+	args := appendFilesystemPolicyArgs(nil, CommandRequest{DeniedReadablePaths: []string{denied}})
+	tmpfs := mountArgIndex(args, "--tmpfs", denied)
+	remount := mountArgIndex(args, "--remount-ro", denied)
+	if tmpfs < 0 || remount != tmpfs+2 {
+		t.Fatalf("a denied directory with no nested rule must be read-only immediately: %v", args)
+	}
+}

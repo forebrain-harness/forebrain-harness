@@ -14,6 +14,11 @@
 //     A project edit afterwards creates a new entry for new sessions; the
 //     bound session keeps the old one, so its instructions, memory scope and
 //     MCP list do not move mid-session.
+//   - A session freezes its project's type when it is born
+//     (fb_sessions.project_type), and entries are keyed by that frozen type,
+//     not the project's current one: a type edit creates a new generation for
+//     new sessions only, and after a restart the session still resolves by its
+//     birth type, so the prompt and tool table never drift under it.
 //   - Each entry snapshots the project row it was built from and serves
 //     per-session instruction snapshots from that copy.
 //   - Eviction closes the entry's Runner — an evicted Runner's servers must not
@@ -645,6 +650,7 @@ func (p *RunnerPool) BoundRunnerForSession(ctx context.Context, sessionID string
 	if err != nil || !ok {
 		return base, base != nil
 	}
+	project = p.withSessionType(ctx, sessionID, project)
 	key := poolKey(p.env.Deps.AgentName, project)
 	p.mu.Lock()
 	entry := p.entries[key]
@@ -782,6 +788,7 @@ func (p *RunnerPool) workshopEntry(ctx context.Context, sessionID string) (*pool
 }
 
 func (p *RunnerPool) entryForSession(ctx context.Context, sessionID string, project state.Project) (*poolEntry, error) {
+	project = p.withSessionType(ctx, sessionID, project)
 	p.mu.Lock()
 	if bound, ok := p.sessions[sessionID]; ok {
 		if entry, ok := p.entries[bound]; ok {
@@ -819,7 +826,9 @@ func (p *RunnerPool) entryForSession(ctx context.Context, sessionID string, proj
 // resource access, identity). UpdatedAt alone is too coarse — two edits in
 // the same second would silently share a generation — so the content itself
 // is hashed. A session bound to an older generation keeps it; a new session
-// after any edit resolves to the fresh one.
+// after any edit resolves to the fresh one. The project type joins the
+// fingerprint as the type the session froze at birth (see withSessionType),
+// so a type edit is another generation, not a silent reuse.
 func poolKey(agentID string, project state.Project) string {
 	body := strings.Join([]string{
 		strings.TrimSpace(project.ID),
@@ -830,9 +839,32 @@ func poolKey(agentID string, project state.Project) string {
 		state.NormalizeProjectMemoryScope(project.MemoryScope),
 		fmt.Sprintf("%t", project.ResourceAccess),
 		fmt.Sprintf("%d", project.UpdatedAt),
+		state.NormalizeProjectType(project.ProjectType),
 	}, "\x1f")
 	sum := sha256.Sum256([]byte(body))
 	return strings.TrimSpace(agentID) + "\x00" + strings.TrimSpace(project.ID) + "\x00" + hex.EncodeToString(sum[:])
+}
+
+// withSessionType returns project with ProjectType replaced by the type the
+// session was born with. A conversation keeps its birth type across project
+// edits and process restarts, so the entry it resolves to is chosen by that
+// type, never by the project's current one.
+//
+// A session that has no row yet keeps the project's current type, because that
+// is the type it is about to freeze when it is born: the birth reads the same
+// project row. A surface binds the conversation before its first turn, which
+// is what creates the row, so reading a missing row as anything else would run
+// that first turn under a type the conversation never had.
+func (p *RunnerPool) withSessionType(ctx context.Context, sessionID string, project state.Project) state.Project {
+	if p == nil || p.projects == nil || strings.TrimSpace(sessionID) == "" {
+		return project
+	}
+	t, found, err := p.projects.SessionProjectTypeKnown(ctx, sessionID)
+	if err != nil || !found {
+		return project
+	}
+	project.ProjectType = t
+	return project
 }
 
 func (e *poolEntry) touchLocked() {
@@ -1043,6 +1075,7 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		deps.CodeIntelControl = entry.lsp
 	}
 	deps.ProjectMemoryOnly = state.NormalizeProjectMemoryScope(project.MemoryScope) == state.ProjectMemoryProjectOnly
+	deps.ProjectType = state.NormalizeProjectType(project.ProjectType)
 	deps.ProjectInstructionsFor = func(sessionID string) string {
 		return entry.frozenInstructions(sessionID)
 	}

@@ -150,6 +150,13 @@ func validateWSClientMessage(m wsClientMsg) error {
 		}
 		// A message may say nothing but what it attached.
 		if body == "" && len(m.Message.Attachments) == 0 && len(m.Message.MentionImages) == 0 {
+			// A batch execution's turn is its task's input or the engine's own
+			// continue prompt, so the client sends no text at all. Whether
+			// such a turn may run is the engine's admission decision, and all
+			// this validator has to leave it is the session it names.
+			if strings.TrimSpace(m.SessionID) != "" {
+				return nil
+			}
 			return fmt.Errorf("message content or an attachment required for start_run")
 		}
 	}

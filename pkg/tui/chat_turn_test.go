@@ -15,6 +15,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -269,6 +270,67 @@ func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
 	// context opening on the whole window.
 	require.Equal(t, ComposerTokenStats{Active: true, PercentLeft: 83, ContextWindow: 1000000}, s.SurfaceComposerTokenStats("s-budget", 152500))
 	require.Equal(t, ComposerTokenStats{Active: true, PercentLeft: 100, ContextWindow: 1000000}, s.SurfaceComposerTokenStats("s-budget", 0))
+}
+
+// The footer's model label and its context gauge are two readings of ONE
+// answer: both must name the model the conversation's next turn runs on, so
+// the window the gauge divides by is that model's. They disagreed whenever the
+// two resolved independently — the label off the most recently used model or
+// the live configured default, the gauge off the runner's pin left behind by a
+// /resume somewhere else. A pin that is neither the file default nor the
+// latest-used model is what tells the three apart.
+func TestSurfaceComposerTokenStatsMatchesLabel(t *testing.T) {
+	ctx := context.Background()
+	// The loader refuses a plaintext api_key in a file on disk, so the fixture
+	// names one through the environment the way a real installation does.
+	t.Setenv("FOREBRAIN_FOOTER_ALIGN_TEST_KEY", "test-key")
+	key := "${FOREBRAIN_FOOTER_ALIGN_TEST_KEY}"
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},              // file default, 1M
+			{Provider: "moonshotai", Model: "kimi-k2.7-code", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"}, // 262144
+			{Provider: "zhipuai", Model: "glm-4.5", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},           // 131072, the pin
+		}},
+	}}}
+	require.NoError(t, appcfg.Save(cfgPath, *cfg))
+	loaded, err := appcfg.Load(cfgPath)
+	require.NoError(t, err)
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{
+		Home: home, AgentName: "main", AppCfg: &loaded, SessionStore: store,
+	}}
+	runner := &run.Runner{Deps: &env.Deps}
+	env.Runner = runner
+	require.NoError(t, runner.Load())
+	s := &ChatSession{Env: env, tuiControl: run.NewController()}
+
+	// The agent's most recently used model: one other conversation's row.
+	require.NoError(t, store.Ensure(ctx, "used", "used"))
+	_, err = store.SaveSessionModelSelection(ctx, "used", state.SessionModelSelection{Provider: "moonshotai", Model: "kimi-k2.7-code"})
+	require.NoError(t, err)
+	// The pin a /resume of another conversation leaves behind — never the
+	// file default, never the latest-used model.
+	require.NoError(t, runner.SetPrimaryModel("zhipuai", "glm-4.5", nil))
+
+	// A conversation that never ran: both halves name the latest-used model.
+	require.NoError(t, store.Ensure(ctx, "fresh", "fresh"))
+	s.SetViewingSession("fresh")
+	require.Equal(t, "moonshotai/kimi-k2.7-code", s.CurrentModelOption())
+	require.Equal(t, ComposerTokenStats{Active: true, PercentLeft: 100, ContextWindow: 262144}, s.SurfaceComposerTokenStats("fresh", 0))
+
+	// An older session (messages, no row): both halves name the live file
+	// default, not the pin.
+	require.NoError(t, store.Ensure(ctx, "legacy", "legacy"))
+	_, err = store.Append(ctx, "legacy", "assistant", "old answer")
+	require.NoError(t, err)
+	s.SetViewingSession("legacy")
+	require.Equal(t, "zhipuai/glm-5.3", s.CurrentModelOption())
+	require.Equal(t, ComposerTokenStats{Active: true, PercentLeft: 100, ContextWindow: 1000000}, s.SurfaceComposerTokenStats("legacy", 0))
 }
 
 // newAuditHookEnv builds the session shape runAuditStepHook requires — a

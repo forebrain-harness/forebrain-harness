@@ -5,6 +5,12 @@ import "strings"
 type Gateway struct {
 	HTTPAddr string      `yaml:"http_addr,omitempty" json:"http_addr,omitempty"`
 	Auth     GatewayAuth `yaml:"auth,omitempty" json:"auth,omitempty"`
+	// PublicURL is the address people reach this gateway's web UI at from
+	// outside (for example https://forebrain.example.com). It is used for one
+	// thing: the links a batch task's end notification carries. It does not
+	// affect what the server listens on, so a gateway behind a proxy sets this
+	// and leaves http_addr alone. Empty means notifications carry no link.
+	PublicURL string `yaml:"public_url,omitempty" json:"public_url,omitempty"`
 }
 
 type GatewayAuth struct {

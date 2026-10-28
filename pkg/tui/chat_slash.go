@@ -38,7 +38,7 @@ func (s *ChatSession) HandleCompactSlash(ctx context.Context, sessionID, channel
 	if s == nil || s.sessStore() == nil {
 		return turn.ExecuteCompact(ctx, sessionID, nil).Reply, true
 	}
-	result := turn.ExecuteCompact(ctx, sessionID, run.CompactionService(s.runner(), s.sessStore()))
+	result := turn.ExecuteCompact(ctx, sessionID, run.CompactionService(s.conversationRunner(sessionID), s.sessStore()))
 	s.tuiMu.Lock()
 	hasTUI := s.uiNotify != nil
 	s.tuiMu.Unlock()

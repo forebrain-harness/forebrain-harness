@@ -22,5 +22,6 @@ func (s *ChatSession) turnCompletedEvent(sessionID, runID string, elapsed time.D
 	return event.NewRunEvent("turn-completed:"+runID, runID, sessionID, event.RunEventTurnCompleted, event.TurnCompletedPayload{
 		ElapsedMS:    elapsed.Milliseconds(),
 		RunPlanFacts: s.runPlanFacts(context.Background(), runID),
+		RunArtifacts: s.runArtifacts(context.Background(), runID),
 	}, time.Now())
 }

@@ -204,3 +204,114 @@ func mustSystemPrompt(t *testing.T, name string) string {
 	}
 	return prompt
 }
+
+// TestOfficeCatalogOffersOnlyGeneralPurposeAndExplore pins what an office
+// conversation may dispatch: the two built-ins whose work is not about code
+// plus the agent's own custom subagents, with plan and verification refused
+// as not available rather than merely disabled — while a coding catalog of
+// the same configuration keeps its built-ins.
+func TestOfficeCatalogOffersOnlyGeneralPurposeAndExplore(t *testing.T) {
+	catalog := SubagentCatalogFor(catalogTestConfig(), "main").ForProjectType("office")
+	var names []string
+	for _, def := range catalog.Public() {
+		names = append(names, def.Name)
+	}
+	want := []string{"general-purpose", "explore", "repo-scout", "note-taker"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("office Public() = %v, want %v", names, want)
+	}
+	if _, err := catalog.ResolvePublic("plan"); err == nil || !strings.Contains(err.Error(), "not available in office projects") {
+		t.Fatalf("office ResolvePublic(plan) error = %v, want \"not available in office projects\"", err)
+	}
+	if _, err := catalog.ResolvePublic("verification"); err == nil || !strings.Contains(err.Error(), "not available in office projects") {
+		t.Fatalf("office ResolvePublic(verification) error = %v, want \"not available in office projects\"", err)
+	}
+	// The same configuration read as coding keeps its coding built-ins.
+	coding := SubagentCatalogFor(catalogTestConfig(), "main")
+	var codingNames []string
+	for _, def := range coding.Public() {
+		codingNames = append(codingNames, def.Name)
+	}
+	codingWant := []string{"general-purpose", "explore", "plan", "repo-scout", "note-taker"}
+	if strings.Join(codingNames, ",") != strings.Join(codingWant, ",") {
+		t.Fatalf("coding Public() = %v, want %v", codingNames, codingWant)
+	}
+	if _, err := coding.ResolvePublic("plan"); err != nil {
+		t.Fatalf("coding ResolvePublic(plan) = %v, want ok", err)
+	}
+}
+
+// TestProjectTypeCatalogUsesDistinctSubagentPromptsUnlessConfigured checks
+// the office and batch wordings reach a typed run — and that a prompt the
+// user configured still outranks them, exactly as it outranks the coding
+// built-in text.
+func TestProjectTypeCatalogUsesDistinctSubagentPromptsUnlessConfigured(t *testing.T) {
+	base := SubagentCatalogFor(catalogTestConfig(), "main")
+	officePrompt, ok := base.ForProjectType("office").Prompt("general-purpose")
+	if !ok {
+		t.Fatal("office Prompt(general-purpose) not ok")
+	}
+	batchPrompt, ok := base.ForProjectType("batch").Prompt("general-purpose")
+	if !ok {
+		t.Fatal("batch Prompt(general-purpose) not ok")
+	}
+	if officePrompt == batchPrompt {
+		t.Error("office and batch share the general-purpose subagent prompt")
+	}
+	if want, ok := agent.ProjectTypeSubagentPrompt("general-purpose", "office"); !ok || officePrompt != want {
+		t.Errorf("office Prompt(general-purpose) = %q, want the office constant %q", officePrompt, want)
+	}
+	if want, ok := agent.ProjectTypeSubagentPrompt("general-purpose", "batch"); !ok || batchPrompt != want {
+		t.Errorf("batch Prompt(general-purpose) = %q, want the batch constant %q", batchPrompt, want)
+	}
+	if !strings.Contains(officePrompt, "office task") || !strings.Contains(batchPrompt, "unattended batch task") {
+		t.Error("subagent prompts do not carry their project-type wording")
+	}
+	codingPrompt, ok := base.Prompt("general-purpose")
+	if !ok || strings.Contains(codingPrompt, "office task") {
+		t.Errorf("coding Prompt(general-purpose) = %q, want the coding built-in", codingPrompt)
+	}
+	// The configured rewrite of explore wins in every project type.
+	for _, projectType := range []string{"", "office", "batch"} {
+		prompt, ok := base.ForProjectType(projectType).Prompt("explore")
+		if !ok || prompt != "Search only what the task names." {
+			t.Errorf("Prompt(explore, %q) = %q, want the configured rewrite", projectType, prompt)
+		}
+	}
+}
+
+// TestOfficeEnumDescriptionUsesOfficeSentences checks the subagent_type
+// schema an office model reads: the office sentences, no plan or
+// verification entries, custom subagents still named.
+func TestOfficeEnumDescriptionUsesOfficeSentences(t *testing.T) {
+	got := SubagentCatalogFor(catalogTestConfig(), "main").ForProjectType("office").EnumDescription()
+	for _, name := range agent.OfficeSubagentNames {
+		if !strings.Contains(got, name+": "+agent.OfficeSubagentEnumSentences[name]+".") {
+			t.Errorf("office enum description lacks %s's office sentence: %q", name, got)
+		}
+	}
+	for _, banned := range []string{"plan:", "verification:", "read-only investigation and locating facts"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("office enum description contains %q: %q", banned, got)
+		}
+	}
+	if !strings.Contains(got, "repo-scout:") {
+		t.Errorf("office enum description omits the custom subagent: %q", got)
+	}
+}
+
+// TestBatchEnumDescriptionUsesBatchSentences is the batch counterpart of
+// TestOfficeEnumDescriptionUsesOfficeSentences.
+func TestBatchEnumDescriptionUsesBatchSentences(t *testing.T) {
+	got := SubagentCatalogFor(catalogTestConfig(), "main").ForProjectType("batch").EnumDescription()
+	for _, name := range agent.OfficeSubagentNames {
+		if !strings.Contains(got, name+": "+agent.BatchSubagentEnumSentences[name]+".") {
+			t.Errorf("batch enum description lacks %s's batch sentence: %q", name, got)
+		}
+	}
+	for _, banned := range []string{"plan:", "verification:", agent.OfficeSubagentEnumSentences["general-purpose"]} {
+		if strings.Contains(got, banned) {
+			t.Errorf("batch enum description contains %q: %q", banned, got)
+		}
+	}
+}

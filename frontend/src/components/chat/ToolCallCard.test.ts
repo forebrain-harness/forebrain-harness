@@ -439,3 +439,110 @@ describe('ToolCallCard gates', () => {
     expect(other.find('[data-testid="tool-refused"] .said').exists()).toBe(false)
   })
 })
+
+/**
+ * The turn's deliveries are drawn once, in the group under its last words
+ * (plan 153 A7, owner 2026-10-27). A settled present_files card is its head
+ * alone: no file rows of its own, and no engine body either — that body is the
+ * same per-file list, and two accounts of one delivery is what the rule
+ * forbids. A failed call still says what failed.
+ */
+describe('ToolCallCard deliverables', () => {
+  beforeAll(() => setLocale('zh'))
+  afterEach(() => setLocale('zh'))
+
+  const presented = {
+    presented: [
+      { id: 'a1', name: 'Q3 经营分析报告.docx', relPath: 'Q3 经营分析报告.docx', title: 'Q3 经营分析报告', kind: 'document', preview: 'docx', size: 253952 },
+      { id: 'a2', name: 'Q3 分渠道毛利.xlsx', relPath: 'Q3 分渠道毛利.xlsx', title: 'Q3 分渠道毛利', kind: 'spreadsheet', preview: 'sheet', size: 80896 },
+    ],
+    note: 'The user now sees a download and preview card for each file.',
+  }
+
+  /** The engine's own body for that card: one Markdown line per file. */
+  const displayBody = '- **Q3 经营分析报告** · document · 248.0 KB · `Q3 经营分析报告.docx`\n- **Q3 分渠道毛利** · spreadsheet · 79.0 KB · `Q3 分渠道毛利.xlsx`'
+
+  it('draws a settled present_files card as its head alone', () => {
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        open: true,
+        scope: { sessionId: 's1' },
+        step: stepOf({
+          toolName: 'present_files',
+          summary: 'presented files',
+          header: 'Presented files · Q3 经营分析报告.docx',
+          headerParts: { action: '已交付文件', target: 'Q3 经营分析报告.docx' },
+          output: displayBody,
+          status: 'completed',
+          result: presented,
+        }),
+      },
+    })
+
+    // The head says what the call did.
+    expect(wrapper.get('.ttl').text()).toContain('已交付文件')
+    // No file rows and no engine body: the delivery group is the one place.
+    expect(wrapper.find('[data-testid="artifact-list"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="artifact-card"]').exists()).toBe(false)
+    expect(wrapper.find('.tool-card-body').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Q3 分渠道毛利.xlsx')
+    wrapper.unmount()
+  })
+
+  it('still says what failed when the call did not deliver', () => {
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'present_files',
+          summary: 'present files',
+          header: 'Failed to present files',
+          status: 'failed',
+          error: 'report.docx is outside the project directory',
+        }),
+      },
+    })
+
+    expect(wrapper.get('.tool-card-body').text()).toContain('report.docx is outside the project directory')
+    wrapper.unmount()
+  })
+
+  it('opens the kept-plan exit by default, and only that exit', () => {
+    // No `open` prop: the card decides, as the conversation's own call site
+    // hands every card `default-open="false"`.
+    const kept = mount(ToolCallCard, {
+      props: {
+        step: stepOf({
+          toolName: 'exit_plan_mode',
+          summary: 'kept the plan',
+          header: 'Kept the plan',
+          status: 'completed',
+          planOnly: true,
+          output: 'Kept the plan as the deliverable: plans/年度审计计划.md',
+        }),
+      },
+    })
+
+    // The prototype draws this card open (:4842): the facts line is the
+    // answer, and a folded card leaves it outside the DOM in the browser.
+    const sentence = kept.get('[data-testid="tool-kept-plan"]')
+    expect(sentence.text()).toBe('已保留计划，还没有开始执行。')
+    expect(kept.get('.tool-card').attributes('data-state')).toBe('open')
+    kept.unmount()
+
+    // An ordinary exit answers nothing: its card stays folded like any call's.
+    const exited = mount(ToolCallCard, {
+      props: {
+        step: stepOf({
+          toolName: 'exit_plan_mode',
+          summary: 'exited plan mode',
+          header: 'Exited plan mode',
+          status: 'completed',
+          output: 'Left plan mode.',
+        }),
+      },
+    })
+    expect(exited.get('.tool-card').attributes('data-state')).toBe('closed')
+    exited.unmount()
+  })
+})

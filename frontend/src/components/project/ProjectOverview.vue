@@ -20,6 +20,23 @@
       <Input v-model="draft.description" class="forebrain-field h-[34px] w-full" :placeholder="t('projects.descriptionPlaceholder')" data-testid="project-settings-description" />
     </label>
 
+    <!-- The type is a setting, not a label (plan 153): it is shown as the badge
+         the project table draws, and changing it asks first, because it only
+         reaches the sessions born after the change. -->
+    <div class="forebrain-form-field">
+      <span>{{ t('projects.typeCurrent') }}</span>
+      <div class="flex flex-wrap items-center gap-2">
+        <BadgeComponent :variant="currentTypeOption.badge" class="gap-1" data-testid="project-settings-type">
+          <component :is="currentTypeOption.icon" class="size-3" aria-hidden="true" />
+          {{ t(currentTypeOption.label) }}
+        </BadgeComponent>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto gap-1.5 text-xs" data-testid="project-type-change" @click="openTypeChange">
+          <Repeat class="size-3.5" aria-hidden="true" />{{ t('projects.typeChange') }}
+        </Button>
+        <span class="forebrain-list-note">{{ t('projects.typeAudienceHint') }}</span>
+      </div>
+    </div>
+
     <div class="grid gap-3 md:grid-cols-2">
       <label class="forebrain-form-field">
         <span>{{ t('projects.iconPlaceholder') }}</span>
@@ -79,6 +96,74 @@
     <p v-if="formError" class="text-[12px] text-[var(--forebrain-danger)]">{{ formError }}</p>
   </form>
 
+  <!-- 任务通知 belongs to a batch project only (plan 153 A12): its executions
+       are the project's unattended work, and their ends are announced here. It
+       writes itself, so it sits outside the form above. -->
+  <div v-if="currentType === 'batch'" class="mx-auto mt-4 max-w-4xl">
+    <ProjectTaskNotify :project="project" :project-id="projectId" @saved="emit('saved')" />
+  </div>
+
+  <!-- Changing a project's type asks first: a running conversation keeps the
+       type it was born with, and a batch project needs its directory trusted. -->
+  <ForebrainModal :open="typeChangeOpen" size="sm" :title="t('projects.typeChangeTitle')" @close="closeTypeChange">
+    <div class="grid grid-cols-3 gap-2" role="radiogroup" :aria-label="t('projects.typeField')">
+      <button
+        v-for="option in PROJECT_TYPES"
+        :key="option.value"
+        type="button"
+        class="grid justify-items-start gap-[3px] rounded-lg border px-2.5 py-[10px] text-left"
+        :class="pendingType === option.value
+          ? 'border-[var(--forebrain-brand-1)] bg-[var(--forebrain-brand-soft)]'
+          : 'border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] hover:border-[var(--forebrain-brand-1)]'"
+        role="radio"
+        :aria-checked="pendingType === option.value"
+        :data-testid="`project-type-card-${option.value}`"
+        @click="pendingType = option.value"
+      >
+        <component
+          :is="option.icon"
+          class="size-4"
+          :class="pendingType === option.value ? 'text-[var(--forebrain-brand-1)]' : 'text-[var(--forebrain-text-2)]'"
+          aria-hidden="true"
+        />
+        <b class="text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t(option.label) }}</b>
+        <span class="text-[11.5px] leading-[1.45] text-[var(--forebrain-muted-text)]">{{ t(option.hint) }}</span>
+      </button>
+    </div>
+
+    <p class="mt-3 text-[13px] text-[var(--forebrain-text-2)]" data-testid="project-type-ask">
+      {{ t('projects.typeChangeAsk', { name: project?.name ?? '', from: t(currentTypeOption.label), to: t(pendingTypeOption.label) }) }}
+    </p>
+    <p class="mt-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] px-2.5 py-2 text-[12px] leading-[1.55] text-[var(--forebrain-text-2)]">
+      {{ t('projects.typeChangeNote') }}
+    </p>
+
+    <div v-if="pendingType === 'batch'" class="mt-3">
+      <SwitchRow v-model="typeChangeTrust" :title="t('projects.batchTrustLabel')" :hint="t('projects.batchTrustHint')" />
+      <span class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.batchTrustRequired') }}</span>
+    </div>
+
+    <p
+      v-if="currentType === 'batch'"
+      class="mt-2 rounded-lg border border-[var(--forebrain-warning)] bg-[var(--forebrain-bg-alt)] px-2.5 py-2 text-[12px] leading-[1.55] text-[var(--forebrain-text-2)]"
+      data-testid="project-type-leave-batch"
+    >{{ t('projects.typeLeaveBatchNote') }}</p>
+
+    <p v-if="typeChangeError" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ typeChangeError }}</p>
+    <template #footer>
+      <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeTypeChange">{{ t('common.cancel') }}</Button>
+      <Button
+        type="button"
+        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
+        :disabled="!canChangeType"
+        data-testid="project-type-confirm"
+        @click="confirmTypeChange"
+      >
+        {{ savingType ? t('common.loading') : t('projects.typeChangeConfirm') }}
+      </Button>
+    </template>
+  </ForebrainModal>
+
   <ProjectDeleteDialog
     v-if="deleteOpen && project"
     :project="project"
@@ -97,13 +182,18 @@
  */
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { Repeat } from 'lucide-vue-next'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import ProjectDeleteDialog from '@/components/project/ProjectDeleteDialog.vue'
+import ProjectTaskNotify from '@/components/project/ProjectTaskNotify.vue'
 import RadioField from '@/components/common/RadioField.vue'
 import SwitchRow from '@/components/common/SwitchRow.vue'
-import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
+import { getErrorMessage, forebrainApi, type ProjectRecord, type ProjectType } from '@/lib/api'
+import { PROJECT_TYPES, projectTypeOption } from '@/lib/projectTypes'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{ project: ProjectRecord | null; projectId: string }>()
@@ -169,6 +259,65 @@ const switchRows = computed(() => [
   { key: 'trust' as const, title: t('projects.trustLabel'), hint: t('projects.trustHint') },
   { key: 'resourceAccess' as const, title: t('projects.resourceAccessLabel'), hint: t('projects.resourceAccessHint') },
 ])
+
+// ---- The project's type (plan 153) ----
+
+/** The kind the project is stored as; an unknown field reads as 创意编程. */
+const currentType = computed<ProjectType>(() => props.project?.projectType ?? 'coding')
+const currentTypeOption = computed(() => projectTypeOption(currentType.value))
+const pendingType = ref<ProjectType>('coding')
+const pendingTypeOption = computed(() => projectTypeOption(pendingType.value))
+const typeChangeOpen = ref(false)
+/** The trust the change records when it turns the project into a batch one. */
+const typeChangeTrust = ref(false)
+const savingType = ref(false)
+const typeChangeError = ref('')
+
+const canChangeType = computed(() =>
+  !savingType.value && pendingType.value !== currentType.value
+  && (pendingType.value !== 'batch' || typeChangeTrust.value))
+
+/** The dialog opens on the next kind rather than the current one, so a click on
+ *  确定修改 is the whole change; the cards above it pick any other. */
+function openTypeChange() {
+  const next = PROJECT_TYPES[(PROJECT_TYPES.findIndex((option) => option.value === currentType.value) + 1) % PROJECT_TYPES.length]
+  pendingType.value = next.value
+  typeChangeTrust.value = false
+  typeChangeError.value = ''
+  typeChangeOpen.value = true
+}
+
+function closeTypeChange() {
+  typeChangeOpen.value = false
+  typeChangeError.value = ''
+}
+
+/** The change is its own write: it carries the new type (and, for a batch
+ *  project, the trust decision with it) and leaves the rest of the form alone. */
+async function confirmTypeChange() {
+  if (!props.project || !canChangeType.value) return
+  savingType.value = true
+  typeChangeError.value = ''
+  try {
+    await forebrainApi.projectUpdate(props.projectId, {
+      projectType: pendingType.value,
+      ...(pendingType.value === 'batch' ? { trust: typeChangeTrust.value } : {}),
+    })
+    typeChangeOpen.value = false
+    formError.value = ''
+    formNotice.value = t('projects.saved')
+    emit('saved')
+  } catch (cause) {
+    const code = (cause as { response?: { data?: { error?: string } } }).response?.data?.error
+    typeChangeError.value = code === 'batch_requires_trust'
+      ? t('projects.errBatchRequiresTrust')
+      : code === 'project_type_invalid'
+        ? t('projects.errTypeInvalid')
+        : getErrorMessage(cause)
+  } finally {
+    savingType.value = false
+  }
+}
 
 async function save() {
   // Pressing Enter in a field submits the form even while 保存 is disabled;

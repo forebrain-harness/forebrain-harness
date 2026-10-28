@@ -7,6 +7,7 @@ import { nextTick } from 'vue'
 import { setLocale } from '@/locales'
 import { InlineTeleport } from '@/test-utils/portal'
 import { forebrainApi, type ProjectRecord } from '@/lib/api'
+import { artifactView } from '@/lib/artifacts'
 import { useTopbarContent } from '@/composables/useTopbar'
 import { persistLastSessionId } from '@/composables/useLastSession'
 import { useWorkbench } from '@/composables/useWorkbench'
@@ -23,6 +24,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
   const f = fake as {
     sessionId: unknown
     messages: unknown
+    sessionArtifacts: unknown
     subagents: unknown
     subagentPendingInput: unknown
     subagentReturnedDraft: unknown
@@ -43,6 +45,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
   }
   f.sessionId = ref('s1')
   f.messages = ref([])
+  f.sessionArtifacts = ref([])
   f.subagents = ref([])
   f.subagentPendingInput = ref({})
   f.subagentReturnedDraft = ref({})
@@ -71,6 +74,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       isStreaming: ref(false),
       error: ref(null),
       messages: f.messages,
+      sessionArtifacts: f.sessionArtifacts,
       choose: vi.fn(),
       historyLoading: ref(false),
       historyError: ref(null),
@@ -123,7 +127,15 @@ import ActivityStep from '@/components/chat/ActivityStep.vue'
 config.global.directives = { tip }
 
 function makeRouter() {
-  return createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div />' } }] })
+  // The catch-all keeps a link to a page this test does not mount (a batch
+  // execution's task page) from warning; nothing here navigates to it.
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', component: { template: '<div />' } },
+      { path: '/:pathMatch(.*)*', component: { template: '<div />' } },
+    ],
+  })
 }
 
 // Shared by every describe below: jsdom has no ResizeObserver or matchMedia,
@@ -1001,6 +1013,27 @@ describe('ChatView new conversation picks a project first', () => {
     wrapper.unmount()
   })
 
+  it('offers a batch project\'s task page instead of a composer', async () => {
+    const batch = project({ id: 'b1', name: 'ibs', root: '/work/ibs', projectType: 'batch', trustLevel: 'trusted' })
+    const wrapper = await openNewChat([batch])
+    const push = vi.spyOn((wrapper.vm as unknown as { $router: { push: () => void } }).$router, 'push')
+    await pickProject(wrapper, 'ibs')
+
+    // A batch project takes no conversation: the greeting, the composer and the
+    // quick starts give way to one line and the way to the task page.
+    expect(wrapper.find('[data-testid="chat-batch-gate"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="chat-greeting"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="chat-starters"]').exists()).toBe(false)
+    expect(wrapper.find('.chat-composer').isVisible()).toBe(false)
+    expect(wrapper.find('[data-testid="chat-batch-gate"]').text()).toContain('No conversation starts here')
+
+    await wrapper.find('[data-testid="chat-batch-new-task"]').trigger('click')
+    // The task page itself arrives with the batch segment; the button already
+    // points at it, on the dialog that creates a task.
+    expect(push).toHaveBeenCalledWith({ path: '/projects/b1/tasks', query: { new: '1' } })
+    wrapper.unmount()
+  })
+
   it('refuses to send with no project picked', async () => {
     const create = vi.spyOn(forebrainApi, 'chatSessionCreate')
     const wrapper = await openNewChat([])
@@ -1664,6 +1697,346 @@ describe('ChatView loads older rows at the top of the thread', () => {
     await flushPromises()
 
     expect(loadOlder).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
+
+/**
+ * The turn's one delivery group (plan 153 A7, owner 2026-10-27): a turn whose
+ * `present_files` card named files closes with those files under its last
+ * words — once, and off the activity line. The card itself draws none of them;
+ * that is the card's own test.
+ */
+describe('ChatView delivers a turn once', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    ;(fake as { messages: { value: unknown[] } }).messages.value = []
+    ;(fake as { sessionArtifacts: { value: unknown[] } }).sessionArtifacts.value = []
+  })
+
+  /** A presented pair, as the card's structured output carries it. */
+  const PRESENTED = {
+    presented: [
+      { id: 'a1', name: 'Q3 报告.docx', relPath: 'Q3 报告.docx', title: 'Q3 报告', kind: 'document', preview: 'docx', size: 253952 },
+      { id: 'a2', name: '毛利.xlsx', relPath: '毛利.xlsx', title: '毛利', kind: 'spreadsheet', preview: 'sheet', size: 80896 },
+    ],
+  }
+
+  function presentFilesCard() {
+    return {
+      stepId: 'call-1',
+      toolName: 'present_files',
+      summary: 'presented files',
+      header: '已交付文件 · Q3 报告.docx',
+      status: 'completed',
+      result: PRESENTED,
+    }
+  }
+
+  it('draws the presented files once, after the turn’s last words and off the line', async () => {
+    setLocale('zh')
+    // The same two ids also ride the run's end frame: one delivery, not two.
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        content: '',
+        runId: 'run-1',
+        blocks: [
+          { kind: 'tool', step: presentFilesCard() },
+          { kind: 'assistant', text: '材料都做好了。', open: false },
+        ],
+        artifacts: [
+          { id: 'a1', sessionId: 's1', name: 'Q3 报告.docx', kind: 'document', preview: 'docx', size: 253952 },
+          { id: 'a2', sessionId: 's1', name: '毛利.xlsx', kind: 'spreadsheet', preview: 'sheet', size: 80896 },
+        ],
+      },
+    ]
+    const wrapper = await mountView()
+    await flushPromises()
+
+    const groups = wrapper.findAll('[data-testid="artifact-list"]')
+    expect(groups).toHaveLength(1)
+    expect(groups[0].get('.artifacts-h b').text()).toBe('本轮交付物')
+    // Two files, each once — the card's rows and the frame's are the same two.
+    expect(groups[0].findAll('[data-testid="artifact-card"]')).toHaveLength(2)
+    // Not a step of the activity line: the group sits outside the blocks.
+    expect(wrapper.get('[data-testid="artifact-list"]').element.closest('.msg-blocks')).toBeNull()
+    // And it comes after the turn's last words.
+    const html = wrapper.html()
+    expect(html.indexOf('材料都做好了')).toBeLessThan(html.indexOf('artifact-list'))
+    setLocale('en')
+    wrapper.unmount()
+  })
+
+  it('closes a kept-plan turn with the plan file, named as a plan', async () => {
+    setLocale('zh')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        content: '',
+        blocks: [
+          {
+            kind: 'tool',
+            step: {
+              stepId: 'call-2',
+              toolName: 'exit_plan_mode',
+              summary: 'kept the plan',
+              header: '已保留计划',
+              status: 'completed',
+              planOnly: true,
+              result: {
+                planOnly: true,
+                planFile: 'plans/年度审计计划.md',
+                artifact: { id: 'p1', name: '年度审计计划.md', kind: 'markdown', preview: 'markdown', size: 9216 },
+              },
+            },
+          },
+          { kind: 'assistant', text: '计划写好了。', open: false },
+        ],
+      },
+    ]
+    const wrapper = await mountView()
+    await flushPromises()
+
+    const group = wrapper.get('[data-testid="artifact-list"]')
+    expect(group.get('.artifacts-h b').text()).toBe('计划文件')
+    expect(group.findAll('[data-testid="artifact-card"]')).toHaveLength(1)
+    expect(group.text()).toContain('年度审计计划.md')
+    setLocale('en')
+    wrapper.unmount()
+  })
+
+  it('draws no group for a turn that delivered nothing', async () => {
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        content: '',
+        blocks: [{ kind: 'assistant', text: '就是一个回答。', open: false }],
+      },
+    ]
+    const wrapper = await mountView()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="artifact-list"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  /**
+   * A reloaded keep-only turn, exactly as the replay builds it: the stored
+   * tool row keeps `plan_only` (so the card still says 已保留计划) but never the
+   * call's envelope, and the run's end frame is gone. What is left to name the
+   * group by is the conversation's artifact list, which is where the plan
+   * file's row comes from.
+   */
+  function replayedKeepOnlyTurn() {
+    return {
+      id: 'm1',
+      role: 'assistant',
+      content: '',
+      runId: 'run-1',
+      blocks: [
+        {
+          kind: 'tool',
+          step: {
+            stepId: 'call-2',
+            toolName: 'exit_plan_mode',
+            summary: 'kept the plan',
+            header: '已保留计划',
+            status: 'completed',
+            planOnly: true,
+          },
+        },
+        { kind: 'assistant', text: '计划写好了。', open: false },
+      ],
+    }
+  }
+
+  /** One row of the conversation's artifact list, as the gateway answers it. */
+  function listedPlan() {
+    return {
+      id: 'p1',
+      sessionId: 's1',
+      runId: 'run-1',
+      origin: 'plan',
+      name: 'plan.md',
+      kind: 'markdown',
+      preview: 'markdown',
+      size: 9216,
+    }
+  }
+
+  /** What the composable does with the artifact list's rows: normalize them. */
+  function listArtifacts(rows: unknown[]) {
+    ;(fake as { sessionArtifacts: { value: unknown[] } }).sessionArtifacts.value =
+      rows.flatMap((row) => artifactView('s1', row) ?? [])
+  }
+
+  it('names a reloaded keep-only turn by the plan row its artifact list holds', async () => {
+    setLocale('zh')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [replayedKeepOnlyTurn()]
+    listArtifacts([listedPlan()])
+    // The card itself, not this file's default stub: 已保留计划 outliving the
+    // reload is half of what the regression is about.
+    const wrapper = await mountView({ ToolCallCard: false })
+    await flushPromises()
+
+    const group = wrapper.get('[data-testid="artifact-list"]')
+    expect(group.get('.artifacts-h b').text()).toBe('计划文件')
+    expect(group.findAll('[data-testid="artifact-card"]')).toHaveLength(1)
+    expect(group.text()).toContain('plan.md')
+    // The card's own account of the kept plan outlives the reload too.
+    expect(wrapper.get('[data-testid="tool-kept-plan"]').text()).toContain('已保留计划')
+    setLocale('en')
+    wrapper.unmount()
+  })
+
+  it('leaves a reloaded turn that delivered files named as delivered files', async () => {
+    setLocale('zh')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [replayedKeepOnlyTurn()]
+    listArtifacts([
+      listedPlan(),
+      { id: 'a1', sessionId: 's1', runId: 'run-1', origin: 'model', name: 'Q3 报告.docx', kind: 'document', preview: 'docx', size: 253952 },
+    ])
+    const wrapper = await mountView()
+    await flushPromises()
+
+    // A plan among other files is not "the plan only": the group names files.
+    expect(wrapper.get('.artifacts-h b').text()).toBe('本轮交付物')
+    expect(wrapper.findAll('[data-testid="artifact-card"]')).toHaveLength(2)
+    setLocale('en')
+    wrapper.unmount()
+  })
+
+  it('names a reloaded turn of presented files as delivered files', async () => {
+    setLocale('zh')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [replayedKeepOnlyTurn()]
+    listArtifacts([
+      { id: 'a1', sessionId: 's1', runId: 'run-1', origin: 'model', name: 'Q3 报告.docx', kind: 'document', preview: 'docx', size: 253952 },
+    ])
+    const wrapper = await mountView()
+    await flushPromises()
+
+    expect(wrapper.get('.artifacts-h b').text()).toBe('本轮交付物')
+    setLocale('en')
+    wrapper.unmount()
+  })
+})
+
+/**
+ * A batch execution read on the conversation page (plan 153 B6): the thread is
+ * the same one every conversation draws, and what differs is what is missing —
+ * the composer, the queue, the mode switch — plus the read-only bar that takes
+ * the input's place and the way to the task page an old link needs.
+ */
+describe('ChatView in a batch execution', () => {
+  const sessionIdRef = () => (fake as { sessionId: { value: string | null } }).sessionId
+  const messagesRef = () => (fake as { messages: { value: unknown[] } }).messages
+
+  afterEach(() => {
+    sessionIdRef().value = 's1'
+    messagesRef().value = []
+    vi.restoreAllMocks()
+  })
+
+  function seedThread() {
+    messagesRef().value = [
+      { id: 'u1', role: 'user', content: '审核三季度底稿。' },
+      { id: 'a1', role: 'assistant', content: '', blocks: [{ kind: 'assistant', text: '开始逐份核对。', open: false }] },
+    ]
+  }
+
+  /** A batch execution's own session facts, as the gateway answers them. */
+  function batchSession() {
+    vi.spyOn(forebrainApi, 'chatSession').mockResolvedValue({
+      id: 's1',
+      title: '审核三季度底稿 #2',
+      projectType: 'batch',
+      project: { id: 'p1', name: '投行底稿审核', root: '/tmp/ibs', projectType: 'batch' },
+    })
+    vi.spyOn(forebrainApi, 'projectsList').mockResolvedValue([])
+    vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({ surface: 'webchat', query: '', options: { duringRun: false, sideConversation: false }, records: [] })
+  }
+
+  it('takes no input: the read-only bar replaces the composer, and the task page is named', async () => {
+    seedThread()
+    batchSession()
+    const wrapper = await mountView()
+    await flushPromises()
+
+    // The input, its queue and the quick starts are gone whole.
+    expect(wrapper.find('[data-testid="batch-readonly-bar"]').exists()).toBe(true)
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="chat-starters"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="batch-readonly-bar"]').text()).toContain('Read-only execution')
+    // An old link has no task id in the conversation's facts, so it leads to
+    // the project's task page, where the task is found.
+    expect(wrapper.get('[data-testid="batch-open-task-page"]').attributes('href')).toBe('/projects/p1/tasks')
+    // The thread itself is untouched: the user's words and the answer are read.
+    expect(wrapper.text()).toContain('审核三季度底稿。')
+    wrapper.unmount()
+  })
+
+  it('names the run in the top bar and offers only the acts its state allows', async () => {
+    seedThread()
+    batchSession()
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: { template: '<div />' } },
+        { path: '/:pathMatch(.*)*', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ChatView, {
+      props: {
+        taskRun: { projectId: 'p1', taskId: 'tsk-1', title: '审核三季度底稿', seq: 2, status: 'stopped' },
+      },
+      global: {
+        plugins: [router],
+        stubs: {
+          Conversation: { template: '<div><slot /></div>' },
+          ConversationContent: { template: '<div><slot /></div>' },
+          ConversationScrollButton: true,
+          SubagentTab: true,
+          ChatWorkbench: true,
+          ContextDebugPanel: true,
+          ApprovalPresetPicker: { template: '<div />', methods: { takeDraft: () => null } },
+          SessionHeartbeat: true,
+          LspRecommendationCard: true,
+          AutoContinueBanner: true,
+          PendingInputQueuePopover: true,
+          SlashPickerCard: true,
+          PlanUpdateCard: true,
+          ToolCallCard: true,
+          ApprovalCard: true,
+          SubagentCallCard: true,
+          RunWorkedLine: true,
+          RunErrorBlock: true,
+          CompactionCard: true,
+          GoalLine: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    // The bar offers continue and run-again for a stopped run — never stop.
+    expect(wrapper.find('[data-testid="batch-run-continue"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="batch-run-rerun"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="batch-run-stop"]').exists()).toBe(false)
+    // The bar's own emission is the page's decision, not the view's.
+    await wrapper.get('[data-testid="batch-run-continue"]').trigger('click')
+    expect(wrapper.emitted('batch-continue')).toHaveLength(1)
+
+    const bar = useTopbarContent().value
+    const rendered = mount({ props: {}, render: () => bar!.leading!() }, { global: { plugins: [router], directives: { tip } } })
+    expect(rendered.text()).toContain('审核三季度底稿')
+    expect(rendered.text()).toContain('Run 2')
+    expect(rendered.text()).toContain('Stopped')
     wrapper.unmount()
   })
 })

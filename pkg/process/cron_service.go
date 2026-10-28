@@ -231,6 +231,12 @@ func (c *CronService) deliver(ctx context.Context, channelID, sessionID, text st
 	projectID := ""
 	if c.env.SQL != nil {
 		if p, ok, err := state.NewProjectStore(c.env.SQL, c.agentID).ProjectForSession(ctx, strings.TrimSpace(sessionID)); err == nil && ok {
+			// A batch project's fire is a task, and a task's result is
+			// delivered by the execution's own end notification. Sending the
+			// turn's text here as well would say it twice (plan 151).
+			if state.NormalizeProjectType(p.ProjectType) == state.ProjectTypeBatch {
+				return nil
+			}
 			projectID = p.ID
 		}
 	}

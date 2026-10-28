@@ -65,42 +65,81 @@
         </button>
       </div>
       <template v-else>
-        <p class="q">{{ t('chat.exitPlanQuestion') }}</p>
+        <p class="q">{{ t(officeSession ? 'chat.officePlanQuestion' : 'chat.exitPlanQuestion') }}</p>
         <div class="gate-acts">
-          <button
-            type="button"
-            class="gate-btn gate-btn-pri"
-            data-testid="exit-plan-approve-clear"
-            :disabled="submitting"
-            @click="approveExitPlan(action, true)"
-          >{{ clearContextLabel }}</button>
-          <button
-            type="button"
-            class="gate-btn"
-            data-testid="exit-plan-approve"
-            :disabled="submitting"
-            @click="approveExitPlan(action, false)"
-          >{{ t('chat.exitPlanApprove') }}</button>
-          <button
-            v-if="reviewModels.length"
-            type="button"
-            class="gate-btn"
-            data-testid="exit-plan-ask-review"
-            :disabled="submitting"
-            @click="askReviewChosen"
-          >{{ t('chat.exitPlanAskReview') }}</button>
-          <!-- Keep planning is the refusal here: a toggle that opens the words
-               the planner will read, the same pressed state every refusal's
-               toggle takes. -->
-          <button
-            type="button"
-            class="gate-btn"
-            :class="feedbackOpen ? 'gate-btn-on' : ''"
-            :aria-expanded="feedbackOpen"
-            data-testid="exit-plan-keep-planning"
-            :disabled="submitting"
-            @click="keepPlanningChosen"
-          >{{ t('chat.exitPlanKeepPlanning') }}</button>
+          <!-- Office creative work answers the plan in its own four words
+               (plan 153): running it, revising it, keeping it without running,
+               and a second opinion. Clearing the context is a coding habit —
+               an office deliverable keeps its conversation. -->
+          <template v-if="officeSession">
+            <button
+              type="button"
+              class="gate-btn gate-btn-pri"
+              data-testid="office-plan-execute"
+              :disabled="submitting"
+              @click="approveExitPlan(action, false)"
+            >{{ t('chat.officePlanExecute') }}</button>
+            <button
+              type="button"
+              class="gate-btn"
+              :class="feedbackOpen ? 'gate-btn-on' : ''"
+              :aria-expanded="feedbackOpen"
+              data-testid="office-plan-revise"
+              :disabled="submitting"
+              @click="keepPlanningChosen"
+            >{{ t('chat.officePlanRevise') }}</button>
+            <button
+              type="button"
+              class="gate-btn"
+              data-testid="office-plan-keep-only"
+              :disabled="submitting"
+              @click="keepPlanOnly(action)"
+            >{{ t('chat.officePlanKeepOnly') }}</button>
+            <button
+              v-if="reviewModels.length"
+              type="button"
+              class="gate-btn"
+              data-testid="exit-plan-ask-review"
+              :disabled="submitting"
+              @click="askReviewChosen"
+            >{{ t('chat.exitPlanAskReview') }}</button>
+          </template>
+          <template v-else>
+            <button
+              type="button"
+              class="gate-btn gate-btn-pri"
+              data-testid="exit-plan-approve-clear"
+              :disabled="submitting"
+              @click="approveExitPlan(action, true)"
+            >{{ clearContextLabel }}</button>
+            <button
+              type="button"
+              class="gate-btn"
+              data-testid="exit-plan-approve"
+              :disabled="submitting"
+              @click="approveExitPlan(action, false)"
+            >{{ t('chat.exitPlanApprove') }}</button>
+            <button
+              v-if="reviewModels.length"
+              type="button"
+              class="gate-btn"
+              data-testid="exit-plan-ask-review"
+              :disabled="submitting"
+              @click="askReviewChosen"
+            >{{ t('chat.exitPlanAskReview') }}</button>
+            <!-- Keep planning is the refusal here: a toggle that opens the words
+                 the planner will read, the same pressed state every refusal's
+                 toggle takes. -->
+            <button
+              type="button"
+              class="gate-btn"
+              :class="feedbackOpen ? 'gate-btn-on' : ''"
+              :aria-expanded="feedbackOpen"
+              data-testid="exit-plan-keep-planning"
+              :disabled="submitting"
+              @click="keepPlanningChosen"
+            >{{ t('chat.exitPlanKeepPlanning') }}</button>
+          </template>
         </div>
         <!-- The words are required: the send stays gray until there are some,
              and Esc is the wordless refusal (it stops the turn, 129). -->
@@ -157,12 +196,19 @@ const props = withDefaults(defineProps<{
   action: ActionRow
   /** The conversation the plan belongs to — the dock sits where its input was. */
   sessionId: string
+  /** The kind the conversation was born with (plan 153): an office plan is
+   *  answered in the office's own four words, a coding plan keeps the four it
+   *  always had, unchanged. */
+  sessionType?: string
   /** Opens one of the conversation's plan documents as a drawer tab. */
   onOpenPlan?: (plan: SessionPlan) => void
   /** Whether the eye has somewhere to open the whole plan: the conversation's
    *  drawer takes it; a surface with no plan tab of its own hides the eye. */
   canOpenPlan?: boolean
-}>(), { onOpenPlan: undefined, canOpenPlan: true })
+}>(), { sessionType: '', onOpenPlan: undefined, canOpenPlan: true })
+
+/** Whether this plan is answered with the office creative verdicts. */
+const officeSession = computed(() => String(props.sessionType ?? '').trim().toLowerCase() === 'office')
 
 // The dock renders only under the conversation that provides the store; every
 // fact it reads and every verdict it sends is the store's own.
@@ -171,7 +217,7 @@ const store = injectPendingActions()!
 // The store's pieces this dock reads; its refs unwrap here so the template
 // binds plain values, keyed by the action the input is parked on.
 const {
-  exitPlanRequest, approveExitPlan, keepPlanning, openPlanFeedback, closePlanFeedback,
+  exitPlanRequest, approveExitPlan, keepPlanning, keepPlanOnly, openPlanFeedback, closePlanFeedback,
   toggleModelPicker, requestReview, stopReview, modelLabel, activeReviewLabel, clearContextLabel,
   refuseAndStop,
 } = store

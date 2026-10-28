@@ -714,6 +714,10 @@ type planModeLLM struct {
 	// told to edit won't match the path GuardWrite allows.
 	stateRoot  string
 	projectKey string
+	// office marks a runtime of an office conversation: exit_plan_mode is
+	// offered only while the user has the conversation in plan mode, and the
+	// plan-mode reminders are worded for office work.
+	office bool
 	// anchor keeps the injected reminder at an immutable history boundary for
 	// the life of a run. The kind is derived from transcript-visible msgs; the
 	// completed text is cached because dynamic details such as planExists can
@@ -737,17 +741,57 @@ func wrapPlanModeLLM(inner llm.LLM, stateRoot string, projectKeys ...string) llm
 	}
 }
 
+// wrapPlanModeLLMFor is wrapPlanModeLLM for a runtime of a given project
+// type. An office runtime offers exit_plan_mode only while the user has the
+// conversation in plan mode, and words its reminders for office work.
+func wrapPlanModeLLMFor(inner llm.LLM, stateRoot, projectKey, projectType string) llm.LLM {
+	w, ok := wrapPlanModeLLM(inner, stateRoot, projectKey).(*planModeLLM)
+	if !ok {
+		return nil
+	}
+	w.office = projectType == state.ProjectTypeOffice
+	return w
+}
+
+// withoutTool returns a new slice with the named tool removed. The caller's
+// slice is never modified.
+func withoutTool(tools []*llm.Tool, name string) []*llm.Tool {
+	out := make([]*llm.Tool, 0, len(tools))
+	for _, t := range tools {
+		if t == nil || t.Name() != name {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 func (w *planModeLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	if w.stateRoot == "" {
+		// Office hides exit_plan_mode unless plan mode is proven; every early
+		// exit below fails closed the same way.
+		if w.office {
+			tools = withoutTool(tools, "exit_plan_mode")
+		}
 		return w.inner.Execute(ctx, msgs, tools)
 	}
 	sid := llm.AgentSessionIDFromContext(ctx)
 	if sid == "" {
+		if w.office {
+			tools = withoutTool(tools, "exit_plan_mode")
+		}
 		return w.inner.Execute(ctx, msgs, tools)
 	}
 	st, err := state.Get(w.stateRoot, sid)
 	if err != nil {
+		if w.office {
+			tools = withoutTool(tools, "exit_plan_mode")
+		}
 		return w.inner.Execute(ctx, msgs, tools)
+	}
+	// The user puts an office conversation into plan mode explicitly, so the
+	// tool is offered only once that state has been read and says plan.
+	if w.office && st.Mode != state.ModePlan {
+		tools = withoutTool(tools, "exit_plan_mode")
 	}
 	projectKey := w.projectKey
 	if ctxProjectKey := tool.ProjectKeyFromContext(ctx); ctxProjectKey != "" {
@@ -791,6 +835,9 @@ func (w *planModeLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*
 	// state.
 	isSubagent := tool.IsForkChildFromContext(ctx) || strings.TrimSpace(tool.SubagentTypeFromContext(ctx)) != ""
 	reminder := buildPlanModeReminder(planDir, planFile, planExists, kind, isReentry, isSubagent)
+	if w.office {
+		reminder = buildOfficePlanModeReminder(planDir, planFile, planExists, kind, isReentry, isSubagent)
+	}
 	reminder, insertAt := w.stableReminderForRun(ctx, msgs, reminder)
 	msgs = injectAndRecordPlanReminder(ctx, msgs, reminder, insertAt)
 	return w.inner.Execute(ctx, msgs, tools)
@@ -860,7 +907,9 @@ func (w *planModeLLM) executeImplementationPhase(ctx context.Context, msgs []llm
 	// The plan directory stays writable outside plan mode: it is the only path
 	// under the agent state root the implementation record may be written to.
 	ctx = tool.WithAllowedPlanPath(ctx, planDir)
-	if !st.HasExitedPlan {
+	// PlanKeptOnly: the user kept the plan as the deliverable and nothing
+	// should nudge the model into carrying it out (always false for coding).
+	if !st.HasExitedPlan || st.PlanKeptOnly {
 		return w.inner.Execute(ctx, msgs, tools)
 	}
 	// A subagent must not close the parent's plan loop: it does not own the
@@ -878,6 +927,9 @@ func (w *planModeLLM) executeImplementationPhase(ctx context.Context, msgs []llm
 	}
 	planFile := state.PlanPathForSession(w.stateRoot, projectKey, planSID)
 	reminder := buildPlanImplementationReminder(planFile, planModeKindForCount(reminderCount))
+	if w.office {
+		reminder = buildOfficePlanImplementationReminder(planFile, planModeKindForCount(reminderCount))
+	}
 	reminder, insertAt := w.stableReminderForRun(ctx, msgs, reminder)
 	msgs = injectAndRecordPlanReminder(ctx, msgs, reminder, insertAt)
 	return w.inner.Execute(ctx, msgs, tools)
@@ -1154,6 +1206,144 @@ Phase 5 - Exit: call exit_plan_mode when the plan is complete and ready for user
 - When ready, call exit_plan_mode to request user approval.`,
 		planDir, exists, reentrySection,
 	)
+}
+
+// The office plan-mode and implementation reminders, worded for document
+// work (no codebase, no code tools). Golden-checked verbatim in
+// testdata/office_plan_prompts.golden.json.
+const (
+	// officeMainPlanFullFormat takes planDir, the exists note, and the
+	// re-entry section in that order.
+	officeMainPlanFullFormat = `PLAN MODE ACTIVE - read carefully.
+
+The user switched this conversation to plan mode: plan the work before doing it. You MUST NOT create or change any file except plan files inside this dedicated plan directory:
+
+  %s
+%s
+%sAuthor plan files with write_file (create or replace) or edit_file (targeted change). Every other write is blocked.
+
+## Plan files keep their history
+
+- Give each plan its own file with a descriptive name based on the task (for example "q3-board-report.md" or "prospectus-review-checklist.md"). Do not use the generic name "plan.md".
+- To refine the current plan, edit it in place; for a substantially new plan, create a new file. The most recently modified .md file is the one shown for approval.
+
+## How to plan office work
+
+1. Understand: read the files in the folder and the attachments that matter, and note what each source contributes.
+2. Design each deliverable: its format; its structure (sections, sheets or slides); what goes in each part and from which source; the calculations or data processing it needs; the template or style to follow.
+3. Surface decisions: list your assumptions and the questions only the user can answer. When an answer would change the plan, ask with user_interaction, all questions in one go.
+4. Write the plan file with these sections: Goal, Deliverables, Sources, Outline of each deliverable, Steps, Checks before hand-over, Open questions.
+5. Call exit_plan_mode when the plan is complete. The user can have it carried out, ask for changes, keep the plan itself as the deliverable, or ask another model to review it.
+
+## Tools in plan mode
+
+- Reading files, searching, web research and read-only commands: free use.
+- user_interaction: free use to clarify the plan.
+- write_file, edit_file: only inside the plan directory above.
+- Anything that creates or changes other files: blocked until the plan is approved.
+
+## Important
+
+- Do not produce any deliverable in plan mode; the plan describes it.
+- Do not use user_interaction to ask "is this plan okay?" - that is what exit_plan_mode does.`
+
+	// officeSubagentPlanFull takes planDir.
+	officeSubagentPlanFull = `PLAN MODE ACTIVE (subagent) - read carefully.
+
+You are a subagent helping with office planning. You MUST NOT create or change any file except plan files inside this dedicated plan directory:
+
+  %s
+
+## Tools in subagent plan mode
+
+- Reading documents and data, searching the folder, web research and read-only commands: free use.
+- user_interaction: free use to clarify the approach with the parent agent or the user.
+- write_file, edit_file: only inside the plan directory above.
+- Anything that creates or changes other files: blocked.
+- exit_plan_mode: NOT available; only the parent agent can exit plan mode.
+- subagent_run, subagent_fanout: NOT available within a subagent.
+
+## Important
+
+- Read the sources that matter and contribute findings, source references, open decisions and a proposed deliverable structure.
+- Do not produce the deliverable itself. When done, summarize your findings; the parent agent will decide how to proceed.`
+
+	// officeSubagentPlanSparseFormat takes planDir.
+	officeSubagentPlanSparseFormat = `Plan mode active (subagent). Write/edit plan files only inside %s - all other writes blocked. Use user_interaction to clarify the approach.`
+
+	// officeImplementationFullFormat takes the marker, the plan file, and the
+	// implementation heading in that order.
+	officeImplementationFullFormat = `%s - read carefully.
+
+You are carrying out an approved plan. The plan file is:
+
+  %s
+
+It is writable in this mode.
+
+## Closing the plan loop
+
+When the plan's tasks are done - or when you stop working on the plan for any reason - update the plan file BEFORE your final answer:
+
+1. Mark each task as done, partly done or not done.
+2. Append a final section with exactly this heading:
+
+   %s
+
+3. Under it record the files delivered (names and locations), any deviation from the plan and why, anything planned but not done and why, and how you checked the deliverables.
+
+Use edit_file to append the section; keep the plan's original text readable.`
+
+	// officeImplementationSparseFormat takes the marker, the plan file, and
+	// the implementation heading in that order.
+	officeImplementationSparseFormat = `%s: before you report the work finished, update the plan file %s - mark what was done and append a '%s' section listing the files delivered.`
+)
+
+// buildOfficePlanModeReminder is buildPlanModeReminder worded for office
+// conversations: the plan describes document work, and the tool list names no
+// code tools. The sparse main-agent text is shared with coding (it mentions
+// no code); the full texts are office-only.
+func buildOfficePlanModeReminder(planDir, planFile string, planExists bool, kind string, isReentry bool, isSubagent bool) string {
+	if isSubagent {
+		if kind == "sparse" {
+			return fmt.Sprintf(officeSubagentPlanSparseFormat, planDir)
+		}
+		return fmt.Sprintf(officeSubagentPlanFull, planDir)
+	}
+	if kind == "sparse" {
+		return buildPlanModeReminder(planDir, planFile, planExists, "sparse", false, false)
+	}
+	exists := "(no plan file exists yet - create a NEW <descriptive-name>.md file, e.g. 'q3-board-report.md'. Do NOT name it plan.md)"
+	if planExists {
+		exists = fmt.Sprintf("(current plan file %s already has content - edit_file to refine it, or create a NEW .md file to start a fresh plan)", planFile)
+	}
+	reentrySection := ""
+	if isReentry && planExists {
+		reentrySection = `
+## Re-entering Plan Mode
+
+You are returning to plan mode after having previously exited it. A plan file exists from your previous planning state.
+
+**Before proceeding with any new planning, you should:**
+1. Read the existing plan file to understand what was previously planned
+2. Evaluate the user's current request against that plan
+3. Decide how to proceed:
+   - **Different task**: If the user's request is for a different task, start fresh by creating a NEW plan file
+   - **Same task, continuing**: If this is a continuation or refinement, modify the existing plan while cleaning up outdated sections
+4. Always edit/create the plan file before calling exit_plan_mode
+
+`
+	}
+	return fmt.Sprintf(officeMainPlanFullFormat, planDir, exists, reentrySection)
+}
+
+// buildOfficePlanImplementationReminder is buildPlanImplementationReminder
+// worded for office conversations.
+func buildOfficePlanImplementationReminder(planFile, kind string) string {
+	if kind == "sparse" {
+		return fmt.Sprintf(officeImplementationSparseFormat, planImplementationReminderMarker, planFile, state.ImplementationHeading)
+	}
+	return fmt.Sprintf(officeImplementationFullFormat, planImplementationReminderMarker, planFile, state.ImplementationHeading)
 }
 
 // reminderAdoptionSink is a context-scoped channel that lets the reminder
@@ -1776,6 +1966,49 @@ func NewSessionModel(r *Runner, store *state.SessionStore) PrimaryModelState {
 	return resolved
 }
 
+// RowLessSessionModel resolves the model a session with no stored model row
+// will run on, the one rule every surface and the turn entry share.
+//
+// It returns the zero state when the caller must resolve the row itself or
+// fall back: the session already has a stored row, it is outside the D8
+// scope (scheduled fires, channel conversations, subagent workers), or its
+// facts cannot be read.
+func RowLessSessionModel(r *Runner, store *state.SessionStore, sessionID string) PrimaryModelState {
+	if r == nil || store == nil {
+		return PrimaryModelState{}
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return PrimaryModelState{}
+	}
+	// A stored row takes precedence; the caller resolves it.
+	if _, hasRow, err := store.SessionModelSelection(context.Background(), sid); err == nil && hasRow {
+		return PrimaryModelState{}
+	}
+	source, hasOutput, err := store.SessionFactsForModelDefault(context.Background(), sid)
+	if err != nil {
+		return PrimaryModelState{}
+	}
+	// SessionSourceConversation is the empty string: compare against the
+	// constants, never a "conversation" literal.
+	if source != state.SessionSourceConversation && source != state.SessionSourceWorkshop {
+		return PrimaryModelState{}
+	}
+	if !hasOutput {
+		// A new conversation runs its first turn on the agent's most recently
+		// used model; nothing resolvable to adopt leaves the zero state and
+		// the caller's fallback answers.
+		return NewSessionModel(r, store)
+	}
+	// A session older than the model-state table runs this turn on the live
+	// configured default, and the turn writes that actually used model as its
+	// row (D9a).
+	if def, err := ConfiguredDefaultSelection(r); err == nil {
+		return def
+	}
+	return PrimaryModelSelection(r)
+}
+
 // runtimeHealthErr is the run entry-point gate: an unhealthy Runner refuses
 // work until a complete build operation succeeds.
 func (r *Runner) runtimeHealthErr() error {
@@ -1968,48 +2201,17 @@ func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Conte
 		return ctx, fmt.Errorf("the model chosen for this conversation (%s/%s) is no longer configured; choose another with /model",
 			strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model))
 	}
-	// No row. Outside the D8 scope (scheduled fires, channel conversations,
-	// subagent workers) nothing is adopted or written: they keep the
-	// configuration default and stay out of "most recently used".
-	source, hasMessages, factsErr := store.SessionFactsForModelDefault(ctx, sid)
-	if factsErr != nil {
-		return ctx, nil
-	}
-	if source != state.SessionSourceConversation && source != state.SessionSourceWorkshop {
-		return ctx, nil
-	}
-	if !hasMessages {
-		// A new conversation: its first message fixes it on the most
-		// recently used model, as that session's own row. A derived default
-		// that cannot be resolved (fresh install, dangling newest row)
-		// leaves the configuration default in charge and writes nothing.
-		adopted := NewSessionModel(r, store)
-		if adopted.Set {
-			if _, saveErr := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
-				Provider: adopted.Provider, Model: adopted.Model, Effort: adopted.Effort,
-			}); saveErr != nil {
-				slog.Warn("persist new session model row", "session_id", sid, "err", saveErr)
-			}
-			return WithSessionModelSelection(ctx, adopted), nil
-		}
-		return ctx, nil
-	}
-	// A session older than the model-state table: it runs this turn on the
-	// configuration default as before, and the turn writes that actually
-	// used model as its row, so every session ends up owning one (D9a) and
-	// counts toward "most recently used".
-	def := PrimaryModelSelection(r)
-	if strings.TrimSpace(def.Provider) == "" || strings.TrimSpace(def.Model) == "" {
+	// No row. Adopt or write the same model every surface will name.
+	sel := RowLessSessionModel(r, store, sid)
+	if !sel.Set {
 		return ctx, nil
 	}
 	if _, saveErr := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
-		Provider: def.Provider, Model: def.Model, Effort: def.Effort,
+		Provider: sel.Provider, Model: sel.Model, Effort: sel.Effort,
 	}); saveErr != nil {
-		slog.Warn("persist legacy session model row", "session_id", sid, "err", saveErr)
+		slog.Warn("persist row-less session model row", "session_id", sid, "err", saveErr)
 	}
-	return WithSessionModelSelection(ctx, PrimaryModelState{
-		Provider: def.Provider, Model: def.Model, Effort: def.Effort, Set: true,
-	}), nil
+	return WithSessionModelSelection(ctx, sel), nil
 }
 
 // effectiveModelFor names the model this context's conversation runs on: the
@@ -2112,6 +2314,10 @@ func (r *Runner) sessionClientFor(ctx context.Context) llm.LLM {
 // published, no runtime is rebuilt. A surface whose runner was loaded before
 // the file last changed (the terminal's base runner, built at startup) answers
 // "what would a runner built now run on" with this, not with its own pin.
+// ConfiguredDefaultSelection is also the engine's fallback for a session with
+// no stored row that has already run (RowLessSessionModel), so every surface,
+// the turn entry and this reading name one model for such a session: the
+// live configuration's default, never a runner's pin.
 func ConfiguredDefaultSelection(r *Runner) (PrimaryModelState, error) {
 	if r == nil || r.AppCfg == nil {
 		return PrimaryModelState{}, fmt.Errorf("resolve the configured default: runner has no configuration")
@@ -2128,44 +2334,42 @@ func ConfiguredDefaultSelection(r *Runner) (PrimaryModelState, error) {
 	}, nil
 }
 
-// PrimaryModelStateForSession is the full answer to "what does this
-// conversation run on": the model and the reasoning effort. A stored choice
-// resolves against the runner's live config exactly as a turn's context
-// resolves it at entry, so an effort the row pins is the effort the requests
-// carry, and a row that pins none runs at none. A session with no row, or a
-// row the config no longer offers, runs on the runner's published selection.
-// Every surface that names a conversation's model reads this, because a
-// surface that resolved its own could name a model the conversation's
-// requests never go to.
-func PrimaryModelStateForSession(r *Runner, store *state.SessionStore, sessionID string) PrimaryModelState {
-	return PrimaryModelStateForSessionOn(r, store, sessionID, PrimaryModelSelection(r))
+// sessionModelRowState is the row half of PrimaryModelStateForSession: the
+// session's own stored choice, resolved against the live config. ok is false
+// when there is no row, or a row the config no longer offers — the caller
+// decides what answers instead.
+func sessionModelRowState(r *Runner, store *state.SessionStore, sessionID string) (PrimaryModelState, bool) {
+	if r == nil || store == nil {
+		return PrimaryModelState{}, false
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return PrimaryModelState{}, false
+	}
+	row, hasRow, err := store.SessionModelSelection(context.Background(), sid)
+	if err != nil || !hasRow {
+		return PrimaryModelState{}, false
+	}
+	effort := row.Effort
+	resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort)
+	if err != nil {
+		return PrimaryModelState{}, false
+	}
+	return resolved, true
 }
 
-// PrimaryModelStateForSessionOn is PrimaryModelStateForSession with an
-// explicit fallback for a conversation that never chose — and for one whose
-// row the config no longer resolves. A surface passes the model that
-// conversation's next turn will actually run on, which is not always this
+// PrimaryModelStateForSession is the full answer to "what does this
+// conversation run on": its own stored row resolved against the live config,
+// else the rule a row-less session follows (RowLessSessionModel), else the
 // runner's published selection.
-//
-// This is a display path, not a resolution path: an unresolvable row falls
-// back to the caller's answer only to keep the UI truthful, and no request is
-// ever routed by it — the turn itself is refused at turn entry, where the
-// user is told to re-choose. That is why this fall-through is not the
-// silent-fallback the loader forbids.
-func PrimaryModelStateForSessionOn(
-	r *Runner, store *state.SessionStore, sessionID string, fallback PrimaryModelState,
-) PrimaryModelState {
-	if r != nil && store != nil {
-		if sid := strings.TrimSpace(sessionID); sid != "" {
-			if row, hasRow, err := store.SessionModelSelection(context.Background(), sid); err == nil && hasRow {
-				effort := row.Effort
-				if resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort); err == nil {
-					return resolved
-				}
-			}
-		}
+func PrimaryModelStateForSession(r *Runner, store *state.SessionStore, sessionID string) PrimaryModelState {
+	if resolved, ok := sessionModelRowState(r, store, sessionID); ok {
+		return resolved
 	}
-	return fallback
+	if sel := RowLessSessionModel(r, store, sessionID); sel.Set {
+		return sel
+	}
+	return PrimaryModelSelection(r)
 }
 
 // PrimaryModelForSession names the model one conversation runs on, resolving

@@ -1,5 +1,7 @@
 import { computed, getCurrentScope, onScopeDispose, reactive, ref, shallowRef } from 'vue'
 import { toCamelCase } from '@/lib/case'
+import type { ArtifactView } from '@/lib/artifacts'
+import { runFrameArtifacts, artifactView } from '@/lib/artifacts'
 import {
   formatProviderError,
   parseProviderErrorDetail,
@@ -113,6 +115,13 @@ export interface ChatMessage {
   workedPlanDone?: number
   workedPlanTotal?: number
   workedPlanActive?: string
+  /**
+   * What this turn delivered (plan 153), as the run's end frame listed it:
+   * every file the engine registered for the run, whether the model presented
+   * it or a kept plan became the deliverable. The delivery group reads it and
+   * drops what a `present_files` card already drew.
+   */
+  artifacts?: ArtifactView[]
   /** A choice a slash command asked for, on its notice. */
   picker?: SlashPicker
   /** The value picked from it; a picked notice offers nothing more. */
@@ -278,6 +287,19 @@ export interface SubagentToolStep {
   shellCard?: ShellCard
   /** A file tool's diff (plan 135): edit_file / write_file. */
   fileDiff?: FileDiffFacts
+  /**
+   * The call's structured result, when the socket carried one (plan 153): a
+   * `present_files` completion's `presented[]`, the `exit_plan_mode` envelope
+   * with its `artifact`. A reloaded row carries only its display body, so a
+   * card that needs more than words keeps that body as its account.
+   */
+  result?: Record<string, unknown>
+  /**
+   * A kept-plan exit (plans 148/153): the plan is the deliverable and nothing
+   * was executed. It rides tool_meta, so a live card and a replayed one say
+   * the same thing.
+   */
+  planOnly?: boolean
   /** The call's own execution time in seconds, when it settled. */
   durationSeconds?: number
 }
@@ -775,6 +797,30 @@ function fileDiffFromPayload(payload: Record<string, unknown>): FileDiffFacts | 
 }
 
 /**
+ * toolResultFromPayload reads the structured result a settled call reports.
+ *
+ * The engine hands a tool's own JSON back wrapped under `output` as a string
+ * (pkg/tool/format.go reads exactly that key to build the card's facts), so
+ * the envelope a card draws its files from is that string decoded. A payload
+ * of any other shape — a gate's `requires_action` map, an older completion, an
+ * answer that is not JSON — is handed over as it is, because the wrapper is
+ * then all there is.
+ */
+function toolResultFromPayload(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const wrapper = raw as Record<string, unknown>
+  const text = typeof wrapper.output === 'string' ? wrapper.output.trim() : ''
+  if (!text.startsWith('{')) return wrapper
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+  } catch {
+    // Not JSON: the wrapper is all there is.
+  }
+  return wrapper
+}
+
+/**
  * toolStepFromPayload builds one card from a live tool step event. Both the
  * conversation and a subagent read the same runtime payload, so they label the
  * same call the same way.
@@ -802,6 +848,10 @@ export function toolStepFromPayload(
   // the merge in upsert spreads this object over the started card.
   const shellCard = completed ? shellCardFromPayload(payload) : undefined
   const fileDiff = completed ? fileDiffFromPayload(payload) : undefined
+  // The structured result rides the completion only, and only when the engine
+  // sent a map (plan 153): the card draws its files from it, and everything
+  // else about the call comes from the body.
+  const result = completed ? toolResultFromPayload(payload.output) : undefined
   return {
     stepId: String(payload.stepId ?? '').trim() || fallbackStepId,
     toolName: String(payload.toolName ?? '').trim(),
@@ -821,6 +871,8 @@ export function toolStepFromPayload(
     subagentCall: subagentCallFromMeta(meta),
     ...(shellCard ? { shellCard } : {}),
     ...(fileDiff ? { fileDiff } : {}),
+    ...(result ? { result } : {}),
+    ...(metaBool(meta, 'plan_only') || result?.plan_only === true || result?.planOnly === true ? { planOnly: true } : {}),
     durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : undefined,
   }
 }
@@ -882,6 +934,9 @@ export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?
     subagentCall: row.subagentCall ?? undefined,
     ...(row.shellCard ? { shellCard: row.shellCard } : {}),
     ...(row.fileDiff ? { fileDiff: row.fileDiff } : {}),
+    // A kept-plan exit says so on the row's own meta (plans 148/153), so a
+    // reloaded card keeps the fact the live one showed.
+    ...(metaBool(meta, 'plan_only') ? { planOnly: true } : {}),
   }
 }
 
@@ -1233,6 +1288,18 @@ export function cancelPendingToolBlocks(blocks: TimelineBlock[]): TimelineBlock[
  * anything has no content, not three dots.
  */
 const NOTHING_SAID_YET = '...'
+
+/**
+ * How long a dropped observation socket waits before it is opened again: half
+ * a second at first, doubling up to a quarter minute. Short waits are what a
+ * blip needs — a reconnect replays the durable tail from its cursor, so the
+ * conversation is whole again as soon as the line is — while a gateway that
+ * stays down is not helped by a page knocking five times a second.
+ */
+const OBSERVER_RECONNECT_MIN_MS = 500
+const OBSERVER_RECONNECT_MAX_MS = 15_000
+/** Failed re-opens in a row before the page stops calling the line "reconnecting". */
+const OBSERVER_OFFLINE_AFTER_FAILURES = 3
 
 /**
  * withRunError ends a turn on its failure: what streamed is closed, and the
@@ -1762,6 +1829,8 @@ import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } f
 import { currentLocale, t as translate, type I18nKey } from '@/locales'
 import { AUTO_CONTINUE_EVENT_TYPES, parseAutoContinue, type AutoContinueEntry, type AutoContinueState } from '@/lib/autoContinue'
 import { LSP_RECOMMENDATION_EVENT_TYPE, parseLspRecommendation, type LspRecommendation } from '@/lib/lspRecommendation'
+import { noteSessionBound, recordBatchExecution } from '@/lib/batchExecution'
+import { liveStateFor, setLiveState } from '@/lib/liveConnection'
 import {
   buildBrowserForebrainGatewayChatWsUrl,
   isSupportedForebrainRunEventSchema,
@@ -2203,7 +2272,7 @@ export function workedLineText(line: WorkedLine): string {
  * What a run's end records on its answer, whatever ended it — finished, failed
  * or stopped: when it finished and how long it worked.
  */
-function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStartedAt: string | undefined, plan?: WorkedPlanProgress): Partial<ChatMessage> {
+function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStartedAt: string | undefined, plan?: WorkedPlanProgress, artifacts?: ArtifactView[]): Partial<ChatMessage> {
   const elapsed = Number(elapsedMs)
   const workedDurationMs = elapsedMs != null && Number.isFinite(elapsed) && elapsed >= 0
     ? elapsed
@@ -2212,7 +2281,23 @@ function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStar
     ...(finishedAt ? { runFinishedAt: finishedAt } : {}),
     ...(workedDurationMs != null ? { workedDurationMs } : {}),
     ...(plan && plan.total > 0 ? { workedPlanDone: plan.done, workedPlanTotal: plan.total, workedPlanActive: plan.active } : {}),
+    ...(artifacts?.length ? { artifacts } : {}),
   }
+}
+
+/**
+ * artifactsOfRunEnd reads the delivered files off any way a run ends (plan
+ * 153): `turn_completed` / `turn_error` / `turn_cancelled` carry them at the
+ * payload's top level, the socket's own `run_completed` family under `data`.
+ * Two spellings, one list; a frame that listed none yields none.
+ */
+function artifactsOfRunEnd(payload: Record<string, unknown>): ArtifactView[] {
+  const top = runFrameArtifacts(payload)
+  if (top.length) return top
+  const data = payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+    ? payload.data as Record<string, unknown>
+    : undefined
+  return data ? runFrameArtifacts(data) : []
 }
 
 /** The engine's checklist facts off a run-end payload, unverified shapes dropped. */
@@ -2581,6 +2666,11 @@ export function useChatStream() {
   // never enters the event log, so a reconnect re-asks for it rather than
   // replaying it.
   const mcpStatus = ref<ForebrainMcpStatus | null>(null)
+  // What this conversation's observation socket is doing, for the page that
+  // draws its frames: a run's state and an answer still being written arrive
+  // on that socket, and a page cannot tell a run that stopped moving from a
+  // line that stopped carrying it.
+  const liveState = computed(() => liveStateFor(String(sessionId.value ?? '')))
   // The continuation the runtime is waiting to run once a usage limit resets.
   // Live state like mcpStatus: the observer's binding says what is pending
   // now, and only events after that binding change it. subagentAutoContinue
@@ -2625,6 +2715,13 @@ export function useChatStream() {
   // folds hundreds of subagent events into a long conversation would pay for
   // that proxy on each of them.
   const messages = shallowRef<ChatMessage[]>([])
+  /**
+   * Every file this conversation delivered, as the list endpoint knows them
+   * (plan 153). The delivery group reads it when a run's end frame is no
+   * longer there to read — a session older than its event log, or one whose
+   * frames this client never saw. A run's own frames win over it.
+   */
+  const sessionArtifacts = ref<ArtifactView[]>([])
 	const historyLoading = ref(false)
 	const historyError = ref<string | null>(null)
   const pendingActionsVersion = ref(0)
@@ -2692,6 +2789,18 @@ export function useChatStream() {
     state: RunProjectionState
   }>()
   let observerReady: Promise<void> | null = null
+  // Re-opening a dropped observation socket waits, and waits longer each time:
+  // a gateway that is down (restarting, wedged, unreachable) is not helped by
+  // a page that knocks every half second, and the wait is capped so a page that
+  // stayed up still notices when it comes back.
+  let observerReconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let observerReconnectDelay = OBSERVER_RECONNECT_MIN_MS
+  let observerReconnectFailures = 0
+  // The sockets this page closed itself: replacing one, leaving the
+  // conversation, or dropping a protocol this client cannot read. A close the
+  // page asked for is not a connection that dropped, so it is not retried and
+  // it says nothing about the line.
+  const closedOnPurpose = new WeakSet<WebSocket>()
   let runtimeTimer: ReturnType<typeof setInterval> | null = null
 
   // ---- subagent_* call cards -------------------------------------------
@@ -3028,6 +3137,11 @@ export function useChatStream() {
     }
     observerSessionId = ''
     observerReady = null
+    stopObserverReconnect()
+    // Nothing is watching this conversation once its stream is gone, and the
+    // page that opens it next binds a socket of its own: what this one said
+    // about the line does not survive it.
+    setLiveState(String(sessionId.value ?? ''), 'live')
     activeRunId = null
     stopRuntimeTimer()
     if (subagentClockTimer != null) {
@@ -3331,6 +3445,16 @@ export function useChatStream() {
       if (rememberObservedEvent(evt)) applyHeartbeatFiredEvent(evt, historical)
       return
     }
+    // A task execution's state is the engine's own fact, published as it
+    // moves and durable with the conversation. It is filed where the page
+    // showing the execution reads it — live, and again from the snapshot a
+    // page is handed when it binds, which is how a page opened mid-run draws
+    // the state the run is in without asking the task.
+    if (String(evt.type) === 'batch_execution') {
+      recordBatchExecution(evt)
+      rememberObservedEvent(evt)
+      return
+    }
     // A language-server recommendation is asked once, live: history replays
     // the answer's transcript line, and an event the observer already
     // accounted for is a reconnect, not a second offer.
@@ -3392,14 +3516,69 @@ export function useChatStream() {
     for (const partial of queued) applyStreamPartial(partial)
   }
 
+  /**
+   * Says what a conversation's observation socket is doing, for the pages that
+   * draw its frames: a page showing the last frame it received cannot tell a
+   * run that stopped moving from a line that stopped carrying it
+   * (lib/liveConnection keeps the answer per conversation).
+   */
+  function markObserverLive(target: string) {
+    observerReconnectFailures = 0
+    observerReconnectDelay = OBSERVER_RECONNECT_MIN_MS
+    setLiveState(target, 'live')
+  }
+
+  /**
+   * One dropped socket, one wait, one re-open: a reconnect replays the durable
+   * tail from the bind's cursor, so the conversation heals itself and all the
+   * wait decides is how soon. The wait doubles per failed attempt up to the
+   * cap, and the count is what turns "reconnecting" into "offline" for the
+   * pages that draw it.
+   */
+  function scheduleObserverReconnect(target: string) {
+    observerReconnectFailures += 1
+    setLiveState(
+      target,
+      observerReconnectFailures >= OBSERVER_OFFLINE_AFTER_FAILURES ? 'offline' : 'reconnecting',
+    )
+    if (observerReconnectTimer) clearTimeout(observerReconnectTimer)
+    const wait = observerReconnectDelay
+    observerReconnectDelay = Math.min(wait * 2, OBSERVER_RECONNECT_MAX_MS)
+    observerReconnectTimer = setTimeout(() => {
+      observerReconnectTimer = null
+      if (sessionObserver || observerSessionId !== target || sessionId.value !== target) return
+      observerReady = null
+      void startSessionObserver(target)
+    }, wait)
+  }
+
+  /** Drops a pending re-open: the conversation it belonged to is gone. */
+  function stopObserverReconnect() {
+    if (observerReconnectTimer) clearTimeout(observerReconnectTimer)
+    observerReconnectTimer = null
+  }
+
+  /**
+   * Closes the observation socket without it reading as a dropped line. The
+   * page closes its own socket whenever it replaces it (another conversation,
+   * a rebind after an answer): that is not a connection that failed, and it is
+   * neither retried nor reported.
+   */
+  function closeSessionObserver() {
+    const socket = sessionObserver
+    sessionObserver = null
+    if (!socket) return
+    closedOnPurpose.add(socket)
+    try { socket.close() } catch { /* noop */ }
+  }
+
   function startSessionObserver(sid: string): Promise<void> {
     const target = sid.trim()
     if (!target) return Promise.resolve()
 	if (typeof WebSocket === 'undefined') return Promise.resolve()
     if (sessionObserver && observerSessionId === target && observerReady) return observerReady
-    if (sessionObserver) {
-      try { sessionObserver.close() } catch { /* noop */ }
-    }
+    stopObserverReconnect()
+    closeSessionObserver()
     observerSessionId = target
     const ws = new WebSocket(buildBrowserForebrainGatewayChatWsUrl())
     sessionObserver = ws
@@ -3423,10 +3602,14 @@ export function useChatStream() {
       ws.onmessage = (message) => {
         try {
           const raw = JSON.parse(String(message.data)) as Record<string, unknown>
+          // A frame arrived: the line is carrying this conversation again.
+          // The two fatal branches below take it back — nothing more is coming.
+          markObserverLive(target)
 		  const hello = parseForebrainGatewayServerHello(raw)
 		  if (hello?.protocolVersion && hello.protocolVersion !== FOREBRAIN_GATEWAY_WS_PROTOCOL_VERSION) {
 			observerSessionId = ''
 			setError(`Gateway protocol mismatch (client ${FOREBRAIN_GATEWAY_WS_PROTOCOL_VERSION}, server ${hello.protocolVersion})`)
+			setLiveState(target, 'offline')
 			try { ws.close() } catch { /* noop */ }
 			ready()
 			return
@@ -3435,6 +3618,11 @@ export function useChatStream() {
           if (bound) {
             observerHighWater = bound.highWater ?? 0
             if (autoContinueSequence <= observerHighWater) applyBoundAutoContinues(bound)
+            // One bind of this conversation's observation socket: the first
+            // attach, or a reconnect. A page driving itself from the frames
+            // this socket carries counts them to tell the two apart — the
+            // first attach is already preceded by that page's own read.
+            noteSessionBound(target)
             ready()
             return
           }
@@ -3461,6 +3649,7 @@ export function useChatStream() {
 		  if (evt && !isSupportedForebrainRunEventSchema(evt.schemaVersion)) {
 			observerSessionId = ''
 			setError(`Unsupported session event schema ${evt.schemaVersion}; this client supports ${FOREBRAIN_RUN_EVENT_SCHEMA_VERSION}`)
+			setLiveState(target, 'offline')
 			try { ws.close() } catch { /* noop */ }
 			ready()
 			return
@@ -3474,14 +3663,10 @@ export function useChatStream() {
       ws.onclose = () => {
         ready()
         if (sessionObserver === ws) sessionObserver = null
-        if (observerSessionId === target && sessionId.value === target) {
-          setTimeout(() => {
-            if (!sessionObserver && observerSessionId === target && sessionId.value === target) {
-              observerReady = null
-              void startSessionObserver(target)
-            }
-          }, 500)
-        }
+        // A socket this page closed itself says nothing about the line.
+        if (closedOnPurpose.delete(ws)) return
+        if (observerSessionId !== target || sessionId.value !== target) return
+        scheduleObserverReconnect(target)
       }
     })
     return observerReady
@@ -3498,10 +3683,8 @@ export function useChatStream() {
   // the closed socket would have carried.
   function rebindSessionObserver(): void {
     const sid = String(sessionId.value ?? '').trim()
-    if (sessionObserver) {
-      try { sessionObserver.close() } catch { /* noop */ }
-    }
-    sessionObserver = null
+    stopObserverReconnect()
+    closeSessionObserver()
     observerSessionId = ''
     if (!sid) return
     void startSessionObserver(sid)
@@ -3520,10 +3703,13 @@ export function useChatStream() {
 	  bufferedSessionEvents.splice(0, bufferedSessionEvents.length)
 	  bufferedStreamPartials.splice(0, bufferedStreamPartials.length)
 	  historyLoadingSession = sid
-	  if (sessionObserver) {
-	    try { sessionObserver.close() } catch { /* noop */ }
-	    sessionObserver = null
-	  }
+	  stopObserverReconnect()
+	  closeSessionObserver()
+	  // The conversation being entered has not dropped anything: it is about to
+	  // bind for the first time, and what it says about the line starts over.
+	  observerReconnectDelay = OBSERVER_RECONNECT_MIN_MS
+	  observerReconnectFailures = 0
+	  setLiveState(sid, 'live')
 	  observerSessionId = ''
 	  observerHighWater = 0
 	  autoContinueSequence = 0
@@ -3533,6 +3719,7 @@ export function useChatStream() {
     const generation = historyGeneration
     if (!options.keepLastSession) persistLastSessionId(sid || null)
     messages.value = []
+    sessionArtifacts.value = []
 	historyLoading.value = Boolean(sid && options.loadMessages)
 	historyError.value = null
     plan.value = null
@@ -4578,6 +4765,10 @@ export function useChatStream() {
     assistantMessageId: string,
     planBlocksAccumulator: PlanBlock[],
     state: RunProjectionState,
+    // The send that opened this turn hears its run on its own request socket;
+    // a page that only watches hears the same events on the session observer.
+    // Only the former may claim the run as its own (see the turn_started case).
+    sendOwned = false,
   ) {
 	const eventID = String(evt.id ?? '').trim()
 	if (eventID && appliedEventIDs.has(eventID)) return
@@ -4857,8 +5048,13 @@ export function useChatStream() {
 		if (activeRunId) {
 		  eventProjectionByRun.set(activeRunId, { assistantMessageId, planBlocks: planBlocksAccumulator, state })
 		  // A resumed request socket never hears the legacy run_started op, so
-		  // this event is the only place its run's ownership is claimed.
-		  sendOwnedRunIds.add(activeRunId)
+		  // on that socket this event is the only place its run's ownership is
+		  // claimed. Everywhere else the same event is a page watching someone
+		  // else's turn — the task run page, a second tab, a conversation the
+		  // terminal is driving — and claiming it there would drop every fragment
+		  // the observer brings (fragmentSuppressedBySend), freezing the answer at
+		  // whatever snapshot the binding pushed.
+		  if (sendOwned) sendOwnedRunIds.add(activeRunId)
 		}
         contextSignals.value = { ...contextSignals.value, activeRunId: activeRunId ?? undefined }
         state.runStartedAt = evt.createdAt
@@ -5151,7 +5347,7 @@ export function useChatStream() {
         }
         updateMessageById(assistantMessageId, (message) => ({
           ...withSettledTurnText(message, finalText, evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
@@ -5162,7 +5358,7 @@ export function useChatStream() {
         const msg = String(payload.error ?? payload.message ?? 'Request failed')
         updateMessageById(assistantMessageId, (message) => ({
           ...withRunError(message, evt.runId, msg, parseProviderErrorDetail(payload.detail), evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
@@ -5241,7 +5437,7 @@ export function useChatStream() {
         state.completedRunId = String(evt.runId ?? activeRunId ?? '').trim() || state.completedRunId || null
         updateMessageById(assistantMessageId, (message) => ({
           ...withCancelledTurn(message, evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
@@ -5491,7 +5687,7 @@ export function useChatStream() {
             : payload
           updateMessageById(answerId(), (message) => ({
             ...withSettledTurnText(message, finalText, finishedAt),
-            ...runEndPatch(finishedAt, data.elapsedMs, eventState.runStartedAt, planProgressOfPayload(payload)),
+            ...runEndPatch(finishedAt, data.elapsedMs, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
           }))
           if (streamAbortController === myController) {
             isStreaming.value = false
@@ -5508,7 +5704,7 @@ export function useChatStream() {
           const finishedAt = String(payload.createdAt ?? payload.finishedAt ?? new Date().toISOString()).trim()
           updateMessageById(answerId(), (message) => ({
             ...withRunError(message, String(payload.runId ?? activeRunId ?? '').trim(), msg, parseProviderErrorDetail(payload.data), finishedAt),
-            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload)),
+            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
           }))
           if (streamAbortController === myController) {
             isStreaming.value = false
@@ -5575,7 +5771,7 @@ export function useChatStream() {
           const finishedAt = String(payload.createdAt ?? payload.finishedAt ?? new Date().toISOString()).trim()
           updateMessageById(answerId(), (message) => ({
             ...withCancelledTurn(message, finishedAt),
-            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload)),
+            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
           }))
           if (streamAbortController === myController) {
             isStreaming.value = false
@@ -5733,10 +5929,10 @@ export function useChatStream() {
 				  applyObservedEvent(runEvent)
 				} else {
 				  const projection = eventProjection(runEvent)
-				  handleRunEvent(runEvent, projection.assistantMessageId, projection.planBlocks, projection.state)
+				  handleRunEvent(runEvent, projection.assistantMessageId, projection.planBlocks, projection.state, true)
 				}
 			  } else if (!legacyAlreadyProjected(runEvent)) {
-				handleRunEvent(runEvent, assistantMessageId, planBlocksAccumulator, eventState)
+				handleRunEvent(runEvent, assistantMessageId, planBlocksAccumulator, eventState, true)
               } else {
                 rememberObservedEvent(runEvent)
               }
@@ -5940,6 +6136,36 @@ export function useChatStream() {
     cancel()
   }
 
+  /**
+   * The conversation's delivered files, read once per load (plan 153): this is
+   * the interface's own account of what a turn handed back, and the delivery
+   * group falls back on it when no end frame of that run is left to read. The
+   * list is oldest first, so a long conversation is read from its last page —
+   * the recent turns are the ones a reload still draws.
+   */
+  async function loadSessionArtifacts(target: string): Promise<void> {
+    const PAGE = 200
+    try {
+      const first = await forebrainApi.getSessionArtifacts(target, { page: 1, limit: PAGE })
+      let rows = Array.isArray(first.items) ? first.items : []
+      const total = Number(first.total) || rows.length
+      if (total > rows.length) {
+        const lastPage = Math.max(1, Math.ceil(total / PAGE))
+        const last = await forebrainApi.getSessionArtifacts(target, { page: lastPage, limit: PAGE })
+        rows = Array.isArray(last.items) ? last.items : rows
+      }
+      if (sessionId.value != null && sessionId.value !== target) return
+      sessionArtifacts.value = rows.flatMap((row) => {
+        const view = artifactView(target, row)
+        return view ? [view] : []
+      })
+    } catch {
+      // A conversation whose list cannot be read keeps its cards' own account
+      // of what was delivered.
+      if (sessionId.value == null || sessionId.value === target) sessionArtifacts.value = []
+    }
+  }
+
   async function loadMessages(sid: string): Promise<void> {
 	const target = sid.trim()
 	if (!target) return
@@ -6049,6 +6275,10 @@ export function useChatStream() {
 		applyObservedEvent(evt, true)
 	  }
 	  sessionEventCursor = Math.max(sessionEventCursor, Number(highWater ?? 0))
+	  // Read after the replay, and never awaited by it: a turn whose end frame
+	  // survived the replay needs nothing from this list, and one whose frame
+	  // is gone gets its delivery group from it.
+	  void loadSessionArtifacts(target)
 	  // Sessions created before the canonical event log retain their ledger
 	  // summary as an explicitly best-effort transcript. New sessions always
 	  // take the lossless event path above.
@@ -6190,6 +6420,7 @@ export function useChatStream() {
     isStreaming,
     error,
     messages,
+    sessionArtifacts,
     choose,
 	historyLoading,
 	historyError,
@@ -6211,6 +6442,7 @@ export function useChatStream() {
     takeReturnedNoticeCode,
     runtimeStatus,
     mcpStatus,
+    liveState,
     autoContinue,
     subagentAutoContinue,
     autoContinueForView,

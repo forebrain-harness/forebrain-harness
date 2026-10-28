@@ -594,3 +594,102 @@ func LoadWorkspaceBootstrapFilesWithOptions(home string, opts LoadOptions) ([]Bo
 	}
 	return LoadWorkspaceBootstrapFilesFromRoot(WorkspaceDir(home), opts)
 }
+
+// TestLegacySeedMatchesTheOldTemplate pins that the legacy seed bodies are
+// the pre-rewording template bodies verbatim (front matter stripped): the
+// migration compares files on disk against exactly these bytes, so a
+// paraphrased constant would silently migrate nothing.
+func TestLegacySeedMatchesTheOldTemplate(t *testing.T) {
+	if !strings.HasPrefix(legacyTemplateBodies["SOUL.md"][0], "# SOUL\n\nYou are an agentic coding assistant defined by this workspace.") {
+		t.Errorf("legacy SOUL seed is not the old template body: %q", legacyTemplateBodies["SOUL.md"][0])
+	}
+	if !strings.Contains(legacyTemplateBodies["AGENTS.md"][0], "evidence-backed engineering work") {
+		t.Errorf("legacy AGENTS seed is not the old template body: %q", legacyTemplateBodies["AGENTS.md"][0])
+	}
+}
+
+// TestEnsureWorkspaceReplacesAnUntouchedLegacySeed checks the migration: a
+// workspace file that still holds the old seed body verbatim follows the
+// reworded template; the user never edited it.
+func TestEnsureWorkspaceReplacesAnUntouchedLegacySeed(t *testing.T) {
+	home := t.TempDir()
+	ws := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "SOUL.md"), []byte(legacyTemplateBodies["SOUL.md"][0]), 0o644); err != nil {
+		t.Fatalf("write legacy seed: %v", err)
+	}
+	if err := EnsureWorkspace(home, EnsureOptions{}); err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(ws, "SOUL.md"))
+	if err != nil {
+		t.Fatalf("read SOUL.md: %v", err)
+	}
+	want, err := templateBody("SOUL.md")
+	if err != nil {
+		t.Fatalf("templateBody: %v", err)
+	}
+	if string(raw) != want {
+		t.Fatalf("untouched legacy seed not migrated:\n got: %q\nwant: %q", string(raw), want)
+	}
+	if strings.Contains(string(raw), "agentic coding assistant") {
+		t.Fatal("migrated SOUL.md still carries the coding wording")
+	}
+}
+
+// TestEnsureWorkspaceKeepsAnEditedSeed checks the other half of the
+// migration contract: one byte of the user's own writing keeps their file.
+func TestEnsureWorkspaceKeepsAnEditedSeed(t *testing.T) {
+	home := t.TempDir()
+	ws := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	edited := legacyTemplateBodies["AGENTS.md"][0] + "- A rule the user added on their own.\n"
+	if err := os.WriteFile(filepath.Join(ws, "AGENTS.md"), []byte(edited), 0o644); err != nil {
+		t.Fatalf("write edited seed: %v", err)
+	}
+	if err := EnsureWorkspace(home, EnsureOptions{}); err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(ws, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(raw) != edited {
+		t.Fatalf("edited seed was rewritten:\n got: %q\nwant: %q", string(raw), edited)
+	}
+}
+
+// TestEnsureWorkspaceRefusesASymlinkedSeed checks that a symlink standing in
+// for a workspace seed neither migrates nor touches the file it points to;
+// the replacement must not become a write-through-the-link.
+func TestEnsureWorkspaceRefusesASymlinkedSeed(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside.md")
+	if err := os.WriteFile(outside, []byte("outside content"), 0o644); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	ws := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "SOUL.md")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := EnsureWorkspaceRoot(ws, EnsureOptions{}); err != nil {
+		t.Fatalf("EnsureWorkspaceRoot: %v", err)
+	}
+	raw, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read outside: %v", err)
+	}
+	if string(raw) != "outside content" {
+		t.Fatalf("outside file was modified through the link: %q", string(raw))
+	}
+	if fi, err := os.Lstat(filepath.Join(ws, "SOUL.md")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("SOUL.md is no longer the user's symlink: %v %v", fi, err)
+	}
+}

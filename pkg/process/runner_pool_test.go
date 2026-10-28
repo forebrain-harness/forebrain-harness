@@ -350,6 +350,151 @@ func TestRunnerPoolProjectEditFreezesExistingSessions(t *testing.T) {
 	}
 }
 
+// TestRunnerPoolKeysEntriesBySessionType pins the generation rule for project
+// types: a session's entry is chosen by the type it froze at birth, so a type
+// edit builds a new entry for new sessions while the bound session keeps its
+// runner, and a fresh pool (a restart, whose in-memory bindings are gone)
+// still resolves the old session by its birth type.
+func TestRunnerPoolKeysEntriesBySessionType(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "typed", Root: "/tmp/pool-type", ProjectKey: "-tmp-pool-type", ProjectType: state.ProjectTypeOffice})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Deps.SessionStore.EnsureAt(ctx, "sess-type-a", "sess-type-a", state.SessionBirth{ProjectID: proj.ID}); err != nil {
+		t.Fatal(err)
+	}
+	bound := pool.RunnerForSession(ctx, "sess-type-a")
+	if bound == nil || bound == env.Runner {
+		t.Fatalf("project runner not built")
+	}
+	if got := bound.ProjectType(); got != state.ProjectTypeOffice {
+		t.Fatalf("session A's runner must be office, got %q", got)
+	}
+
+	// Change the project's type. A session born now is coding and resolves to
+	// a different runner; A keeps the office one.
+	coding := state.ProjectTypeCoding
+	if _, err := projects.Update(ctx, proj.ID, state.UpdateProjectInput{ProjectType: &coding}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Deps.SessionStore.EnsureAt(ctx, "sess-type-b", "sess-type-b", state.SessionBirth{ProjectID: proj.ID}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := pool.RunnerForSession(ctx, "sess-type-b")
+	if fresh == nil || fresh == env.Runner {
+		t.Fatalf("second project runner not built")
+	}
+	if fresh == bound {
+		t.Fatalf("a type edit must build a new entry for new sessions")
+	}
+	if got := fresh.ProjectType(); got != state.ProjectTypeCoding {
+		t.Fatalf("session B's runner must be coding, got %q", got)
+	}
+	if got := pool.RunnerForSession(ctx, "sess-type-a"); got != bound {
+		t.Fatalf("session A must keep its office entry after the edit")
+	}
+
+	// A restart drops the in-memory bindings; the reborn pool must still read
+	// A's frozen type from the session row, not the project's current one.
+	pool.Close()
+	restarted := NewRunnerPool(env, 4)
+	defer restarted.Close()
+	after := restarted.RunnerForSession(ctx, "sess-type-a")
+	if after == nil || after == env.Runner {
+		t.Fatalf("project runner not rebuilt after restart")
+	}
+	if got := after.ProjectType(); got != state.ProjectTypeOffice {
+		t.Fatalf("after a restart session A must still resolve by its birth type office, got %q", got)
+	}
+}
+
+// TestRunnerPoolBindsANewSessionToItsProjectsType pins the first turn of a new
+// conversation. A surface binds the conversation before anything is said, so
+// the session row does not exist yet and nothing is frozen: the binding must be
+// built with the project's current type, which is exactly the type the row will
+// freeze when the first turn creates it.
+func TestRunnerPoolBindsANewSessionToItsProjectsType(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+
+	office, err := projects.Create(ctx, state.CreateProjectInput{Name: "office", Root: "/tmp/pool-new-office", ProjectKey: "-tmp-pool-new-office", ProjectType: state.ProjectTypeOffice})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding, err := projects.Create(ctx, state.CreateProjectInput{Name: "coding", Root: "/tmp/pool-new-coding", ProjectKey: "-tmp-pool-new-coding", ProjectType: state.ProjectTypeCoding})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The conversation exists as an id only: its row arrives with the turn.
+	// BindSession is the call a surface makes before the first turn, and the
+	// binding it records is what BoundRunnerForSession reports back.
+	if err := pool.BindSession(ctx, "sess-new-office", office.ID); err != nil {
+		t.Fatal(err)
+	}
+	bound, ok := pool.BoundRunnerForSession(ctx, "sess-new-office")
+	if !ok || bound == nil || bound == env.Runner {
+		t.Fatalf("the new conversation has no project runner after binding")
+	}
+	if got := bound.ProjectType(); got != state.ProjectTypeOffice {
+		t.Fatalf("a new conversation in an office project must bind office, got %q", got)
+	}
+	// The row then freezes office, and the binding it was made with stands.
+	if err := env.Deps.SessionStore.EnsureAt(ctx, "sess-new-office", "sess-new-office", state.SessionBirth{ProjectID: office.ID}); err != nil {
+		t.Fatal(err)
+	}
+	after, ok := pool.BoundRunnerForSession(ctx, "sess-new-office")
+	if !ok || after != bound {
+		t.Fatalf("the birth of the row must not restart the binding")
+	}
+	if got := pool.RunnerForSession(ctx, "sess-new-office"); got != bound {
+		t.Fatalf("the first turn must run on the runner the binding built")
+	}
+	if got := after.ProjectType(); got != state.ProjectTypeOffice {
+		t.Fatalf("the new conversation must stay office after its row is born, got %q", got)
+	}
+
+	if err := pool.BindSession(ctx, "sess-new-coding", coding.ID); err != nil {
+		t.Fatal(err)
+	}
+	fresh, ok := pool.BoundRunnerForSession(ctx, "sess-new-coding")
+	if !ok || fresh == nil || fresh == env.Runner {
+		t.Fatalf("the new coding conversation has no project runner after binding")
+	}
+	if got := fresh.ProjectType(); got != state.ProjectTypeCoding {
+		t.Fatalf("a new conversation in a coding project must bind coding, got %q", got)
+	}
+	if err := env.Deps.SessionStore.EnsureAt(ctx, "sess-new-coding", "sess-new-coding", state.SessionBirth{ProjectID: coding.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pool.RunnerForSession(ctx, "sess-new-coding"); got != fresh {
+		t.Fatalf("the birth of a coding row must not restart the binding")
+	}
+
+	// The freeze still wins over the project's current type: editing the
+	// office project to coding leaves the conversation it already holds office.
+	toCoding := state.ProjectTypeCoding
+	if _, err := projects.Update(ctx, office.ID, state.UpdateProjectInput{ProjectType: &toCoding}); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewRunnerPool(env, 4)
+	defer restarted.Close()
+	reborn := restarted.RunnerForSession(ctx, "sess-new-office")
+	if reborn == nil || reborn == env.Runner {
+		t.Fatalf("project runner not rebuilt after restart")
+	}
+	if got := reborn.ProjectType(); got != state.ProjectTypeOffice {
+		t.Fatalf("the born conversation must keep office after the project became coding, got %q", got)
+	}
+}
+
 func TestRunnerPoolMemoryScopeReachesRunner(t *testing.T) {
 	ctx := context.Background()
 	env, projects, _ := newPoolTestEnv(t)

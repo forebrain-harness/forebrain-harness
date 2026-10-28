@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,28 +35,51 @@ func registerSessionAndMemoryTools(a ToolAdder, st *State, rt *AgentToolRuntime)
 			return err
 		}
 		projectKey := strings.TrimSpace(rt.ProjectKey)
-		t3, err := newEnterPlanModeTool(st, stateRoot, projectKey)
-		if err != nil {
-			return err
+		// Office conversations never offer enter_plan_mode: the user enters
+		// plan mode explicitly (hotkey, /plan, the web switch), and the model
+		// cannot put itself there. A batch conversation offers neither plan
+		// tool: its mode is fixed, nobody is there to approve a plan, and a
+		// task that stopped to ask would stop for good (owner 2026-10-26).
+		batch := rt.ProjectType == state.ProjectTypeBatch
+		office := rt.ProjectType == state.ProjectTypeOffice
+		var t3 *llm.Tool
+		if !office && !batch {
+			t3, err = newEnterPlanModeTool(st, stateRoot, projectKey)
+			if err != nil {
+				return err
+			}
 		}
-		t3b, err := newExitPlanModeTool(st, stateRoot, projectKey)
-		if err != nil {
-			return err
+		var t3b *llm.Tool
+		if !batch {
+			t3b, err = newExitPlanModeToolFor(st, stateRoot, projectKey, rt)
+			if err != nil {
+				return err
+			}
 		}
 		t12, err := NewIntermediateTool(st, stateRoot)
 		if err != nil {
 			return err
 		}
 		registerToolMeta(st, t1, "Use when tracking step-by-step execution progress: a structured checklist with per-item status, rewritten in full on every update (for the prose strategy doc write/edit the plan file with write_file/edit_file)", "session", event.ToolMeta{})
-		registerToolMeta(st, t3, "Use when switching the session into plan mode before implementing a non-trivial task", "session", event.ToolMeta{ReadOnly: true})
-		registerToolMeta(st, t3b, "Use when the plan is written and you're ready to leave plan mode for approval", "session", event.ToolMeta{ReadOnly: true})
+		if t3 != nil {
+			registerToolMeta(st, t3, "Use when switching the session into plan mode before implementing a non-trivial task", "session", event.ToolMeta{ReadOnly: true})
+		}
+		if t3b != nil {
+			registerToolMeta(st, t3b, "Use when the plan is written and you're ready to leave plan mode for approval", "session", event.ToolMeta{ReadOnly: true})
+		}
 		registerToolMeta(st, t12, "Use when investigating or reviewing: save, read, or clear session-scoped working notes to synthesize later", "session", event.ToolMeta{})
 		_ = st.Register(a, t1)
-		_ = st.Register(a, t3)
-		_ = st.Register(a, t3b)
+		if t3 != nil {
+			_ = st.Register(a, t3)
+		}
+		if t3b != nil {
+			_ = st.Register(a, t3b)
+		}
 		_ = st.Register(a, t12)
 	}
-	if rt != nil && memory.DedicatedToolsEnabled(rt.Cfg) {
+	// A batch task has no memory: it runs for a business system, not for the
+	// person whose preferences and history the memory tools serve.
+	if rt != nil && memory.DedicatedToolsEnabled(rt.Cfg) && !batchProject(rt) {
 		tools, err := newDedicatedMemoryTools(st, rt)
 		if err != nil {
 			return err
@@ -488,6 +514,87 @@ func newExitPlanModeTool(st *State, stateRoot string, projectKeys ...string) (*l
 	if len(projectKeys) > 0 {
 		projectKey = strings.TrimSpace(projectKeys[0])
 	}
+	return newExitPlanModeToolFor(st, stateRoot, projectKey, nil)
+}
+
+// actionKeptPlanOnly is the tool-package twin of turn.ActionKeptPlanOnly
+// (the turn package imports this one, so it cannot be used here): it reads
+// the same plan_only field out of an approved action's answer JSON.
+func actionKeptPlanOnly(act *state.Action) bool {
+	if act == nil || act.Status != state.ActionApproved {
+		return false
+	}
+	var answer struct {
+		PlanOnly bool `json:"plan_only"`
+	}
+	_ = json.Unmarshal([]byte(act.AnswerJSON), &answer)
+	return answer.PlanOnly
+}
+
+// planFileTitle returns the plan file's first "# " heading, falling back to
+// the file name when it has none.
+func planFileTitle(planFile, fallback string) string {
+	b, err := os.ReadFile(planFile)
+	if err != nil {
+		return fallback
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "# ") {
+			return strings.TrimSpace(strings.TrimPrefix(t, "# "))
+		}
+	}
+	return fallback
+}
+
+// registerKeptPlanArtifact registers the kept plan file as a conversation
+// artifact with origin 'plan' so the user can preview or download it. A
+// registration failure is a warning only — the plan is already on disk, so
+// the exit must not fail because the ledger could not be updated.
+func registerKeptPlanArtifact(ctx context.Context, rt *AgentToolRuntime, planFile string) (map[string]any, bool) {
+	if rt == nil || rt.Sess == nil {
+		return nil, false
+	}
+	info, err := os.Stat(planFile)
+	if err != nil || info.IsDir() {
+		return nil, false
+	}
+	sum, kind, mimeType, preview, err := hashAndClassifyFile(planFile)
+	if err != nil {
+		slog.Warn("kept-plan artifact classification failed", "path", planFile, "err", err)
+		return nil, false
+	}
+	name := filepath.Base(planFile)
+	row, err := rt.Sess.AddArtifact(ctx, state.Artifact{
+		SessionID:  ConversationSessionIDFromContext(ctx),
+		RunID:      RunIDFromContext(ctx),
+		ToolCallID: ToolUseIDFromContext(ctx),
+		Path:       planFile,
+		Name:       name,
+		Title:      planFileTitle(planFile, name),
+		Kind:       kind,
+		MIME:       mimeType,
+		Preview:    preview,
+		Size:       info.Size(),
+		MTimeNS:    info.ModTime().UnixNano(),
+		SHA256:     sum,
+		Origin:     state.ArtifactOriginPlan,
+	})
+	if err != nil {
+		slog.Warn("kept-plan artifact registration failed", "path", planFile, "err", err)
+		return nil, false
+	}
+	return map[string]any{
+		"id": row.ID, "name": row.Name, "kind": row.Kind, "preview": row.Preview, "size": row.Size,
+	}, true
+}
+
+// newExitPlanModeToolFor is newExitPlanModeTool for a concrete runtime. A nil
+// rt keeps the historical coding behaviour; an office runtime refuses the
+// call outside plan mode (the user enters plan mode explicitly, the wrapper
+// only offers the tool while they are there) and honours a "keep the plan
+// only" approval by leaving plan mode without asking the model to carry the
+// plan out.
+func newExitPlanModeToolFor(st *State, stateRoot, projectKey string, rt *AgentToolRuntime) (*llm.Tool, error) {
 	return llm.NewTool(
 		"exit_plan_mode",
 		exitPlanModeDescription,
@@ -498,6 +605,26 @@ func newExitPlanModeTool(st *State, stateRoot string, projectKeys ...string) (*l
 			sid, err := sessionKey(ctx)
 			if err != nil {
 				return "", err
+			}
+			// Office guard, before any approval is requested: office only
+			// offers exit_plan_mode while the user has the conversation in
+			// plan mode, so a call in agent mode is the model hallucinating
+			// the tool. A missing state file reads as agent mode and refuses
+			// the same way.
+			//
+			// An approved replay is exempt: it is the engine finishing the
+			// decision the user just made, not the model raising the gate on
+			// its own. The gateway switches the conversation out of plan mode
+			// as part of honouring the approval (turn.PlanModeForAction, in
+			// resumeGatewayRun) and only then re-runs this call, so reading
+			// the mode here would turn an approved exit into a failed call.
+			// Skipping the guard for the replay does not widen the rule: a
+			// call the model makes in agent mode still carries no approved
+			// action id and is refused exactly as before.
+			if rt != nil && rt.ProjectType == state.ProjectTypeOffice && strings.TrimSpace(ApprovedActionIDFromContext(ctx)) == "" {
+				if cur, _ := state.Get(stateRoot, sid); cur.Mode != state.ModePlan {
+					return "", fmt.Errorf("exit_plan_mode is only available while the user has this conversation in plan mode")
+				}
 			}
 			hook := st.ActionHook()
 			if hook == nil {
@@ -528,19 +655,51 @@ func newExitPlanModeTool(st *State, stateRoot string, projectKeys ...string) (*l
 			if strings.TrimSpace(string(restored)) == "" {
 				restored = state.ModeAgent
 			}
+			planSID := PlanSessionIDFromContext(ctx)
+			planDir := state.PlanDirForSession(stateRoot, projectKey, planSID)
+			planFile := state.PlanPathForSession(stateRoot, projectKey, planSID)
+			if rt != nil && rt.Actions != nil {
+				actionID := strings.TrimSpace(id)
+				if actionID == "" {
+					actionID = ApprovedActionIDFromContext(ctx)
+				}
+				planOnly := false
+				if actionID != "" {
+					if act, err := rt.Actions.Get(ctx, actionID); err == nil {
+						planOnly = actionKeptPlanOnly(act)
+					}
+				}
+				if planOnly {
+					// The plan itself is the deliverable: leave plan mode the
+					// way an approved exit does, but record that nothing
+					// should nudge the model into implementing the plan.
+					if _, err := state.KeepPlanOnly(stateRoot, sid, restored); err != nil {
+						return "", err
+					}
+					st.SetRuntimeSessionMode(ctx, sid, string(restored), planDir)
+					result := map[string]any{
+						"mode":      string(restored),
+						"plan_file": planFile,
+						"plan_only": true,
+						"message":   "The user kept this plan as the deliverable and does not want it carried out now. Do not start any of its tasks or create any other file. Reply in one or two sentences: where the plan is and that you can carry it out whenever they ask.",
+					}
+					if art, ok := registerKeptPlanArtifact(ctx, rt, planFile); ok {
+						result["artifact"] = art
+					}
+					b, _ := json.Marshal(result)
+					return string(b), nil
+				}
+			}
 			// Switch records the exit so the next enter_plan_mode detects a
 			// re-entry — but only when this actually left plan mode, so calling
 			// exit_plan_mode outside plan mode no longer fakes one.
 			if _, err := state.Switch(stateRoot, sid, restored); err != nil {
 				return "", err
 			}
-			planSID := PlanSessionIDFromContext(ctx)
-			planDir := state.PlanDirForSession(stateRoot, projectKey, planSID)
 			// Keep the plan directory writable in the restored mode so the agent
 			// can close the loop by recording the implementation status in the
 			// plan file once the work is done.
 			st.SetRuntimeSessionMode(ctx, sid, string(restored), planDir)
-			planFile := state.PlanPathForSession(stateRoot, projectKey, planSID)
 			// Keep the LLM-facing payload minimal: only the restored mode, the
 			// plan file reference, and a human-readable confirmation message.
 			b, _ := json.Marshal(map[string]any{

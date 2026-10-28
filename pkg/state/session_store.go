@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -246,18 +247,32 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	// path runs this first, which is what keeps writes inside the boundary.
 	// Source is the same kind of fact, so it too is written at birth only.
 	// ParentSessionID is as well: the conversation a session belongs to is
-	// whoever created it, never a later writer.
+	// whoever created it, never a later writer. ProjectType is too: a session
+	// freezes its project's type at birth (the parent's frozen type when the
+	// parent belongs to a project, else the birth project's), so a later type
+	// edit only reaches sessions born after it. A batch session is born with
+	// memory disabled: it never generates memories (owner 2026-10-26).
 	res, err := q.ExecContext(ctx,
-		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id)
-		VALUES(?, ?, ?, ?, ?, ?,
+		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id, project_type)
+		VALUES(?, ?, ?, ?,
+			CASE WHEN COALESCE(
+				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
+				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
+				'coding') = 'batch' THEN 'disabled' ELSE ? END, ?,
 			COALESCE(NULLIF((SELECT cwd FROM fb_sessions WHERE id=? AND project_id IS NOT NULL), ''), ?),
 			?, ?, ?, NULLIF(?, ''),
-			COALESCE((SELECT project_id FROM fb_sessions WHERE id=?), NULLIF(?, ''), NULLIF(?, '')))
+			COALESCE((SELECT project_id FROM fb_sessions WHERE id=?), NULLIF(?, ''), NULLIF(?, '')),
+			COALESCE(
+				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
+				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
+				'coding'))
 		ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
 		WHERE fb_sessions.agent_id=excluded.agent_id`,
-		id, title, now, now, mode, source,
+		id, title, now, now,
+		parentID, birthProject, defaultProject, mode, source,
 		cwdParent, cwd,
 		branch, s.AgentID(), strings.TrimSpace(birth.Source), parentID,
+		parentID, birthProject, defaultProject,
 		parentID, birthProject, defaultProject)
 	if err != nil {
 		return err
@@ -840,9 +855,12 @@ const conversationsMaxPageSize = 100
 // conversationHoldsAMessage), optionally narrowed to the ones whose title
 // matches the drawer's search box and to one project. A scheduled task's fire is reached from
 // its task's run record and a subagent's conversation from its own view, so
-// neither is listed.
+// neither is listed. Neither is a batch project's execution: each one is an
+// execution of a task, reached from that project's task page and its execution
+// history, so the drawer leaves them out even when it asks for one project's
+// rows (plan 153).
 func (s *SessionStore) conversationsWhere(q, projectID string) (string, []any) {
-	where := `agent_id = ? AND source IN (?, ?) AND (project_id IS NOT NULL OR source = ?) AND ` + conversationHoldsAMessage
+	where := `agent_id = ? AND source IN (?, ?) AND (project_id IS NOT NULL OR source = ?) AND ` + conversationHoldsAMessage + ` AND project_type <> 'batch'`
 	args := []any{s.AgentID(), SessionSourceConversation, SessionSourceWorkshop, SessionSourceWorkshop}
 	if projectID = strings.TrimSpace(projectID); projectID != "" {
 		where += ` AND project_id = ?`
@@ -864,7 +882,8 @@ func (s *SessionStore) conversationsWhere(q, projectID string) (string, []any) {
 // endpoint follows. The near-twin without the legacy exclusion is
 // ListSessionsRecentPaged, the terminal /resume picker's list; whether the
 // terminal should drop the legacy rows too is undecided, so the two methods
-// stay separate. A non-empty projectID narrows the list to that project's
+// stay separate — that one also lists the batch executions the drawer must
+// not show. A non-empty projectID narrows the list to that project's
 // conversations, the drawer's project filter.
 func (s *SessionStore) ListConversationsPage(ctx context.Context, q, projectID string, limit, offset int) ([]SessionSummary, int, error) {
 	if s == nil || s.db == nil {
@@ -957,6 +976,46 @@ func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID str
 	return out, rows.Err()
 }
 
+// ProjectChannelSessions returns a project's conversations that a project
+// channel opened, newest first. WrapProjectChannelSession stamps
+// <channel prefix>-<hex project id>-<peer id> onto the peer's own session id,
+// so the project's own stamp finds them all without knowing which channel
+// wrote each one; the caller splits the id back apart with
+// UnwrapProjectChannelSession.
+func (s *SessionStore) ProjectChannelSessions(ctx context.Context, projectID string, limit int) ([]SessionSummary, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return []SessionSummary{}, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	pattern := "%-" + hex.EncodeToString([]byte(projectID)) + "-%"
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
+		 FROM fb_sessions
+		 WHERE agent_id = ? AND project_id = ? AND id LIKE ?
+		 ORDER BY updated_at DESC, id
+		 LIMIT ?`,
+		s.AgentID(), projectID, pattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SessionSummary{}
+	for rows.Next() {
+		var item SessionSummary
+		if err := rows.Scan(&item.ID, &item.Title, &item.UpdatedAt, &item.Source, &item.ProjectID); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // ProjectSessionsQuery is one project conversation table's request: its search
 // box, and which time its rows are ordered by.
 type ProjectSessionsQuery struct {
@@ -984,6 +1043,9 @@ type ProjectSessionRow struct {
 	// conversation: the visible user and assistant rows. See
 	// projectSessionMessageCount for what that excludes.
 	MessageCount int
+	// ProjectType is the type the conversation froze at birth — never the
+	// project's current type.
+	ProjectType string
 }
 
 // projectSessionMessageCount is the conversation table's "messages" column: the
@@ -1036,7 +1098,8 @@ func (s *SessionStore) projectSessionsPageSQL(projectID string, opts ProjectSess
 	where, args := s.projectSessionsWhere(projectID, opts.Search)
 	query := `SELECT fb_sessions.id, fb_sessions.title, fb_sessions.created_at, fb_sessions.updated_at,
 	        COALESCE(model_state.model, ''),
-	        ` + projectSessionMessageCount + `
+	        ` + projectSessionMessageCount + `,
+	        fb_sessions.project_type
 	 FROM fb_sessions
 	 LEFT JOIN fb_session_model_state model_state ON model_state.session_id = fb_sessions.id
 	 WHERE ` + where + `
@@ -1078,9 +1141,10 @@ func (s *SessionStore) ListSessionsForProjectPage(ctx context.Context, projectID
 	out := []ProjectSessionRow{}
 	for rows.Next() {
 		var item ProjectSessionRow
-		if err := rows.Scan(&item.ID, &item.Title, &item.CreatedAt, &item.UpdatedAt, &item.Model, &item.MessageCount); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.CreatedAt, &item.UpdatedAt, &item.Model, &item.MessageCount, &item.ProjectType); err != nil {
 			return nil, 0, err
 		}
+		item.ProjectType = NormalizeProjectType(item.ProjectType)
 		out = append(out, item)
 	}
 	return out, total, rows.Err()
@@ -2955,6 +3019,20 @@ type SessionModelSelection struct {
 	Effort   string
 }
 
+// sessionModelStampSQL is the updated_at value every write to
+// fb_session_model_state uses: the wall clock in milliseconds, lifted to one
+// past the table's current maximum when a write would otherwise share a
+// millisecond with an existing row. "Most recently used"
+// (LatestSessionModelSelection) is an order, so the value it orders by must be
+// total: without this, two writes inside one millisecond — or a save and a
+// touch — leave the newest row to the storage engine's pick. The lift runs
+// inside the writing statement, so SQLite's write lock makes it atomic across
+// processes sharing the file. fb_session_model_state is STRICT, WITHOUT ROWID
+// (there is no rowid to break ties with), and it holds one small row per
+// session, so the scan behind MAX is cheaper than an index would be to
+// maintain.
+const sessionModelStampSQL = `MAX(?, COALESCE((SELECT MAX(updated_at) FROM fb_session_model_state), 0) + 1)`
+
 // SaveSessionModelSelection stores sel as the session's model choice,
 // last-write-wins. It reports stored=false, without error, when the session
 // row does not exist: model state belongs to a conversation, and there is
@@ -2980,13 +3058,13 @@ func (s *SessionStore) SaveSessionModelSelection(
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, `+sessionModelStampSQL+`
 		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
-		// Millisecond precision: updated_at also orders "most recently
-		// used", and TouchSessionModelSelection refreshes it — two writes
-		// inside one second must still order by the later one.
+		// Milliseconds for the wall clock, lifted past the table's maximum
+		// when needed: updated_at orders "most recently used", so two writes
+		// inside one millisecond must still order by the later one.
 		sessionID, sel.Provider, sel.Model, sel.Effort, time.Now().UnixMilli(), sessionID, s.AgentID(),
 	)
 	if err != nil {
@@ -3160,7 +3238,7 @@ func (s *SessionStore) CopySessionModelSelection(
 	// error.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT ?, src.provider, src.model, src.effort, ?
+		SELECT ?, src.provider, src.model, src.effort, `+sessionModelStampSQL+`
 		FROM fb_session_model_state src
 	WHERE src.session_id=? AND EXISTS (
 		SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
@@ -3183,9 +3261,15 @@ func (s *SessionStore) CopySessionModelSelection(
 // primary agent's own conversation and workshop sessions — the "most
 // recently used" model a new session should start on (D6/D7/D8: by agent,
 // across projects and surfaces; scheduled fires, channel conversations and
-// subagent workers hold no row in this set and never count). Reading one row
-// by the model-state index stays millisecond-scale as sessions grow; it never
-// touches fb_messages.
+// subagent workers hold no row in this set and never count). Every write
+// stamps updated_at strictly increasing, so the newest row is the one written
+// last. This table carries no index beyond its
+// primary key, so the read costs one scan of a table holding one small row
+// per session; it never touches fb_messages. Rows with the same updated_at —
+// written by a build that stamped in seconds, copied in by a migration, or
+// seeded by hand — are ordered by session id: same-value rows pick by session
+// id, deterministically — a stable pick, not a claim about which write came
+// first.
 func (s *SessionStore) LatestSessionModelSelection(ctx context.Context) (SessionModelSelection, bool, error) {
 	if s == nil || s.db == nil {
 		return SessionModelSelection{}, false, nil
@@ -3195,7 +3279,7 @@ func (s *SessionStore) LatestSessionModelSelection(ctx context.Context) (Session
 		`SELECT p.provider, p.model, p.effort
 		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
 		WHERE s.agent_id = ? AND s.source IN (?, ?)
-		ORDER BY p.updated_at DESC LIMIT 1`,
+		ORDER BY p.updated_at DESC, p.session_id DESC LIMIT 1`,
 		s.AgentID(), SessionSourceConversation, SessionSourceWorkshop,
 	).Scan(&sel.Provider, &sel.Model, &sel.Effort)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3221,7 +3305,7 @@ func (s *SessionStore) TouchSessionModelSelection(ctx context.Context, sessionID
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE fb_session_model_state SET updated_at = ?
+		`UPDATE fb_session_model_state SET updated_at = `+sessionModelStampSQL+`
 		WHERE session_id = ?
 		  AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = ? AND source IN (?, ?))`,
 		time.Now().UnixMilli(), sessionID, s.AgentID(), SessionSourceConversation, SessionSourceWorkshop,

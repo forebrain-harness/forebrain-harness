@@ -498,7 +498,17 @@ func applyRuntimeConfigToRequest(req CommandRequest, runtimeCfg RuntimeConfig, c
 	for _, path := range runtimeCfg.Filesystem.DenyWrite {
 		req.DeniedWritablePaths = appendUniquePath(req.DeniedWritablePaths, path)
 	}
-	for _, path := range runtimeCfg.Filesystem.AllowRead {
+	// A request that resolved its own read set keeps exactly that set, for the
+	// same reason as the write set above: the configured read set is "/" by
+	// default, so a request promising "this directory and the shared skills"
+	// cannot express it by adding paths. Denials and the platform runtime
+	// defaults are unaffected - the first still narrows, the second is the OS,
+	// not the user's data.
+	readRoots := runtimeCfg.Filesystem.AllowRead
+	if req.ExclusiveReadablePaths {
+		readRoots = nil
+	}
+	for _, path := range readRoots {
 		req.AdditionalReadablePaths = appendUniquePath(req.AdditionalReadablePaths, path)
 	}
 	for _, path := range runtimeCfg.Filesystem.DenyRead {

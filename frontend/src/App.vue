@@ -218,13 +218,17 @@
       </header>
       <main class="forebrain-main">
         <router-view v-slot="{ Component }">
-          <!-- Keyed on path + tenant, not the full URL: a session change is a
-               query change and must not rebuild the conversation view. No
-               <transition> here: an out-in leave around async route
+          <!-- Keyed on path + the tenant epoch, not the full URL: a session
+               change is a query change and must not rebuild the conversation
+               view. The epoch counts tenant *switches*, not the tenant's
+               resolution — the shell is first drawn before the gateway has
+               said which tenant it is on, and rebuilding then would mount
+               every page a second time, re-reading everything it had just
+               read. No <transition> here: an out-in leave around async route
                components never completes on a cold load with the bare
                sign-in branch above, leaving the view mounted in memory but
                absent from the DOM. -->
-          <component :is="Component" :key="`${route.path}::${activePrimaryId}`" />
+          <component :is="Component" :key="`${route.path}::${tenantEpoch}`" />
         </router-view>
       </main>
     </div>
@@ -343,6 +347,21 @@ const {
 } = usePrimaryAgents()
 const { railTheme, toggleRailTheme } = useAppearance()
 const { collapsed: railCollapsed, collapse: collapseRail, expand: expandRail } = useRailCollapse()
+
+/**
+ * Which tenant the view on screen was built for, counted the only way that
+ * matters to it: a switch. The first resolution of the tenant is not one — the
+ * shell is drawn before the gateway has answered `/agents/primary`, so an
+ * empty previous id means the page is learning the tenant it was always on,
+ * and what it has already loaded belongs to that tenant. Bumping the epoch
+ * there would tear down every page that just mounted and have it read
+ * everything again.
+ */
+const tenantEpoch = ref(0)
+watch(activePrimaryId, (next, prev) => {
+  if (!prev || !next || next === prev) return
+  tenantEpoch.value += 1
+})
 
 const appVersion = __FOREBRAIN_VERSION__
 const languageMenuOpen = ref(false)

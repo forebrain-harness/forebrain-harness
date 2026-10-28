@@ -2869,3 +2869,49 @@ func TestTokenEstimateOptionsMapsDownload(t *testing.T) {
 		t.Fatalf("no home and no config = %+v, want the zero options", te)
 	}
 }
+
+// TestSystemPromptFollowsProjectType pins the static main-agent system prompt
+// of each conversation type. The coding branch is the byte-for-byte prompt
+// creative coding has always had; office and batch replace it with their own
+// constants. The three must stay apart: a coding byte that moves breaks the
+// prefix cache of every existing coding conversation.
+func TestSystemPromptFollowsProjectType(t *testing.T) {
+	newRunner := func(projectType string) *Runner {
+		cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {
+				LLMProviders: []appcfg.AgentLLMProviderConfig{{
+					Provider: "openai",
+					Model:    "qwen-test",
+					APIKey:   "test-key",
+					BaseURL:  "http://127.0.0.1:9/v1",
+				}},
+			},
+		}}}
+		r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: cfg, ProjectType: projectType}}
+		if err := r.Load(); err != nil {
+			t.Fatalf("Load(%s): %v", projectType, err)
+		}
+		return r
+	}
+	coding := newRunner(state.ProjectTypeCoding).MainAgentDescription()
+	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agentIntermediateToolPromptSuffix
+	if coding != wantCoding {
+		t.Errorf("coding system prompt changed:\n got: %q\nwant: %q", coding, wantCoding)
+	}
+	office := newRunner(state.ProjectTypeOffice).MainAgentDescription()
+	wantOffice := "Forebrain Harness agent" + agent.OfficeWorkPrompt + agent.OfficeNotesPromptSuffix
+	if office != wantOffice {
+		t.Errorf("office system prompt:\n got: %q\nwant: %q", office, wantOffice)
+	}
+	batch := newRunner(state.ProjectTypeBatch).MainAgentDescription()
+	wantBatch := "Forebrain Harness agent" + agent.BatchTaskPrompt + agent.OfficeNotesPromptSuffix
+	if batch != wantBatch {
+		t.Errorf("batch system prompt:\n got: %q\nwant: %q", batch, wantBatch)
+	}
+	if strings.Contains(office, "# Scope discipline") || strings.Contains(batch, "# Scope discipline") {
+		t.Error("office or batch system prompt still contains the coding scope discipline")
+	}
+	if strings.Contains(office, agentIntermediateToolPromptSuffix) || strings.Contains(batch, agentIntermediateToolPromptSuffix) {
+		t.Error("office or batch system prompt still contains the coding working-notes suffix")
+	}
+}

@@ -228,6 +228,10 @@ type Renderer struct {
 	// planMode is whether the conversation is in Plan mode; the footer says so
 	// for as long as it lasts.
 	planMode bool
+	// batchReadOnly is whether the conversation on screen is a batch
+	// execution, which the terminal shows read-only (plan 152): the footer
+	// says so, and Plan mode never applies there.
+	batchReadOnly bool
 	// composerTokens is the footer's token budget, keyed by the view it
 	// belongs to: "" is the conversation's own, a roster key is that
 	// subagent's (each subagent's view answers "how much context is left for
@@ -3434,6 +3438,23 @@ func (r *Renderer) SetPlanMode(on bool) {
 // planModeFooterLabel is the footer's Plan-mode segment, which also says how
 // to leave it.
 const planModeFooterLabel = "plan mode (shift+tab to exit)"
+
+// batchReadOnlyFooterLabel is the footer's segment in a batch project: nothing
+// typed here runs, so the footer names what the terminal is instead of what
+// the next turn will be.
+const batchReadOnlyFooterLabel = "batch · read-only"
+
+// SetBatchReadOnly says whether the conversation on screen is a batch
+// execution. The footer answers with the read-only segment for as long as it
+// lasts, in place of the Plan-mode one.
+func (r *Renderer) SetBatchReadOnly(on bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.batchReadOnly = on
+}
 
 // SetComposerTokenStats updates the live token figures shown on the right side
 // of the composer footer for one view ("" for the conversation's own, a roster

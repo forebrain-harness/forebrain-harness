@@ -510,8 +510,10 @@ func importOneSession(ctx context.Context, opts *Options, unit sessionUnit, pars
 		return outcome, 0
 	}
 	// The project row resolves on the shared connection, outside the insert
-	// transaction: FindOrCreateByRoot is idempotent per (agent, root).
-	project, _, err := state.NewProjectStore(opts.DB, opts.AgentID).FindOrCreateByRoot(ctx, root, state.CreateProjectInput{ResourceAccess: true})
+	// transaction: FindOrCreateByRoot is idempotent per (agent, root). The type
+	// is explicit: imported conversations are old coding sessions, not a
+	// folder the launch default should judge from its Git markers.
+	project, _, err := state.NewProjectStore(opts.DB, opts.AgentID).FindOrCreateByRoot(ctx, root, state.CreateProjectInput{ResourceAccess: true, ProjectType: state.ProjectTypeCoding})
 	if err != nil {
 		outcome.Status = StatusFailed
 		outcome.Reason = err.Error()
@@ -662,7 +664,9 @@ WHERE id=? AND agent_id=? AND origin='migrated'`,
 // touched; updated_at and source stay as they are so history order and the
 // subagent-visibility contract (§4.4) are unchanged.
 func rebindMigrated(ctx context.Context, opts *Options, targetID string, parsed *parsedSession, outcome SessionOutcome) (SessionOutcome, int) {
-	project, _, err := state.NewProjectStore(opts.DB, opts.AgentID).FindOrCreateByRoot(ctx, importProjectRoot(opts, parsed.Cwd), state.CreateProjectInput{ResourceAccess: true})
+	// The type is explicit coding here too: a rebinding heals an old coding
+	// conversation, never registers a newly opened folder.
+	project, _, err := state.NewProjectStore(opts.DB, opts.AgentID).FindOrCreateByRoot(ctx, importProjectRoot(opts, parsed.Cwd), state.CreateProjectInput{ResourceAccess: true, ProjectType: state.ProjectTypeCoding})
 	if err != nil {
 		outcome.Status = StatusFailed
 		outcome.Reason = err.Error()

@@ -76,6 +76,19 @@
             <component :is="docIcon(entry.doc)" aria-hidden="true" />
             <span class="subagent-drawer-tab-label" v-tip:bottom.trunc="entry.doc.label">{{ entry.doc.label }}</span>
           </button>
+          <!-- A delivered file's tab also offers the file itself (plan 153 A8):
+               one icon button each for download and close, never a sentence. -->
+          <a
+            v-if="entry.doc.artifact?.downloadUrl"
+            class="subagent-drawer-tab-close"
+            :href="entry.doc.artifact.downloadUrl"
+            download
+            :aria-label="t('chat.artifactDownload', { name: entry.doc.label })"
+            v-tip:bottom="t('chat.artifactDownloadPlain')"
+            :data-testid="`doc-tab-download-${entry.key}`"
+          >
+            <Download aria-hidden="true" />
+          </a>
           <button
             type="button"
             class="subagent-drawer-tab-close"
@@ -186,12 +199,13 @@
  * same way: a column on a wide screen, an overlay on a narrow one.
  */
 import { computed, onUnmounted, ref, watch, type Component } from 'vue'
-import { CheckCircle2, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
+import { CheckCircle2, Download, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
 import { usePanelWidth } from '@/composables/usePanelWidth'
 import { formatRuntimeDuration, type SubagentTranscript } from '@/composables/useChatStream'
 import type { DocTab } from '@/composables/useDocTabs'
 import type { PlanTab } from '@/composables/useSessionPlans'
 import { subagentPhase, subagentStatusLabel, subagentTabLabel } from '@/lib/subagentStatus'
+import { artifactKindIcon } from '@/lib/artifacts'
 import { useI18n } from '@/locales'
 
 const props = withDefaults(defineProps<{
@@ -278,10 +292,12 @@ const orderedTabs = computed(() => {
   })
 })
 
-/** A document tab's glyph says what it holds (prototype tabIcon). */
+/** A document tab's glyph says what it holds (prototype tabIcon); a delivered
+ *  file says what kind of file it is. */
 function docIcon(tab: DocTab): Component {
   if (tab.kind === 'command') return Terminal
   if (tab.kind === 'output') return ScrollText
+  if (tab.kind === 'artifact' && tab.artifact) return artifactKindIcon(tab.artifact.kind)
   return TextIcon
 }
 
@@ -501,6 +517,12 @@ onUnmounted(() => {
 .subagent-drawer-tab-close:hover {
   background: var(--forebrain-bg-alt);
   color: var(--forebrain-text);
+}
+
+/* A delivered file's tab offers the file itself in the same clothes as the
+   close button (plan 153): one icon, no underline. */
+a.subagent-drawer-tab-close {
+  text-decoration: none;
 }
 
 .subagent-drawer-tab-close svg {

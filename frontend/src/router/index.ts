@@ -80,7 +80,28 @@ const router = createRouter({
         { path: 'skills', name: 'project-skills', component: () => import('@/components/project/ProjectSkills.vue'), meta: { title: () => t('routes.projectsTitle') } },
         { path: 'cron', name: 'project-cron', component: () => import('@/components/project/ProjectCron.vue'), meta: { title: () => t('routes.projectsTitle') } },
         { path: 'channels', name: 'project-channels', component: () => import('@/components/project/ProjectChannels.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        // A batch project's work is its tasks, not its conversations (plan 153).
+        // The full path is /projects/:id/tasks; plan 151's notification links
+        // land one level down, on /projects/:id/tasks/:taskId.
+        { path: 'tasks', name: 'project-tasks', component: () => import('@/components/project/ProjectTasks.vue'), meta: { title: () => t('routes.projectsTitle') } },
       ],
+    },
+    // One task of a batch project: its execution history, and one execution
+    // read as the conversation it was. Both name themselves in the shell's top
+    // bar (任务 › 任务名), so they sit outside the project space's tab row. The
+    // task path is what plan 151's notification links point at — it may not
+    // change without the gateway's template changing with it.
+    {
+      path: '/projects/:id/tasks/:taskId',
+      name: 'project-task',
+      component: () => import('@/views/TaskDetailView.vue'),
+      meta: { title: () => t('tasks.runTitle') },
+    },
+    {
+      path: '/projects/:id/tasks/:taskId/runs/:seq',
+      name: 'project-task-run',
+      component: () => import('@/views/TaskRunView.vue'),
+      meta: { title: () => t('tasks.runTitle') },
     },
     // Scheduled tasks and channels belong to a project now; the old
     // agent-level pages send the visitor to the project list.

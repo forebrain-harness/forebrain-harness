@@ -516,3 +516,35 @@ func TestInputQueueDeliveryReachesDeliveredList(t *testing.T) {
 		t.Fatalf("delivered list must drain: %#v", again)
 	}
 }
+
+func TestClosedQueueTakesNothing(t *testing.T) {
+	q := NewInputQueue()
+	if q.Closed() {
+		t.Fatal("a fresh queue is closed")
+	}
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	if !q.Steer(Input{Text: "before"}) {
+		t.Fatal("an open queue refused a steer")
+	}
+	q.Close()
+	if !q.Closed() {
+		t.Fatal("Close did not close the queue")
+	}
+	if q.Steer(Input{Text: "steer after close"}) {
+		t.Fatal("a closed queue accepted a steer")
+	}
+	if q.FollowUp(Input{Text: "follow-up after close"}) {
+		t.Fatal("a closed queue accepted a follow-up")
+	}
+	// Nothing landed anywhere: a batch turn has no rejected lane and no
+	// follow-up lane to deliver from later.
+	if p := q.Preview(); len(p.Steers) != 1 || len(p.Rejected) != 0 || len(p.FollowUp) != 0 {
+		t.Fatalf("lanes after close = %d steers, %d rejected, %d follow-ups; want the one steer taken before the close only", len(p.Steers), len(p.Rejected), len(p.FollowUp))
+	}
+	// Closing is idempotent.
+	q.Close()
+	if p := q.Preview(); len(p.Steers) != 1 || len(p.Rejected) != 0 || len(p.FollowUp) != 0 {
+		t.Fatalf("a second Close changed the lanes: %d/%d/%d", len(p.Steers), len(p.Rejected), len(p.FollowUp))
+	}
+}

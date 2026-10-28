@@ -13,6 +13,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -45,8 +46,91 @@ type Project struct {
 	// LastAttachDir is the directory, relative to Root, the "save to" dialog
 	// last uploaded into. Empty is the root itself.
 	LastAttachDir string
-	CreatedAt     int64
-	UpdatedAt     int64
+	// ProjectType is the project's current kind (office | coding | batch).
+	// A conversation's kind is its own frozen fb_sessions.project_type, not
+	// this field.
+	ProjectType string
+	// TaskNotify is where a batch project's end-of-execution notifications go
+	// when the task did not come in through a channel. Empty means quiet.
+	TaskNotify []TaskNotifyTarget
+	CreatedAt  int64
+	UpdatedAt  int64
+}
+
+// TaskNotifyTarget is one place a batch project's task-end notification is
+// sent: a channel kind (a key of channel.ChannelKinds) and the channel's own
+// recipient id in whatever shape that channel's outbound delivery reads (a
+// Feishu chat id, a Telegram chat id, a webhook session). pkg/state cannot
+// import pkg/channel, so the kind is only trimmed and deduplicated here; the
+// gateway refuses an unknown kind before it is stored.
+type TaskNotifyTarget struct {
+	Channel string `json:"channel"`
+	Target  string `json:"target"`
+}
+
+// maxTaskNotifyTargets bounds a project's notification list: a task's end is a
+// one-line notice, and nobody needs it fanned out to more places than this.
+const maxTaskNotifyTargets = 20
+
+// normalizeTaskNotifyTargets trims, drops half-filled entries, removes
+// duplicates (the same channel and target kept once, first occurrence wins)
+// and caps the list. A nil input stays nil, so "not set" and "set to empty"
+// stay distinguishable to the caller that asks for it.
+func normalizeTaskNotifyTargets(in []TaskNotifyTarget) []TaskNotifyTarget {
+	if in == nil {
+		return nil
+	}
+	out := make([]TaskNotifyTarget, 0, len(in))
+	seen := make(map[TaskNotifyTarget]bool, len(in))
+	for _, target := range in {
+		channel := strings.ToLower(strings.TrimSpace(target.Channel))
+		recipient := strings.TrimSpace(target.Target)
+		if channel == "" || recipient == "" {
+			continue
+		}
+		key := TaskNotifyTarget{Channel: channel, Target: recipient}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+		if len(out) == maxTaskNotifyTargets {
+			break
+		}
+	}
+	return out
+}
+
+// encodeTaskNotify renders the target list as the JSON column stores it. The
+// empty list is what a project with no targets holds, never "null".
+func encodeTaskNotify(targets []TaskNotifyTarget) string {
+	if targets == nil {
+		return "[]"
+	}
+	raw, err := json.Marshal(targets)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
+}
+
+// decodeTaskNotify reads the stored JSON column back. A column that cannot be
+// read as a target list reads as "notifies nobody": a damaged setting must not
+// keep a project from loading.
+func decodeTaskNotify(raw string) []TaskNotifyTarget {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return []TaskNotifyTarget{}
+	}
+	var targets []TaskNotifyTarget
+	if err := json.Unmarshal([]byte(raw), &targets); err != nil {
+		return []TaskNotifyTarget{}
+	}
+	normalized := normalizeTaskNotifyTargets(targets)
+	if normalized == nil {
+		return []TaskNotifyTarget{}
+	}
+	return normalized
 }
 
 // ErrProjectNotFound reports a missing or cross-tenant project id.
@@ -60,6 +144,88 @@ var ErrProjectRootTaken = errors.New("project root already registered")
 // ErrProjectBusy reports that a project cannot be deleted while one of its
 // conversations has a run in flight.
 var ErrProjectBusy = errors.New("project has a run in flight")
+
+// The three kinds of project. A project's type decides how its conversations
+// run: office and batch get their own system prompts and deliverables, batch
+// runs unattended behind its OS task sandbox, and coding is everything forebrain did
+// before project types existed. A conversation freezes its project's type when
+// it is born (fb_sessions.project_type), so changing a project's type only
+// reaches the conversations started after the change.
+const (
+	ProjectTypeOffice = "office"
+	ProjectTypeCoding = "coding"
+	ProjectTypeBatch  = "batch"
+)
+
+// ErrProjectTypeInvalid reports a project type outside the three kinds.
+var ErrProjectTypeInvalid = errors.New("project type must be office, coding or batch")
+
+// NormalizeProjectType maps a stored or empty value onto one of the three
+// kinds; anything unknown reads as coding, the behaviour every conversation had
+// before types existed.
+func NormalizeProjectType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case ProjectTypeOffice:
+		return ProjectTypeOffice
+	case ProjectTypeBatch:
+		return ProjectTypeBatch
+	default:
+		return ProjectTypeCoding
+	}
+}
+
+// ParseProjectType is NormalizeProjectType for input a caller supplied: empty
+// is coding, an unknown value is refused instead of silently becoming coding.
+func ParseProjectType(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ProjectTypeCoding, nil
+	case ProjectTypeOffice, ProjectTypeCoding, ProjectTypeBatch:
+		return strings.ToLower(strings.TrimSpace(raw)), nil
+	default:
+		return "", ErrProjectTypeInvalid
+	}
+}
+
+// hasProjectGitMarker reports whether dir carries a Git marker: the .git
+// directory of a normal repository, or the .git file of a linked worktree or
+// submodule. The rule mirrors memory/assembly (memory/scope.go,
+// assembly/rules.go), repeated here because pkg/state cannot import them.
+func hasProjectGitMarker(dir string) bool {
+	st, err := os.Stat(filepath.Join(dir, ".git"))
+	if err != nil {
+		return false
+	}
+	return st.IsDir() || st.Mode().IsRegular()
+}
+
+// DefaultProjectTypeForRoot applies the launch default for a folder that has
+// no project yet: coding anywhere in a Git worktree, office elsewhere. The
+// marker rules mirror memory/assembly (.git directory or worktree file), so
+// subdirectories, empty repositories and linked worktrees need no git binary.
+func DefaultProjectTypeForRoot(root string) (string, error) {
+	canonical, err := canonicalProjectRoot(root)
+	if err != nil {
+		return "", err
+	}
+	for dir := canonical; ; dir = filepath.Dir(dir) {
+		if hasProjectGitMarker(dir) {
+			return ProjectTypeCoding, nil
+		}
+		if dir == filepath.Dir(dir) {
+			return ProjectTypeOffice, nil
+		}
+	}
+}
+
+// ResolveProjectTypeForRoot honors an explicit project type first. Only an
+// omitted type uses DefaultProjectTypeForRoot.
+func ResolveProjectTypeForRoot(raw, root string) (string, error) {
+	if strings.TrimSpace(raw) != "" {
+		return ParseProjectType(raw)
+	}
+	return DefaultProjectTypeForRoot(root)
+}
 
 // NormalizeProjectMemoryScope canonicalizes a stored scope value.
 func NormalizeProjectMemoryScope(scope string) string {
@@ -236,20 +402,23 @@ func (s *ProjectStore) AgentID() string {
 	return s.agentID
 }
 
-const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, created_at, updated_at`
+const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, project_type, created_at, updated_at, task_notify_json`
 
-const projectColumnCount = 14
+const projectColumnCount = 16
 
 func scanProject(scanner interface{ Scan(...any) error }) (Project, error) {
 	var p Project
 	var resourceAccess int
 	var pinned int
-	if err := scanner.Scan(&p.ID, &p.AgentID, &p.Name, &p.Icon, &p.Description, &p.Instructions, &p.Root, &p.ProjectKey, &p.MemoryScope, &resourceAccess, &pinned, &p.LastAttachDir, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	var taskNotify string
+	if err := scanner.Scan(&p.ID, &p.AgentID, &p.Name, &p.Icon, &p.Description, &p.Instructions, &p.Root, &p.ProjectKey, &p.MemoryScope, &resourceAccess, &pinned, &p.LastAttachDir, &p.ProjectType, &p.CreatedAt, &p.UpdatedAt, &taskNotify); err != nil {
 		return Project{}, err
 	}
 	p.ResourceAccess = resourceAccess != 0
 	p.Pinned = pinned != 0
 	p.MemoryScope = NormalizeProjectMemoryScope(p.MemoryScope)
+	p.ProjectType = NormalizeProjectType(p.ProjectType)
+	p.TaskNotify = decodeTaskNotify(taskNotify)
 	return p, nil
 }
 
@@ -263,6 +432,10 @@ type CreateProjectInput struct {
 	ProjectKey     string
 	MemoryScope    string
 	ResourceAccess bool
+	// ProjectType is the kind to create with. Empty uses the launch default
+	// for the root (Git worktree → coding, elsewhere → office), so the two
+	// surfaces opening an unregistered folder land on the same kind.
+	ProjectType string
 }
 
 // Create inserts a project for this agent. A root the agent has already
@@ -283,6 +456,10 @@ func (s *ProjectStore) Create(ctx context.Context, in CreateProjectInput) (Proje
 	if strings.TrimSpace(s.agentID) == "" {
 		return Project{}, fmt.Errorf("project store has no agent")
 	}
+	projectType, err := ResolveProjectTypeForRoot(in.ProjectType, root)
+	if err != nil {
+		return Project{}, err
+	}
 	now := time.Now().Unix()
 	p := Project{
 		ID:             "prj_" + NewID("project"),
@@ -296,12 +473,13 @@ func (s *ProjectStore) Create(ctx context.Context, in CreateProjectInput) (Proje
 		MemoryScope:    NormalizeProjectMemoryScope(in.MemoryScope),
 		ResourceAccess: in.ResourceAccess,
 		Pinned:         false,
+		ProjectType:    projectType,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.LastAttachDir, p.CreatedAt, p.UpdatedAt)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.LastAttachDir, p.ProjectType, p.CreatedAt, p.UpdatedAt, encodeTaskNotify(p.TaskNotify))
 	if err != nil {
 		if isUniqueConstraint(err) {
 			if existing, ok, getErr := s.GetByRoot(ctx, root); getErr == nil && ok {
@@ -349,6 +527,10 @@ func (s *ProjectStore) FindOrCreateByRoot(ctx context.Context, root string, defa
 	if key == "" {
 		key = ProjectKeyForRoot(canonical)
 	}
+	projectType, err := ResolveProjectTypeForRoot(defaults.ProjectType, canonical)
+	if err != nil {
+		return Project{}, false, err
+	}
 	now := time.Now().Unix()
 	fresh := Project{
 		ID:             "prj_" + NewID("project"),
@@ -362,13 +544,14 @@ func (s *ProjectStore) FindOrCreateByRoot(ctx context.Context, root string, defa
 		MemoryScope:    NormalizeProjectMemoryScope(defaults.MemoryScope),
 		ResourceAccess: defaults.ResourceAccess,
 		Pinned:         false,
+		ProjectType:    projectType,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(agent_id, root) DO NOTHING`,
-		fresh.ID, fresh.AgentID, fresh.Name, fresh.Icon, fresh.Description, fresh.Instructions, fresh.Root, fresh.ProjectKey, fresh.MemoryScope, boolInt(fresh.ResourceAccess), boolInt(fresh.Pinned), fresh.LastAttachDir, fresh.CreatedAt, fresh.UpdatedAt); err != nil {
+		fresh.ID, fresh.AgentID, fresh.Name, fresh.Icon, fresh.Description, fresh.Instructions, fresh.Root, fresh.ProjectKey, fresh.MemoryScope, boolInt(fresh.ResourceAccess), boolInt(fresh.Pinned), fresh.LastAttachDir, fresh.ProjectType, fresh.CreatedAt, fresh.UpdatedAt, encodeTaskNotify(fresh.TaskNotify)); err != nil {
 		return Project{}, false, err
 	}
 	stored, ok, err := s.GetByRoot(ctx, canonical)
@@ -427,6 +610,15 @@ type UpdateProjectInput struct {
 	Instructions   *string
 	MemoryScope    *string
 	ResourceAccess *bool
+	// ProjectType changes the project's kind. It reaches only the
+	// conversations started after the change; a session's own kind stays the
+	// one it froze at birth.
+	ProjectType *string
+	// TaskNotify replaces the batch project's end-of-execution notification
+	// targets. The list is trimmed, deduplicated and capped here; whether a
+	// channel kind exists is the gateway's call, because pkg/state cannot see
+	// the channel registry.
+	TaskNotify *[]TaskNotifyTarget
 }
 
 // Update applies the set fields and touches updated_at.
@@ -456,12 +648,25 @@ func (s *ProjectStore) Update(ctx context.Context, id string, in UpdateProjectIn
 	if in.MemoryScope != nil {
 		current.MemoryScope = NormalizeProjectMemoryScope(*in.MemoryScope)
 	}
+	if in.ProjectType != nil {
+		projectType, err := ParseProjectType(*in.ProjectType)
+		if err != nil {
+			return Project{}, err
+		}
+		current.ProjectType = projectType
+	}
 	if in.ResourceAccess != nil {
 		current.ResourceAccess = *in.ResourceAccess
 	}
+	if in.TaskNotify != nil {
+		current.TaskNotify = normalizeTaskNotifyTargets(*in.TaskNotify)
+		if current.TaskNotify == nil {
+			current.TaskNotify = []TaskNotifyTarget{}
+		}
+	}
 	current.UpdatedAt = time.Now().Unix()
-	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET name=?, icon=?, description=?, instructions=?, memory_scope=?, resource_access=?, updated_at=? WHERE id=? AND agent_id=?`,
-		current.Name, current.Icon, current.Description, current.Instructions, current.MemoryScope, boolInt(current.ResourceAccess), current.UpdatedAt, strings.TrimSpace(id), s.agentID)
+	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET name=?, icon=?, description=?, instructions=?, memory_scope=?, resource_access=?, project_type=?, task_notify_json=?, updated_at=? WHERE id=? AND agent_id=?`,
+		current.Name, current.Icon, current.Description, current.Instructions, current.MemoryScope, boolInt(current.ResourceAccess), current.ProjectType, encodeTaskNotify(current.TaskNotify), current.UpdatedAt, strings.TrimSpace(id), s.agentID)
 	if err != nil {
 		return Project{}, err
 	}
@@ -723,6 +928,40 @@ func (s *ProjectStore) BindSession(ctx context.Context, sessionID, projectID str
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE fb_sessions SET project_id=NULLIF(?,'') WHERE id=? AND agent_id=?`, projectID, sessionID, s.agentID)
 	return err
+}
+
+// SessionProjectType returns the project type a conversation was born with.
+// A session this agent does not own, or one that does not exist, reads as
+// coding — the behaviour of every conversation before types existed.
+func (s *ProjectStore) SessionProjectType(ctx context.Context, sessionID string) (string, error) {
+	projectType, found, err := s.SessionProjectTypeKnown(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return ProjectTypeCoding, nil
+	}
+	return projectType, nil
+}
+
+// SessionProjectTypeKnown is SessionProjectType with the fact that matters to
+// a caller that may run before the conversation exists: whether fb_sessions
+// has the row at all. A conversation with no row has frozen nothing yet — it
+// freezes its project's current type when it is born — while an existing row
+// is the frozen type and must never be re-read from the project.
+func (s *ProjectStore) SessionProjectTypeKnown(ctx context.Context, sessionID string) (projectType string, found bool, err error) {
+	if s == nil || s.db == nil {
+		return "", false, nil
+	}
+	var rowType string
+	err = s.db.QueryRowContext(ctx, `SELECT project_type FROM fb_sessions WHERE id=? AND agent_id=?`, strings.TrimSpace(sessionID), s.agentID).Scan(&rowType)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return NormalizeProjectType(rowType), true, nil
 }
 
 // ProjectForSession returns the project a session is bound to, if any.

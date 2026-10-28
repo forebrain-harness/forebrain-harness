@@ -12,7 +12,36 @@
                both centred in the pane with the quick starts under them
                (prototype .nc) — nothing above the composer to clip what the
                project pill's chooser opens. -->
-          <div v-if="isFreshChat" data-testid="chat-greeting">
+          <!-- A batch project takes no conversation (plan 153): the engine never
+               shows a batch session the asking tools, so the greeting, the
+               composer and the quick starts give way to one line and the way to
+               the task page. -->
+          <div v-if="batchGate" class="w-full max-w-[760px]" data-testid="chat-batch-gate">
+            <h2 class="chat-greeting">{{ batchTarget?.name }}</h2>
+            <div class="mt-4 grid gap-3 rounded-[10px] border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-[18px] py-4">
+              <p class="m-0 text-[13px] leading-[1.6] text-[var(--forebrain-text-2)]">{{ t('chat.batchGateBody') }}</p>
+              <div class="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs"
+                  data-testid="chat-batch-new-task"
+                  @click="openBatchTasks(true)"
+                >
+                  <ListChecks class="size-3.5" aria-hidden="true" />{{ t('chat.batchNewTask') }}
+                </Button>
+                <Button
+                  type="button"
+                  class="forebrain-btn forebrain-btn-ghost h-auto text-xs"
+                  data-testid="chat-batch-view-tasks"
+                  @click="openBatchTasks(false)"
+                >
+                  {{ t('chat.batchViewTasks') }}
+                </Button>
+              </div>
+              <span class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('chat.batchGateHint') }}</span>
+            </div>
+          </div>
+          <div v-else-if="isFreshChat" data-testid="chat-greeting">
             <h2 class="chat-greeting">{{ t('chat.greeting') }}</h2>
           </div>
           <!-- The thread is the conversation's own: a subagent's work is read
@@ -30,6 +59,23 @@
             <div v-if="createdLine" class="sys-line" data-testid="created-project-line">
               <FolderPlus class="size-4" aria-hidden="true" />
               {{ t('chat.createdProject', { name: createdLine.name }) }}
+            </div>
+            <!-- An old link into a batch execution still opens it, read-only,
+                 and says where its own page is (plan 153 B6). The task's id is
+                 not in this conversation's facts, so the link lands on the
+                 project's task list — which is where the task is found. -->
+            <div
+              v-if="batchSession && !batchTask && sessionProject"
+              class="sys-line"
+              data-testid="batch-old-link"
+            >
+              <Lock class="size-4" aria-hidden="true" />
+              {{ t('chat.batchReadonlyMode') }}
+              <RouterLink
+                :to="`/projects/${encodeURIComponent(sessionProject.id)}/tasks`"
+                class="font-medium text-[var(--forebrain-brand-1)] hover:underline"
+                data-testid="batch-open-task-page"
+              >{{ t('chat.batchOpenTaskPage') }}</RouterLink>
             </div>
             <Alert v-if="historyError" variant="destructive" class="mb-4">
               <CircleAlert class="size-4" />
@@ -317,6 +363,18 @@
                           :total-lines="msg.turnDiffs.reduce((s, d) => s + (d.added ?? 0) + (d.deleted ?? 0), 0)"
                         />
                       </div>
+                      <!-- 本轮交付物 (plan 153 A7, owner 2026-10-27): every file
+                           the turn handed back — presented, kept as a plan, or
+                           listed by the run's end frame — in one group after
+                           the turn's last words. It is not a step of the
+                           activity line: the line ends with the prose, and only
+                           the run's own worked line may follow. -->
+                      <ArtifactList
+                        v-if="deliverablesOf(msg).length"
+                        :artifacts="deliverablesOf(msg)"
+                        :label="deliverableLabelOf(msg)"
+                        @preview="openDeliverable"
+                      />
                       <!-- The run's closing line, off the line's end but in
                            its column (prototype .actline .a > .worked). -->
                       <RunWorkedLine class="ml-8" :line="workedLineOf(msg, t)" />
@@ -368,7 +426,7 @@
         </div>
 
 
-        <div class="chat-composer z-10 shrink-0 bg-[var(--forebrain-surface)]">
+        <div v-show="!batchGate" class="chat-composer z-10 shrink-0 bg-[var(--forebrain-surface)]">
           <!-- The run's own state, where the terminal draws it: above the
                queue preview and the composer, gone the moment the run ends. -->
           <RunStatusLine
@@ -380,6 +438,24 @@
             :plan="runLine.plan"
             :tail="runLine.tail"
           />
+          <!-- A batch execution takes the composer's place with one read-only
+               line (plan 153 A11): the input's own width and corner, the lock,
+               what this view is, and the acts this run's state allows. -->
+          <div v-if="batchReadonly" class="task-readonly-bar" data-testid="batch-readonly-bar">
+            <Lock class="size-3.5 shrink-0" aria-hidden="true" />
+            <span>{{ t('chat.batchReadonlyMode') }}</span>
+            <span class="grow" />
+            <span>{{ t('chat.batchSandboxNote') }}</span>
+            <span v-if="batchModelLabel" class="mono">{{ batchModelLabel }}</span>
+            <BatchRunActions
+              v-if="batchTask"
+              :status="String(batchTask.status)"
+              @stop="emit('batch-stop')"
+              @continue="emit('batch-continue')"
+              @rerun="emit('batch-rerun')"
+            />
+          </div>
+          <template v-else>
           <!-- The plan approval takes the input's place while the planner
                waits (plan 138, as the terminal's overlay takes its composer):
                no card in the thread, the plan and its verdicts here, the input
@@ -389,6 +465,7 @@
             v-if="exitPlanPending"
             :action="exitPlanPending"
             :session-id="sessionId ?? ''"
+            :session-type="sessionInfo?.projectType ?? ''"
             :on-open-plan="openPlanTab"
           />
           <!-- The provider's own root is a bare slot, so the hide that keeps
@@ -499,7 +576,7 @@
           </div>
           <!-- The quick starts, under the composer, exactly as the new-chat
                page's prototype draws them. -->
-          <div v-if="isFreshChat" class="starters" data-testid="chat-starters">
+          <div v-if="isFreshChat && !batchGate" class="starters" data-testid="chat-starters">
             <button
               v-for="starter in starters"
               :key="starter.action"
@@ -512,6 +589,7 @@
               {{ t(starter.label) }}
             </button>
           </div>
+          </template>
         </div>
       </main>
       <!-- The subagents this conversation dispatched, beside it: one tab each,
@@ -574,6 +652,12 @@
             :key="tab.id"
             :text="tab.text"
           />
+          <ArtifactPreview
+            v-else-if="tab.kind === 'artifact' && tab.artifact"
+            v-show="tab.id === docActive && !planActive"
+            :key="tab.id"
+            :artifact="tab.artifact"
+          />
         </template>
         <SubagentTab
           v-for="record in drawerRecords"
@@ -590,6 +674,7 @@
           :auto-continue="autoContinueForView(record.agentId)"
           :notice="subagentNotices[record.agentId] ?? null"
           :context="subagentContextTarget === record.agentId ? { data: subagentContextDebug, loading: subagentContextLoading } : null"
+          :readonly="batchReadonly"
           @submit="(m) => handleSubagentSubmit(record.agentId, m)"
           @fold-change="(v) => updateAgentFold(record.agentId, v)"
           @open-agent="openSubagentTab"
@@ -614,6 +699,7 @@
         :scope="workbenchScope"
         :root-path="sessionProject?.root ?? ''"
         :requested-tab="workbench.requested.value"
+        :hide-changes="notACodeConversation"
         @requested-tab-shown="workbench.consumed()"
         @close="workbench.close()"
         @view="viewRoster"
@@ -672,7 +758,7 @@
 <script setup lang="ts">
 import { h, ref, computed, nextTick, onMounted, onUnmounted, watch, withDirectives } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { CheckCircle, CircleAlert, Bot, ImageOff, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
+import { CheckCircle, CircleAlert, Bot, ImageOff, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy, ListChecks, Lock, ChevronRight } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import ProjectPill from '@/components/chat/ProjectPill.vue'
@@ -681,6 +767,7 @@ import RewindDialog from '@/components/chat/RewindDialog.vue'
 import TrustDialog from '@/components/chat/TrustDialog.vue'
 import ProjectServersConsentDialog from '@/components/chat/ProjectServersConsentDialog.vue'
 import SessionHeartbeat from '@/components/chat/SessionHeartbeat.vue'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import SubagentDrawer from '@/components/chat/SubagentDrawer.vue'
 import SubagentTab from '@/components/chat/SubagentTab.vue'
@@ -696,6 +783,7 @@ import ToolDocTitle from '@/components/chat/ToolDocTitle.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import PlanApprovalDock from '@/components/chat/PlanApprovalDock.vue'
+import BatchRunActions from '@/components/chat/BatchRunActions.vue'
 import McpNotice from '@/components/chat/McpNotice.vue'
 import ComposerPlusMenu from '@/components/chat/ComposerPlusMenu.vue'
 import ModeChip from '@/components/chat/ModeChip.vue'
@@ -739,6 +827,8 @@ import ChatWorkbench from '@/components/chat/ChatWorkbench.vue'
 import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
 import ViewModeChip from '@/components/chat/ViewModeChip.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
+import ArtifactList from '@/components/chat/ArtifactList.vue'
+import ArtifactPreview from '@/components/chat/ArtifactPreview.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
@@ -748,6 +838,8 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
+import { artifactsOfPresentFiles, planArtifactOf, turnDeliverables, type ArtifactView } from '@/lib/artifacts'
+import { docTabFor } from '@/composables/useDocTabs'
 import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, timelineBlockKey, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { providePendingActions } from '@/composables/providePendingActions'
@@ -759,6 +851,7 @@ import { useViewMode } from '@/composables/useViewMode'
 import { type PlanTab, type SessionPlan } from '@/composables/useSessionPlans'
 import { planProgress, planTitle } from '@/lib/planProgress'
 import { formatClock } from '@/lib/time'
+import { taskStatusLabel, taskStatusVariant, type BatchRunFacts } from '@/lib/tasks'
 import PlanDoc from '@/components/chat/PlanDoc.vue'
 import { useLastSession } from '@/composables/useLastSession'
 import { useTopbar } from '@/composables/useTopbar'
@@ -839,30 +932,97 @@ const busyNoticeText = computed(() => busyNotice.value
 // The factories run inside the shell's render, so the row tracks this
 // conversation's own state — title, project, heartbeat, roster — without the
 // page re-registering anything.
+
+/**
+ * A batch execution read here rather than in the conversation page (plan 153):
+ * the run page mounts this view with the facts its own page loaded, and the
+ * view answers with the acts it may not perform itself — the page owns the
+ * gateway calls, this view owns the reading.
+ */
+const props = withDefaults(defineProps<{
+  taskRun?: BatchRunFacts | null
+}>(), { taskRun: null })
+
+const emit = defineEmits<{
+  (e: 'batch-stop'): void
+  (e: 'batch-continue'): void
+  (e: 'batch-rerun'): void
+}>()
+
+/** The execution this page was opened on, when it was opened that way. */
+const batchTask = computed(() => props.taskRun)
+/** Whether this conversation runs as a batch execution at all: the session's
+ *  own frozen type, which is what an old link into one still carries. */
+const batchSession = computed(() => String(sessionInfo.value?.projectType ?? '').trim().toLowerCase() === 'batch')
+/**
+ * A batch conversation is read-only here (owner 2026-10-27): no composer, no
+ * queue, no mode switch — the engine never gives a batch session the asking
+ * tools, and nobody joins an unattended run. The read-only bar takes the
+ * composer's place, and the top bar offers only what a viewer may do.
+ */
+const batchReadonly = computed(() => Boolean(batchTask.value) || batchSession.value)
+/** Office creative work and batch executions do not change the project's own
+ *  files (owner 2026-10-27): their workbench offers no 变更文件 tab. */
+const notACodeConversation = computed(() => {
+  const type = String(sessionInfo.value?.projectType ?? '').trim().toLowerCase()
+  return type === 'office' || type === 'batch'
+})
+const batchModelLabel = computed(() => String(batchTask.value?.model ?? '').trim())
+
 setTopbar({
-  // A new conversation names nothing yet: its top bar starts empty, and the
-  // workbench waits for the first message (owner 2026-10-18).
-  leading: () => (isFreshChat.value ? [] : [
-    withDirectives(h('span', {
-      class: 'forebrain-topbar-title',
-      'data-testid': 'chat-session-title',
-    }, sessionTitle.value), [[tip, sessionTitle.value, 'bottom', { trunc: true }]]),
-  // A project's conversation says whose it is and leads back to that
-  // project's space, where its sessions are listed.
-  ...(sessionProject.value ? [(() => {
-    const project = sessionProject.value!
-    return withDirectives(h(RouterLink, {
-      to: `/projects/${encodeURIComponent(project.id)}/overview`,
-      class: 'chat-project-tag',
-      'data-testid': 'chat-project-tag',
-    }, { default: () => [h(FolderGit2, { 'aria-hidden': 'true' }), project.name] }), [[tip, t('chat.openProjectSpace'), 'bottom']])
-  })()] : []),
-  ]),
+  // A batch execution is read, never joined (plan 153 A11): the row names the
+  // task it belongs to and which run of it this is, carries the run's state
+  // beside that, and offers only the acts this state allows. An old link into
+  // a batch conversation has no task to name, so it keeps the ordinary title.
+  leading: () => (batchTask.value
+    ? (() => {
+      const run = batchTask.value!
+      return [
+        h('div', { class: 'forebrain-topbar-crumb' }, [
+          h(RouterLink, {
+            to: `/projects/${encodeURIComponent(run.projectId)}/tasks/${encodeURIComponent(run.taskId)}`,
+            class: 'font-medium text-[var(--forebrain-brand-1)] hover:underline',
+            'data-testid': 'batch-run-crumb-task',
+          }, { default: () => run.title }),
+          h(ChevronRight, { class: 'size-3.5 text-[var(--forebrain-muted-text)]', 'aria-hidden': 'true' }),
+          withDirectives(h('span', {
+            class: 'forebrain-topbar-name font-mono',
+            'data-testid': 'batch-run-crumb-name',
+          }, t('tasks.runHead', { n: run.seq })), [[tip, t('tasks.runHead', { n: run.seq }), 'bottom', { trunc: true }]]),
+        ]),
+        h(BadgeComponent, {
+          variant: taskStatusVariant(String(run.status)),
+          'data-testid': 'batch-run-status',
+        }, { default: () => taskStatusLabel(String(run.status)) }),
+        h(BatchRunActions, {
+          status: String(run.status),
+          onStop: () => emit('batch-stop'),
+          onContinue: () => emit('batch-continue'),
+          onRerun: () => emit('batch-rerun'),
+        }),
+      ]
+    })()
+    : (isFreshChat.value ? [] : [
+      withDirectives(h('span', {
+        class: 'forebrain-topbar-title',
+        'data-testid': 'chat-session-title',
+      }, sessionTitle.value), [[tip, sessionTitle.value, 'bottom', { trunc: true }]]),
+    // A project's conversation says whose it is and leads back to that
+    // project's space, where its sessions are listed.
+    ...(sessionProject.value ? [(() => {
+      const project = sessionProject.value!
+      return withDirectives(h(RouterLink, {
+        to: `/projects/${encodeURIComponent(project.id)}/overview`,
+        class: 'chat-project-tag',
+        'data-testid': 'chat-project-tag',
+      }, { default: () => [h(FolderGit2, { 'aria-hidden': 'true' }), project.name] }), [[tip, t('chat.openProjectSpace'), 'bottom']])
+    })()] : []),
+    ])),
   trailing: () => [
     // The heartbeat is this conversation's, so its control sits in the
     // conversation's row; without a conversation there is nothing for it to
-    // ask again.
-    ...(sessionId.value ? [h(SessionHeartbeat, { sessionId: sessionId.value })] : []),
+    // ask again — and a batch execution is nobody's to schedule.
+    ...(sessionId.value && !batchReadonly.value ? [h(SessionHeartbeat, { sessionId: sessionId.value })] : []),
     // The subagent drawer answers for this conversation's subagents, so its
     // control appears with the first one dispatched — never before.
     ...(!isFreshChat.value && conversationSubagents.value.length ? [h('button', {
@@ -1070,7 +1230,14 @@ async function defaultTarget() {
     if (!info.project) return null
     const match = projects.value.find((p) => p.id === info.project?.id)
     if (match) return targetFromProject(match)
-    return { projectId: info.project.id, name: info.project.name, root: '', isNew: false, trustLevel: 'trusted' } as ProjectTarget
+    return {
+      projectId: info.project.id,
+      name: info.project.name,
+      root: '',
+      isNew: false,
+      trustLevel: 'trusted',
+      projectType: info.project.projectType,
+    } as ProjectTarget
   } catch {
     return null
   }
@@ -1079,6 +1246,24 @@ async function defaultTarget() {
 function pickTarget(next: ProjectTarget) {
   target.value = next
   pillInvalid.value = false
+}
+
+/**
+ * The picked project when it is a batch one (plan 153). A batch project's work
+ * is its tasks, not a conversation: the engine never gives a batch session the
+ * asking tools, so the new-chat page offers the task page instead of a composer
+ * that could not be used.
+ */
+const batchTarget = computed(() =>
+  (target.value && target.value.projectType === 'batch' ? target.value : null))
+const batchGate = computed(() => isFreshChat.value && Boolean(batchTarget.value))
+
+/** The picked batch project's task page — and, for 新建任务, the flag its
+ *  dialog opens on. The page itself arrives with plan 153's task segment. */
+function openBatchTasks(newTask: boolean) {
+  const id = String(batchTarget.value?.projectId ?? '')
+  if (!id) return
+  void router.push({ path: `/projects/${encodeURIComponent(id)}/tasks`, query: newTask ? { new: '1' } : {} })
 }
 
 function openFolderDialog() {
@@ -1382,6 +1567,7 @@ const {
   isStreaming,
   error,
   messages,
+  sessionArtifacts,
   historyLoading,
   historyError,
   subagents,
@@ -1468,6 +1654,78 @@ function firstLineRunIndexOf(msg: ChatMessage): number {
 function planUpdateOf(msg: ChatMessage) {
   if (msg.role !== 'assistant' || viewMode.value !== 'default') return undefined
   return latestPlanUpdate(msg)
+}
+
+/**
+ * The conversation's delivered files by the run that delivered them, built
+ * once per list: a turn asks for its own run's rows, and the page never
+ * re-scans the whole list for every message on every render.
+ */
+const artifactsByRun = computed(() => {
+  // globalThis.Map: this file imports the map icon under the name Map.
+  const byRun = new globalThis.Map<string, ArtifactView[]>()
+  for (const artifact of sessionArtifacts.value) {
+    const runId = String(artifact.runId ?? '').trim()
+    if (!runId) continue
+    const rows = byRun.get(runId)
+    if (rows) rows.push(artifact)
+    else byRun.set(runId, [artifact])
+  }
+  return byRun
+})
+
+/**
+ * The files this turn delivered, as the one group that closes it (plan 153
+ * A7, owner 2026-10-27): the kept plan, the files each `present_files` card of
+ * the turn named, what the run's end frame listed, and — for a turn whose
+ * frame is gone — what the conversation's artifact list holds for its run,
+ * merged by id. The cards themselves draw no files: this group is the one
+ * place they are met, under the turn's last words.
+ */
+function deliverablesOf(msg: ChatMessage): ArtifactView[] {
+  if (msg.role !== 'assistant') return []
+  const sid = String(sessionId.value ?? '').trim()
+  const presented: ArtifactView[] = []
+  const plan: ArtifactView[] = []
+  for (const block of msg.blocks ?? []) {
+    if (block.kind !== 'tool') continue
+    const name = String(block.step.toolName ?? '').trim()
+    if (name === 'present_files') {
+      presented.push(...artifactsOfPresentFiles(block.step.result, sid))
+      continue
+    }
+    if (name === 'exit_plan_mode') {
+      const kept = planArtifactOf(block.step.result, sid)
+      if (kept) plan.push(kept)
+    }
+  }
+  const runId = String(msg.runId ?? '').trim()
+  const fallback = runId ? artifactsByRun.value.get(runId) ?? [] : []
+  return turnDeliverables({
+    presented,
+    plan,
+    frame: msg.artifacts ?? [],
+    fallback,
+  })
+}
+
+/**
+ * What the group is called: a turn that kept a plan and delivered nothing but
+ * that plan says so — the reader asked for nothing to run — and every other
+ * turn delivered files. The question is asked of the rows' own origin, which
+ * a reloaded turn answers from the conversation's artifact list as well as a
+ * live one does: a replayed card keeps its `plan_only` fact but never the
+ * exit call's envelope, so the envelope cannot be what names the group.
+ */
+function deliverableLabelOf(msg: ChatMessage): string {
+  const rows = deliverablesOf(msg)
+  const onlyPlan = rows.length > 0 && rows.every((row) => row.origin === 'plan')
+  return onlyPlan ? t('chat.artifactPlanGroup') : t('chat.artifactGroup')
+}
+
+/** Opens one delivered file in the drawer's preview tab. */
+function openDeliverable(artifact: ArtifactView) {
+  openDocTab(docTabFor('artifact', artifact.name, { artifact }))
 }
 
 /**
@@ -2847,6 +3105,43 @@ onUnmounted(() => {
 
 .chat-col--fresh .chat-composer {
   margin-bottom: 0;
+}
+
+/* The read-only bar of a batch execution (plan 153 A11, prototype
+   .task-readonly-bar): the input's own width and corner, a hairline box on the
+   page's tint, the state's acts on its right. */
+.task-readonly-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  width: min(760px, 100% - 48px);
+  margin: 0 auto;
+  padding: 10px 12px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 12px;
+  background: var(--forebrain-bg-alt);
+  color: var(--forebrain-muted-text);
+  font-size: 11.5px;
+}
+
+.task-readonly-bar .grow {
+  flex: 1;
+}
+
+.task-readonly-bar .mono {
+  font-family: var(--forebrain-mono-font);
+  color: var(--forebrain-text-2);
+}
+
+.task-readonly-bar > svg.lucide {
+  color: var(--forebrain-muted-text);
+}
+
+@media (max-width: 780px) {
+  .task-readonly-bar .grow {
+    display: none;
+  }
 }
 
 .chat-col--fresh .starters {

@@ -17,3 +17,15 @@ The forebrain binary statically links the following third-party libraries:
 The tokenizer files under assets/tokenizers are third-party works. Each
 directory carries its own LICENSE, and assets/tokenizers/README.md records the
 source repository and license of every file.
+
+The embedded web frontend (frontend/, built into pkg/gateway/dist) bundles the
+following third-party libraries. Both are loaded only when a delivered file of
+their kind is previewed:
+
+- docx-preview 0.4.1 (Apache License 2.0) — renders a delivered .docx in the
+  browser, https://github.com/VolodymyrBaydalka/docxjs
+- SheetJS Community Edition, published as xlsx 0.20.3 (Apache License 2.0) —
+  parses a delivered spreadsheet in the browser. Installed from SheetJS's own
+  distribution, https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz, because
+  the npm package of that name stops at 0.18.5.
+

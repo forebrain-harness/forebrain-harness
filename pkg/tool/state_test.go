@@ -411,3 +411,149 @@ func TestIsWithinDirAcceptsDotDotNames(t *testing.T) {
 		t.Fatal("the directory itself is not a file inside it")
 	}
 }
+
+// TestWorkingDirPrefersTheTaskWorkspace pins where a batch turn's tools act:
+// the execution's workspace, while the project root stays the conversation's
+// identity for everything that resolves against it.
+func TestWorkingDirPrefersTheTaskWorkspace(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "tasks", "tsk-1", "1")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithProjectRoot(context.Background(), root)
+	ctx = WithTaskWorkspace(ctx, workspace)
+
+	got, err := WorkingDir(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != workspace {
+		t.Fatalf("WorkingDir = %q, want the task workspace %q", got, workspace)
+	}
+	if ProjectRootFromContext(ctx) != root {
+		t.Fatalf("the project root changed to %q", ProjectRootFromContext(ctx))
+	}
+	resolved, err := ResolvePath(ctx, "outputs/report.xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(workspace, "outputs", "report.xlsx"); resolved != want {
+		t.Fatalf("ResolvePath = %q, want %q", resolved, want)
+	}
+
+	// A conversation without a task workspace is unchanged.
+	plain, err := WorkingDir(WithProjectRoot(context.Background(), root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != root {
+		t.Fatalf("WorkingDir without a task workspace = %q, want the project root %q", plain, root)
+	}
+	if TaskWorkspaceFromContext(context.Background()) != "" {
+		t.Fatal("a plain context carries a task workspace")
+	}
+}
+
+// TestGuardWriteConfinesBatchWrites pins the file-tool half of a batch task's
+// write boundary (plans/150): the task's own directory is writable, everything
+// else — the project root it sits in, a traversal, a symlink out of it — is not,
+// and a turn without a task workspace keeps today's behavior exactly.
+func TestGuardWriteConfinesBatchWrites(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	workspace := filepath.Join(project, "tasks", "T", "1")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{filepath.Join(workspace, "outputs"), outside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(workspace, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Errorf("symlink: %v", err)
+	}
+	st := NewState(project)
+	batchCtx := WithTaskWorkspace(context.Background(), workspace)
+
+	for _, path := range []string{
+		filepath.Join(workspace, "outputs", "a.txt"),
+		filepath.Join(workspace, "new.txt"),
+	} {
+		if err := st.GuardWrite(batchCtx, path); err != nil {
+			t.Fatalf("write inside the task workspace must pass: %v", err)
+		}
+	}
+	for name, path := range map[string]string{
+		"the project root":        filepath.Join(project, "shared.txt"),
+		"a sibling task":          filepath.Join(project, "tasks", "T2", "1", "x.txt"),
+		"a traversal":             filepath.Join(workspace, "..", "..", "..", "x.txt"),
+		"a symlink out of the ws": filepath.Join(link, "x.txt"),
+	} {
+		if err := st.GuardWrite(batchCtx, path); err == nil {
+			t.Fatalf("write to %s must be refused", name)
+		}
+	}
+	// No task workspace: unchanged behavior, whatever the path.
+	ordinaryCtx := WithProjectRoot(context.Background(), project)
+	if err := st.GuardWrite(ordinaryCtx, filepath.Join(project, "shared.txt")); err != nil {
+		t.Fatalf("a non-batch turn keeps its ordinary write guard: %v", err)
+	}
+}
+
+// TestReadPathDeniedInForBatch pins the file-tool half of a batch task's read
+// boundary (plans/150): the task's workspace and the shared skill roots are
+// readable, the project root it sits in, a sibling task and the Forebrain home
+// are not, and a turn without a task workspace falls back to the runner's own
+// deny list.
+func TestReadPathDeniedInForBatch(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	workspace := filepath.Join(project, "tasks", "T", "1")
+	sibling := filepath.Join(project, "tasks", "T2", "1")
+	home := filepath.Join(base, "home")
+	skillRoot := filepath.Join(home, "skills", "demo")
+	for _, dir := range []string{workspace, sibling, skillRoot, filepath.Join(home, "other")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := NewState(project)
+	st.ReplaceLoadedSkillCatalog([]LoadedSkill{{Name: "demo", RootDir: skillRoot}})
+	batchCtx := WithTaskWorkspace(context.Background(), workspace)
+
+	for name, path := range map[string]string{
+		"the workspace":  filepath.Join(workspace, "inputs", "a.txt"),
+		"a shared skill": filepath.Join(skillRoot, "SKILL.md"),
+	} {
+		if st.ReadPathDeniedIn(batchCtx, path) {
+			t.Fatalf("%s must stay readable", name)
+		}
+	}
+	for name, path := range map[string]string{
+		"the project root": filepath.Join(project, "shared.txt"),
+		"a sibling task":   filepath.Join(sibling, "secret.txt"),
+		"the home":         filepath.Join(home, "other", "private.txt"),
+	} {
+		if !st.ReadPathDeniedIn(batchCtx, path) {
+			t.Fatalf("reading %s must be denied", name)
+		}
+	}
+	if !st.ReadDirPrunableIn(batchCtx, sibling) {
+		t.Fatal("a sibling task's directory is prunable in a batch walk")
+	}
+	if st.ReadDirPrunableIn(batchCtx, project) || st.ReadDirPrunableIn(batchCtx, workspace) {
+		t.Fatal("the project root is walkable down to the workspace, and the workspace itself is not prunable")
+	}
+
+	// Without a task workspace the runner's deny list answers, exactly as before.
+	denied := filepath.Join(project, "private")
+	st.SetReadPolicy([]string{denied}, nil, nil, project)
+	ordinaryCtx := WithProjectRoot(context.Background(), project)
+	if !st.ReadPathDeniedIn(ordinaryCtx, filepath.Join(denied, "a.txt")) {
+		t.Fatal("a non-batch turn must fall back to the runner's deny list")
+	}
+	if st.ReadPathDeniedIn(ordinaryCtx, filepath.Join(project, "shared.txt")) {
+		t.Fatal("a non-batch turn must not deny an undeniied path")
+	}
+}

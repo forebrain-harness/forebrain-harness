@@ -116,29 +116,28 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	renderer := NewRenderer(outSync, errSync).WithDiffTheme(t).WithWorkingDir(strings.TrimSpace(opts.WorkingDirectory))
-	renderer.SetComposerFooter(ComposerFooter{
-		Model:           summarizeComposerModel(opts.Session),
-		ReasoningEffort: summarizeComposerReasoningEffort(opts.Session),
-		Directory:       startupWorkingDirectoryDisplay(opts.WorkingDirectory),
-	})
-	renderer.SetComposerTokenStats("", measuredComposerTokenStats(opts.Session, initialSessionID))
-	startupInfo := StartupInfo{
-		Version:   strings.TrimSpace(opts.Version),
-		Directory: startupWorkingDirectoryDisplay(opts.WorkingDirectory),
-	}
 	state := streamState{
 		sessionID:       initialSessionID,
 		terminalFocused: true,
 		home:            strings.TrimSpace(opts.Home),
 		workspaceRoot:   strings.TrimSpace(opts.WorkspaceRoot),
 		workingDir:      strings.TrimSpace(opts.WorkingDirectory),
-		startupInfo:     startupInfo,
-		session:         opts.Session,
-		titleAnimator:   titleAnimator,
+		startupInfo: StartupInfo{
+			Version:   strings.TrimSpace(opts.Version),
+			Directory: startupWorkingDirectoryDisplay(opts.WorkingDirectory),
+		},
+		session:       opts.Session,
+		titleAnimator: titleAnimator,
 	}
-	// The surface starts attached to its first conversation, so the event
-	// funnel knows from the first event which screen it is painting.
+	// The footer's two halves must read one conversation: the label resolves
+	// currentSessionID(), the gauge takes the id as an argument.
 	state.session.SetViewingSession(state.sessionID)
+	renderer.SetComposerFooter(ComposerFooter{
+		Model:           summarizeComposerModel(opts.Session),
+		ReasoningEffort: summarizeComposerReasoningEffort(opts.Session),
+		Directory:       startupWorkingDirectoryDisplay(opts.WorkingDirectory),
+	})
+	renderer.SetComposerTokenStats("", measuredComposerTokenStats(opts.Session, initialSessionID))
 	// Seed the idle terminal title with the resumed session's title (or the
 	// app name for a fresh session); turns animate it from here on.
 	titleAnimator.Settle(initialSessionTitle)
@@ -194,6 +193,9 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	cmds := newCommandController(opts.Session, renderer, selector, readLine, strings.TrimSpace(opts.Home))
 	approvalSink := NewInteractiveApprovalSinkWithTTY(out, selector).WithRenderer(renderer).WithRecorder(opts.Session)
+	if spt, ok := opts.Session.(interface{ SessionProjectType(string) string }); ok {
+		approvalSink = approvalSink.WithProjectTypeOf(spt.SessionProjectType)
+	}
 	if notifier, ok := opts.Session.(interface{ NotifyUIMessage(any) }); ok {
 		approvalSink.notify = notifier.NotifyUIMessage
 	}
@@ -654,8 +656,8 @@ func Run(ctx context.Context, opts Options) error {
 
 	// Seed the welcome chrome into the viewport now that it owns the screen.
 	// In non-viewport runs these fall back to inline writes.
-	renderer.Banner(startupInfo)
-	renderer.StartupInfo(startupInfo)
+	renderer.Banner(state.startupInfo)
+	renderer.StartupInfo(state.startupInfo)
 	renderer.StartupHint()
 
 	if strings.TrimSpace(opts.InitialSessionID) != "" {
@@ -665,7 +667,7 @@ func Run(ctx context.Context, opts Options) error {
 	// The TUI is drawn first, then its startup questions are asked, each after
 	// the one before it: the trust decision, the folder's registration as a
 	// project, the project's servers, the conversation's runtime.
-	if err := startupQuestions(ctx, opts, cmds, renderer, state.sessionID); err != nil {
+	if err := startupQuestions(ctx, opts, cmds, renderer, &state, tracker); err != nil {
 		return err
 	}
 
@@ -1157,6 +1159,26 @@ func abbreviateHomePath(path string, home string) string {
 	return path
 }
 
+// batchViewerSlashGate answers a slash line typed in a batch project's terminal
+// (plan 152) before any handler sees it. handled says the viewer itself
+// answered; fallsThrough says the line is /continue, which is a turn rather than
+// a panel and belongs to the submission path, where the engine admits it.
+func batchViewerSlashGate(renderer *Renderer, state *streamState, cmd string) (handled, fallsThrough bool) {
+	if state == nil || !state.batchReadOnlySession() {
+		return false, false
+	}
+	if cmd == "continue" {
+		return false, true
+	}
+	if batchViewerCommands[cmd] {
+		return false, false
+	}
+	if renderer != nil {
+		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "batch", Content: batchReadOnlyNotice, Final: true})
+	}
+	return true, false
+}
+
 func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, line string) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
 	if cmds == nil || state == nil {
 		return false, false, ComposerSubmission{}, false
@@ -1171,6 +1193,14 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 	cmd := ""
 	if len(toks) > 0 {
 		cmd = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(toks[0]), "/"))
+	}
+	// A batch project's terminal is a viewer (plan 152): of every command it
+	// knows, only the whitelisted ones act here — everything else, builtin or
+	// skill alike, is answered with the same sentence. /continue falls through
+	// instead: it is a turn, not a panel, and the submission path is what admits
+	// and starts it.
+	if handled, fallsThrough := batchViewerSlashGate(renderer, state, cmd); handled || fallsThrough {
+		return handled, false, ComposerSubmission{}, false
 	}
 	args := []string{}
 	if len(toks) > 1 {
@@ -1304,6 +1334,11 @@ func dispatchCancelableStreamSlashCommand(
 	cmd := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
 	if cmd != "compact" {
 		return false, false, ComposerSubmission{}, false
+	}
+	// /compact is the one command that runs on its own dispatcher, so the
+	// viewer's gate is asked here too rather than only in the shared one.
+	if handled, fallsThrough := batchViewerSlashGate(renderer, state, cmd); handled || fallsThrough {
+		return handled, false, ComposerSubmission{}, false
 	}
 
 	opCtx, cancel := context.WithCancel(ctx)
@@ -1698,14 +1733,30 @@ func (s *streamState) stateRoot() string {
 
 // syncPlanModeIndicator reads the conversation's mode — which the hotkey,
 // /plan, the model's enter_plan_mode and exit_plan_mode and a session change
-// can all move — and has the footer show it.
+// can all move — and has the footer show it. The same read answers whether the
+// conversation is a batch execution, because both are properties of the
+// conversation on screen: a switch onto one — /resume in a batch project, the
+// viewer's own opening — must move the footer with it.
 func syncPlanModeIndicator(renderer *Renderer, state *streamState) {
 	if renderer == nil || state == nil || strings.TrimSpace(state.sessionID) == "" {
 		return
 	}
 	st, _ := statepkg.Get(state.stateRoot(), state.sessionID)
 	renderer.SetPlanMode(st.Mode == statepkg.ModePlan)
+	renderer.SetBatchReadOnly(state.batchReadOnlySession())
 	state.recordModeChange(st)
+}
+
+// batchReadOnlySession reports whether the conversation on screen is a batch
+// execution. The surface's own type assertion says so: the tests and the
+// gateway build sessions that have no project registry, and those are never
+// batch executions.
+func (s *streamState) batchReadOnlySession() bool {
+	if s == nil {
+		return false
+	}
+	types, ok := s.session.(interface{ SessionProjectType(string) string })
+	return ok && types.SessionProjectType(s.sessionID) == statepkg.ProjectTypeBatch
 }
 
 // recordModeChange files a mode switch in the conversation's log when the
@@ -4094,6 +4145,50 @@ type launchProjectAdopter interface {
 	AdoptLaunchProject(ctx context.Context) error
 }
 
+// batchProjectViewer is the session half of the batch viewer (plan 152):
+// whether the launch project is a batch project, and which execution the
+// terminal opens with. A surface whose project type means something else — a
+// gateway session serving many conversations — simply does not implement it.
+type batchProjectViewer interface {
+	BatchProject(ctx context.Context) bool
+	LatestBatchExecution(ctx context.Context) string
+}
+
+// openLatestBatchExecution puts the terminal on the newest thing a batch
+// project did — the latest execution of its most recently updated task — by the
+// same switch /resume performs, history included. A batch project with no task
+// yet has nothing to show, so the screen keeps its empty welcome and says so.
+//
+// The viewer is read-only from here on: the footer says so, and the submission
+// path refuses everything but the whitelisted commands.
+//
+// It reports whether it took over the launch conversation. A switch brings the
+// target conversation's runtime up itself, so the startup sequence starts the
+// launch conversation's runtime only when nothing was taken over.
+func openLatestBatchExecution(ctx context.Context, session Session, cmds *commandController, renderer *Renderer, state *streamState, tracker *Tracker) bool {
+	viewer, ok := session.(batchProjectViewer)
+	if !ok || state == nil || !viewer.BatchProject(ctx) {
+		return false
+	}
+	renderer.SetBatchReadOnly(true)
+	sid := strings.TrimSpace(viewer.LatestBatchExecution(ctx))
+	if sid == "" {
+		renderer.RenderFrame(Frame{
+			Kind:    FrameSystem,
+			Title:   "batch",
+			Content: "No tasks yet in this batch project.",
+			Final:   true,
+		})
+		return false
+	}
+	switched, _, _ := switchStreamSession(ctx, state, renderer, tracker, sid)
+	if !switched {
+		return false
+	}
+	cmds.printSessionResumeContext(sid)
+	return true
+}
+
 // startupQuestions asks, once the TUI is on screen, everything the first
 // conversation depends on, in the order that makes each step safe: whether the
 // launch folder may be worked in (until it is answered the environment stands
@@ -4103,22 +4198,32 @@ type launchProjectAdopter interface {
 // conversation's runtime — its project runner is built last, reading the trust
 // decision this sequence just recorded. An error ends the launch; ErrCancelled
 // is the trust question's Quit.
-func startupQuestions(ctx context.Context, opts Options, cmds *commandController, renderer *Renderer, sessionID string) error {
+//
+// A batch project's viewer opens on the newest execution right after the
+// folder is registered (plan 152): nothing is typed into it here, so there is
+// no launch conversation to wait for.
+func startupQuestions(ctx context.Context, opts Options, cmds *commandController, renderer *Renderer, state *streamState, tracker *Tracker) error {
 	if quit, err := askWorkspaceTrust(cmds, renderer); quit {
 		if err != nil {
 			return err
 		}
 		return ErrCancelled
 	}
+	sessionID := ""
+	if state != nil {
+		sessionID = strings.TrimSpace(state.sessionID)
+	}
 	// The launch folder becomes a project only now, after it was trusted (or
 	// carried a decision already): a folder its operator quit on is never
 	// registered. A resumed session already adopted its project through
 	// ResumeOnLaunchProject before the TUI opened.
+	openedBatchViewer := false
 	if strings.TrimSpace(opts.InitialSessionID) == "" {
 		if a, ok := opts.Session.(launchProjectAdopter); ok {
 			if err := a.AdoptLaunchProject(ctx); err != nil {
 				return err
 			}
+			openedBatchViewer = openLatestBatchExecution(ctx, opts.Session, cmds, renderer, state, tracker)
 		}
 	}
 	// The project's servers are asked about on one panel: the answer comes
@@ -4128,8 +4233,11 @@ func startupQuestions(ctx context.Context, opts Options, cmds *commandController
 	// The conversation's runtime comes up last, strictly after the notify sink
 	// exists: the MCP watch's subscription replays the runner's current state,
 	// and a replay delivered before there is anywhere to deliver it is a status
-	// line that simply never appears.
-	startConversationRuntime(ctx, opts.Session, renderer, sessionID)
+	// line that simply never appears. A batch switch already brought its own
+	// conversation's runtime up.
+	if !openedBatchViewer {
+		startConversationRuntime(ctx, opts.Session, renderer, sessionID)
+	}
 	return nil
 }
 
@@ -5002,6 +5110,13 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		return true
 	case hotkeyTogglePlanMode:
 		state.agentControlPrefixArmed = false
+		// A batch execution runs unattended: there is nobody to answer a plan
+		// approval, so its mode is fixed (plan 152). The key says so instead of
+		// moving a mode that would change nothing.
+		if state.batchReadOnlySession() {
+			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "mode", Content: "The mode is fixed in batch projects."})
+			return true
+		}
 		st, _ := statepkg.Get(state.stateRoot(), state.sessionID)
 		target := statepkg.ModePlan
 		if st.Mode == statepkg.ModePlan {

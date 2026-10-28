@@ -159,7 +159,11 @@ const props = withDefaults(defineProps<{
   extraTabs?: WorkbenchExtraTab[]
   /** A tab something outside the panel asked to land on. */
   requestedTab?: string | null
-}>(), { scope: () => ({}), rootPath: '', extraTabs: () => [], requestedTab: null })
+  /** Whether this conversation's work leaves the project's own files alone
+   *  (plan 153): an office deliverable and a batch execution are not code
+   *  changes, so 变更文件 is not offered to them. */
+  hideChanges?: boolean
+}>(), { scope: () => ({}), rootPath: '', extraTabs: () => [], requestedTab: null, hideChanges: false })
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -198,7 +202,9 @@ const baseTabs = [
 ] as const
 
 const allTabs = computed<WorkbenchExtraTab[]>(() => [
-  ...baseTabs.map((tab) => ({ key: tab.key as string, label: tab.label as I18nKey })),
+  ...baseTabs
+    .filter((tab) => !(props.hideChanges && tab.key === 'changes'))
+    .map((tab) => ({ key: tab.key as string, label: tab.label as I18nKey })),
   ...props.extraTabs,
 ])
 

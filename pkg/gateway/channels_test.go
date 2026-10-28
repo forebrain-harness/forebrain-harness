@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -1244,4 +1247,280 @@ func TestHandleModelsListSkipsNonChatModels(t *testing.T) {
 	for _, rec := range out.Records {
 		require.False(t, llm.LoginBackedProvider(rec.Provider), "%s came from a login-backed provider", rec.ModelID)
 	}
+}
+
+// batchChannelGateway builds a gateway over one state database with a batch
+// project whose channel is bound to a recording handler: the channel carries
+// the project's tasks in and its notifications out, exactly as a real bot does.
+func batchChannelGateway(t *testing.T) (*Server, state.Project, *batchNotifyChannel) {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	cfg := &appcfg.Root{}
+	s := &Server{
+		Home:     home,
+		RunRT:    &state.RunStore{DB: db},
+		Env:      &process.Environment{SQL: db, Deps: run.Deps{AppCfg: cfg}},
+		Sessions: state.NewSessionStore(db, "main"),
+		Channels: channel.NewRegistry(),
+	}
+	s.Projects = state.NewProjectStore(db, "main")
+	root := filepath.Join(home, "batch")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	project, err := s.Projects.Create(ctx, state.CreateProjectInput{
+		Name: "batch", Root: root, ProjectKey: state.ProjectKeyForRoot(root), ProjectType: state.ProjectTypeBatch,
+	})
+	require.NoError(t, err)
+	rec := &batchNotifyChannel{id: "wecom"}
+	require.NoError(t, s.Channels.BindProjects(ctx, "main", []channel.BoundChannel{{ProjectID: project.ID, Handler: rec}}, channelBus{s: s}))
+	t.Cleanup(func() { _ = s.Channels.Stop(ctx) })
+	return s, project, rec
+}
+
+// batchNotifyChannel is a project channel that records what the gateway
+// delivered and, when failWith is set, refuses it the way a dead bot does.
+type batchNotifyChannel struct {
+	id       string
+	failWith error
+	mu       sync.Mutex
+	sent     []channel.Outbound
+}
+
+func (c *batchNotifyChannel) ID() string { return c.id }
+
+func (c *batchNotifyChannel) Start(context.Context, channel.RouteAdder, channel.Bus) error {
+	return nil
+}
+
+func (c *batchNotifyChannel) Stop(context.Context) error { return nil }
+
+func (c *batchNotifyChannel) DeliverOutbound(_ context.Context, out channel.Outbound) error {
+	c.mu.Lock()
+	c.sent = append(c.sent, out)
+	c.mu.Unlock()
+	return c.failWith
+}
+
+func (c *batchNotifyChannel) delivered() []channel.Outbound {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]channel.Outbound(nil), c.sent...)
+}
+
+func (c *batchNotifyChannel) texts() []string {
+	out := make([]string, 0, len(c.delivered()))
+	for _, item := range c.delivered() {
+		out = append(out, item.Text)
+	}
+	return out
+}
+
+// inboundBatch sends one message through the project's channel, the way the
+// channel's own HTTP endpoint would.
+func inboundBatch(t *testing.T, s *Server, projectID, sessionID, text string) {
+	t.Helper()
+	require.NoError(t, channelBus{s: s}.PublishInbound(context.Background(), channel.Inbound{
+		ChannelID: "wecom", ProjectID: projectID, SessionID: sessionID, Text: text,
+	}))
+}
+
+// A batch project's channel takes tasks, not a conversation: a message opens a
+// task with its own execution and workspace, the chat is told the task was
+// taken, and the turn runs unattended from there (plan 151).
+func TestBatchChannelMessageStartsATask(t *testing.T) {
+	ctx := context.Background()
+	s, project, rec := batchChannelGateway(t)
+	text := "把上个月的 CSV 汇总成 xlsx"
+	inboundBatch(t, s, project.ID, "u1", text)
+
+	var row state.TaskRow
+	require.Eventually(t, func() bool {
+		rows, _, err := s.Projects.ListTasksPage(ctx, project.ID, state.ListTasksOptions{}, 10, 0)
+		if err != nil || len(rows) != 1 {
+			return false
+		}
+		row = rows[0]
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.Equal(t, state.TaskOriginChannel, row.Origin)
+	require.Equal(t, state.SessionTitleFromContent(text), row.Title)
+	require.Equal(t, state.TaskStatusPending, row.Latest.Status)
+	require.True(t, strings.HasPrefix(row.Latest.SessionID, "batch-"), "a message opens an execution of its own, got %q", row.Latest.SessionID)
+	for _, dir := range []string{"inputs", "outputs", ".work"} {
+		_, statErr := os.Stat(filepath.Join(row.Latest.Workspace, dir))
+		require.NoError(t, statErr, "execution workspace lacks %s", dir)
+	}
+	// The task's input is fixed by the first turn, never written here: a
+	// message the model never saw must not look like a fixed input.
+	require.False(t, row.InputSet)
+	require.Empty(t, row.InputText)
+	// The execution's conversation is born in the batch project, so the
+	// engine's admission sees it as a batch turn.
+	projectType, err := s.Projects.SessionProjectType(ctx, row.Latest.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeBatch, projectType)
+
+	// The ref names the chat the task came from, which is where its end
+	// notification will go.
+	ref, ok := parseChannelTaskRef(row.OriginRef)
+	require.True(t, ok)
+	require.Equal(t, "wecom", ref.Channel)
+	require.Equal(t, state.WrapProjectChannelSession("wecom", project.ID, "u1"), ref.Session)
+
+	// The chat is answered with the acknowledgement, in the chat it came from,
+	// and nothing else: the result arrives as the end notification.
+	require.Eventually(t, func() bool { return len(rec.delivered()) > 0 }, 5*time.Second, 10*time.Millisecond)
+	delivered := rec.delivered()[0]
+	require.Equal(t, "已接收任务："+row.Title+"（"+row.ID+"），完成后通知。", delivered.Text)
+	require.Equal(t, "u1", delivered.SessionID, "the acknowledgement goes back to the sender, not the task's session")
+}
+
+// An ordinary project's channel keeps the conversation it always had: nothing
+// about a batch project's door may open a task for it.
+func TestChannelMessageOnACodingProjectOpensNoTask(t *testing.T) {
+	ctx := context.Background()
+	s, project, _ := batchChannelGateway(t)
+	codingRoot := filepath.Join(t.TempDir(), "coding")
+	require.NoError(t, os.MkdirAll(codingRoot, 0o755))
+	coding, err := s.Projects.Create(ctx, state.CreateProjectInput{
+		Name: "coding", Root: codingRoot, ProjectKey: state.ProjectKeyForRoot(codingRoot), ProjectType: state.ProjectTypeCoding,
+	})
+	require.NoError(t, err)
+
+	inboundBatch(t, s, coding.ID, "u1", "帮我看一下这个仓库")
+
+	rows, _, err := s.Projects.ListTasksPage(ctx, coding.ID, state.ListTasksOptions{}, 10, 0)
+	require.NoError(t, err)
+	require.Empty(t, rows, "a coding project's channel never opens tasks")
+	rows, _, err = s.Projects.ListTasksPage(ctx, project.ID, state.ListTasksOptions{}, 10, 0)
+	require.NoError(t, err)
+	require.Empty(t, rows, "the batch project opened nothing for another project's message")
+}
+
+// A built-in slash command steers a conversation, and a batch project has no
+// conversation to steer: the chat is told so and no task is opened.
+func TestBatchChannelRefusesBuiltinCommands(t *testing.T) {
+	ctx := context.Background()
+	s, project, rec := batchChannelGateway(t)
+	inboundBatch(t, s, project.ID, "u1", "/plan 换个做法")
+
+	require.Eventually(t, func() bool { return len(rec.delivered()) == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, []string{channelTaskCommandRefusal}, rec.texts())
+	rows, _, err := s.Projects.ListTasksPage(ctx, project.ID, state.ListTasksOptions{}, 10, 0)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+}
+
+// batchNotifyEnd is one settled execution, as the engine reports it.
+func batchNotifyEnd(task state.Task, exec state.TaskExecution, status string) turn.BatchExecutionEnd {
+	exec.Status = status
+	return turn.BatchExecutionEnd{
+		SessionID: exec.SessionID, RunID: "run-1", Task: task, Execution: exec,
+		Status: status, ErrorCode: exec.ErrorCode, ErrorText: exec.ErrorText,
+	}
+}
+
+// A task that came in through a channel is answered in that same chat, with
+// the template's status line, task identity and deliverables — and a link only
+// when the gateway knows the address people reach it at (plan 151).
+func TestBatchEndNotifiesTheOriginChat(t *testing.T) {
+	ctx := context.Background()
+	s, project, rec := batchChannelGateway(t)
+	wrapped := state.WrapProjectChannelSession("wecom", project.ID, "u1")
+	now := time.Now().Unix()
+	task := state.Task{ID: "tsk-abc", ProjectID: project.ID, Title: "汇总上个月数据",
+		Origin: state.TaskOriginChannel, OriginRef: newChannelTaskRef("wecom", wrapped)}
+	exec := state.TaskExecution{SessionID: "batch-1", TaskID: task.ID, Seq: 2, Status: state.TaskStatusCompleted,
+		StartedAt: now - 83, FinishedAt: now}
+	end := batchNotifyEnd(task, exec, state.TaskStatusCompleted)
+	end.Artifacts = []state.Artifact{{Name: "汇总.xlsx", Size: 2048}, {Name: "明细.csv", Size: 512}}
+
+	s.notifyBatchExecutionEnd(ctx, end)
+	require.Eventually(t, func() bool { return len(rec.delivered()) == 1 }, 5*time.Second, 10*time.Millisecond)
+	text := rec.texts()[0]
+	require.Contains(t, text, "【任务完成】汇总上个月数据")
+	require.Contains(t, text, "任务 tsk-abc · 第 2 次执行 · 用时 1m23s")
+	require.Contains(t, text, "汇总.xlsx（2.0 KB）")
+	require.Contains(t, text, "明细.csv（512 B）")
+	require.NotContains(t, text, "查看：", "no public URL, no link")
+	require.Equal(t, "u1", rec.delivered()[0].SessionID, "the notification goes back to the chat the task came from")
+
+	// With a public URL configured the notification points at the task.
+	s.Env.Deps.AppCfg.Gateway.PublicURL = "https://forebrain.example.com/"
+	s.notifyBatchExecutionEnd(ctx, end)
+	require.Eventually(t, func() bool { return len(rec.delivered()) == 2 }, 5*time.Second, 10*time.Millisecond)
+	require.Contains(t, rec.texts()[1], "查看：https://forebrain.example.com/projects/"+project.ID+"/tasks/tsk-abc")
+}
+
+// A task that did not come in through a channel goes to the project's own
+// notification targets. One dead target does not silence the other, and the
+// delivery that failed is recorded on the execution — without touching what
+// the task itself ended as (plan 151).
+func TestBatchEndNotifiesProjectTargets(t *testing.T) {
+	ctx := context.Background()
+	s, project, rec := batchChannelGateway(t)
+	targets := []state.TaskNotifyTarget{{Channel: "wecom", Target: "ops-room"}, {Channel: "feishu", Target: "oc_dead"}}
+	_, err := s.Projects.Update(ctx, project.ID, state.UpdateProjectInput{TaskNotify: &targets})
+	require.NoError(t, err)
+	dead := &batchNotifyChannel{id: "feishu", failWith: errors.New("feishu: chat not found")}
+	require.NoError(t, s.Channels.BindProjects(ctx, "main", []channel.BoundChannel{
+		{ProjectID: project.ID, Handler: rec},
+		{ProjectID: project.ID, Handler: dead},
+	}, channelBus{s: s}))
+
+	task, err := s.Projects.CreateTask(ctx, state.Task{ProjectID: project.ID, Title: "月度对账", Origin: state.TaskOriginAPI})
+	require.NoError(t, err)
+	require.NoError(t, s.Sessions.Ensure(ctx, "batch-1", "batch-1"))
+	exec, err := s.Projects.AddTaskExecution(ctx, task.ID, "batch-1", project.Root)
+	require.NoError(t, err)
+	require.NoError(t, s.Projects.MarkExecutionEnded(ctx, exec.SessionID, state.TaskStatusCompleted, "", ""))
+	exec, task, ok, err := s.Projects.ExecutionForSession(ctx, exec.SessionID)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	s.notifyBatchExecutionEnd(ctx, batchNotifyEnd(task, exec, state.TaskStatusCompleted))
+
+	require.Eventually(t, func() bool { return len(rec.delivered()) == 1 && len(dead.delivered()) == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Contains(t, rec.texts()[0], "【任务完成】月度对账")
+	require.Equal(t, "ops-room", rec.delivered()[0].SessionID)
+	require.Equal(t, project.ID, rec.delivered()[0].ProjectID, "a project target is delivered through that project's own channel")
+	require.Eventually(t, func() bool {
+		text, readErr := s.Projects.ExecutionNotifyError(ctx, exec.SessionID)
+		return readErr == nil && strings.Contains(text, "feishu") && strings.Contains(text, "chat not found")
+	}, 5*time.Second, 10*time.Millisecond)
+	// The task's own ending is untouched by a delivery that failed.
+	after, _, ok, err := s.Projects.ExecutionForSession(ctx, exec.SessionID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, state.TaskStatusCompleted, after.Status)
+	require.Empty(t, after.ErrorCode)
+}
+
+// A stopped execution and a failed one say so, and a failure explains itself
+// with the code a client switches on plus what the failure said (plan 151).
+func TestBatchStoppedAndFailedWording(t *testing.T) {
+	ctx := context.Background()
+	s, project, rec := batchChannelGateway(t)
+	wrapped := state.WrapProjectChannelSession("wecom", project.ID, "u1")
+	task := state.Task{ID: "tsk-abc", ProjectID: project.ID, Title: "汇总上个月数据",
+		Origin: state.TaskOriginChannel, OriginRef: newChannelTaskRef("wecom", wrapped)}
+	now := time.Now().Unix()
+	exec := state.TaskExecution{SessionID: "batch-1", TaskID: task.ID, Seq: 1, StartedAt: now - 3, FinishedAt: now}
+
+	s.notifyBatchExecutionEnd(ctx, batchNotifyEnd(task, exec, state.TaskStatusStopped))
+	require.Eventually(t, func() bool { return len(rec.delivered()) == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Contains(t, rec.texts()[0], "【任务已停止】汇总上个月数据")
+	require.NotContains(t, rec.texts()[0], "原因：")
+
+	failed := exec
+	failed.ErrorCode = "provider_timeout"
+	failed.ErrorText = "upstream model did not answer within the request timeout"
+	s.notifyBatchExecutionEnd(ctx, batchNotifyEnd(task, failed, state.TaskStatusFailed))
+	require.Eventually(t, func() bool { return len(rec.delivered()) == 2 }, 5*time.Second, 10*time.Millisecond)
+	require.Contains(t, rec.texts()[1], "【任务失败】汇总上个月数据")
+	require.Contains(t, rec.texts()[1], "原因：provider_timeout：upstream model did not answer within the request timeout")
 }

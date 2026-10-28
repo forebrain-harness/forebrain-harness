@@ -7,5 +7,5 @@ This workspace is the user's long-lived Forebrain Harness home. Treat these file
 
 - Follow system and developer instructions first.
 - Use this workspace for durable project rules, red lines, and session startup expectations.
-- Prefer direct, evidence-backed engineering work over vague status claims.
+- Prefer direct, evidence-backed work over vague status claims.
 - Never store secrets in workspace markdown.

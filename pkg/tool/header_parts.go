@@ -240,6 +240,8 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 			action = "Kept planning"
 		} else if isFailed {
 			action = "Failed to " + FailedActionPhrase(lower)
+		} else if meta.PlanOnly {
+			action = "Kept the plan"
 		} else {
 			action = "Exited plan mode"
 		}
@@ -347,6 +349,16 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		// The header carries the verb alone; what was asked is the body's
 		// business (the engine pairs each question with its answer).
 
+	case lower == "present_files":
+		if isFailed {
+			action = "Failed to " + FailedActionPhrase(lower)
+		} else if isRunning || isPending {
+			action = "Presenting files"
+		} else {
+			action = "Presented files"
+		}
+		target = presentFilesHeaderTarget(meta.Input)
+
 	// --- MCP ---
 	case strings.HasPrefix(lower, "mcp__"):
 		action = "MCP"
@@ -433,7 +445,7 @@ func HeaderActions() []string {
 		// Session
 		"Todo", "Updating todo", "Failed to update todo",
 		"Entered plan mode", "Entering plan mode", "Failed to enter plan mode",
-		"Exited plan mode", "Failed to exit plan mode", "Kept planning",
+		"Exited plan mode", "Failed to exit plan mode", "Kept planning", "Kept the plan",
 		// Memories
 		"Saved memory note", "Saving memory note", "Failed to save memory note",
 		"Memory note save denied", "Memory note save canceled",
@@ -443,6 +455,8 @@ func HeaderActions() []string {
 		"Memory read denied", "Memory read canceled",
 		"Searched memories", "Searching memories", "Failed to search memories",
 		"Memory search denied", "Memory search canceled",
+		// Deliverables
+		"Presented files", "Presenting files", "Failed to present files",
 		// Notes and questions
 		"Notes", "Saving notes", "Failed to save notes",
 		"Asked user", "Asking user", "Failed to ask user",

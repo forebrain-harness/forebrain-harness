@@ -89,6 +89,15 @@ const (
 	// belongs in the conversation, so the event is stored with it rather than
 	// pushed only.
 	RunEventResponseNotice = "response_notice"
+	// RunEventBatchExecution is one move of a task execution's own state, told
+	// by the engine that made it: the execution a turn admitted is running, or
+	// it ended in the status the engine recorded. A surface that shows a
+	// running task reads its state from these frames rather than asking the
+	// task over and over — the state is the engine's fact, not a fact the
+	// page can infer. Durable by design: the snapshot a page receives when it
+	// binds carries the execution's last state, so a page opened mid-run draws
+	// it without a read of its own.
+	RunEventBatchExecution = "batch_execution"
 	// RunEventFirstToken reports how long the model took to start answering —
 	// one subagent execution's wait; AgentID names whose. Push-only by design:
 	// the wait is live state about a run in flight, and the durable copy for a
@@ -169,6 +178,23 @@ func EncodePayload(v any) json.RawMessage {
 
 type TurnStartedPayload struct{}
 
+// BatchExecutionPayload is one task execution's state as the engine recorded
+// it: the execution a turn admitted is running (StartedAt set), or it ended in
+// Status — completed, stopped or failed — with FinishedAt and, for a failure,
+// the stable ErrorCode and the provider's own ErrorText. TaskID and Seq name
+// the task and which execution of it this is, so a page showing one execution
+// can tell its own frames from a newer execution's.
+type BatchExecutionPayload struct {
+	TaskID     string `json:"task_id,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	Seq        int    `json:"seq,omitempty"`
+	Status     string `json:"status"`
+	ErrorCode  string `json:"error_code,omitempty"`
+	ErrorText  string `json:"error_text,omitempty"`
+	StartedAt  int64  `json:"started_at,omitempty"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+}
+
 // RunPlanFacts is a run's final checklist state, carried by every way a run
 // ends — completed, cancelled or failed — because every run closes with its
 // worked line and the terminal's names the checklist whichever way it ended.
@@ -179,21 +205,52 @@ type RunPlanFacts struct {
 	PlanActive string `json:"plan_active,omitempty"`
 }
 
+// Artifact is one delivered file as integrators and surfaces receive it.
+// Paths are the server's; a client downloads through the gateway's
+// /api/chat/sessions/{session_id}/artifacts/{id}/content route.
+type Artifact struct {
+	ID          string `json:"id"`
+	SessionID   string `json:"session_id"`
+	RunID       string `json:"run_id,omitempty"`
+	ToolCallID  string `json:"tool_call_id,omitempty"`
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Path        string `json:"path"`
+	RelPath     string `json:"rel_path,omitempty"`
+	MIME        string `json:"mime"`
+	Kind        string `json:"kind"`
+	Preview     string `json:"preview,omitempty"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256,omitempty"`
+	Origin      string `json:"origin"`
+	CreatedAt   int64  `json:"created_at"`
+}
+
+// RunArtifacts is every file a run delivered, carried by every way a run
+// ends — the structured result an integrating system reads.
+type RunArtifacts struct {
+	Artifacts []Artifact `json:"artifacts,omitempty"`
+}
+
 type TurnCompletedPayload struct {
 	Text      string `json:"text,omitempty"`
 	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
 	RunPlanFacts
+	RunArtifacts
 }
 
 type TurnCancelledPayload struct {
 	Message string `json:"message,omitempty"`
 	RunPlanFacts
+	RunArtifacts
 }
 
 type TurnErrorPayload struct {
 	Error   string `json:"error,omitempty"`
 	Message string `json:"message,omitempty"`
 	RunPlanFacts
+	RunArtifacts
 	// Title is the heading a surface shows above the error. A turn error that
 	// belongs to a named subsystem — an MCP server that did not start, say —
 	// says so here rather than in prose, so the surface can render the heading

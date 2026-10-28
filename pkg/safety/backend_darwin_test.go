@@ -283,3 +283,107 @@ func TestDarwinSeatbeltIntegrationNetworkDenialIsClassified(t *testing.T) {
 		t.Fatalf("an allowed network was reported as blocked: decision=%+v out=%q", okDecision, okRes.AggregatedOutput)
 	}
 }
+
+// seatbeltWriteAllowLines returns the profile's write-allow lines that grant
+// path, in any spelling the profile may use for it. A path that only appears
+// inside a rule's require-not clause is a denial rather than a grant, so those
+// clauses are removed before matching.
+func seatbeltWriteAllowLines(profile, path string) []string {
+	var out []string
+	for _, line := range strings.Split(profile, "\n") {
+		if !strings.HasPrefix(line, "(allow file-write*") {
+			continue
+		}
+		stripped := line
+		for _, spelling := range normalizeSeatbeltPaths([]string{path}) {
+			quoted := `"` + spelling + `"`
+			stripped = strings.ReplaceAll(stripped, "(require-not (literal "+quoted+"))", "")
+			stripped = strings.ReplaceAll(stripped, "(require-not (subpath "+quoted+"))", "")
+			if strings.Contains(stripped, quoted) {
+				out = append(out, line)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// TestBatchSeatbeltHasNoWholeHomeOrTmpWrite pins the profile an exclusive batch
+// request produces (plans/150): the OS runtime stays readable, the workspace is
+// writable, and neither the home nor any system temp space is.
+func TestBatchSeatbeltHasNoWholeHomeOrTmpWrite(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "tasks", "T", "1")
+	home := "/Users/batch-task-home"
+	skillRoot := filepath.Join(home, "skills", "demo")
+	profile, err := seatbeltProfile(&appcfg.Root{}, CommandRequest{
+		Profile:                 ProfileWorkspaceWrite,
+		AdditionalWritablePaths: []string{workspace},
+		ExclusiveWritablePaths:  true,
+		AdditionalReadablePaths: []string{workspace, skillRoot},
+		ExclusiveReadablePaths:  true,
+		DeniedReadablePaths:     []string{home},
+		IncludePlatformDefaults: true,
+		AllowNetwork:            true,
+	}, workspace)
+	if err != nil {
+		t.Fatalf("seatbeltProfile: %v", err)
+	}
+	if lines := seatbeltWriteAllowLines(profile, workspace); len(lines) == 0 {
+		t.Fatalf("expected the task workspace to stay writable:\n%s", profile)
+	}
+	if lines := seatbeltWriteAllowLines(profile, home); len(lines) != 0 {
+		t.Fatalf("the home must not be writable:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, path := range []string{os.TempDir(), "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"} {
+		if lines := seatbeltWriteAllowLines(profile, path); len(lines) != 0 {
+			t.Fatalf("%s must not be writable for a batch task:\n%s", path, strings.Join(lines, "\n"))
+		}
+	}
+	if !strings.Contains(profile, `(allow file-read* file-test-existence (require-all (subpath "/usr/lib")`) {
+		t.Fatalf("expected the OS runtime to stay readable:\n%s", profile)
+	}
+	if !strings.Contains(profile, `(allow file-read* file-test-existence (require-all (subpath "/etc")`) {
+		t.Fatalf("expected /etc to stay readable:\n%s", profile)
+	}
+}
+
+// TestBatchSeatbeltWorkspaceUnderTmpRemainsWritable pins the other half: a task
+// workspace that happens to live under a temp root keeps its own exact write
+// rule while the temp root around it stays unwritable, which is why the fix is
+// to drop the temp grants instead of denying the parent directory.
+func TestBatchSeatbeltWorkspaceUnderTmpRemainsWritable(t *testing.T) {
+	workspace := filepath.Join("/tmp", "batch-tasks", "tasks", "T", "1")
+	exclusive, err := seatbeltProfile(&appcfg.Root{}, CommandRequest{
+		Profile:                 ProfileWorkspaceWrite,
+		AdditionalWritablePaths: []string{workspace},
+		ExclusiveWritablePaths:  true,
+		AdditionalReadablePaths: []string{workspace},
+		ExclusiveReadablePaths:  true,
+		IncludePlatformDefaults: true,
+	}, workspace)
+	if err != nil {
+		t.Fatalf("seatbeltProfile: %v", err)
+	}
+	if lines := seatbeltWriteAllowLines(exclusive, workspace); len(lines) == 0 {
+		t.Fatalf("expected the workspace under /tmp to stay writable:\n%s", exclusive)
+	}
+	if lines := seatbeltWriteAllowLines(exclusive, "/tmp"); len(lines) != 0 {
+		t.Fatalf("the parent /tmp must not be writable:\n%s", strings.Join(lines, "\n"))
+	}
+
+	// The same request without the exclusive bits is the ordinary workspace-write
+	// profile, which keeps its scratch grants: the difference is the exclusive
+	// flag, not a global removal.
+	ordinary, err := seatbeltProfile(&appcfg.Root{}, CommandRequest{
+		Profile:                 ProfileWorkspaceWrite,
+		AdditionalWritablePaths: []string{workspace},
+		AdditionalReadablePaths: []string{workspace},
+		IncludePlatformDefaults: true,
+	}, workspace)
+	if err != nil {
+		t.Fatalf("seatbeltProfile: %v", err)
+	}
+	if lines := seatbeltWriteAllowLines(ordinary, "/tmp"); len(lines) == 0 {
+		t.Fatalf("an ordinary workspace-write profile keeps its /tmp write grant:\n%s", ordinary)
+	}
+}

@@ -42,11 +42,28 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 	// retires the queue.
 	defer s.discardTUITurnInput()
 	sessionID := strings.TrimSpace(submission.SessionID)
-	userText := submission.UserText
 	ch := strings.TrimSpace(submission.Channel)
 	if ch == "" {
 		ch = "tui"
 	}
+	// A batch project's terminal is a viewer (plan 152): nothing typed here
+	// starts or joins a conversation, so only the whitelisted commands reach
+	// the ordinary path below.
+	if s.batchSession(sessionID) || (sessionID == "" && s.BatchProject(ctx)) {
+		return s.dispatchBatchViewerLine(ctx, sessionID, ch, submission)
+	}
+	return s.dispatchSurfaceContent(ctx, sessionID, ch, submission, nil)
+}
+
+// dispatchSurfaceContent is everything a submission does once it is allowed to
+// be one: the slash command table, the skills a plain message names, its
+// attachments, and the turn itself.
+//
+// batchInput rides along untouched to the engine. It is the whole turn's
+// answer to "what did the surface send before it prepared the prompt", and the
+// engine's admission check reads it instead of the prepared text.
+func (s *ChatSession) dispatchSurfaceContent(ctx context.Context, sessionID, ch string, submission turn.TurnSubmission, batchInput *turn.BatchTurnInput) error {
+	userText := submission.UserText
 	if strings.HasPrefix(strings.TrimSpace(userText), "!") && len(submission.Attachments) == 0 {
 		return s.RunSurfaceShellCommand(ctx, sessionID, ch, userText)
 	}
@@ -180,7 +197,7 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 	// request is refused: the message is still stored, so after /model the
 	// conversation continues with every image in it.
 	imageRefusal := run.ImageTurnRefusal(ctx, s.runner(), sessionID, len(submission.Attachments) > 0)
-	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, imageRefusal, goalObjective, skillName, skillPath, skills, submission.CallerRendersReturnedError, io.Discard); err != nil {
+	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, imageRefusal, goalObjective, skillName, skillPath, skills, batchInput, submission.CallerRendersReturnedError, io.Discard); err != nil {
 		return err
 	}
 	sink := s.toolApprovalSinkGet()
@@ -209,6 +226,129 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 		}
 	}
 	return nil
+}
+
+// The batch viewer's vocabulary (plan 152). The terminal is English like the
+// rest of it: one sentence for everything it refuses, and one for the command
+// that replaces the ordinary submission.
+const (
+	// batchReadOnlyNotice answers anything that is not a whitelisted command.
+	batchReadOnlyNotice = "Batch projects are read-only here. /resume opens a task execution, /continue resumes a stopped one."
+	// batchContinueCommand resumes a stopped execution in this process.
+	batchContinueCommand = "/continue"
+)
+
+// batchViewerCommands are the commands a batch project's terminal still obeys,
+// by their bare names: looking at what ran, and closing the app. Everything
+// else — every other builtin, every skill — is answered with
+// batchReadOnlyNotice.
+//
+// The terminal enforces this in two places because it reaches a command through
+// two doors: the composer's own slash dispatcher handles a typed line before any
+// turn exists, and DispatchSurfaceTurn sees every other submission.
+var batchViewerCommands = map[string]bool{
+	"resume":   true,
+	"status":   true,
+	"help":     true,
+	"exit":     true,
+	"continue": true,
+}
+
+// batchViewerCommandName is the bare command name a submitted line names, ""
+// when the line names none. It is the same first-token reading the slash
+// dispatcher does, so both doors agree on what "/status now" asks for.
+func batchViewerCommandName(line string) string {
+	toks := strings.Fields(strings.TrimSpace(line))
+	if len(toks) == 0 || !strings.HasPrefix(toks[0], "/") {
+		return ""
+	}
+	return strings.ToLower(strings.TrimPrefix(toks[0], "/"))
+}
+
+// dispatchBatchViewerLine is the submission path in a batch project: a
+// conversation nobody types into. A whitelisted command takes the ordinary
+// path; /continue resumes a stopped execution here; anything else — plain
+// text, another command, an attachment — is refused with one sentence.
+func (s *ChatSession) dispatchBatchViewerLine(ctx context.Context, sessionID, ch string, submission turn.TurnSubmission) error {
+	line := strings.TrimSpace(submission.UserText)
+	// An attachment is a turn's payload whatever the text beside it says, and
+	// a batch project takes none from a viewer.
+	if len(submission.Attachments) > 0 {
+		s.notifyBatchViewerNotice(batchReadOnlyNotice)
+		return nil
+	}
+	name := batchViewerCommandName(line)
+	if line == batchContinueCommand {
+		return s.dispatchBatchContinue(ctx, sessionID, ch, submission)
+	}
+	if batchViewerCommands[name] {
+		return s.dispatchSurfaceContent(ctx, sessionID, ch, submission, nil)
+	}
+	s.notifyBatchViewerNotice(batchReadOnlyNotice)
+	return nil
+}
+
+// dispatchBatchContinue resumes a stopped execution of the task this
+// conversation is, in this process, as an ordinary turn: it streams while it
+// runs and is still unattended and sandboxed.
+//
+// The admission is read-only — it never records input and never moves the
+// execution's status — and the transition itself happens inside Submit, under
+// the session lock. That is why the turn carries an empty BatchInput: the
+// engine's admission is the only thing that may start the execution.
+func (s *ChatSession) dispatchBatchContinue(ctx context.Context, sessionID, ch string, submission turn.TurnSubmission) error {
+	store := s.projectStoreFor()
+	adm, err := turn.AdmitBatchTurn(ctx, store, sessionID, "", false)
+	if err != nil {
+		s.notifyBatchViewerNotice(batchAdmissionSentence(err))
+		return nil
+	}
+	if adm.Kind != turn.BatchTurnContinue {
+		// Only a stopped execution continues: a pending one has not started
+		// yet, and starting it is the business system's call, not this
+		// terminal's.
+		s.notifyBatchViewerNotice("This execution is not open for a turn yet.")
+		return nil
+	}
+	submission.UserText = adm.Input
+	submission.RawInput = batchContinueCommand
+	// Nothing of the typed line is shown: the turn on screen is the
+	// continuation prompt the engine chose, exactly as a resumed run replays.
+	submission.DisplayText = ""
+	return s.dispatchSurfaceContent(ctx, sessionID, ch, submission, &turn.BatchTurnInput{Text: "", HasAttachments: false})
+}
+
+// batchAdmissionSentence is how the viewer answers an admission the engine
+// refused: the three states a reader can meet in a batch project get a
+// sentence of the terminal's own, and anything else keeps the engine's.
+func batchAdmissionSentence(err error) string {
+	var refusal *turn.BatchRefusal
+	if !errors.As(err, &refusal) || refusal == nil {
+		return err.Error()
+	}
+	switch refusal.Code {
+	case turn.BatchCodeRunning:
+		return "This execution is still running."
+	case turn.BatchCodeFinished:
+		return "This execution has finished; start a new execution of the task from the web or the API."
+	case turn.BatchCodeNoTask:
+		return "This conversation is not a task execution."
+	default:
+		return refusal.Message
+	}
+}
+
+// notifyBatchViewerNotice says one thing to the reader without touching the
+// transcript's conversation: the same system frame the slash replies use.
+func (s *ChatSession) notifyBatchViewerNotice(text string) {
+	if s == nil {
+		return
+	}
+	s.notifyUI(NewMessageMsg{Msg: Message{
+		Kind:      MsgKindSystem,
+		Content:   text,
+		Timestamp: time.Now(),
+	}})
 }
 
 func (s *ChatSession) EnsureSurfaceTranscript(ctx context.Context, sessionID string) error {
@@ -269,9 +409,17 @@ func (s *ChatSession) ListSessionsRecent(ctx context.Context, limit int) ([]stat
 	// /resume continues one in the project this surface is running, never a
 	// conversation from another directory.
 	if projectID := strings.TrimSpace(s.ProjectID); projectID != "" {
-		return s.sessStore().ListSessionsForProject(ctx, projectID, limit, 0)
+		rows, err := s.sessStore().ListSessionsForProject(ctx, projectID, limit, 0)
+		if err != nil {
+			return nil, err
+		}
+		return s.withExecutionStatuses(ctx, rows), nil
 	}
-	return s.sessStore().ListSessionsRecent(ctx, limit)
+	rows, err := s.sessStore().ListSessionsRecent(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	return s.withExecutionStatuses(ctx, rows), nil
 }
 
 // SessionTitle names one session by id — "" when it has none — the same
@@ -292,9 +440,46 @@ func (s *ChatSession) ListSessionsRecentPaged(ctx context.Context, limit, offset
 		return nil, nil
 	}
 	if projectID := strings.TrimSpace(s.ProjectID); projectID != "" {
-		return s.sessStore().ListSessionsForProject(ctx, projectID, limit, offset)
+		rows, err := s.sessStore().ListSessionsForProject(ctx, projectID, limit, offset)
+		if err != nil {
+			return nil, err
+		}
+		return s.withExecutionStatuses(ctx, rows), nil
 	}
-	return s.sessStore().ListSessionsRecentPaged(ctx, limit, offset)
+	rows, err := s.sessStore().ListSessionsRecentPaged(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return s.withExecutionStatuses(ctx, rows), nil
+}
+
+// withExecutionStatuses appends how each batch execution among rows ended
+// (` · running` and the like), so /resume in a batch project reads as a task
+// history rather than a list of identical titles. Everything else — an
+// ordinary conversation, a conversation in another kind of project — is left
+// exactly as the store returned it.
+func (s *ChatSession) withExecutionStatuses(ctx context.Context, rows []state.SessionSummary) []state.SessionSummary {
+	if s == nil || len(rows) == 0 || !s.BatchProject(ctx) {
+		return rows
+	}
+	store := s.projectStoreFor()
+	if store == nil {
+		return rows
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	statuses, err := store.ExecutionStatuses(ctx, ids)
+	if err != nil || len(statuses) == 0 {
+		return rows
+	}
+	for i := range rows {
+		if status := strings.TrimSpace(statuses[rows[i].ID]); status != "" {
+			rows[i].Title = strings.TrimSpace(rows[i].Title) + " · " + status
+		}
+	}
+	return rows
 }
 
 // displayTextOrUserText moved to pkg/turn.DisplayTextOrUserText (P5-2): a
@@ -559,7 +744,7 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		// card and the approval-resolved event print. The reviews a denied
 		// plan collected reach the model when the denial is resumed, composed
 		// there (resumeAgentContext), so the conversation never displays them.
-		Permissions: decision.RequestPermissionsResponse, Reason: decision.DenyReason, ClearContext: decision.ClearContext,
+		Permissions: decision.RequestPermissionsResponse, Reason: decision.DenyReason, ClearContext: decision.ClearContext, PlanOnly: decision.PlanOnly,
 	})
 	if err != nil {
 		return err

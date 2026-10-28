@@ -103,6 +103,11 @@ type Deps struct {
 	// same session context as the MCP list — the memory instruction sits in
 	// the cached prefix.
 	ProjectMemoryOnly bool
+	// ProjectType is the type of the conversations this runtime serves
+	// (state.ProjectTypeOffice/Coding/Batch): the type each one froze at birth,
+	// never the project's current type. The runner pool keys its entries by it,
+	// so one runner never serves two types. Empty reads as coding.
+	ProjectType string
 	// LaunchProject is the frozen launch-project trust decision this runtime
 	// was built from. The TUI's is the directory it started in; a project
 	// runner's is the project it serves. Zero means no launch project, and
@@ -424,6 +429,21 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 			return tool.ApprovedActionIDFromContext(ctx), false, nil
 		}
 	} else if tool.ApprovedActionIDFromContext(ctx) != "" {
+		return "", false, nil
+	}
+	// A batch task runs unattended inside its task sandbox (plans/150): nobody
+	// is ever asked anything. An explicit deny rule still refuses; every other
+	// call proceeds, confined by the sandbox and the workspace guards, and is
+	// never escalated out of them.
+	if !exitPlanMode && strings.TrimSpace(tool.TaskWorkspaceFromContext(ctx)) != "" {
+		if isApplyPatch {
+			return "", false, nil // GuardWrite confines every target to the workspace
+		}
+		decision := r.evaluateToolPermission(tool.ConversationSessionIDFromContext(ctx), kind, pay)
+		decision = r.applyMCPToolApprovalPolicy(ctx, kind, decision)
+		if decision.Behavior == safety.BehaviorDeny && decision.Matched != nil && decision.Matched.Behavior == safety.BehaviorDeny {
+			return "", false, formatPermissionDenyError(decision, kind, pay)
+		}
 		return "", false, nil
 	}
 	// A child run has no branch of its own here. It suspends through the same
@@ -1028,7 +1048,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// The prompt a typed run reaches the model with is this primary agent's
 	// answer: its rewrite of a built-in, or a custom subagent's own text.
 	llmClient = wrapTypedSubagentPromptLLM(llmClient, func(subtype string) (string, bool) {
-		return SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).Prompt(subtype)
+		return SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).ForProjectType(r.ProjectType()).Prompt(subtype)
 	})
 	llmClient = wrapCodegraphPromptLLM(llmClient)
 	// The skill roots are resolved once per load, from this runtime's frozen
@@ -1039,8 +1059,13 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// conversation and frozen per session for the same cache reason. The
 	// standing skill-offer criteria join the same frozen block.
 	llmClient = wrapSkillCatalogLLM(llmClient, skillRoots, r.workspaceRoot(), r.SessionStore, r.skillOfferGuidance)
-	llmClient = wrapMemoryInstructionLLM(llmClient, r.workspaceRoot(), r.ProjectKey, r.AppCfg, r.SessionStore, r.ProjectMemoryOnly())
-	llmClient = wrapMemoryCitationLLM(llmClient, r.AppCfg, r.MemoryStore)
+	// Memory is a collaboration with the person: a batch task runs unattended
+	// for a business system, so neither the memory instructions nor the
+	// citation wrapper reach its requests (owner 2026-10-26).
+	if r.ProjectType() != state.ProjectTypeBatch {
+		llmClient = wrapMemoryInstructionLLM(llmClient, r.workspaceRoot(), r.ProjectKey, r.AppCfg, r.SessionStore, r.ProjectMemoryOnly())
+		llmClient = wrapMemoryCitationLLM(llmClient, r.AppCfg, r.MemoryStore)
+	}
 	llmClient = wrapTypedSubagentToolFilterLLM(llmClient)
 	// Everything wrapped so far shapes the start of a request — system prompt,
 	// injected context, the tools a typed subagent sees. A compaction's summary
@@ -1081,7 +1106,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// loop adopts it into (see reminderAdoptionSink): a mid-call write would
 	// land between an assistant tool_calls row stored at an approval gate and the
 	// result that answers it, and the dangling-result repair then strips both.
-	llmClient = wrapPlanModeLLM(llmClient, r.workspaceRoot(), r.ProjectKey)
+	llmClient = wrapPlanModeLLMFor(llmClient, r.workspaceRoot(), r.ProjectKey, r.ProjectType())
 	// The skill-offer gate sits outside the plan-mode wrapper: it suppresses
 	// itself in plan mode, and when it does inject, both wrappers' reminders
 	// reach the live session through the same adoption sink in record order.
@@ -1253,8 +1278,18 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if desc == "" {
 		desc = "Forebrain Harness agent"
 	}
-	desc += agent.ScopeDisciplinePrompt
-	desc += agentIntermediateToolPromptSuffix
+	switch r.ProjectType() {
+	case state.ProjectTypeOffice:
+		desc += agent.OfficeWorkPrompt
+		desc += agent.OfficeNotesPromptSuffix
+	case state.ProjectTypeBatch:
+		desc += agent.BatchTaskPrompt
+		desc += agent.OfficeNotesPromptSuffix
+	default:
+		// Creative coding: the prompt forebrain has always sent, byte for byte.
+		desc += agent.ScopeDisciplinePrompt
+		desc += agentIntermediateToolPromptSuffix
+	}
 	//desc += agentCollaborationPromptSuffix
 	a, err := agent.New(mainLLM, name, desc)
 	if err != nil {
@@ -1278,7 +1313,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		r.tools.SetActionHook(r.actionHook)
 	}
 	rt := &tool.AgentToolRuntime{
-		Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectKey: r.ProjectKey, Cfg: r.AppCfg, YOLO: r.yoloEnabled(), Sess: r.SessionStore, Actions: r.Actions, RunRT: r.RunRT,
+		Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectKey: r.ProjectKey, ProjectType: r.ProjectType(), Cfg: r.AppCfg, YOLO: r.yoloEnabled(), Sess: r.SessionStore, Actions: r.Actions, RunRT: r.RunRT,
 		PolicyRunID:                  r.policyRunIDForTool,
 		PermissionSnapshot:           r.PermissionSnapshot,
 		PermissionSnapshotForSession: r.PermissionSnapshotForSession,
@@ -1524,6 +1559,13 @@ func (r *Runner) RunContent(ctx context.Context, parts []llm.ContentPart) (*agen
 		// context here, once. A subagent that already set one is left as is.
 		if strings.TrimSpace(tool.ProjectRootFromContext(ctx)) == "" && strings.TrimSpace(r.ProjectRoot) != "" {
 			ctx = tool.WithProjectRoot(ctx, r.ProjectRoot)
+		}
+		// Same stamping for the conversation's project type: the run executor
+		// sets it for gateway turns, and this covers every other entry into a
+		// runner-served turn. An empty value is the coding default, so only
+		// fill it in when nothing recorded one yet.
+		if tool.ProjectTypeFromContext(ctx) == "" {
+			ctx = tool.WithProjectType(ctx, r.ProjectType())
 		}
 		// The anchor a file change is recorded against is the user message that
 		// started this turn. The surface stored that row before it started the
@@ -3576,6 +3618,14 @@ func (r *Runner) ProjectMemoryOnly() bool {
 		return false
 	}
 	return r.Deps.ProjectMemoryOnly
+}
+
+// ProjectType is this runtime's conversation type, coding when unset.
+func (r *Runner) ProjectType() string {
+	if r == nil || r.Deps == nil {
+		return state.ProjectTypeCoding
+	}
+	return state.NormalizeProjectType(r.Deps.ProjectType)
 }
 
 // ProjectInstructionsFor returns the frozen project instructions for one

@@ -12,6 +12,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 var (
@@ -99,7 +100,48 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 	}
 	defer unlock()
 
+	// Batch admission. A conversation that is a task execution starts the
+	// execution's turn here, under the session lock, so two entries racing for
+	// it end with exactly one running; the store repeats the transition inside
+	// its own transaction, so a competing process still loses cleanly. The
+	// preview is read-only, so a refusal leaves the execution exactly as it
+	// was — still pending, still ready for the turn that retries properly.
+	batchTurn := false
+	// The execution this turn admitted, carried to the frame that announces it
+	// running: the store's own post-transition row, not the preview's.
+	var batchAdmission BatchAdmission
+	if s.batchTasks != nil {
+		admission, err := s.admitBatchTurn(ctx, req)
+		if err != nil {
+			return TurnOutcome{SessionID: req.SessionID, Status: TurnFailed, Error: err}, err
+		}
+		if admission.Kind != "" {
+			batchTurn = true
+			batchAdmission = admission
+			// Nobody is watching a batch turn: a usage limit ends it for good,
+			// and no continuation timer ever follows it.
+			req.Unattended = true
+			// A turn that carried nothing of its own runs on what the engine
+			// admitted — the task's fixed input for a new execution, the
+			// continue prompt for a stopped one. A turn that prepared inputs
+			// keeps them: its attachments are already in its parts.
+			if strings.TrimSpace(req.UserText) == "" && (req.BatchInput == nil || !req.BatchInput.HasAttachments) {
+				req.UserText = admission.Input
+				req.RawInput = admission.Input
+			}
+		}
+	}
 	runID := req.ExistingRunID
+	// endBatch settles the execution this turn ran, whatever way it ends. It
+	// runs on a context that outlives the turn's cancellation: a cancelled
+	// execution still has to be recorded as stopped, still has its outputs
+	// collected, and still reaches whoever waits for its end.
+	endBatch := func(status, code string, cause error) {
+		if !batchTurn {
+			return
+		}
+		s.endBatchExecution(context.WithoutCancel(ctx), req, runID, status, code, cause)
+	}
 	startedAt := time.Now()
 	// turn_started is published from inside the executor's callback rather than
 	// before the call, so it carries the run ID the executor actually persisted
@@ -116,6 +158,20 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 			runID = id
 		}
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnStarted})
+		// The execution's own state moves with the turn that made it: the
+		// engine committed the transition before the run existed, and the run
+		// now names the execution it belongs to. A turn that never got a run
+		// has nothing running to tell the pages, and its ending follows
+		// immediately from the epilogue.
+		if batchTurn && runID != "" {
+			s.publishBatchExecution(ctx, runID, event.BatchExecutionPayload{
+				TaskID:    batchAdmission.Task.ID,
+				SessionID: req.SessionID,
+				Seq:       batchAdmission.Execution.Seq,
+				Status:    state.TaskStatusRunning,
+				StartedAt: batchAdmission.Execution.StartedAt,
+			})
+		}
 	}
 	// The turn's first output, measured once per run: the moment the model
 	// began answering this turn. The sink only fires for the foreground
@@ -158,6 +214,11 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 	switch {
 	case errors.As(err, &waiting):
 		s.autoContinue.turnEnded(ctx, req, runID, nil)
+		// A batch turn must never park on an approval: its tools are all
+		// pre-approved (plan 150). Reaching this branch means that policy is
+		// not in force, so the execution is failed with the reason rather than
+		// left running with nobody to answer the gate.
+		endBatch(state.TaskStatusFailed, "approval_required", err)
 		out.Status = TurnWaitingApproval
 		out.Approval = waiting.Request
 		out.Resume = waiting.Resume
@@ -165,6 +226,7 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		return out, nil
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		s.autoContinue.turnEnded(ctx, req, runID, nil)
+		endBatch(state.TaskStatusStopped, "", err)
 		out.Status = TurnCancelled
 		out.Error = err
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnCancelled})
@@ -172,6 +234,7 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 	case err != nil:
 		out.Status = TurnFailed
 		out.Error = err
+		endBatch(state.TaskStatusFailed, "", err)
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnError})
 		// A turn stopped by a spent usage allowance is continued by the
 		// runtime once the allowance returns. It is decided here, below every
@@ -181,6 +244,7 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		return out, err
 	default:
 		s.autoContinue.turnEnded(ctx, req, runID, nil)
+		endBatch(state.TaskStatusCompleted, "", nil)
 		out.Status = TurnCompleted
 		out.Result = result
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnCompleted})

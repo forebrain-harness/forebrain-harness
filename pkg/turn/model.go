@@ -65,6 +65,11 @@ type TurnRequest struct {
 	// nobody watching it: a usage limit ends it for good — the next trigger
 	// comes on schedule or by a person, never by a continuation timer.
 	Unattended bool `json:"-"`
+	// BatchInput is the original task text a batch turn was started with,
+	// before the surface prepared any attachment blocks. Its presence is how
+	// the engine knows a batch turn went through the admission table; a turn
+	// of an execution without it is refused rather than run.
+	BatchInput *BatchTurnInput `json:"-"`
 	// AgentContextIsRunContext says the caller already built the run context --
 	// it holds the cancel function the controller tracks and has seeded the
 	// session and run ids. The executor then passes the context through
@@ -592,6 +597,9 @@ type ToolApprovalRequest struct {
 	NetworkPort          int
 	PlanReviewModels     []PlanReviewModelOption
 	PlanReviews          []PlanReviewNote
+	// ProjectType is the type of the conversation the gate belongs to. The
+	// terminal picks its exit-plan choice group from it; empty means coding.
+	ProjectType string
 }
 
 type PlanReviewModelOption struct {
@@ -625,6 +633,7 @@ type ToolApprovalDecision struct {
 	RequestPermissionsResponse *safety.RequestPermissionsResponse
 	NetworkPolicyAmendment     *safety.NetworkPolicyAmendment
 	ClearContext               bool
+	PlanOnly                   bool
 	DenyReason                 string
 	RequestPlanReview          *PlanReviewModelOption
 }

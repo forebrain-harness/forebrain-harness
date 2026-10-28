@@ -73,6 +73,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if MODE == "reply" and self.serve_netdrop_marker(request):
             return
+        if MODE == "reply" and self.serve_tool_call_marker(request):
+            return
+        if MODE == "reply" and self.serve_batch(request):
+            return
 
         if MODE == "netdrop" and self.serve_netdrop():
             return
@@ -126,6 +130,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # How long the subagent holds its answer after the delta that takes the
     # steer: the page is checked inside this window, while it still runs.
     SUBAGENT_STEER_HOLD = 30
+    # The marker a caller puts in its message to have the model call one tool of
+    # the caller's choosing. The JSON that follows it names the tool and its
+    # arguments, so a spec scripts a call without a new provider:
+    #   [[e2e:tool-call]]{"name":"present_files","arguments":{"files":[…]}}
+    # The conversation's first request answers with that call; the request that
+    # carries its result gets the ordinary reply, so the turn ends the way a
+    # turn that ran the tool does.
+    TOOL_CALL_MARKER = "[[e2e:tool-call]]"
+    # The marker a batch task's input carries. A turn carrying it holds its
+    # answer long enough to be stopped from the task page; the continue turn of
+    # a stopped execution is refused, so the execution ends failed and the page
+    # offers 重新执行.
+    BATCH_MARKER = "[[e2e:batch]]"
+    BATCH_HOLD = 30
+    # The marker that makes a batch turn keep writing while it holds: the words
+    # arrive one step at a time after the first, so a page that opens mid-run
+    # has something to see grow. Without it the turn writes once and is silent,
+    # which is all a case that only stops it needs.
+    BATCH_LIVE_MARKER = "[[e2e:batch-live]]"
+    BATCH_LIVE_WORDS = (" slowly", " but", " surely", " and", " steadily")
+    BATCH_LIVE_STEP = 3
+    # The live case does not have to stay stoppable for half a minute: the
+    # watcher needs the run to still be going when it attaches, and then to end
+    # by itself, which is what this shorter hold leaves it to do.
+    BATCH_LIVE_HOLD = 10
+    # What the engine continues a stopped execution with (pkg/turn/batch.go,
+    # BatchContinuePrompt): the one human text a batch turn must not be.
+    CONTINUE_PROMPT = "Continue this task from where it stopped"
 
     @staticmethod
     def text_of(content):
@@ -289,6 +321,107 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pass
         return True
 
+    def serve_tool_call_marker(self, request):
+        """Answers a caller's scripted tool call in `reply` mode; False to fall
+        through.
+
+        The caller's message carries TOOL_CALL_MARKER followed by the JSON that
+        names the tool and its arguments. The conversation's first request
+        answers with exactly that call; the request after it carries the call's
+        result and gets the ordinary reply.
+        """
+        messages = request.get("messages") if isinstance(request, dict) else None
+        if not isinstance(messages, list) or not messages:
+            return False
+        payload = ""
+        for text in self.human_user_texts(messages):
+            at = text.find(self.TOOL_CALL_MARKER)
+            if at < 0:
+                continue
+            payload = text[at + len(self.TOOL_CALL_MARKER):].strip()
+        if not payload:
+            return False
+        if any(message.get("role") == "tool" for message in messages):
+            self.stream_text(TEXT)
+            return True
+        try:
+            # The payload is one JSON object; whatever the person wrote after
+            # it belongs to the message, not to the call.
+            call, _ = json.JSONDecoder().raw_decode(payload)
+        except ValueError:
+            sys.stderr.write("TOOL_CALL marker payload is not JSON\n")
+            sys.stderr.flush()
+            self.stream_text(TEXT)
+            return True
+        name = str(call.get("name") or "").strip()
+        if not name:
+            sys.stderr.write("TOOL_CALL marker names no tool\n")
+            sys.stderr.flush()
+            self.stream_text(TEXT)
+            return True
+        arguments = call.get("arguments")
+        self.stream_tool_call(name, arguments if arguments is not None else {}, "call_scripted")
+        return True
+
+    def serve_batch(self, request):
+        """Answers the batch-task cases in `reply` mode; False to fall through.
+
+        A batch turn whose conversation carries BATCH_MARKER holds: one delta,
+        then BATCH_HOLD seconds of silence, so the page has a running execution
+        to stop. The continue turn of that stopped execution is refused with a
+        400 — the network boundary's non-retryable rejection — so the execution
+        ends failed and the page offers 重新执行. A turn that also carries
+        BATCH_LIVE_MARKER writes one word every BATCH_LIVE_STEP seconds while it
+        holds, so a page opened mid-run has a live tail to draw.
+        """
+        messages = request.get("messages") if isinstance(request, dict) else None
+        if not isinstance(messages, list) or not messages:
+            return False
+        human = self.human_user_texts(messages)
+        if not any(self.BATCH_MARKER in text for text in human):
+            return False
+        if human and human[-1].strip().startswith(self.CONTINUE_PROMPT):
+            self.refuse(400, "the fake provider refuses every continue turn")
+            return True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_event(chunk(delta={"role": "assistant", "content": "working"}))
+        live = any(self.BATCH_LIVE_MARKER in text for text in human)
+        if live:
+            # The turn keeps talking while it holds: each word is its own
+            # delta, so a watching page draws the answer grow instead of
+            # receiving one finished block.
+            for word in self.BATCH_LIVE_WORDS:
+                time.sleep(self.BATCH_LIVE_STEP)
+                try:
+                    self.write_event(chunk(delta={"content": word}))
+                except OSError:
+                    return True
+        time.sleep(self.BATCH_LIVE_HOLD if live else self.BATCH_HOLD)
+        # The page may have stopped the run long ago; the socket it was written
+        # to is gone, and that is this case's whole point.
+        try:
+            self.write_event(chunk(finish="stop"))
+            self.write_raw(b"data: [DONE]\n\n")
+            self.write_raw(b"")
+        except OSError:
+            pass
+        return True
+
+    def refuse(self, status, message):
+        """Answers one request with an API error: no stream, no retry."""
+        body = json.dumps({"error": {"message": message, "type": "invalid_request_error"}}).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+        sys.stderr.write("REFUSED %d %s\n" % (status, message))
+        sys.stderr.flush()
+
     def serve_netdrop(self):
         """Request 1 streams part of the answer and closes the connection
         cleanly with no finish frame — a proxy cutting an SSE stream
@@ -330,7 +463,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
 
-    def stream_tool_call(self, name, arguments):
+    def stream_tool_call(self, name, arguments, call_id="call_subagent_net"):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -340,7 +473,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "content": "calling %s" % name,
             "tool_calls": [{
                 "index": 0,
-                "id": "call_subagent_net",
+                "id": call_id,
                 "type": "function",
                 "function": {"name": name, "arguments": json.dumps(arguments)},
             }],

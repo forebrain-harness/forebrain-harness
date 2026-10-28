@@ -777,6 +777,289 @@ func TestProjectsCreateTrustIsExplicitOperatorChoice(t *testing.T) {
 	}
 }
 
+// TestProjectsCreateCarriesProjectType pins the create round trip: an explicit
+// type is stored and read back by both the create response and the detail.
+func TestProjectsCreateCarriesProjectType(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	root := projectTempRoot(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "office", "root": root, "project_type": "office"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var row map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["project_type"] != "office" {
+		t.Fatalf("create row project_type = %v, want office", row["project_type"])
+	}
+	id, _ := row["id"].(string)
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	detail := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail["project_type"] != "office" {
+		t.Fatalf("detail project_type = %v, want office", detail["project_type"])
+	}
+}
+
+// TestProjectDefaultTypeEndpoint pins the read-only default the new-project
+// dialog preselects from (plan 153 consumes it): Git worktree → coding,
+// elsewhere → office, and asking never creates a project row.
+func TestProjectDefaultTypeEndpoint(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	plain := projectTempRoot(t)
+	rec := doJSON(t, s, http.MethodGet, "/api/v1/projects/default-type?root="+url.QueryEscape(plain), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-Git root: %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		ProjectType string `json:"project_type"`
+		Source      string `json:"source"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ProjectType != "office" || body.Source != "non_git" {
+		t.Fatalf("non-Git root answers office/non_git, got %+v", body)
+	}
+	repo := projectTempRoot(t)
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(repo, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/default-type?root="+url.QueryEscape(sub), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Git subdirectory: %d %s", rec.Code, rec.Body.String())
+	}
+	body = struct {
+		ProjectType string `json:"project_type"`
+		Source      string `json:"source"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ProjectType != "coding" || body.Source != "git_worktree" {
+		t.Fatalf("Git subdirectory answers coding/git_worktree, got %+v", body)
+	}
+	projects, err := store.ListProjects(context.Background(), state.ListProjectsOptions{}, 50, 0)
+	if err != nil || len(projects) != 0 {
+		t.Fatalf("the endpoint must not create project rows: %v %+v", err, projects)
+	}
+	// No root is a bad request, not a default.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/default-type", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing root: %d", rec.Code)
+	}
+}
+
+// TestProjectsCreateAndFolderSessionUseGitAwareDefaults pins that both entry
+// points a folder can reach the store through — the projects API and the
+// new-chat page's folder field — land on the same Git-aware default, and that
+// reopening a registered folder never reclassifies it.
+func TestProjectsCreateAndFolderSessionUseGitAwareDefaults(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+
+	// No type on a non-Git root: office.
+	plain := projectTempRoot(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "plain", "root": plain})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create plain: %d %s", rec.Code, rec.Body.String())
+	}
+	row := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["project_type"] != "office" {
+		t.Fatalf("plain create project_type = %v, want office", row["project_type"])
+	}
+
+	// A folder session under a Git worktree: coding, via the same store
+	// boundary (no HTTP hop to the default-type endpoint).
+	repo := projectTempRoot(t)
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/chat/sessions", map[string]any{"folder": repo})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("folder session: %d %s", rec.Code, rec.Body.String())
+	}
+	created := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	project, _ := created["project"].(map[string]any)
+	if project["project_type"] != "coding" {
+		t.Fatalf("Git folder session project_type = %v, want coding", project["project_type"])
+	}
+
+	// A folder session on the already-registered non-Git root reuses the
+	// office row even though nothing changed on disk.
+	rec = doJSON(t, s, http.MethodPost, "/api/chat/sessions", map[string]any{"folder": plain})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("reopen plain: %d %s", rec.Code, rec.Body.String())
+	}
+	reopened := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &reopened); err != nil {
+		t.Fatal(err)
+	}
+	project, _ = reopened["project"].(map[string]any)
+	if project["project_type"] != "office" {
+		t.Fatalf("a registered folder must keep its type, got %v", project["project_type"])
+	}
+	projects, err := store.ListProjects(context.Background(), state.ListProjectsOptions{}, 50, 0)
+	if err != nil || len(projects) != 2 {
+		t.Fatalf("two projects expected (plain + repo), got %v %v", err, len(projects))
+	}
+}
+
+// TestProjectsCreateRejectsUnknownProjectType pins the refusal: a type outside
+// the three kinds is a 400 naming the field, not a silent default.
+func TestProjectsCreateRejectsUnknownProjectType(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "bad", "root": projectTempRoot(t), "project_type": "x"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown type: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "project_type_invalid") {
+		t.Fatalf("body must name the error: %s", rec.Body.String())
+	}
+}
+
+// TestProjectsBatchRequiresTrust pins the creation gate (owner 2026-10-26): a
+// batch project exists only together with its trust decision.
+func TestProjectsBatchRequiresTrust(t *testing.T) {
+	s, store, home := newProjectsTestServer(t)
+	root := projectTempRoot(t)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "batch", "root": root, "project_type": "batch"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("batch without trust: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "batch_requires_trust") {
+		t.Fatalf("body must name the error: %s", rec.Body.String())
+	}
+	projects, err := store.ListProjects(context.Background(), state.ListProjectsOptions{}, 50, 0)
+	if err != nil || len(projects) != 0 {
+		t.Fatalf("a refused batch create must leave no project behind: %v %+v", err, projects)
+	}
+
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "batch", "root": root, "project_type": "batch", "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("batch with trust: %d %s", rec.Code, rec.Body.String())
+	}
+	trusted, err := safety.IsTrusted(home, safety.Project{Root: root})
+	if err != nil || !trusted {
+		t.Fatalf("the batch create must record trust: %v %v", trusted, err)
+	}
+}
+
+// TestProjectPatchTypeReachesOnlyNewSessions pins the surface contract: a
+// PATCH changes the project's type, the session detail keeps reporting each
+// conversation's frozen type, and the nested project row reports the current
+// one so the page can flag the difference.
+func TestProjectPatchTypeReachesOnlyNewSessions(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	root := projectTempRoot(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "typed", "root": root, "project_type": "office"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	row := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := row["id"].(string)
+
+	newSession := func() string {
+		rec := doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/sessions", map[string]any{})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("session create: %d %s", rec.Code, rec.Body.String())
+		}
+		out := map[string]any{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		sid, _ := out["id"].(string)
+		return sid
+	}
+	sessionType := func(sid string) (string, string) {
+		rec := doJSON(t, s, http.MethodGet, "/api/chat/sessions/"+sid, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("session detail: %d %s", rec.Code, rec.Body.String())
+		}
+		detail := map[string]any{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		project, _ := detail["project"].(map[string]any)
+		frozen, _ := detail["project_type"].(string)
+		current, _ := project["project_type"].(string)
+		return frozen, current
+	}
+
+	s1 := newSession()
+	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, map[string]any{"project_type": "coding"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: %d %s", rec.Code, rec.Body.String())
+	}
+	s2 := newSession()
+
+	frozen, current := sessionType(s1)
+	if frozen != "office" {
+		t.Fatalf("S1 must keep its frozen office, got %q", frozen)
+	}
+	if current != "coding" {
+		t.Fatalf("S1's project row must report the current coding, got %q", current)
+	}
+	if frozen, _ = sessionType(s2); frozen != "coding" {
+		t.Fatalf("S2 must be born coding, got %q", frozen)
+	}
+}
+
+// TestProjectPatchToBatchRequiresTrust pins the PATCH gate: switching to batch
+// needs either a request that restates the trust decision or a root already
+// trusted.
+func TestProjectPatchToBatchRequiresTrust(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	root := projectTempRoot(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "switch", "root": root})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	row := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := row["id"].(string)
+
+	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, map[string]any{"project_type": "batch"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("patch to batch without trust: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "batch_requires_trust") {
+		t.Fatalf("body must name the error: %s", rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, map[string]any{"project_type": "batch", "trust": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch to batch with trust: %d %s", rec.Code, rec.Body.String())
+	}
+	patched := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
+		t.Fatal(err)
+	}
+	if patched["project_type"] != "batch" {
+		t.Fatalf("patched project_type = %v, want batch", patched["project_type"])
+	}
+}
+
 func TestProjectsCRUDPinDelete(t *testing.T) {
 	s, store, _ := newProjectsTestServer(t)
 	root := t.TempDir()
@@ -1521,6 +1804,8 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	projects := rest.Group("/api/v1/projects")
 	projects.Get("/", s.handleProjectsList)
 	projects.Post("/", s.handleProjectsCreate)
+	// Static before /:id, mirroring the production registration.
+	projects.Get("/default-type", s.handleProjectDefaultType)
 	projects.Get("/:id", s.handleProjectOne)
 	projects.Patch("/:id", s.handleProjectOne)
 	projects.Delete("/:id", s.handleProjectDelete)
@@ -1528,6 +1813,18 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	projects.Post("/:id/pin", s.handleProjectPin)
 	projects.Get("/:id/sessions", s.handleProjectSessionsList)
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
+	// The batch task reads, mirroring the production registration.
+	projects.Get("/:id/tasks", s.handleProjectTasksList)
+	// The chats a project's channels have spoken with, for its notification
+	// settings, mirroring the production registration.
+	projects.Get("/:id/channel-targets", s.handleProjectChannelTargets)
+	tasks := rest.Group("/api/v1/tasks")
+	tasks.Get("/:task_id", s.handleTaskOne)
+	// The chat session routes the project-type round trips ride on, mirroring
+	// the production registration.
+	chatSessions := rest.Group("/api/chat/sessions")
+	chatSessions.Post("/", s.handleChatSessionCreate)
+	chatSessions.Get("/:id", s.handleChatSession)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
 	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
@@ -9087,4 +9384,475 @@ func TestSubagentToolOutputServesItsWorkersSessionOnly(t *testing.T) {
 		"a spool of the conversation's own session is not the worker's")
 	require.Equal(t, http.StatusNotFound, get("sid", "ghost", strconv.FormatInt(mineID, 10)).Code)
 	require.Equal(t, http.StatusBadRequest, get("sid", "agent-1", "abc").Code)
+}
+
+// A "keep the plan only" approval (plan 148) rides the same REST approval
+// body as clear_context: valid on an exit-plan action, rejected anywhere
+// else.
+func TestApproveExitPlanWithPlanOnly(t *testing.T) {
+	s, actions := newApprovalHTTPServer(t)
+	action, err := actions.CreatePending(context.Background(), "session-1", "exit_plan_mode", map[string]any{
+		"action": "exit", "session_id": "session-1",
+	})
+	require.NoError(t, err)
+
+	rr := postApprovalDecision(t, s, action.ID, map[string]any{"plan_only": true})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	stored, err := actions.Get(context.Background(), action.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActionApproved, stored.Status)
+	var answer struct {
+		PlanOnly bool `json:"plan_only"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stored.AnswerJSON), &answer))
+	require.True(t, answer.PlanOnly)
+
+	other, err := actions.CreatePending(context.Background(), "session-1", "shell", map[string]any{
+		"command": "go test ./...", "session_id": "session-1",
+	})
+	require.NoError(t, err)
+	rr = postApprovalDecision(t, s, other.ID, map[string]any{"plan_only": true})
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	storedOther, err := actions.Get(context.Background(), other.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActionPending, storedOther.Status)
+}
+
+// batchTestProject creates a batch project and returns its row.
+func batchTestProject(t *testing.T, s *Server) state.Project {
+	t.Helper()
+	root := t.TempDir()
+	project, err := s.Projects.Create(context.Background(), state.CreateProjectInput{
+		Name:        "batch",
+		Root:        root,
+		ProjectType: state.ProjectTypeBatch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return project
+}
+
+// batchTestTask creates one task of the project, the way the create endpoint
+// does.
+func batchTestTask(t *testing.T, s *Server, project state.Project) state.Task {
+	t.Helper()
+	task, err := s.Projects.CreateTask(context.Background(), state.Task{ProjectID: project.ID, Title: "count rows"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+// batchTestExecutionForTask opens a pending execution of the task in its own
+// conversation, the way the create endpoint does.
+func batchTestExecutionForTask(t *testing.T, s *Server, project state.Project, task state.Task, sessionID string) state.TaskExecution {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.Sessions.EnsureAt(ctx, sessionID, sessionID, state.SessionBirth{
+		Cwd:       project.Root,
+		ProjectID: project.ID,
+		Source:    state.SessionSourceConversation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Projects.BindSession(ctx, sessionID, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	exec, err := s.Projects.AddTaskExecution(ctx, task.ID, sessionID, project.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exec
+}
+
+// batchTestExecution is one pending execution of a fresh task.
+func batchTestExecution(t *testing.T, s *Server, project state.Project, sessionID string) state.TaskExecution {
+	t.Helper()
+	return batchTestExecutionForTask(t, s, project, batchTestTask(t, s, project), sessionID)
+}
+
+// fixBatchInput starts an execution with the task's text, which is what fixes
+// the task's input; the execution is left running.
+func fixBatchInput(t *testing.T, s *Server, exec state.TaskExecution) {
+	t.Helper()
+	if _, err := s.Projects.StartTaskExecution(context.Background(), exec.SessionID, state.TaskStatusPending, "count the rows", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBatchProjectSessionCreateMakesATaskAndExecution(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	root := t.TempDir()
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{
+		"name": "batch", "root": root, "trust": true, "project_type": "batch",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	projectID := created["id"].(string)
+
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+projectID+"/sessions", map[string]any{
+		"title": "monthly report", "external_ref": "ext-1",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create task session: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	var raw struct {
+		ID   string `json:"id"`
+		Task struct {
+			ID          string `json:"id"`
+			Title       string `json:"title"`
+			ExternalRef string `json:"external_ref"`
+			Origin      string `json:"origin"`
+		} `json:"task"`
+		Execution struct {
+			Seq          int    `json:"seq"`
+			Status       string `json:"status"`
+			Workspace    string `json:"workspace"`
+			WorkspaceRel string `json:"workspace_rel"`
+		} `json:"execution"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw.ID == "" || raw.Task.ID == "" {
+		t.Fatalf("create response = %s", body)
+	}
+	if raw.Task.ExternalRef != "ext-1" || raw.Task.Origin != state.TaskOriginAPI {
+		t.Fatalf("task = %+v, want the external ref and the api origin", raw.Task)
+	}
+	if raw.Execution.Seq != 1 || raw.Execution.Status != state.TaskStatusPending {
+		t.Fatalf("execution = %+v, want the first pending execution", raw.Execution)
+	}
+	stored, err := store.Get(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(stored.Root, "tasks", raw.Task.ID, "1"); raw.Execution.Workspace != want {
+		t.Fatalf("workspace = %q, want %q", raw.Execution.Workspace, want)
+	}
+	if want := filepath.ToSlash(filepath.Join("tasks", raw.Task.ID, "1")); raw.Execution.WorkspaceRel != want {
+		t.Fatalf("workspace_rel = %q, want %q", raw.Execution.WorkspaceRel, want)
+	}
+	for _, dir := range []string{"inputs", "outputs", ".work"} {
+		if info, err := os.Stat(filepath.Join(raw.Execution.Workspace, dir)); err != nil || !info.IsDir() {
+			t.Fatalf("workspace has no %s/: %v", dir, err)
+		}
+	}
+	// The conversation froze the batch type at birth, which is what every door
+	// reads to decide this is a task and not a chat.
+	if ptype, err := store.SessionProjectType(context.Background(), raw.ID); err != nil || ptype != state.ProjectTypeBatch {
+		t.Fatalf("session project type = %q, %v", ptype, err)
+	}
+
+	// A second execution of the same task: a new conversation, a new
+	// workspace, and the previous inputs carried over.
+	if err := os.WriteFile(filepath.Join(raw.Execution.Workspace, "inputs", "rows.csv"), []byte("a,b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+projectID+"/sessions", map[string]any{
+		"task_id": raw.Task.ID,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create execution session: %d %s", rec.Code, rec.Body.String())
+	}
+	var second struct {
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Execution struct {
+			Seq       int    `json:"seq"`
+			Workspace string `json:"workspace"`
+		} `json:"execution"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.ID == raw.ID {
+		t.Fatal("a re-run reused the conversation it re-runs")
+	}
+	if second.Execution.Seq != 2 {
+		t.Fatalf("second execution seq = %d, want 2", second.Execution.Seq)
+	}
+	if second.Title != "monthly report #2" {
+		t.Fatalf("second execution title = %q, want the task and its sequence", second.Title)
+	}
+	copied, err := os.ReadFile(filepath.Join(second.Execution.Workspace, "inputs", "rows.csv"))
+	if err != nil || string(copied) != "a,b\n" {
+		t.Fatalf("the re-run was not handed the previous inputs: %q %v", string(copied), err)
+	}
+
+	// A task id names a task of a batch project; anywhere else it is refused.
+	coding, err := s.Projects.Create(context.Background(), state.CreateProjectInput{
+		Name: "coding", Root: t.TempDir(), ProjectType: state.ProjectTypeCoding,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+coding.ID+"/sessions", map[string]any{"task_id": raw.Task.ID})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "task_id_requires_batch_project") {
+		t.Fatalf("task_id on a coding project: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A batch conversation is only ever created with its task, so the plain
+	// new-chat door answers with the door to use.
+	rec = doJSON(t, s, http.MethodPost, "/api/chat/sessions", map[string]any{"project_id": projectID})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "batch_project_uses_tasks") {
+		t.Fatalf("chat sessions create on a batch project: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRunInputRefusedForBatchSession(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	project := batchTestProject(t, s)
+	exec := batchTestExecution(t, s, project, "s-input-refused")
+	fixBatchInput(t, s, exec)
+	// The run exists in the controller, so the handler reaches its own check
+	// instead of answering before it.
+	s.runController().Track("run-batch", exec.SessionID, func() {})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/run-batch/input", strings.NewReader(`{"message":"hello"}`))
+	req.SetPathValue("id", "run-batch")
+	rec := httptest.NewRecorder()
+	s.handleRunInput(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "batch_takes_no_input") {
+		t.Fatalf("run input on a batch session: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTaskReadEndpoints(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	project := batchTestProject(t, s)
+	exec := batchTestExecution(t, s, project, "s-read")
+	fixBatchInput(t, s, exec)
+	if err := s.Projects.MarkExecutionEnded(context.Background(), exec.SessionID, state.TaskStatusCompleted, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/v1/projects/"+project.ID+"/tasks?page=1&limit=10", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task list: %d %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Total != 1 || len(list.Items) != 1 {
+		t.Fatalf("task list = %+v", list)
+	}
+	latest, _ := list.Items[0]["latest"].(map[string]any)
+	if latest["status"] != state.TaskStatusCompleted || latest["session_id"] != exec.SessionID {
+		t.Fatalf("latest execution = %+v", latest)
+	}
+	if list.Items[0]["executions"] != float64(1) {
+		t.Fatalf("executions = %v, want 1", list.Items[0]["executions"])
+	}
+
+	taskID := list.Items[0]["id"].(string)
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/tasks/"+taskID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		Task struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"task"`
+		Executions struct {
+			Items []map[string]any `json:"items"`
+			Total int              `json:"total"`
+		} `json:"executions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Task.ID != taskID || detail.Executions.Total != 1 {
+		t.Fatalf("task detail = %+v", detail)
+	}
+	if rel, _ := detail.Executions.Items[0]["workspace_rel"].(string); rel != filepath.ToSlash(filepath.Join("tasks", taskID, "1")) {
+		t.Fatalf("workspace_rel = %q", rel)
+	}
+
+	// Another agent's task, and one that does not exist, both read as missing.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/tasks/tsk-missing", nil)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "task_not_found") {
+		t.Fatalf("missing task: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestProjectTaskNotifyValidation pins the notification-target setting: a
+// channel kind this build cannot build or an empty recipient is refused before
+// anything is stored, a valid list round-trips through the row, and a project
+// that notifies nobody answers with an empty array rather than null (plan 151).
+func TestProjectTaskNotifyValidation(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	root := projectTempRoot(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "batch", "root": root, "project_type": "batch", "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := created["id"].(string)
+	// Nothing to notify is an empty list, never a missing or null field.
+	if items, ok := created["task_notify"].([]any); !ok || len(items) != 0 {
+		t.Fatalf("a fresh project's task_notify = %v, want []", created["task_notify"])
+	}
+
+	for _, body := range []map[string]any{
+		{"task_notify": []map[string]any{{"channel": "carrier-pigeon", "target": "coop"}}},
+		{"task_notify": []map[string]any{{"channel": "feishu", "target": "   "}}},
+		{"task_notify": []map[string]any{{"channel": "", "target": "oc_1"}}},
+	} {
+		rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("patch %v = %d %s, want 400", body["task_notify"], rec.Code, rec.Body.String())
+		}
+		var failure map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &failure); err != nil {
+			t.Fatal(err)
+		}
+		if failure["error"] != "task_notify_invalid" {
+			t.Fatalf("patch %v error = %v, want task_notify_invalid", body["task_notify"], failure["error"])
+		}
+		if stored, err := store.Get(context.Background(), id); err != nil || len(stored.TaskNotify) != 0 {
+			t.Fatalf("a refused setting was stored anyway: %v %v", stored.TaskNotify, err)
+		}
+	}
+
+	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, map[string]any{
+		"task_notify": []map[string]any{
+			{"channel": "feishu", "target": "oc_1"},
+			{"channel": "feishu", "target": "oc_1"},
+			{"channel": "telegram", "target": "42"},
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch a valid list: %d %s", rec.Code, rec.Body.String())
+	}
+	var patched map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := patched["task_notify"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("stored task_notify = %v, want the duplicate dropped", patched["task_notify"])
+	}
+	first, _ := items[0].(map[string]any)
+	if first["channel"] != "feishu" || first["target"] != "oc_1" {
+		t.Fatalf("first target = %v, want feishu/oc_1", first)
+	}
+}
+
+// TestProjectChannelTargetsListsSeenChats pins the picker's source: the peers
+// whose messages opened tasks and the conversations a channel opened in the
+// project, each split back into the (channel, target) pair a notification can
+// name, newest first (plan 151).
+func TestProjectChannelTargetsListsSeenChats(t *testing.T) {
+	ctx := context.Background()
+	// The handler reads the project's bound channels through the environment
+	// it was built with, so this fixture carries one.
+	home := t.TempDir()
+	db, dbErr := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	if dbErr != nil {
+		t.Fatal(dbErr)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := &Server{
+		Home:     home,
+		Runner:   &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}},
+		Projects: state.NewProjectStore(db, "main"),
+		Sessions: state.NewSessionStore(db, "main"),
+		Env:      &process.Environment{SQL: db, Deps: run.Deps{AppCfg: &appcfg.Root{}}},
+	}
+	store := s.Projects
+	root := projectTempRoot(t)
+	project, err := store.Create(ctx, state.CreateProjectInput{
+		Name: "batch", Root: root, ProjectKey: state.ProjectKeyForRoot(root), ProjectType: state.ProjectTypeBatch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The project runs a Feishu bot; the picker only offers kinds it can send
+	// through.
+	if err := state.NewProjectChannelStore(s.Env.SQL, "main").Upsert(ctx, state.ProjectChannel{
+		ProjectID: project.ID, Kind: "feishu", Enabled: true, ConfigJSON: `{"enabled":true}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// One task that came in through the bot, and one that did not.
+	base := time.Now().Unix()
+	spoke := state.WrapProjectChannelSession("feishu", project.ID, "oc_task")
+	if _, err := store.CreateTask(ctx, state.Task{
+		ProjectID: project.ID, Title: "帮我看下这份表", Origin: state.TaskOriginChannel, OriginRef: newChannelTaskRef("feishu", spoke),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateTask(ctx, state.Task{ProjectID: project.ID, Title: "手工建的任务"}); err != nil {
+		t.Fatal(err)
+	}
+	// A conversation the bot opened, whose message no longer maps to a task.
+	chat := state.WrapProjectChannelSession("feishu", project.ID, "oc_chat")
+	if err := s.Sessions.EnsureAt(ctx, chat, "群里的对话", state.SessionBirth{
+		Cwd: root, ProjectID: project.ID, Source: state.SessionSourceConversation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Env.SQL.ExecContext(ctx, `UPDATE fb_sessions SET updated_at=? WHERE id=?`, base+60, chat); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/v1/projects/"+project.ID+"/channel-targets", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("channel-targets: %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			Channel  string `json:"channel"`
+			Target   string `json:"target"`
+			Label    string `json:"label"`
+			LastSeen int64  `json:"last_seen"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("items = %+v, want the task's sender and the chat's conversation", body.Items)
+	}
+	// Newest first: the conversation was touched last.
+	if body.Items[0].Target != "oc_chat" || body.Items[1].Target != "oc_task" {
+		t.Fatalf("items = %+v, want the newest target first", body.Items)
+	}
+	if body.Items[0].Channel != "feishu" || body.Items[1].Channel != "feishu" {
+		t.Fatalf("items = %+v, want the project's feishu channel on both", body.Items)
+	}
+	if body.Items[1].Label != "帮我看下这份表" {
+		t.Fatalf("the task's target label = %q, want the task title", body.Items[1].Label)
+	}
+	if body.Items[1].LastSeen == 0 {
+		t.Fatal("the task's target has no last_seen")
+	}
+}
+
+// TestProjectChannelTargetsRequiresTheProject keeps the picker inside one
+// project's boundary: an id nobody owns is not found, and nothing else is
+// listed in its place.
+func TestProjectChannelTargetsRequiresTheProject(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	rec := doJSON(t, s, http.MethodGet, "/api/v1/projects/prj_missing/channel-targets", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("channel-targets for a missing project = %d %s, want 404", rec.Code, rec.Body.String())
+	}
 }

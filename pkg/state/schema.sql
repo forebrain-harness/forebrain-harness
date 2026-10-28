@@ -21,6 +21,15 @@ CREATE TABLE fb_projects (
   -- to the root with '/' separators. '' is the project root itself, and a
   -- directory since deleted falls back to the root when the dialog opens.
   last_attach_dir TEXT NOT NULL DEFAULT '',
+  -- What kind of project this is (office | coding | batch). A conversation
+  -- copies it into fb_sessions.project_type when it is born, so changing it
+  -- only reaches the conversations started afterwards.
+  project_type TEXT NOT NULL DEFAULT 'coding' CHECK (project_type IN ('office', 'coding', 'batch')),
+  -- Where a batch project's end-of-execution notifications go: a JSON array of
+  -- {"channel","target"} pairs, written from the project's settings page. A
+  -- task that came in through a channel answers its own chat instead; an empty
+  -- list means "tell nobody" (plan 151).
+  task_notify_json TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
@@ -67,6 +76,9 @@ CREATE TABLE fb_sessions (
   -- 'workshop' = a skill-workshop task): the chat drawer filters on it so a
   -- workshop task stays out of the conversation list.
   source TEXT NOT NULL DEFAULT '',
+  -- The project type this conversation was born with (office | coding |
+  -- batch), frozen at birth like source and agent_id.
+  project_type TEXT NOT NULL DEFAULT 'coding' CHECK (project_type IN ('office', 'coding', 'batch')),
   cwd TEXT NOT NULL DEFAULT '',
   git_branch TEXT NOT NULL DEFAULT '',
   memory_mode TEXT NOT NULL DEFAULT 'disabled',
@@ -578,4 +590,73 @@ CREATE TABLE fb_migration_units (
   plans_json TEXT,
   imported_at_ms INTEGER NOT NULL,
   PRIMARY KEY(agent_id, target_id)
+) STRICT;
+
+-- A file a conversation delivered: the model presented it with present_files
+-- (origin 'model'), a batch task's output folder was collected when the task
+-- presented nothing (origin 'fallback'), or an office plan was kept as the
+-- deliverable (origin 'plan'). path is the absolute file as presented; the
+-- file itself is never copied, so a later edit or delete shows up as
+-- changed/missing when the row is read. run_id is a plain reference (no
+-- foreign key): an artifact must outlive the pruning of run rows.
+CREATE TABLE fb_artifacts (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL DEFAULT '',
+  tool_call_id TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL,
+  rel_path TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  mime TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  preview TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL,
+  mtime_ns INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL DEFAULT 'model' CHECK (origin IN ('model', 'fallback', 'plan')),
+  created_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_fb_artifacts_session ON fb_artifacts(session_id, created_at);
+CREATE INDEX idx_fb_artifacts_run ON fb_artifacts(run_id);
+
+-- A batch project's business task. A task is run by one or more executions;
+-- every execution is its own conversation with its own task workspace
+-- (<project root>/tasks/<task id>/<seq>), and re-running a task adds an
+-- execution instead of reusing a conversation (owner 2026-10-26).
+CREATE TABLE fb_tasks (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
+  project_id TEXT NOT NULL REFERENCES fb_projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',
+  input_text TEXT NOT NULL DEFAULT '',
+  input_set INTEGER NOT NULL DEFAULT 0 CHECK (input_set IN (0, 1)),
+  external_ref TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL DEFAULT 'api' CHECK (origin IN ('api', 'web', 'cron', 'channel')),
+  origin_ref TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_fb_tasks_project_updated ON fb_tasks(project_id, updated_at DESC);
+CREATE INDEX idx_fb_tasks_external_ref ON fb_tasks(project_id, external_ref) WHERE external_ref <> '';
+
+-- One execution of a task: exactly one conversation and one task workspace.
+CREATE TABLE fb_task_executions (
+  session_id TEXT PRIMARY KEY REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES fb_tasks(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL CHECK (seq > 0),
+  workspace TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'stopped', 'completed', 'failed')),
+  error_code TEXT NOT NULL DEFAULT '',
+  error_text TEXT NOT NULL DEFAULT '',
+  -- Why the end-of-execution notification could not be delivered. The status
+  -- above is about the task; a message that never arrived does not fail it
+  -- (plan 151).
+  notify_error TEXT NOT NULL DEFAULT '',
+  started_at INTEGER,
+  finished_at INTEGER,
+  created_at INTEGER NOT NULL,
+  UNIQUE (task_id, seq)
 ) STRICT;

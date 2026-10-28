@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 19
+const stateSchemaVersion = 23
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -58,6 +58,10 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 17, apply: migrateStateV16ToV17},
 	{version: 18, apply: migrateStateV17ToV18},
 	{version: 19, apply: migrateStateV18ToV19},
+	{version: 20, apply: migrateStateV19ToV20},
+	{version: 21, apply: migrateStateV20ToV21},
+	{version: 22, apply: migrateStateV21ToV22},
+	{version: 23, apply: migrateStateV22ToV23},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -810,6 +814,144 @@ func migrateStateV18ToV19(ctx context.Context, conn *sql.Conn) error {
 	if llmMsCol == 0 {
 		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_runs ADD COLUMN usage_llm_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return fmt.Errorf("add fb_runs.usage_llm_ms: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateStateV19ToV20 adds the project-type column to fb_projects and
+// fb_sessions (plan 145). Two plain ADD COLUMNs, so a database that already
+// carries them (a fixture built from the current schema.sql with a lowered
+// user_version) skips the ALTER instead of failing on a duplicate. Every
+// existing project and conversation reads as 'coding' — the kind everything
+// was before project types existed (owner 2026-10-26: already-registered
+// projects migrate to coding).
+func migrateStateV19ToV20(ctx context.Context, conn *sql.Conn) error {
+	var projectCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_projects') WHERE name='project_type'`).Scan(&projectCol); err != nil {
+		return err
+	}
+	if projectCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_projects ADD COLUMN project_type TEXT NOT NULL DEFAULT 'coding' CHECK (project_type IN ('office', 'coding', 'batch'))`); err != nil {
+			return fmt.Errorf("add fb_projects.project_type: %w", err)
+		}
+	}
+	var sessionCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_sessions') WHERE name='project_type'`).Scan(&sessionCol); err != nil {
+		return err
+	}
+	if sessionCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_sessions ADD COLUMN project_type TEXT NOT NULL DEFAULT 'coding' CHECK (project_type IN ('office', 'coding', 'batch'))`); err != nil {
+			return fmt.Errorf("add fb_sessions.project_type: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateStateV20ToV21 adds fb_artifacts: the files a conversation delivered
+// (plan 146). The table text matches schema.sql byte for byte — the
+// migration-vs-fresh-schema test compares sqlite_master — and uses IF NOT
+// EXISTS so a fixture built from the current schema.sql with a lowered
+// user_version skips the statements instead of failing on a duplicate. Rows
+// are only ever inserted going forward; nothing backfills.
+func migrateStateV20ToV21(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_artifacts (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL DEFAULT '',
+  tool_call_id TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL,
+  rel_path TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  mime TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  preview TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL,
+  mtime_ns INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL DEFAULT 'model' CHECK (origin IN ('model', 'fallback', 'plan')),
+  created_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_fb_artifacts_session ON fb_artifacts(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_fb_artifacts_run ON fb_artifacts(run_id);`); err != nil {
+		return fmt.Errorf("create fb_artifacts: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV21ToV22 adds fb_tasks and fb_task_executions: a batch project's
+// business task and each of its executions (plan 149). One execution is one
+// conversation and one task workspace, so the execution row is keyed by the
+// conversation id and records where that conversation runs. The table text
+// matches schema.sql byte for byte — the migration-vs-fresh-schema test
+// compares sqlite_master — and uses IF NOT EXISTS so a fixture built from the
+// current schema.sql with a lowered user_version skips the statements instead
+// of failing on a duplicate. Rows are only ever inserted going forward;
+// nothing backfills, because no conversation ran as a task before this.
+func migrateStateV21ToV22(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_tasks (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
+  project_id TEXT NOT NULL REFERENCES fb_projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',
+  input_text TEXT NOT NULL DEFAULT '',
+  input_set INTEGER NOT NULL DEFAULT 0 CHECK (input_set IN (0, 1)),
+  external_ref TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL DEFAULT 'api' CHECK (origin IN ('api', 'web', 'cron', 'channel')),
+  origin_ref TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_fb_tasks_project_updated ON fb_tasks(project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fb_tasks_external_ref ON fb_tasks(project_id, external_ref) WHERE external_ref <> '';
+CREATE TABLE IF NOT EXISTS fb_task_executions (
+  session_id TEXT PRIMARY KEY REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES fb_tasks(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL CHECK (seq > 0),
+  workspace TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'stopped', 'completed', 'failed')),
+  error_code TEXT NOT NULL DEFAULT '',
+  error_text TEXT NOT NULL DEFAULT '',
+  started_at INTEGER,
+  finished_at INTEGER,
+  created_at INTEGER NOT NULL,
+  UNIQUE (task_id, seq)
+) STRICT;`); err != nil {
+		return fmt.Errorf("create fb_tasks and fb_task_executions: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV22ToV23 adds the two columns plan 151's notifications need:
+// the targets a batch project's end-of-execution notification goes to, and the
+// reason a notification that was due never arrived. Two plain ADD COLUMNs, so
+// a database that already carries them (a fixture built from the current
+// schema.sql with a lowered user_version) skips the ALTER instead of failing on
+// a duplicate. Every existing project notifies nobody — an empty target list is
+// exactly what "'[]'" means — and no execution has a delivery failure to
+// report.
+func migrateStateV22ToV23(ctx context.Context, conn *sql.Conn) error {
+	var notifyCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_projects') WHERE name='task_notify_json'`).Scan(&notifyCol); err != nil {
+		return err
+	}
+	if notifyCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_projects ADD COLUMN task_notify_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("add fb_projects.task_notify_json: %w", err)
+		}
+	}
+	var notifyErrCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_task_executions') WHERE name='notify_error'`).Scan(&notifyErrCol); err != nil {
+		return err
+	}
+	if notifyErrCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_task_executions ADD COLUMN notify_error TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_task_executions.notify_error: %w", err)
 		}
 	}
 	return nil

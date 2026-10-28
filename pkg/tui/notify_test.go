@@ -14,6 +14,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
@@ -1151,5 +1152,30 @@ func TestSupersededAbandonedErrorIsNotReplayed(t *testing.T) {
 	got := supersededAbandonedErrors(events)
 	if _, ok := got[0]; !ok || len(got) != 1 {
 		t.Fatalf("superseded = %v, want only the abandoned error of the run that also has a real one", got)
+	}
+}
+
+// A kept-plan exit (plan 148) reaches a subagent's own view through
+// subagentToolStepMsg: the mirror must carry plan_only with the rest of the
+// meta, or the card header on that view loses "Kept the plan".
+func TestSubagentToolStepMsgKeepsPlanOnly(t *testing.T) {
+	payload := `{"mode":"agent","plan_file":"/tmp/plans/p/q3.md","plan_only":true,"message":"kept"}`
+	step := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		StepID:   "step-kept",
+		ToolName: "exit_plan_mode",
+		Output:   map[string]any{"output": payload},
+	}
+	canonical, ok := tool.RunEventFromStep(context.Background(), "sess-1", "run-1", "tui", step)
+	if !ok {
+		t.Fatal("the kept-plan exit must reach the surfaces as a canonical run event")
+	}
+	var completed event.ToolCallCompletedPayload
+	if err := json.Unmarshal(canonical.Payload, &completed); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	msg := subagentToolStepMsg(canonical, completed.StepID, completed.ToolName, completed.Summary, completed.ToolMeta, canonical.Type)
+	if !msg.Msg.ToolMeta.PlanOnly {
+		t.Fatalf("the mirror dropped plan_only: %+v", msg.Msg.ToolMeta)
 	}
 }

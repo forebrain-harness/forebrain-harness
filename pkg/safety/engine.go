@@ -447,6 +447,9 @@ var safeReadOnlyTools = map[string]struct{}{
 var safeInternalTools = map[string]struct{}{
 	"intermediate_tool": {},
 	"session_todo":      {},
+	// Delivering a file registers a row; it never writes workspace bytes,
+	// so it asks no approval of its own.
+	"present_files":     {},
 	"subagent_run":      {},
 	"subagent_fanout":   {},
 	"subagent_send":     {},

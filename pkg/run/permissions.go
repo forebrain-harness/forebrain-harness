@@ -898,6 +898,12 @@ type SessionPresetState struct {
 	Source    string
 }
 
+// PresetBatchSandbox names the approval posture a batch task runs under: the
+// task sandbox with no approvals at all. It is not one of the three built-in
+// presets and cannot be picked — a batch project's conversations are fixed to
+// it (plans/150) — so a surface only reads it.
+const PresetBatchSandbox = "batch-sandbox"
+
 // SessionPresetFor names the preset one conversation runs under. The live
 // in-process preset wins (the store is the truth of what executes this
 // instant); the persisted row — including a lazily inferred YOLO row — is
@@ -906,6 +912,13 @@ type SessionPresetState struct {
 func (r *Runner) SessionPresetFor(ctx context.Context, sessionID string) SessionPresetState {
 	if r == nil {
 		return SessionPresetState{}
+	}
+	// A batch task is never asked anything and cannot be given anything: its
+	// posture follows from the project type, not from a stored row, so a row a
+	// picker wrote earlier cannot describe it. Answering first is what keeps a
+	// surface from showing a preset that does not apply.
+	if r.ProjectType() == state.ProjectTypeBatch {
+		return SessionPresetState{Current: PresetBatchSandbox, Effective: PresetBatchSandbox, Source: "project_type"}
 	}
 	if safety.RuntimeYOLOEnabled() {
 		return SessionPresetState{Current: safety.PresetFullAccess, Effective: safety.PresetFullAccess, Source: state.SessionPresetSourceYolo}

@@ -284,7 +284,7 @@ func authorizeRead(ctx context.Context, st *State, toolName, filePath string) (r
 			return readPathResolution{}, &RequiresActionError{ActionID: id, ActionKind: toolName, ToolName: toolName, ToolInput: payload}
 		}
 	}
-	if st.ReadPathDenied(abs) && !st.PathUnderLoadedSkillRoot(abs) {
+	if st.ReadPathDeniedIn(ctx, abs) && !st.PathUnderLoadedSkillRoot(abs) {
 		CaptureToolError(ctx, ErrPathReadDenied)
 		return readPathResolution{}, fmt.Errorf("%w: %s", ErrPathReadDenied, abs)
 	}

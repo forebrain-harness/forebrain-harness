@@ -2145,3 +2145,95 @@ func TestGatewayToolMetaPayloadCarriesTheRefusalWords(t *testing.T) {
 	require.Equal(t, "复用 http_server.go", out["deny_feedback"])
 	require.NotContains(t, gatewayToolMetaPayload(tool.ToolMeta{ToolName: "shell", Status: "completed"}), "deny_feedback")
 }
+
+// TestRunEndFramesCarryArtifacts pins the structured result a run's end
+// carries on the socket: writeMsg fills the run's delivered files from the
+// session store, the canonical turn_completed record keeps them, and an
+// integrating system reads the same list the live card drew.
+func TestRunEndFramesCarryArtifacts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	row, err := sessions.AddArtifact(ctx, state.Artifact{
+		SessionID: "s1", RunID: "run-1", Path: "/work/proj/report.docx",
+		RelPath: "report.docx", Name: "report.docx", Title: "Q3 report",
+		MIME: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		Kind: "document", Preview: "docx", Size: 1259520,
+	})
+	require.NoError(t, err)
+
+	s := &Server{Sessions: sessions}
+	m := wsServerMsg{Op: "run_completed", RunID: "run-1", SessionID: "s1"}
+	// The exact fill writeMsg performs for every run-end op.
+	m.RunArtifacts = turn.RunArtifactsOf(context.Background(), s.Sessions, m.RunID)
+	require.NotEmpty(t, m.RunArtifacts.Artifacts)
+
+	events := canonicalRunEventsFromWS(m)
+	require.NotEmpty(t, events)
+	require.Equal(t, event.RunEventTurnCompleted, events[0].Type)
+	raw, err := json.Marshal(events[0].Payload)
+	require.NoError(t, err)
+	var payload struct {
+		Artifacts []event.Artifact `json:"artifacts"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	require.Len(t, payload.Artifacts, 1)
+	require.Equal(t, row.ID, payload.Artifacts[0].ID)
+	require.Equal(t, "report.docx", payload.Artifacts[0].Name)
+	require.Equal(t, "docx", payload.Artifacts[0].Preview)
+}
+
+// A kept-plan exit (plan 148) rides the ws "step" op's tool_meta like every
+// other card fact: the rebuild must keep plan_only so the web card can show
+// "Kept the plan" on replay too.
+func TestCanonicalRunEventsKeepPlanOnly(t *testing.T) {
+	events := canonicalRunEventsFromWS(wsServerMsg{
+		Op: "step",
+		Data: map[string]any{
+			"kind":        event.RunEventToolCompleted,
+			"step_id":     "call-kept",
+			"description": "tool exit_plan_mode",
+			"tool_name":   "exit_plan_mode",
+			"tool_meta": map[string]any{
+				"tool_name": "exit_plan_mode",
+				"status":    "completed",
+				"plan_only": true,
+			},
+		},
+	})
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	var completed event.ToolCallCompletedPayload
+	if err := json.Unmarshal(events[0].Payload, &completed); err != nil {
+		t.Fatalf("decode completed payload: %v", err)
+	}
+	if !completed.ToolMeta.PlanOnly {
+		t.Fatalf("canonical tool meta lost plan_only: %+v", completed.ToolMeta)
+	}
+	// An ordinary exit keeps the flag off.
+	events = canonicalRunEventsFromWS(wsServerMsg{
+		Op: "step",
+		Data: map[string]any{
+			"kind":        event.RunEventToolCompleted,
+			"step_id":     "call-plain",
+			"description": "tool exit_plan_mode",
+			"tool_name":   "exit_plan_mode",
+			"tool_meta": map[string]any{
+				"tool_name": "exit_plan_mode",
+				"status":    "completed",
+			},
+		},
+	})
+	var plain event.ToolCallCompletedPayload
+	if err := json.Unmarshal(events[0].Payload, &plain); err != nil {
+		t.Fatalf("decode plain payload: %v", err)
+	}
+	if plain.ToolMeta.PlanOnly {
+		t.Fatalf("ordinary exit must not be marked plan-only: %+v", plain.ToolMeta)
+	}
+}

@@ -40,6 +40,7 @@ func RunEventFromStep(ctx context.Context, sessionID, runID, channel string, evt
 		PreviewWidth: meta.PreviewWidth, PreviewHeight: meta.PreviewHeight,
 		PreviewBytes: meta.PreviewBytes, PreviewScaled: meta.PreviewScaled,
 		StartedAtMs: meta.StartedAtMs,
+		PlanOnly:    meta.PlanOnly,
 		// Origin is audit metadata; it rides on the canonical payload but never
 		// on ToolMeta, so no renderer can branch on it.
 		Origin:       strings.TrimSpace(evt.Origin),
@@ -336,6 +337,9 @@ type ToolMeta struct {
 	// DenyFeedback is the user's own words when they refused this call, for
 	// the card that shows the refusal; empty for every other call.
 	DenyFeedback string `json:"deny_feedback,omitempty"`
+	// PlanOnly marks an exit_plan_mode approved as "keep the plan only": the
+	// plan is the deliverable and must not be carried out.
+	PlanOnly bool `json:"plan_only,omitempty"`
 }
 
 // RunningFor reports how long an executing call has been running as of now,

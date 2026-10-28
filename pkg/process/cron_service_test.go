@@ -773,3 +773,72 @@ func TestPruneReadsTheLiveRetentionConfig(t *testing.T) {
 		t.Fatal("a sweep under a 1-day retention kept a 40-day-old fire")
 	}
 }
+
+// TestCronDeliverSkipsBatchProjects pins where a fire's answer goes: a batch
+// project's fire is a task, and a task's result is delivered by the
+// execution's own end notification, so the scheduled-task delivery stays quiet
+// there instead of saying the same thing twice. An ordinary project's fire
+// still delivers its answer (plan 151).
+func TestCronDeliverSkipsBatchProjects(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	sent := &fakeOutboundChannel{}
+	registry := channel.NewRegistry()
+	t.Cleanup(func() { _ = registry.Stop(ctx) })
+	service := &CronService{env: &Environment{SQL: db, Channels: registry}, agentID: "main"}
+
+	projects := state.NewProjectStore(db, "main")
+	sessions := state.NewSessionStore(db, "main")
+	batchRoot := t.TempDir()
+	batch, err := projects.Create(ctx, state.CreateProjectInput{
+		Name: "batch", Root: batchRoot, ProjectKey: state.ProjectKeyForRoot(batchRoot), ProjectType: state.ProjectTypeBatch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codingRoot := t.TempDir()
+	coding, err := projects.Create(ctx, state.CreateProjectInput{
+		Name: "coding", Root: codingRoot, ProjectKey: state.ProjectKeyForRoot(codingRoot), ProjectType: state.ProjectTypeCoding,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both projects run the same delivery target, so the batch fire's silence
+	// is the project's doing and not a channel that was never bound.
+	if err := registry.BindProjects(ctx, "main", []channel.BoundChannel{
+		{ProjectID: batch.ID, Handler: sent},
+		{ProjectID: coding.ID, Handler: sent},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := sessions.Ensure(ctx, "cron-batch-1", "cron-batch-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "cron-batch-1", batch.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.deliver(ctx, "fake", "cron-batch-1", "任务跑完了，结果在 outputs"); err != nil {
+		t.Fatalf("a batch project's delivery = %v, want nil", err)
+	}
+	if got := sent.delivered(); len(got) != 0 {
+		t.Fatalf("a batch project's fire delivered %v; its result comes from the task's end notification", got)
+	}
+
+	if err := sessions.Ensure(ctx, "cron-coding-1", "cron-coding-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "cron-coding-1", coding.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.deliver(ctx, "fake", "cron-coding-1", "the answer"); err != nil {
+		t.Fatalf("an ordinary project's delivery = %v, want nil", err)
+	}
+	if got := sent.delivered(); len(got) != 1 || got[0] != "the answer" {
+		t.Fatalf("an ordinary project's fire delivered %v, want its answer", got)
+	}
+}

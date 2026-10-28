@@ -34,7 +34,12 @@
         </Button>
       </template>
     </ToolHeader>
-    <ToolContent class="tool-card-body">
+    <!-- A delivered set of files is drawn once, at the end of the turn (plan
+         153 A7, owner 2026-10-27): the card is its head alone — the action and
+         the files it named — and the files themselves are met in the turn's
+         delivery group, under its last words. Its body is the engine's
+         per-file list, which would be that group a second time. -->
+    <ToolContent v-if="!deliversAtTurnEnd" class="tool-card-body">
       <!-- While the call waits on the reader, what the decision turns on is
            the panel (plan 138): the gate's facts replace the result the call
            has not produced yet. -->
@@ -110,6 +115,12 @@
         />
         <ToolOutput :output="step.fileDiff.rest ?? ''" :error-text="''" />
       </template>
+      <!-- A plan kept as the deliverable (plan 148): the call did what the
+           reader asked — nothing was executed — and the plan file itself is
+           the turn's delivery, drawn below the turn's last words. -->
+      <div v-else-if="isKeptPlan" class="tool-kept-plan" data-testid="tool-kept-plan">
+        <p>{{ t('chat.toolKeptPlan') }}</p>
+      </div>
       <!-- A skill card's display_body is the whole user-facing text ("Loaded
            from …" / "Failed to load from …" plus the raw error), so the
            separate error line would repeat what the body already says. -->
@@ -376,11 +387,12 @@ const isAnsweredAsk = computed(() => (
 ))
 
 /**
- * The prototype draws a settled ask open (:3113): the answer is the point of
- * the card, so it is not hidden behind the fold. A live call still opens
- * closed, as every other call's card does.
+ * The prototype draws a settled ask open (:3113) and a kept plan's facts line
+ * open (:4842): the answer is the point of the card, so it is not hidden
+ * behind the fold. A live call still opens closed, as every other call's card
+ * does, and so does an ordinary exit — only keeping the plan is an answer.
  */
-const openedByDefault = computed(() => props.defaultOpen || isAnsweredAsk.value)
+const openedByDefault = computed(() => props.defaultOpen || isAnsweredAsk.value || isKeptPlan.value)
 
 const toolStatusLabel = computed(() => {
   const labels = {
@@ -489,6 +501,25 @@ watch(headInputs, () => nextTick(() => {
 
 const showEye = computed(() => truncated.value || multiLineCommand.value)
 
+/**
+ * deliversAtTurnEnd marks the call whose result is the turn's delivery (plan
+ * 153 A7): a settled `present_files` says what was handed back in its head,
+ * and the files are drawn once, in the group under the turn's last words. The
+ * body is withheld — not replaced — because its own text is the same list, and
+ * two accounts of one delivery is exactly what the rule forbids.
+ */
+const deliversAtTurnEnd = computed(() => (
+  String(props.step.toolName ?? '').trim() === 'present_files'
+  && toolStatus.value === 'done'
+))
+
+/** A kept-plan exit (plan 148): the plan is the deliverable, nothing ran. */
+const isKeptPlan = computed(() => (
+  String(props.step.toolName ?? '').trim() === 'exit_plan_mode'
+  && toolStatus.value === 'done'
+  && props.step.planOnly === true
+))
+
 /** Opens the whole text — the command as it ran, else the title — as a document tab. */
 function openDoc() {
   if (command.value) {
@@ -515,6 +546,14 @@ function openDoc() {
   padding: 6px 0;
   background: transparent;
   border-bottom: 0;
+}
+
+/* The kept-plan answer is one plain sentence, the same facts line the
+   prototype's exit card draws. */
+.tool-kept-plan p {
+  margin: 2px 0 4px;
+  font: 12.5px/1.6 var(--forebrain-ui-font);
+  color: var(--forebrain-text-2);
 }
 
 /* The action word goes quieter still on the line (:434). */

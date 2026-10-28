@@ -3,10 +3,12 @@ package run
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -39,6 +41,9 @@ type SubagentCatalog struct {
 	// customs are the custom entries in configuration order, which is the order
 	// the subagent page lists them in.
 	customs []appcfg.SubagentConfig
+	// projectType is the conversation type this catalog was narrowed to with
+	// ForProjectType; "" means the coding default.
+	projectType string
 }
 
 // SubagentCatalogFor reads one primary agent's subagent configuration. An
@@ -61,6 +66,21 @@ func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
 		}
 	}
 	return catalog
+}
+
+// ForProjectType is this catalog as a conversation of the given type sees
+// it: office and batch conversations dispatch only the built-ins whose
+// work is not about code (agent.OfficeSubagentNames), under their office
+// wording, plus the agent's own custom subagents.
+func (c SubagentCatalog) ForProjectType(projectType string) SubagentCatalog {
+	c.projectType = state.NormalizeProjectType(projectType)
+	return c
+}
+
+// office reports whether this catalog was narrowed to an office or batch
+// conversation, the two types that share the not-about-code built-in set.
+func (c SubagentCatalog) office() bool {
+	return c.projectType == state.ProjectTypeOffice || c.projectType == state.ProjectTypeBatch
 }
 
 // Public lists what the model may dispatch: enabled built-ins (in
@@ -95,6 +115,9 @@ func (c SubagentCatalog) ResolvePublic(name string) (agent.Definition, error) {
 	}
 	if isPublicSubagentName(key) {
 		if !c.builtinEnabled(key) {
+			if c.office() {
+				return agent.Definition{}, fmt.Errorf("subagent_type %q is not available in %s projects", key, c.projectType)
+			}
 			return agent.Definition{}, fmt.Errorf("subagent_type %q is disabled for this agent", key)
 		}
 		return agent.ResolvePublicSubtype(key)
@@ -110,10 +133,16 @@ func (c SubagentCatalog) ResolvePublic(name string) (agent.Definition, error) {
 }
 
 // Prompt is the system prompt a typed run of name uses: a custom subagent's
-// own, this agent's rewrite of a built-in, else the built-in's.
+// own, this agent's rewrite of a built-in, else the built-in's. An office or
+// batch conversation reads the built-in under its project-type wording.
 func (c SubagentCatalog) Prompt(name string) (string, bool) {
 	if entry, ok := c.entries[subagentKey(name)]; ok {
 		if prompt := strings.TrimSpace(entry.SystemPrompt); prompt != "" {
+			return prompt, true
+		}
+	}
+	if c.office() {
+		if prompt, ok := agent.ProjectTypeSubagentPrompt(name, c.projectType); ok {
 			return prompt, true
 		}
 	}
@@ -160,7 +189,8 @@ func (c SubagentCatalog) ToolPolicy(name string) (tool.SubagentToolPolicy, bool)
 
 // EnumDescription is the subagent_type schema description: the built-in
 // sentences for the enabled built-ins, then "<name>: <description>." for each
-// enabled custom one, then how to omit the field.
+// enabled custom one, then how to omit the field. Office and batch read their
+// own built-in sentences.
 func (c SubagentCatalog) EnumDescription() string {
 	var b strings.Builder
 	b.WriteString("Optional public typed subagent.")
@@ -168,7 +198,14 @@ func (c SubagentCatalog) EnumDescription() string {
 		if !c.builtinEnabled(name) {
 			continue
 		}
-		fmt.Fprintf(&b, " %s: %s.", name, publicSubagentEnumSentences[name])
+		sentence := publicSubagentEnumSentences[name]
+		switch c.projectType {
+		case state.ProjectTypeOffice:
+			sentence = agent.OfficeSubagentEnumSentences[name]
+		case state.ProjectTypeBatch:
+			sentence = agent.BatchSubagentEnumSentences[name]
+		}
+		fmt.Fprintf(&b, " %s: %s.", name, sentence)
 	}
 	for _, entry := range c.customs {
 		if !subagentConfigEnabled(entry) {
@@ -208,6 +245,9 @@ func (c SubagentCatalog) configures(name string) bool {
 }
 
 func (c SubagentCatalog) builtinEnabled(name string) bool {
+	if c.office() && !slices.Contains(agent.OfficeSubagentNames, name) {
+		return false
+	}
 	entry, ok := c.entries[name]
 	return !ok || subagentConfigEnabled(entry)
 }

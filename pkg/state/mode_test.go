@@ -59,6 +59,63 @@ func TestSwitchPreservesPlanBookkeeping(t *testing.T) {
 	}
 }
 
+// KeepPlanOnly leaves plan mode the way an approved exit does and marks the
+// plan as the deliverable itself; entering plan mode again clears the mark.
+func TestKeepPlanOnlyLeavesPlanModeAndMarksIt(t *testing.T) {
+	home := t.TempDir()
+	sid := "sid-keep-plan-only"
+
+	if _, err := Switch(home, sid, ModePlan); err != nil {
+		t.Fatalf("Switch to plan: %v", err)
+	}
+	kept, err := KeepPlanOnly(home, sid, ModeAgent)
+	if err != nil {
+		t.Fatalf("KeepPlanOnly: %v", err)
+	}
+	if kept.Mode != ModeAgent || kept.Phase != "" || kept.PrePlanMode != "" {
+		t.Fatalf("kept = %+v, want a plain agent state the way an approved exit leaves", kept)
+	}
+	if !kept.HasExitedPlan {
+		t.Fatal("KeepPlanOnly must record the exit like any other leave")
+	}
+	if !kept.PlanKeptOnly {
+		t.Fatal("KeepPlanOnly must set PlanKeptOnly")
+	}
+	stored, err := Get(home, sid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !stored.PlanKeptOnly || stored.Mode != ModeAgent {
+		t.Fatalf("stored = %+v, want persisted agent mode with the kept-only flag", stored)
+	}
+}
+
+func TestEnteringPlanModeClearsPlanKeptOnly(t *testing.T) {
+	home := t.TempDir()
+	sid := "sid-keep-then-reenter"
+
+	if _, err := Switch(home, sid, ModePlan); err != nil {
+		t.Fatalf("Switch to plan: %v", err)
+	}
+	if _, err := KeepPlanOnly(home, sid, ModeAgent); err != nil {
+		t.Fatalf("KeepPlanOnly: %v", err)
+	}
+	reentered, err := Switch(home, sid, ModePlan)
+	if err != nil {
+		t.Fatalf("Switch back to plan: %v", err)
+	}
+	if reentered.PlanKeptOnly {
+		t.Fatal("entering plan mode must clear PlanKeptOnly")
+	}
+	stored, err := Get(home, sid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.PlanKeptOnly {
+		t.Fatal("persisted state must not carry PlanKeptOnly after a re-entry")
+	}
+}
+
 // Switching to the mode already in effect must not overwrite the stashed
 // pre-plan mode with "plan" itself.
 func TestSwitchToPlanTwiceKeepsOriginalPrePlanMode(t *testing.T) {

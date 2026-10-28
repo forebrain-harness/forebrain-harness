@@ -37,6 +37,18 @@ type ApprovalSink struct {
 	// notify, when wired, reaches the main loop: an approval asks an open
 	// slash panel to yield the composer area (PanelCloseMsg) before it paints.
 	notify func(any)
+	// projectTypeOf, when wired, resolves a session's project type so an
+	// exit-plan request that arrives without one still gets the choice group
+	// of its conversation (office vs coding, plan 148).
+	projectTypeOf func(sessionID string) string
+}
+
+// WithProjectTypeOf wires the session project-type resolver.
+func (s *ApprovalSink) WithProjectTypeOf(fn func(string) string) *ApprovalSink {
+	if s != nil {
+		s.projectTypeOf = fn
+	}
+	return s
 }
 
 // WithRecorder wires the display recorder. Optional: without it the sink is
@@ -79,6 +91,9 @@ func (s *ApprovalSink) PromptToolApproval(ctx context.Context, req turn.ToolAppr
 	}
 	if s.rawSel == nil {
 		return turn.ToolApprovalDecision{}, fmt.Errorf("tui approvals require an interactive raw terminal")
+	}
+	if s.projectTypeOf != nil && strings.TrimSpace(req.ProjectType) == "" {
+		req.ProjectType = s.projectTypeOf(req.SessionID)
 	}
 	// A slash panel shares the composer area with the approval overlay: it
 	// yields first, and the approval paints only once the main loop has taken

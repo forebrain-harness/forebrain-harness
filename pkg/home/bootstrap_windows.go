@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 )
@@ -134,4 +135,65 @@ func writeFileIfMissingInWorkspace(rootDir *os.File, name, content string) error
 
 	_, err = f.WriteString(content)
 	return err
+}
+
+// replaceLegacySeedInWorkspace rewrites a workspace bootstrap file whose bytes
+// are still exactly one of the given legacy seed bodies: the seed the user
+// never edited follows a template rewording. A missing file, a file past the
+// read budget and a file that differs by even one byte are left as they are.
+// A symlink in the seed's place is refused, as writeFileIfMissingInWorkspace
+// refuses one. The write goes through a temporary file renamed over the seed,
+// so a failure mid-way cannot leave a half-written bootstrap file behind.
+func replaceLegacySeedInWorkspace(rootDir *os.File, name string, legacy []string, body string) error {
+	if rootDir == nil {
+		return errors.New("workspace root handle is nil")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("workspace bootstrap file name is empty")
+	}
+
+	targetPath := filepath.Join(rootDir.Name(), name)
+
+	fi, err := os.Lstat(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errors.New("target is a symlink")
+	}
+
+	const maxLegacySeedBytes = 64 << 10
+	current, err := os.ReadFile(targetPath)
+	if err != nil {
+		return err
+	}
+	if len(current) > maxLegacySeedBytes {
+		return nil
+	}
+	if !slices.Contains(legacy, string(current)) {
+		return nil
+	}
+
+	tmpPath := targetPath + ".forebrain-new"
+	tmpF, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = tmpF.WriteString(body)
+	if closeErr := tmpF.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }

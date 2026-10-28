@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -223,6 +224,16 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/subagents/:agent/context", s.handleSubagentContext)
 	chatSessions.Get("/:id/subagents/:agent/budget", s.handleSubagentBudget)
 
+	// The conversation's deliverables (plan 146): what present_files
+	// registered — the rows, their bytes (a download by default, inline only
+	// for types that earn it), an archive's directory, and the LibreOffice
+	// PDF preview of an office document.
+	chatSessions.Get("/:id/artifacts", s.handleSessionArtifacts)
+	chatSessions.Get("/:id/artifacts/:aid", s.handleSessionArtifact)
+	chatSessions.Get("/:id/artifacts/:aid/content", s.handleSessionArtifactContent)
+	chatSessions.Get("/:id/artifacts/:aid/preview.pdf", s.handleSessionArtifactPreviewPDF)
+	chatSessions.Get("/:id/artifacts/:aid/entries", s.handleSessionArtifactEntries)
+
 	api.Post("/internal/worker-event", s.handleWorkerInternalEvent)
 
 	actions := api.Group("/actions")
@@ -236,6 +247,9 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects := api.Group("/v1/projects")
 	projects.Get("/", s.handleProjectsList)
 	projects.Post("/", s.handleProjectsCreate)
+	// Static before /:id, so "default-type" is not read as a project id. The
+	// new-project dialog calls it to preselect the type a folder would get.
+	projects.Get("/default-type", s.handleProjectDefaultType)
 	projects.Get("/:id", s.handleProjectOne)
 	projects.Patch("/:id", s.handleProjectOne)
 	projects.Delete("/:id", s.handleProjectDelete)
@@ -247,6 +261,12 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Post("/:id/dirs", s.handleProjectDirs)
 	projects.Get("/:id/sessions", s.handleProjectSessionsList)
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
+	// A batch project's business tasks: the list its page draws, and one task
+	// with its execution history.
+	projects.Get("/:id/tasks", s.handleProjectTasksList)
+
+	tasks := api.Group("/v1/tasks")
+	tasks.Get("/:task_id", s.handleTaskOne)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
 	// The project's own MCP file, edited from the web: create, update, delete,
@@ -275,6 +295,9 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Get("/:id/cron/jobs/:jobId/runs", s.handleCronJobRuns)
 	projects.Get("/:id/channels", s.handleChannels)
 	projects.Put("/:id/channels", s.handleChannels)
+	// The chats this project's channels have spoken with, for the settings page
+	// that fills in where a task's end notification goes.
+	projects.Get("/:id/channel-targets", s.handleProjectChannelTargets)
 
 	// Project-scoped skill lifecycle: /projects/:id/skills mirrors /skills
 	// operation for operation, scoped to the route's project.
@@ -1431,6 +1454,14 @@ func (s *Server) handleChatSessionCreate(w http.ResponseWriter, r *http.Request)
 	}
 
 	if haveProject {
+		if project.ProjectType == state.ProjectTypeBatch {
+			// A batch project's conversations are task executions, and only
+			// the project-sessions endpoint creates those: it makes the task
+			// and the execution the conversation belongs to. A conversation
+			// opened here would be one with no task to run.
+			writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "batch_project_uses_tasks"})
+			return
+		}
 		res, err := s.createSessionWithBirth(r.Context(), body.Title, project, source)
 		if err != nil {
 			if errors.Is(err, errSessionsDisabled) {
@@ -1683,7 +1714,14 @@ func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 	// The lookup is the agent's project store, so another tenant's session
 	// reads as belonging to no project.
 	var project map[string]any
+	projectType := state.ProjectTypeCoding
 	if store := s.projectStore(); store != nil {
+		t, err := store.SessionProjectType(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		projectType = t
 		p, ok, err := store.ProjectForSession(r.Context(), sid)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1692,10 +1730,14 @@ func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			// Root and missing say whether the conversation can still run: a
 			// directory that is gone leaves the page its read-only notice.
-			project = map[string]any{"id": p.ID, "name": p.Name, "root": p.Root, "missing": !hostDirExists(p.Root), "last_attach_dir": p.LastAttachDir}
+			// project_type is the project's current kind — different from the
+			// session's frozen one when the project was edited afterwards, so
+			// the page can say "the project changed type; this conversation
+			// keeps the one it was born with".
+			project = map[string]any{"id": p.ID, "name": p.Name, "root": p.Root, "missing": !hostDirExists(p.Root), "last_attach_dir": p.LastAttachDir, "project_type": state.NormalizeProjectType(p.ProjectType)}
 		}
 	}
-	writeJSON(w, map[string]any{"id": sid, "title": title, "project": project})
+	writeJSON(w, map[string]any{"id": sid, "title": title, "project_type": projectType, "project": project})
 }
 
 // sessionModelOption is one model this conversation's primary agent is
@@ -2951,6 +2993,10 @@ func (s *Server) handleSubagentInput(w http.ResponseWriter, r *http.Request) {
 			// The subagent is idle: its view takes no messages, because the
 			// agent that dispatched it decides what it does next.
 			writeSubagentViewError(w, subagentNotRunningCode, "the subagent is not running", http.StatusConflict)
+		case errors.Is(err, run.ErrBatchTakesNoInput):
+			// A batch task's subagent view is read-only for the same reason
+			// its conversation is: nobody joins an unattended execution.
+			writeSubagentViewError(w, "batch_takes_no_input", "a batch task takes no input", http.StatusConflict)
 		default:
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
@@ -3830,6 +3876,7 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 		Reason                     string                             `json:"reason"`
 		Update                     *safety.PermissionUpdate           `json:"update,omitempty"`
 		ClearContext               bool                               `json:"clear_context,omitempty"`
+		PlanOnly                   bool                               `json:"plan_only,omitempty"`
 		Decision                   string                             `json:"decision,omitempty"`
 		ExecPolicyAmendment        safety.ExecPolicyAmendment         `json:"execpolicy_amendment,omitempty"`
 		NetworkPolicyAmendment     *safety.NetworkPolicyAmendment     `json:"network_policy_amendment,omitempty"`
@@ -3854,7 +3901,7 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.resolveGatewayApproval(r.Context(), id, turn.ApprovalReply{
 		Choice: decision, Exec: body.ExecPolicyAmendment, Network: body.NetworkPolicyAmendment,
-		Permissions: body.RequestPermissionsResponse, Update: body.Update, Reason: body.Reason, ClearContext: body.ClearContext,
+		Permissions: body.RequestPermissionsResponse, Update: body.Update, Reason: body.Reason, ClearContext: body.ClearContext, PlanOnly: body.PlanOnly,
 	})
 	if err != nil {
 		if errors.Is(err, turn.ErrApprovalConflict) {
@@ -6771,6 +6818,11 @@ type projectPayload struct {
 	MemoryScope    string `json:"memory_scope"`
 	ResourceAccess *bool  `json:"resource_access"`
 	Pinned         *bool  `json:"pinned"`
+	ProjectType    string `json:"project_type"`
+	// TaskNotify replaces the batch project's end-of-execution notification
+	// targets. A pointer, so "not in this request" and "make it empty" are
+	// different requests (plan 151).
+	TaskNotify *[]state.TaskNotifyTarget `json:"task_notify"`
 }
 
 // projectIsTrusted reads the persisted trust decision for one project root —
@@ -6790,6 +6842,12 @@ func projectIsTrusted(home string, root string) bool {
 }
 
 func (s *Server) projectRow(p state.Project) map[string]any {
+	// Always an array: a project that notifies nobody says so with [], never
+	// with null.
+	taskNotify := p.TaskNotify
+	if taskNotify == nil {
+		taskNotify = []state.TaskNotifyTarget{}
+	}
 	return map[string]any{
 		"id":              p.ID,
 		"name":            p.Name,
@@ -6802,6 +6860,8 @@ func (s *Server) projectRow(p state.Project) map[string]any {
 		"resource_access": p.ResourceAccess,
 		"pinned":          p.Pinned,
 		"last_attach_dir": p.LastAttachDir,
+		"project_type":    state.NormalizeProjectType(p.ProjectType),
+		"task_notify":     taskNotify,
 		"created_at":      p.CreatedAt,
 		"updated_at":      p.UpdatedAt,
 		// The picker reads these two to badge a row: a root that is no longer
@@ -6898,6 +6958,38 @@ func (s *Server) handleProjectsList(w http.ResponseWriter, r *http.Request) {
 	writeListPage(w, "projects", rows, total, servedPage, q, nil)
 }
 
+// handleProjectDefaultType answers the type a folder would get if it were
+// registered as a project right now — the new-project dialog's preselected
+// value. It only reads filesystem markers: no project row is created and no
+// trust decision is written. "source" says why the type is what it is, so the
+// dialog can explain the default instead of just showing it.
+func (s *Server) handleProjectDefaultType(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	root := strings.TrimSpace(r.URL.Query().Get("root"))
+	if root == "" {
+		http.Error(w, "root is required", http.StatusBadRequest)
+		return
+	}
+	root, err := state.ValidateProjectRoot(s.Home, root)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	projectType, err := state.DefaultProjectTypeForRoot(root)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	source := "non_git"
+	if projectType == state.ProjectTypeCoding {
+		source = "git_worktree"
+	}
+	writeJSON(w, map[string]any{"project_type": projectType, "source": source})
+}
+
 // handleProjectsCreate creates a project. The trust flag must be an explicit
 // operator choice: the request has to carry "trust": true to record one, and
 // the response says which decision was recorded.
@@ -6929,6 +7021,23 @@ func (s *Server) handleProjectsCreate(w http.ResponseWriter, r *http.Request) {
 	if body.ResourceAccess != nil {
 		resourceAccess = *body.ResourceAccess
 	}
+	projectType, err := state.ResolveProjectTypeForRoot(body.ProjectType, root)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "project_type_invalid"})
+		return
+	}
+	if projectType == state.ProjectTypeBatch && !body.Trust {
+		// A batch project's tasks run unattended on the project's own skills
+		// and MCP servers, which load only in a trusted project, and its
+		// sandbox is derived from that trust. Creating one therefore records
+		// the trust decision with it.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "batch_requires_trust"})
+		return
+	}
 	p, err := store.Create(r.Context(), state.CreateProjectInput{
 		Name:           body.Name,
 		Icon:           body.Icon,
@@ -6938,6 +7047,7 @@ func (s *Server) handleProjectsCreate(w http.ResponseWriter, r *http.Request) {
 		ProjectKey:     state.ProjectKeyForRoot(root),
 		MemoryScope:    body.MemoryScope,
 		ResourceAccess: resourceAccess,
+		ProjectType:    projectType,
 	})
 	if errors.Is(err, state.ErrProjectRootTaken) {
 		// One project per (agent, root): the row the caller collided with is
@@ -6956,6 +7066,18 @@ func (s *Server) handleProjectsCreate(w http.ResponseWriter, r *http.Request) {
 		if err := safety.MarkTrusted(s.Home, safety.Project{Root: root}); err == nil {
 			trustRecorded = true
 		}
+	}
+	if projectType == state.ProjectTypeBatch && !trustRecorded {
+		// A batch project is only creatable together with its trust record
+		// (its tasks run unattended on trusted-only project skills and MCP).
+		// When the record could not be written the project must not survive:
+		// an untrusted batch project would be force-sandboxed out of the
+		// very things it depends on.
+		_ = store.Delete(r.Context(), p.ID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "trust_not_recorded"})
+		return
 	}
 	row := s.projectRow(p)
 	row["trust_recorded"] = trustRecorded
@@ -7003,8 +7125,34 @@ func (s *Server) handleProjectOne(w http.ResponseWriter, r *http.Request) {
 		if body.MemoryScope != "" {
 			in.MemoryScope = &body.MemoryScope
 		}
+		if body.ProjectType != "" {
+			projectType, err := state.ParseProjectType(body.ProjectType)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "project_type_invalid"})
+				return
+			}
+			// Changing a project to batch carries the same trust requirement
+			// as creating one: only a project whose root is already trusted
+			// can switch without the request restating the decision.
+			if projectType == state.ProjectTypeBatch && !body.Trust && !projectIsTrusted(s.Home, p.Root) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "batch_requires_trust"})
+				return
+			}
+			in.ProjectType = &projectType
+		}
 		if body.ResourceAccess != nil {
 			in.ResourceAccess = body.ResourceAccess
+		}
+		if body.TaskNotify != nil {
+			if err := validateTaskNotifyTargets(*body.TaskNotify); err != nil {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "task_notify_invalid"})
+				return
+			}
+			in.TaskNotify = body.TaskNotify
 		}
 		updated, err := store.Update(r.Context(), id, in)
 		if err != nil {
@@ -7041,6 +7189,157 @@ func (s *Server) handleProjectPin(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "pinned": body.Pinned})
+}
+
+// validateTaskNotifyTargets refuses a notification target list the gateway
+// cannot deliver to: every entry names a channel this build can build and a
+// recipient on it. pkg/state only trims and deduplicates — the channel kinds
+// are known here (plan 151).
+func validateTaskNotifyTargets(targets []state.TaskNotifyTarget) error {
+	for _, target := range targets {
+		kind := strings.ToLower(strings.TrimSpace(target.Channel))
+		if kind == "" || !slices.Contains(channel.ChannelKinds, kind) {
+			return fmt.Errorf("task_notify channel %q is not a channel kind", target.Channel)
+		}
+		if strings.TrimSpace(target.Target) == "" {
+			return fmt.Errorf("task_notify target for %s is empty", kind)
+		}
+	}
+	return nil
+}
+
+// channelTarget is one (channel, target) pair a project's tasks can be
+// notified to, with the label that helps a person recognise it.
+type channelTarget struct {
+	channel  string
+	target   string
+	label    string
+	lastSeen int64
+}
+
+// handleProjectChannelTargets lists the chats this project's channels have
+// spoken with, as the (channel, target) pairs a task_notify setting can name:
+// the peers whose messages opened a task, and the conversations a channel
+// opened in the project. A settings page offers them instead of asking a person
+// to type a raw platform id (plan 151).
+func (s *Server) handleProjectChannelTargets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	ctx := r.Context()
+	projectID := pathParam(r, "id")
+	project, err := store.Get(ctx, projectID)
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	seen := map[channelTarget]bool{}
+	items := make([]channelTarget, 0, 8)
+	add := func(item channelTarget) {
+		item.channel = strings.ToLower(strings.TrimSpace(item.channel))
+		item.target = strings.TrimSpace(item.target)
+		if item.channel == "" || item.target == "" {
+			return
+		}
+		key := channelTarget{channel: item.channel, target: item.target}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		items = append(items, item)
+	}
+	// The peers whose messages opened tasks: origin_ref is the channel's own
+	// record of who spoke, and unwrapping it is how the wrapped conversation
+	// id becomes the recipient id the channel delivers to.
+	if rows, _, err := store.ListTasksPage(ctx, project.ID, state.ListTasksOptions{Origin: state.TaskOriginChannel}, 200, 0); err != nil {
+		slog.Warn("channel targets: tasks", "project", project.ID, "err", err)
+	} else {
+		for _, row := range rows {
+			ref, ok := parseChannelTaskRef(row.OriginRef)
+			if !ok {
+				continue
+			}
+			_, target := state.UnwrapProjectChannelSession(ref.Channel, ref.Session)
+			add(channelTarget{channel: ref.Channel, target: target, label: row.Title, lastSeen: row.CreatedAt})
+		}
+	}
+	// The conversations the project's channels opened, whether or not their
+	// message became a task: a channel that has been talked to at all is one a
+	// person may want notifications on.
+	if s.Sessions != nil {
+		kinds := s.projectChannelKinds(ctx, project.ID)
+		if sessions, err := s.Sessions.ProjectChannelSessions(ctx, project.ID, 0); err != nil {
+			slog.Warn("channel targets: sessions", "project", project.ID, "err", err)
+		} else {
+			for _, session := range sessions {
+				for _, kind := range kinds {
+					owner, target := state.UnwrapProjectChannelSession(kind, session.ID)
+					if owner != project.ID || target == "" || target == session.ID {
+						continue
+					}
+					add(channelTarget{channel: kind, target: target, label: session.Title, lastSeen: session.UpdatedAt})
+				}
+			}
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].lastSeen != items[j].lastSeen {
+			return items[i].lastSeen > items[j].lastSeen
+		}
+		if items[i].channel != items[j].channel {
+			return items[i].channel < items[j].channel
+		}
+		return items[i].target < items[j].target
+	})
+	if len(items) > channelTargetsLimit {
+		items = items[:channelTargetsLimit]
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{
+			"channel":   item.channel,
+			"target":    item.target,
+			"label":     item.label,
+			"last_seen": item.lastSeen,
+		})
+	}
+	writeJSON(w, map[string]any{"items": out})
+}
+
+// channelTargetsLimit bounds the list a settings page is offered: past this,
+// the search box is what narrows it, not scrolling.
+const channelTargetsLimit = 100
+
+// projectChannelKinds names the channel kinds the project actually runs. A
+// project's conversation ids carry the channel's prefix and the project's
+// stamp, so these are the only kinds that can have opened one (plan 151).
+func (s *Server) projectChannelKinds(ctx context.Context, projectID string) []string {
+	store := s.projectStore()
+	if store == nil {
+		return nil
+	}
+	channels := s.projectChannelStore(store.AgentID())
+	if channels == nil {
+		return nil
+	}
+	rows, err := channels.List(ctx, projectID)
+	if err != nil {
+		slog.Warn("channel targets: project channels", "project", projectID, "err", err)
+		return nil
+	}
+	kinds := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if kind := strings.TrimSpace(row.Kind); kind != "" {
+			kinds = append(kinds, kind)
+		}
+	}
+	return kinds
 }
 
 func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
@@ -7119,11 +7418,87 @@ func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Requ
 	}
 	var body struct {
 		Title string `json:"title"`
+		// TaskID names an existing task of this project: the call opens one
+		// more execution of it instead of a new task. Empty means "a new
+		// task", whose first message is its input.
+		TaskID string `json:"task_id"`
+		// ExternalRef is the caller's own handle for the task, echoed back on
+		// every read so an integrating system can correlate.
+		ExternalRef string `json:"external_ref"`
+		// Origin says which door the task came in by (api | web), default api.
+		Origin string `json:"origin"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
 	// No title leaves the session unnamed, so its first message names it.
 	title := strings.TrimSpace(body.Title)
-	res, err := s.createSessionWithBirth(r.Context(), title, p, state.SessionSourceConversation)
+	taskID := strings.TrimSpace(body.TaskID)
+	if p.ProjectType != state.ProjectTypeBatch {
+		if taskID != "" {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "task_id_requires_batch_project"})
+			return
+		}
+		res, err := s.createSessionWithBirth(r.Context(), title, p, state.SessionSourceConversation)
+		if err != nil {
+			if errors.Is(err, errSessionsDisabled) {
+				http.Error(w, "sessions disabled", http.StatusServiceUnavailable)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		res.Project = s.projectRow(p)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(res)
+		return
+	}
+	s.handleBatchProjectSessionCreate(w, r, store, p, title, taskID, body.ExternalRef, body.Origin)
+}
+
+// handleBatchProjectSessionCreate opens a task or one more execution of one.
+// Every conversation of a batch project is an execution from the moment it
+// exists, so this is the only door that creates one: a batch conversation
+// without an execution row would have nothing to run.
+func (s *Server) handleBatchProjectSessionCreate(w http.ResponseWriter, r *http.Request, store *state.ProjectStore, p state.Project, title, taskID, externalRef, origin string) {
+	ctx := r.Context()
+	switch origin = strings.TrimSpace(origin); origin {
+	case "":
+		origin = state.TaskOriginAPI
+	case state.TaskOriginAPI, state.TaskOriginWeb:
+	default:
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "task_origin_invalid"})
+		return
+	}
+	var task state.Task
+	var err error
+	newTask := taskID == ""
+	if newTask {
+		task, err = store.CreateTask(ctx, state.Task{
+			ProjectID:   p.ID,
+			Title:       title,
+			ExternalRef: externalRef,
+			Origin:      origin,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		task, err = store.GetTask(ctx, taskID)
+		if err != nil || task.ProjectID != p.ID {
+			writeJSONStatus(w, http.StatusNotFound, map[string]any{"error": "task_not_found"})
+			return
+		}
+	}
+	// A new task's first conversation carries the task's own first message as
+	// its title (empty names it later, from that message). A new execution is
+	// named after the task and its sequence number, which only exists once the
+	// execution does.
+	sessionTitle := title
+	if !newTask {
+		sessionTitle = task.Title
+	}
+	res, err := s.createSessionWithBirth(ctx, sessionTitle, p, state.SessionSourceConversation)
 	if err != nil {
 		if errors.Is(err, errSessionsDisabled) {
 			http.Error(w, "sessions disabled", http.StatusServiceUnavailable)
@@ -7132,10 +7507,59 @@ func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	res.Project = s.projectRow(p)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(res)
+	exec, err := store.AddTaskExecution(ctx, task.ID, res.ID, p.Root)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !newTask {
+		// Now that the sequence is known the conversation can say which
+		// execution of the task it is; writing it earlier would have meant
+		// guessing.
+		_ = s.Sessions.SetTitle(ctx, res.ID, fmt.Sprintf("%s #%d", task.Title, exec.Seq))
+		res.Title = fmt.Sprintf("%s #%d", task.Title, exec.Seq)
+	}
+	execDirs := []string{"inputs", "outputs", ".work"}
+	for _, dir := range execDirs {
+		if err := os.MkdirAll(filepath.Join(exec.Workspace, dir), 0o755); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if exec.Seq > 1 {
+		// A re-run starts with the inputs the previous execution was given:
+		// the task's content did not change, so neither did what it was handed.
+		previous := state.TaskWorkspaceDir(p.Root, task.ID, exec.Seq-1)
+		if err := copyTaskInputs(filepath.Join(previous, "inputs"), filepath.Join(exec.Workspace, "inputs")); err != nil {
+			// The execution is unusable with half its inputs, so its directory
+			// goes. The rows stay: the execution is pending and readable, which
+			// is how the caller sees what happened.
+			_ = os.RemoveAll(exec.Workspace)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	workspaceRel := exec.Workspace
+	if rel, relErr := filepath.Rel(p.Root, exec.Workspace); relErr == nil {
+		workspaceRel = filepath.ToSlash(rel)
+	}
+	writeJSONStatus(w, http.StatusCreated, map[string]any{
+		"id":      res.ID,
+		"title":   res.Title,
+		"project": s.projectRow(p),
+		"task": map[string]any{
+			"id":           task.ID,
+			"title":        task.Title,
+			"external_ref": task.ExternalRef,
+			"origin":       task.Origin,
+		},
+		"execution": map[string]any{
+			"seq":           exec.Seq,
+			"status":        exec.Status,
+			"workspace":     exec.Workspace,
+			"workspace_rel": workspaceRel,
+		},
+	})
 }
 
 // bindSessionToProject ties a session to one project: the project store's
@@ -7213,6 +7637,9 @@ func (s *Server) handleProjectSessionsList(w http.ResponseWriter, r *http.Reques
 			// the agent's default — and the table draws its own placeholder.
 			"model":         item.Model,
 			"message_count": item.MessageCount,
+			// The type this conversation froze at birth — the project's
+			// current type may have moved on since.
+			"project_type": item.ProjectType,
 		}
 		if beat, ok := beats[item.ID]; ok {
 			row["heartbeat"] = beat
@@ -7682,6 +8109,13 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	// A batch task's posture is the task sandbox with no approvals, which its
+	// project type decides (plans/150). Storing a picker row for it would
+	// describe a session that never runs that way, so the choice is refused.
+	if runner.ProjectType() == state.ProjectTypeBatch {
+		http.Error(w, "batch_preset_fixed", http.StatusConflict)
+		return
+	}
 	// Persist first, apply second: the row is what the other surface and the
 	// next process restore, so a choice that failed to persist never ran
 	// only in memory either.
@@ -7918,6 +8352,47 @@ func pathParam(r *http.Request, name string) string {
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// writeJSONStatus writes a JSON body under an explicit status code.
+func writeJSONStatus(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+// copyTaskInputs copies the regular files of one execution's inputs/ folder
+// into the next execution's. It follows no symlink: what a re-run is handed
+// must be exactly the files the first execution was handed, not what they
+// point at.
+func copyTaskInputs(srcDir, dstDir string) error {
+	info, err := os.Stat(srcDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	return filepath.WalkDir(srcDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(srcDir, p)
+		if relErr != nil {
+			return relErr
+		}
+		target := filepath.Join(dstDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		return copyFile(p, target)
+	})
 }
 
 // lspControlFor resolves the session's Runner the way the MCP endpoints do
@@ -8323,4 +8798,152 @@ func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	writeJSON(w, map[string]any{"ok": true, "allowed": body.Allow})
+}
+
+// taskPageWindow reads the paging a task read was asked for. Anything
+// nonsensical reads the first page, the contract every list endpoint follows.
+func taskPageWindow(r *http.Request) (page, limit int) {
+	page, limit = 1, 50
+	query := r.URL.Query()
+	if n, err := strconv.Atoi(strings.TrimSpace(query.Get("page"))); err == nil && n > 0 {
+		page = n
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(query.Get("limit"))); err == nil && n > 0 {
+		limit = n
+	}
+	return page, limit
+}
+
+// taskRowMap is one task as the read endpoints publish it: what the task is,
+// and the execution that speaks for it.
+func (s *Server) taskRowMap(ctx context.Context, row state.TaskRow) map[string]any {
+	out := map[string]any{
+		"id":           row.ID,
+		"project_id":   row.ProjectID,
+		"title":        row.Title,
+		"external_ref": row.ExternalRef,
+		"origin":       row.Origin,
+		"origin_ref":   row.OriginRef,
+		"input_set":    row.InputSet,
+		"created_at":   row.CreatedAt,
+		"updated_at":   row.UpdatedAt,
+		"latest": map[string]any{
+			"seq":         row.Latest.Seq,
+			"session_id":  row.Latest.SessionID,
+			"status":      row.Latest.Status,
+			"started_at":  row.Latest.StartedAt,
+			"finished_at": row.Latest.FinishedAt,
+			"error_code":  row.Latest.ErrorCode,
+		},
+		"executions": row.Executions,
+		"artifacts":  s.countSessionArtifacts(ctx, row.Latest.SessionID),
+	}
+	return out
+}
+
+// countSessionArtifacts is how many deliverables one execution's conversation
+// holds; a gateway without a session store counts none.
+func (s *Server) countSessionArtifacts(ctx context.Context, sessionID string) int {
+	if s == nil || s.Sessions == nil || strings.TrimSpace(sessionID) == "" {
+		return 0
+	}
+	_, total, err := s.Sessions.ListArtifactsPage(ctx, sessionID, 1, 0)
+	if err != nil {
+		return 0
+	}
+	return total
+}
+
+// handleProjectTasksList draws one page of a batch project's tasks.
+func (s *Server) handleProjectTasksList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "tasks unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	projectID := pathParam(r, "id")
+	if _, err := store.Get(r.Context(), projectID); err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	page, limit := taskPageWindow(r)
+	rows, total, err := store.ListTasksPage(r.Context(), projectID, state.ListTasksOptions{
+		Search: strings.TrimSpace(r.URL.Query().Get("q")),
+		Status: strings.TrimSpace(r.URL.Query().Get("status")),
+	}, limit, (page-1)*limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	items := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, s.taskRowMap(r.Context(), row))
+	}
+	writeJSON(w, map[string]any{"items": items, "total": total})
+}
+
+// handleTaskOne draws one task with its execution history.
+func (s *Server) handleTaskOne(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "tasks unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	task, err := store.GetTask(r.Context(), pathParam(r, "task_id"))
+	if err != nil {
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{"error": "task_not_found"})
+		return
+	}
+	root := ""
+	if project, pErr := store.Get(r.Context(), task.ProjectID); pErr == nil {
+		root = project.Root
+	}
+	page, limit := taskPageWindow(r)
+	executions, total, err := store.ListTaskExecutionsPage(r.Context(), task.ID, limit, (page-1)*limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	items := make([]map[string]any, 0, len(executions))
+	for _, exec := range executions {
+		rel := exec.Workspace
+		if root != "" {
+			if r, relErr := filepath.Rel(root, exec.Workspace); relErr == nil {
+				rel = filepath.ToSlash(r)
+			}
+		}
+		items = append(items, map[string]any{
+			"seq":           exec.Seq,
+			"session_id":    exec.SessionID,
+			"status":        exec.Status,
+			"workspace_rel": rel,
+			"started_at":    exec.StartedAt,
+			"finished_at":   exec.FinishedAt,
+			"error_code":    exec.ErrorCode,
+			"error_text":    exec.ErrorText,
+			"artifacts":     s.countSessionArtifacts(r.Context(), exec.SessionID),
+		})
+	}
+	writeJSON(w, map[string]any{
+		"task": map[string]any{
+			"id":           task.ID,
+			"project_id":   task.ProjectID,
+			"title":        task.Title,
+			"external_ref": task.ExternalRef,
+			"origin":       task.Origin,
+			"origin_ref":   task.OriginRef,
+			"input_set":    task.InputSet,
+			"created_at":   task.CreatedAt,
+			"updated_at":   task.UpdatedAt,
+		},
+		"executions": map[string]any{"items": items, "total": total},
+	})
 }

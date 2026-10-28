@@ -140,6 +140,17 @@ func (f Factory) appConfig() *appcfg.Root {
 	return f.AppCfg
 }
 
+// projectType is the conversation type this factory's subagents run in: the
+// owning runner serves exactly one type (its runner pool is per-type), so the
+// catalog a subagent resolves built-ins against narrows to it. A detached
+// factory has no conversation and answers the coding default.
+func (f Factory) projectType() string {
+	if f.Owner != nil {
+		return f.Owner.ProjectType()
+	}
+	return state.ProjectTypeCoding
+}
+
 func (f Factory) ownerActionService() *state.ActionService {
 	if f.Owner != nil {
 		return f.Owner.Actions

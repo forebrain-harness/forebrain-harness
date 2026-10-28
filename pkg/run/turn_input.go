@@ -469,11 +469,45 @@ type InputQueue struct {
 	delivered []Input // steers the model received, waiting for the surface to render them
 	seq       int
 	hook      func()
+	// closed marks a conversation that takes no input at all: a batch task
+	// runs unattended and nobody may join it, as a steer or as a follow-up. A
+	// closed queue keeps no rejected lane, because a batch turn has no "later"
+	// to deliver into.
+	closed bool
 }
 
 // NewInputQueue creates an empty, detached conversation queue.
 func NewInputQueue() *InputQueue {
 	return &InputQueue{}
+}
+
+// Close shuts the conversation to input for good. A batch task's turn runs
+// unattended: nobody may steer it mid-flight and nobody may queue a message
+// behind it, so both lanes refuse from here on. Closing is idempotent and
+// wakes whoever watches the queue, so a surface showing "you can join this
+// run" learns it cannot.
+func (q *InputQueue) Close() {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	already := q.closed
+	q.closed = true
+	hook := q.hook
+	q.mu.Unlock()
+	if !already && hook != nil {
+		hook()
+	}
+}
+
+// Closed reports whether the conversation refuses all input.
+func (q *InputQueue) Closed() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.closed
 }
 
 // Attach connects the queue to this turn's steer runtime: steers enqueued
@@ -602,6 +636,12 @@ func (q *InputQueue) Steer(in Input) bool {
 		return false
 	}
 	q.mu.Lock()
+	if q.closed {
+		// A closed conversation takes nothing, and keeps nothing either: a
+		// batch task has no later turn this message could be handed to.
+		q.mu.Unlock()
+		return false
+	}
 	q.seq++
 	in.Seq = q.seq
 	if q.rt == nil {
@@ -646,6 +686,10 @@ func (q *InputQueue) FollowUp(in Input) bool {
 		return false
 	}
 	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return false
+	}
 	q.seq++
 	in.Seq = q.seq
 	if in.Rejected {

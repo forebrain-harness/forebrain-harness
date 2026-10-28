@@ -3199,3 +3199,56 @@ func cardCorpusCases() map[string]cardCorpusInput {
 		},
 	}
 }
+
+// TestPlanOnlyMetadataSurvivesLiveAndReplay pins the projection chain a
+// kept-plan exit's facts ride (plan 148): BuildToolMeta derives PlanOnly from
+// the tool result, RunEventFromStep carries it on the canonical event's
+// tool_meta, and the card header derives "Kept the plan" from it. An ordinary
+// exit and a malformed result must both stay PlanOnly=false.
+func TestPlanOnlyMetadataSurvivesLiveAndReplay(t *testing.T) {
+	t.Parallel()
+	planOnlyPayload := `{"mode":"agent","plan_file":"/tmp/plans/p/q3-board-report.md","plan_only":true,"message":"The user kept this plan as the deliverable and does not want it carried out now."}`
+	planOnlyEvt := StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "exit_plan_mode",
+		Output:   map[string]any{"output": planOnlyPayload},
+	}
+	meta := BuildToolMeta(planOnlyEvt)
+	if !meta.PlanOnly {
+		t.Fatalf("BuildToolMeta must mark a plan-only exit: %+v", meta)
+	}
+	ev, ok := RunEventFromStep(context.Background(), "s1", "r1", "test", planOnlyEvt)
+	if !ok {
+		t.Fatal("RunEventFromStep dropped the plan-only step")
+	}
+	var completed event.ToolCallCompletedPayload
+	if err := json.Unmarshal(ev.Payload, &completed); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if !completed.ToolMeta.PlanOnly {
+		t.Fatalf("canonical event lost plan_only: %+v", completed.ToolMeta)
+	}
+	if action, _, _ := DisplayParts(DisplayFrame{Title: "exit_plan_mode", Final: true, Meta: meta}, ""); action != "Kept the plan" {
+		t.Fatalf("card action=%q, want Kept the plan", action)
+	}
+	body, trunc := FormatToolStepResult(planOnlyEvt, DefaultMaxFormattedBody)
+	if trunc || !strings.HasPrefix(body, "Kept the plan as the deliverable: /tmp/plans/p/q3-board-report.md") {
+		t.Fatalf("plan-only body=%q trunc=%t", body, trunc)
+	}
+
+	// Ordinary exit: no plan_only anywhere.
+	plainPayload := `{"mode":"agent","plan_file":"/tmp/plans/p/plan.md","message":"Exited plan mode. You can now make edits."}`
+	plainMeta := BuildToolMeta(StepEvent{Kind: StepKindToolCompleted, ToolName: "exit_plan_mode", Output: map[string]any{"output": plainPayload}})
+	if plainMeta.PlanOnly {
+		t.Fatalf("ordinary exit must not be marked plan-only: %+v", plainMeta)
+	}
+	if action, _, _ := DisplayParts(DisplayFrame{Title: "exit_plan_mode", Final: true, Meta: plainMeta}, ""); action != "Exited plan mode" {
+		t.Fatalf("ordinary exit action=%q", action)
+	}
+
+	// Malformed result: the fallback path cannot invent PlanOnly.
+	badMeta := BuildToolMeta(StepEvent{Kind: StepKindToolCompleted, ToolName: "exit_plan_mode", Output: map[string]any{"output": "not json"}})
+	if badMeta.PlanOnly {
+		t.Fatalf("malformed result must not be marked plan-only: %+v", badMeta)
+	}
+}

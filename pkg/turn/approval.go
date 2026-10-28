@@ -74,6 +74,7 @@ type ApprovalReply struct {
 	Reason        string
 	AskAnswerJSON string
 	ClearContext  bool
+	PlanOnly      bool
 }
 
 // ApprovalResult records the state transition made by Decide.
@@ -221,6 +222,7 @@ func (s ApprovalService) ApplyResolvedEffect(action *state.Action, runID string)
 		Network      *safety.NetworkPolicyAmendment `json:"network_policy_amendment"`
 		Update       *safety.PermissionUpdate       `json:"update"`
 		ClearContext bool                           `json:"clear_context"`
+		PlanOnly     bool                           `json:"plan_only"`
 	}
 	if raw := strings.TrimSpace(action.AnswerJSON); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &answer); err != nil {
@@ -233,7 +235,7 @@ func (s ApprovalService) ApplyResolvedEffect(action *state.Action, runID string)
 	}
 	effect, err := s.effect(action, choice, ApprovalReply{
 		Choice: choice, Exec: answer.Exec, Network: answer.Network,
-		Update: answer.Update, ClearContext: answer.ClearContext,
+		Update: answer.Update, ClearContext: answer.ClearContext, PlanOnly: answer.PlanOnly,
 	})
 	if err != nil {
 		return err
@@ -268,6 +270,12 @@ func (s ApprovalService) Decide(ctx context.Context, actionID string, reply Appr
 	}
 	if reply.ClearContext && (!strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") || choice != "accept") {
 		return ApprovalResult{}, fmt.Errorf("clear context is only valid for an approved exit-plan decision")
+	}
+	if reply.PlanOnly && (!strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") || choice != "accept") {
+		return ApprovalResult{}, fmt.Errorf("plan only is only valid for an approved exit-plan decision")
+	}
+	if reply.PlanOnly && reply.ClearContext {
+		return ApprovalResult{}, fmt.Errorf("plan only and clear context cannot be combined")
 	}
 	if reply.Update != nil && choice != "accept" {
 		return ApprovalResult{}, fmt.Errorf("approval decision cannot include a permission update")
@@ -309,7 +317,8 @@ func (s ApprovalService) Decide(ctx context.Context, actionID string, reply Appr
 		Network      *safety.NetworkPolicyAmendment `json:"network_policy_amendment,omitempty"`
 		Update       *safety.PermissionUpdate       `json:"update,omitempty"`
 		ClearContext bool                           `json:"clear_context,omitempty"`
-	}{Decision: choice, Exec: reply.Exec, Network: reply.Network, Update: reply.Update, ClearContext: reply.ClearContext})
+		PlanOnly     bool                           `json:"plan_only,omitempty"`
+	}{Decision: choice, Exec: reply.Exec, Network: reply.Network, Update: reply.Update, ClearContext: reply.ClearContext, PlanOnly: reply.PlanOnly})
 	if err != nil {
 		return ApprovalResult{}, err
 	}
@@ -370,17 +379,18 @@ func sameApprovedReply(act *state.Action, choice string, reply ApprovalReply) bo
 		Network      *safety.NetworkPolicyAmendment `json:"network_policy_amendment"`
 		Update       *safety.PermissionUpdate       `json:"update"`
 		ClearContext bool                           `json:"clear_context"`
+		PlanOnly     bool                           `json:"plan_only"`
 	}
 	if json.Unmarshal([]byte(act.AnswerJSON), &answer) != nil {
-		return choice == "accept" && len(reply.Exec) == 0 && reply.Network == nil && reply.Update == nil && !reply.ClearContext
+		return choice == "accept" && len(reply.Exec) == 0 && reply.Network == nil && reply.Update == nil && !reply.ClearContext && !reply.PlanOnly
 	}
 	return answer.Decision == choice && reflect.DeepEqual(answer.Exec, reply.Exec) &&
 		reflect.DeepEqual(answer.Network, reply.Network) && reflect.DeepEqual(answer.Update, reply.Update) &&
-		answer.ClearContext == reply.ClearContext
+		answer.ClearContext == reply.ClearContext && answer.PlanOnly == reply.PlanOnly
 }
 
 func (s ApprovalService) decideAsk(ctx context.Context, act *state.Action, choice string, reply ApprovalReply) (ApprovalResult, error) {
-	if reply.Update != nil || len(reply.Exec) > 0 || reply.Network != nil || reply.Permissions != nil || reply.ClearContext {
+	if reply.Update != nil || len(reply.Exec) > 0 || reply.Network != nil || reply.Permissions != nil || reply.ClearContext || reply.PlanOnly {
 		return ApprovalResult{}, fmt.Errorf("user_interaction does not accept approval policy options")
 	}
 	if choice == "cancel" {
@@ -698,6 +708,19 @@ func ActionClearedContext(action *state.Action) bool {
 	}
 	_ = json.Unmarshal([]byte(action.AnswerJSON), &answer)
 	return answer.ClearContext
+}
+
+// ActionKeptPlanOnly reports whether an approved action was answered with
+// "keep the plan only". Same shape as ActionClearedContext.
+func ActionKeptPlanOnly(action *state.Action) bool {
+	if action == nil || action.Status != state.ActionApproved {
+		return false
+	}
+	var answer struct {
+		PlanOnly bool `json:"plan_only"`
+	}
+	_ = json.Unmarshal([]byte(action.AnswerJSON), &answer)
+	return answer.PlanOnly
 }
 
 // PlanModeForAction returns the mode selected by an approved plan action.

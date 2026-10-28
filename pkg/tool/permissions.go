@@ -857,6 +857,11 @@ func (s *State) GuardTool(ctx context.Context, toolName string) error {
 	if IsSubagentRunFromContext(ctx) && isSubagentManagementToolName(name) {
 		return fmt.Errorf("subagent tools are only available to the primary agent")
 	}
+	// Structural rule of the same rank: the deliverable action speaks for the
+	// whole conversation, so only the primary agent may perform it.
+	if IsSubagentRunFromContext(ctx) && PrimaryOnlyToolName(name) {
+		return fmt.Errorf("%s is only available to the primary agent", name)
+	}
 	// A custom subagent's policy comes from this primary agent's configuration
 	// and travels on its run's context; every other type's stays the static
 	// table. When a policy is present it is the whole answer for that run, so a

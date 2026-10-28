@@ -1084,7 +1084,7 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 			if budget, ok := s.tokenBudgetMessageFromUsage(evt.SessionID, p.TokensAfter); ok {
 				s.notifyUIForSession(evt.SessionID, budget)
 			}
-		} else if payload, ok := run.SubagentContextBudget(context.Background(), s.runner(), evt.SessionID, agentID); ok {
+		} else if payload, ok := run.SubagentContextBudget(context.Background(), s.conversationRunner(evt.SessionID), evt.SessionID, agentID); ok {
 			s.notifyUIForSession(evt.SessionID, tokenBudgetMsgFromPayload(payload))
 		}
 	// A turn error is durable and it is the surface's own conversation, so the
@@ -1199,6 +1199,19 @@ func (s *ChatSession) runPlanFacts(ctx context.Context, runID string) event.RunP
 	return turn.LastPlanProgressOfRun(ctx, s.runSvc(), runID).Facts()
 }
 
+// runArtifacts is every file the run delivered, as its end carries it — the
+// same lookup the gateway closes its runs with. A session without its store
+// passes a nil lister, which reads as no deliverables.
+func (s *ChatSession) runArtifacts(ctx context.Context, runID string) event.RunArtifacts {
+	var lister turn.RunArtifactLister
+	if s != nil {
+		if store := s.sessStore(); store != nil {
+			lister = store
+		}
+	}
+	return turn.RunArtifactsOf(ctx, lister, runID)
+}
+
 // publishTUIRunEvent records one lifecycle transition the terminal surface
 // itself produced (approval recovery and cancellation in particular) on the
 // conversation's event log. Runtime tool hooks perform the same write at their
@@ -1211,14 +1224,18 @@ func (s *ChatSession) publishTUIRunEvent(ctx context.Context, sessionID, runID, 
 	if runID == "" {
 		return fmt.Errorf("publish TUI run event: run id is required")
 	}
-	// Every way a run ends carries its checklist facts: the worked line closes
-	// every run, and it names the checklist however the run ended.
+	// Every way a run ends carries its checklist facts and its delivered
+	// files: the worked line closes every run and names the checklist however
+	// the run ended, and the files it delivered are the run's structured
+	// result.
 	switch ending := payload.(type) {
 	case event.TurnCancelledPayload:
 		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		ending.RunArtifacts = s.runArtifacts(ctx, runID)
 		payload = ending
 	case event.TurnErrorPayload:
 		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		ending.RunArtifacts = s.runArtifacts(ctx, runID)
 		payload = ending
 	}
 	return s.publishRunEvent(ctx, event.NewRunEvent("", runID, strings.TrimSpace(sessionID), eventType, payload, time.Now()))
@@ -1232,7 +1249,8 @@ func (s *ChatSession) persistRunTurnError(sessionID, runID, text string) {
 		return
 	}
 	s.persistRunEvent(context.Background(), event.NewRunEvent("", runID, sessionID, event.RunEventTurnError,
-		event.TurnErrorPayload{Error: text, Message: text, RunPlanFacts: s.runPlanFacts(context.Background(), runID)}, time.Now()))
+		event.TurnErrorPayload{Error: text, Message: text, RunPlanFacts: s.runPlanFacts(context.Background(), runID),
+			RunArtifacts: s.runArtifacts(context.Background(), runID)}, time.Now()))
 }
 
 // persistRunEvent stores one canonical event in the conversation's log without
@@ -1536,6 +1554,7 @@ func subagentToolStepMsg(evt event.RunEvent, stepID, toolName, summary string, m
 			SkillPath:    strings.TrimSpace(meta.SkillPath),
 			ResultLines:  meta.ResultLines,
 			ResultOffset: meta.ResultOffset,
+			PlanOnly:     meta.PlanOnly,
 			// The preview facts are what make this card the same card the
 			// conversation draws. Dropping them left a child agent's image
 			// step below the renderer's preview gate (render.go), so it
@@ -1657,6 +1676,15 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 				return nil
 			},
 		})),
+		// A batch task's execution is admitted and settled by the engine, so
+		// a task a person opened in the terminal behaves exactly like one a
+		// business system opened over the websocket. The notification sink is
+		// the gateway's (plan 151); the terminal needs none.
+		turn.WithBatchTasks(
+			state.NewProjectStore(env.SQL, env.Deps.AgentName),
+			env.Deps.SessionStore,
+			nil,
+		),
 	)
 	// This process reaps the runs whose owners stopped renewing — a gateway
 	// that crashed, another terminal that was killed mid-turn — and reports

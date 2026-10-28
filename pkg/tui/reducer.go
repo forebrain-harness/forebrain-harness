@@ -3669,11 +3669,15 @@ func (r *Renderer) composerFooterSidesLocked() (string, string) {
 	if view := strings.TrimSpace(r.activeView); view != "" {
 		return r.subagentFooterLeftLocked(view), formatComposerTokenStats(r.composerTokens.get(view))
 	}
-	plan := ""
-	if r.planMode {
-		plan = planModeFooterLabel
+	lead := ""
+	if r.batchReadOnly {
+		// A batch execution has no mode and no next turn to prepare for, so
+		// the footer says what the terminal is instead (plan 152).
+		lead = batchReadOnlyFooterLabel
+	} else if r.planMode {
+		lead = planModeFooterLabel
 	}
-	return joinFooterSegments(plan, r.footer.Model, r.footer.ReasoningEffort),
+	return joinFooterSegments(lead, r.footer.Model, r.footer.ReasoningEffort),
 		formatComposerTokenStats(r.composerTokens.get(""))
 }
 

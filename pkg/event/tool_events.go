@@ -103,6 +103,9 @@ type ToolCallMeta struct {
 	// SubagentCall is the structured card facts of a subagent_* call, derived
 	// once by the runtime so every surface draws the same card.
 	SubagentCall *SubagentCall `json:"subagent_call,omitempty"`
+	// PlanOnly marks an exit_plan_mode approved as "keep the plan only": the
+	// plan is the deliverable and must not be carried out.
+	PlanOnly bool `json:"plan_only,omitempty"`
 }
 
 // SubagentCall is what one subagent_* tool call is about — the tasks it

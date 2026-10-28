@@ -181,6 +181,16 @@ describe('SubagentTab', () => {
     expect(open.find('context-debug-panel-stub').exists()).toBe(true)
   })
 
+  it('draws no composer on a read-only page, only the bar that reads the run', () => {
+    // plan 153: a batch execution takes nobody's input, so a running
+    // subagent's tab offers no input box either — the same calm bar an idle
+    // tab keeps.
+    const { wrapper } = mountTab({ readonly: true })
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="subagent-idle-bar"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('forwards the transcript’s folds and nested dispatches to its host', async () => {
     const { wrapper } = mountTab()
     const conversation = wrapper.findComponent({ name: 'SubagentConversation' })

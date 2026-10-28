@@ -272,6 +272,56 @@ func TestApprovalServiceRejectsInvalidClearContext(t *testing.T) {
 	require.Equal(t, state.ActionPending, store.action.Status)
 }
 
+func TestDecidePlanOnlyOnlyForApprovedExitPlan(t *testing.T) {
+	// Non exit_plan_mode kind.
+	store := &approvalStoreStub{action: &state.Action{ID: "a1", Kind: "shell", Status: state.ActionPending, PayloadJSON: `{}`}}
+	_, err := (ApprovalService{Actions: store}).Decide(context.Background(), "a1", ApprovalReply{PlanOnly: true})
+	require.ErrorContains(t, err, "plan only is only valid")
+	require.Equal(t, state.ActionPending, store.action.Status)
+
+	// A denied exit-plan decision cannot keep the plan only.
+	store = &approvalStoreStub{action: &state.Action{ID: "a2", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+	_, err = (ApprovalService{Actions: store}).Decide(context.Background(), "a2", ApprovalReply{Choice: "deny", PlanOnly: true})
+	require.ErrorContains(t, err, "plan only is only valid")
+	require.Equal(t, state.ActionPending, store.action.Status)
+
+	// plan_only and clear_context are mutually exclusive.
+	store = &approvalStoreStub{action: &state.Action{ID: "a3", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+	_, err = (ApprovalService{Actions: store}).Decide(context.Background(), "a3", ApprovalReply{PlanOnly: true, ClearContext: true})
+	require.ErrorContains(t, err, "cannot be combined")
+	require.Equal(t, state.ActionPending, store.action.Status)
+}
+
+func TestPlanOnlyIsRecordedAndIdempotent(t *testing.T) {
+	store := &approvalStoreStub{action: &state.Action{ID: "a1", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+	service := ApprovalService{Actions: store}
+
+	result, err := service.Decide(context.Background(), "a1", ApprovalReply{PlanOnly: true})
+	require.NoError(t, err)
+	require.True(t, result.Approved)
+	require.Contains(t, store.action.AnswerJSON, `"plan_only":true`)
+
+	retry, err := service.Decide(context.Background(), "a1", ApprovalReply{PlanOnly: true})
+	require.NoError(t, err)
+	require.True(t, retry.Approved)
+	require.True(t, retry.Idempotent)
+
+	_, err = service.Decide(context.Background(), "a1", ApprovalReply{})
+	require.ErrorIs(t, err, ErrApprovalConflict)
+}
+
+func TestActionKeptPlanOnly(t *testing.T) {
+	if !ActionKeptPlanOnly(&state.Action{Status: state.ActionApproved, AnswerJSON: `{"plan_only":true}`}) {
+		t.Fatal("approved plan-only action was not recognized")
+	}
+	if ActionKeptPlanOnly(&state.Action{Status: state.ActionPending, AnswerJSON: `{"plan_only":true}`}) {
+		t.Fatal("pending action kept the plan only")
+	}
+	if ActionKeptPlanOnly(&state.Action{Status: state.ActionApproved, AnswerJSON: `{}`}) {
+		t.Fatal("ordinary approval kept the plan only")
+	}
+}
+
 func TestBuildToolApprovalRequestSuppressesPersistentCommandChoicesAfterMatch(t *testing.T) {
 	req, _, blocked := BuildToolApprovalRequest(ApprovalSource{
 		SessionID: "sid", ToolName: "shell", ActionKind: "shell", ToolInput: map[string]any{"command": "npm run build"},

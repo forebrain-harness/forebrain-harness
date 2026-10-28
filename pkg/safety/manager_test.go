@@ -479,3 +479,55 @@ func TestSandboxStatusLineReadsTheEffectiveStatus(t *testing.T) {
 		t.Fatalf("profile line = %q", got)
 	}
 }
+
+// TestExclusiveReadablePathsDoesNotInheritAllowRead pins the merge that makes a
+// batch task's read boundary hold (plans/150): the configured read set is "/" by
+// default, so an exclusive request must not inherit it — while an ordinary
+// request still does, and denials still narrow either one.
+func TestExclusiveReadablePathsDoesNotInheritAllowRead(t *testing.T) {
+	cwd := t.TempDir()
+	runtimeCfg := RuntimeConfig{}
+	runtimeCfg.Filesystem.AllowRead = []string{string(filepath.Separator)}
+	runtimeCfg.Filesystem.AllowWrite = []string{cwd}
+	runtimeCfg.Filesystem.DenyRead = []string{filepath.Join(cwd, "private")}
+	workspace := filepath.Join(cwd, "tasks", "T", "1")
+
+	merged, err := applyRuntimeConfigToRequest(CommandRequest{
+		AdditionalWritablePaths: []string{workspace},
+		ExclusiveWritablePaths:  true,
+		AdditionalReadablePaths: []string{workspace},
+		ExclusiveReadablePaths:  true,
+	}, runtimeCfg, cwd)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	for _, readable := range merged.AdditionalReadablePaths {
+		if filepath.Clean(readable) == string(filepath.Separator) {
+			t.Fatalf("an exclusive read set inherited the ambient root: %#v", merged.AdditionalReadablePaths)
+		}
+	}
+	if len(merged.AdditionalWritablePaths) != 1 || merged.AdditionalWritablePaths[0] != workspace {
+		t.Fatalf("writable = %#v, want only the task workspace", merged.AdditionalWritablePaths)
+	}
+	if !containsPath(merged.DeniedReadablePaths, filepath.Join(cwd, "private")) {
+		t.Fatalf("denied = %#v, want the configured deny kept", merged.DeniedReadablePaths)
+	}
+
+	ordinary, err := applyRuntimeConfigToRequest(CommandRequest{AdditionalReadablePaths: []string{workspace}}, runtimeCfg, cwd)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if !containsPath(ordinary.AdditionalReadablePaths, string(filepath.Separator)) {
+		t.Fatalf("an ordinary request keeps the configured read set: %#v", ordinary.AdditionalReadablePaths)
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if filepath.Clean(path) == want {
+			return true
+		}
+	}
+	return false
+}

@@ -841,6 +841,82 @@ func TestStateV11UpgradesToV12AddsProjectFileColumns(t *testing.T) {
 	}
 }
 
+// TestStateV19UpgradesToV20AddsProjectTypeColumns pins the columns this
+// version adds to both tables. A database that predates them — modelled by
+// dropping them from the current schema and lowering the version — gains them
+// when it is opened again, its version moves forward, and the rows written
+// before the columns existed read as coding: the kind every project and every
+// conversation was before project types existed (owner 2026-10-26).
+func TestStateV19UpgradesToV20AddsProjectTypeColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := NewProjectStore(db, "main")
+	sessions := NewSessionStore(db, "main")
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "old", Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.EnsureAt(ctx, "old-session", "old-session", SessionBirth{ProjectID: p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE fb_sessions DROP COLUMN project_type`,
+		`ALTER TABLE fb_projects DROP COLUMN project_type`,
+		`PRAGMA user_version = 19`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v19 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+
+	for _, col := range []struct{ table, name string }{
+		{"fb_projects", "project_type"},
+		{"fb_sessions", "project_type"},
+	} {
+		var n int
+		if err := migrated.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, col.table, col.name).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("%s.%s must exist after the migration (found %d)", col.table, col.name, n)
+		}
+	}
+	var projectType, sessionType string
+	if err := migrated.QueryRowContext(ctx, `SELECT project_type FROM fb_projects WHERE id=?`, p.ID).Scan(&projectType); err != nil {
+		t.Fatal(err)
+	}
+	if projectType != ProjectTypeCoding {
+		t.Fatalf("a pre-existing project must read as coding, got %q", projectType)
+	}
+	if err := migrated.QueryRowContext(ctx, `SELECT project_type FROM fb_sessions WHERE id=?`, "old-session").Scan(&sessionType); err != nil {
+		t.Fatal(err)
+	}
+	if sessionType != ProjectTypeCoding {
+		t.Fatalf("a pre-existing session must read as coding, got %q", sessionType)
+	}
+}
+
 // TestStateV12UpgradesToV13AddsFirstTokenColumn pins the column this version
 // adds. A database that predates it — modelled by dropping it from the current
 // schema and lowering the version — gains it when it is opened again, its
@@ -2745,4 +2821,268 @@ WHERE COALESCE(run_id,'')=? AND event_type='tool_output_delta'
 			t.Fatalf("an already-current database was backed up: %v", err)
 		}
 	})
+}
+
+func TestStateV20UpgradesToV21AddsArtifacts(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s','main','s',10,10,'/repo/s')`,
+		`DROP TABLE fb_artifacts`,
+		`PRAGMA user_version = 20`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v20 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	want := map[string]bool{"id": true, "agent_id": true, "session_id": true, "run_id": true,
+		"tool_call_id": true, "path": true, "rel_path": true, "name": true, "title": true,
+		"description": true, "mime": true, "kind": true, "preview": true, "size": true,
+		"mtime_ns": true, "sha256": true, "origin": true, "created_at": true}
+	rows, err := migrated.QueryContext(ctx, `SELECT name FROM pragma_table_info('fb_artifacts')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		got[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("fb_artifacts columns = %v, want %v", got, want)
+	}
+	for name := range want {
+		if !got[name] {
+			t.Fatalf("fb_artifacts lost column %s", name)
+		}
+	}
+	// The run-end frames join on run_id; the session list orders on
+	// created_at — both indexes must come with the table.
+	for _, idx := range []string{"idx_fb_artifacts_session", "idx_fb_artifacts_run"} {
+		var count int
+		if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s count = %d, want 1", idx, count)
+		}
+	}
+}
+
+// TestStateV21UpgradesToV22AddsTasks carries a v21 state file forward: the
+// batch task tables arrive, the conversations and projects already in the file
+// keep their rows, and the new tables hold nothing.
+func TestStateV21UpgradesToV22AddsTasks(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_projects(id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, project_type, created_at, updated_at)
+		 VALUES('prj','main','batch','','','','/repo/batch','-repo-batch','shared',1,0,'','batch',10,10)`,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s','main','s',10,10,'/repo/batch')`,
+		`DROP TABLE fb_task_executions`,
+		`DROP TABLE fb_tasks`,
+		`PRAGMA user_version = 21`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v21 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	for table, want := range map[string]map[string]bool{
+		"fb_tasks": {"id": true, "agent_id": true, "project_id": true, "title": true, "input_text": true,
+			"input_set": true, "external_ref": true, "origin": true, "origin_ref": true,
+			"created_at": true, "updated_at": true},
+		"fb_task_executions": {"session_id": true, "task_id": true, "seq": true, "workspace": true,
+			"status": true, "error_code": true, "error_text": true, "started_at": true,
+			"finished_at": true, "created_at": true, "notify_error": true},
+	} {
+		rows, err := migrated.QueryContext(ctx, `SELECT name FROM pragma_table_info('`+table+`')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			got[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s columns = %v, want %v", table, got, want)
+		}
+		for name := range want {
+			if !got[name] {
+				t.Fatalf("%s lost column %s", table, name)
+			}
+		}
+		var count int
+		if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s holds %d rows after the upgrade, want none", table, count)
+		}
+	}
+
+	for _, idx := range []string{"idx_fb_tasks_project_updated", "idx_fb_tasks_external_ref"} {
+		var count int
+		if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s count = %d, want 1", idx, count)
+		}
+	}
+
+	// The rows the file already held are untouched, and the new tables are
+	// usable through the store the migration's schema describes.
+	var sessions, projects int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects`).Scan(&projects); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 || projects != 1 {
+		t.Fatalf("after the upgrade: %d sessions, %d projects; want the row each", sessions, projects)
+	}
+	task, err := NewProjectStore(migrated, "main").CreateTask(ctx, Task{ProjectID: "prj", Title: "first"})
+	if err != nil {
+		t.Fatalf("create a task on the migrated database: %v", err)
+	}
+	if _, err := NewProjectStore(migrated, "main").AddTaskExecution(ctx, task.ID, "s", "/repo/batch"); err != nil {
+		t.Fatalf("open an execution on the migrated database: %v", err)
+	}
+}
+
+// TestStateV22UpgradesToV23AddsTaskNotify carries a v22 state file forward: the
+// notification target column and the delivery-failure column arrive, the rows
+// already in the file keep their values, and the new columns read as "notify
+// nobody" and "nothing failed to arrive".
+func TestStateV22UpgradesToV23AddsTaskNotify(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_projects(id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, project_type, created_at, updated_at)
+		 VALUES('prj','main','batch','','','','/repo/batch','-repo-batch','shared',1,0,'','batch',10,10)`,
+		`INSERT INTO fb_tasks(id, agent_id, project_id, title, created_at, updated_at) VALUES('tsk','main','prj','first',10,10)`,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s','main','s',10,10,'/repo/batch')`,
+		`INSERT INTO fb_task_executions(session_id, task_id, seq, workspace, status, created_at) VALUES('s','tsk',1,'/repo/batch/tasks/tsk/1','completed',10)`,
+		`ALTER TABLE fb_task_executions DROP COLUMN notify_error`,
+		`ALTER TABLE fb_projects DROP COLUMN task_notify_json`,
+		`PRAGMA user_version = 22`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v22 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	var projectNotify string
+	if err := migrated.QueryRowContext(ctx, `SELECT task_notify_json FROM fb_projects WHERE id='prj'`).Scan(&projectNotify); err != nil {
+		t.Fatalf("fb_projects.task_notify_json after the upgrade: %v", err)
+	}
+	if projectNotify != "[]" {
+		t.Fatalf("an existing project's targets = %q, want the empty list", projectNotify)
+	}
+	var notifyErr string
+	if err := migrated.QueryRowContext(ctx, `SELECT notify_error FROM fb_task_executions WHERE session_id='s'`).Scan(&notifyErr); err != nil {
+		t.Fatalf("fb_task_executions.notify_error after the upgrade: %v", err)
+	}
+	if notifyErr != "" {
+		t.Fatalf("an existing execution's delivery failure = %q, want none", notifyErr)
+	}
+
+	// The upgraded file is usable through the store the new shape describes.
+	store := NewProjectStore(migrated, "main")
+	p, err := store.Get(ctx, "prj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := []TaskNotifyTarget{{Channel: "feishu", Target: "oc_1"}}
+	if _, err := store.Update(ctx, p.ID, UpdateProjectInput{TaskNotify: &targets}); err != nil {
+		t.Fatalf("write targets on the migrated database: %v", err)
+	}
+	if err := store.SetExecutionNotifyError(ctx, "s", "channel unreachable"); err != nil {
+		t.Fatalf("record a delivery failure on the migrated database: %v", err)
+	}
+	if got, err := store.ExecutionNotifyError(ctx, "s"); err != nil || got != "channel unreachable" {
+		t.Fatalf("delivery failure after writing it = %q err=%v", got, err)
+	}
 }

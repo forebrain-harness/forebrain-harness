@@ -382,6 +382,14 @@ export function usePendingActions(options: {
     await submitAction(a.id, () => forebrainApi.actionsDeny(a.id, reason ? { reason } : {}))
   }
 
+  /** 「只要计划，先不执行」(plan 153): the approval is granted with `plan_only`,
+   *  so the turn ends with the plan kept as this turn's deliverable instead of
+   *  starting the work. It is a decision, so the feedback draft goes with it. */
+  async function keepPlanOnly(a: ActionRow) {
+    closePlanFeedback(a)
+    await submitAction(a.id, () => forebrainApi.actionsApprove(a.id, { planOnly: true }))
+  }
+
   /** The feedback field opens on the「继续规划」verdict and closes on any other
    *  decision or its own cancel, taking the unfinished draft with it. */
   function openPlanFeedback(a: ActionRow) {
@@ -548,6 +556,7 @@ export function usePendingActions(options: {
     pendingForStep,
     approveExitPlan,
     keepPlanning,
+    keepPlanOnly,
     openPlanFeedback,
     closePlanFeedback,
     toggleModelPicker,

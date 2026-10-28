@@ -77,7 +77,12 @@ func runSeatbeltCommand(ctx context.Context, cfg *appcfg.Root, req CommandReques
 func seatbeltProfile(cfg *appcfg.Root, req CommandRequest, workDir string) (string, error) {
 	req = constrainRequestToFilesystemProfile(req, workDir)
 	allowWrites := append([]string(nil), req.AdditionalWritablePaths...)
-	if req.Profile == ProfileWorkspaceWrite {
+	if req.Profile == ProfileWorkspaceWrite && !req.ExclusiveWritablePaths {
+		// The configured workspace roots are the ambient policy; a request that
+		// states its own complete write set has decided against them, temp
+		// spaces included. That is what keeps an unattended command out of every
+		// other task's directory when the workspace happens to live under a temp
+		// root (plans/150).
 		if cfg == nil || !cfg.SandboxWorkspaceWrite.ExcludeTmpdirEnvVar {
 			allowWrites = append(allowWrites, os.TempDir())
 		}
@@ -122,7 +127,7 @@ func seatbeltProfile(cfg *appcfg.Root, req CommandRequest, workDir string) (stri
 		}
 	}
 	if req.IncludePlatformDefaults {
-		writeSeatbeltMinimalPolicy(&b, normalizedDenyRead, normalizedDeny)
+		writeSeatbeltMinimalPolicy(&b, normalizedDenyRead, normalizedDeny, !req.ExclusiveWritablePaths)
 	}
 	if req.ManagedNetwork != nil {
 		writeManagedSeatbeltNetworkPolicy(&b, *req.ManagedNetwork)
@@ -398,7 +403,12 @@ var seatbeltPlatformExecutableSubpaths = []string{
 	"/usr/lib",
 }
 
-func writeSeatbeltMinimalPolicy(b *strings.Builder, deniedRead, deniedWrite []string) {
+// writeSeatbeltMinimalPolicy supplies the OS runtime and device whitelist the
+// minimal profile needs. allowTempWrites is false for a request whose write set
+// is exclusive: the temp spaces stay readable (runtimes and tools expect them)
+// but become unwritable, so a workspace that lives under one is the only
+// writable place inside it.
+func writeSeatbeltMinimalPolicy(b *strings.Builder, deniedRead, deniedWrite []string, allowTempWrites bool) {
 	if b == nil {
 		return
 	}
@@ -435,7 +445,9 @@ func writeSeatbeltMinimalPolicy(b *strings.Builder, deniedRead, deniedWrite []st
 	// workspace-write. Keep that grant, but let explicit deny rules narrow it.
 	for _, path := range []string{"/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"} {
 		writeSeatbeltPlatformRule(b, "file-read* file-test-existence", seatbeltSubpathFilter(path), deniedRead)
-		writeSeatbeltPlatformRule(b, "file-write*", seatbeltSubpathFilter(path), deniedWrite)
+		if allowTempWrites {
+			writeSeatbeltPlatformRule(b, "file-write*", seatbeltSubpathFilter(path), deniedWrite)
+		}
 	}
 
 	for _, path := range []string{

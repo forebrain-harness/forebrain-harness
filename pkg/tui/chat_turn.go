@@ -1371,7 +1371,7 @@ func (s *ChatSession) maybeAutoCompactBeforeAppend(ctx context.Context, sessionI
 	if s == nil || s.sessStore() == nil {
 		return nil
 	}
-	svc := run.CompactionService(s.runner(), s.sessStore())
+	svc := run.CompactionService(s.conversationRunner(sessionID), s.sessStore())
 	_, err := assembly.RunPreflight(ctx, assembly.PreflightConfig{
 		HookContext: hook.HookContext{
 			SessionID: sessionID,
@@ -1491,7 +1491,7 @@ func (s *ChatSession) tokenBudgetPayloadFromUsage(sessionID string, usage int) (
 	if s == nil || usage <= 0 {
 		return event.TokenBudgetUpdatedPayload{}, false
 	}
-	return run.ContextBudget(s.runner(), sessionID, nil, usage)
+	return run.ContextBudget(s.conversationRunner(sessionID), sessionID, nil, usage)
 }
 
 // tokenBudgetMessageFromUsage builds the composer-footer budget message from a
@@ -1517,7 +1517,7 @@ func (s *ChatSession) tokenBudgetResetMessage(sessionID string) (TokenBudgetUpda
 	if s == nil {
 		return TokenBudgetUpdatedMsg{}, false
 	}
-	payload, ok := run.ContextBudget(s.runner(), sessionID, nil, 0)
+	payload, ok := run.ContextBudget(s.conversationRunner(sessionID), sessionID, nil, 0)
 	if !ok {
 		return TokenBudgetUpdatedMsg{}, false
 	}

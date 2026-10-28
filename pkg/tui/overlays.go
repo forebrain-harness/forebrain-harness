@@ -128,6 +128,7 @@ type overlayChoice struct {
 	feedbackInput          bool
 	isPlanReview           bool
 	clearContext           bool
+	planOnly               bool
 	strictReview           bool
 	networkPolicyAmendment *safety.NetworkPolicyAmendment
 	commandPrefix          safety.ExecPolicyAmendment
@@ -301,6 +302,22 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 }
 
 func buildExitPlanChoices(req turn.ToolApprovalRequest, percentUsed int) []overlayChoice {
+	// Office conversations get their own verdicts (plan 148): no
+	// clear-context exit, plus "keep the plan only" as a first-class answer.
+	// The deny row keeps the same input field the coding one has.
+	if req.ProjectType == state.ProjectTypeOffice {
+		choices := []overlayChoice{
+			{label: "Yes, carry out the plan", allowOnce: true},
+			{label: "No, revise the plan", denyOnce: true, isPlanDeny: true},
+			{label: "Keep the plan only, don't carry it out", allowOnce: true, planOnly: true},
+		}
+		if len(req.PlanReviewModels) > 0 {
+			choices = append(choices, overlayChoice{
+				label: "Ask another model to review this plan", isPlanReview: true,
+			})
+		}
+		return choices
+	}
 	clearLabel := "Yes, clear context and proceed"
 	if percentUsed > 0 {
 		clearLabel = fmt.Sprintf("Yes, clear context (%d%% used) and proceed", percentUsed)
@@ -1370,7 +1387,7 @@ func (o *approvalOverlay) commit() turn.ToolApprovalDecision {
 		return turn.ToolApprovalDecision{Approved: true, RequestPermissionsResponse: &response}
 	}
 	if choice.allowOnce {
-		return turn.ToolApprovalDecision{Approved: true, ClearContext: choice.clearContext}
+		return turn.ToolApprovalDecision{Approved: true, ClearContext: choice.clearContext, PlanOnly: choice.planOnly}
 	}
 	if choice.denyOnce {
 		return turn.ToolApprovalDecision{Denied: true}

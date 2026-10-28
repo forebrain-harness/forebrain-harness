@@ -81,10 +81,11 @@ func canonicalRunEventsFromWS(m wsServerMsg) []event.RunEvent {
 		payload = event.TurnCompletedPayload{
 			ElapsedMS:    int64Field(m.Data, "elapsed_ms"),
 			RunPlanFacts: m.RunPlanFacts,
+			RunArtifacts: m.RunArtifacts,
 		}
 	case "run_cancelled":
 		typeName = event.RunEventTurnCancelled
-		payload = event.TurnCancelledPayload{Message: strings.TrimSpace(m.Message), RunPlanFacts: m.RunPlanFacts}
+		payload = event.TurnCancelledPayload{Message: strings.TrimSpace(m.Message), RunPlanFacts: m.RunPlanFacts, RunArtifacts: m.RunArtifacts}
 	case "run_error":
 		typeName = event.RunEventTurnError
 		payload = event.TurnErrorPayload{
@@ -92,6 +93,7 @@ func canonicalRunEventsFromWS(m wsServerMsg) []event.RunEvent {
 			Message:      strings.TrimSpace(m.Message),
 			Detail:       turnErrorDetail(m.Data),
 			RunPlanFacts: m.RunPlanFacts,
+			RunArtifacts: m.RunArtifacts,
 		}
 	case "requires_action":
 		typeName = event.RunEventApprovalReq
@@ -462,6 +464,7 @@ func toolCallMetaFromWS(top map[string]any, nested map[string]any) event.ToolCal
 		meta.PreviewBytes = int(float64OrZero(metaMap["preview_bytes"]))
 		meta.PreviewScaled = boolField(metaMap, "preview_scaled")
 		meta.StartedAtMs = int64(float64OrZero(metaMap["started_at_ms"]))
+		meta.PlanOnly = boolField(metaMap, "plan_only")
 		// The subagent_* card facts (plan 012) ride the same tool_meta; the
 		// conversion rebuilds the meta field by field, so they are decoded
 		// here rather than dropped — a lost copy leaves the web rendering the

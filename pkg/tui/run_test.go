@@ -6945,3 +6945,156 @@ func TestSubagentWorkingLineShowsFirstToken(t *testing.T) {
 		t.Fatalf("silent subagent working line = %q, must show no first-token wait", silent)
 	}
 }
+
+// batchTypeSession is a surface session that answers one conversation's frozen
+// project type, the way the real surface reads it from the store.
+type batchTypeSession struct {
+	*fakeSession
+	types map[string]string
+}
+
+func (s *batchTypeSession) SessionProjectType(sessionID string) string {
+	if projectType := s.types[sessionID]; projectType != "" {
+		return projectType
+	}
+	return statepkg.ProjectTypeCoding
+}
+
+// batchProjectSession is a launch project that is a batch project, with the
+// execution the viewer opens with.
+type batchProjectSession struct {
+	*batchTypeSession
+	latest string
+}
+
+func (s *batchProjectSession) BatchProject(context.Context) bool { return true }
+
+func (s *batchProjectSession) LatestBatchExecution(context.Context) string { return s.latest }
+
+// The mode hotkey does not move a batch execution: nobody is watching it to
+// answer a plan approval, so the key says the mode is fixed and leaves the
+// stored mode alone.
+func TestBatchHotkeyDoesNotSwitchMode(t *testing.T) {
+	home := t.TempDir()
+	session := &batchTypeSession{
+		fakeSession: &fakeSession{},
+		types:       map[string]string{"s1": statepkg.ProjectTypeBatch},
+	}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
+
+	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyTogglePlanMode) {
+		t.Fatal("expected the hotkey to be handled")
+	}
+	if got := rendererFrameContents(renderer); len(got) != 1 || got[0] != "The mode is fixed in batch projects." {
+		t.Fatalf("frames = %q, want the fixed-mode notice", got)
+	}
+	st, err := statepkg.Get(home, "s1")
+	if err != nil {
+		t.Fatalf("state.Get: %v", err)
+	}
+	if st.Mode == statepkg.ModePlan {
+		t.Fatalf("a batch execution's mode moved to %q", st.Mode)
+	}
+}
+
+// A batch project's terminal opens on the newest execution — the latest
+// execution of the most recently updated task — through the same switch
+// /resume performs, and turns read-only with it.
+func TestBatchLaunchOpensLatestExecution(t *testing.T) {
+	home := t.TempDir()
+	session := &batchProjectSession{
+		batchTypeSession: &batchTypeSession{
+			fakeSession: &fakeSession{},
+			types:       map[string]string{"batch-exec-1": statepkg.ProjectTypeBatch},
+		},
+		latest: "batch-exec-1",
+	}
+	state := &streamState{sessionID: "fresh-1", session: session, home: home, workspaceRoot: home}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	cmds := newCommandController(session, renderer, nil, nil, home)
+
+	if !openLatestBatchExecution(context.Background(), session, cmds, renderer, state, NewTracker()) {
+		t.Fatal("a batch project with a task must open its latest execution")
+	}
+	if state.sessionID != "batch-exec-1" {
+		t.Fatalf("session on screen = %q, want the latest execution", state.sessionID)
+	}
+	renderer.mu.Lock()
+	readOnly := renderer.batchReadOnly
+	renderer.mu.Unlock()
+	if !readOnly {
+		t.Fatal("the viewer must switch the footer to read-only")
+	}
+
+	// A batch project with nothing in it keeps the launch conversation and says
+	// why the screen stays empty.
+	empty := &batchProjectSession{batchTypeSession: &batchTypeSession{fakeSession: &fakeSession{}}}
+	emptyState := &streamState{sessionID: "fresh-2", session: empty, home: home, workspaceRoot: home}
+	emptyRenderer := NewRenderer(io.Discard, io.Discard)
+	emptyCmds := newCommandController(empty, emptyRenderer, nil, nil, home)
+	if openLatestBatchExecution(context.Background(), empty, emptyCmds, emptyRenderer, emptyState, NewTracker()) {
+		t.Fatal("there is nothing to open in an empty batch project")
+	}
+	if emptyState.sessionID != "fresh-2" {
+		t.Fatalf("session on screen = %q, want the launch conversation", emptyState.sessionID)
+	}
+	if got := rendererFrameContents(emptyRenderer); len(got) != 1 || got[0] != "No tasks yet in this batch project." {
+		t.Fatalf("frames = %q, want the empty-project notice", got)
+	}
+}
+
+// rendererFrameContents is what the terminal has been told, block by block, in
+// the order it will paint them.
+func rendererFrameContents(r *Renderer) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.vm.blocks))
+	for _, block := range r.vm.blocks {
+		if block != nil {
+			out = append(out, block.frame.Content)
+		}
+	}
+	return out
+}
+
+// A slash line typed in a batch execution never reaches the terminal's own
+// command handlers: only the whitelisted ones act, and /continue is left to the
+// submission path, which is what admits and starts the turn.
+func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
+	home := t.TempDir()
+	session := &batchTypeSession{
+		fakeSession: &fakeSession{},
+		types:       map[string]string{"s1": statepkg.ProjectTypeBatch},
+	}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
+	cmds := newCommandController(session, renderer, nil, nil, home)
+
+	for _, refused := range []string{"/plan write it", "/model", "/permissions", "/new", "/some-skill"} {
+		handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, refused)
+		if !handled {
+			t.Fatalf("%s was not handled", refused)
+		}
+		contents := rendererFrameContents(renderer)
+		if len(contents) == 0 || contents[len(contents)-1] != batchReadOnlyNotice {
+			t.Fatalf("%s answered %q, want the read-only notice", refused, contents)
+		}
+	}
+
+	// /compact has a dispatcher of its own — the one that keeps the event loop
+	// alive while it runs — so it is asked the same question there.
+	handled, _, _, _ := dispatchCancelableStreamSlashCommand(context.Background(), nil, nil, nil, nil, cmds, renderer, NewTracker(), state, "/compact")
+	if !handled {
+		t.Fatal("/compact was not handled")
+	}
+	if contents := rendererFrameContents(renderer); contents[len(contents)-1] != batchReadOnlyNotice {
+		t.Fatalf("/compact answered %q, want the read-only notice", contents)
+	}
+
+	// /continue is a turn: the dispatcher declines it so the submission reaches
+	// the surface, which admits it against the execution.
+	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/continue"); handled {
+		t.Fatal("/continue must fall through to the submission path")
+	}
+}

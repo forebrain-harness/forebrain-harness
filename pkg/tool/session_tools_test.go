@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -535,5 +536,303 @@ func TestRegisterDefaultToolsRegistersSessionToolsWithWorkspaceRootOnlyRuntime(t
 	}
 	if len(todos.Items) != 1 || todos.Items[0].ID != "review" {
 		t.Fatalf("session_todo did not persist under workspace root: %+v", todos.Items)
+	}
+}
+
+// --- office plan mode (plan 148) ------------------------------------------
+
+func registeredToolNames(t *testing.T, rt *AgentToolRuntime) []string {
+	t.Helper()
+	a, err := agent.New(noopLLM{}, "test", "test")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	st := NewState(t.TempDir())
+	if err := RegisterDefaultTools(a, st, rt); err != nil {
+		t.Fatalf("RegisterDefaultTools: %v", err)
+	}
+	names := make([]string, 0, len(a.Tools()))
+	for _, tl := range a.Tools() {
+		names = append(names, tl.Name())
+	}
+	return names
+}
+
+func TestOfficeRuntimeRegistersNoEnterPlanMode(t *testing.T) {
+	office := registeredToolNames(t, &AgentToolRuntime{
+		Cfg: &appcfg.Root{}, WorkspaceRoot: t.TempDir(), ProjectType: state.ProjectTypeOffice,
+	})
+	if slices.Contains(office, "enter_plan_mode") {
+		t.Fatalf("office tool table must not offer enter_plan_mode: %v", office)
+	}
+	if !slices.Contains(office, "exit_plan_mode") {
+		t.Fatalf("office tool table must offer exit_plan_mode: %v", office)
+	}
+
+	coding := registeredToolNames(t, &AgentToolRuntime{
+		Cfg: &appcfg.Root{}, WorkspaceRoot: t.TempDir(), ProjectType: state.ProjectTypeCoding,
+	})
+	if !slices.Contains(coding, "enter_plan_mode") || !slices.Contains(coding, "exit_plan_mode") {
+		t.Fatalf("coding tool table must offer both plan tools: %v", coding)
+	}
+}
+
+func TestOfficeExitPlanModeRefusedOutsidePlanMode(t *testing.T) {
+	home := t.TempDir()
+	sid := "sid-office-refuse"
+	_ = state.Set(home, sid, state.State{Mode: state.ModeAgent})
+	st := &State{}
+	rt := &AgentToolRuntime{ProjectType: state.ProjectTypeOffice}
+	tool, err := newExitPlanModeToolFor(st, home, "", rt)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	ctx := withSession(context.Background(), sid)
+	_, err = tool.Handle(ctx, `{}`)
+	if err == nil || !strings.Contains(err.Error(), "exit_plan_mode is only available while the user has this conversation in plan mode") {
+		t.Fatalf("agent-mode office call must be refused with the guard message, got: %v", err)
+	}
+
+	// In plan mode the guard passes; the missing hook is what answers then,
+	// which proves the refusal above came from the office guard.
+	_ = state.Set(home, sid, state.State{Mode: state.ModePlan, PrePlanMode: state.ModeAgent})
+	_, err = tool.Handle(ctx, `{}`)
+	if err == nil || !strings.Contains(err.Error(), "approval unavailable") {
+		t.Fatalf("plan-mode office call must pass the guard, got: %v", err)
+	}
+}
+
+func officePlanOnlySetup(t *testing.T, answerJSON string) (*State, *AgentToolRuntime, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	sid := "sid-office-exit"
+	conv := "conv-office-exit"
+
+	db := openToolTestDB(t)
+	sess := state.NewSessionStore(db, "main")
+	if err := sess.Ensure(ctx, conv, "conversation"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	actions := &state.ActionService{DB: db}
+	act, err := actions.CreatePending(ctx, conv, "exit_plan_mode", map[string]any{"action": "exit"})
+	if err != nil {
+		t.Fatalf("CreatePending: %v", err)
+	}
+	if _, err := actions.ApproveWithAnswer(ctx, act.ID, "", answerJSON); err != nil {
+		t.Fatalf("ApproveWithAnswer: %v", err)
+	}
+
+	st := &State{}
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return act.ID, false, nil
+	})
+	rt := &AgentToolRuntime{ProjectType: state.ProjectTypeOffice, Sess: sess, Actions: actions}
+
+	_ = state.Set(home, sid, state.State{Mode: state.ModePlan, Phase: "plan", PrePlanMode: state.ModeAgent})
+	// The plan belongs to the conversation (PlanSessionIDFromContext reads
+	// the conversation id), not the agent session id.
+	if err := state.SetPlanForSession(home, "", conv, "# Q3 Board Report\n\n- [ ] draft the deck"); err != nil {
+		t.Fatalf("SetPlanForSession: %v", err)
+	}
+	return st, rt, home, sid
+}
+
+func TestExitPlanModePlanOnlyKeepsThePlanAndRecordsAnArtifact(t *testing.T) {
+	ctx := context.Background()
+	st, rt, home, sid := officePlanOnlySetup(t, `{"decision":"accept","plan_only":true}`)
+
+	tool, err := newExitPlanModeToolFor(st, home, "", rt)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	tctx := withSession(context.Background(), sid)
+	tctx = WithConversationSessionID(tctx, "conv-office-exit")
+	tctx = WithRunID(tctx, "run-office-exit")
+	tctx = WithToolUseID(tctx, "toolu-office-exit")
+	raw, err := tool.Handle(tctx, `{}`)
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw.(string)), &obj); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if v, _ := obj["plan_only"].(bool); !v {
+		t.Fatalf("result must carry plan_only=true: %s", raw)
+	}
+	if _, has := obj["on_completion"]; has {
+		t.Fatalf("plan-only result must not carry on_completion: %s", raw)
+	}
+	if want := "The user kept this plan as the deliverable and does not want it carried out now. Do not start any of its tasks or create any other file. Reply in one or two sentences: where the plan is and that you can carry it out whenever they ask."; obj["message"] != want {
+		t.Fatalf("message must be the verbatim plan-only sentence:\n got: %q\nwant: %q", obj["message"], want)
+	}
+	art, has := obj["artifact"].(map[string]any)
+	if !has || strings.TrimSpace(fmt.Sprint(art["id"])) == "" {
+		t.Fatalf("plan-only result must carry the registered artifact: %s", raw)
+	}
+	if art["kind"] != "markdown" {
+		t.Fatalf("artifact kind=%v, want markdown", art["kind"])
+	}
+
+	final, _ := state.Get(home, sid)
+	if final.Mode != state.ModeAgent || !final.PlanKeptOnly {
+		t.Fatalf("mode state after plan-only exit = %+v, want agent with plan_kept_only", final)
+	}
+
+	rows, err := rt.Sess.ListArtifactsForRun(ctx, "run-office-exit")
+	if err != nil {
+		t.Fatalf("ListArtifactsForRun: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("artifact rows = %d, want 1", len(rows))
+	}
+	if rows[0].Origin != state.ArtifactOriginPlan {
+		t.Fatalf("artifact origin=%q, want plan", rows[0].Origin)
+	}
+	if rows[0].Kind != "markdown" {
+		t.Fatalf("artifact kind=%q, want markdown", rows[0].Kind)
+	}
+	if rows[0].Title != "Q3 Board Report" {
+		t.Fatalf("artifact title=%q, want the plan's first heading", rows[0].Title)
+	}
+}
+
+func TestExitPlanModeWithoutPlanOnlyIsUnchanged(t *testing.T) {
+	st, rt, home, sid := officePlanOnlySetup(t, `{"decision":"accept"}`)
+
+	tool, err := newExitPlanModeToolFor(st, home, "", rt)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	tctx := withSession(context.Background(), sid)
+	raw, err := tool.Handle(tctx, `{}`)
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw.(string)), &obj); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	wantKeys := []string{"mode", "plan_file", "message", "on_completion"}
+	if len(obj) != len(wantKeys) {
+		t.Fatalf("result keys = %v, want exactly %v", obj, wantKeys)
+	}
+	for _, k := range wantKeys {
+		if _, has := obj[k]; !has {
+			t.Fatalf("result missing %q: %s", k, raw)
+		}
+	}
+	// This test's context carries no conversation id, so the plan file is
+	// resolved under the agent session id (PlanSessionIDFromContext falls
+	// back to it).
+	planFile := state.PlanPathForSession(home, "", sid)
+	if want := "Exited plan mode. You can now make edits, run tools, and take actions. Implement the approved plan in " + planFile + "."; obj["message"] != want {
+		t.Fatalf("message drifted:\n got: %q\nwant: %q", obj["message"], want)
+	}
+	if on, _ := obj["on_completion"].(string); !strings.Contains(on, state.ImplementationHeading) {
+		t.Fatalf("on_completion must keep the implementation-record instruction: %s", raw)
+	}
+	final, _ := state.Get(home, sid)
+	if final.PlanKeptOnly {
+		t.Fatalf("an ordinary approval must not set plan_kept_only: %+v", final)
+	}
+}
+
+// The gateway honours an approved office exit_plan_mode by switching the
+// conversation out of plan mode first and re-running the call afterwards
+// (pkg/gateway/api_extra.go, resumeGatewayRun's turn.PlanModeForAction switch).
+// The call the office guard then sees is an approved replay in agent mode, and
+// it must complete the decision the user made rather than refuse it.
+func TestOfficeExitPlanModeApprovedReplayPassesTheModeGuard(t *testing.T) {
+	ctx := context.Background()
+
+	// plan_only: the replay finishes the kept-plan exit the mode switch would
+	// otherwise have made impossible.
+	st, rt, home, sid := officePlanOnlySetup(t, `{"decision":"accept","plan_only":true}`)
+	if _, err := state.Switch(home, sid, state.ModeAgent); err != nil {
+		t.Fatalf("Switch: %v", err)
+	}
+	if cur, _ := state.Get(home, sid); cur.Mode != state.ModeAgent {
+		t.Fatalf("setup mode = %q, want the gateway's agent mode", cur.Mode)
+	}
+	// The replay's hook answers with the approved action's id and opens no new
+	// gate (pkg/run/runner.go, actionHook's exitPlanMode branch).
+	actionID, ok, hookErr := st.ActionHook()(ctx, "exit_plan_mode", nil)
+	if hookErr != nil || ok || strings.TrimSpace(actionID) == "" {
+		t.Fatalf("hook on replay = (%q, %v, %v), want the approved action's id and no new gate", actionID, ok, hookErr)
+	}
+	exitTool, err := newExitPlanModeToolFor(st, home, "", rt)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// A call the model makes itself carries no approved action id and is still
+	// refused in agent mode.
+	if _, err := exitTool.Handle(withSession(ctx, sid), `{}`); err == nil ||
+		!strings.Contains(err.Error(), "exit_plan_mode is only available while the user has this conversation in plan mode") {
+		t.Fatalf("an unapproved agent-mode office call must still be refused, got: %v", err)
+	}
+	raw, err := exitTool.Handle(WithApprovedActionID(withSession(ctx, sid), actionID), `{}`)
+	if err != nil {
+		t.Fatalf("approved replay: %v", err)
+	}
+	var kept map[string]any
+	if err := json.Unmarshal([]byte(raw.(string)), &kept); err != nil {
+		t.Fatalf("decode replay result: %v", err)
+	}
+	if v, _ := kept["plan_only"].(bool); !v {
+		t.Fatalf("approved replay must keep the plan-only result: %s", raw)
+	}
+	if final, _ := state.Get(home, sid); !final.PlanKeptOnly {
+		t.Fatalf("approved replay must record the kept plan: %+v", final)
+	}
+
+	// The ordinary approval takes the same road to its own result.
+	st2, rt2, home2, sid2 := officePlanOnlySetup(t, `{"decision":"accept"}`)
+	if _, err := state.Switch(home2, sid2, state.ModeAgent); err != nil {
+		t.Fatalf("Switch: %v", err)
+	}
+	approved2, ok2, err2 := st2.ActionHook()(ctx, "exit_plan_mode", nil)
+	if err2 != nil || ok2 || strings.TrimSpace(approved2) == "" {
+		t.Fatalf("hook on replay = (%q, %v, %v), want the approved action's id and no new gate", approved2, ok2, err2)
+	}
+	exitTool2, err := newExitPlanModeToolFor(st2, home2, "", rt2)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	raw2, err := exitTool2.Handle(WithApprovedActionID(withSession(ctx, sid2), approved2), `{}`)
+	if err != nil {
+		t.Fatalf("approved replay: %v", err)
+	}
+	var exited map[string]any
+	if err := json.Unmarshal([]byte(raw2.(string)), &exited); err != nil {
+		t.Fatalf("decode replay result: %v", err)
+	}
+	for _, k := range []string{"mode", "plan_file", "message", "on_completion"} {
+		if _, has := exited[k]; !has {
+			t.Fatalf("approved replay must answer with the ordinary exit result, missing %q: %s", k, raw2)
+		}
+	}
+	if _, has := exited["plan_only"]; has {
+		t.Fatalf("an ordinary approval must not answer as a kept plan: %s", raw2)
+	}
+}
+
+// The guard is the office runtime's alone: a coding session still exits plan
+// mode from agent mode, as it always has.
+func TestCodingExitPlanModeNeedsNoPlanMode(t *testing.T) {
+	home := t.TempDir()
+	sid := "sid-coding-agent"
+	if err := state.Set(home, sid, state.State{Mode: state.ModeAgent}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	rt := &AgentToolRuntime{ProjectType: state.ProjectTypeCoding}
+	exitTool, err := newExitPlanModeToolFor(&State{}, home, "", rt)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	_, err = exitTool.Handle(withSession(context.Background(), sid), `{}`)
+	if err == nil || !strings.Contains(err.Error(), "approval unavailable") {
+		t.Fatalf("a coding agent-mode call must pass the office guard, got: %v", err)
 	}
 }

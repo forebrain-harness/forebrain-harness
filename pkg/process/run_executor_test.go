@@ -20,6 +20,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/session"
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/testutil"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
@@ -823,4 +824,96 @@ func TestRunExecutorFilesTheOneTurnEndBudgetRecord(t *testing.T) {
 			t.Fatalf("TokenUsage = %d, want 5 — the flushed first response's input 3 + output 2", payload.TokenUsage)
 		}
 	})
+}
+
+// TestBatchTurnRunsInItsTaskWorkspace pins what the executor does to a batch
+// execution's environment: the turn's working directory becomes the task
+// workspace, the task context the model is told about is on the context, the
+// three folders exist, and the conversation takes no input.
+func TestBatchTurnRunsInItsTaskWorkspace(t *testing.T) {
+	ctx := context.Background()
+	env := envWithFakeLLM(t, "hello from the model")
+	projects := state.NewProjectStore(env.SQL, env.Deps.AgentName)
+	root := t.TempDir()
+	project, err := projects.Create(ctx, state.CreateProjectInput{
+		Name:        "batch",
+		Root:        root,
+		ProjectType: state.ProjectTypeBatch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := projects.CreateTask(ctx, state.Task{ProjectID: project.ID, Title: "count rows"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sid = "batch-session"
+	if err := env.Deps.SessionStore.EnsureAt(ctx, sid, "batch", state.SessionBirth{
+		Cwd:       root,
+		ProjectID: project.ID,
+		Source:    state.SessionSourceConversation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exec, err := projects.AddTaskExecution(ctx, task.ID, sid, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var observed WorkDirObservation
+	svc := turn.New(
+		turn.WithSessionStore(env.Deps.SessionStore),
+		turn.WithForegroundLocker(env.Foreground),
+		turn.WithBatchTasks(projects, env.Deps.SessionStore, nil),
+		turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{
+			BeforeAgent: func(agentCtx context.Context, runID, sessionID, input string) error {
+				wd, _ := tool.WorkingDir(agentCtx)
+				observed = WorkDirObservation{
+					WorkingDir:    wd,
+					TaskWorkspace: tool.TaskWorkspaceFromContext(agentCtx),
+					TaskContext:   tool.TaskContextFromContext(agentCtx),
+					SessionID:     sessionID,
+					Input:         input,
+				}
+				return nil
+			},
+		})),
+	)
+	out, err := svc.Submit(ctx, turn.TurnRequest{
+		SessionID:  sid,
+		UserText:   "count the rows",
+		BatchInput: &turn.BatchTurnInput{Text: "count the rows"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if out.Status != turn.TurnCompleted {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if observed.WorkingDir != exec.Workspace || observed.TaskWorkspace != exec.Workspace {
+		t.Fatalf("turn working dir = %q (task workspace %q), want %q", observed.WorkingDir, observed.TaskWorkspace, exec.Workspace)
+	}
+	for _, want := range []string{"task_id: " + task.ID, "execution: 1", "task_workspace: " + exec.Workspace, "deliverables: outputs/"} {
+		if !strings.Contains(observed.TaskContext, want) {
+			t.Fatalf("task context %q is missing %q", observed.TaskContext, want)
+		}
+	}
+	for _, dir := range []string{"inputs", "outputs", ".work"} {
+		if info, statErr := os.Stat(filepath.Join(exec.Workspace, dir)); statErr != nil || !info.IsDir() {
+			t.Fatalf("the task workspace has no %s/: %v", dir, statErr)
+		}
+	}
+	if q := env.Control.SessionQueue(sid); q == nil || !q.Closed() {
+		t.Fatal("a batch execution left its conversation open to input")
+	}
+}
+
+// WorkDirObservation is what the turn's own context said when the agent
+// started.
+type WorkDirObservation struct {
+	WorkingDir    string
+	TaskWorkspace string
+	TaskContext   string
+	SessionID     string
+	Input         string
 }

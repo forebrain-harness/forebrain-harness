@@ -4,8 +4,10 @@ package home
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -81,4 +83,67 @@ func writeFileIfMissingInWorkspace(rootDir *os.File, name, content string) error
 	defer f.Close()
 	_, err = f.WriteString(content)
 	return err
+}
+
+// replaceLegacySeedInWorkspace rewrites a workspace bootstrap file whose bytes
+// are still exactly one of the given legacy seed bodies. A missing file, a
+// file past the read budget and a file that differs by even one byte are the
+// user's own business and are left as they are. The write goes through a
+// temporary file renamed over the seed, so a failure mid-way cannot leave a
+// half-written bootstrap file behind.
+func replaceLegacySeedInWorkspace(rootDir *os.File, name string, legacy []string, body string) error {
+	if rootDir == nil {
+		return errors.New("workspace root handle is nil")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("workspace bootstrap file name is empty")
+	}
+	fd, err := unix.Openat(int(rootDir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if err == unix.ENOENT {
+			return nil
+		}
+		return err
+	}
+	f := os.NewFile(uintptr(fd), filepath.Join(rootDir.Name(), name))
+	if f == nil {
+		_ = unix.Close(fd)
+		return errors.New("open workspace bootstrap file")
+	}
+	defer f.Close()
+	const maxLegacySeedBytes = 64 << 10
+	current, err := io.ReadAll(io.LimitReader(f, maxLegacySeedBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(current) > maxLegacySeedBytes {
+		return nil
+	}
+	if !slices.Contains(legacy, string(current)) {
+		return nil
+	}
+	tmp := name + ".forebrain-new"
+	tmpFD, err := unix.Openat(int(rootDir.Fd()), tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o644)
+	if err != nil {
+		return err
+	}
+	tmpF := os.NewFile(uintptr(tmpFD), filepath.Join(rootDir.Name(), tmp))
+	if tmpF == nil {
+		_ = unix.Close(tmpFD)
+		return errors.New("open workspace bootstrap file")
+	}
+	_, err = tmpF.WriteString(body)
+	if closeErr := tmpF.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = unix.Unlinkat(int(rootDir.Fd()), tmp, 0)
+		return err
+	}
+	if err := unix.Renameat(int(rootDir.Fd()), tmp, int(rootDir.Fd()), name); err != nil {
+		_ = unix.Unlinkat(int(rootDir.Fd()), tmp, 0)
+		return err
+	}
+	return nil
 }

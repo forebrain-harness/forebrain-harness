@@ -8,6 +8,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 type registryNoopLLM struct{}
@@ -215,5 +216,65 @@ func TestLSPToolRegistrationOrder(t *testing.T) {
 	names = toolNames(&AgentToolRuntime{CodeIntel: nopCodeIntel{}, CodeIntelTool: true, Cfg: cfg})
 	if got := position(names, "lsp"); got != position(names, "request_permissions")+1 {
 		t.Fatalf("lsp position = %d in %v, want directly after request_permissions", got, names)
+	}
+}
+
+// boolRef is the *bool a config field needs.
+func boolRef(v bool) *bool { return &v }
+
+// memoryToolsConfig turns the memory features on, so a test can tell "the
+// batch gate removed the tools" from "the features were off anyway".
+func memoryToolsConfig(t *testing.T) *appcfg.Root {
+	t.Helper()
+	cfg := &appcfg.Root{}
+	cfg.Features.Memories = boolRef(true)
+	cfg.Memories.UseMemories = boolRef(true)
+	cfg.Memories.DedicatedTools = boolRef(true)
+	return cfg
+}
+
+// batchToolNames is the tool table one runtime registers, as a set.
+func batchToolNames(t *testing.T, rt *AgentToolRuntime) map[string]bool {
+	t.Helper()
+	names := map[string]bool{}
+	for _, name := range registeredToolNames(t, rt) {
+		names[name] = true
+	}
+	return names
+}
+
+// TestBatchToolSetHasNoHumanInTheLoop pins what a batch execution's model can
+// reach: it runs unattended for a business system, so nothing that waits for a
+// person is offered — not the question tool, not the plan-mode gates, not a
+// permission request, not memory — while the tools that do the work stay.
+func TestBatchToolSetHasNoHumanInTheLoop(t *testing.T) {
+	rt := &AgentToolRuntime{Cfg: memoryToolsConfig(t), WorkspaceRoot: t.TempDir(), ProjectType: state.ProjectTypeBatch}
+	names := batchToolNames(t, rt)
+	for _, forbidden := range []string{
+		"user_interaction", "enter_plan_mode", "exit_plan_mode", "request_permissions",
+		"memories_list", "memories_read", "memories_search", "memories_add_ad_hoc_note",
+	} {
+		if names[forbidden] {
+			t.Fatalf("a batch conversation registered %s", forbidden)
+		}
+	}
+	for _, required := range []string{"present_files", "session_todo", "intermediate_tool", "write_file", "shell"} {
+		if !names[required] {
+			t.Fatalf("a batch conversation is missing %s", required)
+		}
+	}
+
+	// The control: the same runtime as a coding conversation keeps every one
+	// of them, so the assertions above are about the batch gate and not about
+	// a config that had the features off.
+	coding := &AgentToolRuntime{Cfg: memoryToolsConfig(t), WorkspaceRoot: t.TempDir(), ProjectType: state.ProjectTypeCoding}
+	names = batchToolNames(t, coding)
+	for _, required := range []string{
+		"user_interaction", "enter_plan_mode", "exit_plan_mode",
+		"memories_list", "memories_read", "memories_search", "memories_add_ad_hoc_note",
+	} {
+		if !names[required] {
+			t.Fatalf("a coding conversation is missing %s, so the batch assertion proves nothing", required)
+		}
 	}
 }

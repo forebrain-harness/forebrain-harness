@@ -747,6 +747,74 @@ func TestListConversationsPagePinsTheDrawerList(t *testing.T) {
 	}
 }
 
+// TestListConversationsPageLeavesOutBatchExecutions pins the drawer's other
+// exclusion (plan 153): a batch project's conversations are executions of its
+// tasks, reached from that project's task page and its execution history, so
+// the conversation drawer never lists them — neither in the whole list nor
+// when it asks for that project's rows — while a coding and an office
+// conversation under the same agent stay.
+func TestListConversationsPageLeavesOutBatchExecutions(t *testing.T) {
+	ctx := context.Background()
+	projects, store := newProjectStoreForTest(t, "main")
+	create := func(name, projectType string) Project {
+		t.Helper()
+		p, err := projects.Create(ctx, CreateProjectInput{Name: name, Root: t.TempDir(), ProjectType: projectType})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	batch := create("batch", ProjectTypeBatch)
+	coding := create("coding", ProjectTypeCoding)
+	office := create("office", ProjectTypeOffice)
+	// The batch execution is the newest row, so a list that forgot the filter
+	// cannot hide behind the page's cut.
+	for _, row := range []struct {
+		id      string
+		project Project
+		at      int64
+	}{
+		{"batch-run-1", batch, 30},
+		{"coding-talk", coding, 20},
+		{"office-talk", office, 10},
+	} {
+		if err := store.EnsureAt(ctx, row.id, row.id, SessionBirth{ProjectID: row.project.ID}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, row.id, "user", "hello "+row.id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE fb_sessions SET updated_at = ? WHERE id = ?`, row.at, row.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := func(rows []SessionSummary) []string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return out
+	}
+
+	rows, total, err := store.ListConversationsPage(ctx, "", "", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || !slices.Equal(ids(rows), []string{"coding-talk", "office-talk"}) {
+		t.Fatalf("drawer list = %v (total %d), want only the coding and office conversations", ids(rows), total)
+	}
+
+	// The project filter does not open the door again: a batch project's
+	// executions are listed by its task page, never here.
+	rows, total, err = store.ListConversationsPage(ctx, "", batch.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("batch project's drawer list = %v (total %d), want nothing", ids(rows), total)
+	}
+}
+
 // TestConversationCountsByProjectCountsOnlyConversationsWithMessages pins the
 // count a project table draws per row: it is the same predicate
 // ListSessionsForProject lists by, so a row that never said anything and a
@@ -1463,6 +1531,98 @@ func TestLatestSessionModelSelectionScopesAndTouch(t *testing.T) {
 	}
 }
 
+// TestSessionModelStampIsStrictlyIncreasing pins the order "most recently
+// used" depends on: many writes inside one millisecond must still leave
+// strictly increasing timestamps, so the newest row is the one just written
+// and never the storage engine's pick. fb_session_model_state is STRICT,
+// WITHOUT ROWID — there is no rowid to break a tie with — which is why the
+// stamp itself has to be total.
+func TestSessionModelStampIsStrictlyIncreasing(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+	const n = 64
+	prev := int64(0)
+	for i := 0; i < n; i++ {
+		sid := fmt.Sprintf("stamp-%02d", i)
+		model := fmt.Sprintf("m-%02d", i)
+		if err := store.Ensure(ctx, sid, sid); err != nil {
+			t.Fatalf("Ensure %s: %v", sid, err)
+		}
+		if _, err := store.SaveSessionModelSelection(ctx, sid, SessionModelSelection{Provider: "openai", Model: model}); err != nil {
+			t.Fatalf("save %s: %v", sid, err)
+		}
+		// The reading surfaces share: the row just written is the newest.
+		got, ok, err := store.LatestSessionModelSelection(ctx)
+		if err != nil || !ok || got.Model != model {
+			t.Fatalf("after write %d latest = %+v ok=%v err=%v, want %s", i, got, ok, err, model)
+		}
+	}
+	rows, err := db.Query(`SELECT updated_at FROM fb_session_model_state ORDER BY updated_at ASC`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var at int64
+		if err := rows.Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		if at <= prev {
+			t.Fatalf("stamp %d after %d is not strictly increasing", at, prev)
+		}
+		prev = at
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if seen != n {
+		t.Fatalf("stamps = %d, want %d", seen, n)
+	}
+}
+
+// TestLatestSessionModelSelectionIsDeterministicOnSharedStamps covers the
+// rows this process did not write: a file from a build that stamped in
+// seconds, a migrated file, or a hand-seeded one can hold several rows with
+// the same updated_at. There is no true order among them, so what the reading
+// must guarantee is the same answer on every call — a stable pick, not the
+// storage engine's.
+func TestLatestSessionModelSelectionIsDeterministicOnSharedStamps(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	for _, sid := range []string{"tie-a", "tie-b"} {
+		if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd, source) VALUES(?,?,?,?,?,?,?)`,
+			sid, "main", sid, 500, 1, "/repo/s", ""); err != nil {
+			t.Fatalf("seed session %s: %v", sid, err)
+		}
+		if _, err := db.Exec(`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at) VALUES(?,?,?,?,?)`,
+			sid, "openai", "gpt-"+sid, "", 500); err != nil {
+			t.Fatalf("seed row %s: %v", sid, err)
+		}
+	}
+	store := NewSessionStore(db, "main")
+	first, ok, err := store.LatestSessionModelSelection(ctx)
+	if err != nil || !ok {
+		t.Fatalf("latest: ok=%v err=%v", ok, err)
+	}
+	for i := 0; i < 8; i++ {
+		again, ok, err := store.LatestSessionModelSelection(ctx)
+		if err != nil || !ok || again != first {
+			t.Fatalf("read %d = %+v ok=%v err=%v, want the same %+v", i, again, ok, err, first)
+		}
+	}
+	// A touch lifts one of them past the other: recency works even when the
+	// file arrived full of shared stamps.
+	if err := store.TouchSessionModelSelection(ctx, "tie-a"); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	if got, ok, err := store.LatestSessionModelSelection(ctx); err != nil || !ok || got.Model != "gpt-tie-a" {
+		t.Fatalf("latest after touch = %+v ok=%v err=%v, want gpt-tie-a", got, ok, err)
+	}
+}
+
 // The permission-preset row follows the model-selection row's rules: write and
 // read back, last write wins, another primary agent sees nothing, /fork copies
 // and /new (a fresh row) does not, deleting the session takes the row with it,
@@ -1993,6 +2153,43 @@ func TestSessionProjectIsFixedAtBirth(t *testing.T) {
 	}
 	if projectID != born.ID {
 		t.Fatalf("session project moved to %q, want it fixed at birth %q", projectID, born.ID)
+	}
+}
+
+// TestBatchSessionIsBornWithMemoryDisabled pins the owner's rule (2026-10-26):
+// a batch conversation never generates memories, so even a process whose
+// memory defaults are enabled stamps a batch session disabled at birth. A
+// coding session under the same defaults keeps the enabled mode.
+func TestBatchSessionIsBornWithMemoryDisabled(t *testing.T) {
+	projects, sessions := newProjectStoreForTest(t, "main")
+	ctx := context.Background()
+	sessions.ConfigureMemoryDefaults("enabled", "", "", "")
+	batch, err := projects.Create(ctx, CreateProjectInput{Name: "batch", Root: t.TempDir(), ProjectType: ProjectTypeBatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding, err := projects.Create(ctx, CreateProjectInput{Name: "coding", Root: filepath.Join(t.TempDir(), "c"), ProjectType: ProjectTypeCoding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.EnsureAt(ctx, "batch-s1", "batch-s1", SessionBirth{ProjectID: batch.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.EnsureAt(ctx, "coding-s1", "coding-s1", SessionBirth{ProjectID: coding.ID}); err != nil {
+		t.Fatal(err)
+	}
+	var batchMode, codingMode string
+	if err := sessions.db.QueryRowContext(ctx, `SELECT memory_mode FROM fb_sessions WHERE id='batch-s1'`).Scan(&batchMode); err != nil {
+		t.Fatal(err)
+	}
+	if batchMode != "disabled" {
+		t.Fatalf("a batch session must be born with memory disabled, got %q", batchMode)
+	}
+	if err := sessions.db.QueryRowContext(ctx, `SELECT memory_mode FROM fb_sessions WHERE id='coding-s1'`).Scan(&codingMode); err != nil {
+		t.Fatal(err)
+	}
+	if codingMode != "enabled" {
+		t.Fatalf("a coding session must keep the process default, got %q", codingMode)
 	}
 }
 

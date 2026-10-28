@@ -2243,6 +2243,88 @@ func TestAdoptLaunchProjectRegistersTheLaunchDirectory(t *testing.T) {
 	require.Equal(t, s.ProjectID, projectID)
 }
 
+// TestAdoptLaunchProjectUsesGitAwareDefaultType pins the launch default the
+// two surfaces share (owner 2026-10-27): a folder not registered as a project
+// yet is adopted as coding inside a Git worktree and office elsewhere, and an
+// already-registered project is never reclassified by a later adoption.
+func TestAdoptLaunchProjectUsesGitAwareDefaultType(t *testing.T) {
+	ctx := context.Background()
+
+	// A non-Git launch directory adopts as office.
+	plainHome := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", plainHome)
+	plain := t.TempDir()
+	plainSession, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), plain)
+	require.NoError(t, err)
+	defer plainSession.Close()
+	require.NoError(t, plainSession.AdoptLaunchProject(ctx))
+	projects := state.NewProjectStore(plainSession.Env.SQL, plainSession.Env.Deps.AgentName)
+	plainProject, err := projects.Get(ctx, plainSession.ProjectID)
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeOffice, plainProject.ProjectType)
+
+	// A Git subdirectory adopts as coding.
+	gitHome := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", gitHome)
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
+	sub := filepath.Join(repo, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	gitSession, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), sub)
+	require.NoError(t, err)
+	defer gitSession.Close()
+	require.NoError(t, gitSession.AdoptLaunchProject(ctx))
+	gitProjects := state.NewProjectStore(gitSession.Env.SQL, gitSession.Env.Deps.AgentName)
+	gitProject, err := gitProjects.Get(ctx, gitSession.ProjectID)
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeCoding, gitProject.ProjectType)
+
+	// Adopting again never reclassifies the registered project: the .git
+	// marker is read once, when the row is inserted.
+	require.NoError(t, os.Mkdir(filepath.Join(plain, ".git"), 0o755))
+	require.NoError(t, plainSession.AdoptLaunchProject(ctx))
+	reread, err := projects.Get(ctx, plainSession.ProjectID)
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeOffice, reread.ProjectType)
+}
+
+// TestBindingANewConversationUsesTheProjectsType pins the first turn of a new
+// conversation in an office project. The launch binds the conversation before
+// the first turn creates its row, so nothing is frozen yet and the binding has
+// to be built with the project's current type — the type the row is about to
+// freeze. Reading the missing row as coding is how a new office conversation's
+// first turn ran the coding prompt and tool table (plans/145).
+func TestBindingANewConversationUsesTheProjectsType(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	// Not a Git worktree: the launch directory is adopted as office.
+	launch := t.TempDir()
+	s, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), launch)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	require.NoError(t, s.AdoptLaunchProject(ctx))
+	projects := state.NewProjectStore(s.Env.SQL, s.Env.Deps.AgentName)
+	project, err := projects.Get(ctx, s.ProjectID)
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeOffice, project.ProjectType)
+
+	// The conversation is an id only: its row arrives with the first turn.
+	const sid = "new-cli-conversation"
+	var rows int
+	require.NoError(t, s.Env.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&rows))
+	require.Zero(t, rows, "the conversation has no row before its first turn")
+
+	require.NoError(t, s.BindConversationRuntime(ctx, sid))
+	bound, ok := s.Env.BoundRunnerForSession(ctx, sid)
+	require.True(t, ok)
+	require.NotNil(t, bound)
+	require.NotSame(t, s.runner(), bound)
+	require.Equal(t, state.ProjectTypeOffice, bound.ProjectType(),
+		"a new conversation must be bound with the type it is about to freeze")
+}
+
 // sessionIDsOf maps a session list to the ids it holds, for membership checks.
 func sessionIDsOf(list []state.SessionSummary) []string {
 	out := make([]string, 0, len(list))
@@ -8403,7 +8485,9 @@ func TestCharacterizationModelSwitchAppliesWithinSession(t *testing.T) {
 		t.Fatalf("Messages = %+v, want the first reply recorded against gpt-main", first.Messages)
 	}
 
-	if reply := chooseInSession(t, s, "model", "openai/gpt-main-v2").Reply; reply != "Switched to openai/gpt-main-v2." {
+	// The switch must land on the session under test: the shared chooseInSession
+	// helper hardcodes "s1", so its row would be the one that changed.
+	if reply := s.ChooseSurfaceSlash(context.Background(), sessionID, turn.SlashChoice{Command: "model", Value: "openai/gpt-main-v2"}).Reply; reply != "Switched to openai/gpt-main-v2." {
 		t.Fatalf("/model choice replied %q", reply)
 	}
 	if got := cliResultModel(s, sessionID); got != "gpt-main-v2" {

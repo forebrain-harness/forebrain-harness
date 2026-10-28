@@ -60,7 +60,7 @@
         />
         <!-- Relative, so the model-and-context card opens against the composer
              rather than against the pill. -->
-        <div v-if="active" class="relative">
+        <div v-if="active && !readonly" class="relative">
           <PendingInputQueuePopover
             :preview="pendingInput"
             @edit-last-queued="emit('edit-last-queued')"
@@ -194,6 +194,10 @@ const props = withDefaults(defineProps<{
   notice?: { title: string; detail: string } | null
   /** Its own /context report, or null while none is open. */
   context?: { data: SessionContextDebug | null; loading: boolean } | null
+  /** A read-only page (plan 153): a batch execution takes nobody's input, so
+   *  even a running subagent's tab draws no composer — only the bar that reads
+   *  the run it is in. */
+  readonly?: boolean
 }>(), {
   callTasks: undefined,
   now: undefined,
@@ -202,6 +206,7 @@ const props = withDefaults(defineProps<{
   autoContinue: null,
   notice: null,
   context: null,
+  readonly: false,
 })
 
 const emit = defineEmits<{

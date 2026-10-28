@@ -306,6 +306,74 @@ func (s *ChatSession) projectStoreFor() *state.ProjectStore {
 	return state.NewProjectStore(s.Env.SQL, s.Env.Deps.AgentName)
 }
 
+// SessionProjectType is the type a conversation was born with, coding when
+// it cannot be read.
+func (s *ChatSession) SessionProjectType(sessionID string) string {
+	store := s.projectStoreFor()
+	if store == nil {
+		return state.ProjectTypeCoding
+	}
+	pt, err := store.SessionProjectType(context.Background(), sessionID)
+	if err != nil || strings.TrimSpace(pt) == "" {
+		return state.ProjectTypeCoding
+	}
+	return pt
+}
+
+// batchSession reports whether a conversation is a batch execution: a
+// conversation in a batch project is one nobody types into (plan 152).
+func (s *ChatSession) batchSession(sessionID string) bool {
+	return s.SessionProjectType(sessionID) == state.ProjectTypeBatch
+}
+
+// BatchProject reports whether the launch project is a batch project. The
+// project's current type is what it says, not a conversation's frozen one: the
+// viewer's read-only rule is the project's, and a project whose type was
+// edited away stops being one.
+func (s *ChatSession) BatchProject(ctx context.Context) bool {
+	if s == nil {
+		return false
+	}
+	projectID := strings.TrimSpace(s.ProjectID)
+	if projectID == "" {
+		return false
+	}
+	store := s.projectStoreFor()
+	if store == nil {
+		return false
+	}
+	p, err := store.Get(ctx, projectID)
+	if err != nil {
+		return false
+	}
+	return state.NormalizeProjectType(p.ProjectType) == state.ProjectTypeBatch
+}
+
+// LatestBatchExecution is the session of the most recently updated task's
+// latest execution in the launch project, "" when there is none. It is what
+// the terminal opens with in a batch project: the newest thing that happened,
+// replayed read-only.
+func (s *ChatSession) LatestBatchExecution(ctx context.Context) string {
+	if s == nil {
+		return ""
+	}
+	projectID := strings.TrimSpace(s.ProjectID)
+	if projectID == "" {
+		return ""
+	}
+	store := s.projectStoreFor()
+	if store == nil {
+		return ""
+	}
+	// The task list is ordered by the task's own activity, so the first row is
+	// the task that moved last and its latest execution is that activity.
+	rows, _, err := store.ListTasksPage(ctx, projectID, state.ListTasksOptions{}, 1, 0)
+	if err != nil || len(rows) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(rows[0].Latest.SessionID)
+}
+
 // AdoptLaunchProject registers this session's launch directory as a project
 // for the active primary agent (creating the row when none exists) and points
 // the session and its session-store default at it: conversations started here
@@ -563,22 +631,16 @@ func (s *ChatSession) ActivateSessionModel(ctx context.Context, sessionID string
 		return "", err
 	}
 	if !hasRow {
-		// A conversation that has not started yet opens on the agent's most
-		// recently used model — the same rule its first message will adopt —
-		// so the header already names what the first turn will run on. An
-		// older session without a row (predating the model-state table) keeps
-		// the file default here; its next turn writes the model it actually
-		// used as its row (D9a, at the run entry).
-		if source, hasRunATurn, factsErr := store.SessionFactsForModelDefault(ctx, sid); factsErr == nil &&
-			!hasRunATurn && (source == "" || source == "workshop") {
-			if adopted := run.NewSessionModel(r, store); adopted.Set {
-				if err := r.OpenSession(adopted); err != nil {
-					return "", s.restoreAfterActivationFailure(r, outgoing, err)
-				}
-				return "", nil
+		// The engine's one row-less rule: a conversation that has not started
+		// opens on the model its first turn will adopt, an older session on
+		// the live configured default. A session outside the D8 scope opens on
+		// the config default, as it always did.
+		if sel := run.RowLessSessionModel(r, store, sid); sel.Set {
+			if err := r.OpenSession(sel); err != nil {
+				return "", s.restoreAfterActivationFailure(r, outgoing, err)
 			}
+			return "", nil
 		}
-		// A session that never chose runs on the latest file default.
 		if err := r.OpenSession(run.PrimaryModelState{}); err != nil {
 			return "", s.restoreAfterActivationFailure(r, outgoing, err)
 		}
@@ -1122,38 +1184,15 @@ func (s *ChatSession) currentSessionID() string {
 
 // sessionModelState is what one conversation runs on, resolved the way its
 // next request resolves it: its own stored choice against the live config,
-// else the runner that turn will run on. A surface that answered this from
-// the base runner alone named a model the conversation's requests never go to:
-// turns run on the project runner, which the pool builds from the live
-// configuration, while the base runner keeps whatever it pinned at startup.
+// else the rule a row-less session follows (run.RowLessSessionModel) on the
+// runner that turn will run on. A surface that answered this from the base
+// runner alone named a model the conversation's requests never go to.
 func (s *ChatSession) sessionModelState(sessionID string) run.PrimaryModelState {
 	if s == nil || s.Env == nil {
 		return run.PrimaryModelState{}
 	}
-	base := s.runner()
 	sid := strings.TrimSpace(sessionID)
-	store := s.sessStore()
-	// A session with no row yet starts on the agent's most recently used
-	// model — the same reading its first message adopts (run.NewSessionModel)
-	// — so the footer names what the next turn will actually run on, not the
-	// configured default the adoption would have to override. An older
-	// session's row appears at its next turn (D9a) and this fallback stops
-	// applying the moment it does.
-	fallback := run.NewSessionModel(base, store)
-	if !fallback.Set {
-		if def, err := run.ConfiguredDefaultSelection(base); err == nil {
-			fallback = def
-		} else {
-			fallback = run.PrimaryModelSelection(base)
-		}
-	}
-	if bound, ok := s.Env.BoundRunnerForSession(context.Background(), sid); ok {
-		return run.PrimaryModelStateForSessionOn(bound, store, sid, fallback)
-	}
-	// No project runner exists yet: the first turn builds it from the live
-	// config; the answer above is what that turn adopts — never this
-	// process's base-runner pin.
-	return run.PrimaryModelStateForSessionOn(base, store, sid, fallback)
+	return run.PrimaryModelStateForSession(s.conversationRunner(sid), s.sessStore(), sid)
 }
 
 // currentModelNames is the provider/model pair this conversation's requests go
@@ -1583,7 +1622,7 @@ func (s *ChatSession) DiscardSubagentInput(sessionID, agentKey string) int {
 // from: the same report as the conversation's, fed the subagent's own worker
 // session, model and occupancy.
 func (s *ChatSession) SubagentContextReport(sessionID, agentKey string) (string, bool) {
-	r := s.runner()
+	r := s.conversationRunner(sessionID)
 	if r == nil {
 		return "context: unavailable", true
 	}
@@ -1605,7 +1644,7 @@ func (s *ChatSession) SubagentContextReport(sessionID, agentKey string) (string,
 // SubagentComposerTokenStats is the subagent's own footer gauge — how much of
 // that subagent's context window is left, computed on the model it runs on.
 func (s *ChatSession) SubagentComposerTokenStats(sessionID, agentKey string) ComposerTokenStats {
-	payload, ok := run.SubagentContextBudget(context.Background(), s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	payload, ok := run.SubagentContextBudget(context.Background(), s.conversationRunner(sessionID), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
 	if !ok {
 		return ComposerTokenStats{}
 	}
@@ -2129,7 +2168,7 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, compl
 	})
 }
 
-func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, imageRefusal error, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, callerRendersReturnedError bool, out io.Writer) (retErr error) {
+func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, imageRefusal error, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, batchInput *turn.BatchTurnInput, callerRendersReturnedError bool, out io.Writer) (retErr error) {
 	s.dispatchTurnMu.Lock()
 	defer s.dispatchTurnMu.Unlock()
 	foreground := foregroundTurnFrom(ctx)
@@ -2356,6 +2395,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		SkillName:     skillName,
 		SkillPath:     skillPath,
 		Skills:        skills,
+		BatchInput:    batchInput,
 	}, nil)
 	res := outcome.Result
 	runIDOut = outcome.RunID
@@ -2704,6 +2744,12 @@ func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string,
 	preset, ok := safety.ApprovalPresetByID(presetID)
 	if !ok {
 		return "", fmt.Errorf("permissions: unknown preset %q", strings.TrimSpace(presetID))
+	}
+	// A batch task's posture is the task sandbox with no approvals, which its
+	// project type decides (plans/150): the picker cannot change it, and a row
+	// written here would describe a session that never runs that way.
+	if r := s.runner(); r != nil && r.ProjectType() == state.ProjectTypeBatch {
+		return "", fmt.Errorf("permissions: batch_preset_fixed — a batch project's tasks always run in the task sandbox with no approvals")
 	}
 	// Persist first, apply second — a choice that failed to persist never
 	// ran only in memory either.

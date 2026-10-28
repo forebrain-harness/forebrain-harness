@@ -4,7 +4,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 
 import { hideTip, useTooltipState } from '@/composables/useTooltip'
 import tip from '@/directives/tip'
-import { forebrainApi, type CronJobRow, type CronRunRow } from '@/lib/api'
+import { forebrainApi, type CronJobRow, type CronRunRow, type ProjectType } from '@/lib/api'
 import { formatMonthDayTime } from '@/lib/time'
 import { setLocale } from '@/locales'
 import { openSelect, selectedText } from '@/test-utils/formControls'
@@ -37,7 +37,7 @@ function runRow(): CronRunRow {
   return { id: 11, jobId: 'j1', status: 'ok', startedAt: 1_700_000_000, trigger: 'schedule', output: 'done' }
 }
 
-async function mountView(): Promise<VueWrapper> {
+async function mountView(props: { projectType?: ProjectType } = {}): Promise<VueWrapper> {
   vi.mocked(forebrainApi.cronJobsPage).mockResolvedValue({
     rows: [
       job(),
@@ -66,7 +66,7 @@ async function mountView(): Promise<VueWrapper> {
     ],
   })
   const wrapper = mount(CronView, {
-    props: { projectId: 'p1' },
+    props: { projectId: 'p1', ...props },
     global: { plugins: [router], stubs: { teleport: InlineTeleport }, directives: { tip } },
   })
   await flushPromises()
@@ -199,6 +199,21 @@ describe('CronView', () => {
     expect(choices.findAll('[role="option"]').map((option) => option.text())).toEqual(['只记录，不投递', 'feishu'])
 
     // The builder's own preview is debounced; let it run while its answer is mocked.
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    await flushPromises()
+  })
+
+  it('leaves the delivery channel out for a batch project, whose runs are notified', async () => {
+    const wrapper = await mountView({ projectType: 'batch' })
+
+    await wrapper.find('[data-testid="cron-edit-j1"]').trigger('click')
+    await flushPromises()
+
+    // A batch run's end notice goes to the project's 任务通知, so the field is
+    // gone rather than left meaning nothing (plan 153).
+    expect(wrapper.find('[data-testid="cron-deliver"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="cron-deliver-batch-hint"]').text()).toContain('结束通知由项目设置里的「任务通知」负责')
+
     await new Promise((resolve) => setTimeout(resolve, 450))
     await flushPromises()
   })

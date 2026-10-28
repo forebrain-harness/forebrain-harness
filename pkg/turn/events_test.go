@@ -438,3 +438,55 @@ func TestExtractTurnDiffPayloadCoversShellEditDiff(t *testing.T) {
 	})
 	require.False(t, ok)
 }
+
+// stubArtifactLister hands RunArtifactsOf the rows the store would return.
+type stubArtifactLister struct {
+	rows   []state.Artifact
+	runIDs []string
+	err    error
+}
+
+func (s *stubArtifactLister) ListArtifactsForRun(ctx context.Context, runID string) ([]state.Artifact, error) {
+	s.runIDs = append(s.runIDs, runID)
+	return s.rows, s.err
+}
+
+// TestRunArtifactsOfConvertsRows pins the engine-level lookup both surfaces
+// close a run with: every delivered file, field for field; and silence — not
+// a panic — for a nil lister, an empty run id or a failing read.
+func TestRunArtifactsOfConvertsRows(t *testing.T) {
+	t.Parallel()
+	row := state.Artifact{
+		ID: "art-1", AgentID: "main", SessionID: "s1", RunID: "run-1", ToolCallID: "toolu-1",
+		Path: "/work/proj/out/report.docx", RelPath: "out/report.docx", Name: "report.docx",
+		Title: "Q3 report", Description: "The quarterly operating review",
+		MIME: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		Kind: "document", Preview: "docx", Size: 1259520, MTimeNS: 1793000000_000000000,
+		SHA256: "abc123", Origin: "model", CreatedAt: 1793000000,
+	}
+	got := RunArtifactsOf(context.Background(), &stubArtifactLister{rows: []state.Artifact{row, {ID: "art-2", SessionID: "s1", Name: "deck.pptx", Kind: "presentation"}}}, "run-1")
+	require.Len(t, got.Artifacts, 2)
+	first := got.Artifacts[0]
+	require.Equal(t, row.ID, first.ID)
+	require.Equal(t, row.SessionID, first.SessionID)
+	require.Equal(t, row.RunID, first.RunID)
+	require.Equal(t, row.ToolCallID, first.ToolCallID)
+	require.Equal(t, row.Name, first.Name)
+	require.Equal(t, row.Title, first.Title)
+	require.Equal(t, row.Description, first.Description)
+	require.Equal(t, row.Path, first.Path)
+	require.Equal(t, row.RelPath, first.RelPath)
+	require.Equal(t, row.MIME, first.MIME)
+	require.Equal(t, row.Kind, first.Kind)
+	require.Equal(t, row.Preview, first.Preview)
+	require.Equal(t, row.Size, first.Size)
+	require.Equal(t, row.SHA256, first.SHA256)
+	require.Equal(t, row.Origin, first.Origin)
+	require.Equal(t, row.CreatedAt, first.CreatedAt)
+	// No lister and no run id are the same silence; a failing read never ends
+	// the run with an error of its own.
+	require.Equal(t, event.RunArtifacts{}, RunArtifactsOf(context.Background(), nil, "run-1"))
+	require.Equal(t, event.RunArtifacts{}, RunArtifactsOf(context.Background(), &stubArtifactLister{rows: []state.Artifact{row}}, "  "))
+	failing := &stubArtifactLister{err: context.DeadlineExceeded}
+	require.Equal(t, event.RunArtifacts{}, RunArtifactsOf(context.Background(), failing, "run-1"))
+}

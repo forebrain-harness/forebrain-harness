@@ -63,6 +63,11 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	staticDist := strings.TrimSpace(os.Getenv("FOREBRAIN_STATIC_DIST"))
 	notifier := event.NewNotifier()
 	process.StartConfigHotReload(ctx, h)
+	// gw is declared before the engine so the batch end-of-execution hook can
+	// be handed over at construction and still reach the server it serves: the
+	// engine outlives every request, so the callback reads the variable, and
+	// the assignment below happens before the first turn can run.
+	var gw *Server
 	core := turn.New(
 		turn.WithWorkspaceRoot(runner.StateRoot()),
 		turn.WithPermissionFacade(runner),
@@ -89,11 +94,36 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		// started a second run against that session. submitChannelTurn already
 		// knows how to report the wait to the user.
 		turn.WithApprovalGate(approvalGateOn(root, h.Deps.AppCfg, runner, runSvc, actionSvc, state.NewProjectStore(h.SQL, runner.AgentName), sessStore)),
+		// A batch task's execution is admitted and settled by the engine, so
+		// every door into a batch conversation — the websocket, a detached
+		// turn, a channel, a scheduled fire — answers with the same codes. Its
+		// end is also what tells an integrating system the task finished: the
+		// notification goes back through the channel the task came in by, or
+		// to the project's own targets (plan 151).
+		turn.WithBatchTasks(state.NewProjectStore(h.SQL, runner.AgentName), sessStore, func(endCtx context.Context, end turn.BatchExecutionEnd) {
+			if gw != nil {
+				gw.notifyBatchExecutionEnd(endCtx, end)
+			}
+		}),
+		// A batch execution's state is the engine's own fact, so the engine
+		// publishes it: recorded on the conversation's durable event log and
+		// pushed to every page watching it. A page showing a running task then
+		// draws the state it was sent instead of asking the task every few
+		// seconds, and a page that opens mid-run replays the last one from the
+		// snapshot it binds with. gw is read through the variable for the same
+		// reason the end hook is: the bus belongs to the server this call
+		// builds.
+		turn.WithRunEventPublisher(func(pubCtx context.Context, evt event.RunEvent) error {
+			if gw == nil {
+				return nil
+			}
+			return gw.RunEvents().Publish(pubCtx, evt)
+		}),
 	)
 	// The pool is built before the first request so project sessions are
 	// served by per-project runners from the start.
 	h.EnsureRunnerPool()
-	gw := &Server{
+	gw = &Server{
 		Home:   root,
 		Core:   core,
 		Runner: runner,

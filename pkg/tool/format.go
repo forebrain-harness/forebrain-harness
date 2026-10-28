@@ -177,6 +177,8 @@ func FormatToolStepResult(evt StepEvent, maxBytes int) (formatted string, trunca
 		body, truncated = formatSubagentCallStep(evt, maxBytes)
 	case "intermediate_tool":
 		body, truncated = formatIntermediateToolStep(evt, maxBytes)
+	case "present_files":
+		body, truncated = formatPresentFilesStep(evt, maxBytes)
 	case "exit_plan_mode":
 		body, truncated = formatExitPlanModeStep(evt, maxBytes)
 	case "user_interaction":
@@ -254,6 +256,13 @@ func BuildToolMeta(evt StepEvent) ToolMeta {
 	// can show them (plan 135); every other call keeps the field empty.
 	if evt.Denied {
 		meta.DenyFeedback = strings.TrimSpace(evt.DenyFeedback)
+	}
+	// A kept plan (plan 148): the exit was approved as "keep the plan only".
+	// The card header and body derive from this fact, live and replay alike.
+	if strings.EqualFold(strings.TrimSpace(evt.ToolName), "exit_plan_mode") && meta.Status == "completed" {
+		if parsed, ok := exitPlanModeResult(evt); ok && parsed.PlanOnly {
+			meta.PlanOnly = true
+		}
 	}
 	return meta
 }
@@ -1986,25 +1995,60 @@ func formatIntermediateToolStep(evt StepEvent, maxBytes int) (string, bool) {
 	}
 }
 
+// exitPlanModeArtifact is the artifact ledger entry a plan-only exit reports
+// back (a subset of the row the session store returned).
+type exitPlanModeArtifact struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Preview string `json:"preview"`
+	Size    int64  `json:"size"`
+}
+
+// exitPlanModeEnvelope is the parsed result envelope of a completed
+// exit_plan_mode.
+type exitPlanModeEnvelope struct {
+	Message  string                `json:"message"`
+	Mode     string                `json:"mode"`
+	PlanFile string                `json:"plan_file"`
+	PlanOnly bool                  `json:"plan_only"`
+	Artifact *exitPlanModeArtifact `json:"artifact"`
+}
+
+// exitPlanModeResult parses the tool's JSON envelope (wrapped under the
+// "output" key as a string). ok is false when the output is absent or not
+// the expected shape; a malformed payload can never report PlanOnly.
+func exitPlanModeResult(evt StepEvent) (exitPlanModeEnvelope, bool) {
+	var parsed exitPlanModeEnvelope
+	raw := strings.TrimSpace(stringFromAny(evt.Output["output"]))
+	if raw == "" {
+		return parsed, false
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return parsed, false
+	}
+	return parsed, true
+}
+
 // formatExitPlanModeStep renders the human-facing result of exit_plan_mode.
 // The tool returns a JSON envelope (wrapped under the "output" key as a string)
 // carrying a human-readable "message" plus the restored "mode" and "plan_file".
 // Extract just the message so the TUI shows a clean confirmation line instead
 // of an escaped JSON blob with an "output:" label.
 func formatExitPlanModeStep(evt StepEvent, maxBytes int) (string, bool) {
-	raw := strings.TrimSpace(stringFromAny(evt.Output["output"]))
-	if raw == "" {
-		return "", false
-	}
-	var parsed struct {
-		Message  string `json:"message"`
-		Mode     string `json:"mode"`
-		PlanFile string `json:"plan_file"`
-	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+	parsed, ok := exitPlanModeResult(evt)
+	if !ok {
+		if strings.TrimSpace(stringFromAny(evt.Output["output"])) == "" {
+			return "", false
+		}
 		// Unexpected payload shape - fall back to the generic renderer rather
 		// than hiding the result entirely.
 		return formatGenericToolStep(evt, "exit_plan_mode", maxBytes)
+	}
+	if parsed.PlanOnly {
+		// The message asked the model not to act; the card states the fact
+		// the user cares about instead.
+		return clampBody("Kept the plan as the deliverable: "+parsed.PlanFile, maxBytes)
 	}
 	body := strings.TrimSpace(parsed.Message)
 	if body == "" {

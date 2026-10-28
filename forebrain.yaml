@@ -29,6 +29,11 @@ gateway:
     # Default: empty.
     # Example: token read from env.
     token: "${FOREBRAIN_GATEWAY_TOKEN}"
+  # Default: empty (task-end notifications carry no link).
+  # Example: the address the web UI is reached at from outside, used to build
+  # the "view it" link in a batch task's notification. It does not change what
+  # the gateway listens on.
+  # public_url: https://forebrain.example.com
 # Default when omitted: workspace-write for a trusted Git project; read-only
 # for untrusted, unknown, or non-Git directories.
 # Example: explicit sandbox mode override for model-generated commands.

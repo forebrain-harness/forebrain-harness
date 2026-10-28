@@ -28,8 +28,13 @@ type State struct {
 	// enter_plan_mode runs. It lets enter_plan_mode detect a re-entry (user
 	// previously exited plan mode and is coming back) and guide the LLM to
 	// evaluate the existing plan file rather than blindly overwriting it.
-	HasExitedPlan bool  `json:"has_exited_plan,omitempty"`
-	UpdatedAt     int64 `json:"updated_at,omitempty"`
+	HasExitedPlan bool `json:"has_exited_plan,omitempty"`
+	// PlanKeptOnly is set when the user approved a plan as the deliverable
+	// itself ("keep the plan only"): the session left plan mode without carrying
+	// the plan out, so nothing should nudge it to implement the plan. Entering
+	// plan mode again clears it.
+	PlanKeptOnly bool  `json:"plan_kept_only,omitempty"`
+	UpdatedAt    int64 `json:"updated_at,omitempty"`
 }
 
 func modePath(home, sessionID string) string {
@@ -103,6 +108,7 @@ func Switch(home, sessionID string, mode Mode) (State, error) {
 			next.PrePlanMode = normalizeMode(cur.Mode)
 		}
 		next.HasExitedPlan = false
+		next.PlanKeptOnly = false
 	} else {
 		next.Phase = ""
 		next.PrePlanMode = ""
@@ -110,6 +116,17 @@ func Switch(home, sessionID string, mode Mode) (State, error) {
 			next.HasExitedPlan = true
 		}
 	}
+	return next, Set(home, sessionID, next)
+}
+
+// KeepPlanOnly leaves plan mode the way an approved exit does and records that
+// the plan is the deliverable, not work to carry out.
+func KeepPlanOnly(home, sessionID string, restore Mode) (State, error) {
+	next, err := Switch(home, sessionID, restore)
+	if err != nil {
+		return State{}, err
+	}
+	next.PlanKeptOnly = true
 	return next, Set(home, sessionID, next)
 }
 

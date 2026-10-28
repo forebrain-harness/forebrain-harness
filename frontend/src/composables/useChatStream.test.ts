@@ -3,8 +3,10 @@ import { effectScope } from 'vue'
 
 import { setLocale, t } from '@/locales'
 import { toCamelCase } from '@/lib/case'
+import { artifactsOfPresentFiles, planArtifactOf } from '@/lib/artifacts'
 import { forebrainApi, GatewayHttpError } from '@/lib/api'
 import { lastSessionIdValue, persistLastSessionId } from '@/composables/useLastSession'
+import { liveBatchExecution, sessionBindCount } from '@/lib/batchExecution'
 import {
   REJECTION_STOPPED_KEY,
   STEER_PREEMPTED_KEY,
@@ -1332,6 +1334,76 @@ describe('useChatStream helpers', () => {
       const turn = stream.messages.value.find((m) => m.role === 'assistant')
       expect(turn?.content).toBeTruthy()
       expect(String(turn?.content ?? '').split('from the other tab').length - 1).toBe(1)
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  // Opening a conversation someone else is still running (the task run page,
+  // a second tab, a turn the terminal started) attaches to it: the log replays
+  // the turn_started of a run this page never sent, and the fragments that
+  // follow on the observer are the answer growing. Claiming that replayed run
+  // as this page's own send would drop every one of them, freezing the answer
+  // at the in-flight snapshot the binding pushed until the run ended.
+  it('a page that opens a running conversation draws the fragments that follow it', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId: 's1',
+        nextCursor: 4,
+        highWater: 4,
+        hasMore: false,
+        schemaVersion: 1,
+        events: [{
+          id: 'evt-turn-started',
+          sequence: 4,
+          schemaVersion: 1,
+          runId: 'run-live',
+          sessionId: 's1',
+          type: 'turn_started',
+          createdAt: '2026-10-27T00:00:00.000Z',
+          payload: {},
+        }],
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
+    ]
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      let observer: FakeChatWebSocket | undefined
+      for (const candidate of FakeChatWebSocket.instances) {
+        candidate.open()
+        const frame = JSON.parse(candidate.sent[0] ?? '{}') as Record<string, unknown>
+        if (String(frame.op ?? '') === 'bind_session' && frame.session_id === 's1') observer = candidate
+      }
+      expect(observer).toBeTruthy()
+      observer!.message({ op: 'session_bound', session_id: 's1' })
+      // The in-flight answer this process holds: pushed whole at the binding.
+      observer!.message({
+        op: 'stream_partial',
+        run_id: 'run-live',
+        session_id: 's1',
+        data: { agent_id: '', content: 'working', reasoning: '', tool_outputs: null },
+      })
+      // What the run says next, as the push-only fragment it is.
+      observer!.message({
+        op: 'run_event',
+        data: {
+          type: 'assistant_delta',
+          run_id: 'run-live',
+          session_id: 's1',
+          payload: { text: ' slowly' },
+        },
+      })
+
+      const turn = stream.messages.value.find((message) => message.role === 'assistant')
+      expect(turn?.content).toContain('working slowly')
     } finally {
       for (const spy of spies) spy.mockRestore()
       Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
@@ -2760,6 +2832,76 @@ describe('skill message cards', () => {
  * carrying raw tool JSON. Both are checked here against the same block model the
  * subagent view uses.
  */
+/**
+ * A settled call's structured result. The engine hands a tool its own JSON back
+ * under `output` as a string (pkg/tool/format.go reads that key), so a card
+ * that draws files from the envelope — the kept plan's artifact, the files a
+ * `present_files` delivered — reads it from the decoded map, never from the
+ * wrapper the wire happened to carry.
+ */
+describe('the structured result of a settled call', () => {
+  it('decodes the tool envelope under the output wrapper', () => {
+    const envelope = {
+      mode: 'agent',
+      plan_file: '/w/plans/p/s/plan.md',
+      plan_only: true,
+      message: 'The user kept this plan as the deliverable.',
+      artifact: { id: 'art-1', kind: 'markdown', name: 'plan.md', preview: 'markdown', size: 138 },
+    }
+    const step = toolStepFromPayload(
+      {
+        stepId: 'call-1',
+        toolName: 'exit_plan_mode',
+        // The wire shape the gateway sends: the tool's JSON as a string.
+        output: { output: JSON.stringify(envelope) },
+        displayBody: 'Kept the plan as the deliverable: /w/plans/p/s/plan.md',
+        toolMeta: { tool_name: 'exit_plan_mode', invocation: 'exit_plan_mode', status: 'completed', plan_only: true },
+      },
+      true,
+      'fallback-id',
+    )
+
+    expect(step.planOnly).toBe(true)
+    const kept = planArtifactOf(step.result, 's1')
+    expect(kept?.name).toBe('plan.md')
+    expect(kept?.id).toBe('art-1')
+  })
+
+  it('hands over a payload that is not a JSON envelope as it is', () => {
+    const gate = toolStepFromPayload(
+      { stepId: 'call-2', toolName: 'shell', output: { requires_action: { id: 'a1', kind: '' } } },
+      true,
+      'fallback-id',
+    )
+    expect(gate.result).toEqual({ requires_action: { id: 'a1', kind: '' } })
+
+    const prose = toolStepFromPayload(
+      { stepId: 'call-3', toolName: 'shell', output: { output: 'not json at all' } },
+      true,
+      'fallback-id',
+    )
+    expect(prose.result).toEqual({ output: 'not json at all' })
+  })
+
+  it('draws a delivered file set from the decoded envelope too', () => {
+    const step = toolStepFromPayload(
+      {
+        stepId: 'call-4',
+        toolName: 'present_files',
+        output: {
+          output: JSON.stringify({
+            presented: [{ id: 'a9', name: 'Q3 报告.docx', rel_path: 'Q3 报告.docx', kind: 'document', preview: 'docx', size: 1024 }],
+          }),
+        },
+        toolMeta: { tool_name: 'present_files', status: 'completed' },
+      },
+      true,
+      'fallback-id',
+    )
+    expect(artifactsOfPresentFiles(step.result, 's1').map((row) => row.name)).toEqual(['Q3 报告.docx'])
+  })
+})
+
 describe('conversation tool and approval timeline', () => {
   beforeAll(() => setLocale('en'))
   afterAll(() => setLocale('en'))
@@ -6235,5 +6377,228 @@ describe('isHiddenRunRow', () => {
   it('keeps the runtime keys byte-identical', () => {
     expect(STEER_PREEMPTED_KEY).toBe('Not run — a queued user message took the turn first.')
     expect(REJECTION_STOPPED_KEY).toBe('Not run — the user refused a call in this response and stopped the turn.')
+  })
+})
+
+// A batch execution's state is the engine's own fact, published as it moves.
+// The conversation files those frames where the page showing the execution
+// reads them, so the page draws the state it was sent instead of asking the
+// task on a clock — and a page that opens mid-run is handed the same state by
+// the snapshot its socket binds with.
+describe('batch execution frames', () => {
+  function execution(sessionId: string, id: string, sequence: number, payload: Record<string, unknown>) {
+    return {
+      op: 'run_event',
+      data: {
+        id,
+        sequence,
+        type: 'batch_execution',
+        run_id: 'run-batch',
+        session_id: sessionId,
+        created_at: '2026-10-28T00:00:01.000Z',
+        payload: { task_id: 'tsk-1', session_id: sessionId, seq: 1, ...payload },
+      },
+    }
+  }
+
+  it('files the execution state it is sent, live and replayed', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    const sessionId = 'web-batch-state'
+    try {
+      const stream = useChatStream()
+      stream.switchToSession(sessionId)
+      // Opening a conversation opens its observation socket, which binds the
+      // session and replays what the conversation already holds.
+      const observer = FakeChatWebSocket.instances[0]
+      expect(observer).toBeTruthy()
+      observer.open()
+      expect(JSON.parse(observer.sent[0] ?? '{}')).toMatchObject({ op: 'bind_session', session_id: sessionId })
+      observer.message({ op: 'session_bound', session_id: sessionId, high_water: 8 })
+      expect(sessionBindCount(sessionId)).toBe(1)
+
+      // The run started: the execution is running, and the page is told.
+      observer.message(execution(sessionId, 'evt-b1', 1, { status: 'running', started_at: 1760000000 }))
+      expect(liveBatchExecution(sessionId)).toMatchObject({
+        taskId: 'tsk-1',
+        sessionId,
+        seq: 1,
+        status: 'running',
+        startedAt: 1760000000,
+        finishedAt: 0,
+      })
+
+      // Stopped, then continued: the same execution moves again, and the
+      // later frame is the state.
+      observer.message(execution(sessionId, 'evt-b2', 2, { status: 'stopped', started_at: 1760000000, finished_at: 1760000030 }))
+      expect(liveBatchExecution(sessionId)).toMatchObject({ status: 'stopped', finishedAt: 1760000030 })
+      observer.message(execution(sessionId, 'evt-b3', 3, { status: 'running', started_at: 1760000040 }))
+      expect(liveBatchExecution(sessionId)).toMatchObject({ status: 'running', startedAt: 1760000040, finishedAt: 0 })
+      observer.message(execution(sessionId, 'evt-b4', 4, { status: 'completed', started_at: 1760000040, finished_at: 1760000100 }))
+      expect(liveBatchExecution(sessionId)).toMatchObject({ status: 'completed', finishedAt: 1760000100 })
+
+      // A replay of the same frame states what is already known; an older one
+      // that lands after it must not walk the execution backwards.
+      observer.message(execution(sessionId, 'evt-b4', 4, { status: 'completed', started_at: 1760000040, finished_at: 1760000100 }))
+      observer.message(execution(sessionId, 'evt-b1', 1, { status: 'running', started_at: 1760000000 }))
+      expect(liveBatchExecution(sessionId)).toMatchObject({ status: 'completed' })
+
+      // A failed ending carries why, for the surface that reports it.
+      observer.message(execution(sessionId, 'evt-b5', 5, {
+        status: 'failed',
+        started_at: 1760000040,
+        finished_at: 1760000110,
+        error_code: 'rate_limit',
+        error_text: 'the provider refused the request',
+      }))
+      expect(liveBatchExecution(sessionId)).toMatchObject({
+        status: 'failed',
+        errorCode: 'rate_limit',
+        errorText: 'the provider refused the request',
+      })
+
+      // A reconnect counts again: the page's own catch-up signal.
+      observer.message({ op: 'session_bound', session_id: sessionId, high_water: 20 })
+      expect(sessionBindCount(sessionId)).toBe(2)
+      expect(stream.sessionId.value).toBe(sessionId)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+})
+
+// A conversation's observation socket is the only thing carrying its live
+// state: a run that moves, an answer still being written. When the line drops,
+// the page keeps drawing the last frame it received — so the stream says what
+// the line is doing, and re-opens it with a wait that grows, rather than
+// knocking every half second at a gateway that is down.
+describe('a conversation whose observation socket dropped', () => {
+  function observerSpies(sessionId: string) {
+    return [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId, nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId, records: [] }),
+    ]
+  }
+
+  /**
+   * The socket this stream is observing through right now: the newest one
+   * whose bind names this conversation. The tests' streams share one static
+   * list and the ones earlier tests left behind re-open on their own clock, so
+   * the conversation — not the position in the list — is what names a socket.
+   */
+  function activeObserver(): FakeChatWebSocket {
+    const mine: FakeChatWebSocket[] = []
+    for (const candidate of FakeChatWebSocket.instances) {
+      candidate.open()
+      const frame = JSON.parse(candidate.sent[0] ?? '{}') as Record<string, unknown>
+      if (frame.op === 'bind_session' && frame.session_id === 'web-line-1') mine.push(candidate)
+    }
+    const newest = mine[mine.length - 1]
+    if (!newest) throw new Error('this conversation has no observation socket')
+    return newest
+  }
+
+  it('says when it is reconnecting, waits longer each failure, and says when it is offline', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = observerSpies('web-line-1')
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('web-line-1')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      const first = FakeChatWebSocket.instances[0]
+      first.open()
+      // Nothing has gone wrong yet, before the socket has said anything.
+      expect(stream.liveState.value).toBe('live')
+      first.message({ op: 'session_bound', session_id: 'web-line-1' })
+      expect(stream.liveState.value).toBe('live')
+
+      vi.useFakeTimers()
+      // The line drops: the page is told, one re-open is scheduled (never two
+      // stacked), and it waits half a second.
+      first.close()
+      expect(stream.liveState.value).toBe('reconnecting')
+      expect(vi.getTimerCount()).toBe(1)
+      const created = FakeChatWebSocket.instances.length
+      await vi.advanceTimersByTimeAsync(499)
+      expect(FakeChatWebSocket.instances.length).toBe(created)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(FakeChatWebSocket.instances.length).toBeGreaterThan(created)
+
+      // A re-open that closes again without a frame is a second failure: the
+      // wait doubles, so a gateway that stays down is knocked half as often.
+      activeObserver().close()
+      expect(stream.liveState.value).toBe('reconnecting')
+      await vi.advanceTimersByTimeAsync(999)
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(vi.getTimerCount()).toBe(0)
+
+      // Three failures in a row: nothing is reconnecting any more, and the
+      // page stops promising that it is. The wait grows again with it.
+      activeObserver().close()
+      expect(stream.liveState.value).toBe('offline')
+      await vi.advanceTimersByTimeAsync(1999)
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(vi.getTimerCount()).toBe(0)
+
+      // Frames arrive again: the line is live, and the next drop starts over
+      // at the shortest wait rather than wherever the backoff had climbed to.
+      const recovered = activeObserver()
+      recovered.message({ op: 'session_bound', session_id: 'web-line-1' })
+      expect(stream.liveState.value).toBe('live')
+      recovered.close()
+      expect(stream.liveState.value).toBe('reconnecting')
+      await vi.advanceTimersByTimeAsync(499)
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  // A socket the page closes itself says nothing about the line: replacing it
+  // (a rebind after an answer) must not flash "reconnecting" on every page
+  // that draws the conversation.
+  it('does not read a rebind as a connection that dropped', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = observerSpies('web-line-2')
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('web-line-2')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      const observer = FakeChatWebSocket.instances[0]
+      observer.open()
+      observer.message({ op: 'session_bound', session_id: 'web-line-2' })
+      expect(stream.liveState.value).toBe('live')
+
+      vi.useFakeTimers()
+      stream.rebindSessionObserver()
+      expect(stream.liveState.value).toBe('live')
+      // No re-open was scheduled: the rebind's own socket is already there.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(FakeChatWebSocket.instances).toHaveLength(2)
+      expect(stream.liveState.value).toBe('live')
+    } finally {
+      vi.useRealTimers()
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
   })
 })

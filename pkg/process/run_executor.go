@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -174,6 +176,35 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 	if runnerErr != nil {
 		slog.Error("turn cannot start: no runner for the session", "session", sid, "err", runnerErr)
 		return nil, runnerErr
+	}
+	// The turn's context carries the conversation's project type so the
+	// process-wide hooks (rules injection) can vary by it without knowing
+	// which runner serves the turn.
+	agBase = tool.WithProjectType(agBase, runner.ProjectType())
+	// A batch execution runs in its own task workspace, carries the task
+	// context the model is told about, and takes no input: this is the one
+	// place the turn's environment is built, so it is where all three are
+	// fixed. A conversation that is not an execution has nothing to run — a
+	// batch conversation without a task is refused rather than run somewhere
+	// nobody can find its work.
+	if runner.ProjectType() == state.ProjectTypeBatch {
+		exec, task, ok, err := state.NewProjectStore(x.env.SQL, x.env.Deps.AgentName).ExecutionForSession(ctx, sid)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &turn.BatchRefusal{Code: turn.BatchCodeNoTask, Message: "this batch conversation has no task execution"}
+		}
+		for _, dir := range []string{"inputs", "outputs", ".work"} {
+			if err := os.MkdirAll(filepath.Join(exec.Workspace, dir), 0o755); err != nil {
+				return nil, fmt.Errorf("task workspace %s: %w", exec.Workspace, err)
+			}
+		}
+		agBase = tool.WithTaskWorkspace(agBase, exec.Workspace)
+		agBase = tool.WithTaskContext(agBase, turn.BatchTaskContext(task, exec))
+		if x.env.Control != nil {
+			x.env.Control.SessionQueue(sid).Close()
+		}
 	}
 	if x.opts.FailOnRequiredMCP {
 		if err := awaitRequiredMCP(ctx, runner); err != nil {

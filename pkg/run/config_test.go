@@ -861,15 +861,16 @@ func TestContextBudgetUsesEachAgentsOwnModel(t *testing.T) {
 
 // A conversation's model is one answer, and it is the conversation's own: the
 // row a surface wrote, resolved against the live config the way turn entry
-// resolves it. The runner's published snapshot answers only for a conversation
-// that has no row — or a row the config no longer offers, the same ordinary
-// reload that rewrites it — because a surface reading the snapshot instead
-// names a model the conversation's requests never go to.
+// resolves it. The rule a row-less session follows answers next — a session
+// that never ran adopts the most recently used model, an older session with no
+// row runs on the live configured default — and the runner's published
+// snapshot answers last, for a row the config no longer offers and for an id
+// that reaches no session at all.
 func TestPrimaryModelStateForSessionPrefersTheConversationsRow(t *testing.T) {
 	runner, store := newSessionRoutingRunner(t, nil)
 	ctx := context.Background()
 	for _, sid := range []string{"conv-pinned", "conv-bare", "conv-gone"} {
-		if err := store.Ensure(ctx, sid, "conversation"); err != nil {
+		if err := store.Ensure(ctx, sid, sid); err != nil {
 			t.Fatalf("Ensure %q: %v", sid, err)
 		}
 	}
@@ -886,9 +887,14 @@ func TestPrimaryModelStateForSessionPrefersTheConversationsRow(t *testing.T) {
 		}
 	}
 
+	// Three writes back to back — the same millisecond in all likelihood,
+	// which is the ordering the stamp itself has to make total.
+	save("conv-pinned", "openai", "gpt-b", "high")
+	save("conv-bare", "openai", "gpt-b", "")
+	save("conv-gone", "openai", "gpt-gone", "")
+
 	// The row wins, effort included: what the requests carry is what the
 	// surface draws.
-	save("conv-pinned", "openai", "gpt-b", "high")
 	if got := PrimaryModelStateForSession(runner, store, "conv-pinned"); got.Provider != "openai" || got.Model != "gpt-b" || got.Effort != "high" || !got.Set {
 		t.Fatalf("state for a pinned conversation = %+v, want openai/gpt-b effort high", got)
 	}
@@ -898,19 +904,136 @@ func TestPrimaryModelStateForSessionPrefersTheConversationsRow(t *testing.T) {
 
 	// An empty effort in the row means the requests carry none — not "the
 	// model's configured effort", which the wire would have to add.
-	save("conv-bare", "openai", "gpt-b", "")
 	if got := PrimaryModelStateForSession(runner, store, "conv-bare"); got.Model != "gpt-b" || got.Effort != "" {
 		t.Fatalf("state for a conversation pinned without effort = %+v, want openai/gpt-b and no effort", got)
 	}
 
-	// A row the config no longer offers falls back to the published selection,
-	// as the wire does; so does a conversation that never pinned one, and an
-	// empty id.
-	save("conv-gone", "openai", "gpt-gone", "")
-	for _, sid := range []string{"conv-gone", "conv-never-pinned", ""} {
-		if got := PrimaryModelStateForSession(runner, store, sid); got != snapshot {
-			t.Fatalf("state for %q = %+v, want the published selection %+v", sid, got, snapshot)
-		}
+	// A row the config no longer offers is not a row this reading can answer
+	// with, and it is not adoptable either: the published selection answers.
+	if got := PrimaryModelStateForSession(runner, store, "conv-gone"); got != snapshot {
+		t.Fatalf("state for a conversation whose row is gone = %+v, want the published selection %+v", got, snapshot)
+	}
+
+	// A conversation that never ran and holds no row adopts the most
+	// recently used model — and the newest row here is conv-gone's dangling
+	// one, which adopts nothing, so the published selection answers.
+	if err := store.Ensure(ctx, "conv-never-pinned", "conv-never-pinned"); err != nil {
+		t.Fatalf("Ensure conv-never-pinned: %v", err)
+	}
+	if got := PrimaryModelStateForSession(runner, store, "conv-never-pinned"); got != snapshot {
+		t.Fatalf("state for a fresh conversation over a dangling newest row = %+v, want the published selection %+v", got, snapshot)
+	}
+
+	// A session older than the model-state table — output, no row — runs on
+	// the live configured default.
+	if err := store.Ensure(ctx, "conv-legacy", "conv-legacy"); err != nil {
+		t.Fatalf("Ensure conv-legacy: %v", err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('conv-legacy','assistant','visible','old answer',2)`); err != nil {
+		t.Fatalf("seed conv-legacy's assistant row: %v", err)
+	}
+	configured, err := ConfiguredDefaultSelection(runner)
+	if err != nil {
+		t.Fatalf("ConfiguredDefaultSelection: %v", err)
+	}
+	if got := PrimaryModelStateForSession(runner, store, "conv-legacy"); got != configured {
+		t.Fatalf("state for a legacy conversation = %+v, want the configured default %+v", got, configured)
+	}
+
+	// The distinction that matters: the pin moves, the legacy conversation
+	// does not. It follows the live configuration, never whatever a /resume
+	// of some other conversation left pinned on this runner.
+	if err := runner.SetPrimaryModel("openai", "gpt-b", nil); err != nil {
+		t.Fatalf("SetPrimaryModel: %v", err)
+	}
+	if got := PrimaryModelSelection(runner); got.Model != "gpt-b" {
+		t.Fatalf("published selection after the pin = %+v, want openai/gpt-b", got)
+	}
+	if got := PrimaryModelStateForSession(runner, store, "conv-legacy"); got.Model != "gpt-a" {
+		t.Fatalf("state for a legacy conversation after the pin moved = %+v, want the configured default openai/gpt-a", got)
+	}
+
+	// And a conversation that never ran follows the most recently used model:
+	// conv-pinned re-saved — the same pair a /model re-selection writes — is
+	// now the newest row, with its effort.
+	save("conv-pinned", "openai", "gpt-b", "high")
+	adopted := PrimaryModelState{Provider: "openai", Model: "gpt-b", Effort: "high", Set: true}
+	if got := PrimaryModelStateForSession(runner, store, "conv-never-pinned"); got != adopted {
+		t.Fatalf("state for a fresh conversation = %+v, want the most recently used %+v", got, adopted)
+	}
+	if pinned := PrimaryModelSelection(runner); adopted.Model == pinned.Model && adopted.Effort == pinned.Effort {
+		t.Fatalf("the adopted model %+v must be distinguishable from the pin %+v", adopted, pinned)
+	}
+
+	// An empty id reaches no session: the published selection answers.
+	if got := PrimaryModelStateForSession(runner, store, ""); got != PrimaryModelSelection(runner) {
+		t.Fatalf("state for an empty id = %+v, want the published selection %+v", got, PrimaryModelSelection(runner))
+	}
+}
+
+// RowLessSessionModel is the one rule for a session with no stored row, so it
+// must answer exactly what turn entry and the surfaces act on: the most
+// recently used model for a conversation that never ran, the live configured
+// default for one older than the table, and nothing at all when the caller has
+// to resolve the row itself or fall back.
+func TestRowLessSessionModelMirrorsTurnEntry(t *testing.T) {
+	runner, store := newSessionRoutingRunner(t, nil)
+	ctx := context.Background()
+
+	// The "most recently used" source: another conversation that chose gpt-b.
+	if err := store.Ensure(ctx, "used-b", "used-b"); err != nil {
+		t.Fatalf("Ensure used-b: %v", err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "used-b", state.SessionModelSelection{Provider: "openai", Model: "gpt-b", Effort: "high"}); err != nil {
+		t.Fatalf("save used-b's row: %v", err)
+	}
+
+	// A conversation that never ran adopts the most recently used model.
+	if err := store.Ensure(ctx, "fresh", "fresh"); err != nil {
+		t.Fatalf("Ensure fresh: %v", err)
+	}
+	if got := RowLessSessionModel(runner, store, "fresh"); got != (PrimaryModelState{Provider: "openai", Model: "gpt-b", Effort: "high", Set: true}) {
+		t.Fatalf("row-less rule for a fresh conversation = %+v, want the most recently used openai/gpt-b/high", got)
+	}
+
+	// An older session with no row runs on the live configured default.
+	if err := store.Ensure(ctx, "legacy", "legacy"); err != nil {
+		t.Fatalf("Ensure legacy: %v", err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('legacy','assistant','visible','old answer',2)`); err != nil {
+		t.Fatalf("seed legacy's assistant row: %v", err)
+	}
+	configured, err := ConfiguredDefaultSelection(runner)
+	if err != nil {
+		t.Fatalf("ConfiguredDefaultSelection: %v", err)
+	}
+	if got := RowLessSessionModel(runner, store, "legacy"); got != configured {
+		t.Fatalf("row-less rule for a legacy session = %+v, want the configured default %+v", got, configured)
+	}
+
+	// Outside the D8 scope the rule answers nothing, so the caller keeps the
+	// configuration default and writes no row.
+	if err := store.Ensure(ctx, "fire", "fire"); err != nil {
+		t.Fatalf("Ensure fire: %v", err)
+	}
+	if err := store.SetSessionSource(ctx, "fire", state.SessionSourceCron); err != nil {
+		t.Fatalf("SetSessionSource fire: %v", err)
+	}
+	if got := RowLessSessionModel(runner, store, "fire"); got.Set {
+		t.Fatalf("row-less rule for a scheduled fire = %+v, want the zero state", got)
+	}
+
+	// A session that holds a row is the caller's to resolve, not this rule's.
+	if got := RowLessSessionModel(runner, store, "used-b"); got.Set {
+		t.Fatalf("row-less rule for a session with a row = %+v, want the zero state", got)
+	}
+
+	// Nothing to read: no id, or no store.
+	if got := RowLessSessionModel(runner, store, ""); got.Set {
+		t.Fatalf("row-less rule for an empty id = %+v, want the zero state", got)
+	}
+	if got := RowLessSessionModel(runner, nil, "fresh"); got.Set {
+		t.Fatalf("row-less rule without a store = %+v, want the zero state", got)
 	}
 }
 
@@ -1577,5 +1700,261 @@ func TestPublishContextBudget(t *testing.T) {
 	}
 	if got := probe.budgetEvents(); len(got) != 1 {
 		t.Fatalf("budget events after the unmeasured call = %d, want still one", len(got))
+	}
+}
+
+// --- office plan mode (plan 148) -----------------------------------------
+
+func newPlanToolForTest(t *testing.T, name string) *llm.Tool {
+	t.Helper()
+	tl, err := llm.NewTool(name, "test tool", func(context.Context, *struct{}) (string, error) {
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("new tool %s: %v", name, err)
+	}
+	return tl
+}
+
+func allReminderText(msgs []llm.Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		b.WriteString(llm.TextContent(m.Parts...))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func TestOfficeAgentModeRequestHasNoExitPlanMode(t *testing.T) {
+	home := t.TempDir()
+	sid := "office-agent"
+	setMode(t, home, sid, state.ModeAgent, 0)
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLMFor(inner, home, "", state.ProjectTypeOffice)
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	tools := []*llm.Tool{newPlanToolForTest(t, "write_file"), newPlanToolForTest(t, "exit_plan_mode")}
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hello"))}, tools); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if hasToolNamed(inner.gotTools, "exit_plan_mode") {
+		t.Fatalf("office agent mode must not offer exit_plan_mode, got %v", toolNames(inner.gotTools))
+	}
+	if !hasToolNamed(inner.gotTools, "write_file") {
+		t.Fatalf("unrelated tool dropped: %v", toolNames(inner.gotTools))
+	}
+}
+
+func TestOfficePlanModeRequestHasExitPlanMode(t *testing.T) {
+	home := t.TempDir()
+	sid := "office-plan"
+	setMode(t, home, sid, state.ModePlan, 0)
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLMFor(inner, home, "", state.ProjectTypeOffice)
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	tools := []*llm.Tool{newPlanToolForTest(t, "write_file"), newPlanToolForTest(t, "exit_plan_mode")}
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("plan the report"))}, tools); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !hasToolNamed(inner.gotTools, "exit_plan_mode") {
+		t.Fatalf("office plan mode must offer exit_plan_mode, got %v", toolNames(inner.gotTools))
+	}
+}
+
+func TestOfficeModeReadFailureHidesExitPlanMode(t *testing.T) {
+	home := t.TempDir()
+	sid := "office-broken"
+	// A directory where the mode file should be makes state.Get fail with a
+	// read error rather than not-exist: the wrapper cannot prove plan mode,
+	// so it must fail closed.
+	if err := os.MkdirAll(filepath.Join(home, "state", "modes", sid+".json"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLMFor(inner, home, "", state.ProjectTypeOffice)
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	tools := []*llm.Tool{newPlanToolForTest(t, "exit_plan_mode")}
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hello"))}, tools); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if hasToolNamed(inner.gotTools, "exit_plan_mode") {
+		t.Fatalf("unreadable mode state must hide exit_plan_mode, got %v", toolNames(inner.gotTools))
+	}
+}
+
+func TestOfficeEmptySessionIDHidesExitPlanMode(t *testing.T) {
+	home := t.TempDir()
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLMFor(inner, home, "", state.ProjectTypeOffice)
+	tools := []*llm.Tool{newPlanToolForTest(t, "exit_plan_mode")}
+	if _, err := w.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hello"))}, tools); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if hasToolNamed(inner.gotTools, "exit_plan_mode") {
+		t.Fatalf("missing session id must hide exit_plan_mode, got %v", toolNames(inner.gotTools))
+	}
+}
+
+func TestOfficePlanPromptsGolden(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "office_plan_prompts.golden.json"))
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	var golden map[string]string
+	if err := json.Unmarshal(raw, &golden); err != nil {
+		t.Fatalf("decode golden: %v", err)
+	}
+	constants := map[string]string{
+		"officeMainPlanFullFormat":         officeMainPlanFullFormat,
+		"officeSubagentPlanFull":           officeSubagentPlanFull,
+		"officeSubagentPlanSparseFormat":   officeSubagentPlanSparseFormat,
+		"officeImplementationFullFormat":   officeImplementationFullFormat,
+		"officeImplementationSparseFormat": officeImplementationSparseFormat,
+	}
+	if len(golden) != len(constants) {
+		t.Fatalf("golden has %d keys, want %d", len(golden), len(constants))
+	}
+	for name, want := range constants {
+		got, ok := golden[name]
+		if !ok {
+			t.Fatalf("golden missing key %s", name)
+		}
+		if got != want {
+			t.Fatalf("constant %s drifted from the golden file", name)
+		}
+	}
+
+	// Render every dimension the main full format parameterizes, so a wrong
+	// %s order cannot pass the constant comparison above.
+	planDir := filepath.Join("plans", "proj", "s1")
+	planFile := filepath.Join(planDir, "q3-board-report.md")
+	for _, planExists := range []bool{false, true} {
+		for _, isReentry := range []bool{false, true} {
+			exists := "(no plan file exists yet - create a NEW <descriptive-name>.md file, e.g. 'q3-board-report.md'. Do NOT name it plan.md)"
+			if planExists {
+				exists = fmt.Sprintf("(current plan file %s already has content - edit_file to refine it, or create a NEW .md file to start a fresh plan)", planFile)
+			}
+			reentry := ""
+			if isReentry && planExists {
+				reentry = `
+## Re-entering Plan Mode
+
+You are returning to plan mode after having previously exited it. A plan file exists from your previous planning state.
+
+**Before proceeding with any new planning, you should:**
+1. Read the existing plan file to understand what was previously planned
+2. Evaluate the user's current request against that plan
+3. Decide how to proceed:
+   - **Different task**: If the user's request is for a different task, start fresh by creating a NEW plan file
+   - **Same task, continuing**: If this is a continuation or refinement, modify the existing plan while cleaning up outdated sections
+4. Always edit/create the plan file before calling exit_plan_mode
+
+`
+			}
+			got := buildOfficePlanModeReminder(planDir, planFile, planExists, "full", isReentry, false)
+			if want := fmt.Sprintf(officeMainPlanFullFormat, planDir, exists, reentry); got != want {
+				t.Fatalf("office main full (exists=%v reentry=%v) mismatch", planExists, isReentry)
+			}
+		}
+	}
+	// Sparse main-agent text is the coding sparse text.
+	if got, want := buildOfficePlanModeReminder(planDir, planFile, false, "sparse", false, false),
+		buildPlanModeReminder(planDir, planFile, false, "sparse", false, false); got != want {
+		t.Fatalf("office sparse main text must equal coding sparse: %q vs %q", got, want)
+	}
+	if got, want := buildOfficePlanModeReminder(planDir, planFile, true, "sparse", false, false),
+		buildPlanModeReminder(planDir, planFile, true, "sparse", false, false); got != want {
+		t.Fatalf("office sparse main text (plan exists) must equal coding sparse: %q vs %q", got, want)
+	}
+	// Subagent variants render their single parameter.
+	if got, want := buildOfficePlanModeReminder(planDir, planFile, false, "sparse", false, true),
+		fmt.Sprintf(officeSubagentPlanSparseFormat, planDir); got != want {
+		t.Fatalf("office subagent sparse mismatch: %q vs %q", got, want)
+	}
+	if got, want := buildOfficePlanModeReminder(planDir, planFile, true, "full", true, true),
+		fmt.Sprintf(officeSubagentPlanFull, planDir); got != want {
+		t.Fatalf("office subagent full mismatch: %q vs %q", got, want)
+	}
+	// Implementation reminders render marker, plan file, heading in order.
+	if got, want := buildOfficePlanImplementationReminder(planFile, "sparse"),
+		fmt.Sprintf(officeImplementationSparseFormat, planImplementationReminderMarker, planFile, state.ImplementationHeading); got != want {
+		t.Fatalf("office implementation sparse mismatch: %q vs %q", got, want)
+	}
+	if got, want := buildOfficePlanImplementationReminder(planFile, "full"),
+		fmt.Sprintf(officeImplementationFullFormat, planImplementationReminderMarker, planFile, state.ImplementationHeading); got != want {
+		t.Fatalf("office implementation full mismatch: %q vs %q", got, want)
+	}
+}
+
+func TestCodingPlanReminderUnchanged(t *testing.T) {
+	got := buildPlanModeReminder(filepath.Join("plans", "p", "s"), filepath.Join("plans", "p", "s", "plan.md"), true, "full", false, false)
+	if !strings.Contains(got, "Phase 1 - Initial Understanding: explore the codebase") {
+		t.Fatalf("coding plan reminder lost its codebase workflow: %q", got)
+	}
+}
+
+func TestOfficeSubagentPlanReminderSaysNothingAboutCode(t *testing.T) {
+	for kind, text := range map[string]string{
+		"sparse": buildOfficePlanModeReminder("d", "d/p.md", false, "sparse", false, true),
+		"full":   buildOfficePlanModeReminder("d", "d/p.md", false, "full", false, true),
+	} {
+		lower := strings.ToLower(text)
+		// "source references" (ordinary English, part of the verbatim
+		// office wording) is not the codegraph references tool: ban the tool
+		// name shapes, not the bare word.
+		for _, banned := range []string{"codebase", "code_search", ", references", "references:", "definitions", "askuserquestion"} {
+			if strings.Contains(lower, banned) {
+				t.Fatalf("office subagent %s reminder mentions %q: %q", kind, banned, text)
+			}
+		}
+		if !strings.Contains(lower, "user_interaction") {
+			t.Fatalf("office subagent %s reminder must name user_interaction: %q", kind, text)
+		}
+	}
+	full := buildOfficePlanModeReminder("d", "d/p.md", false, "full", false, true)
+	if !strings.Contains(full, "NOT available") {
+		t.Fatalf("office subagent full reminder must say what is NOT available: %q", full)
+	}
+}
+
+func TestPlanKeptOnlySuppressesImplementationReminder(t *testing.T) {
+	home := t.TempDir()
+	sid := "kept-only"
+	if err := state.SetPlanForSession(home, "", sid, "# Plan\n\n- [ ] write the report"); err != nil {
+		t.Fatalf("SetPlanForSession: %v", err)
+	}
+
+	// With PlanKeptOnly the model must not be nudged into implementing.
+	if err := state.Set(home, sid, state.State{Mode: state.ModeAgent, HasExitedPlan: true, PlanKeptOnly: true}); err != nil {
+		t.Fatalf("state.Set: %v", err)
+	}
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLMFor(inner, home, "", state.ProjectTypeOffice)
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("thanks"))}, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if text := allReminderText(inner.gotMsgs); strings.Contains(text, planImplementationReminderMarker) {
+		t.Fatalf("kept-only session must not get an implementation reminder: %q", text)
+	}
+
+	// Without it the reminder comes back (office wording).
+	if err := state.Set(home, sid, state.State{Mode: state.ModeAgent, HasExitedPlan: true}); err != nil {
+		t.Fatalf("state.Set: %v", err)
+	}
+	inner2 := &capturingLLM{}
+	w2 := wrapPlanModeLLMFor(inner2, home, "", state.ProjectTypeOffice)
+	if _, err := w2.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("go"))}, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	text := allReminderText(inner2.gotMsgs)
+	if !strings.Contains(text, planImplementationReminderMarker) {
+		t.Fatalf("an approved exit without plan-only must still remind: %q", text)
+	}
+	if !strings.Contains(text, "You are carrying out an approved plan.") {
+		t.Fatalf("office implementation reminder must use office wording: %q", text)
 	}
 }

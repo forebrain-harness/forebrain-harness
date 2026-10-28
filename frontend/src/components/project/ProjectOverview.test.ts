@@ -31,6 +31,7 @@ function project(overrides: Partial<ProjectRecord> = {}): ProjectRecord {
     createdAt: at,
     updatedAt: at,
     trusted: true,
+    projectType: 'coding',
     ...overrides,
   }
 }
@@ -81,6 +82,7 @@ describe('ProjectOverview', () => {
       '项目名',
       '绑定的工作目录',
       '说明',
+      '项目类型',
       '图标',
       '项目键',
       '项目指令',
@@ -187,5 +189,87 @@ describe('ProjectOverview', () => {
     expect(modal?.textContent).toContain('将同时删除 2 个对话和 1 个定时任务，无法恢复。')
     expect((document.body.querySelector('[data-testid="confirm-ok"]') as HTMLButtonElement).disabled).toBe(true)
     expect(forebrainApi.projectDeletePreview).toHaveBeenCalledWith('p-alpha')
+  })
+
+  it('shows the project type as its badge and changes it only after asking', async () => {
+    const wrapper = await mountTab()
+    const update = vi.mocked(forebrainApi.projectUpdate)
+
+    expect(wrapper.find('[data-testid="project-settings-type"]').text()).toContain('创意编程')
+
+    await wrapper.find('[data-testid="project-type-change"]').trigger('click')
+    await flushPromises()
+
+    const modal = document.body.querySelector('.forebrain-modal')
+    // The dialog opens on the next kind, so confirming is one click; the cards
+    // above it pick any other.
+    expect(modal?.textContent).toContain('把 alpha 从创意编程改成后台跑批？')
+    expect(modal?.textContent).toContain('只影响之后新建的会话；进行中的会话保持它出生时的类型。')
+    expect(update).not.toHaveBeenCalled()
+
+    // 办公创作: the ask and the change follow the card.
+    ;(document.body.querySelector('[data-testid="project-type-card-office"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(modal?.textContent).toContain('把 alpha 从创意编程改成办公创作？')
+    ;(document.body.querySelector('[data-testid="project-type-confirm"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(update).toHaveBeenCalledWith('p-alpha', { projectType: 'office' })
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('will not turn a project into a batch one without trusting its directory', async () => {
+    const wrapper = await mountTab({ projectType: 'office' })
+    const update = vi.mocked(forebrainApi.projectUpdate)
+
+    await wrapper.find('[data-testid="project-type-change"]').trigger('click')
+    await flushPromises()
+    ;(document.body.querySelector('[data-testid="project-type-card-batch"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const confirm = () => document.body.querySelector('[data-testid="project-type-confirm"]') as HTMLButtonElement
+    const modal = document.body.querySelector('.forebrain-modal')
+    expect(modal?.textContent).toContain('跑批任务无人值守：沙箱隔离、只写本次执行的工作区，调用任何工具都免审批。')
+    expect(confirm().disabled).toBe(true)
+
+    // The trust switch in the dialog is the decision the create form asks for.
+    const trust = Array.from(document.body.querySelectorAll('[role="switch"]'))
+      .find((row) => row.getAttribute('aria-label') === '信任此目录') as HTMLElement
+    trust.click()
+    await flushPromises()
+    expect(confirm().disabled).toBe(false)
+
+    confirm().click()
+    await flushPromises()
+    expect(update).toHaveBeenCalledWith('p-alpha', { projectType: 'batch', trust: true })
+  })
+
+  it('says what leaving batch takes away', async () => {
+    const wrapper = await mountTab({ projectType: 'batch' })
+
+    expect(wrapper.find('[data-testid="project-settings-type"]').text()).toContain('后台跑批')
+    await wrapper.find('[data-testid="project-type-change"]').trigger('click')
+    await flushPromises()
+
+    const modal = document.body.querySelector('.forebrain-modal')
+    expect(modal?.querySelector('[data-testid="project-type-leave-batch"]')?.textContent)
+      .toBe('改出跑批后，这个项目的任务页与任务通知都不再显示；已产生的任务仍可查看。')
+  })
+
+  it('offers 任务通知 to a batch project only', async () => {
+    // The section's own reads: a project's channels and the recipients its
+    // channels have spoken to.
+    vi.spyOn(forebrainApi, 'projectChannelsPage').mockResolvedValue({ rows: [], total: 0, page: 1, pageSize: 50 })
+    vi.spyOn(forebrainApi, 'getChannelTargets').mockResolvedValue([])
+
+    const coding = await mountTab()
+    expect(coding.find('[data-testid="project-task-notify"]').exists()).toBe(false)
+    coding.unmount()
+
+    const batch = await mountTab({ projectType: 'batch', taskNotify: [{ channel: 'feishu', target: 'oc_1' }] })
+    expect(batch.find('[data-testid="project-task-notify"]').exists()).toBe(true)
+    expect(batch.get('[data-testid="project-task-notify"]').text()).toContain('任务通知')
+    expect(batch.get('[data-testid="task-notify-row-0"]').text()).toContain('飞书 · oc_1')
+    batch.unmount()
   })
 })

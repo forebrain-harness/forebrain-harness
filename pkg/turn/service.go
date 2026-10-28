@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
@@ -59,6 +60,22 @@ type Service struct {
 	opencodeModels     OpenCodeModelsSource
 	autoContinue       *autoContinuer
 	firstTokens        FirstTokenStore
+	// batchTasks is the engine's view of a batch execution: which task a
+	// conversation is, and the transition that starts it. Nil leaves every
+	// turn on the ordinary path.
+	batchTasks BatchTaskStore
+	// batchArtifacts collects a task's deliverables when the model presented
+	// none, and is what BatchExecutionEnd carries.
+	batchArtifacts BatchArtifactStore
+	// batchOnEnd is told how every execution ended. A surface that notifies an
+	// integrating system passes it.
+	batchOnEnd func(context.Context, BatchExecutionEnd)
+	// runEventPublisher carries the execution's own state to wherever the
+	// conversation's frames are kept: the durable event log when a surface has
+	// one, so a page that binds mid-run replays the state instead of asking
+	// the task over and over. Nil is a service whose surface has no such log
+	// and needs none (the terminal renders its own session in process).
+	runEventPublisher func(context.Context, event.RunEvent) error
 }
 
 type Option func(*Service)
@@ -82,6 +99,20 @@ func WithRunEventStore(store RunEventStore) Option {
 			return
 		}
 		s.runEventStore = store
+	}
+}
+
+// WithRunEventPublisher installs where a run's own events are sent when the
+// engine is the producer: today the batch execution's state. A surface with a
+// durable event log passes its publish (the gateway's, which records the event
+// and fans it out to every page watching the session); a surface without one
+// passes nothing, and the engine then tells nobody but the onEnd hook.
+func WithRunEventPublisher(publish func(context.Context, event.RunEvent) error) Option {
+	return func(s *Service) {
+		if s == nil {
+			return
+		}
+		s.runEventPublisher = publish
 	}
 }
 

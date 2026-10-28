@@ -218,7 +218,11 @@ func (s *Server) projectStore() *state.ProjectStore {
 	if s.Projects != nil {
 		return s.Projects
 	}
-	if s.Env != nil && s.Env.SQL != nil {
+	// The store is scoped to the primary agent, so it is built from the
+	// runner's name: a server without one (a test harness, a handler reached
+	// before the environment is wired) has no tenant to scope by and answers
+	// nil rather than dereferencing nothing.
+	if s.Env != nil && s.Env.SQL != nil && s.Runner != nil {
 		s.Projects = state.NewProjectStore(s.Env.SQL, s.Runner.AgentName)
 	}
 	return s.Projects
@@ -635,6 +639,17 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 			return
 		}
 		projectID := strings.TrimSpace(m.ProjectID)
+		// A batch project's channel carries tasks, not a conversation: every
+		// message opens a task of its own and is answered by the execution's
+		// end notification, so nothing below this point (slash commands, the
+		// conversation that grows across messages, the answer delivered
+		// straight back) applies to it (plan 151).
+		if b.s != nil && projectID != "" {
+			if p, err := b.s.projectStore().Get(ctx, projectID); err == nil && state.NormalizeProjectType(p.ProjectType) == state.ProjectTypeBatch {
+				b.s.startChannelTask(ctx, ch, projectID, sid, m.Text)
+				return
+			}
+		}
 		sc := parseSlashCommand(b.s, sid, ch, m.Text)
 		if sc.ModeChanged {
 			slog.Info("mode changed", "session", sid, "mode", sc.Mode, "phase", sc.Phase, "source", "channel")
@@ -863,6 +878,9 @@ type wsServerMsg struct {
 	// The run's checklist facts, on the three operations that end a run.
 	// writeMsg fills them, so no ending can leave them out.
 	event.RunPlanFacts
+	// The run's delivered files, on the same three operations: the structured
+	// result an integrating system reads off the stream.
+	event.RunArtifacts
 }
 
 // withToolHeader returns the event with its tool card header added (a no-op for
@@ -1054,6 +1072,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		}
 		if wsRunEndOps[m.Op] && strings.TrimSpace(m.RunID) != "" {
 			m.RunPlanFacts = s.runPlanFacts(context.Background(), m.RunID)
+			m.RunArtifacts = turn.RunArtifactsOf(context.Background(), s.Sessions, m.RunID)
 		}
 		canonical := canonicalRunEventsFromWS(m)
 		writeMu.Lock()
@@ -1495,6 +1514,21 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			mode := strings.ToLower(strings.TrimSpace(m.Mode))
 			// Switch derives the phase and keeps the plan bookkeeping (pre-plan
 			// mode, exited-plan flag) that a full-record Set would erase.
+			// A batch task's mode is fixed: it runs non-interactively, and a
+			// plan phase would leave it waiting for an approval nobody gives.
+			if store := s.projectStore(); store != nil {
+				if ptype, pErr := store.SessionProjectType(r.Context(), sid); pErr == nil && ptype == state.ProjectTypeBatch {
+					refused := turn.BatchRefusal{Code: turn.BatchCodeModeFixed, Message: "a batch task always runs in agent mode"}
+					writeMsg(wsServerMsg{
+						Op:        "run_error",
+						RequestID: m.RequestID,
+						SessionID: sid,
+						Error:     refused.Error(),
+						Data:      map[string]any{"code": refused.Code},
+					})
+					continue
+				}
+			}
 			next, _ := state.Switch(s.stateRoot(), sid, state.CoerceMode(mode))
 			if clientPhase := strings.TrimSpace(m.Phase); clientPhase != "" && next.Mode == state.ModePlan && clientPhase != next.Phase {
 				next.Phase = clientPhase
@@ -1619,6 +1653,59 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if content == "" {
 			content = strings.TrimSpace(m.Content)
 		}
+		// A batch execution's turn is admitted before anything is prepared for
+		// it. The engine's table decides whether this conversation takes a turn
+		// at all — a finished execution, a running one, a stopped one that was
+		// sent text — and a refusal must not leave a run, a prepared
+		// attachment or a stored message behind.
+		batchSession := false
+		var batchInput *turn.BatchTurnInput
+		if sid := strings.TrimSpace(m.SessionID); sid != "" {
+			if store := s.projectStore(); store != nil {
+				if ptype, pErr := store.SessionProjectType(r.Context(), sid); pErr == nil && ptype == state.ProjectTypeBatch {
+					batchSession = true
+					if name, ok := slashCommandName(content); ok && turn.IsBuiltinName(name) {
+						// A batch task runs unattended: no built-in command may
+						// switch its mode, clear its history or move it to
+						// another conversation. A skill's own command is not a
+						// built-in and stays available.
+						refusal := turn.BatchRefusal{Code: turn.BatchCodeCommandRefused, Message: "built-in commands are not available in a batch task"}
+						writeMsg(wsServerMsg{
+							Op:        "turn_withdrawn",
+							RequestID: m.RequestID,
+							SessionID: sid,
+							Error:     refusal.Error(),
+							Data:      map[string]any{"code": refusal.Code},
+						})
+						wsRequestCacheSet(requestCache, m.RequestID, wsServerMsg{
+							Op:        "turn_withdrawn",
+							RequestID: m.RequestID,
+							SessionID: sid,
+							Error:     refusal.Error(),
+							Data:      map[string]any{"code": refusal.Code},
+						}, 2*time.Minute, time.Now())
+						continue
+					}
+					// The turn's own text, before the engine replaces it: a new
+					// execution runs on the task's fixed input, a stopped one on
+					// the continue prompt, and Send records which it was.
+					batchInput = &turn.BatchTurnInput{Text: content, HasAttachments: len(attachments)+len(mentionImages) > 0}
+					adm, admErr := turn.AdmitBatchTurn(r.Context(), store, sid, content, batchInput.HasAttachments)
+					if admErr != nil {
+						code := turn.BatchCodeNoTask
+						var refusal *turn.BatchRefusal
+						if errors.As(admErr, &refusal) {
+							code = refusal.Code
+						}
+						withdrawn := wsServerMsg{Op: "turn_withdrawn", RequestID: m.RequestID, SessionID: sid, Error: admErr.Error(), Data: map[string]any{"code": code}}
+						writeMsg(withdrawn)
+						wsRequestCacheSet(requestCache, m.RequestID, withdrawn, 2*time.Minute, time.Now())
+						continue
+					}
+					content = adm.Input
+				}
+			}
+		}
 		if content == "" && len(attachments) == 0 && len(mentionImages) == 0 {
 			continue
 		}
@@ -1670,11 +1757,18 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		commandMu.Lock()
 		commandCancel = stopCommand
 		commandMu.Unlock()
-		sc := parseSlashCommandWithOptions(s, sid, "webchat", content, turn.Context{
-			DuringRun:      strings.TrimSpace(currentRunID) != "",
-			RunID:          strings.TrimSpace(currentRunID),
-			CommandContext: commandCtx,
-		}, m.Message.Choice)
+		// A batch execution runs no built-in command (they were refused above),
+		// so its turn is only dispatched when the message starts with a slash —
+		// that is how a skill's own command is activated. Plain text goes
+		// straight to the engine, which is what a task's own words are.
+		sc := slashCommandResult{}
+		if !batchSession || strings.HasPrefix(content, "/") {
+			sc = parseSlashCommandWithOptions(s, sid, "webchat", content, turn.Context{
+				DuringRun:      strings.TrimSpace(currentRunID) != "",
+				RunID:          strings.TrimSpace(currentRunID),
+				CommandContext: commandCtx,
+			}, m.Message.Choice)
+		}
 		commandMu.Lock()
 		commandCancel = nil
 		commandMu.Unlock()
@@ -2232,6 +2326,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				SkillPath:                skillPath,
 				Skills:                   sc.Skills,
 				ExistingRunID:            runID,
+				BatchInput:               batchInput,
 				AgentContextIsRunContext: true,
 				// The turn's first token reaches this socket as a legacy op —
 				// live state that never enters the session log
@@ -2514,6 +2609,25 @@ func requiresLintFollowup(events []state.SessionEvent) bool {
 
 // slashCommandResult is a slash command's outcome as the engine reports it.
 type slashCommandResult = turn.Result
+
+// slashCommandName is the command a message starts with, when it starts with
+// one. It mirrors the engine's own parse (one leading "/", then fields) so the
+// gateway's batch refusal names exactly the command the engine would have run.
+func slashCommandName(content string) (string, bool) {
+	line := strings.TrimSpace(content)
+	if !strings.HasPrefix(line, "/") {
+		return "", false
+	}
+	toks := strings.Fields(line)
+	if len(toks) == 0 {
+		return "", false
+	}
+	name := strings.TrimPrefix(strings.ToLower(toks[0]), "/")
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
 
 func parseSlashCommand(s *Server, sessionID, channel, content string) slashCommandResult {
 	return parseSlashCommandWithOptions(s, sessionID, channel, content, turn.Context{}, nil)

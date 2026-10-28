@@ -101,7 +101,7 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 	} else if rt != nil && rt.PermissionSnapshot != nil {
 		st.SetRuntimeValue("permission_snapshot", rt.PermissionSnapshot)
 	}
-	if rt != nil && memory.ReadPathEnabled(rt.Cfg) {
+	if rt != nil && memory.ReadPathEnabled(rt.Cfg) && !batchProject(rt) {
 		// StateRoot, not Home: widening the read allowlist to a home-derived
 		// memory root would let this agent's read_file reach every other
 		// primary agent's memory. Scoped to this session's own project plus
@@ -158,7 +158,7 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 	t17.SetContainsExternalContext(true)
 	registerMeta(t17, "Use when you need current information from the public web (Tavily, Brave, Baidu Qianfan, or DeepSeek)", "web", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
 	var t21 *llm.Tool
-	if requestPermissionsToolEnabled(rt) {
+	if requestPermissionsToolEnabled(rt) && !batchProject(rt) {
 		t21, err = NewRequestPermissionsTool(st, rt)
 		if err != nil {
 			return err
@@ -176,6 +176,17 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 		}
 		registerMeta(tLSP, lspToolDescription, "code", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
 	}
+	// Deliverables belong to the conversation, not the process: only office
+	// and batch sessions register the tool, so a coding project's tool set is
+	// exactly what it was.
+	var tPresent *llm.Tool
+	if rt != nil && (rt.ProjectType == state.ProjectTypeOffice || rt.ProjectType == state.ProjectTypeBatch) {
+		tPresent, err = newPresentFilesTool(st, rt)
+		if err != nil {
+			return err
+		}
+		registerMeta(tPresent, "Use when your work produced final files the user should receive (download and preview cards)", "session", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
+	}
 	for _, t := range []*llm.Tool{t1, t2, t3} {
 		_ = st.Register(a, t)
 	}
@@ -189,11 +200,23 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 	if tLSP != nil {
 		_ = st.Register(a, tLSP)
 	}
+	if tPresent != nil {
+		_ = st.Register(a, tPresent)
+	}
 	return registerSessionAndMemoryTools(a, st, rt)
 }
 
 func requestPermissionsToolEnabled(rt *AgentToolRuntime) bool {
 	return rt != nil && rt.Cfg != nil && rt.Cfg.EffectiveFeatures().RequestPermissionsTool
+}
+
+// batchProject reports whether this tool runtime serves a batch conversation.
+// A batch task runs unattended for a business system, so the tools that exist
+// to talk to a person — the ask-the-user tools, the plan-mode gates that wait
+// for an approval, the permission request, and memory — are not offered at
+// all: the model cannot ask a question nobody will answer.
+func batchProject(rt *AgentToolRuntime) bool {
+	return rt != nil && rt.ProjectType == state.ProjectTypeBatch
 }
 
 type ToolAdder interface {
@@ -286,10 +309,13 @@ func (s *State) Register(a ToolAdder, t *llm.Tool) error {
 }
 
 type AgentToolRuntime struct {
-	Home                         string
-	WorkspaceRoot                string
-	AdditionalReadRoots          []string
-	ProjectKey                   string
+	Home                string
+	WorkspaceRoot       string
+	AdditionalReadRoots []string
+	ProjectKey          string
+	// ProjectType is the session's project type; office and batch
+	// conversations register present_files, coding keeps today's tool set.
+	ProjectType                  string
 	Cfg                          *appcfg.Root
 	YOLO                         bool
 	Sess                         *state.SessionStore
@@ -351,6 +377,11 @@ func BuiltinFilterDocs() map[string]string {
 
 func registerProductTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 	if a == nil || st == nil || rt == nil {
+		return nil
+	}
+	// batchProject: nobody is in the loop to answer a question, so the tool
+	// that asks one is not offered to a batch task at all.
+	if batchProject(rt) {
 		return nil
 	}
 	t1, err := newUserInteractionTool(st, rt)

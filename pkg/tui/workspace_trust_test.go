@@ -315,7 +315,7 @@ func TestStartupQuestionsRunTrustAdoptServersBind(t *testing.T) {
 	session := &startupQuestionsSession{fakeSession: &fakeSession{}}
 	selector := &startupQuestionsSelector{session: session, trusted: true}
 	cmds := newCommandController(session, renderer, selector, nil, t.TempDir())
-	require.NoError(t, startupQuestions(ctx, Options{Session: session}, cmds, renderer, "sid-1"))
+	require.NoError(t, startupQuestions(ctx, Options{Session: session}, cmds, renderer, &streamState{session: session, sessionID: "sid-1"}, nil))
 	require.Equal(t, []string{
 		"trust:pending", "trust:panel", "trust:recorded",
 		"adopt",
@@ -327,7 +327,7 @@ func TestStartupQuestionsRunTrustAdoptServersBind(t *testing.T) {
 	session = &startupQuestionsSession{fakeSession: &fakeSession{}}
 	selector = &startupQuestionsSelector{session: session, trusted: false}
 	cmds = newCommandController(session, renderer, selector, nil, t.TempDir())
-	err := startupQuestions(ctx, Options{Session: session}, cmds, renderer, "sid-1")
+	err := startupQuestions(ctx, Options{Session: session}, cmds, renderer, &streamState{session: session, sessionID: "sid-1"}, nil)
 	require.Equal(t, ErrCancelled, err)
 	require.Equal(t, []string{"trust:pending", "trust:panel"}, session.order)
 
@@ -336,7 +336,7 @@ func TestStartupQuestionsRunTrustAdoptServersBind(t *testing.T) {
 	session = &startupQuestionsSession{fakeSession: &fakeSession{}}
 	selector = &startupQuestionsSelector{session: session, trusted: true}
 	cmds = newCommandController(session, renderer, selector, nil, t.TempDir())
-	require.NoError(t, startupQuestions(ctx, Options{Session: session, InitialSessionID: "resume-me"}, cmds, renderer, "sid-1"))
+	require.NoError(t, startupQuestions(ctx, Options{Session: session, InitialSessionID: "resume-me"}, cmds, renderer, &streamState{session: session, sessionID: "sid-1"}, nil))
 	require.Equal(t, []string{
 		"trust:pending", "trust:panel", "trust:recorded",
 		"servers:pending", "servers:panel", "servers:decided",

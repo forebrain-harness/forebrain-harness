@@ -1203,3 +1203,83 @@ func TestSessionGrantsDoNotPersistAPresetRow(t *testing.T) {
 		t.Fatalf("a session grant wrote a preset row: stored=%v err=%v", stored, err)
 	}
 }
+
+// TestBatchActionHookNeverAsks pins the approval half of a batch task
+// (plans/150): nobody is ever asked anything, so the hook answers "no approval
+// needed, nothing pending" for every call — and only an explicit deny rule, the
+// one thing that still refuses, produces an error.
+func TestBatchActionHookNeverAsks(t *testing.T) {
+	ctx := llm.WithAgentSessionID(context.Background(), "session-1")
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ensureRunSessions(t, db, "session-1")
+	permissionStore := safety.NewStore()
+	permissionStore.AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
+		ToolName: "Bash", RuleContent: "rm -rf:*", SessionID: "session-1",
+	})
+	runner := &Runner{
+		Deps:        &Deps{Actions: &state.ActionService{DB: db}},
+		permRuntime: safety.NewRuntimeWithStore(permissionStore),
+	}
+	workspace := filepath.Join(t.TempDir(), "tasks", "T", "1")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	batchCtx := tool.WithTaskWorkspace(ctx, workspace)
+
+	for _, call := range []struct {
+		kind    string
+		payload map[string]any
+	}{
+		{kind: "shell", payload: map[string]any{"command": "curl -sS https://example.com", "force_tool_approval": true}},
+		{kind: "web_fetch", payload: map[string]any{"url": "https://example.com"}},
+		{kind: "mcp__demo__search", payload: map[string]any{"query": "anything"}},
+		{kind: "apply_patch", payload: map[string]any{"file_path": filepath.Join(workspace, "a.txt")}},
+	} {
+		id, pending, hookErr := runner.actionHook(batchCtx, call.kind, call.payload)
+		if hookErr != nil || pending || id != "" {
+			t.Fatalf("%s in a batch task: id=%q pending=%v err=%v, want nobody asked", call.kind, id, pending, hookErr)
+		}
+	}
+	// Nothing was recorded for anyone to answer.
+	actions, err := runner.Deps.Actions.List(ctx, "", state.ActionFilter{}, 10)
+	if err != nil {
+		t.Fatalf("list actions: %v", err)
+	}
+	if len(actions) != 0 {
+		t.Fatalf("a batch turn created %d action(s): %+v", len(actions), actions)
+	}
+
+	// An explicit deny rule is the one refusal that survives.
+	if _, pending, hookErr := runner.actionHook(batchCtx, "shell", map[string]any{"command": "rm -rf /"}); hookErr == nil || pending {
+		t.Fatalf("an explicit deny rule must refuse a batch call: pending=%v err=%v", pending, hookErr)
+	}
+
+	// Outside a batch turn the same call is still a question.
+	if _, pending, hookErr := runner.actionHook(ctx, "shell", map[string]any{"command": "curl -sS https://example.com"}); hookErr != nil || !pending {
+		t.Fatalf("non-batch shell must still ask: pending=%v err=%v", pending, hookErr)
+	}
+}
+
+// TestBatchSessionPresetIsFixed pins the read-only preset a batch project shows
+// (plans/150): the task sandbox with no approvals, decided by the project type
+// and not by any stored row or environment choice.
+func TestBatchSessionPresetIsFixed(t *testing.T) {
+	batch := &Runner{Deps: &Deps{ProjectType: state.ProjectTypeBatch}}
+	got := batch.SessionPresetFor(context.Background(), "session-1")
+	if got.Current != PresetBatchSandbox || got.Effective != PresetBatchSandbox || got.Source != "project_type" {
+		t.Fatalf("batch preset = %+v, want the fixed task sandbox", got)
+	}
+	// YOLO does not describe a batch task either.
+	t.Setenv("FOREBRAIN_YOLO", "1")
+	if got := batch.SessionPresetFor(context.Background(), "session-1"); got.Current != PresetBatchSandbox {
+		t.Fatalf("batch preset under YOLO = %+v, want the fixed task sandbox", got)
+	}
+	coding := &Runner{Deps: &Deps{ProjectType: state.ProjectTypeCoding}}
+	if got := coding.SessionPresetFor(context.Background(), "session-1"); got.Current == PresetBatchSandbox {
+		t.Fatalf("a coding project must not report the batch preset: %+v", got)
+	}
+}

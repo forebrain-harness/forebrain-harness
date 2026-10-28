@@ -343,7 +343,7 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 	// session can actually do. A catalog with nothing dispatchable left — every
 	// type this agent may dispatch is disabled — is the same case: there is no
 	// type to offer, so the family is not offered either.
-	cat := SubagentCatalogFor(fac.appConfig(), fac.AgentName)
+	cat := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType())
 	if !appcfg.SubagentsEnabledFor(fac.appConfig(), fac.AgentName) || len(cat.Public()) == 0 {
 		return nil
 	}
@@ -461,7 +461,7 @@ func dropSubagentManagementTools(ctx context.Context, tools []*llm.Tool) []*llm.
 	}
 	out := make([]*llm.Tool, 0, len(tools))
 	for _, t := range tools {
-		if t != nil && subagentToolName(strings.TrimSpace(t.Name())) {
+		if t != nil && (subagentToolName(strings.TrimSpace(t.Name())) || tool.PrimaryOnlyToolName(t.Name())) {
 			continue
 		}
 		out = append(out, t)
@@ -1284,6 +1284,14 @@ func runForkSubagent(ctx context.Context, fac Factory, prep preparedSubagent) (s
 					// the user's cwd (first allowed root), not the forebrain home
 					// directory.
 					agentCtx = tool.WithProjectRoot(agentCtx, fac.projectRoot())
+					// A subagent of a batch execution works in the same task
+					// workspace its dispatcher does, and carries the same task
+					// context: it is doing the task, not a conversation about
+					// it.
+					if ws := tool.TaskWorkspaceFromContext(ctx); ws != "" {
+						agentCtx = tool.WithTaskWorkspace(agentCtx, ws)
+						agentCtx = tool.WithTaskContext(agentCtx, tool.TaskContextFromContext(ctx))
+					}
 					agentCtx = tool.WithWorkspaceRoot(agentCtx, fac.ActiveWorkspaceRoot())
 					rosterKey := subagentRosterKey(prep.entry)
 					if rosterKey != "" {
@@ -1485,7 +1493,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	if rawSubtype != "" && own.SubagentExecutor == nil {
 		return preparedSubagent{}, fmt.Errorf("subagent requires an in-process executor")
 	}
-	cat := SubagentCatalogFor(fac.appConfig(), fac.AgentName)
+	cat := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType())
 	parent := strings.TrimSpace(tool.RunIDFromContext(baseCtx))
 	sid := strings.TrimSpace(llm.AgentSessionIDFromContext(baseCtx))
 	if sid == "" {
@@ -1526,6 +1534,13 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// ~/.forebrain as the subagent's scope, hiding the real project.
 	if pr := fac.projectRoot(); pr != "" {
 		cctx = tool.WithProjectRoot(cctx, pr)
+	}
+	// The task workspace and task context follow the dispatch: a subagent of a
+	// batch execution works inside the execution's workspace, under the same
+	// task facts its dispatcher was given.
+	if ws := tool.TaskWorkspaceFromContext(baseCtx); ws != "" {
+		cctx = tool.WithTaskWorkspace(cctx, ws)
+		cctx = tool.WithTaskContext(cctx, tool.TaskContextFromContext(baseCtx))
 	}
 	if wsRoot := strings.TrimSpace(fac.ActiveWorkspaceRoot()); wsRoot != "" {
 		cctx = tool.WithWorkspaceRoot(cctx, wsRoot)
@@ -1779,7 +1794,7 @@ func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, 
 		title:      title,
 		task:       task,
 		subtype:    subagentType,
-		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ResolvePublic,
+		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
 		governTool: "subagent_run",
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			// A gate this child hits is answered in place, while its run and its
@@ -1827,7 +1842,7 @@ func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, s
 		title:      title,
 		task:       task,
 		subtype:    subagentType,
-		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ResolvePublic,
+		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
 		governTool: "subagent_run",
 	}
 	prep, handle, err := startSubagent(ctx, fac, d)
@@ -2008,7 +2023,7 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 		// The policy a custom subagent ran under on its first execution, for the
 		// same reason: it is configuration, and the record's execution has to
 		// answer to it again.
-		if policy, ok := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ToolPolicy(record.AgentType); ok {
+		if policy, ok := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ToolPolicy(record.AgentType); ok {
 			hostCtx = tool.WithSubagentToolPolicy(hostCtx, policy)
 		}
 	}
@@ -2026,6 +2041,13 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	// permission layer detects the subagent boundary with them.
 	if pr := fac.projectRoot(); pr != "" {
 		hostCtx = tool.WithProjectRoot(hostCtx, pr)
+	}
+	// A continued subagent keeps running where its execution runs: the task
+	// workspace and task context its dispatch carried are restored here, so a
+	// later attempt edits the same files under the same rules.
+	if ws := tool.TaskWorkspaceFromContext(ctx); ws != "" {
+		hostCtx = tool.WithTaskWorkspace(hostCtx, ws)
+		hostCtx = tool.WithTaskContext(hostCtx, tool.TaskContextFromContext(ctx))
 	}
 	if wsRoot := strings.TrimSpace(fac.ActiveWorkspaceRoot()); wsRoot != "" {
 		hostCtx = tool.WithWorkspaceRoot(hostCtx, wsRoot)
@@ -2065,6 +2087,11 @@ var ErrSubagentNotFound = errors.New("subagent not found")
 // An idle subagent takes no messages: the agent that dispatched it decides what
 // it does next (owner, 2026-10-26).
 var ErrSubagentNotRunning = errors.New("subagent is not running")
+
+// ErrBatchTakesNoInput refuses every message into a batch task's conversation,
+// including one addressed to a subagent view of it: a batch task runs
+// unattended and nobody joins it, whatever door the message comes through.
+var ErrBatchTakesNoInput = errors.New("batch tasks take no input")
 
 // subagentChannelForConversation resolves an agent key to its channel in this
 // conversation, or ErrSubagentNotFound. The lookup filters by conversation, so
@@ -2135,6 +2162,12 @@ const (
 // the first call installs it, and a later call replaces it so a reconnected
 // surface takes over.
 func SendToSubagent(ctx context.Context, r *Runner, surface SubagentSurface, conversationSessionID, agentKey string, in Input) (SubagentDelivery, error) {
+	// A batch task's conversation takes no input at all, so a message to one
+	// of its subagent views is refused here, below every surface: nobody is
+	// watching a batch task and nobody may join it.
+	if r != nil && r.ProjectType() == state.ProjectTypeBatch {
+		return "", ErrBatchTakesNoInput
+	}
 	ch, record, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
 	if err != nil {
 		return "", err
@@ -2438,7 +2471,7 @@ func refuseGoneCustomSubagent(fac Factory, record agent.HistoryEntry) error {
 	if strings.TrimSpace(record.DefSource) != SubagentSourceCustom {
 		return nil
 	}
-	if SubagentCatalogFor(fac.appConfig(), fac.AgentName).configures(record.AgentType) {
+	if SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).configures(record.AgentType) {
 		return nil
 	}
 	return fmt.Errorf("subagent type %q no longer exists for this agent", strings.TrimSpace(record.AgentType))
@@ -2471,7 +2504,7 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 		if err := refuseGoneCustomSubagent(fac, record); err != nil {
 			return agent.HistoryEntry{}, err
 		}
-		if _, rerr := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ResolvePublic(record.AgentType); rerr != nil {
+		if _, rerr := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic(record.AgentType); rerr != nil {
 			return agent.HistoryEntry{}, rerr // disabled: the catalog's own reason
 		}
 	}

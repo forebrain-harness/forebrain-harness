@@ -4,6 +4,7 @@ import (
 	"embed"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,11 +24,26 @@ var (
 	osLstatFn              = os.Lstat
 	openWorkspaceRootFn    = openWorkspaceRootNoFollow
 	writeFileInWorkspaceFn = writeFileIfMissingInWorkspace
+	replaceLegacySeedFn    = replaceLegacySeedInWorkspace
 	filepathEvalSymlinksFn = filepath.EvalSymlinks
 	filepathRelFn          = filepath.Rel
 	readAllFn              = io.ReadAll
 	templateBodyFn         = templateBody
 )
+
+// legacyTemplateBodies holds the workspace seed bodies written before the
+// 2026-10-26 rewording (coding-specific wording taken out of the shared
+// seeds). A file on disk that still matches one of them byte for byte is a
+// seed the user never edited, so EnsureWorkspaceRoot replaces it with the
+// current body; anything else is the user's own file and stays untouched.
+var legacyTemplateBodies = map[string][]string{
+	"AGENTS.md": {
+		"# AGENTS\n\nThis workspace is the user's long-lived Forebrain Harness home. Treat these files as user-owned context, not as hard security boundaries.\n\n- Follow system and developer instructions first.\n- Use this workspace for durable project rules, red lines, and session startup expectations.\n- Prefer direct, evidence-backed engineering work over vague status claims.\n- Never store secrets in workspace markdown.\n",
+	},
+	"SOUL.md": {
+		"# SOUL\n\nYou are an agentic coding assistant defined by this workspace.\n\nAct with practical judgment. Be genuinely useful, concise when possible, and explicit about evidence, assumptions, and risks. Explore locally before asking the user to answer discoverable questions. Do not use empty reassurance, fabricated results, or claims that were not verified.\n\nRespect privacy and local boundaries. Ask before external or destructive actions. If important collaboration preferences emerge and the user wants them preserved, write them to the appropriate workspace memory file.\n",
+	},
+}
 
 var (
 	errWorkspaceSymlink = errors.New("workspace path contains symlink")
@@ -99,6 +115,14 @@ func EnsureWorkspaceRoot(workspaceRoot string, _ EnsureOptions) error {
 		}
 		if err := writeFileInWorkspaceFn(rootDir, name, body); err != nil {
 			return err
+		}
+		// A pre-rewording seed the user never edited migrates to the current
+		// body. A replacement that cannot happen must not block startup: the
+		// user still owns a readable file, and the next run tries again.
+		if legacy, ok := legacyTemplateBodies[name]; ok {
+			if err := replaceLegacySeedFn(rootDir, name, legacy, body); err != nil {
+				slog.Warn("workspace legacy seed not replaced", "file", name, "err", err)
+			}
 		}
 	}
 	return nil

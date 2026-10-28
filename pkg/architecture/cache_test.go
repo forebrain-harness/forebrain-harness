@@ -913,9 +913,14 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // 45 methods (was 44): SessionPresetFor is the one shared reading of the
 // conversation's approval preset (stored row, live preset, config default)
 // the gateway and the TUI both show.
+//
+// 46 methods (was 45): ProjectType reads the conversation type this runtime
+// serves — the type each session froze at birth (plan 145); every
+// type-dependent branch in 146–153 goes through it instead of the project's
+// current type.
 const (
 	runnerFields  = 27
-	runnerMethods = 45
+	runnerMethods = 46
 )
 
 func TestRunnerOnlyShrinks(t *testing.T) {

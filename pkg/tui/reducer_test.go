@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strconv"
@@ -5388,5 +5389,33 @@ func TestReplayResponseNoticeMessageProducesTheSameFrame(t *testing.T) {
 
 	if _, ok := replayResponseNoticeMessage(event.RunEvent{ID: "evt-2", Type: event.RunEventImageRejected}); ok {
 		t.Fatal("another event type must not replay as a response notice")
+	}
+}
+
+// A batch execution's footer says the terminal is read-only, and Plan mode —
+// which is fixed there — never takes that segment over.
+func TestBatchFooterLabel(t *testing.T) {
+	renderer := NewRenderer(io.Discard, io.Discard)
+	renderer.SetComposerFooter(ComposerFooter{Model: "openai/gpt-5"})
+	renderer.SetBatchReadOnly(true)
+
+	footer := func() string {
+		renderer.mu.Lock()
+		defer renderer.mu.Unlock()
+		return stripANSI(renderer.composerFooterText(120))
+	}
+	if got := footer(); !strings.HasPrefix(got, batchReadOnlyFooterLabel) {
+		t.Fatalf("batch footer = %q, want it to start with %q", got, batchReadOnlyFooterLabel)
+	}
+
+	renderer.SetPlanMode(true)
+	if got := footer(); strings.Contains(got, planModeFooterLabel) {
+		t.Fatalf("batch footer still shows plan mode: %q", got)
+	}
+
+	// Leaving the batch conversation gives the footer back to the mode.
+	renderer.SetBatchReadOnly(false)
+	if got := footer(); strings.HasPrefix(got, batchReadOnlyFooterLabel) || !strings.Contains(got, planModeFooterLabel) {
+		t.Fatalf("footer after the batch conversation = %q", got)
 	}
 }

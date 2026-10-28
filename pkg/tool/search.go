@@ -830,7 +830,7 @@ func NewLSPTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				if _, err := ResolveWithinRoots(p, readRoots); err != nil {
 					return false
 				}
-				return !st.ReadPathDenied(p) && st.ProtectedReadReason(p) == ""
+				return !st.ReadPathDeniedIn(ctx, p) && st.ProtectedReadReason(p) == ""
 			}
 			res, err := rt.CodeIntel.Query(ctx, CodeIntelQuery{
 				Operation:          operation,

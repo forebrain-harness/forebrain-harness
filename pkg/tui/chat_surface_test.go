@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
@@ -56,6 +58,35 @@ func newSurfaceTestSession(t *testing.T) (*ChatSession, func()) {
 	return sess, func() {
 		_ = db.Close()
 	}
+}
+
+// batchRunRecorder stands in for the agent run of a batch turn: it keeps the
+// request the engine admitted and finishes at once. No provider and no project
+// runner are involved, so what the terminal sent is the whole evidence.
+type batchRunRecorder struct {
+	mu    sync.Mutex
+	reqs  []turn.TurnRequest
+	onRun func()
+}
+
+func (r *batchRunRecorder) Run(_ context.Context, req turn.TurnRequest, started func(runID string)) (*agent.Result, error) {
+	r.mu.Lock()
+	r.reqs = append(r.reqs, req)
+	hook := r.onRun
+	r.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if started != nil {
+		started("run-batch-1")
+	}
+	return &agent.Result{}, nil
+}
+
+func (r *batchRunRecorder) requests() []turn.TurnRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]turn.TurnRequest(nil), r.reqs...)
 }
 
 func dispatchSurfaceText(ctx context.Context, s *ChatSession, sessionID, text string) error {
@@ -211,6 +242,233 @@ func TestDispatchSurfaceTurnExitRequestsQuit(t *testing.T) {
 	turns, err := s.sessStore().ListRecentMessages(context.Background(), "linked-2", 8)
 	require.NoError(t, err)
 	require.Len(t, turns, 0)
+}
+
+// batchSurfaceSentinel marks the end of one dispatch's system messages: the
+// surface's dispatcher is FIFO, so every message a dispatch sent arrives ahead
+// of it.
+const batchSurfaceSentinel = "batch-viewer-sentinel"
+
+// batchSurfaceMessages collects the system messages the surface sends, and
+// returns a flush that reports everything sent before its sentinel.
+func batchSurfaceMessages(t *testing.T, s *ChatSession) (flush func() []string) {
+	t.Helper()
+	messages := make(chan string, 64)
+	s.PrependUINotify(func(msg any) {
+		switch m := msg.(type) {
+		case NewMessageMsg:
+			if m.Msg.Kind == MsgKindSystem {
+				messages <- m.Msg.Content
+			}
+		case RunEndedMsg:
+			if m.RunID == batchSurfaceSentinel {
+				messages <- batchSurfaceSentinel
+			}
+		}
+	})
+	return func() []string {
+		t.Helper()
+		s.notifyUI(RunEndedMsg{RunID: batchSurfaceSentinel})
+		var out []string
+		for {
+			next := requireUIMessage(t, messages)
+			if next == batchSurfaceSentinel {
+				return out
+			}
+			out = append(out, next)
+		}
+	}
+}
+
+// newBatchSurfaceTestSession is a surface launched in a batch project with one
+// task and one execution of it, moved to status. It returns the execution's
+// conversation id, which is what /resume and the viewer's own opening address,
+// and the recorder that stands in for the agent run.
+func newBatchSurfaceTestSession(t *testing.T, status string) (*ChatSession, string, *batchRunRecorder) {
+	t.Helper()
+	s, cleanup := newSurfaceTestSession(t)
+	ctx := context.Background()
+	// The project registry is per primary agent, and this fixture is the one
+	// named "main" throughout (see newSurfaceTestSession's session store).
+	s.Env.Deps.AgentName = "main"
+	store := s.projectStoreFor()
+	require.NotNil(t, store)
+	root := t.TempDir()
+	project, err := store.Create(ctx, state.CreateProjectInput{
+		Name:        "batch",
+		Root:        root,
+		ProjectKey:  state.ProjectKeyForRoot(root),
+		ProjectType: state.ProjectTypeBatch,
+	})
+	require.NoError(t, err)
+	s.ProjectID = project.ID
+	task, err := store.CreateTask(ctx, state.Task{ProjectID: project.ID, Title: "monthly report"})
+	require.NoError(t, err)
+
+	const sessionID = "batch-exec-1"
+	require.NoError(t, s.sessStore().EnsureAt(ctx, sessionID, "monthly report", state.SessionBirth{
+		ProjectID: project.ID,
+		Source:    state.SessionSourceConversation,
+	}))
+	_, err = store.AddTaskExecution(ctx, task.ID, sessionID, root)
+	require.NoError(t, err)
+	if status != state.TaskStatusPending {
+		_, err = store.StartTaskExecution(ctx, sessionID, state.TaskStatusPending, "", false)
+		require.NoError(t, err)
+		if status != state.TaskStatusRunning {
+			require.NoError(t, store.MarkExecutionEnded(ctx, sessionID, status, "", ""))
+		}
+	}
+	// The engine admits and settles batch executions, exactly as the real
+	// surface wires it; the run itself is recorded rather than performed.
+	runs := &batchRunRecorder{}
+	s.Core = turn.New(
+		turn.WithSessionStore(s.sessStore()),
+		turn.WithSessionSource(memory.SessionSourceTUI),
+		turn.WithRunExecutor(runs),
+		turn.WithBatchTasks(store, s.sessStore(), nil),
+	)
+	t.Cleanup(cleanup)
+	return s, sessionID, runs
+}
+
+// A batch project's terminal is a viewer: plain text starts no turn and is
+// answered with the one sentence that says what may be typed instead.
+func TestBatchViewerRefusesPlainText(t *testing.T) {
+	s, sessionID, _ := newBatchSurfaceTestSession(t, state.TaskStatusCompleted)
+	flush := batchSurfaceMessages(t, s)
+
+	require.NoError(t, dispatchSurfaceText(context.Background(), s, sessionID, "write the report for me"))
+	require.Equal(t, []string{batchReadOnlyNotice}, flush())
+
+	turns, err := s.sessStore().ListRecentMessages(context.Background(), sessionID, 8)
+	require.NoError(t, err)
+	require.Len(t, turns, 0, "a refused line must not reach the transcript")
+}
+
+// Only the whitelisted commands reach the ordinary path: /status answers, and
+// /plan and /model — both of which would change how this conversation runs —
+// do not.
+func TestBatchViewerAllowsWhitelistedCommands(t *testing.T) {
+	s, sessionID, _ := newBatchSurfaceTestSession(t, state.TaskStatusCompleted)
+	flush := batchSurfaceMessages(t, s)
+	ctx := context.Background()
+
+	require.NoError(t, dispatchSurfaceText(ctx, s, sessionID, "/status"))
+	for _, text := range flush() {
+		require.NotEqual(t, batchReadOnlyNotice, text, "/status is whitelisted")
+	}
+
+	for _, refused := range []string{"/plan do it again", "/model"} {
+		require.NoError(t, dispatchSurfaceText(ctx, s, sessionID, refused))
+		require.Equal(t, []string{batchReadOnlyNotice}, flush(), refused)
+	}
+
+	// A skill command is not a builtin, and is refused the same way.
+	require.NoError(t, dispatchSurfaceText(ctx, s, sessionID, "/some-skill"))
+	require.Equal(t, []string{batchReadOnlyNotice}, flush())
+
+	turns, err := s.sessStore().ListRecentMessages(context.Background(), sessionID, 8)
+	require.NoError(t, err)
+	require.Len(t, turns, 0)
+}
+
+// /continue resumes a stopped execution here: the preview writes nothing, and
+// the turn that runs is the engine's continuation prompt, started by Submit
+// with the pre-admission text still empty.
+func TestBatchContinueRunsAStoppedExecution(t *testing.T) {
+	s, sessionID, runs := newBatchSurfaceTestSession(t, state.TaskStatusStopped)
+	ctx := context.Background()
+	store := s.projectStoreFor()
+	before, _, ok, err := store.ExecutionForSession(ctx, sessionID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, state.TaskStatusStopped, before.Status)
+
+	// The status the execution held at the instant the turn ran: the admission
+	// preview alone never moves it, so this is Submit's own transition.
+	statusAtRun := ""
+	runs.onRun = func() {
+		live, _, ok, err := store.ExecutionForSession(context.Background(), sessionID)
+		if err == nil && ok {
+			statusAtRun = live.Status
+		}
+	}
+	require.NoError(t, dispatchSurfaceText(ctx, s, sessionID, "/continue"))
+
+	require.Len(t, runs.requests(), 1, "a continuation runs exactly one turn")
+	req := runs.requests()[0]
+	require.Equal(t, turn.BatchContinuePrompt, req.UserText)
+	require.Equal(t, "/continue", req.RawInput)
+	require.NotNil(t, req.BatchInput, "the engine refuses a batch turn that did not pass admission")
+	require.Empty(t, req.BatchInput.Text)
+	require.False(t, req.BatchInput.HasAttachments)
+	require.Equal(t, state.TaskStatusRunning, statusAtRun, "Submit starts the execution under the session lock")
+
+	// A continuation carries no new task input, so the task's own input stayed
+	// unrecorded: the turn carried an empty BatchInput, not the prompt.
+	after, task, ok, err := store.ExecutionForSession(ctx, sessionID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEqual(t, state.TaskStatusStopped, after.Status, "Submit must start the execution")
+	require.False(t, task.InputSet)
+	require.Empty(t, task.InputText)
+
+	turns, err := s.sessStore().ListRecentMessages(ctx, sessionID, 16)
+	require.NoError(t, err)
+	var inputs []string
+	for _, turn := range turns {
+		if turn.Role == "user" {
+			inputs = append(inputs, turn.Content)
+		}
+	}
+	// The row replays as the typed command, the same way every slash
+	// continuation persists its raw line; the model input is the prompt above.
+	require.Equal(t, []string{"/continue"}, inputs)
+
+	// A finished execution refuses the command instead, and starts nothing.
+	done, doneID, doneRuns := newBatchSurfaceTestSession(t, state.TaskStatusCompleted)
+	flush := batchSurfaceMessages(t, done)
+	require.NoError(t, dispatchSurfaceText(ctx, done, doneID, "/continue"))
+	require.Equal(t, []string{"This execution has finished; start a new execution of the task from the web or the API."}, flush())
+	require.Empty(t, doneRuns.requests(), "a refused continuation starts no turn")
+	finished, err := done.sessStore().ListRecentMessages(ctx, doneID, 8)
+	require.NoError(t, err)
+	require.Len(t, finished, 0)
+}
+
+// /resume in a batch project reads as a task history: every execution of a
+// task a person opened in the terminal is named, and the list says how each
+// one ended.
+func TestResumeListShowsExecutionStatus(t *testing.T) {
+	s, sessionID, _ := newBatchSurfaceTestSession(t, state.TaskStatusStopped)
+	ctx := context.Background()
+	// A conversation with a message is what the list holds; the reader opened
+	// this execution, which is all the row needs to appear.
+	_, err := s.sessStore().AppendShellCommandTurn(ctx, sessionID, "ls", "", llm.ExecutionTiming{})
+	require.NoError(t, err)
+
+	rows, err := s.ListSessionsRecent(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, "monthly report · stopped", rows[0].Title)
+
+	// The same suffix on the paged read the picker browses with.
+	paged, err := s.ListSessionsRecentPaged(ctx, 10, 0)
+	require.NoError(t, err)
+	require.Len(t, paged, 1)
+	require.Equal(t, "monthly report · stopped", paged[0].Title)
+
+	// A conversation that is not an execution keeps the title the store gave
+	// it: nothing is appended where there is no status to report.
+	plain, plainCleanup := newSurfaceTestSession(t)
+	t.Cleanup(plainCleanup)
+	_, err = plain.sessStore().AppendShellCommandTurn(ctx, "linked-9", "ls", "", llm.ExecutionTiming{})
+	require.NoError(t, err)
+	plainRows, err := plain.ListSessionsRecent(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, plainRows, 1)
+	require.NotContains(t, plainRows[0].Title, " · ")
 }
 
 func TestDispatchSurfaceTurnNewRequestsSessionSwitch(t *testing.T) {

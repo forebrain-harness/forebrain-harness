@@ -2259,3 +2259,139 @@ func main() {
 	}
 }
 `
+
+// wsReadUntil reads frames until one matches, so a test ignores the connected
+// banner and any event beside the answer it asked for.
+func wsReadUntil(t *testing.T, conn *websocket.Conn, match func(wsServerMsg) bool) wsServerMsg {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatal(err)
+		}
+		var msg wsServerMsg
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if match(msg) {
+			return msg
+		}
+	}
+}
+
+func TestBatchWebsocketRefusals(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	project := batchTestProject(t, s)
+	srv := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	t.Cleanup(srv.Close)
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	wsReadUntil(t, conn, func(m wsServerMsg) bool { return m.Op == "connected" })
+
+	startRun := func(requestID, sessionID, content string) wsServerMsg {
+		t.Helper()
+		require := wsClientMsg{Op: "start_run", RequestID: requestID, SessionID: sessionID}
+		require.Message.Content = content
+		if err := conn.WriteJSON(require); err != nil {
+			t.Fatal(err)
+		}
+		return wsReadUntil(t, conn, func(m wsServerMsg) bool {
+			return m.RequestID == requestID && (m.Op == "turn_withdrawn" || m.Op == "run_error")
+		})
+	}
+	codeOf := func(m wsServerMsg) string {
+		t.Helper()
+		data, ok := m.Data.(map[string]any)
+		if !ok {
+			return ""
+		}
+		code, _ := data["code"].(string)
+		return code
+	}
+
+	// A finished execution takes no more turns.
+	ctx := context.Background()
+	finished := batchTestExecution(t, s, project, "s-finished")
+	fixBatchInput(t, s, finished)
+	if err := s.Projects.MarkExecutionEnded(ctx, finished.SessionID, state.TaskStatusCompleted, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	msg := startRun("req-finished", finished.SessionID, "again")
+	if msg.Op != "turn_withdrawn" || codeOf(msg) != "batch_execution_finished" {
+		t.Fatalf("finished execution: %+v (code %q)", msg, codeOf(msg))
+	}
+
+	// A new execution whose task already has its input takes none of its own.
+	task := batchTestTask(t, s, project)
+	inputExec := batchTestExecutionForTask(t, s, project, task, "s-input-first")
+	fixBatchInput(t, s, inputExec)
+	withInput := batchTestExecutionForTask(t, s, project, task, "s-input")
+	msg = startRun("req-input", withInput.SessionID, "something else")
+	if msg.Op != "turn_withdrawn" || codeOf(msg) != "batch_task_input_fixed" {
+		t.Fatalf("new execution with input: %+v (code %q)", msg, codeOf(msg))
+	}
+
+	// A stopped execution continues without new input.
+	stopped := batchTestExecution(t, s, project, "s-stopped")
+	fixBatchInput(t, s, stopped)
+	if err := s.Projects.MarkExecutionEnded(ctx, stopped.SessionID, state.TaskStatusStopped, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	msg = startRun("req-stopped", stopped.SessionID, "here is more")
+	if msg.Op != "turn_withdrawn" || codeOf(msg) != "batch_takes_no_input" {
+		t.Fatalf("stopped execution with input: %+v (code %q)", msg, codeOf(msg))
+	}
+
+	// A built-in command is not available in a task; a skill's command is.
+	running := batchTestExecution(t, s, project, "s-builtin")
+	msg = startRun("req-builtin", running.SessionID, "/plan do it")
+	if msg.Op != "turn_withdrawn" || codeOf(msg) != "batch_command_not_allowed" {
+		t.Fatalf("built-in command: %+v (code %q)", msg, codeOf(msg))
+	}
+
+	// The mode is fixed.
+	if err := conn.WriteJSON(wsClientMsg{Op: "switch_mode", RequestID: "req-mode", SessionID: running.SessionID, Mode: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	msg = wsReadUntil(t, conn, func(m wsServerMsg) bool { return m.RequestID == "req-mode" })
+	if msg.Op != "run_error" || codeOf(msg) != "batch_mode_fixed" {
+		t.Fatalf("switch_mode on a batch session: %+v (code %q)", msg, codeOf(msg))
+	}
+	// The mode really did not change.
+	if mode, err := state.Get(s.stateRoot(), running.SessionID); err != nil || mode.Mode == state.ModePlan {
+		t.Fatalf("switch_mode changed a batch session's mode: %+v %v", mode, err)
+	}
+}
+
+// TestDetachedBatchTurnCarriesItsTaskInput pins the scheduled and detached
+// path: a batch execution's turn reaches Submit with the task text and no
+// watcher, while an ordinary conversation is left exactly as it was.
+func TestDetachedBatchTurnCarriesItsTaskInput(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	project := batchTestProject(t, s)
+	exec := batchTestExecution(t, s, project, "s-detached")
+
+	turn := detachedTurn{SessionID: exec.SessionID, Prompt: "count the rows"}
+	batch, err := s.admitDetachedBatchTurn(context.Background(), exec.SessionID, &turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch || turn.BatchInput == nil || turn.BatchInput.Text != "count the rows" {
+		t.Fatalf("detached batch turn = %v, %+v", batch, turn.BatchInput)
+	}
+
+	plain := detachedTurn{SessionID: "s-plain", Prompt: "hello"}
+	if err := s.Sessions.Ensure(context.Background(), "s-plain", "s-plain"); err != nil {
+		t.Fatal(err)
+	}
+	batch, err = s.admitDetachedBatchTurn(context.Background(), "s-plain", &plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch || plain.BatchInput != nil {
+		t.Fatalf("an ordinary detached turn was treated as a batch one: %v %+v", batch, plain.BatchInput)
+	}
+}

@@ -143,7 +143,7 @@
              the library's Select, a button. 只记录，不投递 is the empty string on
              the wire, which a SelectItem may not carry: the sentinel stands in
              for it on both sides. -->
-        <div class="block">
+        <div v-if="!batchProject" class="block">
           <Label for="cron-deliver" class="mb-1 block text-[12px] font-normal leading-[normal] text-[var(--forebrain-text-2)]">{{ t('cron.deliverLabel') }}</Label>
           <Select :model-value="toChoice(editorDeliver)" @update:model-value="(value) => (editorDeliver = fromChoice(value))">
             <SelectTrigger id="cron-deliver" class="forebrain-field h-9" data-testid="cron-deliver">
@@ -155,6 +155,7 @@
             </SelectContent>
           </Select>
         </div>
+        <span v-else class="self-end text-[11px] text-[var(--forebrain-muted-text)]" data-testid="cron-deliver-batch-hint">{{ t('cron.batchNotifyHint') }}</span>
         <label class="block">
           <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.repeatLimitLabel') }}</span>
           <Input
@@ -220,13 +221,18 @@ import TablePager from '@/components/common/TablePager.vue'
 import CronRunsDialog from '@/components/cron/CronRunsDialog.vue'
 import ScheduleBuilder from '@/components/cron/ScheduleBuilder.vue'
 import { useServerList } from '@/composables/useServerList'
-import { getErrorMessage, forebrainApi, type CronJobRow } from '@/lib/api'
+import { getErrorMessage, forebrainApi, type CronJobRow, type ProjectType } from '@/lib/api'
 import { formatProviderError } from '@/lib/providerError'
 import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { formatMonthDayTime } from '@/lib/time'
 import { useI18n } from '@/locales'
 
-const props = defineProps<{ projectId: string }>()
+const props = defineProps<{ projectId: string; projectType?: ProjectType }>()
+
+/** A batch project's runs are announced by 任务通知 (plan 151/153), so its job
+ *  form has no delivery channel to choose — the field is gone rather than left
+ *  meaningless. */
+const batchProject = computed(() => props.projectType === 'batch')
 
 const { t, locale } = useI18n()
 

@@ -159,6 +159,9 @@ const (
 	ctxKeySubagentPolicy       ctxKey = "forebrain_subagent_tool_policy"
 	ctxKeySubagentDefSrc       ctxKey = "forebrain_subagent_definition_source"
 	ctxKeyProjectRoot          ctxKey = "forebrain_project_root"
+	ctxKeyProjectType          ctxKey = "forebrain_project_type"
+	ctxKeyTaskWorkspace        ctxKey = "forebrain_task_workspace"
+	ctxKeyTaskContext          ctxKey = "forebrain_task_context"
 	ctxKeyWorkspaceRoot        ctxKey = "forebrain_workspace_root"
 	ctxKeyProjectKey           ctxKey = "forebrain_project_key"
 	ctxKeyToolUseID            ctxKey = "forebrain_tool_use_id"
@@ -641,11 +644,79 @@ func ProjectRootFromContext(ctx context.Context) string {
 	return strings.TrimSpace(v)
 }
 
-// WorkingDir is the directory a turn's tools act in: the session's project
-// root that the runner put on the context at the turn's entry. A context
-// without one (a test, a command run outside any turn) falls back to the
-// process directory. The result is absolute and cleaned.
+// WithProjectType records the conversation's project type on a turn's context
+// (state.ProjectTypeOffice/Coding/Batch) for the process-wide hooks that do not
+// know which runner serves the turn.
+func WithProjectType(ctx context.Context, projectType string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeyProjectType, strings.TrimSpace(projectType))
+}
+
+// ProjectTypeFromContext is the type WithProjectType recorded, "" when none.
+func ProjectTypeFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(ctxKeyProjectType).(string)
+	return strings.TrimSpace(v)
+}
+
+// WithTaskWorkspace records a batch execution's task workspace. WorkingDir
+// prefers it over the project root, so every tool of the turn runs there while
+// the project root stays the turn's identity: FOREBRAIN.md, trust and the
+// permission roots are still resolved from the project, never from this
+// subdirectory.
+func WithTaskWorkspace(ctx context.Context, dir string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeyTaskWorkspace, strings.TrimSpace(dir))
+}
+
+// TaskWorkspaceFromContext is the task workspace WithTaskWorkspace recorded,
+// "" when the turn is not a batch execution.
+func TaskWorkspaceFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(ctxKeyTaskWorkspace).(string)
+	return strings.TrimSpace(v)
+}
+
+// WithTaskContext records the task context paragraph a batch turn's
+// environment carries (task id, execution, workspace, input files). The rules
+// hook wraps it in its own tag when it builds the turn's addendum.
+func WithTaskContext(ctx context.Context, text string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeyTaskContext, text)
+}
+
+// TaskContextFromContext is the task context WithTaskContext recorded, "" when
+// the turn carries none.
+func TaskContextFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(ctxKeyTaskContext).(string)
+	return v
+}
+
+// WorkingDir is the directory a turn's tools act in: the batch execution's
+// task workspace when the turn runs one, else the session's project root that
+// the runner put on the context at the turn's entry. A context without either
+// (a test, a command run outside any turn) falls back to the process
+// directory. The result is absolute and cleaned.
 func WorkingDir(ctx context.Context) (string, error) {
+	if ws := TaskWorkspaceFromContext(ctx); ws != "" {
+		if abs, err := filepath.Abs(ws); err == nil {
+			return filepath.Clean(abs), nil
+		}
+		return filepath.Clean(ws), nil
+	}
 	if root := strings.TrimSpace(ProjectRootFromContext(ctx)); root != "" {
 		if abs, err := filepath.Abs(root); err == nil {
 			return filepath.Clean(abs), nil
@@ -1050,7 +1121,22 @@ func (s *State) GuardWrite(ctx context.Context, absPath string) error {
 	if mode == "plan" && !planTarget {
 		return fmt.Errorf("plan mode: write blocked (only the plan directory is writable); call exit_plan_mode first")
 	}
+	// A batch task's write set is the directory it was given, and nobody is
+	// there to approve an exception (plans/150). The symlink resolution in
+	// pathWithinWorkspace is what stops a link from carrying the write out of
+	// it.
+	if ws := strings.TrimSpace(TaskWorkspaceFromContext(ctx)); ws != "" && !pathWithinWorkspace(absPath, ws) {
+		return fmt.Errorf("batch task: writes are confined to the task workspace %s", ws)
+	}
 	return nil
+}
+
+// pathWithinWorkspace reports whether absPath lands inside the batch task's
+// directory, after resolving both sides: a symlink inside the workspace is a
+// write outside it. pathWithinRoot normalizes through EvalSymlinks (and through
+// the deepest existing parent when the target does not exist yet).
+func pathWithinWorkspace(absPath, workspace string) bool {
+	return pathWithinRoot(absPath, workspace)
 }
 
 // ProtectedWriteReason returns the one sentence the approval prompt shows for a
@@ -2647,6 +2733,48 @@ func (s *State) ReadDirPrunable(dir string) bool {
 			continue
 		}
 		if rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..") {
+			return false
+		}
+	}
+	return true
+}
+
+// ReadPathDeniedIn is ReadPathDenied with the batch task's read boundary
+// applied (plans/150): a task may read its own workspace and the shared skill
+// roots, and nothing else — not the project root it was carved out of, not the
+// Forebrain home, not another task's directory. Outside a batch turn it is
+// exactly ReadPathDenied.
+func (s *State) ReadPathDeniedIn(ctx context.Context, path string) bool {
+	ws := strings.TrimSpace(TaskWorkspaceFromContext(ctx))
+	if ws == "" {
+		return s.ReadPathDenied(path)
+	}
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return false
+	}
+	if s == nil {
+		return true
+	}
+	return !pathWithinRoot(p, ws) && !s.PathUnderLoadedSkillRoot(p)
+}
+
+// ReadDirPrunableIn is ReadDirPrunable with the batch task's read boundary
+// applied: a batch walk may skip any directory that is neither inside the task
+// workspace nor an ancestor of the workspace or of a shared skill root.
+func (s *State) ReadDirPrunableIn(ctx context.Context, dir string) bool {
+	ws := strings.TrimSpace(TaskWorkspaceFromContext(ctx))
+	if ws == "" {
+		return s.ReadDirPrunable(dir)
+	}
+	if s == nil {
+		return true
+	}
+	if pathWithinRoot(dir, ws) || pathWithinRoot(ws, dir) {
+		return false
+	}
+	for _, root := range s.LoadedSkillRoots() {
+		if pathWithinRoot(dir, root) || pathWithinRoot(root, dir) {
 			return false
 		}
 	}

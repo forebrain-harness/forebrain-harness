@@ -146,17 +146,22 @@ func (s *Server) publishGatewayRunEvent(ctx context.Context, sessionID, runID, e
 	if runID == "" {
 		return fmt.Errorf("publish gateway run event: run id is required")
 	}
-	// Every way a run ends carries its checklist facts: the worked line
-	// closes every run, and it names the checklist however the run ended.
+	// Every way a run ends carries its checklist facts and its delivered
+	// files: the worked line closes every run and names the checklist however
+	// the run ended, and the files it delivered are the structured result an
+	// integrating system reads.
 	switch ending := payload.(type) {
 	case event.TurnCompletedPayload:
 		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		ending.RunArtifacts = turn.RunArtifactsOf(ctx, s.Sessions, runID)
 		payload = ending
 	case event.TurnCancelledPayload:
 		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		ending.RunArtifacts = turn.RunArtifactsOf(ctx, s.Sessions, runID)
 		payload = ending
 	case event.TurnErrorPayload:
 		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		ending.RunArtifacts = turn.RunArtifactsOf(ctx, s.Sessions, runID)
 		payload = ending
 	}
 	return s.RunEvents().Publish(ctx, event.NewRunEvent("", runID, strings.TrimSpace(sessionID), eventType, payload, time.Now()))

@@ -1,4 +1,4 @@
-import type { ProjectRecord, TrustLevel } from '@/lib/api'
+import type { ProjectRecord, ProjectType, TrustLevel } from '@/lib/api'
 
 /**
  * The project or folder a new conversation will run in — what the project pill
@@ -16,6 +16,9 @@ export interface ProjectTarget {
   /** True for a folder that is not yet a project. */
   isNew: boolean
   trustLevel: TrustLevel
+  /** The existing project's kind. A batch project takes no conversation, so
+   *  the new-chat page offers its task page instead of a composer (plan 153). */
+  projectType?: ProjectType
 }
 
 /** The target a project row becomes. */
@@ -26,6 +29,7 @@ export function targetFromProject(p: ProjectRecord): ProjectTarget {
     root: p.root,
     isNew: false,
     trustLevel: p.trustLevel ?? (p.trusted ? 'trusted' : 'unknown'),
+    projectType: p.projectType,
   }
 }
 

@@ -2749,3 +2749,85 @@ func TestApprovalFieldLinesCoversEmptyCollections(t *testing.T) {
 		})
 	}
 }
+
+// --- office exit-plan choices (plan 148) ----------------------------------
+
+func TestOfficeExitPlanChoices(t *testing.T) {
+	req := turn.ToolApprovalRequest{
+		ToolName:           "exit_plan_mode",
+		PermissionToolName: "exit_plan_mode",
+		ProjectType:        "office",
+	}
+	choices := buildExitPlanChoices(req, 90)
+	if len(choices) != 3 {
+		t.Fatalf("office choices=%d want 3 (no review models configured)", len(choices))
+	}
+	wantLabels := []string{
+		"Yes, carry out the plan",
+		"No, revise the plan",
+		"Keep the plan only, don't carry it out",
+	}
+	for i, want := range wantLabels {
+		if choices[i].label != want {
+			t.Fatalf("office choice %d label=%q want %q", i+1, choices[i].label, want)
+		}
+	}
+	if !choices[1].isPlanDeny || !choices[1].denyOnce {
+		t.Fatalf("the revise row must reuse the plan-deny input field: %+v", choices[1])
+	}
+	if !choices[2].planOnly || !choices[2].allowOnce || choices[2].clearContext {
+		t.Fatalf("the keep-plan row must be an approve with planOnly: %+v", choices[2])
+	}
+
+	// The decisions the rows commit to.
+	first := (&approvalOverlay{req: req, options: choices, cursor: 0}).commit()
+	if !first.Approved || first.ClearContext || first.PlanOnly {
+		t.Fatalf("carry-out decision=%#v", first)
+	}
+	third := (&approvalOverlay{req: req, options: choices, cursor: 2}).commit()
+	if !third.Approved || !third.PlanOnly || third.ClearContext {
+		t.Fatalf("keep-plan decision=%#v", third)
+	}
+
+	// With reviewers configured the fourth row appears.
+	req.PlanReviewModels = []turn.PlanReviewModelOption{{Provider: "p", Model: "m"}}
+	withReview := buildExitPlanChoices(req, 0)
+	if len(withReview) != 4 {
+		t.Fatalf("office choices with review models=%d want 4", len(withReview))
+	}
+	if withReview[3].label != "Ask another model to review this plan" || !withReview[3].isPlanReview {
+		t.Fatalf("review row=%+v", withReview[3])
+	}
+}
+
+func TestCodingExitPlanChoicesUnchanged(t *testing.T) {
+	req := turn.ToolApprovalRequest{
+		ToolName:           "exit_plan_mode",
+		PermissionToolName: "exit_plan_mode",
+	}
+	choices := buildExitPlanChoices(req, 37)
+	wantLabels := []string{
+		"Yes, clear context (37% used) and proceed",
+		"Yes, proceed",
+		"No, keep planning",
+	}
+	if len(choices) != len(wantLabels) {
+		t.Fatalf("coding choices=%d want %d", len(choices), len(wantLabels))
+	}
+	for i, want := range wantLabels {
+		if choices[i].label != want {
+			t.Fatalf("coding choice %d label=%q want %q", i+1, choices[i].label, want)
+		}
+	}
+	if !choices[0].clearContext || !choices[0].allowOnce {
+		t.Fatalf("coding first row must keep clearContext: %+v", choices[0])
+	}
+	if choices[2].label != "No, keep planning" || !choices[2].isPlanDeny {
+		t.Fatalf("coding deny row drifted: %+v", choices[2])
+	}
+	for i := range choices {
+		if choices[i].planOnly {
+			t.Fatalf("coding rows must never set planOnly: %+v", choices[i])
+		}
+	}
+}

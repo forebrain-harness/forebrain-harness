@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +85,13 @@ func (s *Server) handleRunInput(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// A batch task takes no input: nobody joins an unattended execution, not
+	// one step into its turn and not behind it. The queue is closed too, so
+	// this is the sentence a caller gets instead of a silent drop.
+	if ptype, err := s.projectStore().SessionProjectType(r.Context(), sessionID); err == nil && ptype == state.ProjectTypeBatch {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "batch_takes_no_input"})
+		return
+	}
 	var req runInputRequest
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -119,6 +128,13 @@ func (s *Server) handleRunQueuedInput(w http.ResponseWriter, r *http.Request) {
 	}
 	if !owned {
 		http.NotFound(w, r)
+		return
+	}
+	// A batch task takes no input: nobody joins an unattended execution, not
+	// one step into its turn and not behind it. The queue is closed too, so
+	// this is the sentence a caller gets instead of a silent drop.
+	if ptype, err := s.projectStore().SessionProjectType(r.Context(), sessionID); err == nil && ptype == state.ProjectTypeBatch {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "batch_takes_no_input"})
 		return
 	}
 	var req runInputRequest
@@ -530,6 +546,36 @@ func (s *Server) webMessageAttachesImage(ctx context.Context, uploads, mentionIm
 	return false
 }
 
+// copyIntoTaskInputs copies one attached file into a task execution's inputs/
+// folder under its own name, adding " (2)" and so on when that name is taken.
+// It returns the name the file landed under, which is how the message names it.
+func copyIntoTaskInputs(src, name, inputsDir string) (string, error) {
+	if err := os.MkdirAll(inputsDir, 0o755); err != nil {
+		return "", err
+	}
+	base := filepath.Base(strings.TrimSpace(name))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		base = filepath.Base(src)
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	target := filepath.Join(inputsDir, base)
+	for i := 2; ; i++ {
+		_, statErr := os.Lstat(target)
+		if errors.Is(statErr, fs.ErrNotExist) {
+			break
+		}
+		if statErr != nil {
+			return "", statErr
+		}
+		target = filepath.Join(inputsDir, fmt.Sprintf("%s (%d)%s", stem, i, ext))
+	}
+	if err := copyFile(src, target); err != nil {
+		return "", err
+	}
+	return filepath.Base(target), nil
+}
+
 // prepareWebTurnInput makes everything a message attaches available to the
 // agent before its turn exists. An upload is saved into the workspace and
 // named in the text by the path it was saved at; an image upload and every
@@ -539,6 +585,16 @@ func (s *Server) webMessageAttachesImage(ctx context.Context, uploads, mentionIm
 func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content string, uploads, mentionImages []string) (webTurnInput, error) {
 	text := strings.TrimSpace(content)
 	var blocks, markers, parts []string
+	// A batch execution works in its own task workspace, so what the business
+	// system attached is copied into that execution's inputs/ folder and named
+	// by that path: the file the model reads is the one the next execution is
+	// handed, and both are inside the workspace the task owns.
+	taskInputs := ""
+	if store := s.projectStore(); store != nil && len(uploads) > 0 {
+		if exec, _, ok, err := store.ExecutionForSession(ctx, sessionID); err == nil && ok {
+			taskInputs = filepath.Join(exec.Workspace, "inputs")
+		}
+	}
 	for _, fid := range uploads {
 		fid = strings.TrimSpace(fid)
 		if fid == "" {
@@ -566,6 +622,13 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 		savedAt := absPath
 		if rec != nil && strings.TrimSpace(rec.ProjectPath) != "" {
 			savedAt = rec.ProjectPath
+		}
+		if taskInputs != "" {
+			copied, copyErr := copyIntoTaskInputs(absPath, label, taskInputs)
+			if copyErr != nil {
+				return webTurnInput{}, copyErr
+			}
+			savedAt = "inputs/" + copied
 		}
 		blocks = append(blocks, "[Attachment "+named+"]\nSaved at: "+savedAt+"\nUse your file tools to open and process it as needed.")
 		markers = append(markers, "[Attachment "+label+"]")
@@ -744,6 +807,9 @@ type detachedTurn struct {
 	// parked for any page to resume. Nil when nobody needs telling: a fire
 	// uses it to warn its job's delivery target that the answer is waiting.
 	OnParked func(ctx context.Context, gate *tool.RequiresActionError)
+	// BatchInput is the original task text a batch execution's turn carries,
+	// before any surface prepared it. Nil for every ordinary turn.
+	BatchInput *turn.BatchTurnInput
 }
 
 // startDetachedTurn starts t's turn as a detached run. It is detached for the
@@ -760,6 +826,16 @@ type detachedTurn struct {
 func (s *Server) startDetachedTurn(t detachedTurn) (string, error) {
 	sid := strings.TrimSpace(t.SessionID)
 	ctx := context.Background()
+	// A batch execution's turn is admitted before its run exists, so a refused
+	// turn leaves no run and no row behind. The preview reads only: the
+	// transition that starts the execution happens in Submit, under the
+	// session lock.
+	if batch, err := s.admitDetachedBatchTurn(ctx, sid, &t); err != nil {
+		return "", err
+	} else if batch {
+		// Nobody is watching a scheduled or detached batch turn either.
+		t.Unattended = true
+	}
 	startedAt := time.Now()
 	runID := "ws-" + fmt.Sprint(startedAt.UnixNano())
 	if s.RunRT != nil {
@@ -781,6 +857,32 @@ func (s *Server) startDetachedTurn(t detachedTurn) (string, error) {
 	}
 	go s.runDetachedTurn(runCtx, t, runID, startedAt, inputRT)
 	return runID, nil
+}
+
+// admitDetachedBatchTurn runs a detached turn through the batch admission
+// table when its conversation is a task execution, and fills in the turn's
+// BatchInput so Submit can repeat the decision under the session lock. It
+// reports whether this was a batch turn; a non-batch conversation is left
+// exactly as it was, with no store read at all.
+func (s *Server) admitDetachedBatchTurn(ctx context.Context, sid string, t *detachedTurn) (bool, error) {
+	if t == nil || strings.TrimSpace(sid) == "" {
+		return false, nil
+	}
+	store := s.projectStore()
+	if store == nil {
+		return false, nil
+	}
+	ptype, err := store.SessionProjectType(ctx, sid)
+	if err != nil || ptype != state.ProjectTypeBatch {
+		return false, nil
+	}
+	// The task's own prompt is what the turn is; the admission decides whether
+	// this execution runs on it, on its fixed input, or not at all.
+	t.BatchInput = &turn.BatchTurnInput{Text: t.Prompt}
+	if _, err := turn.AdmitBatchTurn(ctx, store, sid, t.Prompt, false); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // continueAfterUsageLimit starts the continuation. A subagent's continuation is
@@ -849,6 +951,7 @@ func (s *Server) runDetachedTurn(runCtx context.Context, t detachedTurn, runID s
 		RawInput:                 t.Prompt,
 		ExistingRunID:            runID,
 		Unattended:               t.Unattended,
+		BatchInput:               t.BatchInput,
 		AgentContextIsRunContext: true,
 	}, nil)
 	if outcome.Status == turn.TurnWaitingApproval && outcome.Resume != nil {
@@ -990,6 +1093,29 @@ func (s *Server) startCronFire(ctx context.Context, fire turn.CronFire) error {
 	}
 	if err := s.bindSessionToProject(ctx, fire.SessionID, p); err != nil {
 		return err
+	}
+	if p.ProjectType == state.ProjectTypeBatch {
+		// A fire of a batch project is a task of its own: one more thing to
+		// run, not another execution of an old one. Its input is fixed by the
+		// first turn Submit runs, atomically, so nothing is recorded here.
+		task, taskErr := s.projectStore().CreateTask(ctx, state.Task{
+			ProjectID: p.ID,
+			Title:     fire.Title,
+			Origin:    state.TaskOriginCron,
+			OriginRef: fire.Job.ID,
+		})
+		if taskErr != nil {
+			return taskErr
+		}
+		exec, execErr := s.projectStore().AddTaskExecution(ctx, task.ID, fire.SessionID, p.Root)
+		if execErr != nil {
+			return execErr
+		}
+		for _, dir := range []string{"inputs", "outputs", ".work"} {
+			if mkErr := os.MkdirAll(filepath.Join(exec.Workspace, dir), 0o755); mkErr != nil {
+				return mkErr
+			}
+		}
 	}
 	_, err = s.startDetachedTurn(detachedTurn{
 		SessionID:    fire.SessionID,

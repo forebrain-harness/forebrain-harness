@@ -242,6 +242,8 @@ func FailedActionPhrase(toolName string) string {
 		return "update todo"
 	case "user_interaction":
 		return "ask user"
+	case "present_files":
+		return "present files"
 	case "intermediate_tool":
 		return "save notes"
 	case "memories_list":

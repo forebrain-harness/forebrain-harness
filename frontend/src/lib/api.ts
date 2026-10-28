@@ -1,4 +1,4 @@
-import axios, { type AxiosError } from 'axios'
+import axios, { type AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 
 import { toCamelCase, toSnakeCase } from './case'
 import type { ForebrainTokenBudget } from './forebrainGatewayRuntime'
@@ -175,6 +175,67 @@ export interface ChatToolOutput {
   command: string
   text: string
   spoolOmittedBytes: number
+}
+
+/**
+ * One file a conversation delivered (plans 146/153). The engine's own
+ * classification (`kind`, `preview`, `mime`) plus the two facts a reader
+ * needs about the bytes on disk and the three URLs to reach them.
+ * `download_url` → `downloadUrl` by the interceptor, as everywhere here.
+ */
+export interface ArtifactRecord {
+  id: string
+  sessionId: string
+  runId?: string
+  toolCallId?: string
+  name: string
+  title?: string
+  description?: string
+  /** Absolute path on the gateway's machine — audit, never shown as a name. */
+  path: string
+  /** The same file, relative to the project directory. */
+  relPath?: string
+  mime: string
+  kind: string
+  preview?: string
+  size: number
+  sha256?: string
+  /** Who put it there: the model's `present_files`, a kept plan, or a batch
+   *  run's output folder. */
+  origin: string
+  createdAt?: number
+  /** The bytes are no longer on disk; the row outlives them. */
+  missing?: boolean
+  /** The bytes are no longer the version that was presented. */
+  changed?: boolean
+  downloadUrl: string
+  contentUrl: string
+  /** The LibreOffice conversion, for an office document (503 when the
+   *  machine has no LibreOffice). */
+  previewUrl?: string
+  /** An archive's directory listing. */
+  entriesUrl?: string
+}
+
+/** One page of a conversation's delivered files, with the count a pager needs. */
+export interface ArtifactPage {
+  items: ArtifactRecord[]
+  total: number
+}
+
+/** One line of an archive's directory listing. */
+export interface ArtifactEntry {
+  name: string
+  size: number
+  dir: boolean
+}
+
+/** An archive's directory: names only, nothing extracted. */
+export interface ArtifactEntries {
+  entries: ArtifactEntry[]
+  total: number
+  /** The archive held more than the gateway's listing cap. */
+  truncated: boolean
 }
 
 export interface RunInputResponse {
@@ -795,6 +856,104 @@ export interface McpProjectStatus {
   notApplied?: Array<{ name: string; reason: string }>
 }
 
+/**
+ * The three kinds of project (plan 145): 办公创作, 创意编程 and 后台跑批. A
+ * project's type decides how its conversations run, and a conversation freezes
+ * the type it was born with — so changing a project's type only reaches the
+ * sessions opened afterwards.
+ */
+export type ProjectType = 'office' | 'coding' | 'batch'
+
+/**
+ * Why a folder would get the type it would get: inside a Git worktree the
+ * default is 创意编程, anywhere else 办公创作. The gateway decides it — the web
+ * never repeats the `.git` check.
+ */
+export type ProjectTypeDefaultSource = 'git_worktree' | 'non_git'
+
+/** One end-of-run notification target of a batch project (plan 151): a channel
+ *  kind and the recipient on it. */
+export interface TaskNotifyTarget {
+  channel: string
+  target: string
+}
+
+/**
+ * How one execution of a batch task stands (plan 149). `pending` is an
+ * execution whose first turn has not started yet; `stopped` one a person
+ * stopped, which is the only finished state that may be continued.
+ */
+export type TaskStatus = 'pending' | 'running' | 'stopped' | 'completed' | 'failed'
+
+/** The door a task came in by: a business system, this page, a schedule, or a
+ *  channel's conversation. */
+export type TaskOrigin = 'api' | 'web' | 'cron' | 'channel'
+
+/** The execution that speaks for a task — its newest one. */
+export interface TaskLatestExecution {
+  seq: number
+  sessionId: string
+  status: TaskStatus | (string & {})
+  startedAt?: number
+  finishedAt?: number
+  errorCode?: string
+}
+
+/** One row of a batch project's task table (plan 149's list endpoint). */
+export interface ProjectTaskRow {
+  id: string
+  projectId: string
+  title: string
+  externalRef: string
+  origin: TaskOrigin | (string & {})
+  originRef: string
+  /** Whether the task's own input is already recorded. */
+  inputSet: boolean
+  createdAt: number
+  updatedAt: number
+  latest: TaskLatestExecution
+  /** How many executions the task has had. */
+  executions: number
+  /** How many deliverables its newest execution produced. */
+  artifacts: number
+}
+
+/** The task itself, as one task's detail read names it. */
+export interface TaskRecord {
+  id: string
+  projectId: string
+  title: string
+  externalRef: string
+  origin: TaskOrigin | (string & {})
+  originRef: string
+  inputSet: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+/** One execution in a task's history list: its number, its session and how it
+ *  ended. The workspace is relative to the project root. */
+export interface TaskExecutionRow {
+  seq: number
+  sessionId: string
+  status: TaskStatus | (string & {})
+  workspaceRel: string
+  startedAt?: number
+  finishedAt?: number
+  errorCode?: string
+  errorText?: string
+  artifacts: number
+}
+
+/** A recipient a project's channels have already spoken to — what the task
+ *  notification dialog offers instead of asking for an id nobody knows. */
+export interface ChannelTargetRow {
+  channel: string
+  target: string
+  label: string
+  lastSeen?: number
+}
+
 export interface ProjectRecord {
   id: string
   name: string
@@ -806,6 +965,10 @@ export interface ProjectRecord {
   memoryScope: string
   resourceAccess: boolean
   pinned: boolean
+  /** The project's current kind — what a conversation born now would get. */
+  projectType?: ProjectType
+  /** Where a batch project's finished runs are announced. */
+  taskNotify?: TaskNotifyTarget[]
   /** The directory the "save to" dialog last uploaded into, relative to the
    * root ('' is the root). */
   lastAttachDir?: string
@@ -1216,6 +1379,12 @@ export interface ActionApprovalBody {
   execpolicyAmendment?: string[]
   networkPolicyAmendment?: import('./approvalSuggestions').NetworkPolicyAmendment
   requestPermissionsResponse?: RequestPermissionsResponse
+  /**
+   * Approve an office plan as "keep the plan only" (plan 148/153): the plan
+   * file stays as the deliverable and nothing is executed. Sent as
+   * `plan_only`; the engine refuses it on any other kind of gate.
+   */
+  planOnly?: boolean
 }
 
 /** One model a pending exit-plan approval may be handed to for a review. */
@@ -1284,7 +1453,10 @@ export interface ChatSessionsResponse {
 export interface ChatSessionInfo {
   id: string
   title: string
-  project: { id: string; name: string; root?: string; missing?: boolean; lastAttachDir?: string } | null
+  /** The kind the conversation was born with (plan 145): it is frozen at birth,
+   *  so a project edited afterwards keeps this session as it was. */
+  projectType?: ProjectType
+  project: { id: string; name: string; root?: string; missing?: boolean; lastAttachDir?: string; projectType?: ProjectType } | null
 }
 
 export interface SessionTodosResponse {
@@ -1895,6 +2067,53 @@ const api = axios.create({
 
 export const __apiClient = api
 
+/**
+ * Reads that are in flight, keyed by the exact request they make. Two pages
+ * (or two mounts of one page) asking the same question at the same moment
+ * share one answer instead of racing two identical GETs at the gateway.
+ *
+ * An entry lives exactly as long as its request: it is dropped the moment the
+ * answer — or the failure — arrives. This is not a cache. A cache would keep
+ * the answer past the request that produced it, and every read on this surface
+ * is expected to read.
+ */
+const inFlightReads = new Map<string, Promise<AxiosResponse>>()
+
+/** One request's identity: the same method over the same path and query. */
+function readKey(config: InternalAxiosRequestConfig): string {
+  return `${String(config.method ?? 'get').toLowerCase()} ${api.getUri(config)}`
+}
+
+/**
+ * The transport under this layer. It is resolved from the library's own
+ * adapter rather than from the request's: a request's `adapter` is this
+ * instance's default merged into it, which is this function — reading it back
+ * would send the request to itself.
+ */
+function sendRequest(config: InternalAxiosRequestConfig) {
+  return axios.getAdapter(axios.defaults.adapter)(config)
+}
+
+// Reads are merged below the interceptors and above the transport, so every
+// caller still runs its own response chain: the camel-case pass writes a
+// caller's own copy of the data, and one caller cannot see another's response.
+api.defaults.adapter = (config) => {
+  const method = String(config.method ?? 'get').toLowerCase()
+  // A read that can be aborted is the caller's own: merging would hand its
+  // cancellation to everyone who asked the same question.
+  if (method !== 'get' || config.signal) return sendRequest(config)
+  const key = readKey(config)
+  const shared = inFlightReads.get(key)
+  if (shared) return shared.then((response) => ({ ...response }))
+  const pending = sendRequest(config)
+  inFlightReads.set(key, pending)
+  const settled = () => {
+    if (inFlightReads.get(key) === pending) inFlightReads.delete(key)
+  }
+  pending.then(settled, settled)
+  return pending.then((response) => ({ ...response }))
+}
+
 // The browser's gateway session is a cookie, so axios requests carry their
 // credentials without any per-request work. A 401 means the session is gone:
 // report it so the router can offer the sign-in page again.
@@ -2125,8 +2344,14 @@ export const forebrainApi = {
     return api.delete<PrimaryAgentsResponse>(`/agents/primary/${encodeURIComponent(id)}`).then((res) => res.data)
   },
 
-  agentRoster() {
-    return api.get<AgentRosterResponse>('/agents/roster').then((res) => res.data)
+  /** The live roster. With a `sessionId` the primary agent's row answers that
+   *  conversation's own newest run — its id and whether it is working — which
+   *  is how a read-only task page finds the run it may stop (plan 153). */
+  agentRoster(sessionId?: string) {
+    const sid = String(sessionId ?? '').trim()
+    return api
+      .get<AgentRosterResponse>('/agents/roster', ...(sid ? [{ params: { session_id: sid } }] : []))
+      .then((res) => res.data)
   },
 
   /** One page of the subagent table: filtered (`running`), searched and
@@ -2293,6 +2518,58 @@ export const forebrainApi = {
     return api
       .get<ChatToolOutput>(`/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/tool-output/${encodeURIComponent(String(retrieveId))}`)
       .then((res) => res.data)
+  },
+
+  /**
+   * One page of the files this conversation delivered, in delivery order
+   * (plans 146/153). Server-side paged with a total, as every list here is;
+   * the card and the run-end frames carry the same rows, so this is the
+   * account a reload falls back on.
+   */
+  getSessionArtifacts(sessionId: string, opts?: { page?: number; limit?: number }): Promise<ArtifactPage> {
+    const params = new URLSearchParams()
+    if (opts?.page && opts.page > 0) params.set('page', String(opts.page))
+    if (opts?.limit && opts.limit > 0) params.set('limit', String(opts.limit))
+    const query = params.toString()
+    return api
+      .get<ArtifactPage>(`/chat/sessions/${encodeURIComponent(sessionId)}/artifacts${query ? `?${query}` : ''}`)
+      .then((res) => res.data)
+  },
+
+  /** An archive's directory listing — names and sizes, never an extraction. */
+  getArtifactEntries(sessionId: string, artifactId: string): Promise<ArtifactEntries> {
+    return api
+      .get<ArtifactEntries>(`/chat/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/entries`)
+      .then((res) => res.data)
+  },
+
+  /**
+   * A delivered file's bytes, as the renderers that need the whole file read
+   * them (docx-preview, SheetJS, the Markdown and text pages). Inline
+   * disposition: the gateway serves the bytes, and for an HTML or SVG file it
+   * also stamps the sandbox CSP that keeps them an opaque origin.
+   */
+  async getArtifactContent(sessionId: string, artifactId: string): Promise<ArrayBuffer> {
+    const res = await gatewayFetch(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/content?disposition=inline`,
+    )
+    if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
+    return await res.arrayBuffer()
+  },
+
+  /**
+   * Whether an office document can be drawn as a PDF right now. The gateway
+   * converts through LibreOffice and answers 503 `libreoffice_unavailable`
+   * when the machine has none — a fact to show, not an error to throw.
+   */
+  async getArtifactPreviewState(sessionId: string, artifactId: string): Promise<'ready' | 'libreoffice_unavailable'> {
+    const res = await gatewayFetch(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/preview.pdf`,
+      { method: 'HEAD' },
+    )
+    if (res.status === 503) return 'libreoffice_unavailable'
+    if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
+    return 'ready'
   },
 
   sessionEvents(sessionId: string, params?: { cursor?: number; highWater?: number; limit?: number }) {
@@ -3026,6 +3303,7 @@ export const forebrainApi = {
         ...(body?.execpolicyAmendment ? { execpolicyAmendment: body.execpolicyAmendment } : {}),
         ...(body?.networkPolicyAmendment ? { networkPolicyAmendment: body.networkPolicyAmendment } : {}),
         ...(body?.requestPermissionsResponse ? { requestPermissionsResponse: body.requestPermissionsResponse } : {}),
+        ...(body?.planOnly ? { planOnly: true } : {}),
       })),
     }).then(async (r) => {
       if (!r.ok) throw new Error(await r.text())
@@ -3322,15 +3600,28 @@ export const forebrainApi = {
     trust?: boolean
     memoryScope?: string
     resourceAccess?: boolean
+    projectType?: ProjectType
   }) {
     return postJson<ProjectRecord, Record<string, unknown>>('/v1/projects', toSnakeCase(body))
+  },
+
+  /**
+   * The type a folder would get if it were registered right now, and why
+   * (plan 145). It reads filesystem markers and writes nothing: no project row
+   * and no trust decision. The new-project dialog preselects this and shows the
+   * source as its reason; an explicit pick always wins over it.
+   */
+  getProjectDefaultType(root: string) {
+    return api
+      .get<{ projectType: ProjectType; source: ProjectTypeDefaultSource }>('/v1/projects/default-type', { params: { root } })
+      .then((res) => res.data)
   },
 
   projectGet(id: string) {
     return api.get<ProjectRecord>(`/v1/projects/${encodeURIComponent(id)}`).then((res) => res.data)
   },
 
-  projectUpdate(id: string, body: Partial<{ name: string; icon: string; description: string; instructions: string; memoryScope: string; resourceAccess: boolean; trust: boolean }>) {
+  projectUpdate(id: string, body: Partial<{ name: string; icon: string; description: string; instructions: string; memoryScope: string; resourceAccess: boolean; trust: boolean; projectType: ProjectType; taskNotify: TaskNotifyTarget[] }>) {
     return api
       // axios reads the second type argument as the whole response, not the
       // request body, so naming the body there left res.data as unknown.
@@ -3377,6 +3668,82 @@ export const forebrainApi = {
 
   projectSessionCreate(id: string, title: string) {
     return postJson<{ id: string; title: string }, { title: string }>(`/v1/projects/${encodeURIComponent(id)}/sessions`, { title })
+  },
+
+  /**
+   * Opens a task of a batch project — or one more execution of one (plan 149).
+   * `taskId` names an existing task, whose new execution starts from the
+   * inputs the previous one was given; leaving it out makes a new task whose
+   * first message is its content. `origin: 'web'` records the door it came in
+   * by, so a business system's tasks and a person's are told apart.
+   */
+  createTaskSession(projectId: string, body: { title?: string; taskId?: string; externalRef?: string }) {
+    const payload = { ...body, origin: 'web' }
+    return postJson<{
+      id: string
+      title: string
+      project: ProjectRecord
+      task: { id: string; title: string; externalRef: string; origin: string }
+      execution: { seq: number; status: string; workspace: string; workspaceRel: string }
+    }, typeof payload>(`/v1/projects/${encodeURIComponent(projectId)}/sessions`, payload)
+  },
+
+  /**
+   * One page of a batch project's tasks (plan 153): the search reads the title,
+   * the external reference and the id, and the status filter keeps the tasks
+   * whose newest execution holds it. This endpoint pages by `limit` rather than
+   * the list convention's `page_size`, and answers no page of its own, so the
+   * page here is the one asked for, clamped to what the total allows — exactly
+   * what the store does with an offset past the end.
+   */
+  listProjectTasks(projectId: string, query: ListQuery) {
+    const pageSize = query.pageSize || 10
+    const params = new URLSearchParams({ page: String(query.page || 1), limit: String(pageSize) })
+    if (query.q) params.set('q', query.q)
+    const status = String(query.status ?? '').trim()
+    if (status) params.set('status', status)
+    return api
+      .get<{ items?: ProjectTaskRow[]; total?: number }>(`/v1/projects/${encodeURIComponent(projectId)}/tasks`, { params })
+      .then((res) => {
+        const rows = Array.isArray(res.data?.items) ? res.data.items : []
+        const total = Number(res.data?.total ?? 0)
+        const lastPage = Math.max(1, Math.ceil(total / pageSize))
+        return { rows, total, page: Math.min(query.page || 1, lastPage), pageSize }
+      })
+  },
+
+  /** One task with the page of its execution history the table draws. */
+  getTask(taskId: string, query: ListQuery) {
+    const pageSize = query.pageSize || 10
+    const params = new URLSearchParams({ page: String(query.page || 1), limit: String(pageSize) })
+    return api
+      .get<{ task?: TaskRecord; executions?: { items?: TaskExecutionRow[]; total?: number } }>(
+        `/v1/tasks/${encodeURIComponent(taskId)}`,
+        { params },
+      )
+      .then((res) => {
+        const rows = Array.isArray(res.data?.executions?.items) ? res.data.executions.items : []
+        const total = Number(res.data?.executions?.total ?? 0)
+        const lastPage = Math.max(1, Math.ceil(total / pageSize))
+        return {
+          task: res.data?.task ?? null,
+          rows,
+          total,
+          page: Math.min(query.page || 1, lastPage),
+          pageSize,
+        }
+      })
+  },
+
+  /**
+   * The recipients this project's channels have already spoken to (plan 151):
+   * the notification dialog picks one instead of asking for an id nobody
+   * remembers. It only reads — opening a conversation is what records one.
+   */
+  getChannelTargets(projectId: string) {
+    return api
+      .get<{ items?: ChannelTargetRow[] }>(`/v1/projects/${encodeURIComponent(projectId)}/channel-targets`)
+      .then((res) => (Array.isArray(res.data?.items) ? res.data.items : []))
   },
 
   projectMcp(id: string) {

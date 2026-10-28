@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1595,5 +1596,304 @@ func TestShellToolCardKeepsTheOriginalOutputWhenTheModelGetsItCompressed(t *test
 	}
 	if !strings.Contains(body, "progress step") {
 		t.Fatalf("card body must show the original output:\n%s", body)
+	}
+}
+
+// TestBatchShellRequestShape pins the boundary a batch task's shell command is
+// assembled from, without needing an OS sandbox: the task's directory is the
+// whole write set, the read set is that directory plus the shared skill roots,
+// and the project root and Forebrain home are denied (plans/150). The merge
+// that turns those paths into the request a backend receives — and the way a
+// configured allow_read "/" is kept out of it — is pinned by
+// pkg/safety's TestExclusiveReadablePathsDoesNotInheritAllowRead.
+func TestBatchShellRequestShape(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	workspace := filepath.Join(project, "tasks", "T", "1")
+	home := filepath.Join(base, "home")
+	skillRoot := filepath.Join(home, "skills", "demo")
+
+	boundary := batchShellBoundary(workspace, []string{skillRoot}, nil, project, home)
+	if want := []string{workspace}; !reflect.DeepEqual(boundary.writable, want) {
+		t.Fatalf("writable = %#v, want %#v", boundary.writable, want)
+	}
+	wantRead := []string{workspace, skillRoot}
+	if !reflect.DeepEqual(boundary.readable, wantRead) {
+		t.Fatalf("readable = %#v, want %#v", boundary.readable, wantRead)
+	}
+	if len(boundary.denied) != 2 || boundary.denied[0] != project || boundary.denied[1] != home {
+		t.Fatalf("denied = %#v, want the project root and the home", boundary.denied)
+	}
+	// A configured deny survives: the batch boundary narrows, never widens.
+	withDeny := batchShellBoundary(workspace, []string{skillRoot}, []string{filepath.Join(project, "private")}, project, home)
+	if !pathWithinAny(filepath.Join(project, "private"), withDeny.denied) {
+		t.Fatalf("denied = %#v, want the configured deny kept", withDeny.denied)
+	}
+
+	// YOLO and danger-full-access are an operator's choices for an interactive
+	// session, and neither may reach a batch task's shell.
+	t.Setenv("FOREBRAIN_YOLO", "1")
+	batchCfg := batchSandboxConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess})
+	if batchCfg.SandboxMode != appcfg.SandboxModeWorkspaceWrite || batchCfg.DefaultPermissions != "" {
+		t.Fatalf("batch config = %+v, want workspace-write with no named profile", batchCfg)
+	}
+	if batchCfg.DangerFullAccessEnabled() {
+		t.Fatal("a batch task's config must never be danger-full-access")
+	}
+}
+
+// TestBatchShellRejectsEscalationRequests pins that a batch task cannot ask for
+// more than its sandbox: the refusal happens before any command runs, so a
+// model that reaches for the escalation fields learns they do not work
+// (plans/150).
+func TestBatchShellRejectsEscalationRequests(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "tasks", "T", "1")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(workspace, "escalated.txt")
+	shellTool, err := NewShellTool(NewState(workspace), &AgentToolRuntime{Cfg: &appcfg.Root{}})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithTaskWorkspace(context.Background(), workspace)
+	for _, input := range []map[string]any{
+		{"command": "echo x > escalated.txt", "sandbox_permissions": "require_escalated"},
+		{"command": "echo x > escalated.txt", "sandbox_permissions": "with_additional_permissions",
+			"additional_permissions": map[string]any{"file_system": map[string]any{"entries": []any{}}}},
+	} {
+		raw, _ := json.Marshal(input)
+		if _, err := shellTool.Handle(ctx, string(raw)); err == nil {
+			t.Fatalf("batch shell accepted %v", input)
+		}
+		if _, statErr := os.Stat(probe); statErr == nil {
+			t.Fatalf("batch shell ran a refused escalation request: %v", input)
+		}
+	}
+}
+
+// TestBatchShellIsConfinedToTheTaskWorkspace runs the real seatbelt sandbox
+// against a batch task's boundary (plans/150). Nothing here is mocked: every
+// case is a command the OS must run or must refuse, and the whole turn must ask
+// nobody anything.
+func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the seatbelt sandbox only exists on macOS")
+	}
+	if testing.Short() {
+		t.Skip("runs real sandboxed commands")
+	}
+	// YOLO is an operator's choice for an interactive session; it must change
+	// nothing for an unattended batch task.
+	t.Setenv("FOREBRAIN_YOLO", "1")
+
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	workspace := filepath.Join(project, "tasks", "T", "1")
+	sibling := filepath.Join(project, "tasks", "T2", "1")
+	home := filepath.Join(base, "home")
+	skillRoot := filepath.Join(home, "skills", "demo")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{
+		filepath.Join(workspace, "inputs"), filepath.Join(workspace, "outputs"), filepath.Join(workspace, ".work"),
+		sibling, skillRoot, filepath.Join(home, "other"), outside,
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(filepath.Join(sibling, "secret.txt"), "sibling secret")
+	writeFile(filepath.Join(project, "shared.txt"), "project secret")
+	writeFile(filepath.Join(skillRoot, "SKILL.md"), "# demo skill\n")
+	writeFile(filepath.Join(home, "other", "private.txt"), "home secret")
+	writeFile(filepath.Join(outside, "private.txt"), "outside secret")
+	// The home the command is given is the test's own: the boundary denies it,
+	// and that must hold whatever the operator's real home looks like.
+	t.Setenv("HOME", home)
+
+	st := NewState(project)
+	st.ReplaceLoadedSkillCatalog([]LoadedSkill{{Name: "demo", RootDir: skillRoot}})
+	var hookCalls atomic.Int32
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		hookCalls.Add(1)
+		return "", false, nil
+	})
+	// A remembered grant for "/", on top of the configuration's ambient
+	// allow_read "/": neither may reach the request the sandbox receives.
+	snapshot := safety.Snapshot{FileSystemGrants: []safety.FileSystemPermissionGrant{{
+		Entry: safety.FileSystemPermissionEntry{
+			Path:   safety.NewFileSystemPermissionPath(string(filepath.Separator)),
+			Access: safety.FileSystemAccessWrite,
+		},
+		Scope: safety.GrantScopeSession,
+	}}}
+	shellTool, err := NewShellTool(st, &AgentToolRuntime{
+		Home: home, WorkspaceRoot: project, Cfg: &appcfg.Root{},
+		PermissionSnapshot: func() safety.Snapshot { return snapshot },
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithProjectRoot(context.Background(), project)
+	ctx = WithTaskWorkspace(ctx, workspace)
+
+	type shellOutcome struct {
+		stdout   string
+		stderr   string
+		exitCode int
+		err      error
+	}
+	run := func(t *testing.T, input map[string]any) shellOutcome {
+		t.Helper()
+		raw, marshalErr := json.Marshal(input)
+		if marshalErr != nil {
+			t.Fatalf("marshal %v: %v", input, marshalErr)
+		}
+		out, handleErr := shellTool.Handle(ctx, string(raw))
+		body, _ := out.(string)
+		var parsed struct {
+			Stdout   string `json:"stdout"`
+			Stderr   string `json:"stderr"`
+			ExitCode int    `json:"exit_code"`
+		}
+		if body != "" {
+			_ = json.Unmarshal([]byte(body), &parsed)
+		}
+		return shellOutcome{stdout: parsed.Stdout, stderr: parsed.Stderr, exitCode: parsed.ExitCode, err: handleErr}
+	}
+	mustSucceed := func(t *testing.T, command string) string {
+		t.Helper()
+		got := run(t, map[string]any{"command": command})
+		if got.err != nil || got.exitCode != 0 {
+			t.Fatalf("%q must succeed inside the task sandbox: exit=%d err=%v stderr=%s", command, got.exitCode, got.err, got.stderr)
+		}
+		return got.stdout
+	}
+	mustFail := func(t *testing.T, command string) {
+		t.Helper()
+		got := run(t, map[string]any{"command": command})
+		if got.err == nil && got.exitCode == 0 {
+			t.Fatalf("%q must be refused by the task sandbox; it succeeded with stdout=%q", command, got.stdout)
+		}
+	}
+	// mustNotLeak is mustFail plus the mark the command would print if the
+	// sandbox had let it through: a refusal that still returned the file would
+	// otherwise read as a pass.
+	mustNotLeak := func(t *testing.T, command, secret string) {
+		t.Helper()
+		got := run(t, map[string]any{"command": command})
+		if strings.Contains(got.stdout, secret) {
+			t.Fatalf("%q read %q out of the sandbox; stdout=%q", command, secret, got.stdout)
+		}
+		if got.err == nil && got.exitCode == 0 {
+			t.Fatalf("%q must be refused by the task sandbox; it succeeded with stdout=%q", command, got.stdout)
+		}
+	}
+
+	t.Run("the workspace is writable", func(t *testing.T) {
+		mustSucceed(t, "echo ok > outputs/a.txt")
+		body, readErr := os.ReadFile(filepath.Join(workspace, "outputs", "a.txt"))
+		if readErr != nil {
+			t.Fatalf("read the written file: %v", readErr)
+		}
+		if strings.TrimSpace(string(body)) != "ok" {
+			t.Fatalf("outputs/a.txt = %q, want ok", string(body))
+		}
+		if got := mustSucceed(t, "cat outputs/a.txt"); strings.TrimSpace(got) != "ok" {
+			t.Fatalf("reading inside the workspace = %q, want ok", got)
+		}
+	})
+
+	t.Run("another task's directory is unreachable", func(t *testing.T) {
+		mustFail(t, "echo x > ../../T2/1/pwn.txt")
+		if _, statErr := os.Stat(filepath.Join(sibling, "pwn.txt")); statErr == nil {
+			t.Fatal("a batch task wrote into a sibling task's directory")
+		}
+		mustNotLeak(t, "cat ../../T2/1/secret.txt", "sibling secret")
+	})
+
+	t.Run("the rest of the project is unreachable", func(t *testing.T) {
+		mustNotLeak(t, "cat ../../../shared.txt", "project secret")
+	})
+
+	t.Run("the shared skill root is readable", func(t *testing.T) {
+		got := mustSucceed(t, "cat "+filepath.Join(skillRoot, "SKILL.md"))
+		if strings.TrimSpace(got) != "# demo skill" {
+			t.Fatalf("skill read = %q", got)
+		}
+	})
+
+	t.Run("the home and the outside world stay unreadable", func(t *testing.T) {
+		mustNotLeak(t, "cat "+filepath.Join(home, "other", "private.txt"), "home secret")
+		mustNotLeak(t, "cat $HOME/other/private.txt", "home secret")
+		mustNotLeak(t, "cat "+filepath.Join(outside, "private.txt"), "outside secret")
+		mustSucceed(t, "cat /etc/hosts")
+	})
+
+	t.Run("the temp directory is the task's own", func(t *testing.T) {
+		if python, lookErr := exec.LookPath("python3"); lookErr == nil {
+			got := mustSucceed(t, `"`+python+`" -c "import tempfile;print(tempfile.gettempdir())"`)
+			// The interpreter reports the TMPDIR it was handed; compare the
+			// resolved directories so /var and /private/var spellings match.
+			if resolvedWorkingDir(t, strings.TrimSpace(got)) != resolvedWorkingDir(t, filepath.Join(workspace, ".work", "tmp")) {
+				t.Fatalf("TMPDIR = %q, want %q", strings.TrimSpace(got), filepath.Join(workspace, ".work", "tmp"))
+			}
+		}
+		escape := filepath.Join(os.TempDir(), "batch-escape")
+		mustFail(t, `echo x > "`+escape+`"`)
+		if _, statErr := os.Stat(escape); statErr == nil {
+			t.Fatalf("a batch task wrote %s, outside its workspace", escape)
+		}
+	})
+
+	t.Run("the home is the task's own", func(t *testing.T) {
+		wantHome := filepath.Join(workspace, ".work", "home")
+		got := run(t, map[string]any{"command": `echo "$HOME"`})
+		if got.err != nil || got.exitCode != 0 {
+			t.Fatalf("reading HOME must succeed in the task sandbox: exit=%d err=%v stderr=%s", got.exitCode, got.err, got.stderr)
+		}
+		if resolvedWorkingDir(t, strings.TrimSpace(got.stdout)) != resolvedWorkingDir(t, wantHome) {
+			t.Fatalf("HOME = %q, want %q", strings.TrimSpace(got.stdout), wantHome)
+		}
+		// The real home stays unreadable across the boundary, so a login shell
+		// must not be pointed at it: that read is the ".profile: Operation not
+		// permitted" line every batch command used to carry on stderr.
+		if strings.Contains(got.stderr, ".profile: Operation not permitted") {
+			t.Fatalf("the task's shell read a profile out of the real home; stderr=%q", got.stderr)
+		}
+		mustSucceed(t, `echo hi > "$HOME/notes.txt"`)
+		body, readErr := os.ReadFile(filepath.Join(wantHome, "notes.txt"))
+		if readErr != nil {
+			t.Fatalf("read the file written under the task's home: %v", readErr)
+		}
+		if strings.TrimSpace(string(body)) != "hi" {
+			t.Fatalf(".work/home/notes.txt = %q, want hi", string(body))
+		}
+	})
+
+	t.Run("escalation is refused before anything runs", func(t *testing.T) {
+		got := run(t, map[string]any{
+			"command": "echo x > escalated.txt", "sandbox_permissions": "require_escalated",
+			"justification": "needs the host",
+		})
+		if got.err == nil {
+			t.Fatalf("require_escalated must be refused, got exit=%d stdout=%q", got.exitCode, got.stdout)
+		}
+		if !strings.Contains(got.err.Error(), "task sandbox") {
+			t.Fatalf("refusal = %v, want it to name the task sandbox", got.err)
+		}
+		if _, statErr := os.Stat(filepath.Join(workspace, "escalated.txt")); statErr == nil {
+			t.Fatal("the command of a refused escalation ran")
+		}
+	})
+
+	if calls := hookCalls.Load(); calls != 0 {
+		t.Fatalf("a batch turn asked the action hook %d time(s); it must ask nobody anything", calls)
 	}
 }

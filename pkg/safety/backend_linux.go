@@ -210,6 +210,7 @@ func appendFilesystemPolicyArgs(args []string, req CommandRequest) []string {
 		}
 		return normalized[i].access < normalized[j].access
 	})
+	var deferredRemounts []string
 	for _, rule := range normalized {
 		if rule.path == string(filepath.Separator) && rule.access == filesystemMountRead {
 			continue
@@ -225,13 +226,43 @@ func appendFilesystemPolicyArgs(args []string, req CommandRequest) []string {
 			args = append(args, "--bind", rule.path, rule.path)
 		case filesystemMountDeny:
 			if info.IsDir() {
-				args = append(args, "--tmpfs", rule.path, "--remount-ro", rule.path)
+				args = append(args, "--tmpfs", rule.path)
+				if deniedDirHasNestedRule(normalized, rule.path) {
+					// bwrap needs a mount point inside the tmpfs for each nested
+					// bind, and a read-only mount has none to offer: remounting the
+					// parent read-only before its children are mounted makes those
+					// mounts fail. Defer the remount until they exist. The nested
+					// binds are independent mounts, so making the parent read-only
+					// afterwards leaves them writable/readable as each rule asked.
+					deferredRemounts = append(deferredRemounts, rule.path)
+					continue
+				}
+				args = append(args, "--remount-ro", rule.path)
 			} else {
 				args = append(args, "--ro-bind", "/dev/null", rule.path)
 			}
 		}
 	}
+	for _, path := range deferredRemounts {
+		args = append(args, "--remount-ro", path)
+	}
 	return args
+}
+
+// deniedDirHasNestedRule reports whether another filesystem rule sits strictly
+// beneath dir, which is what makes its remount have to wait.
+func deniedDirHasNestedRule(rules []filesystemMountRule, dir string) bool {
+	for _, other := range rules {
+		if other.path == dir {
+			continue
+		}
+		rel, err := filepath.Rel(dir, other.path)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 const linuxNetworkBridgeArgument = "__forebrain_internal_network_bridge__"
