@@ -622,3 +622,70 @@ func TestInterruptToSendSeesASteerItsCallIsCarrying(t *testing.T) {
 		t.Fatal("a committed steer still reported something to send")
 	}
 }
+
+// Esc is the user sending: the delivery that carries the queued steer is
+// reported as delivered where the turn takes it, so the surface moves the
+// message into the transcript at the handoff instead of at the next call's
+// first output.
+func TestInterruptToSendCommitsTheSteerAtTheHandoff(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	rt.bindCallAbort(func() {})
+	if !q.Steer(Input{Text: "keep going", Parts: []llm.ContentPart{llm.Text("keep going")}}) {
+		t.Fatal("the running turn refused the steer")
+	}
+	if !rt.InterruptToSend() {
+		t.Fatal("a queued steer reported nothing to send")
+	}
+	delivery := rt.BeginSteerDelivery(context.Background())
+	if delivery == nil {
+		t.Fatal("the queued steer was not taken for the call")
+	}
+	if !delivery.CommitNow() {
+		t.Fatal("the delivery carrying Esc's intent did not commit at the handoff")
+	}
+	if preview := q.Preview(); preview.Visible() {
+		t.Fatalf("queue still shows the steer Esc sent: %#v", preview)
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 1 || delivered[0].Text != "keep going" {
+		t.Fatalf("delivered = %#v, want the steer Esc sent", delivered)
+	}
+	// Settled at the handoff: the boundary the next call reaches has nothing
+	// left to commit.
+	if delivery.Commit() {
+		t.Fatal("the handoff commit left the delivery still to settle")
+	}
+}
+
+// A steer the user merely queued keeps the ordinary boundary — the model's
+// first output — so a call that fails before answering it can still put it
+// back in the queue. Esc's intent is what changed the moment, nothing else.
+func TestAQueuedSteerWaitsForTheAnswerWithoutEsc(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	if !q.Steer(Input{Text: "keep going", Parts: []llm.ContentPart{llm.Text("keep going")}}) {
+		t.Fatal("the running turn refused the steer")
+	}
+	delivery := rt.BeginSteerDelivery(context.Background())
+	if delivery == nil {
+		t.Fatal("the queued steer was not taken for the call")
+	}
+	if delivery.CommitNow() {
+		t.Fatal("a delivery that carries no Esc intent committed at the handoff")
+	}
+	if p := q.Preview(); len(p.Steers) != 1 || p.Steers[0] != "keep going" {
+		t.Fatalf("the steer left the preview before the model answered it: %#v", p)
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 0 {
+		t.Fatalf("delivered = %#v, want nothing until the model answers", delivered)
+	}
+	// The ordinary boundary still reports it, exactly as before.
+	if !delivery.Commit() {
+		t.Fatal("the call's first output did not commit the steer")
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 1 || delivered[0].Text != "keep going" {
+		t.Fatalf("delivered = %#v, want the steer the model answered", delivered)
+	}
+}

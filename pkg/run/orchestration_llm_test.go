@@ -5672,6 +5672,109 @@ func TestInterruptToSendStopsTheCallAndContinuesTheTurn(t *testing.T) {
 	}
 }
 
+// steerAtInterruptParkedLLM presses Esc in the middle of a streaming call and
+// then parks the call that carries the steer before it writes a byte: the test
+// can then ask what the surface was told while the model was still silent.
+type steerAtInterruptParkedLLM struct {
+	rt      *TurnInputRuntime
+	q       *InputQueue
+	calls   [][]llm.Message
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *steerAtInterruptParkedLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls = append(m.calls, append([]llm.Message(nil), messages...))
+	if len(m.calls) > 1 {
+		// The call that carries the steer: nothing to say yet, and the turn
+		// waits here until the test has looked at the queue.
+		if len(m.calls) == 2 {
+			close(m.entered)
+		}
+		<-m.release
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnDelta != nil {
+		sink.OnDelta("half an answer")
+	}
+	// The real path: the queue stamps the entry's seq and hands it to the
+	// attached runtime, which is what the surface's composer does.
+	if !m.q.Steer(Input{Text: "send it now", Parts: []llm.ContentPart{llm.Text("send it now")}}) {
+		return nil, errors.New("steer refused while the turn was running")
+	}
+	if !m.rt.InterruptToSend() {
+		return nil, errors.New("InterruptToSend refused a queued steer")
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestInterruptToSendHandsTheSteerOverBeforeTheModelAnswers is the timing Esc
+// promises: the surface shows the message it just sent while the next call is
+// still silent. Waiting for that call's first output made the delay equal the
+// provider's time to first token, which is the seconds-long lag users see.
+func TestInterruptToSendHandsTheSteerOverBeforeTheModelAnswers(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+
+	inner := &steerAtInterruptParkedLLM{rt: rt, q: q, entered: make(chan struct{}), release: make(chan struct{})}
+	type outcome struct {
+		res *llm.Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+			llm.WithStreamSink(WithTurnInputRuntime(context.Background(), rt), streamTestSink()),
+			[]llm.Message{llm.UserMessage(llm.Text("go"))},
+			nil,
+		)
+		done <- outcome{res: res, err: err}
+	}()
+	<-inner.entered
+
+	// The call is parked before its first token: whatever the queue says now is
+	// what the surface showed in this window.
+	var delivered []Input
+	for deadline := time.Now().Add(2 * time.Second); len(delivered) == 0 && time.Now().Before(deadline); {
+		delivered = q.TakeDelivered()
+		if len(delivered) == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	close(inner.release)
+	if len(delivered) != 1 || delivered[0].Text != "send it now" {
+		t.Fatalf("the steer was not reported as sent while the call was silent: delivered=%#v", delivered)
+	}
+	if preview := q.Preview(); preview.Visible() {
+		t.Fatalf("queue still shows the steer Esc sent: %#v", preview)
+	}
+
+	select {
+	case out := <-done:
+		if out.err != nil {
+			t.Fatalf("the turn ended after the handoff: %v", out.err)
+		}
+		if out.res == nil || out.res.Message == nil || out.res.Message.TextContent() != "done" {
+			t.Fatalf("unexpected result: %#v", out.res)
+		}
+		found := false
+		for _, msg := range out.res.Session {
+			if msg.TextContent() == "send it now" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the persisted session lost the steer: %v", roles(out.res.Session))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn did not finish after the parked call was released")
+	}
+}
+
 // writeProbeSkill writes a real SKILL.md whose body a test can look for in the
 // request the model receives.
 func writeProbeSkill(t *testing.T) string {

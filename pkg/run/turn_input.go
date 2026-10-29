@@ -44,6 +44,12 @@ type TurnInputRuntime struct {
 	// a steer, which is what lets Esc stop a call that is already streaming an
 	// answer nobody asked to continue.
 	callAbort func()
+	// sendNow records that the user pressed Esc to send what is queued (see
+	// InterruptToSend). The next steer delivery this turn takes carries it, and
+	// the loop then reports those entries as delivered at the handoff instead
+	// of at the next call's first output: Esc is the user sending, so that is
+	// the event the surface must show, not the model's answer to it.
+	sendNow bool
 }
 
 func NewTurnInputRuntime() *TurnInputRuntime {
@@ -139,6 +145,11 @@ func (r *TurnInputRuntime) notifyDelivered(delivered []TurnInputEntry) {
 // boundary resubmits it. The first model-output event commits delivery; failure
 // before that boundary rolls it back.
 //
+// Esc's "send it now" is the one exception, and it is the user's own act: a
+// delivery carrying that intent is committed where the turn takes the entries
+// (see CommitNow), because nobody has to ask the model whether the message was
+// sent — the user already sent it.
+//
 // A delivery's state lives under its runtime's lock, so a steer is always in
 // exactly one place — pending, or an unsettled delivery — and a retraction
 // can never slip between the two.
@@ -148,6 +159,11 @@ type SteerDelivery struct {
 	settled   bool
 	retracted bool   // the user took a steer back out before the call settled
 	abort     func() // abandons the model call carrying the delivery
+	// sendNow carries the user's Esc "send it now" intent into this handoff
+	// (see TurnInputRuntime.InterruptToSend): those entries are reported as
+	// delivered where the turn takes them, not at the next call's first
+	// output.
+	sendNow bool
 }
 
 // BeginSteerDelivery takes the queued steers for a model call that is about to
@@ -174,7 +190,8 @@ func (r *TurnInputRuntime) BeginSteerDelivery(ctx context.Context) *SteerDeliver
 	if len(entries) == 0 {
 		return nil
 	}
-	d := &SteerDelivery{rt: r, entries: entries}
+	d := &SteerDelivery{rt: r, entries: entries, sendNow: r.sendNow}
+	r.sendNow = false
 	r.inflight = append(r.inflight, d)
 	return d
 }
@@ -211,6 +228,21 @@ func (d *SteerDelivery) Commit() bool {
 	r.mu.Unlock()
 	r.notifyDelivered(entries)
 	return true
+}
+
+// CommitNow commits the delivery when the user pressed Esc to send these
+// entries now (see TurnInputRuntime.InterruptToSend): the surface shows the
+// message at the handoff instead of at the next call's first output, which is
+// what makes Esc feel immediate. Entries the user merely queued keep the
+// ordinary boundary — the first model output — so a call that fails before
+// answering them can still put them back in the queue. Callers run it after
+// the entries are in the turn's session: a cancellation in between must not
+// leave the surface showing a message the conversation does not carry.
+func (d *SteerDelivery) CommitNow() bool {
+	if d == nil || !d.sendNow {
+		return false
+	}
+	return d.Commit()
 }
 
 // Rollback returns the entries to the queue because the call that was to carry
@@ -375,6 +407,12 @@ func (r *TurnInputRuntime) InterruptToSend() bool {
 				break
 			}
 		}
+	}
+	// The next delivery this turn takes carries the user's intent: Esc is the
+	// send, so the loop reports those entries as delivered where the turn
+	// takes them instead of waiting for the next call to open its mouth.
+	if waiting {
+		r.sendNow = true
 	}
 	abort := r.callAbort
 	r.mu.Unlock()

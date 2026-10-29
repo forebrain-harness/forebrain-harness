@@ -632,6 +632,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				session = append(session, w.steerMessages(ctx, delivery.Entries())...)
 				inFlightSteers = delivery
 				partialCapture.Set(session)
+				delivery.CommitNow()
 			}
 			continue
 		}
@@ -705,6 +706,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					inFlightSteers = delivery
 					sessionBeforeSteers = len(session)
 					session = append(session, w.steerMessages(ctx, delivery.Entries())...)
+					delivery.CommitNow()
 					continue
 				}
 				if heldAnswer != nil {
@@ -824,6 +826,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					session = append(session, w.steerMessages(ctx, delivery.Entries())...)
 					inFlightSteers = delivery
 					partialCapture.Set(session)
+					delivery.CommitNow()
 					continue
 				}
 			}
@@ -932,6 +935,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			sessionBeforeSteers = len(session)
 			session = append(session, w.steerMessages(ctx, delivery.Entries())...)
 			partialCapture.Set(session)
+			delivery.CommitNow()
 		}
 	}
 }
