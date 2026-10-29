@@ -1717,3 +1717,102 @@ func TestInlineApprovalWithoutASinkHandsTheGateBack(t *testing.T) {
 		t.Fatalf("resolveInlineApproval err = %v, want the gate itself handed back", err)
 	}
 }
+
+// slashImageSession builds a session whose one model accepts images or, with
+// accepts false, a catalog row that cannot — the shape a session model takes
+// when the operator switched to a text-only one.
+func slashImageSession(t *testing.T, accepts bool) (*ChatSession, *capturingLLM) {
+	t.Helper()
+	previous, err := llm.RepoModelsJSONForTest()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if restored, err := llm.Parse(previous); err == nil {
+			llm.SetGlobalCatalogForTest(restored)
+		}
+	})
+	flag := "false"
+	if accepts {
+		flag = "true"
+	}
+	cat, err := llm.Parse([]byte(`{"openai/gpt-main":{"id":"openai/gpt-main","attachment":` + flag + `,"limit":{"context":200000,"output":8000}}}`))
+	require.NoError(t, err)
+	llm.SetGlobalCatalogForTest(cat)
+	model := &capturingLLM{text: "read."}
+	return newCharacterizationSession(t, model), model
+}
+
+// oneImageIn counts the image parts in a message.
+func oneImageIn(parts []llm.ContentPart) int {
+	images := 0
+	for _, part := range parts {
+		if part.Type == llm.ContentTypeImageBase64 {
+			images++
+		}
+	}
+	return images
+}
+
+// A slash command's turn is the draft's turn: expanding the command rewrites
+// only the model text, so the draft's image still reaches the model, and the
+// row keeps a reference to it for the replay.
+func TestDispatchSurfaceTurnSkillCommandKeepsImageAttachment(t *testing.T) {
+	s, model := slashImageSession(t, true)
+	ctx := context.Background()
+	sid := "slash-image-kept"
+	img := newTestPNG(t)
+
+	require.NoError(t, s.DispatchSurfaceTurn(ctx, turn.TurnSubmission{
+		SessionID:   sid,
+		UserText:    "/init",
+		Attachments: []turn.InputAttachment{{Path: img, Label: "probe.png"}},
+	}))
+
+	received := model.lastReceived()
+	require.NotEmpty(t, received)
+	var user *llm.Message
+	for i := range received {
+		if received[i].Role == llm.RoleUser && strings.Contains(received[i].TextContent(), "FOREBRAIN.md") {
+			user = &received[i]
+			break
+		}
+	}
+	require.NotNil(t, user, "the expanded /init prompt must reach the model: %+v", received)
+	require.Equal(t, 1, oneImageIn(user.Parts), "the draft's image must be sent exactly once: %+v", user.Parts)
+
+	rows := captureCharacterization(t, s, sid).Messages
+	require.NotEmpty(t, rows)
+	require.Equal(t, "user", rows[0].Role)
+	require.Equal(t, "/init", rows[0].Content, "resume replay still shows the command the user typed")
+	require.Contains(t, rows[0].PartsJSON, state.PartTypeFileReference)
+	require.Contains(t, rows[0].PartsJSON, img)
+	require.NotContains(t, rows[0].PartsJSON, "base64", "the row references the file rather than carrying its bytes")
+}
+
+// The face of the field bug: a session model that cannot take images must
+// refuse the slash turn and name /model, instead of running blind while the
+// transcript looks illustrated.
+func TestDispatchSurfaceTurnSkillCommandRefusedByTextOnlyModel(t *testing.T) {
+	s, model := slashImageSession(t, false)
+	ctx := context.Background()
+	sid := "slash-image-refused"
+	img := newTestPNG(t)
+
+	err := s.DispatchSurfaceTurn(ctx, turn.TurnSubmission{
+		SessionID:   sid,
+		UserText:    "/init",
+		Attachments: []turn.InputAttachment{{Path: img, Label: "probe.png"}},
+	})
+	require.Error(t, err)
+	var refused *run.ImageInputRefusedError
+	require.ErrorAs(t, err, &refused)
+	require.Contains(t, err.Error(), "does not accept image input")
+	require.Contains(t, err.Error(), "/model")
+	require.Empty(t, model.lastReceived(), "a refused turn must not send a request")
+
+	rows := captureCharacterization(t, s, sid).Messages
+	require.Len(t, rows, 1, "the refused message is kept")
+	require.Equal(t, "user", rows[0].Role)
+	require.Equal(t, "/init", rows[0].Content)
+	require.Contains(t, rows[0].PartsJSON, state.PartTypeFileReference)
+	require.Contains(t, rows[0].PartsJSON, img)
+}

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -126,67 +128,116 @@ func TestToolWritesLedgerCoversEveryFileToolPath(t *testing.T) {
 	}
 }
 
-func TestToolWritesLedgerPrunesOldEntries(t *testing.T) {
+// A window is the shell card's own: a write before or after it is not this
+// command's, so the reader filters by the announced time, not by the shard a
+// line happens to sit in.
+func TestToolWritesLedgerIgnoresEntriesOutsideTheWindow(t *testing.T) {
+	ledger := t.TempDir()
+	t.Setenv(toolWriteDirEnv, ledger)
 	dir := t.TempDir()
-	expired := resolveForLedger(filepath.Join(dir, "expired.txt"))
-	fresh := resolveForLedger(filepath.Join(dir, "fresh.txt"))
+	outside := filepath.Join(dir, "earlier.txt")
+	inside := filepath.Join(dir, "later.txt")
 	now := time.Now()
+	earlier := now.Add(-10 * time.Minute)
 
-	toolWrites.mu.Lock()
-	toolWrites.byPath[expired] = now.Add(-toolWriteRetention - time.Minute)
-	toolWrites.byPath[fresh] = now
-	toolWrites.mu.Unlock()
-	t.Cleanup(func() {
-		toolWrites.mu.Lock()
-		delete(toolWrites.byPath, expired)
-		delete(toolWrites.byPath, fresh)
-		toolWrites.mu.Unlock()
-	})
+	noteToolFileWrite(outside, earlier)
+	noteToolFileWrite(inside, now)
 
-	noteToolFileWrite(filepath.Join(dir, "noted.txt"), now) // runs pruneLocked
-
-	got := toolWritesBetween(now.Add(-2*toolWriteRetention), now)
-	if _, ok := got[expired]; ok {
-		t.Fatal("expired entry survived the prune")
+	near := toolWritesBetween(now.Add(-time.Minute), now)
+	if _, ok := near[resolveForLedger(inside)]; !ok {
+		t.Fatal("a write inside the window was not reported")
 	}
-	if _, ok := got[fresh]; !ok {
-		t.Fatal("fresh entry was pruned")
+	if _, ok := near[resolveForLedger(outside)]; ok {
+		t.Fatal("a write before the window was reported")
+	}
+	old := toolWritesBetween(earlier.Add(-time.Minute), earlier.Add(time.Minute))
+	if _, ok := old[resolveForLedger(outside)]; !ok {
+		t.Fatal("a write inside its own window was not reported")
 	}
 }
 
-func TestToolWritesLedgerDropsOldestOverTheCap(t *testing.T) {
-	dir := t.TempDir()
+// Shards are kept for the retention window and then deleted by whichever
+// process writes next: that is the whole cleanup story, since a shard whose
+// minute is over is never appended to again.
+func TestToolWritesLedgerPrunesExpiredShards(t *testing.T) {
+	ledger := t.TempDir()
+	t.Setenv(toolWriteDirEnv, ledger)
 	now := time.Now()
-	oldest := resolveForLedger(filepath.Join(dir, "cap-oldest.txt"))
-	toolWrites.mu.Lock()
-	toolWrites.byPath[oldest] = now.Add(-20 * time.Minute)
-	for i := 0; i < toolWriteMaxEntries-1; i++ {
-		toolWrites.byPath[fmt.Sprintf("%s/cap-%d.txt", dir, i)] = now.Add(-20*time.Minute + time.Duration(i+1)*time.Millisecond)
-	}
-	toolWrites.mu.Unlock()
-	t.Cleanup(func() {
-		toolWrites.mu.Lock()
-		for i := 0; i < toolWriteMaxEntries-1; i++ {
-			delete(toolWrites.byPath, fmt.Sprintf("%s/cap-%d.txt", dir, i))
-		}
-		toolWrites.mu.Unlock()
-	})
 
-	noted := filepath.Join(dir, "noted.txt")
-	noteToolFileWrite(noted, now) // one over the cap: the oldest entry goes
+	expired := now.Add(-toolWriteRetention - 2*time.Minute)
+	old := filepath.Join(t.TempDir(), "expired.txt")
+	noteToolFileWrite(old, expired)
+	staleShard := filepath.Join(ledger, toolWriteShardName(expired.Unix()/60))
+	if _, err := os.Stat(staleShard); err != nil {
+		t.Fatalf("expired shard was not written: %v", err)
+	}
 
-	toolWrites.mu.Lock()
-	_, oldestAlive := toolWrites.byPath[oldest]
-	_, notedAlive := toolWrites.byPath[resolveForLedger(noted)]
-	size := len(toolWrites.byPath)
-	toolWrites.mu.Unlock()
-	if oldestAlive {
-		t.Fatal("the oldest entry survived a cap-exceeding note")
+	resetToolWriteSweep()
+	noteToolFileWrite(filepath.Join(t.TempDir(), "fresh.txt"), now)
+
+	if _, err := os.Stat(staleShard); !os.IsNotExist(err) {
+		t.Fatalf("expired shard survived the sweep: %v", err)
 	}
-	if !notedAlive {
-		t.Fatal("the new entry was dropped instead of the oldest")
+	if got := toolWritesBetween(expired.Add(-time.Minute), expired.Add(time.Minute)); len(got) != 0 {
+		t.Fatalf("expired announcements still read back: %v", got)
 	}
-	if size != toolWriteMaxEntries {
-		t.Fatalf("ledger size = %d, want the cap %d", size, toolWriteMaxEntries)
+	if got := toolWritesBetween(now.Add(-time.Minute), now); len(got) == 0 {
+		t.Fatal("the new announcement was not readable")
 	}
+}
+
+// The ledger's whole point since plan 186: a shell card in one forebrain must
+// see a write announced by a different forebrain process. Only a second
+// process can prove it, so the test binary re-executes itself.
+func TestToolWritesLedgerIsVisiblySharedAcrossProcesses(t *testing.T) {
+	t.Setenv(toolWriteDirEnv, t.TempDir())
+	path := filepath.Join(t.TempDir(), "written-elsewhere.go")
+	at := time.Now()
+
+	runToolWriteHelperProcess(t, path, at)
+
+	got := toolWritesBetween(at.Add(-time.Minute), at.Add(time.Minute))
+	if _, ok := got[resolveForLedger(path)]; !ok {
+		t.Fatalf("another process's write is invisible to this one: %v", got)
+	}
+}
+
+// runToolWriteHelperProcess makes a second forebrain process announce a write.
+// The child runs the same noteToolFileWrite a file tool runs, in its own
+// address space, so only a ledger outside the process can see it.
+func runToolWriteHelperProcess(t *testing.T, path string, at time.Time) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestToolWritesLedgerHelperProcess$")
+	cmd.Env = append(os.Environ(),
+		toolWriteHelperEnv+"=1",
+		"FB_TOOLWRITES_PATH="+path,
+		"FB_TOOLWRITES_AT="+strconv.FormatInt(at.UnixNano(), 10),
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("helper process: %v\n%s", err, out)
+	}
+}
+
+// TestToolWritesLedgerHelperProcess is the child side of
+// runToolWriteHelperProcess, not a test of its own: without the marker in its
+// environment it does nothing.
+func TestToolWritesLedgerHelperProcess(t *testing.T) {
+	if os.Getenv(toolWriteHelperEnv) == "" {
+		t.Skip("helper process only")
+	}
+	at, err := strconv.ParseInt(os.Getenv("FB_TOOLWRITES_AT"), 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FB_TOOLWRITES_AT: %v\n", err)
+		os.Exit(2)
+	}
+	noteToolFileWrite(os.Getenv("FB_TOOLWRITES_PATH"), time.Unix(0, at))
+	os.Exit(0)
+}
+
+// resetToolWriteSweep clears the per-process rate limit so a test's own write
+// performs the sweep it is about to assert on.
+func resetToolWriteSweep() {
+	toolWriteSweepMu.Lock()
+	toolWriteSweptAt = time.Time{}
+	toolWriteSweepMu.Unlock()
 }

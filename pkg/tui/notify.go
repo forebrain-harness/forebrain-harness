@@ -1880,6 +1880,11 @@ type Session interface {
 	StartApprovalRecovery(sessionID string)
 	SetToolApprovalSink(sink turn.ToolApprovalDecisionSink)
 	CancelActiveRun() bool
+	// InterruptToSend stops the conversation's in-flight model call so the
+	// steers queued behind it are sent now, inside the same turn — Esc's
+	// "interrupt and send immediately". False means nothing was waiting, so
+	// the surface keeps its other meaning for Esc: stop the run.
+	InterruptToSend(sessionID string) bool
 	// SurfaceInputQueue returns the conversation's input queue — the one
 	// place queue semantics are decided. The surface enqueues, recalls,
 	// previews and drains through it; the queue belongs to the conversation,

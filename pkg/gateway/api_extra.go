@@ -212,6 +212,11 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/file-changes", s.handleSessionFileChanges)
 	chatSessions.Post("/:id/file-changes/revert", s.handleSessionFileChangesRevert)
 	chatSessions.Get("/:id/file-changes/diff", s.handleSessionFileChangesDiff)
+	// Esc in the conversation itself: stop the model call in flight so the
+	// steers queued behind it go now, inside the same turn. The answer is the
+	// engine's, not the surface's guess — false means Esc keeps its other
+	// meaning there and the surface stops the run.
+	chatSessions.Post("/:id/interrupt-send", s.handleSessionInterruptSend)
 	// A subagent's own view talks to that subagent through these — the same
 	// semantics the terminal's subagent view has (plan 007), decided in the
 	// engine (plan 005): steer, recall, interrupt-and-send, context, and the

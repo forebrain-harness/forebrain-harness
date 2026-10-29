@@ -1611,6 +1611,26 @@ func (s *ChatSession) InterruptSubagentToSend(sessionID, agentKey string) bool {
 	return run.InterruptSubagentToSend(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
 }
 
+// InterruptToSend is Esc's "interrupt and send immediately" in the
+// conversation's own view: the engine stops the model call in flight and the
+// turn goes on carrying the steers, exactly as a subagent's does. It reads the
+// controller that holds this conversation's TUI runs — the one CancelActiveRun
+// resolves through — which a session without an environment owns separately
+// from the runner's.
+func (s *ChatSession) InterruptToSend(sessionID string) bool {
+	if s == nil {
+		return false
+	}
+	s.tuiRunMu.Lock()
+	ctl := s.tuiControlLocked()
+	runID := s.tuiRunIDLocked(strings.TrimSpace(sessionID))
+	s.tuiRunMu.Unlock()
+	if runID == "" {
+		return false
+	}
+	return ctl.InterruptToSend(runID)
+}
+
 // DiscardSubagentInput empties the subagent's queued input and returns how many
 // messages were dropped — the same discard the conversation's own queue gets
 // when its conversation is left.

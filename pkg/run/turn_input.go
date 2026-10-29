@@ -39,6 +39,11 @@ type TurnInputRuntime struct {
 	// back until its call commits (see RetractSteer).
 	inflight []*SteerDelivery
 	onChange []func(delivered []TurnInputEntry)
+	// callAbort abandons the model call in flight; nil between calls. The
+	// orchestration loop binds it for every request, not only the ones carrying
+	// a steer, which is what lets Esc stop a call that is already streaming an
+	// answer nobody asked to continue.
+	callAbort func()
 }
 
 func NewTurnInputRuntime() *TurnInputRuntime {
@@ -311,6 +316,77 @@ func (r *TurnInputRuntime) RetractSteer(seq int) bool {
 	}
 	r.mu.Unlock()
 	return false
+}
+
+// bindCallAbort registers how to abandon the model call about to be made. The
+// orchestration loop binds it before every request and retires it with endCall
+// once that request returned, so the handle always describes exactly one call.
+func (r *TurnInputRuntime) bindCallAbort(abort func()) {
+	if r == nil || abort == nil {
+		return
+	}
+	r.mu.Lock()
+	r.callAbort = abort
+	r.mu.Unlock()
+}
+
+// endCall retires the abandon handle of the call that just returned: the next
+// request binds its own, and between calls there is nothing to abandon.
+func (r *TurnInputRuntime) endCall() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.callAbort = nil
+	r.mu.Unlock()
+}
+
+// InterruptToSend is Esc's "interrupt and send immediately" for the
+// conversation's own turn: when a steer is waiting — queued, or carried by a
+// call that has not settled — the call in flight is abandoned so the loop asks
+// again carrying it, and the turn keeps running. It reports false when nothing
+// is waiting, so the surface can keep Esc's other meaning for that state: stop
+// the run. Nothing waiting is the whole of that rule — a call streaming, a tool
+// executing and an approval gate all read false on an empty queue, and Esc then
+// cancels exactly as it does without this method.
+//
+// A waiting steer with no call in flight still reports true: the message goes
+// out with the next call the turn makes, which is what the user asked for, and
+// the surface must not fall back to cancelling around it.
+func (r *TurnInputRuntime) InterruptToSend() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	waiting := false
+	for _, entry := range r.pending {
+		if entry.Mode == TurnInputModeSteer {
+			waiting = true
+			break
+		}
+	}
+	// A delivery's entries have left pending but the model has not begun
+	// answering them (Commit retires the delivery), so they are still waiting
+	// to be read. Every delivery carries steers only: the take filters them.
+	if !waiting {
+		for _, d := range r.inflight {
+			if !d.settled && len(d.entries) > 0 {
+				waiting = true
+				break
+			}
+		}
+	}
+	abort := r.callAbort
+	r.mu.Unlock()
+	if !waiting {
+		return false
+	}
+	// Outside the lock: abandoning a call runs the caller's teardown, which
+	// must not hold the runtime between the take above and this abort.
+	if abort != nil {
+		abort()
+	}
+	return true
 }
 
 func (r *TurnInputRuntime) DrainAll() []TurnInputEntry {

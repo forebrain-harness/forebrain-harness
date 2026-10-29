@@ -158,6 +158,29 @@ func TestShellCardDoesNotClaimAFileAnotherToolWrote(t *testing.T) {
 	}
 }
 
+// …and the same holds when the writer is a different forebrain process: two
+// terminals share one machine and one work tree, not one address space, so the
+// card must not claim the edit the other session is making (plan 186 — the
+// `go vet` card that reported another session's git_install.go diff).
+func TestShellCardDoesNotClaimAFileAnotherProcessWrote(t *testing.T) {
+	ctx := context.Background()
+	root := newShellDiffRepo(t)
+	t.Setenv(toolWriteDirEnv, t.TempDir())
+	run := beginShellEditDiff(ctx, "go vet ./...", root, false)
+	if run == nil {
+		t.Fatal("beginShellEditDiff returned nil in a git work tree")
+	}
+	file := filepath.Join(root, "git_install.go")
+	if err := os.WriteFile(file, []byte("package skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runToolWriteHelperProcess(t, file, time.Now()) // a second forebrain wrote it
+	diff := run.finish(ctx, "go vet ./...", 0, nil)
+	if diff != nil && len(diff.Files) > 0 {
+		t.Fatalf("the card claimed another process's write: %+v", diff.Files)
+	}
+}
+
 // …and it still reports the file the command itself wrote, so the fix is not a
 // blanket suppression.
 func TestShellCardStillClaimsWhatTheCommandWrote(t *testing.T) {

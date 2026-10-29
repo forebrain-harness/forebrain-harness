@@ -983,8 +983,8 @@ type shellEditDiffRun struct {
 	left        bool
 	shared      bool
 	startedAt   time.Time
-	// externalWrites is the seam a test injects to name the sibling-tool
-	// writes inside its window; nil means the process-wide tool-write ledger.
+	// externalWrites is the seam a test injects to name the tool writes inside
+	// its window; nil means the shared tool-write ledger.
 	externalWrites func(from, to time.Time) map[string]struct{}
 }
 
@@ -1076,8 +1076,9 @@ func (r *shellEditDiffRun) finish(ctx context.Context, command string, exitCode 
 			external = toolWritesBetween
 		}
 		// The snapshot pair answers "what changed on disk during the window",
-		// not "what did this command change": subtract the paths sibling
-		// tools announced inside it (plan 180).
+		// not "what did this command change": subtract the paths any
+		// forebrain tool of this user announced inside it, whichever process
+		// it ran in (plan 180, plan 186).
 		diff = dropExternalWrites(diff, external(r.startedAt, time.Now()))
 	}
 	if diff == nil {

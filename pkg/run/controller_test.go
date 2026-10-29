@@ -117,6 +117,45 @@ func TestControllerClaimsResumeOnce(t *testing.T) {
 	}
 }
 
+func TestControllerInterruptToSendReachesTheRunRuntime(t *testing.T) {
+	c := NewController()
+	rt := NewTurnInputRuntime()
+	if !c.TrackRuntime("r-1", "s1", func() {}, rt) {
+		t.Fatal("track")
+	}
+	aborted := 0
+	rt.bindCallAbort(func() { aborted++ })
+	// An empty queue is the owner's rule: Esc there cancels the run the way it
+	// always has, so the engine answers false and the surface falls back.
+	if c.InterruptToSend("r-1") {
+		t.Fatal("a run with nothing waiting reported something to send")
+	}
+	if aborted != 0 {
+		t.Fatalf("abort called %d times with an empty queue; want 0", aborted)
+	}
+	q := c.SessionQueue("s1")
+	if !q.Steer(Input{Text: "keep going", Parts: []llm.ContentPart{llm.Text("keep going")}}) {
+		t.Fatal("steer")
+	}
+	if !c.InterruptToSend("r-1") {
+		t.Fatal("a queued steer did not reach the run's runtime")
+	}
+	if aborted != 1 {
+		t.Fatalf("abort called %d times; want 1", aborted)
+	}
+	if c.InterruptToSend("missing") {
+		t.Fatal("an unknown run reported something to send")
+	}
+	// A finished run has no turn left to send into, even with a steer queued:
+	// that message belongs to the next turn.
+	if !c.Finish("r-1") {
+		t.Fatal("finish")
+	}
+	if c.InterruptToSend("r-1") {
+		t.Fatal("a finished run reported something to send")
+	}
+}
+
 func TestControllerTracksProvidedInputRuntime(t *testing.T) {
 	c := NewController()
 	rt := NewTurnInputRuntime()

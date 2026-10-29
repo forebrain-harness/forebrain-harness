@@ -548,3 +548,77 @@ func TestClosedQueueTakesNothing(t *testing.T) {
 		t.Fatalf("a second Close changed the lanes: %d/%d/%d", len(p.Steers), len(p.Rejected), len(p.FollowUp))
 	}
 }
+
+func TestInterruptToSendReportsFalseWithNothingWaiting(t *testing.T) {
+	rt := NewTurnInputRuntime()
+	aborted := 0
+	rt.bindCallAbort(func() { aborted++ })
+	if rt.InterruptToSend() {
+		t.Fatal("an empty runtime reported something to send")
+	}
+	// A follow-up is not a steer: it waits for the turn boundary by definition,
+	// so Esc keeps its other meaning.
+	rt.Enqueue(TurnInputModeFollowUp, []llm.ContentPart{llm.Text("a follow up")})
+	if rt.InterruptToSend() {
+		t.Fatal("a follow-up alone reported something to send")
+	}
+	if aborted != 0 {
+		t.Fatalf("abort called %d times with nothing waiting; want 0", aborted)
+	}
+}
+
+func TestInterruptToSendAbortsTheCallInFlight(t *testing.T) {
+	rt := NewTurnInputRuntime()
+	aborted := 0
+	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("keep going")})
+	rt.bindCallAbort(func() { aborted++ })
+	if !rt.InterruptToSend() {
+		t.Fatal("a queued steer reported nothing to send")
+	}
+	if aborted != 1 {
+		t.Fatalf("abort called %d times; want 1", aborted)
+	}
+	// The handle belongs to the call until the loop retires it, so a second
+	// press abandons that same call again rather than going quiet.
+	if !rt.InterruptToSend() {
+		t.Fatal("a queued steer stopped reporting something to send")
+	}
+	if aborted != 2 {
+		t.Fatalf("abort called %d times after a second press; want 2", aborted)
+	}
+	rt.endCall()
+	if !rt.InterruptToSend() {
+		t.Fatal("the steer is still waiting after the call was retired")
+	}
+	if aborted != 2 {
+		t.Fatalf("abort called %d times after endCall; want the retired handle left alone", aborted)
+	}
+}
+
+func TestInterruptToSendWithoutACallStillReportsTrue(t *testing.T) {
+	rt := NewTurnInputRuntime()
+	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("keep going")})
+	// Between calls — a tool executing, an approval gate waiting — there is no
+	// handle to fire, but the message still goes out with the next call, so the
+	// surface must not fall back to cancelling.
+	if !rt.InterruptToSend() {
+		t.Fatal("a waiting steer between calls reported nothing to send")
+	}
+}
+
+func TestInterruptToSendSeesASteerItsCallIsCarrying(t *testing.T) {
+	rt := NewTurnInputRuntime()
+	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("keep going")})
+	delivery := rt.BeginSteerDelivery(context.Background())
+	if delivery == nil {
+		t.Fatal("the queued steer was not taken for the call")
+	}
+	// Out of pending, but unsettled: the model has not begun answering it.
+	if !rt.InterruptToSend() {
+		t.Fatal("a steer riding an unsettled call reported nothing to send")
+	}
+	delivery.Commit()
+	if rt.InterruptToSend() {
+		t.Fatal("a committed steer still reported something to send")
+	}
+}

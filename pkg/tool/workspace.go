@@ -16,7 +16,8 @@ func attachTurnDiff(output map[string]any, absPath string, before, after []byte)
 		return
 	}
 	output["turn_diff"] = summary
-	// One call == one tool just finished changing this path: the tool-write
-	// ledger a concurrent shell card subtracts from its own window (plan 180).
+	// One call == one tool just finished changing this path: the announcement
+	// a concurrent shell card subtracts from its own window — in any forebrain
+	// process of this user, not just this one (plan 186).
 	noteToolFileWrite(absPath, time.Now())
 }

@@ -2871,10 +2871,10 @@ func TestTokenEstimateOptionsMapsDownload(t *testing.T) {
 }
 
 // TestSystemPromptFollowsProjectType pins the static main-agent system prompt
-// of each conversation type. The coding branch is the byte-for-byte prompt
-// creative coding has always had; office and batch replace it with their own
-// constants. The three must stay apart: a coding byte that moves breaks the
-// prefix cache of every existing coding conversation.
+// of each conversation type. Every type is its own base prompt plus the shared
+// native plan-workflow contract plus that type's working-notes suffix, in that
+// order and exactly once each; the equality is what proves it. A coding byte
+// that moves breaks the prefix cache of every existing coding conversation.
 func TestSystemPromptFollowsProjectType(t *testing.T) {
 	newRunner := func(projectType string) *Runner {
 		cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
@@ -2894,17 +2894,17 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 		return r
 	}
 	coding := newRunner(state.ProjectTypeCoding).MainAgentDescription()
-	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agentIntermediateToolPromptSuffix
+	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agent.BugRootCausePrompt + agent.SubagentUserRulingPrompt + agent.AdvisorWorkflowPrompt + agent.PlanHandoffQualityPrompt + agentIntermediateToolPromptSuffix
 	if coding != wantCoding {
 		t.Errorf("coding system prompt changed:\n got: %q\nwant: %q", coding, wantCoding)
 	}
 	office := newRunner(state.ProjectTypeOffice).MainAgentDescription()
-	wantOffice := "Forebrain Harness agent" + agent.OfficeWorkPrompt + agent.OfficeNotesPromptSuffix
+	wantOffice := "Forebrain Harness agent" + agent.OfficeWorkPrompt + agent.SubagentUserRulingPrompt + agent.AdvisorWorkflowPrompt + agent.PlanHandoffQualityPrompt + agent.OfficeNotesPromptSuffix
 	if office != wantOffice {
 		t.Errorf("office system prompt:\n got: %q\nwant: %q", office, wantOffice)
 	}
 	batch := newRunner(state.ProjectTypeBatch).MainAgentDescription()
-	wantBatch := "Forebrain Harness agent" + agent.BatchTaskPrompt + agent.OfficeNotesPromptSuffix
+	wantBatch := "Forebrain Harness agent" + agent.BatchTaskPrompt + agent.AdvisorWorkflowPrompt + agent.PlanHandoffQualityPrompt + agent.OfficeNotesPromptSuffix
 	if batch != wantBatch {
 		t.Errorf("batch system prompt:\n got: %q\nwant: %q", batch, wantBatch)
 	}
@@ -2913,5 +2913,22 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 	}
 	if strings.Contains(office, agentIntermediateToolPromptSuffix) || strings.Contains(batch, agentIntermediateToolPromptSuffix) {
 		t.Error("office or batch system prompt still contains the coding working-notes suffix")
+	}
+	if strings.Contains(office, agent.BugRootCausePrompt) || strings.Contains(batch, agent.BugRootCausePrompt) {
+		t.Error("the bug-reproduction rule is coding-only and must not reach office or batch")
+	}
+	if !strings.Contains(coding, agent.BugRootCausePrompt) {
+		t.Error("a coding conversation must carry the bug-reproduction rule")
+	}
+	// The user-may-address-a-subagent rule is for the interactive types only:
+	// batch is unattended, so nobody can address its subagents directly.
+	if !strings.Contains(coding, agent.SubagentUserRulingPrompt) || !strings.Contains(office, agent.SubagentUserRulingPrompt) {
+		t.Error("a coding or office conversation must know the user can address a subagent directly")
+	}
+	if strings.Contains(batch, agent.SubagentUserRulingPrompt) {
+		t.Error("the subagent-audience rule must not reach an unattended batch conversation")
+	}
+	if !strings.Contains(batch, "You cannot ask anyone anything.") {
+		t.Error("batch system prompt no longer forbids asking")
 	}
 }

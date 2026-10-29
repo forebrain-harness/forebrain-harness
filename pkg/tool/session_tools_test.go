@@ -20,8 +20,20 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
+// toolWriteHelperEnv marks the re-executed test binary that plays the "another
+// forebrain process" side of the tool-write ledger tests. It keeps TestMain
+// from pinning scratch directories, so the helper writes where its parent
+// looks (see tool_writes_test.go).
+const toolWriteHelperEnv = "FB_TOOLWRITES_HELPER"
+
 // TestMain puts the segmentation dictionary beside the test binary: the memory
 // tools search through it, and read it from there as forebrain does.
+//
+// It also pins the two directories tests could otherwise write to on a real
+// install: FOREBRAIN_HOME (an agent session exports the user's own) and the
+// tool-write ledger, which lives outside any home on purpose (plan 186). An
+// inherited value is overridden, never merely filled in — a suite that ran
+// against the ambient home would write into it.
 func TestMain(m *testing.M) {
 	executable, err := os.Executable()
 	if err == nil {
@@ -31,7 +43,23 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "install segmentation dictionary:", err)
 		os.Exit(1)
 	}
-	os.Exit(m.Run())
+	var scratch []string
+	if os.Getenv(toolWriteHelperEnv) == "" {
+		for _, name := range []string{"FOREBRAIN_HOME", toolWriteDirEnv} {
+			dir, err := os.MkdirTemp("", "forebrain-tool-test-")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "create scratch directory:", err)
+				os.Exit(1)
+			}
+			scratch = append(scratch, dir)
+			os.Setenv(name, dir)
+		}
+	}
+	code := m.Run()
+	for _, dir := range scratch {
+		os.RemoveAll(dir)
+	}
+	os.Exit(code)
 }
 
 func withSession(ctx context.Context, sid string) context.Context {
@@ -737,6 +765,115 @@ func TestExitPlanModeWithoutPlanOnlyIsUnchanged(t *testing.T) {
 	if final.PlanKeptOnly {
 		t.Fatalf("an ordinary approval must not set plan_kept_only: %+v", final)
 	}
+}
+
+// TestApprovedPlanExecutionPromptContract pins what an approved plan tells its
+// executor. This text is the immediate on_completion of exit_plan_mode and the
+// recurring implementation reminder, so it is the one place the execution rules
+// live; a missing clause here is a rule no model ever receives.
+func TestApprovedPlanExecutionPromptContract(t *testing.T) {
+	const planFile = "/tmp/plans/add-s3-sync.md"
+	got := ApprovedPlanExecutionPrompt(planFile)
+
+	for name, want := range map[string]string{
+		"identity":              "You are the primary executor of an approved plan.",
+		"plan path":             planFile,
+		"plan still writable":   "It remains writable in this mode; keep the original plan readable beside the implementation record.",
+		"no separate executor":  "Do not create a separate executor, worktree, branch, commit, merge or push",
+		"drift check":           "Run the plan's drift check first",
+		"dependency check":      "If the plan declares dependencies, confirm they are complete.",
+		"stop on drift":         "Any load-bearing content mismatch, stale plan or missing dependency is a STOP",
+		"step verification":     "Run every verification command and confirm its expected result before moving on.",
+		"scope":                 "Touch only in-scope files or deliverables and preserve unrelated user work.",
+		"stop conditions":       "Stop immediately and report when a plan STOP condition occurs",
+		"no weakened tests":     "Do not hide a failure by weakening its test.",
+		"adaptation record":     "Record the adaptation and its evidence",
+		"done criteria rerun":   "Re-run every done criterion",
+		"change set review":     "Inspect the complete change set and compare it with the scope",
+		"test review":           "assert behavior that could regress rather than merely making a command pass",
+		"two-cycle stop":        "After two edit-and-review cycles without convergence, stop and report",
+		"implementation record": "append exactly the heading " + state.ImplementationHeading,
+		"report status":         "STATUS: COMPLETE | STOPPED",
+		"report steps":          "STEPS: per step",
+		"report stopped":        "STOPPED BECAUSE:",
+		"report files":          "FILES CHANGED: list",
+		"report notes":          "NOTES: deviations",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the execution contract is missing its %s rule: %q", name, want)
+		}
+	}
+
+	// Each insertion point is filled exactly once: a duplicated plan path or
+	// heading would mean the format string and the arguments drifted apart.
+	if n := strings.Count(got, planFile); n != 1 {
+		t.Errorf("the plan path appears %d times, want 1", n)
+	}
+	if n := strings.Count(got, state.ImplementationHeading); n != 1 {
+		t.Errorf("the implementation heading appears %d times, want 1", n)
+	}
+}
+
+// TestApprovedPlanExecutionPromptIsTheExitPayload checks that an ordinary
+// approval hands the primary agent this contract verbatim, that the response
+// keys and the human-readable message are unchanged, and that the plan-only
+// branch answers without any execution contract at all.
+func TestApprovedPlanExecutionPromptIsTheExitPayload(t *testing.T) {
+	t.Run("ordinary approval", func(t *testing.T) {
+		st, rt, home, sid := officePlanOnlySetup(t, `{"decision":"accept"}`)
+		tool, err := newExitPlanModeToolFor(st, home, "", rt)
+		if err != nil {
+			t.Fatalf("new: %v", err)
+		}
+		raw, err := tool.Handle(withSession(context.Background(), sid), `{}`)
+		if err != nil {
+			t.Fatalf("handle: %v", err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(raw.(string)), &obj); err != nil {
+			t.Fatalf("decode result: %v", err)
+		}
+		wantKeys := []string{"mode", "plan_file", "message", "on_completion"}
+		if len(obj) != len(wantKeys) {
+			t.Fatalf("result keys = %v, want exactly %v", obj, wantKeys)
+		}
+		for _, k := range wantKeys {
+			if _, has := obj[k]; !has {
+				t.Fatalf("result missing %q: %s", k, raw)
+			}
+		}
+		planFile := state.PlanPathForSession(home, "", sid)
+		if got, want := obj["on_completion"], ApprovedPlanExecutionPrompt(planFile); got != want {
+			t.Fatalf("on_completion is not the shared execution contract:\n got: %q\nwant: %q", got, want)
+		}
+		if want := "Exited plan mode. You can now make edits, run tools, and take actions. Implement the approved plan in " + planFile + "."; obj["message"] != want {
+			t.Fatalf("human-readable message drifted:\n got: %q\nwant: %q", obj["message"], want)
+		}
+	})
+
+	t.Run("plan only", func(t *testing.T) {
+		st, rt, home, sid := officePlanOnlySetup(t, `{"decision":"accept","plan_only":true}`)
+		tool, err := newExitPlanModeToolFor(st, home, "", rt)
+		if err != nil {
+			t.Fatalf("new: %v", err)
+		}
+		raw, err := tool.Handle(withSession(context.Background(), sid), `{}`)
+		if err != nil {
+			t.Fatalf("handle: %v", err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(raw.(string)), &obj); err != nil {
+			t.Fatalf("decode result: %v", err)
+		}
+		planFile := state.PlanPathForSession(home, "", sid)
+		contract := ApprovedPlanExecutionPrompt(planFile)
+		if _, has := obj["on_completion"]; has {
+			t.Fatalf("a kept plan must not carry an execution contract: %s", raw)
+		}
+		if text, has := obj["message"].(string); has && strings.Contains(text, strings.TrimSpace(contract)) {
+			t.Fatalf("a kept plan must not carry the execution contract in its message: %s", raw)
+		}
+	})
 }
 
 // The gateway honours an approved office exit_plan_mode by switching the

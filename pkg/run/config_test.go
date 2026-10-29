@@ -1811,7 +1811,6 @@ func TestOfficePlanPromptsGolden(t *testing.T) {
 		"officeMainPlanFullFormat":         officeMainPlanFullFormat,
 		"officeSubagentPlanFull":           officeSubagentPlanFull,
 		"officeSubagentPlanSparseFormat":   officeSubagentPlanSparseFormat,
-		"officeImplementationFullFormat":   officeImplementationFullFormat,
 		"officeImplementationSparseFormat": officeImplementationSparseFormat,
 	}
 	if len(golden) != len(constants) {
@@ -1855,7 +1854,7 @@ You are returning to plan mode after having previously exited it. A plan file ex
 `
 			}
 			got := buildOfficePlanModeReminder(planDir, planFile, planExists, "full", isReentry, false)
-			if want := fmt.Sprintf(officeMainPlanFullFormat, planDir, exists, reentry); got != want {
+			if want := fmt.Sprintf(officeMainPlanFullFormat, planDir, exists, reentry) + agent.SinglePlanModePrompt; got != want {
 				t.Fatalf("office main full (exists=%v reentry=%v) mismatch", planExists, isReentry)
 			}
 		}
@@ -1883,9 +1882,11 @@ You are returning to plan mode after having previously exited it. A plan file ex
 		fmt.Sprintf(officeImplementationSparseFormat, planImplementationReminderMarker, planFile, state.ImplementationHeading); got != want {
 		t.Fatalf("office implementation sparse mismatch: %q vs %q", got, want)
 	}
+	// The full office reminder is the shared execution contract: marker first,
+	// then the same text coding conversations receive.
 	if got, want := buildOfficePlanImplementationReminder(planFile, "full"),
-		fmt.Sprintf(officeImplementationFullFormat, planImplementationReminderMarker, planFile, state.ImplementationHeading); got != want {
-		t.Fatalf("office implementation full mismatch: %q vs %q", got, want)
+		planImplementationReminderMarker+" - read carefully.\n\n"+tool.ApprovedPlanExecutionPrompt(planFile); got != want {
+		t.Fatalf("office implementation full must be the shared execution contract: %q vs %q", got, want)
 	}
 }
 
@@ -1893,6 +1894,65 @@ func TestCodingPlanReminderUnchanged(t *testing.T) {
 	got := buildPlanModeReminder(filepath.Join("plans", "p", "s"), filepath.Join("plans", "p", "s", "plan.md"), true, "full", false, false)
 	if !strings.Contains(got, "Phase 1 - Initial Understanding: explore the codebase") {
 		t.Fatalf("coding plan reminder lost its codebase workflow: %q", got)
+	}
+	// The single-plan branch belongs to the main agent's full reminder only:
+	// a sparse reminder or a subagent reminder that repeated it would pay for
+	// the same text twice on every request.
+	if !strings.Contains(got, agent.SinglePlanModePrompt) {
+		t.Fatal("coding full main plan reminder is missing the single-plan workflow")
+	}
+	if !strings.Contains(got, agent.BugRootCausePrompt) {
+		t.Fatal("coding plan mode must require a reproduction before the plan")
+	}
+	// A decision that belongs to the user is asked for, not taken - including
+	// whatever a plan review came back with.
+	if !strings.Contains(got, "Do use user_interaction for a decision that is the user's to make") {
+		t.Fatal("coding plan mode must send the user's own decisions to the user")
+	}
+	if !strings.Contains(got, "including every open question a plan review returned") {
+		t.Fatal("coding plan mode must say that review open questions reach the user")
+	}
+	sparse := buildPlanModeReminder(filepath.Join("plans", "p", "s"), filepath.Join("plans", "p", "s", "plan.md"), true, "sparse", false, false)
+	if strings.Contains(sparse, agent.SinglePlanModePrompt) {
+		t.Fatal("coding sparse plan reminder must not repeat the single-plan workflow")
+	}
+	if strings.Contains(sparse, agent.BugRootCausePrompt) {
+		t.Fatal("coding sparse plan reminder must not repeat the bug-reproduction rule")
+	}
+	for _, kind := range []string{"full", "sparse"} {
+		sub := buildPlanModeReminder(filepath.Join("plans", "p", "s"), filepath.Join("plans", "p", "s", "plan.md"), true, kind, false, true)
+		if strings.Contains(sub, agent.SinglePlanModePrompt) {
+			t.Fatalf("coding %s subagent plan reminder must not repeat the single-plan workflow", kind)
+		}
+	}
+}
+
+// TestApprovedPlanExecutionReminderIsShared keeps the recurring reminder and
+// the immediate exit_plan_mode payload on one contract: coding and office full
+// reminders are the marker plus exactly the text the tool hands back, so the
+// two surfaces cannot drift apart. The sparse reminders keep their short
+// wording, and every reminder still starts with the marker the counter reads.
+func TestApprovedPlanExecutionReminderIsShared(t *testing.T) {
+	planFile := filepath.Join("plans", "p", "s", "add-s3-sync.md")
+	want := planImplementationReminderMarker + " - read carefully.\n\n" + tool.ApprovedPlanExecutionPrompt(planFile)
+	for name, got := range map[string]string{
+		"coding full": buildPlanImplementationReminder(planFile, "full"),
+		"office full": buildOfficePlanImplementationReminder(planFile, "full"),
+	} {
+		if got != want {
+			t.Fatalf("%s reminder is not the shared execution contract:\n got: %q\nwant: %q", name, got, want)
+		}
+	}
+	for name, got := range map[string]string{
+		"coding sparse": buildPlanImplementationReminder(planFile, "sparse"),
+		"office sparse": buildOfficePlanImplementationReminder(planFile, "sparse"),
+	} {
+		if !strings.HasPrefix(got, planImplementationReminderMarker) {
+			t.Fatalf("%s reminder must start with the counting marker: %q", name, got)
+		}
+		if strings.Contains(got, "You are the primary executor of an approved plan") {
+			t.Fatalf("%s reminder must keep its short wording, not the full contract: %q", name, got)
+		}
 	}
 }
 
@@ -1954,7 +2014,7 @@ func TestPlanKeptOnlySuppressesImplementationReminder(t *testing.T) {
 	if !strings.Contains(text, planImplementationReminderMarker) {
 		t.Fatalf("an approved exit without plan-only must still remind: %q", text)
 	}
-	if !strings.Contains(text, "You are carrying out an approved plan.") {
-		t.Fatalf("office implementation reminder must use office wording: %q", text)
+	if !strings.Contains(text, "You are the primary executor of an approved plan") {
+		t.Fatalf("office implementation reminder must carry the shared execution contract: %q", text)
 	}
 }

@@ -13926,7 +13926,7 @@ func TestPlanReviewRunsAsAPlanReviewerSubagentOnTheChosenModel(t *testing.T) {
 	if !strings.Contains(call.task, "1. Ship it.") || !strings.Contains(call.task, "Add S3 sync.") {
 		t.Fatalf("review task missing material:\n%s", call.task)
 	}
-	if !strings.Contains(call.task, "Read the code this touches before you judge the plan") {
+	if !strings.Contains(call.task, "Investigate the project sources this plan touches") {
 		t.Fatalf("review task must order investigation before judgement:\n%s", call.task)
 	}
 }
@@ -21767,7 +21767,7 @@ func TestApplySlashOutcomeCarriesExplicitSkillSelection(t *testing.T) {
 		SkillPath:         "/skills/review/SKILL.md",
 	}
 
-	handled, continueRun, submission, _ := applySlashOutcome(context.Background(), nil, nil, nil, state, "review", "/review review this diff", outcome)
+	handled, continueRun, submission, _ := applySlashOutcome(context.Background(), nil, nil, nil, state, "review", "/review review this diff", nil, outcome)
 	if !handled || !continueRun {
 		t.Fatalf("handled=%v continue=%v", handled, continueRun)
 	}
@@ -25650,26 +25650,9 @@ const sampleTurnDiff = "turn diff: `/repo/internal/foo/bar.go` (+2/-1)\n\n" +
 	" }\n" +
 	"```"
 
-func TestLooksLikeTurnDiff(t *testing.T) {
-	path, ok := looksLikeTurnDiff(sampleTurnDiff)
-	if !ok {
-		t.Fatal("expected turn diff to be recognized")
-	}
-	if path != "/repo/internal/foo/bar.go" {
-		t.Fatalf("path = %q", path)
-	}
-
-	if _, ok := looksLikeTurnDiff("stdout:\n\n```text\nhello\n```"); ok {
-		t.Fatal("non-turn-diff body should not match")
-	}
-	if _, ok := looksLikeTurnDiff("turn diff: `/x` (+1/-0)\nno fence here"); ok {
-		t.Fatal("missing ```diff fence should not match")
-	}
-}
-
 func TestRenderTurnDiffCard_Structure(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, 0)
+	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark)
 	if !ok {
 		t.Fatal("expected render to succeed")
 	}
@@ -25700,7 +25683,7 @@ func TestRenderTurnDiffCard_Structure(t *testing.T) {
 
 func TestRenderTurnDiffCard_BandsAndHighlight(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, 0)
+	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark)
 	if !ok {
 		t.Fatal("render failed")
 	}
@@ -25725,7 +25708,7 @@ func TestRenderTurnDiffCard_BandsAndHighlight(t *testing.T) {
 
 func TestRenderTurnDiffCard_NoColor(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, 0)
+	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark)
 	if !ok {
 		t.Fatal("render failed")
 	}
@@ -25734,57 +25717,6 @@ func TestRenderTurnDiffCard_NoColor(t *testing.T) {
 	}
 	if !strings.Contains(block, "11 - "+sp(4)+"x := oldValue") {
 		t.Fatalf("gutter + marker still expected under NO_COLOR:\n%s", block)
-	}
-}
-
-// TestExtractDiffFence_CodeFenceInDiffContent verifies that extractDiffFence
-// does not prematurely stop at backtick-fence lines that appear inside the diff
-// body (e.g. "  ```sh" or "  ``` " from a Markdown file's code blocks).
-func TestExtractDiffFence_CodeFenceInDiffContent(t *testing.T) {
-	// Simulates a turn diff for a Markdown file that contains ```sh and ```
-	// code fences. The diff body has context lines "  ```sh" and "  ``` " that
-	// must NOT be treated as the closing fence of the ```diff block.
-	content := "turn diff: `FOREBRAIN.md` (+3/-1)\n\n" +
-		"```diff\n" +
-		"--- FOREBRAIN.md:before\n" +
-		"+++ FOREBRAIN.md:after\n" +
-		"@@ -1,6 +1,8 @@\n" +
-		" # Title\n" +
-		" \n" +
-		"  ```sh\n" + // code fence in diff context — must not close
-		"+ pnpm install\n" +
-		"  pnpm build\n" +
-		"  ```\n" + // closing code fence in diff context — must not close
-		"+ \n" +
-		"+ ## New Section\n" +
-		"```" // actual closing fence
-
-	fence := extractDiffFence(content)
-	if fence == "" {
-		t.Fatal("extractDiffFence returned empty")
-	}
-	// Must contain all lines up to the real closing fence.
-	if !strings.Contains(fence, "```sh") {
-		t.Fatalf("missing ```sh context line in extracted fence:\n%s", fence)
-	}
-	if !strings.Contains(fence, "+ pnpm install") {
-		t.Fatalf("missing + pnpm install in extracted fence:\n%s", fence)
-	}
-	if !strings.Contains(fence, "## New Section") {
-		t.Fatal("fence truncated before ## New Section — code-fence line was treated as closing fence")
-	}
-	// The actual closing fence must NOT be in the extracted body.
-	if strings.Contains(fence, "\n```") {
-		t.Fatal("extracted fence contains the closing ``` — it wasn't stripped")
-	}
-}
-
-func TestExtractDiffFence_ExactClosingFence(t *testing.T) {
-	// The closing fence line "```" (no leading whitespace) must still terminate.
-	content := "turn diff: `/x.go` (+1/-0)\n\n```diff\n+hello\n```"
-	fence := extractDiffFence(content)
-	if fence != "+hello" {
-		t.Fatalf("expected '+hello', got %q", fence)
 	}
 }
 
@@ -30796,7 +30728,7 @@ func TestNewSessionAsksForProjectServersBeforeSwitching(t *testing.T) {
 	cmds := newCommandController(session, renderer, selector, nil, t.TempDir())
 	state := &streamState{sessionID: "sess-a", session: session}
 
-	handled, _, _, _ := applySlashOutcome(context.Background(), cmds, renderer, nil, state, "/new", "/new", SlashOutcome{
+	handled, _, _, _ := applySlashOutcome(context.Background(), cmds, renderer, nil, state, "/new", "/new", nil, SlashOutcome{
 		Handled:         true,
 		Reply:           "Started a new conversation.",
 		SessionChanged:  true,

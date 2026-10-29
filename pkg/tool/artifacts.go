@@ -186,13 +186,13 @@ func classifyDetected(contentType string) (kind, mimeType, preview string) {
 }
 
 type presentFileInput struct {
-	Path        string `json:"path" jsonschema:"description=The file, relative to the project directory or an absolute path inside it."`
-	Title       string `json:"title,omitempty" jsonschema:"description=A short human title for the card, e.g. 2026 Q3 operating review. Defaults to the file name."`
-	Description string `json:"description,omitempty" jsonschema:"description=One sentence on what the file is and what it is for."`
+	Path        string `json:"path" jsonschema_description:"The file, relative to the project directory or an absolute path inside it."`
+	Title       string `json:"title,omitempty" jsonschema_description:"A short human title for the card, e.g. 2026 Q3 operating review. Defaults to the file name."`
+	Description string `json:"description,omitempty" jsonschema_description:"One sentence on what the file is and what it is for."`
 }
 
 type presentFilesInput struct {
-	Files []presentFileInput `json:"files" jsonschema:"minItems=1,maxItems=20,description=Every final deliverable of this task, in the order the user should see them."`
+	Files []presentFileInput `json:"files" jsonschema:"minItems=1,maxItems=20" jsonschema_description:"Every final deliverable of this task, in the order the user should see them."`
 }
 
 // presentFilesToolNote is the one sentence the tool answers with; the card

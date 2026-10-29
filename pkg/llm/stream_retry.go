@@ -41,6 +41,18 @@ type streamRetryLLM struct {
 // opened tells the user, the rest stay quiet.
 var streamingFallbackWarned atomic.Bool
 
+// retryAnnounceNumber is the number a retry announcement carries: the retry's
+// own 1-based ordinal, every announced retry counted. It is not the shared
+// budget's spend, because the decision table also retries without spending it —
+// a machine that slept through the request gets up to maxSleptThrough retries of
+// its own — and an announcement numbered 0 is read downstream as no retry at
+// all: the pending notice would never be armed, so its Cleared would never fire
+// and the status line would outlive the recovery until the turn ended. Clamped
+// to the cap the line divides by, which the slept-through retries sit past.
+func retryAnnounceNumber(c streamRetryCounts, maxRetries int) int {
+	return min(c.retries+c.sleptThrough, maxRetries)
+}
+
 func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools []*Tool) (*Result, error) {
 	maxRetries := r.cfg.maxAttempts - 1
 	if maxRetries < 0 {
@@ -258,15 +270,16 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 					return nil, acct.fail(err)
 				}
 				if r.cfg.notify != nil {
+					retryNo := retryAnnounceNumber(counts, maxRetries)
 					r.cfg.notify(notifyCtx, TransportRetry{
-						Retry:        counts.retries,
+						Retry:        retryNo,
 						Total:        maxRetries,
 						Wait:         sleep,
 						Err:          err,
 						Status:       statusOf(err),
 						NonStreaming: attemptNonStreaming,
 					})
-					pendingRetry.Store(int64(counts.retries))
+					pendingRetry.Store(int64(retryNo))
 				}
 				if werr := wait(sleep); werr != nil {
 					return nil, acct.fail(werr)

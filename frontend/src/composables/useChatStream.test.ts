@@ -3963,6 +3963,46 @@ describe('conversation tool and approval timeline', () => {
     }
   }))
 
+  /**
+   * Esc while messages wait on the run asks the engine first: only a refusal
+   * ("nothing waiting") falls back to stopping the run, which is what Esc means
+   * on an empty queue.
+   */
+  it('Esc interrupts the run before cancelling it', withFakeWebSocket(async () => {
+    try {
+      FakeChatWebSocket.instances = []
+      const stream = useChatStream()
+      stream.sessionId.value = 'esc-1'
+      const sent = stream.send('a question')
+      const socket = FakeChatWebSocket.instances[0]!
+      socket.open()
+      socket.message({ op: 'run_started', request_id: 'req-probe', run_id: 'run-1', session_id: 'esc-1' })
+      expect(stream.contextSignals.value.activeRunId).toBe('run-1')
+
+      const interrupt = vi.spyOn(forebrainApi, 'sessionInterruptSend').mockResolvedValue({ interrupted: true })
+      const runCancel = vi.spyOn(forebrainApi, 'runCancel').mockResolvedValue({} as never)
+
+      // A steer waiting: the engine stops the call and the run goes on, so the
+      // page must not stop the run underneath it.
+      await stream.sendPendingSteersAfterInterrupt()
+      expect(interrupt).toHaveBeenCalledWith('esc-1')
+      expect(runCancel).not.toHaveBeenCalled()
+
+      // Nothing waiting: the engine refuses and Esc keeps its other meaning.
+      interrupt.mockResolvedValue({ interrupted: false })
+      await stream.sendPendingSteersAfterInterrupt()
+      expect(runCancel).toHaveBeenCalledWith('run-1')
+
+      socket.message({ op: 'run_completed', request_id: 'req-probe', run_id: 'run-1', data: { text: 'done' } })
+      await sent
+      expect(stream.isStreaming.value).toBe(false)
+      interrupt.mockRestore()
+      runCancel.mockRestore()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  }))
+
   /** A send whose conversation is being compacted for it, before its run exists. */
   function startWaitingSend(sessionId: string) {
     FakeChatWebSocket.instances = []

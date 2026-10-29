@@ -818,7 +818,7 @@ func TestBuildPromptDelimitsRequestAndPlan(t *testing.T) {
 // before judging, or it reviews the plan against the plan.
 func TestBuildPromptOrdersInvestigationBeforeJudgement(t *testing.T) {
 	prompt := BuildPrompt(Request{Task: "Add S3 sync.", Plan: "# Plan"})
-	read := strings.Index(prompt, "Read the code this touches before you judge the plan")
+	read := strings.Index(prompt, "Investigate the project sources this plan touches")
 	if read < 0 {
 		t.Fatalf("task must direct the reviewer to the source first:\n%s", prompt)
 	}
@@ -832,6 +832,12 @@ func TestBuildPromptSaysWhenTheRequestIsUnavailable(t *testing.T) {
 	if !strings.Contains(prompt, "the originating request is not available") &&
 		!strings.Contains(prompt, "The originating request is not available") {
 		t.Fatalf("prompt must admit the missing task context:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "project sources") {
+		t.Fatalf("the fallback must send the reviewer to the project sources:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "the code it touches") {
+		t.Fatalf("the fallback must not describe a code-only plan:\n%s", prompt)
 	}
 }
 
@@ -851,6 +857,32 @@ func TestComposeDenyFeedbackWithoutReviewsIsTheUsersOwnWords(t *testing.T) {
 	}
 	if got := ComposeDenyFeedback([]PlanReviewResult{{Text: "   "}}, ""); got != "" {
 		t.Fatalf("an empty review must contribute nothing, got %q", got)
+	}
+}
+
+func TestComposeDenyFeedbackDemandsTheUsersAnswersToOpenQuestions(t *testing.T) {
+	// A review that raises a choice only the user can make must reach the user,
+	// not be settled by the planner. The hand-back names the tool so the planner
+	// asks instead of deciding, and says where the answers belong.
+	got := ComposeDenyFeedback([]PlanReviewResult{
+		{Model: Model{Provider: "zhipuai", Model: "glm-5.3"}, Text: "Verdict: approve with changes. Open question: keep the cache or drop it?"},
+	}, "")
+
+	for _, want := range []string{
+		"Settle the open questions before you rewrite anything",
+		"ONE user_interaction call",
+		"with your recommended answer for each",
+		"Do not decide such a question yourself",
+		"do not resubmit the plan for approval while one is still open",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("deny feedback does not require the user's answer: missing %q\n%s", want, got)
+		}
+	}
+	// An approval without reviews is the user's words alone: the review rule must
+	// not attach to a plain refusal.
+	if got := ComposeDenyFeedback(nil, "just revise the intro"); strings.Contains(got, "user_interaction") {
+		t.Fatalf("a refusal with no review must not carry the review rule:\n%s", got)
 	}
 }
 

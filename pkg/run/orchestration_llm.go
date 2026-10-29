@@ -185,6 +185,10 @@ func (w *toolOrchestrationLLM) steerMessages(ctx context.Context, entries []Turn
 // WrapToolOrchestrationLLM exposes the canonical execution-chain wrapper used
 // by Forebrain Harness product runtimes when tool results must be governed before they are
 // replayed into model context.
+//
+// A request abandoned to send the steers queued behind it — Esc's "interrupt and
+// send immediately" — is not a cancellation: the turn keeps what that call
+// produced and asks again carrying them, so one run still reaches one boundary.
 func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	if w == nil || w.inner == nil {
 		return nil, fmt.Errorf("nil orchestrated llm")
@@ -468,6 +472,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			inFlightSteers.bindAbort(func() { abandonCall(errSteerRetracted) })
 		}
 		callCtx = withSteerDeliveryResponseStart(callCtx, inFlightSteers)
+		// Every call gets an abandon handle, not only the ones carrying a steer:
+		// Esc has to be able to stop a call that is already streaming an answer
+		// nobody asked to continue.
+		if rt := TurnInputRuntimeFromContext(ctx); rt != nil {
+			rt.bindCallAbort(func() { abandonCall(errInterruptToSend) })
+		}
 		// The failure decisions ride on what this one request had produced
 		// when it died, and a finish is built from what it completed: both
 		// are recorded per model call, so the loop resets them each time it
@@ -519,7 +529,14 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		}
 		transcript.beginAttempt()
 		res, err := w.inner.Execute(callCtx, session, tools)
+		// Read the cause before retiring the call context: a CancelCauseFunc
+		// handed nil records plain context.Canceled, which would hide an
+		// interrupt that already landed.
+		interruptedToSend := errors.Is(context.Cause(callCtx), errInterruptToSend)
 		abandonCall(nil)
+		if rt := TurnInputRuntimeFromContext(ctx); rt != nil {
+			rt.endCall()
+		}
 		if err == nil {
 			// A successful non-streaming call has no response-start event, so commit
 			// here. For streaming calls this is an idempotent no-op: the first event
@@ -543,6 +560,80 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			if incomplete.Complete {
 				incomplete = nil // a response that fully arrived is an ordinary one
 			}
+		}
+		// Esc stopped this call to send what was waiting behind it. What the
+		// model already said stays in the turn, the steers the abandoned call
+		// was carrying go back to the queue so they ride the next call together
+		// with everything queued since, and the loop asks again instead of
+		// returning: the run does not end, so the surface keeps one clock and
+		// shows no "Worked for". A call that answered before the abort landed
+		// settles below like any other; only one that stopped short is here.
+		if interruptedToSend && ctx.Err() == nil && (err != nil || res == nil || res.Message == nil) {
+			// The answer text this call produced ends here, at the same boundary
+			// a provider's own text-block end marks: the surface seals the live
+			// block before the steer opens a user block, so the words it already
+			// showed stay their own block instead of being replaced by the answer
+			// the next call produces. The same call ends the collector's block,
+			// which is what puts those words into the session below.
+			if sink := llm.StreamSinkFrom(callCtx); sink != nil && sink.OnTextBlockDone != nil {
+				sink.OnTextBlockDone()
+			}
+			accumulateUsage(&totalUsage, usageCopy(res))
+			// Unwind the abandoned call's steers before appending anything: the
+			// tail this truncation drops is exactly those user messages, and the
+			// partial answer belongs after it.
+			carried := 0
+			if inFlightSteers != nil {
+				carried = len(session) - sessionBeforeSteers
+			}
+			if inFlightSteers != nil && inFlightSteers.Rollback() {
+				session = session[:sessionBeforeSteers]
+			}
+			// A mid-turn compaction that finished inside the abandoned call
+			// published its checkpoint, and the checkpoint is the base the rest
+			// of this branch builds on: taking it at the next successful call
+			// instead would replace the answer this call already showed and the
+			// steers appended below it. It stops before the provisional tail, so
+			// the tail is trimmed off it the same way.
+			if replaced, ok := adoptionSink.take(); ok && len(replaced) >= carried {
+				session = replaced[:len(replaced)-carried]
+			}
+			// Reminders injected into the abandoned request belong to that
+			// request alone: the next call injects them again, and adopting them
+			// here would apply positions computed for a slice that is gone.
+			reminderSink.discard()
+			inFlightSteers = nil
+			heldAnswer = nil
+			answer := collector.result().Message
+			if exec != nil && exec.dispatched() {
+				// Calls the stream already started settle here: the ones that
+				// finished keep their results, the rest read as interrupted. The
+				// run's own ctx is alive, so this is a settlement, not a
+				// cancellation, and the turn goes on after it.
+				settled := exec.abort(ctx)
+				if answer != nil && (len(answer.ToolCalls) > 0 || strings.TrimSpace(answer.TextContent()) != "") {
+					session = append(session, *answer)
+					noteResponseCompleted()
+				}
+				for _, result := range settled {
+					session = append(session, toolResultMessage(result))
+				}
+			} else if answer != nil && strings.TrimSpace(answer.TextContent()) != "" {
+				// Nothing of this call is worth a session entry when the model had
+				// not written a word yet: an empty assistant message would be a
+				// message the next request has to carry and answer.
+				session = append(session, *answer)
+				noteResponseCompleted()
+			}
+			partialCapture.Set(session)
+			transcript.flush(context.WithoutCancel(ctx), session, modelForTranscript(), nil)
+			if delivery := TurnInputRuntimeFromContext(ctx).BeginSteerDelivery(ctx); delivery != nil {
+				sessionBeforeSteers = len(session)
+				session = append(session, w.steerMessages(ctx, delivery.Entries())...)
+				inFlightSteers = delivery
+				partialCapture.Set(session)
+			}
+			continue
 		}
 		// A cancelled request whose tools already started settles them here:
 		// the ones that finished keep their results, the rest are interrupted,
@@ -848,6 +939,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 // errSteerRetracted is the cause a model call is abandoned with when the user
 // takes back a queued steer it was carrying before the model began answering.
 var errSteerRetracted = errors.New("queued steer retracted before the model answered it")
+
+// errInterruptToSend is the cause a model call is abandoned with when the user
+// pressed Esc with steers waiting: the call stops where it is and the same turn
+// asks again carrying them. It is not a cancellation — nothing the turn
+// produced is thrown away and no turn boundary is reached.
+var errInterruptToSend = errors.New("interrupt to send the queued steers")
 
 // withSteerDeliveryResponseStart binds a provisional delivery to the provider's
 // response boundary. The provider fires OnResponseStarted before forwarding its

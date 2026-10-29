@@ -541,7 +541,7 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 		"  error 12:6 missing return [gopls syntax]\n" +
 		"  warning 30:1 unused variable\n" +
 		"```"
-	block, ok := renderTurnDiffCard(withDiag, DiffThemeDark, 0)
+	block, ok := renderTurnDiffCard(withDiag, DiffThemeDark)
 	if !ok {
 		t.Fatal("expected render to succeed")
 	}
@@ -570,7 +570,7 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 		"internal/foo/bar.go\n" +
 		"  error 12:6 missing return [gopls syntax]\n" +
 		"```"
-	block, ok = renderTurnDiffCard(singular, DiffThemeDark, 0)
+	block, ok = renderTurnDiffCard(singular, DiffThemeDark)
 	if !ok {
 		t.Fatal("expected singular render to succeed")
 	}
@@ -584,7 +584,7 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 		"```text\n" +
 		"diagnostics for internal/foo/bar.go are still being computed and will follow\n" +
 		"```"
-	block, ok = renderTurnDiffCard(pending, DiffThemeDark, 0)
+	block, ok = renderTurnDiffCard(pending, DiffThemeDark)
 	if !ok {
 		t.Fatal("expected pending render to succeed")
 	}
@@ -593,12 +593,230 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 	}
 
 	// Without a section the card keeps its diff-only shape.
-	block, ok = renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, 0)
+	block, ok = renderTurnDiffCard(sampleTurnDiff, DiffThemeDark)
 	if !ok {
 		t.Fatal("expected diff-only render to succeed")
 	}
 	if plain := stripANSI(block); strings.Contains(plain, "diagnostic") {
 		t.Fatalf("no diagnostics section, no diagnostics rows:\n%s", plain)
+	}
+}
+
+// An edit whose diff quotes a code fence within the three context lines around
+// the change made the writer escalate the turn-diff fence past three backticks
+// (fenceFor). The card must still be a card: the body is read back with the
+// writer's own parser, so the fence's length needs no guesswork — matching a
+// hardcoded ``` opened nothing and dropped the whole body into the generic
+// renderer as "turn diff: …" followed by a bare diff.
+func TestRenderTurnDiffCard_RendersAnEscalatedFence(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "edit_file",
+		Input:    map[string]any{"file_path": "/w/docs/plan.md"},
+		Output: map[string]any{"turn_diff": event.Summary{
+			Path: "/w/docs/plan.md", Added: 1, Deleted: 1,
+			UnifiedDiff: "@@ -2,7 +2,7 @@\n # Plan\n \n ```bash\n-make build\n+make build test\n ```\n tail",
+		}},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	if !strings.Contains(body, "````diff") {
+		t.Fatalf("the formatter did not escalate the fence:\n%s", body)
+	}
+	block, ok := renderTurnDiffCard(body, DiffThemeDark)
+	if !ok {
+		t.Fatalf("an escalated-fence turn diff must render as a diff card:\n%s", body)
+	}
+	plain := stripANSI(block)
+	for _, want := range []string{"```bash", "+ make build test", "  tail"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("diff row %q missing from the card:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "turn diff:") {
+		t.Fatalf("the card fell back to the raw body:\n%s", plain)
+	}
+}
+
+// An edit whose diff quotes this card's own diagnostics format must not be read
+// as diagnostics. A unified diff's context lines are " " + the file's text, and
+// the old reader trimmed them before matching the header — so a file that
+// documents the section (a note, a bug report, the card format itself) invented
+// a count the tool never reported, and a ```text block further down supplied
+// the "problem lines". The section is read from tool.FileDiff.Rest, the body
+// after the turn diff, which is what the writer fills.
+func TestRenderTurnDiffCardIgnoresDiagnosticsTextInsideTheDiff(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	// The hunk's context holds both shapes the reader looks for.
+	turnDiff := event.Summary{
+		Path:    "/w/notes.md",
+		Added:   1,
+		Deleted: 1,
+		UnifiedDiff: "@@ -1,6 +1,6 @@\n" +
+			" # Card format\n" +
+			" lsp diagnostics: 2 new in 1 file\n" +
+			" \n" +
+			" ```text\n" +
+			"-old note\n" +
+			"+new note\n" +
+			" ```\n",
+	}
+	body, _ := tool.FormatToolStepResult(tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "edit_file",
+		Input:    map[string]any{"file_path": "/w/notes.md"},
+		Output:   map[string]any{"turn_diff": turnDiff},
+	}, tool.DefaultMaxFormattedBody)
+	block, ok := renderTurnDiffCard(body, DiffThemeDark)
+	if !ok {
+		t.Fatalf("an escalated-fence turn diff must render as a diff card:\n%s", body)
+	}
+	plain := stripANSI(block)
+	if strings.Contains(plain, "Found 2 new diagnostic issues") {
+		t.Fatalf("the diff's own context lines were read as a diagnostics section:\n%s", plain)
+	}
+	// The diff's summary is the card's only └ row without a section.
+	if got := strings.Count(plain, "  └ "); got != 1 {
+		t.Fatalf("card has %d └ rows, want just the turn-diff summary:\n%s", got, plain)
+	}
+
+	// A real diagnostics section still renders, and the quoted text cannot
+	// outrank it: the reader stops at the turn diff's own end.
+	body, _ = tool.FormatToolStepResult(tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "edit_file",
+		Input:    map[string]any{"file_path": "/w/notes.md"},
+		Output: map[string]any{
+			"turn_diff": turnDiff,
+			"lsp_diagnostics": event.LSPDiagnosticsSummary{
+				New:   1,
+				Files: 1,
+				Items: []event.LSPDiagnostic{{
+					Path: "/w/notes.md", Line: 3, Column: 1,
+					Severity: "error", Message: "missing return",
+				}},
+			},
+		},
+	}, tool.DefaultMaxFormattedBody)
+	block, ok = renderTurnDiffCard(body, DiffThemeDark)
+	if !ok {
+		t.Fatalf("an escalated-fence turn diff must render as a diff card:\n%s", body)
+	}
+	plain = stripANSI(block)
+	for _, want := range []string{
+		"  └ Found 1 new diagnostic issue in 1 file",
+		"      error 3:1 missing return",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("real diagnostics row %q missing:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "Found 2 new diagnostic issues") {
+		t.Fatalf("the quoted header outranked the tool's own report:\n%s", plain)
+	}
+}
+
+// The normalizer's "inside a fence" test follows the renderer's character and
+// length rules, so a fence the body quotes and a ~~~ fence both keep their
+// state. The prefix test it replaced flipped on any "```" line: the quoted
+// fragment started a new "fence", and the code after the block kept an indent
+// the prose no longer had.
+//
+// The third case is the anchor for the rule this tracker deliberately does not
+// take from the renderer: indentation is not part of it, because a fence nested
+// in a list item sits past four spaces and is still a fence.
+func TestNormalizeAssistantTextIgnoresFencesInsideABlock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "backticks quoted inside a longer fence",
+			raw: "Here is the doc:\n\n" +
+				"    ````markdown\n" +
+				"    # Title\n" +
+				"    ```bash\n" +
+				"    make build\n" +
+				"    ```\n" +
+				"    done\n" +
+				"    ````",
+			want: "Here is the doc:\n\n" +
+				"````markdown\n" +
+				"    # Title\n" +
+				"    ```bash\n" +
+				"    make build\n" +
+				"    ```\n" +
+				"    done\n" +
+				"````",
+		},
+		{
+			name: "tilde fence",
+			raw: "Here is the doc:\n\n" +
+				"    ~~~\n" +
+				"    code\n" +
+				"    ~~~\n" +
+				"    done",
+			want: "Here is the doc:\n\n" +
+				"~~~\n" +
+				"    code\n" +
+				"~~~\n" +
+				"done",
+		},
+		{
+			name: "fence indented past four spaces",
+			raw:  "    before\n\n    ```go\n        fmt.Println(\"x\")\n    ```\n\n    after",
+			want: "before\n\n```go\n        fmt.Println(\"x\")\n```\n\nafter",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeAssistantText(tc.raw); got != tc.want {
+				t.Fatalf("unexpected normalized text:\nwant=%q\ngot =%q", tc.want, got)
+			}
+		})
+	}
+}
+
+// Bodies that are not a turn diff stay out of the card: a shell card's stdout,
+// a header whose diff did not fit, and a body that opens with a fence hold no
+// turn diff for the card to read.
+func TestRenderTurnDiffCard_RejectsNonTurnDiffBody(t *testing.T) {
+	for _, content := range []string{
+		"stdout:\n\n```text\nhello\n```",
+		"turn diff: `/x` (+1/-0)\nno fence here",
+		"````diff\n+a\n````",
+	} {
+		if block, ok := renderTurnDiffCard(content, DiffThemeDark); ok {
+			t.Fatalf("%q rendered as a turn-diff card:\n%s", content, block)
+		}
+	}
+}
+
+// A shell card's stdout that quotes a code fence escalates the fence around it,
+// so the section reader must close on a fence of the same length. Matching any
+// "```" prefix ended the stream at the quoted fence and dropped everything
+// after it; the stderr section that follows must still be found.
+func TestExtractFencedSectionKeepsStdoutWhenFenceEscalates(t *testing.T) {
+	stdout := "```bash\nmake build\n```\ntail after the fence"
+	stderr := "warning: one"
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Output:   map[string]any{"stdout": stdout, "stderr": stderr, "exit_code": 1},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	if !strings.Contains(body, "````text") {
+		t.Fatalf("the formatter did not escalate the stdout fence:\n%s", body)
+	}
+	sections := toolOutputSections(body)
+	if len(sections) != 2 {
+		t.Fatalf("sections = %d, want stdout and stderr:\n%s", len(sections), body)
+	}
+	if sections[0] != stdout {
+		t.Fatalf("stdout section = %q, want the whole stream:\n%s", sections[0], body)
+	}
+	if sections[1] != stderr {
+		t.Fatalf("stderr section = %q, want %q:\n%s", sections[1], stderr, body)
 	}
 }
 

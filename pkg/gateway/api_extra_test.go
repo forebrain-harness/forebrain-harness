@@ -5888,6 +5888,68 @@ func TestSubagentViewEndpointsRefuseAnUnknownAgent(t *testing.T) {
 	}
 }
 
+// TestSessionInterruptSendReportsTheEngineAnswer pins two things at once: the
+// route is mounted on the production route table (a test that called the
+// handler directly would keep passing if the registration were lost, and the
+// web surface would then silently fall back to cancelling), and the endpoint is
+// a forwarder — whether Esc means "send what is queued" or "stop the run" is
+// the engine's decision, and the surface only reads the boolean.
+func TestSessionInterruptSendReportsTheEngineAnswer(t *testing.T) {
+	s, _ := newSubagentViewTestServer(t)
+	// The runs live in the controller the server resolves, which a test server
+	// without an environment owns separately from the runner's.
+	ctl := s.runController()
+	rt := run.NewTurnInputRuntime()
+	require.True(t, ctl.TrackRuntime("run-1", "sid", func() {}, rt))
+
+	routes := NewRestServer("")
+	s.AttachExtraRoutes(routes)
+	do := func(method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, nil)
+		rec := httptest.NewRecorder()
+		routes.Server.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+	const target = "/api/chat/sessions/sid/interrupt-send"
+
+	interrupted := func(t *testing.T) bool {
+		t.Helper()
+		w := do(http.MethodPost, target)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var out struct {
+			Interrupted bool `json:"interrupted"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		return out.Interrupted
+	}
+
+	// Nothing waiting: Esc keeps its other meaning in the conversation.
+	require.False(t, interrupted(t))
+
+	// A queued steer is the engine's to send, and it stays queued: this is an
+	// interrupt to send, not a cancel that would hand the message back.
+	rt.Enqueue(run.TurnInputModeSteer, []llm.ContentPart{llm.Text("keep going")})
+	require.True(t, interrupted(t))
+	require.Len(t, rt.Snapshot(), 1)
+
+	// A run that ended has no turn left to send into.
+	require.True(t, ctl.Finish("run-1"))
+	require.False(t, interrupted(t))
+
+	// The route is a POST, like every other action on a conversation.
+	require.Equal(t, http.StatusMethodNotAllowed, do(http.MethodGet, target).Code)
+}
+
+func TestSessionInterruptSendRefusesAForeignConversation(t *testing.T) {
+	s, _ := newSubagentViewTestServer(t)
+	routes := NewRestServer("")
+	s.AttachExtraRoutes(routes)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/other/interrupt-send", nil)
+	rec := httptest.NewRecorder()
+	routes.Server.Handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestSubagentInputRefusesConversationCommands(t *testing.T) {
 	s, ws := newSubagentViewTestServer(t)
 	seedSubagentRecord(t, ws, "sid", "agent-1")

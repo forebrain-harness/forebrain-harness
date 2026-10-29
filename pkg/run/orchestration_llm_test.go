@@ -5578,6 +5578,100 @@ func TestRetractedInFlightSteerIsResentWithoutIt(t *testing.T) {
 	}
 }
 
+// interruptDuringCallLLM streams a partial answer and then blocks, so the test
+// can press Esc mid-call the way a user does: the steer is queued while the
+// call is running, the call is abandoned, and the same turn asks again.
+type interruptDuringCallLLM struct {
+	rt    *TurnInputRuntime
+	q     *InputQueue
+	calls [][]llm.Message
+	// interrupted records that the second call observed its own cancellation.
+	interrupted bool
+}
+
+func (m *interruptDuringCallLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls = append(m.calls, append([]llm.Message(nil), messages...))
+	switch len(m.calls) {
+	case 1:
+		msg := llm.AssistantMessage(nil, llm.ToolCall{ID: "call-read", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"server.go"}`}})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	case 2:
+		if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnDelta != nil {
+			sink.OnDelta("half an answer")
+		}
+		// The real path: the queue stamps the entry's seq and hands it to the
+		// attached runtime, which is what the surface's composer does.
+		if !m.q.Steer(Input{Text: "keep going", Parts: []llm.ContentPart{llm.Text("keep going")}}) {
+			return nil, errors.New("steer refused while the turn was running")
+		}
+		if !m.rt.InterruptToSend() {
+			return nil, errors.New("InterruptToSend refused a queued steer")
+		}
+		<-ctx.Done()
+		m.interrupted = true
+		return nil, ctx.Err()
+	default:
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+}
+
+// TestInterruptToSendStopsTheCallAndContinuesTheTurn is the engine contract
+// Esc's "interrupt and send immediately" rests on: the call in flight is
+// abandoned where it is, what it had already said stays in the turn, and the
+// same turn asks again carrying the steer — one run, no turn boundary.
+func TestInterruptToSendStopsTheCallAndContinuesTheTurn(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+
+	inner := &interruptDuringCallLLM{q: q, rt: rt}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		llm.WithStreamSink(WithTurnInputRuntime(context.Background(), rt), streamTestSink()),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		[]*llm.Tool{readFileTestTool(t)},
+	)
+	if err != nil {
+		t.Fatalf("an interrupted call ended the turn: %v", err)
+	}
+	if !inner.interrupted {
+		t.Fatal("the abandoned call never observed its own cancellation")
+	}
+	if len(inner.calls) != 3 {
+		t.Fatalf("model calls=%d want 3 (tool call, abandoned call, call carrying the steer)", len(inner.calls))
+	}
+	third := inner.calls[2]
+	if last := third[len(third)-1]; last.Role != llm.RoleUser || last.TextContent() != "keep going" {
+		t.Fatalf("the call after the interrupt must end with the steer, got %v", roles(third))
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+	// The half answer is kept, not discarded the way a retraction discards it:
+	// the user already read it, and the next request has to carry it.
+	half, steer := -1, -1
+	for i, msg := range res.Session {
+		switch msg.TextContent() {
+		case "half an answer":
+			half = i
+		case "keep going":
+			steer = i
+		}
+	}
+	if half < 0 || steer < 0 {
+		t.Fatalf("persisted session lost the half answer or the steer: %v", roles(res.Session))
+	}
+	if half > steer {
+		t.Fatalf("the steer must follow the answer it interrupted, session=%v", roles(res.Session))
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 1 || delivered[0].Text != "keep going" {
+		t.Fatalf("delivered = %#v, want only the steer the model answered", delivered)
+	}
+}
+
 // writeProbeSkill writes a real SKILL.md whose body a test can look for in the
 // request the model receives.
 func writeProbeSkill(t *testing.T) string {

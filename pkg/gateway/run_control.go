@@ -310,6 +310,35 @@ func (s *Server) watchRunQueue(q *run.InputQueue, runID, sessionID string) {
 	})
 }
 
+// handleSessionInterruptSend is Esc's "interrupt and send immediately" for the
+// conversation itself: the run's model call in flight is abandoned and the turn
+// goes on carrying the steers queued behind it — no run end, no "Worked for",
+// one clock. The answer is the engine's: false means nothing was waiting, which
+// leaves the surface its other meaning for Esc, stopping the run.
+func (s *Server) handleSessionInterruptSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if sid == "" {
+		http.NotFound(w, r)
+		return
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	runID, _, ok := s.runController().Find(sid)
+	interrupted := ok && s.runController().InterruptToSend(runID)
+	writeJSON(w, map[string]any{"interrupted": interrupted})
+}
+
 func writeRunInputJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)

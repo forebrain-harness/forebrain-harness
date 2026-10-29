@@ -988,34 +988,7 @@ func buildPlanImplementationReminder(planFile, kind string) string {
 			planImplementationReminderMarker, planFile, state.ImplementationHeading,
 		)
 	}
-	return fmt.Sprintf(`%s - read carefully.
-
-You are implementing an approved plan. The plan file is:
-
-  %s
-
-It is writable in this mode (it is the one path under the agent state root you may write outside plan mode).
-
-## Closing the plan loop
-
-When the plan's tasks are done - or when you stop working on the plan for any reason, including it being abandoned or superseded - you MUST update the plan file BEFORE giving your final answer:
-
-1. Mark each task in the plan as done, partially done, or not done (e.g. tick its checkbox).
-2. Append a final section with exactly this heading:
-
-   %s
-
-3. Under that heading, record:
-   - What actually landed, and where (files, packages, commands).
-   - Any deviation from the plan, and why the plan was wrong or incomplete.
-   - Anything planned but not done, and why.
-   - How it was verified (build, tests, manual run) and the result.
-
-Use edit_file to append the section rather than rewriting the plan: the plan's original intent must stay readable next to what happened.
-
-A plan is complete only once this record exists in the file. This reminder stops appearing as soon as the file contains the heading above.`,
-		planImplementationReminderMarker, planFile, state.ImplementationHeading,
-	)
+	return planImplementationReminderMarker + " - read carefully.\n\n" + tool.ApprovedPlanExecutionPrompt(planFile)
 }
 
 // analyzePlanReminders inspects the LLM-bound message slice to derive the
@@ -1203,13 +1176,15 @@ Phase 5 - Exit: call exit_plan_mode when the plan is complete and ready for user
 
 - MUST NOT make codebase edits outside the plan directory. This is a hard guarantee.
 - Do not use user_interaction to ask "is this plan okay?" - that's exit_plan_mode's job.
+- Do use user_interaction for a decision that is the user's to make, including every open question a plan review returned: one call, all of them, each with your recommendation. A question only the user can answer is never yours to settle silently.
 - When ready, call exit_plan_mode to request user approval.`,
 		planDir, exists, reentrySection,
-	)
+	) + agent.SinglePlanModePrompt + agent.BugRootCausePrompt
 }
 
-// The office plan-mode and implementation reminders, worded for document
-// work (no codebase, no code tools). Golden-checked verbatim in
+// The office plan-mode and sparse implementation reminders, worded for
+// document work (no codebase, no code tools). The full implementation reminder
+// is the shared execution contract in pkg/tool. Golden-checked verbatim in
 // testdata/office_plan_prompts.golden.json.
 const (
 	// officeMainPlanFullFormat takes planDir, the exists note, and the
@@ -1271,29 +1246,6 @@ You are a subagent helping with office planning. You MUST NOT create or change a
 	// officeSubagentPlanSparseFormat takes planDir.
 	officeSubagentPlanSparseFormat = `Plan mode active (subagent). Write/edit plan files only inside %s - all other writes blocked. Use user_interaction to clarify the approach.`
 
-	// officeImplementationFullFormat takes the marker, the plan file, and the
-	// implementation heading in that order.
-	officeImplementationFullFormat = `%s - read carefully.
-
-You are carrying out an approved plan. The plan file is:
-
-  %s
-
-It is writable in this mode.
-
-## Closing the plan loop
-
-When the plan's tasks are done - or when you stop working on the plan for any reason - update the plan file BEFORE your final answer:
-
-1. Mark each task as done, partly done or not done.
-2. Append a final section with exactly this heading:
-
-   %s
-
-3. Under it record the files delivered (names and locations), any deviation from the plan and why, anything planned but not done and why, and how you checked the deliverables.
-
-Use edit_file to append the section; keep the plan's original text readable.`
-
 	// officeImplementationSparseFormat takes the marker, the plan file, and
 	// the implementation heading in that order.
 	officeImplementationSparseFormat = `%s: before you report the work finished, update the plan file %s - mark what was done and append a '%s' section listing the files delivered.`
@@ -1334,16 +1286,17 @@ You are returning to plan mode after having previously exited it. A plan file ex
 
 `
 	}
-	return fmt.Sprintf(officeMainPlanFullFormat, planDir, exists, reentrySection)
+	return fmt.Sprintf(officeMainPlanFullFormat, planDir, exists, reentrySection) + agent.SinglePlanModePrompt
 }
 
 // buildOfficePlanImplementationReminder is buildPlanImplementationReminder
-// worded for office conversations.
+// worded for office conversations. The full form shares the one execution
+// contract; only the sparse form stays office-specific.
 func buildOfficePlanImplementationReminder(planFile, kind string) string {
 	if kind == "sparse" {
 		return fmt.Sprintf(officeImplementationSparseFormat, planImplementationReminderMarker, planFile, state.ImplementationHeading)
 	}
-	return fmt.Sprintf(officeImplementationFullFormat, planImplementationReminderMarker, planFile, state.ImplementationHeading)
+	return planImplementationReminderMarker + " - read carefully.\n\n" + tool.ApprovedPlanExecutionPrompt(planFile)
 }
 
 // reminderAdoptionSink is a context-scoped channel that lets the reminder

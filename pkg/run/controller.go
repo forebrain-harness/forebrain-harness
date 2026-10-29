@@ -415,6 +415,36 @@ func (c *Controller) Cancel(runID string, cause error) bool {
 	return true
 }
 
+// InterruptToSend is Esc's "interrupt and send immediately" for the
+// conversation's own turn: the run stops its current model call and goes on
+// carrying the steers queued behind it. It is the primary counterpart of
+// InterruptSubagentToSend — same meaning, same one-run contract: the run does
+// not end, so the surface keeps one clock and shows no "Worked for".
+//
+// It reports false when the run is unknown, finished, or has nothing waiting,
+// which is what leaves the surface its other meaning for Esc: stop the run.
+func (c *Controller) InterruptToSend(runID string) bool {
+	if c == nil {
+		return false
+	}
+	state, ok := c.Get(runID)
+	if !ok {
+		return false
+	}
+	state.mu.Lock()
+	q := state.input
+	phase := state.phase
+	state.mu.Unlock()
+	if q == nil || phase == Finished {
+		return false
+	}
+	rt := q.Runtime()
+	if rt == nil {
+		return false
+	}
+	return rt.InterruptToSend()
+}
+
 // Finish releases the foreground slot and removes the active state.
 func (c *Controller) Finish(runID string) bool {
 	if c == nil {

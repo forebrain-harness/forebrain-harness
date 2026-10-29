@@ -176,3 +176,13 @@ func fencedBodyAt(lines []string, i int) (body, info string, last int, ok bool) 
 	}
 	return strings.Join(out, "\n"), info, len(lines) - 1, true
 }
+
+// FencedBodyAt is fencedBodyAt for surfaces outside this package: it reads the
+// backtick fence that follows line i (blank lines allowed between), accepting
+// any opening run of three or more backticks and closing only on the same
+// length — the reader half of fenceFor, which escalates the run when the body
+// itself quotes a fence. Keeping one implementation keeps every surface and the
+// writer in agreement.
+func FencedBodyAt(lines []string, i int) (body, info string, last int, ok bool) {
+	return fencedBodyAt(lines, i)
+}

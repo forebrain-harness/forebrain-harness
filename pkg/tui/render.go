@@ -1731,6 +1731,60 @@ func prefixMarkdownRows(text string, firstPrefix, linePrefix, wrapPrefix string)
 	return out.String()
 }
 
+// mdFence tracks whether a Markdown body is inside a fenced code block. It uses
+// the renderer's character and length rules (goldmark's parser/fcode_block.go:
+// a run of three or more backticks or tildes opens; a backtick fence's info
+// string may not contain a backtick; only the same character with a run at
+// least as long as the opener's, followed by nothing but spaces, closes).
+//
+// Indentation is deliberately *not* part of the rule here. The renderer also
+// requires a fence to sit at less than four spaces of indent, but this pre-pass
+// runs on raw assistant text, before list context is resolved: a fence nested in
+// a list item is indented past four and is still a fence
+// (TestNormalizeAssistantTextPreservesCodeFenceIndent pins exactly that). What
+// went wrong before was the character/length half — deciding "inside a fence"
+// with strings.HasPrefix(line, "```") desynchronises at the first fence the
+// block quotes or at a ~~~ fence, and the normalizer then strips the indentation
+// of code lines while leaving prose indented.
+type mdFence struct {
+	char   byte
+	length int
+	open   bool
+}
+
+// step feeds the next line and reports whether the line is a fence delimiter.
+// Content lines are recognised with inside(); the normalizer treats delimiters
+// like prose and strips their common indent too.
+func (f *mdFence) step(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" || (trimmed[0] != '`' && trimmed[0] != '~') {
+		return false
+	}
+	ch := trimmed[0]
+	run := 0
+	for run < len(trimmed) && trimmed[run] == ch {
+		run++
+	}
+	if run < 3 {
+		return false
+	}
+	rest := strings.TrimSpace(trimmed[run:])
+	if !f.open {
+		if ch == '`' && strings.Contains(rest, "`") {
+			return false
+		}
+		f.char, f.length, f.open = ch, run, true
+		return true
+	}
+	if ch != f.char || run < f.length || rest != "" {
+		return false
+	}
+	f.open = false
+	return true
+}
+
+func (f *mdFence) inside() bool { return f.open }
+
 func normalizeAssistantText(raw string) string {
 	raw = strings.ReplaceAll(raw, "\r", "")
 	if strings.TrimSpace(raw) == "" {
@@ -1740,19 +1794,17 @@ func normalizeAssistantText(raw string) string {
 	if normalizeShiftedAssistantBody(lines) {
 		return strings.Join(lines, "\n")
 	}
-	inFence := false
+	var fence mdFence
 	minIndent := -1
 	for _, line := range lines {
-		trim := strings.TrimSpace(line)
-		if strings.HasPrefix(trim, "```") {
-			inFence = !inFence
+		if fence.step(line) {
 			indent := leadingIndentPrefix(line)
 			if minIndent == -1 || len(indent) < minIndent {
 				minIndent = len(indent)
 			}
 			continue
 		}
-		if inFence || trim == "" {
+		if fence.inside() || strings.TrimSpace(line) == "" {
 			continue
 		}
 		indent := leadingIndentPrefix(line)
@@ -1763,19 +1815,13 @@ func normalizeAssistantText(raw string) string {
 	if minIndent <= 0 {
 		return strings.Join(lines, "\n")
 	}
-	inFence = false
+	fence = mdFence{}
 	for i, line := range lines {
-		trim := strings.TrimSpace(line)
-		if strings.HasPrefix(trim, "```") {
-			inFence = !inFence
+		if fence.step(line) {
 			lines[i] = trimLeadingPrefix(line, minIndent)
 			continue
 		}
-		if trim == "" {
-			continue
-		}
-		if inFence {
-			// Keep indentation inside fenced code blocks.
+		if fence.inside() || strings.TrimSpace(line) == "" {
 			continue
 		}
 		lines[i] = trimLeadingPrefix(line, minIndent)
@@ -1811,23 +1857,18 @@ func normalizeShiftedAssistantBody(lines []string) bool {
 	if bodyStart == -1 {
 		return false
 	}
-	inFence := false
+	var fence mdFence
 	minIndent := -1
 	for i := bodyStart; i < len(lines); i++ {
 		line := lines[i]
-		trim := strings.TrimSpace(line)
-		if trim == "" {
-			continue
-		}
 		indent := len(leadingIndentPrefix(line))
-		if strings.HasPrefix(trim, "```") {
+		if fence.step(line) {
 			if minIndent == -1 || indent < minIndent {
 				minIndent = indent
 			}
-			inFence = !inFence
 			continue
 		}
-		if inFence {
+		if fence.inside() || strings.TrimSpace(line) == "" {
 			continue
 		}
 		if indent == 0 {
@@ -1840,18 +1881,13 @@ func normalizeShiftedAssistantBody(lines []string) bool {
 	if minIndent <= 0 {
 		return false
 	}
-	inFence = false
+	fence = mdFence{}
 	for i := bodyStart; i < len(lines); i++ {
-		trim := strings.TrimSpace(lines[i])
-		if trim == "" {
-			continue
-		}
-		if strings.HasPrefix(trim, "```") {
+		if fence.step(lines[i]) {
 			lines[i] = trimLeadingPrefix(lines[i], minIndent)
-			inFence = !inFence
 			continue
 		}
-		if inFence {
+		if fence.inside() || strings.TrimSpace(lines[i]) == "" {
 			continue
 		}
 		lines[i] = trimLeadingPrefix(lines[i], minIndent)
@@ -2070,7 +2106,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			return
 		}
 		if isDiffTool(title) {
-			if block, ok := renderTurnDiffCard(f.Content, r.diffTheme, 0); ok {
+			if block, ok := renderTurnDiffCard(f.Content, r.diffTheme); ok {
 				_, _ = fmt.Fprintln(r.out, block)
 				_, _ = fmt.Fprintln(r.out)
 				return
@@ -3199,25 +3235,19 @@ func toolOutputSections(content string) []string {
 	return out
 }
 
+// extractFencedSection reads the fence that follows the section label on
+// lines[*idx] and leaves *idx on its closing line, so the caller's loop resumes
+// after the section. The fence opens with any run of three or more backticks
+// (fenceFor escalates the run when the body quotes a fence of its own) and only
+// a fence of that same length closes it — tool.FencedBodyAt owns that rule so
+// this surface cannot drift from the writer again.
 func extractFencedSection(lines []string, idx *int) string {
-	i := *idx + 1
-	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
-		i++
-	}
-	if i >= len(lines) || !strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
+	body, _, last, ok := tool.FencedBodyAt(lines, *idx+1)
+	if !ok {
 		return ""
 	}
-	i++
-	body := []string{}
-	for i < len(lines) {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
-			*idx = i
-			return trimBlankFenceEdges(body)
-		}
-		body = append(body, lines[i])
-		i++
-	}
-	return trimBlankFenceEdges(body)
+	*idx = last
+	return trimBlankFenceEdges(strings.Split(body, "\n"))
 }
 
 func stripToolMetadataSections(content string) string {
@@ -5978,75 +6008,19 @@ func diffGutterWidthFor(hunks []event.Hunk) int {
 	return w
 }
 
-// looksLikeTurnDiff reports whether a tool-result body is an edit "turn diff"
-// (built by tool.turnDiffSection): a "turn diff: `path` (+N/-M)" header
-// followed by a ```diff fenced block. Returns the file path on success.
-func looksLikeTurnDiff(content string) (path string, ok bool) {
-	lines := strings.Split(content, "\n")
-	header := ""
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		header = strings.TrimSpace(l)
-		break
-	}
-	if !strings.HasPrefix(strings.ToLower(header), "turn diff:") {
-		return "", false
-	}
-	if !strings.Contains(content, "```diff") {
-		return "", false
-	}
-	// path lives between the first pair of backticks on the header line.
-	if i := strings.IndexByte(header, '`'); i >= 0 {
-		if j := strings.IndexByte(header[i+1:], '`'); j >= 0 {
-			path = header[i+1 : i+1+j]
-		}
-	}
-	return path, true
-}
-
-// extractDiffFence returns the body of the first ```diff fenced block.
-func extractDiffFence(content string) string {
-	lines := strings.Split(content, "\n")
-	start := -1
-	for i, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "```diff") {
-			start = i + 1
-			break
-		}
-	}
-	if start < 0 {
-		return ""
-	}
-	body := make([]string, 0, len(lines)-start)
-	for i := start; i < len(lines); i++ {
-		// Match only the exact closing fence (``` with optional trailing
-		// whitespace). Diff context lines (e.g. "  ```" or "  ```sh") have a
-		// leading space from the unified-diff format and must not prematurely
-		// terminate extraction.
-		if strings.TrimRight(lines[i], " \t\r") == "```" {
-			break
-		}
-		body = append(body, lines[i])
-	}
-	return strings.Join(body, "\n")
-}
-
 // renderTurnDiffCard renders a turn-diff tool body with the tool-card prefixes
 // ("  └ " / "    ") baked in so the caller can print it directly. Returns
 // false when the body cannot be parsed as a turn diff, so the caller can fall
-// back to the generic renderer.
-func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, bool) {
-	path, ok := looksLikeTurnDiff(content)
-	if !ok {
+// back to the generic renderer. The body is read with tool.ParseFileDiff — the
+// reader half of the writer that built it, so the fence's backtick run length
+// (fenceFor escalates it past three when the diff quotes a code fence) needs no
+// guesswork here.
+func renderTurnDiffCard(content string, theme DiffTheme) (string, bool) {
+	diff, ok := tool.ParseFileDiff(strings.TrimSpace(content))
+	if !ok || strings.TrimSpace(diff.UnifiedDiff) == "" {
 		return "", false
 	}
-	fence := extractDiffFence(content)
-	if strings.TrimSpace(fence) == "" {
-		return "", false
-	}
-	rows, f, ok := diffHunkRowsFor(path, fence, theme)
+	rows, f, ok := diffHunkRowsFor(diff.Path, diff.UnifiedDiff, theme)
 	if !ok {
 		return "", false
 	}
@@ -6055,7 +6029,7 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 	for _, row := range rows {
 		out = append(out, "    "+row)
 	}
-	out = append(out, lspDiagnosticsCardRows(content)...)
+	out = append(out, lspDiagnosticsCardRows(diff.Rest)...)
 	return strings.Join(out, "\n"), true
 }
 
@@ -6161,11 +6135,17 @@ func renderShellDiffCard(content string, theme DiffTheme) (string, bool) {
 // that follow the diff: one summary line, then the section's problem lines.
 // Long cards are folded by the existing foldBlock, so no folding happens here.
 //
+// rest is tool.FileDiff.Rest — the body after the turn diff — rather than the
+// whole card body. The writer puts the section right after the diff, so the
+// diff's own lines are never a candidate: a unified diff's context lines are
+// " " + the file's text, and reading them here turned a file that merely
+// quotes this header (and a ```text block) into an invented diagnostics count.
+//
 // Every row is wrapped at the content width here: the painter cuts a row at
 // the terminal edge (fitPaintRow), so a long compiler message emitted as one
 // row lost its tail.
-func lspDiagnosticsCardRows(content string) []string {
-	lines := strings.Split(content, "\n")
+func lspDiagnosticsCardRows(rest string) []string {
+	lines := strings.Split(rest, "\n")
 	headerIdx := -1
 	for i, l := range lines {
 		if strings.HasPrefix(strings.TrimSpace(l), "lsp diagnostics:") {
@@ -6189,24 +6169,23 @@ func lspDiagnosticsCardRows(content string) []string {
 	}
 	width := termWidthOrDefault() - contentRightMargin
 	rows := lspDiagnosticsWrappedRows("  └ ", summary, width)
-	// The section's body is the ```text fence that follows the header.
-	for i := headerIdx + 1; i < len(lines); i++ {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```text") {
-			for j := i + 1; j < len(lines); j++ {
-				if strings.TrimSpace(lines[j]) == "```" {
-					return rows
-				}
-				if strings.TrimSpace(lines[j]) == "" {
-					continue
-				}
-				// A problem line's own indent belongs to its lead, so the rows
-				// its message spills onto stay under the problem, not the file.
-				text := strings.TrimLeft(lines[j], " ")
-				indent := lines[j][:len(lines[j])-len(text)]
-				rows = append(rows, lspDiagnosticsWrappedRows("    "+indent, text, width)...)
-			}
-			return rows
+	// The section's body is the fence that follows the header, read by the rule
+	// the writer used: three or more backticks open, only a run of that same
+	// length closes (tool.FencedBodyAt). Scanning for a "```text" prefix
+	// instead read the diff's own context lines as a diagnostics section.
+	body, info, _, ok := tool.FencedBodyAt(lines, headerIdx+1)
+	if !ok || info != "text" {
+		return rows
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
+		// A problem line's own indent belongs to its lead, so the rows its
+		// message spills onto stay under the problem, not the file.
+		text := strings.TrimLeft(line, " ")
+		indent := line[:len(line)-len(text)]
+		rows = append(rows, lspDiagnosticsWrappedRows("    "+indent, text, width)...)
 	}
 	return rows
 }

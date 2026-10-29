@@ -2745,6 +2745,15 @@ export const forebrainApi = {
     )
   },
 
+  /** Esc in the conversation: stop the model call in flight so the steers
+   *  queued behind it go now, inside the same turn. */
+  sessionInterruptSend(sessionId: string) {
+    return postJson<{ interrupted: boolean }, Record<string, never>>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/interrupt-send`,
+      {},
+    )
+  },
+
   /** /context for a subagent, in the same shape as the conversation's. */
   subagentContext(sessionId: string, agentId: string) {
     return api.get<SessionContextDebug>(

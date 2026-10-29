@@ -6128,11 +6128,22 @@ export function useChatStream() {
     }
   }
 
-  // Esc while messages wait on the run: the engine owns what an interrupted
-  // run hands back — the steers queued behind it follow as its next turn, the
-  // rest returns to the composer — so this page only cancels and obeys the
-  // release it gets back.
-  function sendPendingSteersAfterInterrupt() {
+  /**
+   * Esc while messages wait on the run: the engine stops the model call in
+   * flight so the steers queued behind it go now, inside the same turn — one
+   * run, one clock, no "Worked for". Only when the engine has nothing to
+   * interrupt does this fall back to stopping the run, which is the meaning Esc
+   * keeps on an empty queue.
+   */
+  async function sendPendingSteersAfterInterrupt() {
+    const sid = String(sessionId.value ?? '').trim()
+    if (sid) {
+      try {
+        if ((await forebrainApi.sessionInterruptSend(sid)).interrupted) return
+      } catch {
+        // An unreachable interrupt falls through to the stop it replaces.
+      }
+    }
     cancel()
   }
 

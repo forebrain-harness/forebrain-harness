@@ -760,6 +760,10 @@ type fakeSession struct {
 	contextReportReply string
 	contextReportOK    bool
 	subagentTokenStats ComposerTokenStats
+	// interruptSendMain is the conversation's own Esc seam, kept apart from the
+	// subagent pair above: the same field cannot answer both.
+	interruptSendMain      bool
+	interruptSendMainCalls int
 }
 
 type subagentSendCall struct {
@@ -1368,6 +1372,13 @@ func (f *fakeSession) InterruptSubagentToSend(_ string, _ string) bool {
 	defer f.mu.Unlock()
 	f.interruptSentCalls++
 	return f.interruptToSend
+}
+
+func (f *fakeSession) InterruptToSend(_ string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.interruptSendMainCalls++
+	return f.interruptSendMain
 }
 
 func (f *fakeSession) DiscardSubagentInput(_ string, _ string) int {
@@ -2561,7 +2572,7 @@ func TestDispatchStreamSlashInitSubmitsBuiltPrompt(t *testing.T) {
 	tracker := NewTracker()
 	cmds := newCommandController(session, renderer, &stubSelector{}, nil, "")
 
-	handled, continueRun, sub, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, tracker, state, "/init")
+	handled, continueRun, sub, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, tracker, state, "/init", nil)
 
 	if !handled {
 		t.Fatalf("expected /init to be handled, got handled=false")
@@ -4246,7 +4257,7 @@ func TestCancelableCompactKeepsNotificationsResponsiveAndCancelsHandler(t *testi
 					}
 				}
 			},
-			cmds, renderer, nil, state, "/compact",
+			cmds, renderer, nil, state, "/compact", nil,
 		)
 		done <- result{handled: handled}
 	}()
@@ -5919,9 +5930,15 @@ func TestEscInASubagentViewWithNothingInFlightReturnsToTheMainView(t *testing.T)
 	}
 }
 
-// The conversation's own Esc behavior is untouched: withdraw a just-sent
-// message, else interrupt to send pending steers, else cancel the run.
-func TestEscInTheMainViewIsUnchanged(t *testing.T) {
+// The conversation's own Esc acts on the queue before it cancels: withdraw a
+// just-sent message, else let the engine interrupt the call in flight and take
+// the pending steers into this same turn, else cancel the run.
+//
+// The middle step is the engine's answer that decides, not the surface's: the
+// queue asks once, and only "nothing waiting" falls back to the old cancel —
+// which is why a queue full of steers and an engine that refuses them must
+// still cancel.
+func TestEscInTheMainViewActsOnTheQueueBeforeCancellingTheRun(t *testing.T) {
 	renderer := NewRenderer(nil, nil)
 
 	// Withdraw a just-sent message.
@@ -5934,23 +5951,85 @@ func TestEscInTheMainViewIsUnchanged(t *testing.T) {
 		t.Fatalf("main-view Esc must still withdraw (withdrawn=%v draft=%q)", foreground.isWithdrawn(), state.composer.DraftText)
 	}
 
-	// Interrupt to send pending steers.
-	steer := &fakeSession{cancelActive: true}
+	// Interrupt to send pending steers: one run, no cancel, no "cancelling run".
+	steer := &fakeSession{cancelActive: true, interruptSendMain: true}
 	steerState := &streamState{sessionID: "s1", session: steer}
 	steer.enqueueSteer("s1", mustComposerSubmission("keep going"))
-	handleActiveRunInput(context.Background(), steer, renderer, nil, steerState, nil,
+	steerRenderer := NewRenderer(nil, nil)
+	handleActiveRunInput(context.Background(), steer, steerRenderer, nil, steerState, nil,
 		inputEvent{kind: inputEventHotkey, hotkey: hotkeyEscapeInterrupt}, nil)
-	if !steerState.submitPendingSteersAfterInterrupt || !steerState.userInterrupted {
-		t.Fatal("main-view Esc with pending steers must interrupt and send")
+	if steer.interruptSendMainCalls != 1 {
+		t.Fatalf("main-view Esc asked the engine %d times, want once", steer.interruptSendMainCalls)
+	}
+	if steer.cancelCalls != 0 {
+		t.Fatalf("main-view Esc cancelled the run %d times while the engine had a steer", steer.cancelCalls)
+	}
+	if steerState.userInterrupted || steerState.submitPendingSteersAfterInterrupt {
+		t.Fatalf("the interrupt path set an interrupt-boundary flag (interrupted=%v submit=%v): the turn would end on one",
+			steerState.userInterrupted, steerState.submitPendingSteersAfterInterrupt)
+	}
+	if got := mainViewStatusLines(steerRenderer); strings.Contains(got, "cancelling run") {
+		t.Fatalf("the interrupt path rendered the cancel line: %q", got)
 	}
 
-	// Cancel the run.
+	// The engine refuses (nothing it can abandon): the old cancel stands.
 	cancel := &fakeSession{cancelActive: true}
 	cancelState := &streamState{sessionID: "s1", session: cancel}
-	handleActiveRunInput(context.Background(), cancel, renderer, nil, cancelState, nil,
+	cancel.enqueueSteer("s1", mustComposerSubmission("keep going"))
+	cancelRenderer := NewRenderer(nil, nil)
+	handleActiveRunInput(context.Background(), cancel, cancelRenderer, nil, cancelState, nil,
 		inputEvent{kind: inputEventHotkey, hotkey: hotkeyEscapeInterrupt}, nil)
-	if cancel.cancelCalls != 1 || !cancelState.userInterrupted {
-		t.Fatalf("main-view Esc must cancel the run (cancels=%d interrupted=%v)", cancel.cancelCalls, cancelState.userInterrupted)
+	if cancel.cancelCalls != 1 || !cancelState.userInterrupted || !cancelState.submitPendingSteersAfterInterrupt {
+		t.Fatalf("main-view Esc must fall back to cancel (cancels=%d interrupted=%v submit=%v)",
+			cancel.cancelCalls, cancelState.userInterrupted, cancelState.submitPendingSteersAfterInterrupt)
+	}
+	if got := mainViewStatusLines(cancelRenderer); !strings.Contains(got, "cancelling run") {
+		t.Fatalf("the fallback must render the cancel line, got %q", got)
+	}
+}
+
+// mainViewStatusLines lists the status lines the conversation's own transcript
+// retained, in order: the surface the cancel line and "Worked for" live on.
+func mainViewStatusLines(r *Renderer) string {
+	var titles []string
+	for _, block := range r.vm.blocks {
+		if block != nil && block.frame.Kind == FrameStatus {
+			titles = append(titles, block.frame.Title)
+		}
+	}
+	return strings.Join(titles, "\n")
+}
+
+// An empty queue is the owner's rule: Esc keeps the meaning it always had and
+// cancels the run, whichever part of the turn is executing. Anyone who later
+// makes "empty queue" stop cancelling has to break this test to do it.
+func TestEscInTheMainViewWithoutSteersStillCancelsTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// What the turn is doing. The engine refuses on its own here, so the
+		// case fails loudly if the surface ever stops asking it.
+		during string
+	}{
+		{name: "model call in flight", during: "the model is streaming an answer"},
+		{name: "tool call executing", during: "a long tool is running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renderer := NewRenderer(nil, nil)
+			session := &fakeSession{cancelActive: true, interruptSendMain: false}
+			state := &streamState{sessionID: "s1", session: session}
+			handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
+				inputEvent{kind: inputEventHotkey, hotkey: hotkeyEscapeInterrupt}, nil)
+			if session.interruptSendMainCalls != 1 {
+				t.Fatalf("Esc must ask the engine once even with an empty queue, asked %d times", session.interruptSendMainCalls)
+			}
+			if session.cancelCalls != 1 || !state.userInterrupted {
+				t.Fatalf("Esc with an empty queue (%s) must cancel the run (cancels=%d interrupted=%v)",
+					tc.during, session.cancelCalls, state.userInterrupted)
+			}
+			if got := mainViewStatusLines(renderer); !strings.Contains(got, "cancelling run") {
+				t.Fatalf("Esc with an empty queue (%s) must render the cancel line, got %q", tc.during, got)
+			}
+		})
 	}
 }
 
@@ -6067,21 +6146,21 @@ func TestSubagentViewSlashCommandClasses(t *testing.T) {
 	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
 
 	// A hidden command points back to the conversation and changes nothing.
-	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/new")
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/new", nil)
 	if renderer.ActiveView() != "task-b" {
 		t.Fatal("a hidden command must not change the view")
 	}
 
 	// /context reports this subagent (no error, and the report is rendered in
 	// this view).
-	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/context")
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/context", nil)
 	if vm := renderer.ensurePerAgentVM("task-b"); vm == nil || len(vm.blocks) == 0 {
 		t.Fatal("/context must render its report in the subagent's view")
 	}
 
 	// /compact is hidden there now: it answers with the one sentence that points
 	// back to the conversation instead of running.
-	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/compact")
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/compact", nil)
 	if vm := renderer.ensurePerAgentVM("task-b"); vm == nil || !blockSays(vm.blocks, subagentViewMainOnlyReply) {
 		t.Fatal("/compact must answer as a conversation command in a subagent's view")
 	}
@@ -6109,7 +6188,7 @@ func TestSubagentViewSendsARegisteredSkillCommandToTheSubagent(t *testing.T) {
 	renderer.SetActiveView("task-b")
 	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
 
-	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/probe-skill tighten it")
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/probe-skill tighten it", nil)
 
 	if len(session.subagentSent) != 1 {
 		t.Fatalf("sent to the subagent %d times, want once", len(session.subagentSent))
@@ -7072,7 +7151,7 @@ func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
 	cmds := newCommandController(session, renderer, nil, nil, home)
 
 	for _, refused := range []string{"/plan write it", "/model", "/permissions", "/new", "/some-skill"} {
-		handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, refused)
+		handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, refused, nil)
 		if !handled {
 			t.Fatalf("%s was not handled", refused)
 		}
@@ -7084,7 +7163,7 @@ func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
 
 	// /compact has a dispatcher of its own — the one that keeps the event loop
 	// alive while it runs — so it is asked the same question there.
-	handled, _, _, _ := dispatchCancelableStreamSlashCommand(context.Background(), nil, nil, nil, nil, cmds, renderer, NewTracker(), state, "/compact")
+	handled, _, _, _ := dispatchCancelableStreamSlashCommand(context.Background(), nil, nil, nil, nil, cmds, renderer, NewTracker(), state, "/compact", nil)
 	if !handled {
 		t.Fatal("/compact was not handled")
 	}
@@ -7094,7 +7173,64 @@ func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
 
 	// /continue is a turn: the dispatcher declines it so the submission reaches
 	// the surface, which admits it against the execution.
-	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/continue"); handled {
+	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/continue", nil); handled {
 		t.Fatal("/continue must fall through to the submission path")
+	}
+}
+
+// TestApplySlashOutcomeCarriesDraftImageAttachments pins the field bug: an
+// image attached to a slash-command draft must become part of the turn the
+// command continues into, and the model text must not keep the composer chip.
+func TestApplySlashOutcomeCarriesDraftImageAttachments(t *testing.T) {
+	img := newTestPNG(t)
+	state := &streamState{sessionID: "s1"}
+	outcome := SlashOutcome{ShouldContinueRun: true, ContinueInput: "如截图所示[Image #1] 定位根因"}
+	handled, continueRun, sub, _ := applySlashOutcome(
+		context.Background(), nil, nil, nil, state, "improve",
+		"/improve 如截图所示[Image #1] 定位根因",
+		[]InputAttachment{{Path: img, Label: "shot.png"}},
+		outcome,
+	)
+	if !handled || !continueRun {
+		t.Fatalf("handled=%v continueRun=%v, want true/true", handled, continueRun)
+	}
+	if len(sub.Attachments) != 1 || sub.Attachments[0].Path != img {
+		t.Fatalf("attachments = %+v, want the draft's one image", sub.Attachments)
+	}
+	if len(sub.Parts) < 2 {
+		t.Fatalf("parts = %+v, want a text part and an image part", sub.Parts)
+	}
+	if text := llm.TextContent(sub.Parts...); strings.Contains(text, "[Image #1]") {
+		t.Fatalf("model text = %q, the composer chip must be stripped", text)
+	}
+	// The transcript still shows the command the user typed, chip included.
+	if sub.DisplayText != "/improve 如截图所示[Image #1] 定位根因" {
+		t.Fatalf("display text = %q, want the raw command", sub.DisplayText)
+	}
+	if sub.RawInput != "/improve 如截图所示[Image #1] 定位根因" {
+		t.Fatalf("raw input = %q, want the raw command", sub.RawInput)
+	}
+}
+
+// A slash command submitted with nothing attached keeps exactly the turn it
+// built before attachments were threaded through the doors.
+func TestApplySlashOutcomeWithoutAttachmentsUnchanged(t *testing.T) {
+	state := &streamState{sessionID: "s1"}
+	outcome := SlashOutcome{Handled: true, ShouldContinueRun: true, ContinueInput: "review this diff"}
+	handled, continueRun, sub, _ := applySlashOutcome(
+		context.Background(), nil, nil, nil, state, "review",
+		"/review review this diff", nil, outcome,
+	)
+	if !handled || !continueRun {
+		t.Fatalf("handled=%v continueRun=%v, want true/true", handled, continueRun)
+	}
+	if sub.Text != "review this diff" || sub.DisplayText != "/review review this diff" {
+		t.Fatalf("submission = %+v, want the expanded prompt and the raw line", sub)
+	}
+	if len(sub.Attachments) != 0 {
+		t.Fatalf("attachments = %+v, want none", sub.Attachments)
+	}
+	if len(sub.Parts) != 1 || sub.Parts[0].Type != llm.ContentTypeText || sub.Parts[0].Text != "review this diff" {
+		t.Fatalf("parts = %+v, want the one text part", sub.Parts)
 	}
 }

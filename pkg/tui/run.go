@@ -949,10 +949,10 @@ func Run(ctx context.Context, opts Options) error {
 			if cmd == "compact" {
 				handled, continueRun, slashSubmission, exitRequested = dispatchCancelableStreamSlashCommand(
 					ctx, sigCh, events, notifyCh, processUINotification,
-					cmds, renderer, tracker, &state, line,
+					cmds, renderer, tracker, &state, line, submission.Attachments,
 				)
 			} else {
-				handled, continueRun, slashSubmission, exitRequested = dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, &state, line)
+				handled, continueRun, slashSubmission, exitRequested = dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, &state, line, submission.Attachments)
 			}
 			if handled {
 				if exitRequested {
@@ -1179,7 +1179,9 @@ func batchViewerSlashGate(renderer *Renderer, state *streamState, cmd string) (h
 	return true, false
 }
 
-func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, line string) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
+// attachments is the draft the command was submitted from: the turn the
+// command expands into is that draft's turn, so its images ride along.
+func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, line string, attachments []InputAttachment) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
 	if cmds == nil || state == nil {
 		return false, false, ComposerSubmission{}, false
 	}
@@ -1300,7 +1302,7 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		}
 		return false, false, ComposerSubmission{}, false
 	}
-	return applySlashOutcome(ctx, cmds, renderer, tracker, state, cmd, line, outcome)
+	return applySlashOutcome(ctx, cmds, renderer, tracker, state, cmd, line, attachments, outcome)
 }
 
 // dispatchCancelableStreamSlashCommand keeps the TUI event loop alive while a
@@ -1323,6 +1325,7 @@ func dispatchCancelableStreamSlashCommand(
 	tracker *Tracker,
 	state *streamState,
 	line string,
+	attachments []InputAttachment,
 ) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
 	if cmds == nil || cmds.session == nil || state == nil {
 		return false, false, ComposerSubmission{}, false
@@ -1377,7 +1380,7 @@ func dispatchCancelableStreamSlashCommand(
 			if !result.ok || (!result.outcome.Handled && !result.outcome.ShouldContinueRun) {
 				return false, false, ComposerSubmission{}, false
 			}
-			return applySlashOutcome(ctx, cmds, renderer, tracker, state, cmd, line, result.outcome)
+			return applySlashOutcome(ctx, cmds, renderer, tracker, state, cmd, line, attachments, result.outcome)
 		case <-ctxDone:
 			// Keep waiting for the handler's synchronous cleanup/persistence
 			// barrier, but do not spin on an already-closed context channel.
@@ -2465,7 +2468,7 @@ func subagentViewLine(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 
 	switch {
 	case strings.HasPrefix(line, "/"):
-		subagentViewSlash(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, cmds, view, line)
+		subagentViewSlash(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, cmds, view, line, submission.Attachments)
 	case strings.HasPrefix(line, "!"):
 		// A shell command is the conversation's, never the subagent's.
 		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "shell", Content: subagentViewMainOnlyReply, AgentID: view, Final: true})
@@ -2482,7 +2485,7 @@ func subagentViewLine(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 
 // subagentViewSlash dispatches a slash command typed in a subagent's view by
 // its D4 class.
-func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, view, line string) {
+func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, view, line string, attachments []InputAttachment) {
 	fields := strings.Fields(strings.TrimSpace(line))
 	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
 	// The registry lists skill commands beside the built-ins, so a name it
@@ -2492,7 +2495,7 @@ func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-cha
 		// A skill command acts on the subagent: it is expanded through the
 		// shared slash path and sent to the subagent with the skill explicitly
 		// activated.
-		submission, ok := expandSubagentSkillCommand(ctx, session, state, line)
+		submission, ok := expandSubagentSkillCommand(ctx, session, state, line, attachments)
 		if !ok {
 			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.UnknownCommandReply(turn.SurfaceTUI, name, turn.DiscoveryOptions{SubagentView: true, FastAvailable: sessionFastAvailable(session)}), AgentID: view, Final: true})
 			return
@@ -2504,7 +2507,7 @@ func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-cha
 	switch builtin.SubagentView {
 	case turn.SubagentViewGlobal:
 		// Runs exactly as it does in the conversation's view.
-		dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line)
+		dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line, attachments)
 	case turn.SubagentViewActs:
 		switch name {
 		case "context":
@@ -2524,7 +2527,7 @@ func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-cha
 // expandSubagentSkillCommand expands a skill command into the submission the
 // subagent runs: the shared slash path builds the prompt, and the trusted skill
 // selection rides along so the execution activates that skill.
-func expandSubagentSkillCommand(ctx context.Context, session Session, state *streamState, line string) (ComposerSubmission, bool) {
+func expandSubagentSkillCommand(ctx context.Context, session Session, state *streamState, line string, attachments []InputAttachment) (ComposerSubmission, bool) {
 	outcome, ok := session.ExecuteSurfaceSlash(ctx, state.sessionID, line)
 	if !ok || !outcome.ShouldContinueRun {
 		return ComposerSubmission{}, false
@@ -2533,7 +2536,7 @@ func expandSubagentSkillCommand(ctx context.Context, session Session, state *str
 	if next == "" {
 		return ComposerSubmission{}, false
 	}
-	sub, ok := buildComposerSubmission(next, strings.TrimSpace(line), nil)
+	sub, ok := buildComposerSubmission(stripComposerAttachmentPlaceholders(next, attachments), strings.TrimSpace(line), attachments)
 	if !ok {
 		return ComposerSubmission{}, false
 	}
@@ -4683,7 +4686,8 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				session.CancelActiveRun()
 				return
 			}
-			// Esc cancels the in-flight run. Discard only the committed
+			// Esc cancels the in-flight run once the engine has nothing waiting
+			// to send. Discard only the committed
 			// composer.Text (set by a paste/attachment via holdComposer) so
 			// the idle loop does not auto-submit it as the next turn once the
 			// run ends. The live draft (DraftText) and the raw reader's line
@@ -4693,6 +4697,18 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			// nextAutomaticSubmission.
 			state.composer.Text = ""
 			state.holdComposer = false
+			// Esc with a steer waiting is one operation the engine owns: the
+			// call in flight is abandoned and this same turn goes on carrying
+			// the steer — the meaning Esc already has in a subagent's view.
+			// The run does not end, so there is no "cancelling run" line and
+			// no "Worked for" closing it, and the working clock keeps counting.
+			// The two flags below stay untouched here on purpose: a set
+			// userInterrupted makes the turn's end read as an interrupt
+			// boundary that hands the queue back to the composer, and a set
+			// submitPendingSteersAfterInterrupt resubmits it as a fresh turn.
+			if session.InterruptToSend(state.sessionID) {
+				return
+			}
 			// Every esc is a user-initiated interrupt. The flag must be set
 			// regardless of what is queued: the cancellation error is swallowed
 			// downstream and surfaces as nil, so without it runTurn reports
@@ -4822,7 +4838,10 @@ func handleActiveRunSlash(ctx context.Context, session Session, renderer *Render
 		return
 	}
 	if cmds != nil {
-		handled, continueRun, submission, _ := dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line)
+		// The active-run door clears the draft before dispatching (the submitted
+		// line has left the composer), so this call has no attachments to carry:
+		// a slash command typed mid-run still drops the images drafted with it.
+		handled, continueRun, submission, _ := dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line, nil)
 		if handled {
 			if continueRun {
 				// A steer joins an already-built agent session and cannot safely add
@@ -4882,7 +4901,9 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 	outcome := cmds.session.ChooseSurfaceSlash(ctx, state.sessionID, turn.SlashChoice{Command: picker.Command, Value: picker.Items[idx].Value})
 	// A model, an effort or an agent may have changed under the footer.
 	refreshSessionFooter(renderer, cmds.session, state.sessionID)
-	return applySlashOutcome(ctx, cmds, renderer, tracker, state, strings.TrimSuffix(picker.Command, "-effort"), "", outcome)
+	// A picker choice authors a turn of its own: it has no draft, so nothing
+	// is attached to it.
+	return applySlashOutcome(ctx, cmds, renderer, tracker, state, strings.TrimSuffix(picker.Command, "-effort"), "", nil, outcome)
 }
 
 // refreshSessionFooter redraws what the footer says about the session: its
@@ -4915,7 +4936,7 @@ func refreshSessionFooter(renderer *Renderer, session Session, sessionID string)
 	}
 }
 
-func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, title string, rawLine string, outcome SlashOutcome) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
+func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, title string, rawLine string, attachments []InputAttachment, outcome SlashOutcome) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
 	if state == nil {
 		return false, false, ComposerSubmission{}, false
 	}
@@ -4993,7 +5014,15 @@ func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *R
 		if displayText == "" {
 			displayText = next
 		}
-		sub, ok := buildComposerSubmission(next, displayText, nil)
+		// The turn is the draft's own turn with the command's prompt as its
+		// model text, so the draft's attachments come with it: dropping them
+		// sent slash-submitted screenshots nowhere, left the row looking
+		// illustrated, and gave the text-only-model gate nothing to see.
+		// stripComposerAttachmentPlaceholders removes the composer chip first,
+		// because turn.SurfaceTurnContentParts appends one clean [Image #N]
+		// marker per attachment that actually goes out (see
+		// composerSubmission, same file).
+		sub, ok := buildComposerSubmission(stripComposerAttachmentPlaceholders(next, attachments), displayText, attachments)
 		if !ok {
 			return true, false, ComposerSubmission{}, outcome.ExitRequested
 		}

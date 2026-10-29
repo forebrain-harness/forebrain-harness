@@ -918,8 +918,14 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // serves — the type each session froze at birth (plan 145); every
 // type-dependent branch in 146–153 goes through it instead of the project's
 // current type.
+//
+// 28 fields (was 27): attemptLedger is the run's attempt ledger (plan 181).
+// One instance serves the conversation chain, the compaction summary's chain
+// and the image-refusal recorder, which is why it hangs off the Runner rather
+// than off any one chain — a per-chain ledger would restart the call numbers
+// every time a summary or a refusal ran between two chat calls.
 const (
-	runnerFields  = 27
+	runnerFields  = 28
 	runnerMethods = 46
 )
 

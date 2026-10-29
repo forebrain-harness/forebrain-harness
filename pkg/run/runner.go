@@ -1278,18 +1278,27 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if desc == "" {
 		desc = "Forebrain Harness agent"
 	}
+	// Each project type keeps its own base prompt; the shared plan-workflow
+	// contract is appended identically for all three, followed by that type's
+	// working-notes suffix. The user-may-address-a-subagent rule joins the two
+	// interactive types' base prompts — batch is unattended and never sees it.
+	notesSuffix := agentIntermediateToolPromptSuffix
 	switch r.ProjectType() {
 	case state.ProjectTypeOffice:
 		desc += agent.OfficeWorkPrompt
-		desc += agent.OfficeNotesPromptSuffix
+		desc += agent.SubagentUserRulingPrompt
+		notesSuffix = agent.OfficeNotesPromptSuffix
 	case state.ProjectTypeBatch:
 		desc += agent.BatchTaskPrompt
-		desc += agent.OfficeNotesPromptSuffix
+		notesSuffix = agent.OfficeNotesPromptSuffix
 	default:
-		// Creative coding: the prompt forebrain has always sent, byte for byte.
 		desc += agent.ScopeDisciplinePrompt
-		desc += agentIntermediateToolPromptSuffix
+		desc += agent.BugRootCausePrompt
+		desc += agent.SubagentUserRulingPrompt
 	}
+	desc += agent.AdvisorWorkflowPrompt
+	desc += agent.PlanHandoffQualityPrompt
+	desc += notesSuffix
 	//desc += agentCollaborationPromptSuffix
 	a, err := agent.New(mainLLM, name, desc)
 	if err != nil {

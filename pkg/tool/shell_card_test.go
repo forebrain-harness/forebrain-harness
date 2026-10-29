@@ -181,3 +181,35 @@ func TestParseFileDiffReadsTheTurnDiffSection(t *testing.T) {
 	_, ok = ParseFileDiff("**shell**\n\nstdout:\n\n```text\nx\n```")
 	require.False(t, ok, "a body that does not open with the turn diff is not a file diff")
 }
+
+// TestParseFileDiffReadsAnEscalatedFence pins the fence-length half of the same
+// pair: when the diff quotes a code fence within the context lines around the
+// change, fenceFor opens the turn-diff fence with four backticks and only a
+// fence of that same length may close it.
+func TestParseFileDiffReadsAnEscalatedFence(t *testing.T) {
+	unified := "@@ -2,7 +2,7 @@\n # Plan\n \n ```bash\n-make build\n+make build test\n ```\n tail"
+	evt := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "edit_file",
+		Input:    map[string]any{"file_path": "/w/docs/plan.md"},
+		Output: map[string]any{
+			"turn_diff": event.Summary{Path: "/w/docs/plan.md", Added: 1, Deleted: 1, UnifiedDiff: unified},
+		},
+	}
+	body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	require.Contains(t, body, "````diff", "the writer escalates the fence past the one the diff quotes")
+	diff, ok := ParseFileDiff(body)
+	require.True(t, ok, "an escalated-fence card body must parse:\n%s", body)
+	require.Equal(t, unified, diff.UnifiedDiff, "the whole diff reads back, through the quoted fence:\n%s", body)
+
+	// A stream that quotes a three-backtick fence reads back whole as well.
+	shell := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Output:   map[string]any{"stdout": "```bash\nmake build\n```\ntail", "exit_code": 0},
+	}
+	shellBody, _ := FormatToolStepResult(shell, DefaultMaxFormattedBody)
+	card, ok := ParseShellCard(shellBody)
+	require.True(t, ok, "a shell card body must parse:\n%s", shellBody)
+	require.Equal(t, "```bash\nmake build\n```\ntail", card.Stdout)
+}

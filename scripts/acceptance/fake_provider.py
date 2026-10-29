@@ -28,6 +28,19 @@ TOOL_SCRIPT = [
 # are unchanged for every existing caller.
 if os.environ.get("FAKE_TOOL_NAME"):
     TOOL_SCRIPT = [(os.environ["FAKE_TOOL_NAME"], os.environ.get("FAKE_TOOL_ARGS", "{}"))]
+# FAKE_TOOL_SCRIPT points at a JSON file holding the whole script as
+# [["name", "arguments-json"], ...] and replaces it outright, which is what a
+# case needs when the turn has to reach a tool only after an earlier one has
+# been answered. REQUESTS is one counter for the whole provider process, so the
+# main agent and any subagent consume the same script in arrival order: a case
+# that wants a subagent to fall through to the plain text leaves the script
+# shorter than the request number that subagent will make. Unset, the two
+# single-shot switches above and the default script behave exactly as before.
+SCRIPT_MULTI_SHOT = False
+if os.environ.get("FAKE_TOOL_SCRIPT"):
+    with open(os.environ["FAKE_TOOL_SCRIPT"], "r", encoding="utf-8") as _script_file:
+        TOOL_SCRIPT = [(name, arguments) for name, arguments in json.load(_script_file)]
+    SCRIPT_MULTI_SHOT = True
 REQUESTS = itertools.count()
 # How many netdrop-marker requests have been cut so far; the marker's own
 # counter counts only requests that carried it.
@@ -56,9 +69,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         streamed = request.get("stream") if isinstance(request, dict) else None
         sys.stderr.write("REQUEST %s stream=%s mode=%s\n" % (self.path, streamed, MODE))
         sys.stderr.flush()
+        # FAKE_DUMP_DIR keeps every request body as one JSON line, which is how
+        # a case checks what the model was actually sent - the system prompt,
+        # the reminder appended to it, the task a subagent was handed. Unset,
+        # nothing is written and the behaviour is unchanged.
+        dump_dir = os.environ.get("FAKE_DUMP_DIR")
+        if dump_dir:
+            os.makedirs(dump_dir, exist_ok=True)
+            with open(os.path.join(dump_dir, "requests.jsonl"), "ab") as dump_file:
+                dump_file.write(body + b"\n")
 
         if MODE == "toolcall":
-            self.serve_tool_script(next(REQUESTS))
+            self.serve_tool_script(next(REQUESTS), streamed is True and SCRIPT_MULTI_SHOT)
             return
 
         # In `reply` mode one process also serves the subagent-net cases: it
@@ -482,7 +504,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
 
-    def serve_tool_script(self, nth):
+    def serve_tool_script(self, nth, streaming=True):
+        # A turn's first request streams; the request that carries a tool result
+        # back does not, and must be answered with a JSON body rather than an
+        # event stream. Without this the continuation is unparseable and the
+        # client gives up after its retries, so no scripted sequence longer than
+        # one call could ever run.
+        if not streaming:
+            name, arguments = TOOL_SCRIPT[nth] if nth < len(TOOL_SCRIPT) else (None, None)
+            if arguments is not None and not isinstance(arguments, str):
+                arguments = json.dumps(arguments)
+            message = {"role": "assistant", "content": [{"type": "text", "text": TEXT}]}
+            if name:
+                message["tool_calls"] = [{
+                    "id": "call_fake_%d" % nth,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }]
+            payload = json.dumps({
+                "id": "fake-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "fake-model",
+                "choices": [{"index": 0, "message": message,
+                             "finish_reason": "tool_calls" if name else "stop"}],
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -494,6 +547,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.write_raw(b"")
             return
         name, arguments = TOOL_SCRIPT[nth]
+        # An empty name is a plain-text beat: it lets a multi-shot script place
+        # one scripted answer between two scripted tool calls, which is how a
+        # subagent's own request is kept out of the tool sequence.
+        if not name:
+            self.write_event(chunk(delta={"role": "assistant", "content": TEXT}))
+            self.write_event(chunk(finish="stop"))
+            self.write_raw(b"data: [DONE]\n\n")
+            self.write_raw(b"")
+            return
         self.write_event(chunk(delta={
             "role": "assistant",
             "content": "calling %s" % name,

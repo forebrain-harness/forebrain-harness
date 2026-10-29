@@ -588,6 +588,52 @@ func registerKeptPlanArtifact(ctx context.Context, rt *AgentToolRuntime, planFil
 	}, true
 }
 
+// planExecutionContractFormat is the one execution contract an approved plan
+// hands back to the primary agent: it arrives immediately in the exit_plan_mode
+// result and again as the recurring implementation reminder, so office
+// conversations cannot drift onto a second, shorter set of rules. The two
+// placeholders are the plan file path and state.ImplementationHeading.
+const planExecutionContractFormat = `You are the primary executor of an approved plan. The plan file is:
+
+  %s
+
+It remains writable in this mode; keep the original plan readable beside the implementation record.
+
+You own implementation and review in the current approved workspace. Do not create a separate executor, worktree, branch, commit, merge or push unless the user or approved plan explicitly requires it.
+
+## Execute against the approved contract
+
+1. Run the plan's drift check first and compare load-bearing current-state excerpts with the live project. If the plan declares dependencies, confirm they are complete. Any load-bearing content mismatch, stale plan or missing dependency is a STOP that requires returning for reconciliation; no adaptation is allowed on that path.
+2. Follow the steps in order. Run every verification command and confirm its expected result before moving on. Touch only in-scope files or deliverables and preserve unrelated user work.
+3. Stop immediately and report when a plan STOP condition occurs, a required change falls out of scope, a load-bearing assumption is false, or verification still fails after a focused diagnosis and one justified retry. Do not hide a failure by weakening its test.
+4. Only a non-load-bearing detail that triggers no drift or STOP condition may be adapted, and only when intent, scope, public behavior and done criteria remain unchanged. Record the adaptation and its evidence; every other deviation returns for reconciliation instead of being patched locally.
+
+## Review your own work before claiming completion
+
+- Re-run every done criterion; do not rely on an earlier step's success.
+- Inspect the complete change set and compare it with the scope. Any unjustified out-of-scope change fails review.
+- Read the actual changes and the new tests. Confirm they solve the stated problem, follow project conventions, and assert behavior that could regress rather than merely making a command pass.
+- Use independent verification when available and useful, but the primary agent remains responsible for the verdict. After two edit-and-review cycles without convergence, stop and report instead of patching indefinitely.
+
+## Close the plan loop
+
+Before the final answer, mark each plan task done, partially done or not done and append exactly the heading %s. Record what landed and where, every deviation and why, anything not done, and each verification result. Update a backlog index only when the plan's own workflow assigns that status update to the executor.
+
+Finish with this report structure; omit STOPPED BECAUSE unless stopped:
+
+STATUS: COMPLETE | STOPPED
+STEPS: per step — done/skipped + verification result
+STOPPED BECAUSE: the exact condition and observation
+FILES CHANGED: list
+NOTES: deviations, surprises, judgment calls and anything left unresolved`
+
+// ApprovedPlanExecutionPrompt is the contract the primary agent executes an
+// approved plan under. It is returned to the model only: it never reaches a
+// human-readable approval card.
+func ApprovedPlanExecutionPrompt(planFile string) string {
+	return fmt.Sprintf(planExecutionContractFormat, planFile, state.ImplementationHeading)
+}
+
 // newExitPlanModeToolFor is newExitPlanModeTool for a concrete runtime. A nil
 // rt keeps the historical coding behaviour; an office runtime refuses the
 // call outside plan mode (the user enters plan mode explicitly, the wrapper
@@ -702,13 +748,13 @@ func newExitPlanModeToolFor(st *State, stateRoot, projectKey string, rt *AgentTo
 			st.SetRuntimeSessionMode(ctx, sid, string(restored), planDir)
 			// Keep the LLM-facing payload minimal: only the restored mode, the
 			// plan file reference, and a human-readable confirmation message.
+			// The execution contract rides in on_completion, which is for the
+			// model only and is rendered nowhere.
 			b, _ := json.Marshal(map[string]any{
-				"mode":      string(restored),
-				"plan_file": planFile,
-				"message":   "Exited plan mode. You can now make edits, run tools, and take actions. Implement the approved plan in " + planFile + ".",
-				"on_completion": "When the plan's tasks are done (or you stop working on it), you MUST update " + planFile +
-					" before reporting back: tick off the completed tasks and append a final '" + state.ImplementationHeading +
-					"' section summarizing what actually landed, any deviations from the plan, what was left out, and how it was verified. The plan file is writable in this mode. This is not optional - a plan is only complete once its implementation status is recorded in it.",
+				"mode":          string(restored),
+				"plan_file":     planFile,
+				"message":       "Exited plan mode. You can now make edits, run tools, and take actions. Implement the approved plan in " + planFile + ".",
+				"on_completion": ApprovedPlanExecutionPrompt(planFile),
 			})
 			return string(b), nil
 		},

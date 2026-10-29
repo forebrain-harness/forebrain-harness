@@ -566,7 +566,7 @@
                       :status="submitStatus"
                       :disabled="composerLocked"
                       :label="submitLabel"
-                      @stop="interruptAndSendPendingSteers"
+                      @stop="cancel"
                     />
                   </div>
                 </PromptInputFooter>
@@ -1526,7 +1526,7 @@ async function restoreLastQueuedMessage() {
 }
 
 async function interruptAndSendPendingSteers() {
-  sendPendingSteersAfterInterrupt()
+  await sendPendingSteersAfterInterrupt()
 }
 
 const { sessions, fetchSessions } = useChatSessions()
@@ -1595,6 +1595,7 @@ const {
   send,
   choose,
   editLastQueuedMessage,
+  cancel,
   sendPendingSteersAfterInterrupt,
   loadMessages,
   loadOlderMessages,

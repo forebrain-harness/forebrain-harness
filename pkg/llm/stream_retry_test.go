@@ -603,3 +603,66 @@ func TestWaitForComputesJitterAndRetryAfter(t *testing.T) {
 		t.Fatalf("waitFor = %v/%v, want the server's own wait", sleep, giveUp)
 	}
 }
+
+// A machine that slept through the request is retried without spending the
+// shared budget, and that retry still has to announce a number the status line
+// can show and the pending bookkeeping can clear: 0 is what downstream reads as
+// "no retry at all", so the notice would arm nothing and its Cleared would
+// never fire — the line would outlive the recovery, stuck on "attempt 0/10".
+func TestSleptThroughRetryAnnouncesItsFirstAttempt(t *testing.T) {
+	t.Parallel()
+
+	policy := streamRetryPolicy{maxRetries: 10, maxSleptThrough: 10, maxOverloaded: 3, allowNonStreaming: true}
+	dec := decideStreamFailure(CauseSuspended, StreamProgressSnapshot{Kind: ProgressNothing}, false, streamRetryCounts{}, policy)
+	if dec.d != DecideRetry {
+		t.Fatalf("decision = %v, want DecideRetry", dec.d)
+	}
+	if dec.c.retries != 0 || dec.c.sleptThrough != 1 {
+		t.Fatalf("counts = %+v, want a slept-through retry that spends no shared budget", dec.c)
+	}
+	if got := retryAnnounceNumber(dec.c, policy.maxRetries); got != 1 {
+		t.Fatalf("announced retry = %d, want 1", got)
+	}
+}
+
+// Every retry the decision table decides to take announces a 1-based number no
+// larger than the cap the status line divides by — the invariant the pending
+// notice and the attempt ledger both rely on.
+func TestRetryAnnouncementsAreOneBasedAndCapped(t *testing.T) {
+	t.Parallel()
+
+	policy := streamRetryPolicy{maxRetries: 10, maxSleptThrough: 10, maxOverloaded: 3, allowNonStreaming: true}
+	causes := []StreamFailureCause{
+		CauseOverloaded, CauseServerError, CauseTimedOut, CauseStalled, CauseTruncated,
+		CauseSuspended, CauseConnectionLost, CauseMalformed, CauseBadRequest, CauseUnknown,
+	}
+	kinds := []StreamProgressKind{ProgressNothing, ProgressStarted, ProgressPartialOutput, ProgressThinkingOnly, ProgressOutput}
+	histories := []streamRetryCounts{
+		{},
+		{retries: 1},
+		{retries: 10},
+		{sleptThrough: 5},
+		{retries: 3, sleptThrough: 5},
+		{retries: 10, sleptThrough: 10},
+	}
+	for _, cause := range causes {
+		for _, kind := range kinds {
+			for _, outlasted := range []bool{false, true} {
+				for _, stop := range []bool{false, true} {
+					for _, counts := range histories {
+						snap := StreamProgressSnapshot{Kind: kind, StopReasonReceived: stop}
+						dec := decideStreamFailure(cause, snap, outlasted, counts, policy)
+						if dec.d != DecideRetry {
+							continue
+						}
+						got := retryAnnounceNumber(dec.c, policy.maxRetries)
+						if got < 1 || got > policy.maxRetries {
+							t.Fatalf("%v/%v outlasted=%v stop=%v from %+v: announced retry = %d, want 1..%d",
+								cause, kind, outlasted, stop, counts, got, policy.maxRetries)
+						}
+					}
+				}
+			}
+		}
+	}
+}

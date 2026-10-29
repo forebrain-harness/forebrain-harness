@@ -42,6 +42,9 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
     olderExhausted: unknown
     send: unknown
     runtimeStatus: unknown
+    isStreaming: unknown
+    cancel: unknown
+    sendPendingSteersAfterInterrupt: unknown
   }
   f.sessionId = ref('s1')
   f.messages = ref([])
@@ -55,6 +58,9 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
   f.recallSubagentInput = vi.fn()
   f.loadSubagentBudget = vi.fn()
   f.send = vi.fn()
+  f.isStreaming = ref(false)
+  f.cancel = vi.fn()
+  f.sendPendingSteersAfterInterrupt = vi.fn()
   f.takeSubagentReturnedDraft = vi.fn(() => null)
   f.autoContinueForView = vi.fn(() => null)
   f.cancelAutoContinue = vi.fn()
@@ -71,7 +77,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       modePhase: ref(''),
       plan: ref(null),
       answer: ref(''),
-      isStreaming: ref(false),
+      isStreaming: f.isStreaming,
       error: ref(null),
       messages: f.messages,
       sessionArtifacts: f.sessionArtifacts,
@@ -105,7 +111,8 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       takeReturnedNoticeCode: vi.fn(() => null),
       send: f.send,
       editLastQueuedMessage: vi.fn(),
-      sendPendingSteersAfterInterrupt: vi.fn(),
+      sendPendingSteersAfterInterrupt: f.sendPendingSteersAfterInterrupt,
+      cancel: f.cancel,
       loadMessages: vi.fn(),
       loadOlderMessages: f.loadOlderMessages,
       olderLoading: f.olderLoading,
@@ -564,6 +571,36 @@ describe('ChatView subagent drawer', () => {
  * order — the state, then the checklist, then the first-token wait — and no
  * line at all while nothing runs.
  */
+describe('ChatView composer stop', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    ;(fake as { isStreaming: { value: boolean } }).isStreaming.value = false
+  })
+
+  /**
+   * The stop button and Esc are two different operations: the button stops the
+   * run, while Esc hands the engine the chance to interrupt-and-send first.
+   * Sharing one handler would turn the stop button into "carry the queue into
+   * this turn" whenever the queue was non-empty — a control that keeps running.
+   */
+  it('stops the run from the button instead of interrupting to send', async () => {
+    const f = fake as {
+      isStreaming: { value: boolean }
+      cancel: ReturnType<typeof vi.fn>
+      sendPendingSteersAfterInterrupt: ReturnType<typeof vi.fn>
+    }
+    f.isStreaming.value = true
+    const wrapper = await mountView()
+    const stop = wrapper.find('[aria-label="Stop"]')
+    expect(stop.exists()).toBe(true)
+    await stop.trigger('click')
+    expect(f.cancel).toHaveBeenCalledTimes(1)
+    expect(f.sendPendingSteersAfterInterrupt).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
+
 describe('ChatView run status line', () => {
   const runtimeStatus = () => (fake as { runtimeStatus: { value: unknown } }).runtimeStatus
 

@@ -1,1 +1,0 @@
-import{d as t,f as a,H as e,y as n,o as r}from"./index-D4vW97rL.js";const l={class:"forebrain-list-toolbar"},c=t({__name:"ListToolbar",setup(i){return(s,o)=>(r(),a("div",l,[e(s.$slots,"left"),o[0]||(o[0]=n("span",{class:"flex-1"},null,-1)),e(s.$slots,"actions")]))}});export{c as _};
