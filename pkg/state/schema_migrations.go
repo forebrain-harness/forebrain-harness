@@ -1772,9 +1772,49 @@ SELECT COUNT(*) FROM (
 	if _, err := conn.ExecContext(ctx, `VACUUM INTO ?`, backupPath); err != nil {
 		return fmt.Errorf("copy the state database to %s: %w", backupPath, err)
 	}
+	// One copy is the insurance; a second one beside it is only disk spent.
+	// The copy just written retires the backups earlier upgrades left behind.
+	removed := pruneOldStateBackups(backupDir, backupPath)
 	slog.Info("backed up the state database before migrating",
-		"from_version", version, "to_version", stateSchemaVersion, "path", backupPath)
+		"from_version", version, "to_version", stateSchemaVersion, "path", backupPath,
+		"kept", backupPath, "removed", removed)
 	return nil
+}
+
+// pruneOldStateBackups removes the pre-migration backups older than the one
+// keepPath names: the owner keeps exactly one, so a fresh copy retires those
+// earlier upgrade runs left behind. Only files named like this feature's
+// backups are touched — anything else sharing the directory (say the owner's
+// own restore copy) stays. Cleanup is best-effort: the backup itself already
+// succeeded, so a file that refuses removal is warned about and skipped
+// instead of failing the migration.
+func pruneOldStateBackups(backupDir, keepPath string) int {
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		slog.Warn("could not list the state backup directory to prune it",
+			"dir", backupDir, "err", err)
+		return 0
+	}
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "forebrain.state.v") || !strings.HasSuffix(name, ".sqlite") {
+			continue
+		}
+		path := filepath.Join(backupDir, name)
+		if path == keepPath {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			slog.Warn("could not remove an old state backup", "path", path, "err", err)
+			continue
+		}
+		removed++
+	}
+	return removed
 }
 
 // stateTableExists reports whether the database declares a table of the given

@@ -2777,6 +2777,95 @@ WHERE COALESCE(run_id,'')=? AND event_type='tool_output_delta'
 		}
 	})
 
+	// The owner keeps one backup, not one per upgrade: the copy this
+	// migration writes retires the ones earlier runs left behind, and touches
+	// nothing else in the directory.
+	t.Run("only the newest backup is kept", func(t *testing.T) {
+		path := streamDeltaFixtureV11(t, 10)
+		backupsDir := filepath.Join(filepath.Dir(path), "backups")
+		if err := os.MkdirAll(backupsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old := []string{
+			"forebrain.state.v10.20200101T000000.000000000Z.sqlite",
+			"forebrain.state.v9.19990101T000000.000000000Z.sqlite",
+		}
+		for _, name := range old {
+			if err := os.WriteFile(filepath.Join(backupsDir, name), []byte("old backup"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		migrated, err := Open(ctx, path, nil)
+		if err != nil {
+			t.Fatalf("open the v10 fixture: %v", err)
+		}
+		defer migrated.Close()
+
+		entries, err := os.ReadDir(backupsDir)
+		if err != nil {
+			t.Fatalf("read the backup directory: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("backup directory holds %d files, want 1 (the fresh copy)", len(entries))
+		}
+		if name := entries[0].Name(); !strings.HasPrefix(name, "forebrain.state.v10.") || !strings.HasSuffix(name, ".sqlite") {
+			t.Fatalf("kept backup is %q, want the one this migration wrote", name)
+		}
+		for _, name := range old {
+			if _, err := os.Stat(filepath.Join(backupsDir, name)); !os.IsNotExist(err) {
+				t.Fatalf("an older backup survived the migration: %q (stat err %v)", name, err)
+			}
+		}
+	})
+
+	t.Run("files that are not state backups are left alone", func(t *testing.T) {
+		path := streamDeltaFixtureV11(t, 10)
+		backupsDir := filepath.Join(filepath.Dir(path), "backups")
+		if err := os.MkdirAll(backupsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old := []string{
+			"forebrain.state.v10.20200101T000000.000000000Z.sqlite",
+			"forebrain.state.v9.19990101T000000.000000000Z.sqlite",
+		}
+		for _, name := range old {
+			if err := os.WriteFile(filepath.Join(backupsDir, name), []byte("old backup"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		unrelated := []string{"notes.txt", "my-restore.sqlite"}
+		for _, name := range unrelated {
+			if err := os.WriteFile(filepath.Join(backupsDir, name), []byte("the owner's own file"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		migrated, err := Open(ctx, path, nil)
+		if err != nil {
+			t.Fatalf("open the v10 fixture: %v", err)
+		}
+		defer migrated.Close()
+
+		for _, name := range unrelated {
+			if _, err := os.Stat(filepath.Join(backupsDir, name)); err != nil {
+				t.Fatalf("the migration touched %q: %v", name, err)
+			}
+		}
+		for _, name := range old {
+			if _, err := os.Stat(filepath.Join(backupsDir, name)); !os.IsNotExist(err) {
+				t.Fatalf("an older backup survived the migration: %q (stat err %v)", name, err)
+			}
+		}
+		entries, err := os.ReadDir(backupsDir)
+		if err != nil {
+			t.Fatalf("read the backup directory: %v", err)
+		}
+		if len(entries) != 3 {
+			t.Fatalf("backup directory holds %d files, want 3 (the fresh copy plus both unrelated files)", len(entries))
+		}
+	})
+
 	t.Run("the space check refuses before touching the database", func(t *testing.T) {
 		path := streamDeltaFixtureV11(t, 10)
 		old := migrationFreeSpace
