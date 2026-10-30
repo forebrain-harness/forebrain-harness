@@ -700,7 +700,7 @@ func wrapGuardrailsLLM(inner llm.LLM, cfg *appcfg.Root, dedup *guardrailRunDedup
 		if dedup != nil && !dedup.markChecked(tool.RunIDFromContext(ctx)) {
 			return nil
 		}
-		q := strings.TrimSpace(latestUserText(messages))
+		q := strings.TrimSpace(latestSentUserText(messages))
 		if q == "" || strings.HasPrefix(q, "/") {
 			return nil
 		}
@@ -734,13 +734,18 @@ func wrapGuardrailsLLM(inner llm.LLM, cfg *appcfg.Root, dedup *guardrailRunDedup
 	return llm.Use(inner, mw)
 }
 
-// latestUserText returns the most recent non-empty user message text.
-func latestUserText(messages []llm.Message) string {
+// latestSentUserText returns the most recent non-empty user message text that
+// the person actually sent. The runtime's injected environment block rides as
+// a user message too (IsMeta), and it arrives after the person's own message,
+// so picking the last user row unchecked made the input rail scan that block
+// instead of what was typed.
+func latestSentUserText(messages []llm.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == llm.RoleUser {
-			if text := strings.TrimSpace(messages[i].TextContent()); text != "" {
-				return text
-			}
+		if messages[i].Role != llm.RoleUser || messages[i].IsMeta {
+			continue
+		}
+		if text := strings.TrimSpace(messages[i].TextContent()); text != "" {
+			return text
 		}
 	}
 	return ""

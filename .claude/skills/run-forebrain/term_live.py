@@ -134,16 +134,24 @@ def cmd_open(d, cols=141, rows=30):
     wid = new_window(d, "forebrain", cmd)
     # First launch in a new project asks for trust; the page opens on Quit, so
     # the answer is Down then Enter, sent once — the same as driver.sh does.
+    # The banner prints "commands" before the question is painted, so one frame
+    # carrying that text does not prove the question is gone: accept it once the
+    # answer has been sent, or once it has been absent for 15 frames (3s).
     trusted = False
+    quiet = 0
     deadline = time.time() + 40
     while time.time() < deadline:
         text = screen_text(d)
-        if "Trust this folder?" in text and not trusted:
-            cmd_send(d, "\\x1b[B\\r")
-            trusted = True
-        elif "commands" in text and (trusted or "Trust this folder?" not in text):
-            print("window %s: forebrain %dx%d, logs in %s" % (wid, int(cols), int(rows), d))
-            return
+        if "Trust this folder?" in text:
+            if not trusted:
+                cmd_send(d, "\\x1b[B\\r")
+                trusted = True
+            quiet = 0
+        elif "commands" in text:
+            if trusted or quiet >= 15:
+                print("window %s: forebrain %dx%d, logs in %s" % (wid, int(cols), int(rows), d))
+                return
+            quiet += 1
         time.sleep(0.2)
     die("forebrain never reached the composer in window %s; see %s" % (wid, path(d, "proxy.err")))
 

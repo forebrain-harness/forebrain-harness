@@ -699,6 +699,150 @@ MD
   pass "$name"
 }
 
+# The reviewer's task context must survive a plan turn that wrote hundreds of
+# the agent's own rows after the request. The store-side window used to be the
+# newest 200 transcript rows; 110 scripted read_file calls put 220 rows between
+# the request and the review, so a window like that holds no user row at all.
+fake_plan_review_long_investigation() {
+  local name=plan-review-long-investigation
+  want "$name" || return 0
+  local script="$LOGS/scripts-long-review.json" i
+  {
+    printf '[["", "{}"],'
+    for i in $(seq 1 110); do
+      printf '["read_file", "{\\"file_path\\":\\"README.md\\",\\"offset\\":%d}"],' "$((i % 5))"
+    done
+    printf '["exit_plan_mode", "{}"]]'
+  } > "$script"
+  SCENARIO_SCRIPT="$script"
+  scenario_start toolcall vcs --plan || { fail "$name" "session did not start"; return; }
+
+  # Turn 1 only names the session's plan directory (the plan-mode reminder
+  # carries it); the review needs a plan on disk, and the long turn below is the
+  # request the reviewer must still be able to see.
+  driver submit "Tell me where this session keeps its plan." >/dev/null 2>&1
+  wait_grew "Worked for" "$TURN_COUNT" 60 || { fail "$name" "the plan-directory turn never closed"; return; }
+  TURN_COUNT=$(screen_count "Worked for")
+  local dir; dir=$(plan_dir_on_disk 1)
+  [ -n "$dir" ] || { fail "$name" "the plan reminder named no plan directory"; return; }
+  cat > "$LOGS/plan-long-investigation.md" <<'MD'
+# Add S3 sync to the skill installer
+
+## Steps
+1. Upload the staged skill bundle to the configured S3 bucket.
+2. Keep the local installer working when no bucket is configured.
+
+## Verification
+- `go test ./pkg/skill`
+MD
+  seed_plan "$dir" s3-sync.md "$LOGS/plan-long-investigation.md"
+
+  driver submit "Add S3 sync to the skill installer." >/dev/null 2>&1
+  exit_card 120 || { fail "$name" "the long investigation never reached its card"; return; }
+  driver key m >/dev/null 2>&1
+  wait_text "Which model should review this plan" 20 || { fail "$name" "the reviewer picker never opened"; return; }
+  driver key Enter >/dev/null 2>&1
+  wait_text "plan-reviewer task" 60 || { fail "$name" "no reviewer run was recorded"; shot "$name-review"; return; }
+  sleep 2
+  shot "$name-review"
+
+  local review
+  review=$(db "SELECT content FROM fb_messages WHERE role='user' AND content LIKE 'Review the plan below%' ORDER BY id DESC LIMIT 1;")
+  case "$review" in
+    *"Add S3 sync to the skill installer."*) ;;
+    *) fail "$name" "the reviewer's <request> does not carry the user's ask"; return ;;
+  esac
+  case "$review" in
+    *forebrain_environment_context*) fail "$name" "the reviewer's <request> carries the runtime environment block"; return ;;
+  esac
+
+  # The discriminator: the request sits more than one 200-row window before the
+  # review, so a newest-rows window cannot reach it. The review dispatch line
+  # lands in the reviewer's worker session, so the row ids are read globally and
+  # the conversation id is read back from the request row itself.
+  local sid req_row review_row between
+  req_row=$(db "SELECT id FROM fb_messages WHERE role='user' AND content LIKE '%Add S3 sync%' AND content NOT LIKE 'Review the plan below%' ORDER BY id DESC LIMIT 1;" | tr -d ' ')
+  review_row=$(db "SELECT id FROM fb_messages WHERE role='user' AND content LIKE 'Review the plan below%' ORDER BY id DESC LIMIT 1;" | tr -d ' ')
+  sid=$(db "SELECT session_id FROM fb_messages WHERE id=${req_row:-0};" | tr -d ' ')
+  between=$(db "SELECT count(*) FROM fb_messages WHERE session_id='${sid:-none}' AND visibility='visible' AND id > ${req_row:-0} AND id < ${review_row:-0};" | tr -d ' ')
+  if [ -z "$req_row" ] || [ -z "$review_row" ] || [ "${between:-0}" -le 200 ]; then
+    fail "$name" "not discriminating: ${between:-0} rows between the request and the review"; return
+  fi
+  pass "$name"
+}
+
+# The input rail must judge what the person typed. The runtime appends its
+# environment block as a meta user message after the turn's own message, so a
+# rail that picks the last user row scans the block: a blocked phrase in what
+# the person typed reaches the provider anyway, and a clean message is judged
+# by the block. The store rows the failed turn persisted are the discriminator:
+# the environment block follows the blocked message, so the pre-fix rail would
+# have scanned the block.
+fake_input_rail_scans_the_persons_message() {
+  local name=input-rail-scans-the-persons-message
+  want "$name" || return 0
+  scenario_start reply vcs || { fail "$name" "session did not start"; return; }
+  # driver start wrote the config; the guardrail tunables are not part of it, so
+  # the TUI is restarted by hand over the same home, project and provider.
+  driver stop >/dev/null 2>&1 || true
+  cat > "$HOME_DIR/forebrain.yaml" <<YAML
+approval_policy: on-request
+agents:
+  defaults:
+    guardrails:
+      input:
+        block_substrings:
+        - zzz-blocked-needle
+  definitions:
+    main:
+      primary: true
+      enable_subagent: false
+      llm_providers:
+      - provider: deepseek
+        model: deepseek-v4-flash
+        api_key: \${FAKE_LLM_KEY}
+        base_url: http://127.0.0.1:$PORT
+YAML
+  python3 "$REPO/scripts/acceptance/fake_provider.py" reply "$PORT" FAKE_ANSWER 0.6 \
+    > "$ACCEPT_HOME/provider.log" 2>&1 &
+  echo $! > "$ACCEPT_HOME/provider.pid"
+  local i
+  for ((i = 0; i < 50; i++)); do
+    grep -q LISTENING "$ACCEPT_HOME/provider.log" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q LISTENING "$ACCEPT_HOME/provider.log" || { fail "$name" "the fake provider never bound its port"; return; }
+  tmux new-session -d -s "$SESSION" -x 140 -y 45 -c "$PROJ" \
+    "FAKE_LLM_KEY=sk-local-fake FAKE_TOOL_SCRIPT=$EMPTY_SCRIPT FAKE_DUMP_DIR=$DUMP FOREBRAIN_HOME=$HOME_DIR $BIN 2>$ACCEPT_HOME/tui.err; echo EXIT=\$?; exec bash"
+  accept_trust || { fail "$name" "the TUI never left the trust dialog"; return; }
+  wait_text "/ commands" 30 || { fail "$name" "the composer never appeared"; return; }
+
+  local before after status
+  before=$(request_count); before=${before:-0}
+  driver submit "please explain zzz-blocked-needle" >/dev/null 2>&1
+  sleep 8
+  after=$(request_count); after=${after:-0}
+  if [ "$after" != "$before" ]; then
+    fail "$name" "the rail let the blocked message reach the provider (${before} -> ${after})"; return
+  fi
+  status=$(db "SELECT status FROM fb_runs ORDER BY rowid DESC LIMIT 1;" | tr -d ' ')
+  [ "$status" = failed ] || { fail "$name" "latest run status = ${status:-none}, want failed"; return; }
+  screen | grep -q 'input guard "input-rail" failed' \
+    || { fail "$name" "the turn did not fail on the input rail"; return; }
+
+  # The discriminator: the runtime did append its environment block after the
+  # blocked message (the failed turn persisted both rows), so a rail that read
+  # the last user row scanned that block instead of the person's text.
+  local sid blocked_row env_row
+  sid=$(db "SELECT session_id FROM fb_messages WHERE role='user' AND content LIKE '%zzz-blocked-needle%' ORDER BY id DESC LIMIT 1;" | tr -d ' ')
+  blocked_row=$(db "SELECT id FROM fb_messages WHERE session_id='${sid:-none}' AND role='user' AND content LIKE '%zzz-blocked-needle%' ORDER BY id DESC LIMIT 1;" | tr -d ' ')
+  env_row=$(db "SELECT id FROM fb_messages WHERE session_id='${sid:-none}' AND role='user' AND content LIKE '<forebrain_environment_context>%' ORDER BY id DESC LIMIT 1;" | tr -d ' ')
+  if [ -z "$blocked_row" ] || [ -z "$env_row" ] || [ "${env_row:-0}" -le "${blocked_row:-0}" ]; then
+    fail "$name" "not discriminating: the environment block did not follow the blocked message"; return
+  fi
+  pass "$name"
+}
+
 # --------------------------------------------------- scenario 4a: office loop --
 fake_office_plan_review_execute() {
   local name=office-plan-review-execute
@@ -1541,6 +1685,8 @@ run_fake() {
   skill_vacuum || { echo "the acceptance environment is not skill-vacuum" >&2; exit 2; }
 
   fake_coding_plan_review_execute
+  fake_plan_review_long_investigation
+  fake_input_rail_scans_the_persons_message
   fake_advisor_all
   fake_plan_mode_audit
   fake_trivial_request

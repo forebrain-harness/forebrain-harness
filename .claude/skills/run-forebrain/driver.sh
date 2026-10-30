@@ -139,7 +139,10 @@ cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishel
   # already expired, and then nothing answers it and the composer never comes.
   # The page opens on Quit, so the answer is Down then Enter, sent once — a
   # second Enter would reach the composer and submit an empty turn.
-  local trusted=no i pane
+  # The banner prints "/ commands" before the question is painted, so one frame
+  # carrying that text does not prove the question is gone: accept it once the
+  # answer has been sent, or once it has been absent for 15 frames (3s).
+  local trusted=no quiet=0 i pane
   for ((i = 0; i < 200; i++)); do
     pane="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)"
     case "$pane" in
@@ -148,11 +151,22 @@ cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishel
           tmux send-keys -t "$SESSION" Down Enter
           trusted=yes
         fi
+        quiet=0
         ;;
-      *"/ commands"*) break ;;
+      *"/ commands"*)
+        if [ "$trusted" = yes ] || [ "$quiet" -ge 15 ]; then break; fi
+        quiet=$((quiet + 1))
+        ;;
+      *"EXIT="*)
+        die "the TUI exited during startup; see $WORK/tui.err"
+        ;;
     esac
     sleep 0.2
   done
+  [ "$trusted" = yes ] || [ "$quiet" -ge 15 ] || die "TUI never reached the composer; see $WORK/tui.err"
+  if tmux capture-pane -t "$SESSION" -p 2>/dev/null | grep -qF "Trust this folder?"; then
+    die "the trust question is still unanswered; refusing to send keys"
+  fi
   wait_for 25 "/ commands" || die "TUI never reached the composer; see $WORK/tui.err"
   echo "started: session=$SESSION provider=$mode port=$PORT home=$HOME_DIR${RESUME_ID:+ resume=$RESUME_ID}"
 }

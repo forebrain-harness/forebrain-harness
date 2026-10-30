@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1022,4 +1023,124 @@ func TestApprovalToolStepIDNamesTheGatedCall(t *testing.T) {
 		},
 	}
 	require.Equal(t, "call-exit-1", ApprovalToolStepID(fromSnapshot))
+}
+
+func newPlanReviewTaskStore(t *testing.T) *state.SessionStore {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	require.NoError(t, store.Ensure(ctx, "s1", "s1"))
+	return store
+}
+
+func appendInvestigationRows(t *testing.T, store *state.SessionStore, n int) {
+	t.Helper()
+	rows := make([]llm.Message, 0, n)
+	for i := 0; i < n; i++ {
+		rows = append(rows, llm.AssistantMessage([]llm.ContentPart{
+			llm.Text(fmt.Sprintf("investigation step %d: reading the installer", i)),
+		}))
+	}
+	require.NoError(t, store.AppendNewMessages(context.Background(), "s1", "", rows, "", ""))
+}
+
+func metaEnvironmentMessage() llm.Message {
+	msg := llm.UserMessage(llm.Text("<forebrain_environment_context>\nproject=/work\n</forebrain_environment_context>"))
+	msg.IsMeta = true
+	return msg
+}
+
+// A plan-mode turn writes hundreds of the agent's own rows after the request.
+// The reviewer's material must still be the request, not whatever the newest
+// transcript rows happen to be.
+func TestPlanReviewTaskContextSurvivesALongInvestigation(t *testing.T) {
+	ctx := context.Background()
+	store := newPlanReviewTaskStore(t)
+	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
+		llm.UserMessage(llm.Text("Add S3 sync to the skill installer.")),
+	}, "", ""))
+	appendInvestigationRows(t, store, 300)
+	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
+		metaEnvironmentMessage(),
+	}, "", ""))
+
+	got := planReviewTaskContext(ctx, store, "s1")
+	require.Contains(t, got, "Add S3 sync to the skill installer.")
+	require.NotContains(t, got, "forebrain_environment_context")
+}
+
+// The runtime-injected environment block is stored as a user row. It is not
+// something the person asked for, so it is not reviewer material.
+func TestPlanReviewTaskContextSkipsRuntimeMetaRows(t *testing.T) {
+	ctx := context.Background()
+	store := newPlanReviewTaskStore(t)
+	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
+		llm.UserMessage(llm.Text("Add S3 sync to the skill installer.")),
+		metaEnvironmentMessage(),
+	}, "", ""))
+
+	got := planReviewTaskContext(ctx, store, "s1")
+	require.Contains(t, got, "Add S3 sync to the skill installer.")
+	require.NotContains(t, got, "forebrain_environment_context")
+}
+
+// The newest turn is the request the plan is meant to serve, so the budget is
+// spent on it first: an older turn can be cut, never the newest one.
+func TestPlanReviewTaskContextKeepsTheNewestTurnWhole(t *testing.T) {
+	ctx := context.Background()
+	store := newPlanReviewTaskStore(t)
+	older := make([]llm.Message, 0, 5)
+	for i := 0; i < 5; i++ {
+		older = append(older, llm.UserMessage(llm.Text(
+			fmt.Sprintf("older turn %d: %s", i, strings.Repeat("a", 3000)),
+		)))
+	}
+	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", older, "", ""))
+	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
+		llm.UserMessage(llm.Text("Add S3 sync to the skill installer.")),
+	}, "", ""))
+
+	got := planReviewTaskContext(ctx, store, "s1")
+	require.Contains(t, got, "Add S3 sync to the skill installer.")
+	// MaxTaskChars of turn text, the "\n[truncated]" marker on the turn that
+	// hit the budget, and the "\n\n" separators between the kept turns.
+	overrun := len([]rune("\n[truncated]")) + 2*(planReviewTaskMessages-1)
+	require.LessOrEqual(t, len([]rune(got)), MaxTaskChars+overrun)
+}
+
+type recordingReviewer struct {
+	task string
+	plan string
+}
+
+func (r *recordingReviewer) Review(_ context.Context, req Request) (PlanReviewResult, error) {
+	r.task = req.Task
+	r.plan = req.Plan
+	return PlanReviewResult{Model: req.Model, Text: "looks fine"}, nil
+}
+
+// The wiring-level counterpart: what the reviewer is handed through
+// RunPlanReview is the person's request, not the fallback.
+func TestRunPlanReviewHandsTheRequestToTheReviewer(t *testing.T) {
+	ctx := context.Background()
+	store := newPlanReviewTaskStore(t)
+	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
+		llm.UserMessage(llm.Text("Add S3 sync to the skill installer.")),
+	}, "", ""))
+	appendInvestigationRows(t, store, 300)
+
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", "s1", "# Plan\n\nbody"))
+
+	reviewer := &recordingReviewer{}
+	require.NoError(t, RunPlanReview(ctx, PlanReviewRun{
+		ActionID: "a1", Model: Model{Provider: "openai", Model: "gpt-4o"},
+		SessionID: "s1", StateRoot: stateRoot, ProjectKey: "proj",
+		Transcripts: store, Reviewer: reviewer,
+	}))
+	require.Contains(t, reviewer.task, "Add S3 sync to the skill installer.")
+	require.Contains(t, reviewer.plan, "# Plan")
 }

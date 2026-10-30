@@ -1236,6 +1236,12 @@ func TestRawSelectorFeedbackNewlineModeIsIsolated(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The bytes after a bare Esc that are not part of a sequence are
+			// handed back to the queue: drain them so they do not become the
+			// first key of the next case.
+			t.Cleanup(func() { takePendingTerminalInput() })
+			takePendingTerminalInput()
+
 			readEnd, writeEnd, err := os.Pipe()
 			if err != nil {
 				t.Fatalf("os.Pipe: %v", err)
@@ -1260,6 +1266,45 @@ func TestRawSelectorFeedbackNewlineModeIsIsolated(t *testing.T) {
 				t.Fatalf("key kind = %v, want %v", key.kind, tt.want)
 			}
 		})
+	}
+}
+
+// Esc followed by a byte that is not part of a sequence: that byte was read one
+// chunk early, and it is the user's next key. Dropping it lost the first
+// character typed right after leaving a panel.
+func TestRawSelectorHandsBackTheByteAfterABareEscape(t *testing.T) {
+	t.Cleanup(func() { takePendingTerminalInput() })
+	takePendingTerminalInput()
+
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		readEnd.Close()
+		writeEnd.Close()
+	})
+	if _, err := writeEnd.Write([]byte("\x1bx")); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	if err := writeEnd.Close(); err != nil {
+		t.Fatalf("close input: %v", err)
+	}
+
+	sel := newRawSelector(readEnd, nil)
+	key, err := sel.readKey()
+	if err != nil {
+		t.Fatalf("first readKey: %v", err)
+	}
+	if key.kind != rawKeyEscape {
+		t.Fatalf("first key kind = %v, want %v", key.kind, rawKeyEscape)
+	}
+	key, err = sel.readKey()
+	if err != nil {
+		t.Fatalf("second readKey dropped the byte after Esc: %v", err)
+	}
+	if key.kind != rawKeyRune || key.r != 'x' {
+		t.Fatalf("second key = %v %q, want rune 'x'", key.kind, key.r)
 	}
 }
 

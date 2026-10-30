@@ -1388,9 +1388,12 @@ func planReviewerAgentID(ctx context.Context, log PlanReviewLog, sessionID, revi
 }
 
 // PlanReviewTranscripts is the transcript half of the reviewer's task
-// context: what the user asked for, read from the conversation itself.
+// context: the user turns of the conversation the plan serves, read from the
+// conversation itself.
 type PlanReviewTranscripts interface {
-	ListTranscriptMessages(ctx context.Context, sessionID string, limit int) ([]llm.Message, error)
+	// ListVisibleUserMessages returns the conversation's newest visible user
+	// turns, newest first, with the runtime's injected meta rows left out.
+	ListVisibleUserMessages(ctx context.Context, sessionID string, limit int) ([]state.UserMessageRef, error)
 }
 
 // planReviewTaskMessages bounds how far back the reviewer's task context
@@ -1405,32 +1408,32 @@ func planReviewTaskContext(ctx context.Context, transcripts PlanReviewTranscript
 	if transcripts == nil {
 		return ""
 	}
-	messages, err := transcripts.ListTranscriptMessages(ctx, strings.TrimSpace(sessionID), 200)
+	// The user turns themselves, not the newest rows of the transcript: a
+	// plan-mode turn writes hundreds of the agent's own rows after the
+	// request, and a window that counted them swallowed the request.
+	turns, err := transcripts.ListVisibleUserMessages(ctx, strings.TrimSpace(sessionID), planReviewTaskMessages)
 	if err != nil {
 		return ""
 	}
-	userTurns := make([]string, 0, planReviewTaskMessages)
-	for i := len(messages) - 1; i >= 0 && len(userTurns) < planReviewTaskMessages; i-- {
-		if messages[i].Role != llm.RoleUser {
-			continue
+	// Newest first is also the order the budget is spent in: the newest turn
+	// is the request the plan is meant to serve, so a long earlier turn can
+	// never crowd it out of the reviewer's material.
+	kept := make([]string, 0, len(turns))
+	budget := MaxTaskChars
+	for _, turn := range turns {
+		if budget <= 0 {
+			break
 		}
-		text := strings.TrimSpace(messages[i].TextContent())
+		text := strings.TrimSpace(turn.Content)
 		if text == "" {
 			continue
 		}
-		userTurns = append(userTurns, text)
+		text = Truncate(text, budget)
+		kept = append(kept, text)
+		budget -= len([]rune(text))
 	}
-	if len(userTurns) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for i := len(userTurns) - 1; i >= 0; i-- {
-		b.WriteString(userTurns[i])
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-	}
-	return Truncate(b.String(), MaxTaskChars)
+	slices.Reverse(kept)
+	return strings.Join(kept, "\n\n")
 }
 
 const (

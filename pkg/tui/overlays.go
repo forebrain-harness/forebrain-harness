@@ -3652,8 +3652,9 @@ func (s *rawSelector) readKeyWithMode(multiline bool) (parsedKey, error) {
 	defer stdinReadMu.Unlock()
 
 	buf := make([]byte, 1)
-	_, err := s.in.Read(buf)
-	if err != nil {
+	if queued, ok := takePendingTerminalInputByte(); ok {
+		buf[0] = queued
+	} else if _, err := s.in.Read(buf); err != nil {
 		return parsedKey{}, err
 	}
 	b := buf[0]
@@ -3681,6 +3682,9 @@ func (s *rawSelector) readKeyWithMode(multiline bool) (parsedKey, error) {
 			if multiline && (next[0] == '\r' || next[0] == '\n') {
 				return parsedKey{kind: rawKeyNewline}, nil
 			}
+			// Not part of a sequence: it is the next keypress, read one chunk
+			// early. Hand it back to the input pipeline instead of dropping it.
+			keepTerminalInputForInputPipeline(next)
 			return parsedKey{kind: rawKeyEscape}, nil
 		}
 		// SGR mouse report: ESC [ < Cb ; Cx ; Cy (M|m). Read until the M/m

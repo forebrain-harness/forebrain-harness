@@ -13780,8 +13780,8 @@ func runSharedReview(
 
 type stubReviewTranscripts struct{ text string }
 
-func (s stubReviewTranscripts) ListTranscriptMessages(context.Context, string, int) ([]llm.Message, error) {
-	return []llm.Message{llm.UserMessage(llm.Text(s.text))}, nil
+func (s stubReviewTranscripts) ListVisibleUserMessages(context.Context, string, int) ([]state.UserMessageRef, error) {
+	return []state.UserMessageRef{{RowID: 1, Content: s.text}}, nil
 }
 
 // fakeSubagentExecutor records how each review run was dispatched and replays a

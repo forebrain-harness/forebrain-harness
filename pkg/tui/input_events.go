@@ -225,6 +225,19 @@ func takePendingTerminalInput() []byte {
 	return b
 }
 
+// takePendingTerminalInputByte removes and returns the oldest queued byte — what
+// a reader that reads a byte at a time needs, so the queue keeps its order.
+func takePendingTerminalInputByte() (byte, bool) {
+	pendingTerminalInputMu.Lock()
+	defer pendingTerminalInputMu.Unlock()
+	if len(pendingTerminalInput) == 0 {
+		return 0, false
+	}
+	b := pendingTerminalInput[0]
+	pendingTerminalInput = pendingTerminalInput[1:]
+	return b, true
+}
+
 // stdinReadMu serialises reads from the terminal fd so the modal overlay's
 // direct readKey() path and the background reader goroutine never race on
 // the same fd. Without this the two goroutines can both block on Read(),
@@ -894,6 +907,12 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 				if len(carried) > 0 {
 					n = copy(buf, carried)
 					carried = carried[n:]
+				} else if queued, ok := takePendingTerminalInputByte(); ok {
+					// A reader that took a byte it turned out not to own (the
+					// modal overlay's readKey, ending a bare Esc) hands it back
+					// here; delivering it keeps the key the user pressed.
+					buf[0] = queued
+					n = 1
 				} else {
 					readable, perr := pollReadableInputFD(fd, pollIntervalMs)
 					if perr != nil {
@@ -1044,8 +1063,9 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 				}
 			}
 			pasteBurst.clear()
-			pendingUTF8 = pendingUTF8[:0]
-			pendingEscape = pendingEscape[:0]
+			// A seed replaces the line buffer, not the byte stream: an escape
+			// sequence or a multi-byte rune still in flight belongs to the
+			// terminal's next bytes, not to the draft being replaced.
 			historyIndex = -1
 			historyDraft = nil
 			// The whole buffer is being replaced, so a published selection
@@ -1185,9 +1205,6 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 							ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyJumpToBottom}
 							continue
 						}
-						if len(pendingEscape) == 2 && pendingEscape[1] == 0x1b {
-							continue
-						}
 						if bytes.Equal(pendingEscape, []byte{0x1b, '[', '2', '0', '0', '~'}) {
 							pendingEscape = pendingEscape[:0]
 							collectingPaste = true
@@ -1221,6 +1238,11 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 							ch <- inputEvent{kind: inputEventDraft, draft: string(line), cursor: cursor}
 							continue
 						}
+						// A two-byte buffer that is not a sequence start means the
+						// pending Esc was a complete keypress and this byte is the
+						// next one: deliver the interrupt and replay the byte. A
+						// second Esc is exactly that case — no report the reader
+						// decodes begins with ESC ESC.
 						if len(pendingEscape) == 2 && !startsEscapeSequence(pendingEscape) {
 							pendingEscape = pendingEscape[:0]
 							ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyEscapeInterrupt}

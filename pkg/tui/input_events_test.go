@@ -439,6 +439,235 @@ func TestPauseAckSucceedsWhileInnerReaderBlockedOnReadCh(t *testing.T) {
 	resumeInteractiveInputRead()
 }
 
+// collectRawInputEvents drains the reader's channel until deadline passes.
+// The reader publishes on a buffered channel from its own goroutine, so a test
+// cannot know it has seen everything one write causes without waiting.
+func collectRawInputEvents(t *testing.T, events <-chan inputEvent, deadline time.Duration) []inputEvent {
+	t.Helper()
+	var out []inputEvent
+	expired := time.After(deadline)
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return out
+			}
+			out = append(out, ev)
+		case <-expired:
+			return out
+		}
+	}
+}
+
+// draftTextsFromEvents returns every text that would reach the composer: a
+// draft replacement or a paste insertion.
+func draftTextsFromEvents(events []inputEvent) []string {
+	var out []string
+	for _, ev := range events {
+		switch ev.kind {
+		case inputEventDraft:
+			out = append(out, ev.draft)
+		case inputEventPaste:
+			out = append(out, ev.paste)
+		}
+	}
+	return out
+}
+
+// newSeedTornInputReader starts the raw input reader on a pipe and returns the
+// write end and its events, with the shared seed/caret channels cleared.
+func newSeedTornInputReader(t *testing.T) (*os.File, <-chan inputEvent) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	resumeInteractiveInputRead()
+	drainInteractiveInputSeedQueue()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe error: %v", err)
+	}
+	t.Cleanup(func() {
+		w.Close()
+		r.Close()
+	})
+
+	events := readRawInputEvents(ctx, r, io.Discard, stubRawInputController{}, testRawInputHistoryStore{})
+	return w, events
+}
+
+// A seed replaces the composer's draft; it must not tear a terminal report that
+// is still arriving. rawInputReadBufferSize is 1, so one SGR mouse report spans
+// several reads: dropping its head used to leak the tail into the composer as
+// text — the ";18M" a mouse press at row 18 left behind after Esc seeded an
+// empty draft.
+func TestReaderKeepsAPendingEscapeAcrossASeed(t *testing.T) {
+	w, events := newSeedTornInputReader(t)
+
+	// ESC[<0;12 — a left-button press at column 12, row 18, stopped mid-field.
+	if _, err := w.Write([]byte("\x1b[<0;12")); err != nil {
+		t.Fatalf("write mouse report head: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	// What Esc does when it leaves a view or withdraws a submission.
+	seedInteractiveInput("", 0)
+	time.Sleep(30 * time.Millisecond)
+
+	if _, err := w.Write([]byte(";18M")); err != nil {
+		t.Fatalf("write mouse report tail: %v", err)
+	}
+
+	seen := collectRawInputEvents(t, events, 300*time.Millisecond)
+	drafts := draftTextsFromEvents(seen)
+	var press *inputEvent
+	for i := range seen {
+		if seen[i].kind == inputEventMousePress {
+			press = &seen[i]
+			break
+		}
+	}
+	if press == nil {
+		t.Fatalf("seed tore the in-flight mouse report: no press decoded; drafts=%q", drafts)
+	}
+	if press.mouseCol != 11 || press.mouseRow != 17 {
+		t.Fatalf("mouse press at (%d,%d), want (11,17)", press.mouseCol, press.mouseRow)
+	}
+	for _, draft := range drafts {
+		if strings.Contains(draft, "18M") {
+			t.Fatalf("mouse report tail leaked into the composer: drafts=%q", drafts)
+		}
+	}
+}
+
+// A bare Esc followed, inside the 60ms window that decides whether it stands
+// alone, by a report whose first byte is itself ESC used to join the two into
+// one buffer that no decoder claims: the interrupt was lost and so was the
+// report. A second Esc is not a sequence start, so the pending Esc was a
+// complete keypress and the byte after it is the next key.
+func TestReaderKeepsABareEscapeBeforeTheNextReport(t *testing.T) {
+	w, events := newSeedTornInputReader(t)
+
+	if _, err := w.Write([]byte("\x1b")); err != nil {
+		t.Fatalf("write bare esc: %v", err)
+	}
+	// Inside the 60ms window, so the reader waits rather than deciding now.
+	time.Sleep(20 * time.Millisecond)
+	// ESC[<0;12;18M — a left-button press at column 12, row 18.
+	if _, err := w.Write([]byte("\x1b[<0;12;18M")); err != nil {
+		t.Fatalf("write mouse report: %v", err)
+	}
+
+	seen := collectRawInputEvents(t, events, 300*time.Millisecond)
+	drafts := draftTextsFromEvents(seen)
+	var interrupted, pressed bool
+	for _, ev := range seen {
+		if ev.kind == inputEventHotkey && ev.hotkey == hotkeyEscapeInterrupt {
+			interrupted = true
+		}
+		if ev.kind == inputEventMousePress && ev.mouseCol == 11 && ev.mouseRow == 17 {
+			pressed = true
+		}
+	}
+	if !interrupted {
+		t.Fatalf("the bare Esc before the report was swallowed: no interrupt; drafts=%q", drafts)
+	}
+	if !pressed {
+		t.Fatalf("the report after the bare Esc was swallowed: no press at (11,17); drafts=%q", drafts)
+	}
+	for _, draft := range drafts {
+		if strings.Contains(draft, "[") || strings.Contains(draft, "18M") {
+			t.Fatalf("report bytes leaked into the composer: drafts=%q", drafts)
+		}
+	}
+}
+
+// The modal reader hands a byte back when it turns out not to belong to an
+// escape sequence. The composer reader is the other half of that handshake: it
+// must consult the queue again mid-run, not only when it starts, or the byte is
+// still lost — in a different place.
+func TestReaderResumesFromTheHandedBackByte(t *testing.T) {
+	t.Cleanup(func() { takePendingTerminalInput() })
+	w, events := newSeedTornInputReader(t)
+
+	// One ordinary key first: it proves the reader is past the queue it took at
+	// startup, so the byte queued below arrives mid-run.
+	if _, err := w.Write([]byte("a")); err != nil {
+		t.Fatalf("write lead-in: %v", err)
+	}
+	seen := collectRawInputEvents(t, events, 300*time.Millisecond)
+	if drafts := draftTextsFromEvents(seen); len(drafts) == 0 || drafts[len(drafts)-1] != "a" {
+		t.Fatalf("reader did not start: drafts=%q", drafts)
+	}
+
+	keepTerminalInputForInputPipeline([]byte("x"))
+	seen = collectRawInputEvents(t, events, 300*time.Millisecond)
+	if drafts := draftTextsFromEvents(seen); len(drafts) == 0 || drafts[len(drafts)-1] != "ax" {
+		t.Fatalf("handed-back byte never reached the composer: drafts=%q", drafts)
+	}
+}
+
+// Same root cause, second symptom: a multi-byte rune split across a seed lost
+// its continuation bytes (RuneError, size 1 → silently dropped).
+func TestReaderKeepsAPendingRuneAcrossASeed(t *testing.T) {
+	w, events := newSeedTornInputReader(t)
+
+	// First byte of 我 (0xe6 0x88 0x91).
+	if _, err := w.Write([]byte("\xe6")); err != nil {
+		t.Fatalf("write rune head: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	seedInteractiveInput("", 0)
+	time.Sleep(30 * time.Millisecond)
+
+	if _, err := w.Write([]byte("\x88\x91")); err != nil {
+		t.Fatalf("write rune tail: %v", err)
+	}
+
+	seen := collectRawInputEvents(t, events, 300*time.Millisecond)
+	drafts := draftTextsFromEvents(seen)
+	if len(drafts) == 0 || drafts[len(drafts)-1] != "我" {
+		t.Fatalf("seed tore the in-flight rune: drafts=%q, want last draft %q", drafts, "我")
+	}
+}
+
+// Editing keys are escape sequences too, and they must survive a seed for the
+// same reason. A seed re-sends the same draft, so the forward-delete at the end
+// of the line is a no-op: nothing may be inserted as text, and the draft has to
+// stay "ab".
+func TestReaderKeepsAPendingEscapeAcrossASeedForKnownKeys(t *testing.T) {
+	w, events := newSeedTornInputReader(t)
+
+	if _, err := w.Write([]byte("ab")); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	// ESC[3~ (forward delete), stopped after the introducer.
+	if _, err := w.Write([]byte("\x1b[")); err != nil {
+		t.Fatalf("write key sequence head: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	seedInteractiveInput("ab", -1)
+	time.Sleep(30 * time.Millisecond)
+
+	if _, err := w.Write([]byte("3~")); err != nil {
+		t.Fatalf("write key sequence tail: %v", err)
+	}
+
+	seen := collectRawInputEvents(t, events, 300*time.Millisecond)
+	drafts := draftTextsFromEvents(seen)
+	for _, draft := range drafts {
+		if strings.Contains(draft, "[") || strings.Contains(draft, "3~") {
+			t.Fatalf("seed tore the in-flight key sequence: drafts=%q", drafts)
+		}
+	}
+	if len(drafts) == 0 || drafts[len(drafts)-1] != "ab" {
+		t.Fatalf("drafts=%q, want last draft %q", drafts, "ab")
+	}
+}
+
 func TestBrowseRawInputHistoryNavigatesUpAndDown(t *testing.T) {
 	history := []string{"first", "second", "third"}
 	current := []rune("draft")

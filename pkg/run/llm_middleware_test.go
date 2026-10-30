@@ -12,7 +12,9 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 // netRetryTestLLM streams part of an answer, dies with a transport error on
@@ -589,5 +591,64 @@ func TestPersistRunUsageWritesTheModelCallTime(t *testing.T) {
 	}
 	if tokens != 120 || ms != 12_345 {
 		t.Fatalf("SessionOutputRate = %d / %d, want 120 / 12345", tokens, ms)
+	}
+}
+
+type recordingRailLLM struct{ calls int }
+
+func (r *recordingRailLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	r.calls++
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("ok")})
+	return &llm.Result{Message: &msg}, nil
+}
+
+func railTestCtx() context.Context {
+	ctx := WithQuerySource(context.Background(), "repl_main_thread")
+	return tool.WithRunID(ctx, "run-rail")
+}
+
+func metaEnvMessage(text string) llm.Message {
+	msg := llm.UserMessage(llm.Text(text))
+	msg.IsMeta = true
+	return msg
+}
+
+// The rail must judge what the person typed. The environment block the
+// runtime injects rides as a user message after it (IsMeta), so scanning the
+// last user row unchecked scanned the wrong text.
+func TestInputRailBlocksWhatThePersonSent(t *testing.T) {
+	cfg := &appcfg.Root{}
+	cfg.Agents.Defaults.Guardrails.Input.BlockSubstrings = []string{"zzz-blocked-needle"}
+	inner := &recordingRailLLM{}
+	wrapped := wrapGuardrailsLLM(inner, cfg, newGuardrailRunDedup())
+
+	messages := []llm.Message{
+		llm.UserMessage(llm.Text("please run zzz-blocked-needle")),
+		metaEnvMessage("<forebrain_environment_context>\nproject=/work\nplain text\n</forebrain_environment_context>"),
+	}
+	_, err := wrapped.Execute(railTestCtx(), messages, nil)
+	if !errors.Is(err, safety.ErrInputBlocked) {
+		t.Fatalf("err = %v, want the person's blocked input to stop the request", err)
+	}
+	if inner.calls != 0 {
+		t.Fatalf("inner calls = %d, want 0: the request was rejected before the model", inner.calls)
+	}
+}
+
+func TestInputRailIgnoresTheRuntimeEnvironmentBlock(t *testing.T) {
+	cfg := &appcfg.Root{}
+	cfg.Agents.Defaults.Guardrails.Input.BlockSubstrings = []string{"zzz-blocked-needle"}
+	inner := &recordingRailLLM{}
+	wrapped := wrapGuardrailsLLM(inner, cfg, newGuardrailRunDedup())
+
+	messages := []llm.Message{
+		llm.UserMessage(llm.Text("please explain the installer")),
+		metaEnvMessage("<forebrain_environment_context>\nzzz-blocked-needle\n</forebrain_environment_context>"),
+	}
+	if _, err := wrapped.Execute(railTestCtx(), messages, nil); err != nil {
+		t.Fatalf("err = %v, want the runtime environment block not to block the request", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1", inner.calls)
 	}
 }
