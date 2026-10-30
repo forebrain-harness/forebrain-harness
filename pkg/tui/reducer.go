@@ -7214,9 +7214,10 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 			return click
 		}
 		// The drawer owns the cells it was painted on: its progress token, its
-		// close control, the list itself, and — for a click anywhere else while
-		// it is open — the dismissal. This is the same resolution
-		// ViewportClickToggle uses, so the two paths cannot disagree.
+		// close control and the list itself. Every other cell is not its own,
+		// so a click there resolves normally below (caret, card, jump). This is
+		// the same resolution ViewportClickToggle uses, so the two paths cannot
+		// disagree.
 		if handled, _ := r.planDrawerClickLocked(s, clickCol, clickRow); handled {
 			r.mu.Unlock()
 			return click

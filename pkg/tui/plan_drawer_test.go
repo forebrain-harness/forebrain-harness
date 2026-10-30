@@ -904,10 +904,11 @@ func TestPlanDrawerClickInsideIsConsumed(t *testing.T) {
 	}
 }
 
-// A click outside the open drawer closes it and stops there: the click that
-// dismissed the drawer must not also fold a card, open a subagent, move the
-// composer caret or jump to the bottom. The next click works normally.
-func TestPlanDrawerOutsideClickOnlyCloses(t *testing.T) {
+// The drawer is opened and closed through its own controls — the token, the
+// close control, Escape. Using the screen beside it is not a close: the drawer
+// covers only the right column, so the history and the composer on its left
+// keep working while it stays open.
+func TestPlanDrawerOutsideClickDoesNotClose(t *testing.T) {
 	r := newPlanDrawerScreen(t, 120, 40)
 	toolRow := strings.Join([]string{
 		"row 01", "row 02", "row 03", "row 04", "row 05", "row 06",
@@ -918,7 +919,8 @@ func TestPlanDrawerOutsideClickOnlyCloses(t *testing.T) {
 	planDrawerOpenForTest(t, r)
 	drainCaretRequest()
 
-	// The tool card's preview body row is a fold target.
+	// A click on the tool card's preview body folds it, and leaves the drawer
+	// open: the card is not under the drawer, so nothing about it is swallowed.
 	blockID, _ := r.vpLastRender.blockAtRow(1)
 	if blockID < 0 {
 		t.Fatal("row 1 is not part of the tool card")
@@ -927,31 +929,43 @@ func TestPlanDrawerOutsideClickOnlyCloses(t *testing.T) {
 	offsetBefore := r.vpScrollOffset
 	clickAt(r, 2, 1)
 
-	if r.planDrawer.open {
-		t.Fatal("an outside click did not close the drawer")
+	if !r.planDrawer.open {
+		t.Fatal("a click on the history closed the drawer; only its own controls may")
 	}
-	if b := r.activeVMLocked().blockByID(blockID); b == nil || b.expanded {
-		t.Fatal("the dismissing click also folded the card under it")
+	if b := r.activeVMLocked().blockByID(blockID); b == nil || !b.expanded {
+		t.Fatal("the click on the card did not fold it while the drawer was open")
 	}
 	if got := drainCaretRequest(); got != -1 {
-		t.Fatalf("the dismissing click requested composer caret %d", got)
+		t.Fatalf("the click on the card requested composer caret %d", got)
 	}
 	if r.ActiveView() != viewBefore {
-		t.Fatalf("the dismissing click switched the view to %q", r.ActiveView())
+		t.Fatalf("the click on the card switched the view to %q", r.ActiveView())
 	}
 	if r.vpScrollOffset != offsetBefore {
-		t.Fatalf("the dismissing click jumped the transcript from %d to %d", offsetBefore, r.vpScrollOffset)
+		t.Fatalf("the click on the card jumped the transcript from %d to %d", offsetBefore, r.vpScrollOffset)
 	}
 
-	// The next click does act on the new screen. Widening the history reflowed
-	// the card, so the target is resolved on the layout that is on screen now.
-	span, ok := r.vpLastRender.spanForBlock(blockID)
-	if !ok {
-		t.Fatal("the tool card is gone after closing the drawer")
+	// A click in the composer places the caret and leaves the drawer open too.
+	cursor := len("hello world")
+	r.RenderComposerState(ComposerRenderState{Text: "hello world", Cursor: &cursor})
+	planDrawerOpenForTest(t, r)
+	drainCaretRequest()
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	clickAt(r, prefix+6, row)
+	if got := drainCaretRequest(); got != 6 {
+		t.Fatalf("clicking the composer with the drawer open requested caret %d, want 6", got)
 	}
-	clickAt(r, 2, span.startRow-r.vpLastRender.firstRow+1)
-	if b := r.activeVMLocked().blockByID(blockID); b == nil || !b.expanded {
-		t.Fatal("the click after the dismissal did not fold the card")
+	if !r.planDrawer.open {
+		t.Fatal("a click in the composer closed the drawer; only its own controls may")
+	}
+
+	// The close control is still the way out.
+	planDrawerOpenForTest(t, r)
+	closeCell := r.vpDrawerLayout.leftWidth + r.vpDrawerLayout.closeSpan.startCol + 1
+	clickAt(r, closeCell, 0)
+	if r.planDrawer.open {
+		t.Fatal("the close control no longer closes the drawer")
 	}
 }
 

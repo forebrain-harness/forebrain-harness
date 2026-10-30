@@ -662,16 +662,19 @@ func (r *Renderer) scrollPlanDrawerLocked(delta int) bool {
 
 // planDrawerClickLocked resolves one plain click against the screen s, in the
 // order the contract fixes: the progress token toggles the drawer, the close
-// control closes it, a click inside it is consumed, and a click outside it closes
-// it and stops there — the click must not also fold a card, open a subagent,
-// move the composer's caret or jump to the bottom. handled reports that this
-// gesture was the drawer's; changed reports that the screen changed. Caller
-// holds r.mu.
+// control closes it, and a click inside it is consumed. A click outside it is
+// not the drawer's at all: the drawer covers only the right column, so the
+// history and the composer on its left stay live — clicking a card folds it,
+// clicking the composer moves the caret, and clicking the jump control jumps.
+// The drawer closes through its own controls only (the token, the close
+// control, and Esc), never as a side effect of using the screen beside it.
+// handled reports that the gesture was the drawer's; changed reports that the
+// screen changed. Caller holds r.mu.
 //
 // A gesture the drawer consumes also ends the multi-click sequence: the next
-// press acts on the new screen as a first click, so repeating a dismissal on the
-// same cell folds the card under it instead of being read as the second click of
-// a double-click.
+// press acts on the new screen as a first click, so a click on the token (or
+// inside the list) followed by one on the same cell is not read as the second
+// click of a double-click.
 func (r *Renderer) planDrawerClickLocked(s shownScreen, col, row int) (handled, changed bool) {
 	handled, changed = r.planDrawerConsumeClickLocked(s, col, row)
 	if handled {
@@ -699,7 +702,9 @@ func (r *Renderer) planDrawerConsumeClickLocked(s shownScreen, col, row int) (ha
 		// history region would have had there.
 		return true, false
 	}
-	return true, r.closePlanDrawerLocked()
+	// Left of the divider (or below the body, in the composer): the drawer has
+	// no cells there, so the click belongs to whatever the screen shows.
+	return false, false
 }
 
 // planDrawerPressLocked reports whether a press at this cell is on a drawer
