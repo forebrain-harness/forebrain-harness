@@ -1063,6 +1063,18 @@ func TestPlanDrawerHoverHighlightsOnlyTheToken(t *testing.T) {
 	if got := r.vpPainted[span.row]; got != plainBefore {
 		t.Fatalf("moving off the token did not restore the line:\nwant %q\ngot  %q", plainBefore, got)
 	}
+
+	// The drawer does not take the token's hover with it: the entry that opened
+	// the drawer is still the entry that closes it, so it keeps its own
+	// highlight on the split screen too.
+	planDrawerOpenForTest(t, r)
+	if got := r.vpProgressSpan; got != span {
+		t.Fatalf("opening the drawer moved the token's hot zone to %+v, want %+v", got, span)
+	}
+	move(span.startCol+1, span.row)
+	if got := r.vpPainted[span.row]; !strings.Contains(got, "\x1b[48;5;"+hoverBackgroundColor+"m☑3/7\x1b[49m") {
+		t.Fatalf("hovering the token with the drawer open painted no highlight on it: %q", got)
+	}
 }
 
 // The drawer's close control hovers the same way, on its own cells only, and
