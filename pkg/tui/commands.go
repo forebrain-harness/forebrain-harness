@@ -375,6 +375,7 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 		return 0
 	}
 	workerBodies := buildReplayWorkerBodies(events, workerTranscripts)
+	lastEventByRun := lastEventIndexes(events)
 	anchors := subagentEventAnchors(turns, events)
 	// The card facts of every subagent_* call the transcript answered, derived
 	// the way the live path derived them, so a row recorded before the card
@@ -472,18 +473,39 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 			sequence = int64(i + 1)
 		}
 		// An execution whose words are in its worker transcript is rebuilt from
-		// them: its block deltas spend the rebuilt messages one group at a time
-		// and are otherwise dropped, while everything that is not a block delta -
-		// an approval, a plan card, the lifecycle - keeps the place the events
-		// drew it at. One worker session's executions share its run id, so the
-		// bodies are left in place across a `subagent_ended`; a later execution
-		// of the same subagent keeps consuming the same body.
-		if body := workerBodies[strings.TrimSpace(evt.RunID)]; body != nil {
+		// them. The durable log holds no block deltas to walk it by, so the body
+		// draws its own rows in order and an event only says where a card falls;
+		// everything that is not a block boundary - an approval, a plan card,
+		// the lifecycle - keeps the place the events drew it at. One worker
+		// session's executions share its run id, so the bodies are left in place
+		// across a `subagent_ended`; a later execution of the same subagent
+		// keeps drawing the same body.
+		runID := strings.TrimSpace(evt.RunID)
+		if body := workerBodies[runID]; body != nil {
+			// A run's blocks end at its last event: whatever the rows still
+			// hold - a text-only execution's thinking and answer, or the
+			// thinking and answer that follow the final call - belongs there,
+			// ahead of that event's own account.
+			if lastEventByRun[runID] == i {
+				for _, m := range body.takeRest() {
+					pending[pos] = append(pending[pos], replayEventItem{sequence: sequence, message: m})
+				}
+			}
 			if injected, consumed := body.consume(evt); consumed {
-				if injected != nil {
-					pending[pos] = append(pending[pos], replayEventItem{sequence: sequence, message: injected})
+				for _, m := range injected {
+					pending[pos] = append(pending[pos], replayEventItem{sequence: sequence, message: m})
 				}
 				continue
+			}
+		}
+		// A subagent_ended repeats the execution's own answer in its Output
+		// field. The rows already hold that answer, so the reload draws the row
+		// and drops the copy; the field stays the only record of an execution
+		// whose rows are gone.
+		if ended, isEnded := msg.(SubagentEndedMsg); isEnded {
+			if body := workerBodies[runID]; body != nil && body.endsOnAnswer() {
+				ended.Output = ""
+				msg = ended
 			}
 		}
 		// One event, one identity: the message and every frame rebuilt from it
@@ -1363,16 +1385,20 @@ func replayToolEventSkipped(meta event.ToolCallMeta) bool {
 	return !strings.EqualFold(strings.TrimSpace(meta.Category), "skill")
 }
 
-// replayWorkerBody walks one subagent execution's rebuilt messages as its delta
+// replayWorkerBody draws one subagent execution's rebuilt messages as its
 // events replay (plan 017). A message is one block - a thinking block, one tool
-// card, or a run of answer text - and its events name the same blocks in the
-// same order, so a reload spends one message at each block boundary and drops
-// the rest of that block's deltas.
+// card, or a run of answer text - and a row is the block's only record: the
+// durable log keeps no deltas for it (event.IsPushOnlyStreamEvent). A reload
+// therefore walks the rows in order, and a tool event only says how far to walk:
+// the blocks up to and including that call's card, which is what keeps a turn's
+// thinking, answers and calls from being spent one event at a time.
 type replayWorkerBody struct {
 	messages []any
 	cursor   int
 	group    string
-	stepID   string
+	// emitted names the tool steps already drawn from a row, so the same
+	// step's completed event is swallowed instead of drawing the card twice.
+	emitted map[string]struct{}
 }
 
 // next returns the following rebuilt message, or nil when the body is spent.
@@ -1385,16 +1411,71 @@ func (b *replayWorkerBody) next() any {
 	return message
 }
 
+// advanceToTool emits every block the rows hold up to and including the card of
+// stepID, or nothing when the rows do not hold that step: a call stopped before
+// its row was written draws from its event, as it always did, and must not spend
+// a row that belongs to another block.
+func (b *replayWorkerBody) advanceToTool(stepID string) []any {
+	stepID = strings.TrimSpace(stepID)
+	if b == nil || stepID == "" {
+		return nil
+	}
+	for i := b.cursor; i < len(b.messages); i++ {
+		if replayWorkerStepID(b.messages[i]) != stepID {
+			continue
+		}
+		blocks := b.messages[b.cursor : i+1]
+		b.cursor = i + 1
+		if b.emitted == nil {
+			b.emitted = make(map[string]struct{})
+		}
+		b.emitted[stepID] = struct{}{}
+		return blocks
+	}
+	return nil
+}
+
+// takeRest returns the blocks not drawn yet: a text-only execution (no tool step
+// at all), and the thinking and answer that follow the last call.
+func (b *replayWorkerBody) takeRest() []any {
+	if b == nil || b.cursor >= len(b.messages) {
+		return nil
+	}
+	blocks := b.messages[b.cursor:]
+	b.cursor = len(b.messages)
+	return blocks
+}
+
+// endsOnAnswer reports whether the rows' last block is the execution's own
+// answer, which is what a `subagent_ended` repeats in its Output field.
+func (b *replayWorkerBody) endsOnAnswer() bool {
+	if b == nil || len(b.messages) == 0 {
+		return false
+	}
+	msg, ok := b.messages[len(b.messages)-1].(NewMessageMsg)
+	return ok && msg.Msg.Kind == MsgKindAssistant
+}
+
+// replayWorkerStepID is the tool call a rebuilt message is the card of, or ""
+// for a block that is not a call.
+func replayWorkerStepID(message any) string {
+	msg, ok := message.(NewMessageMsg)
+	if !ok || msg.Msg.Kind != MsgKindTool {
+		return ""
+	}
+	return strings.TrimSpace(msg.Msg.StepID)
+}
+
 // consume drops one delta event of a worker-backed execution, returning the
-// rebuilt message a new block group starts with - nil when the delta continues
-// the open group. It reports false for events that are not block deltas, which
-// the caller routes as usual.
-func (b *replayWorkerBody) consume(evt event.RunEvent) (any, bool) {
+// rebuilt blocks it draws - none when the delta continues the open group. It
+// reports false for events that are not block boundaries, which the caller
+// routes as usual.
+func (b *replayWorkerBody) consume(evt event.RunEvent) ([]any, bool) {
 	switch evt.Type {
 	case event.RunEventReasoningDelta:
 		if b.group != "thinking" {
 			b.group = "thinking"
-			return b.next(), true
+			return replayWorkerBlocks(b.next()), true
 		}
 		return nil, true
 	case event.RunEventReasoningDone:
@@ -1403,17 +1484,17 @@ func (b *replayWorkerBody) consume(evt event.RunEvent) (any, bool) {
 	case event.RunEventAssistantDelta:
 		if b.group != "assistant" {
 			b.group = "assistant"
-			return b.next(), true
+			return replayWorkerBlocks(b.next()), true
 		}
 		return nil, true
 	case event.RunEventToolStarted:
 		var p event.ToolCallStartedPayload
 		_ = json.Unmarshal(evt.Payload, &p)
-		return b.startTool(p.StepID), true
+		return b.toolStep(p.StepID)
 	case event.RunEventToolCompleted:
 		var p event.ToolCallCompletedPayload
 		_ = json.Unmarshal(evt.Payload, &p)
-		return b.startTool(p.StepID), true
+		return b.toolStep(p.StepID)
 	case event.RunEventToolOutputDelta:
 		return nil, true
 	default:
@@ -1421,14 +1502,39 @@ func (b *replayWorkerBody) consume(evt event.RunEvent) (any, bool) {
 	}
 }
 
-func (b *replayWorkerBody) startTool(stepID string) any {
+// toolStep answers a tool boundary event: the card is the rows', so the event
+// only says how far to walk. It reports false - leaving the event on the path
+// that draws its own card - for a step the rows hold no card for.
+func (b *replayWorkerBody) toolStep(stepID string) ([]any, bool) {
 	stepID = strings.TrimSpace(stepID)
-	if b.group != "tool" || b.stepID != stepID {
-		b.group = "tool"
-		b.stepID = stepID
-		return b.next()
+	if _, drawn := b.emitted[stepID]; drawn {
+		return nil, true
 	}
-	return nil
+	if blocks := b.advanceToTool(stepID); len(blocks) > 0 {
+		return blocks, true
+	}
+	return nil, false
+}
+
+// replayWorkerBlocks wraps the single block a delta boundary starts, so every
+// branch of consume hands the caller a list.
+func replayWorkerBlocks(message any) []any {
+	if message == nil {
+		return nil
+	}
+	return []any{message}
+}
+
+// lastEventIndexes maps each run to the index of its last event: where an
+// execution's rebuilt body takes the rest of its blocks (see takeRest).
+func lastEventIndexes(events []event.RunEvent) map[string]int {
+	out := make(map[string]int, len(events))
+	for i := range events {
+		if runID := strings.TrimSpace(events[i].RunID); runID != "" {
+			out[runID] = i
+		}
+	}
+	return out
 }
 
 // buildReplayWorkerBodies rebuilds, per execution, the messages a subagent's

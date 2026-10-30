@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1382,6 +1383,225 @@ func TestReplaySubagentFromWorkerTranscriptMatchesEventReplay(t *testing.T) {
 	distinctView := strings.Join(frames(map[string][]state.Message{"worker-1": distinct}), "\n")
 	require.Contains(t, distinctView, "answer from the worker transcript")
 	require.NotContains(t, distinctView, "all checks passed")
+}
+
+// A block's words live once: in the worker transcript, written as each block
+// ended — never in the durable event log, which keeps only the block boundaries
+// (event.IsPushOnlyStreamEvent). A reload therefore has to draw the execution's
+// rows in order and let a tool event say only where a card falls. The logs below
+// are the shapes real executions record: two calls with thinking and an answer
+// between them, a text-only execution, and a call whose row is missing because
+// the run was stopped before it wrote one.
+func TestReplaySubagentWorkerBodyDrawsEveryBlock(t *testing.T) {
+	const (
+		agentID  = "task-worker-blocks"
+		runID    = "exec-worker-blocks"
+		workerID = "worker-blocks"
+	)
+	now := time.Unix(100, 0)
+
+	spawn := event.NewRunEvent("spawn", runID, "session-1", event.RunEventSubagentSpawned, event.SubagentSpawnedPayload{
+		AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Task: "read two files",
+		ParentRunID: "parent-1", ParentToolCallID: "call-spawn", TaskIndex: 0, ExecutionID: runID,
+		WorkerSessionID: workerID,
+	}, now)
+	usage := func(id string, at time.Time) event.RunEvent {
+		return event.NewRunEvent(id, runID, "session-1", event.RunEventUsageDelta,
+			event.UsageDeltaPayload{AgentID: agentID, InputTokens: 120, OutputTokens: 8}, at)
+	}
+	budget := func(id string, at time.Time) event.RunEvent {
+		return event.NewRunEvent(id, runID, "session-1", event.CompactEventBudgetUpdated,
+			event.TokenBudgetUpdatedPayload{AgentID: agentID, TokenUsage: 128, PercentLeft: 99}, at)
+	}
+	started := func(id, step, path string, at time.Time) event.RunEvent {
+		return event.NewRunEvent(id, runID, "session-1", event.RunEventToolStarted, event.ToolCallStartedPayload{
+			Kind: event.RunEventToolStarted, StepID: step, ToolName: "read_file", Summary: "running read " + path,
+			ToolMeta: event.ToolCallMeta{ToolName: "read_file", AgentID: agentID, Status: "running",
+				Input: map[string]any{"file_path": path}},
+		}, at)
+	}
+	completed := func(id, step, path, body string, at time.Time) event.RunEvent {
+		return event.NewRunEvent(id, runID, "session-1", event.RunEventToolCompleted, event.ToolCallCompletedPayload{
+			Kind: event.RunEventToolCompleted, StepID: step, ToolName: "read_file", DisplayBody: body,
+			ToolMeta: event.ToolCallMeta{ToolName: "read_file", AgentID: agentID, Status: "completed",
+				Input: map[string]any{"file_path": path}},
+		}, at)
+	}
+	ended := func(output string) event.RunEvent {
+		return event.NewRunEvent("ended", runID, "session-1", event.RunEventSubagentEnded, event.SubagentEndedPayload{
+			AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Status: "ok", Output: output,
+			ParentRunID: "parent-1", ParentToolCallID: "call-spawn", TaskIndex: 0, ExecutionID: runID,
+		}, now.Add(30*time.Second))
+	}
+	promptRow := state.Message{RunID: runID, Role: "user", Content: "read two files"}
+	// callRow is the assistant row that issued a call, with the words it said
+	// before the call — the runtime writes them as one row, and the call's own
+	// name and arguments are recoverable only from its tool_calls part.
+	callRow := func(callID, path, content string) state.Message {
+		return state.Message{RunID: runID, Role: "assistant", Content: content,
+			PartsJSON: state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+				ID: callID, Type: llm.ToolTypeFunction,
+				Function: llm.FunctionCall{Name: "read_file", Arguments: fmt.Sprintf(`{"file_path":%q}`, path)},
+			}), content)}
+	}
+	toolRow := func(callID, path, body string) state.Message {
+		return state.Message{RunID: runID, Role: "tool", ToolStepID: callID, Content: body,
+			PartsJSON: fmt.Sprintf(`[{"text":%q,"type":"text"},{"type":"tool_result_meta","tool_call_id":%q}]`, body, callID)}
+	}
+	reasoningRow := func(text string, spent time.Duration) state.Message {
+		return state.Message{RunID: runID, Role: "reasoning", Content: text,
+			PartsJSON: fmt.Sprintf(`[{"text":%q,"type":"text"},{"duration_ms":%d,"type":"reasoning_timing"}]`,
+				text, spent.Milliseconds())}
+	}
+	answerRow := func(text string) state.Message {
+		return state.Message{RunID: runID, Role: "assistant", Content: text}
+	}
+
+	cases := []struct {
+		name   string
+		events []event.RunEvent
+		rows   []state.Message
+		want   []struct {
+			kind     FrameKind
+			content  string
+			stepID   string
+			duration time.Duration
+		}
+		once []string
+	}{
+		{
+			name: "two-tool-calls-with-tail",
+			events: []event.RunEvent{
+				spawn,
+				usage("usage-1", now.Add(time.Second)), budget("budget-1", now.Add(time.Second)),
+				started("tool-start-readme", "call-readme", "README.md", now.Add(2*time.Second)),
+				completed("tool-done-readme", "call-readme", "README.md", "1|scratch project", now.Add(2*time.Second)),
+				usage("usage-2", now.Add(3*time.Second)), budget("budget-2", now.Add(3*time.Second)),
+				started("tool-start-gomod", "call-gomod", "go.mod", now.Add(4*time.Second)),
+				completed("tool-done-gomod", "call-gomod", "go.mod", "1|module example.com/scratch", now.Add(4*time.Second)),
+				usage("usage-3", now.Add(5*time.Second)), budget("budget-3", now.Add(5*time.Second)),
+				ended("final answer"),
+				// The execution's last event is a budget update, not its ending:
+				// the tail still closes the run, and the ending paints nothing
+				// twice.
+				budget("budget-4", now.Add(6*time.Second)),
+			},
+			rows: []state.Message{
+				promptRow,
+				callRow("call-readme", "README.md", ""),
+				reasoningRow("thinking one", 10*time.Second),
+				toolRow("call-readme", "README.md", "1|scratch project"),
+				reasoningRow("thinking two", 0),
+				callRow("call-gomod", "go.mod", "answer between calls"),
+				toolRow("call-gomod", "go.mod", "1|module example.com/scratch"),
+				reasoningRow("thinking three", 281*time.Millisecond),
+				answerRow("final answer"),
+			},
+			want: []struct {
+				kind     FrameKind
+				content  string
+				stepID   string
+				duration time.Duration
+			}{
+				// The dispatching prompt opens the subagent's own view.
+				{kind: FrameUser, content: "read two files"},
+				{kind: FrameThinking, content: "thinking one", duration: 10 * time.Second},
+				{kind: FrameTool, stepID: "call-readme"},
+				{kind: FrameThinking, content: "thinking two"},
+				{kind: FrameAssistant, content: "answer between calls"},
+				{kind: FrameTool, stepID: "call-gomod"},
+				{kind: FrameThinking, content: "thinking three", duration: 281 * time.Millisecond},
+				{kind: FrameAssistant, content: "final answer"},
+			},
+			once: []string{"final answer", "thinking one"},
+		},
+		{
+			name: "text-only",
+			events: []event.RunEvent{
+				spawn,
+				usage("usage-1", now.Add(time.Second)),
+				ended("just the answer"),
+			},
+			rows: []state.Message{
+				promptRow,
+				reasoningRow("pondering", 2*time.Second),
+				answerRow("just the answer"),
+			},
+			want: []struct {
+				kind     FrameKind
+				content  string
+				stepID   string
+				duration time.Duration
+			}{
+				{kind: FrameUser, content: "read two files"},
+				{kind: FrameThinking, content: "pondering", duration: 2 * time.Second},
+				{kind: FrameAssistant, content: "just the answer"},
+			},
+			once: []string{"just the answer"},
+		},
+		{
+			name: "tool-step-without-row",
+			events: []event.RunEvent{
+				spawn,
+				started("tool-start-notes", "call-notes", "notes.md", now.Add(time.Second)),
+				completed("tool-done-notes", "call-notes", "notes.md", "1|notes", now.Add(time.Second)),
+				ended("the answer"),
+			},
+			rows: []state.Message{
+				promptRow,
+				reasoningRow("quick look", 2*time.Second),
+				answerRow("the answer"),
+			},
+			want: []struct {
+				kind     FrameKind
+				content  string
+				stepID   string
+				duration time.Duration
+			}{
+				{kind: FrameUser, content: "read two files"},
+				// The step has no row, so its card comes from the event - and
+				// it must not spend a block the rows hold for something else.
+				{kind: FrameTool, stepID: "call-notes"},
+				{kind: FrameThinking, content: "quick look", duration: 2 * time.Second},
+				{kind: FrameAssistant, content: "the answer"},
+			},
+			once: []string{"the answer", "quick look"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			renderer := NewRenderer(nil, nil)
+			renderer.viewportMode = true
+			renderer.composerSuppressed = true
+			replayTimelineWithWorkers(renderer, nil, tc.events, &Reducer{}, nil,
+				map[string][]state.Message{workerID: tc.rows})
+			vm := renderer.perAgentVM[agentID]
+			if vm == nil {
+				t.Fatal("replayed subagent view is empty")
+			}
+			require.Len(t, vm.blocks, len(tc.want), "replayed block count")
+			painted := make([]string, 0, len(vm.blocks))
+			for i, want := range tc.want {
+				frame := vm.blocks[i].frame
+				require.Equal(t, want.kind, frame.Kind, "block %d kind", i)
+				if want.stepID != "" {
+					require.Equal(t, want.stepID, frame.StepID, "block %d call", i)
+				}
+				if want.content != "" {
+					require.Equal(t, want.content, strings.TrimSpace(frame.Content), "block %d content", i)
+				}
+				if want.duration > 0 {
+					require.Equal(t, want.duration, frame.Duration, "block %d duration", i)
+				}
+				painted = append(painted, frame.Title, frame.Summary, frame.Content)
+			}
+			joined := strings.Join(painted, "\n")
+			for _, text := range tc.once {
+				require.Equal(t, 1, strings.Count(joined, text), "%q must be drawn exactly once", text)
+			}
+		})
+	}
 }
 
 // The note-write result carries the stored path; sessions recorded before the
