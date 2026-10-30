@@ -3629,19 +3629,15 @@ func (r *Renderer) buildComposerBlock(cs ComposerRenderState, termWidth int) com
 }
 
 // buildReadOnlyComposerBlock lays out a composer that takes no input: the status
-// row while something is running, the footer, and the roster when it is up —
-// and no input box, because there is nothing to type into it. A subagent's view
-// is read-only exactly while that subagent is idle (owner, 2026-10-26): an idle
-// subagent belongs to the agent that dispatched it, and the view still has to
-// say which one it shows and how to leave.
+// row while something is running, the footer — and no input box, because there
+// is nothing to type into it. It draws no agent roster either: the roster is a
+// keyboard control and this view's reader drops every byte but Esc, so a roster
+// here would be painted rows that can never answer (agentRosterOperable). A
+// subagent's view is read-only exactly while that subagent is idle (owner,
+// 2026-10-26): an idle subagent belongs to the agent that dispatched it, and the
+// view still has to say which one it shows and how to leave.
 func (r *Renderer) buildReadOnlyComposerBlock(cs ComposerRenderState, statusText, footerText string, termWidth int) composerBlock {
-	rosterVisible := len(cs.OverlayRows) == 0 && agentRosterHasRunningSubagent(cs.AgentRoster)
-	rosterLines := []string(nil)
-	if rosterVisible {
-		marked := agentRosterMarkedIndex(cs.AgentRoster, cs.RosterFocused, r.rosterCursorIndex(cs.AgentRoster))
-		rosterLines = formatAgentRosterLines(cs.AgentRoster, cs.RosterFocused, marked, termWidth)
-	}
-	lines := make([]string, 0, len(rosterLines)+4)
+	lines := make([]string, 0, 4)
 	hasProgress, progressRow, progressStart, progressEnd := false, -1, 0, 0
 	if statusText != "" {
 		// Keep the live status visually separate from the transcript's last
@@ -3658,10 +3654,6 @@ func (r *Renderer) buildReadOnlyComposerBlock(cs ComposerRenderState, statusText
 	}
 	if len(cs.OverlayRows) == 0 {
 		lines = append(lines, sharedBlockFooterStyle+footerText+sharedBlockReset)
-	}
-	if rosterVisible {
-		lines = append(lines, "")
-		lines = append(lines, rosterLines...)
 	}
 	if len(cs.OverlayRows) > 0 {
 		lines = append(lines, r.composerMenuLines(cs.OverlayRows, termWidth)...)

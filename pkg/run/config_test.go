@@ -90,6 +90,68 @@ func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
 	}
 }
 
+// The effort AgentModel answers has to belong to the model it names. A
+// terminal that entered an existing session never activated that session's
+// model, and the gateway never does either, so the runner's published
+// snapshot stays on whichever entry the runtime was built with — a different
+// model's effort. The field showed a glm-5.3 conversation (configured xhigh)
+// running at the snapshot's "high", and that wrong pin is what its requests
+// were sent with.
+func TestAgentModelAnswersTheEffortOfTheModelItNames(t *testing.T) {
+	store := newPromptStateStore(t)
+	ctx := context.Background()
+	const sid = "session-glm"
+
+	cfg := newPrimaryModelRoot(
+		primaryModelEntry("opencode-go", "step-5-preview", "key", "https://example.invalid",
+			appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`)),
+		primaryModelEntry("zhipuai", "glm-5.3", "key", "https://example.invalid",
+			appcfg.LLMRequestParams(`{"reasoning":{"effort":"xhigh"}}`)),
+	)
+	r := loadPrimaryModelRunner(t, cfg)
+	r.SessionStore = store
+	if err := store.Ensure(ctx, sid, sid); err != nil {
+		t.Fatalf("Ensure session: %v", err)
+	}
+	// The snapshot is the configuration's first entry, a different model than
+	// the session runs: this is the state that used to answer for both.
+	requireSelection(t, r, "opencode-go", "step-5-preview", "high")
+	pinEffort := func(effort string) {
+		t.Helper()
+		if _, err := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
+			Provider: "zhipuai", Model: "glm-5.3", Effort: effort,
+		}); err != nil {
+			t.Fatalf("SaveSessionModelSelection(%q): %v", effort, err)
+		}
+	}
+	agents := []struct {
+		name  string
+		entry *agent.HistoryEntry
+	}{
+		{"primary", nil},
+		{"typed without a chain", &agent.HistoryEntry{AgentKind: "typed", AgentType: "general-purpose"}},
+	}
+
+	pinEffort("xhigh")
+	for _, a := range agents {
+		provider, model, effort := AgentModel(r, sid, a.entry)
+		if provider != "zhipuai" || model != "glm-5.3" || effort != "xhigh" {
+			t.Fatalf("%s = %s/%s · %s, want the session's model with its own effort", a.name, provider, model, effort)
+		}
+	}
+
+	// An empty effort on the row is an explicit "the model's default" pin, not
+	// "read the other model's effort": the chain entry's own value is what the
+	// run then falls back to, and the pin says nothing.
+	pinEffort("")
+	for _, a := range agents {
+		provider, model, effort := AgentModel(r, sid, a.entry)
+		if provider != "zhipuai" || model != "glm-5.3" || effort != "" {
+			t.Fatalf("%s with an empty pin = %s/%s · %q, want the session's model and no effort", a.name, provider, model, effort)
+		}
+	}
+}
+
 // TestNewLLMForAgentTypeNilConfig verifies graceful degradation: a nil config
 // yields no client and no error, so callers can treat the feature as disabled.
 func TestNewLLMForAgentTypeNilConfig(t *testing.T) {

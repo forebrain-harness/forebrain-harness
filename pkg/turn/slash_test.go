@@ -294,6 +294,7 @@ func TestHintedCommandsAcceptTheirOwnHint(t *testing.T) {
 		"rename":      "/rename a fresh title",
 		"plan":        "/plan ship the parser rewrite",
 		"goal":        "/goal finish the parser rewrite",
+		"config":      "/config memories",
 	}
 	for _, cmd := range commands {
 		if !cmd.SupportsInlineArgs {
@@ -404,6 +405,7 @@ func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
 		"connect":     SubagentViewGlobal,
 		"memories":    SubagentViewGlobal,
 		"migrate":     SubagentViewGlobal,
+		"config":      SubagentViewGlobal,
 		// Hidden, and answered with one sentence pointing back to the conversation.
 		"new":    SubagentViewHidden,
 		"resume": SubagentViewHidden,

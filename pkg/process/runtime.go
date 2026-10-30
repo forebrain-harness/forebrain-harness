@@ -142,6 +142,11 @@ func SaveConfig(ctx Context) error {
 	if err := ensureStartupConfigFile(ctx.ConfigPath); err != nil {
 		return err
 	}
+	// The setup flow may run before anything else has laid the home out, so
+	// the state directory's existence cannot be assumed here.
+	if err := os.MkdirAll(filepath.Join(ctx.Home, "state"), 0o755); err != nil {
+		return err
+	}
 	db, err := state.OpenStateFromHome(context.Background(), ctx.Home, nil)
 	if err != nil {
 		return fmt.Errorf("open state database: %w", err)

@@ -506,6 +506,7 @@ func envWithTwoPrimaryAgents(t *testing.T) *Environment {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	t.Cleanup(env.Close)
 	return env
 }
@@ -719,9 +720,9 @@ func TestMaintainSweepsAtMostOnceAnHour(t *testing.T) {
 }
 
 // TestPruneReadsTheLiveRetentionConfig pins that each sweep reads the
-// configuration in force right then — the hot-reloaded value — so changing
-// the retention on the settings page applies from the next cleanup without a
-// restart.
+// configuration in force right then — the value the last application left — so
+// changing the retention on the settings page applies from the next cleanup
+// without a restart.
 func TestPruneReadsTheLiveRetentionConfig(t *testing.T) {
 	env := envWithTwoPrimaryAgents(t)
 	ctx := context.Background()

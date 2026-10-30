@@ -19,9 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mattn/go-runewidth"
-
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/mattn/go-runewidth"
 )
 
 // planFrameFor builds the plan frame exactly as PlanUpdatedMsg does, so the

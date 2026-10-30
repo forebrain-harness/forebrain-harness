@@ -32,9 +32,10 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 	}
 	s.surfaceSyncResume.Store(true)
 	defer s.surfaceSyncResume.Store(false)
-	// Runner.Load and hot reload can replace the tool registry after the UI
-	// installed its approval sink. Rebind at the turn boundary so inline
-	// network and subagent approvals cannot silently degrade into hard denials.
+	// Runner.Load and an applied configuration can replace the tool registry
+	// after the UI installed its approval sink. Rebind at the turn boundary so
+	// inline network and subagent approvals cannot silently degrade into hard
+	// denials.
 	s.syncToolApprovalHooks()
 	// This call owns the whole turn, including the approval loop below and the
 	// resume runs it drives. Queued turn input survives those intermediate run

@@ -6363,7 +6363,9 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	runner := &run.Runner{Deps: &env.Deps}
 	env.Runner = runner
 	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
-	require.NoError(t, s.Env.ReloadConfig())
+	// The fixture states its configuration directly (the file is a restart-time
+	// source, not a watched one — plan 189).
+	s.Env.AdoptConfig(&cfg)
 
 	modelCall := func(method string, body map[string]any) *httptest.ResponseRecorder {
 		t.Helper()
@@ -6504,7 +6506,9 @@ func TestChatModelDefaultFollowsMostRecentlyUsed(t *testing.T) {
 	runner := &run.Runner{Deps: &env.Deps}
 	env.Runner = runner
 	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
-	require.NoError(t, s.Env.ReloadConfig())
+	// The fixture states its configuration directly (the file is a restart-time
+	// source, not a watched one — plan 189).
+	s.Env.AdoptConfig(&cfg)
 
 	rec := httptest.NewRecorder()
 	s.handleChatModelDefault(rec, httptest.NewRequest(http.MethodGet, "/api/chat/model", nil))
@@ -6669,9 +6673,17 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 		Runner:     runner,
 	}
 	s := &Server{Home: home, Runner: runner, Env: env, Projects: state.NewProjectStore(db, agentName)}
-	if err := env.ReloadConfig(); err != nil {
-		t.Fatalf("reload: %v", err)
+	// The fixture takes the file as its live configuration the way a process
+	// start does — ${ENV} references resolved, the launch project's trust
+	// applied — because the file is a restart-time source, not a watched one
+	// (plan 189).
+	loaded, err := appcfg.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load fixture config: %v", err)
 	}
+	live := safety.EffectiveConfig(loaded, safety.ProjectContext{})
+	env.AdoptConfig(&live)
+	runner.AppCfg = &live
 	return &mcpWriteFixture{server: s, cfgPath: cfgPath, home: home, agentName: agentName, projects: s.Projects}
 }
 

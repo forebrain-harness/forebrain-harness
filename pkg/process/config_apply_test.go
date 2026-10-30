@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,77 +15,13 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
-// These two migrated here from pkg/tui when the duplicate TUI-side fsnotify
-// watcher was deleted (P3-1 requires the idempotent start/stop tests to move
-// with the watcher; P3-5 requires exactly one watcher implementation
-// repo-wide). The behaviour asserted is unchanged — only the owner is.
-//
-// The watcher only needs ConfigPath to be non-empty and its directory to
-// exist; it watches the directory rather than the file, so the config file
-// itself never has to be written for these.
-
-func TestStartConfigHotReloadIsIdempotent(t *testing.T) {
-	env := &Environment{ConfigPath: filepath.Join(t.TempDir(), "forebrain.yaml")}
-	t.Cleanup(env.stopConfigHotReload)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	StartConfigHotReload(ctx, env)
-	env.watchMu.Lock()
-	firstStop := env.watchStop
-	firstID := env.watchID
-	env.watchMu.Unlock()
-	if firstStop == nil {
-		t.Fatal("watchStop is nil after the first start, want a stop func")
-	}
-	if firstID == 0 {
-		t.Fatal("watchID = 0 after the first start, want it incremented")
-	}
-
-	// A second start must not replace the running watcher. watchID is the
-	// witness rather than the stop func: Go func values cannot be compared
-	// to each other, only to nil, and watchID increments on every genuine
-	// start.
-	StartConfigHotReload(ctx, env)
-	env.watchMu.Lock()
-	secondStop := env.watchStop
-	secondID := env.watchID
-	env.watchMu.Unlock()
-	if secondStop == nil {
-		t.Fatal("watchStop is nil after the second start, want the first one retained")
-	}
-	if secondID != firstID {
-		t.Fatalf("watchID = %d after a second start, want it unchanged at %d (the second start must be a no-op)", secondID, firstID)
-	}
-}
-
-func TestStopConfigHotReloadIsIdempotent(t *testing.T) {
-	env := &Environment{ConfigPath: filepath.Join(t.TempDir(), "forebrain.yaml")}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	StartConfigHotReload(ctx, env)
-
-	// Stopping twice must not panic.
-	env.stopConfigHotReload()
-	env.stopConfigHotReload()
-
-	env.watchMu.Lock()
-	stopped := env.watchStop
-	env.watchMu.Unlock()
-	if stopped != nil {
-		t.Fatal("watchStop is non-nil after stop, want it cleared")
-	}
-}
-
 // P3-4 requires a broken-config test proving the live runtime is left
-// completely unchanged, with no half-applied state. reloadConfig swaps
-// Runner.AppCfg/MCPServers/YOLO *before* it calls Runner.Load, so a config
-// that parses and passes the startup check but fails to load is exactly the
-// case that can strand the runner describing a file nothing else is using.
-// The rollback in config_reload.go had no coverage before this.
-func TestReloadConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T) {
+// completely unchanged, with no half-applied state. applyComposedConfigLocked
+// swaps Runner.AppCfg/MCPServers/YOLO *before* it calls Runner.Load, so a
+// config that parses and passes the startup check but fails to load is exactly
+// the case that can strand the runner describing a configuration nothing else
+// is using. The rollback in config_apply.go had no coverage before this.
+func TestApplyComposedConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T) {
 	t.Setenv("FOREBRAIN_ROLLBACK_TEST_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
@@ -118,17 +53,33 @@ func TestReloadConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T) {
 	}
 	env := &Environment{Deps: run.Deps{AppCfg: live}, Root: home, ConfigPath: cfgPath, Runner: runner}
 
-	// Parses but is refused by the loader: a default_model naming no entry
-	// never reaches the runner, so ReloadConfig fails after the fields above
-	// have already been swapped. (An emptied llm_providers list no longer
-	// fails here by design — the runner keeps serving its published model.)
-	const broken = "agents:\n  definitions:\n    main:\n      default_model: openai/gone\n      llm_providers:\n        - provider: openai\n          model: gpt-old\n          api_key: ${FOREBRAIN_ROLLBACK_TEST_KEY}\n          base_url: http://localhost:0/v1\n"
-	if err := os.WriteFile(cfgPath, []byte(broken), 0o600); err != nil {
-		t.Fatal(err)
+	// Refused by the loader: a provider the runtime cannot route never becomes
+	// the running model, so the application fails after the pointer has already
+	// been swapped and only the rollback can leave the live runtime intact. The
+	// refusal comes from Runner.LoadConfig and not from the read — a
+	// save-or-load-side guard would fail before anything was swapped, which is
+	// the state this test exists to rule out.
+	brokenCfg := cfg
+	brokenDefs := make(map[string]appcfg.AgentDefinition, len(cfg.Agents.Definitions))
+	for name, def := range cfg.Agents.Definitions {
+		brokenDefs[name] = def
 	}
+	brokenMain := brokenDefs["main"]
+	brokenMain.LLMProviders = []appcfg.AgentLLMProviderConfig{{
+		Provider: "openai", Model: "gpt-old",
+		BaseURL: "http://localhost:0/v1",
+	}}
+	brokenDefs["main"] = brokenMain
+	brokenCfg.Agents.Definitions = brokenDefs
 
-	if err := env.ReloadConfig(); err == nil {
-		t.Fatal("ReloadConfig with an unloadable config = nil, want an error")
+	if err := env.applyComposedConfigLocked(brokenCfg); err == nil {
+		t.Fatal("applying an unloadable config = nil, want an error")
+	}
+	// The snapshot did reach the kernel — it passed the startup check and only
+	// the runner refused it — so the assertions below are about the rollback,
+	// not about an early return.
+	if got := env.RawConfig.Agents.Definitions["main"].LLMProviders; len(got) != 1 || got[0].APIKey != "" {
+		t.Fatalf("RawConfig = %+v, want the applied snapshot; the failure came before the runner was reached", got)
 	}
 
 	if env.Deps.AppCfg != live {
@@ -138,10 +89,10 @@ func TestReloadConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T) {
 		t.Fatalf("Runner.AppCfg = %p, want it restored to the live config %p", env.Runner.AppCfg, live)
 	}
 	if got := env.Runner.AppCfg.Agents.Definitions["main"].LLMProviders; len(got) != 1 || got[0].Model != "gpt-old" {
-		t.Fatalf("Runner.AppCfg providers = %+v, want the pre-reload gpt-old entry", got)
+		t.Fatalf("Runner.AppCfg providers = %+v, want the pre-apply gpt-old entry", got)
 	}
 	if len(env.Runner.MCPServers) != 1 || env.Runner.MCPServers[0].Name != "keep-me" {
-		t.Fatalf("Runner.MCPServers = %+v, want the pre-reload entry restored", env.Runner.MCPServers)
+		t.Fatalf("Runner.MCPServers = %+v, want the pre-apply entry restored", env.Runner.MCPServers)
 	}
 	// The rollback re-Loads the old config, so the runner must still be usable.
 	// The agent is published once MCP startup for the restored generation has
@@ -206,12 +157,13 @@ func TestRefreshSandboxRuntimeReappliesFilesystemPolicyToInProcessTools(t *testi
 	}
 }
 
-// TestReloadConfigLeavesMCPServersFrozen pins D2: the effective MCP list is
-// resolved once per session and a config reload must not replace it, even when
-// the reloaded file carries a different agents.defaults.mcp_servers. The new
-// list lands in the next session; Runner.Load keeps the live sessions because
-// the frozen list (and its fingerprint) is unchanged.
-func TestReloadConfigLeavesMCPServersFrozen(t *testing.T) {
+// TestApplyComposedConfigLeavesMCPServersFrozen pins D2: the effective MCP list
+// is resolved once per session and applying a configuration must not replace
+// it, even when the applied snapshot carries a different
+// agents.defaults.mcp_servers. The new list lands in the next session;
+// Runner.Load keeps the live sessions because the frozen list (and its
+// fingerprint) is unchanged.
+func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 	t.Setenv("FOREBRAIN_FREEZE_TEST_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
@@ -237,7 +189,7 @@ func TestReloadConfigLeavesMCPServersFrozen(t *testing.T) {
 	live := &cfg
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: live}}
 	// The composition root resolved the effective list once at Open time; the
-	// reload path must not touch it afterwards.
+	// apply path must not touch it afterwards.
 	runner.MCPServers = append([]appcfg.MCPServerConfig(nil), live.Agents.Defaults.MCPServers...)
 	frozen := runner.MCPServers
 	if err := runner.Load(); err != nil {
@@ -260,11 +212,15 @@ func TestReloadConfigLeavesMCPServersFrozen(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(second), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.ReloadConfig(); err != nil {
-		t.Fatalf("ReloadConfig: %v", err)
+	secondCfg, err := appcfg.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.applyComposedConfigLocked(secondCfg); err != nil {
+		t.Fatalf("apply: %v", err)
 	}
 	if got := env.Runner.AppCfg.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-new" {
-		t.Fatalf("AppCfg should reflect the reloaded file, got %q", got)
+		t.Fatalf("AppCfg should reflect the applied snapshot, got %q", got)
 	}
 	if len(env.Runner.MCPServers) != 1 || env.Runner.MCPServers[0].Name != "first-server" {
 		t.Fatalf("effective MCP list must stay frozen, got %+v", env.Runner.MCPServers)
@@ -274,35 +230,36 @@ func TestReloadConfigLeavesMCPServersFrozen(t *testing.T) {
 	}
 }
 
-// TestReloadConfigPropagatesToPoolEntries pins the pool half of the reload
-// contract: after the base runner adopts a config, every live project runner
-// is offered the reloaded raw config through its own LoadConfig and re-derives
-// its effective form from it, so a session bound to a project never serves a
-// config the rest of the process has left behind — while its sandbox stays the
-// one its own trust decision produced, not the base runner's.
-func TestReloadConfigPropagatesToPoolEntries(t *testing.T) {
+// TestApplyComposedConfigPropagatesToPoolEntries pins the pool half of the
+// apply contract: after the base runner adopts a configuration, every live
+// project runner is offered the applied raw config through its own LoadConfig
+// and re-derives its effective form from it, so a session bound to a project
+// never serves a config the rest of the process has left behind — while its
+// sandbox stays the one its own trust decision produced, not the base
+// runner's.
+func TestApplyComposedConfigPropagatesToPoolEntries(t *testing.T) {
 	ctx := context.Background()
 	env, projects, _ := newPoolTestEnv(t)
 	// The environment owns its pool the way the gateway's startup does.
 	env.EnsureRunnerPool()
 	defer env.CloseRunnerPool()
 
-	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "reload", Root: "/tmp/pool-reload", ProjectKey: "-tmp-pool-reload"})
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "apply", Root: "/tmp/pool-apply", ProjectKey: "-tmp-pool-apply"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Deps.SessionStore.Ensure(ctx, "sess-reload", "sess-reload"); err != nil {
+	if err := env.Deps.SessionStore.Ensure(ctx, "sess-apply", "sess-apply"); err != nil {
 		t.Fatal(err)
 	}
-	if err := projects.BindSession(ctx, "sess-reload", proj.ID); err != nil {
+	if err := projects.BindSession(ctx, "sess-apply", proj.ID); err != nil {
 		t.Fatal(err)
 	}
-	pooled := env.pool.RunnerForSession(ctx, "sess-reload")
+	pooled := env.pool.RunnerForSession(ctx, "sess-apply")
 	if pooled == nil || pooled == env.Runner {
 		t.Fatal("session did not resolve to a pooled runner")
 	}
 
-	// A reordered file with a rotated provider entry.
+	// A reordered configuration with a rotated provider entry.
 	t.Setenv("FOREBRAIN_PROPAGATION_TEST_KEY", "rotated-key")
 	body := "agents:\n" +
 		"  definitions:\n" +
@@ -315,8 +272,12 @@ func TestReloadConfigPropagatesToPoolEntries(t *testing.T) {
 	if err := os.WriteFile(env.ConfigPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.ReloadConfig(); err != nil {
-		t.Fatalf("ReloadConfig: %v", err)
+	next, err := appcfg.Load(env.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.applyComposedConfigLocked(next); err != nil {
+		t.Fatalf("apply: %v", err)
 	}
 
 	if pooled.AppCfg == env.Deps.AppCfg {
@@ -325,37 +286,60 @@ func TestReloadConfigPropagatesToPoolEntries(t *testing.T) {
 	if got := run.PrimaryEndpoint(pooled); got != "http://propagated.test/v1" {
 		t.Fatalf("pooled runner provider details stale: %q", got)
 	}
-	// The ordinary pinned reload kept its published selection.
+	// The ordinary pinned load kept its published selection.
 	if sel := run.PrimaryModelSelection(pooled); !sel.Set || sel.Model != "gpt-test" {
 		t.Fatalf("pooled runner selection after propagation = %+v", sel)
 	}
 }
 
-// TestHotReloadSeesAnAtomicSave pins the watcher's compatibility with the
-// atomic config save: Save writes a sibling temp file (a different name, which
-// the filename filter ignores) and renames it over the target, landing as a
-// Create/Rename event on the watched name. A reload must still fire — this is
-// what keeps "save from one surface, the others follow" true now that every
-// Save replaces the file instead of rewriting it in place.
-func TestHotReloadSeesAnAtomicSave(t *testing.T) {
-	var calls atomic.Int32
-	env := &Environment{ConfigPath: filepath.Join(t.TempDir(), "forebrain.yaml")}
-	env.reload = NewConfigManager(nil, func() error {
-		calls.Add(1)
-		return nil
-	})
-	StartConfigHotReload(context.Background(), env)
-	t.Cleanup(env.stopConfigHotReload)
+// TestHandEditedConfigFileIsNotPickedUp pins plan 189's ruling: the config file
+// stopped being a runtime source. A running process has no watcher, so editing
+// forebrain.yaml underneath it changes nothing — not at the next turn boundary
+// either, where the runtime sections are read from the state database and the
+// file contributes only its startup sections (gateway, credentials). A restart
+// is what a hand edit needs.
+func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
+	env := syncEnvForTest(t)
+	defer env.Close()
 
-	if err := appcfg.Save(env.ConfigPath, appcfg.Root{}); err != nil {
-		t.Fatalf("Save: %v", err)
+	applied := 0
+	env.OnConfigReload = func(*appcfg.Root) { applied++ }
+	before := env.Deps.AppCfg
+
+	// A file edit the old watcher would have picked up within its 400ms
+	// debounce: a different provider model, with no database row behind it.
+	body := "agents:\n" +
+		"  definitions:\n" +
+		"    main:\n" +
+		"      llm_providers:\n" +
+		"        - provider: openai\n" +
+		"          model: gpt-hand-edited\n" +
+		"          api_key: ${FOREBRAIN_IMPORT_TEST_KEY}\n" +
+		"          base_url: http://hand-edited.test/v1\n"
+	if err := os.WriteFile(env.ConfigPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for calls.Load() < 1 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
+	if applied != 0 {
+		t.Fatalf("the file edit was applied %d times without a restart, want 0: nothing watches the file (plan 189)", applied)
 	}
-	if calls.Load() < 1 {
-		t.Fatal("no config reload within 3s of an atomic save; the watcher missed the rename")
+	if env.Deps.AppCfg != before {
+		t.Fatal("the live config moved under a file edit")
+	}
+	if got := env.Deps.AppCfg.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-import" {
+		t.Fatalf("live provider model = %q, want the imported gpt-import", got)
+	}
+
+	// Even an explicit turn-boundary sync keeps serving the database's runtime
+	// sections: the file's agents section is dead.
+	if err := env.SyncConfigFromDB(context.Background()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := env.Deps.AppCfg.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-import" {
+		t.Fatalf("provider model after a sync = %q, want the database's gpt-import (a hand edit is not a source)", got)
+	}
+	if applied != 0 {
+		t.Fatalf("the unchanged composed configuration was applied %d times, want 0", applied)
 	}
 }
 
@@ -379,6 +363,7 @@ func TestAdoptLaunchTrustRederivesTheSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	defer env.Close()
 
 	// Not decided yet: the sandbox the environment froze is read-only.
@@ -397,6 +382,7 @@ func TestAdoptLaunchTrustRederivesTheSandbox(t *testing.T) {
 	if err := env.AdoptLaunchTrust(); err != nil {
 		t.Fatalf("AdoptLaunchTrust: %v", err)
 	}
+
 	if level := env.LaunchProject.TrustLevel; level != safety.LevelTrusted {
 		t.Fatalf("trust level after AdoptLaunchTrust = %q, want trusted", level)
 	}

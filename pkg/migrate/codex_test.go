@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
@@ -93,8 +94,14 @@ func (f *fixtureCodexHome) options(t *testing.T, dryRun bool) *Options {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(t.TempDir(), "forebrain.yaml")
-	if err := os.WriteFile(cfgPath, []byte("agents:\n  defaults:\n    mcp_servers:\n      - name: existing\n        transport: stdio\n        command: /bin/true\n"), 0o600); err != nil {
+	const cfgDoc = "agents:\n  defaults:\n    mcp_servers:\n      - name: existing\n        transport: stdio\n        command: /bin/true\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgDoc), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	// The configuration the importer reads and writes is the stored one; the
+	// seeded file copy stays as the untouched-file evidence (plan 188 W11).
+	if root, perr := appcfg.ParseRootYAML([]byte(cfgDoc)); perr == nil {
+		seedMigrateSections(t, db, root)
 	}
 	return &Options{
 		DryRun:             dryRun,
@@ -376,15 +383,12 @@ func TestCodexUserMCPDisabledSkipped(t *testing.T) {
 	} else if !strings.Contains(entry.Detail, "startup_timeout_sec") {
 		t.Fatalf("dropped key not reported: %s", entry.Detail)
 	}
-	body, err := os.ReadFile(opts.ConfigPath)
-	if err != nil {
-		t.Fatal(err)
+	stored := migrateSectionRow(t, opts.DB, "agents")
+	if strings.Contains(stored, "computer-use") {
+		t.Fatal("disabled entry must not be written")
 	}
-	if strings.Contains(string(body), "computer-use") {
-		t.Fatal("disabled entry must not be written to forebrain.yaml")
-	}
-	if !strings.Contains(string(body), "node_repl") {
-		t.Fatal("enabled entry missing from forebrain.yaml")
+	if !strings.Contains(stored, "node_repl") {
+		t.Fatal("enabled entry missing from the stored agents section")
 	}
 }
 

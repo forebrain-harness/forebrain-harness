@@ -2441,8 +2441,8 @@ func TestPrimaryModelReadersAgreeAfterSelection(t *testing.T) {
 	if got := PrimaryEndpoint(r); got != "http://b.test/v1" {
 		t.Fatalf("PrimaryEndpoint = %q", got)
 	}
-	if got := PrimaryReasoningEffort(r); got != "high" {
-		t.Fatalf("PrimaryReasoningEffort = %q", got)
+	if got := PrimaryModelSelection(r).Effort; got != "high" {
+		t.Fatalf("PrimaryModelSelection effort = %q", got)
 	}
 	requireSelection(t, r, "anthropic", "claude-b", "high")
 	if got := r.approvalHookModel(context.Background()); got != "claude-b" {
@@ -2464,7 +2464,7 @@ func TestPrimaryModelStateUnloadedFallback(t *testing.T) {
 	if state.Set || state.Provider != "openai" || state.Model != "gpt-a" || state.Effort != "low" {
 		t.Fatalf("unloaded selection = %+v", state)
 	}
-	if strings.TrimSpace(PrimaryReasoningEffort(nil)) != "" {
+	if strings.TrimSpace(PrimaryModelSelection(nil).Effort) != "" {
 		t.Fatal("nil runner effort is non-empty")
 	}
 }

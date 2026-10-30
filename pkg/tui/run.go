@@ -1248,6 +1248,9 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 	case "memories":
 		_ = cmds.handleMemories(state.sessionID)
 		return true, false, ComposerSubmission{}, false
+	case "config":
+		_ = cmds.handleConfig(ctx, args)
+		return true, false, ComposerSubmission{}, false
 	case "status":
 		_ = cmds.handleStatus(state.sessionID)
 		return true, false, ComposerSubmission{}, false
@@ -1974,7 +1977,7 @@ func (s *streamState) handleOverlayNav(hotkey inputHotkey, renderer *Renderer) b
 	} else if overlay := s.composer.MentionOverlay; overlay != nil && overlay.Active && len(overlay.Visible) > 0 {
 		overlay.MoveSelection(delta)
 		return true
-	} else if agentRosterHasRunningSubagent(s.agentRoster) {
+	} else if agentRosterOperable(s.agentRoster, s.composerReadOnlyView(renderer) == "") {
 		if hotkey == hotkeyOverlayDown {
 			if !s.agentRosterFocused {
 				// Focus lands where the cursor already points — the agent whose
@@ -2417,6 +2420,22 @@ func (s *streamState) subagentViewRunning(view string) bool {
 		return true
 	}
 	return s.session.SubagentRunning(s.sessionID, view)
+}
+
+// composerReadOnlyView returns the subagent whose view takes no input: the view
+// on screen belongs to a subagent whose execution has ended. It is the single
+// definition of that fact — composerReadOnly is stored from it and the agent
+// roster's operability is derived from it — because a view that takes no input
+// cannot operate anything on the roster either.
+func (s *streamState) composerReadOnlyView(renderer *Renderer) string {
+	if s == nil || renderer == nil {
+		return ""
+	}
+	view := strings.TrimSpace(renderer.ActiveView())
+	if view == "" || s.subagentViewRunning(view) {
+		return ""
+	}
+	return view
 }
 
 func (s *streamState) composerPendingInputPreview() ComposerPendingInputPreview {
@@ -3322,10 +3341,7 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 	// messages (run.ErrSubagentNotRunning) — so its view draws no input box, the
 	// raw reader accepts no edits, and anything typed there before it went idle
 	// moves to the conversation's composer rather than being stranded.
-	idle := ""
-	if view := strings.TrimSpace(renderer.ActiveView()); view != "" && !state.subagentViewRunning(view) {
-		idle = view
-	}
+	idle := state.composerReadOnlyView(renderer)
 	composerReadOnly.Store(idle != "")
 	if idle != "" {
 		if draft, ok := state.currentDraftSubmission(); ok {
@@ -3339,9 +3355,11 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 	mentionOverlayActive.Store(mentionOv != nil && mentionOv.Active)
 	// Queue recall is handled by explicit modified key sequences; no global
 	// bare-Up queue gate is maintained.
-	rosterActive := agentRosterHasRunningSubagent(state.agentRoster)
+	rosterActive := agentRosterOperable(state.agentRoster, idle == "")
 	if !rosterActive {
-		// Guards against stale focus if the subagent finishes mid-navigation.
+		// Guards against stale focus if the subagent finishes mid-navigation,
+		// and against a view that takes no input keeping the keyboard on a
+		// roster it does not paint.
 		state.agentRosterFocused = false
 	}
 	agentRosterActive.Store(rosterActive)

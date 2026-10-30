@@ -61,10 +61,16 @@ func importLegacyConfigIfNeeded(ctx context.Context, sqlDB *sql.DB, home, cfgPat
 	}
 
 	// B. The login files become the auth.* credential rows. The files stay
-	// where they are — this release still reads them; they become dead data
-	// when the read side switches to the database.
+	// where they are — the runtime no longer reads them, but they are the
+	// user's own copy and nothing deletes them.
+	//
+	// ChatGPT reads the override the file-era configuration names
+	// (credentials.chatgpt): the import is the one reader of that section
+	// left, because it is what keeps a login living at ~/.codex/auth.json
+	// from being lost. Once the import has run, the section is dead.
 	if _, ok := sections["auth.chatgpt"]; !ok {
-		if err := importCredentialFile(ctx, store, "auth.chatgpt", openaiauth.DefaultPath(home)); err != nil {
+		path := openaiauth.ResolvePath(home, persisted.Credentials.ChatGPT)
+		if err := importCredentialFile(ctx, store, "auth.chatgpt", path); err != nil {
 			return err
 		}
 	}

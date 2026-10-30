@@ -453,6 +453,24 @@ func explicitSkillSelectionFromContext(ctx context.Context) (explicitSkillSelect
 	return selections[0], true
 }
 
+// withoutExplicitSkills drops the skill a dispatching turn's message selected,
+// and the activation already loaded from it, so a child conversation never runs
+// on a skill the user gave another conversation. A skill belongs to the message
+// that selected it, not to the conversation that dispatched the child: left in
+// place, the child loads it again in its own worker session and inlines that
+// SKILL.md into every request it makes.
+//
+// Both readers treat an empty slice as "nothing selected", so a child that
+// seeds its own selection after this boundary — a user typing the skill into the
+// subagent view, a steer carrying it — loads it as it always did.
+func withoutExplicitSkills(ctx context.Context) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, explicitSkillSelectionsContextKey{}, []explicitSkillSelection(nil))
+	return context.WithValue(ctx, explicitSkillActivationsContextKey{}, []explicitSkillActivation(nil))
+}
+
 // ExplicitSkillLoadError reports that an explicitly selected skill failed to
 // load before the first LLM request. The failure is already shown to the user
 // as the Skill failure card, so surfaces must not render a second generic

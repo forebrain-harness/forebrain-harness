@@ -233,18 +233,11 @@ type ChatSession struct {
 	surfaceSyncResume  atomic.Bool
 	userHooks          *hook.Runtime
 
-	// config reload (TUI): the fsnotify watcher that used to live here was
-	// deleted once process.Environment became the only session constructor —
-	// it never ran in production and left two watcher implementations in the
-	// tree (P3-5 requires exactly one; its idempotency tests moved to
-	// pkg/process alongside the surviving watcher, per P3-1). The
-	// defer-while-running coordinator that used to live beside it went the
-	// same way once the environment became mandatory: process.ConfigManager is
-	// the only one, and the session merely tells it whether a run is in
-	// flight. What remains here is the explicit reload seam: /connect and the
-	// config-writing slash commands call ReloadConfig / reloadConfigFromDisk
-	// directly. configApplyMu serializes reloadConfigFromDisk.
-	configApplyMu sync.Mutex
+	// There is no config reload seam here (plan 189): a changed configuration
+	// reaches a running session one way — process.Environment.SyncConfigFromDB
+	// at the turn boundary — and a hand-edited forebrain.yaml takes effect on
+	// restart. The session owns no apply lock because it no longer applies a
+	// configuration of its own.
 }
 
 // approvalResumeOwner is the process identity the approval-continuation
@@ -1421,9 +1414,6 @@ func (s *ChatSession) tuiFinish(runID string) {
 		}
 	}
 	s.tuiRunMu.Unlock()
-	if finished {
-		s.reloadConfigAfterRun()
-	}
 }
 
 // tuiWait ends the executing run without discarding the queued turn
@@ -1439,11 +1429,8 @@ func (s *ChatSession) tuiWait(runID string) {
 		return
 	}
 	s.tuiRunMu.Lock()
-	suspended := s.tuiControlLocked().WaitApproval(runID)
+	s.tuiControlLocked().WaitApproval(runID)
 	s.tuiRunMu.Unlock()
-	if suspended {
-		s.reloadConfigAfterRun()
-	}
 }
 
 func (s *ChatSession) CancelActiveRun() bool {
@@ -2621,126 +2608,34 @@ func (s *ChatSession) preferredSessionIDForFast() string {
 	return sid
 }
 
-// ReloadConfig applies the current config file immediately when no turn is
-// running. Connect uses this explicit seam so a successful provider setup is
-// reflected by the already-open session before the next message.
+// SyncConfig adopts the configuration a surface has just written, without
+// waiting for the next turn boundary. Connect uses this seam: the wizard wrote
+// the new provider to the state database, and the session it was launched from
+// must see that provider before the model it configured can be adopted.
 //
-// A run in flight defers the reload the same way a file event does rather than
-// dropping it: the caller has just rewritten the config, so leaving the session
-// on the old one until something else happens to touch the file again would
-// strand the change behind a best-effort watcher.
-func (s *ChatSession) ReloadConfig() error {
-	if s == nil {
+// The read-back is the turn boundary's own path — Environment.SyncConfigFromDB
+// composes the file's startup sections with the database's runtime sections and
+// applies the result only when the snapshot moved — so there is no second way
+// for a configuration to reach a running session. A hand-edited
+// forebrain.yaml is not a source here at all: it takes effect on restart
+// (plan 189).
+func (s *ChatSession) SyncConfig(ctx context.Context) error {
+	if s == nil || s.Env == nil {
 		return fmt.Errorf("chat session unavailable")
 	}
-	// The environment owns the defer-while-running coordinator; the session
-	// only decides whether a run is in flight, because its notion of "in
-	// flight" spans the interactive approval loop that sits above the run.
-	if s.tuiRunActive() {
-		if err := s.Env.RequestConfigReload(); err != nil {
-			return err
-		}
-		return fmt.Errorf("config reload deferred until the current task finishes")
-	}
-	return s.Env.RequestConfigReload()
+	return s.Env.SyncConfigFromDB(ctx)
 }
 
-// reloadConfigFromDisk re-reads the config file and republishes it to everything
-// holding a view of it. configApplyMu serializes the whole read-apply sequence:
-// the watcher's timer goroutine, /connect, and the config-writing slash commands
-// all reach it, and two of them interleaving would leave the environment and
-// the runner describing different files.
-func (s *ChatSession) reloadConfigFromDisk() error {
-	if s == nil {
-		return fmt.Errorf("chat session unavailable")
-	}
-	if err := s.applyConfigFromDisk(); err != nil {
-		return err
-	}
-	// Hand the applied config to the environment, which resolves the active
-	// agent's state root from it for the run executor. This happens after
-	// applyConfigFromDisk has released configApplyMu on purpose: reloadConfig
-	// calls OnConfigReload, which takes configApplyMu, while holding reloadMu,
-	// so acquiring reloadMu from under configApplyMu would invert the order.
-	s.Env.AdoptConfig(s.cfg())
-	return nil
-}
-
-// applyConfigFromDisk validates the file and swaps it into the session and the
-// runner, rolling back together if the runner rejects it. The pointer swap
-// and the rebuild live inside Runner.LoadConfig, under the runner's load
-// lock; this function only adopts the config the runner accepted.
-func (s *ChatSession) applyConfigFromDisk() error {
-	s.configApplyMu.Lock()
-	defer s.configApplyMu.Unlock()
-	cfgPath, err := homepkg.ResolveConfigPath(strings.TrimSpace(s.home()))
-	if err != nil {
-		return fmt.Errorf("resolve config path: %w", err)
-	}
-	loaded, err := appcfg.Load(cfgPath)
-	if err != nil {
-		return fmt.Errorf("load %s: %w", cfgPath, err)
-	}
-	safety.ApplyYOLO(&loaded)
-	loaded = safety.EffectiveConfig(loaded, s.LaunchProject)
-	if err := safety.NewManager().StartupCheck(&loaded); err != nil {
-		return fmt.Errorf("sandbox startup check: %w", err)
-	}
-	deps := s.deps()
-	if deps == nil {
-		return fmt.Errorf("chat session has no environment")
-	}
-	// The runner shares this very Deps, so publishing here publishes to it too;
-	// there is no second copy left to keep in step. MCPServers is deliberately
-	// NOT taken from the reloaded file: a reload only re-points the config.
-	// The MCP list is re-resolved when a conversation begins (run.Runner.
-	// OpenSession / LoadSession), which is what "a file change lands in the
-	// next session" means; until then /mcp reports it as pending.
-	// LoadConfig therefore only restores the config pointer on failure.
-	if r := s.runner(); r != nil {
-		if rerr := r.LoadConfig(&loaded); rerr != nil {
-			return fmt.Errorf("load runner: %w", rerr)
-		}
-	} else {
-		deps.AppCfg = &loaded
-	}
-	s.adoptConfig(&loaded)
-	if st := s.sessStore(); st != nil {
-		st.SetMemoryMode(memory.SessionModeForConfig(s.cfg()))
-	}
-	return nil
-}
-
-// adoptConfig re-points the config pointers the session itself owns. A reload
-// swaps run.Deps.AppCfg for a freshly loaded value rather than overwriting it
-// in place, so every holder has to be told: the environment re-points its own
-// hooks and the runner, and these are the TUI's.
+// adoptConfig re-points the config pointers the session itself owns. An
+// application swaps run.Deps.AppCfg for a freshly composed value rather than
+// overwriting it in place, so every holder has to be told: the environment
+// re-points its own hooks and the runner, and these are the TUI's.
 func (s *ChatSession) adoptConfig(next *appcfg.Root) {
 	if s == nil || next == nil {
 		return
 	}
 	if s.userHooks != nil {
 		s.userHooks.Cfg = next
-	}
-}
-
-// reloadConfigAfterRun applies a deferred config reload when a TUI run
-// completes. If a reload was deferred because a run was active, it applies it
-// now. Safe to call unconditionally after every run end.
-func (s *ChatSession) reloadConfigAfterRun() {
-	if s == nil {
-		return
-	}
-	if err := s.Env.ConfigIdle(); err != nil {
-		slog.Error("config hot reload: apply", "err", err)
-		// A deferred reload is invisible otherwise: nobody asked for it at this
-		// moment, so a config that failed to apply under the session has to say
-		// so rather than leave the old one running silently.
-		s.notifyUI(NewMessageMsg{Msg: Message{
-			Kind:      MsgKindError,
-			Content:   "config reload failed: " + err.Error(),
-			Timestamp: time.Now(),
-		}})
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
@@ -104,8 +105,14 @@ func (f *fixtureHome) options(t *testing.T, dryRun bool) *Options {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(t.TempDir(), "forebrain.yaml")
-	if err := os.WriteFile(cfgPath, []byte("agents:\n  defaults:\n    mcp_servers:\n      - name: existing\n        transport: stdio\n        command: /bin/true\n"), 0o600); err != nil {
+	const cfgDoc = "agents:\n  defaults:\n    mcp_servers:\n      - name: existing\n        transport: stdio\n        command: /bin/true\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgDoc), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	// The configuration the importer reads and writes is the stored one; the
+	// seeded file copy stays as the untouched-file evidence (plan 188 W11).
+	if root, perr := appcfg.ParseRootYAML([]byte(cfgDoc)); perr == nil {
+		seedMigrateSections(t, db, root)
 	}
 	return &Options{
 		DryRun:             dryRun,

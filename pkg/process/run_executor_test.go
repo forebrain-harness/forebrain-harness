@@ -119,6 +119,7 @@ func envWithFakeLLMForSource(t *testing.T, reply, sessionSource string) *Environ
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	t.Cleanup(env.Close)
 	return env
 }
@@ -400,6 +401,7 @@ func TestExecutorDoesNotFinishARunPausedAtAnApprovalGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	t.Cleanup(env.Close)
 
 	svc := turn.New(
@@ -653,6 +655,7 @@ func envWithLLMServer(t *testing.T, srv *httptest.Server, launchDir string) *Env
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	t.Cleanup(env.Close)
 	return env
 }

@@ -112,6 +112,7 @@ func envWithMCPServers(t *testing.T, mcpSection string) (*Environment, *counting
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	t.Cleanup(env.Close)
 	return env, counter
 }
@@ -332,6 +333,7 @@ func envWithScriptedLLMOnModel(t *testing.T, model string, script []scriptedRepl
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	t.Cleanup(env.Close)
 	return env, srv
 }

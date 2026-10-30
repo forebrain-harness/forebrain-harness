@@ -28,8 +28,15 @@ import (
 // again unless something writes it, and nothing does after this switch.
 func syncLegacyCredentialFilesIfNeeded(ctx context.Context, sqlDB *sql.DB, home string) error {
 	store := &state.ConfigStore{DB: sqlDB}
+	// ChatGPT's file is wherever the file-era configuration pointed it
+	// (credentials.chatgpt) — a login kept at ~/.codex/auth.json refreshed
+	// there during the transition, not at the default path.
+	chatGPTPath := openaiauth.DefaultPath(home)
+	if persisted, err := appcfg.LoadPersisted(filepath.Join(strings.TrimSpace(home), "forebrain.yaml")); err == nil {
+		chatGPTPath = openaiauth.ResolvePath(home, persisted.Credentials.ChatGPT)
+	}
 	for _, item := range []struct{ section, path string }{
-		{"auth.chatgpt", openaiauth.DefaultPath(home)},
+		{"auth.chatgpt", chatGPTPath},
 		{"auth.opencode", opencode.DefaultPath(home)},
 	} {
 		if err := syncCredentialFileRow(ctx, sqlDB, store, item.section, item.path); err != nil {

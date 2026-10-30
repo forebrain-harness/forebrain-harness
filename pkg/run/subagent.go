@@ -2048,7 +2048,10 @@ func subagentRosterKey(entry agent.HistoryEntry) string {
 // Everything that shapes the prefix of the subagent's requests is here, so a
 // compaction or a continuation built from it reuses that prefix.
 func subagentRecordContext(ctx context.Context, fac Factory, record agent.HistoryEntry) context.Context {
-	hostCtx := ctx
+	// Like every other parent-turn-only value here: the skill the dispatching
+	// turn selected is not part of this subagent's record, so a continuation
+	// built from the record must not carry it.
+	hostCtx := withoutExplicitSkills(ctx)
 	if strings.TrimSpace(record.AgentKind) == "fork" {
 		hostCtx = tool.WithForkChild(hostCtx, true)
 	} else if strings.TrimSpace(record.AgentKind) == "typed" {
@@ -3494,7 +3497,10 @@ func subagentDispatchBlocksFileWrites(cat SubagentCatalog, subagentType string) 
 // that reassembled the context from the dispatching one dropped the pin and ran
 // on a model nobody announced.
 func subagentExecContext(prep preparedSubagent) context.Context {
-	hostCtx := prep.ctx
+	// The dispatching turn's explicit skill stays with it: the child runs on
+	// the skills its own messages select, and this is where the child's
+	// context leaves the parent's.
+	hostCtx := withoutExplicitSkills(prep.ctx)
 	// Every subagent execution — fork, typed or custom — carries one marker:
 	// this run is a subagent. It is set here, the single place every dispatch
 	// path builds the child's context from, so the subagent-tool guards and

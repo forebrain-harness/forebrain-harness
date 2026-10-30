@@ -5039,6 +5039,16 @@ func agentRosterHasRunningSubagent(snapshot AgentRosterSnapshot) bool {
 	return false
 }
 
+// agentRosterOperable reports whether the agent roster is both on screen and
+// usable: there is a running subagent to show, and the composer on screen takes
+// input. A subagent's view whose execution has ended has a read-only composer —
+// its reader drops every byte but Esc (see composerReadOnly) — so a roster
+// painted there advertised "Enter to view · x to stop" over rows that could
+// never answer (owner report, 2026-10-30).
+func agentRosterOperable(snapshot AgentRosterSnapshot, composerTakesInput bool) bool {
+	return composerTakesInput && agentRosterHasRunningSubagent(snapshot)
+}
+
 func thinkingDisplayLinesWithWidth(f Frame, termWidth int) []string {
 	content := strings.TrimSpace(f.Content)
 	if content == "" {

@@ -14,6 +14,24 @@ import (
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
+// executeStoredConfig reads the configuration a setup or /connect Execute
+// left behind: the composed stored source over that home (plan 188 W9 — the
+// agents section, not the file, is the write's destination).
+func executeStoredConfig(t *testing.T, rt Context) appcfg.Root {
+	t.Helper()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(rt.Home, "state", "forebrain.state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	env := &Environment{Root: rt.Home, ConfigPath: rt.ConfigPath, SQL: db}
+	cfg, err := env.ComposedPersistedConfig(context.Background())
+	if err != nil {
+		t.Fatalf("read stored configuration: %v", err)
+	}
+	return cfg
+}
+
 // /connect is add-or-replace by provider+model identity, not an overwrite of
 // the primary slot or of a same-provider entry's model. Connecting a second
 // model of a provider the agent already carries adds its own entry and
@@ -44,10 +62,7 @@ func TestExecuteConnectSecondModelSameProviderKeepsFirstEntry(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	cfg, err := appcfg.LoadPersisted(rt.ConfigPath)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	cfg := executeStoredConfig(t, rt)
 	def := cfg.Agents.Definitions["main"]
 	if len(def.LLMProviders) != 3 {
 		t.Fatalf("provider count = %d, want 3 (openai and claude-old preserved, claude-new added)", len(def.LLMProviders))
@@ -125,10 +140,7 @@ func TestExecuteConnectAddsNewProvider(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	cfg, err := appcfg.LoadPersisted(rt.ConfigPath)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	cfg := executeStoredConfig(t, rt)
 	def := cfg.Agents.Definitions["main"]
 	if len(def.LLMProviders) != 2 {
 		t.Fatalf("provider count = %d, want 2 (openai kept, anthropic added)", len(def.LLMProviders))
@@ -169,10 +181,7 @@ func TestExecuteConnectUpdatesCurrentPrimaryInPlace(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	cfg, err := appcfg.LoadPersisted(rt.ConfigPath)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	cfg := executeStoredConfig(t, rt)
 	def := cfg.Agents.Definitions["main"]
 	if len(def.LLMProviders) != 1 {
 		t.Fatalf("provider count = %d, want 1 (updated in place)", len(def.LLMProviders))
@@ -211,10 +220,7 @@ func TestExecuteConnectMatchesProviderCaseInsensitively(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	cfg, err := appcfg.LoadPersisted(rt.ConfigPath)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	cfg := executeStoredConfig(t, rt)
 	def := cfg.Agents.Definitions["main"]
 	if len(def.LLMProviders) != 2 {
 		t.Fatalf("provider count = %d, want 2 (openai matched, not duplicated)", len(def.LLMProviders))
@@ -560,10 +566,7 @@ func TestExecuteConfiguresNamedAgentOnly(t *testing.T) {
 		t.Fatalf("report agent = %q, want review", rep.AgentName)
 	}
 
-	cfg, err := appcfg.LoadPersisted(rt.ConfigPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
+	cfg := executeStoredConfig(t, rt)
 	reviewDef := cfg.Agents.Definitions["review"]
 	if len(reviewDef.LLMProviders) != 2 {
 		t.Fatalf("review providers = %+v, want 2 (review-old kept, claude-opus-4-7 appended)", reviewDef.LLMProviders)
@@ -597,10 +600,7 @@ func TestExecuteDefaultsToMainAgent(t *testing.T) {
 		t.Fatalf("report agent = %q, want main", rep.AgentName)
 	}
 
-	cfg, err := appcfg.LoadPersisted(rt.ConfigPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
+	cfg := executeStoredConfig(t, rt)
 	mainDef := cfg.Agents.Definitions["main"]
 	if len(mainDef.LLMProviders) != 2 {
 		t.Fatalf("main providers = %+v, want 2 (gpt-old kept, gpt-new appended)", mainDef.LLMProviders)

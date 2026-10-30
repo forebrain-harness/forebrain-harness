@@ -188,7 +188,8 @@ func validateLoadedRoot(r *Root) error {
 }
 
 // ValidateCronSection checks the install's scheduled-task settings. It is the
-// one verdict behind every write path — startup, hot reload, the YAML editor,
+// one verdict behind every write path — startup, configuration application,
+// the YAML editor,
 // and the structured settings endpoint — so an out-of-range retention is
 // rejected wherever it comes from.
 func ValidateCronSection(c CronSection) error {
@@ -876,7 +877,8 @@ func validatePrimaryAgents(r *Root) error {
 		}
 		// A dangling default_model must never reach disk: the runtime treats
 		// an unresolvable default as an error (no fall-back to the first
-		// entry), so load, hot reload and every structured write path share
+		// entry), so load, configuration application and every structured write
+		// path share
 		// this one verdict via validateLoadedRoot/Save.
 		if strings.TrimSpace(def.DefaultModel) != "" && EffectiveDefaultLLM(def) == nil {
 			return fmt.Errorf(

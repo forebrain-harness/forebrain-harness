@@ -215,7 +215,8 @@ func TestImportMCPAppendOnlyAndNotices(t *testing.T) {
 			project: {"caveman-shrink": {Type: "stdio", Command: "npx", Args: []string{"caveman-shrink"}, Env: map[string]string{"SECRET_TOKEN": "s3cr3t"}}},
 		},
 	}
-	opts := &Options{Home: home, AgentWorkspace: t.TempDir(), ConfigPath: fixture.options(t, false).ConfigPath, Now: fixedClock}
+	base := fixture.options(t, false)
+	opts := &Options{Home: home, AgentWorkspace: t.TempDir(), ConfigPath: base.ConfigPath, DB: base.DB, Now: fixedClock}
 	before, err := os.ReadFile(opts.ConfigPath)
 	if err != nil {
 		t.Fatal(err)
@@ -239,15 +240,21 @@ func TestImportMCPAppendOnlyAndNotices(t *testing.T) {
 		t.Fatalf("caveman-shrink = %+v", byName["caveman-shrink/project"])
 	}
 
+	stored := migrateSectionRow(t, opts.DB, "agents")
+	if !strings.Contains(stored, "command:/bin/true") && !strings.Contains(stored, "/bin/true") {
+		t.Fatal("the pre-existing global entry was dropped")
+	}
+	if !strings.Contains(stored, "codegraph") {
+		t.Fatal("the new global entry was not appended")
+	}
+	// The configuration file is neither rewritten nor backed up: the section
+	// is the write's destination (plan 188 W11).
 	after, err := os.ReadFile(opts.ConfigPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(after), "command: /bin/true") {
-		t.Fatal("the pre-existing global entry was dropped")
-	}
-	if !strings.Contains(string(after), "codegraph") {
-		t.Fatal("the new global entry was not appended")
+	if string(after) != string(before) {
+		t.Fatal("the import must leave the configuration file as it was")
 	}
 	backups := 0
 	entries, _ := os.ReadDir(filepath.Dir(opts.ConfigPath))
@@ -256,12 +263,11 @@ func TestImportMCPAppendOnlyAndNotices(t *testing.T) {
 			backups++
 		}
 	}
-	if backups != 1 {
+	if backups != 0 {
 		t.Fatalf("backups = %d", backups)
 	}
-	if string(before) == string(after) && backups == 0 {
-		t.Fatal("config unchanged and no backup")
-	}
+	// The section write moved the change into fb_config; the file staying
+	// byte-identical with no backup is the expected outcome now.
 
 	projectFile := filepath.Join(project, ".forebrain", "mcp_servers.yaml")
 	body, err := os.ReadFile(projectFile)

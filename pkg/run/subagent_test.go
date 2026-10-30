@@ -2257,6 +2257,127 @@ func TestSubagentContextDoesNotInheritPrimarySteerRuntime(t *testing.T) {
 	}
 }
 
+// TestSubagentDispatchDoesNotInheritTheDispatchTurnsSkill is the skill half of
+// the boundary TestSubagentContextDoesNotInheritPrimarySteerRuntime pins for
+// the steer runtime: a skill belongs to the message that selected it, never to
+// the conversation that dispatched the child. A dispatching turn whose message
+// wrote `/improve` must not hand that skill to the subagent it dispatched —
+// the child would load it in its own worker session and inject another
+// conversation's SKILL.md into every request it makes.
+func TestSubagentDispatchDoesNotInheritTheDispatchTurnsSkill(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	runSvc := &state.RunStore{DB: db}
+	ensureRunSessions(t, db, "session-1")
+	parent, err := runSvc.CreateRun(ctx, "session-1", "parent")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	executor := &ctxCaptureSubagentExecutor{}
+	owner := &Runner{Deps: &Deps{RunRT: runSvc}, SubagentExecutor: executor, Control: NewController()}
+
+	// The dispatching turn exactly as a surface builds it: the message selected
+	// probe-skill, so the turn's context carries the selection and the skill it
+	// already loaded.
+	parentCtx := toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID)
+	parentCtx = WithExplicitSkillSelection(parentCtx, "probe-skill", writeProbeSkill(t))
+	parentCtx = WithExplicitSkillActivation(parentCtx, "probe-skill", probeSkillBody)
+
+	if _, err := execGeneralSubagent(
+		parentCtx,
+		Factory{AgentName: "main", Owner: owner, Home: t.TempDir()},
+		"task-skill-isolation",
+		"short title",
+		"do work",
+		"general-purpose",
+	); err != nil {
+		t.Fatalf("execGeneralSubagent: %v", err)
+	}
+
+	captured := executor.captured
+	if captured == nil {
+		t.Fatal("expected executor to capture the subagent context")
+	}
+	if selections, ok := explicitSkillSelectionsFromContext(captured); ok {
+		t.Fatalf("child context still carries the dispatch turn's skill selection %v: the subagent would load and inject a SKILL.md the user selected for another conversation", selections)
+	}
+	if activations, ok := explicitSkillActivationsFromContext(captured); ok {
+		t.Fatalf("child context still carries the dispatch turn's loaded skill %v: every subagent request would inline another conversation's SKILL.md", activations)
+	}
+}
+
+// TestSubagentContinueDoesNotInheritTheDispatchTurnsSkill covers the second
+// door to the same leak: the model's subagent_continue runs on the tool call's
+// context, which is the dispatching turn's. A continuation must not load that
+// turn's skill either — no Skill card, no activation message in its requests.
+func TestSubagentContinueDoesNotInheritTheDispatchTurnsSkill(t *testing.T) {
+	skillPath := writeProbeSkill(t)
+	fix := newPersistenceFixture(t, "worker system", "worker answered")
+	workerID := "main:conv-skillskip:worker:eeeeeeee-1111-2222-3333-444444444444"
+	fix.seedWorker(t, "conv-skillskip", workerID, []llm.Message{
+		llm.UserMessage(llm.Text("first directive")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("first answer")}),
+	})
+	if err := agent.AppendHistory(fix.fac.subagentScopeRoot(), agent.HistoryEntry{
+		TaskID:          "task-skillskip",
+		AgentID:         "typed-skillskip-agent",
+		RunID:           "seed-run",
+		ParentRunID:     "parent-1",
+		SessionID:       "conv-skillskip",
+		WorkerSessionID: workerID,
+		Task:            "first directive",
+		Status:          agent.StatusOK,
+		Output:          "first answer",
+		AgentType:       "general-purpose",
+		AgentKind:       "typed",
+		RuntimeKind:     "typed_subagent",
+		Continuable:     true,
+		StartedAt:       10,
+		UpdatedAt:       20,
+		FinishedAt:      20,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var steps []toolpkg.StepEvent
+	ctx := toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "conv-skillskip"), "parent-1")
+	ctx = toolpkg.WithStepHook(ctx, func(_ context.Context, evt toolpkg.StepEvent) { steps = append(steps, evt) })
+	ctx = WithExplicitSkillSelection(ctx, "probe-skill", skillPath)
+
+	if _, err := continueSubagentExecution(ctx, fix.fac, &SubagentContinueInput{TaskID: "task-skillskip", Message: "carry on"}); err != nil {
+		t.Fatalf("continueSubagentExecution: %v", err)
+	}
+
+	for _, evt := range steps {
+		if strings.TrimSpace(evt.SkillName) != "" || evt.ToolName == "skill" {
+			t.Fatalf("the continuation loaded the dispatch turn's skill (%s skill=%q): the subagent drew a Skill card for a skill its own message never selected", evt.Kind, evt.SkillName)
+		}
+	}
+	requests := fix.llm.gotRequests()
+	if len(requests) == 0 {
+		t.Fatal("the continuation sent no request")
+	}
+	carried := false
+	for _, request := range requests {
+		for _, msg := range request {
+			if strings.Contains(msg.TextContent(), probeSkillBody) || strings.Contains(msg.TextContent(), "The user selected the") {
+				t.Fatalf("a continuation request carries the dispatch turn's skill activation: %q", msg.TextContent())
+			}
+			if msg.TextContent() == "carry on" {
+				carried = true
+			}
+		}
+	}
+	if !carried {
+		t.Fatal("no request carried the continuation's own message: the run did not happen")
+	}
+}
+
 // streamProbe records the run events a subagent's own stream sink republishes.
 type streamProbe struct {
 	assistant      []event.AssistantDeltaPayload
@@ -4415,6 +4536,11 @@ func TestForkContinuationReplaysItsOwnPrefixByteForByte(t *testing.T) {
 // RunFork rather than the runner's RunContent, so the activation has to be put
 // in front of the message here. It stays out of the stored transcript — it is
 // rebuilt from its selection, never replayed from the database.
+//
+// The selection belongs to the user's follow-up message, and
+// subagentResumeAttempt is the owner that hands it over — not the dispatching
+// turn's context, which a continuation built from the record must never read
+// (TestSubagentContinueDoesNotInheritTheDispatchTurnsSkill).
 func TestForkContinuationLoadsTheSkillItsMessageSelected(t *testing.T) {
 	skillPath := writeProbeSkill(t)
 	fix := newPersistenceFixture(t, "worker system", "continuing")
@@ -4426,7 +4552,7 @@ func TestForkContinuationLoadsTheSkillItsMessageSelected(t *testing.T) {
 	if _, _, err := fix.store.FreezeSessionPromptState(context.Background(), workerID, forkSystemPromptKey, "frozen fork system"); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.AppendHistory(fix.fac.subagentScopeRoot(), agent.HistoryEntry{
+	record := agent.HistoryEntry{
 		TaskID:          "task-forkskill",
 		AgentID:         "fork-skill-agent",
 		RunID:           "seed-run",
@@ -4443,13 +4569,14 @@ func TestForkContinuationLoadsTheSkillItsMessageSelected(t *testing.T) {
 		StartedAt:       10,
 		UpdatedAt:       20,
 		FinishedAt:      20,
-	}); err != nil {
+	}
+	if err := agent.AppendHistory(fix.fac.subagentScopeRoot(), record); err != nil {
 		t.Fatal(err)
 	}
 	ctx := toolpkg.WithToolUseID(toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "conv-forkskill"), "parent-1"), "call-1")
-	ctx = WithExplicitSkillSelection(ctx, "probe-skill", skillPath)
-	if _, err := continueSubagentExecution(ctx, fix.fac, &SubagentContinueInput{TaskID: "task-forkskill", Message: "go on"}); err != nil {
-		t.Fatalf("continueSubagentExecution: %v", err)
+	resume := subagentResumeAttempt(fix.fac, record, Input{Text: "go on"}, []SkillSelection{{Name: "probe-skill", Path: skillPath}})
+	if _, err := resume(ctx); err != nil {
+		t.Fatalf("subagentResumeAttempt: %v", err)
 	}
 	requests := fix.llm.gotRequests()
 	if len(requests) == 0 {

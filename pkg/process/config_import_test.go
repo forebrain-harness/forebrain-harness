@@ -8,9 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
+	openaiauth "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
@@ -38,11 +41,23 @@ func importOpenForTest(t *testing.T, home string) *Environment {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	// Open installs the process-wide section validator over this test's home;
-	// a later test in this binary writes sections against its own home, so
-	// the install must not outlive the environment that made it.
-	t.Cleanup(func() { state.SetSectionValidator(nil) })
+	resetProcessWideInstalls(t)
+	resetProcessWideInstalls(t)
 	return env
+}
+
+// resetProcessWideInstalls clears the process-wide installs Open makes — the
+// section validator and the database-backed credential stores — so a later
+// test in this binary works against its own home rather than the one this
+// test opened (whose temp dir is gone by then).
+func resetProcessWideInstalls(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		state.SetSectionValidator(nil)
+		openaiauth.SetCredentialsStore(nil)
+		opencode.SetCredentialsStore(nil)
+		mcp.SetOAuthOverlayStore(nil)
+	})
 }
 
 func configRowsForTest(t *testing.T, db *sql.DB) map[string]string {
@@ -417,6 +432,62 @@ func TestImportLegacyConfigSkipsWhenDBHoldsSections(t *testing.T) {
 	}
 	if got := env.RawConfig.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-seeded" {
 		t.Fatalf("composed provider model = %q, want the database's gpt-seeded", got)
+	}
+}
+
+// TestCredentialRowAndFileSettleOnTheNewerCopy pins the switch-point rule of
+// plan 188 W12: while both backends were live a token refresh still went to
+// the file, so a file modified after its row was written wins on the next
+// start — and a file the row has not outrun is left alone, so the rule cannot
+// resurrect a stale login.
+func TestCredentialRowAndFileSettleOnTheNewerCopy(t *testing.T) {
+	home := importHomeForTest(t)
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte(legacyImportYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(home, "auth.json")
+	first := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"first","refresh_token":"r1"}}`)
+	if err := os.WriteFile(authPath, first, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := importOpenForTest(t, home)
+	if got := configRowsForTest(t, env.SQL)["auth.chatgpt"]; got != string(first) {
+		t.Fatalf("auth.chatgpt row = %q, want the file's first login", got)
+	}
+	env.Close()
+
+	// A refresh written to the file after the row landed: the file is newer,
+	// so the next start adopts it.
+	second := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"second","refresh_token":"r2"}}`)
+	if err := os.WriteFile(authPath, second, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Minute)
+	if err := os.Chtimes(authPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	env2 := importOpenForTest(t, home)
+	if got := configRowsForTest(t, env2.SQL)["auth.chatgpt"]; got != string(second) {
+		t.Fatalf("auth.chatgpt row = %q, want the newer file's login", got)
+	}
+	env2.Close()
+
+	// The reverse: a stale file left behind after the row moved on must not
+	// overwrite it.
+	stale := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"stale","refresh_token":"r0"}}`)
+	if err := os.WriteFile(authPath, stale, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(authPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	env3 := importOpenForTest(t, home)
+	defer env3.Close()
+	if got := configRowsForTest(t, env3.SQL)["auth.chatgpt"]; got != string(second) {
+		t.Fatalf("auth.chatgpt row = %q, want the stored newer login to survive a stale file", got)
 	}
 }
 

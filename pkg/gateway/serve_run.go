@@ -62,7 +62,6 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	skillHub := skill.NewForWorkspace(root, runner.WorkspaceRoot, runner.LaunchProject.Project.Root)
 	staticDist := strings.TrimSpace(os.Getenv("FOREBRAIN_STATIC_DIST"))
 	notifier := event.NewNotifier()
-	process.StartConfigHotReload(ctx, h)
 	// gw is declared before the engine so the batch end-of-execution hook can
 	// be handed over at construction and still reach the server it serves: the
 	// engine outlives every request, so the callback reads the variable, and

@@ -321,9 +321,11 @@ type SignInCheck struct {
 // ProbeChatGPTModels answers whether the ChatGPT login at path can list its
 // models right now: it lists them through src, which refreshes a nearly
 // expired token the way a turn would. path must come from
-// openai.CredentialsPath (it honors the configured override).
+// openai.CredentialsPath (it honors the configured override); the login
+// itself is read through the installed credential store — the state database
+// from plan 188 on — with the file as the fallback.
 func ProbeChatGPTModels(ctx context.Context, path string, src ChatGPTModelsSource) SignInCheck {
-	if _, err := openai.Load(path); err != nil {
+	if _, err := openai.LoadProcessCredentials(ctx, path); err != nil {
 		return SignInCheck{State: SignInMissing}
 	}
 	records, err := DiscoverChatGPTModels(ctx, src)

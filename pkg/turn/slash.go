@@ -93,6 +93,7 @@ var commands = []Command{
 	{Name: "mcp", Description: "manage MCP servers: status, tools, authentication", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "lsp", Description: "language servers: status, enable, restart, diagnostics", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "sandbox", Description: "show sandbox runtime mode and backend", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "config", Description: "browse and edit the installed configuration, section by section", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[section]", Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "exit", Description: "exit Forebrain Harness", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "subagents", Description: "open one of this chat's subagent sessions", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "goal", Description: "run continuously toward an objective until done", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<objective>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
@@ -241,6 +242,8 @@ func defaultCategory(name string) string {
 		return "agent"
 	case "permissions":
 		return "permissions"
+	case "config":
+		return "ui"
 	case "skills", "mcp", "lsp", "sandbox":
 		return "tools"
 	case "status":
@@ -252,7 +255,7 @@ func defaultCategory(name string) string {
 
 func defaultActionKind(name string) string {
 	switch name {
-	case "permissions", "skills", "model", "resume", "memories", "connect", "migrate", "status", "mcp", "lsp":
+	case "permissions", "skills", "model", "resume", "memories", "connect", "migrate", "status", "mcp", "lsp", "config":
 		return "open-panel"
 	case "plan", "init", "goal":
 		return "inject-prompt"

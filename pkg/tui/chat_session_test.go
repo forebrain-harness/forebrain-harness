@@ -1514,7 +1514,7 @@ func TestApplyPermissionPresetRejectsUnknownID(t *testing.T) {
 // A preset is never written to forebrain.yaml, so a reload of that file must not
 // be able to hand the session's sandbox back to whatever the file still says —
 // nor may the preset leak into the config the file is reloaded as.
-func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
+func TestApplyPermissionPresetSurvivesConfigApply(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
@@ -1537,7 +1537,7 @@ func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 	}
 	_, err := s.ApplyPermissionPreset("s1", safety.PresetReadOnly)
 	require.NoError(t, err)
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
 	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 
@@ -1549,7 +1549,7 @@ func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 			"        - provider: openai\n          model: gpt-old\n"+
 			"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n",
 	), 0o600))
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 	require.Equal(t, appcfg.SandboxModeDangerFullAccess, s.cfg().SandboxMode)
 	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 	decision := s.runner().EvaluatePermissionForSession("s1", "shell", "rm -rf /tmp/build-output")
@@ -1559,7 +1559,7 @@ func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 	_, err = s.ApplyPermissionPreset("s1", safety.PresetDefault)
 	require.NoError(t, err)
 	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, sessionSandbox())
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, sessionSandbox())
 	_, current := s.PermissionPresets("s1")
 	require.Equal(t, safety.PresetDefault, current)
@@ -1608,7 +1608,7 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"), Sandbox: safety.NewManager(), Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 
 	_, err = s.ApplyPermissionPreset("s1", safety.PresetReadOnly)
 	require.NoError(t, err)
@@ -2518,7 +2518,7 @@ func TestHandleSandboxSlashDoesNotChangeMode(t *testing.T) {
 	body := "sandbox_mode: read-only\n"
 	require.NoError(t, os.WriteFile(cfgPath, []byte(body), 0o600))
 	s := sessionEnv{Home: home}.session()
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 
 	for _, mode := range []string{"workspace-write", "danger-full-access", "read-only"} {
 		reply, handled := s.HandleSandboxSlash("s1", "tui", []string{mode})
@@ -3082,80 +3082,6 @@ func captureNotify(s *ChatSession) *[]string {
 		}
 	})
 	return &got
-}
-
-// TestDeferredConfigReloadAppliesWhenTheRunFinishes covers the whole
-// defer-then-apply seam through the one coordinator that survives: the session
-// only reports whether a run is in flight, process.ConfigManager holds the
-// pending request, and tuiFinish releases it. The session-side copy of that
-// coordinator (configReloadPending + applyConfigHotReload) was deleted with
-// P2-8, which made the environment mandatory and the copy unreachable.
-func TestDeferredConfigReloadAppliesWhenTheRunFinishes(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("FOREBRAIN_HOME", home)
-	path := filepath.Join(home, "forebrain.yaml")
-	body := "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-old\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
-	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-	cfg, err := appcfg.Load(path)
-	require.NoError(t, err)
-
-	s := sessionEnv{Home: home, Config: cfg}.session()
-	captured := captureNotify(s)
-
-	s.tuiTrack("run-1", "sid", func() {})
-	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(body, "gpt-old", "gpt-new", 1)), 0o600))
-
-	require.ErrorContains(t, s.ReloadConfig(), "deferred")
-	require.Equal(t, "gpt-old", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model,
-		"a reload requested mid-run must not land until the run ends")
-
-	s.tuiFinish("run-1")
-
-	require.Equal(t, "gpt-new", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model,
-		"the deferred reload must land when the run finishes")
-	_ = captured
-}
-
-// /connect writes the config itself, so a run in flight must postpone the
-// reload rather than drop it: the only other thing that would pick the change
-// up is the file watcher, which is best-effort and may not be running.
-func TestReloadConfigDefersDuringActiveRunInsteadOfDropping(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("FOREBRAIN_HOME", home)
-	path := filepath.Join(home, "forebrain.yaml")
-	body := "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-old\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
-	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-	cfg, err := appcfg.Load(path)
-	require.NoError(t, err)
-
-	s := sessionEnv{Home: home, Config: cfg}.session()
-
-	s.tuiTrack("run-1", "sid", func() {})
-
-	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(body, "gpt-old", "gpt-new", 1)), 0o600))
-
-	require.ErrorContains(t, s.ReloadConfig(), "deferred")
-	require.Equal(t, "gpt-old", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model,
-		"reload must not mutate the runner mid-turn")
-
-	s.tuiFinish("run-1")
-	require.Equal(t, "gpt-new", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model,
-		"the deferred reload must apply once the run ends")
-}
-
-func TestReloadConfigAfterRunNoopWhenNotPending(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("FOREBRAIN_HOME", home)
-	path := filepath.Join(home, "forebrain.yaml")
-	body := "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-old\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
-	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-	cfg, err := appcfg.Load(path)
-	require.NoError(t, err)
-	s := sessionEnv{Home: home, Config: cfg}.session()
-
-	// No pending reload -> calling after-run must be a no-op (config unchanged).
-	s.reloadConfigAfterRun()
-	require.Equal(t, "gpt-old", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
 }
 
 func TestSlashExecutionSurfaceRejectsUnsupportedChannel(t *testing.T) {
@@ -6155,20 +6081,18 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 
 	// A real process.Environment, because several behaviours branch on s.Env
 	// and every one of them took the nil path before: the foreground lock in
-	// chat_surface.go, and both config-reload seams. Most importantly
-	// ReloadConfig has two entirely separate implementations — Env.RequestConfigReload
-	// in production, a local fallback when Env is nil — so a suite built
-	// without Env was characterising the branch production never runs.
+	// chat_surface.go and the configuration the session reads its live copy
+	// from. A suite built without Env was characterising a branch production
+	// never runs.
 	//
 	// SQL is deliberately left off: the harness owns the database's lifetime
 	// through t.Cleanup, and handing it to Environment.Close as well would let
 	// any path that closes the environment pull the store out from under a
 	// still-running test.
 	// One controller shared by the environment and the session, exactly as
-	// openProcessChatSession does. They must be the same instance: the config
-	// manager asks Env.Control whether a run is active, while ReloadConfig
-	// asks the session's controller, and two different controllers would
-	// disagree about whether a reload may land.
+	// openProcessChatSession does. They must be the same instance: a run is
+	// in flight for both of them or for neither, and two different controllers
+	// would disagree about whether the surface still owns a run.
 	control := run.NewController()
 	// The hook pipeline and run store live on the environment, which is the
 	// single owner the session reads through, exactly as openProcessChatSession
@@ -6218,15 +6142,13 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 			},
 		})),
 	)
-	// Mirrors openProcessChatSession: the environment owns the reload and
+	// Mirrors openProcessChatSession: the environment owns the application and
 	// re-points the pointers the session handed out afterwards.
 	env.OnConfigReload = func(next *appcfg.Root) {
 		if next == nil {
 			return
 		}
-		s.configApplyMu.Lock()
 		s.adoptConfig(next)
-		s.configApplyMu.Unlock()
 	}
 	return s
 }
@@ -8146,77 +8068,6 @@ func TestCharacterizationSteerSurvivesApprovalGate(t *testing.T) {
 	}
 }
 
-// TestCharacterizationConfigReloadDefersDuringActiveRun covers P0-9's last
-// requirement, "活动 run 期间配置变更": ChatSession.ReloadConfig, called while
-// a run is active, must not swap the live config out from under the run in
-// progress. Golden shape, confirmed empirically: ReloadConfig returns a
-// "deferred" error and leaves s.cfg() untouched while the run is running:
-// the reload is applied only once the run ends (reloadConfigAfterRun, wired
-// into tuiFinish), and a second ReloadConfig call once the session is idle
-// applies immediately with no error.
-func TestCharacterizationConfigReloadDefersDuringActiveRun(t *testing.T) {
-	reply := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
-	llmDouble := &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}}
-	s := newCharacterizationSession(t, llmDouble)
-	sessionID := "char-config-reload"
-
-	// A saved config rejects a plaintext api_key outright (confirmed by a
-	// first failing run against a literal test-key value), so the fixture
-	// has to reference an env var the same way a real config file would.
-	t.Setenv("FOREBRAIN_CHARACTERIZATION_TEST_KEY", "test-key")
-	s.cfg().Agents.Definitions["main"].LLMProviders[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
-	cfgPath := filepath.Join(s.home(), "forebrain.yaml")
-	if err := appcfg.Save(cfgPath, *s.cfg()); err != nil {
-		t.Fatalf("appcfg.Save (initial): %v", err)
-	}
-
-	var reloadErr error
-	var reloadedDuringRunModel string
-	llmDouble.onCall = func(idx int) {
-		if idx != 0 {
-			return
-		}
-		updated := *s.cfg()
-		updated.Agents.Definitions = map[string]appcfg.AgentDefinition{
-			"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai", Model: "gpt-main-v2", APIKey: "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}", BaseURL: "https://example.invalid",
-			}}},
-		}
-		if err := appcfg.Save(cfgPath, updated); err != nil {
-			t.Errorf("appcfg.Save (updated): %v", err)
-			return
-		}
-		reloadErr = s.ReloadConfig()
-		reloadedDuringRunModel = s.cfg().Agents.Definitions["main"].LLMProviders[0].Model
-	}
-
-	dispatchErr := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{
-		SessionID: sessionID,
-		UserText:  "do something while the config changes underneath",
-	})
-	if dispatchErr != nil {
-		t.Fatalf("DispatchSurfaceTurn = %v, want nil", dispatchErr)
-	}
-	if reloadErr == nil {
-		t.Fatal("ReloadConfig during an active run = nil, want a deferred error")
-	}
-	if reloadedDuringRunModel != "gpt-main" {
-		t.Fatalf("Config model read mid-run = %q, want the pre-reload value %q (reload must not apply while the run is active)", reloadedDuringRunModel, "gpt-main")
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for s.cfg().Agents.Definitions["main"].LLMProviders[0].Model != "gpt-main-v2" {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for the deferred reload to apply after the run ended; Config model = %q", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	if err := s.ReloadConfig(); err != nil {
-		t.Fatalf("ReloadConfig once idle = %v, want nil (no run active, applies immediately)", err)
-	}
-}
-
 // capturingLLM returns a fixed reply and records the exact messages it was
 // called with, so a test can inspect the model-facing form of a turn's
 // input — as opposed to what gets persisted, which the other doubles in
@@ -8740,9 +8591,10 @@ func TestCharacterizationStablePrefixAcrossTurns(t *testing.T) {
 }
 
 // TestCharacterizationPrefixSurvivesConfigReload covers the prefix half of
-// P3-6: a config reload must not disturb the cached prompt prefix of a
-// session already under way. This is an I0 claim, and the risk is concrete
-// rather than theoretical — reloadConfigFromDisk calls Runner.Load, which
+// P3-6: applying a changed configuration must not disturb the cached prompt
+// prefix of a session already under way. This is an I0 claim, and the risk is
+// concrete rather than theoretical — applying a configuration calls
+// Runner.Load, which
 // rebuilds the agent (new system prompt, freshly registered tool table)
 // underneath a live session. If any of that came back even one byte
 // different, every cached turn of the session would be re-billed on the next
@@ -8756,7 +8608,7 @@ func TestCharacterizationStablePrefixAcrossTurns(t *testing.T) {
 // so switching the model (the realistic reload here) legitimately leaves the
 // prefix identical for old and new sessions alike. Asserting a difference
 // would mean contriving one rather than testing the shipped behaviour.
-func TestCharacterizationPrefixSurvivesConfigReload(t *testing.T) {
+func TestCharacterizationPrefixSurvivesConfigApply(t *testing.T) {
 	llmDouble := &prefixCapturingLLM{replies: []string{"before reload", "after reload"}}
 	s := newCharacterizationSession(t, llmDouble)
 	sessionID := "char-prefix-across-reload"
@@ -8788,8 +8640,8 @@ func TestCharacterizationPrefixSurvivesConfigReload(t *testing.T) {
 		t.Fatalf("appcfg.Save (updated): %v", err)
 	}
 	// No run is active, so this applies immediately rather than deferring.
-	if err := s.ReloadConfig(); err != nil {
-		t.Fatalf("ReloadConfig: %v", err)
+	if err := seedConfigFromFile(s); err != nil {
+		t.Fatalf("seedConfigFromFile: %v", err)
 	}
 	if got := s.cfg().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
 		t.Fatalf("model after reload = %q, want gpt-main-v2 — the reload did not actually apply, so this test would prove nothing", got)
@@ -28786,6 +28638,22 @@ func (f *wizardSelector) Review(string, []turn.StatusFact, []string, int) (int, 
 	return 0, true, nil
 }
 
+// composedConfigForTest reads the configuration the runtime would run on: the
+// file's startup sections plus the database's runtime sections (plan 187). A
+// setup or /connect write goes to the database (plan 188 W9), so a test that
+// read the file would see an empty agents section after it.
+func composedConfigForTest(t *testing.T, home string) appcfg.Root {
+	t.Helper()
+	cfg, ok, err := process.ComposedStartupConfig(context.Background(), home)
+	if err != nil {
+		t.Fatalf("compose config: %v", err)
+	}
+	if !ok {
+		t.Fatalf("no composed configuration for %s", home)
+	}
+	return cfg
+}
+
 func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 	useSetupTestCatalog(t)
 	home := t.TempDir()
@@ -28824,10 +28692,7 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 	if err := w.run(context.Background()); err != nil {
 		t.Fatalf("run error: %v", err)
 	}
-	loaded, err := appcfg.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
+	loaded := composedConfigForTest(t, home)
 	v := appcfg.ValidateMainAgentLLMConfigured(&loaded)
 	if !v.Complete() {
 		t.Fatalf("expected LLM configured, missing=%v", v.MissingFields())
@@ -28946,10 +28811,7 @@ func TestOnboardEscGoesBackAPage(t *testing.T) {
 	if got := selector.selectDefaults[4]; got != "high" {
 		t.Fatalf("effort default on the way back = %q, want the effort chosen before", got)
 	}
-	loaded, err := appcfg.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
+	loaded := composedConfigForTest(t, home)
 	if params := fmt.Sprintf("%s", loaded.Agents.Definitions["main"].LLMProviders[0].Params); !strings.Contains(params, `"effort":"low"`) {
 		t.Fatalf("params = %s, want the effort chosen on the second pass", params)
 	}
@@ -29038,22 +28900,18 @@ func (s *backtrackSelector) Review(label string, facts []turn.StatusFact, action
 var _ Selector = (*wizardSelector)(nil)
 
 // TestCharacterizationSlashReloadKeepsEnvironmentConfigLive pins the invariant
-// that the Environment's config is the live one after a slash-triggered
-// reload, not just the session's own copy.
+// that the Environment's config is the live one after a configuration is
+// applied, not just the session's own copy.
 //
-// The TUI has two reload paths. Environment.reloadConfig pushes the new value
-// into the session through OnConfigReload, but the slash-command path
-// (reloadConfigFromDisk, reached from /model and friends) writes s.cfg() and
-// s.runner().AppCfg and nothing else. Env.Config is never assigned anywhere in
-// pkg/tui, so the sync only ever ran in one direction.
-//
-// This is load-bearing rather than tidy: Environment.stateRoot() resolves the
+// The session owns no copy: the environment is the single owner of the live
+// configuration, and an application publishes it there (Environment.Deps). This
+// is load-bearing rather than tidy: Environment.stateRoot() resolves the
 // active primary agent's workspace from Env.Config, and the run executor calls
 // AgentContextForProject with it after the TUI has already built a context
 // from its own copy. The executor's value therefore wins, so a stale Env.Config
 // would silently send the agent's plan-path and session-mode lookups at the
 // previous agent's workspace.
-func TestCharacterizationSlashReloadKeepsEnvironmentConfigLive(t *testing.T) {
+func TestCharacterizationConfigApplyKeepsEnvironmentConfigLive(t *testing.T) {
 	reply := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
 
@@ -29075,32 +28933,33 @@ func TestCharacterizationSlashReloadKeepsEnvironmentConfigLive(t *testing.T) {
 		t.Fatalf("appcfg.Save (updated): %v", err)
 	}
 
-	if err := s.reloadConfigFromDisk(); err != nil {
-		t.Fatalf("reloadConfigFromDisk = %v, want nil", err)
+	if err := seedConfigFromFile(s); err != nil {
+		t.Fatalf("seedConfigFromFile = %v, want nil", err)
 	}
 
 	if got := s.cfg().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
-		t.Fatalf("session config model = %q, want the reloaded value", got)
+		t.Fatalf("session config model = %q, want the applied value", got)
 	}
 	if s.Env == nil || s.Env.Deps.AppCfg == nil {
 		t.Fatal("characterization session must carry an Environment with a config")
 	}
 	if got := s.Env.Deps.AppCfg.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
-		t.Fatalf("Environment config model = %q, want %q: a slash-triggered reload must leave "+
+		t.Fatalf("Environment config model = %q, want %q: applying a configuration must leave "+
 			"the Environment holding the live config, because the run executor resolves the "+
 			"agent state root from it", got, "gpt-main-v2")
 	}
 }
 
-// TestCharacterizationHotReloadKeepsTheSessionPermissionPreset pins that a
-// preset chosen with /permissions survives a hot reload of forebrain.yaml.
+// TestCharacterizationConfigApplyKeepsTheSessionPermissionPreset pins that a
+// preset chosen with /permissions survives an application of the
+// configuration.
 //
 // The choice is never written to forebrain.yaml; it lives in the permission
-// store, scoped to the session, so the environment's hot reload — which
-// cannot see session state — has nothing to undo. Editing the config file for
-// any unrelated reason must not silently revert the user's sandbox choice,
-// and the choice must not leak into the reloaded config either.
-func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) {
+// store, scoped to the session, so the environment's application — which
+// cannot see session state — has nothing to undo. Changing the configuration
+// for any unrelated reason must not silently revert the user's sandbox
+// choice, and the choice must not leak into the applied config either.
+func TestCharacterizationConfigApplyKeepsTheSessionPermissionPreset(t *testing.T) {
 	reply := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
 
@@ -29124,13 +28983,13 @@ func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) 
 		t.Fatalf("session sandbox after preset = %q, want %q", got, appcfg.SandboxModeReadOnly)
 	}
 
-	// A hot reload of the same unchanged file must not undo that.
-	if err := s.Env.ReloadConfig(); err != nil {
-		t.Fatalf("ReloadConfig: %v", err)
+	// Applying the same unchanged configuration must not undo that.
+	if err := seedConfigFromFile(s); err != nil {
+		t.Fatalf("seedConfigFromFile: %v", err)
 	}
 	if got := sessionSandbox(); got != appcfg.SandboxModeReadOnly {
-		t.Fatalf("session sandbox after hot reload = %q, want the session preset %q to survive: "+
-			"reloading forebrain.yaml must not silently restore the sandbox the user moved away from",
+		t.Fatalf("session sandbox after the application = %q, want the session preset %q to survive: "+
+			"applying the configuration must not silently restore the sandbox the user moved away from",
 			got, appcfg.SandboxModeReadOnly)
 	}
 	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
@@ -29139,12 +28998,12 @@ func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) 
 	}
 }
 
-// TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset pins the other
+// TestCharacterizationConfigApplyLetsYOLOOutrankTheSessionPreset pins the other
 // half of the rule above: a session-scoped preset may not walk back YOLO.
 //
 // YOLO comes from the environment, not from anything the user picked in this
 // session, so the session's own sandbox choice gives way to it.
-func TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset(t *testing.T) {
+func TestCharacterizationConfigApplyLetsYOLOOutrankTheSessionPreset(t *testing.T) {
 	reply := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
 
@@ -29159,8 +29018,8 @@ func TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset(t *testing.T) 
 	}
 
 	t.Setenv(safety.EnvYOLO, "1")
-	if err := s.Env.ReloadConfig(); err != nil {
-		t.Fatalf("ReloadConfig: %v", err)
+	if err := seedConfigFromFile(s); err != nil {
+		t.Fatalf("seedConfigFromFile: %v", err)
 	}
 	snap := s.runner().PermissionSnapshotForSession("char-preset-yolo")
 	if got := safety.ConfigForSnapshot(s.cfg(), snap).SandboxMode; got != appcfg.SandboxModeDangerFullAccess {
@@ -29169,9 +29028,10 @@ func TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset(t *testing.T) 
 	}
 }
 
-// TestReloadConfigFromDiskRepointsEveryConfigHolder pins P2-8's invariant: the
-// environment is the single owner of the live config, and a reload swaps the
-// pointer it holds rather than overwriting a value in place.
+// TestConfigApplyRepointsEveryConfigHolder pins P2-8's invariant: the
+// environment is the single owner of the live config, and applying a
+// configuration swaps the pointer it holds rather than overwriting a value in
+// place.
 //
 // Two things follow, and both used to be easy to get wrong. The session must
 // read the new config without being told (it has no copy of its own any more),
@@ -29180,7 +29040,7 @@ func TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset(t *testing.T) 
 // updated, which only worked while that field was a value whose contents were
 // overwritten. Reading the config through the environment turns that silent
 // aliasing into an explicit hand-off.
-func TestReloadConfigFromDiskRepointsEveryConfigHolder(t *testing.T) {
+func TestConfigApplyRepointsEveryConfigHolder(t *testing.T) {
 	t.Setenv("FOREBRAIN_REPOINT_TEST_KEY", "test-key")
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
@@ -29199,16 +29059,16 @@ func TestReloadConfigFromDiskRepointsEveryConfigHolder(t *testing.T) {
 
 	before := s.cfg()
 	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(body, "gpt-old", "gpt-new", 1)), 0o600))
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 
-	require.NotSame(t, before, s.cfg(), "a reload must publish a new config, not mutate the old one in place")
+	require.NotSame(t, before, s.cfg(), "an application must publish a new config, not mutate the old one in place")
 	require.Equal(t, "gpt-new", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
 	require.Same(t, s.cfg(), s.Env.Deps.AppCfg,
 		"the session must read the environment's config, not a copy of it")
 	require.Same(t, s.cfg(), s.runner().AppCfg,
 		"the runner shares the environment's Deps, so it sees the same config")
 	require.Same(t, s.cfg(), s.userHooks.Cfg,
-		"the user hook runtime holds a pointer the session handed out; a reload must re-point it")
+		"the user hook runtime holds a pointer the session handed out; an application must re-point it")
 }
 
 // sessionEnv describes the process.Environment a ChatSession under test reads
@@ -29287,6 +29147,48 @@ func (e sessionEnv) session() *ChatSession {
 		env.Control = run.NewController()
 	}
 	return &ChatSession{Env: env, tuiControl: env.Control}
+}
+
+// seedConfigFromFile makes the fixture session run on its home's
+// forebrain.yaml: the file is read, YOLO and the launch project's trust are
+// applied, the sandbox startup check runs, the runner adopts the result, and
+// the environment takes it as the live configuration.
+//
+// Production has no such path any more (plan 189): a running process adopts a
+// changed configuration at the turn boundary, from the state database, and a
+// hand-edited file waits for a restart. A fixture has no turn to run and no
+// database to compose, so a test that wants a session running on the file it
+// just wrote seeds it here — once at construction, or again after rewriting
+// the file when the test is about what an application does to a session's own
+// state (a preset, a pinned model, a rollback).
+func seedConfigFromFile(s *ChatSession) error {
+	if s == nil || s.Env == nil {
+		return fmt.Errorf("chat session has no environment")
+	}
+	path := strings.TrimSpace(s.Env.ConfigPath)
+	if path == "" {
+		return fmt.Errorf("chat session has no config path")
+	}
+	loaded, err := appcfg.Load(path)
+	if err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
+	}
+	safety.ApplyYOLO(&loaded)
+	effective := safety.EffectiveConfig(loaded, s.LaunchProject)
+	if err := safety.NewManager().StartupCheck(&effective); err != nil {
+		return fmt.Errorf("sandbox startup check: %w", err)
+	}
+	if r := s.runner(); r != nil {
+		if err := r.LoadConfig(&effective); err != nil {
+			return fmt.Errorf("load runner: %w", err)
+		}
+	}
+	s.Env.AdoptConfig(&effective)
+	s.adoptConfig(&effective)
+	if st := s.sessStore(); st != nil {
+		st.SetMemoryMode(memory.SessionModeForConfig(s.cfg()))
+	}
+	return nil
 }
 
 // ptrTo publishes a config value into the environment, which owns it by
@@ -30466,7 +30368,7 @@ func newModelSelectionTestSession(t *testing.T) *ChatSession {
 	s.cfg().Agents.Definitions["main"] = main
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
 	// The pinned runtime follows the file the fixture just wrote.
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 	ctx := context.Background()
 	for _, sid := range []string{"sess-a", "sess-b"} {
 		require.NoError(t, s.sessStore().Ensure(ctx, sid, sid))
@@ -30591,7 +30493,7 @@ func TestNewConversationOpensOnTheMostRecentlyUsedModelAndFooterNamesIt(t *testi
 	}
 	s.cfg().Agents.Definitions["main"] = main
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
 
@@ -30609,7 +30511,7 @@ func TestNewConversationOpensOnTheMostRecentlyUsedModelAndFooterNamesIt(t *testi
 		providers.LLMProviders[0], providers.LLMProviders[at] = providers.LLMProviders[at], providers.LLMProviders[0]
 		s.cfg().Agents.Definitions["main"] = providers
 		require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
-		require.NoError(t, s.reloadConfigFromDisk())
+		require.NoError(t, seedConfigFromFile(s))
 	}
 	setConfiguredDefault("gpt-other")
 	requireRunnerModel(t, s, "openai", "gpt-other", "high")
@@ -30842,7 +30744,7 @@ func TestResumeMissingStoredModelOpensWithWarning(t *testing.T) {
 	main.LLMProviders = main.LLMProviders[:1]
 	s.cfg().Agents.Definitions["main"] = main
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
@@ -30983,10 +30885,10 @@ func (f *crossProcessFixture) loadRuntime(t *testing.T, sessionID string) *ChatS
 	return &ChatSession{Env: env, tuiControl: run.NewController()}
 }
 
-func (f *crossProcessFixture) reloadFileIn(t *testing.T, s *ChatSession, cfg *appcfg.Root) {
+func (f *crossProcessFixture) applyFileIn(t *testing.T, s *ChatSession, cfg *appcfg.Root) {
 	t.Helper()
 	writeCrossProcessConfig(t, f.cfgPath, cfg)
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 }
 
 func requireModel(t *testing.T, s *ChatSession, provider, model, effort string) {
@@ -31051,7 +30953,7 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 			{Provider: "openai", Model: "gpt-m1", APIKey: key, BaseURL: "http://m1.test/v1"},
 		}},
 	}}}
-	f.reloadFileIn(t, f.b, edited)
+	f.applyFileIn(t, f.b, edited)
 	requireModel(t, f.b, "openai", "gpt-m1", "high")
 
 	fresh := f.loadRuntime(t, "sess-fresh")
@@ -31077,7 +30979,7 @@ func TestCrossProcessProviderDetailsStillRefresh(t *testing.T) {
 			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"},
 		}},
 	}}}
-	f.reloadFileIn(t, f.b, rotated)
+	f.applyFileIn(t, f.b, rotated)
 	requireModel(t, f.b, "openai", "gpt-m1", "")
 	require.Equal(t, "http://rotated.test/v1", run.PrimaryEndpoint(f.b.runner()))
 
@@ -31089,7 +30991,7 @@ func TestCrossProcessProviderDetailsStillRefresh(t *testing.T) {
 			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"},
 		}},
 	}}}
-	f.reloadFileIn(t, f.b, withoutPair)
+	f.applyFileIn(t, f.b, withoutPair)
 	requireModel(t, f.b, "openai", "gpt-m1", "")
 }
 
@@ -31147,7 +31049,7 @@ func TestApplyConfigFromDiskKeepsServingWhenProvidersEmptied(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"),
 		Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 	live := s.cfg()
 	require.Equal(t, "gpt-a", live.Agents.Definitions["main"].LLMProviders[0].Model)
 
@@ -31157,7 +31059,7 @@ func TestApplyConfigFromDiskKeepsServingWhenProvidersEmptied(t *testing.T) {
 	// write). The error lands at the use point — a session that pinned the
 	// gone pair is refused at its next turn, where the user can re-choose.
 	require.NoError(t, os.WriteFile(cfgPath, []byte("agents:\n  definitions:\n    main: {}\n"), 0o600))
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 	require.NotSame(t, live, s.cfg(), "a successful reload adopts the new config pointer")
 	sel := run.PrimaryModelSelection(s.runner())
 	require.True(t, sel.Set)
@@ -31182,7 +31084,7 @@ func TestApplyConfigFromDiskRollbackFailureIsVisible(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"),
 		Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 	// Mutate the live config in place into an unloadable shape: the rollback
 	// the next reload would run rebuilds against this same object and fails
 	// too, so neither failure may be hidden.
@@ -31198,12 +31100,12 @@ func TestApplyConfigFromDiskRollbackFailureIsVisible(t *testing.T) {
 	}}
 	broken.ApprovalsReviewer = "auto_review"
 	require.NoError(t, appcfg.Save(cfgPath, broken))
-	err = s.reloadConfigFromDisk()
+	err = seedConfigFromFile(s)
 	require.Error(t, err)
 	require.True(t, run.IsPrimaryModelRuntimeUncertain(err), "a discarded rollback failure must surface as runtime-uncertain, got %v", err)
 }
 
-func TestSelectModelConcurrentWithConfigReload(t *testing.T) {
+func TestSelectModelConcurrentWithConfigApply(t *testing.T) {
 	t.Setenv("FOREBRAIN_TUI_CONCURRENT_TEST_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
@@ -31219,7 +31121,7 @@ func TestSelectModelConcurrentWithConfigReload(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"),
 		Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
-	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, seedConfigFromFile(s))
 
 	var wg sync.WaitGroup
 	const rounds = 6
@@ -31243,7 +31145,7 @@ func TestSelectModelConcurrentWithConfigReload(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			require.NoError(t, appcfg.Save(cfgPath, newReordered()))
-			_ = s.reloadConfigFromDisk()
+			_ = seedConfigFromFile(s)
 		}()
 	}
 	wg.Wait()

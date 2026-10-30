@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // enableClaudePluginsInHome writes a settings.json enabling the given plugin
@@ -57,11 +58,23 @@ func writePluginFile(t *testing.T, dir, relPath, body string) {
 // forebrain.yaml and a fixed clock, nothing else.
 func lspOptions(t *testing.T, configBody string) *Options {
 	t.Helper()
-	cfgPath := filepath.Join(t.TempDir(), "forebrain.yaml")
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
 	if err := os.WriteFile(cfgPath, []byte(configBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return &Options{ConfigPath: cfgPath, Now: fixedClock}
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// The configuration the importer reads and writes is the stored one; seed
+	// the document's runtime sections so the "already configured" checks see
+	// them (plan 188 W11).
+	if root, err := appcfg.ParseRootYAML([]byte(configBody)); err == nil {
+		seedMigrateSections(t, db, root)
+	}
+	return &Options{Home: home, ConfigPath: cfgPath, DB: db, Now: fixedClock}
 }
 
 const baseLSPConfig = `agents:
@@ -173,11 +186,11 @@ func TestImportOfficialPluginEnablesCatalogServer(t *testing.T) {
 	if !foundNotice {
 		t.Fatalf("notices = %v", notices)
 	}
-	cfg, err := appcfg.Load(opts.ConfigPath)
-	if err != nil {
+	var section appcfg.LSPSection
+	if err := json.Unmarshal([]byte(migrateSectionRow(t, opts.DB, "lsp")), &section); err != nil {
 		t.Fatal(err)
 	}
-	entry, ok := cfg.LSP.Servers["gopls"]
+	entry, ok := section.Servers["gopls"]
 	if !ok || entry.Enabled == nil || !*entry.Enabled {
 		t.Fatalf("gopls entry = %+v", entry)
 	}
@@ -226,11 +239,11 @@ func TestImportCustomPlugin(t *testing.T) {
 	if outcomes[0].Detail != wantDetail {
 		t.Fatalf("detail = %q, want %q", outcomes[0].Detail, wantDetail)
 	}
-	cfg, err := appcfg.Load(opts.ConfigPath)
-	if err != nil {
+	var section appcfg.LSPSection
+	if err := json.Unmarshal([]byte(migrateSectionRow(t, opts.DB, "lsp")), &section); err != nil {
 		t.Fatal(err)
 	}
-	entry := cfg.LSP.Servers["mylang-server"]
+	entry := section.Servers["mylang-server"]
 	if entry.Command != filepath.Join(dir, "bin/mylang-ls") {
 		t.Fatalf("command = %q", entry.Command)
 	}
@@ -296,10 +309,19 @@ func TestImportSkips(t *testing.T) {
 	}
 	byName := map[string]LSPOutcome{}
 	for _, outcome := range outcomes {
+		byName[outcome.Name] = outcome
+		if outcome.Name == "secret-srv" {
+			// Plaintext env values are legal in the stored section (owner
+			// ruling 2026-10-30, plan 188 W11): the file-side secret skip no
+			// longer applies to what the importer writes.
+			if outcome.Status != "written" {
+				t.Fatalf("secret-srv = %+v, want written with its plaintext env", outcome)
+			}
+			continue
+		}
 		if outcome.Status != "skipped" {
 			t.Fatalf("%s = %+v, want skipped", outcome.Name, outcome)
 		}
-		byName[outcome.Name] = outcome
 	}
 	details := map[string]string{
 		"mylang":       "an entry with this id is already configured; not overwritten",
@@ -307,14 +329,13 @@ func TestImportSkips(t *testing.T) {
 		"projdir-srv":  "uses ${CLAUDE_PROJECT_DIR}, which forebrain does not provide",
 		"userconf-srv": "uses plugin user settings, which forebrain does not provide",
 		"empty-srv":    "the declaration has no command or extensionToLanguage",
-		"secret-srv":   "its env holds a plaintext secret; add it by hand with ${ENV_NAME} from ~/.forebrain/.env",
 	}
 	for name, detail := range details {
 		if byName[name].Detail != detail {
 			t.Fatalf("%s detail = %q, want %q", name, byName[name].Detail, detail)
 		}
 	}
-	if len(outcomes) != len(details) {
+	if len(outcomes) != len(details)+1 {
 		t.Fatalf("outcomes = %+v", outcomes)
 	}
 	after, err := os.ReadFile(opts.ConfigPath)
@@ -381,6 +402,8 @@ func TestImportLSPDryRunWritesNothing(t *testing.T) {
 
 // TestImportLSPBacksUpConfig checks the real run copies forebrain.yaml aside
 // before rewriting it, the same contract the MCP append patch holds.
+// The import stores the lsp section; the configuration file is neither
+// rewritten nor backed up, because nothing writes it (plan 188 W11).
 func TestImportLSPBacksUpConfig(t *testing.T) {
 	dir := t.TempDir()
 	data := &claudeData{LSPPlugins: []claudeLSPPlugin{{
@@ -391,22 +414,11 @@ func TestImportLSPBacksUpConfig(t *testing.T) {
 	if _, _, err := importLSP(data, opts, nil); err != nil {
 		t.Fatal(err)
 	}
-	entries, _ := os.ReadDir(filepath.Dir(opts.ConfigPath))
-	backups := 0
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "forebrain.yaml.bak-") {
-			backups++
-			body, err := os.ReadFile(filepath.Join(filepath.Dir(opts.ConfigPath), entry.Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(body) != baseLSPConfig {
-				t.Fatalf("backup does not hold the original config:\n%s", body)
-			}
-		}
+	if raw, err := os.ReadFile(opts.ConfigPath); err != nil || string(raw) != baseLSPConfig {
+		t.Fatalf("the import must leave the configuration file as it was:\n%s (%v)", raw, err)
 	}
-	if backups != 1 {
-		t.Fatalf("backups = %d", backups)
+	if !strings.Contains(migrateSectionRow(t, opts.DB, "lsp"), `"gopls"`) {
+		t.Fatal("the enabled server must land in the stored lsp section")
 	}
 }
 

@@ -1342,6 +1342,13 @@ func TestBatchChannelMessageStartsATask(t *testing.T) {
 		if err != nil || len(rows) != 1 {
 			return false
 		}
+		// The task row and its execution are two writes: the row appears
+		// first and the execution's status settles right after it. Waiting
+		// for the row alone let the assertions below read an execution that
+		// had not been written yet, which is the one thing the wait is for.
+		if rows[0].Latest.Status == "" {
+			return false
+		}
 		row = rows[0]
 		return true
 	}, 5*time.Second, 10*time.Millisecond)

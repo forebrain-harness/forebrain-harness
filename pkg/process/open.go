@@ -116,19 +116,14 @@ type Environment struct {
 	// is a no-op, different means the full re-application runs. Open seeds it
 	// from the first composed root.
 	configFingerprint []byte
-	managerMu         sync.RWMutex
-	reload            *ConfigManager
 	poolOnce          sync.Once
 	pool              *RunnerPool
 	// LSP is the process-wide language-server pool; lspManager is the
 	// primary runner's view of it. Project runners get their own managers
 	// from the same pool (see RunnerPool).
-	LSP            *lsp.Pool
-	lspManager     *lsp.Manager
-	watchMu        sync.Mutex
-	watchStop      func()
-	watchID        uint64
-	cronOnce       sync.Once
+	LSP        *lsp.Pool
+	lspManager *lsp.Manager
+	cronOnce   sync.Once
 	cron           *CronService
 	rulesHook      *assembly.PreHook
 	ctxHook        *assembly.Hook
@@ -152,7 +147,6 @@ func (env *Environment) Close() {
 	if env == nil {
 		return
 	}
-	env.stopConfigHotReload()
 	if env.approvalSweepStop != nil {
 		env.approvalSweepStop()
 	}
@@ -390,7 +384,6 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		source = memory.SessionSourceWebchat
 	}
 	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, RawConfig: loaded, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel, ChannelMigrationNotes: channelMigrationBannerNotes(channelMigrationNotes), configFingerprint: configFingerprint, runtimeConfigFromDB: opts.Config == nil}
-	env.reload = NewConfigManager(env.Control, env.reloadConfig)
 	// The environment's own runner is the primary agent's: it serves no
 	// conversation — every conversation runs on its project's runner (see
 	// RunnerPool) — so it never resolves or hosts an MCP list. Servers

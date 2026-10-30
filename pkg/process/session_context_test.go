@@ -16,7 +16,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
-	"github.com/joho/godotenv"
 )
 
 // compositionConfig is the smallest config Open accepts: one agent with one
@@ -40,6 +39,7 @@ func openForContract(t *testing.T, home, launchDir string, opts OpenOptions) *En
 	if err != nil {
 		t.Fatalf("Open(%+v): %v", opts, err)
 	}
+	resetProcessWideInstalls(t)
 	t.Cleanup(env.Close)
 	return env
 }
@@ -277,68 +277,6 @@ func TestChannelSecretEnvNameIsScopedToTheAgent(t *testing.T) {
 	}
 }
 
-func TestAPIKeyConfigReferenceStoresPlaintextInDotEnv(t *testing.T) {
-	home := t.TempDir()
-
-	got, err := apiKeyConfigReference(home, "openai", "sk-live-secret")
-	if err != nil {
-		t.Fatalf("apiKeyConfigReference error: %v", err)
-	}
-	if got != "${OPENAI_API_KEY}" {
-		t.Fatalf("reference = %q, want ${OPENAI_API_KEY}", got)
-	}
-
-	envPath := filepath.Join(home, ".env")
-	envBytes, err := os.ReadFile(envPath)
-	if err != nil {
-		t.Fatalf("read .env: %v", err)
-	}
-	if got := string(envBytes); !strings.Contains(got, "OPENAI_API_KEY=") || !strings.Contains(got, "sk-live-secret") {
-		t.Fatalf(".env missing API key, got %q", got)
-	}
-	info, err := os.Stat(envPath)
-	if err != nil {
-		t.Fatalf("stat .env: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf(".env mode = %v, want 0600", got)
-	}
-}
-
-func TestAPIKeyConfigReferencePreservesEnvReference(t *testing.T) {
-	home := t.TempDir()
-
-	got, err := apiKeyConfigReference(home, "openai", "${CUSTOM_OPENAI_KEY}")
-	if err != nil {
-		t.Fatalf("apiKeyConfigReference error: %v", err)
-	}
-	if got != "${CUSTOM_OPENAI_KEY}" {
-		t.Fatalf("reference = %q", got)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".env")); !os.IsNotExist(err) {
-		t.Fatalf(".env stat error = %v, want not exists", err)
-	}
-}
-
-func TestAPIKeyConfigReferenceStoresInvalidEnvReferenceAsValue(t *testing.T) {
-	home := t.TempDir()
-
-	got, err := apiKeyConfigReference(home, "openai", "${BAD-NAME}")
-	if err != nil {
-		t.Fatalf("apiKeyConfigReference error: %v", err)
-	}
-	if got != "${OPENAI_API_KEY}" {
-		t.Fatalf("reference = %q, want ${OPENAI_API_KEY}", got)
-	}
-	envMap, err := godotenv.Read(filepath.Join(home, ".env"))
-	if err != nil {
-		t.Fatalf("parse .env: %v", err)
-	}
-	if got := envMap["OPENAI_API_KEY"]; got != "${BAD-NAME}" {
-		t.Fatalf("OPENAI_API_KEY = %q", got)
-	}
-}
-
 func TestExecuteStoresAPIKeyReferenceInConfig(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
@@ -360,22 +298,19 @@ func TestExecuteStoresAPIKeyReferenceInConfig(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read config: %v", err)
+	// The key is stored in plaintext in the agents section (owner ruling
+	// 2026-10-30, plan 188 W9/W14): neither the home's .env nor any other
+	// file receives it.
+	cfg := executeStoredConfig(t, rt)
+	entries := cfg.Agents.Definitions["main"].LLMProviders
+	if len(entries) == 0 || entries[0].APIKey != "sk-live-secret" {
+		t.Fatalf("stored agents section = %+v, want the plaintext key", entries)
 	}
-	if got := string(raw); strings.Contains(got, "sk-live-secret") {
-		t.Fatalf("config contains plaintext API key: %q", got)
+	if _, err := os.Stat(filepath.Join(home, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env stat error = %v, want not exists", err)
 	}
-	if got := string(raw); !strings.Contains(got, "${OPENAI_API_KEY}") {
-		t.Fatalf("config missing env reference: %q", got)
-	}
-	envMap, err := godotenv.Read(filepath.Join(home, ".env"))
-	if err != nil {
-		t.Fatalf("parse .env: %v", err)
-	}
-	if got := envMap["OPENAI_API_KEY"]; got != "sk-live-secret" {
-		t.Fatalf("OPENAI_API_KEY = %q", got)
+	if raw, err := os.ReadFile(cfgPath); err != nil || strings.Contains(string(raw), "sk-live-secret") {
+		t.Fatalf("the configuration file must not carry the key: %q (%v)", raw, err)
 	}
 }
 
@@ -643,13 +578,15 @@ func TestNilAndLightweightWorkerhostPaths(t *testing.T) {
 }
 
 func TestEnvironmentConfigHelpers(t *testing.T) {
-	StartConfigHotReload(context.Background(), nil)
-	StartConfigHotReload(context.Background(), &Environment{})
-	if err := (*Environment)(nil).ReloadConfig(); err == nil {
-		t.Fatal("expected nil reload error")
+	// An environment with no composed source — nil, or hand-built without a
+	// configuration path and a database — has nothing to sync, so the
+	// turn-boundary hook is a no-op rather than an error: Submit calls it
+	// unconditionally, before any queueing.
+	if err := (*Environment)(nil).SyncConfigFromDB(context.Background()); err != nil {
+		t.Fatalf("nil environment sync = %v, want nil", err)
 	}
-	if err := (&Environment{}).ReloadConfig(); err == nil || !strings.Contains(err.Error(), "empty config path") {
-		t.Fatalf("reload err=%v", err)
+	if err := (&Environment{}).SyncConfigFromDB(context.Background()); err != nil {
+		t.Fatalf("empty environment sync = %v, want nil", err)
 	}
 	(&Environment{}).RefreshSandboxRuntime()
 	(*Environment)(nil).RefreshSandboxRuntime()

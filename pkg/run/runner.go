@@ -250,8 +250,9 @@ type runnerLocks struct {
 	// load guards main, mainCfg, forkLLM, tools, userTracer, mcpReg and
 	// memPipeline. The guardian used to be in this list; it now lives on
 	// safety.Runtime, which does its own locking, and actionHook reads it
-	// unguarded by design — that relies on a config reload never overlapping
-	// an active run (see ConfigManager.applyIfIdle), which this lock does not
+	// unguarded by design — that relies on a configuration being applied only
+	// at a turn boundary, never inside an active run (see
+	// process.Environment.SyncConfigFromDB), which this lock does not
 	// affect either way. permRuntime's lazy creation deliberately does
 	// NOT use this lock — see permRuntimeOnce's comment on the Runner struct
 	// for why nesting it inside loadLocked (which already holds load) would
@@ -959,7 +960,8 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// Merge ~/.forebrain/.env into os.Environ before resolving any ${ENV_VAR}
 	// LLM api_key/base_url placeholders below. Callers that reach loadLocked
 	// via config.LoadPersisted (e.g. the /model slash command's
-	// ApplyModelSelection, config hot-reload) intentionally do NOT merge .env,
+	// ApplyModelSelection, a configuration application) intentionally do NOT
+	// merge .env,
 	// so without this the placeholder resolves to empty and the LLM call fails
 	// with an auth error. Idempotent: re-reads the on-disk .env each call.
 	if _, envErr := appcfg.MergeDotEnvToProcess(); envErr != nil {

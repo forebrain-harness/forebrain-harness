@@ -1708,10 +1708,10 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 		}
 		// The environment has already published next to Deps, so the session
 		// reads it through s.cfg() without being told. What it does own are the
-		// pointers it handed out itself.
-		s.configApplyMu.Lock()
+		// pointers it handed out itself. This runs whenever a configuration
+		// snapshot is applied at a turn boundary, which is the only way a
+		// changed configuration reaches a running process (plan 189).
 		s.adoptConfig(next)
-		s.configApplyMu.Unlock()
 	}
 	// Every subagent execution reports its start and end here, so the engine
 	// arms that subagent's own auto-continue the same way it arms the
@@ -1736,7 +1736,6 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 	s.pipe().Add("00-project-context", s.projectContextPreHook)
 	runner.Events = event.SinkFunc(s.publishRunEvent)
 	s.userHooks = newUserHooks(s, env)
-	process.StartConfigHotReload(ctx, env)
 	return s, nil
 }
 
@@ -1815,12 +1814,13 @@ type Session interface {
 	ModelSummaryString() string
 	SkillListString() string
 	AvailableSkillToggleOptions() []skill.Entry
-	// ReloadConfig re-reads the config file into the running session, so a
-	// provider written by /connect governs the next turn without a restart.
-	// It belongs in the interface rather than behind a runtime type assertion:
-	// a surface that cannot do this reduces /connect to a command that saves a
-	// file and changes nothing, which is worth catching at compile time.
-	ReloadConfig() error
+	// SyncConfig adopts the configuration a surface has just written, through
+	// the same path a turn boundary uses, so a provider written by /connect
+	// governs this session without a restart. It belongs in the interface
+	// rather than behind a runtime type assertion: a surface that cannot do
+	// this reduces /connect to a command that saves a setting and changes
+	// nothing, which is worth catching at compile time.
+	SyncConfig(ctx context.Context) error
 	CurrentModelOption() string
 	CurrentModelReasoningEffort() string
 	ApplySkillSelection(label string) (string, error)

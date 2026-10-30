@@ -1309,9 +1309,8 @@ func chatSessionActiveAgentName(s *ChatSession) string {
 
 // refreshSandboxRuntime re-derives the sandbox manager and the in-process file
 // tools' policy from the live config. The environment owns both, so this is a
-// one-line delegate; it must not be called while configApplyMu is held, since
-// the environment takes reloadMu and reloadConfig takes those in the other
-// order.
+// one-line delegate; it takes the environment's reloadMu, which is the same
+// lock a configuration application holds.
 func (s *ChatSession) refreshSandboxRuntime() {
 	if s == nil {
 		return

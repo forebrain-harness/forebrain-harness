@@ -670,10 +670,10 @@ type fakeSession struct {
 	subagentOpts             []string
 	currentReasoningEffort   string
 	appliedModel             string
-	reloadedConfig           int
+	syncedConfig             int
 	sandboxReply             string
 	sandboxArgs              [][]string
-	reloadConfigErr          error
+	syncConfigErr            error
 	appliedReasoning         string
 	appliedSkill             string
 	appliedEnabledPaths      []string
@@ -1044,11 +1044,11 @@ func (f *fakeSession) HandleSandboxSlash(sessionID, channel string, args []strin
 	return f.sandboxReply, true
 }
 
-func (f *fakeSession) ReloadConfig() error {
+func (f *fakeSession) SyncConfig(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.reloadedConfig++
-	return f.reloadConfigErr
+	f.syncedConfig++
+	return f.syncConfigErr
 }
 
 func (f *fakeSession) CurrentModelOption() string {
@@ -3975,6 +3975,39 @@ func TestRosterCursorStaysOnItsAgentWhenAnotherRowLeaves(t *testing.T) {
 	}
 }
 
+// With the view on a finished subagent the roster is not painted, so Down must
+// not take the keyboard onto it: a focus on an invisible roster eats the first
+// Esc and moves a cursor nobody can see (owner report, 2026-10-30).
+func TestFinishedSubagentViewDoesNotFocusTheRoster(t *testing.T) {
+	session := &fakeSession{subagentRunning: map[string]bool{"task-b": false}}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	renderer.viewportMode = true
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, agentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "main", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "task-a", Kind: "subagent", Label: "general-purpose", Status: "running", Title: "network probe"},
+	}}}
+
+	if state.handleOverlayNav(hotkeyOverlayDown, renderer) {
+		t.Fatal("Down must not take the keyboard onto a roster a finished view does not paint")
+	}
+	if state.agentRosterFocused {
+		t.Fatal("the roster must not take focus in a finished subagent's view")
+	}
+
+	// The subagent runs again: the view takes input, so the roster is back and
+	// Down focuses it as before.
+	session.mu.Lock()
+	session.subagentRunning["task-b"] = true
+	session.mu.Unlock()
+	if !state.handleOverlayNav(hotkeyOverlayDown, renderer) {
+		t.Fatal("Down must focus the roster once the subagent runs again")
+	}
+	if !state.agentRosterFocused {
+		t.Fatal("Down must move keyboard focus onto the roster once the subagent runs again")
+	}
+}
+
 // Enter on the roster opens the row the cursor is on and leaves the roster
 // focused with the cursor on the agent that just opened — the view and the
 // cursor move together through the single view-assignment entry.
@@ -6388,6 +6421,52 @@ func TestIdleSubagentViewHasNoInputBox(t *testing.T) {
 	}
 	if joined := stripANSI(strings.Join(block.lines, "\n")); !strings.Contains(joined, "─") || !strings.Contains(joined, composerPromptMarker) {
 		t.Fatalf("running composer = %q, want its input box back", joined)
+	}
+}
+
+// A subagent's view whose execution has ended draws no agent roster: the view's
+// composer takes no input, so the roster's own keys (Enter, x) never reach it.
+// Painting it there advertises rows that cannot answer, and Down would move the
+// keyboard onto a roster that is not on screen (owner report, 2026-10-30).
+func TestFinishedSubagentViewDoesNotPaintTheAgentRoster(t *testing.T) {
+	session := &fakeSession{subagentRunning: map[string]bool{"task-b": false}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	// The roster holds the keyboard the way it does when the user opens a card
+	// from it: that is when a painted roster also advertises its keys.
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b",
+		agentRosterFocused: true,
+		agentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
+			{ID: "task-a", Kind: "subagent", Label: "general-purpose", Status: "running", Title: "network probe"},
+		}}}
+	t.Cleanup(func() { composerReadOnly.Store(false) })
+
+	renderComposerWithState(renderer, state)
+	if !composerReadOnly.Load() {
+		t.Fatal("the fixture must be a read-only view")
+	}
+	block := renderer.buildComposerBlock(renderer.composerState, 100)
+	lines := stripANSI(strings.Join(block.lines, "\n"))
+	if strings.Contains(lines, "network probe") || strings.Contains(lines, agentRosterSubagentHint) {
+		t.Fatalf("a finished subagent's view still paints the roster: %q", lines)
+	}
+
+	// The subagent starts working: the view takes input, so the roster is
+	// operable there and comes back — with its keys, when it has the keyboard.
+	session.mu.Lock()
+	session.subagentRunning["task-b"] = true
+	session.mu.Unlock()
+	state.agentRosterFocused = true
+	renderComposerWithState(renderer, state)
+	if composerReadOnly.Load() {
+		t.Fatal("a running subagent's view must take edits")
+	}
+	block = renderer.buildComposerBlock(renderer.composerState, 100)
+	lines = stripANSI(strings.Join(block.lines, "\n"))
+	if !strings.Contains(lines, "network probe") || !strings.Contains(lines, agentRosterSubagentHint) {
+		t.Fatalf("a running subagent's view must paint the operable roster: %q", lines)
 	}
 }
 

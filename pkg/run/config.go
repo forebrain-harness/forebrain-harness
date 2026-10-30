@@ -1891,13 +1891,6 @@ func PrimaryModelSelection(r *Runner) PrimaryModelState {
 	return state
 }
 
-// PrimaryReasoningEffort is the concrete reasoning effort the effective
-// primary model runs at — "" is an explicitly pinned no-effort value on a
-// loaded runner, never "re-read the file".
-func PrimaryReasoningEffort(r *Runner) string {
-	return PrimaryModelSelection(r).Effort
-}
-
 // NewSessionModel is the model a new session starts on: this primary agent's
 // most recently used model (the newest session row among its conversations
 // and workshops, provider/model/effort together), resolved against the
@@ -2373,8 +2366,13 @@ func AgentModel(r *Runner, conversationSessionID string, subagent *agent.History
 	if r != nil && r.Deps != nil {
 		store = r.Deps.SessionStore
 	}
-	p, m := PrimaryModelForSession(r, store, conversationSessionID)
-	return p, m, PrimaryReasoningEffort(r)
+	// One source for all three facts: the effort has to belong to the model
+	// this call names. The runner's published snapshot is not that source —
+	// a terminal that entered an existing session never activated its model,
+	// and the gateway never does, so the snapshot answers for whichever entry
+	// the runtime was built with.
+	sel := PrimaryModelStateForSession(r, store, conversationSessionID)
+	return sel.Provider, sel.Model, sel.Effort
 }
 
 // ContextOccupancy is how much of the context window a session fills right

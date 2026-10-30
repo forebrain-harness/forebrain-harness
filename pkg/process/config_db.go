@@ -420,8 +420,8 @@ func configSnapshotFingerprint(root appcfg.Root) ([]byte, error) {
 // broken, not that the configuration is undesirable.
 //
 // Callers must not hold a lock the OnConfigReload callback acquires: this
-// method invokes that callback while holding reloadMu, the same order
-// reloadConfig always has.
+// method invokes that callback while holding reloadMu, the order
+// applyComposedConfigLocked always runs under.
 func (env *Environment) SyncConfigFromDB(ctx context.Context) error {
 	if env == nil {
 		return nil
@@ -445,7 +445,7 @@ func (env *Environment) SyncConfigFromDB(ctx context.Context) error {
 	if bytes.Equal(env.configFingerprint, next) {
 		return nil
 	}
-	if err := env.applyRawConfigLocked(composed); err != nil {
+	if err := env.applyComposedConfigLocked(composed); err != nil {
 		return fmt.Errorf("sync config: %w", err)
 	}
 	env.configFingerprint = next

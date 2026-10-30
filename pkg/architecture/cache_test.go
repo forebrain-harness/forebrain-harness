@@ -294,7 +294,7 @@ func TestFanOutOnlyShrinks(t *testing.T) {
 // are domain siblings (process ⊃ session ⊃ turn ⊃ run), but none of the three
 // may import another's package. Each depends on the others only through a
 // narrow interface it defines itself (RunExecutor, SessionContext,
-// ActiveRunProbe, SessionRepository, SkillCommandHooks, ...), wired together by
+// SessionRepository, SkillCommandHooks, ...), wired together by
 // process, the sole composition root. A direct import here means a concrete
 // dependency slipped back in behind the interface boundary.
 func TestLayer3PackagesDoNotImportEachOther(t *testing.T) {
@@ -1671,5 +1671,311 @@ func TestEveryReleaseBuildInstallsTheDictionaries(t *testing.T) {
 		if strings.Contains(text, "go build") && !strings.Contains(text, "install-dictionary.sh") {
 			t.Fatalf("%s builds forebrain without installing its dictionaries (scripts/install-dictionary.sh); the shipped memory search could not segment text", file)
 		}
+	}
+}
+
+// The configuration write contract (plans 187/188): the state database is the
+// one place a running process stores configuration and credentials. The
+// guards below are the friction that makes a regression loud — a new surface
+// that writes forebrain.yaml, or a package that writes a credential file
+// behind the storage port's back, turns one of them red.
+
+// bannedCallScan reports the calls to any of banned in src, by enclosing
+// function name and callee. It exists as a plain function so its red case can
+// be proven on a synthetic source instead of by leaving a violation in the
+// tree.
+func bannedCallScan(t *testing.T, filename string, src []byte, banned map[string]bool) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filename, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", filename, err)
+	}
+	var hits []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := calleeName(call)
+			// A banned entry may name the call in full (appcfg.Save) or by
+			// its bare identifier (ProviderAPIKeyConfigReference), which then
+			// matches every qualifier the call site happens to use.
+			last := name
+			if i := strings.LastIndex(name, "."); i >= 0 {
+				last = name[i+1:]
+			}
+			if banned[name] || banned[last] {
+				hits = append(hits, fn.Name.Name+" calls "+name)
+			}
+			return true
+		})
+	}
+	return hits
+}
+
+// calleeName renders a call's target as pkg.Func or Func.
+func calleeName(call *ast.CallExpr) string {
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return fn.Name
+	case *ast.SelectorExpr:
+		if pkg, ok := fn.X.(*ast.Ident); ok {
+			return pkg.Name + "." + fn.Sel.Name
+		}
+		return fn.Sel.Name
+	}
+	return ""
+}
+
+// TestRuntimeCodeDoesNotWriteTheConfigFile pins the first guard: no runtime
+// surface writes forebrain.yaml any more. The legacy import's one rewrite and
+// the migration tool are the documented exceptions; everything else goes
+// through ConfigStore.UpdateSection, which is what makes a change effective
+// on the next turn rather than immediately.
+func TestRuntimeCodeDoesNotWriteTheConfigFile(t *testing.T) {
+	root := findRepoRoot(t)
+	banned := map[string]bool{"appcfg.Save": true, "config.Save": true}
+	var violations []string
+	for _, dir := range []string{"pkg/gateway", "pkg/tui", "pkg/process"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			src, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			rel, _ := filepath.Rel(root, path)
+			for _, hit := range bannedCallScan(t, rel, src, banned) {
+				violations = append(violations, rel+": "+hit)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("runtime code writes the configuration file (use ConfigStore.UpdateSection):\n%s",
+			strings.Join(violations, "\n"))
+	}
+}
+
+// TestNothingBuildsDotEnvKeyReferences pins the second guard: the .env write
+// path is gone, so a plaintext provider key lands in the agents section
+// instead of being turned into a ${ENV} reference. Reading .env is still
+// allowed — a user's own file is merged at compose time.
+func TestNothingBuildsDotEnvKeyReferences(t *testing.T) {
+	root := findRepoRoot(t)
+	banned := map[string]bool{
+		"ProviderAPIKeyConfigReference": true,
+		"writeEnvReference":             true,
+		"apiKeyConfigReference":         true,
+	}
+	var violations []string
+	for _, dir := range []string{"pkg", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			src, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			rel, _ := filepath.Rel(root, path)
+			for _, hit := range bannedCallScan(t, rel, src, banned) {
+				violations = append(violations, rel+": "+hit)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("code builds a .env key reference (store the plaintext key instead):\n%s",
+			strings.Join(violations, "\n"))
+	}
+}
+
+// TestCredentialPackagesWriteFilesOnlyInTheStoreDefault pins the third guard:
+// the three Layer 0 credential packages may write their file only as the
+// store's default implementation. Any other function touching the file means
+// a code path bypassed the installed store — the one thing plan 188's switch
+// must not allow, since the database is the only source after it.
+func TestCredentialPackagesWriteFilesOnlyInTheStoreDefault(t *testing.T) {
+	root := findRepoRoot(t)
+	cases := []struct {
+		dir      string
+		banned   map[string]bool
+		allow    map[string]bool
+		describe string
+	}{
+		{
+			dir:    "pkg/llm/openai",
+			banned: map[string]bool{"os.CreateTemp": true, "os.WriteFile": true},
+			// Save is the explicit-path file writer; SaveStoredCredentials is
+			// the store default. Nothing else writes a login file.
+			allow: map[string]bool{"Save": true, "SaveStoredCredentials": true},
+		},
+		{
+			dir:    "pkg/llm/opencode",
+			banned: map[string]bool{"os.CreateTemp": true, "os.WriteFile": true},
+			allow:  map[string]bool{"Save": true, "SaveStoredCredentials": true},
+		},
+	}
+	var violations []string
+	for _, c := range cases {
+		err := filepath.WalkDir(filepath.Join(root, c.dir), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			src, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			rel, _ := filepath.Rel(root, path)
+			for _, hit := range bannedCallScan(t, rel, src, c.banned) {
+				if c.allow[strings.SplitN(hit, " calls ", 2)[0]] {
+					continue
+				}
+				violations = append(violations, rel+": "+hit+" (outside the store default)")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", c.dir, err)
+		}
+	}
+
+	// pkg/mcp writes many project files; the credential overlay tree is the
+	// one this guard owns, so only a writer that also names oauthOverlayPath
+	// is in scope.
+	mcpRoot := filepath.Join(root, "pkg", "mcp")
+	err := filepath.WalkDir(mcpRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		rel, _ := filepath.Rel(root, path)
+		for _, hit := range overlayWriters(src) {
+			if hit == "SaveStoredOAuth" {
+				continue
+			}
+			violations = append(violations, rel+": "+hit+" writes the credential overlay tree")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk pkg/mcp: %v", err)
+	}
+
+	if len(violations) > 0 {
+		t.Fatalf("credential files written outside the storage port:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+// overlayWriters names the functions in src that both reach the overlay path
+// helper and write a file.
+func overlayWriters(src []byte) []string {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "src.go", src, 0)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		reachesPath, writesFile := false, false
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch calleeName(call) {
+			case "oauthOverlayPath":
+				reachesPath = true
+			case "os.WriteFile":
+				writesFile = true
+			}
+			return true
+		})
+		if reachesPath && writesFile {
+			out = append(out, fn.Name.Name)
+		}
+	}
+	return out
+}
+
+// TestConfigWriteGuardsCatchViolations proves the guards above are not
+// vacuous: the same scanners, run over source that does violate the rules,
+// report the violation.
+func TestConfigWriteGuardsCatchViolations(t *testing.T) {
+	configWrite := []byte(`package gateway
+
+func saveIt(root string) error {
+	return appcfg.Save(root, nil)
+}
+`)
+	hits := bannedCallScan(t, "synthetic.go", configWrite, map[string]bool{"appcfg.Save": true, "config.Save": true})
+	if len(hits) != 1 || hits[0] != "saveIt calls appcfg.Save" {
+		t.Fatalf("config-file guard did not catch the violation: %v", hits)
+	}
+
+	envRef := []byte(`package gateway
+
+func keyFor(home, provider, key string) string {
+	ref, _ := process.ProviderAPIKeyConfigReference(home, provider, key)
+	return ref
+}
+`)
+	hits = bannedCallScan(t, "synthetic.go", envRef, map[string]bool{"ProviderAPIKeyConfigReference": true})
+	if len(hits) != 1 || hits[0] != "keyFor calls process.ProviderAPIKeyConfigReference" {
+		t.Fatalf(".env reference guard did not catch the violation: %v", hits)
+	}
+
+	credentialWrite := []byte(`package openai
+
+func sneak(path string, raw []byte) error {
+	return os.WriteFile(path, raw, 0o600)
+}
+`)
+	hits = bannedCallScan(t, "synthetic.go", credentialWrite, map[string]bool{"os.WriteFile": true, "os.CreateTemp": true})
+	if len(hits) != 1 || hits[0] != "sneak calls os.WriteFile" {
+		t.Fatalf("credential-file guard did not catch the violation: %v", hits)
+	}
+
+	overlay := []byte(`package mcp
+
+func sneakOverlay(home string) error {
+	return os.WriteFile(oauthOverlayPath(home, "", "srv"), nil, 0o600)
+}
+`)
+	if got := overlayWriters(overlay); len(got) != 1 || got[0] != "sneakOverlay" {
+		t.Fatalf("overlay guard did not catch the violation: %v", got)
 	}
 }

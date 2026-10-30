@@ -198,7 +198,9 @@ func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 		Sessions: sess,
 		Env:      env,
 	}
-	require.NoError(t, s.Env.ReloadConfig())
+	// The fixture states its configuration directly: the file is not a runtime
+	// source any more (plan 189), and this server never ran an Open.
+	s.Env.AdoptConfig(&cfg)
 
 	res := parseSlashCommandWithOptions(s, "s1", "webchat", "/model", turn.Context{}, nil)
 	require.True(t, res.Handled)
@@ -341,7 +343,13 @@ func TestHandleSandboxSlashDoesNotChangeMode(t *testing.T) {
 			ConfigPath: cfgPath,
 		},
 	}
-	require.NoError(t, s.Env.ReloadConfig())
+	// The file states the sandbox the fixture runs under; the server adopts it
+	// as its live configuration (the file is a restart-time source, not a
+	// watched one — plan 189).
+	loaded, err := appcfg.Load(cfgPath)
+	require.NoError(t, err)
+	effective := safety.EffectiveConfig(loaded, safety.ProjectContext{})
+	s.Env.AdoptConfig(&effective)
 
 	for _, mode := range []string{"workspace-write", "danger-full-access", "read-only"} {
 		reply, handled := s.HandleSandboxSlash("s1", "webchat", []string{mode})
@@ -608,78 +616,6 @@ func TestGatewayProjectRunnerSelectionIsolated(t *testing.T) {
 	// The gateway seam routes through the pool's resolution; here it settles
 	// on the base runner, which the project selections never touched.
 	requireGatewayNoSelection(t, s, "any-session")
-}
-
-// TestGatewayCatalogAgreesAfterPropagatedReload pins the boundary this test
-// used to document: a pooled runner's config no longer lags behind the live
-// config. Environment.ReloadConfig propagates the reloaded config to every
-// live pool entry, so the picker catalog (liveCfg) and the runner's snapshot
-// marker describe the same provider set.
-func TestGatewayCatalogAgreesAfterPropagatedReload(t *testing.T) {
-	s := gatewayModelServer(t)
-	// A project runner built through the environment's own pool, the way a
-	// web session bound to a project gets one.
-	db, err := state.OpenStateForTest(context.Background(), filepath.Join(s.Home, "state.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	s.Env.SQL = db
-	s.Env.Deps.AgentName = "main"
-	s.Env.Deps.SessionStore = state.NewSessionStore(db, "main")
-	s.Sessions = s.Env.Deps.SessionStore
-	s.Env.EnsureRunnerPool()
-	t.Cleanup(s.Env.CloseRunnerPool)
-
-	projects := state.NewProjectStore(db, "main")
-	proj, err := projects.Create(context.Background(), state.CreateProjectInput{
-		Name: "propagate", Root: "/tmp/gw-propagate", ProjectKey: "-tmp-gw-propagate",
-	})
-	require.NoError(t, err)
-	sid := "sess-propagate"
-	require.NoError(t, s.Sessions.Ensure(context.Background(), sid, sid))
-	require.NoError(t, projects.BindSession(context.Background(), sid, proj.ID))
-	pooled := s.Env.RunnerForSession(context.Background(), sid)
-	require.NotNil(t, pooled)
-	require.NotSame(t, s.Runner, pooled)
-	require.NoError(t, pooled.SetPrimaryModel("openai", "gpt-b", nil))
-
-	// The file changes underneath: reordered, with a rotated credential.
-	t.Setenv("FOREBRAIN_GATEWAY_PROPAGATED_KEY", "rotated-key")
-	body := "agents:\n" +
-		"  definitions:\n" +
-		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-b\n" +
-		"          api_key: ${FOREBRAIN_GATEWAY_PROPAGATED_KEY}\n" +
-		"          base_url: http://propagated.test/v1\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-a\n" +
-		"          api_key: ${FOREBRAIN_GATEWAY_PROPAGATED_KEY}\n" +
-		"          base_url: http://a.test/v1\n"
-	require.NoError(t, os.WriteFile(s.Env.ConfigPath, []byte(body), 0o600))
-
-	require.NoError(t, s.Env.ReloadConfig())
-
-	// The pooled runner re-derived its own effective config from the reloaded
-	// file (its sandbox follows its own trust decision, not the base runner's)
-	// and kept its pin; the catalog and the marker now describe the same world.
-	require.NotSame(t, s.Env.Deps.AppCfg, pooled.AppCfg)
-	sel := run.PrimaryModelSelection(pooled)
-	require.True(t, sel.Set)
-	require.Equal(t, "gpt-b", sel.Model)
-	require.Equal(t, "http://propagated.test/v1", run.PrimaryEndpoint(pooled))
-	// The session never chose on the web, so its marker carries no selection
-	// (the runner-level pin above is the pool entry's own, not the row's);
-	// the catalog still has to describe the reloaded world.
-	settings, err := s.ModelSettings(sid)
-	require.NoError(t, err)
-	require.False(t, settings.Selection.Set)
-	for _, choice := range turn.ModelChoices(settings.Config, settings.AgentName) {
-		if strings.EqualFold(choice.Model, "gpt-b") || strings.EqualFold(choice.Model, "gpt-a") {
-			continue
-		}
-		t.Fatalf("catalog lists a model the reloaded config does not define: %+v", choice)
-	}
 }
 
 // TestGatewaySelectModelWritesOnlyTheSessionRow pins the gateway half of the

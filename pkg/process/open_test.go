@@ -152,7 +152,7 @@ func TestFileReferenceResolverAnswersTerminalAttachmentPaths(t *testing.T) {
 // root here instead of the launch directory, so the two disagreed: every
 // memory a session produced was consolidated into a scope
 // (projects/-Users-...-forebrain-workspace) that no session ever searched, and the
-// real project's MEMORY.md stopped growing. The reload path repeated the same
+// real project's MEMORY.md stopped growing. The apply path repeated the same
 // derivation, so a config change re-broke a session that Open had got right.
 func TestOpenFilesSessionsUnderTheLaunchProjectScope(t *testing.T) {
 	ctx := context.Background()
@@ -176,6 +176,7 @@ func TestOpenFilesSessionsUnderTheLaunchProjectScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	defer env.Close()
 
 	sessionCwd := func(id string) string {
@@ -205,10 +206,12 @@ func TestOpenFilesSessionsUnderTheLaunchProjectScope(t *testing.T) {
 
 	assertScope("after Open", sessionCwd("s-open"))
 
-	if err := env.ReloadConfig(); err != nil {
-		t.Fatalf("ReloadConfig: %v", err)
+	// A configuration application re-derives everything the environment froze
+	// from it; the project a session's memory is filed under is not one of them.
+	if err := env.applyComposedConfigLocked(env.RawConfig); err != nil {
+		t.Fatalf("apply config: %v", err)
 	}
-	assertScope("after a config reload", sessionCwd("s-reload"))
+	assertScope("after a config application", sessionCwd("s-apply"))
 }
 
 // TestOpenWiresCodeIntelligence pins the composition-root contract of task 03:
@@ -234,6 +237,7 @@ func TestOpenWiresCodeIntelligence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	if env.LSP == nil {
 		t.Fatal("Open built no language-server pool")
 	}
@@ -380,6 +384,7 @@ func TestOpenRegistersTheRunOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	owner := env.Deps.RunRT.Owner
 	if owner == "" {
 		t.Fatal("the production RunStore must carry the process owner")
@@ -454,6 +459,7 @@ func TestGatewayEnvironmentHasNoLaunchProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	defer env.Close()
 
 	if env.LaunchProject.Project.Root != "" {
@@ -495,6 +501,7 @@ func TestOpenBaseRunnerHostsNoMCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	resetProcessWideInstalls(t)
 	t.Cleanup(func() { env.Close() })
 	if len(env.Runner.MCPServers) != 0 {
 		t.Fatalf("base runner MCPServers = %+v, want none even with a configured global entry", env.Runner.MCPServers)

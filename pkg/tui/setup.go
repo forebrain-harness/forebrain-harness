@@ -1486,8 +1486,8 @@ func (c *commandController) handleConnect(ctx context.Context, sessionID string)
 		c.renderer.PrintError(fmt.Errorf("connect: active session unavailable; config was saved but is not active"))
 		return true
 	}
-	if err := c.session.ReloadConfig(); err != nil {
-		c.renderer.PrintError(fmt.Errorf("connect: config saved but active session reload failed: %w", err))
+	if err := c.session.SyncConfig(ctx); err != nil {
+		c.renderer.PrintError(fmt.Errorf("connect: config saved but the active session could not adopt it: %w", err))
 		return true
 	}
 	// The connected model is now this session's own choice, not the file

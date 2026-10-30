@@ -450,12 +450,12 @@ func TestComposedStartupConfigTransitionCases(t *testing.T) {
 	}
 }
 
-// TestReloadConfigComposesFromDatabase pins the watcher's side of plan 187
-// §3.2: a file reload on a composing environment re-composes — the file's
-// startup sections plus the database's runtime sections — so a runtime
-// section the database holds survives a reload even though the file no
-// longer carries it.
-func TestReloadConfigComposesFromDatabase(t *testing.T) {
+// TestSyncConfigFromDBComposesFromDatabase pins plan 187 §3.2 from the
+// applying side: a turn-boundary sync on a composing environment re-composes —
+// the file's startup sections plus the database's runtime sections — so a
+// runtime section the database holds survives the sync even though the file
+// no longer carries it.
+func TestSyncConfigFromDBComposesFromDatabase(t *testing.T) {
 	env := syncEnvForTest(t)
 	defer env.Close()
 
@@ -469,14 +469,14 @@ func TestReloadConfigComposesFromDatabase(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.ReloadConfig(); err != nil {
-		t.Fatalf("ReloadConfig: %v", err)
+	if err := env.SyncConfigFromDB(ctx); err != nil {
+		t.Fatalf("sync: %v", err)
 	}
 	if env.RawConfig.ApprovalPolicy.Mode != "never" {
-		t.Fatalf("reloaded approval_policy = %q, want the database's never", env.RawConfig.ApprovalPolicy.Mode)
+		t.Fatalf("applied approval_policy = %q, want the database's never", env.RawConfig.ApprovalPolicy.Mode)
 	}
-	// The runtime sections the import moved are still there after the reload:
-	// the file the watcher watched holds none of them.
+	// The runtime sections the import moved are still there after the sync:
+	// the file holds none of them.
 	if got := env.RawConfig.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-import" {
 		t.Fatalf("reloaded provider model = %q, want the imported gpt-import", got)
 	}

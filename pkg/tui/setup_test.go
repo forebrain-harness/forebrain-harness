@@ -1071,10 +1071,7 @@ func TestConfigureOpenCodeGoOffersPerModelEffortLevels(t *testing.T) {
 	if _, err := process.Execute(rt, opts); err != nil {
 		t.Fatalf("save the OpenCode Go setup: %v", err)
 	}
-	saved, err := appcfg.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("load the saved config: %v", err)
-	}
+	saved := composedConfigForTest(t, home)
 	validation := appcfg.ValidateAgentLLMConfigured(&saved, "main")
 	if validation.Provider != "opencode-go" || validation.Model != "glm-5.3" {
 		t.Fatalf("saved provider/model = %q/%q", validation.Provider, validation.Model)
