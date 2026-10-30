@@ -63,3 +63,7 @@ manifest-report.md
 # never hide repository content from a commit.
 !pkg/migrate/testdata/**
 pkg/migrate/testdata/**/.DS_Store
+
+# Plan documents are owner-local, never committed:
+docs/plan/
+plans/
