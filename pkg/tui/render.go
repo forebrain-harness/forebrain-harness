@@ -410,6 +410,30 @@ type Renderer struct {
 	// background highlight to clickable rows under the cursor. -1 means no
 	// hover (e.g. cursor left the window or first move not yet received).
 	vpHoverRow int
+	// vpControlHover names the local control the pointer is over — the
+	// composer's ☑N/M plan-progress token or the plan drawer's close control —
+	// or hoverTargetNone. It is kept separately from vpHoverRow because those
+	// controls highlight their own cells rather than a whole transcript row.
+	// ?1003h reports every pointer move, so the hover handler repaints only
+	// when this target actually changes (see viewportHoverAt).
+	vpControlHover int
+	// planDrawer is the todo drawer's state: whether it is open, which view it
+	// was opened for, and how far its list is scrolled.
+	planDrawer planDrawerState
+	// vpDrawerLayout and vpDrawerOpen are the drawer as the LAST paint laid it
+	// out; a mouse event resolves against the screen it was read on, so the
+	// hit zones come from here, never from a fresh computation at the new
+	// terminal size.
+	vpDrawerLayout planDrawerLayout
+	vpDrawerOpen   bool
+	// vpRowWidth is the history region's width in the last paint — the full
+	// terminal width with the drawer closed, the left column with it open.
+	// Selection and hover padding, the jump control's layout and the seam
+	// between the two columns are all measured against it.
+	vpRowWidth int
+	// vpProgressSpan is the screen cell the last paint drew the composer's
+	// ☑N/M plan-progress token on, or a span on no row.
+	vpProgressSpan screenSpan
 	// vpNewMessages counts transcript messages that arrived in the visible view
 	// while the user was scrolled away from the bottom, i.e. the ones they have
 	// not seen. The floating control announces them ("1 new message (ctrl+End)
@@ -4184,6 +4208,16 @@ func dimComposerPreviewLine(text string, italic bool, termWidth int) string {
 }
 
 func (r *Renderer) renderComposerStatusLine(text string, termWidth int) string {
+	line, _, _, _ := r.composerStatusLine(text, termWidth)
+	return line
+}
+
+// composerStatusLine renders the live status row and, when the row shows the
+// plan-progress token ☑N/M whole, the token's display-column span in it. The
+// span is measured on the FINAL row — after the whitespace fold and the
+// truncation to the terminal width — so the entry the user can click is exactly
+// the token they can see: a token the width cut in half has no span.
+func (r *Renderer) composerStatusLine(text string, termWidth int) (line string, startCol, endCol int, hasToken bool) {
 	// One column short of the full width, like every other row of this block:
 	// the line must never reach the terminal's autowrap threshold and spill
 	// onto the spacer row below it, where nothing would ever erase it. The
@@ -4192,7 +4226,8 @@ func (r *Renderer) renderComposerStatusLine(text string, termWidth int) string {
 	// through would spill exactly the same way.
 	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
 	text = runewidth.Truncate(text, termWidth-1, "…")
-	return sharedBlockReset + "\x1b[2m" + text + "\x1b[K" + sharedBlockReset
+	startCol, endCol, hasToken = planProgressToken(text)
+	return sharedBlockReset + "\x1b[2m" + text + "\x1b[K" + sharedBlockReset, startCol, endCol, hasToken
 }
 
 // sharedCardPad returns the spaces that carry a shared-card row up to the full

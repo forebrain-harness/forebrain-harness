@@ -24299,14 +24299,18 @@ func TestSanitizeTerminalDraftAdjustsCursor(t *testing.T) {
 	}
 }
 
-func TestMouseTrackingAvoidsAllMotion(t *testing.T) {
-	if contains := strings.Contains(enableMouseSeq, "?1003h"); contains {
-		t.Fatalf("enableMouseSeq must not enable all-motion tracking: %q", enableMouseSeq)
+func TestMouseTrackingEnablesAllMotionForHover(t *testing.T) {
+	// Hover highlighting needs no-button motion, so all-motion tracking is on.
+	if !strings.Contains(enableMouseSeq, "?1003h") {
+		t.Fatalf("enableMouseSeq must enable all-motion tracking for hover: %q", enableMouseSeq)
 	}
-	for _, seq := range []string{"?1002h", "?1006h"} {
-		if !strings.Contains(enableMouseSeq, seq) {
-			t.Fatalf("enableMouseSeq = %q, missing %q", enableMouseSeq, seq)
-		}
+	// 1003 supersedes 1002's event set; leaving 1002 on as well only produces
+	// duplicate reports on terminals that keep both modes.
+	if strings.Contains(enableMouseSeq, "?1002h") {
+		t.Fatalf("enableMouseSeq must not also enable ?1002h: %q", enableMouseSeq)
+	}
+	if !strings.Contains(enableMouseSeq, "?1006h") {
+		t.Fatalf("enableMouseSeq = %q, missing %q", enableMouseSeq, "?1006h")
 	}
 	for _, seq := range []string{"?1002l", "?1003l", "?1006l"} {
 		if !strings.Contains(disableMouseSeq, seq) {
@@ -24324,9 +24328,13 @@ func TestFocusReportingSequencesUseTerminalFocusProtocol(t *testing.T) {
 	}
 }
 
-func TestMouseEventFromSGRDropsNoButtonMotion(t *testing.T) {
-	if got, ok := mouseEventFromSGR(sgrMouseEvent{button: 35, press: true}); ok {
-		t.Fatalf("Cb=35 produced %#v; no-button motion must be dropped", got)
+func TestMouseEventFromSGRDecodesNoButtonMotionAsHover(t *testing.T) {
+	got, ok := mouseEventFromSGR(sgrMouseEvent{button: 35, press: true, col: 7, row: 3})
+	if !ok || got.kind != inputEventMouseMove {
+		t.Fatalf("Cb=35 = (%#v, %v), want a hover move at (7,3)", got, ok)
+	}
+	if got.mouseCol != 7 || got.mouseRow != 3 {
+		t.Fatalf("hover move at (%d,%d), want (7,3)", got.mouseCol, got.mouseRow)
 	}
 	if got, ok := mouseEventFromSGR(sgrMouseEvent{button: 32, press: true, col: 4, row: 2}); !ok || got.kind != inputEventMouseDrag {
 		t.Fatalf("left drag = (%#v, %v), want mouse drag", got, ok)

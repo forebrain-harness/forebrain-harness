@@ -1449,6 +1449,12 @@ func handleBlockingSlashInput(session Session, renderer *Renderer, state *stream
 		state.composer.HandleDraftUpdate(ev.line, session)
 		renderComposerWithState(renderer, state)
 	case inputEventHotkey:
+		// The drawer is the lowest-priority surface on screen, so a key the
+		// menus above did not want closes it rather than cancelling the
+		// blocking operation: closing the drawer is not an interrupt.
+		if ev.hotkey == hotkeyEscapeInterrupt && closePlanDrawerOnEsc(renderer) {
+			return false
+		}
 		switch ev.hotkey {
 		case hotkeyInterrupt, hotkeyEscapeInterrupt:
 			return true
@@ -4642,6 +4648,12 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				state.agentRosterFocused = false
 				return
 			}
+			// The open todo drawer is the next layer down: Esc closes it and
+			// stops there, because closing a read-only panel must not cancel
+			// the run the user is watching.
+			if closePlanDrawerOnEsc(renderer) {
+				return
+			}
 			// In a subagent's view, Esc takes back what this subagent has not
 			// answered, else interrupts it to send the queued steers, else
 			// leaves its view (D1); it never cancels the run.
@@ -5041,6 +5053,20 @@ func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *R
 	return true, false, ComposerSubmission{}, outcome.ExitRequested
 }
 
+// closePlanDrawerOnEsc closes the todo drawer if it is open and reports whether
+// the key is spent. The drawer is the lowest-priority surface on screen: the
+// slash/@ menus, the roster, the bottom panels and the approval/question modals
+// are all offered Esc before the paths that call this, and only when none of them
+// wants the key does it reach the drawer. Closing it is a paint and nothing else
+// — no turn cancellation, no draft change, no view switch, no session reset — so
+// every path that would otherwise cancel the run has to call this first.
+func closePlanDrawerOnEsc(renderer *Renderer) bool {
+	if renderer == nil {
+		return false
+	}
+	return renderer.ClosePlanDrawer()
+}
+
 func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, state *streamState, clipboard ClipboardImageReader, selector Selector, hotkey inputHotkey) bool {
 	switch hotkey {
 	case hotkeyJumpToBottom:
@@ -5052,6 +5078,12 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		renderer.ForceRepaint()
 		return true
 	case hotkeyEscapeInterrupt:
+		// An open todo drawer takes Esc before anything else here: it is a
+		// read-only panel, so closing it consumes the key without touching the
+		// draft, the session or the view.
+		if closePlanDrawerOnEsc(renderer) {
+			return true
+		}
 		// In a subagent's view, Esc takes back / interrupts-to-send / returns to
 		// the conversation (D1).
 		if renderer != nil {

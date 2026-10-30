@@ -540,6 +540,93 @@ func TestReaderKeepsAPendingEscapeAcrossASeed(t *testing.T) {
 	}
 }
 
+// Hover reports are the same wire format as click reports with Cb=35 (motion,
+// no button). ?1003h delivers them, so the decoder must turn one into a move
+// event carrying the 0-based pointer cell — and nothing else: no draft, no
+// paste, no caret request.
+func TestReadRawInputEventsEmitsHoverMoveForNoButtonMotion(t *testing.T) {
+	w, events := newSeedTornInputReader(t)
+
+	// ESC[<35;13;5M — pointer motion at column 13, row 5 (1-based).
+	if _, err := w.Write([]byte("\x1b[<35;13;5M")); err != nil {
+		t.Fatalf("write hover report: %v", err)
+	}
+
+	seen := collectRawInputEvents(t, events, 300*time.Millisecond)
+	if len(seen) != 1 {
+		t.Fatalf("hover report produced %d events (%#v), want exactly one move", len(seen), seen)
+	}
+	move := seen[0]
+	if move.kind != inputEventMouseMove {
+		t.Fatalf("hover report decoded as %v, want a move", move.kind)
+	}
+	if move.mouseCol != 12 || move.mouseRow != 4 {
+		t.Fatalf("hover move at (%d,%d), want (12,4)", move.mouseCol, move.mouseRow)
+	}
+	if drafts := draftTextsFromEvents(seen); len(drafts) != 0 {
+		t.Fatalf("hover report reached the composer: drafts=%q", drafts)
+	}
+}
+
+// The torn-report guard must cover hover reports too: a seed that interrupts a
+// no-button motion report used to leave its tail (";18M") to be typed into the
+// composer, which is what makes ?1003h risky without this scrub.
+func TestReaderKeepsAPendingHoverReportAcrossASeed(t *testing.T) {
+	w, events := newSeedTornInputReader(t)
+
+	// ESC[<35;12 — a hover report at column 12, row 18, stopped mid-field.
+	if _, err := w.Write([]byte("\x1b[<35;12")); err != nil {
+		t.Fatalf("write hover report head: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	seedInteractiveInput("", 0)
+	time.Sleep(30 * time.Millisecond)
+
+	if _, err := w.Write([]byte(";18M")); err != nil {
+		t.Fatalf("write hover report tail: %v", err)
+	}
+
+	seen := collectRawInputEvents(t, events, 300*time.Millisecond)
+	drafts := draftTextsFromEvents(seen)
+	var move *inputEvent
+	for i := range seen {
+		if seen[i].kind == inputEventMouseMove {
+			move = &seen[i]
+			break
+		}
+	}
+	if move == nil {
+		t.Fatalf("seed tore the in-flight hover report: no move decoded; drafts=%q", drafts)
+	}
+	if move.mouseCol != 11 || move.mouseRow != 17 {
+		t.Fatalf("hover move at (%d,%d), want (11,17)", move.mouseCol, move.mouseRow)
+	}
+	for _, draft := range drafts {
+		if strings.Contains(draft, "18M") {
+			t.Fatalf("hover report tail leaked into the composer: drafts=%q", drafts)
+		}
+	}
+}
+
+// Enabling and disabling hover tracking is a protocol pair: 1002 must be turned
+// off before 1003 goes on (a terminal that still has the narrower mode from an
+// earlier session would otherwise keep sending both event sets), and exit must
+// turn 1003 back off or the user's shell inherits all-motion reporting.
+func TestMouseSequencesEnableHoverAndTurnItOffOnExit(t *testing.T) {
+	off1002 := strings.Index(enableMouseSeq, "?1002l")
+	on1003 := strings.Index(enableMouseSeq, "?1003h")
+	on1006 := strings.Index(enableMouseSeq, "?1006h")
+	if off1002 < 0 || on1003 < 0 || on1006 < 0 || !(off1002 < on1003 && on1003 < on1006) {
+		t.Fatalf("enableMouseSeq must disable ?1002, then enable ?1003, then SGR ?1006: %q", enableMouseSeq)
+	}
+	for _, seq := range []string{"?1006l", "?1003l", "?1002l"} {
+		if !strings.Contains(disableMouseSeq, seq) {
+			t.Fatalf("disableMouseSeq = %q, missing %q", disableMouseSeq, seq)
+		}
+	}
+}
+
 // A bare Esc followed, inside the 60ms window that decides whether it stands
 // alone, by a report whose first byte is itself ESC used to join the two into
 // one buffer that no decoder claims: the interrupt was lost and so was the

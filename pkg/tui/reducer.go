@@ -3423,6 +3423,31 @@ type composerBlock struct {
 	// in the composer buffer. Zero for overlay blocks, which own their own
 	// fields and hit-test them themselves.
 	text composerTextArea
+	// progressRow is the block-local (full, un-scrolled) index of the row that
+	// carries the plan-progress token ☑N/M, or -1 when this block shows none —
+	// a read-only composer, an overlay, or a status line whose token the
+	// terminal width cut off. progressStart/progressEnd are the token's display
+	// columns within that row, so the hit zone is the token actually drawn.
+	hasProgress   bool
+	progressRow   int
+	progressStart int
+	progressEnd   int
+}
+
+// progressScreenSpan maps the progress token to the screen cell it was painted
+// on, given the body height the composer block starts below. A vertically
+// scrolled composer moves the token with its row, and a token scrolled out of
+// the visible slice has no screen span at all (row -1): there is nothing on
+// screen to hover or click.
+func (b composerBlock) progressScreenSpan(bodyHeight int) screenSpan {
+	if !b.hasProgress {
+		return screenSpan{row: -1}
+	}
+	visible := b.progressRow - b.scrollOffset
+	if visible < 0 || visible >= len(b.lines) {
+		return screenSpan{row: -1}
+	}
+	return screenSpan{row: bodyHeight + visible, startCol: b.progressStart, endCol: b.progressEnd}
 }
 
 // composerTextArea records where a composerBlock renders the composer buffer.
@@ -3617,11 +3642,18 @@ func (r *Renderer) buildReadOnlyComposerBlock(cs ComposerRenderState, statusText
 		rosterLines = formatAgentRosterLines(cs.AgentRoster, cs.RosterFocused, marked, termWidth)
 	}
 	lines := make([]string, 0, len(rosterLines)+4)
+	hasProgress, progressRow, progressStart, progressEnd := false, -1, 0, 0
 	if statusText != "" {
 		// Keep the live status visually separate from the transcript's last
 		// retained row, the way the editable composer does.
 		lines = append(lines, "")
-		lines = append(lines, r.renderComposerStatusLine(statusText, termWidth))
+		statusLine, startCol, endCol, hasToken := r.composerStatusLine(statusText, termWidth)
+		lines = append(lines, statusLine)
+		if hasToken {
+			// The plan-progress entry is the token on this row: its own cells
+			// are the hit zone, nothing else on the row is.
+			hasProgress, progressRow, progressStart, progressEnd = true, len(lines)-1, startCol, endCol
+		}
 		lines = append(lines, "")
 	}
 	if len(cs.OverlayRows) == 0 {
@@ -3638,7 +3670,7 @@ func (r *Renderer) buildReadOnlyComposerBlock(cs ComposerRenderState, statusText
 		lines[i] = stripTerminalBells(lines[i])
 	}
 	// No caret: there is no text to place it in.
-	return composerBlock{lines: lines, cursorRow: -1}
+	return composerBlock{lines: lines, cursorRow: -1, hasProgress: hasProgress, progressRow: progressRow, progressStart: progressStart, progressEnd: progressEnd}
 }
 
 func (r *Renderer) composerFooterText(termWidth int) string {
@@ -3732,12 +3764,17 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 	}
 
 	lines := make([]string, 0, len(layout.lines)+len(previewLines)+len(rosterLines)+8)
+	hasProgress, progressRow, progressStart, progressEnd := false, -1, 0, 0
 	if statusText != "" {
 		// Keep the live status visually separate from the transcript's last
 		// retained row. The composer block is painted immediately after the
 		// transcript region, so this leading row is the boundary spacing.
 		lines = append(lines, "")
-		lines = append(lines, r.renderComposerStatusLine(statusText, termWidth))
+		statusLine, startCol, endCol, hasToken := r.composerStatusLine(statusText, termWidth)
+		lines = append(lines, statusLine)
+		if hasToken {
+			hasProgress, progressRow, progressStart, progressEnd = true, len(lines)-1, startCol, endCol
+		}
 	}
 	if statusText != "" && len(previewLines) > 0 {
 		lines = append(lines, "")
@@ -3793,7 +3830,7 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 		// no caret, so there is one place the keyboard can be seen.
 		cursorRow = -1
 	}
-	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: cursorCol, text: textArea}
+	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: cursorCol, text: textArea, hasProgress: hasProgress, progressRow: progressRow, progressStart: progressStart, progressEnd: progressEnd}
 }
 
 func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText, statusText, footerText string, previewLines []string, overlayRows []OverlayRow, termWidth int) composerBlock {
@@ -3809,11 +3846,16 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 	layout := layoutNormalComposer(displayText, cs.Cursor, termWidth)
 
 	lines := make([]string, 0, len(previewLines)+len(overlayRows)+len(layout.lines)+4)
+	hasProgress, progressRow, progressStart, progressEnd := false, -1, 0, 0
 	if statusText != "" {
 		// Match the normal composer: the live status starts one row below the
 		// transcript rather than touching its final retained row.
 		lines = append(lines, "")
-		lines = append(lines, r.renderComposerStatusLine(statusText, termWidth))
+		statusLine, startCol, endCol, hasToken := r.composerStatusLine(statusText, termWidth)
+		lines = append(lines, statusLine)
+		if hasToken {
+			hasProgress, progressRow, progressStart, progressEnd = true, len(lines)-1, startCol, endCol
+		}
 	}
 	if statusText != "" && len(previewLines) > 0 {
 		lines = append(lines, "")
@@ -3856,7 +3898,7 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 	for i := range lines {
 		lines[i] = stripTerminalBells(lines[i])
 	}
-	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: layout.cursorCol, text: textArea}
+	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: layout.cursorCol, text: textArea, hasProgress: hasProgress, progressRow: progressRow, progressStart: progressStart, progressEnd: progressEnd}
 }
 
 // EnableViewportMode switches the renderer into the alt-screen virtual viewport.
@@ -4617,6 +4659,12 @@ func (r *Renderer) paintViewportLocked() {
 				// firstLine indexes the full block, so the scrolled slice
 				// resolves clicks through the same table.
 				text: fullComposer.text,
+				// The progress token moves with the row it sits on, and a row
+				// scrolled out of the slice has no hit zone.
+				hasProgress:   fullComposer.hasProgress,
+				progressRow:   fullComposer.progressRow,
+				progressStart: fullComposer.progressStart,
+				progressEnd:   fullComposer.progressEnd,
 			}
 		} else {
 			r.composerScrollOffset = 0
@@ -4635,19 +4683,41 @@ func (r *Renderer) paintViewportLocked() {
 	if r.vpFollow {
 		offset = 1 << 30
 	}
+	// The todo drawer, when open, takes its columns out of the history region:
+	// the transcript is laid out at the narrower width and reflows, while the
+	// composer below keeps the full terminal width. drawerLayout.leftWidth is
+	// the whole history region, divider included on the drawer's side of the
+	// seam, so a physical row is leftWidth + drawerWidth = the terminal width.
+	drawerLayout, drawerOpen := r.planDrawerLayoutLocked(width, bodyHeight)
+	rowWidth := width
+	historyWidth := contentWidth
+	if drawerOpen {
+		// The layout clamps the offset it was given, so the state follows it:
+		// a resize that shrinks the drawer must not leave the list beyond its
+		// end.
+		r.planDrawer.scroll = drawerLayout.scroll
+		rowWidth = drawerLayout.leftWidth
+		historyWidth = rowWidth - viewportRightPadding
+		if historyWidth < 1 {
+			historyWidth = 1
+		}
+	}
+	r.vpDrawerLayout = drawerLayout
+	r.vpDrawerOpen = drawerOpen
+	r.vpRowWidth = rowWidth
 	activeVM := r.activeVMLocked()
 	// Stamp the current spinner phase so renderViewport can rotate the
 	// running-tool marker. paintViewportLocked runs every repaint (frame events
 	// plus the ~200ms working-status and 500ms cursor-blink ticks), so the
 	// Braille spinner advances while a tool is in flight.
 	activeVM.spinnerPhase = r.spinnerPhase
-	vr := renderViewport(activeVM, contentWidth, bodyHeight, offset, r.diffTheme, r.cwd)
+	vr := renderViewport(activeVM, historyWidth, bodyHeight, offset, r.diffTheme, r.cwd)
 	r.vpLastRender = vr
 	r.vpScrollOffset = vr.firstRow
 	r.vpLastComposer = composer
 	r.publishComposerSelectionLocked()
 
-	const hoverBgColor = "236"
+	const hoverBgColor = hoverBackgroundColor
 	hoverBgSeq := "\x1b[48;5;" + hoverBgColor + "m"
 	const selectBgColor = "24"
 	selectBgSeq := "\x1b[48;5;" + selectBgColor + "m"
@@ -4682,9 +4752,15 @@ func (r *Renderer) paintViewportLocked() {
 	rows := make([]string, bodyHeight+composerHeight)
 	for row := 0; row < bodyHeight; row++ {
 		if row >= len(vr.lines) {
+			if drawerOpen {
+				// A row past the transcript's own content still carries the
+				// drawer's column: the divider and its cells run the full
+				// height of the region, not just beside text.
+				rows[row] = planDrawerBlankCells(drawerLayout, row, r.vpControlHover == hoverTargetClose)
+			}
 			continue
 		}
-		line := canvasRow(vr.lines[row], width)
+		line := canvasRow(vr.lines[row], rowWidth)
 		// Selection anchors are in absolute transcript-row space; map this
 		// screen row to its absolute row to test membership.
 		absRow := vr.firstRow + row
@@ -4708,12 +4784,17 @@ func (r *Renderer) paintViewportLocked() {
 			// The trailing \x1b[49m\x1b[0m closes the selection background; no
 			// \x1b[K here — a full-width row (the composer footer) would have
 			// its last painted cell erased on deferred-wrap terminals.
-			rows[row] = applySelectionHighlight(line, selectBgSeq, startCol, endCol) + "\x1b[49m\x1b[0m"
+			line = applySelectionHighlight(line, selectBgSeq, startCol, endCol) + "\x1b[49m\x1b[0m"
 		} else if r.vpHoverRow == row && vr.isClickableRow(row, activeVM) {
-			rows[row] = applyHoverHighlight(line, width, hoverBgSeq)
-		} else {
-			rows[row] = line
+			line = applyHoverHighlight(line, rowWidth, hoverBgSeq)
 		}
+		if drawerOpen {
+			// The hover background covers the history region only, and the
+			// drawer's own cells follow it, so a hover can never bleed across
+			// the divider.
+			line = planDrawerSplitRow(line, rowWidth, drawerLayout, row, r.vpControlHover == hoverTargetClose)
+		}
+		rows[row] = line
 	}
 	// When the user has scrolled away from the newest transcript rows, float a
 	// compact clickable control over the last body row. It intentionally does
@@ -4722,7 +4803,9 @@ func (r *Renderer) paintViewportLocked() {
 	// part of that row's bytes, so the row's damage check covers the control too
 	// and it is repainted exactly when it appears, changes or goes away.
 	if !r.vpFollow && vr.maxScrollOffset() > 0 {
-		label, startCol, _, buttonRow := jumpToBottomButtonLayout(width, bodyHeight, r.vpNewMessages)
+		// The floating control stays inside the history region: with the drawer
+		// open it centres on the left column, never over the list.
+		label, startCol, _, buttonRow := jumpToBottomButtonLayout(rowWidth, bodyHeight, r.vpNewMessages)
 		if label != "" && buttonRow >= 0 && buttonRow < bodyHeight {
 			rows[buttonRow] += fmt.Sprintf("\x1b[%d;%dH\x1b[38;5;255;48;5;236m%s\x1b[0m", buttonRow+1, startCol+1, label)
 		}
@@ -4763,6 +4846,12 @@ func (r *Renderer) paintViewportLocked() {
 		} else {
 			rows[bodyHeight+i] = composerLine
 		}
+	}
+	r.vpProgressSpan = composer.progressScreenSpan(bodyHeight)
+	if r.vpControlHover == hoverTargetProgress && r.vpProgressSpan.row >= 0 && r.vpProgressSpan.row < len(rows) {
+		// Only the token's own cells take the hover background, and only the
+		// background: the status line's faint stays as it is.
+		rows[r.vpProgressSpan.row] = highlightCells(rows[r.vpProgressSpan.row], r.vpProgressSpan.startCol, r.vpProgressSpan.endCol, hoverBgSeq)
 	}
 
 	var b strings.Builder
@@ -5164,6 +5253,13 @@ func (r *Renderer) setActiveViewLocked(agentID string) {
 		NewMessages:  r.vpNewMessages,
 	}
 	r.assignActiveViewLocked(nextView)
+	// The drawer showed the outgoing view's plan; it belongs to that view, so
+	// switching views closes it rather than showing one agent's list beside
+	// another agent's transcript.
+	if r.planDrawer.open {
+		r.planDrawer = planDrawerState{}
+		r.vpControlHover = hoverTargetNone
+	}
 	// The sweep animates the view on screen, which just changed.
 	r.syncLiveBlockAnimationLocked()
 	if saved, ok := r.viewBrowseState[nextView]; ok {
@@ -5612,8 +5708,16 @@ func (r *Renderer) viewportScrollAtLocked(delta, col, row int, at time.Time) {
 	if !r.viewportMode {
 		return
 	}
-	_ = col
-	bodyHeight := r.screenAtLocked(at).bodyHeight
+	s := r.screenAtLocked(at)
+	bodyHeight := s.bodyHeight
+	// A notch over the open drawer's columns scrolls its list; the divider
+	// column belongs to the drawer. At either end of the list the notch falls
+	// through to the transcript, so a short list cannot swallow the wheel.
+	if s.drawerOpen && col >= s.drawerLeft && row < bodyHeight {
+		if r.scrollPlanDrawerLocked(delta) {
+			return
+		}
+	}
 	if r.overlayActive && row >= bodyHeight {
 		if r.overlayCanScrollLocked(delta) {
 			r.scrollViewportLocked(delta, true)
@@ -5947,7 +6051,7 @@ func (r *Renderer) HandleMouse(ev inputEvent) viewportClick {
 	case inputEventMouseRelease:
 		return r.viewportRelease(ev.mouseCol, ev.mouseRow, ev.at)
 	case inputEventMouseMove:
-		r.ViewportHover(ev.mouseCol, ev.mouseRow)
+		r.viewportHoverAt(ev.mouseCol, ev.mouseRow, ev.at)
 	case inputEventMouseWheel:
 		r.mu.Lock()
 		r.viewportScrollAtLocked(ev.wheelDelta, ev.mouseCol, ev.mouseRow, ev.at)
@@ -5974,6 +6078,10 @@ func (r *Renderer) viewportClickToggleAt(col, row int, at time.Time) bool {
 		return false
 	}
 	s := r.screenAtLocked(at)
+	if handled, changed := r.planDrawerClickLocked(s, col, row); handled {
+		r.mu.Unlock()
+		return changed
+	}
 	if s.jumpButton.contains(col, row) {
 		r.jumpToBottomLocked()
 		r.mu.Unlock()
@@ -6010,13 +6118,21 @@ func (r *Renderer) transcriptClickLocked(s shownScreen, row int) (changed bool, 
 	return false, imagePath, imageLabel
 }
 
-// ViewportHover records the 0-based screen row under the mouse cursor so the
-// next paint can apply a subtle background highlight to clickable rows.
-// Repaints only when the hover row actually changes (avoids thrashing on
-// sub-pixel moves within the same row). col/row are screen coordinates; row
-// outside the viewport body clears the hover state so the highlight disappears
-// when the cursor leaves the transcript area.
+// ViewportHover records what the pointer is over so the next paint can apply a
+// subtle background highlight: the local control under it (the plan-progress
+// token or the drawer's close control), or the transcript row under it.
+// Repaints only when that target actually changes — ?1003h reports every pointer
+// move, so a repaint per report would flood the terminal once the pointer
+// crosses cell boundaries. col/row are screen coordinates resolved against the
+// live screen; HandleMouse routes a move report through viewportHoverAt with the
+// screen that was on the terminal when the report was read.
 func (r *Renderer) ViewportHover(col, row int) {
+	r.viewportHoverAt(col, row, time.Time{})
+}
+
+// viewportHoverAt is ViewportHover for a move report read at `at`.
+// Caller takes r.mu.
+func (r *Renderer) viewportHoverAt(col, row int, at time.Time) {
 	if r == nil {
 		return
 	}
@@ -6025,14 +6141,19 @@ func (r *Renderer) ViewportHover(col, row int) {
 	if !r.viewportMode {
 		return
 	}
-	_ = col
-	if row < 0 || row >= r.vpHeight {
-		row = -1
+	s := r.screenAtLocked(at)
+	target := planDrawerHoverTarget(s, col, row)
+	hoverRow := -1
+	if target == hoverTargetNone && !(s.drawerOpen && col >= s.drawerLeft && row < s.bodyHeight) {
+		if row >= 0 && row < r.vpHeight {
+			hoverRow = row
+		}
 	}
-	if r.vpHoverRow == row {
+	if target == r.vpControlHover && hoverRow == r.vpHoverRow {
 		return
 	}
-	r.vpHoverRow = row
+	r.vpControlHover = target
+	r.vpHoverRow = hoverRow
 	r.paintViewportLocked()
 }
 
@@ -6085,6 +6206,10 @@ func (r *Renderer) ViewportResetSession() {
 	r.vpFollow = true
 	r.vpNewMessages = 0
 	r.vpHoverRow = -1
+	r.vpControlHover = hoverTargetNone
+	// A new session has no plan: the drawer's frame, scroll and view all belong
+	// to the conversation that just left.
+	r.planDrawer = planDrawerState{}
 	r.composerScrollOffset = 0
 	r.overlayScrollOffset = 0
 	r.selectClearLocked()
@@ -6387,6 +6512,16 @@ type shownScreen struct {
 	overlayRefs     []overlayRowRef
 	overlayFirstRow int
 	jumpButton      screenSpan // the floating jump-to-bottom control
+	// termWidth is the terminal width this paint used, and drawerLeft /
+	// drawerOpen / drawerClose / progress are the split-column and control
+	// geometry it drew: a click or a hover is resolved against the cells that
+	// were actually painted, which is what keeps a stale screen from acting on
+	// the new one's layout.
+	termWidth   int
+	drawerOpen  bool
+	drawerLeft  int
+	drawerClose screenSpan
+	progress    screenSpan
 }
 
 // shownScreensKept is how many past paints the renderer keeps for resolving
@@ -6536,7 +6671,7 @@ func (r *Renderer) OverlaySelection() (startLine, startCol, endLine, endCol int,
 // what a call with no read time — a direct call from a test, say — and a
 // renderer that has not painted yet resolve against. Caller holds r.mu.
 func (r *Renderer) liveScreenLocked() shownScreen {
-	return shownScreen{
+	s := shownScreen{
 		view:            r.activeView,
 		render:          r.vpLastRender,
 		bodyHeight:      r.vpBodyHeight,
@@ -6545,7 +6680,32 @@ func (r *Renderer) liveScreenLocked() shownScreen {
 		overlayRefs:     r.vpOverlayRefs,
 		overlayFirstRow: r.vpOverlayFirstRow,
 		jumpButton:      r.jumpButtonSpanLocked(),
+		progress:        r.vpProgressSpan,
+		drawerOpen:      r.vpDrawerOpen,
 	}
+	if r.vpDrawerOpen {
+		s.termWidth = r.vpDrawerLayout.width + r.vpDrawerLayout.leftWidth
+		s.drawerLeft = r.vpDrawerLayout.leftWidth
+		s.drawerClose = makeScreenSpan(r.vpDrawerLayout.closeSpan, r.vpDrawerLayout.leftWidth)
+	} else {
+		width := termWidthOrDefault()
+		if width < 1 {
+			width = 80
+		}
+		s.termWidth = width
+		s.drawerLeft = width
+		s.drawerClose = screenSpan{row: -1}
+	}
+	return s
+}
+
+// makeScreenSpan moves a drawer-local span into screen cells by offsetting its
+// columns past the history region.
+func makeScreenSpan(span screenSpan, colOffset int) screenSpan {
+	if span.row < 0 {
+		return span
+	}
+	return screenSpan{row: span.row, startCol: span.startCol + colOffset, endCol: span.endCol + colOffset}
 }
 
 // recordScreenLocked keeps the screen the paint just written, trimmed to what
@@ -6597,6 +6757,11 @@ func (r *Renderer) screenAtLocked(at time.Time) shownScreen {
 type viewportPress struct {
 	armed        bool
 	onJumpButton bool
+	// onPlanDrawer marks a press on the todo drawer or one of its controls: the
+	// release resolves it as a drawer gesture (toggle, close, or consumed), and
+	// nothing under it — a card, the composer's caret, the jump control — sees
+	// it. Drags are swallowed so they cannot select text behind the drawer.
+	onPlanDrawer bool
 	col, row     int // 0-based screen cell of the press
 	screen       shownScreen
 }
@@ -6666,7 +6831,13 @@ func (r *Renderer) jumpButtonSpanLocked() screenSpan {
 	if r.vpFollow || r.vpLastRender.maxScrollOffset() <= 0 {
 		return screenSpan{row: -1}
 	}
-	width := termWidthOrDefault()
+	// The control floats inside the history region, so it is laid out against
+	// the width the last paint gave that region — with the drawer open it
+	// centres on the left column and never lands on the list.
+	width := r.vpRowWidth
+	if width < 1 {
+		width = termWidthOrDefault()
+	}
 	if width < 1 {
 		width = 80
 	}
@@ -6756,6 +6927,15 @@ func (r *Renderer) viewportPressLocked(col, row int, at time.Time) {
 		r.vpPress = viewportPress{armed: true, onJumpButton: true, col: col, row: row, screen: s}
 		return
 	}
+	if r.planDrawerPressLocked(s, col, row) {
+		// The drawer's controls and the drawer itself behave like the jump
+		// control: the press arms the gesture, so a drag from here cannot
+		// become a text selection over the cells the drawer covers.
+		r.selectClearLocked()
+		r.selectDragging = false
+		r.vpPress = viewportPress{armed: true, onPlanDrawer: true, col: col, row: row, screen: s}
+		return
+	}
 	r.selectDragging = true
 	now := at
 	if now.IsZero() {
@@ -6826,6 +7006,11 @@ func (r *Renderer) viewportDragLocked(col, row int, at time.Time) {
 		// Keep consuming motion until release so a drag that started on the
 		// button cannot become a transcript selection/toggle underneath it. The
 		// release coordinate decides whether the click still activates.
+		return
+	}
+	if r.vpPress.onPlanDrawer {
+		// Same rule for the drawer: a press on it never turns into a selection
+		// of the transcript it covers, and a drag inside it is consumed.
 		return
 	}
 	// A drag extends only the END anchor; the START is fixed at the press
@@ -7005,6 +7190,17 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 		r.mu.Unlock()
 		return viewportClick{}
 	}
+	if press.onPlanDrawer {
+		// The gesture belonged to the drawer. It is resolved against the screen
+		// the press landed on and consumes the click outright: closing the
+		// drawer must not also fold the card, move the caret or jump.
+		s := press.screen
+		if s.view == r.activeView {
+			r.planDrawerClickLocked(s, press.col, press.row)
+		}
+		r.mu.Unlock()
+		return viewportClick{}
+	}
 	if !r.selectDidDrag {
 		r.selectClearLocked()
 		r.vpHoverRow = -1
@@ -7014,6 +7210,14 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 			s, clickCol, clickRow = press.screen, press.col, press.row
 		}
 		if s.view != r.activeView {
+			r.mu.Unlock()
+			return click
+		}
+		// The drawer owns the cells it was painted on: its progress token, its
+		// close control, the list itself, and — for a click anywhere else while
+		// it is open — the dismissal. This is the same resolution
+		// ViewportClickToggle uses, so the two paths cannot disagree.
+		if handled, _ := r.planDrawerClickLocked(s, clickCol, clickRow); handled {
 			r.mu.Unlock()
 			return click
 		}

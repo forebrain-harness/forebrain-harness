@@ -682,18 +682,27 @@ const (
 	disableFocusReportingSeq = "\x1b[?1004l"
 )
 
-// SGR mouse reporting. ?1002h reports button press/release, drag, and wheel
-// events without emitting no-button hover motion; ?1006h switches to SGR
-// encoding so coordinates beyond column/row 223 are not truncated (the legacy
-// X10 encoding packs them into single bytes). Reports arrive as ESC [ < Cb ; Cx
-// ; Cy (M|m): M=press/motion, m=release, Cx/Cy 1-based. Avoiding ?1003h is
-// important because its all-motion reports can be copied or pasted as text by
-// terminal/multiplexer edge cases. Capturing the mouse means the terminal's own
-// text selection now needs Shift held (vim/tmux/htop behave the same — a
-// protocol limitation).
+// SGR mouse reporting. ?1003h reports every pointer move in addition to the
+// button press/release, drag, and wheel events ?1002h covers; ?1006h switches to
+// SGR encoding so coordinates beyond column/row 223 are not truncated (the
+// legacy X10 encoding packs them into single bytes). Reports arrive as ESC [ <
+// Cb ; Cx ; Cy (M|m): M=press/motion, m=release, Cx/Cy 1-based.
+//
+// All-motion is enabled on purpose: hover highlighting of local controls (the
+// composer's ☑N/M plan-progress token, the plan drawer's close glyph, clickable
+// transcript rows) needs to know where the pointer is without a button held.
+// The renderer must dedupe on the hover target — repainting on every report
+// would flood the terminal once the pointer crosses cell boundaries. Because
+// all-motion reports can also be pasted as text by terminal/multiplexer edge
+// cases, orphan SGR tails are scrubbed from pastes and seeds
+// (orphanSGRMousePattern, sanitizeTerminalDraft). Capturing the mouse means the
+// terminal's own text selection needs Shift held (vim/tmux/htop behave the same
+// — a protocol limitation).
 const (
-	enableMouseSeq  = "\x1b[?1003l\x1b[?1002h\x1b[?1006h"
-	disableMouseSeq = "\x1b[?1006l\x1b[?1002l\x1b[?1003l"
+	// 1002 is disabled first: a terminal that still has it on from a previous
+	// session would otherwise emit the narrower event set alongside 1003's.
+	enableMouseSeq  = "\x1b[?1002l\x1b[?1003h\x1b[?1006h"
+	disableMouseSeq = "\x1b[?1006l\x1b[?1003l\x1b[?1002l"
 )
 
 // sgrMouseEvent is a decoded SGR mouse report.
@@ -786,8 +795,9 @@ func atoiStrict(s string) (int, bool) {
 //
 // Motion events carry Cb >= 32 (bit 5 set). 32=motion+left,
 // 33=motion+middle, 34=motion+right, and 35=motion+no-button. The reader
-// accepts left drags, but deliberately drops no-button motion from stale
-// ?1003h terminal state rather than reintroducing hover-driven input traffic.
+// turns a left drag into a selection gesture and no-button motion into a hover
+// report (inputEventMouseMove); the renderer decides what that pointer position
+// hovers over and repaints only when the target changes.
 const wheelScrollLines = 3
 
 func mouseEventFromSGR(ev sgrMouseEvent) (inputEvent, bool) {
@@ -802,12 +812,16 @@ func mouseEventFromSGR(ev sgrMouseEvent) (inputEvent, bool) {
 		// always scrolls the transcript, making tall overlays unscrollable.
 		return inputEvent{kind: inputEventMouseWheel, wheelDelta: delta, mouseCol: ev.col, mouseRow: ev.row}, true
 	}
-	// Motion events set bit 5 (32) in Cb. Only a left-button drag affects
-	// selection. In particular, discard Cb=35 (motion with no button), which an
-	// old ?1003h terminal state can still emit after startup.
+	// Motion events set bit 5 (32) in Cb. A left-button drag moves a selection;
+	// motion with no button (Cb=35, bit 0 and 1 both set) is a hover report,
+	// which ?1003h delivers for every pointer move. Middle/right drags are not
+	// gestures this UI has.
 	if ev.button >= 32 && ev.press {
-		if ev.button&0x03 == 0 {
+		switch ev.button & 0x03 {
+		case 0:
 			return inputEvent{kind: inputEventMouseDrag, mouseCol: ev.col, mouseRow: ev.row}, true
+		case 3:
+			return inputEvent{kind: inputEventMouseMove, mouseCol: ev.col, mouseRow: ev.row}, true
 		}
 		return inputEvent{}, false
 	}
