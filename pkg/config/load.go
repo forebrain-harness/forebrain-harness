@@ -73,6 +73,22 @@ func LoadPersisted(path string) (Root, error) {
 	return r, nil
 }
 
+// FinishLoad runs the tail of Load on a root the caller assembled by hand:
+// the home .env merge, ${ENV} expansion, and validation, in Load's order. The
+// composed runtime configuration — the YAML's startup sections plus the
+// database's runtime sections (plan 187) — runs through the same steps a root
+// read from one file did, so both behave identically.
+func FinishLoad(r *Root) error {
+	if r == nil {
+		return fmt.Errorf("finish load: nil root")
+	}
+	if err := applyDotEnvAfterNormalize("", r); err != nil {
+		return err
+	}
+	expandRootEnvReferences(r)
+	return validateLoadedRoot(r)
+}
+
 func loadPersisted(path string) (Root, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

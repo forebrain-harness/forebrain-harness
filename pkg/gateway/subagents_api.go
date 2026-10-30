@@ -1,7 +1,8 @@
 // Subagent configuration from the web surface (plan 079).
 //
-// A primary agent's subagents are one list in forebrain.yaml — its overrides of
-// the built-ins the model may dispatch, and the custom subagents it defines.
+// A primary agent's subagents are one list in the agents section of the state
+// database — its overrides of the built-ins the model may dispatch, and the
+// custom subagents it defines.
 // The page this file serves is a configuration list, not a roster: what runs
 // right now is on the conversation card, in the subagent drawer and on the
 // workbench, and none of that is written here.
@@ -14,9 +15,9 @@
 //   - A system subagent is visible and read-only. The system dispatches it at
 //     its own occasions (plan review, /goal checks, automatic approval), so a
 //     switch or a prompt there would be a promise the runtime does not keep.
-//   - A write validates the definition the way the loader would, saves the file
-//     and rebinds the agent's runners. Rebuilding is what "the next session uses
-//     it" means for a process that already has runners.
+//   - A write validates the definition the way the loader would, stores the
+//     section and rebinds the agent's runners. Rebuilding is what "the next
+//     session uses it" means for a process that already has runners.
 package gateway
 
 import (
@@ -31,6 +32,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -81,6 +83,11 @@ func failSubagentWrite(w http.ResponseWriter, err error) {
 	var api *subagentAPIError
 	if errors.As(err, &api) {
 		http.Error(w, api.Msg, api.Status)
+		return
+	}
+	var invalid *state.InvalidSectionError
+	if errors.As(err, &invalid) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -462,7 +469,7 @@ func (s *Server) subagentConfigFor(r *http.Request) (*config.Root, string, error
 	if err != nil {
 		return nil, "", err
 	}
-	cfg, err := s.persistedConfig()
+	cfg, err := s.persistedConfig(r.Context())
 	if err != nil {
 		return nil, "", err
 	}
@@ -492,9 +499,9 @@ func decodeSubagentSwitch(r *http.Request) (bool, error) {
 	return *in.Enabled, nil
 }
 
-// subagentWrite is one configuration write in progress: the file as written,
-// the primary agent it edits and that agent's definition, which a handler
-// changes and the writer stores back before validating and saving.
+// subagentWrite is one configuration write in progress: the agents section as
+// stored, the primary agent it edits and that agent's definition, which a
+// handler changes and the writer stores back before validating and saving.
 type subagentWrite struct {
 	cfg     config.Root
 	agentID string
@@ -513,45 +520,45 @@ func (w *subagentWrite) switchAfter() bool {
 	return config.SubagentsEnabledFor(&w.cfg, w.agentID)
 }
 
-// writeAgentSubagents is the one write path behind every subagent route: read
-// the file as written, let the handler change this agent's definition, check
-// the result the way the loader would, save it and bring the running process
-// onto it. The read-modify-write runs under withConfigWrite so a concurrent
-// config write cannot drop this change (or be dropped by it).
+// writeAgentSubagents is the one write path behind every subagent route (plan
+// 188 W7): one read-modify-write of the agents section in the state database,
+// with the handler changing this agent's definition and the result checked the
+// way the loader would. The store's transaction is the mutual exclusion the
+// file lock used to provide.
 //
 // The rebind is not optional: a session's subagent types are decided when it
-// starts, so a write that only reached the file would look like it did nothing.
-// Rebuilding the agent's runners is what "the next session uses it" means for a
-// process that already has them.
+// starts, so the pooled runners are rebuilt before the answer goes out.
+// Rebuilding the agent's runners is what "the next session uses it" means for
+// a process that already has them.
 func (s *Server) writeAgentSubagents(w http.ResponseWriter, r *http.Request, mutate func(*subagentWrite) (any, error)) {
+	// Resolving the route's agent reads liveCfg (Env.Deps.AppCfg), which the
+	// next turn's sync replaces — resolving it before the write is the same
+	// snapshot the write itself works from.
+	id, err := s.subagentAgentID(pathParam(r, "id"))
+	if err != nil {
+		failSubagentWrite(w, err)
+		return
+	}
 	var payload any
-	err := s.withConfigWrite(func() error {
-		// Inside the lock on purpose: resolving the route's agent reads
-		// liveCfg (Env.Deps.AppCfg), the same field saveAndReload's reload
-		// replaces — resolving it outside the lock races a concurrent save.
-		id, err := s.subagentAgentID(pathParam(r, "id"))
-		if err != nil {
-			return err
-		}
-		cfg, err := s.persistedConfig()
-		if err != nil {
-			return err
-		}
+	err = s.withConfigSection(r.Context(), "agents", func(cfg *config.Root) error {
 		if cfg.Agents.Definitions == nil {
 			cfg.Agents.Definitions = map[string]config.AgentDefinition{}
 		}
-		write := &subagentWrite{cfg: cfg, agentID: id, def: cfg.Agents.Definitions[id]}
+		write := &subagentWrite{cfg: *cfg, agentID: id, def: cfg.Agents.Definitions[id]}
+		var err error
 		payload, err = mutate(write)
 		if err != nil {
 			return err
 		}
 		write.store()
-		// The validator is the loader's own: a configuration the CLI would reject
-		// must not reach the file, and its sentence names the entry and the rule.
+		// The validator is the loader's own: a configuration the CLI would
+		// reject must not reach the section, and its sentence names the entry
+		// and the rule.
 		if err := config.ValidateAgentSubagents(id, write.def, agent.PublicSubagentNames, agent.SystemSubagentNames); err != nil {
 			return subagentBadRequest("%v", err)
 		}
-		return s.saveAndReload(write.cfg)
+		*cfg = write.cfg
+		return nil
 	})
 	if err != nil {
 		failSubagentWrite(w, err)
@@ -566,7 +573,7 @@ func (s *Server) writeAgentSubagents(w http.ResponseWriter, r *http.Request, mut
 // handleSubagentsDefaultGet serves GET /agents/defaults/subagents: the global
 // switch the settings page owns.
 func (s *Server) handleSubagentsDefaultGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.persistedConfig()
+	cfg, err := s.persistedConfig(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -662,13 +669,9 @@ func (s *Server) handleSubagentsDefaultPut(w http.ResponseWriter, r *http.Reques
 		failSubagentWrite(w, err)
 		return
 	}
-	err = s.withConfigWrite(func() error {
-		cfg, err := s.persistedConfig()
-		if err != nil {
-			return err
-		}
+	err = s.withConfigSection(r.Context(), "agents", func(cfg *config.Root) error {
 		cfg.Agents.Defaults.EnableSubagent = config.BoolPtr(enabled)
-		return s.saveAndReload(cfg)
+		return nil
 	})
 	if err != nil {
 		failSubagentWrite(w, err)

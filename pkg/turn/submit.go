@@ -76,6 +76,15 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 	if s == nil || s.runner == nil {
 		return TurnOutcome{SessionID: req.SessionID, Status: TurnFailed, Error: ErrNoRunExecutor}, ErrNoRunExecutor
 	}
+	// The configuration sync runs before anything else the turn does — no
+	// queueing, no approval read, no run (plan 187): a turn that cannot adopt
+	// the current configuration does not start, and the error goes back to
+	// whoever submitted it.
+	if s.configSync != nil {
+		if err := s.configSync(ctx); err != nil {
+			return TurnOutcome{SessionID: req.SessionID, Status: TurnFailed, Error: err}, err
+		}
+	}
 	if s.approval != nil {
 		pending, err := s.approval.Pending(ctx, req.SessionID)
 		if err != nil {

@@ -660,3 +660,26 @@ CREATE TABLE fb_task_executions (
   created_at INTEGER NOT NULL,
   UNIQUE (task_id, seq)
 ) STRICT;
+
+-- The install's runtime configuration, one row per root section of
+-- forebrain.yaml (plan 187). The startup sections — gateway and the
+-- transition-period credentials pointer — stay in the file; everything else
+-- reads and writes here. value_json is the section marshaled with its own
+-- json tags; updated_at_ms records the last write for diagnostics.
+CREATE TABLE fb_config (
+  section TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+) STRICT;
+
+-- MCP OAuth refresh tokens, one row per (namespace, server): the overlay the
+-- file tree kept under state/mcp-oauth, moved into the state database. An
+-- empty project_key is the shared global store; otherwise it is the project
+-- key or "agent:<id>" the server's scope stamp names.
+CREATE TABLE fb_mcp_oauth (
+  project_key TEXT NOT NULL,
+  server_name TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (project_key, server_name)
+) STRICT;

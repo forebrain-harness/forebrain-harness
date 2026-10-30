@@ -274,45 +274,56 @@ func importCodexUserMCP(data *codexData, opts *Options) ([]MCPOutcome, []string,
 	if len(data.UserMCP) == 0 {
 		return out, notices, nil
 	}
-	cfg, err := appcfg.Load(opts.ConfigPath)
-	if err != nil {
-		return out, notices, fmt.Errorf("load %s: %w", opts.ConfigPath, err)
-	}
 	changed := false
-	for _, server := range data.UserMCP {
-		if server.Enabled != nil && !*server.Enabled {
-			out = append(out, MCPOutcome{Name: server.Name, Scope: "global", Status: "skipped", Detail: "disabled at the source"})
-			continue
-		}
-		exists := false
-		for _, existing := range cfg.Agents.Defaults.MCPServers {
-			if mcp.SameServerName(existing.Name, server.Name) {
-				exists = true
-				break
+	ctx := context.Background()
+	appendServers := func(servers *[]appcfg.MCPServerConfig) {
+		for _, server := range data.UserMCP {
+			if server.Enabled != nil && !*server.Enabled {
+				out = append(out, MCPOutcome{Name: server.Name, Scope: "global", Status: "skipped", Detail: "disabled at the source"})
+				continue
 			}
+			exists := false
+			for _, existing := range *servers {
+				if mcp.SameServerName(existing.Name, server.Name) {
+					exists = true
+					break
+				}
+			}
+			if exists {
+				out = append(out, MCPOutcome{Name: server.Name, Scope: "global", Status: "skipped", Detail: "an entry with this name is already configured; not overwritten"})
+				continue
+			}
+			*servers = append(*servers, codexMCPServerConfig(server))
+			changed = true
+			detail := describeCodexMCPServer(server)
+			if len(server.Dropped) > 0 {
+				detail += "; dropped (no forebrain counterpart): " + strings.Join(server.Dropped, ", ")
+			}
+			out = append(out, MCPOutcome{Name: server.Name, Scope: "global", Status: "written", Detail: detail})
 		}
-		if exists {
-			out = append(out, MCPOutcome{Name: server.Name, Scope: "global", Status: "skipped", Detail: "an entry with this name is already configured; not overwritten"})
-			continue
-		}
-		cfg.Agents.Defaults.MCPServers = append(cfg.Agents.Defaults.MCPServers, codexMCPServerConfig(server))
-		changed = true
-		detail := describeCodexMCPServer(server)
-		if len(server.Dropped) > 0 {
-			detail += "; dropped (no forebrain counterpart): " + strings.Join(server.Dropped, ", ")
-		}
-		out = append(out, MCPOutcome{Name: server.Name, Scope: "global", Status: "written", Detail: detail})
 	}
-	if changed {
-		if opts.DryRun {
-			return out, append(notices, "written MCP entries take effect for new sessions only"), nil
-		}
-		if err := backupFile(opts.ConfigPath, opts.now()); err != nil {
+	// The user-level servers are the agents section's shared list, stored in
+	// the state database like every configuration write (plan 188 W11); the
+	// file is not touched.
+	if opts.DryRun {
+		if err := sectionDryRun(ctx, opts, "agents", func(cur *appcfg.AgentsSection) error {
+			appendServers(&cur.Defaults.MCPServers)
+			return nil
+		}); err != nil {
 			return out, notices, err
 		}
-		if err := appcfg.Save(opts.ConfigPath, cfg); err != nil {
-			return out, notices, fmt.Errorf("save %s: %w", opts.ConfigPath, err)
+		if changed {
+			notices = append(notices, "written MCP entries take effect for new sessions only")
 		}
+		return out, notices, nil
+	}
+	if err := updateConfigSection(ctx, opts, "agents", func(cur *appcfg.AgentsSection) error {
+		appendServers(&cur.Defaults.MCPServers)
+		return nil
+	}); err != nil {
+		return out, notices, err
+	}
+	if changed {
 		notices = append(notices, "written MCP entries take effect for new sessions only")
 	}
 	return out, notices, nil

@@ -852,6 +852,10 @@ func TestHandleChatWSRefusesATurnWithoutARunnableProject(t *testing.T) {
 	env, err := process.Open(ctx, process.OpenOptions{Home: home, ConfigPath: cfgPath, NoLaunchProject: true, SessionSource: "webchat"})
 	require.NoError(t, err)
 	defer env.Close()
+	// Open installs the process-wide section validator over this test's home;
+	// a later test in this binary writes sections against its own home, so
+	// the install must not outlive the environment that made it.
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
 	db := env.SQL
 	sessions := env.Deps.SessionStore
 	runStore := env.Deps.RunRT

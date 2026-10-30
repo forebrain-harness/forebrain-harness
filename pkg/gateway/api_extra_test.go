@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"database/sql"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -196,6 +197,53 @@ func TestParseSlashCommandWebchatGoalWithoutObjectiveIsUsageHint(t *testing.T) {
 	require.True(t, res.Handled)
 }
 
+// seedConfigRoot stores every runtime section of a configuration the way the
+// write paths store them now (plan 188): one fb_config row per section. The
+// rows are planted directly, so a fixture may seed a shape the validator
+// would refuse, exactly like a row an earlier state of the install left.
+func seedConfigRoot(t *testing.T, db *sql.DB, root appcfg.Root) {
+	t.Helper()
+	for _, name := range process.RootConfigSections() {
+		raw, err := process.MarshalRootSection(root, name)
+		require.NoError(t, err)
+		if raw == nil {
+			continue
+		}
+		_, err = db.Exec(`INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
+ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`, name, string(raw))
+		require.NoError(t, err)
+	}
+}
+
+// seedConfigDocument seeds a file-era YAML document's runtime sections into
+// the database — the seeding a forebrain.yaml write did before the write side
+// moved to fb_config.
+func seedConfigDocument(t *testing.T, db *sql.DB, doc string) {
+	t.Helper()
+	root, err := appcfg.ParseRootYAML([]byte(doc))
+	require.NoError(t, err)
+	seedConfigRoot(t, db, root)
+}
+
+// configSectionRow reads one stored section's raw JSON, the assertion a file
+// read made before the write side moved to fb_config.
+func configSectionRow(t *testing.T, db *sql.DB, section string) string {
+	t.Helper()
+	var raw string
+	err := db.QueryRow(`SELECT value_json FROM fb_config WHERE section = ?`, section).Scan(&raw)
+	require.NoError(t, err)
+	return raw
+}
+
+// configSectionAbsent reports whether a section holds no row at all.
+func configSectionAbsent(t *testing.T, db *sql.DB, section string) bool {
+	t.Helper()
+	var raw string
+	err := db.QueryRow(`SELECT value_json FROM fb_config WHERE section = ?`, section).Scan(&raw)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	return true
+}
+
 // cronTestServer builds the least server the standing-work endpoints need: a
 // database for the jobs, and an active primary agent to own them.
 func cronTestServer(t *testing.T) *Server {
@@ -207,6 +255,11 @@ func cronTestServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := &appcfg.Root{}
+	// The composed read needs the startup file: gateway binds before a
+	// database may exist, so every home has one.
+	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte("gateway: {}\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	// Scheduled work belongs to a project now, so the fixture has one.
 	root := filepath.Join(home, "project")
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -218,7 +271,7 @@ func cronTestServer(t *testing.T) *Server {
 	return &Server{
 		Home:  home,
 		RunRT: &state.RunStore{DB: db},
-		Env:   &process.Environment{Root: home, SQL: db, Deps: run.Deps{AppCfg: cfg}},
+		Env:   &process.Environment{Root: home, ConfigPath: filepath.Join(home, "forebrain.yaml"), SQL: db, Deps: run.Deps{Home: home, AppCfg: cfg}},
 	}
 }
 
@@ -441,10 +494,7 @@ func TestHeartbeatRoundTripsThroughTheAPI(t *testing.T) {
 func TestConfigEndpointRedactsSecretsAndRefusesInvalidText(t *testing.T) {
 	s := cronTestServer(t)
 	path := filepath.Join(s.Home, "forebrain.yaml")
-	if err := os.WriteFile(path, []byte("agents:\n  definitions:\n    main:\n      primary: true\n      channels:\n        telegram:\n          enabled: true\n          bot_token: super-secret\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	s.Env.ConfigPath = path
+	seedConfigDocument(t, s.Env.SQL, "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n      - provider: deepseek\n        model: deepseek-v4\n        api_key: super-secret\n        base_url: https://api.deepseek.com\n")
 
 	rec := cronRequest(t, s, http.MethodGet, "/api/config", nil, s.handleConfigFile)
 	if rec.Code != http.StatusOK {
@@ -457,19 +507,32 @@ func TestConfigEndpointRedactsSecretsAndRefusesInvalidText(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if strings.Contains(got.YAML, "super-secret") {
-		t.Fatal("the editor must not be handed the secret it is not allowed to read")
+	// The editor is handed the composed document with its credentials in
+	// plaintext (owner ruling 2026-10-30, plan 188 W3): what it shows is what
+	// the runtime composes, and what it sends back is what lands.
+	if !strings.Contains(got.YAML, "super-secret") {
+		t.Fatalf("the editor must be handed the stored document:\n%s", got.YAML)
 	}
-	if !strings.Contains(got.YAML, appcfg.RedactedSecretPlaceholder) {
-		t.Fatalf("a set secret must still be visible as set:\n%s", got.YAML)
+	if !strings.Contains(got.YAML, "agents:") {
+		t.Fatalf("the stored runtime sections belong to the document:\n%s", got.YAML)
+	}
+	if strings.Contains(got.YAML, "credentials:") {
+		t.Fatalf("the credentials pointer never appears:\n%s", got.YAML)
 	}
 	if got.Path != path {
 		t.Fatalf("path = %q", got.Path)
 	}
 
-	bad := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{"yaml": "agents: [unclosed"}, s.handleConfigFile)
+	// An unparsable body changes nothing.
+	if !configSectionAbsent(t, s.Env.SQL, "hooks") {
+		t.Fatal("precondition: hooks holds no row")
+	}
+	bad := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{"yaml": "hooks: [unclosed"}, s.handleConfigFile)
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("unparsable config = %d %s", bad.Code, bad.Body.String())
+	}
+	if !configSectionAbsent(t, s.Env.SQL, "hooks") {
+		t.Fatal("a refused editor write must store nothing")
 	}
 }
 
@@ -521,23 +584,19 @@ func TestHooksEndpointPublishesTheKnownEventsAndTypes(t *testing.T) {
 // is what a write reads first.
 func TestHooksEndpointPagesTheFlattenedTable(t *testing.T) {
 	s := cronTestServer(t)
-	s.Env.ConfigPath = filepath.Join(s.Home, "forebrain.yaml")
-	yaml := "hooks:\n" +
-		"  PostToolUse:\n" +
-		"    - matcher: Bash\n" +
-		"      hooks:\n" +
-		"        - type: command\n" +
-		"          command: echo first\n" +
-		"    - hooks:\n" +
-		"        - type: command\n" +
-		"          command: echo second\n" +
-		"  Stop:\n" +
-		"    - hooks:\n" +
-		"        - type: prompt\n" +
-		"          prompt: summarise what happened\n"
-	if err := os.WriteFile(s.Env.ConfigPath, []byte(yaml), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	seedConfigDocument(t, s.Env.SQL, "hooks:\n"+
+		"  PostToolUse:\n"+
+		"    - matcher: Bash\n"+
+		"      hooks:\n"+
+		"        - type: command\n"+
+		"          command: echo first\n"+
+		"    - hooks:\n"+
+		"        - type: command\n"+
+		"          command: echo second\n"+
+		"  Stop:\n"+
+		"    - hooks:\n"+
+		"        - type: prompt\n"+
+		"          prompt: summarise what happened\n")
 
 	type hookAnswer struct {
 		Rows       []hookRow `json:"rows"`
@@ -3293,9 +3352,13 @@ func rulesServer(t *testing.T) (*Server, string, string) {
 	require.NoError(t, os.MkdirAll(workspace, 0o755))
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	require.NoError(t, os.WriteFile(cfgPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
 	cfg := &appcfg.Root{}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {Primary: true}}
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}}
+	seedConfigRoot(t, db, *cfg)
+	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
 	env.ConfigPath = cfgPath
 	return &Server{Home: home, Env: env}, home, workspace
 }
@@ -3474,7 +3537,7 @@ func TestApprovalDefaultGetPut(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"current":"full-access"`)
 
-	persisted, err := s.persistedConfig()
+	persisted, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, appcfg.ApprovalPolicyNever, persisted.ApprovalPolicy.Mode)
 	require.Equal(t, appcfg.SandboxModeDangerFullAccess, persisted.SandboxMode)
@@ -3692,39 +3755,37 @@ func providersPut(t *testing.T, s *Server, body string) *httptest.ResponseRecord
 	return rr
 }
 
-func TestProvidersDTORoundTripStoresKeyAsEnvReference(t *testing.T) {
+// The plaintext key a page submits is stored in the agents section as sent,
+// the file and the .env are not touched, and the GET answers the same
+// plaintext back (owner ruling 2026-10-30, plan 188 W4).
+func TestProvidersDTORoundTripStoresKeyInPlaintext(t *testing.T) {
 	s, home := providersDTOServer(t)
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	before := mustRead(t, cfgPath)
 
 	created := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4","deepseek-v4-flash"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-live-plain-9876"}
+		{"provider":"deepseek","models":["deepseek-v4","deepseek-v4-flash"],"base_url":"https://api.deepseek.com","api_key":"sk-live-plain-9876"}
 	]}`)
 	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+	require.Contains(t, created.Body.String(), `"applies":"next_turn"`, created.Body.String())
 
-	// The yaml keeps only the reference; the plaintext lives in .env with
-	// owner-only permissions.
-	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	require.Contains(t, string(cfgRaw), "${DEEPSEEK_API_KEY}")
-	require.NotContains(t, string(cfgRaw), "sk-live-plain-9876")
-	envRaw, err := os.ReadFile(filepath.Join(home, ".env"))
-	require.NoError(t, err)
-	require.Contains(t, string(envRaw), "DEEPSEEK_API_KEY=")
-	require.Contains(t, string(envRaw), "sk-live-plain-9876")
-	info, err := os.Stat(filepath.Join(home, ".env"))
-	require.NoError(t, err)
-	require.Zero(t, info.Mode().Perm()&0o077, ".env must be 0600: %v", info.Mode())
+	// The plaintext key is in the stored agents section, verbatim.
+	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "sk-live-plain-9876")
+	// Neither forebrain.yaml nor .env was written: the key belongs in the
+	// section, not in the user's files.
+	require.Equal(t, before, mustRead(t, cfgPath))
+	if _, err := os.Stat(filepath.Join(home, ".env")); !os.IsNotExist(err) {
+		t.Fatal("a provider key write must not create .env")
+	}
 
-	// The GET answers set+hint and no key material of any kind.
 	rows := providersGet(t, s)
 	require.Len(t, rows, 1)
 	require.Equal(t, "deepseek", rows[0]["provider"])
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, "9876", rows[0]["api_key_hint"])
+	require.Equal(t, "sk-live-plain-9876", rows[0]["api_key"], "the GET answers the stored plaintext")
+	require.NotContains(t, rows[0], "api_key_set")
+	require.NotContains(t, rows[0], "api_key_hint")
 	models := rows[0]["models"].([]any)
 	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, models)
-	raw, _ := json.Marshal(rows)
-	require.NotContains(t, string(raw), "sk-live-plain-9876")
-	require.NotContains(t, string(raw), "[REDACTED]")
 }
 
 func TestProviderKeyBackfillFollowsTheEntryNotTheProvider(t *testing.T) {
@@ -3748,8 +3809,8 @@ func TestProviderKeyBackfillFollowsTheEntryNotTheProvider(t *testing.T) {
 	require.Len(t, rows, 2)
 	require.Equal(t, "https://a.example", rows[0]["base_url"])
 	require.Equal(t, "https://b.example", rows[1]["base_url"])
-	require.Equal(t, "1111", rows[0]["api_key_hint"], "a.example 必须还是 A 的 key")
-	require.Equal(t, "2222", rows[1]["api_key_hint"], "b.example 不许继承 A 的 key")
+	require.Equal(t, "${ZHIPUAI_A_KEY}", rows[0]["api_key"], "a.example 必须还是 A 的 key")
+	require.Equal(t, "${ZHIPUAI_B_KEY}", rows[1]["api_key"], "b.example 不许继承 A 的 key")
 }
 
 func TestProviderKeyBackfillNeverCrossesEndpoints(t *testing.T) {
@@ -3777,7 +3838,7 @@ func TestProviderKeyBackfillNeverCrossesEndpoints(t *testing.T) {
 func TestProvidersDTOParamsRoundTripKeepsProviderFieldNames(t *testing.T) {
 	s, _ := providersDTOServer(t)
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-params-1111","params":{"max_tokens":512,"reasoning_effort":"high"}}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key":"sk-params-1111","params":{"max_tokens":512,"reasoning_effort":"high"}}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
@@ -3796,7 +3857,7 @@ func TestProvidersDTOParamsRoundTripKeepsProviderFieldNames(t *testing.T) {
 // saved into a config the gateway could not start with again.
 func TestProvidersDTORefusesAnIncompletePrimary(t *testing.T) {
 	s, home := providersDTOServer(t)
-	rr := providersPut(t, s, `{"providers":[{"provider":"moonshotai","models":[],"api_key_plain":"sk-e2e-7788"}]}`)
+	rr := providersPut(t, s, `{"providers":[{"provider":"moonshotai","models":[],"api_key":"sk-e2e-7788"}]}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), "model")
 	require.Contains(t, rr.Body.String(), "base_url")
@@ -3806,8 +3867,8 @@ func TestProvidersDTORefusesAnIncompletePrimary(t *testing.T) {
 
 	// An incomplete row is fine as a fallback behind a complete primary.
 	rr = providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-primary-1234"},
-		{"provider":"moonshotai","models":[],"api_key_plain":"sk-e2e-7788"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key":"sk-primary-1234"},
+		{"provider":"moonshotai","models":[],"api_key":"sk-e2e-7788"}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 }
@@ -3818,8 +3879,8 @@ func TestProvidersDTORefusesAnIncompletePrimary(t *testing.T) {
 func TestProvidersDTORefusesAProviderTheEngineCannotBuild(t *testing.T) {
 	s, home := providersDTOServer(t)
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-primary-1234"},
-		{"provider":"made-up-svc","base_url":"https://llm.example.test/v1","models":["m"],"api_key_plain":"sk-x-9999"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key":"sk-primary-1234"},
+		{"provider":"made-up-svc","base_url":"https://llm.example.test/v1","models":["m"],"api_key":"sk-x-9999"}
 	]}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), "unsupported provider: made-up-svc")
@@ -3848,12 +3909,13 @@ func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
         model: gpt-test
 `
 	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+	seedConfigDocument(t, s.Env.SQL, seed)
 
 	rows := providersGet(t, s)
 	require.Len(t, rows, 2)
 	require.Equal(t, "deepseek", rows[0]["provider"])
 	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, rows[0]["models"].([]any))
-	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "${DEEPSEEK_API_KEY}", rows[0]["api_key"])
 	require.Equal(t, "openai", rows[1]["provider"])
 
 	// An interleaved order is a fallback order, not one service: it stays
@@ -3871,34 +3933,32 @@ func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
         model: deepseek-v4-flash
 `
 	require.NoError(t, os.WriteFile(cfgPath, []byte(interleaved), 0o600))
+	seedConfigDocument(t, s.Env.SQL, interleaved)
 	require.Len(t, providersGet(t, s), 3)
 }
 
 func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
-	s, home := providersDTOServer(t)
+	s, _ := providersDTOServer(t)
 	created := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-live-keep-4321"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key":"sk-live-keep-4321"}
 	]}`)
 	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
 
-	envBefore, err := os.ReadFile(filepath.Join(home, ".env"))
-	require.NoError(t, err)
+	before := configSectionRow(t, s.Env.SQL, "agents")
 
 	// A PUT that touches only the model list carries no key fields: the
-	// stored key and the .env entry are exactly what they were.
+	// stored key is exactly what it was.
 	updated := providersPut(t, s, `{"providers":[
 		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-r2"]}
 	]}`)
 	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
 	rows := providersGet(t, s)
 	require.Len(t, rows, 1)
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, "4321", rows[0]["api_key_hint"])
+	require.Equal(t, "sk-live-keep-4321", rows[0]["api_key"])
 	require.Equal(t, []any{"deepseek-v4", "deepseek-r2"}, rows[0]["models"].([]any))
 
-	envAfter, err := os.ReadFile(filepath.Join(home, ".env"))
-	require.NoError(t, err)
-	require.Equal(t, string(envBefore), string(envAfter))
+	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "sk-live-keep-4321")
+	_ = before
 }
 
 // A key-mode fallback cannot lose its key either. The row would save and then
@@ -3922,8 +3982,8 @@ func TestProvidersDTOKeyClearOnAFallbackIsRefused(t *testing.T) {
         base_url: https://api.arcee.ai/v1
 `
 	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
-	before, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
+	seedConfigDocument(t, s.Env.SQL, seed)
+	before := mustRead(t, cfgPath)
 
 	cleared := providersPut(t, s, `{"providers":[
 		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"]},
@@ -3932,15 +3992,13 @@ func TestProvidersDTOKeyClearOnAFallbackIsRefused(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, cleared.Code, cleared.Body.String())
 	require.Contains(t, cleared.Body.String(), "arcee-ai needs api_key")
 
-	after, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	require.Equal(t, string(before), string(after), "a refused clear writes nothing")
+	require.Equal(t, before, mustRead(t, cfgPath), "a refused clear writes nothing")
 
 	// The untouched table still reads back with both keys.
 	rows := providersGet(t, s)
 	require.Len(t, rows, 2)
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, true, rows[1]["api_key_set"])
+	require.Equal(t, "${DEEPSEEK_API_KEY}", rows[0]["api_key"])
+	require.Equal(t, "${ARCEE_AI_API_KEY}", rows[1]["api_key"])
 }
 
 // The login-backed services are the one shape an empty key is correct for:
@@ -3962,6 +4020,7 @@ func TestProvidersDTOLoginBackedFallbackMayStayKeyless(t *testing.T) {
         base_url: https://chatgpt.com/backend-api/codex
 `
 	require.NoError(t, os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(seed), 0o600))
+	seedConfigDocument(t, s.Env.SQL, seed)
 
 	rr := providersPut(t, s, `{"providers":[
 		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"]},
@@ -3969,14 +4028,14 @@ func TestProvidersDTOLoginBackedFallbackMayStayKeyless(t *testing.T) {
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	saved, err := appcfg.LoadPersisted(filepath.Join(home, "forebrain.yaml"))
+	saved, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
 	entries := saved.Agents.Definitions["main"].LLMProviders
 	require.Len(t, entries, 2)
 	require.Empty(t, entries[1].APIKey, "a login-backed row carries no key")
 	rows := providersGet(t, s)
 	require.Len(t, rows, 2)
-	require.Equal(t, false, rows[1]["api_key_set"])
+	require.Empty(t, rows[1]["api_key"])
 }
 
 // A key-mode provider cannot be left keyless when it is the primary: the
@@ -3997,8 +4056,8 @@ func TestProvidersDTOKeyClearOnThePrimaryIsRefused(t *testing.T) {
         base_url: https://api.deepseek.com
 `
 	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
-	before, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
+	seedConfigDocument(t, s.Env.SQL, seed)
+	before := mustRead(t, cfgPath)
 
 	rr := providersPut(t, s, `{"providers":[
 		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"],"api_key":""}
@@ -4006,70 +4065,61 @@ func TestProvidersDTOKeyClearOnThePrimaryIsRefused(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "needs api_key")
 
-	after, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	require.Equal(t, string(before), string(after), "a refused clear writes nothing")
+	require.Equal(t, before, mustRead(t, cfgPath), "a refused clear writes nothing")
+	require.NotContains(t, configSectionRow(t, s.Env.SQL, "agents"), `"api_key":""`)
 }
 
-// A typed secret is the most explicit statement a client can make, so it wins
-// over an empty api_key travelling in the same row: the key is stored in .env
-// and the yaml keeps the reference. Nothing is cleared.
+// The value a client states is stored as sent (plan 188 W4): a plaintext key
+// lands in the agents section, and neither file nor .env is involved.
 func TestProvidersDTOTypedSecretWinsOverAnEmptyReference(t *testing.T) {
 	s, home := providersDTOServer(t)
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"","api_key_plain":"sk-typed-1234"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"","api_key":"sk-typed-1234"}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	require.Contains(t, string(cfgRaw), "${DEEPSEEK_API_KEY}")
-	require.NotContains(t, string(cfgRaw), "sk-typed-1234")
-	envRaw, err := os.ReadFile(filepath.Join(home, ".env"))
-	require.NoError(t, err)
-	require.Contains(t, string(envRaw), "sk-typed-1234")
+	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "sk-typed-1234")
+	require.NoFileExists(t, filepath.Join(home, ".env"))
 
 	rows := providersGet(t, s)
 	require.Len(t, rows, 1)
-	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "sk-typed-1234", rows[0]["api_key"])
 }
 
 func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
-	s, home := providersDTOServer(t)
+	s, _ := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"sk-old-aaaa"}]}`).Code)
+		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"sk-old-aaaa"}]}`).Code)
 
 	rotated := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"sk-new-bbbb"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"sk-new-bbbb"}
 	]}`)
 	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
-	envRaw, err := os.ReadFile(filepath.Join(home, ".env"))
-	require.NoError(t, err)
-	require.Contains(t, string(envRaw), "sk-new-bbbb")
-	require.NotContains(t, string(envRaw), "sk-old-aaaa")
+	row := configSectionRow(t, s.Env.SQL, "agents")
+	require.Contains(t, row, "sk-new-bbbb")
+	require.NotContains(t, row, "sk-old-aaaa")
 	rows := providersGet(t, s)
-	require.Equal(t, "bbbb", rows[0]["api_key_hint"])
+	require.Equal(t, "sk-new-bbbb", rows[0]["api_key"])
 }
 
-// A short key hides entirely: the hint must not be the whole key.
+// A short key is stored and answered whole: plaintext in, plaintext out, at
+// any length (plan 188 W4).
 func TestProvidersDTOShortKeyHintIsFullyMasked(t *testing.T) {
 	s, _ := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"ab"}]}`).Code)
+		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"ab"}]}`).Code)
 	rows := providersGet(t, s)
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, "••••", rows[0]["api_key_hint"])
+	require.Equal(t, "ab", rows[0]["api_key"])
 }
 
 // An explicit api_key value (a pasted ${ENV} reference) passes through as-is.
 func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
-	s, home := providersDTOServer(t)
+	s, _ := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
 		`{"providers":[{"provider":"openai","base_url":"https://llm.example.test/v1","models":["m"],"api_key":"${MY_CUSTOM_KEY}"}]}`).Code)
-	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	require.Contains(t, string(cfgRaw), "${MY_CUSTOM_KEY}")
-	require.NoFileExists(t, filepath.Join(home, ".env"))
+	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "${MY_CUSTOM_KEY}")
+	rows := providersGet(t, s)
+	require.Equal(t, "${MY_CUSTOM_KEY}", rows[0]["api_key"])
 }
 
 // The settings page never sees a stored key — it shows a hint and sends
@@ -4095,6 +4145,7 @@ func TestProvidersDTOHealsALoginRowCarryingAnotherProvidersKey(t *testing.T) {
         base_url: https://opencode.ai/inference/go
 `
 	require.NoError(t, os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(seed), 0o600))
+	seedConfigDocument(t, s.Env.SQL, seed)
 
 	// What the table sends for rows whose key the user did not touch.
 	rr := providersPut(t, s, `{"providers":[
@@ -4103,9 +4154,7 @@ func TestProvidersDTOHealsALoginRowCarryingAnotherProvidersKey(t *testing.T) {
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	saved, err := appcfg.LoadPersisted(filepath.Join(home, "forebrain.yaml"))
+	saved, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
 	entries := saved.Agents.Definitions["main"].LLMProviders
 	require.Len(t, entries, 2)
@@ -4113,27 +4162,25 @@ func TestProvidersDTOHealsALoginRowCarryingAnotherProvidersKey(t *testing.T) {
 	require.Equal(t, "${DEEPSEEK_API_KEY}", entries[0].APIKey, "the owner keeps its own key")
 	require.Equal(t, "opencode-go", entries[1].Provider)
 	require.Empty(t, entries[1].APIKey, "the login row must not keep the lent key")
-	require.Contains(t, string(cfgRaw), "${DEEPSEEK_API_KEY}")
-	// The row still reports a key on disk? It must not: the hint follows the
-	// stored value, so a healed row reads as keyless to the next page load.
+	// The healed row reads as keyless to the next page load.
 	rows := providersGet(t, s)
 	require.Len(t, rows, 2)
-	require.Equal(t, false, rows[1]["api_key_set"])
+	require.Empty(t, rows[1]["api_key"])
 }
 
 // The expanded per-model entries the DTO writes are what the engine itself
 // expands — no yaml model list, so nothing is lost on the next save.
 func TestProvidersDTOPersistedShapeIsEngineExpanded(t *testing.T) {
-	s, home := providersDTOServer(t)
+	s, _ := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["a","b"],"api_key_plain":"sk-x-1234"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["a","b"],"api_key":"sk-x-1234"}
 	]}`).Code)
-	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	body := string(cfgRaw)
-	require.Contains(t, body, "model: a")
-	require.Contains(t, body, "model: b")
-	require.NotContains(t, body, "- a")
+	// One stored entry per model — the engine's own expanded shape — with no
+	// yaml model list anywhere in the section.
+	row := configSectionRow(t, s.Env.SQL, "agents")
+	require.Contains(t, row, `"model":"a"`)
+	require.Contains(t, row, `"model":"b"`)
+	require.Contains(t, row, `"api_key":"sk-x-1234"`)
 }
 
 // workspaceTreeServer builds a Server whose file view is one conversation's,
@@ -5169,15 +5216,20 @@ func TestCronSettingsRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put 7 = %d %s", rec.Code, rec.Body.String())
 	}
-	raw, err := os.ReadFile(path)
+	if row := configSectionRow(t, s.Env.SQL, "cron"); !strings.Contains(row, `"retention_days":7`) {
+		t.Fatalf("stored cron section = %s, want retention 7", row)
+	}
+	// The write lands on the next turn (plan 188): the stored configuration
+	// reads 7 and the running process keeps what it had.
+	stored, err := s.persistedConfig(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "cron:") || !strings.Contains(string(raw), "retention_days: 7") {
-		t.Fatalf("saved config lacks the cron section:\n%s", raw)
+	if eff := stored.CronRetentionDays(); eff != 7 {
+		t.Fatalf("stored retention after the write = %d, want 7", eff)
 	}
-	if eff := s.liveCfg().CronRetentionDays(); eff != 7 {
-		t.Fatalf("live retention after the write = %d, want 7", eff)
+	if eff := s.liveCfg().CronRetentionDays(); eff == 7 {
+		t.Fatal("the live configuration must not adopt a section write before its next turn")
 	}
 	rec = cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -5191,16 +5243,16 @@ func TestCronSettingsRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("put 0 = %d %s, want 400", rec.Code, rec.Body.String())
 	}
-	if raw, _ = os.ReadFile(path); !strings.Contains(string(raw), "retention_days: 7") {
-		t.Fatalf("a rejected write changed the file:\n%s", raw)
+	if row := configSectionRow(t, s.Env.SQL, "cron"); !strings.Contains(row, `"retention_days":7`) {
+		t.Fatalf("a rejected write changed the stored section: %s", row)
 	}
 
 	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": nil}, s.handleCronSettings)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put null = %d %s", rec.Code, rec.Body.String())
 	}
-	if raw, _ = os.ReadFile(path); strings.Contains(string(raw), "retention_days") {
-		t.Fatalf("null did not unset the key:\n%s", raw)
+	if !configSectionAbsent(t, s.Env.SQL, "cron") {
+		t.Fatal("null did not unset the key")
 	}
 	rec = cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -5226,16 +5278,16 @@ func TestCronSettingsPutBoundsRequestBody(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "too large") {
 		t.Fatalf("refusal should name the body limit: %s", rec.Body.String())
 	}
-	if raw, _ := os.ReadFile(path); strings.Contains(string(raw), "retention_days") {
-		t.Fatalf("a refused write changed the file:\n%s", raw)
+	if !configSectionAbsent(t, s.Env.SQL, "cron") {
+		t.Fatalf("a refused write changed the stored section: %s", configSectionRow(t, s.Env.SQL, "cron"))
 	}
 
 	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": 7}, s.handleCronSettings)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("small body = %d %s", rec.Code, rec.Body.String())
 	}
-	if raw, err := os.ReadFile(path); err != nil || !strings.Contains(string(raw), "retention_days: 7") {
-		t.Fatalf("the small write did not land:\n%s (%v)", raw, err)
+	if row := configSectionRow(t, s.Env.SQL, "cron"); !strings.Contains(row, `"retention_days":7`) {
+		t.Fatalf("the small write did not land: %s", row)
 	}
 }
 
@@ -5253,9 +5305,8 @@ func TestCronSettingsSharedValidationWithTheYAMLEditor(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("yaml editor with retention 0 = %d %s, want 400", rec.Code, rec.Body.String())
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		raw, _ := os.ReadFile(path)
-		t.Fatalf("a rejected editor write reached the file:\n%s", raw)
+	if !configSectionAbsent(t, s.Env.SQL, "cron") {
+		t.Fatalf("a rejected editor write reached the store: %s", configSectionRow(t, s.Env.SQL, "cron"))
 	}
 }
 
@@ -6597,6 +6648,9 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	// The runtime sections live in the database (plan 188); the seeded file
+	// stays as the untouched-file evidence the write tests compare against.
+	seedConfigRoot(t, db, cfg)
 	ws := filepath.Join(home, "workspace")
 	runner := &run.Runner{Deps: &run.Deps{
 		Home:          home,
@@ -6610,6 +6664,7 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 		Root:       home,
 		ConfigPath: cfgPath,
 		RawConfig:  cfg,
+		SQL:        db,
 		Deps:       run.Deps{Home: home, AgentName: agentName, AppCfg: &cfg, WorkspaceRoot: ws},
 		Runner:     runner,
 	}
@@ -6633,11 +6688,13 @@ func sharedMCPFixture(root *appcfg.Root) {
 	}}
 }
 
+// config reads the configuration as the surfaces now do: the composed
+// persisted source, the startup file plus the stored sections (plan 188).
 func (f *mcpWriteFixture) config(t *testing.T) appcfg.Root {
 	t.Helper()
-	cfg, err := appcfg.LoadPersisted(f.cfgPath)
+	cfg, err := f.server.Env.ComposedPersistedConfig(context.Background())
 	if err != nil {
-		t.Fatalf("read back %s: %v", f.cfgPath, err)
+		t.Fatalf("read back the stored configuration: %v", err)
 	}
 	return cfg
 }
@@ -6886,7 +6943,12 @@ func TestMCPServerWriteKeepsUntouchedFieldsAndTargets(t *testing.T) {
 // sending the placeholder back keeps the stored value, and a plaintext secret
 // written by hand is refused rather than saved into a file the loader would then
 // refuse to read.
-func TestMCPServerWriteNeverReturnsAStoredSecret(t *testing.T) {
+// TestMCPServerWriteReturnsStoredCredentialsInPlaintext pins the owner's
+// 2026-10-30 ruling (plan 188 W8): a stored literal credential travels back
+// to the surface in plaintext, and a plaintext value a surface sends is
+// stored in the section as sent. The placeholder keep semantics and the
+// empty-value removal stay as they were.
+func TestMCPServerWriteReturnsStoredCredentialsInPlaintext(t *testing.T) {
 	entry := appcfg.MCPServerConfig{
 		Name:      "secretive",
 		Transport: "streamable_http",
@@ -6900,8 +6962,8 @@ func TestMCPServerWriteNeverReturnsAStoredSecret(t *testing.T) {
 	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
 		root.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{entry}
 	}, "main", []appcfg.MCPServerConfig{entry})
-	// A live token in the credential store must not travel with the
-	// configuration either: the list describes what is configured.
+	// A live token in the credential store travels with the configuration
+	// too: what the surface shows is what the runtime holds.
 	if err := mcp.SaveOAuthOverlayMerge(f.home, "", "secretive", appcfg.MCPOAuthConfig{AccessToken: "real-access-token"}); err != nil {
 		t.Fatal(err)
 	}
@@ -6910,54 +6972,46 @@ func TestMCPServerWriteNeverReturnsAStoredSecret(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "eyJhbGciOiJSUzI1NiJ9") {
-		t.Fatalf("the header literal must not come back: %s", rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "real-access-token") {
-		t.Fatalf("a stored token must not come back: %s", rec.Body.String())
-	}
 	row := mcpServerRow(t, decodeMCPServersBody(t, rec), "secretive")
 	headers := row["headers"].(map[string]any)
-	if headers["Authorization"] != appcfg.RedactedSecretPlaceholder {
-		t.Fatalf("headers = %+v", headers)
+	if headers["Authorization"] != "Bearer eyJhbGciOiJSUzI1NiJ9" {
+		t.Fatalf("headers = %+v, want the stored literal in plaintext", headers)
 	}
 	if headers["x-api-key"] != "" {
-		t.Fatalf("a reference the load resolved (its env is unset) reads empty, not a secret: %+v", headers)
+		t.Fatalf("a reference the load resolved (its env is unset) reads empty: %+v", headers)
 	}
 	oauth := row["oauth"].(map[string]any)
 	if oauth["client_secret"] != "" {
-		t.Fatalf("a secret reference the load resolved (its env unset) reads empty, not a secret: %+v", oauth)
-	}
-	if oauth["access_token"] != "" {
-		t.Fatalf("the config has no access token to show: %+v", oauth)
+		t.Fatalf("a secret reference the load resolved (its env is unset) reads empty: %+v", oauth)
 	}
 	if row["oauth_overlay"] != true {
 		t.Fatalf("the list must say a stored credential exists: %+v", row)
 	}
 
-	// Sending the placeholder back leaves the stored literal alone.
+	// A plaintext value the surface sends is stored as sent, in the section's
+	// own JSON.
+	before := mustRead(t, f.cfgPath)
 	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/secretive", map[string]any{
-		"headers": map[string]string{"Authorization": appcfg.RedactedSecretPlaceholder},
-		"oauth":   map[string]any{"client_secret": appcfg.RedactedSecretPlaceholder},
+		"headers": map[string]string{"x-api-key": "sk-live-plaintext"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
 	}
 	saved := findServer(t, f.shared(t), "secretive")
-	if saved.Headers["Authorization"] != "Bearer eyJhbGciOiJSUzI1NiJ9" {
-		t.Fatalf("headers = %+v", saved.Headers)
+	if saved.Headers["x-api-key"] != "sk-live-plaintext" {
+		t.Fatalf("headers = %+v, want the plaintext value stored", saved.Headers)
 	}
-	if saved.OAuth.ClientSecret != "${DOCS_OAUTH_SECRET}" {
-		t.Fatalf("oauth = %+v", saved.OAuth)
+	if !strings.Contains(configSectionRow(t, f.server.Env.SQL, "agents"), "sk-live-plaintext") {
+		t.Fatal("the stored agents section must carry the plaintext credential")
 	}
-	if saved.Headers["x-api-key"] != "${DOCS_API_KEY}" {
-		t.Fatalf("a header the update did not mention must survive: %+v", saved.Headers)
+	if mustRead(t, f.cfgPath) != before {
+		t.Fatal("the configuration file must not be touched by a section write")
 	}
 
-	// An empty value is how the form removes one key, and it removes only that
-	// one.
+	// The placeholder still means "leave what is stored" for a sender that
+	// uses it, and an empty value removes exactly the key it names.
 	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/secretive", map[string]any{
-		"headers": map[string]string{"x-api-key": ""},
+		"headers": map[string]string{"x-api-key": "", "Authorization": appcfg.RedactedSecretPlaceholder},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
@@ -6967,23 +7021,10 @@ func TestMCPServerWriteNeverReturnsAStoredSecret(t *testing.T) {
 		t.Fatalf("an empty value must remove the key: %+v", saved.Headers)
 	}
 	if saved.Headers["Authorization"] != "Bearer eyJhbGciOiJSUzI1NiJ9" {
-		t.Fatalf("removing one key must not touch the others: %+v", saved.Headers)
+		t.Fatalf("the placeholder must keep the stored literal: %+v", saved.Headers)
 	}
-
-	// A secret-like key written as a literal is refused: the loader would not
-	// read the file back.
-	before := mustRead(t, f.cfgPath)
-	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/secretive", map[string]any{
-		"headers": map[string]string{"x-api-key": "sk-live-plaintext"},
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d %s, want 400", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "plaintext secret") {
-		t.Fatalf("body = %q", rec.Body.String())
-	}
-	if mustRead(t, f.cfgPath) != before {
-		t.Fatal("a refused write must change nothing")
+	if saved.OAuth.ClientSecret != "${DOCS_OAUTH_SECRET}" {
+		t.Fatalf("oauth = %+v", saved.OAuth)
 	}
 }
 
@@ -8531,32 +8572,33 @@ func TestCronJobEditWithoutDeliverKeepsTheJobsTarget(t *testing.T) {
 	require.Equal(t, "", clearedJob.Deliver)
 }
 
-// TestWithConfigWriteSerialisesWriters pins the guarantee the config write
-// paths lean on: only one read-modify-write of forebrain.yaml runs at a time,
-// so a save that started from a stale file cannot overwrite another's change.
-func TestWithConfigWriteSerialisesWriters(t *testing.T) {
-	s := &Server{}
+// TestWithConfigSectionSerialisesWriters pins the guarantee the config write
+// paths lean on (plan 188 W2): a section's read-modify-write runs inside the
+// store's BEGIN IMMEDIATE transaction, so writers serialize and a save that
+// started from a stale section cannot overwrite another's change — eight
+// concurrent increments of one stored field land as eight.
+func TestWithConfigSectionSerialisesWriters(t *testing.T) {
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Home: home, Env: &process.Environment{Root: home, ConfigPath: filepath.Join(home, "forebrain.yaml"), SQL: db, Deps: run.Deps{Home: home, AppCfg: &appcfg.Root{}}}}
 
-	var mu sync.Mutex
-	inside, peak, ran := 0, 0, 0
-	errs := make([]error, 8)
+	const writers = 8
+	errs := make([]error, writers)
 	var wg sync.WaitGroup
 	for i := range errs {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = s.withConfigWrite(func() error {
-				mu.Lock()
-				inside++
-				ran++
-				if inside > peak {
-					peak = inside
-				}
-				mu.Unlock()
-				time.Sleep(5 * time.Millisecond)
-				mu.Lock()
-				inside--
-				mu.Unlock()
+			errs[i] = s.withConfigSection(context.Background(), "compact", func(cfg *appcfg.Root) error {
+				limit := cfg.Compact.ModelAutoCompactTokenLimit + 1
+				cfg.Compact.ModelAutoCompactTokenLimit = limit
 				return nil
 			})
 		}(i)
@@ -8566,9 +8608,10 @@ func TestWithConfigWriteSerialisesWriters(t *testing.T) {
 	for i, err := range errs {
 		require.NoError(t, err, "writer %d", i)
 	}
-	require.Equal(t, 1, peak, "writers must never overlap")
-	require.Equal(t, 8, ran, "every writer must have run")
-	require.Equal(t, 0, inside)
+	cfg, err := s.persistedConfig(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, writers, cfg.Compact.ModelAutoCompactTokenLimit,
+		"every writer's increment must have landed")
 }
 
 // providersGetPaged exercises the paged GET branch, which must carry the same
@@ -8599,9 +8642,12 @@ func providersGetDefaultModel(t *testing.T, s *Server) string {
 	return out.DefaultModel
 }
 
-// seedProvidersConfig writes main's llm_providers (one entry per line,
-// provider/model pairs) straight to the yaml, in the exact order given.
-func seedProvidersConfig(t *testing.T, home string, extraTop string, pairs ...[2]string) string {
+// seedProvidersConfig seeds main's llm_providers (one entry per line,
+// provider/model pairs) into the stored agents section, in the exact order
+// given; the file copy it also writes stays as the untouched-file evidence.
+func seedProvidersConfig(t *testing.T, s *Server, extraTop string, pairs ...[2]string) string {
+	t.Helper()
+	home := s.Home
 	t.Helper()
 	var b strings.Builder
 	b.WriteString("agents:\n  definitions:\n    main:\n      primary: true\n")
@@ -8612,6 +8658,7 @@ func seedProvidersConfig(t *testing.T, home string, extraTop string, pairs ...[2
 	}
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	require.NoError(t, os.WriteFile(cfgPath, []byte(b.String()), 0o600))
+	seedConfigDocument(t, s.Env.SQL, b.String())
 	return cfgPath
 }
 
@@ -8619,8 +8666,8 @@ func seedProvidersConfig(t *testing.T, home string, extraTop string, pairs ...[2
 // order is the base, known rows update in place, dropped rows are deleted,
 // and genuinely new rows are appended at the end.
 func TestProvidersDTOPutPreservesDiskOrder(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := seedProvidersConfig(t, home, "",
+	s, _ := providersDTOServer(t)
+	cfgPath := seedProvidersConfig(t, s, "",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 		[2]string{"moonshotai", "kimi"},
@@ -8629,21 +8676,34 @@ func TestProvidersDTOPutPreservesDiskOrder(t *testing.T) {
 	// The page reorders two rows (moonshot first), drops openai, and adds a
 	// brand-new row — as a stale snapshot written back whole would.
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"moonshotai","models":["kimi"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-keep-1111"},
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-keep-2222"},
-		{"provider":"zhipuai","models":["glm-5.3"],"base_url":"https://open.bigmodel.cn/api/paas/v4","api_key_plain":"sk-new-3333"}
+		{"provider":"moonshotai","models":["kimi"],"base_url":"https://api.deepseek.com","api_key":"sk-keep-1111"},
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-keep-2222"},
+		{"provider":"zhipuai","models":["glm-5.3"],"base_url":"https://open.bigmodel.cn/api/paas/v4","api_key":"sk-new-3333"}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	cfgRaw, err := os.ReadFile(cfgPath)
+	stored, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek", "moonshotai", "zhipuai"}, providerOrderInYAML(t, string(cfgRaw)), "disk order must be preserved: existing rows in place, new row appended at the end")
+	require.Equal(t, []string{"deepseek", "moonshotai", "zhipuai"}, providerOrder(t, stored), "stored order must be preserved: existing rows in place, new row appended at the end")
+	if _, err := os.Stat(cfgPath); err == nil {
+		if raw := mustRead(t, cfgPath); strings.Contains(raw, "zhipuai") {
+			t.Fatal("the section write must not touch the configuration file")
+		}
+	}
 }
 
-func providerOrderInYAML(t *testing.T, raw string) []string {
+// providerOrder lists the stored llm_providers' providers, in storage order.
+func providerOrder(t *testing.T, cfg appcfg.Root) []string {
 	t.Helper()
-	cfg, err := appcfg.ParseRootYAML([]byte(raw))
-	require.NoError(t, err)
+	out := []string{}
+	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
+		out = append(out, item.Provider)
+	}
+	return out
+}
+
+func providerOrderInYAML(t *testing.T, cfg appcfg.Root) []string {
+	t.Helper()
 	out := []string{}
 	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
 		out = append(out, item.Provider)
@@ -8655,8 +8715,8 @@ func providerOrderInYAML(t *testing.T, raw string) []string {
 // dangling value, refuses clearing it, and both GET branches report the
 // effective value (default_model when set, otherwise the first row).
 func TestProvidersDTODefaultModel(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := seedProvidersConfig(t, home, "",
+	s, _ := providersDTOServer(t)
+	_ = seedProvidersConfig(t, s, "",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 	)
@@ -8666,27 +8726,25 @@ func TestProvidersDTODefaultModel(t *testing.T) {
 	require.Equal(t, "deepseek/deepseek-v4", pagedDefault, "paged GET reports the same default_model")
 
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	],"default_model":"openai/gpt-test"}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	cfgRaw, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	require.Contains(t, string(cfgRaw), "default_model: openai/gpt-test")
+	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), `"default_model":"openai/gpt-test"`)
 	require.Equal(t, "openai/gpt-test", providersGetDefaultModel(t, s))
 
 	// A dangling default_model is refused, not saved.
 	rr = providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	],"default_model":"openai/gone"}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "default_model")
 
 	// Clearing is refused: switch the default, do not empty it.
 	rr = providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	],"default_model":""}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
@@ -8694,34 +8752,34 @@ func TestProvidersDTODefaultModel(t *testing.T) {
 // The row the default resolves to may not be deleted — explicitly pointed at
 // by default_model, or implicitly as the first row of an unset default.
 func TestProvidersDTORefusesDeletingTheDefaultRow(t *testing.T) {
-	s, home := providersDTOServer(t)
-	seedProvidersConfig(t, home, "      default_model: openai/gpt-test\n",
+	s, _ := providersDTOServer(t)
+	seedProvidersConfig(t, s, "      default_model: openai/gpt-test\n",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 	)
 
 	// Dropping openai while default_model points at it: refused.
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"}
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"}
 	]}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "默认模型")
 
 	// Retargeting the default in the same write that drops openai: allowed.
 	rr = providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"}
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"}
 	],"default_model":"deepseek/deepseek-v4"}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	// Implicit default: with default_model unset, the first row cannot be
 	// deleted either.
-	s2, home2 := providersDTOServer(t)
-	seedProvidersConfig(t, home2, "",
+	s2, _ := providersDTOServer(t)
+	seedProvidersConfig(t, s2, "",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 	)
 	rr = providersPut(t, s2, `{"providers":[
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	]}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "默认模型")
@@ -8729,10 +8787,8 @@ func TestProvidersDTORefusesDeletingTheDefaultRow(t *testing.T) {
 
 // providerModelOrderInYAML is the expanded provider/model order the file was
 // written in, one item per stored entry.
-func providerModelOrderInYAML(t *testing.T, raw string) []string {
+func providerModelOrderInYAML(t *testing.T, cfg appcfg.Root) []string {
 	t.Helper()
-	cfg, err := appcfg.ParseRootYAML([]byte(raw))
-	require.NoError(t, err)
 	out := []string{}
 	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
 		out = append(out, item.Provider+"/"+item.Model)
@@ -8740,10 +8796,8 @@ func providerModelOrderInYAML(t *testing.T, raw string) []string {
 	return out
 }
 
-func providerBaseURLInYAML(t *testing.T, raw, provider string) string {
+func providerBaseURLInYAML(t *testing.T, cfg appcfg.Root, provider string) string {
 	t.Helper()
-	cfg, err := appcfg.ParseRootYAML([]byte(raw))
-	require.NoError(t, err)
 	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
 		if strings.EqualFold(strings.TrimSpace(item.Provider), provider) {
 			return strings.TrimSpace(item.BaseURL)
@@ -8755,48 +8809,48 @@ func providerBaseURLInYAML(t *testing.T, raw, provider string) string {
 // An edit is an edit, not a delete plus an append: a row the page changed the
 // endpoint of keeps the position its stored entries occupy.
 func TestProvidersDTOPutEditsARowInPlace(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := seedProvidersConfig(t, home, "",
+	s, _ := providersDTOServer(t)
+	_ = seedProvidersConfig(t, s, "",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 		[2]string{"moonshotai", "kimi"},
 	)
 
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://mirror.example.com","api_key_plain":"sk-b-2222",
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://mirror.example.com","api_key":"sk-b-2222",
 		 "replaces":{"provider":"openai","base_url":"https://api.deepseek.com","models":["gpt-test"]}},
-		{"provider":"moonshotai","models":["kimi"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-c-3333"}
+		{"provider":"moonshotai","models":["kimi"],"base_url":"https://api.deepseek.com","api_key":"sk-c-3333"}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	cfgRaw, err := os.ReadFile(cfgPath)
+	stored, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek", "openai", "moonshotai"}, providerOrderInYAML(t, string(cfgRaw)),
+	require.Equal(t, []string{"deepseek", "openai", "moonshotai"}, providerOrderInYAML(t, stored),
 		"the edited row must keep its stored slot instead of being appended at the end")
-	require.Equal(t, "https://mirror.example.com", providerBaseURLInYAML(t, string(cfgRaw), "openai"))
+	require.Equal(t, "https://mirror.example.com", providerBaseURLInYAML(t, stored, "openai"))
 }
 
 // Adding a model to an existing service must leave its entries adjacent: the
 // read path folds only adjacent same-signature entries into one row.
 func TestProvidersDTOPutAddsAModelNextToItsRow(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := seedProvidersConfig(t, home, "",
+	s, _ := providersDTOServer(t)
+	_ = seedProvidersConfig(t, s, "",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 	)
 
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4","deepseek-v4-flash"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111",
+		{"provider":"deepseek","models":["deepseek-v4","deepseek-v4-flash"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111",
 		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	cfgRaw, err := os.ReadFile(cfgPath)
+	stored, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []string{"deepseek/deepseek-v4", "deepseek/deepseek-v4-flash", "openai/gpt-test"},
-		providerModelOrderInYAML(t, string(cfgRaw)),
+		providerModelOrderInYAML(t, stored),
 		"the new model must sit next to the row it belongs to")
 
 	rows := providersGet(t, s)
@@ -8806,41 +8860,41 @@ func TestProvidersDTOPutAddsAModelNextToItsRow(t *testing.T) {
 }
 
 func TestProvidersDTOPutRemovesAModelFromARow(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := seedProvidersConfig(t, home, "",
+	s, _ := providersDTOServer(t)
+	_ = seedProvidersConfig(t, s, "",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"deepseek", "deepseek-v4-flash"},
 		[2]string{"openai", "gpt-test"},
 	)
 
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111",
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111",
 		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-v4-flash"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	cfgRaw, err := os.ReadFile(cfgPath)
+	stored, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek/deepseek-v4", "openai/gpt-test"}, providerModelOrderInYAML(t, string(cfgRaw)))
-	require.NotContains(t, string(cfgRaw), "deepseek-v4-flash")
+	require.Equal(t, []string{"deepseek/deepseek-v4", "openai/gpt-test"}, providerModelOrderInYAML(t, stored))
+	require.NotContains(t, configSectionRow(t, s.Env.SQL, "agents"), "deepseek-v4-flash")
 }
 
 // Editing the row the default resolves to must not hand the default to another
 // model: with default_model unset the first stored row is the default, so the
 // edited row has to keep its slot.
 func TestProvidersDTOEditingTheImplicitDefaultKeepsItDefault(t *testing.T) {
-	s, home := providersDTOServer(t)
-	seedProvidersConfig(t, home, "",
+	s, _ := providersDTOServer(t)
+	seedProvidersConfig(t, s, "",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 	)
 	require.Equal(t, "deepseek/deepseek-v4", providersGetDefaultModel(t, s))
 
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://mirror.example.com","api_key_plain":"sk-a-1111",
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://mirror.example.com","api_key":"sk-a-1111",
 		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Equal(t, "deepseek/deepseek-v4", providersGetDefaultModel(t, s),
@@ -8856,61 +8910,59 @@ func TestProvidersDTOEditingTheImplicitDefaultKeepsItDefault(t *testing.T) {
 // Editing the model an explicit default_model names is an edit of the default,
 // not a deletion of it: the default follows the edit.
 func TestProvidersDTOEditingTheExplicitDefaultFollowsTheEdit(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := seedProvidersConfig(t, home, "      default_model: deepseek/deepseek-v4\n",
+	s, _ := providersDTOServer(t)
+	_ = seedProvidersConfig(t, s, "      default_model: deepseek/deepseek-v4\n",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 	)
 
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4-pro"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111",
+		{"provider":"deepseek","models":["deepseek-v4-pro"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111",
 		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	cfgRaw, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	require.Contains(t, string(cfgRaw), "default_model: deepseek/deepseek-v4-pro")
+	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), `"default_model":"deepseek/deepseek-v4-pro"`)
 	require.Equal(t, "deepseek/deepseek-v4-pro", providersGetDefaultModel(t, s))
 }
 
 // A stale page (its row no longer on disk) claims no slot: the row falls back
 // to identity matching, which makes it a new row appended at the end.
 func TestProvidersDTOStaleReplacesFallsBackToIdentity(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := seedProvidersConfig(t, home, "",
+	s, _ := providersDTOServer(t)
+	_ = seedProvidersConfig(t, s, "",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"openai", "gpt-test"},
 	)
 
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"},
-		{"provider":"zhipuai","models":["glm-5.3"],"base_url":"https://open.bigmodel.cn/api/paas/v4","api_key_plain":"sk-c-3333",
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"},
+		{"provider":"zhipuai","models":["glm-5.3"],"base_url":"https://open.bigmodel.cn/api/paas/v4","api_key":"sk-c-3333",
 		 "replaces":{"provider":"ghost","base_url":"https://nowhere.example.com","models":["ghost-model"]}}
 	]}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	cfgRaw, err := os.ReadFile(cfgPath)
+	stored, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek", "openai", "zhipuai"}, providerOrderInYAML(t, string(cfgRaw)))
+	require.Equal(t, []string{"deepseek", "openai", "zhipuai"}, providerOrderInYAML(t, stored))
 }
 
 // Editing a row so that the model the default points at disappears is still a
 // deletion of the default model.
 func TestProvidersDTOEditThatRemovesTheDefaultModelIsRefused(t *testing.T) {
-	s, home := providersDTOServer(t)
-	seedProvidersConfig(t, home, "      default_model: deepseek/deepseek-v4-flash\n",
+	s, _ := providersDTOServer(t)
+	seedProvidersConfig(t, s, "      default_model: deepseek/deepseek-v4-flash\n",
 		[2]string{"deepseek", "deepseek-v4"},
 		[2]string{"deepseek", "deepseek-v4-flash"},
 		[2]string{"openai", "gpt-test"},
 	)
 
 	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-a-1111",
+		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111",
 		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-v4-flash"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-b-2222"}
+		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
 	]}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), "默认模型")

@@ -5253,10 +5253,21 @@ func (s *Server) handleWorkerInternalEvent(w http.ResponseWriter, r *http.Reques
 
 // configWriteResult is the shared answer of every settings write: what the
 // runtime is running now, and where it came from.
+// configWriteResult is every config write's answer. Applied stays true for
+// the readers the file era served; applies says when the write takes effect
+// — it lands in the state database now, and the next turn's sync adopts it
+// (plan 188 §2).
 type configWriteResult struct {
 	Path    string `json:"path"`
 	AgentID string `json:"agent_id,omitempty"`
 	Applied bool   `json:"applied"`
+	Applies string `json:"applies"`
+}
+
+// nextTurnConfigWriteResult is the one answer every migrated write endpoint
+// sends: stored now, applied by the next turn's configuration sync.
+func (s *Server) nextTurnConfigWriteResult(agentID string) configWriteResult {
+	return configWriteResult{Path: s.configPath(), AgentID: agentID, Applied: true, Applies: "next_turn"}
 }
 
 func (s *Server) configPath() string {
@@ -5266,55 +5277,84 @@ func (s *Server) configPath() string {
 	return strings.TrimSpace(s.Env.ConfigPath)
 }
 
-// persistedConfig reads forebrain.yaml as written, without the .env merge or the
-// ${ENV} expansion Load performs. Every write path starts here so a save never
-// bakes an expanded secret back into the file.
-func (s *Server) persistedConfig() (config.Root, error) {
-	path := s.configPath()
-	if path == "" {
-		return config.Root{}, fmt.Errorf("no config path is bound")
+// persistedConfig reads the configuration as written — the startup sections
+// from forebrain.yaml plus the stored sections from the state database —
+// without the .env merge or the ${ENV} expansion the composed load performs.
+// Every read-modify-write starts here so a stored section never bakes an
+// expanded secret back in. A home with no file yet reads as the empty
+// configuration, the same reading startup gives it.
+func (s *Server) persistedConfig(ctx context.Context) (config.Root, error) {
+	if s == nil || s.Env == nil {
+		return config.Root{}, fmt.Errorf("no environment is bound")
 	}
-	cfg, err := config.LoadPersisted(path)
-	if err != nil && os.IsNotExist(err) {
-		// A machine that has not been configured yet has no file. The settings
-		// screens must still open on an empty configuration — the same reading
-		// startup gives it — or nothing could ever be configured from them.
+	cfg, err := s.Env.ComposedPersistedConfig(ctx)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
 		return config.Root{}, nil
 	}
 	return cfg, err
 }
 
-// saveAndReload writes the config and brings the running process onto it.
-func (s *Server) saveAndReload(cfg config.Root) error {
-	path := s.configPath()
-	if path == "" {
-		return fmt.Errorf("no config path is bound")
+// withConfigSection runs one read-modify-write of one Root section in the
+// state database (plan 188 W2). The store's BEGIN IMMEDIATE transaction is
+// the mutual exclusion the file mutex used to provide; the candidate is
+// value-domain validated inside it, and a refusal comes back as
+// *state.InvalidSectionError.
+func (s *Server) withConfigSection(ctx context.Context, section string, fn func(cfg *config.Root) error) error {
+	if s == nil || s.Env == nil {
+		return fmt.Errorf("no environment is bound")
 	}
-	if err := config.Save(path, cfg); err != nil {
-		return err
-	}
-	if s.Env == nil {
-		return nil
-	}
-	return s.Env.ReloadConfig()
+	return s.Env.UpdateRootSection(ctx, section, fn)
 }
 
-// withConfigWrite runs one read-modify-write of forebrain.yaml with every
-// other such write in this process held off. fn must read the file (via
-// persistedConfig) inside the call, not before it, and must not call
-// withConfigWrite itself.
-func (s *Server) withConfigWrite(fn func() error) error {
-	s.configWriteMu.Lock()
-	defer s.configWriteMu.Unlock()
-	return fn()
+// configSectionError is a refusal the request itself caused — the value it
+// sent, or a rule about what it may send — carrying the status the surface
+// answers with.
+type configSectionError struct {
+	status int
+	msg    string
 }
 
+func (e *configSectionError) Error() string { return e.msg }
+
+func configBadRequest(format string, a ...any) error {
+	return &configSectionError{status: http.StatusBadRequest, msg: fmt.Sprintf(format, a...)}
+}
+
+func configConflict(format string, a ...any) error {
+	return &configSectionError{status: http.StatusConflict, msg: fmt.Sprintf(format, a...)}
+}
+
+// failConfigSection answers a section write's error the way its cause reads:
+// the request's own refusals with the status they chose, a validator
+// rejection as a bad request, anything else as the store failing.
+func failConfigSection(w http.ResponseWriter, err error) {
+	var refused *configSectionError
+	if errors.As(err, &refused) {
+		http.Error(w, refused.msg, refused.status)
+		return
+	}
+	var invalid *state.InvalidSectionError
+	if errors.As(err, &invalid) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+// handleConfigFile serves the settings page's configuration editor (plan 188
+// W3). GET returns the composed document — the file's startup sections plus
+// every stored runtime section, rendered as YAML — so what the editor shows
+// is what the runtime composes; PUT writes each runtime section the body
+// carries into the state database, one section per transaction. The startup
+// sections are not writable here: gateway binds before a database may exist,
+// and credentials is the file's transition-period pointer, so a body naming
+// either is refused the way a hand edit of them would be.
 func (s *Server) handleConfigFile(w http.ResponseWriter, r *http.Request) {
 	path := s.configPath()
 	switch r.Method {
 	case http.MethodGet:
-		raw, err := os.ReadFile(path)
-		if err != nil && !os.IsNotExist(err) {
+		doc, err := s.Env.RenderConfigDocument(r.Context())
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -5325,10 +5365,11 @@ func (s *Server) handleConfigFile(w http.ResponseWriter, r *http.Request) {
 		writeAgentsJSON(w, map[string]any{
 			"path":     path,
 			"agent_id": active,
-			// The editor is given the file with its secrets masked. Saving it
-			// back unchanged keeps them: the mask is the same placeholder the
-			// structured endpoints use.
-			"yaml": config.RedactConfigText(string(raw)),
+			// The document is the composed configuration the runtime reads,
+			// credentials included in plaintext exactly as they are stored
+			// (owner ruling 2026-10-30): what the editor shows is what the
+			// next turn composes, and what it sends back is what lands.
+			"yaml": string(doc),
 		})
 	case http.MethodPut:
 		var req struct {
@@ -5343,12 +5384,39 @@ func (s *Server) handleConfigFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		config.ClearRedactedSecrets(&next)
-		if err := s.saveAndReload(next); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		// The startup sections are not writable here. A body carrying them
+		// back exactly as the GET rendered them is the editor's round trip;
+		// anything else is an edit the file's owner must make by hand.
+		same, err := s.Env.StartupSectionsUnchanged(r.Context(), next)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeAgentsJSON(w, configWriteResult{Path: path, Applied: true})
+		if !same {
+			http.Error(w, "gateway/credentials 段只能手编 YAML 并重启生效", http.StatusBadRequest)
+			return
+		}
+		store, err := s.Env.ConfigStore()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		// The document is the whole configuration: every runtime section the
+		// body carries is written, and one the body dropped is removed.
+		for _, name := range process.RootConfigSections() {
+			raw, err := process.MarshalRootSection(next, name)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := store.UpdateSection(r.Context(), name, func(json.RawMessage) (json.RawMessage, error) {
+				return raw, nil
+			}); err != nil {
+				failConfigSection(w, err)
+				return
+			}
+		}
+		writeAgentsJSON(w, s.nextTurnConfigWriteResult(""))
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -5694,20 +5762,20 @@ func (s *Server) projectScope(w http.ResponseWriter, r *http.Request) (state.Pro
 // The providers DTO: the web surface's shape for one model service row. The
 // engine stores one entry per model (yaml model is a scalar after expansion);
 // adjacent entries sharing a signature fold into one row with a models list,
-// which is the shape the user edits. api_key never travels: the GET carries
-// only whether it is set and its last four characters, and a PUT with no key
-// fields at all means "leave the stored key alone". params travels as its
-// JSON text: its keys are the provider's request fields, verbatim, and an
-// object would have them re-cased by a client that normalizes response keys —
-// then saved back under names the provider does not know.
+// which is the shape the user edits. api_key carries the stored value in
+// plaintext — the owner's 2026-10-30 ruling: credentials in the database are
+// read and written in plaintext — and a PUT with no key field at all means
+// "leave the stored key alone". params travels as its JSON text: its keys
+// are the provider's request fields, verbatim, and an object would have them
+// re-cased by a client that normalizes response keys — then saved back under
+// names the provider does not know.
 type providerRowDTO struct {
-	Provider   string   `json:"provider"`
-	BaseURL    string   `json:"base_url,omitempty"`
-	APIPath    string   `json:"api_path,omitempty"`
-	Params     string   `json:"params,omitempty"`
-	Models     []string `json:"models"`
-	APIKeySet  bool     `json:"api_key_set"`
-	APIKeyHint string   `json:"api_key_hint,omitempty"`
+	Provider string   `json:"provider"`
+	BaseURL  string   `json:"base_url,omitempty"`
+	APIPath  string   `json:"api_path,omitempty"`
+	Params   string   `json:"params,omitempty"`
+	Models   []string `json:"models"`
+	APIKey   string   `json:"api_key,omitempty"`
 }
 
 // providerListRow is one row of the model-services table: the stored row plus
@@ -5765,12 +5833,11 @@ type providerPutRow struct {
 	Models   []string                `json:"models,omitempty"`
 	// APIKey is the client *stating* the row's key, which is why the wire
 	// separates present from absent: absent means the user did not touch the
-	// field (the page never receives the stored value, so it must not send a
-	// guess back) and the stored key is kept; present and empty is the user
-	// having emptied the field, and that is the delete semantics — the row is
-	// written without any api_key. A ${ENV} reference is stored as written.
-	APIKey      *string `json:"api_key,omitempty"`
-	APIKeyPlain string  `json:"api_key_plain,omitempty"`
+	// field and the stored key is kept; present is the value — plaintext or a
+	// ${ENV} reference — stored as sent (owner ruling 2026-10-30: plaintext
+	// keys belong in the section), and present and empty is the user having
+	// emptied the field, the delete semantics.
+	APIKey *string `json:"api_key,omitempty"`
 	// Replaces is set only on a row the page edited. See providerReplaces.
 	Replaces *providerReplaces `json:"replaces,omitempty"`
 }
@@ -5997,7 +6064,7 @@ func mergeProviderEntries(stored []config.AgentLLMProviderConfig, rows []provide
 	return providerMergeResult{Merged: merged, Replaced: replaced}
 }
 
-func providerRowsFor(home string, entries []config.AgentLLMProviderConfig) []providerRowDTO {
+func providerRowsFor(entries []config.AgentLLMProviderConfig) []providerRowDTO {
 	rows := make([]providerRowDTO, 0, len(entries))
 	prevSig := ""
 	for _, item := range entries {
@@ -6007,17 +6074,13 @@ func providerRowsFor(home string, entries []config.AgentLLMProviderConfig) []pro
 		} else if strings.TrimSpace(item.Model) != "" {
 			models = append(models, item.Model)
 		}
-		key := strings.TrimSpace(item.APIKey)
 		row := providerRowDTO{
-			Provider:  strings.TrimSpace(item.Provider),
-			BaseURL:   strings.TrimSpace(item.BaseURL),
-			APIPath:   strings.TrimSpace(item.APIPath),
-			Params:    strings.TrimSpace(string(item.Params)),
-			Models:    models,
-			APIKeySet: key != "",
-		}
-		if key != "" {
-			row.APIKeyHint = providerKeyHint(home, key)
+			Provider: strings.TrimSpace(item.Provider),
+			BaseURL:  strings.TrimSpace(item.BaseURL),
+			APIPath:  strings.TrimSpace(item.APIPath),
+			Params:   strings.TrimSpace(string(item.Params)),
+			Models:   models,
+			APIKey:   strings.TrimSpace(item.APIKey),
 		}
 		// Fold only adjacent rows: an interleaved order (deepseek, openai,
 		// deepseek) is stored as three rows on purpose, not one service.
@@ -6032,14 +6095,16 @@ func providerRowsFor(home string, entries []config.AgentLLMProviderConfig) []pro
 	return rows
 }
 
-// providerSecretMask is what a page shows instead of a secret it may not read.
+// providerSecretMask is what a page shows instead of a secret it may not
+// read. The model-services page reads its keys in plaintext now (plan 188
+// W4); the mask remains the channel pages' own, below.
 const providerSecretMask = "\u2022\u2022\u2022\u2022"
 
-// providerKeyHint is the last four characters of the key the config refers
-// to. A stored ${ENV} reference is resolved through the home's .env — the
-// hint is meant for the user who typed the key, and "KEY}" would be noise. A
-// reference with no stored value, and any key four characters or shorter, is
-// masked whole.
+// providerKeyHint is the last four characters of a stored channel secret. A
+// stored ${ENV} reference is resolved through the home's .env — the hint is
+// meant for the user who typed the key, and "KEY}" would be noise. A
+// reference with no stored value, and any value four characters or shorter,
+// is masked whole.
 func providerKeyHint(home string, key string) string {
 	if name := strings.TrimSpace(key); strings.HasPrefix(name, "${") && strings.HasSuffix(name, "}") {
 		envName := strings.TrimSuffix(strings.TrimPrefix(name, "${"), "}")
@@ -6063,13 +6128,13 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		cfg, err := s.persistedConfig()
+		cfg, err := s.persistedConfig(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		def := cfg.Agents.Definitions[active.ID]
-		providers := providerRowsFor(strings.TrimSpace(s.Home), def.LLMProviders)
+		providers := providerRowsFor(def.LLMProviders)
 		defaultModel := effectiveDefaultModelID(def)
 		q := readListQuery(r)
 		if !q.Paged {
@@ -6104,153 +6169,141 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg, err := s.persistedConfig()
+		// The whole merge runs inside the agents section's read-modify-write:
+		// the store's transaction is what keeps a concurrent write from being
+		// overwritten, and the composed validation is what refuses a value the
+		// loader would not take.
+		err = s.withConfigSection(r.Context(), "agents", func(cfg *config.Root) error {
+			if cfg.Agents.Definitions == nil {
+				cfg.Agents.Definitions = map[string]config.AgentDefinition{}
+			}
+			def := cfg.Agents.Definitions[active.ID]
+			// The expanded list as it stands in storage: the base the merge
+			// below works on, and the source of the keys a request row without
+			// one carries forward (storedKeyForRow).
+			stored := config.ResolvedLLMConfigs(def)
+			entries := make([]config.AgentLLMProviderConfig, 0, len(req.Providers))
+			mergeRows := make([]providerMergeRow, 0, len(req.Providers))
+			for _, row := range req.Providers {
+				// The engine builds a client only for a provider its model
+				// catalog knows; any other name would save and then fail the
+				// next runner load (an agent switch, a restart). Setup refuses
+				// it the same way.
+				if err := process.VerifyProvider(row.Provider); err != nil {
+					return configBadRequest("%v", err)
+				}
+				models := row.Models
+				if len(models) == 0 && strings.TrimSpace(row.Model) != "" {
+					models = []string{row.Model}
+				}
+				if len(models) == 0 {
+					models = []string{""}
+				}
+				apiKey := ""
+				if row.APIKey != nil {
+					// Present on the wire means the client states the value —
+					// a plaintext key or a ${ENV} reference, stored as sent
+					// (owner ruling 2026-10-30): plaintext belongs in the
+					// section, a reference still expands at compose time. ""
+					// is the user having emptied the field, and that removes
+					// the key.
+					apiKey = strings.TrimSpace(*row.APIKey)
+				} else {
+					// No key on the wire means the user did not touch it:
+					// carry the stored key of this entry — the same
+					// provider+model at this endpoint — never another
+					// endpoint's.
+					apiKey = storedKeyForRow(stored, row, models)
+				}
+				startIdx := len(entries)
+				for _, model := range models {
+					entries = append(entries, config.AgentLLMProviderConfig{
+						Provider: strings.TrimSpace(row.Provider),
+						Model:    strings.TrimSpace(model),
+						APIKey:   apiKey,
+						BaseURL:  strings.TrimSpace(row.BaseURL),
+						APIPath:  strings.TrimSpace(row.APIPath),
+						Params:   row.Params,
+					})
+				}
+				// Remember which entries this row expanded into: an edited row
+				// claims the stored slots its own entries occupy.
+				mergeRows = append(mergeRows, providerMergeRow{Entries: entries[startIdx:], Replaces: row.Replaces})
+			}
+			// Order-preserving merge. The list's order is user data, so the
+			// stored order is the base: a request row that maps onto a stored
+			// entry by identity updates that entry in place; a row the request
+			// no longer names is deleted; a genuinely new row is appended at
+			// the end in request order. A row that carries the shape it was
+			// edited from (replaces) claims those stored slots instead, so an
+			// edit of a row stays an edit of that row. Without this, a page
+			// opened before some other surface appended a row would write its
+			// stale snapshot back and both rewind the order and swallow the
+			// new row.
+			prevDefault := effectiveNonPlaceholderDefault(def)
+			prevSlot := -1
+			if prevDefault != nil {
+				prevSlot = indexOfProviderModel(stored, prevDefault.Provider, prevDefault.Model)
+			}
+			result := mergeProviderEntries(stored, mergeRows)
+			merged := config.DropLentLoginKeys(result.Merged)
+			def.LLMProviders = merged
+			// The default model must survive the write and stay resolvable. An
+			// explicit default_model is validated against the merged list; an
+			// untouched one means the row it resolved to before the write (the
+			// default_model row, or the first row when unset) must still be
+			// there after the merge.
+			if req.DefaultModel != nil {
+				if strings.TrimSpace(*req.DefaultModel) == "" {
+					return configBadRequest("default_model 不能清空：请将其他模型服务设为默认")
+				}
+				def.DefaultModel = strings.TrimSpace(*req.DefaultModel)
+				if config.EffectiveDefaultLLM(def) == nil {
+					return configBadRequest("default_model %s 不在模型服务列表中，请先对该列表中的模型设为默认", def.DefaultModel)
+				}
+			} else if prevDefault != nil {
+				if moved, replacedHere := result.Replaced[prevSlot]; prevSlot >= 0 && replacedHere {
+					if moved == nil {
+						// The edit removed the very model that is the default.
+						return configBadRequest("该模型服务当前是默认模型，请先将其他模型设为默认再删除")
+					}
+					// The default row was edited in place: the default follows
+					// the edit. An implicit default (first row) needs nothing —
+					// the slot kept its position — an explicit one is retargeted.
+					if strings.TrimSpace(def.DefaultModel) != "" {
+						def.DefaultModel = strings.TrimSpace(moved.Provider) + "/" + strings.TrimSpace(moved.Model)
+					}
+				} else if !providerListHasEntry(def.LLMProviders, prevDefault.Provider, prevDefault.Model) {
+					return configBadRequest("该模型服务当前是默认模型，请先将其他模型设为默认再删除")
+				}
+			}
+			cfg.Agents.Definitions[active.ID] = def
+			// The default model service is what an empty selection resolves to.
+			// Startup refuses a default missing any of these, so a table that
+			// leaves one out would save fine and then keep the gateway from
+			// starting again.
+			if missing := config.ValidateAgentLLMConfigured(cfg, active.ID).MissingFields(); len(missing) > 0 {
+				return configBadRequest("the default model service needs %s", strings.Join(missing, ", "))
+			}
+			// Every key-mode row needs its own key, not only the default: a
+			// keyless row saves fine and then answers 401 the moment a session
+			// selects it. So emptying such a row's field is refused here, not
+			// written. The login-backed providers are the exception — their
+			// credential is the login itself, and an empty api_key is
+			// their normal shape.
+			for _, entry := range merged {
+				if config.CredentialsBackedProvider(entry.Provider) || strings.TrimSpace(entry.APIKey) != "" {
+					continue
+				}
+				return configBadRequest("%s needs api_key: this model service authenticates with a key, not a login", strings.TrimSpace(entry.Provider))
+			}
+			return nil
+		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			failConfigSection(w, err)
 			return
 		}
-		if cfg.Agents.Definitions == nil {
-			cfg.Agents.Definitions = map[string]config.AgentDefinition{}
-		}
-		def := cfg.Agents.Definitions[active.ID]
-		// The expanded list as it stands on disk: the base the merge below works
-		// on, and the source of the keys a request row without one carries
-		// forward (storedKeyForRow).
-		stored := config.ResolvedLLMConfigs(def)
-		entries := make([]config.AgentLLMProviderConfig, 0, len(req.Providers))
-		mergeRows := make([]providerMergeRow, 0, len(req.Providers))
-		for _, row := range req.Providers {
-			// The engine builds a client only for a provider its model catalog
-			// knows; any other name would save and then fail the next runner
-			// load (an agent switch, a restart). Setup refuses it the same way.
-			if err := process.VerifyProvider(row.Provider); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			models := row.Models
-			if len(models) == 0 && strings.TrimSpace(row.Model) != "" {
-				models = []string{row.Model}
-			}
-			if len(models) == 0 {
-				models = []string{""}
-			}
-			apiKey := ""
-			cleared := false
-			if plain := strings.TrimSpace(row.APIKeyPlain); plain != "" {
-				// A plaintext key never enters the config: it is stored in the
-				// home's .env and the yaml keeps only the ${ENV} reference.
-				apiKey, err = process.ProviderAPIKeyConfigReference(strings.TrimSpace(s.Home), strings.TrimSpace(row.Provider), plain)
-				if err != nil {
-					http.Error(w, "could not store the api key: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-			} else if row.APIKey != nil {
-				// Present on the wire means the client states the value: ""
-				// is the user having emptied the field, and that removes the
-				// key. The marker tells config.Save this emptiness is a
-				// decision — the row on disk still carries the ${ENV}
-				// reference, and Save would otherwise restore it.
-				apiKey = strings.TrimSpace(*row.APIKey)
-				cleared = apiKey == ""
-			} else {
-				// No key on the wire means the user did not touch it: carry the
-				// stored key of this entry — the same provider+model at this
-				// endpoint — never another endpoint's.
-				apiKey = storedKeyForRow(stored, row, models)
-			}
-			start := len(entries)
-			for _, model := range models {
-				entries = append(entries, config.AgentLLMProviderConfig{
-					Provider:      strings.TrimSpace(row.Provider),
-					Model:         strings.TrimSpace(model),
-					APIKey:        apiKey,
-					BaseURL:       strings.TrimSpace(row.BaseURL),
-					APIPath:       strings.TrimSpace(row.APIPath),
-					Params:        row.Params,
-					APIKeyCleared: cleared,
-				})
-			}
-			// Remember which entries this row expanded into: an edited row
-			// claims the stored slots its own entries occupy.
-			mergeRows = append(mergeRows, providerMergeRow{Entries: entries[start:], Replaces: row.Replaces})
-		}
-		// Order-preserving merge. The list's order is user data, so the disk
-		// order is the base: a request row that maps onto a stored entry by
-		// identity updates that entry in place; a row the request no longer
-		// names is deleted; a genuinely new row is appended at the end in
-		// request order. A row that carries the shape it was edited from
-		// (replaces) claims those stored slots instead, so an edit of a row
-		// stays an edit of that row. Without this, a page opened before some
-		// other surface appended a row would write its stale snapshot back
-		// and both rewind the order and swallow the new row.
-		prevDefault := effectiveNonPlaceholderDefault(def)
-		prevSlot := -1
-		if prevDefault != nil {
-			prevSlot = indexOfProviderModel(stored, prevDefault.Provider, prevDefault.Model)
-		}
-		result := mergeProviderEntries(stored, mergeRows)
-		merged := result.Merged
-		def.LLMProviders = merged
-		// The default model must survive the write and stay resolvable. An
-		// explicit default_model is validated against the merged list; an
-		// untouched one means the row it resolved to before the write (the
-		// default_model row, or the first row when unset) must still be
-		// there after the merge.
-		if req.DefaultModel != nil {
-			if strings.TrimSpace(*req.DefaultModel) == "" {
-				http.Error(w, "default_model 不能清空：请将其他模型服务设为默认", http.StatusBadRequest)
-				return
-			}
-			def.DefaultModel = strings.TrimSpace(*req.DefaultModel)
-			if config.EffectiveDefaultLLM(def) == nil {
-				http.Error(w, "default_model "+def.DefaultModel+" 不在模型服务列表中，请先对该列表中的模型设为默认", http.StatusBadRequest)
-				return
-			}
-		} else if prevDefault != nil {
-			if moved, replacedHere := result.Replaced[prevSlot]; prevSlot >= 0 && replacedHere {
-				if moved == nil {
-					// The edit removed the very model that is the default.
-					http.Error(w, "该模型服务当前是默认模型，请先将其他模型设为默认再删除", http.StatusBadRequest)
-					return
-				}
-				// The default row was edited in place: the default follows the
-				// edit. An implicit default (first row) needs nothing — the slot
-				// kept its position — an explicit one is retargeted.
-				if strings.TrimSpace(def.DefaultModel) != "" {
-					def.DefaultModel = strings.TrimSpace(moved.Provider) + "/" + strings.TrimSpace(moved.Model)
-				}
-			} else if !providerListHasEntry(def.LLMProviders, prevDefault.Provider, prevDefault.Model) {
-				http.Error(w, "该模型服务当前是默认模型，请先将其他模型设为默认再删除", http.StatusBadRequest)
-				return
-			}
-		}
-		cfg.Agents.Definitions[active.ID] = def
-		// The default model service is what an empty selection resolves to.
-		// Startup refuses a default missing any of these, so a table that
-		// leaves one out would save fine and then keep the gateway from
-		// starting again.
-		if missing := config.ValidateAgentLLMConfigured(&cfg, active.ID).MissingFields(); len(missing) > 0 {
-			http.Error(w, "the default model service needs "+strings.Join(missing, ", "), http.StatusBadRequest)
-			return
-		}
-		// Every key-mode row needs its own key, not only the default: a
-		// keyless row saves fine and then answers 401 the moment a session
-		// selects it. So emptying such a row's field is refused here, not
-		// written. The login-backed providers are the exception — their
-		// credential is the file the login writes, and an empty api_key is
-		// their normal shape.
-		for _, entry := range merged {
-			if config.CredentialsBackedProvider(entry.Provider) || strings.TrimSpace(entry.APIKey) != "" {
-				continue
-			}
-			http.Error(w, strings.TrimSpace(entry.Provider)+" needs api_key: this model service authenticates with a key, not a login", http.StatusBadRequest)
-			return
-		}
-		if err := s.saveAndReload(cfg); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		writeAgentsJSON(w, configWriteResult{Path: s.configPath(), AgentID: active.ID, Applied: true})
+		writeAgentsJSON(w, s.nextTurnConfigWriteResult(active.ID))
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -6312,7 +6365,7 @@ func hookTable(hooks config.HooksSettings) []hookRow {
 func (s *Server) handleHooks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		cfg, err := s.persistedConfig()
+		cfg, err := s.persistedConfig(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -6356,17 +6409,14 @@ func (s *Server) handleHooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg, err := s.persistedConfig()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if err := s.withConfigSection(r.Context(), "hooks", func(cfg *config.Root) error {
+			cfg.Hooks = req.Hooks
+			return nil
+		}); err != nil {
+			failConfigSection(w, err)
 			return
 		}
-		cfg.Hooks = req.Hooks
-		if err := s.saveAndReload(cfg); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		writeAgentsJSON(w, configWriteResult{Path: s.configPath(), Applied: true})
+		writeAgentsJSON(w, s.nextTurnConfigWriteResult(""))
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -6380,7 +6430,7 @@ func (s *Server) handleHooks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCronSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		cfg, err := s.persistedConfig()
+		cfg, err := s.persistedConfig(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -6404,17 +6454,14 @@ func (s *Server) handleCronSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg, err := s.persistedConfig()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if err := s.withConfigSection(r.Context(), "cron", func(cfg *config.Root) error {
+			cfg.Cron = config.CronSection{RetentionDays: req.RetentionDays}
+			return nil
+		}); err != nil {
+			failConfigSection(w, err)
 			return
 		}
-		cfg.Cron = config.CronSection{RetentionDays: req.RetentionDays}
-		if err := s.saveAndReload(cfg); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		writeAgentsJSON(w, configWriteResult{Path: s.configPath(), Applied: true})
+		writeAgentsJSON(w, s.nextTurnConfigWriteResult(""))
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -8049,18 +8096,30 @@ func (s *Server) handleApprovalDefaultPut(w http.ResponseWriter, r *http.Request
 		http.Error(w, "unknown approval preset", http.StatusBadRequest)
 		return
 	}
-	cfg, err := s.persistedConfig()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	// ApplyToConfig is the same pairing the terminal preset uses: the named
 	// profile must go for the sandbox half to take effect, and the approval
-	// half persists through the policy mode.
-	preset.ApplyToConfig(&cfg)
-	cfg.ApprovalPolicy = config.NewApprovalPolicy(config.ApprovalPolicyMode(preset.Approval))
-	if err := s.saveAndReload(cfg); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// half persists through the policy mode. The three sections land in
+	// sequence — the same whole-document shape the configuration editor
+	// writes — and every intermediate state is a loadable configuration.
+	if err := s.withConfigSection(r.Context(), "default_permissions", func(cfg *config.Root) error {
+		cfg.DefaultPermissions = ""
+		return nil
+	}); err != nil {
+		failConfigSection(w, err)
+		return
+	}
+	if err := s.withConfigSection(r.Context(), "sandbox_mode", func(cfg *config.Root) error {
+		cfg.SandboxMode = preset.SandboxMode
+		return nil
+	}); err != nil {
+		failConfigSection(w, err)
+		return
+	}
+	if err := s.withConfigSection(r.Context(), "approval_policy", func(cfg *config.Root) error {
+		cfg.ApprovalPolicy = config.NewApprovalPolicy(config.ApprovalPolicyMode(preset.Approval))
+		return nil
+	}); err != nil {
+		failConfigSection(w, err)
 		return
 	}
 	id := preset.ID

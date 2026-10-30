@@ -267,8 +267,12 @@ func crudServer(t *testing.T) (*Server, string) {
 	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
 	cfg, err := appcfg.LoadPersisted(cfgPath)
 	require.NoError(t, err)
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, cfg)
 	crudHome = home
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: &cfg}}
+	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: &cfg}, Root: home, SQL: db}
 	env.ConfigPath = cfgPath
 	s := &Server{Home: home, Env: env}
 	t.Cleanup(func() {})
@@ -304,10 +308,13 @@ func TestPrimaryAgentCreatePersistsDefinition(t *testing.T) {
 	require.Contains(t, rr.Body.String(), `"id":"helper"`)
 	require.Contains(t, rr.Body.String(), `"name":"Helper"`)
 
-	raw, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	require.Contains(t, string(raw), "helper:")
-	require.Contains(t, string(raw), "display_name: Helper")
+	// The definition lands in the agents section (plan 188), and the seeded
+	// file is not touched by a section write.
+	stored := configSectionRow(t, s.Env.SQL, "agents")
+	require.Contains(t, stored, "\"helper\":")
+	require.Contains(t, stored, "\"display_name\":\"Helper\"")
+	before := mustRead(t, cfgPath)
+	require.NotContains(t, before, "helper:")
 	// Workspace subdirectories are materialised for the new tenant at its
 	// conventional root.
 	require.DirExists(t, filepath.Join(home(), "workspaces", "helper", "skills"))
@@ -325,16 +332,14 @@ func TestPrimaryAgentCreateRejectsDuplicateID(t *testing.T) {
 // is checked against it — not merely for existing somewhere — and a mismatch
 // is refused before anything is written.
 func TestPrimaryAgentCreateChecksExpectedWorkspaceRoot(t *testing.T) {
-	s, cfgPath := crudServer(t)
+	s, _ := crudServer(t)
 	elsewhere := t.TempDir()
 	rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{
 		"id": "ghost", "workspace_root": elsewhere,
 	})
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "derived from the agent id")
-	raw, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	require.NotContains(t, string(raw), "ghost:")
+	require.NotContains(t, configSectionRow(t, s.Env.SQL, "agents"), "ghost:")
 
 	// The derived root is accepted even though it does not exist yet; the
 	// create is what materialises it.
@@ -362,7 +367,7 @@ func TestPrimaryAgentUpdateChangesOnlyPresentation(t *testing.T) {
 
 	// The definition's other fields (primary flag) are untouched: a created
 	// tenant stays a tenant.
-	persisted, err := s.persistedConfig()
+	persisted, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
 	def := persisted.Agents.Definitions["helper"]
 	require.Equal(t, "Renamed", def.DisplayName)

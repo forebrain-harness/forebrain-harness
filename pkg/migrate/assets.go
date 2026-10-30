@@ -503,46 +503,50 @@ func importUserMCP(data *claudeData, opts *Options) ([]MCPOutcome, []string, err
 	if len(data.UserMCP) == 0 {
 		return out, notices, nil
 	}
-	cfg, err := appcfg.Load(opts.ConfigPath)
-	if err != nil {
-		return out, notices, fmt.Errorf("load %s: %w", opts.ConfigPath, err)
-	}
 	names := make([]string, 0, len(data.UserMCP))
 	for name := range data.UserMCP {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	changed := false
-	for _, name := range names {
-		server := data.UserMCP[name]
-		exists := false
-		for _, existing := range cfg.Agents.Defaults.MCPServers {
-			if mcp.SameServerName(existing.Name, name) {
-				exists = true
-				break
+	// The user-level servers are the agents section's shared list, stored in
+	// the state database like every configuration write (plan 188 W11); the
+	// file is not touched.
+	ctx := context.Background()
+	appendServers := func(servers *[]appcfg.MCPServerConfig) {
+		for _, name := range names {
+			server := data.UserMCP[name]
+			exists := false
+			for _, existing := range *servers {
+				if mcp.SameServerName(existing.Name, name) {
+					exists = true
+					break
+				}
 			}
+			if exists {
+				out = append(out, MCPOutcome{Name: name, Scope: "global", Status: "skipped", Detail: "an entry with this name is already configured; not overwritten"})
+				continue
+			}
+			*servers = append(*servers, convertMCPServer(name, server))
+			out = append(out, MCPOutcome{Name: name, Scope: "global", Status: "written", Detail: describeMCPServer(server)})
 		}
-		if exists {
-			out = append(out, MCPOutcome{Name: name, Scope: "global", Status: "skipped", Detail: "an entry with this name is already configured; not overwritten"})
-			continue
-		}
-		cfg.Agents.Defaults.MCPServers = append(cfg.Agents.Defaults.MCPServers, convertMCPServer(name, server))
-		changed = true
-		out = append(out, MCPOutcome{Name: name, Scope: "global", Status: "written", Detail: describeMCPServer(server)})
 	}
-	if changed {
-		if opts.DryRun {
-			notices = append(notices, "written MCP entries take effect for new sessions only")
-			return out, notices, nil
-		}
-		if err := backupFile(opts.ConfigPath, opts.now()); err != nil {
+	if opts.DryRun {
+		if err := sectionDryRun(ctx, opts, "agents", func(cur *appcfg.AgentsSection) error {
+			appendServers(&cur.Defaults.MCPServers)
+			return nil
+		}); err != nil {
 			return out, notices, err
 		}
-		if err := appcfg.Save(opts.ConfigPath, cfg); err != nil {
-			return out, notices, fmt.Errorf("save %s: %w", opts.ConfigPath, err)
-		}
 		notices = append(notices, "written MCP entries take effect for new sessions only")
+		return out, notices, nil
 	}
+	if err := updateConfigSection(ctx, opts, "agents", func(cur *appcfg.AgentsSection) error {
+		appendServers(&cur.Defaults.MCPServers)
+		return nil
+	}); err != nil {
+		return out, notices, err
+	}
+	notices = append(notices, "written MCP entries take effect for new sessions only")
 	return out, notices, nil
 }
 

@@ -29407,7 +29407,7 @@ func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
 // openChatSession. Use this when the caller (e.g. the TUI startup flow) has
 // already loaded the config via process.Resolve().
 func OpenChatSessionWithConfig(ctx context.Context, cfg appcfg.Root) (*ChatSession, error) {
-	return openProcessChatSession(ctx, cfg, "")
+	return openProcessChatSession(ctx, &cfg, "")
 }
 
 func (s *ChatSession) sqlDB() *sql.DB {

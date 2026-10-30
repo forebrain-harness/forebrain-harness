@@ -1601,9 +1601,9 @@ func (s tuiFirstTokenStore) StampRunFirstToken(ctx context.Context, runID string
 	return err
 }
 
-func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*ChatSession, error) {
+func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (*ChatSession, error) {
 	env, err := process.Open(ctx, process.OpenOptions{
-		Config: &cfg,
+		Config: cfg,
 		// The TUI's launch directory IS its project root (R2): resolve it as
 		// an exact root so a TUI started in a checkout subdirectory runs as
 		// that subdirectory's project, never the enclosing repository.
@@ -1637,6 +1637,11 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 	}
 	s.Core = turn.New(
 		turn.WithSessionStore(env.Deps.SessionStore),
+		// Every turn adopts the current composed configuration before it
+		// starts (plan 187): a change written through the web or the TUI
+		// becomes effective on this surface's next turn, and a running turn
+		// never sees its configuration move.
+		turn.WithConfigSync(env.SyncConfigFromDB),
 		// The run-step ledger backs the projected history this session serves
 		// (SurfaceSessionPlanUpdates replays the conversation's plan cards from
 		// it); without the store those reads silently come back empty.

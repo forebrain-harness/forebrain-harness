@@ -2,6 +2,7 @@
 package process
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -45,7 +46,15 @@ func channelMigrationBannerNotes(names []string) []string {
 		" were configured at the primary-agent level and were removed; configure them in a project's Channels tab"}
 }
 
+// loadCfg reads the configuration a pre-session reader sees: the composed
+// source when the state database holds sections (plan 187), the file
+// otherwise. A home nothing can read yet reads as no configuration.
 func loadCfg(home string) *appcfg.Root {
+	if composed, ok, err := ComposedStartupConfig(context.Background(), home); err != nil {
+		return nil
+	} else if ok {
+		return &composed
+	}
 	cfgPath, err := homepkg.ResolveConfigPath(home)
 	if err != nil {
 		cfgPath = homepkg.ConfigPath(home)
@@ -55,58 +64,6 @@ func loadCfg(home string) *appcfg.Root {
 		return nil
 	}
 	return &cfg
-}
-
-func apiKeyConfigReference(home, provider, apiKey string) (string, error) {
-	key := strings.TrimSpace(apiKey)
-	if key == "" || isEnvReference(key) {
-		return key, nil
-	}
-	envName := firstEnvName(ProviderKeyEnvMap(provider, key))
-	return writeEnvReference(home, envName, key)
-}
-
-// ProviderAPIKeyConfigReference stores a provider API key in the home's .env
-// and returns the ${ENV} reference the config file keeps instead of the
-// plaintext. Every surface that takes a provider key from a user — the setup
-// flow and the web settings page alike — goes through this one path, so a key
-// never lands in the yaml and the env naming stays single-sourced.
-func ProviderAPIKeyConfigReference(home, provider, apiKey string) (string, error) {
-	return apiKeyConfigReference(home, provider, apiKey)
-}
-
-func writeEnvReference(home string, envName string, value string) (string, error) {
-	key := strings.TrimSpace(value)
-	if key == "" || isEnvReference(key) {
-		return key, nil
-	}
-	envName = strings.TrimSpace(envName)
-	envPath := homepkg.DefaultEnvPath(home)
-	envMap, err := godotenv.Read(envPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		envMap = map[string]string{}
-	}
-	envMap[envName] = key
-	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
-		return "", err
-	}
-	if err := godotenv.Write(envMap, envPath); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(envPath, 0o600); err != nil {
-		return "", err
-	}
-	return "${" + envName + "}", nil
-}
-
-func firstEnvName(m map[string]string) string {
-	for k := range m {
-		return strings.TrimSpace(k)
-	}
-	return ""
 }
 
 func isEnvReference(v string) bool {
@@ -145,12 +102,36 @@ func secretConfigReference(home string, envName string, secret string) (string, 
 	return storeSecretEnvReference(home, name, key)
 }
 
+// storeSecretEnvReference stores a channel secret in the home's .env and
+// returns the ${ENV} reference the channel's stored configuration keeps
+// instead of the plaintext. This is the one .env write left (plan 188 W14):
+// provider keys live in plaintext in the agents section, and channels keep
+// the reference/value split their store was built on.
 func storeSecretEnvReference(home string, envName string, secret string) (string, error) {
 	key := strings.TrimSpace(secret)
 	if key == "" || isEnvReference(key) {
 		return key, nil
 	}
-	return writeEnvReference(home, strings.TrimSpace(envName), key)
+	name := strings.TrimSpace(envName)
+	envPath := homepkg.DefaultEnvPath(home)
+	envMap, err := godotenv.Read(envPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		envMap = map[string]string{}
+	}
+	envMap[name] = key
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := godotenv.Write(envMap, envPath); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(envPath, 0o600); err != nil {
+		return "", err
+	}
+	return "${" + name + "}", nil
 }
 
 // ChannelSecretEnvName builds the ~/.forebrain/.env variable a channel secret is

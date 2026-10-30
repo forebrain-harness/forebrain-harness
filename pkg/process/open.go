@@ -18,7 +18,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
-	openaiauth "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
@@ -103,11 +102,24 @@ type Environment struct {
 	ChannelMigrationNotes []string
 
 	ConfigPath string
-	reloadMu   sync.Mutex
-	managerMu  sync.RWMutex
-	reload     *ConfigManager
-	poolOnce   sync.Once
-	pool       *RunnerPool
+	// runtimeConfigFromDB records that this process composes its runtime
+	// configuration from the state database — the production path, where Open
+	// imported the file's sections into fb_config before the first compose.
+	// An environment built around OpenOptions.Config (the test bypass that
+	// supplies the whole configuration) keeps the file as its source, exactly
+	// as before plan 187, and so does a hand-built Environment.
+	runtimeConfigFromDB bool
+	reloadMu            sync.Mutex
+	// configFingerprint is the digest of the configuration snapshot currently
+	// in force, guarded by reloadMu. SyncConfigFromDB compares a freshly
+	// composed snapshot against it: equal means nothing changed and the sync
+	// is a no-op, different means the full re-application runs. Open seeds it
+	// from the first composed root.
+	configFingerprint []byte
+	managerMu         sync.RWMutex
+	reload            *ConfigManager
+	poolOnce          sync.Once
+	pool              *RunnerPool
 	// LSP is the process-wide language-server pool; lspManager is the
 	// primary runner's view of it. Project runners get their own managers
 	// from the same pool (see RunnerPool).
@@ -281,11 +293,6 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			return nil, fmt.Errorf("load config %s: %w", cfgPath, err)
 		}
 	}
-	// credentials.chatgpt from the loaded config, installed once so every
-	// ChatGPT client built in this process reads the same file. Empty leaves
-	// the default of <FOREBRAIN_HOME>/auth.json in place.
-	openaiauth.SetCredentialsPath(loaded.Credentials.ChatGPT)
-
 	// The launch project is resolved only when this process has one. The
 	// gateway sets NoLaunchProject: the directory it is started in is not a
 	// project, so neither its trust decision nor its default cwd apply to any
@@ -311,29 +318,78 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			slog.Warn("project trust lookup failed; using read-only sandbox", "err", trustErr)
 		}
 	}
+	// The state database opens before anything consumes the runtime
+	// configuration: the composed configuration reads every runtime section
+	// from it (plan 187). OpenStateFromHome takes no data from the
+	// configuration — its cfg parameter has never been read.
+	sqlDB, err := state.OpenStateFromHome(ctx, root, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	// Every failure from here until the Environment owns the database handle
+	// must close it itself: nothing has been handed it yet.
+	if opts.Config == nil {
+		if err := importLegacyConfigIfNeeded(ctx, sqlDB, root, cfgPath); err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("import legacy configuration: %w", err)
+		}
+	}
+	// The database-backed credential stores go in behind the Layer 0 ports
+	// (plan 187 §1.4); those packages' own reads and writes keep using the
+	// files until 188 switches them.
+	installCredentialStores(sqlDB)
+	// The write-side gate every section update runs (plan 188 §1): a
+	// candidate must compose with this install's configuration and pass the
+	// loader's value-domain checks before it lands.
+	InstallConfigSectionValidator(cfgPath, sqlDB)
+	// The one-time final sync of plan 188 W12: the 187→188 transition kept
+	// writing the login files and the MCP overlay tree, so whichever side is
+	// newer wins into the database here — and nothing writes those files
+	// again.
+	if opts.Config == nil {
+		if err := syncLegacyCredentialFilesIfNeeded(ctx, sqlDB, root); err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("sync legacy credential files: %w", err)
+		}
+	}
+	var configFingerprint []byte
+	if opts.Config == nil {
+		// OpenOptions.Config keeps its bypass semantics: it supplies the
+		// whole configuration and neither the file nor the database is
+		// consulted — tests run on it.
+		composed, cerr := composeConfig(ctx, &Environment{Root: root, ConfigPath: cfgPath, SQL: sqlDB})
+		if cerr != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("compose config: %w", cerr)
+		}
+		loaded = composed
+	}
+	// The fingerprint of the configuration that starts the process: every
+	// later SyncConfigFromDB compares against it, so the first turn does not
+	// re-apply what Open just applied.
+	if fp, ferr := configSnapshotFingerprint(loaded); ferr == nil {
+		configFingerprint = fp
+	}
 	cfgRoot := effectiveFor(loaded, launchProject)
 	if err := safety.NewManager().StartupCheck(cfgRoot); err != nil {
+		_ = sqlDB.Close()
 		return nil, err
 	}
 	// Every per-agent seam below (sessions, memories, the runner's
 	// workspace, the project channels) hangs off the active primary agent, so
-	// resolve it once here.
+	// resolve it once here. It reads the composed configuration.
 	activeAgent := activePrimaryAgent(root, cfgRoot)
 
 	var shutdownTel func(context.Context) error
 	if opts.EnableTelemetry {
 		shutdownTel, _ = telemetry.InitFromEnv("forebrain")
 	}
-	sqlDB, err := state.OpenStateFromHome(ctx, root, cfgRoot)
-	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
 
 	source := strings.TrimSpace(opts.SessionSource)
 	if source == "" {
 		source = memory.SessionSourceWebchat
 	}
-	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, RawConfig: loaded, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel, ChannelMigrationNotes: channelMigrationBannerNotes(channelMigrationNotes)}
+	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, RawConfig: loaded, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel, ChannelMigrationNotes: channelMigrationBannerNotes(channelMigrationNotes), configFingerprint: configFingerprint, runtimeConfigFromDB: opts.Config == nil}
 	env.reload = NewConfigManager(env.Control, env.reloadConfig)
 	// The environment's own runner is the primary agent's: it serves no
 	// conversation — every conversation runs on its project's runner (see

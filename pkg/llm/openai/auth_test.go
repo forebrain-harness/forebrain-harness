@@ -883,3 +883,83 @@ func TestTransportRefreshKeepsOtherFailturesUnjudged(t *testing.T) {
 		t.Fatalf("err = %v, a transport failure must not read as an API refusal", err)
 	}
 }
+
+type fakeCredentialsStore struct {
+	loaded  int
+	saved   int
+	bytes   json.RawMessage
+	loadErr error
+}
+
+func (f *fakeCredentialsStore) LoadCredentials(context.Context) (json.RawMessage, error) {
+	f.loaded++
+	return f.bytes, f.loadErr
+}
+
+func (f *fakeCredentialsStore) SaveCredentials(_ context.Context, raw json.RawMessage) error {
+	f.saved++
+	f.bytes = raw
+	return nil
+}
+
+// TestStoredCredentialsDefaultToFile pins the port's default: with no store
+// installed, the stored credentials are the file at CredentialsPath(home) —
+// absent reads as "no login", a write lands in the file, and nothing else
+// changes.
+func TestStoredCredentialsDefaultToFile(t *testing.T) {
+	SetCredentialsStore(nil)
+	ctx := context.Background()
+	home := t.TempDir()
+
+	if raw, err := LoadStoredCredentials(ctx, home); err != nil || raw != nil {
+		t.Fatalf("absent credentials = (%q, %v), want (nil, nil)", raw, err)
+	}
+	if err := SaveStoredCredentials(ctx, home, json.RawMessage(`{"tokens":{"access_token":"a"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := LoadStoredCredentials(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"tokens":{"access_token":"a"}}` {
+		t.Fatalf("roundtrip = %q", raw)
+	}
+	if _, err := os.Stat(filepath.Join(home, CredentialsFile)); err != nil {
+		t.Fatalf("the default backend did not write the file: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(home, CredentialsFile))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("credentials file mode = %v, want 0600", info.Mode())
+	}
+}
+
+// TestStoredCredentialsGoThroughInstalledStore pins the installed half: once
+// a store is installed, loads and saves reach it and the file is not touched.
+func TestStoredCredentialsGoThroughInstalledStore(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	fake := &fakeCredentialsStore{bytes: json.RawMessage(`{"tokens":{"access_token":"from-store"}}`)}
+	SetCredentialsStore(fake)
+	t.Cleanup(func() { SetCredentialsStore(nil) })
+
+	raw, err := LoadStoredCredentials(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.loaded != 1 {
+		t.Fatalf("store loads = %d, want 1", fake.loaded)
+	}
+	if string(raw) != `{"tokens":{"access_token":"from-store"}}` {
+		t.Fatalf("load = %q, want the store's bytes", raw)
+	}
+
+	if err := SaveStoredCredentials(ctx, home, json.RawMessage(`{"tokens":{"access_token":"next"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if fake.saved != 1 || string(fake.bytes) != `{"tokens":{"access_token":"next"}}` {
+		t.Fatalf("store save = (%d, %q)", fake.saved, fake.bytes)
+	}
+	if _, err := os.Stat(filepath.Join(home, CredentialsFile)); !os.IsNotExist(err) {
+		t.Fatal("the file default ran although a store is installed")
+	}
+}

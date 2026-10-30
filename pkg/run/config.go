@@ -524,10 +524,12 @@ func (t *openCodeAuthTransport) OwnsUserAgent() bool {
 // newOpenCodeLLM builds a client for one of the OpenCode surfaces.
 //
 // The credential is resolved in the order the login flows write it: an
-// api_key in configuration (which may be an ${ENV} reference), then
-// OPENCODE_API_KEY, then the opencode.json that /connect and the web login
-// write. There is no anonymous fallback: every model, the free ones included,
-// needs a login with a Go or Go Plus subscription or a Console key.
+// api_key in configuration (plaintext in the stored section, or an ${ENV}
+// reference), then OPENCODE_API_KEY, then the stored login — the database row
+// the composition root installs, with opencode.json as the file fallback —
+// that /connect and the web login write. There is no anonymous fallback:
+// every model, the free ones included, needs a login with a Go or Go Plus
+// subscription or a Console key.
 //
 // The model decides the wire protocol, and the protocol decides which client
 // the request goes to; each client gets the base URL whose path suffix it
@@ -550,7 +552,10 @@ func newOpenCodeLLM(prov, model, apiKey, baseURL string, cfg *LLMProviderYAML) (
 	if key == "" {
 		if homeRoot, err := home.Root(); err == nil {
 			path := opencode.DefaultPath(homeRoot)
-			if _, err := opencode.Load(path); err == nil {
+			// The presence check reads the stored login — the database row
+			// once the composition root installed the store (plan 188 W13),
+			// the file otherwise — exactly like the transport that follows.
+			if _, err := opencode.LoadProcessCredentials(context.Background(), path); err == nil {
 				auth.Path = path
 			}
 		}

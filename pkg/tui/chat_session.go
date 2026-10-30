@@ -261,7 +261,17 @@ func (s *ChatSession) approvalResumeOwner() string {
 // OpenChatSessionWithConfigForProject opens a session using a fixed launch cwd,
 // deriving trust-based sandbox defaults before startup checks and Runner.Load.
 func OpenChatSessionWithConfigForProject(ctx context.Context, cfg appcfg.Root, cwd string) (*ChatSession, error) {
-	return openProcessChatSession(ctx, cfg, cwd)
+	return openProcessChatSession(ctx, &cfg, cwd)
+}
+
+// OpenChatSessionForProject opens a session whose configuration the runtime
+// composes itself — the file's startup sections plus the database's runtime
+// sections (plan 187). The interactive surface used to hand Resolve()'s file
+// copy in to save a parse; once the legacy import empties the file that copy
+// holds only the startup sections, so the session (and its per-turn
+// configuration sync) runs on the composed source instead.
+func OpenChatSessionForProject(ctx context.Context, cwd string) (*ChatSession, error) {
+	return openProcessChatSession(ctx, nil, cwd)
 }
 
 // ErrResumeForeignProject reports a resume for a conversation bound to a

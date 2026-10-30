@@ -1381,26 +1381,46 @@ func (s *ChatSession) MemorySettings() (bool, bool, bool) {
 	return settings.Enabled, settings.UseMemories, settings.GenerateMemories
 }
 
+// UpdateMemorySettings stores the memory switches the settings screen
+// changed (plan 188 W10): features.memories in the features section, the two
+// memory switches in the memories section — each in its own section write,
+// a switch the request did not carry left alone. The change lands on the next
+// turn's configuration sync; nothing reloads here.
 func (s *ChatSession) UpdateMemorySettings(sessionID string, featureEnabled, useMemories, generateMemories *bool) error {
-	if s == nil {
+	if s == nil || s.Env == nil || s.Env.SQL == nil {
 		return fmt.Errorf("memory settings unavailable")
 	}
-	path, err := home.ResolveConfigPath(strings.TrimSpace(s.home()))
-	if err != nil {
-		return err
+	ctx := context.Background()
+	if featureEnabled != nil {
+		if err := s.Env.UpdateRootSection(ctx, "features", func(cfg *appcfg.Root) error {
+			value := *featureEnabled
+			cfg.Features.Memories = &value
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
-	if err := appcfg.PatchMemory(path, appcfg.MemoryPatch{FeatureEnabled: featureEnabled, UseMemories: useMemories, GenerateMemories: generateMemories}); err != nil {
-		return err
-	}
-	if err := s.reloadConfigFromDisk(); err != nil {
-		return err
+	if useMemories != nil || generateMemories != nil {
+		if err := s.Env.UpdateRootSection(ctx, "memories", func(cfg *appcfg.Root) error {
+			if useMemories != nil {
+				value := *useMemories
+				cfg.Memories.UseMemories = &value
+			}
+			if generateMemories != nil {
+				value := *generateMemories
+				cfg.Memories.GenerateMemories = &value
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
 	if generateMemories != nil && s.memoryStore() != nil {
 		mode := memory.ThreadMemoryDisabled
 		if *generateMemories {
 			mode = memory.ThreadMemoryEnabled
 		}
-		return s.memoryStore().SetThreadMemoryMode(context.Background(), sessionID, mode)
+		return s.memoryStore().SetThreadMemoryMode(ctx, sessionID, mode)
 	}
 	return nil
 }

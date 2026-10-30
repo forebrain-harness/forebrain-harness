@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -75,16 +76,60 @@ func Load(path string) (Credentials, error) {
 	if err != nil {
 		return Credentials{}, err
 	}
+	c, err := parseCredentials(raw)
+	if err != nil {
+		return Credentials{}, fmt.Errorf("parse OpenCode credentials %s: %w", path, err)
+	}
+	return c, nil
+}
+
+// parseCredentials decodes the opencode.json shape.
+func parseCredentials(raw []byte) (Credentials, error) {
 	var c Credentials
 	if err := json.Unmarshal(raw, &c); err != nil {
-		return Credentials{}, fmt.Errorf("parse OpenCode credentials %s: %w", path, err)
+		return Credentials{}, err
 	}
 	c.AccessToken = strings.TrimSpace(c.AccessToken)
 	c.RefreshToken = strings.TrimSpace(c.RefreshToken)
 	if c.AccessToken == "" || c.RefreshToken == "" {
-		return Credentials{}, fmt.Errorf("OpenCode credentials in %s are incomplete; run /connect to log in", path)
+		return Credentials{}, fmt.Errorf("OpenCode credentials are incomplete; run /connect to log in")
 	}
 	return c, nil
+}
+
+// LoadProcessCredentials reads the login this process holds, through the
+// installed store when one is — the state database, from plan 188 W12 on —
+// and the file at path otherwise. The bytes are the same either way: the
+// opencode.json shape, byte for byte.
+func LoadProcessCredentials(ctx context.Context, path string) (Credentials, error) {
+	if h, ok := credentialsStore.Load().(credentialsStoreHolder); ok && h.store != nil {
+		raw, err := h.store.LoadCredentials(ctx)
+		if err != nil {
+			return Credentials{}, err
+		}
+		if raw == nil {
+			return Credentials{}, fmt.Errorf("OpenCode credentials in %s are incomplete; run /connect to log in", path)
+		}
+		c, err := parseCredentials(raw)
+		if err != nil {
+			return Credentials{}, fmt.Errorf("parse stored OpenCode credentials: %w", err)
+		}
+		return c, nil
+	}
+	return Load(path)
+}
+
+// SaveProcessCredentials writes the login this process holds, through the
+// installed store when one is and the file at path otherwise.
+func SaveProcessCredentials(ctx context.Context, path string, c Credentials) error {
+	if h, ok := credentialsStore.Load().(credentialsStoreHolder); ok && h.store != nil {
+		raw, err := json.MarshalIndent(c, "", "  ")
+		if err != nil {
+			return err
+		}
+		return h.store.SaveCredentials(ctx, raw)
+	}
+	return Save(path, c)
 }
 
 // Save writes credentials to path with an atomic replace, mode 0600. The
@@ -124,6 +169,82 @@ func Save(path string, c Credentials) error {
 type LoginInfo struct {
 	VerificationURL string
 	UserCode        string
+}
+
+// CredentialsStore is the port behind the opencode.json file: it hands back
+// the stored bytes and takes new ones, both in the file's own shape, so
+// swapping the backend never rewrites what is stored. The composition root
+// installs a database-backed store after the state database opens (plan 187);
+// with none installed the credentials live in the file at DefaultPath(home).
+//
+// This package is Layer 0 and cannot reach the state database, so the store
+// arrives installed by the composition root, like the transport pieces llm
+// exposes for the same reason.
+type CredentialsStore interface {
+	// LoadCredentials returns the stored bytes, or nil when no login is
+	// stored.
+	LoadCredentials(ctx context.Context) (json.RawMessage, error)
+	SaveCredentials(ctx context.Context, raw json.RawMessage) error
+}
+
+var credentialsStore atomic.Value
+
+type credentialsStoreHolder struct{ store CredentialsStore }
+
+// SetCredentialsStore installs the backend the store-based credential
+// accesses go through; nil restores the file default. Process-wide: one
+// process has one login.
+func SetCredentialsStore(store CredentialsStore) {
+	if store == nil {
+		credentialsStore.Store(credentialsStoreHolder{})
+		return
+	}
+	credentialsStore.Store(credentialsStoreHolder{store: store})
+}
+
+// LoadStoredCredentials reads the process's stored credentials through the
+// installed store — the file at DefaultPath(home) when none is. Absent is
+// (nil, nil): "no login stored", not an error.
+func LoadStoredCredentials(ctx context.Context, home string) (json.RawMessage, error) {
+	if h, ok := credentialsStore.Load().(credentialsStoreHolder); ok && h.store != nil {
+		return h.store.LoadCredentials(ctx)
+	}
+	b, err := os.ReadFile(DefaultPath(home))
+	if err != nil && os.IsNotExist(err) {
+		return nil, nil
+	}
+	return b, err
+}
+
+// SaveStoredCredentials writes the process's credentials through the
+// installed store — the file at DefaultPath(home) when none is, written
+// atomically at 0600 like Save writes it.
+func SaveStoredCredentials(ctx context.Context, home string, raw json.RawMessage) error {
+	if h, ok := credentialsStore.Load().(credentialsStoreHolder); ok && h.store != nil {
+		return h.store.SaveCredentials(ctx, raw)
+	}
+	path := DefaultPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".opencode-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 // LoginStage is what a login is doing at a moment. A surface that shows
@@ -220,7 +341,7 @@ func LoginDeviceFlow(ctx context.Context, path string, out io.Writer,
 	if err := ctx.Err(); err != nil {
 		return Credentials{}, err
 	}
-	if err := Save(path, c); err != nil {
+	if err := SaveProcessCredentials(ctx, path, c); err != nil {
 		return Credentials{}, fmt.Errorf("save OpenCode credentials: %w", err)
 	}
 	return c, nil

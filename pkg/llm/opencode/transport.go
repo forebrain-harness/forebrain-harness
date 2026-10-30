@@ -113,7 +113,7 @@ func (t *Transport) token(ctx context.Context) (string, error) {
 	mu := llm.CredentialMutex(t.Path)
 	mu.Lock()
 	defer mu.Unlock()
-	c, err := Load(t.Path)
+	c, err := LoadProcessCredentials(ctx, t.Path)
 	if err != nil {
 		return "", fmt.Errorf("OpenCode login required; run /connect to log in: %w", err)
 	}
@@ -122,12 +122,12 @@ func (t *Transport) token(ctx context.Context) (string, error) {
 	}
 	updated, err := refresh(ctx, c)
 	if err != nil {
-		if adopted, ok := adoptRotatedLogin(t.Path, c, err); ok {
+		if adopted, ok := adoptRotatedLogin(ctx, t.Path, c, err); ok {
 			return adopted.AccessToken, nil
 		}
 		return "", err
 	}
-	if err := Save(t.Path, updated); err != nil {
+	if err := SaveProcessCredentials(ctx, t.Path, updated); err != nil {
 		return "", fmt.Errorf("save refreshed OpenCode credentials: %w", err)
 	}
 	return updated.AccessToken, nil
@@ -138,12 +138,12 @@ func (t *Transport) token(ctx context.Context) (string, error) {
 // the gateway) exchanged it first and wrote the rotated pair. When the file now
 // holds a different refresh token and a login that is not about to expire, that
 // login is the live one — use it instead of reporting a dead login.
-func adoptRotatedLogin(path string, sent Credentials, refreshErr error) (Credentials, bool) {
+func adoptRotatedLogin(ctx context.Context, path string, sent Credentials, refreshErr error) (Credentials, bool) {
 	var api *llm.APIError
 	if !errors.As(refreshErr, &api) || api.StatusCode != http.StatusUnauthorized {
 		return Credentials{}, false
 	}
-	latest, err := Load(path)
+	latest, err := LoadProcessCredentials(ctx, path)
 	if err != nil || latest.RefreshToken == sent.RefreshToken {
 		return Credentials{}, false
 	}

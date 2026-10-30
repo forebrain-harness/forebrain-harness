@@ -1836,6 +1836,46 @@ func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, 
 	}, nil
 }
 
+// asyncSubagentContext rebuilds the context one fire-and-forget dispatch runs
+// under: a fresh background context, because the execution outlives the turn
+// that started it, carrying the few facts of the dispatch that must cross the
+// boundary. The dispatching turn's run-scoped hooks cross with them — the step
+// hook that draws and records this child's tool cards (a background context
+// inherits none, and the child's project runner has no process-wide fallback),
+// and the three approval hooks that let a gated call inside the child be
+// answered instead of failing the whole execution. A hook the dispatcher does
+// not carry stays absent: nothing is invented here.
+func asyncSubagentContext(ctx context.Context) context.Context {
+	base := context.Background()
+	if sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)); sid != "" {
+		base = llm.WithAgentSessionID(base, sid)
+		base = tool.WithConversationSessionID(base, sid)
+	}
+	if cacheKey := strings.TrimSpace(llm.PromptCacheKeyFromContext(ctx)); cacheKey != "" {
+		base = llm.WithPromptCacheKey(base, cacheKey)
+	}
+	if parent := strings.TrimSpace(tool.RunIDFromContext(ctx)); parent != "" {
+		base = tool.WithRunID(base, parent)
+	}
+	// The dispatching call's id is the only fact a surface has to draw this
+	// agent into that call's card; the async execution leaves the dispatching
+	// context behind, so it has to be carried over explicitly.
+	base = tool.WithToolUseID(base, tool.ToolUseIDFromContext(ctx))
+	if hook := tool.StepHookFromContext(ctx, nil); hook != nil {
+		base = tool.WithStepHook(base, hook)
+	}
+	if hook := tool.NetworkApprovalPromptHookFromContext(ctx, nil); hook != nil {
+		base = tool.WithNetworkApprovalPromptHook(base, hook)
+	}
+	if hook := tool.SubagentApprovalHookFromContext(ctx, nil); hook != nil {
+		base = tool.WithSubagentApprovalHook(base, hook)
+	}
+	if hook := tool.InlineApprovalHookFromContext(ctx, nil); hook != nil {
+		base = tool.WithInlineApprovalHook(base, hook)
+	}
+	return base
+}
+
 func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, subagentType string) (agent.HistoryEntry, error) {
 	d := subagentDispatch{
 		taskID:     taskID,
@@ -1845,7 +1885,11 @@ func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, s
 		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
 		governTool: "subagent_run",
 	}
-	prep, handle, err := startSubagent(ctx, fac, d)
+	// The execution outlives the call that starts it, so it runs on the
+	// background context built here rather than on the dispatching one: this is
+	// the single place a fire-and-forget dispatch decides what crosses that
+	// boundary, and every entry point that starts one comes through it.
+	prep, handle, err := startSubagent(asyncSubagentContext(ctx), fac, d)
 	if err != nil {
 		return agent.HistoryEntry{}, err
 	}
@@ -2946,24 +2990,8 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 				})
 				return string(b), nil
 			}
-			baseCtx := context.Background()
-			if sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)); sid != "" {
-				baseCtx = llm.WithAgentSessionID(baseCtx, sid)
-				baseCtx = tool.WithConversationSessionID(baseCtx, sid)
-			}
-			if cacheKey := strings.TrimSpace(llm.PromptCacheKeyFromContext(ctx)); cacheKey != "" {
-				baseCtx = llm.WithPromptCacheKey(baseCtx, cacheKey)
-			}
-			if parent := strings.TrimSpace(tool.RunIDFromContext(ctx)); parent != "" {
-				baseCtx = tool.WithRunID(baseCtx, parent)
-			}
-			// The dispatching call's id is the only fact a surface has to draw
-			// this agent into that call's card; the async execution leaves the
-			// dispatching context behind, so it has to be carried over
-			// explicitly.
-			baseCtx = tool.WithToolUseID(baseCtx, tool.ToolUseIDFromContext(ctx))
 			taskID := newSubagentTaskID()
-			entry, err := spawnAsyncSubagent(baseCtx, fac, taskID, title, task, subType)
+			entry, err := spawnAsyncSubagent(ctx, fac, taskID, title, task, subType)
 			if err != nil {
 				return "", err
 			}

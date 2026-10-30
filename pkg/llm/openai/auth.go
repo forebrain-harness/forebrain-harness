@@ -130,15 +130,135 @@ func CredentialsPath(home string) string {
 	return ResolvePath(home, configured)
 }
 
+// CredentialsStore is the port behind the credentials file: it hands back the
+// stored bytes and takes new ones, both in the on-disk auth.json shape, so
+// swapping the backend never rewrites what is stored. The composition root
+// installs a database-backed store after the state database opens (plan 187);
+// with none installed the credentials live in the file at CredentialsPath.
+//
+// This package is Layer 0 and cannot reach the state database, so the store
+// arrives the same way the credentials path override does: installed once by
+// the composition root, read by whoever needs the bytes.
+type CredentialsStore interface {
+	// LoadCredentials returns the stored bytes, or nil when no login is
+	// stored.
+	LoadCredentials(ctx context.Context) (json.RawMessage, error)
+	SaveCredentials(ctx context.Context, raw json.RawMessage) error
+}
+
+var credentialsStore atomic.Pointer[CredentialsStore]
+
+// SetCredentialsStore installs the backend the store-based credential
+// accesses go through; nil restores the file default. Process-wide, like the
+// credentials path: one process has one login.
+func SetCredentialsStore(store CredentialsStore) {
+	if store == nil {
+		credentialsStore.Store(nil)
+		return
+	}
+	credentialsStore.Store(&store)
+}
+
+// LoadStoredCredentials reads the process's stored credentials through the
+// installed store — the file at CredentialsPath(home) when none is. Absent is
+// (nil, nil): "no login stored", not an error.
+func LoadStoredCredentials(ctx context.Context, home string) (json.RawMessage, error) {
+	if s := credentialsStore.Load(); s != nil {
+		return (*s).LoadCredentials(ctx)
+	}
+	b, err := os.ReadFile(CredentialsPath(home))
+	if err != nil && os.IsNotExist(err) {
+		return nil, nil
+	}
+	return b, err
+}
+
+// SaveStoredCredentials writes the process's credentials through the
+// installed store — the file at CredentialsPath(home) when none is, written
+// atomically at 0600 like Save writes it.
+func SaveStoredCredentials(ctx context.Context, home string, raw json.RawMessage) error {
+	if s := credentialsStore.Load(); s != nil {
+		return (*s).SaveCredentials(ctx, raw)
+	}
+	path := CredentialsPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".auth-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+// LoadProcessCredentials reads the login this process holds, through the
+// installed store when one is — the state database, from plan 188 W12 on —
+// and the file at path otherwise. The bytes are the same either way: the
+// on-disk auth.json shape, byte for byte.
+func LoadProcessCredentials(ctx context.Context, path string) (Credentials, error) {
+	if s := credentialsStore.Load(); s != nil {
+		raw, err := (*s).LoadCredentials(ctx)
+		if err != nil {
+			return Credentials{}, err
+		}
+		if raw == nil {
+			return Credentials{}, fmt.Errorf("ChatGPT credentials in %s are incomplete; run /connect to log in", path)
+		}
+		c, err := parseCredentials(raw)
+		if err != nil {
+			return Credentials{}, fmt.Errorf("parse stored ChatGPT credentials: %w", err)
+		}
+		return c, nil
+	}
+	return Load(path)
+}
+
+// SaveProcessCredentials writes the login this process holds, through the
+// installed store when one is and the file at path otherwise. The store keeps
+// the bytes in the on-disk shape, so a login round-trips through either
+// backend unchanged.
+func SaveProcessCredentials(ctx context.Context, path string, c Credentials) error {
+	if s := credentialsStore.Load(); s != nil {
+		raw, err := marshalCredentials(c)
+		if err != nil {
+			return err
+		}
+		return (*s).SaveCredentials(ctx, raw)
+	}
+	return Save(path, c)
+}
+
 // Load reads credentials from an explicit file path.
 func Load(path string) (Credentials, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Credentials{}, err
 	}
+	c, err := parseCredentials(raw)
+	if err != nil {
+		return Credentials{}, fmt.Errorf("parse ChatGPT credentials %s: %w", path, err)
+	}
+	return c, nil
+}
+
+// parseCredentials decodes the on-disk auth.json shape.
+func parseCredentials(raw []byte) (Credentials, error) {
 	var stored storedAuth
 	if err := json.Unmarshal(raw, &stored); err != nil {
-		return Credentials{}, fmt.Errorf("parse ChatGPT credentials %s: %w", path, err)
+		return Credentials{}, err
 	}
 	c := Credentials{
 		AccessToken:  strings.TrimSpace(stored.Tokens.AccessToken),
@@ -148,7 +268,7 @@ func Load(path string) (Credentials, error) {
 		AuthMode:     strings.TrimSpace(stored.AuthMode),
 	}
 	if c.AccessToken == "" || c.RefreshToken == "" {
-		return Credentials{}, fmt.Errorf("ChatGPT credentials in %s are incomplete; run /connect to log in", path)
+		return Credentials{}, fmt.Errorf("ChatGPT credentials are incomplete; run /connect to log in")
 	}
 	// The file carries no expiry, so it comes from the token itself. A token
 	// whose exp cannot be read is treated as already expired, which makes the
@@ -188,21 +308,7 @@ func Save(path string, c Credentials) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	mode := strings.TrimSpace(c.AuthMode)
-	if mode == "" {
-		mode = "chatgpt"
-	}
-	stored := storedAuth{
-		AuthMode: mode,
-		Tokens: storedTokens{
-			IDToken:      c.IDToken,
-			AccessToken:  c.AccessToken,
-			RefreshToken: c.RefreshToken,
-			AccountID:    c.AccountID,
-		},
-		LastRefresh: time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	raw, err := json.MarshalIndent(stored, "", "  ")
+	raw, err := marshalCredentials(c)
 	if err != nil {
 		return err
 	}
@@ -224,6 +330,26 @@ func Save(path string, c Credentials) error {
 		return err
 	}
 	return os.Rename(name, path)
+}
+
+// marshalCredentials renders the on-disk auth.json shape: the Codex CLI's own,
+// so the same bytes work for both tools.
+func marshalCredentials(c Credentials) ([]byte, error) {
+	mode := strings.TrimSpace(c.AuthMode)
+	if mode == "" {
+		mode = "chatgpt"
+	}
+	stored := storedAuth{
+		AuthMode: mode,
+		Tokens: storedTokens{
+			IDToken:      c.IDToken,
+			AccessToken:  c.AccessToken,
+			RefreshToken: c.RefreshToken,
+			AccountID:    c.AccountID,
+		},
+		LastRefresh: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	return json.MarshalIndent(stored, "", "  ")
 }
 
 // Login runs a loopback PKCE flow and stores the result at path. The URL is
@@ -419,7 +545,7 @@ wait:
 		return Credentials{}, errors.New("ChatGPT token endpoint returned no refresh token")
 	}
 	c := credentialsFromTokens(tokens)
-	if err := Save(path, c); err != nil {
+	if err := SaveProcessCredentials(ctx, path, c); err != nil {
 		return Credentials{}, fmt.Errorf("save ChatGPT credentials: %w", err)
 	}
 	return c, nil
@@ -691,7 +817,7 @@ func (t *Transport) current(ctx context.Context) (Credentials, error) {
 	mu := llm.CredentialMutex(t.Path)
 	mu.Lock()
 	defer mu.Unlock()
-	c, err := Load(t.Path)
+	c, err := LoadProcessCredentials(ctx, t.Path)
 	if err != nil {
 		return Credentials{}, fmt.Errorf("ChatGPT login required: %w", err)
 	}
@@ -716,7 +842,7 @@ func (t *Transport) current(ctx context.Context) (Credentials, error) {
 			// (the TUI beside the gateway) may have exchanged the token first
 			// and written the rotated pair. A different refresh token plus a
 			// login that is not about to expire is that live login.
-			if latest, loadErr := Load(t.Path); loadErr == nil &&
+			if latest, loadErr := LoadProcessCredentials(ctx, t.Path); loadErr == nil &&
 				latest.RefreshToken != c.RefreshToken &&
 				time.Until(latest.ExpiresAt) > 2*time.Minute {
 				return latest, nil
@@ -744,7 +870,7 @@ func (t *Transport) current(ctx context.Context) (Credentials, error) {
 	if updated.IDToken == "" {
 		updated.IDToken = c.IDToken
 	}
-	if err := Save(t.Path, updated); err != nil {
+	if err := SaveProcessCredentials(ctx, t.Path, updated); err != nil {
 		return Credentials{}, err
 	}
 	return updated, nil

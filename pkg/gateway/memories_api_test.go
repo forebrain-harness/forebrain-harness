@@ -98,19 +98,28 @@ func TestMemoriesSettingsValidRequestUpdatesConfig(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("features:\n  memories: true\nmemories:\n  use_memories: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env := &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{}}, Root: home, ConfigPath: configPath}
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigDocument(t, db, "features:\n  memories: true\nmemories:\n  use_memories: true\n")
+	env := &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{}}, Root: home, ConfigPath: configPath, SQL: db}
 	server := &Server{Home: home, Env: env}
 	recorder := httptest.NewRecorder()
 	server.handleMemoriesSettings(recorder, httptest.NewRequest(http.MethodPost, "/memories/settings", strings.NewReader(`{"use_memories":false}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
-	loaded, err := appcfg.Load(configPath)
+	loaded, err := server.Env.ComposedPersistedConfig(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if loaded.EffectiveMemories().UseMemories {
 		t.Fatal("valid request did not update use_memories")
+	}
+	if row := configSectionRow(t, db, "features"); !strings.Contains(row, `"memories":true`) {
+		t.Fatalf("a switch the request did not carry must keep its stored value: %s", row)
 	}
 }
 
@@ -121,7 +130,13 @@ func TestMemoriesSettingsStrictJSONAndStorePrecondition(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{Home: home, Env: &process.Environment{Root: home, ConfigPath: configPath}}
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigDocument(t, db, original)
+	server := &Server{Home: home, Env: &process.Environment{Root: home, ConfigPath: configPath, SQL: db, Deps: run.Deps{AppCfg: &appcfg.Root{}}}}
 	for _, body := range []string{`{"unknown":true}`, `{} {}`} {
 		recorder := httptest.NewRecorder()
 		server.handleMemoriesSettings(recorder, httptest.NewRequest(http.MethodPost, "/memories/settings", strings.NewReader(body)))
@@ -134,12 +149,11 @@ func TestMemoriesSettingsStrictJSONAndStorePrecondition(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("missing store status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
-	body, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
+	if raw, err := os.ReadFile(configPath); err != nil || string(raw) != original {
+		t.Fatalf("config file changed before store precondition: %q (%v)", raw, err)
 	}
-	if string(body) != original {
-		t.Fatalf("config changed before store precondition: %q", body)
+	if row := configSectionRow(t, db, "memories"); !strings.Contains(row, `"generate_memories":true`) {
+		t.Fatalf("stored section changed before store precondition: %s", row)
 	}
 }
 

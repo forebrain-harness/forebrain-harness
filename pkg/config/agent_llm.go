@@ -473,6 +473,46 @@ func (v MainAgentLLMValidation) Complete() bool {
 	return v.APIKey != ""
 }
 
+// DropLentLoginKeys removes a credential lent across providers from the
+// login-backed entries of a provider list a write path is about to store: a
+// ${ENV} reference that another provider in the same list declares as its own
+// (that provider's row carries the same reference, and the name is the
+// variable the write paths give that provider). Such a reference is how
+// /connect used to hand a displaced provider's key to a new entry, and a
+// login-backed entry must never keep one: for OpenCode a configured key
+// outranks the login in the client's resolution order, which is what produced
+// the 401. Nothing else is touched — a custom name, a token two providers
+// share under a name neither owns, and a reference nobody claims all stay, so
+// the check removes only what the configuration itself attributes to another
+// provider. This is the rule config.Save applied to the file, moved to the
+// section write every surface now makes (plan 188 W4).
+func DropLentLoginKeys(entries []AgentLLMProviderConfig) []AgentLLMProviderConfig {
+	for i := range entries {
+		if !CredentialsBackedProvider(entries[i].Provider) {
+			continue
+		}
+		ref := strings.TrimSpace(entries[i].APIKey)
+		name := envNameOfReference(ref)
+		if name == "" || name == providerKeyEnvName(entries[i].Provider) {
+			continue
+		}
+		lent := false
+		for j := range entries {
+			if j == i || strings.EqualFold(strings.TrimSpace(entries[j].Provider), strings.TrimSpace(entries[i].Provider)) {
+				continue
+			}
+			if strings.TrimSpace(entries[j].APIKey) == ref && providerKeyEnvName(entries[j].Provider) == name {
+				lent = true
+				break
+			}
+		}
+		if lent {
+			entries[i].APIKey = ""
+		}
+	}
+	return entries
+}
+
 func (v MainAgentLLMValidation) MissingFields() []string {
 	var out []string
 	if v.Provider == "" {

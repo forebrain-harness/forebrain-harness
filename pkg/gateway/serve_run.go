@@ -70,6 +70,12 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	var gw *Server
 	core := turn.New(
 		turn.WithWorkspaceRoot(runner.StateRoot()),
+		// Every turn adopts the current composed configuration before it
+		// starts (plan 187): a change written through any surface becomes
+		// effective on the next turn here — the websocket, a channel, an
+		// approval continuation, a cron fire alike, since all of them run
+		// through Submit.
+		turn.WithConfigSync(h.SyncConfigFromDB),
 		turn.WithPermissionFacade(runner),
 		turn.WithRunEventStore(runSvc),
 		turn.WithChildRunStore(runSvc),

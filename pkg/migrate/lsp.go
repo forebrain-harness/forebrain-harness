@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,7 +10,6 @@ import (
 	"strings"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
-	"go.yaml.in/yaml/v2"
 )
 
 // claudeLSPPlugin is one enabled Claude Code plugin that declares language
@@ -236,84 +236,93 @@ func importLSP(data *claudeData, opts *Options, progress func(Progress)) ([]LSPO
 	if len(data.LSPPlugins) == 0 {
 		return out, notices, nil
 	}
-	cfg, err := appcfg.Load(opts.ConfigPath)
-	if err != nil {
-		return out, notices, fmt.Errorf("load %s: %w", opts.ConfigPath, err)
-	}
-	if cfg.LSP.Servers == nil {
-		cfg.LSP.Servers = map[string]appcfg.LSPServerConfig{}
-	}
 	changed := false
-	for _, plugin := range data.LSPPlugins {
-		if plugin.Err != "" {
-			out = append(out, LSPOutcome{Name: plugin.Key, Status: "skipped", Detail: plugin.Err})
-			continue
+	ctx := context.Background()
+	applyServers := func(servers map[string]appcfg.LSPServerConfig) {
+		if servers == nil {
+			return
 		}
-		if parts := strings.SplitN(plugin.Key, "@", 2); len(parts) == 2 &&
-			parts[1] == officialLSPMarketplace && officialLSPPlugins[plugin.Name] != "" {
-			id := officialLSPPlugins[plugin.Name]
-			if _, exists := cfg.LSP.Servers[id]; exists {
-				out = append(out, LSPOutcome{Name: id, Status: "skipped", Detail: "an entry with this id is already configured; not overwritten"})
+		for _, plugin := range data.LSPPlugins {
+			if plugin.Err != "" {
+				out = append(out, LSPOutcome{Name: plugin.Key, Status: "skipped", Detail: plugin.Err})
 				continue
 			}
-			// The catalog entry carries the server's definition; only the
-			// enablement is the user's to migrate.
-			cfg.LSP.Servers[id] = appcfg.LSPServerConfig{Enabled: appcfg.BoolPtr(true)}
-			changed = true
-			out = append(out, LSPOutcome{Name: id, Status: "enabled", Detail: fmt.Sprintf("built-in %s server enabled (from %s)", id, plugin.Key)})
-			continue
-		}
-		names := make([]string, 0, len(plugin.Servers))
-		for name := range plugin.Servers {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			id := lspServerID(name, plugin.Name)
-			entry, reason := convertLSPServer(plugin, plugin.Servers[name])
-			if reason != "" {
-				out = append(out, LSPOutcome{Name: id, Status: "skipped", Detail: reason})
+			if parts := strings.SplitN(plugin.Key, "@", 2); len(parts) == 2 &&
+				parts[1] == officialLSPMarketplace && officialLSPPlugins[plugin.Name] != "" {
+				id := officialLSPPlugins[plugin.Name]
+				if _, exists := servers[id]; exists {
+					out = append(out, LSPOutcome{Name: id, Status: "skipped", Detail: "an entry with this id is already configured; not overwritten"})
+					continue
+				}
+				// The catalog entry carries the server's definition; only the
+				// enablement is the user's to migrate.
+				servers[id] = appcfg.LSPServerConfig{Enabled: appcfg.BoolPtr(true)}
+				changed = true
+				out = append(out, LSPOutcome{Name: id, Status: "enabled", Detail: fmt.Sprintf("built-in %s server enabled (from %s)", id, plugin.Key)})
 				continue
 			}
-			if _, exists := cfg.LSP.Servers[id]; exists {
-				out = append(out, LSPOutcome{Name: id, Status: "skipped", Detail: "an entry with this id is already configured; not overwritten"})
-				continue
+			names := make([]string, 0, len(plugin.Servers))
+			for name := range plugin.Servers {
+				names = append(names, name)
 			}
-			if err := appcfg.ValidateLSPServers("lsp.servers", map[string]appcfg.LSPServerConfig{id: entry}); err != nil {
-				out = append(out, LSPOutcome{Name: id, Status: "skipped", Detail: err.Error()})
-				continue
+			sort.Strings(names)
+			for _, name := range names {
+				id := lspServerID(name, plugin.Name)
+				entry, reason := convertLSPServer(plugin, plugin.Servers[name])
+				if reason != "" {
+					out = append(out, LSPOutcome{Name: id, Status: "skipped", Detail: reason})
+					continue
+				}
+				if _, exists := servers[id]; exists {
+					out = append(out, LSPOutcome{Name: id, Status: "skipped", Detail: "an entry with this id is already configured; not overwritten"})
+					continue
+				}
+				if err := appcfg.ValidateLSPServers("lsp.servers", map[string]appcfg.LSPServerConfig{id: entry}); err != nil {
+					out = append(out, LSPOutcome{Name: id, Status: "skipped", Detail: err.Error()})
+					continue
+				}
+				// Plaintext env values are legal in the stored section (owner
+				// ruling 2026-10-30, plan 188 W11): the file-side secret scan
+				// no longer applies to what the importer writes.
+				servers[id] = entry
+				changed = true
+				extensions := make([]string, 0, len(entry.ExtensionToLanguage))
+				for ext := range entry.ExtensionToLanguage {
+					extensions = append(extensions, ext)
+				}
+				sort.Strings(extensions)
+				out = append(out, LSPOutcome{Name: id, Status: "written",
+					Detail: fmt.Sprintf("%s for %s (from %s)", entry.Command, strings.Join(extensions, ", "), plugin.Key)})
 			}
-			body, err := yaml.Marshal(entry)
-			if err != nil {
-				return out, notices, fmt.Errorf("marshal lsp.servers.%s: %w", id, err)
-			}
-			if err := appcfg.RejectPlaintextConfigSecrets("forebrain.yaml", body); err != nil {
-				out = append(out, LSPOutcome{Name: id, Status: "skipped",
-					Detail: "its env holds a plaintext secret; add it by hand with ${ENV_NAME} from ~/.forebrain/.env"})
-				continue
-			}
-			cfg.LSP.Servers[id] = entry
-			changed = true
-			extensions := make([]string, 0, len(entry.ExtensionToLanguage))
-			for ext := range entry.ExtensionToLanguage {
-				extensions = append(extensions, ext)
-			}
-			sort.Strings(extensions)
-			out = append(out, LSPOutcome{Name: id, Status: "written",
-				Detail: fmt.Sprintf("%s for %s (from %s)", entry.Command, strings.Join(extensions, ", "), plugin.Key)})
 		}
 	}
-	if changed {
-		if opts.DryRun {
-			notices = append(notices, "enabled language servers apply to edits from the next session; run forebrain lsp doctor to check them")
-			return out, notices, nil
-		}
-		if err := backupFile(opts.ConfigPath, opts.now()); err != nil {
+	// The servers are the lsp section, stored in the state database like
+	// every configuration write (plan 188 W11); the file is not touched.
+	if opts.DryRun {
+		if err := sectionDryRun(ctx, opts, "lsp", func(cur *appcfg.LSPSection) error {
+			if cur.Servers == nil {
+				cur.Servers = map[string]appcfg.LSPServerConfig{}
+			}
+			applyServers(cur.Servers)
+			return nil
+		}); err != nil {
 			return out, notices, err
 		}
-		if err := appcfg.Save(opts.ConfigPath, cfg); err != nil {
-			return out, notices, fmt.Errorf("save %s: %w", opts.ConfigPath, err)
+		if changed {
+			notices = append(notices, "enabled language servers apply to edits from the next session; run forebrain lsp doctor to check them")
 		}
+		return out, notices, nil
+	}
+	if err := updateConfigSection(ctx, opts, "lsp", func(cur *appcfg.LSPSection) error {
+		if cur.Servers == nil {
+			cur.Servers = map[string]appcfg.LSPServerConfig{}
+		}
+		applyServers(cur.Servers)
+		return nil
+	}); err != nil {
+		return out, notices, err
+	}
+	if changed {
 		notices = append(notices, "enabled language servers apply to edits from the next session; run forebrain lsp doctor to check them")
 	}
 	return out, notices, nil

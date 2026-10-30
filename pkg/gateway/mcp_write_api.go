@@ -16,6 +16,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
@@ -69,6 +70,11 @@ func failMCPWrite(w http.ResponseWriter, err error) {
 	var api *mcpAPIError
 	if errors.As(err, &api) {
 		http.Error(w, api.Msg, api.Status)
+		return
+	}
+	var invalid *state.InvalidSectionError
+	if errors.As(err, &invalid) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -152,8 +158,8 @@ func readMCPServerWrite(stored appcfg.MCPServerConfig) map[string]any {
 		"enabled":                     appcfg.ServerEnabled(stored),
 		"startup_timeout":             stored.StartupTimeout,
 		"request_timeout":             stored.RequestTimeout,
-		"headers":                     redactedMCPSecretMap(stored.Headers),
-		"env":                         redactedMCPSecretMap(stored.Env),
+		"headers":                     plaintextMCPSecretMap(stored.Headers),
+		"env":                         plaintextMCPSecretMap(stored.Env),
 		"inherit_parent_env":          stored.InheritParentEnv != nil && *stored.InheritParentEnv,
 		"disable_standalone_sse":      stored.DisableStandaloneSSE != nil && *stored.DisableStandaloneSSE,
 		"expected_command_sha256":     strings.TrimSpace(stored.ExpectedCommandSHA256),
@@ -162,70 +168,38 @@ func readMCPServerWrite(stored appcfg.MCPServerConfig) map[string]any {
 	}
 }
 
-// readMCPOAuthWrite renders an OAuth block with its credentials masked. An
-// unset value stays empty: "never configured" and "configured but hidden" are
-// different facts a settings screen has to be able to tell apart.
+// readMCPOAuthWrite renders an OAuth block with its credentials in plaintext
+// (owner ruling 2026-10-30, plan 188 W8): what a settings screen shows is what
+// is stored. An unset value stays empty: "never configured" and "configured
+// but empty" are different facts a settings screen has to be able to tell
+// apart.
 func readMCPOAuthWrite(o appcfg.MCPOAuthConfig) map[string]any {
 	return map[string]any{
 		"mode":              strings.TrimSpace(o.Mode),
-		"access_token":      redactMCPSecret(o.AccessToken),
+		"access_token":      strings.TrimSpace(o.AccessToken),
 		"token_type":        strings.TrimSpace(o.TokenType),
 		"client_id":         strings.TrimSpace(o.ClientID),
-		"client_secret":     redactMCPSecret(o.ClientSecret),
+		"client_secret":     strings.TrimSpace(o.ClientSecret),
 		"token_url":         strings.TrimSpace(o.TokenURL),
 		"authorization_url": strings.TrimSpace(o.AuthorizationURL),
 		"redirect_url":      strings.TrimSpace(o.RedirectURL),
-		"refresh_token":     redactMCPSecret(o.RefreshToken),
+		"refresh_token":     strings.TrimSpace(o.RefreshToken),
 		"scopes":            append([]string(nil), o.Scopes...),
 	}
 }
 
-// redactedMCPSecretMap renders an env or header map for a surface: key names
-// travel, values do not. A single ${ENV_NAME} reference is passed through —
-// that is a pointer, not a secret — and an empty value stays empty.
-func redactedMCPSecretMap(in map[string]string) map[string]string {
+// plaintextMCPSecretMap renders an env or header map for a surface with its
+// values as stored — plaintext or a ${ENV_NAME} reference, whichever the
+// configuration carries (plan 188 W8).
+func plaintextMCPSecretMap(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return map[string]string{}
 	}
 	out := make(map[string]string, len(in))
 	for k, v := range in {
-		out[k] = redactMCPSecret(v)
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
 	return out
-}
-
-// redactMCPSecret is one value's read form: a single ${ENV_NAME} reference is
-// the value itself, everything else set is masked, and empty stays empty.
-func redactMCPSecret(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
-	}
-	if isMCPEnvReference(trimmed) {
-		return trimmed
-	}
-	return appcfg.RedactedSecretPlaceholder
-}
-
-// isMCPEnvReference reports whether value is exactly one ${ENV_NAME}
-// reference, the one form of a credential a configuration file may carry.
-func isMCPEnvReference(value string) bool {
-	if !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") {
-		return false
-	}
-	name := strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}")
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		isAlpha := r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
-		isDigitAfterFirst := i > 0 && r >= '0' && r <= '9'
-		if r == '_' || isAlpha || isDigitAfterFirst {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 // writeTransport is the transport an entry is written and shown as: the
@@ -490,16 +464,18 @@ type mcpWriteLayer struct {
 	entries     []appcfg.MCPServerConfig
 }
 
-// mcpGlobalWriteLayer resolves the shared list in forebrain.yaml.
+// mcpGlobalWriteLayer resolves the shared list in the agents section of the
+// state database.
 func (s *Server) mcpGlobalWriteLayer() (mcpWriteLayer, error) {
-	cfg, path, err := s.mcpConfigForWrite()
+	ctx := context.Background()
+	cfg, err := s.persistedConfig(ctx)
 	if err != nil {
 		return mcpWriteLayer{}, err
 	}
 	return mcpWriteLayer{
 		scope:   appcfg.MCPServerScopeGlobal,
 		label:   "the shared list",
-		source:  path,
+		source:  s.configPath(),
 		entries: cfg.Agents.Defaults.MCPServers,
 	}, nil
 }
@@ -508,11 +484,11 @@ func (s *Server) mcpGlobalWriteLayer() (mcpWriteLayer, error) {
 // already exist: this route edits an agent the user configured, it does not
 // invent one, and "main" always exists.
 func (s *Server) mcpAgentWriteLayer(agentID string) (mcpWriteLayer, error) {
-	cfg, path, err := s.mcpConfigForWrite()
+	id, err := s.resolveMCPAgentID(agentID)
 	if err != nil {
 		return mcpWriteLayer{}, err
 	}
-	id, err := s.resolveMCPAgentID(agentID)
+	cfg, err := s.persistedConfig(context.Background())
 	if err != nil {
 		return mcpWriteLayer{}, err
 	}
@@ -520,7 +496,7 @@ func (s *Server) mcpAgentWriteLayer(agentID string) (mcpWriteLayer, error) {
 	return mcpWriteLayer{
 		scope:   appcfg.MCPServerScopeAgent,
 		label:   fmt.Sprintf("primary agent %q", id),
-		source:  path,
+		source:  s.configPath(),
 		agentID: id,
 		entries: def.MCPServers,
 	}, nil
@@ -566,20 +542,6 @@ func (s *Server) mcpProjectWriteLayer(ctx context.Context, projectID string) (mc
 	}, nil
 }
 
-// mcpConfigForWrite reads forebrain.yaml as written, ready to be edited in
-// memory and saved back.
-func (s *Server) mcpConfigForWrite() (*appcfg.Root, string, error) {
-	path := strings.TrimSpace(s.configPath())
-	if path == "" {
-		return nil, "", mcpUnavailable("no config path is bound")
-	}
-	cfg, err := s.persistedConfig()
-	if err != nil {
-		return nil, "", err
-	}
-	return &cfg, path, nil
-}
-
 // resolveMCPAgentID resolves the route's agent to an id that is in effect.
 func (s *Server) resolveMCPAgentID(agentID string) (string, error) {
 	if strings.TrimSpace(agentID) == "" {
@@ -596,45 +558,80 @@ func (s *Server) resolveMCPAgentID(agentID string) (string, error) {
 	return strings.TrimSpace(sum.ID), nil
 }
 
-// saveMCPLayer validates the layer's new list the way the loader would, writes
-// it, and brings the running process onto the change.
+// mcpLayerApply is one write's change to a layer's list: cur is the layer as
+// it stands inside the write's own transaction, and the answer reports the
+// entry the request wrote or removed.
+type mcpLayerApply func(cur []appcfg.MCPServerConfig) (next []appcfg.MCPServerConfig, reported appcfg.MCPServerConfig, err error)
+
+// saveMCPLayer validates the layer's new list the way the loader would and
+// stores it (plan 188 W8). The global and agent layers are one read-modify-
+// write of the agents section in the state database — the apply closure runs
+// against the list as it stands inside the store's transaction, so a
+// concurrent write can neither be overwritten nor overwrite this one, and
+// credentials land in plaintext: the plaintext-secret scan is a file-side
+// guardrail and the section is not a file (owner ruling 2026-10-30). The
+// project layer stays a repository file and keeps the file rules, scan
+// included.
 //
-// The rebind is not optional: an MCP list is frozen when a session starts, so a
-// write that only reached the file would look like it did nothing. Rebuilding
+// The rebind is not optional: an MCP list is frozen when a session starts, so
+// a write that only reached storage would look like it did nothing. Rebuilding
 // the pool is what "the next session uses it" means for a process that already
 // has runners.
-func (s *Server) saveMCPLayer(layer mcpWriteLayer, servers []appcfg.MCPServerConfig) error {
-	appcfg.NormalizeMCPServers(servers)
-	if err := appcfg.ValidateMCPServers(layer.source, servers); err != nil {
-		return mcpBadRequest("%v", err)
-	}
-	// The loader refuses to read a file with a plaintext secret in it, so
-	// writing one would leave a configuration nothing can start from.
-	if err := appcfg.RejectPlaintextMCPSecrets(layer.source, servers); err != nil {
-		return mcpBadRequest("%v", err)
-	}
+func (s *Server) saveMCPLayer(ctx context.Context, layer mcpWriteLayer, apply mcpLayerApply) (appcfg.MCPServerConfig, error) {
 	if layer.scope == appcfg.MCPServerScopeProject {
-		if err := mcp.SaveProjectMCPServers(layer.projectRoot, servers); err != nil {
-			return err
+		next, reported, err := apply(layer.entries)
+		if err != nil {
+			return reported, err
 		}
-	} else {
-		cfg, _, err := s.mcpConfigForWrite()
+		appcfg.NormalizeMCPServers(next)
+		if err := appcfg.ValidateMCPServers(layer.source, next); err != nil {
+			return reported, mcpBadRequest("%v", err)
+		}
+		// The loader refuses to read a file with a plaintext secret in it, so
+		// writing one would leave a configuration nothing can start from.
+		if err := appcfg.RejectPlaintextMCPSecrets(layer.source, next); err != nil {
+			return reported, mcpBadRequest("%v", err)
+		}
+		if err := mcp.SaveProjectMCPServers(layer.projectRoot, next); err != nil {
+			return reported, err
+		}
+		s.rebindAgentRunners()
+		return reported, nil
+	}
+	var reported appcfg.MCPServerConfig
+	err := s.withConfigSection(ctx, "agents", func(cfg *appcfg.Root) error {
+		if cfg.Agents.Definitions == nil && layer.scope == appcfg.MCPServerScopeAgent {
+			cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{}
+		}
+		var cur []appcfg.MCPServerConfig
+		if layer.scope == appcfg.MCPServerScopeAgent {
+			cur = cfg.Agents.Definitions[layer.agentID].MCPServers
+		} else {
+			cur = cfg.Agents.Defaults.MCPServers
+		}
+		next, out, err := apply(append([]appcfg.MCPServerConfig(nil), cur...))
 		if err != nil {
 			return err
 		}
+		reported = out
+		appcfg.NormalizeMCPServers(next)
+		if err := appcfg.ValidateMCPServers(layer.source, next); err != nil {
+			return mcpBadRequest("%v", err)
+		}
 		if layer.scope == appcfg.MCPServerScopeAgent {
 			def := cfg.Agents.Definitions[layer.agentID]
-			def.MCPServers = servers
+			def.MCPServers = next
 			cfg.Agents.Definitions[layer.agentID] = def
 		} else {
-			cfg.Agents.Defaults.MCPServers = servers
+			cfg.Agents.Defaults.MCPServers = next
 		}
-		if err := s.saveAndReload(*cfg); err != nil {
-			return err
-		}
+		return nil
+	})
+	if err != nil {
+		return reported, err
 	}
 	s.rebindAgentRunners()
-	return nil
+	return reported, nil
 }
 
 // rebindAgentRunners rebuilds the pooled runners of the agent serving this
@@ -679,15 +676,11 @@ func (s *Server) handleProjectMCPServersWrite(w http.ResponseWriter, r *http.Req
 // writeMCPServer is the one write path behind all three layers: POST creates
 // an entry, PUT replaces the one the route names, DELETE removes it.
 //
-// The whole body runs under configWriteMu: resolve snapshots layer.entries and
-// saveMCPLayer later replaces that entire layer, so any config write landing
-// in between would be silently overwritten. saveMCPLayer's rebind (which can
-// wait up to runnerPoolCloseDeadline on a stuck MCP subprocess) runs inside
-// the lock by the same token — a rebind of stale runners would race the layer
-// replacement it is part of.
+// The store's section transaction is the mutual exclusion the file mutex used
+// to provide: the apply closure reads and replaces the whole layer inside it,
+// so a config write landing in between can neither be overwritten nor
+// overwrite this one (plan 188 W2).
 func (s *Server) writeMCPServer(w http.ResponseWriter, r *http.Request, resolve mcpLayerResolver) {
-	s.configWriteMu.Lock()
-	defer s.configWriteMu.Unlock()
 	layer, err := resolve(r)
 	if err != nil {
 		failMCPWrite(w, err)
@@ -700,7 +693,7 @@ func (s *Server) writeMCPServer(w http.ResponseWriter, r *http.Request, resolve 
 	case http.MethodPut:
 		s.updateMCPServer(w, r, layer, name)
 	case http.MethodDelete:
-		s.deleteMCPServer(w, layer, name)
+		s.deleteMCPServer(w, r, layer, name)
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -717,10 +710,6 @@ func (s *Server) createMCPServer(w http.ResponseWriter, r *http.Request, layer m
 		failMCPWrite(w, mcpBadRequest("an MCP server needs a name"))
 		return
 	}
-	if i := findMCPServerIndex(layer.entries, name); i >= 0 {
-		failMCPWrite(w, mcpConflict("an MCP server named %q is already configured in %s", name, layer.label))
-		return
-	}
 	if strings.TrimSpace(in.Transport) == "" {
 		failMCPWrite(w, mcpBadRequest("transport is required; use stdio or streamable_http"))
 		return
@@ -730,12 +719,19 @@ func (s *Server) createMCPServer(w http.ResponseWriter, r *http.Request, layer m
 		failMCPWrite(w, err)
 		return
 	}
-	next := append(append([]appcfg.MCPServerConfig(nil), layer.entries...), srv)
-	if err := s.saveMCPLayer(layer, next); err != nil {
+	// The name check runs inside the write's transaction, on the list as it
+	// stands there: two concurrent creates of one name cannot both land.
+	written, err := s.saveMCPLayer(r.Context(), layer, func(cur []appcfg.MCPServerConfig) ([]appcfg.MCPServerConfig, appcfg.MCPServerConfig, error) {
+		if i := findMCPServerIndex(cur, name); i >= 0 {
+			return nil, appcfg.MCPServerConfig{}, mcpConflict("an MCP server named %q is already configured in %s", name, layer.label)
+		}
+		return append(cur, srv), srv, nil
+	})
+	if err != nil {
 		failMCPWrite(w, err)
 		return
 	}
-	writeMCPServerWriteResult(w, layer, srv, false)
+	writeMCPServerWriteResult(w, layer, written, false)
 }
 
 func (s *Server) updateMCPServer(w http.ResponseWriter, r *http.Request, layer mcpWriteLayer, name string) {
@@ -748,40 +744,43 @@ func (s *Server) updateMCPServer(w http.ResponseWriter, r *http.Request, layer m
 		failMCPWrite(w, err)
 		return
 	}
-	idx := findMCPServerIndex(layer.entries, name)
-	if idx < 0 {
-		failMCPWrite(w, mcpNotFound("no MCP server named %q in %s", name, layer.label))
-		return
-	}
-	srv := layer.entries[idx]
-	if err := applyMCPServerWrite(&srv, in); err != nil {
+	written, err := s.saveMCPLayer(r.Context(), layer, func(cur []appcfg.MCPServerConfig) ([]appcfg.MCPServerConfig, appcfg.MCPServerConfig, error) {
+		idx := findMCPServerIndex(cur, name)
+		if idx < 0 {
+			return nil, appcfg.MCPServerConfig{}, mcpNotFound("no MCP server named %q in %s", name, layer.label)
+		}
+		srv := cur[idx]
+		if err := applyMCPServerWrite(&srv, in); err != nil {
+			return nil, appcfg.MCPServerConfig{}, err
+		}
+		next := append([]appcfg.MCPServerConfig(nil), cur...)
+		next[idx] = srv
+		return next, srv, nil
+	})
+	if err != nil {
 		failMCPWrite(w, err)
 		return
 	}
-	next := append([]appcfg.MCPServerConfig(nil), layer.entries...)
-	next[idx] = srv
-	if err := s.saveMCPLayer(layer, next); err != nil {
-		failMCPWrite(w, err)
-		return
-	}
-	writeMCPServerWriteResult(w, layer, srv, false)
+	writeMCPServerWriteResult(w, layer, written, false)
 }
 
-func (s *Server) deleteMCPServer(w http.ResponseWriter, layer mcpWriteLayer, name string) {
+func (s *Server) deleteMCPServer(w http.ResponseWriter, r *http.Request, layer mcpWriteLayer, name string) {
 	if name == "" {
 		failMCPWrite(w, mcpBadRequest("an MCP server name is required"))
 		return
 	}
-	idx := findMCPServerIndex(layer.entries, name)
-	if idx < 0 {
-		failMCPWrite(w, mcpNotFound("no MCP server named %q in %s", name, layer.label))
-		return
-	}
-	removed := layer.entries[idx]
-	next := make([]appcfg.MCPServerConfig, 0, len(layer.entries)-1)
-	next = append(next, layer.entries[:idx]...)
-	next = append(next, layer.entries[idx+1:]...)
-	if err := s.saveMCPLayer(layer, next); err != nil {
+	removed, err := s.saveMCPLayer(r.Context(), layer, func(cur []appcfg.MCPServerConfig) ([]appcfg.MCPServerConfig, appcfg.MCPServerConfig, error) {
+		idx := findMCPServerIndex(cur, name)
+		if idx < 0 {
+			return nil, appcfg.MCPServerConfig{}, mcpNotFound("no MCP server named %q in %s", name, layer.label)
+		}
+		out := cur[idx]
+		next := make([]appcfg.MCPServerConfig, 0, len(cur)-1)
+		next = append(next, cur[:idx]...)
+		next = append(next, cur[idx+1:]...)
+		return next, out, nil
+	})
+	if err != nil {
 		failMCPWrite(w, err)
 		return
 	}
@@ -797,6 +796,7 @@ func writeMCPServerWriteResult(w http.ResponseWriter, layer mcpWriteLayer, srv a
 		"path":    layer.source,
 		"scope":   layer.scope,
 		"applied": true,
+		"applies": "next_turn",
 		"removed": removed,
 		"server":  readMCPServerWrite(srv),
 	})

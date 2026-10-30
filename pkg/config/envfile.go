@@ -177,7 +177,13 @@ func applyDotEnvAfterNormalize(_ string, r *Root) error {
 		return nil
 	}
 	// The .env took part in this configuration, so it is one of the files the
-	// configuration was read from.
+	// configuration was read from. A root that already lists it — FinishLoad
+	// runs after Load did — must not list it twice.
+	for _, existing := range r.SourceFiles {
+		if existing == envPath {
+			return applyMergedEnvForLoad(r, m, applyMergedEnvToProcess)
+		}
+	}
 	r.SourceFiles = append(r.SourceFiles, envPath)
 	return applyMergedEnvForLoad(r, m, applyMergedEnvToProcess)
 }

@@ -21,6 +21,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	toolpkg "github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
@@ -898,6 +899,203 @@ func TestSubagentSendLifecycleNamesItsDispatchingCall(t *testing.T) {
 	}
 	if spawns[0].TaskIndex != 0 {
 		t.Fatalf("spawn TaskIndex=%d, want 0", spawns[0].TaskIndex)
+	}
+}
+
+// stepHookRecorder is a step hook that records what it is handed, so a test can
+// tell the dispatcher's own hook apart from merely some non-nil function.
+type stepHookRecorder struct {
+	mu     sync.Mutex
+	events []toolpkg.StepEvent
+}
+
+func (r *stepHookRecorder) hook(_ context.Context, evt toolpkg.StepEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, evt)
+}
+
+func (r *stepHookRecorder) recorded() []toolpkg.StepEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]toolpkg.StepEvent(nil), r.events...)
+}
+
+// dispatchHarness is one dispatching turn: a persisted parent run for the child
+// to hang off, the dispatch context that names it, the registered
+// subagent_send tool so a test dispatches the way the agent does, and the
+// executor that captures the context the child's execution actually runs under.
+type dispatchHarness struct {
+	dispatch context.Context
+	parent   string
+	send     *llm.Tool
+	executor *ctxCaptureSubagentExecutor
+	factory  Factory
+}
+
+func newDispatchHarness(t *testing.T) *dispatchHarness {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	runSvc := &state.RunStore{DB: db}
+	ensureRunSessions(t, db, "session-1")
+	parent, err := runSvc.CreateRun(ctx, "session-1", "parent")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	executor := &ctxCaptureSubagentExecutor{reached: make(chan context.Context, 1)}
+	owner := &Runner{Deps: &Deps{RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: executor, Control: NewController()}
+	fac := Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, fac); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	send, ok := aToolByName(a, "subagent_send")
+	if !ok {
+		t.Fatal("subagent_send not registered")
+	}
+	return &dispatchHarness{
+		dispatch: toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID),
+		parent:   parent.ID,
+		send:     send,
+		executor: executor,
+		factory:  fac,
+	}
+}
+
+// dispatchAsync calls subagent_send the way the dispatching agent's tool call
+// does: everything a surface froze into that turn rides on the call's context,
+// which is all the handler is handed before the execution outlives it.
+func (h *dispatchHarness) dispatchAsync(t *testing.T, ctx context.Context) {
+	t.Helper()
+	args, err := json.Marshal(map[string]any{
+		"title":         "Async dispatch",
+		"task":          "run a tool",
+		"subagent_type": "general-purpose",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+	if _, err := h.send.Handle(ctx, string(args)); err != nil {
+		t.Fatalf("subagent_send: %v", err)
+	}
+}
+
+// A subagent_send dispatch outlives the turn that started it, so its execution
+// context is rebuilt from a background context. Everything the child needs from
+// that turn has to cross the boundary explicitly, the run-scoped hooks above
+// all: a step hook the child does not carry produces no tool event at all, so
+// its view shows its answers and its thinking and never a tool card, and a
+// missing approval hook makes a gated call inside the child fail the whole
+// execution instead of asking.
+func TestAsyncSubagentExecutionKeepsTheDispatchingRunsHooks(t *testing.T) {
+	h := newDispatchHarness(t)
+	recorder := &stepHookRecorder{}
+	dispatch := toolpkg.WithStepHook(h.dispatch, recorder.hook)
+	dispatch = toolpkg.WithNetworkApprovalPromptHook(dispatch, func(context.Context, string, map[string]any, safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
+		return safety.NetworkApprovalDeny, nil
+	})
+	dispatch = toolpkg.WithSubagentApprovalHook(dispatch, func(ctx context.Context, _ *toolpkg.RequiresActionError) (context.Context, error) {
+		return ctx, nil
+	})
+	dispatch = toolpkg.WithInlineApprovalHook(dispatch, func(ctx context.Context, _ *toolpkg.RequiresActionError) (context.Context, error) {
+		return ctx, nil
+	})
+
+	h.dispatchAsync(t, dispatch)
+	captured := h.executor.await(t)
+
+	step := toolpkg.StepHookFromContext(captured, nil)
+	if step == nil {
+		t.Fatal("the async subagent execution context carries no step hook: none of its tool steps produces an event, so its view shows no tool card and the event log records none")
+	}
+	if toolpkg.NetworkApprovalPromptHookFromContext(captured, nil) == nil {
+		t.Fatal("the async subagent execution context carries no network approval hook: a sandboxed command's network approval inside it becomes a refusal")
+	}
+	if toolpkg.SubagentApprovalHookFromContext(captured, nil) == nil {
+		t.Fatal("the async subagent execution context carries no subagent approval hook: a gated call inside it fails the whole execution instead of pausing")
+	}
+	if toolpkg.InlineApprovalHookFromContext(captured, nil) == nil {
+		t.Fatal("the async subagent execution context carries no inline approval hook: one of its own gates cannot be answered where the call is")
+	}
+
+	// The hook has to be the dispatching turn's own, not merely some function:
+	// the event handed to it must land where that turn's hook records.
+	step(captured, toolpkg.StepEvent{Kind: toolpkg.StepKindToolStarted, StepID: "step-async-hooks", ToolName: "read_file"})
+	recorded := recorder.recorded()
+	if len(recorded) != 1 || recorded[0].StepID != "step-async-hooks" {
+		t.Fatalf("recorded step events = %#v, want the one sent through the captured hook", recorded)
+	}
+}
+
+// Rebuilding the execution context from a background context must carry the
+// dispatch's identity with it: the conversation the child reports into, the
+// prompt-cache key its calls are priced with, the run it hangs off, and the call
+// that draws it into a card.
+func TestAsyncSubagentContextKeepsTheDispatchIdentity(t *testing.T) {
+	h := newDispatchHarness(t)
+	dispatch := llm.WithPromptCacheKey(h.dispatch, "cache-key-async")
+	dispatch = toolpkg.WithToolUseID(dispatch, "call-async-1")
+
+	h.dispatchAsync(t, dispatch)
+	captured := h.executor.await(t)
+
+	if got := llm.AgentSessionIDFromContext(captured); got != "session-1" {
+		t.Fatalf("execution session = %q, want session-1", got)
+	}
+	if got := llm.PromptCacheKeyFromContext(captured); got != "cache-key-async" {
+		t.Fatalf("execution prompt-cache key = %q, want cache-key-async", got)
+	}
+	if got := toolpkg.RunIDFromContext(captured); got != h.parent {
+		t.Fatalf("execution run id = %q, want the dispatching run %q", got, h.parent)
+	}
+	if got := toolpkg.ToolUseIDFromContext(captured); got != "call-async-1" {
+		t.Fatalf("execution tool-use id = %q, want the dispatching call call-async-1", got)
+	}
+}
+
+// Every path that executes a subagent owes its child the dispatching turn's step
+// hook. Two of them carry that duty: the blocking dispatch subagent_run and
+// subagent_fanout share, and the background dispatch subagent_send uses. A path
+// that rebuilds its context without the hook loses every tool event of its
+// children silently — no error, just no cards.
+func TestSubagentDispatchKernelsKeepTheDispatchingRunsHooks(t *testing.T) {
+	kernels := []struct {
+		name string
+		run  func(t *testing.T, h *dispatchHarness, dispatch context.Context)
+	}{
+		{"execGeneralSubagent", func(t *testing.T, h *dispatchHarness, dispatch context.Context) {
+			if _, err := execGeneralSubagent(dispatch, h.factory, "task-kernel-sync", "kernels", "run a tool", "general-purpose"); err != nil {
+				t.Fatalf("execGeneralSubagent: %v", err)
+			}
+		}},
+		{"subagent_send", func(t *testing.T, h *dispatchHarness, dispatch context.Context) {
+			h.dispatchAsync(t, dispatch)
+		}},
+	}
+	for _, k := range kernels {
+		t.Run(k.name, func(t *testing.T) {
+			h := newDispatchHarness(t)
+			recorder := &stepHookRecorder{}
+			k.run(t, h, toolpkg.WithStepHook(h.dispatch, recorder.hook))
+
+			captured := h.executor.await(t)
+			step := toolpkg.StepHookFromContext(captured, nil)
+			if step == nil {
+				t.Fatalf("%s handed the child no step hook: every tool step it takes loses its event and its card", k.name)
+			}
+			step(captured, toolpkg.StepEvent{Kind: toolpkg.StepKindToolStarted, StepID: "step-" + k.name})
+			if recorded := recorder.recorded(); len(recorded) != 1 || recorded[0].StepID != "step-"+k.name {
+				t.Fatalf("%s: recorded step events = %#v, want the one sent through the captured hook", k.name, recorded)
+			}
+		})
 	}
 }
 
@@ -1965,11 +2163,40 @@ func TestExecGeneralSubagentExecCtxCarriesRosterKeyAsHookAgentID(t *testing.T) {
 // test can assert on which context values crossed the subagent boundary.
 type ctxCaptureSubagentExecutor struct {
 	captured context.Context
+	// reached, when set, hands the captured context to the test: an
+	// asynchronous dispatch runs on its own goroutine, so the test has to wait
+	// for the capture instead of reading it after the call returns.
+	reached chan context.Context
 }
 
 func (h *ctxCaptureSubagentExecutor) RunSubagentExec(ctx context.Context, _ SubagentExecRequest) (string, error) {
 	h.captured = ctx
+	if h.reached != nil {
+		select {
+		case h.reached <- ctx:
+		default:
+		}
+	}
 	return "ok", nil
+}
+
+// await returns the context the execution was handed, waiting for an
+// asynchronous one to start.
+func (h *ctxCaptureSubagentExecutor) await(t *testing.T) context.Context {
+	t.Helper()
+	if h.reached == nil {
+		if h.captured == nil {
+			t.Fatal("the subagent execution never started")
+		}
+		return h.captured
+	}
+	select {
+	case captured := <-h.reached:
+		return captured
+	case <-time.After(10 * time.Second):
+		t.Fatal("the subagent execution never started")
+		return nil
+	}
 }
 
 // TestSubagentContextDoesNotInheritPrimarySteerRuntime reproduces the bug

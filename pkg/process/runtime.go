@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // resolveCache caches the first Resolve() result so callers that check
@@ -99,6 +101,15 @@ func resolveUncachedWithHooks(hooks StartupHooks) (Context, error) {
 			return Context{}, err
 		}
 	}
+	// The composed source wins once the state database holds sections (plan
+	// 187): the file's runtime sections are dead after the legacy import, so
+	// a reader that kept reading them would see an empty configuration after
+	// any database-era write (plan 188 W9).
+	if composed, ok, cerr := ComposedStartupConfig(context.Background(), home); cerr != nil {
+		return Context{}, cerr
+	} else if ok {
+		cfg = composed
+	}
 	// Initialize the global model catalog so that provider validation and
 	// token-limit lookups are available to all downstream code: the home gets
 	// its copy of models.json when it has none, and the effective catalog is
@@ -115,11 +126,33 @@ func resolveUncachedWithHooks(hooks StartupHooks) (Context, error) {
 	return Context{Home: home, ConfigPath: cfgPath, Config: cfg}, nil
 }
 
+// SaveConfig persists the setup flow's configuration change (plan 188 W9):
+// the agents section — the only one a setup or /connect changes — goes into
+// the state database, the one write path every configuration surface shares.
+// forebrain.yaml is not written; a home whose file does not exist yet gets a
+// minimal startup-sections one created, because the gateway binds before a
+// database may exist and the file is where its startup sections live.
 func SaveConfig(ctx Context) error {
 	if ctx.ConfigPath == "" {
 		return fmt.Errorf("empty config path")
 	}
-	return appcfg.Save(ctx.ConfigPath, ctx.Config)
+	if ctx.Home == "" {
+		return fmt.Errorf("empty home")
+	}
+	if err := ensureStartupConfigFile(ctx.ConfigPath); err != nil {
+		return err
+	}
+	db, err := state.OpenStateFromHome(context.Background(), ctx.Home, nil)
+	if err != nil {
+		return fmt.Errorf("open state database: %w", err)
+	}
+	defer db.Close()
+	InstallConfigSectionValidator(ctx.ConfigPath, db)
+	env := &Environment{Root: ctx.Home, ConfigPath: ctx.ConfigPath, SQL: db}
+	return env.UpdateRootSection(context.Background(), "agents", func(cfg *appcfg.Root) error {
+		cfg.Agents = ctx.Config.Agents
+		return nil
+	})
 }
 
 // ErrorLogPath is where a forebrain home keeps its error log.

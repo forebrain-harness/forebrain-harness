@@ -37,7 +37,7 @@ func (s chatGPTModelsSource) ChatGPTModels(ctx context.Context) ([]openai.ModelI
 	// version is a request to the npm registry, and the fetch would fail on the
 	// missing credentials right after it — so ask for the login first. The
 	// wording is the Transport's own, which callers already match on.
-	if _, err := openai.Load(s.path); err != nil {
+	if _, err := openai.LoadProcessCredentials(ctx, s.path); err != nil {
 		return nil, fmt.Errorf("ChatGPT login required: %w", err)
 	}
 	// The declared client version is resolved live on every discovery: it
@@ -57,8 +57,10 @@ func DiscoverChatGPTModels(ctx context.Context, home string) ([]turn.ModelRecord
 }
 
 // NewOpenCodeModelsSource returns the OpenCode model source for a home: the
-// Console and the Go subscription catalogs, both read with the login file or
-// OPENCODE_API_KEY through the same transport a turn would use.
+// Console and the Go subscription catalogs, both read with the stored login
+// (the database row the composition root installed, <home>/opencode.json as
+// the file fallback) or OPENCODE_API_KEY through the same transport a turn
+// would use.
 func NewOpenCodeModelsSource(home string) turn.OpenCodeModelsSource {
 	return newOpenCodeModelsSource(opencode.DefaultPath(home))
 }
@@ -96,8 +98,8 @@ func (s openCodeModelsSource) OpenCodeSignedIn() bool {
 // credential resolves the bearer and the transport the catalogs are read with.
 // Neither surface answers without one.
 func (s openCodeModelsSource) credential() (string, http.RoundTripper, error) {
-	if c, err := opencode.Load(s.path); err == nil && strings.TrimSpace(c.AccessToken) != "" {
-		// The login-file transport refreshes a nearly expired token and writes
+	if c, err := opencode.LoadProcessCredentials(context.Background(), s.path); err == nil && strings.TrimSpace(c.AccessToken) != "" {
+		// The login transport refreshes a nearly expired token and writes
 		// the rotated pair back, so discovery leaves the login usable.
 		return c.AccessToken, &opencode.Transport{Path: s.path}, nil
 	}

@@ -66,12 +66,10 @@ func Execute(rt Context, opts Options) (Report, error) {
 			return rep, err
 		}
 	}
-	apiKey, err := apiKeyConfigReference(rt.Home, opts.Provider, opts.APIKey)
-	if err != nil {
-		logSetupError(rt.Home, "setup.execute.api_key_error", opts, err.Error())
-		return rep, err
-	}
-	opts.APIKey = apiKey
+	// The key is stored as the plaintext value the user typed, directly in
+	// the agents section (owner ruling 2026-10-30, plan 188 W14): the home's
+	// .env is the user's own file and no code path writes it for a provider
+	// key anymore.
 	agentName := agentNameOrMain(opts.AgentName)
 	if err := ApplyAgentLLMToConfigForAgent(&rt.Config, agentName, opts.Provider, opts.Model, opts.APIKey, opts.BaseURL, opts.APIPath, opts.UpdateParams, parsed); err != nil {
 		logSetupError(rt.Home, "setup.execute.agent_error", opts, err.Error())

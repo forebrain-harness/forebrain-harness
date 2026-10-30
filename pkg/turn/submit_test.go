@@ -917,3 +917,60 @@ func TestSubagentSuccessResetsItsContinuationCount(t *testing.T) {
 		t.Fatalf("plan = %+v, pending %v; want a fresh first attempt after success", plan, ok)
 	}
 }
+
+// TestSubmitRunsConfigSyncFirst pins the turn-boundary contract of the
+// configuration sync (plan 187): it runs before the executor, exactly once
+// per Submit, and its error fails the turn before any run exists.
+func TestSubmitRunsConfigSyncFirst(t *testing.T) {
+	var order []string
+	svc := New(
+		WithRunExecutor(runFunc(func(context.Context, TurnRequest, func(string)) (*agent.Result, error) {
+			order = append(order, "run")
+			return &agent.Result{}, nil
+		})),
+		WithConfigSync(func(context.Context) error {
+			order = append(order, "sync")
+			return nil
+		}),
+	)
+	out, err := svc.Submit(context.Background(), TurnRequest{SessionID: "s1"}, nil)
+	if err != nil || out.Status != TurnCompleted {
+		t.Fatalf("outcome = %#v, error = %v", out, err)
+	}
+	if len(order) != 2 || order[0] != "sync" || order[1] != "run" {
+		t.Fatalf("execution order = %v, want sync before run", order)
+	}
+}
+
+// TestSubmitFailsWhenConfigSyncFails pins the fail-closed half: a sync error
+// is the submitter's error, and the executor never runs.
+func TestSubmitFailsWhenConfigSyncFails(t *testing.T) {
+	syncErr := errors.New("state database is broken")
+	svc := New(
+		WithRunExecutor(runFunc(func(context.Context, TurnRequest, func(string)) (*agent.Result, error) {
+			t.Fatal("runner called although the config sync failed")
+			return nil, nil
+		})),
+		WithConfigSync(func(context.Context) error { return syncErr }),
+	)
+	out, err := svc.Submit(context.Background(), TurnRequest{SessionID: "s1"}, nil)
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("error = %v, want the sync error back", err)
+	}
+	if out.Status != TurnFailed || out.Error != syncErr {
+		t.Fatalf("outcome = %#v, want a failed turn carrying the sync error", out)
+	}
+}
+
+// TestSubmitWithoutConfigSyncKeepsWorking pins the nil case: a service whose
+// runtime has nothing to sync turns exactly as before.
+func TestSubmitWithoutConfigSyncKeepsWorking(t *testing.T) {
+	svc := New(WithRunExecutor(runFunc(func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+		started("run-plain")
+		return &agent.Result{}, nil
+	})))
+	out, err := svc.Submit(context.Background(), TurnRequest{SessionID: "s1"}, nil)
+	if err != nil || out.Status != TurnCompleted || out.RunID != "run-plain" {
+		t.Fatalf("outcome = %#v, error = %v", out, err)
+	}
+}

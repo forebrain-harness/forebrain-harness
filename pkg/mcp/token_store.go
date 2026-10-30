@@ -1,12 +1,14 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 )
@@ -19,10 +21,15 @@ func oauthOverlayDir(home string) string {
 
 // overlayProjectDir is the per-project namespace inside the overlay directory.
 func overlayProjectDir(home, projectKey string) string {
-	return filepath.Join(oauthOverlayDir(home), "projects", overlaySlug(projectKey))
+	return filepath.Join(oauthOverlayDir(home), "projects", OverlaySlug(projectKey))
 }
 
-func overlaySlug(name string) string {
+// OverlaySlug renders a namespace or server name the way the overlay tree
+// names its directories and files: every character outside [a-zA-Z0-9_.-]
+// becomes "_", and an empty result reads as "server". The slug is lossy —
+// two names can share one — so the legacy import (plan 187) only adopts a
+// file whose slug pair matches exactly one configured server.
+func OverlaySlug(name string) string {
 	s := overlaySlugRe.ReplaceAllString(strings.TrimSpace(name), "_")
 	if s == "" {
 		return "server"
@@ -31,8 +38,8 @@ func overlaySlug(name string) string {
 }
 
 func oauthOverlayPath(home, projectKey, serverName string) string {
-	s := overlaySlug(serverName)
-	if pk := overlaySlug(projectKey); pk != "server" && pk != "" {
+	s := OverlaySlug(serverName)
+	if pk := OverlaySlug(projectKey); pk != "server" && pk != "" {
 		return filepath.Join(overlayProjectDir(home, pk), s+".json")
 	}
 	return filepath.Join(oauthOverlayDir(home), s+".json")
@@ -92,24 +99,25 @@ func mergeOAuthFields(base, over appcfg.MCPOAuthConfig) appcfg.MCPOAuthConfig {
 	return out
 }
 
-// LoadOAuthOverlay reads one server's stored credential overlay. projectKey
-// selects the namespace: empty means the global store, a project key means
-// that project's. An absent file is "no overlay", not an error.
+// LoadOAuthOverlay reads one server's stored credential overlay (plan 188
+// W12): through the installed store when one is — the state database — and
+// the file tree under home otherwise. projectKey selects the namespace: empty
+// means the global store, a project key means that project's. An absent
+// overlay is "no overlay", not an error.
 func LoadOAuthOverlay(home, projectKey, serverName string) (appcfg.MCPOAuthConfig, bool, error) {
 	var zero appcfg.MCPOAuthConfig
-	if strings.TrimSpace(home) == "" || strings.TrimSpace(serverName) == "" {
+	if strings.TrimSpace(serverName) == "" {
 		return zero, false, nil
 	}
-	p := oauthOverlayPath(home, projectKey, serverName)
-	b, err := os.ReadFile(p)
+	raw, err := LoadStoredOAuth(context.Background(), home, projectKey, serverName)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return zero, false, nil
-		}
 		return zero, false, err
 	}
+	if raw == nil {
+		return zero, false, nil
+	}
 	var o appcfg.MCPOAuthConfig
-	if err := json.Unmarshal(b, &o); err != nil {
+	if err := json.Unmarshal(raw, &o); err != nil {
 		return zero, false, err
 	}
 	return o, true, nil
@@ -122,21 +130,13 @@ func SaveOAuthOverlayMerge(home, projectKey, serverName string, delta appcfg.MCP
 		return errors.New("invalid home or server name")
 	}
 	projectKey = strings.TrimSpace(projectKey)
-	dir := oauthOverlayDir(home)
-	if projectKey != "" {
-		dir = overlayProjectDir(home, projectKey)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	cur, _, _ := LoadOAuthOverlay(home, projectKey, serverName)
 	merged := mergeOAuthFields(cur, delta)
 	b, err := json.MarshalIndent(merged, "", "  ")
 	if err != nil {
 		return err
 	}
-	p := oauthOverlayPath(home, projectKey, serverName)
-	return os.WriteFile(p, b, 0o600)
+	return SaveStoredOAuth(context.Background(), home, projectKey, serverName, b)
 }
 
 // MergeMCPServerOAuth merges the stored credential overlay onto srv. The
@@ -158,4 +158,70 @@ func MergeMCPServerOAuth(home string, srv appcfg.MCPServerConfig) appcfg.MCPServ
 	out := srv
 	out.OAuth = mergeOAuthFields(srv.OAuth, ov)
 	return out
+}
+
+// OAuthOverlayStore is the port behind the overlay tree: it hands back one
+// server's stored credential bytes and takes new ones, in the JSON the tree's
+// files hold. The composition root installs a database-backed store after
+// the state database opens (plan 187); with none installed the overlays live
+// in the files under <home>/state/mcp-oauth.
+//
+// This package sits below the state database, so the store arrives installed
+// by the composition root, the same way llm's transport pieces do.
+type OAuthOverlayStore interface {
+	// LoadOAuth returns the server's stored bytes, or nil when no overlay is
+	// stored for it.
+	LoadOAuth(ctx context.Context, projectKey, serverName string) (json.RawMessage, error)
+	SaveOAuth(ctx context.Context, projectKey, serverName string, raw json.RawMessage) error
+}
+
+var oauthOverlayStore atomic.Pointer[OAuthOverlayStore]
+
+// SetOAuthOverlayStore installs the backend the store-based overlay accesses
+// go through; nil restores the file default. Process-wide: one process has
+// one overlay store.
+func SetOAuthOverlayStore(store OAuthOverlayStore) {
+	if store == nil {
+		oauthOverlayStore.Store(nil)
+		return
+	}
+	oauthOverlayStore.Store(&store)
+}
+
+// LoadStoredOAuth reads one server's stored overlay through the installed
+// store — the file tree under home when none is. Absent is (nil, nil): "no
+// overlay stored", not an error.
+func LoadStoredOAuth(ctx context.Context, home, projectKey, serverName string) (json.RawMessage, error) {
+	if s := oauthOverlayStore.Load(); s != nil {
+		return (*s).LoadOAuth(ctx, projectKey, serverName)
+	}
+	if strings.TrimSpace(home) == "" || strings.TrimSpace(serverName) == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(oauthOverlayPath(home, projectKey, serverName))
+	if err != nil && os.IsNotExist(err) {
+		return nil, nil
+	}
+	return b, err
+}
+
+// SaveStoredOAuth writes one server's overlay through the installed store —
+// the file tree under home when none is, at 0600 like SaveOAuthOverlayMerge
+// writes it.
+func SaveStoredOAuth(ctx context.Context, home, projectKey, serverName string, raw json.RawMessage) error {
+	if s := oauthOverlayStore.Load(); s != nil {
+		return (*s).SaveOAuth(ctx, projectKey, serverName, raw)
+	}
+	if strings.TrimSpace(home) == "" || strings.TrimSpace(serverName) == "" {
+		return errors.New("invalid home or server name")
+	}
+	projectKey = strings.TrimSpace(projectKey)
+	dir := oauthOverlayDir(home)
+	if projectKey != "" {
+		dir = overlayProjectDir(home, projectKey)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(oauthOverlayPath(home, projectKey, serverName), raw, 0o600)
 }

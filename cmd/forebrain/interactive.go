@@ -33,13 +33,10 @@ var onboardRunner = tui.RunOnboarding
 var interactiveRunOnboard = onboardRunner
 var interactiveStartupConfigError = tui.StartupConfigError
 var interactiveOpenChatSession = func(ctx context.Context, cwd string) (*tui.ChatSession, error) {
-	// Use the cached config from process.Resolve() so openChatSession
-	// does not load and parse forebrain.yaml a third time.
-	rt, err := process.Resolve()
-	if err != nil {
-		return nil, err
-	}
-	return tui.OpenChatSessionWithConfigForProject(ctx, rt.Config, cwd)
+	// The session composes its own configuration from the file's startup
+	// sections and the database's runtime sections (plan 187); handing
+	// Resolve()'s file copy in would bypass exactly that.
+	return tui.OpenChatSessionForProject(ctx, cwd)
 }
 var interactiveTUIRun = tui.Run
 

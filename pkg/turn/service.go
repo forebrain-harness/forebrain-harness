@@ -76,6 +76,11 @@ type Service struct {
 	// the task over and over. Nil is a service whose surface has no such log
 	// and needs none (the terminal renders its own session in process).
 	runEventPublisher func(context.Context, event.RunEvent) error
+	// configSync runs at the turn boundary, before any queueing or execution:
+	// the one place a running process adopts a new configuration (plan 187).
+	// Nil — a service whose runtime has no composed configuration to re-read —
+	// keeps every turn on the configuration it already holds.
+	configSync func(context.Context) error
 }
 
 type Option func(*Service)
@@ -156,6 +161,21 @@ func WithOpenCodeModels(src OpenCodeModelsSource) Option {
 			return
 		}
 		s.opencodeModels = src
+	}
+}
+
+// WithConfigSync installs the per-turn configuration sync Submit runs before
+// any queueing or execution (plan 187). The runtime hands its
+// SyncConfigFromDB here: a running turn never sees its configuration move,
+// and a change one surface wrote becomes effective on every surface's next
+// turn. A sync error fails the turn — the write side validated before
+// storing, so a read that errors means the store itself is broken.
+func WithConfigSync(sync func(context.Context) error) Option {
+	return func(s *Service) {
+		if s == nil {
+			return
+		}
+		s.configSync = sync
 	}
 }
 

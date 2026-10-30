@@ -552,48 +552,48 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid agent id", http.StatusBadRequest)
 		return
 	}
-	cfg, err := s.persistedConfig()
+	// The write runs as one agents-section read-modify-write in the state
+	// database (plan 188 W6); written carries the section as stored, so the
+	// answer can show the agent the request created even though the running
+	// process adopts the change on its next turn.
+	var written config.Root
+	err := s.withConfigSection(r.Context(), "agents", func(cfg *config.Root) error {
+		if cfg.Agents.Definitions == nil {
+			cfg.Agents.Definitions = map[string]config.AgentDefinition{}
+		}
+		if _, exists := cfg.Agents.Definitions[id]; exists {
+			return configConflict("agent id already exists")
+		}
+		cfg.Agents.Definitions[id] = config.AgentDefinition{
+			Primary:     true,
+			DisplayName: strings.TrimSpace(req.Name),
+			Description: strings.TrimSpace(req.Description),
+		}
+		if err := validateLoadedRootForAgents(cfg); err != nil {
+			return configBadRequest("%v", err)
+		}
+		// The workspace root is derived from the tenant key (<home>/workspaces/
+		// <id>, or <home>/workspace for main); the config schema has no override
+		// for it. A caller may pass the root it expects to have that expectation
+		// checked against the derived one — a different path is a mismatch, not
+		// a relocation, and is refused before anything is written.
+		if expected := strings.TrimSpace(req.WorkspaceRoot); expected != "" {
+			derived, err := derivedWorkspaceRoot(s.Home, cfg, id)
+			if err != nil {
+				return configBadRequest("%v", err)
+			}
+			if !sameWorkspaceRoot(expected, derived) {
+				return configBadRequest("workspace_root is derived from the agent id: %s", derived)
+			}
+		}
+		written = *cfg
+		return nil
+	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		failConfigSection(w, err)
 		return
 	}
-	if cfg.Agents.Definitions == nil {
-		cfg.Agents.Definitions = map[string]config.AgentDefinition{}
-	}
-	if _, exists := cfg.Agents.Definitions[id]; exists {
-		http.Error(w, "agent id already exists", http.StatusConflict)
-		return
-	}
-	cfg.Agents.Definitions[id] = config.AgentDefinition{
-		Primary:     true,
-		DisplayName: strings.TrimSpace(req.Name),
-		Description: strings.TrimSpace(req.Description),
-	}
-	if err := validateLoadedRootForAgents(&cfg); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	// The workspace root is derived from the tenant key (<home>/workspaces/
-	// <id>, or <home>/workspace for main); the config schema has no override
-	// for it. A caller may pass the root it expects to have that expectation
-	// checked against the derived one — a different path is a mismatch, not
-	// a relocation, and is refused before anything is written.
-	if expected := strings.TrimSpace(req.WorkspaceRoot); expected != "" {
-		derived, err := derivedWorkspaceRoot(s.Home, &cfg, id)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if !sameWorkspaceRoot(expected, derived) {
-			http.Error(w, "workspace_root is derived from the agent id: "+derived, http.StatusBadRequest)
-			return
-		}
-	}
-	if err := s.saveAndReload(cfg); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	resolver, err := s.primaryAgentResolver()
+	resolver, err := config.NewResolver(s.Home, &written)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -659,30 +659,28 @@ func (s *Server) handlePrimaryAgentUpdate(w http.ResponseWriter, r *http.Request
 	if !decodePrimaryAgentBody(w, r, &req) {
 		return
 	}
-	cfg, err := s.persistedConfig()
+	var written config.Root
+	err := s.withConfigSection(r.Context(), "agents", func(cfg *config.Root) error {
+		def, exists := cfg.Agents.Definitions[id]
+		if !exists {
+			return &configSectionError{status: http.StatusNotFound, msg: "agent not found"}
+		}
+		// The ID is the tenant key and never moves; only the presentation
+		// fields are editable.
+		def.DisplayName = strings.TrimSpace(req.Name)
+		def.Description = strings.TrimSpace(req.Description)
+		cfg.Agents.Definitions[id] = def
+		if err := validateLoadedRootForAgents(cfg); err != nil {
+			return configBadRequest("%v", err)
+		}
+		written = *cfg
+		return nil
+	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		failConfigSection(w, err)
 		return
 	}
-	def, exists := cfg.Agents.Definitions[id]
-	if !exists {
-		http.Error(w, "agent not found", http.StatusNotFound)
-		return
-	}
-	// The ID is the tenant key and never moves; only the presentation fields
-	// are editable.
-	def.DisplayName = strings.TrimSpace(req.Name)
-	def.Description = strings.TrimSpace(req.Description)
-	cfg.Agents.Definitions[id] = def
-	if err := validateLoadedRootForAgents(&cfg); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := s.saveAndReload(cfg); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	resolver, err := s.primaryAgentResolver()
+	resolver, err := config.NewResolver(s.Home, &written)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -696,34 +694,31 @@ func (s *Server) handlePrimaryAgentDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
-	cfg, err := s.persistedConfig()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if _, exists := cfg.Agents.Definitions[id]; !exists {
-		http.Error(w, "agent not found", http.StatusNotFound)
-		return
-	}
 	active, err := s.activePrimarySummary()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if id == active.ID {
-		http.Error(w, "cannot delete the active primary agent", http.StatusConflict)
+	var written config.Root
+	err = s.withConfigSection(r.Context(), "agents", func(cfg *config.Root) error {
+		if _, exists := cfg.Agents.Definitions[id]; !exists {
+			return &configSectionError{status: http.StatusNotFound, msg: "agent not found"}
+		}
+		if id == active.ID {
+			return configConflict("cannot delete the active primary agent")
+		}
+		if id == "main" {
+			return configConflict("cannot delete the default primary agent")
+		}
+		delete(cfg.Agents.Definitions, id)
+		written = *cfg
+		return nil
+	})
+	if err != nil {
+		failConfigSection(w, err)
 		return
 	}
-	if id == "main" {
-		http.Error(w, "cannot delete the default primary agent", http.StatusConflict)
-		return
-	}
-	delete(cfg.Agents.Definitions, id)
-	if err := s.saveAndReload(cfg); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	resolver, err := s.primaryAgentResolver()
+	resolver, err := config.NewResolver(s.Home, &written)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

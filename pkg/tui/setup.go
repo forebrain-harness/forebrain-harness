@@ -1612,6 +1612,20 @@ func connectCurrentLLM(cfg *appcfg.Root, agentName string) *appcfg.AgentLLMProvi
 	return appcfg.EffectiveDefaultLLM(def)
 }
 
+// startupJudgeConfig returns the configuration the setup gates judge by:
+// the composed one when the state database holds sections (the legacy import
+// ran and emptied the file — plan 187), otherwise the resolved file copy. A
+// gate that judged by the file alone would send every migrated install back
+// through first-run setup.
+func startupJudgeConfig(rt process.Context) (appcfg.Root, error) {
+	if composed, ok, err := process.ComposedStartupConfig(context.Background(), rt.Home); err != nil {
+		return appcfg.Root{}, err
+	} else if ok {
+		return composed, nil
+	}
+	return rt.Config, nil
+}
+
 // NeedsFirstSetup reports whether this home still has to be set up.
 //
 // The criterion is the main agent's LLM configuration, not the config file's
@@ -1626,7 +1640,11 @@ func NeedsFirstSetup() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return !mainLLMConfigured(&rt.Config), nil
+	cfg, err := startupJudgeConfig(rt)
+	if err != nil {
+		return false, err
+	}
+	return !mainLLMConfigured(&cfg), nil
 }
 
 var ErrStartupConfigIncomplete = errors.New("startup config incomplete")
@@ -1644,7 +1662,11 @@ func StartupConfigError() error {
 	if err != nil {
 		return err
 	}
-	missing := MainAgentLLMMissingFieldsWithConfig(rt.Config)
+	judged, err := startupJudgeConfig(rt)
+	if err != nil {
+		return err
+	}
+	missing := MainAgentLLMMissingFieldsWithConfig(judged)
 	if len(missing) == 0 {
 		return nil
 	}

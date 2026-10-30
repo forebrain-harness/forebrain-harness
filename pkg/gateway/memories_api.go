@@ -29,7 +29,7 @@ func (s *Server) handleMemoriesSettings(w http.ResponseWriter, r *http.Request) 
 	case http.MethodGet:
 		writeMemoriesSettings(w, memory.SettingsFromConfig(s.liveCfg()))
 	case http.MethodPost:
-		if s == nil || s.Env == nil || strings.TrimSpace(s.Env.ConfigPath) == "" {
+		if s == nil || s.Env == nil || s.Env.SQL == nil {
 			http.Error(w, "memory settings unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -49,18 +49,36 @@ func (s *Server) handleMemoriesSettings(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "memory settings unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		patch := appcfg.MemoryPatch{
-			FeatureEnabled:   req.FeatureEnabled,
-			UseMemories:      req.UseMemories,
-			GenerateMemories: req.GenerateMemories,
+		// The switches are stored in their sections in the state database
+		// (plan 188 W10): features.memories in features, the two memory
+		// switches in memories — each in its own section write, a switch the
+		// request did not carry left alone. The change lands on the next
+		// turn's configuration sync; nothing reloads here.
+		if req.FeatureEnabled != nil {
+			if err := s.withConfigSection(r.Context(), "features", func(cfg *appcfg.Root) error {
+				value := *req.FeatureEnabled
+				cfg.Features.Memories = &value
+				return nil
+			}); err != nil {
+				failConfigSection(w, err)
+				return
+			}
 		}
-		if err := appcfg.PatchMemory(s.Env.ConfigPath, patch); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := s.Env.ReloadConfig(); err != nil {
-			http.Error(w, "settings saved but reload failed: "+err.Error(), http.StatusInternalServerError)
-			return
+		if req.UseMemories != nil || req.GenerateMemories != nil {
+			if err := s.withConfigSection(r.Context(), "memories", func(cfg *appcfg.Root) error {
+				if req.UseMemories != nil {
+					value := *req.UseMemories
+					cfg.Memories.UseMemories = &value
+				}
+				if req.GenerateMemories != nil {
+					value := *req.GenerateMemories
+					cfg.Memories.GenerateMemories = &value
+				}
+				return nil
+			}); err != nil {
+				failConfigSection(w, err)
+				return
+			}
 		}
 		if req.GenerateMemories != nil && strings.TrimSpace(req.ThreadID) != "" && s.MemoryStore != nil {
 			mode := memory.ThreadMemoryDisabled
@@ -72,7 +90,14 @@ func (s *Server) handleMemoriesSettings(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 		}
-		writeMemoriesSettings(w, memory.SettingsFromConfig(s.liveCfg()))
+		// The answer reports what was stored, not what the running process
+		// still holds: the next turn adopts it.
+		stored, err := s.persistedConfig(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeMemoriesSettings(w, memory.SettingsFromConfig(&stored))
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}

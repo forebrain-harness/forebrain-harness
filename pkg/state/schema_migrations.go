@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 23
+const stateSchemaVersion = 24
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -62,6 +62,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 21, apply: migrateStateV20ToV21},
 	{version: 22, apply: migrateStateV21ToV22},
 	{version: 23, apply: migrateStateV22ToV23},
+	{version: 24, apply: migrateStateV23ToV24},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -953,6 +954,34 @@ func migrateStateV22ToV23(ctx context.Context, conn *sql.Conn) error {
 		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_task_executions ADD COLUMN notify_error TEXT NOT NULL DEFAULT ''`); err != nil {
 			return fmt.Errorf("add fb_task_executions.notify_error: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateStateV23ToV24 adds the configuration tables plan 187 needs: fb_config
+// holds the runtime sections of forebrain.yaml one row per section, and
+// fb_mcp_oauth holds the MCP OAuth overlay the file tree kept under
+// state/mcp-oauth. Both start empty — the legacy import at startup, not the
+// migration, fills them — so this is DDL only. The table text matches
+// schema.sql byte for byte (the migration-vs-fresh-schema test compares
+// sqlite_master) and uses IF NOT EXISTS so a fixture built from the current
+// schema.sql with a lowered user_version skips the statements instead of
+// failing on a duplicate.
+func migrateStateV23ToV24(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_config (
+  section TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS fb_mcp_oauth (
+  project_key TEXT NOT NULL,
+  server_name TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (project_key, server_name)
+) STRICT;`); err != nil {
+		return fmt.Errorf("create fb_config and fb_mcp_oauth: %w", err)
 	}
 	return nil
 }

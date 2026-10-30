@@ -198,11 +198,33 @@ func (env *Environment) reloadConfig() error {
 	if strings.TrimSpace(env.ConfigPath) == "" {
 		return fmt.Errorf("empty config path")
 	}
-	loaded, err := appcfg.Load(env.ConfigPath)
-	if err != nil {
+	// The runtime source of truth is the composed configuration — the file's
+	// startup sections plus the database's runtime sections — so a file
+	// reload re-composes rather than reading the whole file as raw (plan 187
+	// §3.2). An environment that does not compose (the OpenOptions.Config
+	// bypass, a hand-built test environment) keeps the plain file read: its
+	// database holds no sections to compose with.
+	var loaded appcfg.Root
+	if env.runtimeConfigFromDB && env.SQL != nil {
+		composed, err := composeConfig(context.Background(), env)
+		if err != nil {
+			return err
+		}
+		loaded = composed
+	} else {
+		fileRoot, err := appcfg.Load(env.ConfigPath)
+		if err != nil {
+			return err
+		}
+		loaded = fileRoot
+	}
+	if err := env.applyRawConfigLocked(loaded); err != nil {
 		return err
 	}
-	return env.applyRawConfigLocked(loaded)
+	if fp, err := configSnapshotFingerprint(loaded); err == nil {
+		env.configFingerprint = fp
+	}
+	return nil
 }
 
 // applyRawConfigLocked adopts loaded as the configuration and re-derives
