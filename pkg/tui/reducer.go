@@ -1623,6 +1623,11 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		// there, not only on the card they clicked to get in.
 		if r.tracker != nil {
 			r.tracker.ObserveAgentEnded(agentID, m.Timestamp)
+			// The ended event persists the first-token wait alongside its finish:
+			// a replay has no push-only first_token event to observe, so it reads
+			// the wait back from here. Live carries the same value it already
+			// fed, and the tracker keeps the first write either way.
+			r.tracker.ObserveAgentFirstToken(agentID, m.FirstToken)
 		}
 		closing := r.subagentClosingFrames(agentID, m)
 		closing = append(closing, r.subagentWorkedFrames(agentID)...)
@@ -2172,7 +2177,15 @@ func (r *Reducer) subagentWorkedFrames(agentID string) []Frame {
 	if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
 		title += " · " + wait
 	}
-	title += " · " + workedCompletionTime(time.Now())
+	// The minute the run closed is the tracker's own clock for an ended run
+	// — a replay paints runs that finished long before, and now would stamp
+	// the resume, not the run — and the live path's now while it runs (the
+	// two are the same moment there).
+	completion := time.Now()
+	if snap.Ended && !snap.EndedAt.IsZero() {
+		completion = snap.EndedAt.Local()
+	}
+	title += " · " + workedCompletionTime(completion)
 	return []Frame{{
 		Kind:    FrameStatus,
 		Title:   title,
@@ -7761,6 +7774,10 @@ type AgentRunSnapshot struct {
 	Counters Counters
 	Elapsed  time.Duration
 	Ended    bool
+	// EndedAt is the moment the run's clock stopped — zero while it runs.
+	// Any face that paints a finished run's completion time from now (a
+	// replay draws runs that ended long before) reads it from here.
+	EndedAt time.Time
 }
 
 // NewTracker constructs a Tracker.
@@ -8000,7 +8017,7 @@ func (t *Tracker) SnapshotAgentRun(agentID string) (AgentRunSnapshot, bool) {
 	}
 	c := run.counters
 	c.Retry = t.retries[agentID]
-	return AgentRunSnapshot{Counters: c, Elapsed: until.Sub(run.startedAt), Ended: ended}, true
+	return AgentRunSnapshot{Counters: c, Elapsed: until.Sub(run.startedAt), Ended: ended, EndedAt: run.endedAt}, true
 }
 
 // ObserveRunEnd folds provider-reported token usage into the session.

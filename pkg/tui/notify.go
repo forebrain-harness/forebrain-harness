@@ -453,6 +453,12 @@ type SubagentEndedMsg struct {
 	ParentToolCallID string
 	TaskIndex        int
 	ExecutionID      string
+	// FirstToken is the wait this execution's own model cost before its first
+	// output, as the ended event persists it — the durable record of a wait
+	// whose first_token event is push-only and never reaches a reload. A
+	// replay reads the wait back from here; live carries the same value the
+	// FirstTokenMsg already fed, and the tracker keeps the first write.
+	FirstToken time.Duration
 	// FinishedAt is when this execution actually stopped — the ended event's
 	// payload when it carries one, the event's own timestamp otherwise. A
 	// task row's final elapsed time is measured to here, so a reaped
@@ -983,7 +989,7 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 	case event.RunEventSubagentEnded:
 		var p event.SubagentEndedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUIForSession(evt.SessionID, SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, FinishedAt: time.UnixMilli(p.FinishedAtMs), Timestamp: evt.CreatedAt})
+			s.notifyUIForSession(evt.SessionID, SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, FirstToken: time.Duration(p.FirstTokenMs) * time.Millisecond, FinishedAt: time.UnixMilli(p.FinishedAtMs), Timestamp: evt.CreatedAt})
 		}
 	case event.RunEventSubagentInputDelivered:
 		// A message the user sent a running subagent was handed to its model at

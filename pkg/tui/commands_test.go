@@ -1604,6 +1604,99 @@ func TestReplaySubagentWorkerBodyDrawsEveryBlock(t *testing.T) {
 	}
 }
 
+// A replayed worker-backed subagent view closes with the same line the live
+// one draws: the run's own elapsed, the wait for its model's first output —
+// which a reload can only read back from the ended event, the push-only
+// first_token event never reaches it — and the wall-clock minute the run
+// ended at, taken from the event's own clock rather than the moment of the
+// resume. The line belongs after every block the run's transcript rebuilt:
+// the tail a later event (here a budget update, the run's actual last event)
+// still holds is released at the ending, ahead of the line itself.
+func TestReplaySubagentWorkerBodyWorkedLineClosesTheView(t *testing.T) {
+	const (
+		agentID  = "task-worker-worked"
+		runID    = "exec-worker-worked"
+		workerID = "worker-worked"
+	)
+	startedAt := time.UnixMilli(1793332807170)
+	endedAt := time.UnixMilli(1793332835812)
+
+	spawn := event.NewRunEvent("spawn", runID, "session-1", event.RunEventSubagentSpawned, event.SubagentSpawnedPayload{
+		AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Task: "read two files",
+		ParentRunID: "parent-1", ParentToolCallID: "call-spawn", TaskIndex: 0, ExecutionID: runID,
+		WorkerSessionID: workerID,
+	}, startedAt)
+	budget := func(id string, at time.Time) event.RunEvent {
+		return event.NewRunEvent(id, runID, "session-1", event.CompactEventBudgetUpdated,
+			event.TokenBudgetUpdatedPayload{AgentID: agentID, TokenUsage: 128, PercentLeft: 99}, at)
+	}
+	toolStarted := event.NewRunEvent("tool-start", runID, "session-1", event.RunEventToolStarted, event.ToolCallStartedPayload{
+		Kind: event.RunEventToolStarted, StepID: "call-readme", ToolName: "read_file", Summary: "running read",
+		ToolMeta: event.ToolCallMeta{ToolName: "read_file", AgentID: agentID, Status: "running",
+			Input: map[string]any{"file_path": "README.md"}},
+	}, startedAt.Add(2*time.Second))
+	toolDone := event.NewRunEvent("tool-done", runID, "session-1", event.RunEventToolCompleted, event.ToolCallCompletedPayload{
+		Kind: event.RunEventToolCompleted, StepID: "call-readme", ToolName: "read_file", DisplayBody: "1|scratch project",
+		ToolMeta: event.ToolCallMeta{ToolName: "read_file", AgentID: agentID, Status: "completed",
+			Input: map[string]any{"file_path": "README.md"}},
+	}, startedAt.Add(2*time.Second))
+	ended := event.NewRunEvent("ended", runID, "session-1", event.RunEventSubagentEnded, event.SubagentEndedPayload{
+		AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Status: "ok", Output: "final answer",
+		ParentRunID: "parent-1", ParentToolCallID: "call-spawn", TaskIndex: 0, ExecutionID: runID,
+		FirstTokenMs: 7491, FinishedAtMs: endedAt.UnixMilli(),
+	}, endedAt)
+	events := []event.RunEvent{
+		spawn,
+		toolStarted, toolDone,
+		ended,
+		budget("budget-tail", endedAt.Add(time.Second)),
+	}
+
+	rows := []state.Message{
+		{RunID: runID, Role: "user", Content: "read two files"},
+		{RunID: runID, Role: "assistant", Content: "",
+			PartsJSON: state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+				ID: "call-readme", Type: llm.ToolTypeFunction,
+				Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"README.md"}`},
+			}), "")},
+		{RunID: runID, Role: "reasoning", Content: "thinking one",
+			PartsJSON: fmt.Sprintf(`[{"text":%q,"type":"text"},{"duration_ms":10000,"type":"reasoning_timing"}]`, "thinking one")},
+		{RunID: runID, Role: "tool", ToolStepID: "call-readme", Content: "1|scratch project",
+			PartsJSON: fmt.Sprintf(`[{"text":%q,"type":"text"},{"type":"tool_result_meta","tool_call_id":%q}]`, "1|scratch project", "call-readme")},
+		{RunID: runID, Role: "reasoning", Content: "thinking tail",
+			PartsJSON: fmt.Sprintf(`[{"text":%q,"type":"text"},{"duration_ms":281,"type":"reasoning_timing"}]`, "thinking tail")},
+		{RunID: runID, Role: "assistant", Content: "final answer"},
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithWorkers(renderer, nil, events, (&Reducer{}).WithTracker(NewTracker()), nil,
+		map[string][]state.Message{workerID: rows})
+
+	vm := renderer.perAgentVM[agentID]
+	if vm == nil {
+		t.Fatal("replayed subagent view is empty")
+	}
+	wantKinds := []FrameKind{FrameUser, FrameThinking, FrameTool, FrameThinking, FrameAssistant, FrameStatus}
+	if len(vm.blocks) != len(wantKinds) {
+		t.Fatalf("replayed block count = %d, want the rebuilt blocks and the closing line (%d)", len(vm.blocks), len(wantKinds))
+	}
+	for i, want := range wantKinds {
+		if got := vm.blocks[i].frame.Kind; got != want {
+			t.Fatalf("block %d kind = %s, want %s", i, got, want)
+		}
+	}
+	answer := vm.blocks[4].frame
+	if strings.TrimSpace(answer.Content) != "final answer" {
+		t.Fatalf("block before the closing line = %#v, want the execution's final answer", answer)
+	}
+	wantClosing := "Worked for 28s · first token 7.5s · " + endedAt.Local().Format("15:04")
+	if closing := vm.blocks[5].frame; closing.Title != wantClosing {
+		t.Fatalf("closing title = %q, want %q", closing.Title, wantClosing)
+	}
+}
+
 // The note-write result carries the stored path; sessions recorded before the
 // tool returned one carry an empty object. Both must replay as the note body.
 func TestReplayMemoryNoteUsesIndexedInputAndLiveFormatter(t *testing.T) {

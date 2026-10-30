@@ -143,7 +143,13 @@ func (c *commandController) replaySession(sessionID string, note func(messages i
 	// the events.
 	workerTranscripts := c.loadSubagentWorkerTranscripts(events)
 	c.renderer.BeginBatch()
-	reducer := &Reducer{}
+	// The replay's reducer carries a tracker so a replayed subagent view
+	// closes the way live closed it: a spawn opens the run's clock, tool and
+	// usage events count, and the ended event stops the clock and hands back
+	// the first-token wait it persists — the Worked line is drawn from all
+	// of it. The tracker is this throwaway reducer's own: the cards built
+	// here are adopted by the live reducer below, the tracker is not.
+	reducer := (&Reducer{}).WithTracker(NewTracker())
 	replayTimelineWithWorkers(c.renderer, turns, events, reducer, planUpdates, workerTranscripts)
 	flushReplayReducer(c.renderer, reducer)
 	// The cards the replay built are the ones on screen now; the live reducer
@@ -487,6 +493,19 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 			// thinking and answer that follow the final call - belongs there,
 			// ahead of that event's own account.
 			if lastEventByRun[runID] == i {
+				for _, m := range body.takeRest() {
+					pending[pos] = append(pending[pos], replayEventItem{sequence: sequence, message: m})
+				}
+			}
+			// The ending releases them too, and first: the Worked line the
+			// ended event draws closes the view, so the tail it summarizes
+			// has to be on screen ahead of it — a run whose last event is
+			// not its ending (a budget update after it) would otherwise
+			// leave the tail for that later event and let the line arrive
+			// ahead of the blocks. Same sequence, drawn in insertion order;
+			// the run's own last event then finds the cursor spent and
+			// paints nothing twice.
+			if evt.Type == event.RunEventSubagentEnded {
 				for _, m := range body.takeRest() {
 					pending[pos] = append(pending[pos], replayEventItem{sequence: sequence, message: m})
 				}
@@ -1260,7 +1279,7 @@ func replaySubagentRunEventMessage(evt event.RunEvent) (any, bool) {
 		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" {
 			return nil, false
 		}
-		return SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, FinishedAt: time.UnixMilli(p.FinishedAtMs), Timestamp: evt.CreatedAt}, true
+		return SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, FirstToken: time.Duration(p.FirstTokenMs) * time.Millisecond, FinishedAt: time.UnixMilli(p.FinishedAtMs), Timestamp: evt.CreatedAt}, true
 	case event.RunEventAssistantDelta:
 		var p event.AssistantDeltaPayload
 		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" || p.Text == "" {
