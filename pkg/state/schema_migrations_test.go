@@ -3892,3 +3892,63 @@ func TestDialectMigrationsMustImplementEveryDialect(t *testing.T) {
 		t.Fatalf("the current version needs a migration without a dialect implementation: %v", err)
 	}
 }
+
+// TestOutputRecordsMigrationReachesAnOlderDatabase pins the v30 migration on
+// every engine. A fresh database gets output_records from the schema script and
+// never runs a migration, so without this the MySQL and PostgreSQL arms of that
+// migration would be proven only by never having been asked for — which is
+// exactly what a database 209 created before the table joined the schema is.
+func TestOutputRecordsMigrationReachesAnOlderDatabase(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	dialect := dbx.DialectOf(db)
+
+	// Take the object and the version row away, whatever the engine keeps them
+	// in: the database now looks like one from before v30.
+	if _, err := db.ExecContext(ctx, `DROP TABLE output_records`); err != nil {
+		t.Fatalf("drop output_records: %v", err)
+	}
+	if dialect == dbx.SQLite {
+		if _, err := db.ExecContext(ctx, `PRAGMA user_version = 29`); err != nil {
+			t.Fatalf("lower user_version: %v", err)
+		}
+	} else if err := writeDialectSchemaVersion(ctx, db, dialect, 29); err != nil {
+		t.Fatalf("lower the version row: %v", err)
+	}
+
+	// The same entry point Open uses, so the migration runs through the
+	// dispatch that picks this engine's arm.
+	if err := migrateStateSchema(ctx, db, ""); err != nil {
+		t.Fatalf("%s migrate to v%d: %v", dialect, stateSchemaVersion, err)
+	}
+	if dialect == dbx.SQLite {
+		requireSchemaVersion(ctx, t, db, stateSchemaVersion)
+	} else {
+		version, err := readDialectSchemaVersion(ctx, db, dialect)
+		if err != nil {
+			t.Fatalf("read %s schema version: %v", dialect, err)
+		}
+		if version != stateSchemaVersion {
+			t.Fatalf("%s schema version = %d, want %d", dialect, version, stateSchemaVersion)
+		}
+	}
+
+	// The table the migration created is the one the store writes: a row goes
+	// in, its id is generated, and it reads back.
+	insert := dbx.Rebind(dialect, `INSERT INTO output_records
+		(kind, command, original_output, filtered_output, original_output_bytes,
+		 filtered_output_bytes, saved_tokens, created_at_ms)
+		VALUES (?,?,?,?,?,?,?,?)`)
+	if _, err := db.ExecContext(ctx, insert, "shell", "make", "orig", "filt", 4, 4, 0, 1); err != nil {
+		t.Fatalf("insert on the migrated table: %v", err)
+	}
+	var id int64
+	var kind string
+	read := dbx.Rebind(dialect, `SELECT id, kind FROM output_records WHERE command = ?`)
+	if err := db.QueryRowContext(ctx, read, "make").Scan(&id, &kind); err != nil {
+		t.Fatalf("read the migrated table: %v", err)
+	}
+	if id <= 0 || kind != "shell" {
+		t.Fatalf("migrated row = id %d kind %q", id, kind)
+	}
+}
