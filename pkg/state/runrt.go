@@ -447,7 +447,7 @@ UPDATE fb_run_waits SET session_snapshot_json=$1, updated_at=$2 WHERE run_id=$3 
 	sessionHasRunWaitingOnToolApprovalSQL = dbx.SQL{
 		SQLite:   `SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=? AND status=?)`,
 		MySQL:    `SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=? AND status=?)`,
-		Postgres: `SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=$1 AND status=$2)`,
+		Postgres: `SELECT CASE WHEN EXISTS(SELECT 1 FROM fb_runs WHERE session_id=$1 AND status=$2) THEN 1 ELSE 0 END`,
 	}
 	firstWaitingRunIDForSessionSQL = dbx.SQL{
 		SQLite: `
@@ -778,9 +778,15 @@ func (s *RunStore) liveRunRefusal(ctx context.Context, sessionID string, now tim
 	var ownerLive int
 	d := dbx.DialectOf(s.DB)
 	ph := func(n int) string { return dbx.Placeholder(d, n) }
+	ownerLiveExpr := `EXISTS(SELECT 1 FROM fb_run_owners o WHERE o.owner = r.owner AND o.heartbeat_at_ms >= ` + ph(1) + `)`
+	if d == dbx.Postgres {
+		// PostgreSQL answers EXISTS with a boolean, which does not scan into
+		// the int the caller reads.
+		ownerLiveExpr = `CASE WHEN ` + ownerLiveExpr + ` THEN 1 ELSE 0 END`
+	}
 	query := `
 SELECT r.status, r.owner,
-  EXISTS(SELECT 1 FROM fb_run_owners o WHERE o.owner = r.owner AND o.heartbeat_at_ms >= ` + ph(1) + `)
+  ` + ownerLiveExpr + `
 FROM fb_runs r
 WHERE r.session_id = ` + ph(2) + ` AND r.parent_run_id IS NULL AND ` + livePrimaryRunConditionFor(d, "r", 3) + `
 ORDER BY r.updated_at DESC LIMIT 1`
@@ -1565,11 +1571,17 @@ func (s *RunStore) SessionHasLiveRun(ctx context.Context, sessionID string) (boo
 	}
 	var live int
 	d := dbx.DialectOf(s.DB)
-	query := `
-SELECT EXISTS(
+	existsExpr := `EXISTS(
   SELECT 1 FROM fb_runs r
   WHERE r.session_id=` + dbx.Placeholder(d, 1) + ` AND r.parent_run_id IS NULL
     AND ` + livePrimaryRunConditionFor(d, "r", 2) + `)`
+	if d == dbx.Postgres {
+		// PostgreSQL answers EXISTS with a boolean, which does not scan into
+		// the int the caller reads.
+		existsExpr = `CASE WHEN ` + existsExpr + ` THEN 1 ELSE 0 END`
+	}
+	query := `
+SELECT ` + existsExpr
 	err := s.DB.QueryRowContext(ctx, query,
 		append([]any{sid}, liveRunArgs(time.Now())...)...).Scan(&live)
 	if err != nil {
