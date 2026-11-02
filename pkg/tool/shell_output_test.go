@@ -3,6 +3,7 @@ package tool
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -947,4 +948,27 @@ func TestShellToolUnknownCommandNeverUsesEmptyGuardWrite(t *testing.T) {
 	if err != nil && strings.Contains(err.Error(), "only the plan directory is writable") {
 		t.Fatalf("unknown command was coupled to file-write policy: %v", err)
 	}
+}
+
+// openStateDBForTest opens a scratch state database. The tool-output history is
+// a table of that database in every mode, so a test that needs a history needs
+// this handle rather than a file of its own.
+func openStateDBForTest(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open the state database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// openOutputHistoryForTest binds a history store to a scratch state database.
+func openOutputHistoryForTest(t *testing.T) *state.Store {
+	t.Helper()
+	store, err := state.OpenOutputHistory(context.Background(), openStateDBForTest(t), "")
+	if err != nil {
+		t.Fatalf("open the output history: %v", err)
+	}
+	return store
 }

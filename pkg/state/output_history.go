@@ -1,16 +1,12 @@
-// The one-time import of a pre-migration tool-output history file.
+// The tool-output history store: the Compress-Cite-Retrieve table the agent
+// reads compressed output back from, and the one-time import of the file it
+// used to live in.
 //
-// Until the history became a table of the state database (owner ruling
-// 2026-11-01: one main database), it was a SQLite file of its own at
-// <state root>/state/outfilter/history.db. An install that still has one keeps
-// its records — and the retrieval ids its transcripts cite — because the first
-// open carries them into the main table and then deletes the file (owner
-// ruling 2026-11-03: the old history.db must go, not be renamed aside). The main
-// database is the history now, and a second copy of it under state/outfilter is
-// the very file on shared storage a replica cannot read safely.
-//
-// Nothing here writes to the legacy file: it is read once and removed.
-package tool
+// output_records is a table of the process's main state database in every mode
+// (owner ruling 2026-11-01: one main database), so the store lives in the
+// package that owns that database. It borrows the handle it is handed: nothing
+// here opens, closes or migrates a database of its own.
+package state
 
 import (
 	"context"
@@ -21,11 +17,308 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// Store persists compressed-command history for later retrieval (CCR:
+// Compress-Cite-Retrieve). Boost keeps the full redacted original of every
+// compressed output in a database so the agent can always get back what a
+// filter hid; this is what makes aggressive compression safe. We mirror that
+// contract.
+//
+// The store borrows the state database handle: it never opens or closes a
+// database of its own, and Close leaves the handle to whoever opened it.
+type Store struct {
+	db      *sql.DB
+	dialect dbx.Dialect
+	mu      sync.Mutex
+}
+
+// Record kinds. Boost keeps shell output and MCP tool responses in two separate
+// tables (`commands` and `mcp_tool_calls`) even though the columns it needs are
+// the same. We keep one table with a discriminator instead: the retrieval id
+// stays a single namespace, so retrieve_output recovers an MCP response with the
+// same code path it already uses for shell output, and savings for both
+// mechanisms aggregate in one query.
+const (
+	KindShell = "shell"
+	KindMCP   = "mcp"
+)
+
+// Entry is one compressed output record (shell command or MCP tool call).
+type Entry struct {
+	ID   int64
+	Kind string // KindShell (default) or KindMCP
+	// Command is the shell command line for KindShell, or "server/tool" for
+	// KindMCP — in both cases the thing whose output was compressed.
+	Command           string
+	Timestamp         time.Time
+	OriginalOutput    string
+	FilteredOutput    string
+	OriginalBytes     int
+	FilteredBytes     int
+	SavedTokens       int
+	CapabilityID      string // e.g. "toml:builtin:make", "go:grep", "mcp:toon"
+	CapabilityVer     string
+	SessionID         string
+	RetrieveCount     int
+	RetrieveReason    string
+	SpoolPath         string
+	SpoolOmittedBytes int64
+}
+
+// The table's statements. The SQLite text is the text the store has always
+// run; MySQL and PostgreSQL are translations with the same rows, the same
+// order and the same nulls. PostgreSQL has no LastInsertId, so its insert
+// hands the new id back the one way the engine can.
+var (
+	outputRecordInsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO output_records (kind, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens, session_id,
+			capability_id, capability_version, spool_path, spool_omitted_bytes, created_at_ms)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `INSERT INTO output_records (kind, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens, session_id,
+			capability_id, capability_version, spool_path, spool_omitted_bytes, created_at_ms)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `INSERT INTO output_records (kind, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens, session_id,
+			capability_id, capability_version, spool_path, spool_omitted_bytes, created_at_ms)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+	}
+	outputRecordSelectSQL = dbx.SQL{
+		SQLite: `SELECT id, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens,
+			session_id, capability_id, capability_version, retrieve_count, retrieve_reason,
+			kind, spool_path, spool_omitted_bytes, created_at_ms
+		 FROM output_records WHERE id = ?`,
+		MySQL: `SELECT id, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens,
+			session_id, capability_id, capability_version, retrieve_count, retrieve_reason,
+			kind, spool_path, spool_omitted_bytes, created_at_ms
+		 FROM output_records WHERE id = ?`,
+		Postgres: `SELECT id, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens,
+			session_id, capability_id, capability_version, retrieve_count, retrieve_reason,
+			kind, spool_path, spool_omitted_bytes, created_at_ms
+		 FROM output_records WHERE id = $1`,
+	}
+	outputRecordRetrieveSQL = dbx.SQL{
+		SQLite:   `UPDATE output_records SET retrieve_count = retrieve_count + 1, retrieve_reason = ? WHERE id = ?`,
+		MySQL:    `UPDATE output_records SET retrieve_count = retrieve_count + 1, retrieve_reason = ? WHERE id = ?`,
+		Postgres: `UPDATE output_records SET retrieve_count = retrieve_count + 1, retrieve_reason = $1 WHERE id = $2`,
+	}
+	// outputRecordTotalsSQL is the aggregate every savings report reads. Its
+	// text is the same on all three engines — only the placeholders the WHERE
+	// clause adds are numbered — so statsSince assembles it from this one
+	// string.
+	outputRecordTotalsSQL = `SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN saved_tokens > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(original_output_bytes), 0),
+		COALESCE(SUM(filtered_output_bytes), 0),
+		COALESCE(SUM(saved_tokens), 0),
+		COALESCE(SUM(retrieve_count), 0)
+		FROM output_records`
+)
+
+// OpenOutputHistory binds the tool-output history to the state database
+// db. There is no second database to open in any mode: output_records is a
+// table of the main one.
+//
+// stateRoot locates the pre-migration history file — <state root>/state/
+// outfilter/history.db — and nothing else. An install that still has one hands
+// its rows over here, once, best effort: a history nobody can read is worth
+// less than a start-up that never happens, so a failed import is logged and the
+// store starts empty rather than blocking the caller.
+func OpenOutputHistory(ctx context.Context, db *sql.DB, stateRoot string) (*Store, error) {
+	if db == nil {
+		return nil, fmt.Errorf("output history: no state database")
+	}
+	s := &Store{db: db, dialect: dbx.DialectOf(db)}
+	if err := s.importLegacyHistory(ctx, stateRoot); err != nil {
+		slog.Warn("kept the legacy tool-output history file without importing it",
+			"path", legacyHistoryPath(stateRoot), "error", err)
+	}
+	return s, nil
+}
+
+// Save inserts a record and returns its retrieval id.
+func (s *Store) Save(e Entry) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("store not open")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now()
+	}
+	if strings.TrimSpace(e.Kind) == "" {
+		e.Kind = KindShell
+	}
+	args := []any{
+		e.Kind, e.Command, e.OriginalOutput, e.FilteredOutput,
+		e.OriginalBytes, e.FilteredBytes, e.SavedTokens, e.SessionID,
+		e.CapabilityID, e.CapabilityVer, e.SpoolPath, e.SpoolOmittedBytes, e.Timestamp.UTC().UnixMilli(),
+	}
+	stmt := outputRecordInsertSQL.For(s.dialect)
+	if s.dialect == dbx.Postgres {
+		return insertOutputRecordReturningID(context.Background(), s.db, stmt, args)
+	}
+	res, err := dbx.Exec(context.Background(), s.db, stmt, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// insertOutputRecordReturningID runs the insert in a write transaction and
+// hands back the id RETURNING gives it. PostgreSQL is the only engine whose
+// driver cannot report the new id of an Exec, and the transaction is what puts
+// the write behind the global lock every other out-of-transaction write takes.
+func insertOutputRecordReturningID(ctx context.Context, db *sql.DB, stmt string, args []any) (int64, error) {
+	tx, err := dbx.BeginTx(ctx, db, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var id int64
+	if err := tx.QueryRowContext(ctx, stmt, args...).Scan(&id); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// Get loads one record by retrieval id.
+func (s *Store) Get(id int64) (Entry, error) {
+	if s == nil || s.db == nil {
+		return Entry{}, fmt.Errorf("store not open")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var e Entry
+	var createdAtMs int64
+	err := s.db.QueryRow(outputRecordSelectSQL.For(s.dialect), id).Scan(
+		&e.ID, &e.Command, &e.OriginalOutput, &e.FilteredOutput,
+		&e.OriginalBytes, &e.FilteredBytes, &e.SavedTokens,
+		&e.SessionID, &e.CapabilityID, &e.CapabilityVer, &e.RetrieveCount, &e.RetrieveReason,
+		&e.Kind, &e.SpoolPath, &e.SpoolOmittedBytes, &createdAtMs)
+	if err != nil {
+		return Entry{}, err
+	}
+	e.Timestamp = time.UnixMilli(createdAtMs)
+	if strings.TrimSpace(e.SpoolPath) != "" {
+		data, readErr := os.ReadFile(e.SpoolPath)
+		if readErr != nil {
+			// Spools are deliberately subject to a retention policy. Keep the
+			// retrieval row useful after expiry instead of turning a normal cache
+			// eviction into a misleading database/read failure.
+			e.OriginalOutput = e.FilteredOutput + fmt.Sprintf("\n[full spooled output is no longer available: %v]\n", readErr)
+			return e, nil
+		}
+		e.OriginalOutput = string(data)
+		if e.SpoolOmittedBytes > 0 {
+			e.OriginalOutput += fmt.Sprintf("\n... [%d bytes exceeded the spool quota] ...\n", e.SpoolOmittedBytes)
+		}
+	}
+	return e, nil
+}
+
+// RecordRetrieve bumps the retrieve counter and records the reason, which the
+// engine uses to auto-disable filters that repeatedly hide useful detail.
+func (s *Store) RecordRetrieve(id int64, reason string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("store not open")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := dbx.Exec(context.Background(), s.db, outputRecordRetrieveSQL.For(s.dialect),
+		strings.TrimSpace(reason), id,
+	)
+	return err
+}
+
+// Stats is the aggregate savings summary (boost report equivalent).
+type Stats struct {
+	TotalCommands    int64
+	FilteredCommands int64
+	OriginalBytes    int64
+	FilteredBytes    int64
+	SavedTokens      int64
+	Retrievals       int64
+}
+
+// StatsSince aggregates savings for every record after since (zero = all),
+// across both shell and MCP kinds.
+func (s *Store) StatsSince(since time.Time) (Stats, error) {
+	return s.statsSince(since, "")
+}
+
+// StatsSinceKind aggregates savings for one kind (KindShell / KindMCP). Split
+// stats are what make the feedback loop actionable: a filter family whose
+// retrieval count keeps climbing is hiding detail the agent needs, and that
+// signal is meaningless if shell and MCP savings are pooled.
+func (s *Store) StatsSinceKind(since time.Time, kind string) (Stats, error) {
+	return s.statsSince(since, strings.TrimSpace(kind))
+}
+
+func (s *Store) statsSince(since time.Time, kind string) (Stats, error) {
+	if s == nil || s.db == nil {
+		return Stats{}, fmt.Errorf("store not open")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var st Stats
+	query := outputRecordTotalsSQL
+	var where []string
+	args := []any{}
+	if !since.IsZero() {
+		where = append(where, `created_at_ms >= `+dbx.Placeholder(s.dialect, len(args)+1))
+		args = append(args, since.UTC().UnixMilli())
+	}
+	if kind != "" {
+		where = append(where, `kind = `+dbx.Placeholder(s.dialect, len(args)+1))
+		args = append(args, kind)
+	}
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, ` AND `)
+	}
+	err := s.db.QueryRow(query, args...).Scan(
+		&st.TotalCommands, &st.FilteredCommands, &st.OriginalBytes,
+		&st.FilteredBytes, &st.SavedTokens, &st.Retrievals,
+	)
+	return st, err
+}
+
+// Close releases the store. The handle belongs to the composition root, which
+// opened the one state database and hands it out; closing it here would take
+// the database out from under every other store that borrowed it.
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.db = nil
+	return nil
+}
+
+// The one-time import of a pre-migration tool-output history file.
+//
+// Until the history became a table of the state database (owner ruling
+// 2026-11-01: one main database), it was a SQLite file of its own at
+// <state root>/state/outfilter/history.db. An install that still has one keeps
+// its records — and the retrieval ids its transcripts cite — because the first
+// open carries them into the main table and then deletes the file (owner ruling
+// 2026-11-03: the old history.db must go, not be renamed aside). The main
+// database is the history now, and a second copy of it under state/outfilter is
+// the very file on shared storage a replica cannot read safely.
+//
+// Nothing here writes to the legacy file: it is read once and removed.
 
 // The two statements the import itself runs against the main database: the
 // explicit-id insert that keeps a transcript's citations resolving, and the
@@ -167,7 +460,7 @@ func readLegacyOutputRecords(ctx context.Context, path string) (entries []legacy
 		return nil, false, err
 	}
 	defer func() { _ = db.Close() }()
-	has, err := legacyTableExists(ctx, db, "output_records")
+	has, err := legacyHistoryHasTable(ctx, db, "output_records")
 	if err != nil {
 		return nil, false, err
 	}
@@ -175,7 +468,7 @@ func readLegacyOutputRecords(ctx context.Context, path string) (entries []legacy
 		entries, err = readLegacyOutputTable(ctx, db)
 		return entries, true, err
 	}
-	has, err = legacyTableExists(ctx, db, "commands")
+	has, err = legacyHistoryHasTable(ctx, db, "commands")
 	if err != nil {
 		return nil, false, err
 	}
@@ -187,9 +480,10 @@ func readLegacyOutputRecords(ctx context.Context, path string) (entries []legacy
 	return entries, true, err
 }
 
-// legacyTableExists asks the legacy file itself, which is the only place its
-// shape is knowable.
-func legacyTableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+// legacyHistoryHasTable asks the legacy file itself, which is the only place
+// its shape is knowable. (schema_migrations.go has a legacyTableExists of its
+// own for the schema copy; this one reads a detached file through *sql.DB.)
+func legacyHistoryHasTable(ctx context.Context, db *sql.DB, name string) (bool, error) {
 	var n int
 	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n); err != nil {

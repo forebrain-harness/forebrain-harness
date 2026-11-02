@@ -16,6 +16,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 const (
@@ -163,8 +164,8 @@ func registerShellSpool(ctx context.Context, rt *AgentToolRuntime, command strin
 		}
 		preview += res.Stderr
 	}
-	id, err := store.Save(Entry{
-		Kind: KindShell, Command: command, Timestamp: time.Now(),
+	id, err := store.Save(state.Entry{
+		Kind: state.KindShell, Command: command, Timestamp: time.Now(),
 		FilteredOutput: preview, OriginalBytes: int(res.StdoutBytes + res.StderrBytes),
 		FilteredBytes: len(preview), SessionID: llm.AgentSessionIDFromContext(ctx),
 		CapabilityID: "bounded-output", CapabilityVer: "1",
@@ -465,7 +466,7 @@ type Meta struct {
 // compressor built against the new one.
 type Compressor struct {
 	engine *Engine
-	store  *Store
+	store  *state.Store
 	db     *sql.DB
 }
 
@@ -509,7 +510,7 @@ func CompressorFor(stateRoot string, db *sql.DB) *Compressor {
 		}
 		c.engine = engine
 	}
-	if store, err := OpenOutputHistory(context.Background(), db, stateRoot); err == nil {
+	if store, err := state.OpenOutputHistory(context.Background(), db, stateRoot); err == nil {
 		c.store = store
 	}
 	compressors[stateRoot] = c
@@ -594,7 +595,7 @@ func (c *Compressor) CompressShellOutput(command, stdout, sessionID string) (str
 		original = Redact(original)
 	}
 	if c.store != nil {
-		id, err := c.store.Save(Entry{
+		id, err := c.store.Save(state.Entry{
 			Command:        command,
 			OriginalOutput: original,
 			FilteredOutput: res.Output,
@@ -647,7 +648,7 @@ func safeApply(e *Engine, command, output string) (res Result) {
 }
 
 // Store exposes the compressor's retrieval store (may be nil).
-func (c *Compressor) Store() *Store {
+func (c *Compressor) Store() *state.Store {
 	if c == nil {
 		return nil
 	}

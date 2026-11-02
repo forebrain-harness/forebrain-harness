@@ -8,6 +8,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // mcp.go — accounting for MCP tool responses.
@@ -71,8 +72,8 @@ func (c *Compressor) RecordMCPResult(serverName, toolName, original, compressed,
 	if RedactEnabled() {
 		stored = Redact(stored)
 	}
-	id, err := c.store.Save(Entry{
-		Kind:           KindMCP,
+	id, err := c.store.Save(state.Entry{
+		Kind:           state.KindMCP,
 		Command:        MCPTarget(serverName, toolName),
 		OriginalOutput: stored,
 		FilteredOutput: compressed,

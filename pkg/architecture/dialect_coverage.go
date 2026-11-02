@@ -44,9 +44,11 @@ var dialectAllowlist = []DialectAllowance{
 			"database is built from its dialect schema at the current version",
 	},
 	{
-		File: "pkg/tool/output_history_legacy.go",
-		Reason: "reads the tool-output history file an install had before that table moved into " +
-			"the state database, once, read-only — a foreign SQLite file the import never writes",
+		File: "pkg/state/output_history.go",
+		Reason: "the tool-output history store belongs to pkg/state, and beside it sits the " +
+			"one-time read of the history file an install had before that table moved into the " +
+			"state database: a foreign SQLite file, read once, that the import never writes. " +
+			"The store's own statements are dbx.SQL arms",
 	},
 	{
 		File: "pkg/migrate/codex.go",

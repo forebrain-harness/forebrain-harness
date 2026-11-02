@@ -58,7 +58,7 @@ type ContextSources struct {
 	Compactions CompactionLog
 	// Filtering is the agent's record of the tool output it filtered before
 	// the model saw it; nil when none is kept.
-	Filtering *tool.Store
+	Filtering *state.Store
 	// Gauge is how full the context window is: the same gauge /status and
 	// the composer footer show (ContextGaugeOf).
 	Gauge StatusContext
@@ -236,7 +236,7 @@ func compactionTriggerText(p event.ContextCompactedPayload) string {
 
 // filteringSection reports the tool output filtered before the model saw it.
 // The record is the agent's, kept across its conversations.
-func filteringSection(store *tool.Store) string {
+func filteringSection(store *state.Store) string {
 	if store == nil {
 		return ""
 	}
@@ -253,7 +253,7 @@ func filteringSection(store *tool.Store) string {
 	if all.Retrievals > 0 {
 		fmt.Fprintf(&b, "\n  The model fetched a full output back %s", countNoun(int(all.Retrievals), "time"))
 	}
-	for _, kind := range []struct{ id, label string }{{tool.KindShell, "Shell commands"}, {tool.KindMCP, "MCP tools"}} {
+	for _, kind := range []struct{ id, label string }{{state.KindShell, "Shell commands"}, {state.KindMCP, "MCP tools"}} {
 		stats, err := store.StatsSinceKind(time.Time{}, kind.id)
 		if err != nil || stats.TotalCommands == 0 {
 			continue

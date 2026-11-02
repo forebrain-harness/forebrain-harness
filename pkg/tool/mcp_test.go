@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 func TestActionAllowsApprovalUpdate(t *testing.T) {
@@ -90,8 +92,8 @@ func TestRecordMCPResultStoresRecoverableOriginal(t *testing.T) {
 	if entry.OriginalOutput != original {
 		t.Errorf("stored original does not round-trip")
 	}
-	if entry.Kind != KindMCP {
-		t.Errorf("Kind = %q, want %q", entry.Kind, KindMCP)
+	if entry.Kind != state.KindMCP {
+		t.Errorf("Kind = %q, want %q", entry.Kind, state.KindMCP)
 	}
 	if entry.Command != "github/list_issues" {
 		t.Errorf("Command = %q, want \"github/list_issues\"", entry.Command)

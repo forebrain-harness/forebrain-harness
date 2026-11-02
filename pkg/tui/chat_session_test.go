@@ -1649,10 +1649,10 @@ func TestHandleContextSlashStatsUsesRunnerStateRoot(t *testing.T) {
 	sess := state.NewSessionStore(db, "main")
 	// The history is a table of the state database, which the runner hands the
 	// /context report: there is no file under the state root to write.
-	store, err := tool.OpenOutputHistory(context.Background(), db, root)
+	store, err := state.OpenOutputHistory(context.Background(), db, root)
 	require.NoError(t, err)
-	_, err = store.Save(tool.Entry{
-		Kind:          tool.KindShell,
+	_, err = store.Save(state.Entry{
+		Kind:          state.KindShell,
 		OriginalBytes: 4096,
 		FilteredBytes: 1024,
 		SavedTokens:   100,

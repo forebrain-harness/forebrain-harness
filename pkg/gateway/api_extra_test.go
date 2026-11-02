@@ -9699,10 +9699,10 @@ func TestChatToolOutputServesItsOwnSessionOnly(t *testing.T) {
 	sessions := state.NewSessionStore(db, "main")
 	// The history lives in the state database, which the runner hands to the
 	// endpoint that serves it: there is no file under the state root to write.
-	store, err := tool.OpenOutputHistory(ctx, db, root)
+	store, err := state.OpenOutputHistory(ctx, db, root)
 	require.NoError(t, err)
-	id, err := store.Save(tool.Entry{
-		Kind: tool.KindShell, Command: "go test ./...",
+	id, err := store.Save(state.Entry{
+		Kind: state.KindShell, Command: "go test ./...",
 		FilteredOutput: "preview", OriginalBytes: len(full), FilteredBytes: len("preview"),
 		SessionID: "s1", SpoolPath: spool,
 	})
@@ -9744,15 +9744,15 @@ func TestSubagentToolOutputServesItsWorkersSessionOnly(t *testing.T) {
 	require.NoError(t, os.WriteFile(mine, []byte(full), 0o644))
 	conversation := filepath.Join(ws, "spool-conversation.txt")
 	require.NoError(t, os.WriteFile(conversation, []byte("primary session output"), 0o644))
-	store, err := tool.OpenOutputHistory(context.Background(), s.Sessions.DB(), ws)
+	store, err := state.OpenOutputHistory(context.Background(), s.Sessions.DB(), ws)
 	require.NoError(t, err)
-	mineID, err := store.Save(tool.Entry{
-		Kind: tool.KindShell, Command: "grep -r x .",
+	mineID, err := store.Save(state.Entry{
+		Kind: state.KindShell, Command: "grep -r x .",
 		FilteredOutput: "preview", SessionID: "worker-1", SpoolPath: mine,
 	})
 	require.NoError(t, err)
-	conversationID, err := store.Save(tool.Entry{
-		Kind: tool.KindShell, Command: "ls",
+	conversationID, err := store.Save(state.Entry{
+		Kind: state.KindShell, Command: "ls",
 		FilteredOutput: "preview", SessionID: "sid", SpoolPath: conversation,
 	})
 	require.NoError(t, err)
