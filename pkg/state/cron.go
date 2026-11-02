@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // Cron job statuses. They describe the last fire, not the job's configuration,
@@ -102,6 +104,174 @@ type CronStore struct {
 
 func (s *CronStore) ok() bool { return s != nil && s.DB != nil }
 
+// The cron store's statements. Each SQLite arm is the text this file carried
+// before multi-database support. MySQL backticks `trigger`, which is a
+// reserved word there, and PostgreSQL numbers its parameters; StartRun's
+// PostgreSQL arm returns the new fire's id because pgx's database/sql result
+// carries no LastInsertId.
+var (
+	cronJobInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_cron_jobs (id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit,
+  run_count, next_run_at, last_run_at, last_status, last_error, last_output, failure_streak, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_cron_jobs (id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit,
+  run_count, next_run_at, last_run_at, last_status, last_error, last_output, failure_streak, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_cron_jobs (id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit,
+  run_count, next_run_at, last_run_at, last_status, last_error, last_output, failure_streak, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+	}
+	cronJobUpdateConfigSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_cron_jobs
+SET project_id=?, name=?, schedule=?, prompt=?, deliver=?, enabled=?, repeat_limit=?, next_run_at=?, updated_at=?
+WHERE id=? AND agent_id=?`,
+		MySQL: `
+UPDATE fb_cron_jobs
+SET project_id=?, name=?, schedule=?, prompt=?, deliver=?, enabled=?, repeat_limit=?, next_run_at=?, updated_at=?
+WHERE id=? AND agent_id=?`,
+		Postgres: `
+UPDATE fb_cron_jobs
+SET project_id=$1, name=$2, schedule=$3, prompt=$4, deliver=$5, enabled=$6, repeat_limit=$7, next_run_at=$8, updated_at=$9
+WHERE id=$10 AND agent_id=$11`,
+	}
+	cronJobClaimDueSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_cron_jobs
+SET next_run_at=?, run_count=run_count+1, last_status=?, updated_at=?
+WHERE id=? AND agent_id=? AND next_run_at=?`,
+		MySQL: `
+UPDATE fb_cron_jobs
+SET next_run_at=?, run_count=run_count+1, last_status=?, updated_at=?
+WHERE id=? AND agent_id=? AND next_run_at=?`,
+		Postgres: `
+UPDATE fb_cron_jobs
+SET next_run_at=$1, run_count=run_count+1, last_status=$2, updated_at=$3
+WHERE id=$4 AND agent_id=$5 AND next_run_at=$6`,
+	}
+	cronJobRecordOutcomeSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_cron_jobs
+SET last_run_at=?, last_status=?, last_error=?, last_error_code=?, last_output=?,
+    failure_streak=CASE WHEN ?=? THEN failure_streak+1 WHEN ?=? THEN 0 ELSE failure_streak END,
+    updated_at=?
+WHERE id=?`,
+		MySQL: `
+UPDATE fb_cron_jobs
+SET last_run_at=?, last_status=?, last_error=?, last_error_code=?, last_output=?,
+    failure_streak=CASE WHEN ?=? THEN failure_streak+1 WHEN ?=? THEN 0 ELSE failure_streak END,
+    updated_at=?
+WHERE id=?`,
+		Postgres: `
+UPDATE fb_cron_jobs
+SET last_run_at=$1, last_status=$2, last_error=$3, last_error_code=$4, last_output=$5,
+    failure_streak=CASE WHEN $6=$7 THEN failure_streak+1 WHEN $8=$9 THEN 0 ELSE failure_streak END,
+    updated_at=$10
+WHERE id=$11`,
+	}
+	cronRunInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_cron_runs (job_id, agent_id, session_id, trigger, status, started_at)
+VALUES (?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_cron_runs (job_id, agent_id, session_id, ` + "`trigger`" + `, status, started_at)
+VALUES (?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_cron_runs (job_id, agent_id, session_id, trigger, status, started_at)
+VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+	}
+	cronJobDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_cron_jobs WHERE id = ?`,
+		MySQL:    `DELETE FROM fb_cron_jobs WHERE id = ?`,
+		Postgres: `DELETE FROM fb_cron_jobs WHERE id = $1`,
+	}
+	cronRunCountSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_cron_runs WHERE job_id = ?`,
+		MySQL:    `SELECT COUNT(*) FROM fb_cron_runs WHERE job_id = ?`,
+		Postgres: `SELECT COUNT(*) FROM fb_cron_runs WHERE job_id = $1`,
+	}
+	heartbeatDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_heartbeats WHERE session_id = ?`,
+		MySQL:    `DELETE FROM fb_heartbeats WHERE session_id = ?`,
+		Postgres: `DELETE FROM fb_heartbeats WHERE session_id = $1`,
+	}
+	cronRunFinishSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_cron_runs SET status = ?, output = ?, error = ?, error_code = ?, finished_at = ?
+WHERE id = ? AND status = ?`,
+		MySQL: `
+UPDATE fb_cron_runs SET status = ?, output = ?, error = ?, error_code = ?, finished_at = ?
+WHERE id = ? AND status = ?`,
+		Postgres: `
+UPDATE fb_cron_runs SET status = $1, output = $2, error = $3, error_code = $4, finished_at = $5
+WHERE id = $6 AND status = $7`,
+	}
+	cronRunMarkDeliveredSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_cron_runs SET delivered_to = ? WHERE id = ? AND status = ?`,
+		MySQL: `
+UPDATE fb_cron_runs SET delivered_to = ? WHERE id = ? AND status = ?`,
+		Postgres: `
+UPDATE fb_cron_runs SET delivered_to = $1 WHERE id = $2 AND status = $3`,
+	}
+	cronRunMarkDeliveryFailedSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_cron_runs SET status = ?, error = ?, error_code = ? WHERE id = ? AND status = ?`,
+		MySQL: `
+UPDATE fb_cron_runs SET status = ?, error = ?, error_code = ? WHERE id = ? AND status = ?`,
+		Postgres: `
+UPDATE fb_cron_runs SET status = $1, error = $2, error_code = $3 WHERE id = $4 AND status = $5`,
+	}
+	heartbeatUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_heartbeats (session_id, interval_seconds, prompt, next_run_at, last_fired_at, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?)
+ON CONFLICT(session_id) DO UPDATE SET
+  interval_seconds=excluded.interval_seconds, prompt=excluded.prompt,
+  next_run_at=excluded.next_run_at, updated_at=excluded.updated_at`,
+		MySQL: `
+INSERT INTO fb_heartbeats (session_id, interval_seconds, prompt, next_run_at, last_fired_at, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?)
+ON DUPLICATE KEY UPDATE
+  interval_seconds=VALUES(interval_seconds), prompt=VALUES(prompt),
+  next_run_at=VALUES(next_run_at), updated_at=VALUES(updated_at)`,
+		Postgres: `
+INSERT INTO fb_heartbeats (session_id, interval_seconds, prompt, next_run_at, last_fired_at, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT(session_id) DO UPDATE SET
+  interval_seconds=excluded.interval_seconds, prompt=excluded.prompt,
+  next_run_at=excluded.next_run_at, updated_at=excluded.updated_at`,
+	}
+	heartbeatClaimSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_heartbeats SET next_run_at=?, updated_at=?
+WHERE session_id=? AND next_run_at=?`,
+		MySQL: `
+UPDATE fb_heartbeats SET next_run_at=?, updated_at=?
+WHERE session_id=? AND next_run_at=?`,
+		Postgres: `
+UPDATE fb_heartbeats SET next_run_at=$1, updated_at=$2
+WHERE session_id=$3 AND next_run_at=$4`,
+	}
+	heartbeatReanchorSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_heartbeats
+SET next_run_at=?, last_fired_at=COALESCE(?, last_fired_at), updated_at=?
+WHERE session_id=? AND next_run_at IS NOT NULL`,
+		MySQL: `
+UPDATE fb_heartbeats
+SET next_run_at=?, last_fired_at=COALESCE(?, last_fired_at), updated_at=?
+WHERE session_id=? AND next_run_at IS NOT NULL`,
+		Postgres: `
+UPDATE fb_heartbeats
+SET next_run_at=$1, last_fired_at=COALESCE($2, last_fired_at), updated_at=$3
+WHERE session_id=$4 AND next_run_at IS NOT NULL`,
+	}
+)
+
 // InsertJob creates a job. The caller owns the id and the computed NextRunAt:
 // the store records what it is told rather than re-deriving a schedule it does
 // not parse.
@@ -123,10 +293,7 @@ func (s *CronStore) InsertJob(ctx context.Context, job CronJob) error {
 		job.CreatedAt = now
 	}
 	job.UpdatedAt = now
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_cron_jobs (id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit,
-  run_count, next_run_at, last_run_at, last_status, last_error, last_output, failure_streak, created_at, updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := dbx.Exec(ctx, s.DB, cronJobInsertSQL.For(dbx.DialectOf(s.DB)),
 		strings.TrimSpace(job.ID), strings.TrimSpace(job.Ag), strings.TrimSpace(job.ProjectID), strings.TrimSpace(job.Name),
 		strings.TrimSpace(job.Sched), job.Prompt, strings.TrimSpace(job.Deliver), boolToInt(job.Enabled),
 		job.RepeatLimit, job.RunCount, job.NextRunAt, job.LastRunAt, job.LastStatus, job.LastError,
@@ -150,10 +317,7 @@ func (s *CronStore) UpdateJobConfig(ctx context.Context, job CronJob) error {
 	if strings.TrimSpace(job.ProjectID) == "" {
 		return fmt.Errorf("cron job project id required")
 	}
-	_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_cron_jobs
-SET project_id=?, name=?, schedule=?, prompt=?, deliver=?, enabled=?, repeat_limit=?, next_run_at=?, updated_at=?
-WHERE id=? AND agent_id=?`,
+	_, err := dbx.Exec(ctx, s.DB, cronJobUpdateConfigSQL.For(dbx.DialectOf(s.DB)),
 		strings.TrimSpace(job.ProjectID), strings.TrimSpace(job.Name), strings.TrimSpace(job.Sched), job.Prompt,
 		strings.TrimSpace(job.Deliver), boolToInt(job.Enabled), job.RepeatLimit, job.NextRunAt, time.Now().Unix(),
 		strings.TrimSpace(job.ID), strings.TrimSpace(job.Ag))
@@ -169,10 +333,7 @@ func (s *CronStore) ClaimDueJob(ctx context.Context, job CronJob, dueAt int64, n
 	if !s.ok() {
 		return false, fmt.Errorf("cron store unavailable")
 	}
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_cron_jobs
-SET next_run_at=?, run_count=run_count+1, last_status=?, updated_at=?
-WHERE id=? AND agent_id=? AND next_run_at=?`,
+	res, err := dbx.Exec(ctx, s.DB, cronJobClaimDueSQL.For(dbx.DialectOf(s.DB)),
 		next, CronStatusRunning, time.Now().Unix(), strings.TrimSpace(job.ID), strings.TrimSpace(job.Ag), dueAt)
 	if err != nil {
 		return false, err
@@ -193,12 +354,7 @@ func (s *CronStore) RecordOutcome(ctx context.Context, jobID, status, output, er
 	if !s.ok() {
 		return fmt.Errorf("cron store unavailable")
 	}
-	_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_cron_jobs
-SET last_run_at=?, last_status=?, last_error=?, last_error_code=?, last_output=?,
-    failure_streak=CASE WHEN ?=? THEN failure_streak+1 WHEN ?=? THEN 0 ELSE failure_streak END,
-    updated_at=?
-WHERE id=?`,
+	_, err := dbx.Exec(ctx, s.DB, cronJobRecordOutcomeSQL.For(dbx.DialectOf(s.DB)),
 		at, status, errText, errCode, output,
 		status, CronStatusFailed, status, CronStatusOK, time.Now().Unix(), strings.TrimSpace(jobID))
 	return err
@@ -208,7 +364,7 @@ func (s *CronStore) GetJob(ctx context.Context, id string) (*CronJob, error) {
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
-	rows, err := s.DB.QueryContext(ctx, cronJobSelect+` WHERE id = ?`, strings.TrimSpace(id))
+	rows, err := s.DB.QueryContext(ctx, cronJobSelect+` WHERE id = `+dbx.Placeholder(dbx.DialectOf(s.DB), 1), strings.TrimSpace(id))
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +385,8 @@ func (s *CronStore) ListJobsForProject(ctx context.Context, agentID, projectID s
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
-	rows, err := s.DB.QueryContext(ctx, cronJobSelect+` WHERE agent_id = ? AND project_id = ? ORDER BY created_at DESC`,
+	rows, err := s.DB.QueryContext(ctx, cronJobSelect+` WHERE agent_id = `+dbx.Placeholder(dbx.DialectOf(s.DB), 1)+
+		` AND project_id = `+dbx.Placeholder(dbx.DialectOf(s.DB), 2)+` ORDER BY created_at DESC`,
 		strings.TrimSpace(agentID), strings.TrimSpace(projectID))
 	if err != nil {
 		return nil, err
@@ -246,7 +403,7 @@ func (s *CronStore) DueJobs(ctx context.Context, agentID string, at time.Time) (
 		return nil, fmt.Errorf("cron store unavailable")
 	}
 	rows, err := s.DB.QueryContext(ctx, cronJobSelect+`
-WHERE agent_id = ? AND next_run_at IS NOT NULL AND next_run_at <= ?
+WHERE agent_id = `+dbx.Placeholder(dbx.DialectOf(s.DB), 1)+` AND next_run_at IS NOT NULL AND next_run_at <= `+dbx.Placeholder(dbx.DialectOf(s.DB), 2)+`
 ORDER BY next_run_at ASC`, strings.TrimSpace(agentID), at.Unix())
 	if err != nil {
 		return nil, err
@@ -259,7 +416,7 @@ func (s *CronStore) DeleteJob(ctx context.Context, id string) error {
 	if !s.ok() {
 		return fmt.Errorf("cron store unavailable")
 	}
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM fb_cron_jobs WHERE id = ?`, strings.TrimSpace(id))
+	_, err := dbx.Exec(ctx, s.DB, cronJobDeleteSQL.For(dbx.DialectOf(s.DB)), strings.TrimSpace(id))
 	return err
 }
 
@@ -275,11 +432,28 @@ func (s *CronStore) StartRun(ctx context.Context, run CronRun) (int64, error) {
 	if strings.TrimSpace(run.Status) == "" {
 		run.Status = CronStatusRunning
 	}
-	res, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_cron_runs (job_id, agent_id, session_id, trigger, status, started_at)
-VALUES (?,?,?,?,?,?)`,
-		strings.TrimSpace(run.JobID), strings.TrimSpace(run.AgentID),
-		strings.TrimSpace(run.SessionID), strings.TrimSpace(run.Trigger), run.Status, run.StartedAt)
+	d := dbx.DialectOf(s.DB)
+	args := []any{strings.TrimSpace(run.JobID), strings.TrimSpace(run.AgentID),
+		strings.TrimSpace(run.SessionID), strings.TrimSpace(run.Trigger), run.Status, run.StartedAt}
+	if d == dbx.Postgres {
+		// pgx's database/sql result carries no LastInsertId; the statement
+		// returns the new fire's id instead. The write stays in a transaction
+		// so it takes the global write lock like every other writer.
+		tx, err := dbx.BeginTx(ctx, s.DB, nil)
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		var id int64
+		if err := tx.QueryRowContext(ctx, cronRunInsertSQL.Postgres, args...).Scan(&id); err != nil {
+			return 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+	res, err := dbx.Exec(ctx, s.DB, cronRunInsertSQL.For(d), args...)
 	if err != nil {
 		return 0, err
 	}
@@ -295,9 +469,7 @@ func (s *CronStore) FinishRun(ctx context.Context, id int64, status, output, err
 	if !s.ok() {
 		return false, fmt.Errorf("cron store unavailable")
 	}
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_cron_runs SET status = ?, output = ?, error = ?, error_code = ?, finished_at = ?
-WHERE id = ? AND status = ?`,
+	res, err := dbx.Exec(ctx, s.DB, cronRunFinishSQL.For(dbx.DialectOf(s.DB)),
 		status, output, errText, errCode, time.Now().Unix(), id, CronStatusRunning)
 	if err != nil {
 		return false, err
@@ -315,8 +487,7 @@ func (s *CronStore) MarkFireDelivered(ctx context.Context, id int64, target stri
 	if !s.ok() {
 		return fmt.Errorf("cron store unavailable")
 	}
-	_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_cron_runs SET delivered_to = ? WHERE id = ? AND status = ?`,
+	_, err := dbx.Exec(ctx, s.DB, cronRunMarkDeliveredSQL.For(dbx.DialectOf(s.DB)),
 		strings.TrimSpace(target), id, CronStatusOK)
 	return err
 }
@@ -330,8 +501,7 @@ func (s *CronStore) MarkFireDeliveryFailed(ctx context.Context, id int64, errCod
 	if !s.ok() {
 		return fmt.Errorf("cron store unavailable")
 	}
-	_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_cron_runs SET status = ?, error = ?, error_code = ? WHERE id = ? AND status = ?`,
+	_, err := dbx.Exec(ctx, s.DB, cronRunMarkDeliveryFailedSQL.For(dbx.DialectOf(s.DB)),
 		CronStatusDeliveryError, errText, errCode, id, CronStatusOK)
 	return err
 }
@@ -342,8 +512,9 @@ func (s *CronStore) OpenFires(ctx context.Context, agentID string) ([]CronRun, e
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
-	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
-WHERE agent_id = ? AND status = ? ORDER BY started_at ASC, id ASC`,
+	d := dbx.DialectOf(s.DB)
+	rows, err := s.DB.QueryContext(ctx, cronRunSelectFor(d)+`
+WHERE agent_id = `+dbx.Placeholder(d, 1)+` AND status = `+dbx.Placeholder(d, 2)+` ORDER BY started_at ASC, id ASC`,
 		strings.TrimSpace(agentID), CronStatusRunning)
 	if err != nil {
 		return nil, err
@@ -358,8 +529,9 @@ func (s *CronStore) OpenFireForSession(ctx context.Context, sessionID string) (*
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
-	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
-WHERE session_id = ? AND status = ? ORDER BY started_at ASC, id ASC LIMIT 1`,
+	d := dbx.DialectOf(s.DB)
+	rows, err := s.DB.QueryContext(ctx, cronRunSelectFor(d)+`
+WHERE session_id = `+dbx.Placeholder(d, 1)+` AND status = `+dbx.Placeholder(d, 2)+` ORDER BY started_at ASC, id ASC LIMIT 1`,
 		strings.TrimSpace(sessionID), CronStatusRunning)
 	if err != nil {
 		return nil, err
@@ -378,8 +550,9 @@ func (s *CronStore) LatestOpenFire(ctx context.Context, jobID string) (*CronRun,
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
-	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
-WHERE job_id = ? AND status = ? ORDER BY started_at DESC, id DESC LIMIT 1`,
+	d := dbx.DialectOf(s.DB)
+	rows, err := s.DB.QueryContext(ctx, cronRunSelectFor(d)+`
+WHERE job_id = `+dbx.Placeholder(d, 1)+` AND status = `+dbx.Placeholder(d, 2)+` ORDER BY started_at DESC, id DESC LIMIT 1`,
 		strings.TrimSpace(jobID), CronStatusRunning)
 	if err != nil {
 		return nil, err
@@ -399,8 +572,9 @@ func (s *CronStore) ListRuns(ctx context.Context, jobID string, limit int) ([]Cr
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
-WHERE job_id = ? ORDER BY started_at DESC, id DESC LIMIT ?`,
+	d := dbx.DialectOf(s.DB)
+	rows, err := s.DB.QueryContext(ctx, cronRunSelectFor(d)+`
+WHERE job_id = `+dbx.Placeholder(d, 1)+` ORDER BY started_at DESC, id DESC LIMIT `+dbx.Placeholder(d, 2),
 		strings.TrimSpace(jobID), limit)
 	if err != nil {
 		return nil, err
@@ -423,15 +597,16 @@ func (s *CronStore) ListRunsPage(ctx context.Context, jobID string, limit, offse
 	}
 	limit = min(limit, 100)
 	offset = max(offset, 0)
+	d := dbx.DialectOf(s.DB)
 	var total int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_runs WHERE job_id = ?`, jobID).Scan(&total); err != nil {
+	if err := s.DB.QueryRowContext(ctx, cronRunCountSQL.For(d), jobID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if offset >= total {
 		offset = max(total-1, 0) / limit * limit
 	}
-	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
-WHERE job_id = ? ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`,
+	rows, err := s.DB.QueryContext(ctx, cronRunSelectFor(d)+`
+WHERE job_id = `+dbx.Placeholder(d, 1)+` ORDER BY started_at DESC, id DESC LIMIT `+dbx.Placeholder(d, 2)+` OFFSET `+dbx.Placeholder(d, 3),
 		jobID, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -465,19 +640,20 @@ func (s *CronStore) ExpiredFires(ctx context.Context, cutoff time.Time) ([]Expir
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
+	d := dbx.DialectOf(s.DB)
 	args := append([]any{SessionSourceCron, CronStatusRunning, cutoff.Unix()},
 		liveRunArgs(time.Now())...)
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT r.id, r.agent_id, r.session_id,
-       CASE WHEN s.id IS NOT NULL AND s.source = ? THEN 1 ELSE 0 END
+       CASE WHEN s.id IS NOT NULL AND s.source = `+dbx.Placeholder(d, 1)+` THEN 1 ELSE 0 END
 FROM fb_cron_runs r
 LEFT JOIN fb_sessions s ON s.id = r.session_id
-WHERE r.status <> ?
-  AND COALESCE(s.updated_at, r.finished_at, r.started_at) < ?
+WHERE r.status <> `+dbx.Placeholder(d, 2)+`
+  AND COALESCE(s.updated_at, r.finished_at, r.started_at) < `+dbx.Placeholder(d, 3)+`
   AND NOT EXISTS (
     SELECT 1 FROM fb_runs rr
     WHERE rr.session_id = r.session_id AND rr.parent_run_id IS NULL
-      AND `+fmt.Sprintf(livePrimaryRunCondition, "rr")+`)`, args...)
+      AND `+livePrimaryRunConditionFor(d, "rr", 4)+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -507,12 +683,12 @@ func (s *CronStore) DeleteFireRecords(ctx context.Context, ids []int64) error {
 			end = len(ids)
 		}
 		chunk := ids[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		placeholders := dbx.Placeholders(dbx.DialectOf(s.DB), 1, len(chunk))
 		args := make([]any, 0, len(chunk))
 		for _, id := range chunk {
 			args = append(args, id)
 		}
-		if _, err := s.DB.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE id IN (`+placeholders+`)`, args...); err != nil {
+		if _, err := dbx.Exec(ctx, s.DB, `DELETE FROM fb_cron_runs WHERE id IN (`+placeholders+`)`, args...); err != nil {
 			return err
 		}
 	}
@@ -536,12 +712,7 @@ func (s *CronStore) SaveHeartbeat(ctx context.Context, hb Heartbeat) error {
 		hb.CreatedAt = now
 	}
 	hb.UpdatedAt = now
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_heartbeats (session_id, interval_seconds, prompt, next_run_at, last_fired_at, created_at, updated_at)
-VALUES (?,?,?,?,?,?,?)
-ON CONFLICT(session_id) DO UPDATE SET
-  interval_seconds=excluded.interval_seconds, prompt=excluded.prompt,
-  next_run_at=excluded.next_run_at, updated_at=excluded.updated_at`,
+	_, err := dbx.Exec(ctx, s.DB, heartbeatUpsertSQL.For(dbx.DialectOf(s.DB)),
 		strings.TrimSpace(hb.SessionID), hb.IntervalSec, hb.Prompt, hb.NextRunAt, hb.LastFiredAt, hb.CreatedAt, hb.UpdatedAt)
 	return err
 }
@@ -550,7 +721,7 @@ func (s *CronStore) GetHeartbeat(ctx context.Context, sessionID string) (*Heartb
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
-	rows, err := s.DB.QueryContext(ctx, heartbeatSelect+` WHERE h.session_id = ?`, strings.TrimSpace(sessionID))
+	rows, err := s.DB.QueryContext(ctx, heartbeatSelect+` WHERE h.session_id = `+dbx.Placeholder(dbx.DialectOf(s.DB), 1), strings.TrimSpace(sessionID))
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +742,7 @@ func (s *CronStore) ListHeartbeats(ctx context.Context, agentID string) ([]Heart
 		return nil, fmt.Errorf("cron store unavailable")
 	}
 	rows, err := s.DB.QueryContext(ctx, heartbeatSelect+`
-WHERE EXISTS(SELECT 1 FROM fb_sessions s WHERE s.id = h.session_id AND s.agent_id = ?)
+WHERE EXISTS(SELECT 1 FROM fb_sessions s WHERE s.id = h.session_id AND s.agent_id = `+dbx.Placeholder(dbx.DialectOf(s.DB), 1)+`)
 ORDER BY h.created_at DESC, h.session_id ASC`, strings.TrimSpace(agentID))
 	if err != nil {
 		return nil, err
@@ -588,9 +759,10 @@ func (s *CronStore) DueHeartbeats(ctx context.Context, agentID string, at time.T
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
+	d := dbx.DialectOf(s.DB)
 	rows, err := s.DB.QueryContext(ctx, heartbeatSelect+`
-WHERE h.next_run_at IS NOT NULL AND h.next_run_at <= ?
-  AND EXISTS(SELECT 1 FROM fb_sessions s WHERE s.id = h.session_id AND s.agent_id = ?)
+WHERE h.next_run_at IS NOT NULL AND h.next_run_at <= `+dbx.Placeholder(d, 1)+`
+  AND EXISTS(SELECT 1 FROM fb_sessions s WHERE s.id = h.session_id AND s.agent_id = `+dbx.Placeholder(d, 2)+`)
 ORDER BY h.next_run_at ASC`, at.Unix(), strings.TrimSpace(agentID))
 	if err != nil {
 		return nil, err
@@ -606,9 +778,8 @@ func (s *CronStore) ClaimHeartbeat(ctx context.Context, sessionID string, dueAt,
 	if !s.ok() {
 		return false, fmt.Errorf("cron store unavailable")
 	}
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_heartbeats SET next_run_at=?, updated_at=?
-WHERE session_id=? AND next_run_at=?`, next, time.Now().Unix(), strings.TrimSpace(sessionID), dueAt)
+	res, err := dbx.Exec(ctx, s.DB, heartbeatClaimSQL.For(dbx.DialectOf(s.DB)),
+		next, time.Now().Unix(), strings.TrimSpace(sessionID), dueAt)
 	if err != nil {
 		return false, err
 	}
@@ -626,10 +797,7 @@ func (s *CronStore) ReanchorHeartbeat(ctx context.Context, sessionID string, nex
 	if !s.ok() {
 		return false, fmt.Errorf("cron store unavailable")
 	}
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_heartbeats
-SET next_run_at=?, last_fired_at=COALESCE(?, last_fired_at), updated_at=?
-WHERE session_id=? AND next_run_at IS NOT NULL`,
+	res, err := dbx.Exec(ctx, s.DB, heartbeatReanchorSQL.For(dbx.DialectOf(s.DB)),
 		next, firedAt, time.Now().Unix(), strings.TrimSpace(sessionID))
 	if err != nil {
 		return false, err
@@ -645,7 +813,7 @@ func (s *CronStore) DeleteHeartbeat(ctx context.Context, sessionID string) error
 	if !s.ok() {
 		return fmt.Errorf("cron store unavailable")
 	}
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM fb_heartbeats WHERE session_id = ?`, strings.TrimSpace(sessionID))
+	_, err := dbx.Exec(ctx, s.DB, heartbeatDeleteSQL.For(dbx.DialectOf(s.DB)), strings.TrimSpace(sessionID))
 	return err
 }
 
@@ -656,10 +824,19 @@ FROM fb_cron_jobs`
 
 // The conversation column is derived: a fire's session holds a transcript
 // exactly when it holds a visible message.
-const cronRunSelect = `
-SELECT id, job_id, agent_id, session_id, trigger, status, output, error, error_code, delivered_to, started_at, finished_at,
+// cronRunSelectFor is the fire-history select with the dialect's spelling of
+// the trigger column: `trigger` is a reserved word in MySQL, which backticks
+// it. PostgreSQL and SQLite take it plain.
+func cronRunSelectFor(d dbx.Dialect) string {
+	trigger := "trigger"
+	if d == dbx.MySQL {
+		trigger = "`trigger`"
+	}
+	return `
+SELECT id, job_id, agent_id, session_id, ` + trigger + `, status, output, error, error_code, delivered_to, started_at, finished_at,
        EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = fb_cron_runs.session_id AND m.visibility = 'visible')
 FROM fb_cron_runs`
+}
 
 const heartbeatSelect = `
 SELECT h.session_id, h.interval_seconds, h.prompt, h.next_run_at, h.last_fired_at, h.created_at, h.updated_at
