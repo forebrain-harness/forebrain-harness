@@ -2,7 +2,6 @@ package tool
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -25,12 +24,7 @@ func TestActionAllowsApprovalUpdate(t *testing.T) {
 // accounting path needs (compression already happened upstream).
 func newTestCompressor(t *testing.T) *Compressor {
 	t.Helper()
-	store, err := OpenStore(filepath.Join(t.TempDir(), "history.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	return &Compressor{store: store}
+	return &Compressor{store: openOutputHistoryForTest(t)}
 }
 
 // mcpEnvelope renders a realistic MCP tool result envelope.

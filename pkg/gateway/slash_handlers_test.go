@@ -55,7 +55,13 @@ func TestHandleContextSlashStatsUsesRunnerStateRoot(t *testing.T) {
 	tool.ResetCompressors()
 	t.Cleanup(tool.ResetCompressors)
 
-	store, err := tool.OpenStore(filepath.Join(root, "state", "outfilter", "history.db"))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	// The history is a table of the state database, which the runner hands the
+	// /context report: there is no file under the state root to write.
+	store, err := tool.OpenOutputHistory(context.Background(), db, root)
 	require.NoError(t, err)
 	_, err = store.Save(tool.Entry{
 		Kind:          tool.KindMCP,
@@ -65,9 +71,8 @@ func TestHandleContextSlashStatsUsesRunnerStateRoot(t *testing.T) {
 		CapabilityID:  tool.MCPCapabilityTOON,
 	})
 	require.NoError(t, err)
-	require.NoError(t, store.Close())
 
-	s := &Server{Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root}}}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root, SessionStore: sessions}}}
 	reply, handled := s.HandleContextSlash(context.Background(), "s1", "webchat", nil)
 	require.True(t, handled)
 	require.Contains(t, reply, "Filtered tool output, across this agent's conversations")

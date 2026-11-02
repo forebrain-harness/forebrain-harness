@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,11 @@ type Session struct {
 	// resolve, or MCP records would land in a different history database and
 	// retrieve_output could never find their ids. Empty disables accounting.
 	stateRoot string
+	// stateDB is the process's main state database, which holds the
+	// tool-output history in every mode (owner ruling 2026-11-01: one main
+	// database). The store borrows the handle; the session never closes it.
+	// Nil disables accounting, as an empty stateRoot does.
+	stateDB *sql.DB
 	// resultsDir is the directory MCP tool results are written under: saved
 	// image and resource blobs and offloaded large outputs. It is the primary
 	// agent workspace's state/mcp-results, NOT home — living inside the
@@ -83,6 +89,19 @@ func (s *Session) SetStateRoot(stateRoot string) {
 	}
 	s.mu.Lock()
 	s.stateRoot = strings.TrimSpace(stateRoot)
+	s.mu.Unlock()
+}
+
+// SetStateDB points output-compression accounting at the process's main state
+// database — the handle the shell tools' history store borrows too, so both
+// kinds share one retrieval-id namespace and one savings report. The session
+// does not own the handle and never closes it.
+func (s *Session) SetStateDB(db *sql.DB) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.stateDB = db
 	s.mu.Unlock()
 }
 
@@ -177,14 +196,15 @@ func (s *Session) isClosed() bool {
 }
 
 // accounting returns the immutable half of a session: the target the response
-// compression reports against, and the identity the record carries.
-func (s *Session) accounting() (stateRoot, serverName string) {
+// compression reports against — its state root and the main database the
+// history lives in — and the identity the record carries.
+func (s *Session) accounting() (stateRoot string, db *sql.DB, serverName string) {
 	if s == nil {
-		return "", ""
+		return "", nil, ""
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.stateRoot, s.serverName
+	return s.stateRoot, s.stateDB, s.serverName
 }
 
 // requestTimeoutValue is the per-call bound this session applies, zero when the
@@ -1085,7 +1105,7 @@ func (s *Session) callToolAttempt(ctx context.Context, toolName string, args any
 	if err != nil {
 		return "", err
 	}
-	stateRoot, serverName := s.accounting()
+	stateRoot, stateDB, serverName := s.accounting()
 	if timeout := s.requestTimeoutValue(); timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -1101,6 +1121,7 @@ func (s *Session) callToolAttempt(ctx context.Context, toolName string, args any
 	}
 	out, err := processToolResultJSON(s.resultsRootValue(), serverName, toolName, string(b), accounting{
 		stateRoot: stateRoot,
+		stateDB:   stateDB,
 		sessionID: llm.AgentSessionIDFromContext(ctx),
 	})
 	if err != nil {
@@ -1122,7 +1143,7 @@ func (s *Session) callToolContentAttempt(ctx context.Context, toolName string, a
 	if err != nil {
 		return nil, err
 	}
-	stateRoot, serverName := s.accounting()
+	stateRoot, stateDB, serverName := s.accounting()
 	if timeout := s.requestTimeoutValue(); timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -1138,6 +1159,7 @@ func (s *Session) callToolContentAttempt(ctx context.Context, toolName string, a
 	}
 	parts, err := ToolResultContent(ctx, s.resultsRootValue(), serverName, toolName, string(b), accounting{
 		stateRoot: stateRoot,
+		stateDB:   stateDB,
 		sessionID: llm.AgentSessionIDFromContext(ctx),
 	}, imageRefusal)
 	if err != nil {
@@ -1239,6 +1261,9 @@ func (s *Session) install(fresh *Session) error {
 	// after the first reconnect.
 	if strings.TrimSpace(s.stateRoot) == "" {
 		s.stateRoot = fresh.stateRoot
+	}
+	if s.stateDB == nil {
+		s.stateDB = fresh.stateDB
 	}
 	// The lifetime travels with the connection it belongs to. Keeping the old
 	// one would leave this session holding the process context of the child that

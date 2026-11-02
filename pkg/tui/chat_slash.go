@@ -70,7 +70,7 @@ func (s *ChatSession) HandleContextSlash(ctx context.Context, sessionID, channel
 	sid := strings.TrimSpace(sessionID)
 	src := turn.ContextSources{
 		Snapshots: s.Env.Tools(),
-		Filtering: tool.CompressorFor(s.runner().StateRoot()).Store(),
+		Filtering: tool.CompressorFor(s.runner().StateRoot(), s.sessStore().DB()).Store(),
 	}
 	if runs := s.runSvc(); runs != nil {
 		src.Compactions = runs

@@ -2724,7 +2724,7 @@ func (s *Server) serveToolOutput(w http.ResponseWriter, r *http.Request, runner 
 		http.NotFound(w, r)
 		return
 	}
-	entry, err := tool.CompressorFor(runner.StateRoot()).Store().Get(id)
+	entry, err := tool.CompressorFor(runner.StateRoot(), runner.SessionStore.DB()).Store().Get(id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)

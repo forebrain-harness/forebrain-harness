@@ -1643,7 +1643,13 @@ func TestHandleContextSlashStatsUsesRunnerStateRoot(t *testing.T) {
 	tool.ResetCompressors()
 	t.Cleanup(tool.ResetCompressors)
 
-	store, err := tool.OpenStore(filepath.Join(root, "state", "outfilter", "history.db"))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	// The history is a table of the state database, which the runner hands the
+	// /context report: there is no file under the state root to write.
+	store, err := tool.OpenOutputHistory(context.Background(), db, root)
 	require.NoError(t, err)
 	_, err = store.Save(tool.Entry{
 		Kind:          tool.KindShell,
@@ -1653,9 +1659,8 @@ func TestHandleContextSlashStatsUsesRunnerStateRoot(t *testing.T) {
 		CapabilityID:  "toml:make",
 	})
 	require.NoError(t, err)
-	require.NoError(t, store.Close())
 
-	s := sessionEnv{Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root}}}.session()
+	s := sessionEnv{Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root, SessionStore: sess}}}.session()
 	// The filtered tool output folds into the plain /context reply: one
 	// command answers for everything that shapes the context.
 	reply, handled := s.HandleContextSlash(context.Background(), "s1", "tui", nil)

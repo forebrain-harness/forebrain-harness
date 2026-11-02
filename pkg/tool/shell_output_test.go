@@ -14,6 +14,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 func TestShellBuiltinRequiresApprovalForExpansionAndShellBypassPatterns(t *testing.T) {
@@ -263,7 +264,7 @@ func TestCompressShellOutputRoundTrip(t *testing.T) {
 	ResetCompressors()
 	defer ResetCompressors()
 
-	rt := &AgentToolRuntime{WorkspaceRoot: dir}
+	rt := &AgentToolRuntime{WorkspaceRoot: dir, Sess: state.NewSessionStore(openStateDBForTest(t), "main")}
 	var b strings.Builder
 	b.WriteString("make[1]: Entering directory '/home/user/app'\n")
 	for i := 0; i < 400; i++ {
@@ -293,7 +294,7 @@ func TestCompressShellOutputRoundTrip(t *testing.T) {
 		t.Fatalf("retrieve tool: %v", err)
 	}
 	_ = tool // registration surface validated by tools.go; exercise store directly
-	entry, err := CompressorFor(dir).Store().Get(comp.Meta.RetrieveID)
+	entry, err := CompressorFor(dir, rt.StateDB()).Store().Get(comp.Meta.RetrieveID)
 	if err != nil {
 		t.Fatalf("store get: %v", err)
 	}

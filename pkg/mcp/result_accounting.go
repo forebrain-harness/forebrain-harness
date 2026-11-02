@@ -24,7 +24,7 @@ func recordMCPCompression(acct accounting, serverName, toolName, original, compr
 	if strings.TrimSpace(acct.stateRoot) == "" {
 		return compressed
 	}
-	c := tool.CompressorFor(acct.stateRoot)
+	c := tool.CompressorFor(acct.stateRoot, acct.stateDB)
 	if c == nil {
 		return compressed
 	}

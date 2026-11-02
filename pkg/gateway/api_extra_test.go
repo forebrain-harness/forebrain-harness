@@ -6110,7 +6110,7 @@ func newSubagentViewTestServer(t *testing.T) (*Server, string) {
 	cfg := &appcfg.Root{}
 	// A production runner always carries the controller: a subagent's channel
 	// keeps its queue there, and a steer is only deliverable through it.
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main"}, Control: run.NewController()}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main", SessionStore: sessions}, Control: run.NewController()}
 	s := &Server{Home: home, RunRT: &state.RunStore{DB: db}, Sessions: sessions, Runner: runner}
 	return s, filepath.Join(home, "workspace")
 }
@@ -9693,24 +9693,24 @@ func TestChatToolOutputServesItsOwnSessionOnly(t *testing.T) {
 	spool := filepath.Join(root, "spool-1.txt")
 	full := strings.Repeat("throughput line\n", 4000)
 	require.NoError(t, os.WriteFile(spool, []byte(full), 0o644))
-	store, err := tool.OpenStore(filepath.Join(root, "state", "outfilter", "history.db"))
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	// The history lives in the state database, which the runner hands to the
+	// endpoint that serves it: there is no file under the state root to write.
+	store, err := tool.OpenOutputHistory(ctx, db, root)
+	require.NoError(t, err)
 	id, err := store.Save(tool.Entry{
 		Kind: tool.KindShell, Command: "go test ./...",
 		FilteredOutput: "preview", OriginalBytes: len(full), FilteredBytes: len("preview"),
 		SessionID: "s1", SpoolPath: spool,
 	})
 	require.NoError(t, err)
-
-	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	sessions := state.NewSessionStore(db, "main")
 	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
 	require.NoError(t, sessions.Ensure(ctx, "s2", "s2"))
 
-	s := &Server{Sessions: sessions, Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root}}}
+	s := &Server{Sessions: sessions, Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root, SessionStore: sessions}}}
 	get := func(sid, retrieve string) *httptest.ResponseRecorder {
 		return cronRequest(t, s, http.MethodGet, "/api/chat/sessions/"+sid+"/tool-output/"+retrieve, nil,
 			s.handleChatToolOutput, "id", sid, "retrieve", retrieve)
@@ -9744,9 +9744,8 @@ func TestSubagentToolOutputServesItsWorkersSessionOnly(t *testing.T) {
 	require.NoError(t, os.WriteFile(mine, []byte(full), 0o644))
 	conversation := filepath.Join(ws, "spool-conversation.txt")
 	require.NoError(t, os.WriteFile(conversation, []byte("primary session output"), 0o644))
-	store, err := tool.OpenStore(filepath.Join(ws, "state", "outfilter", "history.db"))
+	store, err := tool.OpenOutputHistory(context.Background(), s.Sessions.DB(), ws)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	mineID, err := store.Save(tool.Entry{
 		Kind: tool.KindShell, Command: "grep -r x .",
 		FilteredOutput: "preview", SessionID: "worker-1", SpoolPath: mine,

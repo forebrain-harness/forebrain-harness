@@ -3,6 +3,7 @@ package tool
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -348,6 +349,18 @@ type AgentToolRuntime struct {
 // intermediate stores join "state". It is the agent's workspace root, falling
 // back to <home>/workspace for the main agent. Every store-backed tool must use
 // this (not rt.Home) so a non-main primary agent gets its own isolated state.
+// StateDB is the main state database this runtime's stores write to: the one
+// handle the composition root opened, borrowed by whoever needs it — the
+// tool-output history lives in it in every mode. Nil when the runtime was
+// built without a session store, which is the shape an embedder that never
+// opened a database has.
+func (rt *AgentToolRuntime) StateDB() *sql.DB {
+	if rt == nil || rt.Sess == nil {
+		return nil
+	}
+	return rt.Sess.DB()
+}
+
 func (rt *AgentToolRuntime) StateRoot() string {
 	if rt == nil {
 		return ""

@@ -1682,7 +1682,7 @@ func (s *ChatSession) SubagentContextReport(sessionID, agentKey string) (string,
 	}
 	src := turn.ContextSources{
 		Snapshots: s.Env.Tools(),
-		Filtering: tool.CompressorFor(r.StateRoot()).Store(),
+		Filtering: tool.CompressorFor(r.StateRoot(), s.sessStore().DB()).Store(),
 	}
 	if runs := s.runSvc(); runs != nil {
 		src.Compactions = runs

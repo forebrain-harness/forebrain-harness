@@ -4,6 +4,7 @@ package tool
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -150,7 +151,7 @@ func registerShellSpool(ctx context.Context, rt *AgentToolRuntime, command strin
 		}
 		return 0
 	}
-	store := CompressorFor(rt.StateRoot()).Store()
+	store := CompressorFor(rt.StateRoot(), rt.StateDB()).Store()
 	if store == nil {
 		_ = os.Remove(path)
 		return 0
@@ -239,7 +240,7 @@ func compressShellOutput(ctx context.Context, rt *AgentToolRuntime, command, std
 	if stateRoot == "" {
 		return shellCompression{}
 	}
-	c := CompressorFor(stateRoot)
+	c := CompressorFor(stateRoot, rt.StateDB())
 	if c == nil {
 		return shellCompression{}
 	}
@@ -299,7 +300,7 @@ func NewRetrieveOutputTool(rt *AgentToolRuntime) (*llm.Tool, error) {
 			if stateRoot == "" {
 				return "", fmt.Errorf("state root unavailable")
 			}
-			c := CompressorFor(stateRoot)
+			c := CompressorFor(stateRoot, rt.StateDB())
 			store := c.Store()
 			if store == nil {
 				return "", fmt.Errorf("compression store unavailable")
@@ -458,10 +459,14 @@ type Meta struct {
 	RetrieveID    int64  `json:"retrieve_id,omitempty"`
 }
 
-// Compressor couples a filter engine with the local retrieval store.
+// Compressor couples a filter engine with the retrieval store inside the state
+// database. db is the handle the store borrowed, remembered so a caller that
+// changes the database a state root maps to (a test opening a fresh one) gets a
+// compressor built against the new one.
 type Compressor struct {
 	engine *Engine
 	store  *Store
+	db     *sql.DB
 }
 
 var (
@@ -477,17 +482,23 @@ const CustomFilterRelDir = ".forebrain/filters"
 // it lazily. Construction never fails hard: a nil-safe compressor is returned
 // so callers can stay fail-open. Each state root gets its own engine copy so
 // project filters never leak between workspaces.
-func CompressorFor(stateRoot string) *Compressor {
+//
+// db is the process's main state database, which holds the tool-output history
+// in every mode (owner ruling 2026-11-01): the store borrows that handle
+// instead of opening a file of its own. A caller with no handle — an embedder
+// that never opened one — gets a compressor without a store, which is the
+// fail-open shape the compression layer already had.
+func CompressorFor(stateRoot string, db *sql.DB) *Compressor {
 	stateRoot = strings.TrimSpace(stateRoot)
 	if stateRoot == "" {
 		stateRoot = "."
 	}
 	compressorsMu.Lock()
 	defer compressorsMu.Unlock()
-	if c, ok := compressors[stateRoot]; ok {
+	if c, ok := compressors[stateRoot]; ok && c.db == db {
 		return c
 	}
-	c := &Compressor{}
+	c := &Compressor{db: db}
 	if base, _ := DefaultEngine(); base != nil {
 		engine := &Engine{filters: make([]*Filter, 0, len(base.Filters())+4)}
 		engine.AddFilters(base.Filters()...)
@@ -498,7 +509,7 @@ func CompressorFor(stateRoot string) *Compressor {
 		}
 		c.engine = engine
 	}
-	if store, err := OpenStore(filepath.Join(stateRoot, "state", "outfilter", "history.db")); err == nil {
+	if store, err := OpenOutputHistory(context.Background(), db, stateRoot); err == nil {
 		c.store = store
 	}
 	compressors[stateRoot] = c

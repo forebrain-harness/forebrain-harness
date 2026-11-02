@@ -2791,6 +2791,10 @@ func (ld *mcpLoad) runTask(t *mcpLoadTask) {
 	// tools use, so both kinds share one retrieval-id namespace and one savings
 	// report.
 	cli.SetStateRoot(ld.r.StateRoot())
+	// ... and against the same main database the shell tools' history store
+	// borrows, so both kinds share one retrieval-id namespace (owner ruling
+	// 2026-11-01: one main database, in every mode).
+	cli.SetStateDB(ld.r.SessionStore.DB())
 	// Results (saved images, resource blobs and offloaded large outputs) land
 	// in the primary agent workspace's state/mcp-results — a read-exempt root —
 	// so the model can read a screenshot an MCP server returned without an

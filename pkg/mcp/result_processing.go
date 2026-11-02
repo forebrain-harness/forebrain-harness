@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,9 @@ const defaultMaxMCPOutputTokens = 25000
 // compression behaviour itself unchanged.
 type accounting struct {
 	stateRoot string
+	// stateDB is the main state database holding the tool-output history; nil
+	// disables accounting.
+	stateDB   *sql.DB
 	sessionID string
 }
 

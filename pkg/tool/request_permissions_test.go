@@ -1749,7 +1749,7 @@ func TestCompressorEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	ResetCompressors()
 	defer ResetCompressors()
-	c := CompressorFor(dir)
+	c := CompressorFor(dir, openStateDBForTest(t))
 	if c == nil || c.engine == nil {
 		t.Fatal("compressor not constructed")
 	}
@@ -1825,7 +1825,7 @@ func TestCompressorSmallOutputUntouched(t *testing.T) {
 	dir := t.TempDir()
 	ResetCompressors()
 	defer ResetCompressors()
-	c := CompressorFor(dir)
+	c := CompressorFor(dir, openStateDBForTest(t))
 	out, meta := c.CompressShellOutput("make", "gcc -O2 -c main.c\n", "s")
 	if meta.Applied || out != "gcc -O2 -c main.c\n" {
 		t.Fatalf("small output must pass through, meta=%+v", meta)
@@ -1862,7 +1862,7 @@ on_empty = "deploy: ok"
 	}
 	ResetCompressors()
 	defer ResetCompressors()
-	c := CompressorFor(dir)
+	c := CompressorFor(dir, openStateDBForTest(t))
 	var b strings.Builder
 	for i := 0; i < 200; i++ {
 		b.WriteString("==> progress noise line\n")
@@ -3285,11 +3285,7 @@ func TestCountLinesWithoutTrailingNewlineAddsLastLine(t *testing.T) {
 
 func TestStoreGetReadsSpooledOutput(t *testing.T) {
 	dir := t.TempDir()
-	store, err := OpenStore(filepath.Join(dir, "spool.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openOutputHistoryForTest(t)
 	spool := filepath.Join(dir, "command.output")
 	if err := os.WriteFile(spool, []byte("full output\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3309,11 +3305,7 @@ func TestStoreGetReadsSpooledOutput(t *testing.T) {
 
 func TestStoreGetReportsExpiredSpoolWithoutFailing(t *testing.T) {
 	dir := t.TempDir()
-	store, err := OpenStore(filepath.Join(dir, "spool.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openOutputHistoryForTest(t)
 	id, err := store.Save(Entry{
 		Command: "noisy", FilteredOutput: "bounded preview", SpoolPath: filepath.Join(dir, "expired.output"),
 	})
@@ -3330,11 +3322,7 @@ func TestStoreGetReportsExpiredSpoolWithoutFailing(t *testing.T) {
 }
 
 func TestStoreKindRoundTrip(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "h.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer store.Close()
+	store := openOutputHistoryForTest(t)
 
 	shellID, err := store.Save(Entry{Kind: KindShell, Command: "make", OriginalOutput: "original-shell", FilteredOutput: "filtered-shell", OriginalBytes: 100, FilteredBytes: 10, SavedTokens: 22, CapabilityID: "toml:make"})
 	if err != nil {
@@ -3363,11 +3351,7 @@ func TestStoreKindRoundTrip(t *testing.T) {
 }
 
 func TestStatsSinceKindSeparatesShellAndMCP(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "h.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer store.Close()
+	store := openOutputHistoryForTest(t)
 
 	_, _ = store.Save(Entry{Kind: KindShell, Command: "make", SavedTokens: 10, CapabilityID: "toml:make"})
 	_, _ = store.Save(Entry{Kind: KindShell, Command: "make", SavedTokens: 5, CapabilityID: "toml:make"})
@@ -3404,158 +3388,6 @@ func TestStatsSinceKindSeparatesShellAndMCP(t *testing.T) {
 	}
 	if mcpOnly.SavedTokens != 20 {
 		t.Errorf("mcp SavedTokens=%d want 20", mcpOnly.SavedTokens)
-	}
-}
-
-// Rows written before the kind column existed must survive migration and be
-// readable with an empty Kind (effectively KindShell).
-func TestStoreMigratesExistingDatabaseWithoutKindColumn(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-
-	// Write a row using a schema that predates the kind column.
-	db, err := sql.Open("sqlite3", path+"?_busy_timeout=5000")
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS commands (
-		id INTEGER PRIMARY KEY,
-		timestamp TEXT NOT NULL,
-		cmd TEXT NOT NULL DEFAULT '',
-		original_output TEXT NOT NULL DEFAULT '',
-		filtered_output TEXT NOT NULL DEFAULT '',
-		original_output_bytes INTEGER NOT NULL DEFAULT 0,
-		filtered_output_bytes INTEGER NOT NULL DEFAULT 0,
-		saved_tokens INTEGER NOT NULL DEFAULT 0,
-		retrieve_count INTEGER NOT NULL DEFAULT 0,
-		session_id TEXT NOT NULL DEFAULT '',
-		capability_id TEXT NOT NULL DEFAULT '',
-		capability_version TEXT NOT NULL DEFAULT '',
-		retrieve_reason TEXT NOT NULL DEFAULT ''
-	)`)
-	if err != nil {
-		t.Fatalf("create legacy table: %v", err)
-	}
-	_, err = db.Exec(`INSERT INTO commands(timestamp,cmd,saved_tokens) VALUES('2025-01-01T00:00:00Z','make',7)`)
-	if err != nil {
-		t.Fatalf("legacy insert: %v", err)
-	}
-	db.Close()
-
-	// OpenStore must run migration and not fail.
-	store, err := OpenStore(path)
-	if err != nil {
-		t.Fatalf("OpenStore on legacy db: %v", err)
-	}
-	defer store.Close()
-
-	// Legacy rows should aggregate (kind defaults to 'shell').
-	st, err := store.StatsSince(time.Time{})
-	if err != nil {
-		t.Fatalf("StatsSince: %v", err)
-	}
-	if st.TotalCommands != 1 {
-		t.Errorf("TotalCommands=%d want 1", st.TotalCommands)
-	}
-}
-
-// A history database from the released binary migrates onto the v1 shape a
-// fresh one has — the same sqlite_master objects, byte for byte — while every
-// row's data and the aggregate stats stay put.
-func TestStoreMigrationMatchesFreshSchemaAndKeepsStats(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite3", path+"?_busy_timeout=5000")
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	// The exact v0 shape the released OpenStore created.
-	if _, err := db.Exec(`CREATE TABLE commands (
-		id INTEGER PRIMARY KEY,
-		timestamp TEXT NOT NULL,
-		cmd TEXT NOT NULL DEFAULT '',
-		original_output TEXT NOT NULL DEFAULT '',
-		filtered_output TEXT NOT NULL DEFAULT '',
-		original_output_bytes INTEGER NOT NULL DEFAULT 0,
-		filtered_output_bytes INTEGER NOT NULL DEFAULT 0,
-		saved_tokens INTEGER NOT NULL DEFAULT 0,
-		retrieve_count INTEGER NOT NULL DEFAULT 0,
-		session_id TEXT NOT NULL DEFAULT '',
-		capability_id TEXT NOT NULL DEFAULT '',
-		capability_version TEXT NOT NULL DEFAULT '',
-		retrieve_reason TEXT NOT NULL DEFAULT '',
-		kind TEXT NOT NULL DEFAULT 'shell',
-		spool_path TEXT NOT NULL DEFAULT '',
-		spool_omitted_bytes INTEGER NOT NULL DEFAULT 0
-	)`); err != nil {
-		t.Fatalf("create v0 table: %v", err)
-	}
-	if _, err := db.Exec(`CREATE INDEX idx_outfilter_commands_ts ON commands(timestamp)`); err != nil {
-		t.Fatalf("create v0 index: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO commands(timestamp,cmd,original_output,filtered_output,original_output_bytes,filtered_output_bytes,saved_tokens,retrieve_count,session_id,kind,spool_path) VALUES
-		('2026-01-02T03:04:05Z','make all','orig-a','filt-a',100,40,900,2,'s-1','shell','/tmp/does-not-exist'),
-		('2026-01-02T03:05:00Z','server/tool','orig-b','filt-b',200,80,400,0,'s-2','mcp',''),
-		('2026-01-02T03:06:00Z','go test','orig-c','filt-c',50,50,0,1,'s-1','shell','')`); err != nil {
-		t.Fatalf("seed v0 rows: %v", err)
-	}
-	db.Close()
-
-	store, err := OpenStore(path)
-	if err != nil {
-		t.Fatalf("OpenStore on v0 db: %v", err)
-	}
-	defer store.Close()
-	fresh, err := OpenStore(filepath.Join(t.TempDir(), "fresh.db"))
-	if err != nil {
-		t.Fatalf("OpenStore fresh: %v", err)
-	}
-	defer fresh.Close()
-
-	schema := func(s *Store) []string {
-		t.Helper()
-		rows, err := s.db.Query(`SELECT type, name, tbl_name, IFNULL(sql,'') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
-		if err != nil {
-			t.Fatalf("sqlite_master: %v", err)
-		}
-		defer rows.Close()
-		var out []string
-		for rows.Next() {
-			var typ, name, tbl, ddl string
-			if err := rows.Scan(&typ, &name, &tbl, &ddl); err != nil {
-				t.Fatal(err)
-			}
-			out = append(out, typ+" "+name+" "+tbl+" "+ddl)
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		return out
-	}
-	got, want := schema(store), schema(fresh)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("migrated history schema differs from a fresh one:\nmigrated=%v\nfresh=%v", got, want)
-	}
-
-	st, err := store.StatsSince(time.Time{})
-	if err != nil {
-		t.Fatalf("StatsSince: %v", err)
-	}
-	if st.TotalCommands != 3 || st.FilteredCommands != 2 || st.OriginalBytes != 350 ||
-		st.FilteredBytes != 170 || st.SavedTokens != 1300 || st.Retrievals != 3 {
-		t.Fatalf("stats after migration = %+v, want the seeded totals", st)
-	}
-
-	e, err := store.Get(1)
-	if err != nil {
-		t.Fatalf("Get(1): %v", err)
-	}
-	if e.Command != "make all" || e.SavedTokens != 900 || e.Kind != KindShell {
-		t.Fatalf("record 1 = %+v, want its command and savings", e)
-	}
-	if got := e.Timestamp.UTC(); !got.Equal(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)) {
-		t.Fatalf("record 1 timestamp = %v, want the seeded millisecond", got)
-	}
-	if e2, err := store.Get(2); err != nil || e2.Kind != KindMCP {
-		t.Fatalf("record 2 = %+v (%v), want its mcp kind", e2, err)
 	}
 }
 

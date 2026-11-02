@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,7 +15,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // LoadedSkill is the internal catalog record for one discovered skill, keyed by
@@ -555,14 +556,23 @@ func (s *State) loadedSkillReferencedByShell(command, cwd string) (LoadedSkill, 
 }
 
 // store.go — local recovery store (CCR: Compress-Cite-Retrieve). Boost keeps
-// the full redacted original of every compressed output in a SQLite database
-// so the agent can always get back what a filter hid; this is what makes
-// aggressive compression safe. We mirror that contract.
+// the full redacted original of every compressed output in a database so the
+// agent can always get back what a filter hid; this is what makes aggressive
+// compression safe. We mirror that contract.
+//
+// The table lives in the process's state database in every mode (owner ruling
+// 2026-11-01: one main database). It used to be a SQLite file of its own under
+// state/outfilter — plan 212 §3 for the servers, and now for SQLite too,
+// because a second file on shared storage is exactly what a replica cannot
+// read safely.
 
-// Store persists compressed-command history for later retrieval.
+// Store persists compressed-command history for later retrieval. It borrows
+// the state database handle: the store never opens or closes a database of its
+// own, and Close leaves the handle to whoever opened it.
 type Store struct {
-	db *sql.DB
-	mu sync.Mutex
+	db      *sql.DB
+	dialect dbx.Dialect
+	mu      sync.Mutex
 }
 
 // Record kinds. Boost keeps shell output and MCP tool responses in two separate
@@ -598,212 +608,79 @@ type Entry struct {
 	SpoolOmittedBytes int64
 }
 
-// OpenStore opens (creating if needed) the history database at path.
-func OpenStore(path string) (*Store, error) {
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
-		}
+// The table's statements. The SQLite text is the text the store has always
+// run; MySQL and PostgreSQL are translations with the same rows, the same
+// order and the same nulls. PostgreSQL has no LastInsertId, so its insert
+// hands the new id back the one way the engine can.
+var (
+	outputRecordInsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO output_records (kind, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens, session_id,
+			capability_id, capability_version, spool_path, spool_omitted_bytes, created_at_ms)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `INSERT INTO output_records (kind, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens, session_id,
+			capability_id, capability_version, spool_path, spool_omitted_bytes, created_at_ms)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `INSERT INTO output_records (kind, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens, session_id,
+			capability_id, capability_version, spool_path, spool_omitted_bytes, created_at_ms)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
 	}
-	// The same durability contract as the state database: WAL, an immediate
-	// write lock so a second process (the terminal and the gateway share this
-	// file) waits instead of failing to upgrade, and a five-second busy timeout.
-	db, err := sql.Open("sqlite3", path+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL&_txlock=immediate")
-	if err != nil {
-		return nil, err
+	outputRecordSelectSQL = dbx.SQL{
+		SQLite: `SELECT id, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens,
+			session_id, capability_id, capability_version, retrieve_count, retrieve_reason,
+			kind, spool_path, spool_omitted_bytes, created_at_ms
+		 FROM output_records WHERE id = ?`,
+		MySQL: `SELECT id, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens,
+			session_id, capability_id, capability_version, retrieve_count, retrieve_reason,
+			kind, spool_path, spool_omitted_bytes, created_at_ms
+		 FROM output_records WHERE id = ?`,
+		Postgres: `SELECT id, command, original_output, filtered_output,
+			original_output_bytes, filtered_output_bytes, saved_tokens,
+			session_id, capability_id, capability_version, retrieve_count, retrieve_reason,
+			kind, spool_path, spool_omitted_bytes, created_at_ms
+		 FROM output_records WHERE id = $1`,
 	}
-	if err := migrateHistoryStore(db); err != nil {
-		db.Close()
-		return nil, err
+	outputRecordRetrieveSQL = dbx.SQL{
+		SQLite:   `UPDATE output_records SET retrieve_count = retrieve_count + 1, retrieve_reason = ? WHERE id = ?`,
+		MySQL:    `UPDATE output_records SET retrieve_count = retrieve_count + 1, retrieve_reason = ? WHERE id = ?`,
+		Postgres: `UPDATE output_records SET retrieve_count = retrieve_count + 1, retrieve_reason = $1 WHERE id = $2`,
 	}
-	return &Store{db: db}, nil
-}
+	// outputRecordTotalsSQL is the aggregate every savings report reads. Its
+	// text is the same on all three engines — only the placeholders the WHERE
+	// clause adds are numbered — so statsSince assembles it from this one
+	// string.
+	outputRecordTotalsSQL = `SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN saved_tokens > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(original_output_bytes), 0),
+		COALESCE(SUM(filtered_output_bytes), 0),
+		COALESCE(SUM(saved_tokens), 0),
+		COALESCE(SUM(retrieve_count), 0)
+		FROM output_records`
+)
 
-// historySchemaVersion is the shape historySchemaSQL declares. A database at a
-// lower version is carried forward by migrateHistoryStore; one at a higher
-// version was written by a newer binary.
-const historySchemaVersion = 1
-
-// historySchemaSQL is the v1 shape: one table of compressed outputs, keyed by a
-// single retrieval id. It exists as a plain script rather than the additive
-// "CREATE TABLE IF NOT EXISTS" the store used to run, because a shape newer
-// than the released one has to be built by a versioned migration, not patched.
-const historySchemaSQL = `
-CREATE TABLE output_records (
-  id INTEGER PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('shell', 'mcp')),
-  command TEXT NOT NULL,
-  session_id TEXT NOT NULL DEFAULT '',
-  original_output TEXT NOT NULL,
-  filtered_output TEXT NOT NULL,
-  original_output_bytes INTEGER NOT NULL,
-  filtered_output_bytes INTEGER NOT NULL,
-  saved_tokens INTEGER NOT NULL,
-  capability_id TEXT NOT NULL DEFAULT '',
-  capability_version TEXT NOT NULL DEFAULT '',
-  retrieve_count INTEGER NOT NULL DEFAULT 0,
-  retrieve_reason TEXT NOT NULL DEFAULT '',
-  spool_path TEXT NOT NULL DEFAULT '',
-  spool_omitted_bytes INTEGER NOT NULL DEFAULT 0,
-  created_at_ms INTEGER NOT NULL
-) STRICT;`
-
-// migrateHistoryStore brings the history database behind db to
-// historySchemaVersion in one IMMEDIATE transaction. A fresh file is created
-// at the current version; a v0 file — the released `commands` table, which may
-// predate the kind discriminator and the spool columns — has its rows carried
-// onto the v1 table and is then dropped. Timestamps move from the driver's TEXT
-// spelling to milliseconds since the epoch; a non-empty timestamp that does not
-// parse would silently become NULL under a NOT NULL column, so the count of
-// such rows is checked and the migration fails instead.
-func migrateHistoryStore(db *sql.DB) error {
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return err
+// OpenOutputHistory binds the tool-output history to the state database
+// db. There is no second database to open in any mode: output_records is a
+// table of the main one.
+//
+// stateRoot locates the pre-migration history file — <state root>/state/
+// outfilter/history.db — and nothing else. An install that still has one hands
+// its rows over here, once, best effort: a history nobody can read is worth
+// less than a start-up that never happens, so a failed import is logged and the
+// store starts empty rather than blocking the caller.
+func OpenOutputHistory(ctx context.Context, db *sql.DB, stateRoot string) (*Store, error) {
+	if db == nil {
+		return nil, fmt.Errorf("output history: no state database")
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return fmt.Errorf("outfilter store migrate: %w", err)
+	s := &Store{db: db, dialect: dbx.DialectOf(db)}
+	if err := s.importLegacyHistory(ctx, stateRoot); err != nil {
+		slog.Warn("kept the legacy tool-output history file without importing it",
+			"path", legacyHistoryPath(stateRoot), "error", err)
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-
-	var version int
-	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
-		return fmt.Errorf("outfilter store migrate: %w", err)
-	}
-	if version == historySchemaVersion {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return err
-		}
-		committed = true
-		return nil
-	}
-	if version > historySchemaVersion {
-		return fmt.Errorf("outfilter store was written by a newer forebrain (user_version=%d)", version)
-	}
-
-	hasOutput, err := historyTableExists(ctx, conn, "output_records")
-	if err != nil {
-		return err
-	}
-	if !hasOutput {
-		if _, err := conn.ExecContext(ctx, historySchemaSQL); err != nil {
-			return fmt.Errorf("outfilter store migrate: %w", err)
-		}
-	}
-	hasCommands, err := historyTableExists(ctx, conn, "commands")
-	if err != nil {
-		return err
-	}
-	if hasCommands {
-		if err := copyHistoryCommands(ctx, conn); err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `DROP TABLE commands`); err != nil {
-			return fmt.Errorf("outfilter store migrate: %w", err)
-		}
-	}
-	// The v0 indexes name the table that no longer exists; dropping them keeps
-	// a migrated file's sqlite_master identical to a fresh one's.
-	for _, index := range []string{"idx_outfilter_commands_ts", "idx_outfilter_commands_kind_ts"} {
-		if _, err := conn.ExecContext(ctx, `DROP INDEX IF EXISTS `+index); err != nil {
-			return fmt.Errorf("outfilter store migrate: %w", err)
-		}
-	}
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, historySchemaVersion)); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
-}
-
-func historyTableExists(ctx context.Context, conn *sql.Conn, name string) (bool, error) {
-	var n int
-	if err := conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n); err != nil {
-		return false, fmt.Errorf("outfilter store migrate: %w", err)
-	}
-	return n > 0, nil
-}
-
-// copyHistoryCommands carries the v0 `commands` rows onto output_records,
-// tolerating a still older shape: a column the old table lacks takes the v1
-// default, and cmd/command are the same string under two names.
-func copyHistoryCommands(ctx context.Context, conn *sql.Conn) error {
-	present, err := historyColumnSet(ctx, conn, "commands")
-	if err != nil {
-		return err
-	}
-	expr := func(column, fallback string) string {
-		if present[column] {
-			return quoteHistoryIdent(column)
-		}
-		return fallback
-	}
-	kind := expr("kind", "'shell'")
-	// A NULL or empty timestamp is "no time"; anything else must convert. The
-	// value is rounded, not truncated — the julianday arithmetic lands a
-	// fraction under the exact millisecond and CAST would drop it to the wrong
-	// one.
-	createdAt := `CASE WHEN IFNULL(` + expr("timestamp", "''") + `,'')='' THEN NULL
-	  ELSE CAST(ROUND((julianday(NULLIF(` + expr("timestamp", "''") + `,'')) - 2440587.5) * 86400000) AS INTEGER) END`
-	var badCount int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM commands WHERE `+createdAt+` IS NULL AND IFNULL(`+expr("timestamp", "''")+`,'')<>''`).Scan(&badCount); err != nil {
-		return fmt.Errorf("outfilter store migrate: %w", err)
-	}
-	if badCount > 0 {
-		return fmt.Errorf("outfilter store migrate: %d command timestamps could not be converted to milliseconds", badCount)
-	}
-	copySQL := fmt.Sprintf(`INSERT INTO output_records(
-  id, kind, command, session_id, original_output, filtered_output,
-  original_output_bytes, filtered_output_bytes, saved_tokens,
-  capability_id, capability_version, retrieve_count, retrieve_reason,
-  spool_path, spool_omitted_bytes, created_at_ms)
-SELECT
-  id, IFNULL(%s,'shell'), %s, %s, %s, %s,
-  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-FROM commands`,
-		kind,
-		expr("cmd", "''"), expr("session_id", "''"),
-		expr("original_output", "''"), expr("filtered_output", "''"),
-		expr("original_output_bytes", "0"), expr("filtered_output_bytes", "0"), expr("saved_tokens", "0"),
-		expr("capability_id", "''"), expr("capability_version", "''"),
-		expr("retrieve_count", "0"), expr("retrieve_reason", "''"),
-		expr("spool_path", "''"), expr("spool_omitted_bytes", "0"), createdAt)
-	if _, err := conn.ExecContext(ctx, copySQL); err != nil {
-		return fmt.Errorf("outfilter store migrate: %w", err)
-	}
-	return nil
-}
-
-func historyColumnSet(ctx context.Context, conn *sql.Conn, table string) (map[string]bool, error) {
-	rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return nil, fmt.Errorf("outfilter store migrate: %w", err)
-	}
-	defer rows.Close()
-	set := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		set[strings.ToLower(name)] = true
-	}
-	return set, rows.Err()
-}
-
-func quoteHistoryIdent(name string) string {
-	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	return s, nil
 }
 
 // Save inserts a record and returns its retrieval id.
@@ -819,19 +696,40 @@ func (s *Store) Save(e Entry) (int64, error) {
 	if strings.TrimSpace(e.Kind) == "" {
 		e.Kind = KindShell
 	}
-	res, err := s.db.Exec(
-		`INSERT INTO output_records (kind, command, original_output, filtered_output,
-			original_output_bytes, filtered_output_bytes, saved_tokens, session_id,
-			capability_id, capability_version, spool_path, spool_omitted_bytes, created_at_ms)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	args := []any{
 		e.Kind, e.Command, e.OriginalOutput, e.FilteredOutput,
 		e.OriginalBytes, e.FilteredBytes, e.SavedTokens, e.SessionID,
 		e.CapabilityID, e.CapabilityVer, e.SpoolPath, e.SpoolOmittedBytes, e.Timestamp.UTC().UnixMilli(),
-	)
+	}
+	stmt := outputRecordInsertSQL.For(s.dialect)
+	if s.dialect == dbx.Postgres {
+		return insertOutputRecordReturningID(context.Background(), s.db, stmt, args)
+	}
+	res, err := dbx.Exec(context.Background(), s.db, stmt, args...)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// insertOutputRecordReturningID runs the insert in a write transaction and
+// hands back the id RETURNING gives it. PostgreSQL is the only engine whose
+// driver cannot report the new id of an Exec, and the transaction is what puts
+// the write behind the global lock every other out-of-transaction write takes.
+func insertOutputRecordReturningID(ctx context.Context, db *sql.DB, stmt string, args []any) (int64, error) {
+	tx, err := dbx.BeginTx(ctx, db, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var id int64
+	if err := tx.QueryRowContext(ctx, stmt, args...).Scan(&id); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // Get loads one record by retrieval id.
@@ -843,13 +741,8 @@ func (s *Store) Get(id int64) (Entry, error) {
 	defer s.mu.Unlock()
 	var e Entry
 	var createdAtMs int64
-	err := s.db.QueryRow(
-		`SELECT id, command, original_output, filtered_output,
-			original_output_bytes, filtered_output_bytes, saved_tokens,
-			session_id, capability_id, capability_version, retrieve_count, retrieve_reason,
-			kind, spool_path, spool_omitted_bytes, created_at_ms
-		 FROM output_records WHERE id = ?`, id,
-	).Scan(&e.ID, &e.Command, &e.OriginalOutput, &e.FilteredOutput,
+	err := s.db.QueryRow(outputRecordSelectSQL.For(s.dialect), id).Scan(
+		&e.ID, &e.Command, &e.OriginalOutput, &e.FilteredOutput,
 		&e.OriginalBytes, &e.FilteredBytes, &e.SavedTokens,
 		&e.SessionID, &e.CapabilityID, &e.CapabilityVer, &e.RetrieveCount, &e.RetrieveReason,
 		&e.Kind, &e.SpoolPath, &e.SpoolOmittedBytes, &createdAtMs)
@@ -882,8 +775,7 @@ func (s *Store) RecordRetrieve(id int64, reason string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(
-		`UPDATE output_records SET retrieve_count = retrieve_count + 1, retrieve_reason = ? WHERE id = ?`,
+	_, err := dbx.Exec(context.Background(), s.db, outputRecordRetrieveSQL.For(s.dialect),
 		strings.TrimSpace(reason), id,
 	)
 	return err
@@ -920,21 +812,15 @@ func (s *Store) statsSince(since time.Time, kind string) (Stats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var st Stats
-	query := `SELECT COUNT(*),
-		COALESCE(SUM(CASE WHEN saved_tokens > 0 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(original_output_bytes), 0),
-		COALESCE(SUM(filtered_output_bytes), 0),
-		COALESCE(SUM(saved_tokens), 0),
-		COALESCE(SUM(retrieve_count), 0)
-		FROM output_records`
+	query := outputRecordTotalsSQL
 	var where []string
 	args := []any{}
 	if !since.IsZero() {
-		where = append(where, `created_at_ms >= ?`)
+		where = append(where, `created_at_ms >= `+dbx.Placeholder(s.dialect, len(args)+1))
 		args = append(args, since.UTC().UnixMilli())
 	}
 	if kind != "" {
-		where = append(where, `kind = ?`)
+		where = append(where, `kind = `+dbx.Placeholder(s.dialect, len(args)+1))
 		args = append(args, kind)
 	}
 	if len(where) > 0 {
@@ -947,10 +833,13 @@ func (s *Store) statsSince(since time.Time, kind string) (Stats, error) {
 	return st, err
 }
 
-// Close closes the underlying database.
+// Close releases the store. The handle belongs to the composition root, which
+// opened the one state database and hands it out; closing it here would take
+// the database out from under every other store that borrowed it.
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.db = nil
+	return nil
 }

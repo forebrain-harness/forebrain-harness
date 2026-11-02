@@ -54,7 +54,7 @@ func (s *Server) HandleContextSlash(ctx context.Context, sessionID, channel stri
 	}
 	src := turn.ContextSources{
 		Snapshots: s.Env.Tools(),
-		Filtering: tool.CompressorFor(s.Runner.StateRoot()).Store(),
+		Filtering: tool.CompressorFor(s.Runner.StateRoot(), s.Sessions.DB()).Store(),
 	}
 	if s.RunRT != nil {
 		src.Compactions = s.RunRT
