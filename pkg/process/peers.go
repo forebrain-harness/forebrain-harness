@@ -160,6 +160,14 @@ type peerBranchEntry struct {
 // guard. Failures are logged, never returned: the peer service must not be
 // able to keep a TUI or a gateway from starting.
 func (env *Environment) StartPeers(ctx context.Context, s PeerSurface) (stop func()) {
+	// The tools' port onto the other processes' agents (plan 197), installed
+	// before the service decides whether it can run: the pair is always on
+	// (owner 2026-10-31), and the tool table sits in the prompt prefix, so the
+	// port may not follow the registration's life — a call made while the
+	// service is between modes answers that messaging is not available.
+	if env != nil {
+		env.Deps.Peers = env.peerDirectory()
+	}
 	svc := &peerService{
 		env:          env,
 		surface:      s,
@@ -171,6 +179,12 @@ func (env *Environment) StartPeers(ctx context.Context, s PeerSurface) (stop fun
 	}
 	svc.procStart, _ = peer.ProcStart(os.Getpid())
 	svc.inbox = newPeerInbox(svc, s)
+	// The receipts a peer sends about a message this process sent are what the
+	// sending conversation hears back (plan 197 §3.6): they go to this
+	// process's outbound table, which aggregates them into one note.
+	if port := env.outbound(); port != nil {
+		svc.inbox.onReceipt = port.tracker.receipt
+	}
 	svc.onTeardown = svc.inbox.teardown
 	switch strings.TrimSpace(s.Kind) {
 	case "gateway":

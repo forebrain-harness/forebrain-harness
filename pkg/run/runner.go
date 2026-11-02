@@ -135,10 +135,18 @@ type Deps struct {
 	CodeIntel        tool.CodeIntelligence
 	CodeIntelControl tool.CodeIntelControl
 	CodeIntelTool    bool
-	MemoryStore      *memory.Store
-	AppCfg           *appcfg.Root
-	SessionStore     *state.SessionStore
-	RunRT            *state.RunStore
+	// Peers is this runtime's port onto the agents in the other processes on
+	// this machine, installed by the composition root; nil when this platform
+	// has no peer messaging at all. It is the peer tools' only gate — the pair
+	// is always on, so the platform is the whole switch — and it is fixed for
+	// the life of the process, because the tool table sits in the prompt
+	// prefix and may not follow a peer service starting or stopping. Subagents
+	// inherit it through the factory that built them.
+	Peers        PeerDirectory
+	MemoryStore  *memory.Store
+	AppCfg       *appcfg.Root
+	SessionStore *state.SessionStore
+	RunRT        *state.RunStore
 }
 
 // MCPServersResolution is one session-open re-resolution of the effective MCP

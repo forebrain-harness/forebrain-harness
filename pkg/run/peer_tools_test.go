@@ -400,6 +400,16 @@ func TestPeerToolDescriptionsAreTheStableText(t *testing.T) {
 	if sendMeta.Category != "session" || !sendMeta.ReadOnly {
 		t.Fatalf("peer_send meta = %#v, want a read-only session tool", sendMeta)
 	}
+	// The arguments a model fills in are part of the cached schema, so their
+	// names are pinned here with the descriptions.
+	if schema := string(sendMeta.InputSchema); !strings.Contains(schema, `"to"`) ||
+		!strings.Contains(schema, `"message"`) || !strings.Contains(schema, "required") {
+		t.Fatalf("peer_send schema = %s, want to and message required", schema)
+	}
+	if schema := string(peerMeta.InputSchema); !strings.Contains(schema, `"properties":{}`) ||
+		strings.Contains(schema, `"required"`) {
+		t.Fatalf("peer_list schema = %s, want no arguments", schema)
+	}
 }
 
 // The two peer tools are not part of the subagent family: the family's name
@@ -412,6 +422,192 @@ func TestPeerToolsAreNotSubagentManagementTools(t *testing.T) {
 		}
 		if toolpkg.GuardToolNameOnly(toolpkg.WithSubagentRun(context.Background(), true), name) != nil {
 			t.Fatalf("%s is refused inside a subagent run: it is not a management tool", name)
+		}
+	}
+}
+
+// fakePeerDirectory stands in for the other processes' agents: it answers with
+// whatever listing a case needs and records what the tools asked it to send.
+type fakePeerDirectory struct {
+	listing  PeerListing
+	listErr  error
+	sendErr  error
+	result   PeerSendResult
+	listAsk  []PeerCaller
+	sentTo   []string
+	sentBody []string
+	sentAs   []PeerCaller
+}
+
+func (d *fakePeerDirectory) List(_ context.Context, from PeerCaller) (PeerListing, error) {
+	d.listAsk = append(d.listAsk, from)
+	return d.listing, d.listErr
+}
+
+func (d *fakePeerDirectory) Send(_ context.Context, from PeerCaller, to, message string) (PeerSendResult, error) {
+	d.sentAs = append(d.sentAs, from)
+	d.sentTo = append(d.sentTo, to)
+	d.sentBody = append(d.sentBody, message)
+	return d.result, d.sendErr
+}
+
+// withPeers hands the fixture's runner the port the tools reach the other
+// processes through, the way the composition root does.
+func (f *peerFixture) withPeers(port PeerDirectory) *fakePeerDirectory {
+	dir, _ := port.(*fakePeerDirectory)
+	f.owner.Deps.Peers = port
+	return dir
+}
+
+// The roster is one list: the conversation's own subagents and the agents of
+// the other processes, with who is where and what they are doing.
+func TestPeerListMergesTheAgentsOfOtherProcesses(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeCoding)
+	f.record(t, "task-peer-local", "conv-peer-merge", agent.StatusRunning)
+	f.withPeers(&fakePeerDirectory{listing: PeerListing{Peers: []PeerEntry{
+		{Name: "elsewhere-1", Kind: "terminal", Status: "busy", Task: "Refactoring the importer", Cwd: "/repo/shared", SameTree: true, ActiveAgo: 90 * time.Second},
+		{Name: "elsewhere-2", Kind: "gateway conversation", Status: "idle", Cwd: "/elsewhere", ActiveAgo: 3 * time.Hour},
+	}}})
+
+	text, err := f.call(t, primaryContext("conv-peer-merge"), "peer_list", map[string]any{})
+	if err != nil {
+		t.Fatalf("peer_list: %v", err)
+	}
+	answer := decodePeerAnswer(t, text)
+	agents, _ := answer["agents"].([]any)
+	if len(agents) != 3 {
+		t.Fatalf("agents = %#v, want the local subagent and both peers", agents)
+	}
+	local, _ := agents[0].(map[string]any)
+	if local["name"] != "task-peer-local" {
+		t.Fatalf("agents[0] = %#v, want the conversation's own subagent first", local)
+	}
+	near, _ := agents[1].(map[string]any)
+	if near["name"] != "elsewhere-1" || near["kind"] != "terminal" || near["same_tree"] != true {
+		t.Fatalf("agents[1] = %#v, want the same-tree peer with its kind", near)
+	}
+	if near["active_ago"] != "1m" || near["cwd"] != "/repo/shared" {
+		t.Fatalf("agents[1] = %#v, want where it works and when it last did", near)
+	}
+	far, _ := agents[2].(map[string]any)
+	if far["active_ago"] != "3h" || far["same_tree"] != nil {
+		t.Fatalf("agents[2] = %#v, want the older peer without same_tree", far)
+	}
+	if _, ok := answer["note"]; ok {
+		t.Fatalf("answer = %#v, want no empty-roster note", answer)
+	}
+}
+
+// A name the conversation does not own is looked for in the other processes,
+// and the answer names the recipient the way the listing printed it.
+func TestPeerSendGoesToAnAgentOfAnotherProcess(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeCoding)
+	dir := f.withPeers(&fakePeerDirectory{result: PeerSendResult{Name: "elsewhere-1", Status: "busy"}})
+
+	answer, err := f.call(t, primaryContext("conv-peer-cross"), "peer_send", map[string]any{
+		"to": "elsewhere-1", "message": "I am about to edit pkg/run/runner.go",
+	})
+	if err != nil {
+		t.Fatalf("peer_send: %v", err)
+	}
+	decoded := decodePeerAnswer(t, answer)
+	if decoded["status"] != "delivered" || decoded["to"] != "elsewhere-1" || decoded["peer_status"] != "busy" {
+		t.Fatalf("answer = %#v, want a delivered message to the peer's own status", decoded)
+	}
+	if len(dir.sentTo) != 1 || dir.sentTo[0] != "elsewhere-1" {
+		t.Fatalf("sent = %#v, want one message to elsewhere-1", dir.sentTo)
+	}
+	if dir.sentBody[0] != "I am about to edit pkg/run/runner.go" {
+		t.Fatalf("body = %q, want the message alone: the wire carries its own envelope", dir.sentBody[0])
+	}
+	if len(dir.sentAs) != 1 || dir.sentAs[0].SessionID != "conv-peer-cross" || dir.sentAs[0].AgentKey != "" {
+		t.Fatalf("caller = %#v, want this conversation and no subagent", dir.sentAs)
+	}
+}
+
+// A subagent reaches the other processes too, and says who it is: the roster
+// key is what the recipient sees beside the conversation.
+func TestPeerSendFromASubagentGoesToAnotherProcess(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeCoding)
+	dir := f.withPeers(&fakePeerDirectory{result: PeerSendResult{Name: "elsewhere-1", Status: "idle"}})
+	f.record(t, "task-peer-cross-child", "conv-peer-cross-child", agent.StatusRunning)
+
+	answer, err := f.call(t, subagentContext("task-peer-cross-child", "conv-peer-cross-child"), "peer_send", map[string]any{
+		"to": "elsewhere-1", "message": "the importer is done",
+	})
+	if err != nil {
+		t.Fatalf("peer_send: %v", err)
+	}
+	if got := decodePeerAnswer(t, answer)["status"]; got != "delivered" {
+		t.Fatalf("status = %v, want delivered", got)
+	}
+	if len(dir.sentAs) != 1 || dir.sentAs[0].AgentKey != "task-peer-cross-child" {
+		t.Fatalf("caller = %#v, want the subagent's roster key", dir.sentAs)
+	}
+}
+
+// A batch task talks to its own agents and to nobody else, even though the
+// process it runs in can see the machine.
+func TestPeerToolsStayInsideABatchConversation(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeBatch)
+	dir := f.withPeers(&fakePeerDirectory{listing: PeerListing{Peers: []PeerEntry{
+		{Name: "elsewhere-1", Kind: "terminal", Status: "busy"},
+	}}})
+	f.record(t, "task-peer-batch-local", "conv-peer-batch-only", agent.StatusRunning)
+
+	text, err := f.call(t, primaryContext("conv-peer-batch-only"), "peer_list", map[string]any{})
+	if err != nil {
+		t.Fatalf("peer_list: %v", err)
+	}
+	agents, _ := decodePeerAnswer(t, text)["agents"].([]any)
+	if len(agents) != 1 {
+		t.Fatalf("agents = %#v, want only the task's own subagent", agents)
+	}
+	if len(dir.listAsk) != 0 {
+		t.Fatalf("the batch task asked the machine for its agents: %#v", dir.listAsk)
+	}
+
+	_, err = f.call(t, primaryContext("conv-peer-batch-only"), "peer_send", map[string]any{
+		"to": "elsewhere-1", "message": "hi",
+	})
+	if err == nil || !strings.Contains(err.Error(), "batch tasks talk only to their own agents") {
+		t.Fatalf("peer_send to another process = %v, want the batch refusal", err)
+	}
+	if len(dir.sentTo) != 0 {
+		t.Fatalf("the batch task sent %#v, want nothing sent", dir.sentTo)
+	}
+}
+
+// Without a port — a platform that has no peer messaging — the two tools are
+// still registered and still work inside the conversation; the only names that
+// resolve are the conversation's own.
+func TestPeerToolsNameOnlyTheirOwnAgentsWithoutAPort(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeCoding)
+	f.record(t, "task-peer-solo", "conv-peer-solo", agent.StatusRunning)
+
+	text, err := f.call(t, primaryContext("conv-peer-solo"), "peer_list", map[string]any{})
+	if err != nil {
+		t.Fatalf("peer_list: %v", err)
+	}
+	if agents, _ := decodePeerAnswer(t, text)["agents"].([]any); len(agents) != 1 {
+		t.Fatalf("agents = %#v, want the conversation's own subagent", agents)
+	}
+	_, err = f.call(t, primaryContext("conv-peer-solo"), "peer_send", map[string]any{
+		"to": "elsewhere-1", "message": "hi",
+	})
+	if err == nil || !strings.Contains(err.Error(), `no agent named "elsewhere-1"; call peer_list`) {
+		t.Fatalf("peer_send to an unknown name = %v, want the plain refusal", err)
+	}
+}
+
+// The two descriptions are compiled in and cached: neither may name a vendor,
+// a model or another agent's product.
+func TestPeerToolDescriptionsNameNoVendor(t *testing.T) {
+	for _, description := range []string{peerListDescription, peerSendDescription} {
+		for _, brand := range []string{"Claude", "Anthropic", "OpenAI", "Codex", "GPT", "Gemini", "DeepSeek"} {
+			if strings.Contains(description, brand) {
+				t.Fatalf("description %q names %q", description, brand)
+			}
 		}
 	}
 }

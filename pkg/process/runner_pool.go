@@ -1078,6 +1078,10 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	deps.ProjectMemoryOnly = state.NormalizeProjectMemoryScope(project.MemoryScope) == state.ProjectMemoryProjectOnly
 	deps.ProjectType = state.NormalizeProjectType(project.ProjectType)
 	deps.BatchSandbox = project.BatchSandbox
+	// One port per process: a conversation served by a project runner reaches
+	// the same agents the base runner does, because peer messaging is a
+	// property of this process and not of a project.
+	deps.Peers = baseDeps.Peers
 	deps.ProjectInstructionsFor = func(sessionID string) string {
 		return entry.frozenInstructions(sessionID)
 	}

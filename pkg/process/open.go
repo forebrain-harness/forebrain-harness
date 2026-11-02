@@ -140,6 +140,11 @@ type Environment struct {
 	// peers is this process's peer registration (plan 195); Close stops it
 	// before anything it reads from goes away.
 	peers *peerService
+	// peerOut is this process's port onto the other processes' agents (plan
+	// 197): the peer tools reach it through Deps.Peers. It is built once and
+	// outlives the registration, because the tool table sits in the prompt
+	// prefix while a registration may start, switch modes and stop.
+	peerOut *peerOutbound
 	// ownerLeaseStop deregisters this process's run-owner lease. It runs
 	// after the runners are closed and before the SQL handle is: while any
 	// runner lives it may still settle runs under this owner, and the DELETE

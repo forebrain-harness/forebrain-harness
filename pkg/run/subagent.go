@@ -2372,11 +2372,14 @@ func SubagentRunning(r *Runner, conversationSessionID, agentKey string) bool {
 
 // LiveSubagent is one subagent of a conversation with an execution in flight,
 // as a listing shows it (plan 195 §3.3): the roster key a surface names it by,
-// the title its task carries, and when this execution started.
+// the title its task carries, when this execution started, and the worker
+// session it runs in — the identity that goes beside the key when the agent is
+// addressed from outside this conversation.
 type LiveSubagent struct {
-	Key       string
-	Title     string
-	StartedAt time.Time
+	Key             string
+	Title           string
+	StartedAt       time.Time
+	WorkerSessionID string
 }
 
 // LiveSubagents lists the subagents of one conversation whose execution is in
@@ -2398,11 +2401,12 @@ func LiveSubagents(r *Runner, conversationSessionID string) []LiveSubagent {
 		}
 		ch.mu.Lock()
 		ex := ch.running
+		workerSessionID := ch.workerSessionID
 		ch.mu.Unlock()
 		if ex == nil {
 			continue
 		}
-		out = append(out, LiveSubagent{Key: ch.agentKey, Title: ch.title, StartedAt: ex.started})
+		out = append(out, LiveSubagent{Key: ch.agentKey, Title: ch.title, StartedAt: ex.started, WorkerSessionID: workerSessionID})
 	}
 	// Insertion sort keeps the listing stable without a new import — the
 	// channel table is a map, and an unordered listing would re-order the

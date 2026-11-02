@@ -635,7 +635,7 @@ func (in *peerInbox) deliverToSubagent(ctx context.Context, a peerArrival, targe
 	// The message is wrapped as the peer envelope it is, and marked meta with
 	// its origin: an agent reading it must see what the sender wrote and where
 	// it came from, and must not have its own view re-pointed at this surface.
-	_, err := run.SteerLiveSubagent(runner, target.SessionID, target.AgentKey, peerInput(envelope))
+	_, err := run.SteerLiveSubagent(runner, target.SessionID, target.AgentKey, peerInput(envelope, state.MessageOriginPeer))
 	switch {
 	case err == nil:
 		return ""
@@ -657,18 +657,44 @@ func (in *peerInbox) deliverToSubagent(ctx context.Context, a peerArrival, targe
 // turn that is running, behind the gate it is parked on, or as a turn of its own
 // when the conversation is idle.
 func (in *peerInbox) deliverToPrimary(ctx context.Context, sessionID, envelope, msgID, fromName string) string {
+	return in.deliverPrimary(ctx, sessionID, PeerPrompt{
+		SessionID: sessionID,
+		Text:      envelope,
+		Origin:    state.MessageOriginPeer,
+		MsgID:     msgID,
+		FromName:  fromName,
+	})
+}
+
+// deliverNote hands one of this process's own notes to a conversation — what
+// became of the messages it sent (plan 197 §3.6) — the same way a peer message
+// goes: into the running turn, behind the gate, or as a turn of its own. Its
+// origin is what makes it a delivery update rather than a message from
+// somebody.
+func (in *peerInbox) deliverNote(ctx context.Context, sessionID, text string) string {
+	return in.deliverPrimary(ctx, sessionID, PeerPrompt{
+		SessionID: sessionID,
+		Text:      text,
+		Origin:    state.MessageOriginPeerStatus,
+	})
+}
+
+// deliverPrimary is the one delivery table a conversation's own agent is
+// reached through, whatever the message is: a peer's envelope or a note this
+// process wrote about one.
+func (in *peerInbox) deliverPrimary(ctx context.Context, sessionID string, prompt PeerPrompt) string {
 	if in.svc.env == nil || in.svc.env.Control == nil {
 		return peerRefusedInboxNotAttached
 	}
 	if runID, phase, ok := in.svc.env.Control.Find(sessionID); ok {
 		switch phase {
 		case run.Running:
-			if in.svc.env.Control.Steer(runID, peerInput(envelope)) {
+			if in.svc.env.Control.Steer(runID, peerInput(prompt.Text, prompt.Origin)) {
 				in.noteHanded(sessionID)
 				return ""
 			}
 		case run.Waiting, run.Finishing:
-			if in.svc.env.Control.FollowUp(runID, peerInput(envelope)) {
+			if in.svc.env.Control.FollowUp(runID, peerInput(prompt.Text, prompt.Origin)) {
 				in.noteHanded(sessionID)
 				return ""
 			}
@@ -684,14 +710,7 @@ func (in *peerInbox) deliverToPrimary(ctx context.Context, sessionID, envelope, 
 	if in.surface.Wake == nil {
 		return peerRefusedInboxNotAttached
 	}
-	err := in.surface.Wake(ctx, PeerPrompt{
-		SessionID: sessionID,
-		Text:      envelope,
-		Origin:    state.MessageOriginPeer,
-		MsgID:     msgID,
-		FromName:  fromName,
-	})
-	if err != nil {
+	if err := in.surface.Wake(ctx, prompt); err != nil {
 		if !errors.Is(err, ErrPeerWakeUnavailable) {
 			slog.Debug("peer wake failed", "session_id", sessionID, "err", err)
 		}
@@ -703,11 +722,11 @@ func (in *peerInbox) deliverToPrimary(ctx context.Context, sessionID, envelope, 
 
 // peerInput is a peer message as the engine's input: the envelope as the text,
 // one text part, and the origin that marks the row as written elsewhere.
-func peerInput(envelope string) run.Input {
+func peerInput(envelope, origin string) run.Input {
 	return run.Input{
 		Text:   envelope,
 		Parts:  []llm.ContentPart{llm.Text(envelope)},
-		Origin: state.MessageOriginPeer,
+		Origin: origin,
 	}
 }
 

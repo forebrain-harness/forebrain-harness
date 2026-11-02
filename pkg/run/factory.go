@@ -199,6 +199,24 @@ func (f Factory) ownerCodeIntel() (tool.CodeIntelligence, tool.CodeIntelControl,
 	return nil, nil, false
 }
 
+// peerDirectory hands the peer tools the port onto the other processes'
+// agents: the owning runner's, because a subagent reaches the same processes
+// its dispatcher does and a nil port (a platform with no peer messaging) must
+// stay nil rather than become a nil-interface call in the child.
+func (f Factory) peerDirectory() PeerDirectory {
+	if f.Owner != nil && f.Owner.Deps != nil && f.Owner.Peers != nil {
+		return f.Owner.Peers
+	}
+	return nil
+}
+
+// peerTargetsStayInConversation reports whether this conversation may only
+// reach its own agents: a batch task runs unattended for a business system, so
+// it talks to its own agents and to nobody outside the conversation.
+func (f Factory) peerTargetsStayInConversation() bool {
+	return f.projectType() == state.ProjectTypeBatch
+}
+
 func (f Factory) ownerSubagentExecutor() SubagentExecutor {
 	if f.Owner != nil {
 		return f.Owner.SubagentExecutor
