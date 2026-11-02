@@ -54,6 +54,15 @@ func notePeerWrite(ctx context.Context, peers PeerWorkTree, absPath string) stri
 	return note
 }
 
+// notePeerFileWrite records one path in the peer identity ledger, when this
+// machine has a peer port at all. A path a call announced but never showed as a
+// model-facing result — the source of a move — is announced here.
+func notePeerFileWrite(ctx context.Context, rt *AgentToolRuntime, absPath string) {
+	if peers := peersOf(rt); peers != nil {
+		peers.NoteWrite(ctx, absPath, time.Now())
+	}
+}
+
 // recentPeerTouch is the newest write by another agent to absPath inside the
 // hint's window.
 func recentPeerTouch(ctx context.Context, peers PeerWorkTree, root, absPath string, now time.Time) (PeerTouch, bool) {

@@ -437,6 +437,27 @@ type fakePeerDirectory struct {
 	sentTo   []string
 	sentBody []string
 	sentAs   []PeerCaller
+
+	// The same-tree guards (plan 198) ask the same fake. A case that does not
+	// set these gets the quiet answers: nobody in the tree, nothing touched.
+	workTree []toolpkg.WorkTreePeer
+	touches  []toolpkg.PeerTouch
+	noted    []string
+	roots    []string
+}
+
+func (d *fakePeerDirectory) WorkTreePeers(_ context.Context, root string) []toolpkg.WorkTreePeer {
+	d.roots = append(d.roots, root)
+	return d.workTree
+}
+
+func (d *fakePeerDirectory) NoteWrite(_ context.Context, absPath string, _ time.Time) {
+	d.noted = append(d.noted, absPath)
+}
+
+func (d *fakePeerDirectory) TouchesBetween(_ context.Context, root string, _, _ time.Time) []toolpkg.PeerTouch {
+	d.roots = append(d.roots, root)
+	return d.touches
 }
 
 func (d *fakePeerDirectory) List(_ context.Context, from PeerCaller) (PeerListing, error) {

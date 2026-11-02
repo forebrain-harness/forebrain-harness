@@ -955,6 +955,10 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				}
 			}
 			attachTurnDiff(output, abs, before, []byte(in.Content))
+			// The write lands either way; the note that another agent edited
+			// this same file in the last half hour rides on the model's result,
+			// never on the card (plan 198 §3.4).
+			peerNote := notePeerWrite(ctx, peersOf(rt), abs)
 			// Diagnostics are collected only after the write landed, so the wait
 			// window can never fail or delay the write itself (spec §8.3.5).
 			diag := reportEditDiagnostics(ctx, codeIntelOf(rt), output, []FileChange{{AbsPath: abs, Before: before, After: []byte(in.Content)}})
@@ -968,6 +972,9 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			}
 			if diag != "" {
 				result += "\n\n" + diag
+			}
+			if peerNote != "" {
+				result += "\n\n" + peerNote
 			}
 			return result, nil
 		},
@@ -1019,6 +1026,9 @@ type FileEditOptions struct {
 	// edit tool is built without a runtime, so the language-server runtime is
 	// handed in here instead.
 	CodeIntel CodeIntelligence
+	// Peers is the identity ledger this edit announces itself to and reads the
+	// other agents' writes back from (plan 198), handed in for the same reason.
+	Peers PeerWorkTree
 }
 
 func NewFileEditTool(st *State) (*llm.Tool, error) {
@@ -1194,6 +1204,9 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 				}
 			}
 			attachTurnDiff(output, abs, raw, []byte(out))
+			// What another agent did to this file in the last half hour travels
+			// with the result the model reads, not with the card (plan 198 §3.4).
+			peerNote := notePeerWrite(ctx, opts.Peers, abs)
 			// Diagnostics are collected only after the write landed, so the wait
 			// window can never fail or delay the write itself (spec §8.3.5).
 			diag := reportEditDiagnostics(ctx, opts.CodeIntel, output, []FileChange{{AbsPath: abs, Before: raw, After: []byte(out)}})
@@ -1207,6 +1220,9 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			}
 			if diag != "" {
 				result += "\n\n" + diag
+			}
+			if peerNote != "" {
+				result += "\n\n" + peerNote
 			}
 			return result, nil
 		},
@@ -1570,6 +1586,7 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 	var protectedReasons []string
 	var protectedPaths []string
 	var repairNotes []string
+	var peerNotes []string
 	for _, op := range ops {
 		toolName := "edit_file"
 		if op.Kind == applyPatchAdd {
@@ -1798,6 +1815,10 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 				// concurrent shell card, in this process or another, must not
 				// claim this deletion (plans 180, 186).
 				noteToolFileWrite(abs, time.Now())
+				// The same deletion goes into the peer identity ledger: the
+				// source of a move is gone, and the other agents' guards need to
+				// know who removed it (plan 198).
+				notePeerFileWrite(ctx, rt, abs)
 				changes = append(changes, FileChange{AbsPath: abs, Before: plan.Before})
 				changes = append(changes, FileChange{AbsPath: plan.MoveAbs, Before: plan.MoveBefore, After: plan.After})
 				st.recordFileChange(ctx, state.FileChange{
@@ -1834,6 +1855,9 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 			entry["source_display_path"] = displayPathFor(ctx, abs)
 		}
 		attachTurnDiff(entry, outputPath, plan.Before, plan.After)
+		if note := notePeerWrite(ctx, peersOf(rt), outputPath); note != "" {
+			peerNotes = append(peerNotes, note)
+		}
 		files = append(files, entry)
 	}
 	stdout := fmt.Sprintf("Applied patch to %d file(s).\n", len(files))
@@ -1848,6 +1872,12 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 	diag := reportEditDiagnostics(ctx, codeIntelOf(rt), diagOutput, changes)
 	if diag != "" {
 		stdout += "\n" + diag + "\n"
+	}
+	// The peer notes ride at the end of the same text, one line per path,
+	// because they say what happened to a file this call wrote rather than
+	// what the call did (plan 198 §3.4).
+	if len(peerNotes) > 0 {
+		stdout += "\n" + strings.Join(peerNotes, "\n") + "\n"
 	}
 	payload := map[string]any{
 		"stdout":      stdout,
