@@ -336,6 +336,12 @@ type AgentToolRuntime struct {
 	// tools' diagnostics (task 11) read CodeIntel too.
 	CodeIntel     CodeIntelligence
 	CodeIntelTool bool
+	// Peers is the tools' port onto the other agents working in this directory
+	// tree (plan 198): the file tools announce their writes through it and read
+	// back who else touched the same file, and the shell tool asks it before a
+	// git command that could sweep somebody else's uncommitted work. Nil means
+	// this machine has no peer coordination, and every guard stays quiet.
+	Peers PeerWorkTree
 }
 
 // StateRoot returns the per-agent state root onto which the mode/plan/todo/

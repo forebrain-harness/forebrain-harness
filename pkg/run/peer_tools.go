@@ -46,6 +46,10 @@ type PeerDirectory interface {
 	// Send delivers message to the agent `to` names: a name as List printed
 	// it, or a peer address.
 	Send(ctx context.Context, from PeerCaller, to, message string) (PeerSendResult, error)
+	// The same-tree guards (plan 198) are the tools' own port, declared beside
+	// the tools: the file and shell tools ask the same questions here, and the
+	// one implementation satisfies both interfaces.
+	tool.PeerWorkTree
 }
 
 // PeerCaller is who is speaking, in the terms the other process needs to
