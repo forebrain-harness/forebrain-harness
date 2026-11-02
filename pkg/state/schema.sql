@@ -719,3 +719,29 @@ CREATE TABLE fb_file_read_states (
   touch_kind TEXT NOT NULL DEFAULT 'read' CHECK (touch_kind = 'read'),
   PRIMARY KEY (session_id, path)
 ) STRICT, WITHOUT ROWID;
+
+-- The tool-output history: the original text behind every output the
+-- compression layer shortened, keyed by the retrieval id the marker cites. It
+-- used to be a second SQLite file of its own (state/outfilter/history.db,
+-- design §2.6); it lives in the state database in every mode now — one install
+-- keeps exactly one database, because a second file on shared storage is what
+-- a replica cannot read safely. An existing history.db is imported once and
+-- then renamed aside (pkg/tool).
+CREATE TABLE output_records (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('shell', 'mcp')),
+  command TEXT NOT NULL,
+  session_id TEXT NOT NULL DEFAULT '',
+  original_output TEXT NOT NULL,
+  filtered_output TEXT NOT NULL,
+  original_output_bytes INTEGER NOT NULL,
+  filtered_output_bytes INTEGER NOT NULL,
+  saved_tokens INTEGER NOT NULL,
+  capability_id TEXT NOT NULL DEFAULT '',
+  capability_version TEXT NOT NULL DEFAULT '',
+  retrieve_count INTEGER NOT NULL DEFAULT 0,
+  retrieve_reason TEXT NOT NULL DEFAULT '',
+  spool_path TEXT NOT NULL DEFAULT '',
+  spool_omitted_bytes INTEGER NOT NULL DEFAULT 0,
+  created_at_ms INTEGER NOT NULL
+) STRICT;

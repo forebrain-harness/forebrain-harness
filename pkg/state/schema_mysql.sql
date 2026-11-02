@@ -618,6 +618,29 @@ CREATE TABLE fb_file_read_states (
   PRIMARY KEY (session_id, path_sha)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+-- The tool-output history: the original text behind every output the
+-- compression layer shortened, keyed by the retrieval id the marker cites. It
+-- lives in the state database in every mode — one install keeps exactly one
+-- database (design §2.6).
+CREATE TABLE output_records (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  kind VARCHAR(16) NOT NULL CHECK (kind IN ('shell', 'mcp')),
+  command LONGTEXT NOT NULL,
+  session_id VARCHAR(191) NOT NULL DEFAULT '',
+  original_output LONGTEXT NOT NULL,
+  filtered_output LONGTEXT NOT NULL,
+  original_output_bytes BIGINT NOT NULL,
+  filtered_output_bytes BIGINT NOT NULL,
+  saved_tokens BIGINT NOT NULL,
+  capability_id VARCHAR(191) NOT NULL DEFAULT '',
+  capability_version VARCHAR(64) NOT NULL DEFAULT '',
+  retrieve_count BIGINT NOT NULL DEFAULT 0,
+  retrieve_reason LONGTEXT NOT NULL DEFAULT (''),
+  spool_path LONGTEXT NOT NULL DEFAULT (''),
+  spool_omitted_bytes BIGINT NOT NULL DEFAULT 0,
+  created_at_ms BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 -- Every foreign key: the same references schema.sql declares, each named after
 -- the column that carries it. The first two close the fb_sessions /
 -- fb_messages cycle — each table points at the other, and both exist by now.
