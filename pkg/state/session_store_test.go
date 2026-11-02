@@ -112,7 +112,7 @@ func TestWithdrawUserTurn(t *testing.T) {
 		t.Fatalf("model transcript: %+v, %v", model, err)
 	}
 	var visibility string
-	if err := db.QueryRow("SELECT visibility FROM fb_messages WHERE id=?", id).Scan(&visibility); err != nil || visibility != "withdrawn" {
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), "SELECT visibility FROM fb_messages WHERE id=?"), id).Scan(&visibility); err != nil || visibility != "withdrawn" {
 		t.Fatalf("audit row: %q, %v", visibility, err)
 	}
 	rows, err := reopened.ListRecentMessages(ctx, "other", 20)
@@ -291,7 +291,7 @@ func TestListSessionsRecentPaged(t *testing.T) {
 		}
 		// Distinct, descending timestamps so the newest-first order is
 		// deterministic: s-00 is the most recent session.
-		if _, err := db.Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(10_000-i), id); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), "UPDATE fb_sessions SET updated_at = ? WHERE id = ?"), int64(10_000-i), id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -387,7 +387,7 @@ func TestConversationListsAreFilteredInTheQuery(t *testing.T) {
 		if err := projects.BindSession(ctx, projID, p.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec("UPDATE fb_sessions SET updated_at = ? WHERE id IN (?, ?)", int64(100+i), cronID, projID); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), "UPDATE fb_sessions SET updated_at = ? WHERE id IN (?, ?)"), int64(100+i), cronID, projID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -544,7 +544,7 @@ func TestConversationListsHideSessionsWithoutAMessage(t *testing.T) {
 			}
 		}
 		for i := 0; i < 8; i++ {
-			if _, err := db.Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(100-i), fmt.Sprintf("s-%d", i)); err != nil {
+			if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), "UPDATE fb_sessions SET updated_at = ? WHERE id = ?"), int64(100-i), fmt.Sprintf("s-%d", i)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -665,7 +665,7 @@ func TestListConversationsPagePinsTheDrawerList(t *testing.T) {
 		"own-task": 30, "proj-task": 20, "proj-talk": 10,
 		"legacy": 90, "fire": 80, "sub": 70, "quiet": 60, "theirs": 50,
 	} {
-		if _, err := db.Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", at, id); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), "UPDATE fb_sessions SET updated_at = ? WHERE id = ?"), at, id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -785,7 +785,7 @@ func TestListConversationsPageLeavesOutBatchExecutions(t *testing.T) {
 		if _, err := store.Append(ctx, row.id, "user", "hello "+row.id); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.db.Exec(`UPDATE fb_sessions SET updated_at = ? WHERE id = ?`, row.at, row.id); err != nil {
+		if _, err := store.db.Exec(dbx.Rebind(dbx.DialectOf(store.db), `UPDATE fb_sessions SET updated_at = ? WHERE id = ?`), row.at, row.id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1004,7 +1004,7 @@ func TestListSessionsForProjectPageSortsCountsAndSearches(t *testing.T) {
 	}
 	seed := func(sessionID, role, visibility, content string) {
 		t.Helper()
-		if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`),
 			sessionID, role, visibility, content, 1); err != nil {
 			t.Fatal(err)
 		}
@@ -1025,7 +1025,7 @@ func TestListSessionsForProjectPageSortsCountsAndSearches(t *testing.T) {
 		"talked":          {100, 300},
 		"quiet-then-loud": {200, 200},
 	} {
-		if _, err := db.Exec(`UPDATE fb_sessions SET created_at = ?, updated_at = ? WHERE id = ?`, times[0], times[1], id); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_sessions SET created_at = ?, updated_at = ? WHERE id = ?`), times[0], times[1], id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1469,12 +1469,12 @@ func TestLatestSessionModelSelectionScopesAndTouch(t *testing.T) {
 	db := openStateDB(t)
 	seed := func(id, agent, source string, at int64, provider, model string) {
 		t.Helper()
-		if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd, source) VALUES(?,?,?,?,?,?,?)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd, source) VALUES(?,?,?,?,?,?,?)`),
 			id, agent, id, at, 1, "/repo/s", source); err != nil {
 			t.Fatalf("seed %s: %v", id, err)
 		}
 		if provider != "" {
-			if _, err := db.Exec(`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at) VALUES(?,?,?,?,?)`,
+			if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at) VALUES(?,?,?,?,?)`),
 				id, provider, model, "", at); err != nil {
 				t.Fatalf("seed row %s: %v", id, err)
 			}
@@ -1597,11 +1597,11 @@ func TestLatestSessionModelSelectionIsDeterministicOnSharedStamps(t *testing.T) 
 	ctx := context.Background()
 	db := openStateDB(t)
 	for _, sid := range []string{"tie-a", "tie-b"} {
-		if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd, source) VALUES(?,?,?,?,?,?,?)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd, source) VALUES(?,?,?,?,?,?,?)`),
 			sid, "main", sid, 500, 1, "/repo/s", ""); err != nil {
 			t.Fatalf("seed session %s: %v", sid, err)
 		}
-		if _, err := db.Exec(`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at) VALUES(?,?,?,?,?)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at) VALUES(?,?,?,?,?)`),
 			sid, "openai", "gpt-"+sid, "", 500); err != nil {
 			t.Fatalf("seed row %s: %v", sid, err)
 		}
@@ -1988,7 +1988,7 @@ func TestSessionBirthIsTheCreatorsAndNeverMovesTheDefault(t *testing.T) {
 
 	birthOf := func(id string) (cwd, branch string) {
 		t.Helper()
-		if err := db.QueryRow("SELECT cwd, git_branch FROM fb_sessions WHERE id=?", id).Scan(&cwd, &branch); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), "SELECT cwd, git_branch FROM fb_sessions WHERE id=?"), id).Scan(&cwd, &branch); err != nil {
 			t.Fatal(err)
 		}
 		return cwd, branch
@@ -2019,7 +2019,7 @@ func TestSessionBirthKeepsCwdAndBranchTogether(t *testing.T) {
 
 	for _, id := range []string{"p1", "p2"} {
 		var cwd, branch string
-		if err := db.QueryRow("SELECT cwd, git_branch FROM fb_sessions WHERE id=?", id).Scan(&cwd, &branch); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), "SELECT cwd, git_branch FROM fb_sessions WHERE id=?"), id).Scan(&cwd, &branch); err != nil {
 			t.Fatal(err)
 		}
 		if cwd != "/launch" || branch != "main" {
@@ -2051,7 +2051,7 @@ func TestSessionBirthNamesWhatTheSessionIsFor(t *testing.T) {
 	sourceOf := func(id string) string {
 		t.Helper()
 		var source string
-		if err := db.QueryRow("SELECT source FROM fb_sessions WHERE id=?", id).Scan(&source); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), "SELECT source FROM fb_sessions WHERE id=?"), id).Scan(&source); err != nil {
 			t.Fatal(err)
 		}
 		return source
@@ -2387,7 +2387,7 @@ func TestDeleteSessionsSparesASessionALiveRunHolds(t *testing.T) {
 		t.Fatal("a session a live run holds was deleted")
 	}
 	for _, sid := range []string{"cron-ended-1", "cron-bare-1"} {
-		if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&n); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM fb_sessions WHERE id=?`), sid).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		if n != 0 {
@@ -2401,7 +2401,7 @@ func TestDeleteSessionsSparesASessionALiveRunHolds(t *testing.T) {
 	}
 
 	// The next sweep, once the run is over, takes the session whole.
-	if _, err := db.Exec(`UPDATE fb_runs SET status=? WHERE session_id='cron-live-1'`, string(RunStatusDone)); err != nil {
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_runs SET status=? WHERE session_id='cron-live-1'`), string(RunStatusDone)); err != nil {
 		t.Fatal(err)
 	}
 	again, err := mine.DeleteSessions(ctx, []string{"cron-live-1"})
@@ -2465,7 +2465,7 @@ func TestListMessagesBeforePagesWithoutGapsOrRepeats(t *testing.T) {
 	}
 	seed := func(role, visibility, content string) {
 		t.Helper()
-		if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`),
 			"s1", role, visibility, content, 1); err != nil {
 			t.Fatal(err)
 		}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,7 +42,7 @@ CREATE TABLE fb_messages (
 func insertRun(t *testing.T, db *sql.DB, id, sessionID string) {
 	t.Helper()
 	if _, err := db.Exec(
-		`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,?,'done',1,1)`,
+		dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,?,'done',1,1)`),
 		id, sessionID, id); err != nil {
 		t.Fatalf("insert run %s: %v", id, err)
 	}
@@ -122,9 +123,9 @@ func TestRewoundVisibilityIsAccepted(t *testing.T) {
 	require.NoError(t, store.Ensure(ctx, "s", "s"))
 	id, err := store.Append(ctx, "s", "user", "hi")
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `UPDATE fb_messages SET visibility='rewound' WHERE id=?`, id)
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_messages SET visibility='rewound' WHERE id=?`), id)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `UPDATE fb_messages SET visibility='visible' WHERE id=?`, id)
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_messages SET visibility='visible' WHERE id=?`), id)
 	require.NoError(t, err)
 }
 

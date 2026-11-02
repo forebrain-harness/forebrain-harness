@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
@@ -25,7 +26,7 @@ func TestExpirePendingExpiresOldActionsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePending old: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE fb_actions SET created_at=? WHERE id=?`, time.Now().Add(-10*time.Minute).Unix(), oldAct.ID); err != nil {
+	if _, err := db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_actions SET created_at=? WHERE id=?`), time.Now().Add(-10*time.Minute).Unix(), oldAct.ID); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
 	freshAct, err := svc.CreatePending(ctx, "conv", "approve", nil)
@@ -77,7 +78,7 @@ func TestExpirePendingCustomReason(t *testing.T) {
 	db := openActionsDB(t)
 	svc := &ActionService{DB: db}
 	act, _ := svc.CreatePending(ctx, "conv", "approve", nil)
-	_, _ = db.ExecContext(ctx, `UPDATE fb_actions SET created_at=? WHERE id=?`, time.Now().Add(-time.Hour).Unix(), act.ID)
+	_, _ = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_actions SET created_at=? WHERE id=?`), time.Now().Add(-time.Hour).Unix(), act.ID)
 	if _, err := svc.ExpirePending(ctx, time.Minute, " custom_reason "); err != nil {
 		t.Fatalf("ExpirePending: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestStartExpireSweeperFiresOnExpiredCallback(t *testing.T) {
 	db := openActionsDB(t)
 	svc := &ActionService{DB: db}
 	act, _ := svc.CreatePending(ctx, "conv", "approve", nil)
-	_, _ = db.ExecContext(ctx, `UPDATE fb_actions SET created_at=? WHERE id=?`, time.Now().Add(-time.Hour).Unix(), act.ID)
+	_, _ = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_actions SET created_at=? WHERE id=?`), time.Now().Add(-time.Hour).Unix(), act.ID)
 
 	var (
 		mu   sync.Mutex
@@ -926,7 +927,7 @@ func TestEnsurePersistsConfiguredMemoryMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	var mode, source, cwd, gitBranch string
-	if err := s.db.QueryRow(`SELECT memory_mode, memory_source, cwd, git_branch FROM fb_sessions WHERE id=?`, "session-1").Scan(&mode, &source, &cwd, &gitBranch); err != nil {
+	if err := s.db.QueryRow(dbx.Rebind(dbx.DialectOf(s.db), `SELECT memory_mode, memory_source, cwd, git_branch FROM fb_sessions WHERE id=?`), "session-1").Scan(&mode, &source, &cwd, &gitBranch); err != nil {
 		t.Fatal(err)
 	}
 	if mode != "disabled" || source != "tui" || cwd != "/work/project" || gitBranch != "feature/memory" {
@@ -1030,7 +1031,7 @@ func TestAutoGenerateTitleFromFirstUserMessage(t *testing.T) {
 
 	// Check title was generated
 	var title string
-	err = s.db.QueryRowContext(ctx, `SELECT title FROM fb_sessions WHERE id=?`, "test-session").Scan(&title)
+	err = s.db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(s.db), `SELECT title FROM fb_sessions WHERE id=?`), "test-session").Scan(&title)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1055,7 +1056,7 @@ func TestTitleTruncation(t *testing.T) {
 	}
 
 	var title string
-	err = s.db.QueryRowContext(ctx, `SELECT title FROM fb_sessions WHERE id=?`, "long-session").Scan(&title)
+	err = s.db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(s.db), `SELECT title FROM fb_sessions WHERE id=?`), "long-session").Scan(&title)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1080,7 +1081,7 @@ func TestTitleFromMultilineInput(t *testing.T) {
 	}
 
 	var title string
-	err = s.db.QueryRowContext(ctx, `SELECT title FROM fb_sessions WHERE id=?`, "multiline-session").Scan(&title)
+	err = s.db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(s.db), `SELECT title FROM fb_sessions WHERE id=?`), "multiline-session").Scan(&title)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1101,7 +1102,7 @@ func TestTitleSkipsSlashCommand(t *testing.T) {
 	}
 
 	var title string
-	err = s.db.QueryRowContext(ctx, `SELECT title FROM fb_sessions WHERE id=?`, "slash-session").Scan(&title)
+	err = s.db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(s.db), `SELECT title FROM fb_sessions WHERE id=?`), "slash-session").Scan(&title)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1122,7 +1123,7 @@ func TestSecondUserMessageDoesNotChangeTitle(t *testing.T) {
 	}
 
 	var firstTitle string
-	err = s.db.QueryRowContext(ctx, `SELECT title FROM fb_sessions WHERE id=?`, "stable-session").Scan(&firstTitle)
+	err = s.db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(s.db), `SELECT title FROM fb_sessions WHERE id=?`), "stable-session").Scan(&firstTitle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1134,7 +1135,7 @@ func TestSecondUserMessageDoesNotChangeTitle(t *testing.T) {
 	}
 
 	var secondTitle string
-	err = s.db.QueryRowContext(ctx, `SELECT title FROM fb_sessions WHERE id=?`, "stable-session").Scan(&secondTitle)
+	err = s.db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(s.db), `SELECT title FROM fb_sessions WHERE id=?`), "stable-session").Scan(&secondTitle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1155,7 +1156,7 @@ func TestAssistantMessageDoesNotGenerateTitle(t *testing.T) {
 	}
 
 	var title string
-	err = s.db.QueryRowContext(ctx, `SELECT title FROM fb_sessions WHERE id=?`, "assistant-first").Scan(&title)
+	err = s.db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(s.db), `SELECT title FROM fb_sessions WHERE id=?`), "assistant-first").Scan(&title)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1489,7 +1490,7 @@ func TestMessageRowWritesStayInsideTheBoundary(t *testing.T) {
 func sessionAgentID(t *testing.T, s *SessionStore, id string) string {
 	t.Helper()
 	var agentID string
-	if err := s.db.QueryRow(`SELECT agent_id FROM fb_sessions WHERE id=?`, id).Scan(&agentID); err != nil {
+	if err := s.db.QueryRow(dbx.Rebind(dbx.DialectOf(s.db), `SELECT agent_id FROM fb_sessions WHERE id=?`), id).Scan(&agentID); err != nil {
 		t.Fatalf("read agent_id for %s: %v", id, err)
 	}
 	return agentID

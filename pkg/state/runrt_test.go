@@ -304,7 +304,7 @@ func newTwoOwnerStores(t *testing.T, sids ...string) (*RunStore, *RunStore, *sql
 // as abandoned.
 func ageOwnerLease(t *testing.T, db *sql.DB, owner string) {
 	t.Helper()
-	_, err := db.Exec(`UPDATE fb_run_owners SET heartbeat_at_ms=? WHERE owner=?`,
+	_, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_run_owners SET heartbeat_at_ms=? WHERE owner=?`),
 		time.Now().UnixMilli()-RunOwnerLease.Milliseconds()-5000, owner)
 	if err != nil {
 		t.Fatal(err)
@@ -480,7 +480,7 @@ func TestCreateRunDoesNotBlameASurfaceThatIsGone(t *testing.T) {
 	if err := a.SetWaitingAction(ctx, run.ID, Wait{ActionID: "act-stale", ToolName: "shell", ToolInputJSON: "{}"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES(?, ?)`,
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES(?, ?)`),
 		"owner-a", time.Now().UnixMilli()-RunOwnerLease.Milliseconds()-5000); err != nil {
 		t.Fatal(err)
 	}
@@ -691,7 +691,7 @@ func TestReapAbandonedRunsEndsOnlyTheDead(t *testing.T) {
 	}
 	// The continuation crossed its fence and the driver died: the run reads
 	// running again while its wait row survives.
-	if _, err := db.Exec(`UPDATE fb_runs SET status='running' WHERE id=?`, fenced.ID); err != nil {
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_runs SET status='running' WHERE id=?`), fenced.ID); err != nil {
 		t.Fatal(err)
 	}
 	ageOwnerLease(t, db, "owner-a")
@@ -713,7 +713,7 @@ func TestReapAbandonedRunsEndsOnlyTheDead(t *testing.T) {
 	for _, id := range []string{stale.ID, stopped.ID} {
 		var status string
 		var started, finished, worked int64
-		if err := db.QueryRow(`SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`, id).
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`), id).
 			Scan(&status, &started, &finished, &worked); err != nil {
 			t.Fatal(err)
 		}
@@ -726,7 +726,7 @@ func TestReapAbandonedRunsEndsOnlyTheDead(t *testing.T) {
 	}
 	for _, id := range []string{fenced.ID} {
 		var status string
-		if err := db.QueryRow(`SELECT status FROM fb_runs WHERE id=?`, id).Scan(&status); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT status FROM fb_runs WHERE id=?`), id).Scan(&status); err != nil {
 			t.Fatal(err)
 		}
 		if status != string(RunStatusRunning) {
@@ -787,7 +787,7 @@ func TestReapAbandonedRunsTakesARunWhoseClockWasStampedBeforeTheStatus(t *testin
 
 	var status string
 	var started, finished, worked int64
-	if err := db.QueryRow(`SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`, stamped.ID).
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`), stamped.ID).
 		Scan(&status, &started, &finished, &worked); err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +799,7 @@ func TestReapAbandonedRunsTakesARunWhoseClockWasStampedBeforeTheStatus(t *testin
 			started, finished, worked, startedAt.UnixMilli(), finishedAt.UnixMilli(), int64(time.Minute/time.Millisecond))
 	}
 
-	if err := db.QueryRow(`SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`, unstamped.ID).
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`), unstamped.ID).
 		Scan(&status, &started, &finished, &worked); err != nil {
 		t.Fatal(err)
 	}
@@ -856,7 +856,7 @@ func TestReapAbandonedRunsCleansLapsedLeaseRows(t *testing.T) {
 
 	// A lapsed lease no run points at any more: the leftover this reaping is
 	// for. Written without a renewal loop so it stays lapsed.
-	if _, err := db.Exec(`INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES('owner-lapsed', ?)`,
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES('owner-lapsed', ?)`),
 		time.Now().UnixMilli()-RunOwnerLease.Milliseconds()-5000); err != nil {
 		t.Fatal(err)
 	}
@@ -879,7 +879,7 @@ func TestReapAbandonedRunsCleansLapsedLeaseRows(t *testing.T) {
 		t.Fatalf("reaped = %+v, want exactly the lapsed owner's run", reaped)
 	}
 	for owner, want := range map[string]int{"owner-a": 0, "owner-lapsed": 0, "owner-b": 1} {
-		if err := db.QueryRow(`SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, owner).Scan(&n); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`), owner).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		if n != want {
@@ -932,7 +932,7 @@ func TestRunStatusEndsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	var owner string
-	if err := a.DB.QueryRow(`SELECT owner FROM fb_runs WHERE id=?`, parked.ID).Scan(&owner); err != nil {
+	if err := a.DB.QueryRow(dbx.Rebind(dbx.DialectOf(a.DB), `SELECT owner FROM fb_runs WHERE id=?`), parked.ID).Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
 	if owner != "owner-b" {
@@ -948,14 +948,14 @@ func TestOwnerLeaseRegistersAndLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, "owner-a").Scan(&n); err != nil {
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`), "owner-a").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Fatalf("owner rows after HoldOwnerLease = %d, want 1", n)
 	}
 	stop()
-	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, "owner-a").Scan(&n); err != nil {
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`), "owner-a").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -1034,7 +1034,7 @@ func TestReapAbandonedRunsLeavesTheReapersOwnRuns(t *testing.T) {
 		t.Fatalf("a process reaped its own live run: %+v, %v", reaped, err)
 	}
 	var status string
-	if err := db.QueryRow(`SELECT status FROM fb_runs WHERE id=?`, run.ID).Scan(&status); err != nil {
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT status FROM fb_runs WHERE id=?`), run.ID).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
 	if status != string(RunStatusRunning) {
