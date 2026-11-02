@@ -13,11 +13,125 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 var (
 	ErrActionNotFound = errors.New("action not found")
 	ErrNotPending     = errors.New("action not pending")
+)
+
+// The approval ledger's statements. Each SQLite arm is the text this file
+// carried before multi-database support; PostgreSQL numbers its parameters,
+// and MySQL has no RETURNING.
+var (
+	insertActionSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_actions(id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_actions(id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_actions(id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+	}
+	selectActionSQL = dbx.SQL{
+		SQLite: `
+SELECT id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at
+FROM fb_actions WHERE id = ?`,
+		MySQL: `
+SELECT id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at
+FROM fb_actions WHERE id = ?`,
+		Postgres: `
+SELECT id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at
+FROM fb_actions WHERE id = $1`,
+	}
+	answerActionSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_actions
+SET status=?, answer_json=?, updated_at=?
+WHERE id=? AND status=?`,
+		MySQL: `
+UPDATE fb_actions
+SET status=?, answer_json=?, updated_at=?
+WHERE id=? AND status=?`,
+		Postgres: `
+UPDATE fb_actions
+SET status=$1, answer_json=$2, updated_at=$3
+WHERE id=$4 AND status=$5`,
+	}
+	approveActionSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_actions
+SET status=?, answer_json=?, error=?, updated_at=?
+WHERE id=? AND status=?`,
+		MySQL: `
+UPDATE fb_actions
+SET status=?, answer_json=?, error=?, updated_at=?
+WHERE id=? AND status=?`,
+		Postgres: `
+UPDATE fb_actions
+SET status=$1, answer_json=$2, error=$3, updated_at=$4
+WHERE id=$5 AND status=$6`,
+	}
+	// denyWithAnswerSQL carries the two columns in the other order: a denial
+	// stamps its reason beside a machine discriminator rather than replacing it.
+	denyWithAnswerSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_actions
+SET status=?, error=?, answer_json=?, updated_at=?
+WHERE id=? AND status=?`,
+		MySQL: `
+UPDATE fb_actions
+SET status=?, error=?, answer_json=?, updated_at=?
+WHERE id=? AND status=?`,
+		Postgres: `
+UPDATE fb_actions
+SET status=$1, error=$2, answer_json=$3, updated_at=$4
+WHERE id=$5 AND status=$6`,
+	}
+	// updateActionStatusAndErrorSQL is the shared "move this action out of
+	// pending, recording why" that deny, cancel and both expire paths run.
+	updateActionStatusAndErrorSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_actions
+SET status=?, error=?, updated_at=?
+WHERE id=? AND status=?`,
+		MySQL: `
+UPDATE fb_actions
+SET status=?, error=?, updated_at=?
+WHERE id=? AND status=?`,
+		Postgres: `
+UPDATE fb_actions
+SET status=$1, error=$2, updated_at=$3
+WHERE id=$4 AND status=$5`,
+	}
+	// expirePendingActionsSQL expires one batch and reports which rows it moved.
+	// Only SQLite and PostgreSQL can say that in one statement; MySQL reads the
+	// ids of the same predicate first, inside the transaction that writes.
+	expirePendingActionsSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_actions
+SET status=?, error=?, updated_at=?
+WHERE status=? AND created_at<?
+RETURNING id`,
+		Postgres: `
+UPDATE fb_actions
+SET status=$1, error=$2, updated_at=$3
+WHERE status=$4 AND created_at<$5
+RETURNING id`,
+	}
+	pendingActionsOlderThanSQL = dbx.SQL{
+		MySQL: `SELECT id FROM fb_actions WHERE status=? AND created_at<?`,
+	}
+	expirePendingActionsUpdateSQL = dbx.SQL{
+		MySQL: `
+UPDATE fb_actions
+SET status=?, error=?, updated_at=?
+WHERE status=? AND created_at<?`,
+	}
 )
 
 type ActionService struct {
@@ -50,10 +164,8 @@ func (s *ActionService) CreatePending(ctx context.Context, sessionID, kind strin
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	_, err = s.DB.ExecContext(ctx, `
-INSERT INTO fb_actions(id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.SessionID, a.Kind, string(a.Status), a.PayloadJSON, "", "", a.CreatedAt, a.UpdatedAt,
+	_, err = dbx.Exec(ctx, s.DB, insertActionSQL.For(dbx.DialectOf(s.DB)),
+		a.ID, a.SessionID, a.Kind, string(a.Status), a.PayloadJSON, a.AnswerJSON, a.Error, a.CreatedAt, a.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -98,10 +210,8 @@ func (s *ActionService) CreateAsk(ctx context.Context, form AskForm) (*Action, e
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_actions(id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.SessionID, a.Kind, string(a.Status), a.PayloadJSON, "", "", a.CreatedAt, a.UpdatedAt,
+	_, err := dbx.Exec(ctx, s.DB, insertActionSQL.For(dbx.DialectOf(s.DB)),
+		a.ID, a.SessionID, a.Kind, string(a.Status), a.PayloadJSON, a.AnswerJSON, a.Error, a.CreatedAt, a.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -130,6 +240,14 @@ func (s *ActionService) List(ctx context.Context, agentID string, f ActionFilter
 	if limit == 0 {
 		limit = 200
 	}
+	d := dbx.DialectOf(s.DB)
+	// The narrowing runs inside the query, so the placeholders are numbered as
+	// the predicates below add parameters, in the order SQLite's '?' appear.
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
 	// An empty agent id leaves the tenant predicate off: a caller with no
 	// sessions store bound (test harnesses) reads every conversation's
 	// actions, as before that boundary existed.
@@ -140,19 +258,19 @@ JOIN fb_sessions s ON s.id = a.session_id`
 	var predicates []string
 	var args []any
 	if agentID = strings.TrimSpace(agentID); agentID != "" {
-		predicates = append(predicates, "s.agent_id = ?")
+		predicates = append(predicates, "s.agent_id = "+next())
 		args = append(args, agentID)
 	}
 	if sessionID := strings.TrimSpace(f.SessionID); sessionID != "" {
-		predicates = append(predicates, "a.session_id = ?")
+		predicates = append(predicates, "a.session_id = "+next())
 		args = append(args, sessionID)
 	}
 	if status := strings.TrimSpace(f.Status); status != "" {
-		predicates = append(predicates, "a.status = ?")
+		predicates = append(predicates, "a.status = "+next())
 		args = append(args, status)
 	}
 	if requester := strings.TrimSpace(f.Requester); requester != "" {
-		predicates = append(predicates, "TRIM(IFNULL(a.payload_json->>'$.agent_id','')) = ?")
+		predicates = append(predicates, "TRIM("+ifNullExpr(d, jsonFieldText(d, "a.payload_json", "agent_id"), `''`)+") = "+next())
 		args = append(args, requester)
 	}
 	if len(predicates) > 0 {
@@ -160,7 +278,7 @@ JOIN fb_sessions s ON s.id = a.session_id`
 	}
 	query += ` ORDER BY a.updated_at DESC, a.id DESC`
 	if limit > 0 {
-		query += ` LIMIT ?`
+		query += ` LIMIT ` + next()
 		args = append(args, limit)
 	}
 	rows, err := s.DB.QueryContext(ctx, query, args...)
@@ -197,9 +315,7 @@ func (s *ActionService) Get(ctx context.Context, id string) (*Action, error) {
 	if id == "" {
 		return nil, ErrActionNotFound
 	}
-	a, err := scanAction(s.DB.QueryRowContext(ctx, `
-SELECT id, session_id, kind, status, payload_json, answer_json, error, created_at, updated_at
-FROM fb_actions WHERE id = ?`, id))
+	a, err := scanAction(s.DB.QueryRowContext(ctx, selectActionSQL.For(dbx.DialectOf(s.DB)), id))
 	if err == sql.ErrNoRows {
 		return nil, ErrActionNotFound
 	}
@@ -219,10 +335,8 @@ func (s *ActionService) AnswerAsk(ctx context.Context, id string, ans AskAnswer)
 	}
 	b, _ := json.Marshal(ans)
 	now := time.Now().Unix()
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_actions
-SET status=?, answer_json=?, updated_at=?
-WHERE id=? AND status=?`, string(ActionAnswered), string(b), now, id, string(ActionPending))
+	res, err := dbx.Exec(ctx, s.DB, answerActionSQL.For(dbx.DialectOf(s.DB)),
+		string(ActionAnswered), string(b), now, id, string(ActionPending))
 	if err != nil {
 		return nil, err
 	}
@@ -252,10 +366,8 @@ func (s *ActionService) ApproveWithAnswer(ctx context.Context, id, reason, answe
 		return nil, ErrActionNotFound
 	}
 	now := time.Now().Unix()
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_actions
-SET status=?, answer_json=?, error=?, updated_at=?
-WHERE id=? AND status=?`, string(ActionApproved), strings.TrimSpace(answerJSON), strings.TrimSpace(reason), now, id, string(ActionPending))
+	res, err := dbx.Exec(ctx, s.DB, approveActionSQL.For(dbx.DialectOf(s.DB)),
+		string(ActionApproved), strings.TrimSpace(answerJSON), strings.TrimSpace(reason), now, id, string(ActionPending))
 	if err != nil {
 		return nil, err
 	}
@@ -276,10 +388,8 @@ func (s *ActionService) Deny(ctx context.Context, id string, reason string) (*Ac
 		return nil, ErrActionNotFound
 	}
 	now := time.Now().Unix()
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_actions
-SET status=?, error=?, updated_at=?
-WHERE id=? AND status=?`, string(ActionDenied), strings.TrimSpace(reason), now, id, string(ActionPending))
+	res, err := dbx.Exec(ctx, s.DB, updateActionStatusAndErrorSQL.For(dbx.DialectOf(s.DB)),
+		string(ActionDenied), strings.TrimSpace(reason), now, id, string(ActionPending))
 	if err != nil {
 		return nil, err
 	}
@@ -304,10 +414,8 @@ func (s *ActionService) DenyWithAnswer(ctx context.Context, id, reason, answerJS
 		return nil, ErrActionNotFound
 	}
 	now := time.Now().Unix()
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_actions
-SET status=?, error=?, answer_json=?, updated_at=?
-WHERE id=? AND status=?`, string(ActionDenied), strings.TrimSpace(reason), strings.TrimSpace(answerJSON), now, id, string(ActionPending))
+	res, err := dbx.Exec(ctx, s.DB, denyWithAnswerSQL.For(dbx.DialectOf(s.DB)),
+		string(ActionDenied), strings.TrimSpace(reason), strings.TrimSpace(answerJSON), now, id, string(ActionPending))
 	if err != nil {
 		return nil, err
 	}
@@ -332,10 +440,8 @@ func (s *ActionService) Cancel(ctx context.Context, id string, reason string) (*
 		reason = "cancelled"
 	}
 	now := time.Now().Unix()
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_actions
-SET status=?, error=?, updated_at=?
-WHERE id=? AND status=?`, string(ActionCancelled), reason, now, id, string(ActionPending))
+	res, err := dbx.Exec(ctx, s.DB, updateActionStatusAndErrorSQL.For(dbx.DialectOf(s.DB)),
+		string(ActionCancelled), reason, now, id, string(ActionPending))
 	if err != nil {
 		return nil, err
 	}
@@ -363,11 +469,44 @@ func (s *ActionService) ExpirePending(ctx context.Context, ttl time.Duration, re
 		reason = "approval_ttl_expired"
 	}
 	cutoff := time.Now().Add(-ttl).Unix()
-	rows, err := s.DB.QueryContext(ctx, `
-UPDATE fb_actions
-SET status=?, error=?, updated_at=?
-WHERE status=? AND created_at<?
-RETURNING id`, string(ActionExpired), reason, time.Now().Unix(), string(ActionPending), cutoff)
+	d := dbx.DialectOf(s.DB)
+	if d == dbx.MySQL {
+		// MySQL has no RETURNING: read the ids the predicate names, then move
+		// exactly those rows, in the one transaction that holds the write lock.
+		tx, err := dbx.BeginTx(ctx, s.DB, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		rows, err := tx.QueryContext(ctx, pendingActionsOlderThanSQL.For(dbx.MySQL), string(ActionPending), cutoff)
+		if err != nil {
+			return nil, err
+		}
+		var expired []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			expired = append(expired, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		if _, err := tx.ExecContext(ctx, expirePendingActionsUpdateSQL.For(dbx.MySQL),
+			string(ActionExpired), reason, time.Now().Unix(), string(ActionPending), cutoff); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return expired, nil
+	}
+	rows, err := s.DB.QueryContext(ctx, expirePendingActionsSQL.For(d),
+		string(ActionExpired), reason, time.Now().Unix(), string(ActionPending), cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -396,10 +535,8 @@ func (s *ActionService) ExpireIfPending(ctx context.Context, id, reason string) 
 		reason = "approval_ttl_expired"
 	}
 	now := time.Now().Unix()
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_actions
-SET status=?, error=?, updated_at=?
-WHERE id=? AND status=?`, string(ActionExpired), reason, now, id, string(ActionPending))
+	res, err := dbx.Exec(ctx, s.DB, updateActionStatusAndErrorSQL.For(dbx.DialectOf(s.DB)),
+		string(ActionExpired), reason, now, id, string(ActionPending))
 	if err != nil {
 		return false, err
 	}
@@ -416,10 +553,8 @@ func (s *ActionService) DenyIfPending(ctx context.Context, id, reason string) (b
 		return false, ErrActionNotFound
 	}
 	now := time.Now().Unix()
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_actions
-SET status=?, error=?, updated_at=?
-WHERE id=? AND status=?`, string(ActionDenied), strings.TrimSpace(reason), now, id, string(ActionPending))
+	res, err := dbx.Exec(ctx, s.DB, updateActionStatusAndErrorSQL.For(dbx.DialectOf(s.DB)),
+		string(ActionDenied), strings.TrimSpace(reason), now, id, string(ActionPending))
 	if err != nil {
 		return false, err
 	}
