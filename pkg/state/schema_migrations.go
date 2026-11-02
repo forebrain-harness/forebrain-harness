@@ -4025,7 +4025,12 @@ type schemaQueryer interface {
 // definition, so the v1→v2 check that tells a finished v1 file from an
 // intermediate one compares everything else, and v3 creates them from their
 // declared text.
-var stateObjectsAddedAfterV2 = map[string]bool{"fb_session_model_state": true}
+var stateObjectsAddedAfterV2 = map[string]bool{
+	"fb_session_model_state": true,
+	// The tool-output history joined the state schema at v30 (plan 212 §3), long
+	// after v2, so a v1 or v2 fixture is built without it.
+	"output_records": true,
+}
 
 // stateSchemaMatchesDeclared reports whether the database holds exactly the
 // objects schema.sql declares, leaving out the tables in omit (and their

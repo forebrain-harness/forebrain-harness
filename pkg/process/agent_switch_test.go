@@ -17,9 +17,18 @@ import (
 // executeStoredConfig reads the configuration a setup or /connect Execute
 // left behind: the composed stored source over that home (plan 188 W9 — the
 // agents section, not the file, is the write's destination).
+//
+// It opens the database the write opened — the one the configuration file names
+// — rather than a scratch one of the test's own: under a MySQL or PostgreSQL
+// server the write and the read have to meet in the same database, which is what
+// production does too.
 func executeStoredConfig(t *testing.T, rt Context) appcfg.Root {
 	t.Helper()
-	db, err := state.OpenStateForTest(context.Background(), filepath.Join(rt.Home, "state", "forebrain.state.sqlite"))
+	databaseURL, err := appcfg.FileDatabaseURL(rt.ConfigPath)
+	if err != nil {
+		t.Fatalf("read database.url: %v", err)
+	}
+	db, err := state.OpenStateFromHome(context.Background(), rt.Home, databaseURL)
 	if err != nil {
 		t.Fatalf("open state: %v", err)
 	}
