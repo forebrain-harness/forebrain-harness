@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,6 +302,35 @@ func TestCompressShellOutputRoundTrip(t *testing.T) {
 	if !strings.Contains(entry.OriginalOutput, "progress step") {
 		t.Fatal("stored original lost noise lines")
 	}
+	// The whole path — compressShellOutput, CompressorFor, the store — leaves
+	// no database file behind: the record is in the state database, and the
+	// state root the compressor was built for gained nothing (owner ruling
+	// 2026-11-01: one main database, in every mode).
+	var created []string
+	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != dir {
+			created = append(created, displayRel(dir, path))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the state root: %v", err)
+	}
+	if len(created) > 0 {
+		t.Fatalf("compression wrote %v under the state root; the history belongs in the state database", created)
+	}
+}
+
+// displayRel is dir + path as one readable string for a failure message.
+func displayRel(dir, path string) string {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return path
+	}
+	return rel
 }
 
 func TestCompressShellOutputFailOpen(t *testing.T) {
