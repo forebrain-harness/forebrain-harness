@@ -11,6 +11,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // fixtureCodexHome builds a Codex home around the static fixtures: one
@@ -198,7 +199,10 @@ func writeCodexChildRollout(t *testing.T, root, elsewhere string) {
 // real home offers agree it ran elsewhere.
 func writeCodexSpawnEdgeState(t *testing.T, ctx context.Context, root, project, elsewhere string) {
 	t.Helper()
-	db, err := state.OpenStateForTest(ctx, filepath.Join(root, "state_5.sqlite"))
+	// The codex home's own state file is a source database the importer reads
+	// as SQLite, never the product's state database: it is opened here the way
+	// the importer opens it, whatever FOREBRAIN_TEST_DATABASE_URL names.
+	db, err := state.Open(ctx, filepath.Join(root, "state_5.sqlite"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +220,7 @@ func writeCodexSpawnEdgeState(t *testing.T, ctx context.Context, root, project, 
 		{"t-codex-sub", elsewhere, "sub thread"},
 	} {
 		if _, err := db.ExecContext(ctx,
-			`INSERT INTO threads (id, cwd, title, git_branch, archived) VALUES (?,?,?, 'main', 0)`,
+			dbx.Rebind(dbx.DialectOf(db), `INSERT INTO threads (id, cwd, title, git_branch, archived) VALUES (?,?,?, 'main', 0)`),
 			row.id, row.cwd, row.title); err != nil {
 			t.Fatal(err)
 		}
@@ -262,7 +266,7 @@ func TestImportBindsCodexChildToParentsProject(t *testing.T) {
 	for _, id := range []string{"cli-t-codex-main", "cli-t-codex-sub"} {
 		var projectID, cwd, parentID sql.NullString
 		if err := opts.DB.QueryRowContext(ctx,
-			`SELECT project_id, cwd, parent_session_id FROM fb_sessions WHERE id=?`, id).
+			dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT project_id, cwd, parent_session_id FROM fb_sessions WHERE id=?`), id).
 			Scan(&projectID, &cwd, &parentID); err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +299,7 @@ func TestImportBindsCodexChildToParentsProject(t *testing.T) {
 	for _, id := range []string{"cli-t-codex-main", "cli-t-codex-sub"} {
 		var projectID, cwd string
 		if err := scopedOpts.DB.QueryRowContext(ctx,
-			`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, id).Scan(&projectID, &cwd); err != nil {
+			dbx.Rebind(dbx.DialectOf(scopedOpts.DB), `SELECT project_id, cwd FROM fb_sessions WHERE id=?`), id).Scan(&projectID, &cwd); err != nil {
 			t.Fatal(err)
 		}
 		if projectID != launch.ID || cwd != launch.Root {
@@ -332,7 +336,7 @@ FROM fb_sessions WHERE id='cli-t-codex-main'`).
 	var partsJSON string
 	var rowID int64
 	if err := opts.DB.QueryRowContext(ctx, `
-SELECT id, IFNULL(parts,'[]') FROM fb_messages WHERE session_id='cli-t-codex-main' AND role='system'`).
+SELECT id, COALESCE(parts,'[]') FROM fb_messages WHERE session_id='cli-t-codex-main' AND role='system'`).
 		Scan(&rowID, &partsJSON); err != nil {
 		t.Fatal(err)
 	}

@@ -26,8 +26,12 @@ func seedMigrateSections(t *testing.T, db *sql.DB, root appcfg.Root) {
 		if raw == nil {
 			continue
 		}
-		if _, err := db.Exec(`INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`, name, string(raw)); err != nil {
+		// Through the store, so the seed is written by the same statement the
+		// product writes sections with and runs on every dialect the tests do.
+		store := &state.ConfigStore{DB: db}
+		if err := store.UpdateSection(context.Background(), name, func(json.RawMessage) (json.RawMessage, error) {
+			return raw, nil
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -54,11 +58,15 @@ func migrateSectionJSON(root appcfg.Root, name string) (json.RawMessage, error) 
 // migrateSectionRow reads one stored section's raw JSON for an assertion.
 func migrateSectionRow(t *testing.T, db *sql.DB, section string) string {
 	t.Helper()
-	var raw string
-	if err := db.QueryRow(`SELECT value_json FROM fb_config WHERE section = ?`, section).Scan(&raw); err != nil {
-		t.Fatalf("read stored %s: %v", section, err)
+	sections, err := (&state.ConfigStore{DB: db}).LoadSections(context.Background())
+	if err != nil {
+		t.Fatalf("read stored sections: %v", err)
 	}
-	return raw
+	raw, ok := sections[section]
+	if !ok {
+		t.Fatalf("section %s is not stored", section)
+	}
+	return string(raw)
 }
 
 // openMigrateStateDB opens the scratch state database an import test uses.

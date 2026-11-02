@@ -17,7 +17,91 @@ import (
 	"encoding/json"
 	"os"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
+
+// The ledger's statements. A unit's row is keyed by (agent_id, target_id),
+// which is the primary key and so the conflict target the upsert names.
+var (
+	ledgerUnitsSelectSQL = dbx.SQL{
+		SQLite: `SELECT target_id, source_path, source_bytes, source_mtime_ms, message_count, plans_json
+		 FROM fb_migration_units WHERE agent_id=? AND source=?`,
+		MySQL: `SELECT target_id, source_path, source_bytes, source_mtime_ms, message_count, plans_json
+		 FROM fb_migration_units WHERE agent_id=? AND source=?`,
+		Postgres: `SELECT target_id, source_path, source_bytes, source_mtime_ms, message_count, plans_json
+		 FROM fb_migration_units WHERE agent_id=$1 AND source=$2`,
+	}
+	ledgerTitlesSelectSQL = dbx.SQL{
+		SQLite:   `SELECT id, title FROM fb_sessions WHERE agent_id=? AND origin='migrated'`,
+		MySQL:    `SELECT id, title FROM fb_sessions WHERE agent_id=? AND origin='migrated'`,
+		Postgres: `SELECT id, title FROM fb_sessions WHERE agent_id=$1 AND origin='migrated'`,
+	}
+	ledgerUnitUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_migration_units(
+  agent_id, source, target_id, source_path, source_bytes, source_mtime_ms,
+  message_count, plans_json, imported_at_ms
+) VALUES(?,?,?,?,?,?,?,?,?)
+ON CONFLICT(agent_id, target_id) DO UPDATE SET
+  source=excluded.source,
+  source_path=excluded.source_path,
+  source_bytes=excluded.source_bytes,
+  source_mtime_ms=excluded.source_mtime_ms,
+  message_count=excluded.message_count,
+  plans_json=excluded.plans_json,
+  imported_at_ms=excluded.imported_at_ms`,
+		MySQL: `
+INSERT INTO fb_migration_units(
+  agent_id, source, target_id, source_path, source_bytes, source_mtime_ms,
+  message_count, plans_json, imported_at_ms
+) VALUES(?,?,?,?,?,?,?,?,?)
+ON DUPLICATE KEY UPDATE
+  source=VALUES(source),
+  source_path=VALUES(source_path),
+  source_bytes=VALUES(source_bytes),
+  source_mtime_ms=VALUES(source_mtime_ms),
+  message_count=VALUES(message_count),
+  plans_json=VALUES(plans_json),
+  imported_at_ms=VALUES(imported_at_ms)`,
+		Postgres: `
+INSERT INTO fb_migration_units(
+  agent_id, source, target_id, source_path, source_bytes, source_mtime_ms,
+  message_count, plans_json, imported_at_ms
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ON CONFLICT(agent_id, target_id) DO UPDATE SET
+  source=excluded.source,
+  source_path=excluded.source_path,
+  source_bytes=excluded.source_bytes,
+  source_mtime_ms=excluded.source_mtime_ms,
+  message_count=excluded.message_count,
+  plans_json=excluded.plans_json,
+  imported_at_ms=excluded.imported_at_ms`,
+	}
+	ledgerUnitPlansUpdateSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_migration_units SET plans_json=? WHERE agent_id=? AND source=? AND target_id=?`,
+		MySQL:    `UPDATE fb_migration_units SET plans_json=? WHERE agent_id=? AND source=? AND target_id=?`,
+		Postgres: `UPDATE fb_migration_units SET plans_json=$1 WHERE agent_id=$2 AND source=$3 AND target_id=$4`,
+	}
+	ledgerUnitDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_migration_units WHERE agent_id=? AND target_id=?`,
+		MySQL:    `DELETE FROM fb_migration_units WHERE agent_id=? AND target_id=?`,
+		Postgres: `DELETE FROM fb_migration_units WHERE agent_id=$1 AND target_id=$2`,
+	}
+)
+
+// ledgerExec runs one ledger write on whatever surface recordUnit was given:
+// the caller's transaction when the fingerprint has to land with the session it
+// describes, or the state database on its own — where MySQL and PostgreSQL must
+// take the global write lock, exactly as a bare SQLite statement already does.
+func ledgerExec(ctx context.Context, db ledgerExecer, q dbx.SQL, args ...any) error {
+	if sqlDB, ok := db.(*sql.DB); ok {
+		_, err := dbx.Exec(ctx, sqlDB, q.For(dbx.DialectOf(sqlDB)), args...)
+		return err
+	}
+	_, err := db.ExecContext(ctx, q.For(dbx.DialectOf(db)), args...)
+	return err
+}
 
 // ledgerPlanRecord is one plan document a unit's extraction produced. Path is
 // the file writeExtractedPlan chose; BodySha256 is the sha256 of the body the
@@ -95,9 +179,7 @@ func newUnitLedger(ctx context.Context, opts *Options, source string) *unitLedge
 		prints:     map[string]unitFingerprint{},
 		plans:      map[string][]PlanOutcome{},
 	}
-	if rows, err := opts.DB.QueryContext(ctx,
-		`SELECT target_id, source_path, source_bytes, source_mtime_ms, message_count, plans_json
-		 FROM fb_migration_units WHERE agent_id=? AND source=?`, ledger.agent, source); err == nil {
+	if rows, err := opts.DB.QueryContext(ctx, ledgerUnitsSelectSQL.For(dbx.DialectOf(opts.DB)), ledger.agent, source); err == nil {
 		for rows.Next() {
 			var target string
 			var fp unitFingerprint
@@ -136,8 +218,7 @@ func (l *unitLedger) title(targetID string) string {
 	}
 	if l.titles == nil {
 		l.titles = map[string]string{}
-		if rows, err := l.db.QueryContext(context.Background(),
-			`SELECT id, title FROM fb_sessions WHERE agent_id=? AND origin='migrated'`, l.agent); err == nil {
+		if rows, err := l.db.QueryContext(context.Background(), ledgerTitlesSelectSQL.For(dbx.DialectOf(l.db)), l.agent); err == nil {
 			for rows.Next() {
 				var id, title string
 				if err := rows.Scan(&id, &title); err == nil {
@@ -195,22 +276,9 @@ func recordUnit(ctx context.Context, db ledgerExecer, agent, source string, unit
 		}
 		plansJSON = string(encoded)
 	}
-	_, err := db.ExecContext(ctx, `
-INSERT INTO fb_migration_units(
-  agent_id, source, target_id, source_path, source_bytes, source_mtime_ms,
-  message_count, plans_json, imported_at_ms
-) VALUES(?,?,?,?,?,?,?,?,?)
-ON CONFLICT(agent_id, target_id) DO UPDATE SET
-  source=excluded.source,
-  source_path=excluded.source_path,
-  source_bytes=excluded.source_bytes,
-  source_mtime_ms=excluded.source_mtime_ms,
-  message_count=excluded.message_count,
-  plans_json=excluded.plans_json,
-  imported_at_ms=excluded.imported_at_ms`,
+	return ledgerExec(ctx, db, ledgerUnitUpsertSQL,
 		agent, source, unit.TargetID, unit.Path, unit.Bytes, unit.MtimeMs,
 		messageCount, plansJSON, now.UnixMilli())
-	return err
 }
 
 // recordUnitPlans fills in the plan records a unit's extraction produced,
@@ -220,19 +288,15 @@ func recordUnitPlans(ctx context.Context, db *sql.DB, agent, source, targetID st
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx,
-		`UPDATE fb_migration_units SET plans_json=? WHERE agent_id=? AND source=? AND target_id=?`,
+	return ledgerExec(ctx, db, ledgerUnitPlansUpdateSQL,
 		string(encoded), agent, source, targetID)
-	return err
 }
 
 // dropUnit removes a fingerprint that no longer describes reality: the
 // session row it pointed at is gone, or belongs to another agent, so keeping
 // the row would force a pointless parse on every later run.
 func dropUnit(ctx context.Context, db ledgerExecer, agent, targetID string) error {
-	_, err := db.ExecContext(ctx,
-		`DELETE FROM fb_migration_units WHERE agent_id=? AND target_id=?`, agent, targetID)
-	return err
+	return ledgerExec(ctx, db, ledgerUnitDeleteSQL, agent, targetID)
 }
 
 func hashBytes(body []byte) string {

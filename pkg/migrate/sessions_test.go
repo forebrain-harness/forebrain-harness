@@ -14,6 +14,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // fixtureClaudeHome builds a minimal ~/.claude layout in a temp dir: one
@@ -251,7 +252,7 @@ func TestImportBindsConversationsToAProject(t *testing.T) {
 	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
 		var projectID, cwd string
 		if err := opts.DB.QueryRowContext(ctx,
-			`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, id).Scan(&projectID, &cwd); err != nil {
+			dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT project_id, cwd FROM fb_sessions WHERE id=?`), id).Scan(&projectID, &cwd); err != nil {
 			t.Fatal(err)
 		}
 		if projectID != project.ID {
@@ -317,7 +318,7 @@ func TestImportScopedToProjectBindsToItsRoot(t *testing.T) {
 	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
 		var projectID, cwd string
 		if err := opts.DB.QueryRowContext(ctx,
-			`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, id).Scan(&projectID, &cwd); err != nil {
+			dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT project_id, cwd FROM fb_sessions WHERE id=?`), id).Scan(&projectID, &cwd); err != nil {
 			t.Fatal(err)
 		}
 		if projectID != project.ID {
@@ -366,7 +367,7 @@ func TestImportBindsChildToParentsProject(t *testing.T) {
 	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
 		var projectID string
 		if err := opts.DB.QueryRowContext(ctx,
-			`SELECT project_id FROM fb_sessions WHERE id=?`, id).Scan(&projectID); err != nil {
+			dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT project_id FROM fb_sessions WHERE id=?`), id).Scan(&projectID); err != nil {
 			t.Fatal(err)
 		}
 		if projectID != project.ID {
@@ -405,7 +406,7 @@ func TestImportBindsChildToParentsProject(t *testing.T) {
 	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
 		var projectID, cwd string
 		if err := scopedOpts.DB.QueryRowContext(ctx,
-			`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, id).Scan(&projectID, &cwd); err != nil {
+			dbx.Rebind(dbx.DialectOf(scopedOpts.DB), `SELECT project_id, cwd FROM fb_sessions WHERE id=?`), id).Scan(&projectID, &cwd); err != nil {
 			t.Fatal(err)
 		}
 		if projectID != launch.ID || cwd != launch.Root {
@@ -454,7 +455,7 @@ func TestImportFallsBackToTheSourceProjectPathAndSkipsOnlyWithoutAny(t *testing.
 	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
 		var projectID string
 		if err := fallbackOpts.DB.QueryRowContext(ctx,
-			`SELECT project_id FROM fb_sessions WHERE id=?`, id).Scan(&projectID); err != nil {
+			dbx.Rebind(dbx.DialectOf(fallbackOpts.DB), `SELECT project_id FROM fb_sessions WHERE id=?`), id).Scan(&projectID); err != nil {
 			t.Fatal(err)
 		}
 		if projectID != project.ID {
@@ -511,7 +512,9 @@ func TestImportFallsBackToTheSourceProjectPathAndSkipsOnlyWithoutAny(t *testing.
 // byte — the read-only pin a dry-run test needs.
 func dumpTable(t *testing.T, ctx context.Context, db *sql.DB, table string) string {
 	t.Helper()
-	rows, err := db.QueryContext(ctx, `SELECT * FROM `+table+` ORDER BY rowid`)
+	// Ordered by id: rowid is SQLite's, and both tables this compares are
+	// keyed by id on every engine.
+	rows, err := db.QueryContext(ctx, `SELECT * FROM `+table+` ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +584,7 @@ func TestReimportRebindsProjectlessMigratedConversations(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := opts.DB.ExecContext(ctx,
-		`UPDATE fb_sessions SET project_id=NULL, cwd=? WHERE origin='migrated'`, "/tmp/old-spelling"); err != nil {
+		dbx.Rebind(dbx.DialectOf(opts.DB), `UPDATE fb_sessions SET project_id=NULL, cwd=? WHERE origin='migrated'`), "/tmp/old-spelling"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -634,7 +637,7 @@ func TestReimportRebindsProjectlessMigratedConversations(t *testing.T) {
 	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
 		var projectID, cwd, source string
 		if err := opts.DB.QueryRowContext(ctx,
-			`SELECT project_id, cwd, COALESCE(source,'') FROM fb_sessions WHERE id=?`, id).
+			dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT project_id, cwd, COALESCE(source,'') FROM fb_sessions WHERE id=?`), id).
 			Scan(&projectID, &cwd, &source); err != nil {
 			t.Fatal(err)
 		}
@@ -762,7 +765,7 @@ func TestImportSessionOwnedByAnotherAgent(t *testing.T) {
 	opts := fixture.options(t, false)
 	target := "cli-s-fix"
 	if _, err := opts.DB.ExecContext(ctx,
-		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES(?,?,?,?,?)`,
+		dbx.Rebind(dbx.DialectOf(opts.DB), `INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES(?,?,?,?,?)`),
 		target, "other", "other's title", 1, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +787,7 @@ func TestImportSessionOwnedByAnotherAgent(t *testing.T) {
 	}
 	var count int
 	if err := opts.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM fb_messages WHERE session_id=?`, target).Scan(&count); err != nil {
+		dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT COUNT(*) FROM fb_messages WHERE session_id=?`), target).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
@@ -835,7 +838,7 @@ func TestImportSessionReplayAndBoundary(t *testing.T) {
 	var partsJSON string
 	var rowSession string
 	if err := opts.DB.QueryRowContext(ctx,
-		`SELECT parts, session_id FROM fb_messages WHERE id=?`, boundaryID.Int64).
+		dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT parts, session_id FROM fb_messages WHERE id=?`), boundaryID.Int64).
 		Scan(&partsJSON, &rowSession); err != nil {
 		t.Fatal(err)
 	}
@@ -888,7 +891,7 @@ func TestImportSubagentSession(t *testing.T) {
 	child := "cli-s-fix-agent-deadbeef"
 	var parent, title string
 	if err := opts.DB.QueryRowContext(ctx,
-		`SELECT parent_session_id, title FROM fb_sessions WHERE id=?`, child).
+		dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT parent_session_id, title FROM fb_sessions WHERE id=?`), child).
 		Scan(&parent, &title); err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +927,7 @@ func TestImportSubagentWithoutAnImportedParent(t *testing.T) {
 	var parent sql.NullString
 	var owner string
 	if err := opts.DB.QueryRowContext(ctx,
-		`SELECT parent_session_id, agent_id FROM fb_sessions WHERE id=?`, "cli-s-fix-agent-deadbeef").
+		dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT parent_session_id, agent_id FROM fb_sessions WHERE id=?`), "cli-s-fix-agent-deadbeef").
 		Scan(&parent, &owner); err != nil {
 		t.Fatalf("subagent conversation was not imported: %v", err)
 	}
@@ -1292,7 +1295,7 @@ func claudeDeltaRecords(cwd string) []string {
 func messageCount(t *testing.T, ctx context.Context, opts *Options, sessionID string) int {
 	t.Helper()
 	var n int
-	if err := opts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_messages WHERE session_id=?`, sessionID).Scan(&n); err != nil {
+	if err := opts.DB.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT COUNT(*) FROM fb_messages WHERE session_id=?`), sessionID).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -1519,11 +1522,15 @@ func TestDryRunReportsUpdatesAndWritesNothing(t *testing.T) {
 	}
 	base := messageCount(t, ctx, opts, "cli-s-fix")
 	appendSessionRecords(t, filepath.Join(fixture.projectDir, "s-fix.jsonl"), fixture.projectPath, claudeDeltaRecords(fixture.projectPath))
-	var ledgerBefore string
+	var beforePath string
+	var beforeBytes, beforeMtime int64
 	if err := opts.DB.QueryRowContext(ctx,
-		`SELECT source_path || ':' || source_bytes || ':' || source_mtime_ms FROM fb_migration_units WHERE target_id='cli-s-fix'`).Scan(&ledgerBefore); err != nil {
+		`SELECT source_path, source_bytes, source_mtime_ms FROM fb_migration_units WHERE target_id='cli-s-fix'`).Scan(&beforePath, &beforeBytes, &beforeMtime); err != nil {
 		t.Fatal(err)
 	}
+	// Compared in Go: the concatenation operator is '||' on SQLite and
+	// PostgreSQL but a logical OR on MySQL.
+	ledgerBefore := fmt.Sprintf("%s:%d:%d", beforePath, beforeBytes, beforeMtime)
 
 	dryOpts := *opts
 	dryOpts.DryRun = true
@@ -1546,11 +1553,13 @@ func TestDryRunReportsUpdatesAndWritesNothing(t *testing.T) {
 	if after := messageCount(t, ctx, opts, "cli-s-fix"); after != base {
 		t.Fatalf("dry run wrote rows: %d → %d", base, after)
 	}
-	var ledgerAfter string
+	var afterPath string
+	var afterBytes, afterMtime int64
 	if err := opts.DB.QueryRowContext(ctx,
-		`SELECT source_path || ':' || source_bytes || ':' || source_mtime_ms FROM fb_migration_units WHERE target_id='cli-s-fix'`).Scan(&ledgerAfter); err != nil {
+		`SELECT source_path, source_bytes, source_mtime_ms FROM fb_migration_units WHERE target_id='cli-s-fix'`).Scan(&afterPath, &afterBytes, &afterMtime); err != nil {
 		t.Fatal(err)
 	}
+	ledgerAfter := fmt.Sprintf("%s:%d:%d", afterPath, afterBytes, afterMtime)
 	if ledgerAfter != ledgerBefore {
 		t.Fatalf("dry run moved the ledger: %q → %q", ledgerBefore, ledgerAfter)
 	}
@@ -1561,7 +1570,7 @@ func ledgerPlanPaths(t *testing.T, ctx context.Context, opts *Options, target st
 	t.Helper()
 	var plansJSON sql.NullString
 	if err := opts.DB.QueryRowContext(ctx,
-		`SELECT plans_json FROM fb_migration_units WHERE target_id=?`, target).Scan(&plansJSON); err != nil {
+		dbx.Rebind(dbx.DialectOf(opts.DB), `SELECT plans_json FROM fb_migration_units WHERE target_id=?`), target).Scan(&plansJSON); err != nil {
 		t.Fatal(err)
 	}
 	if !plansJSON.Valid || plansJSON.String == "" {

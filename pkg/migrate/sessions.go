@@ -14,6 +14,108 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
+// The statements the importer runs against fb_sessions and fb_messages. An
+// imported conversation is written once and then extended in place, so the
+// statements are the same three shapes the state store uses, translated.
+var (
+	migratedOrphansSelectSQL = dbx.SQL{
+		SQLite:   `SELECT id FROM fb_sessions WHERE origin='migrated' AND agent_id=? AND project_id IS NULL`,
+		MySQL:    `SELECT id FROM fb_sessions WHERE origin='migrated' AND agent_id=? AND project_id IS NULL`,
+		Postgres: `SELECT id FROM fb_sessions WHERE origin='migrated' AND agent_id=$1 AND project_id IS NULL`,
+	}
+	migratedMessageIDsSelectSQL = dbx.SQL{
+		SQLite:   `SELECT DISTINCT message_id FROM fb_messages WHERE session_id=? AND message_id<>''`,
+		MySQL:    `SELECT DISTINCT message_id FROM fb_messages WHERE session_id=? AND message_id<>''`,
+		Postgres: `SELECT DISTINCT message_id FROM fb_messages WHERE session_id=$1 AND message_id<>''`,
+	}
+	migratedSessionTouchSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_sessions
+SET updated_at = max(updated_at, ?),
+    title = CASE WHEN TRIM(?) <> '' AND title <> TRIM(?) THEN TRIM(?) ELSE title END
+WHERE id=? AND agent_id=? AND origin='migrated'`,
+		MySQL: `
+UPDATE fb_sessions
+SET updated_at = GREATEST(updated_at, ?),
+    title = CASE WHEN TRIM(?) <> '' AND title <> TRIM(?) THEN TRIM(?) ELSE title END
+WHERE id=? AND agent_id=? AND origin='migrated'`,
+		// PostgreSQL numbers the placeholders SQLite spells '?', one for one:
+		// the title is passed three times because the SQLite statement asks for
+		// it three times.
+		Postgres: `
+UPDATE fb_sessions
+SET updated_at = GREATEST(updated_at, $1),
+    title = CASE WHEN TRIM($2) <> '' AND title <> TRIM($3) THEN TRIM($4) ELSE title END
+WHERE id=$5 AND agent_id=$6 AND origin='migrated'`,
+	}
+	migratedSessionRebindSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_sessions
+SET project_id=?, cwd=?
+WHERE id=? AND agent_id=? AND origin='migrated'`,
+		MySQL: `
+UPDATE fb_sessions
+SET project_id=?, cwd=?
+WHERE id=? AND agent_id=? AND origin='migrated'`,
+		Postgres: `
+UPDATE fb_sessions
+SET project_id=$1, cwd=$2
+WHERE id=$3 AND agent_id=$4 AND origin='migrated'`,
+	}
+	migratedSessionOwnerSQL = dbx.SQL{
+		SQLite:   `SELECT agent_id, origin, COALESCE(project_id,'') FROM fb_sessions WHERE id=?`,
+		MySQL:    `SELECT agent_id, origin, COALESCE(project_id,'') FROM fb_sessions WHERE id=?`,
+		Postgres: `SELECT agent_id, origin, COALESCE(project_id,'') FROM fb_sessions WHERE id=$1`,
+	}
+	migratedSessionInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_sessions(
+  id, agent_id, title, updated_at, created_at, parent_session_id,
+  cwd, git_branch,
+  memory_mode, memory_source, initial_window_id, origin, project_id
+) VALUES(?,?,?,?,?,(SELECT id FROM fb_sessions WHERE id=? AND agent_id=?),?,?,?,?,?,?,?)`,
+		// MySQL refuses a subquery that reads the table being inserted into
+		// ("You can't specify target table for update in FROM clause"); the
+		// derived table is materialised first and is allowed, and it selects
+		// exactly the parent row SQLite's subquery would find.
+		MySQL: `
+INSERT INTO fb_sessions(
+  id, agent_id, title, updated_at, created_at, parent_session_id,
+  cwd, git_branch,
+  memory_mode, memory_source, initial_window_id, origin, project_id
+) VALUES(?,?,?,?,?,(SELECT p.id FROM (SELECT id, agent_id FROM fb_sessions) AS p WHERE p.id=? AND p.agent_id=?),?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_sessions(
+  id, agent_id, title, updated_at, created_at, parent_session_id,
+  cwd, git_branch,
+  memory_mode, memory_source, initial_window_id, origin, project_id
+) VALUES($1,$2,$3,$4,$5,(SELECT id FROM fb_sessions WHERE id=$6 AND agent_id=$7),$8,$9,$10,$11,$12,$13,$14)`,
+	}
+	migratedMessageInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_messages(
+  session_id, role, content, created_at, message_id, parts, model,
+  usage_json, tool_step_id, tool_meta_json
+) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_messages(
+  session_id, role, content, created_at, message_id, parts, model,
+  usage_json, tool_step_id, tool_meta_json
+) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_messages(
+  session_id, role, content, created_at, message_id, parts, model,
+  usage_json, tool_step_id, tool_meta_json
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+RETURNING id`,
+	}
+	migratedBoundaryUpdateSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET compact_boundary_message_id=? WHERE id=?`,
+		MySQL:    `UPDATE fb_sessions SET compact_boundary_message_id=? WHERE id=?`,
+		Postgres: `UPDATE fb_sessions SET compact_boundary_message_id=$1 WHERE id=$2`,
+	}
+)
+
 // Session statuses recorded in the report.
 const (
 	StatusMigrated = "migrated"
@@ -390,8 +492,7 @@ func reportOrphanedMigratedSessions(ctx context.Context, opts *Options, report *
 	for _, outcome := range report.Sessions {
 		seen[outcome.TargetID] = true
 	}
-	rows, err := opts.DB.QueryContext(ctx,
-		`SELECT id FROM fb_sessions WHERE origin='migrated' AND agent_id=? AND project_id IS NULL`,
+	rows, err := opts.DB.QueryContext(ctx, migratedOrphansSelectSQL.For(dbx.DialectOf(opts.DB)),
 		strings.TrimSpace(opts.AgentID))
 	if err != nil {
 		report.Notices = append(report.Notices, "orphaned migrated-conversation check failed: "+err.Error())
@@ -529,7 +630,9 @@ func importOneSession(ctx context.Context, opts *Options, unit sessionUnit, pars
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := insertSession(ctx, tx, opts, targetID, parentID, parsed, project); err == nil {
+	// Assign, not declare: a failure here is what the outcome must report
+	// below, and a fresh err would leave the outer one nil.
+	if err = insertSession(ctx, tx, opts, targetID, parentID, parsed, project); err == nil {
 		var inserted int
 		inserted, err = insertRows(ctx, tx, targetID, parsed)
 		if err == nil && ledger != nil {
@@ -556,8 +659,7 @@ func importOneSession(ctx context.Context, opts *Options, unit sessionUnit, pars
 // yet in the conversation: the rows a run would append to one that grew.
 func countSessionDelta(ctx context.Context, opts *Options, targetID string, parsed *parsedSession) int {
 	existing := make(map[string]bool, len(parsed.Rows))
-	if rows, err := opts.DB.QueryContext(ctx,
-		`SELECT DISTINCT message_id FROM fb_messages WHERE session_id=? AND message_id<>''`, targetID); err == nil {
+	if rows, err := opts.DB.QueryContext(ctx, migratedMessageIDsSelectSQL.For(dbx.DialectOf(opts.DB)), targetID); err == nil {
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err == nil {
@@ -594,8 +696,7 @@ func appendSessionDelta(ctx context.Context, opts *Options, ledger *unitLedger, 
 		Title: parsed.Title, Status: StatusSkipped, Reason: reasonUnchangedSinceLastRun, IsChild: unit.IsChild,
 	}
 	existing := make(map[string]bool, len(parsed.Rows))
-	if rows, err := opts.DB.QueryContext(ctx,
-		`SELECT DISTINCT message_id FROM fb_messages WHERE session_id=? AND message_id<>''`, unit.TargetID); err == nil {
+	if rows, err := opts.DB.QueryContext(ctx, migratedMessageIDsSelectSQL.For(dbx.DialectOf(opts.DB)), unit.TargetID); err == nil {
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err == nil {
@@ -633,11 +734,7 @@ func appendSessionDelta(ctx context.Context, opts *Options, ledger *unitLedger, 
 	defer func() { _ = tx.Rollback() }()
 	inserted, err := insertRowsFiltered(ctx, tx, unit.TargetID, newRows)
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `
-UPDATE fb_sessions
-SET updated_at = max(updated_at, ?),
-    title = CASE WHEN TRIM(?) <> '' AND title <> TRIM(?) THEN TRIM(?) ELSE title END
-WHERE id=? AND agent_id=? AND origin='migrated'`,
+		_, err = tx.ExecContext(ctx, migratedSessionTouchSQL.For(tx.Dialect()),
 			parsed.LastSeen, parsed.Title, parsed.Title, parsed.Title, unit.TargetID, strings.TrimSpace(opts.AgentID))
 	}
 	if err == nil {
@@ -680,10 +777,7 @@ func rebindMigrated(ctx context.Context, opts *Options, targetID string, parsed 
 		return outcome, 0
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `
-UPDATE fb_sessions
-SET project_id=?, cwd=?
-WHERE id=? AND agent_id=? AND origin='migrated'`,
+	result, err := tx.ExecContext(ctx, migratedSessionRebindSQL.For(tx.Dialect()),
 		project.ID, project.Root, targetID, strings.TrimSpace(opts.AgentID))
 	if err != nil {
 		outcome.Status = StatusFailed
@@ -712,8 +806,7 @@ WHERE id=? AND agent_id=? AND origin='migrated'`,
 // session row, or empty strings when the id is free.
 func sessionOwner(ctx context.Context, db *sql.DB, sessionID string) (string, string, string, error) {
 	var owner, origin, projectID string
-	err := db.QueryRowContext(ctx,
-		`SELECT agent_id, origin, COALESCE(project_id,'') FROM fb_sessions WHERE id=?`, sessionID).
+	err := db.QueryRowContext(ctx, migratedSessionOwnerSQL.For(dbx.DialectOf(db)), sessionID).
 		Scan(&owner, &origin, &projectID)
 	if err == sql.ErrNoRows {
 		return "", "", "", nil
@@ -740,16 +833,13 @@ func insertSession(ctx context.Context, tx *dbx.Tx, opts *Options, targetID, par
 		initialWindow = stableWindowID(parsed.SessionID, "initial")
 	}
 	agentID := strings.TrimSpace(opts.AgentID)
-	result, err := tx.ExecContext(ctx, `
-INSERT INTO fb_sessions(
-  id, agent_id, title, updated_at, created_at, parent_session_id,
-  cwd, git_branch,
-  memory_mode, memory_source, initial_window_id, origin, project_id
-) VALUES(?,?,?,?,?,(SELECT id FROM fb_sessions WHERE id=? AND agent_id=?),?,?,?,?,?,?,?)`,
+	args := []any{
 		targetID, agentID, migratedTitle(parsed, targetID),
 		parsed.LastSeen, nonZeroTime(parsed.FirstSeen, parsed.LastSeen), strings.TrimSpace(parentID), agentID,
 		project.Root, parsed.GitBranch,
-		"disabled", "tui", initialWindow, "migrated", project.ID)
+		"disabled", "tui", initialWindow, "migrated", project.ID,
+	}
+	result, err := tx.ExecContext(ctx, migratedSessionInsertSQL.For(tx.Dialect()), args...)
 	if err != nil {
 		return err
 	}
@@ -788,11 +878,7 @@ func insertRows(ctx context.Context, tx *dbx.Tx, targetID string, parsed *parsed
 // passes only the rows the transcript gained, so a boundary the conversation
 // already has never moves the pointer and one the delta brings does.
 func insertRowsFiltered(ctx context.Context, tx *dbx.Tx, targetID string, rows []parsedRow) (int, error) {
-	stmt, err := tx.PrepareContext(ctx, `
-INSERT INTO fb_messages(
-  session_id, role, content, created_at, message_id, parts, model,
-  usage_json, tool_step_id, tool_meta_json
-) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+	stmt, err := tx.PrepareContext(ctx, migratedMessageInsertSQL.For(tx.Dialect()))
 	if err != nil {
 		return 0, err
 	}
@@ -801,15 +887,24 @@ INSERT INTO fb_messages(
 	inserted := 0
 	var boundaryRowID int64
 	for _, row := range rows {
-		res, err := stmt.ExecContext(ctx,
+		args := []any{
 			targetID, row.Role, row.Content, row.CreatedAt, row.MessageID, row.PartsJSON, row.Model,
-			row.UsageJSON, row.ToolStepID, row.ToolMetaJSON)
-		if err != nil {
-			return inserted, err
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return inserted, err
+			row.UsageJSON, row.ToolStepID, row.ToolMetaJSON}
+		var id int64
+		if tx.Dialect() == dbx.Postgres {
+			// pgx's database/sql result carries no LastInsertId; the statement
+			// returns the new row's id instead.
+			if err := stmt.QueryRowContext(ctx, args...).Scan(&id); err != nil {
+				return inserted, err
+			}
+		} else {
+			res, err := stmt.ExecContext(ctx, args...)
+			if err != nil {
+				return inserted, err
+			}
+			if id, err = res.LastInsertId(); err != nil {
+				return inserted, err
+			}
 		}
 		if row.IsBoundary {
 			boundaryRowID = id
@@ -819,8 +914,7 @@ INSERT INTO fb_messages(
 	// The boundary pointer is the LAST boundary (B3): the model context
 	// rebuild projects from the newest checkpoint only.
 	if boundaryRowID > 0 {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE fb_sessions SET compact_boundary_message_id=? WHERE id=?`,
+		if _, err := tx.ExecContext(ctx, migratedBoundaryUpdateSQL.For(tx.Dialect()),
 			fmt.Sprintf("%d", boundaryRowID), targetID); err != nil {
 			return inserted, err
 		}
