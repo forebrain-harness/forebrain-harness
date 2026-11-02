@@ -3,6 +3,7 @@ package memory
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -44,7 +45,16 @@ func TestListAndSearchSkipHiddenFilesAndSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(searched.Matches) != 2 || searched.Matches[0].Path != "a.md" || searched.Matches[1].Path != "nested/z.md" {
+	// Both files, and nothing from the hidden file or the symlinked tree. The
+	// order is the engine's: SQLite's bm25 scores two lines of equal length
+	// alike, while MySQL's relevance counts n-grams and separates them, so the
+	// set is what this test holds every engine to.
+	if len(searched.Matches) != 2 {
+		t.Fatalf("matches = %#v", searched.Matches)
+	}
+	paths := []string{searched.Matches[0].Path, searched.Matches[1].Path}
+	sort.Strings(paths)
+	if paths[0] != "a.md" || paths[1] != "nested/z.md" {
 		t.Fatalf("matches = %#v", searched.Matches)
 	}
 }

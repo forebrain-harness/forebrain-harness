@@ -27,6 +27,85 @@ import (
 // connector, so it may offer a candidate whose terms only look alike — the
 // exact comparison below is what decides, and drops it.
 
+// The search-index statements. Every engine keeps the same three tables —
+// the index rows, the per-file bookkeeping, and the file table — but only
+// SQLite's fb_memory_fts is a virtual table with a rowid: the other two carry
+// an explicit row_id, and each engine matches the terms its own way (design
+// §2.5). The Go side cuts both the query and the stored line into whole terms
+// and is the final arbiter, so the SQL-side match is a recall filter whose
+// scores only have to rank the candidates it returns.
+var (
+	memIndexFilesSelectSQL = dbx.SQL{
+		SQLite:   `SELECT path, size, mtime_unix, terms_revision, first_rowid, line_count FROM fb_memory_index_files WHERE root = ?`,
+		MySQL:    `SELECT path, size, mtime_unix, terms_revision, first_rowid, line_count FROM fb_memory_index_files WHERE root = ?`,
+		Postgres: `SELECT path, size, mtime_unix, terms_revision, first_rowid, line_count FROM fb_memory_index_files WHERE root = $1`,
+	}
+	memFTSRangeDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_memory_fts WHERE rowid >= ? AND rowid < ?`,
+		MySQL:    `DELETE FROM fb_memory_fts WHERE row_id >= ? AND row_id < ?`,
+		Postgres: `DELETE FROM fb_memory_fts WHERE row_id >= $1 AND row_id < $2`,
+	}
+	memIndexFileDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_memory_index_files WHERE root = ? AND path = ?`,
+		MySQL:    `DELETE FROM fb_memory_index_files WHERE root = ? AND path = ?`,
+		Postgres: `DELETE FROM fb_memory_index_files WHERE root = $1 AND path = $2`,
+	}
+	memFTSHighWaterSQL = dbx.SQL{
+		SQLite:   `SELECT IFNULL(MAX(rowid),0)+1 FROM fb_memory_fts`,
+		MySQL:    `SELECT IFNULL(MAX(row_id),0)+1 FROM fb_memory_fts`,
+		Postgres: `SELECT COALESCE(MAX(row_id),0)+1 FROM fb_memory_fts`,
+	}
+	memFTSInsertSQL = dbx.SQL{
+		SQLite:   `INSERT INTO fb_memory_fts(rowid, terms, root, path, line_no) VALUES(?,?,?,?,?)`,
+		MySQL:    `INSERT INTO fb_memory_fts(row_id, terms, root, path, line_no) VALUES(?,?,?,?,?)`,
+		Postgres: `INSERT INTO fb_memory_fts(row_id, terms, root, path, line_no) VALUES($1,$2,$3,$4,$5)`,
+	}
+	// The file row is keyed by (root, path): a primary key on SQLite and
+	// PostgreSQL, and on MySQL the unique index over the SHA-256 of the pair —
+	// the only unique key the table has, so its upsert conflicts exactly there.
+	memIndexFileUpsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_memory_index_files(root, path, size, mtime_unix, terms_revision, first_rowid, line_count) VALUES(?,?,?,?,?,?,?)
+		 ON CONFLICT(root, path) DO UPDATE SET size = excluded.size, mtime_unix = excluded.mtime_unix, terms_revision = excluded.terms_revision, first_rowid = excluded.first_rowid, line_count = excluded.line_count`,
+		MySQL: `INSERT INTO fb_memory_index_files(root, path, size, mtime_unix, terms_revision, first_rowid, line_count) VALUES(?,?,?,?,?,?,?)
+		 ON DUPLICATE KEY UPDATE size = VALUES(size), mtime_unix = VALUES(mtime_unix), terms_revision = VALUES(terms_revision), first_rowid = VALUES(first_rowid), line_count = VALUES(line_count)`,
+		Postgres: `INSERT INTO fb_memory_index_files(root, path, size, mtime_unix, terms_revision, first_rowid, line_count) VALUES($1,$2,$3,$4,$5,$6,$7)
+		 ON CONFLICT(root, path) DO UPDATE SET size = excluded.size, mtime_unix = excluded.mtime_unix, terms_revision = excluded.terms_revision, first_rowid = excluded.first_rowid, line_count = excluded.line_count`,
+	}
+	// The candidate query, one shape per engine: SQLite asks FTS5 for a bm25
+	// score, MySQL for the FULLTEXT relevance of the same quoted phrases, and
+	// PostgreSQL for a ts_rank over the generated tsvector. All three are given
+	// the query's terms once (MySQL twice, because its score and its filter are
+	// two MATCH clauses) and the memory root to stay inside.
+	memFTSSearchSQL = dbx.SQL{
+		SQLite: `SELECT path, line_no, terms, bm25(fb_memory_fts) FROM fb_memory_fts
+		 WHERE fb_memory_fts MATCH ? AND root = ?`,
+		MySQL: `SELECT path, line_no, terms, -(MATCH(terms) AGAINST(? IN BOOLEAN MODE)) FROM fb_memory_fts
+		 WHERE MATCH(terms) AGAINST(? IN BOOLEAN MODE) AND root = ?`,
+		// PostgreSQL's ts_rank counts term frequency and knows nothing of
+		// rarity, which is the only thing the relevance floor is about, so the
+		// score is the sum of the inverse document frequencies of the query's
+		// terms this line carries — bm25's dominant term, on bm25's scale, and
+		// negated like it. The query itself is still one tsquery.
+		Postgres: `WITH corpus AS (
+		   SELECT COUNT(*)::float8 AS n FROM fb_memory_fts WHERE root = $2
+		 ), wanted AS (
+		   SELECT w.word AS word,
+		     (SELECT COUNT(*)::float8 FROM fb_memory_fts x
+		      WHERE x.root = $2 AND x.terms_tsv @@ plainto_tsquery('simple', w.word)) AS df
+		   FROM unnest(string_to_array($1, ' ')) AS w(word)
+		 ), query AS (
+		   SELECT to_tsquery('simple',
+		     (SELECT string_agg(quote_literal(wanted.word), ' | ') FROM wanted)) AS value
+		 )
+		 SELECT f.path, f.line_no, f.terms,
+		   -(SELECT COALESCE(SUM(LN((c.n + 0.5) / (wanted.df + 0.5))), 0)
+		     FROM wanted, corpus c
+		     WHERE f.terms_tsv @@ plainto_tsquery('simple', wanted.word)) AS score
+		 FROM fb_memory_fts f, query q
+		 WHERE f.terms_tsv @@ q.value AND f.root = $2`,
+	}
+)
+
 // searchIndex is the FTS5 index over one state database. It is addressed by
 // memory root, so each project's and the global scope's memories stay separate
 // rows of one table and a search never sees another scope's lines.
@@ -129,7 +208,7 @@ type storedFileState struct {
 }
 
 func storedFiles(ctx context.Context, tx *dbx.Tx, root string) (map[string]storedFileState, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT path, size, mtime_unix, terms_revision, first_rowid, line_count FROM fb_memory_index_files WHERE root = ?`, root)
+	rows, err := tx.QueryContext(ctx, memIndexFilesSelectSQL.For(tx.Dialect()), root)
 	if err != nil {
 		return nil, err
 	}
@@ -148,11 +227,11 @@ func storedFiles(ctx context.Context, tx *dbx.Tx, root string) (map[string]store
 
 func deleteFileRows(ctx context.Context, tx *dbx.Tx, root, path string, prev storedFileState) error {
 	if prev.lineCount > 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_fts WHERE rowid >= ? AND rowid < ?`, prev.firstRowid, prev.firstRowid+prev.lineCount); err != nil {
+		if _, err := tx.ExecContext(ctx, memFTSRangeDeleteSQL.For(tx.Dialect()), prev.firstRowid, prev.firstRowid+prev.lineCount); err != nil {
 			return err
 		}
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_index_files WHERE root = ? AND path = ?`, root, path)
+	_, err := tx.ExecContext(ctx, memIndexFileDeleteSQL.For(tx.Dialect()), root, path)
 	return err
 }
 
@@ -165,10 +244,10 @@ func replaceFileRows(ctx context.Context, tx *dbx.Tx, root string, file indexedF
 	// without a scan. The transaction holds the write lock (_txlock=immediate),
 	// so no other writer can take the same range between the read and the insert.
 	var firstRowid int64
-	if err := tx.QueryRowContext(ctx, `SELECT IFNULL(MAX(rowid),0)+1 FROM fb_memory_fts`).Scan(&firstRowid); err != nil {
+	if err := tx.QueryRowContext(ctx, memFTSHighWaterSQL.For(tx.Dialect())).Scan(&firstRowid); err != nil {
 		return err
 	}
-	insert, err := tx.PrepareContext(ctx, `INSERT INTO fb_memory_fts(rowid, terms, root, path, line_no) VALUES(?,?,?,?,?)`)
+	insert, err := tx.PrepareContext(ctx, memFTSInsertSQL.For(tx.Dialect()))
 	if err != nil {
 		return err
 	}
@@ -184,9 +263,7 @@ func replaceFileRows(ctx context.Context, tx *dbx.Tx, root string, file indexedF
 		}
 		lineCount++
 	}
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO fb_memory_index_files(root, path, size, mtime_unix, terms_revision, first_rowid, line_count) VALUES(?,?,?,?,?,?,?)
-		 ON CONFLICT(root, path) DO UPDATE SET size = excluded.size, mtime_unix = excluded.mtime_unix, terms_revision = excluded.terms_revision, first_rowid = excluded.first_rowid, line_count = excluded.line_count`,
+	_, err = tx.ExecContext(ctx, memIndexFileUpsertSQL.For(tx.Dialect()),
 		root, file.path, file.size, file.modTime.Unix(), termsRevisionInForce(), firstRowid, lineCount)
 	return err
 }
@@ -211,9 +288,7 @@ func (s *searchIndex) signals(ctx context.Context, root string, queries []string
 	if expression == "" {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT path, line_no, terms, bm25(fb_memory_fts) FROM fb_memory_fts
-		 WHERE fb_memory_fts MATCH ? AND root = ?`, expression, root)
+	rows, err := s.db.QueryContext(ctx, memFTSSearchSQL.For(dbx.DialectOf(s.db)), searchArgs(dbx.DialectOf(s.db), all, expression, root)...)
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +322,39 @@ func (s *searchIndex) signals(ctx context.Context, root string, queries []string
 		signals[path][line] = signal
 	}
 	return signals, rows.Err()
+}
+
+// searchArgs feeds the candidate query its dialect's arguments: SQLite takes
+// the FTS5 expression as it stands, MySQL takes the same terms as quoted
+// boolean-mode phrases (and twice, because its score and its filter are two
+// MATCH clauses), and PostgreSQL takes the terms space-joined — the very shape
+// its generated tsvector was built from — turned into a tsquery inside the
+// statement, so no term's punctuation can be read as syntax.
+func searchArgs(d dbx.Dialect, terms []string, expression, root string) []any {
+	switch d {
+	case dbx.MySQL:
+		phrases := make([]string, 0, len(terms))
+		seen := make(map[string]struct{}, len(terms))
+		for _, term := range terms {
+			term = strings.TrimSpace(term)
+			if term == "" {
+				continue
+			}
+			if _, repeat := seen[term]; repeat {
+				continue
+			}
+			seen[term] = struct{}{}
+			// A quote inside a boolean-mode phrase is escaped with a
+			// backslash; the term is bound, so nothing else is escaped.
+			phrases = append(phrases, `"`+strings.ReplaceAll(term, `"`, `\"`)+`"`)
+		}
+		joined := strings.Join(phrases, " ")
+		return []any{joined, joined, root}
+	case dbx.Postgres:
+		return []any{strings.Join(terms, " "), root}
+	default:
+		return []any{expression, root}
+	}
 }
 
 // matchExpression builds the FTS5 query: every term as a quoted string, ORed.

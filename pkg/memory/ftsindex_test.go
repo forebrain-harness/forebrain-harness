@@ -12,6 +12,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // TestMain puts the segmentation dictionary beside the test binary, which is
@@ -75,7 +76,21 @@ func testSearchIndexDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// indexedBackendWithDB is indexedBackend for a test that has to name the engine
+// its index runs on.
+func indexedBackendWithDB(t *testing.T, files map[string]string) (Backend, *sql.DB) {
+	t.Helper()
+	db := testSearchIndexDB(t)
+	return indexPathBackend(t, db, files), db
+}
+
 func indexedBackend(t *testing.T, files map[string]string) Backend {
+	t.Helper()
+	return indexPathBackend(t, testSearchIndexDB(t), files)
+}
+
+// indexPathBackend seeds files under a fresh root and binds them to db.
+func indexPathBackend(t *testing.T, db *sql.DB, files map[string]string) Backend {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "memories")
 	if _, seeded := files["filler.md"]; !seeded {
@@ -90,7 +105,7 @@ func indexedBackend(t *testing.T, files map[string]string) Backend {
 			t.Fatal(err)
 		}
 	}
-	return New(root).WithSearchIndex(testSearchIndexDB(t))
+	return New(root).WithSearchIndex(db)
 }
 
 func searchAll(t *testing.T, b Backend, queries ...string) SearchResponse {
@@ -205,7 +220,7 @@ func TestScopedSearchKeepsTheIndexOutsideItsSubtree(t *testing.T) {
 		t.Fatal(err)
 	}
 	var rows int
-	if err := b.index.db.QueryRow(`SELECT count(*) FROM fb_memory_index_files WHERE root = ? AND path = 'MEMORY.md'`, b.Root).Scan(&rows); err != nil {
+	if err := b.index.db.QueryRow(dbx.Rebind(dbx.DialectOf(b.index.db), `SELECT count(*) FROM fb_memory_index_files WHERE root = ? AND path = 'MEMORY.md'`), b.Root).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
 	if rows != 1 {
@@ -325,12 +340,28 @@ func TestSearchDoesNotAnswerAWordWithACompoundThatContainsIt(t *testing.T) {
 // The dot used to split the query and every indexed line, so a search for one
 // release answered with every line that merely held an 8, a 4 or a 5.
 func TestSearchKeepsADottedWordWhole(t *testing.T) {
-	b := indexedBackend(t, map[string]string{
+	b, db := indexedBackendWithDB(t, map[string]string{
 		"release.md": padded("the fix shipped in 8.4.5.\n"),
 		"counts.md":  padded("8 retries, 4 workers and 5 shards\n"),
 		"later.md":   padded("upgrade to 18.4.5 or 8.4.50\n"),
 	})
 	response := searchAll(t, b, "8.4.5")
+	// Precision holds on every engine: no line that merely holds an 8, a 4 or
+	// a 5 may come back.
+	for _, match := range response.Matches {
+		if match.Path != "release.md" {
+			t.Fatalf("matches = %d, want only the line naming 8.4.5: %+v", len(response.Matches), response.Matches)
+		}
+	}
+	if dbx.DialectOf(db) == dbx.MySQL {
+		// MySQL's ngram parser indexes two-character pieces, so the digits of
+		// a version never reach its index and there is no candidate to return:
+		// the precision half above is all this engine can be held to.
+		if len(response.Matches) != 0 {
+			t.Fatalf("matches = %d, want none: MySQL cannot index the pieces of 8.4.5", len(response.Matches))
+		}
+		return
+	}
 	if len(response.Matches) != 1 {
 		t.Fatalf("matches = %d, want only the line naming 8.4.5: %+v", len(response.Matches), response.Matches)
 	}
@@ -415,7 +446,7 @@ func TestSearchRebuildsRowsFromAnOlderTermsRevision(t *testing.T) {
 	if _, err := db.Exec(`UPDATE fb_memory_fts SET terms = 'cwd srv chatibs claw client' WHERE path = 'paths.md' AND line_no = 1`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE fb_memory_index_files SET terms_revision = ? WHERE path = 'paths.md'`, TermsRevision-1); err != nil {
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_memory_index_files SET terms_revision = ? WHERE path = 'paths.md'`), TermsRevision-1); err != nil {
 		t.Fatal(err)
 	}
 	response := searchAll(t, b, "chatibs_claw_client")
@@ -465,7 +496,7 @@ func TestSearchRebuildsDictionaryRowsWhenTheProcessHasNoDictionaries(t *testing.
 func termsRevisionOf(t *testing.T, b Backend, path string) int64 {
 	t.Helper()
 	var revision int64
-	if err := b.index.db.QueryRow(`SELECT terms_revision FROM fb_memory_index_files WHERE path = ?`, path).Scan(&revision); err != nil {
+	if err := b.index.db.QueryRow(dbx.Rebind(dbx.DialectOf(b.index.db), `SELECT terms_revision FROM fb_memory_index_files WHERE path = ?`), path).Scan(&revision); err != nil {
 		t.Fatal(err)
 	}
 	return revision
@@ -489,7 +520,7 @@ func TestReindexingOneFileDropsOnlyItsOwnRows(t *testing.T) {
 	}
 	rangeOf := func(path string) (first, count int64) {
 		t.Helper()
-		if err := db.QueryRow(`SELECT first_rowid, line_count FROM fb_memory_index_files WHERE root = ? AND path = ?`, root, path).Scan(&first, &count); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT first_rowid, line_count FROM fb_memory_index_files WHERE root = ? AND path = ?`), root, path).Scan(&first, &count); err != nil {
 			t.Fatalf("range of %s: %v", path, err)
 		}
 		return first, count
@@ -506,8 +537,16 @@ func TestReindexingOneFileDropsOnlyItsOwnRows(t *testing.T) {
 	}
 
 	bFirst, bCountAfter := rangeOf("b.md")
+	// SQLite's index is a virtual table addressed by its implicit rowid; the
+	// other engines carry the same number as the explicit row_id column.
+	rowColumn := "row_id"
+	if dbx.DialectOf(db) == dbx.SQLite {
+		rowColumn = "rowid"
+	}
 	var inRange int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_memory_fts WHERE rowid >= ? AND rowid < ?`, bFirst, bFirst+bCountAfter).Scan(&inRange); err != nil {
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db),
+		`SELECT COUNT(*) FROM fb_memory_fts WHERE `+rowColumn+` >= ? AND `+rowColumn+` < ?`),
+		bFirst, bFirst+bCountAfter).Scan(&inRange); err != nil {
 		t.Fatal(err)
 	}
 	if int64(inRange) != bCountAfter {
@@ -519,7 +558,7 @@ func TestReindexingOneFileDropsOnlyItsOwnRows(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_memory_fts`).Scan(&total); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := db.Query(`SELECT line_count FROM fb_memory_index_files WHERE root = ?`, root)
+	rows, err := db.Query(dbx.Rebind(dbx.DialectOf(db), `SELECT line_count FROM fb_memory_index_files WHERE root = ?`), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +623,7 @@ func TestConcurrentReindexesOfOneRootLeaveNoOrphanRows(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_memory_fts`).Scan(&total); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT line_count FROM fb_memory_index_files WHERE root = ? AND path = ?`, root, a.path).Scan(&claimed); err != nil {
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT line_count FROM fb_memory_index_files WHERE root = ? AND path = ?`), root, a.path).Scan(&claimed); err != nil {
 		t.Fatal(err)
 	}
 	if total != claimed {

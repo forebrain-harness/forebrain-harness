@@ -7,6 +7,7 @@ import (
 	"time"
 
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 const testAgentID = "main"
@@ -44,9 +45,9 @@ func insertMemoryThread(t *testing.T, store *Store, id, mode, source string, upd
 
 func insertMemoryThreadForAgent(t *testing.T, store *Store, agentID, id, mode, source string, updatedAt int64) {
 	t.Helper()
-	_, err := store.DB.ExecContext(context.Background(), `INSERT INTO fb_sessions(
+	_, err := store.DB.ExecContext(context.Background(), dbx.Rebind(dbx.DialectOf(store.DB), `INSERT INTO fb_sessions(
 		id,agent_id,title,updated_at,created_at,memory_mode,memory_source,cwd,git_branch
-	) VALUES(?,?,?,?,?,?,?,?,?)`, id, agentID, id, updatedAt, updatedAt-1, mode, source, testCwd, "branch/"+id)
+	) VALUES(?,?,?,?,?,?,?,?,?)`), id, agentID, id, updatedAt, updatedAt-1, mode, source, testCwd, "branch/"+id)
 	if err != nil {
 		t.Fatalf("insert thread %s: %v", id, err)
 	}
@@ -168,7 +169,7 @@ func TestClaimStage1SkipsCronConversations(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Unix()
 	insertMemoryThread(t, store, "fire-conversation", ThreadMemoryEnabled, SessionSourceWebchat, now-7*3600)
-	if _, err := store.DB.ExecContext(ctx, `UPDATE fb_sessions SET source=? WHERE id='fire-conversation'`, sessionSourceCron); err != nil {
+	if _, err := store.DB.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(store.DB), `UPDATE fb_sessions SET source=? WHERE id='fire-conversation'`), sessionSourceCron); err != nil {
 		t.Fatal(err)
 	}
 	insertMemoryThread(t, store, "ordinary", ThreadMemoryEnabled, SessionSourceWebchat, now-8*3600)
@@ -197,7 +198,7 @@ func TestClaimStage1SkipsSubagentConversations(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Unix()
 	insertMemoryThread(t, store, "worker-conversation", ThreadMemoryEnabled, SessionSourceTUI, now-7*3600)
-	if _, err := store.DB.ExecContext(ctx, `UPDATE fb_sessions SET source=? WHERE id='worker-conversation'`, sessionSourceSubagent); err != nil {
+	if _, err := store.DB.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(store.DB), `UPDATE fb_sessions SET source=? WHERE id='worker-conversation'`), sessionSourceSubagent); err != nil {
 		t.Fatal(err)
 	}
 	insertMemoryThread(t, store, "ordinary", ThreadMemoryEnabled, SessionSourceWebchat, now-8*3600)
@@ -231,7 +232,7 @@ func TestNoOutputDeletesPriorOutputAndEnqueuesConsolidation(t *testing.T) {
 	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE thread_id='thread'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("output count=%d err=%v", count, err)
 	}
-	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_memory_jobs WHERE kind=? AND job_key=?`, JobKindConsolidate, consolidateJobKey(store.AgentID(), Scope{Kind: ScopeProject, Key: testProjectKey})).Scan(&count); err != nil || count != 1 {
+	if err := store.DB.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(store.DB), `SELECT COUNT(*) FROM fb_memory_jobs WHERE kind=? AND job_key=?`), JobKindConsolidate, consolidateJobKey(store.AgentID(), Scope{Kind: ScopeProject, Key: testProjectKey})).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("consolidation jobs=%d err=%v", count, err)
 	}
 }

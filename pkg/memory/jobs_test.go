@@ -6,6 +6,7 @@ import (
 	"time"
 
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // TestStage1SkipsBatchSessionsEvenWhenMemoryIsOn pins the generation half of
@@ -27,7 +28,7 @@ func TestStage1SkipsBatchSessionsEvenWhenMemoryIsOn(t *testing.T) {
 	// The process-wide default is "enabled"; the session is born disabled
 	// because of the project it belongs to. Idle long enough to be a candidate,
 	// and with a cwd so the SQL pre-filter cannot be what skips it.
-	if _, err := store.DB.ExecContext(ctx, `UPDATE fb_sessions SET updated_at=?, created_at=?, memory_source=?, cwd=? WHERE id='batch-run'`,
+	if _, err := store.DB.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(store.DB), `UPDATE fb_sessions SET updated_at=?, created_at=?, memory_source=?, cwd=? WHERE id='batch-run'`),
 		now-72*3600, now-73*3600, SessionSourceTUI, testCwd); err != nil {
 		t.Fatal(err)
 	}

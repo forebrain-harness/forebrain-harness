@@ -11,6 +11,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // newInstructionRoots returns an agent's Roots plus a project key with an
@@ -566,7 +567,7 @@ func TestExternalContextPollutesSelectedThreadAndEnqueuesForgetting(t *testing.T
 	if err := store.DB.QueryRowContext(ctx, `SELECT memory_mode FROM fb_sessions WHERE id='thread'`).Scan(&mode); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB.QueryRowContext(ctx, `SELECT status FROM fb_memory_jobs WHERE kind=? AND job_key=?`, JobKindConsolidate, consolidateJobKey(store.AgentID(), scope)).Scan(&status); err != nil {
+	if err := store.DB.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(store.DB), `SELECT status FROM fb_memory_jobs WHERE kind=? AND job_key=?`), JobKindConsolidate, consolidateJobKey(store.AgentID(), scope)).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
 	if mode != threadMemoryPolluted || status != jobStatusPending {
@@ -580,9 +581,9 @@ func TestExternalContextPollutesSelectedThreadAndEnqueuesForgetting(t *testing.T
 // tests want and exactly what these must not use.
 func insertProjectThread(t *testing.T, store *Store, id, cwd string, updatedAt int64) {
 	t.Helper()
-	_, err := store.DB.ExecContext(context.Background(), `INSERT INTO fb_sessions(
+	_, err := store.DB.ExecContext(context.Background(), dbx.Rebind(dbx.DialectOf(store.DB), `INSERT INTO fb_sessions(
 		id,agent_id,title,updated_at,created_at,memory_mode,memory_source,cwd,git_branch
-	) VALUES(?,?,?,?,?,?,?,?,?)`, id, store.AgentID(), id, updatedAt, updatedAt-1,
+	) VALUES(?,?,?,?,?,?,?,?,?)`), id, store.AgentID(), id, updatedAt, updatedAt-1,
 		ThreadMemoryEnabled, SessionSourceTUI, cwd, "main")
 	if err != nil {
 		t.Fatalf("insert thread %s: %v", id, err)
@@ -669,7 +670,7 @@ func TestPhase2SelectionIsClearedPerProject(t *testing.T) {
 
 	for thread := range map[string]struct{}{"alpha-thread": {}, "beta-thread": {}} {
 		var selected int
-		if err := store.DB.QueryRowContext(ctx, `SELECT selected_for_phase2 FROM fb_memory_stage1_outputs WHERE thread_id=?`, thread).Scan(&selected); err != nil {
+		if err := store.DB.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(store.DB), `SELECT selected_for_phase2 FROM fb_memory_stage1_outputs WHERE thread_id=?`), thread).Scan(&selected); err != nil {
 			t.Fatal(err)
 		}
 		if selected != 1 {
@@ -818,7 +819,7 @@ func TestClaimSkipsThreadsWithNoProjectIdentity(t *testing.T) {
 		t.Fatalf("claim carries project key %q", claims[0].Thread.ProjectKey)
 	}
 	var jobs int
-	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_memory_jobs WHERE kind=? AND job_key=?`, JobKindStage1, "no-project").Scan(&jobs); err != nil {
+	if err := store.DB.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(store.DB), `SELECT COUNT(*) FROM fb_memory_jobs WHERE kind=? AND job_key=?`), JobKindStage1, "no-project").Scan(&jobs); err != nil {
 		t.Fatal(err)
 	}
 	if jobs != 0 {
@@ -1090,7 +1091,7 @@ func TestThreadMemoryModeIsTenantScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	var mode string
-	if err := acme.DB.QueryRowContext(ctx, `SELECT memory_mode FROM fb_sessions WHERE id=?`, "acme-thread").Scan(&mode); err != nil {
+	if err := acme.DB.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(acme.DB), `SELECT memory_mode FROM fb_sessions WHERE id=?`), "acme-thread").Scan(&mode); err != nil {
 		t.Fatal(err)
 	}
 	if mode != ThreadMemoryDisabled {

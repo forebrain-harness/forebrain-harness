@@ -310,7 +310,10 @@ var (
 // MySQL refuses a statement that reads the table it is writing, and
 // materialising the rows first is how it is spelled around that.
 const (
-	memJobExistsMySQL      = `SELECT COUNT(*) FROM fb_memory_jobs WHERE kind=? AND job_key=?`
+	memJobExistsMySQL = `SELECT COUNT(*) FROM fb_memory_jobs WHERE kind=? AND job_key=?`
+	// memPhase2OwnedMySQL re-reads a heartbeat's row on MySQL, whose affected
+	// count tells "nothing changed" from "no such row" only together with it.
+	memPhase2OwnedMySQL    = `SELECT COUNT(*) FROM fb_memory_jobs WHERE kind=? AND job_key=? AND agent_id=? AND status=? AND ownership_token=?`
 	memJobClaimInsertMySQL = `INSERT INTO fb_memory_jobs(
 	kind,job_key,agent_id,status,ownership_token,started_at,finished_at,lease_until,retry_at,
 	retry_remaining,last_error,input_watermark,last_success_watermark)
@@ -834,12 +837,27 @@ func (s *Store) HeartbeatGlobalPhase2(ctx context.Context, scope Scope, ownershi
 	if err != nil {
 		return false, err
 	}
-	result, err := dbx.Exec(ctx, s.DB, memPhase2HeartbeatSQL.For(dbx.DialectOf(s.DB)), time.Now().Unix()+phase2LeaseSeconds, JobKindConsolidate, consolidateJobKey(agentID, scope), agentID, jobStatusRunning, ownershipToken)
+	d := dbx.DialectOf(s.DB)
+	result, err := dbx.Exec(ctx, s.DB, memPhase2HeartbeatSQL.For(d), time.Now().Unix()+phase2LeaseSeconds, JobKindConsolidate, consolidateJobKey(agentID, scope), agentID, jobStatusRunning, ownershipToken)
 	if err != nil {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
-	return affected > 0, err
+	if err != nil || affected > 0 {
+		return affected > 0, err
+	}
+	if d != dbx.MySQL {
+		return false, nil
+	}
+	// MySQL counts only the rows a statement changed, and a heartbeat that
+	// asks for the lease the row already holds changes nothing — which is not
+	// the same as having lost the row. The row is read to tell the two apart.
+	var owned int
+	if err := s.DB.QueryRowContext(ctx, memPhase2OwnedMySQL,
+		JobKindConsolidate, consolidateJobKey(agentID, scope), agentID, jobStatusRunning, ownershipToken).Scan(&owned); err != nil {
+		return false, err
+	}
+	return owned > 0, nil
 }
 
 // MarkGlobalPhase2Succeeded records one scope's consolidation pass as done.
