@@ -48,7 +48,7 @@ var (
 		ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
 		WHERE fb_sessions.agent_id=excluded.agent_id`,
 		MySQL: `INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id, project_type)
-		VALUES(?, ?, ?, ?,
+		SELECT ?, ?, ?, ?,
 			CASE WHEN COALESCE(
 				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
 				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
@@ -59,7 +59,7 @@ var (
 			COALESCE(
 				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
 				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
-				'coding'))
+				'coding')
 		ON DUPLICATE KEY UPDATE updated_at=IF(fb_sessions.agent_id=VALUES(agent_id), VALUES(updated_at), updated_at)`,
 		Postgres: `INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id, project_type)
 		VALUES($1, $2, $3, $4,
@@ -395,7 +395,7 @@ SELECT CASE WHEN EXISTS(
 	// (session_id, event_id) the target already holds.
 	forkEventsSQL = dbx.SQL{
 		SQLite:   `INSERT OR IGNORE INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) SELECT ?, event_id, run_id, event_type, payload_json, occurred_at_ms FROM fb_session_events WHERE session_id=? ORDER BY sequence`,
-		MySQL:    `INSERT INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) SELECT ?, event_id, run_id, event_type, payload_json, occurred_at_ms FROM fb_session_events WHERE session_id=? ORDER BY sequence ON DUPLICATE KEY UPDATE sequence=sequence`,
+		MySQL:    `INSERT INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) SELECT ?, event_id, run_id, event_type, payload_json, occurred_at_ms FROM fb_session_events AS src WHERE src.session_id=? ORDER BY src.sequence ON DUPLICATE KEY UPDATE fb_session_events.sequence=fb_session_events.sequence`,
 		Postgres: `INSERT INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) SELECT $1, event_id, run_id, event_type, payload_json, occurred_at_ms FROM fb_session_events WHERE session_id=$2 ORDER BY sequence ON CONFLICT DO NOTHING`,
 	}
 	deleteSessionMessagesSQL = dbx.SQL{
@@ -537,6 +537,11 @@ func sessionModelStampFor(d dbx.Dialect, n int) string {
 		return sessionModelStampSQL
 	}
 	ph := dbx.Placeholder(d, n)
+	if d == dbx.MySQL {
+		// MySQL refuses to read the table it is updating in a subquery; the
+		// derived table materialises the maximum first.
+		return `GREATEST(` + ph + `, COALESCE((SELECT MAX(updated_at) FROM (SELECT updated_at FROM fb_session_model_state) AS fb_session_model_state_max), 0) + 1)`
+	}
 	return `GREATEST(` + ph + `, COALESCE((SELECT MAX(updated_at) FROM fb_session_model_state), 0) + 1)`
 }
 
@@ -702,7 +707,6 @@ func touchSessionModelSelectionSQL(d dbx.Dialect) string {
 		  AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = ? AND source IN (?, ?))`
 	}
 }
-
 // deleteSessionsSpillPathsSQL reads the spilled-output paths a session's tool
 // rows point at. SQLite's json_valid has no PostgreSQL 14 built-in; the column
 // holds what the append paths validated with encoding/json or the empty
@@ -1036,7 +1040,21 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 		return err
 	}
 	if affected == 0 {
-		return fmt.Errorf("%w: %s", ErrSessionNotOwned, id)
+		// MySQL reports 0 both when another primary agent owns the row and
+		// when the row was already current; the owner is fixed at birth, so a
+		// read settles which. SQLite and PostgreSQL answer from the statement
+		// itself, and the read reaches the same verdict.
+		var owner string
+		err := q.QueryRowContext(ctx, sessionOwnerSelectSQL.For(dbx.DialectOf(q)), id).Scan(&owner)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", ErrSessionNotOwned, id)
+		}
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(owner) != s.AgentID() {
+			return fmt.Errorf("%w: %s", ErrSessionNotOwned, id)
+		}
 	}
 	// The session is born with the global approval preset (plan 203 §2b): the
 	// setting is the default a new session starts from, and it is copied into
@@ -3194,31 +3212,38 @@ const (
 // not-found/not-owned error it owes its own caller.
 func (s *SessionStore) setMessageVisibility(ctx context.Context, q dbtx, rowID int64, to string, from []string, sessionID string, role string) (bool, error) {
 	d := dbx.DialectOf(q)
-	n := 0
-	next := func() string {
-		n++
-		return dbx.Placeholder(d, n)
-	}
-	stmt := `UPDATE fb_messages SET visibility=` + next() + ` WHERE id=` + next()
-	args := []any{to, rowID}
-	if sessionID != "" {
-		stmt += ` AND session_id=` + next()
-		args = append(args, sessionID)
-	}
-	if role != "" {
-		stmt += ` AND role=` + next()
-		args = append(args, role)
-	}
-	if len(from) > 0 {
-		stmt += ` AND visibility IN (` + dbx.Placeholders(d, n+1, len(from)) + `)`
-		for _, src := range from {
+	// matchWhere is the row's identity predicate, numbered from start: the
+	// update's SET placeholder takes the first slot, the probe's takes none.
+	matchWhere := func(start int) (string, []any) {
+		n := start - 1
+		next := func() string {
 			n++
-			args = append(args, src)
+			return dbx.Placeholder(d, n)
 		}
+		where := `id=` + next()
+		args := []any{rowID}
+		if sessionID != "" {
+			where += ` AND session_id=` + next()
+			args = append(args, sessionID)
+		}
+		if role != "" {
+			where += ` AND role=` + next()
+			args = append(args, role)
+		}
+		if len(from) > 0 {
+			where += ` AND visibility IN (` + dbx.Placeholders(d, n+1, len(from)) + `)`
+			for _, src := range from {
+				n++
+				args = append(args, src)
+			}
+		}
+		where += ` AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=` + next() + `)`
+		args = append(args, s.AgentID())
+		return where, args
 	}
-	stmt += ` AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=` + next() + `)`
-	args = append(args, s.AgentID())
-	res, err := q.ExecContext(ctx, stmt, args...)
+	where, whereArgs := matchWhere(2)
+	res, err := q.ExecContext(ctx, `UPDATE fb_messages SET visibility=`+dbx.Placeholder(d, 1)+` WHERE `+where,
+		append([]any{to}, whereArgs...)...)
 	if err != nil {
 		return false, err
 	}
@@ -3226,7 +3251,17 @@ func (s *SessionStore) setMessageVisibility(ctx context.Context, q dbtx, rowID i
 	if err != nil {
 		return false, err
 	}
-	return affected > 0, nil
+	if affected > 0 {
+		return true, nil
+	}
+	// MySQL counts a row whose values do not change as unaffected; the move
+	// still matched it, so ask the row itself.
+	probeWhere, probeArgs := matchWhere(1)
+	var exists int
+	if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fb_messages WHERE `+probeWhere+`)`, probeArgs...).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 // excludeMessageFromTranscript moves a row off the 'transcript' source so it is
