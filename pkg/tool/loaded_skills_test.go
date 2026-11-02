@@ -1027,3 +1027,25 @@ func TestLegacyHistoryFileWithoutEitherTableIsUnreadable(t *testing.T) {
 		t.Fatalf("the unreadable file must still be kept, got %v (%v)", matches, err)
 	}
 }
+
+// No mode opens a history file of its own any more: the store writes into the
+// state database it was handed and creates nothing under the state root. This
+// is the owner's ruling as a check — one main database, in every mode.
+func TestOutputHistoryCreatesNoFileUnderTheStateRoot(t *testing.T) {
+	stateRoot := t.TempDir()
+	store, err := OpenOutputHistory(context.Background(), openStateDBForTest(t), stateRoot)
+	if err != nil {
+		t.Fatalf("open the output history: %v", err)
+	}
+	if _, err := store.Save(Entry{Command: "make all", OriginalOutput: "orig", FilteredOutput: "filt"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateRoot, "state", "outfilter")); !os.IsNotExist(err) {
+		t.Fatalf("the store created %s instead of writing to the state database",
+			filepath.Join(stateRoot, "state", "outfilter"))
+	}
+	stats, err := store.StatsSince(time.Time{})
+	if err != nil || stats.TotalCommands != 1 {
+		t.Fatalf("stats = %+v (%v), want the one row in the state database", stats, err)
+	}
+}
