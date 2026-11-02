@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // TestTenantRowsCannotBeRecordedWithoutAnOwningAgent pins the invariant the
@@ -486,4 +489,188 @@ func TestSQLiteBuildErrorIsOneSentenceWithTheInstallCommand(t *testing.T) {
 	if strings.ContainsAny(prose, "\n") || strings.ContainsAny(prose, ".!?") {
 		t.Fatalf("error %q is more than one sentence", msg)
 	}
+}
+
+// TestOpenFromConfigDefaultsToTheStateFile pins the one case every existing
+// install is in: no database.url means the SQLite file under the home's state
+// directory, exactly where it always was (plan 209, design §2.1).
+func TestOpenFromConfigDefaultsToTheStateFile(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	// The state directory is the caller's to create, as it always was: Open
+	// creates the file, not the tree above it.
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatalf("prepare state directory: %v", err)
+	}
+	db, err := OpenFromConfig(ctx, home, "   ", nil)
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	defer db.Close()
+	if got := dbx.DialectOf(db); got != dbx.SQLite {
+		t.Fatalf("an empty database.url opened %s, want sqlite", got)
+	}
+	var tables int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'fb_sessions'`).Scan(&tables); err != nil {
+		t.Fatalf("query state schema: %v", err)
+	}
+	if tables != 1 {
+		t.Fatalf("the state file at %s holds no fb_sessions table", StateDBPath(home))
+	}
+}
+
+// TestOpenFromConfigRejectsAnUnsupportedScheme fails the open rather than
+// silently falling back to SQLite: a database.url the binary cannot serve must
+// not look like a brand-new empty state.
+func TestOpenFromConfigRejectsAnUnsupportedScheme(t *testing.T) {
+	_, err := OpenFromConfig(context.Background(), t.TempDir(), "oracle://user:pass@db:1521/forebrain", nil)
+	if err == nil {
+		t.Fatal("an unsupported database type opened")
+	}
+	if !strings.Contains(err.Error(), "unsupported database type") {
+		t.Fatalf("error %q does not name the unsupported type", err)
+	}
+}
+
+// TestOpenFromConfigOpensTheNamedServer opens a state database on the MySQL or
+// PostgreSQL server FOREBRAIN_TEST_DATABASE_URL names, proves it is at this
+// binary's version, and proves a second open finds it current instead of
+// recreating it — the read-only open included, which must not migrate.
+func TestOpenFromConfigOpensTheNamedServer(t *testing.T) {
+	raw := strings.TrimSpace(os.Getenv(testDatabaseURLVar))
+	if raw == "" {
+		t.Skipf("%s is not set", testDatabaseURLVar)
+	}
+	ctx := context.Background()
+	scratch := filepath.Join(t.TempDir(), "state.sqlite")
+	target, ok, err := testDatabaseURLFor(scratch)
+	if err != nil || !ok {
+		t.Fatalf("scratch database: %v", err)
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatalf("parse scratch url: %v", err)
+	}
+	want := dbx.MySQL
+	if u.Scheme == "postgres" || u.Scheme == "postgresql" {
+		want = dbx.Postgres
+	}
+
+	db, err := OpenFromConfig(ctx, "", target, nil)
+	if err != nil {
+		t.Fatalf("open %s state database: %v", want, err)
+	}
+	if got := dbx.DialectOf(db); got != want {
+		t.Fatalf("opened %s, want %s", got, want)
+	}
+	version, err := readDialectSchemaVersion(ctx, db, want)
+	if err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if version != stateSchemaVersion {
+		t.Fatalf("state database is at v%d, want v%d", version, stateSchemaVersion)
+	}
+	if want == dbx.MySQL {
+		// The session settings every connection has to carry: byte-exact text
+		// comparison and READ COMMITTED, which is what the store's lock-based
+		// serialisation assumes (plan 209 §3.1).
+		var charset, collation, isolation string
+		if err := db.QueryRowContext(ctx,
+			`SELECT @@character_set_client, @@collation_connection, @@transaction_isolation`).
+			Scan(&charset, &collation, &isolation); err != nil {
+			t.Fatalf("read session settings: %v", err)
+		}
+		if charset != mysqlCharset || collation != mysqlCollation {
+			t.Fatalf("session is %s / %s, want %s / %s", charset, collation, mysqlCharset, mysqlCollation)
+		}
+		if isolation != "READ-COMMITTED" {
+			t.Fatalf("session isolation is %s, want READ-COMMITTED", isolation)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Opening again meets the schema already at this version: no migration, no
+	// DDL, and no error.
+	again, err := OpenFromConfig(ctx, "", target, nil)
+	if err != nil {
+		t.Fatalf("reopen %s state database: %v", want, err)
+	}
+	defer again.Close()
+
+	readOnly, err := OpenFromConfig(ctx, "", target, &OpenOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("read-only open of a current %s database: %v", want, err)
+	}
+	defer readOnly.Close()
+	if got := dbx.DialectOf(readOnly); got != want {
+		t.Fatalf("read-only open reads as %s, want %s", got, want)
+	}
+}
+
+// TestMySQLConfigFromURL pins the conversion of a mysql:// URL into the
+// driver's configuration (plan 209 §3.1): percent-encoded credentials reach
+// the server as written, and the settings the store depends on — utf8mb4_bin,
+// no time parsing, one statement per round trip, READ COMMITTED — cannot be
+// overridden by the URL.
+func TestMySQLConfigFromURL(t *testing.T) {
+	u, err := url.Parse("mysql://us%40er:p%3Ass%2Fword@db.internal:3307/forebrain?tls=true&charset=latin1&collation=utf8mb4_general_ci&parseTime=true&multiStatements=true&transaction_isolation=%27READ-UNCOMMITTED%27&timeout=7s")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cfg, err := mysqlConfigFromURL(u)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if cfg.User != "us@er" || cfg.Passwd != "p:ss/word" {
+		t.Fatalf("credentials came out as %q / %q", cfg.User, cfg.Passwd)
+	}
+	if cfg.Addr != "db.internal:3307" || cfg.Net != "tcp" || cfg.DBName != "forebrain" {
+		t.Fatalf("target came out as %q %q %q", cfg.Net, cfg.Addr, cfg.DBName)
+	}
+	if cfg.ParseTime || cfg.MultiStatements {
+		t.Fatalf("parseTime=%v multiStatements=%v, want both forced off", cfg.ParseTime, cfg.MultiStatements)
+	}
+	if cfg.Collation != mysqlCollation {
+		t.Fatalf("collation %q, want %q", cfg.Collation, mysqlCollation)
+	}
+	// The URL's own charset/collation/parseTime/multiStatements are dropped:
+	// the store decides them. The charset travels as a SET NAMES the driver
+	// issues on every connection, which is why it is not a leftover param.
+	for _, key := range []string{"charset", "collation"} {
+		if got := cfg.Params[key]; got != "" {
+			t.Fatalf("%s survived as %q; the URL may not decide it", key, got)
+		}
+	}
+	if got := cfg.Params["transaction_isolation"]; got != "'READ-COMMITTED'" {
+		t.Fatalf("transaction_isolation %q, want the READ COMMITTED setting every write lock assumes", got)
+	}
+	// A parameter the store does not decide itself is the user's to set.
+	if got := cfg.Params["tls"]; got != "true" {
+		t.Fatalf("tls %q, want true passed through", got)
+	}
+	if got := cfg.Params["timeout"]; got != "7s" {
+		t.Fatalf("timeout %q, want 7s passed through", got)
+	}
+
+	if _, err := mysqlConfigFromURL(mustParseURL(t, "mysql://user:pass@db/forebrain")); err != nil {
+		t.Fatalf("a URL without a port: %v", err)
+	}
+	if _, err := mysqlConfigFromURL(mustParseURL(t, "mysql://user:pass@db:3306/")); err == nil {
+		t.Fatal("a mysql URL naming no database converted")
+	}
+	if _, err := mysqlConfigFromURL(mustParseURL(t, "mysql:///forebrain")); err == nil {
+		t.Fatal("a mysql URL naming no host converted")
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %s: %v", raw, err)
+	}
+	return u
 }

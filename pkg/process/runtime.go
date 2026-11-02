@@ -139,7 +139,13 @@ func SaveConfig(ctx Context) error {
 	if err := os.MkdirAll(filepath.Join(ctx.Home, "state"), 0o755); err != nil {
 		return err
 	}
-	db, err := state.OpenStateFromHome(context.Background(), ctx.Home, nil)
+	// The state database opens where the configuration file's database section
+	// says it lives (plan 209); an empty URL is the home's own SQLite file.
+	databaseURL, err := appcfg.FileDatabaseURL(ctx.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read database.url from %s: %w", ctx.ConfigPath, err)
+	}
+	db, err := state.OpenStateFromHome(context.Background(), ctx.Home, databaseURL)
 	if err != nil {
 		return fmt.Errorf("open state database: %w", err)
 	}

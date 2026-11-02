@@ -17,6 +17,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // buildLegacyV0State creates a state file in the v0 shape — the schema.sql
@@ -1519,9 +1520,22 @@ func TestStateMigrationPreservesModelContextBytes(t *testing.T) {
 func TestFreshStateSchemaIsAtV3(t *testing.T) {
 	ctx := context.Background()
 	db := openStateDB(t)
-	requireSchemaVersion(ctx, t, db, stateSchemaVersion)
-	var name string
-	if err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name='fb_session_model_state'`).Scan(&name); err != nil {
+	// A fresh state schema is at this binary's version whichever engine serves
+	// it: SQLite says so in its own PRAGMA, MySQL and PostgreSQL in the version
+	// row they are created with.
+	if dialect := dbx.DialectOf(db); dialect == dbx.SQLite {
+		requireSchemaVersion(ctx, t, db, stateSchemaVersion)
+	} else {
+		version, err := readDialectSchemaVersion(ctx, db, dialect)
+		if err != nil {
+			t.Fatalf("read %s schema version: %v", dialect, err)
+		}
+		if version != stateSchemaVersion {
+			t.Fatalf("%s schema version = %d, want %d", dialect, version, stateSchemaVersion)
+		}
+	}
+	var rows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_model_state`).Scan(&rows); err != nil {
 		t.Fatalf("fresh schema has no fb_session_model_state: %v", err)
 	}
 }
@@ -3835,4 +3849,46 @@ func configPathValue(doc map[string]any, path string) (any, bool) {
 		}
 	}
 	return current, true
+}
+
+// TestDialectMigrationsMustImplementEveryDialect is the guard behind design
+// §0.4: from the multi-database plans on, every schema migration is written
+// three times. A migration a MySQL or PostgreSQL database still needs but that
+// has no implementation for its engine stops the open — migrateDialectSchema
+// asks this before it applies anything — instead of being skipped and leaving
+// that database at the old shape while it claims the new version.
+//
+// The migrations up to stateSchemaVersion keep an empty MySQL and PostgreSQL
+// implementation on purpose: those databases are created at the current shape
+// and never replay the history SQLite needs (design §2.4).
+func TestDialectMigrationsMustImplementEveryDialect(t *testing.T) {
+	noop := func(context.Context, *sql.Conn) error { return nil }
+	migrations := []schemaMigration{
+		{version: 1, apply: noop, applyMySQL: noop, applyPostgres: noop},
+		{version: 2, apply: noop, applyMySQL: noop},
+		{version: 3, apply: noop, applyPostgres: noop},
+		{version: 4, apply: noop, applyMySQL: noop, applyPostgres: noop},
+	}
+
+	// A database at version 2 still needs 3 and 4: 3 has no MySQL half.
+	if err := requireDialectMigrations(migrations, 2); err == nil {
+		t.Fatal("a migration with no MySQL implementation was accepted")
+	} else if !strings.Contains(err.Error(), "v3") || !strings.Contains(err.Error(), "MySQL") {
+		t.Fatalf("error %q does not name the migration and the missing dialect", err)
+	}
+	// A database at version 1 still needs 2: no PostgreSQL half.
+	if err := requireDialectMigrations(migrations, 1); err == nil {
+		t.Fatal("a migration with no PostgreSQL implementation was accepted")
+	} else if !strings.Contains(err.Error(), "v2") || !strings.Contains(err.Error(), "PostgreSQL") {
+		t.Fatalf("error %q does not name the migration and the missing dialect", err)
+	}
+	// Nothing above the version is consulted: the migrations already applied
+	// are history, and history stays SQLite's.
+	if err := requireDialectMigrations(migrations, 4); err != nil {
+		t.Fatalf("a database at the newest version was refused: %v", err)
+	}
+	// The real table has to satisfy this for a database at the current version.
+	if err := requireDialectMigrations(stateSchemaMigrations, stateSchemaVersion); err != nil {
+		t.Fatalf("the current version needs a migration without a dialect implementation: %v", err)
+	}
 }

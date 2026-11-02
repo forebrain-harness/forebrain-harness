@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // The BM25 half of memory search.
@@ -75,7 +77,7 @@ type fileSignals map[int]*lineSignal
 // would re-index a file over the first's rows without deleting them — rows no
 // file record points at any more, returned by every later search.
 func (s *searchIndex) sync(ctx context.Context, root string, files []indexedFile) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return err
 	}
@@ -126,7 +128,7 @@ type storedFileState struct {
 	lineCount  int64
 }
 
-func storedFiles(ctx context.Context, tx *sql.Tx, root string) (map[string]storedFileState, error) {
+func storedFiles(ctx context.Context, tx *dbx.Tx, root string) (map[string]storedFileState, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT path, size, mtime_unix, terms_revision, first_rowid, line_count FROM fb_memory_index_files WHERE root = ?`, root)
 	if err != nil {
 		return nil, err
@@ -144,7 +146,7 @@ func storedFiles(ctx context.Context, tx *sql.Tx, root string) (map[string]store
 	return stored, rows.Err()
 }
 
-func deleteFileRows(ctx context.Context, tx *sql.Tx, root, path string, prev storedFileState) error {
+func deleteFileRows(ctx context.Context, tx *dbx.Tx, root, path string, prev storedFileState) error {
 	if prev.lineCount > 0 {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_fts WHERE rowid >= ? AND rowid < ?`, prev.firstRowid, prev.firstRowid+prev.lineCount); err != nil {
 			return err
@@ -154,7 +156,7 @@ func deleteFileRows(ctx context.Context, tx *sql.Tx, root, path string, prev sto
 	return err
 }
 
-func replaceFileRows(ctx context.Context, tx *sql.Tx, root string, file indexedFile, prev storedFileState) error {
+func replaceFileRows(ctx context.Context, tx *dbx.Tx, root string, file indexedFile, prev storedFileState) error {
 	if err := deleteFileRows(ctx, tx, root, file.path, prev); err != nil {
 		return err
 	}

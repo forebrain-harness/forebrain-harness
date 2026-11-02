@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
@@ -33,9 +35,17 @@ var (
 // transaction on one connection. It runs with foreign keys off and holds the
 // write lock, so it may rebuild tables wholesale but must leave every
 // reference intact: the caller checks PRAGMA foreign_key_check before commit.
+//
+// apply is SQLite's implementation, the only one the migrations up to
+// stateSchemaVersion have: SQLite databases can be decades of versions old,
+// while a MySQL or PostgreSQL database is created at the current shape and
+// only ever runs migrations written after it (design §0.4, §2.4). From here on
+// a new migration fills in all three, and Open fails when it does not.
 type schemaMigration struct {
-	version int
-	apply   func(ctx context.Context, conn *sql.Conn) error
+	version       int
+	apply         func(ctx context.Context, conn *sql.Conn) error
+	applyMySQL    func(ctx context.Context, conn *sql.Conn) error
+	applyPostgres func(ctx context.Context, conn *sql.Conn) error
 }
 
 var stateSchemaMigrations = []schemaMigration{
@@ -2292,6 +2302,9 @@ func formatBytesV11(n int64) string {
 // exactly that) and then sees the version the first process committed, instead
 // of racing it or failing after the pool's five seconds.
 func migrateStateSchema(ctx context.Context, db *sql.DB, dbPath string) (err error) {
+	if dialect := dbx.DialectOf(db); dialect != dbx.SQLite {
+		return migrateDialectSchema(ctx, db, dialect)
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
@@ -2415,6 +2428,9 @@ func migrateStateSchema(ctx context.Context, db *sql.DB, dbPath string) (err err
 // migration needs, an outdated database is an error rather than a best-effort
 // partial read.
 func requireCurrentSchemaVersion(ctx context.Context, db *sql.DB) error {
+	if dialect := dbx.DialectOf(db); dialect != dbx.SQLite {
+		return requireDialectSchemaVersion(ctx, db, dialect)
+	}
 	var version int
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return err

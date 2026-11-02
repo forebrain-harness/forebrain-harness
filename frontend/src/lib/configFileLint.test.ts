@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { lintConfigYaml, unsupportedYAMLKeys, yamlSyntaxError } from '@/lib/configFileLint'
 
 /** The gateway's own whitelist (config.FileSupportedKeys): gateway.http_addr,
- * gateway.auth.token, credentials.chatgpt — nothing else. */
-const KEYS = ['gateway.http_addr', 'gateway.auth.token', 'credentials.chatgpt']
+ * gateway.auth.token, credentials.chatgpt, database.url — nothing else. */
+const KEYS = ['gateway.http_addr', 'gateway.auth.token', 'credentials.chatgpt', 'database.url']
 
 describe('the configuration file lint', () => {
   it('flags the three syntax errors a YAML parser refuses, each on its own line', () => {

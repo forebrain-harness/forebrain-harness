@@ -2,16 +2,21 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"go.yaml.in/yaml/v2"
 )
 
-// FileRoot is the whole of forebrain.yaml: the two startup sections. The
+// FileRoot is the whole of forebrain.yaml: the three startup sections. The
 // gateway binds before a state database may exist, so its address and token
 // live in the file; the credentials pointer stays a file concern because it
-// names where a login file lives.
+// names where a login file lives. The database section names where the state
+// database itself is, which is the one thing that cannot be stored in it
+// (plan 209).
 //
 // Everything else is stored in fb_config and read from there. The file is
 // parsed into this type rather than into Root, so a key the file still carries
@@ -21,6 +26,15 @@ import (
 type FileRoot struct {
 	Gateway     Gateway            `yaml:"gateway,omitempty" json:"gateway,omitempty"`
 	Credentials CredentialsSection `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	Database    DatabaseSection    `yaml:"database,omitempty" json:"database,omitempty"`
+}
+
+// DatabaseSection is where the state database lives (plan 209, design §2.1).
+// An empty URL is the default: the SQLite file under the home's state
+// directory. Otherwise the URL's scheme picks the engine — mysql:// for MySQL
+// 8.0 or later, postgres:// or postgresql:// for PostgreSQL 14 or later.
+type DatabaseSection struct {
+	URL string `yaml:"url,omitempty" json:"url,omitempty"`
 }
 
 // FileSupportedKeys names every key forebrain.yaml may carry, as the dotted
@@ -34,7 +48,46 @@ func FileSupportedKeys() []string {
 		"gateway.http_addr",
 		"gateway.auth.token",
 		"credentials.chatgpt",
+		"database.url",
 	}
+}
+
+// FileDatabaseURL reads the state database URL the configuration file names,
+// or "" when it names none (no file, no database section, no url) — which is
+// the SQLite default. It reads only this section, and it reads it before any
+// database is open, so it must not depend on Root, the composed configuration,
+// or a .env merge: the URL is where the database is, not something stored in
+// it (plan 209, design §2.1).
+//
+// An unreadable file is an error rather than an empty URL: answering "SQLite"
+// for a file that says "postgres://…" but has a typo would open the wrong
+// database and look like data loss.
+func FileDatabaseURL(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var file FileRoot
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yaml", ".yml":
+		if err := yaml.Unmarshal(b, &file); err != nil {
+			return "", err
+		}
+	case ".json":
+		if err := json.Unmarshal(b, &file); err != nil {
+			return "", err
+		}
+	default:
+		if err := json.Unmarshal(b, &file); err != nil {
+			if yamlErr := yaml.Unmarshal(b, &file); yamlErr != nil {
+				return "", err
+			}
+		}
+	}
+	return strings.TrimSpace(file.Database.URL), nil
 }
 
 // LoadLegacyFileSections reads the runtime sections a file-era forebrain.yaml

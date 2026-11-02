@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/google/uuid"
 )
 
@@ -582,7 +583,7 @@ func (s *RunStore) SetWaitingAction(ctx context.Context, runID string, w Wait) e
 		return fmt.Errorf("nil db")
 	}
 	now := time.Now().Unix()
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return err
 	}
@@ -1293,7 +1294,7 @@ func (s *RunStore) ReapAbandonedRuns(ctx context.Context, now time.Time) ([]Aban
 	// before the renewal does; reaping then would end a live run as "stopped
 	// before it finished" while it goes on to report its own, real ending.
 	self := strings.TrimSpace(s.Owner)
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return nil, err
 	}

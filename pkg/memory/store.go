@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 const (
@@ -225,7 +227,7 @@ func (s *Store) DeleteThreadMemory(ctx context.Context, threadID string) error {
 	if err != nil {
 		return err
 	}
-	return s.withImmediate(ctx, func(tx *sql.Tx) error {
+	return s.withImmediate(ctx, func(tx *dbx.Tx) error {
 		var selected int
 		var projectKey string
 		err := tx.QueryRowContext(ctx, `SELECT selected_for_phase2, project_key FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`, threadID, agentID).Scan(&selected, &projectKey)
@@ -294,7 +296,7 @@ func (s *Store) AdvanceStage1Watermark(ctx context.Context, threadID, ownershipT
 	}
 	threadID = strings.TrimSpace(threadID)
 	owned := false
-	err = s.withImmediate(ctx, func(tx *sql.Tx) error {
+	err = s.withImmediate(ctx, func(tx *dbx.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE fb_memory_jobs SET status=?,finished_at=?,lease_until=NULL,last_error=NULL,last_success_watermark=input_watermark
 			WHERE kind=? AND job_key=? AND agent_id=? AND status=? AND ownership_token=?`,
 			jobStatusDone, time.Now().Unix(), JobKindStage1, threadID, agentID, jobStatusRunning, ownershipToken)
@@ -411,7 +413,7 @@ func (s *Store) UpdateUsage(ctx context.Context, threadIDs []string, at int64) e
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return err
 	}
@@ -483,7 +485,7 @@ func (s *Store) Reset(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return err
 	}
@@ -510,7 +512,7 @@ func (s *Store) ResetScope(ctx context.Context, scope Scope) error {
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return err
 	}
@@ -574,8 +576,8 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 // opens every transaction IMMEDIATE, so the write lock is taken before the
 // first read and a reader-turned-writer queues behind busy_timeout instead of
 // failing mid-transaction with SQLITE_BUSY_SNAPSHOT.
-func (s *Store) withImmediate(ctx context.Context, fn func(*sql.Tx) error) (err error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+func (s *Store) withImmediate(ctx context.Context, fn func(*dbx.Tx) error) (err error) {
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return err
 	}

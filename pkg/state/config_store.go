@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // ConfigStore reads and writes the install's runtime configuration, the
@@ -118,7 +120,7 @@ func (s *ConfigStore) UpdateSection(ctx context.Context, section string, fn func
 	if section == "" {
 		return fmt.Errorf("config section name required")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return err
 	}
@@ -184,7 +186,7 @@ func (s *ConfigStore) UpdateSections(ctx context.Context, sections []string, fn 
 	if len(names) == 0 {
 		return fmt.Errorf("config section name required")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return err
 	}
@@ -238,7 +240,7 @@ func (s *ConfigStore) ReplaceAll(ctx context.Context, sections map[string]json.R
 	if !s.ok() {
 		return fmt.Errorf("config store unavailable")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return err
 	}

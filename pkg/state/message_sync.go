@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 func (s *SessionStore) AppendMessageSequence(ctx context.Context, sessionID string, messages []llm.Message, model string, usageJSON string) error {
@@ -43,7 +44,7 @@ func (s *SessionStore) AppendMessageSequenceForRun(ctx context.Context, sessionI
 	// Reading the stored tail, planning the append, and writing it happen in
 	// one IMMEDIATE transaction: two concurrent writers reconciling the same
 	// run would otherwise both compute the same suffix and append it twice.
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return err
 	}
@@ -81,7 +82,7 @@ func (s *SessionStore) AppendNewMessages(ctx context.Context, sessionID, runID s
 	if sessionID == "" {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/google/uuid"
 )
 
@@ -202,7 +203,7 @@ func (s *Store) TryClaimStage1Job(ctx context.Context, threadID string, sourceUp
 	threadID = strings.TrimSpace(threadID)
 	now := time.Now().Unix()
 	token = uuid.NewString()
-	err = s.withImmediate(ctx, func(tx *sql.Tx) error {
+	err = s.withImmediate(ctx, func(tx *dbx.Tx) error {
 		var source int64
 		queryErr := tx.QueryRowContext(ctx, `SELECT source_updated_at FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`, threadID, agentID).Scan(&source)
 		if queryErr == nil && source >= sourceUpdatedAt {
@@ -292,7 +293,7 @@ func (s *Store) MarkStage1Succeeded(ctx context.Context, threadID, projectKey, o
 		return false, err
 	}
 	owned := false
-	err = s.withImmediate(ctx, func(tx *sql.Tx) error {
+	err = s.withImmediate(ctx, func(tx *dbx.Tx) error {
 		var err error
 		owned, err = markStage1SucceededOn(ctx, tx, agentID, threadID, projectKey, ownershipToken, sourceUpdatedAt, rawMemory, rolloutSummary, rolloutSlug, lastMessageRowID)
 		return err
@@ -307,7 +308,7 @@ func (s *Store) MarkStage1Succeeded(ctx context.Context, threadID, projectKey, o
 // so a caller that has none has nothing valid to write. lastMessageRowID is the
 // transcript cursor the extraction ended on: it replaces the row's previous
 // one, so the next pass starts after exactly the messages this one consumed.
-func markStage1SucceededOn(ctx context.Context, tx *sql.Tx, agentID, threadID, projectKey, ownershipToken string, sourceUpdatedAt int64, rawMemory, rolloutSummary string, rolloutSlug *string, lastMessageRowID int64) (bool, error) {
+func markStage1SucceededOn(ctx context.Context, tx *dbx.Tx, agentID, threadID, projectKey, ownershipToken string, sourceUpdatedAt int64, rawMemory, rolloutSummary string, rolloutSlug *string, lastMessageRowID int64) (bool, error) {
 	projectKey = strings.TrimSpace(projectKey)
 	if projectKey == "" {
 		return false, fmt.Errorf("project_key is required")
@@ -358,7 +359,7 @@ func (s *Store) CompleteStage1WithEvidence(ctx context.Context, threadID, projec
 	if err != nil {
 		return false, err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
 	if err != nil {
 		return false, err
 	}
@@ -393,7 +394,7 @@ func (s *Store) MarkStage1SucceededNoOutput(ctx context.Context, threadID, owner
 		return false, err
 	}
 	owned := false
-	err = s.withImmediate(ctx, func(tx *sql.Tx) error {
+	err = s.withImmediate(ctx, func(tx *dbx.Tx) error {
 		now := time.Now().Unix()
 		result, err := tx.ExecContext(ctx, `UPDATE fb_memory_jobs SET status=?,finished_at=?,lease_until=NULL,last_error=NULL,last_success_watermark=input_watermark
 			WHERE kind=? AND job_key=? AND agent_id=? AND status=? AND ownership_token=?`, jobStatusDone, now, JobKindStage1, strings.TrimSpace(threadID), agentID, jobStatusRunning, ownershipToken)
@@ -493,7 +494,7 @@ func (s *Store) TryClaimGlobalPhase2(ctx context.Context, scope Scope) (claim Ph
 	jobKey := consolidateJobKey(agentID, scope)
 	now := time.Now().Unix()
 	token := uuid.NewString()
-	err = s.withImmediate(ctx, func(tx *sql.Tx) error {
+	err = s.withImmediate(ctx, func(tx *dbx.Tx) error {
 		var status string
 		var leaseUntil, retryAt, inputWatermark, finishedAt sql.NullInt64
 		var lastError sql.NullString
@@ -576,7 +577,7 @@ func (s *Store) MarkGlobalPhase2Succeeded(ctx context.Context, scope Scope, owne
 		return false, err
 	}
 	owned := false
-	err = s.withImmediate(ctx, func(tx *sql.Tx) error {
+	err = s.withImmediate(ctx, func(tx *dbx.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE fb_memory_jobs SET status=?,finished_at=?,lease_until=NULL,last_error=NULL,
 			last_success_watermark=MAX(COALESCE(last_success_watermark,0),?)
 			WHERE kind=? AND job_key=? AND agent_id=? AND status=? AND ownership_token=?`, jobStatusDone, time.Now().Unix(), watermark, JobKindConsolidate, consolidateJobKey(agentID, scope), agentID, jobStatusRunning, ownershipToken)

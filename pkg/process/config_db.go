@@ -426,7 +426,9 @@ func readStartupConfig(ctx context.Context, home string) (appcfg.Root, bool, err
 //
 // The database opens read-only: this path runs in commands that must not
 // migrate anything, and a database needing migration is exactly the case
-// where the file-era configuration is the right answer.
+// where the file-era configuration is the right answer. Where it lives comes
+// from the file's database section, which the state database cannot hold
+// (plan 209).
 func ComposedStartupConfig(ctx context.Context, home string) (appcfg.Root, bool, error) {
 	// The same loose path resolution the startup resolve uses: a home with
 	// no config file at all has nothing to compose either way.
@@ -434,7 +436,11 @@ func ComposedStartupConfig(ctx context.Context, home string) (appcfg.Root, bool,
 	if err != nil {
 		cfgPath = homepkg.ConfigPath(home)
 	}
-	db, err := state.Open(ctx, state.StateDBPath(home), &state.OpenOptions{ReadOnly: true})
+	databaseURL, err := appcfg.FileDatabaseURL(cfgPath)
+	if err != nil {
+		return appcfg.Root{}, false, fmt.Errorf("read database.url from %s: %w", cfgPath, err)
+	}
+	db, err := state.OpenFromConfig(ctx, home, databaseURL, &state.OpenOptions{ReadOnly: true})
 	if err != nil {
 		return appcfg.Root{}, false, nil
 	}

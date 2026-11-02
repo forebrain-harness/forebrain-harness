@@ -686,14 +686,20 @@ func TestSameLayerEdgesAreEnumerated(t *testing.T) {
 }
 
 // maxPackageCount is the ratchet on pkg's breadth. OpenCode's two new provider
-// packages (pkg/llm/opencode, pkg/llm/google) raised it from 30.
-const maxPackageCount = 32
+// packages (pkg/llm/opencode, pkg/llm/google) raised it from 30; pkg/state/dbx
+// raised it from 32, the dialect layer plan 209 requires (one statement per
+// dialect, the write lock, the error classification) so that pkg/state itself
+// does not grow a second axis inside the store it already is.
+const maxPackageCount = 33
 
-// allowedLLMSubpackage reports whether a depth-2 path under pkg/ is one of the
-// packages the llm layer is allowed to split into.
-func allowedLLMSubpackage(rel string) bool {
+// allowedSubpackage reports whether a depth-2 path under pkg/ is one of the
+// packages a layer is allowed to split into: the llm layer's provider adapters
+// and the state layer's database dialect layer.
+func allowedSubpackage(rel string) bool {
 	switch rel {
 	case "llm/anthropic", "llm/openai", "llm/opencode", "llm/google", "llm/hftok":
+		return true
+	case "state/dbx":
 		return true
 	}
 	return false
@@ -727,8 +733,11 @@ func TestPackageShape(t *testing.T) {
 		// The only depth-2 packages allowed: the provider adapters under
 		// pkg/llm (anthropic, openai, opencode, google), plus pkg/llm/hftok,
 		// the leaf counting package (stdlib + the tokenizers binding only)
-		// that sits in the llm layer.
-		if len(parts) > 2 || (len(parts) == 2 && !allowedLLMSubpackage(strings.Join(parts, "/"))) {
+		// that sits in the llm layer — and pkg/state/dbx, the database
+		// dialect layer plan 209 puts beside the store: it depends on three
+		// drivers and on nothing in this repository, so it is a leaf the
+		// store composes rather than a second domain in it.
+		if len(parts) > 2 || (len(parts) == 2 && !allowedSubpackage(strings.Join(parts, "/"))) {
 			t.Fatalf("package path %q is deeper than the allowed shape", filepath.ToSlash(rel))
 		}
 		if blacklist[parts[len(parts)-1]] {

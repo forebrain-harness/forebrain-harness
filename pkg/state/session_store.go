@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 type SessionStore struct {
@@ -485,7 +486,7 @@ func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (Sessio
 	if len(cleaned) == 0 {
 		return SessionLeftovers{}, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return SessionLeftovers{}, err
 	}
@@ -2278,7 +2279,7 @@ func nullIfEmpty(v string) any {
 // only while it still equals the id, so two racing first messages cannot both
 // claim the naming and a title a caller set by hand survives.
 func (s *SessionStore) appendRow(ctx context.Context, row messageRow) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -2585,7 +2586,7 @@ func (s *SessionStore) RepairDanglingToolResults(ctx context.Context, sessionID 
 	// The walk and the repairs it plans run in one transaction, so a second
 	// writer appending to the same tail mid-repair cannot strand rows the
 	// walk already judged.
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -2751,7 +2752,7 @@ func (s *SessionStore) AppendCompactCheckpoint(ctx context.Context, sessionID st
 	if !json.Valid([]byte(partsJSON)) {
 		return fmt.Errorf("invalid parts json")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return err
 	}
@@ -2802,7 +2803,7 @@ func (s *SessionStore) ForkInto(ctx context.Context, sourceID, targetID string) 
 	if err := s.Ensure(ctx, targetID, targetID); err != nil {
 		return err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return err
 	}

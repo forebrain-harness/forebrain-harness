@@ -333,9 +333,14 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	}
 	// The state database opens before anything consumes the runtime
 	// configuration: the composed configuration reads every runtime section
-	// from it (plan 187). OpenStateFromHome takes no data from the
-	// configuration — its cfg parameter has never been read.
-	sqlDB, err := state.OpenStateFromHome(ctx, root, nil)
+	// from it (plan 187). Where the database is comes from the file's own
+	// database section, which is the one thing the database cannot hold
+	// (plan 209): nothing is read out of it to find it.
+	databaseURL, err := appcfg.FileDatabaseURL(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("read database.url from %s: %w", cfgPath, err)
+	}
+	sqlDB, err := state.OpenStateFromHome(ctx, root, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

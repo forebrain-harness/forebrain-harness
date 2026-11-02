@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // ProjectChannel is one delivery channel a project owns: the bot or webhook
@@ -216,7 +218,7 @@ ON CONFLICT(project_id, kind) DO UPDATE SET
 		// The unique index is the race-free authority; a concurrent insert of
 		// the same account between the check above and this write is refused
 		// here rather than surfacing as a constraint error.
-		if strings.Contains(err.Error(), "idx_fb_project_channels_account") {
+		if dbx.IsUniqueViolation(err) {
 			return ErrChannelAccountTaken{}
 		}
 		return err

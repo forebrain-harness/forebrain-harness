@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	sqlite3 "github.com/mattn/go-sqlite3"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // Memory scopes for a project.
@@ -496,7 +496,7 @@ func (s *ProjectStore) Create(ctx context.Context, in CreateProjectInput) (Proje
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.LastAttachDir, p.ProjectType, p.CreatedAt, p.UpdatedAt, encodeTaskNotify(p.TaskNotify), boolInt(p.BatchSandbox))
 	if err != nil {
-		if isUniqueConstraint(err) {
+		if dbx.IsUniqueViolation(err) {
 			if existing, ok, getErr := s.GetByRoot(ctx, root); getErr == nil && ok {
 				return existing, ErrProjectRootTaken
 			}
@@ -504,13 +504,6 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		return Project{}, err
 	}
 	return p, nil
-}
-
-// isUniqueConstraint reports whether err is SQLite's UNIQUE-constraint
-// failure, the conflict the root index raises.
-func isUniqueConstraint(err error) bool {
-	var sqliteErr sqlite3.Error
-	return errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
 }
 
 // FindOrCreateByRoot returns this agent's project bound to root, creating one
@@ -742,7 +735,7 @@ func (s *ProjectStore) Delete(ctx context.Context, id string) error {
 		return ErrProjectNotFound
 	}
 	id = strings.TrimSpace(id)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return err
 	}

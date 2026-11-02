@@ -502,7 +502,7 @@ func TestConfigFileSchemaNamesTheSupportedKeys(t *testing.T) {
 		Keys []string `json:"keys"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-	require.Equal(t, []string{"gateway.http_addr", "gateway.auth.token", "credentials.chatgpt"}, got.Keys)
+	require.Equal(t, []string{"gateway.http_addr", "gateway.auth.token", "credentials.chatgpt", "database.url"}, got.Keys)
 }
 
 // The configuration editor edits forebrain.yaml as a file (plan 191 §3.2):

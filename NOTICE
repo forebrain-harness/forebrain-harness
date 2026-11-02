@@ -14,6 +14,14 @@ The forebrain binary statically links the following third-party libraries:
 - Oniguruma (BSD 2-Clause) — regular expressions used by tokenizers,
   https://github.com/kkos/oniguruma
 
+The binary also statically links the database drivers a state database hosted
+on MySQL or PostgreSQL is reached through (both pure Go):
+
+- go-sql-driver/mysql 1.10.1 (Mozilla Public License 2.0) — MySQL protocol
+  driver, https://github.com/go-sql-driver/mysql
+- jackc/pgx/v5 5.12.0 (MIT) — PostgreSQL protocol driver, used through its
+  database/sql adapter, https://github.com/jackc/pgx
+
 The tokenizer files under assets/tokenizers are third-party works. Each
 directory carries its own LICENSE, and assets/tokenizers/README.md records the
 source repository and license of every file.

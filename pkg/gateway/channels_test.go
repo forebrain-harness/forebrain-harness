@@ -44,7 +44,7 @@ func twoAgentChannelServer(t *testing.T, home string) *Server {
 		"acme": {Primary: true},
 	}
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
-	db, err := state.OpenStateFromHome(context.Background(), home, cfg)
+	db, err := state.OpenStateFromHome(context.Background(), home, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 

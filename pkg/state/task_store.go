@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // Task is one row of fb_tasks: the business task a batch project runs.
@@ -236,7 +238,7 @@ func (s *ProjectStore) AddTaskExecution(ctx context.Context, taskID, sessionID, 
 	if root == "" {
 		return TaskExecution{}, fmt.Errorf("task execution needs the project root")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return TaskExecution{}, err
 	}
@@ -320,7 +322,7 @@ func (s *ProjectStore) StartTaskExecution(ctx context.Context, sessionID, expect
 	default:
 		return TaskExecution{}, fmt.Errorf("task execution can only start from pending or stopped, not %q", expectedStatus)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return TaskExecution{}, err
 	}
@@ -383,7 +385,7 @@ func (s *ProjectStore) MarkExecutionEnded(ctx context.Context, sessionID, status
 		return fmt.Errorf("task execution cannot end as %q", status)
 	}
 	sessionID = strings.TrimSpace(sessionID)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
 		return err
 	}
@@ -503,7 +505,7 @@ SELECT e.session_id, e.status
 
 // executionForSessionTx reads one execution and its task inside a
 // transaction, refusing a conversation that is not a task of this agent.
-func executionForSessionTx(ctx context.Context, tx *sql.Tx, sessionID, agentID string) (TaskExecution, Task, error) {
+func executionForSessionTx(ctx context.Context, tx *dbx.Tx, sessionID, agentID string) (TaskExecution, Task, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return TaskExecution{}, Task{}, ErrTaskNotFound

@@ -11,6 +11,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // Session statuses recorded in the report.
@@ -520,7 +521,7 @@ func importOneSession(ctx context.Context, opts *Options, unit sessionUnit, pars
 		return outcome, 0
 	}
 
-	tx, err := opts.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, opts.DB, nil)
 	if err != nil {
 		outcome.Status = StatusFailed
 		outcome.Reason = err.Error()
@@ -623,7 +624,7 @@ func appendSessionDelta(ctx context.Context, opts *Options, ledger *unitLedger, 
 		outcome.Reason = ""
 		return outcome, len(newRows)
 	}
-	tx, err := opts.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, opts.DB, nil)
 	if err != nil {
 		outcome.Status = StatusFailed
 		outcome.Reason = err.Error()
@@ -672,7 +673,7 @@ func rebindMigrated(ctx context.Context, opts *Options, targetID string, parsed 
 		outcome.Reason = err.Error()
 		return outcome, 0
 	}
-	tx, err := opts.DB.BeginTx(ctx, nil)
+	tx, err := dbx.BeginTx(ctx, opts.DB, nil)
 	if err != nil {
 		outcome.Status = StatusFailed
 		outcome.Reason = err.Error()
@@ -733,7 +734,7 @@ func sessionOwner(ctx context.Context, db *sql.DB, sessionID string) (string, st
 // belongs to another primary agent, is not there to link to: the subagent is
 // imported on its own rather than refused by the parent reference or tied to
 // another tenant's conversation.
-func insertSession(ctx context.Context, tx *sql.Tx, opts *Options, targetID, parentID string, parsed *parsedSession, project state.Project) error {
+func insertSession(ctx context.Context, tx *dbx.Tx, opts *Options, targetID, parentID string, parsed *parsedSession, project state.Project) error {
 	initialWindow := parsed.initialWindowID
 	if initialWindow == "" {
 		initialWindow = stableWindowID(parsed.SessionID, "initial")
@@ -778,7 +779,7 @@ func nonZeroTime(v, fallback int64) int64 {
 
 // insertRows appends the mapped rows in transcript order and reports the last
 // boundary row id for the session's compact boundary pointer.
-func insertRows(ctx context.Context, tx *sql.Tx, targetID string, parsed *parsedSession) (int, error) {
+func insertRows(ctx context.Context, tx *dbx.Tx, targetID string, parsed *parsedSession) (int, error) {
 	return insertRowsFiltered(ctx, tx, targetID, parsed.Rows)
 }
 
@@ -786,7 +787,7 @@ func insertRows(ctx context.Context, tx *sql.Tx, targetID string, parsed *parsed
 // boundary among them. The full import passes every row; a delta append
 // passes only the rows the transcript gained, so a boundary the conversation
 // already has never moves the pointer and one the delta brings does.
-func insertRowsFiltered(ctx context.Context, tx *sql.Tx, targetID string, rows []parsedRow) (int, error) {
+func insertRowsFiltered(ctx context.Context, tx *dbx.Tx, targetID string, rows []parsedRow) (int, error) {
 	stmt, err := tx.PrepareContext(ctx, `
 INSERT INTO fb_messages(
   session_id, role, content, created_at, message_id, parts, model,

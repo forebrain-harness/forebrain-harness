@@ -29,7 +29,7 @@ describe('ConfigTab', () => {
       path: '/h/forebrain.yaml',
     })
     vi.spyOn(forebrainApi, 'configFileSchema').mockResolvedValue({
-      keys: ['gateway.http_addr', 'gateway.auth.token', 'credentials.chatgpt'],
+      keys: ['gateway.http_addr', 'gateway.auth.token', 'credentials.chatgpt', 'database.url'],
     })
     vi.spyOn(forebrainApi, 'saveConfigFile').mockResolvedValue({ saved: true })
   })
