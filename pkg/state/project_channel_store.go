@@ -69,6 +69,75 @@ func (s *ProjectChannelStore) ok() bool { return s != nil && s.db != nil }
 
 const projectChannelColumns = `project_id, kind, enabled, config_json, account_key, created_at, updated_at`
 
+// The project channel statements. The upsert conflicts on the primary key
+// (project_id, kind), which is also what a channel's identity is.
+//
+// MySQL has no upsert that names its conflict target: ON DUPLICATE KEY UPDATE
+// fires on *any* unique key, and this table has a second one — the account
+// index — whose row belongs to another project. Letting it fire there would
+// rewrite that project's channel instead of refusing the write, so MySQL gets
+// the update-then-insert pair, run under the global write lock, which raises
+// the same unique violation SQLite's ON CONFLICT(project_id, kind) raises.
+var (
+	projectChannelListSQL = dbx.SQL{
+		SQLite:   `SELECT ` + projectChannelColumns + ` FROM fb_project_channels WHERE project_id=? ORDER BY kind`,
+		MySQL:    `SELECT ` + projectChannelColumns + ` FROM fb_project_channels WHERE project_id=? ORDER BY kind`,
+		Postgres: `SELECT ` + projectChannelColumns + ` FROM fb_project_channels WHERE project_id=$1 ORDER BY kind`,
+	}
+	projectChannelListEnabledSQL = dbx.SQL{
+		SQLite: `
+SELECT pc.project_id, pc.kind, pc.enabled, pc.config_json, pc.account_key, pc.created_at, pc.updated_at
+FROM fb_project_channels pc
+JOIN fb_projects p ON p.id = pc.project_id
+WHERE p.agent_id = ? AND pc.enabled = 1
+ORDER BY pc.project_id, pc.kind`,
+		MySQL: `
+SELECT pc.project_id, pc.kind, pc.enabled, pc.config_json, pc.account_key, pc.created_at, pc.updated_at
+FROM fb_project_channels pc
+JOIN fb_projects p ON p.id = pc.project_id
+WHERE p.agent_id = ? AND pc.enabled = 1
+ORDER BY pc.project_id, pc.kind`,
+		Postgres: `
+SELECT pc.project_id, pc.kind, pc.enabled, pc.config_json, pc.account_key, pc.created_at, pc.updated_at
+FROM fb_project_channels pc
+JOIN fb_projects p ON p.id = pc.project_id
+WHERE p.agent_id = $1 AND pc.enabled = 1
+ORDER BY pc.project_id, pc.kind`,
+	}
+	projectChannelGetSQL = dbx.SQL{
+		SQLite:   `SELECT ` + projectChannelColumns + ` FROM fb_project_channels WHERE project_id=? AND kind=?`,
+		MySQL:    `SELECT ` + projectChannelColumns + ` FROM fb_project_channels WHERE project_id=? AND kind=?`,
+		Postgres: `SELECT ` + projectChannelColumns + ` FROM fb_project_channels WHERE project_id=$1 AND kind=$2`,
+	}
+	projectChannelAccountOwnerSQL = dbx.SQL{
+		SQLite:   `SELECT project_id FROM fb_project_channels WHERE account_key=? AND project_id<>?`,
+		MySQL:    `SELECT project_id FROM fb_project_channels WHERE account_key=? AND project_id<>?`,
+		Postgres: `SELECT project_id FROM fb_project_channels WHERE account_key=$1 AND project_id<>$2`,
+	}
+	projectChannelUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_project_channels (project_id, kind, enabled, config_json, account_key, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?)
+ON CONFLICT(project_id, kind) DO UPDATE SET
+  enabled=excluded.enabled, config_json=excluded.config_json, account_key=excluded.account_key, updated_at=excluded.updated_at`,
+		Postgres: `
+INSERT INTO fb_project_channels (project_id, kind, enabled, config_json, account_key, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT(project_id, kind) DO UPDATE SET
+  enabled=excluded.enabled, config_json=excluded.config_json, account_key=excluded.account_key, updated_at=excluded.updated_at`,
+	}
+	projectChannelDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_project_channels WHERE project_id=? AND kind=?`,
+		MySQL:    `DELETE FROM fb_project_channels WHERE project_id=? AND kind=?`,
+		Postgres: `DELETE FROM fb_project_channels WHERE project_id=$1 AND kind=$2`,
+	}
+	projectOwnedByAgentSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_projects WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT COUNT(*) FROM fb_projects WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT COUNT(*) FROM fb_projects WHERE id=$1 AND agent_id=$2`,
+	}
+)
+
 func scanProjectChannel(scanner interface{ Scan(...any) error }) (ProjectChannel, error) {
 	var ch ProjectChannel
 	var enabled int
@@ -83,7 +152,7 @@ func scanProjectChannel(scanner interface{ Scan(...any) error }) (ProjectChannel
 // learned elsewhere cannot read or change another agent's project.
 func (s *ProjectChannelStore) ownsProject(ctx context.Context, projectID string) (bool, error) {
 	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects WHERE id=? AND agent_id=?`,
+	if err := s.db.QueryRowContext(ctx, projectOwnedByAgentSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(projectID), s.agentID).Scan(&n); err != nil {
 		return false, err
 	}
@@ -103,7 +172,7 @@ func (s *ProjectChannelStore) List(ctx context.Context, projectID string) ([]Pro
 	if !owned {
 		return nil, ErrProjectNotFound
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+projectChannelColumns+` FROM fb_project_channels WHERE project_id=? ORDER BY kind`, projectID)
+	rows, err := s.db.QueryContext(ctx, projectChannelListSQL.For(dbx.DialectOf(s.db)), projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,12 +195,7 @@ func (s *ProjectChannelStore) ListEnabledForAgent(ctx context.Context) ([]Projec
 	if !s.ok() {
 		return nil, fmt.Errorf("project channel store unavailable")
 	}
-	rows, err := s.db.QueryContext(ctx, `
-SELECT pc.project_id, pc.kind, pc.enabled, pc.config_json, pc.account_key, pc.created_at, pc.updated_at
-FROM fb_project_channels pc
-JOIN fb_projects p ON p.id = pc.project_id
-WHERE p.agent_id = ? AND pc.enabled = 1
-ORDER BY pc.project_id, pc.kind`, s.agentID)
+	rows, err := s.db.QueryContext(ctx, projectChannelListEnabledSQL.For(dbx.DialectOf(s.db)), s.agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +216,7 @@ func (s *ProjectChannelStore) Get(ctx context.Context, projectID, kind string) (
 	if !s.ok() {
 		return ProjectChannel{}, false, fmt.Errorf("project channel store unavailable")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+projectChannelColumns+` FROM fb_project_channels WHERE project_id=? AND kind=?`,
+	rows, err := s.db.QueryContext(ctx, projectChannelGetSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(projectID), strings.TrimSpace(kind))
 	if err != nil {
 		return ProjectChannel{}, false, err
@@ -190,8 +254,7 @@ func (s *ProjectChannelStore) Upsert(ctx context.Context, ch ProjectChannel) err
 	key := strings.TrimSpace(ch.AccountKey)
 	if key != "" {
 		var owner string
-		err := s.db.QueryRowContext(ctx,
-			`SELECT project_id FROM fb_project_channels WHERE account_key=? AND project_id<>?`,
+		err := s.db.QueryRowContext(ctx, projectChannelAccountOwnerSQL.For(dbx.DialectOf(s.db)),
 			key, projectID).Scan(&owner)
 		switch {
 		case err == nil:
@@ -208,12 +271,12 @@ func (s *ProjectChannelStore) Upsert(ctx context.Context, ch ProjectChannel) err
 	if configJSON == "" {
 		configJSON = "{}"
 	}
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO fb_project_channels (project_id, kind, enabled, config_json, account_key, created_at, updated_at)
-VALUES (?,?,?,?,?,?,?)
-ON CONFLICT(project_id, kind) DO UPDATE SET
-  enabled=excluded.enabled, config_json=excluded.config_json, account_key=excluded.account_key, updated_at=excluded.updated_at`,
-		projectID, kind, boolToInt(ch.Enabled), configJSON, key, ch.CreatedAt, now)
+	if d := dbx.DialectOf(s.db); d == dbx.MySQL {
+		err = s.upsertChannelMySQL(ctx, projectID, kind, boolToInt(ch.Enabled), configJSON, key, ch.CreatedAt, now)
+	} else {
+		_, err = dbx.Exec(ctx, s.db, projectChannelUpsertSQL.For(d),
+			projectID, kind, boolToInt(ch.Enabled), configJSON, key, ch.CreatedAt, now)
+	}
 	if err != nil {
 		// The unique index is the race-free authority; a concurrent insert of
 		// the same account between the check above and this write is refused
@@ -231,7 +294,44 @@ func (s *ProjectChannelStore) Delete(ctx context.Context, projectID, kind string
 	if !s.ok() {
 		return fmt.Errorf("project channel store unavailable")
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM fb_project_channels WHERE project_id=? AND kind=?`,
+	_, err := dbx.Exec(ctx, s.db, projectChannelDeleteSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(projectID), strings.TrimSpace(kind))
 	return err
+}
+
+// The two statements only MySQL runs, in place of the one upsert. They carry
+// no SQLite text because no SQLite statement says this: a single-statement
+// upsert is what the other two engines have.
+const (
+	projectChannelMySQLCountSQL  = `SELECT COUNT(*) FROM fb_project_channels WHERE project_id=? AND kind=?`
+	projectChannelMySQLUpdateSQL = `UPDATE fb_project_channels SET enabled=?, config_json=?, account_key=?, updated_at=? WHERE project_id=? AND kind=?`
+	projectChannelMySQLInsertSQL = `INSERT INTO fb_project_channels (project_id, kind, enabled, config_json, account_key, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`
+)
+
+// upsertChannelMySQL writes one channel the way SQLite's
+// ON CONFLICT(project_id, kind) does: only a key on the primary key is turned
+// into an update, and an account the table already binds to another project is
+// left for the unique index to refuse. It runs in one transaction, so the pair
+// is as atomic as the other engines' single statement.
+func (s *ProjectChannelStore) upsertChannelMySQL(ctx context.Context, projectID, kind string, enabled int, configJSON, key string, createdAt, now int64) error {
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var existing int
+	if err := tx.QueryRowContext(ctx, projectChannelMySQLCountSQL, projectID, kind).Scan(&existing); err != nil {
+		return err
+	}
+	if existing == 0 {
+		_, err = tx.ExecContext(ctx, projectChannelMySQLInsertSQL,
+			projectID, kind, enabled, configJSON, key, createdAt, now)
+	} else {
+		_, err = tx.ExecContext(ctx, projectChannelMySQLUpdateSQL,
+			enabled, configJSON, key, now, projectID, kind)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
