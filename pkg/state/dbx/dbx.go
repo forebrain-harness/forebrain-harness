@@ -86,6 +86,50 @@ func Placeholders(d Dialect, start, n int) string {
 	return strings.Join(marks, ",")
 }
 
+// Rebind rewrites a SQLite '?'-placeholder statement for d: PostgreSQL numbers
+// its parameters, SQLite and MySQL write every one as '?'. The arguments stay
+// in the order the '?' appear. A '?' inside a single-quoted string literal is
+// left alone, so a statement that carries a literal '?' still rebinds.
+//
+// It is for a statement that is assembled or seeded outside the store's own
+// dbx.SQL arms — a test's fixture, a one-off probe — where writing the same text
+// three times would be more code than the statement is worth.
+func Rebind(d Dialect, query string) string {
+	if d != Postgres {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	inString := false
+	for i := 0; i < len(query); i++ {
+		c := query[i]
+		if inString {
+			b.WriteByte(c)
+			if c == '\'' {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					b.WriteByte(query[i+1])
+					i++
+				} else {
+					inString = false
+				}
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inString = true
+			b.WriteByte(c)
+		case '?':
+			n++
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(n))
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
 // handles maps a registered *sql.DB, and a *sql.Conn taken from one through
 // Conn, to the dialect it speaks.
 var (
