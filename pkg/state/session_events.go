@@ -9,9 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
+	"github.com/google/uuid"
 )
 
 // SessionEventSchemaVersion is the shape of one stored event's payload as the

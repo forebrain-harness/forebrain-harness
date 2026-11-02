@@ -12,9 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
+	"github.com/google/uuid"
 )
 
 var (
