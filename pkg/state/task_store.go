@@ -135,6 +135,141 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 
 const executionColumns = `session_id, task_id, seq, workspace, status, error_code, error_text, started_at, finished_at, created_at`
 
+// The task store's statements. Each SQLite arm is the text this file carried
+// before multi-database support; PostgreSQL numbers its parameters and MySQL
+// takes the same text. The list filter and the IN (…) list are built per
+// dialect too, because SQLite's LIKE ignores ASCII case and MySQL's
+// utf8mb4_bin collation does not.
+var (
+	taskInsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_tasks(` + taskColumns + `)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `INSERT INTO fb_tasks(` + taskColumns + `)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `INSERT INTO fb_tasks(` + taskColumns + `)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+	}
+	taskSelectSQL = dbx.SQL{
+		SQLite:   `SELECT ` + taskColumns + ` FROM fb_tasks WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT ` + taskColumns + ` FROM fb_tasks WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT ` + taskColumns + ` FROM fb_tasks WHERE id=$1 AND agent_id=$2`,
+	}
+	taskNextSeqSQL = dbx.SQL{
+		SQLite:   `SELECT COALESCE(MAX(seq), 0) + 1 FROM fb_task_executions WHERE task_id=?`,
+		MySQL:    `SELECT COALESCE(MAX(seq), 0) + 1 FROM fb_task_executions WHERE task_id=?`,
+		Postgres: `SELECT COALESCE(MAX(seq), 0) + 1 FROM fb_task_executions WHERE task_id=$1`,
+	}
+	executionInsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_task_executions(session_id, task_id, seq, workspace, status, created_at)
+VALUES(?,?,?,?,?,?)`,
+		MySQL: `INSERT INTO fb_task_executions(session_id, task_id, seq, workspace, status, created_at)
+VALUES(?,?,?,?,?,?)`,
+		Postgres: `INSERT INTO fb_task_executions(session_id, task_id, seq, workspace, status, created_at)
+VALUES($1,$2,$3,$4,$5,$6)`,
+	}
+	taskTouchSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_tasks SET updated_at=? WHERE id=?`,
+		MySQL:    `UPDATE fb_tasks SET updated_at=? WHERE id=?`,
+		Postgres: `UPDATE fb_tasks SET updated_at=$1 WHERE id=$2`,
+	}
+	executionForSessionSQL = dbx.SQL{
+		SQLite: `
+SELECT e.session_id, e.task_id, e.seq, e.workspace, e.status, e.error_code, e.error_text, e.started_at, e.finished_at, e.created_at,
+       t.id, t.agent_id, t.project_id, t.title, t.input_text, t.input_set, t.external_ref, t.origin, t.origin_ref, t.created_at, t.updated_at
+  FROM fb_task_executions e
+  JOIN fb_tasks t ON t.id = e.task_id
+ WHERE e.session_id=? AND t.agent_id=?`,
+		MySQL: `
+SELECT e.session_id, e.task_id, e.seq, e.workspace, e.status, e.error_code, e.error_text, e.started_at, e.finished_at, e.created_at,
+       t.id, t.agent_id, t.project_id, t.title, t.input_text, t.input_set, t.external_ref, t.origin, t.origin_ref, t.created_at, t.updated_at
+  FROM fb_task_executions e
+  JOIN fb_tasks t ON t.id = e.task_id
+ WHERE e.session_id=? AND t.agent_id=?`,
+		Postgres: `
+SELECT e.session_id, e.task_id, e.seq, e.workspace, e.status, e.error_code, e.error_text, e.started_at, e.finished_at, e.created_at,
+       t.id, t.agent_id, t.project_id, t.title, t.input_text, t.input_set, t.external_ref, t.origin, t.origin_ref, t.created_at, t.updated_at
+  FROM fb_task_executions e
+  JOIN fb_tasks t ON t.id = e.task_id
+ WHERE e.session_id=$1 AND t.agent_id=$2`,
+	}
+	taskFixInputSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_tasks SET input_text=?, input_set=1, updated_at=? WHERE id=? AND input_set=0`,
+		MySQL:    `UPDATE fb_tasks SET input_text=?, input_set=1, updated_at=? WHERE id=? AND input_set=0`,
+		Postgres: `UPDATE fb_tasks SET input_text=$1, input_set=1, updated_at=$2 WHERE id=$3 AND input_set=0`,
+	}
+	executionStartSQL = dbx.SQL{
+		SQLite: `UPDATE fb_task_executions
+   SET status=?, started_at=?, finished_at=NULL, error_code='', error_text=''
+ WHERE session_id=? AND status=?`,
+		MySQL: `UPDATE fb_task_executions
+   SET status=?, started_at=?, finished_at=NULL, error_code='', error_text=''
+ WHERE session_id=? AND status=?`,
+		Postgres: `UPDATE fb_task_executions
+   SET status=$1, started_at=$2, finished_at=NULL, error_code='', error_text=''
+ WHERE session_id=$3 AND status=$4`,
+	}
+	executionEndSQL = dbx.SQL{
+		SQLite: `UPDATE fb_task_executions
+   SET status=?, error_code=?, error_text=?, finished_at=?
+ WHERE session_id=?`,
+		MySQL: `UPDATE fb_task_executions
+   SET status=?, error_code=?, error_text=?, finished_at=?
+ WHERE session_id=?`,
+		Postgres: `UPDATE fb_task_executions
+   SET status=$1, error_code=$2, error_text=$3, finished_at=$4
+ WHERE session_id=$5`,
+	}
+	executionNotifyErrorSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_task_executions SET notify_error=?
+ WHERE session_id=?
+   AND task_id IN (SELECT id FROM fb_tasks WHERE agent_id=?)`,
+		MySQL: `
+UPDATE fb_task_executions SET notify_error=?
+ WHERE session_id=?
+   AND task_id IN (SELECT id FROM fb_tasks WHERE agent_id=?)`,
+		Postgres: `
+UPDATE fb_task_executions SET notify_error=$1
+ WHERE session_id=$2
+   AND task_id IN (SELECT id FROM fb_tasks WHERE agent_id=$3)`,
+	}
+	executionNotifyErrorSelectSQL = dbx.SQL{
+		SQLite: `
+SELECT COALESCE(e.notify_error, '')
+  FROM fb_task_executions e
+  JOIN fb_tasks t ON t.id = e.task_id
+ WHERE e.session_id=? AND t.agent_id=?`,
+		MySQL: `
+SELECT COALESCE(e.notify_error, '')
+  FROM fb_task_executions e
+  JOIN fb_tasks t ON t.id = e.task_id
+ WHERE e.session_id=? AND t.agent_id=?`,
+		Postgres: `
+SELECT COALESCE(e.notify_error, '')
+  FROM fb_task_executions e
+  JOIN fb_tasks t ON t.id = e.task_id
+ WHERE e.session_id=$1 AND t.agent_id=$2`,
+	}
+	taskExistsSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_tasks WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT COUNT(*) FROM fb_tasks WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT COUNT(*) FROM fb_tasks WHERE id=$1 AND agent_id=$2`,
+	}
+	executionCountSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_task_executions WHERE task_id=?`,
+		MySQL:    `SELECT COUNT(*) FROM fb_task_executions WHERE task_id=?`,
+		Postgres: `SELECT COUNT(*) FROM fb_task_executions WHERE task_id=$1`,
+	}
+	executionPageSQL = dbx.SQL{
+		SQLite: `SELECT ` + executionColumns + ` FROM fb_task_executions
+ WHERE task_id=? ORDER BY seq DESC LIMIT ? OFFSET ?`,
+		MySQL: `SELECT ` + executionColumns + ` FROM fb_task_executions
+ WHERE task_id=? ORDER BY seq DESC LIMIT ? OFFSET ?`,
+		Postgres: `SELECT ` + executionColumns + ` FROM fb_task_executions
+ WHERE task_id=$1 ORDER BY seq DESC LIMIT $2 OFFSET $3`,
+	}
+)
+
 // scanExecution reads one execution row. started_at and finished_at are NULL
 // until their moments happen, which reads as zero.
 func scanExecution(scanner interface{ Scan(...any) error }) (TaskExecution, error) {
@@ -192,8 +327,7 @@ func (s *ProjectStore) CreateTask(ctx context.Context, in Task) (Task, error) {
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO fb_tasks(`+taskColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := dbx.Exec(ctx, s.db, taskInsertSQL.For(dbx.DialectOf(s.db)),
 		t.ID, t.AgentID, t.ProjectID, t.Title, t.InputText, boolInt(t.InputSet),
 		t.ExternalRef, t.Origin, t.OriginRef, t.CreatedAt, t.UpdatedAt); err != nil {
 		return Task{}, err
@@ -206,7 +340,7 @@ func (s *ProjectStore) GetTask(ctx context.Context, id string) (Task, error) {
 	if s == nil || s.db == nil {
 		return Task{}, ErrTaskNotFound
 	}
-	t, err := scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM fb_tasks WHERE id=? AND agent_id=?`,
+	t, err := scanTask(s.db.QueryRowContext(ctx, taskSelectSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(id), s.agentID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrTaskNotFound
@@ -244,7 +378,7 @@ func (s *ProjectStore) AddTaskExecution(ctx context.Context, taskID, sessionID, 
 	}
 	defer func() { _ = tx.Rollback() }()
 	var next int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM fb_task_executions WHERE task_id=?`, taskID).Scan(&next); err != nil {
+	if err := tx.QueryRowContext(ctx, taskNextSeqSQL.For(dbx.DialectOf(tx)), taskID).Scan(&next); err != nil {
 		return TaskExecution{}, err
 	}
 	now := time.Now().Unix()
@@ -256,12 +390,12 @@ func (s *ProjectStore) AddTaskExecution(ctx context.Context, taskID, sessionID, 
 		Status:    TaskStatusPending,
 		CreatedAt: now,
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO fb_task_executions(session_id, task_id, seq, workspace, status, created_at)
-VALUES(?,?,?,?,?,?)`, exec.SessionID, exec.TaskID, exec.Seq, exec.Workspace, exec.Status, exec.CreatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, executionInsertSQL.For(dbx.DialectOf(tx)),
+		exec.SessionID, exec.TaskID, exec.Seq, exec.Workspace, exec.Status, exec.CreatedAt); err != nil {
 		return TaskExecution{}, err
 	}
 	// A new execution is activity on the task: the task list orders by it.
-	if _, err := tx.ExecContext(ctx, `UPDATE fb_tasks SET updated_at=? WHERE id=?`, now, taskID); err != nil {
+	if _, err := tx.ExecContext(ctx, taskTouchSQL.For(dbx.DialectOf(tx)), now, taskID); err != nil {
 		return TaskExecution{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -284,12 +418,7 @@ func (s *ProjectStore) ExecutionForSession(ctx context.Context, sessionID string
 	var started, finished sql.NullInt64
 	var t Task
 	var inputSet int
-	err := s.db.QueryRowContext(ctx, `
-SELECT e.session_id, e.task_id, e.seq, e.workspace, e.status, e.error_code, e.error_text, e.started_at, e.finished_at, e.created_at,
-       t.id, t.agent_id, t.project_id, t.title, t.input_text, t.input_set, t.external_ref, t.origin, t.origin_ref, t.created_at, t.updated_at
-  FROM fb_task_executions e
-  JOIN fb_tasks t ON t.id = e.task_id
- WHERE e.session_id=? AND t.agent_id=?`, sessionID, s.agentID).Scan(
+	err := s.db.QueryRowContext(ctx, executionForSessionSQL.For(dbx.DialectOf(s.db)), sessionID, s.agentID).Scan(
 		&e.SessionID, &e.TaskID, &e.Seq, &e.Workspace, &e.Status, &e.ErrorCode, &e.ErrorText, &started, &finished, &e.CreatedAt,
 		&t.ID, &t.AgentID, &t.ProjectID, &t.Title, &t.InputText, &inputSet, &t.ExternalRef, &t.Origin, &t.OriginRef, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -341,7 +470,7 @@ func (s *ProjectStore) StartTaskExecution(ctx context.Context, sessionID, expect
 	// not record — it is refused, and its own status change rolls back with
 	// the rest of the transaction.
 	if recordInput {
-		res, err := tx.ExecContext(ctx, `UPDATE fb_tasks SET input_text=?, input_set=1, updated_at=? WHERE id=? AND input_set=0`,
+		res, err := tx.ExecContext(ctx, taskFixInputSQL.For(dbx.DialectOf(tx)),
 			inputText, now, task.ID)
 		if err != nil {
 			return TaskExecution{}, err
@@ -350,16 +479,15 @@ func (s *ProjectStore) StartTaskExecution(ctx context.Context, sessionID, expect
 			return TaskExecution{}, ErrTaskInputFixed
 		}
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE fb_task_executions
-   SET status=?, started_at=?, finished_at=NULL, error_code='', error_text=''
- WHERE session_id=? AND status=?`, TaskStatusRunning, now, sessionID, expectedStatus)
+	res, err := tx.ExecContext(ctx, executionStartSQL.For(dbx.DialectOf(tx)),
+		TaskStatusRunning, now, sessionID, expectedStatus)
 	if err != nil {
 		return TaskExecution{}, err
 	}
 	if n, err := res.RowsAffected(); err == nil && n == 0 {
 		return TaskExecution{}, &TaskExecutionStateError{SessionID: sessionID, Status: exec.Status, Want: expectedStatus}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE fb_tasks SET updated_at=? WHERE id=?`, now, task.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, taskTouchSQL.For(dbx.DialectOf(tx)), now, task.ID); err != nil {
 		return TaskExecution{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -395,12 +523,11 @@ func (s *ProjectStore) MarkExecutionEnded(ctx context.Context, sessionID, status
 		return err
 	}
 	now := time.Now().Unix()
-	if _, err := tx.ExecContext(ctx, `UPDATE fb_task_executions
-   SET status=?, error_code=?, error_text=?, finished_at=?
- WHERE session_id=?`, status, code, text, now, exec.SessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, executionEndSQL.For(dbx.DialectOf(tx)),
+		status, code, text, now, exec.SessionID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE fb_tasks SET updated_at=? WHERE id=?`, now, task.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, taskTouchSQL.For(dbx.DialectOf(tx)), now, task.ID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -419,10 +546,7 @@ func (s *ProjectStore) SetExecutionNotifyError(ctx context.Context, sessionID, t
 	if sessionID == "" {
 		return ErrTaskNotFound
 	}
-	res, err := s.db.ExecContext(ctx, `
-UPDATE fb_task_executions SET notify_error=?
- WHERE session_id=?
-   AND task_id IN (SELECT id FROM fb_tasks WHERE agent_id=?)`,
+	res, err := dbx.Exec(ctx, s.db, executionNotifyErrorSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(text), sessionID, s.agentID)
 	if err != nil {
 		return err
@@ -441,11 +565,8 @@ func (s *ProjectStore) ExecutionNotifyError(ctx context.Context, sessionID strin
 		return "", fmt.Errorf("project store unavailable")
 	}
 	var text string
-	err := s.db.QueryRowContext(ctx, `
-SELECT COALESCE(e.notify_error, '')
-  FROM fb_task_executions e
-  JOIN fb_tasks t ON t.id = e.task_id
- WHERE e.session_id=? AND t.agent_id=?`, strings.TrimSpace(sessionID), s.agentID).Scan(&text)
+	err := s.db.QueryRowContext(ctx, executionNotifyErrorSelectSQL.For(dbx.DialectOf(s.db)),
+		strings.TrimSpace(sessionID), s.agentID).Scan(&text)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrTaskNotFound
 	}
@@ -477,7 +598,8 @@ func (s *ProjectStore) ExecutionStatuses(ctx context.Context, sessionIDs []strin
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	d := dbx.DialectOf(s.db)
+	placeholders := dbx.Placeholders(d, 2, len(ids))
 	args := make([]any, 0, len(ids)+1)
 	args = append(args, s.agentID)
 	for _, id := range ids {
@@ -487,7 +609,7 @@ func (s *ProjectStore) ExecutionStatuses(ctx context.Context, sessionIDs []strin
 SELECT e.session_id, e.status
   FROM fb_task_executions e
   JOIN fb_tasks t ON t.id = e.task_id
- WHERE t.agent_id=? AND e.session_id IN (`+placeholders+`)`, args...)
+ WHERE t.agent_id=`+dbx.Placeholder(d, 1)+` AND e.session_id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -514,12 +636,7 @@ func executionForSessionTx(ctx context.Context, tx *dbx.Tx, sessionID, agentID s
 	var started, finished sql.NullInt64
 	var t Task
 	var inputSet int
-	err := tx.QueryRowContext(ctx, `
-SELECT e.session_id, e.task_id, e.seq, e.workspace, e.status, e.error_code, e.error_text, e.started_at, e.finished_at, e.created_at,
-       t.id, t.agent_id, t.project_id, t.title, t.input_text, t.input_set, t.external_ref, t.origin, t.origin_ref, t.created_at, t.updated_at
-  FROM fb_task_executions e
-  JOIN fb_tasks t ON t.id = e.task_id
- WHERE e.session_id=? AND t.agent_id=?`, sessionID, agentID).Scan(
+	err := tx.QueryRowContext(ctx, executionForSessionSQL.For(dbx.DialectOf(tx)), sessionID, agentID).Scan(
 		&e.SessionID, &e.TaskID, &e.Seq, &e.Workspace, &e.Status, &e.ErrorCode, &e.ErrorText, &started, &finished, &e.CreatedAt,
 		&t.ID, &t.AgentID, &t.ProjectID, &t.Title, &t.InputText, &inputSet, &t.ExternalRef, &t.Origin, &t.OriginRef, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -537,7 +654,7 @@ SELECT e.session_id, e.task_id, e.seq, e.workspace, e.status, e.error_code, e.er
 // belongs to another agent.
 func (s *ProjectStore) requireBatchTask(ctx context.Context, taskID string) error {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_tasks WHERE id=? AND agent_id=?`, taskID, s.agentID).Scan(&count)
+	err := s.db.QueryRowContext(ctx, taskExistsSQL.For(dbx.DialectOf(s.db)), taskID, s.agentID).Scan(&count)
 	if err != nil {
 		return err
 	}
@@ -560,20 +677,30 @@ type ListTasksOptions struct {
 
 // taskListWhere is the filter both task-list reads apply, so the page a table
 // draws and the total it pages through always count the same rows.
-func (s *ProjectStore) taskListWhere(projectID string, opts ListTasksOptions) (string, []any) {
-	where := "t.agent_id=? AND t.project_id=?"
+// taskListWhere is the filter both task-list reads apply, so the page a table
+// draws and the total it pages through always count the same rows. The search
+// arm follows each engine's own case rule, as the project list's does.
+func (s *ProjectStore) taskListWhere(d dbx.Dialect, projectID string, opts ListTasksOptions) (string, []any) {
+	where := "t.agent_id=" + dbx.Placeholder(d, 1) + " AND t.project_id=" + dbx.Placeholder(d, 2)
 	args := []any{s.agentID, strings.TrimSpace(projectID)}
 	if q := strings.TrimSpace(opts.Search); q != "" {
-		where += " AND (t.title LIKE ? OR t.external_ref LIKE ? OR t.id LIKE ?)"
 		like := "%" + q + "%"
+		switch d {
+		case dbx.Postgres:
+			where += " AND (t.title ILIKE " + dbx.Placeholder(d, 3) + " OR t.external_ref ILIKE " + dbx.Placeholder(d, 4) + " OR t.id ILIKE " + dbx.Placeholder(d, 5) + ")"
+		case dbx.MySQL:
+			where += " AND (LOWER(t.title) LIKE LOWER(" + dbx.Placeholder(d, 3) + ") OR LOWER(t.external_ref) LIKE LOWER(" + dbx.Placeholder(d, 4) + ") OR LOWER(t.id) LIKE LOWER(" + dbx.Placeholder(d, 5) + "))"
+		default:
+			where += " AND (t.title LIKE " + dbx.Placeholder(d, 3) + " OR t.external_ref LIKE " + dbx.Placeholder(d, 4) + " OR t.id LIKE " + dbx.Placeholder(d, 5) + ")"
+		}
 		args = append(args, like, like, like)
 	}
 	if status := strings.TrimSpace(opts.Status); status != "" {
-		where += " AND (SELECT st.status FROM fb_task_executions st WHERE st.task_id=t.id ORDER BY st.seq DESC LIMIT 1)=?"
+		where += " AND (SELECT st.status FROM fb_task_executions st WHERE st.task_id=t.id ORDER BY st.seq DESC LIMIT 1)=" + dbx.Placeholder(d, len(args)+1)
 		args = append(args, status)
 	}
 	if origin := strings.TrimSpace(opts.Origin); origin != "" {
-		where += " AND t.origin=?"
+		where += " AND t.origin=" + dbx.Placeholder(d, len(args)+1)
 		args = append(args, origin)
 	}
 	return where, args
@@ -588,7 +715,8 @@ func (s *ProjectStore) ListTasksPage(ctx context.Context, projectID string, opts
 		return nil, 0, nil
 	}
 	limit, offset = projectPageWindow(limit, offset)
-	where, args := s.taskListWhere(projectID, opts)
+	d := dbx.DialectOf(s.db)
+	where, args := s.taskListWhere(d, projectID, opts)
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_tasks t WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -606,7 +734,7 @@ SELECT t.id, t.agent_id, t.project_id, t.title, t.input_text, t.input_set, t.ext
    AND e.seq=(SELECT MAX(m.seq) FROM fb_task_executions m WHERE m.task_id=t.id)
  WHERE `+where+`
  ORDER BY t.updated_at DESC, t.id
- LIMIT ? OFFSET ?`, append(args, limit, offset)...)
+ LIMIT `+dbx.Placeholder(d, len(args)+1)+` OFFSET `+dbx.Placeholder(d, len(args)+2), append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -665,14 +793,13 @@ func (s *ProjectStore) ListTaskExecutionsPage(ctx context.Context, taskID string
 	}
 	limit, offset = projectPageWindow(limit, offset)
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_task_executions WHERE task_id=?`, taskID).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, executionCountSQL.For(dbx.DialectOf(s.db)), taskID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if offset >= total {
 		offset = max(total-1, 0) / limit * limit
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+executionColumns+` FROM fb_task_executions
- WHERE task_id=? ORDER BY seq DESC LIMIT ? OFFSET ?`, taskID, limit, offset)
+	rows, err := s.db.QueryContext(ctx, executionPageSQL.For(dbx.DialectOf(s.db)), taskID, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
