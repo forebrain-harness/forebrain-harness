@@ -20,6 +20,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestSessionSourceReadsOnEveryDialect pins the one-row source read the file
+// view makes of fb_sessions: it answers on SQLite, and on MySQL or PostgreSQL
+// when FOREBRAIN_TEST_DATABASE_URL names a server (plans 210-212).
+func TestSessionSourceReadsOnEveryDialect(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.EnsureAt(ctx, "S1", "S1", state.SessionBirth{Source: state.SessionSourceWorkshop}))
+	require.NoError(t, sessions.Ensure(ctx, "S2", "S2"))
+	require.NoError(t, state.NewSessionStore(db, "other").Ensure(ctx, "S3", "S3"))
+
+	s := &Server{Sessions: sessions}
+	source, err := s.sessionSource(ctx, "S1")
+	require.NoError(t, err)
+	require.Equal(t, state.SessionSourceWorkshop, source)
+
+	source, err = s.sessionSource(ctx, "S2")
+	require.NoError(t, err)
+	require.Empty(t, source, "an ordinary conversation has no purpose")
+
+	// Another agent's conversation is not this process's to read.
+	_, err = s.sessionSource(ctx, "S3")
+	require.Error(t, err)
+}
+
 // TestFilesRootFollowsTheSessionsProject pins the file view's root: a
 // conversation's tree, snippet and @ picker all resolve against the project
 // the session belongs to (or, for a not-yet-started conversation, the project
