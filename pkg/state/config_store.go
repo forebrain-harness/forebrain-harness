@@ -23,6 +23,70 @@ type ConfigStore struct {
 	DB *sql.DB
 }
 
+// The configuration and MCP-OAuth statements. Both tables are keyed by the
+// primary key their upsert conflicts on — fb_config by section, fb_mcp_oauth
+// by (project_key, server_name) — so the conflict target is the same one
+// MySQL's ON DUPLICATE KEY UPDATE keys on.
+var (
+	configSectionsSelectSQL = dbx.SQL{
+		SQLite:   `SELECT section, value_json FROM fb_config`,
+		MySQL:    `SELECT section, value_json FROM fb_config`,
+		Postgres: `SELECT section, value_json FROM fb_config`,
+	}
+	configSectionSelectSQL = dbx.SQL{
+		SQLite:   `SELECT value_json FROM fb_config WHERE section = ?`,
+		MySQL:    `SELECT value_json FROM fb_config WHERE section = ?`,
+		Postgres: `SELECT value_json FROM fb_config WHERE section = $1`,
+	}
+	configSectionDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_config WHERE section = ?`,
+		MySQL:    `DELETE FROM fb_config WHERE section = ?`,
+		Postgres: `DELETE FROM fb_config WHERE section = $1`,
+	}
+	configSectionUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)
+ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+		MySQL: `
+INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)
+ON DUPLICATE KEY UPDATE value_json = VALUES(value_json), updated_at_ms = VALUES(updated_at_ms)`,
+		Postgres: `
+INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES ($1,$2,$3)
+ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+	}
+	configSectionsDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_config`,
+		MySQL:    `DELETE FROM fb_config`,
+		Postgres: `DELETE FROM fb_config`,
+	}
+	configSectionInsertSQL = dbx.SQL{
+		SQLite:   `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)`,
+		MySQL:    `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)`,
+		Postgres: `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES ($1,$2,$3)`,
+	}
+	mcpOAuthRowSelectSQL = dbx.SQL{
+		SQLite:   `SELECT value_json FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`,
+		MySQL:    `SELECT value_json FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`,
+		Postgres: `SELECT value_json FROM fb_mcp_oauth WHERE project_key = $1 AND server_name = $2`,
+	}
+	mcpOAuthRowDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`,
+		MySQL:    `DELETE FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`,
+		Postgres: `DELETE FROM fb_mcp_oauth WHERE project_key = $1 AND server_name = $2`,
+	}
+	mcpOAuthRowUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_mcp_oauth (project_key, server_name, value_json, updated_at_ms) VALUES (?,?,?,?)
+ON CONFLICT(project_key, server_name) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+		MySQL: `
+INSERT INTO fb_mcp_oauth (project_key, server_name, value_json, updated_at_ms) VALUES (?,?,?,?)
+ON DUPLICATE KEY UPDATE value_json = VALUES(value_json), updated_at_ms = VALUES(updated_at_ms)`,
+		Postgres: `
+INSERT INTO fb_mcp_oauth (project_key, server_name, value_json, updated_at_ms) VALUES ($1,$2,$3,$4)
+ON CONFLICT(project_key, server_name) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+	}
+)
+
 func (s *ConfigStore) ok() bool { return s != nil && s.DB != nil }
 
 // SectionValidator is the write-side gate UpdateSection runs on every
@@ -84,7 +148,7 @@ func (s *ConfigStore) LoadSections(ctx context.Context) (map[string]json.RawMess
 	if !s.ok() {
 		return nil, fmt.Errorf("config store unavailable")
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT section, value_json FROM fb_config`)
+	rows, err := s.DB.QueryContext(ctx, configSectionsSelectSQL.For(dbx.DialectOf(s.DB)))
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +190,7 @@ func (s *ConfigStore) UpdateSection(ctx context.Context, section string, fn func
 	}
 	defer tx.Rollback()
 	var cur []byte
-	switch err := tx.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = ?`, section).Scan(&cur); {
+	switch err := tx.QueryRowContext(ctx, configSectionSelectSQL.For(tx.Dialect()), section).Scan(&cur); {
 	case err == sql.ErrNoRows:
 		cur = nil
 	case err != nil:
@@ -140,13 +204,11 @@ func (s *ConfigStore) UpdateSection(ctx context.Context, section string, fn func
 		return verr
 	}
 	if next == nil {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM fb_config WHERE section = ?`, section); err != nil {
+		if _, err := tx.ExecContext(ctx, configSectionDeleteSQL.For(tx.Dialect()), section); err != nil {
 			return err
 		}
 	} else {
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+		if _, err := tx.ExecContext(ctx, configSectionUpsertSQL.For(tx.Dialect()),
 			section, string(next), time.Now().UnixMilli()); err != nil {
 			return err
 		}
@@ -194,7 +256,7 @@ func (s *ConfigStore) UpdateSections(ctx context.Context, sections []string, fn 
 	cur := make(map[string]json.RawMessage, len(names))
 	for _, name := range names {
 		var raw []byte
-		switch err := tx.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = ?`, name).Scan(&raw); {
+		switch err := tx.QueryRowContext(ctx, configSectionSelectSQL.For(tx.Dialect()), name).Scan(&raw); {
 		case err == sql.ErrNoRows:
 			cur[name] = nil
 		case err != nil:
@@ -217,14 +279,12 @@ func (s *ConfigStore) UpdateSections(ctx context.Context, sections []string, fn 
 			return verr
 		}
 		if value == nil {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM fb_config WHERE section = ?`, name); err != nil {
+			if _, err := tx.ExecContext(ctx, configSectionDeleteSQL.For(tx.Dialect()), name); err != nil {
 				return err
 			}
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+		if _, err := tx.ExecContext(ctx, configSectionUpsertSQL.For(tx.Dialect()),
 			name, string(value), now); err != nil {
 			return err
 		}
@@ -245,7 +305,7 @@ func (s *ConfigStore) ReplaceAll(ctx context.Context, sections map[string]json.R
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_config`); err != nil {
+	if _, err := tx.ExecContext(ctx, configSectionsDeleteSQL.For(tx.Dialect())); err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()
@@ -257,7 +317,7 @@ func (s *ConfigStore) ReplaceAll(ctx context.Context, sections map[string]json.R
 		if value == nil {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)`,
+		if _, err := tx.ExecContext(ctx, configSectionInsertSQL.For(tx.Dialect()),
 			section, string(value), now); err != nil {
 			return fmt.Errorf("store section %s: %w", section, err)
 		}
@@ -273,7 +333,7 @@ func (s *ConfigStore) LoadCredential(ctx context.Context, section string) (json.
 		return nil, fmt.Errorf("config store unavailable")
 	}
 	var value string
-	switch err := s.DB.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = ?`, strings.TrimSpace(section)).Scan(&value); {
+	switch err := s.DB.QueryRowContext(ctx, configSectionSelectSQL.For(dbx.DialectOf(s.DB)), strings.TrimSpace(section)).Scan(&value); {
 	case err == sql.ErrNoRows:
 		return nil, nil
 	case err != nil:
@@ -292,12 +352,10 @@ func (s *ConfigStore) SaveCredential(ctx context.Context, section string, value 
 		return fmt.Errorf("config section name required")
 	}
 	if value == nil {
-		_, err := s.DB.ExecContext(ctx, `DELETE FROM fb_config WHERE section = ?`, section)
+		_, err := dbx.Exec(ctx, s.DB, configSectionDeleteSQL.For(dbx.DialectOf(s.DB)), section)
 		return err
 	}
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+	_, err := dbx.Exec(ctx, s.DB, configSectionUpsertSQL.For(dbx.DialectOf(s.DB)),
 		section, string(value), time.Now().UnixMilli())
 	return err
 }
@@ -311,8 +369,7 @@ func (s *ConfigStore) LoadMCPOAuthRow(ctx context.Context, projectKey, serverNam
 		return nil, fmt.Errorf("config store unavailable")
 	}
 	var value string
-	switch err := s.DB.QueryRowContext(ctx,
-		`SELECT value_json FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`,
+	switch err := s.DB.QueryRowContext(ctx, mcpOAuthRowSelectSQL.For(dbx.DialectOf(s.DB)),
 		strings.TrimSpace(projectKey), strings.TrimSpace(serverName)).Scan(&value); {
 	case err == sql.ErrNoRows:
 		return nil, nil
@@ -333,12 +390,10 @@ func (s *ConfigStore) SaveMCPOAuthRow(ctx context.Context, projectKey, serverNam
 		return fmt.Errorf("mcp oauth server name required")
 	}
 	if value == nil {
-		_, err := s.DB.ExecContext(ctx, `DELETE FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`, projectKey, serverName)
+		_, err := dbx.Exec(ctx, s.DB, mcpOAuthRowDeleteSQL.For(dbx.DialectOf(s.DB)), projectKey, serverName)
 		return err
 	}
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_mcp_oauth (project_key, server_name, value_json, updated_at_ms) VALUES (?,?,?,?)
-ON CONFLICT(project_key, server_name) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+	_, err := dbx.Exec(ctx, s.DB, mcpOAuthRowUpsertSQL.For(dbx.DialectOf(s.DB)),
 		projectKey, serverName, string(value), time.Now().UnixMilli())
 	return err
 }
