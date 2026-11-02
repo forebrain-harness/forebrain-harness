@@ -8,7 +8,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/architecture",
-      "loc": 257,
+      "loc": 1033,
       "fan_in": 0,
       "fan_out": 0
     },
@@ -26,7 +26,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/config",
-      "loc": 5034,
+      "loc": 5087,
       "fan_in": 15,
       "fan_out": 1
     },
@@ -38,9 +38,9 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
-      "loc": 28116,
+      "loc": 28123,
       "fan_in": 0,
-      "fan_out": 20
+      "fan_out": 21
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/home",
@@ -98,21 +98,21 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
-      "loc": 4954,
+      "loc": 4983,
       "fan_in": 6,
       "fan_out": 5
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/memory",
-      "loc": 6652,
+      "loc": 7295,
       "fan_in": 6,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
-      "loc": 7981,
+      "loc": 8140,
       "fan_in": 1,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/pdf",
@@ -128,13 +128,13 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/process",
-      "loc": 10362,
+      "loc": 10416,
       "fan_in": 2,
-      "fan_out": 22
+      "fan_out": 23
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/run",
-      "loc": 24088,
+      "loc": 24092,
       "fan_in": 3,
       "fan_out": 18
     },
@@ -158,9 +158,15 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/state",
-      "loc": 17618,
+      "loc": 21869,
       "fan_in": 12,
-      "fan_out": 2
+      "fan_out": 3
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/state/dbx",
+      "loc": 498,
+      "fan_in": 5,
+      "fan_out": 0
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry",
@@ -176,7 +182,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
-      "loc": 26744,
+      "loc": 26366,
       "fan_in": 9,
       "fan_out": 9
     },
@@ -316,6 +322,10 @@
     },
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
     },
     {
@@ -415,6 +425,10 @@
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
     },
     {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/memory",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
+    },
+    {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
     },
@@ -441,6 +455,10 @@
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
     },
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
@@ -525,6 +543,10 @@
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
     },
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
@@ -645,6 +667,10 @@
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/state",
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/state",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
     },
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry",
