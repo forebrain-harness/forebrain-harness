@@ -130,7 +130,7 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 		return err
 	}
 	registerMeta(t2, "Use when creating a new file or fully replacing one's contents (requires prior read to overwrite)", "filesystem", event.ToolMeta{Destructive: true})
-	t3, err := NewFileEditToolWithOptions(st, FileEditOptions{CodeIntel: codeIntelOf(rt)})
+	t3, err := NewFileEditToolWithOptions(st, FileEditOptions{CodeIntel: codeIntelOf(rt), Peers: peersOf(rt)})
 	if err != nil {
 		return err
 	}

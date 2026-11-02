@@ -1254,6 +1254,9 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		ApplyPermissionUpdate:        r.ApplyPermissionUpdate,
 		CodeIntel:                    r.CodeIntel,
 		CodeIntelTool:                r.CodeIntelTool,
+		// The same-tree guards' port (plan 198). Nil on a platform without
+		// peer coordination, and every guard then stays quiet.
+		Peers: r.Deps.Peers,
 	}
 	// Reads feed the language servers that are already running (a baseline
 	// for the next edit's diagnostics); they never start one.

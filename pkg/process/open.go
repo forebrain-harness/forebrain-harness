@@ -512,6 +512,11 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// here.
 	env.Deps.MCPResolve = nil
 	env.Deps.MCPDiagnostics = nil
+	// The same-tree guards (plan 198) read their port from the tool runtime the
+	// load below builds, so it has to be there before that load: the port is
+	// built once and outlives the registration, exactly as it does for the peer
+	// tools, which read it again on every call.
+	env.Deps.Peers = env.peerDirectory()
 	runner := &run.Runner{Deps: &env.Deps, Control: env.Control, SkillCommands: run.SkillCommandHooks{
 		Refresh:   turn.RefreshSkills,
 		IsBuiltin: turn.IsBuiltinName,
