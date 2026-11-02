@@ -130,10 +130,18 @@ var (
 // table of the main one.
 //
 // stateRoot locates the pre-migration history file — <state root>/state/
-// outfilter/history.db — and nothing else. An install that still has one hands
-// its rows over here, once, best effort: a history nobody can read is worth
-// less than a start-up that never happens, so a failed import is logged and the
-// store starts empty rather than blocking the caller.
+// outfilter/history.db — and nothing else. Calling this with a state root
+// therefore has a side effect worth knowing about at the call site: an install
+// that still has that file gets its records imported here once, and then the
+// file is deleted, together with the state/outfilter directory when the file
+// was all it held. The main database is the history from then on, so there is
+// nothing left to keep.
+//
+// The import is best effort and never fails the open. A history nobody can read
+// is worth less than a start-up that never happens, so an import that fails is
+// logged once, the file is left untouched under its own name, and the next open
+// retries it. A file that holds no history this store wrote is not one to
+// delete either: it stays exactly where it was found.
 func OpenOutputHistory(ctx context.Context, db *sql.DB, stateRoot string) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("output history: no state database")

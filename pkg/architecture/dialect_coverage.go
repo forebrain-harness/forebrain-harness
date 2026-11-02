@@ -26,6 +26,17 @@ type rawStatement struct {
 type DialectAllowance struct {
 	File   string
 	Reason string
+	// Exception narrows the allowance to the statements its reason explains,
+	// and it is what keeps an allowance from covering a file's next raw
+	// statement by accident. Nil means the whole file is exempt — right for a
+	// file that holds nothing but the foreign-file read itself; a file that
+	// also holds product statements must say which ones it means.
+	Exception func(sql string) bool
+}
+
+// permits reports whether this allowance covers one raw statement.
+func (a DialectAllowance) permits(sql string) bool {
+	return a.Exception == nil || a.Exception(sql)
 }
 
 // dialectAllowlist names the files whose raw literals are not the product's
@@ -45,10 +56,11 @@ var dialectAllowlist = []DialectAllowance{
 	},
 	{
 		File: "pkg/state/output_history.go",
-		Reason: "the tool-output history store belongs to pkg/state, and beside it sits the " +
-			"one-time read of the history file an install had before that table moved into the " +
-			"state database: a foreign SQLite file, read once, that the import never writes. " +
-			"The store's own statements are dbx.SQL arms",
+		Reason: "beside the tool-output history store — whose own statements are all dbx.SQL " +
+			"arms — sits the one-time read of the history file an install had before that table " +
+			"moved into the state database: a foreign SQLite file, read once, that the import " +
+			"never writes. Only that read is exempt, never the file",
+		Exception: func(sql string) bool { return legacyHistoryStatement.MatchString(sql) },
 	},
 	{
 		File: "pkg/migrate/codex.go",
@@ -56,6 +68,13 @@ var dialectAllowlist = []DialectAllowance{
 			"never writes, opened read-only from a snapshot",
 	},
 }
+
+// legacyHistoryStatement recognises the statements the one-time read of a
+// pre-migration history file runs: it asks a foreign SQLite file about its own
+// tables (sqlite_master, PRAGMA) and reads the released `commands` table. It
+// names those constructs rather than the function that reads the file, so a raw
+// statement added to the same file tomorrow is still reported.
+var legacyHistoryStatement = regexp.MustCompile(`(?i)\bsqlite_master\b|\bpragma\b|\bcommands\b`)
 
 // sqliteOnlyMarkers are the constructs that spell a statement for SQLite alone:
 // they are what a translated statement had to stop using.
@@ -158,25 +177,35 @@ func UntranslatedStatements(root string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	allowed := make(map[string]bool, len(dialectAllowlist))
-	for _, entry := range dialectAllowlist {
-		allowed[entry.File] = true
-	}
 	var out []string
 	for _, stmt := range stmts {
-		if allowed[stmt.File] {
+		reason, needs := UntranslatedStatementReason(stmt.File, stmt.SQL)
+		if !needs {
 			continue
 		}
-		if reason, ok := sqliteOnlyReason(stmt.SQL); ok {
-			out = append(out, fmt.Sprintf("%s:%d: %s: %s", stmt.File, stmt.Line, reason, firstSQLWords(stmt.SQL, 12)))
-			continue
-		}
-		if stateTableReference.MatchString(stmt.SQL) {
-			out = append(out, fmt.Sprintf("%s:%d: an fb_ table with no dialect arm: %s",
-				stmt.File, stmt.Line, firstSQLWords(stmt.SQL, 12)))
-		}
+		out = append(out, fmt.Sprintf("%s:%d: %s: %s", stmt.File, stmt.Line, reason, firstSQLWords(stmt.SQL, 12)))
 	}
 	return out, nil
+}
+
+// UntranslatedStatementReason answers for one raw statement: why it needs a
+// dialect arm, and whether it does. It is the whole decision UntranslatedStatements
+// makes, over a file name and a statement rather than over the tree, so the
+// allowance's predicates can be exercised on the statements they claim to
+// explain — and on statements they must not cover.
+func UntranslatedStatementReason(file, sql string) (reason string, needs bool) {
+	for _, entry := range dialectAllowlist {
+		if entry.File == file && entry.permits(sql) {
+			return "", false
+		}
+	}
+	if marker, ok := sqliteOnlyReason(sql); ok {
+		return marker, true
+	}
+	if stateTableReference.MatchString(sql) {
+		return "an fb_ table with no dialect arm", true
+	}
+	return "", false
 }
 
 // DialectAllowances exposes the allowlist to the test, which checks that every
