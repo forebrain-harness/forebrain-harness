@@ -23,7 +23,107 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/google/uuid"
+)
+
+// The file store's statements. Each SQLite arm is the text this file carried
+// before multi-database support; PostgreSQL numbers its parameters, and MySQL
+// takes the same text.
+var (
+	fileUpdateParsedTextSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_files
+SET parse_status=?, parsed_text_path=?, updated_at=?, parse_error=''
+WHERE id=?`,
+		MySQL: `
+UPDATE fb_files
+SET parse_status=?, parsed_text_path=?, updated_at=?, parse_error=''
+WHERE id=?`,
+		Postgres: `
+UPDATE fb_files
+SET parse_status=$1, parsed_text_path=$2, updated_at=$3, parse_error=''
+WHERE id=$4`,
+	}
+	fileUpdateParseFailedSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_files
+SET parse_status=?, parse_error=?, updated_at=?
+WHERE id=?`,
+		MySQL: `
+UPDATE fb_files
+SET parse_status=?, parse_error=?, updated_at=?
+WHERE id=?`,
+		Postgres: `
+UPDATE fb_files
+SET parse_status=$1, parse_error=$2, updated_at=$3
+WHERE id=$4`,
+	}
+	fileInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_files(
+  id, session_id, original_name, media_type, size_bytes, sha256,
+  storage_backend, storage_bucket, storage_key, project_path,
+  parse_status, parsed_text_path, parse_error, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_files(
+  id, session_id, original_name, media_type, size_bytes, sha256,
+  storage_backend, storage_bucket, storage_key, project_path,
+  parse_status, parsed_text_path, parse_error, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_files(
+  id, session_id, original_name, media_type, size_bytes, sha256,
+  storage_backend, storage_bucket, storage_key, project_path,
+  parse_status, parsed_text_path, parse_error, created_at, updated_at
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+	}
+	fileSelectSQL = dbx.SQL{
+		SQLite: `
+SELECT f.id, f.session_id, f.original_name, f.media_type, f.size_bytes, f.sha256,
+       f.storage_backend, f.storage_bucket, f.storage_key, f.project_path,
+       f.parse_status, f.parsed_text_path, f.parse_error, f.created_at, f.updated_at
+FROM fb_files f
+JOIN fb_sessions s ON s.id=f.session_id AND s.agent_id=?
+WHERE f.id=?`,
+		MySQL: `
+SELECT f.id, f.session_id, f.original_name, f.media_type, f.size_bytes, f.sha256,
+       f.storage_backend, f.storage_bucket, f.storage_key, f.project_path,
+       f.parse_status, f.parsed_text_path, f.parse_error, f.created_at, f.updated_at
+FROM fb_files f
+JOIN fb_sessions s ON s.id=f.session_id AND s.agent_id=?
+WHERE f.id=?`,
+		Postgres: `
+SELECT f.id, f.session_id, f.original_name, f.media_type, f.size_bytes, f.sha256,
+       f.storage_backend, f.storage_bucket, f.storage_key, f.project_path,
+       f.parse_status, f.parsed_text_path, f.parse_error, f.created_at, f.updated_at
+FROM fb_files f
+JOIN fb_sessions s ON s.id=f.session_id AND s.agent_id=$1
+WHERE f.id=$2`,
+	}
+	fileProjectRootSQL = dbx.SQL{
+		SQLite: `
+SELECT COALESCE(p.root, '')
+FROM fb_sessions s
+JOIN fb_projects p ON p.id = s.project_id
+WHERE s.id = ?`,
+		MySQL: `
+SELECT COALESCE(p.root, '')
+FROM fb_sessions s
+JOIN fb_projects p ON p.id = s.project_id
+WHERE s.id = ?`,
+		Postgres: `
+SELECT COALESCE(p.root, '')
+FROM fb_sessions s
+JOIN fb_projects p ON p.id = s.project_id
+WHERE s.id = $1`,
+	}
+	messagePartsSQL = dbx.SQL{
+		SQLite:   `SELECT COALESCE(parts, '') FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+		MySQL:    `SELECT COALESCE(parts, '') FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+		Postgres: `SELECT COALESCE(parts, '') FROM fb_messages WHERE id=$1 AND session_id=$2 AND role='user'`,
+	}
 )
 
 type FileStore struct {
@@ -319,10 +419,7 @@ func (s *FileStore) UpdateParsedText(ctx context.Context, fileID string, relpath
 		return fmt.Errorf("file_id and relpath required")
 	}
 	now := time.Now().Unix()
-	_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_files
-SET parse_status=?, parsed_text_path=?, updated_at=?, parse_error=''
-WHERE id=?`,
+	_, err := dbx.Exec(ctx, s.DB, fileUpdateParsedTextSQL.For(dbx.DialectOf(s.DB)),
 		string(ParseStatusDone), filepath.ToSlash(relpath), now, fileID,
 	)
 	return err
@@ -337,10 +434,7 @@ func (s *FileStore) UpdateParseFailed(ctx context.Context, fileID string, errMsg
 		return fmt.Errorf("file_id required")
 	}
 	now := time.Now().Unix()
-	_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_files
-SET parse_status=?, parse_error=?, updated_at=?
-WHERE id=?`,
+	_, err := dbx.Exec(ctx, s.DB, fileUpdateParseFailedSQL.For(dbx.DialectOf(s.DB)),
 		string(ParseStatusFailed), strings.TrimSpace(errMsg), now, fileID,
 	)
 	return err
@@ -350,12 +444,7 @@ func (s *FileStore) insert(ctx context.Context, f *File) error {
 	if f == nil {
 		return fmt.Errorf("nil file")
 	}
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_files(
-  id, session_id, original_name, media_type, size_bytes, sha256,
-  storage_backend, storage_bucket, storage_key, project_path,
-  parse_status, parsed_text_path, parse_error, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := dbx.Exec(ctx, s.DB, fileInsertSQL.For(dbx.DialectOf(s.DB)),
 		f.ID, f.SessionID, f.OriginalName, f.MediaType, f.SizeBytes, f.SHA256,
 		f.StorageBackend, f.StorageBucket, f.StorageKey, f.ProjectPath,
 		f.ParseStatus, f.ParsedTextPath, f.ParseError, f.CreatedAt, f.UpdatedAt,
@@ -375,13 +464,7 @@ func (s *FileStore) Get(ctx context.Context, agentID, id string) (*File, error) 
 		return nil, fmt.Errorf("id required")
 	}
 	var f File
-	err := s.DB.QueryRowContext(ctx, `
-SELECT f.id, f.session_id, f.original_name, f.media_type, f.size_bytes, f.sha256,
-       f.storage_backend, f.storage_bucket, f.storage_key, f.project_path,
-       f.parse_status, f.parsed_text_path, f.parse_error, f.created_at, f.updated_at
-FROM fb_files f
-JOIN fb_sessions s ON s.id=f.session_id AND s.agent_id=?
-WHERE f.id=?`, strings.TrimSpace(agentID), id).Scan(
+	err := s.DB.QueryRowContext(ctx, fileSelectSQL.For(dbx.DialectOf(s.DB)), strings.TrimSpace(agentID), id).Scan(
 		&f.ID, &f.SessionID, &f.OriginalName, &f.MediaType, &f.SizeBytes, &f.SHA256,
 		&f.StorageBackend, &f.StorageBucket, &f.StorageKey, &f.ProjectPath,
 		&f.ParseStatus, &f.ParsedTextPath, &f.ParseError, &f.CreatedAt, &f.UpdatedAt,
@@ -432,11 +515,7 @@ func (s *FileStore) ProjectRootForSession(ctx context.Context, sessionID string)
 		return "", false
 	}
 	var root string
-	err := s.DB.QueryRowContext(ctx, `
-SELECT COALESCE(p.root, '')
-FROM fb_sessions s
-JOIN fb_projects p ON p.id = s.project_id
-WHERE s.id = ?`, sessionID).Scan(&root)
+	err := s.DB.QueryRowContext(ctx, fileProjectRootSQL.For(dbx.DialectOf(s.DB)), sessionID).Scan(&root)
 	if err != nil {
 		return "", false
 	}
@@ -760,8 +839,7 @@ func (s *SessionStore) UserMessageAttachments(ctx context.Context, sessionID str
 		return nil, false, fmt.Errorf("user message attachments: session store unavailable")
 	}
 	var parts string
-	err = s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(parts, '') FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+	err = s.db.QueryRowContext(ctx, messagePartsSQL.For(dbx.DialectOf(s.db)),
 		rowID, strings.TrimSpace(sessionID)).Scan(&parts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil

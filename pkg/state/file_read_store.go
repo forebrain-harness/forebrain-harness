@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // FileReadState is one conversation's read baseline for one path: the version of
@@ -31,6 +33,50 @@ type FileReadState struct {
 
 // fileReadStateColumns is the one column list the reader and the writer share.
 const fileReadStateColumns = `session_id, agent_id, path, mod_time_ns, size, sha256, read_at_ns, touch_kind`
+
+// The read-baseline statements. The conflict target is the primary key
+// (session_id, path) — (session_id, SHA2(path)) on MySQL, which is the same
+// uniqueness over the same rows — so MySQL's ON DUPLICATE KEY UPDATE keys on
+// it the way the other two engines key on ON CONFLICT.
+var (
+	fileReadStateUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_file_read_states(` + fileReadStateColumns + `)
+VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(session_id, path) DO UPDATE SET
+  agent_id=excluded.agent_id,
+  mod_time_ns=excluded.mod_time_ns,
+  size=excluded.size,
+  sha256=excluded.sha256,
+  read_at_ns=excluded.read_at_ns,
+  touch_kind=excluded.touch_kind`,
+		MySQL: `
+INSERT INTO fb_file_read_states(` + fileReadStateColumns + `)
+VALUES(?,?,?,?,?,?,?,?)
+ON DUPLICATE KEY UPDATE
+  agent_id=VALUES(agent_id),
+  mod_time_ns=VALUES(mod_time_ns),
+  size=VALUES(size),
+  sha256=VALUES(sha256),
+  read_at_ns=VALUES(read_at_ns),
+  touch_kind=VALUES(touch_kind)`,
+		Postgres: `
+INSERT INTO fb_file_read_states(` + fileReadStateColumns + `)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT(session_id, path) DO UPDATE SET
+  agent_id=excluded.agent_id,
+  mod_time_ns=excluded.mod_time_ns,
+  size=excluded.size,
+  sha256=excluded.sha256,
+  read_at_ns=excluded.read_at_ns,
+  touch_kind=excluded.touch_kind`,
+	}
+	fileReadStateSelectSQL = dbx.SQL{
+		SQLite:   `SELECT ` + fileReadStateColumns + ` FROM fb_file_read_states WHERE session_id=? AND path=? AND agent_id=?`,
+		MySQL:    `SELECT ` + fileReadStateColumns + ` FROM fb_file_read_states WHERE session_id=? AND path=? AND agent_id=?`,
+		Postgres: `SELECT ` + fileReadStateColumns + ` FROM fb_file_read_states WHERE session_id=$1 AND path=$2 AND agent_id=$3`,
+	}
+)
 
 // SaveFileReadState records that read_file showed this conversation the whole
 // file at Path. A repeated read of the same path overwrites the row: the newest
@@ -70,16 +116,7 @@ func (s *SessionStore) SaveFileReadState(ctx context.Context, in FileReadState) 
 	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `
-INSERT INTO fb_file_read_states(`+fileReadStateColumns+`)
-VALUES(?,?,?,?,?,?,?,?)
-ON CONFLICT(session_id, path) DO UPDATE SET
-  agent_id=excluded.agent_id,
-  mod_time_ns=excluded.mod_time_ns,
-  size=excluded.size,
-  sha256=excluded.sha256,
-  read_at_ns=excluded.read_at_ns,
-  touch_kind=excluded.touch_kind`,
+	if _, err := dbx.Exec(ctx, s.db, fileReadStateUpsertSQL.For(dbx.DialectOf(s.db)),
 		sessionID, s.AgentID(), path, in.ModTimeNS, in.Size, sha, in.ReadAtNS, kind); err != nil {
 		return fmt.Errorf("save file read state for %s: %w", path, err)
 	}
@@ -105,8 +142,7 @@ func (s *SessionStore) FileReadStateForSession(ctx context.Context, sessionID, p
 	}
 	path = filepath.Clean(path)
 	var out FileReadState
-	err := s.db.QueryRowContext(ctx,
-		`SELECT `+fileReadStateColumns+` FROM fb_file_read_states WHERE session_id=? AND path=? AND agent_id=?`,
+	err := s.db.QueryRowContext(ctx, fileReadStateSelectSQL.For(dbx.DialectOf(s.db)),
 		sessionID, path, s.AgentID()).Scan(
 		&out.SessionID, &out.AgentID, &out.Path, &out.ModTimeNS,
 		&out.Size, &out.SHA256, &out.ReadAtNS, &out.TouchKind)
