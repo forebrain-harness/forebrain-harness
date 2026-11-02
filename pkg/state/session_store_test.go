@@ -2806,8 +2806,8 @@ func TestRecentlyActiveSessionsFeedsThePeerListing(t *testing.T) {
 	insert := func(id string, agent string, cwd string, projectType string, updated int64) {
 		t.Helper()
 		if _, err := db.ExecContext(ctx,
-			`INSERT INTO fb_sessions(id, title, updated_at, created_at, agent_id, source, cwd, project_type)
-			 VALUES(?,?,?,?,?,?,?,?)`,
+			dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, title, updated_at, created_at, agent_id, source, cwd, project_type)
+			 VALUES(?,?,?,?,?,?,?,?)`),
 			id, id, updated, updated, agent, "conversation", cwd, projectType); err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
