@@ -892,10 +892,16 @@ VALUES
   (3, 'shell', 'go test', 's-1', 'orig-c', 'filt-c', 50, 50, 0, 1, 1767323160000);`
 
 // A history file from before the table joined the state database is carried
-// into it once, ids and timestamps intact, and then set aside under a name that
-// says so. Nothing is deleted: an install keeps its old file as a backup, and
-// the second open has nothing left to import.
-func TestLegacyHistoryFileIsImportedOnceAndKept(t *testing.T) {
+// into it once, ids and timestamps intact, and then deleted — file and, when
+// the file was all it held, the state/outfilter directory with it. A second open
+// has nothing left to import.
+//
+// The file cannot be imported twice from the same path, because the import that
+// succeeds is the one that removes it: an install only ever sees a second copy
+// if a user restores one from a backup, and that copy is refused by the ids its
+// rows already hold rather than imported again (see
+// TestLegacyHistoryRestoredCopyIsNotImportedTwice).
+func TestLegacyHistoryFileIsImportedOnceAndDeleted(t *testing.T) {
 	stateRoot := t.TempDir()
 	path := writeLegacyHistoryFile(t, stateRoot, legacyV1Shape)
 	ctx := context.Background()
@@ -906,14 +912,13 @@ func TestLegacyHistoryFileIsImportedOnceAndKept(t *testing.T) {
 		t.Fatalf("import the legacy history: %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("the legacy file must be renamed aside, stat err = %v", err)
+		t.Fatalf("the legacy file must be deleted, stat err = %v", err)
 	}
-	aside, err := filepath.Glob(path + ".imported-*")
-	if err != nil || len(aside) != 1 {
-		t.Fatalf("the legacy file must be kept as history.db.imported-<unix>, got %v (%v)", aside, err)
+	if left, err := filepath.Glob(filepath.Join(filepath.Dir(path), "history.db*")); err != nil || len(left) != 0 {
+		t.Fatalf("the legacy file must be deleted, not kept aside: %v (%v)", left, err)
 	}
-	if info, err := os.Stat(aside[0]); err != nil || info.Size() == 0 {
-		t.Fatalf("the kept file must still hold its rows: %v", err)
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatalf("the empty state/outfilter directory must be removed with the file, stat err = %v", err)
 	}
 
 	// The rows are in the main database, under the ids a transcript cites.
@@ -942,8 +947,9 @@ func TestLegacyHistoryFileIsImportedOnceAndKept(t *testing.T) {
 		t.Fatalf("stats after import = %+v, want the seeded totals", stats)
 	}
 
-	// A second open imports nothing again: the file it would have read is no
-	// longer where it looks, so the table keeps its three rows rather than six.
+	// A second open imports nothing again: the file it would have read is gone,
+	// so the table keeps its three rows rather than six, and nothing under the
+	// state root comes back.
 	again, err := OpenOutputHistory(ctx, db, stateRoot)
 	if err != nil {
 		t.Fatalf("second open: %v", err)
@@ -955,8 +961,45 @@ func TestLegacyHistoryFileIsImportedOnceAndKept(t *testing.T) {
 	if stats.TotalCommands != 3 {
 		t.Fatalf("the second open imported the history again: %+v", stats)
 	}
-	if matches, err := filepath.Glob(path + ".imported-*"); err != nil || len(matches) != 1 {
-		t.Fatalf("the second open must not rename anything, got %v (%v)", matches, err)
+	if matches, err := filepath.Glob(filepath.Join(stateRoot, "state", "outfilter", "*")); err != nil || len(matches) != 0 {
+		t.Fatalf("the second open must leave nothing under state/outfilter, got %v (%v)", matches, err)
+	}
+}
+
+// A copy of the history file restored from a backup — the same rows under the
+// same ids the main table already holds — is not imported a second time. The
+// delete-after-import is what makes that the only way to see the file again,
+// and the explicit-id insert is what refuses it: the rows collide with
+// themselves, the transaction rolls back, the file keeps the name it was given
+// and the next open tries it again.
+func TestLegacyHistoryRestoredCopyIsNotImportedTwice(t *testing.T) {
+	stateRoot := t.TempDir()
+	path := writeLegacyHistoryFile(t, stateRoot, legacyV1Shape)
+	ctx := context.Background()
+	db := openStateDBForTest(t)
+
+	if _, err := OpenOutputHistory(ctx, db, stateRoot); err != nil {
+		t.Fatalf("import the legacy history: %v", err)
+	}
+	// The user puts a copy back, exactly as a restore would.
+	writeLegacyHistoryFile(t, stateRoot, legacyV1Shape)
+
+	store, err := OpenOutputHistory(ctx, db, stateRoot)
+	if err != nil {
+		t.Fatalf("a restored copy must not fail the open: %v", err)
+	}
+	stats, err := store.StatsSince(time.Time{})
+	if err != nil {
+		t.Fatalf("StatsSince: %v", err)
+	}
+	if stats.TotalCommands != 3 || stats.SavedTokens != 1300 {
+		t.Fatalf("the restored copy was imported on top of itself: %+v", stats)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("a copy the import refused must be left where it was: %v", err)
+	}
+	if left, err := filepath.Glob(filepath.Join(filepath.Dir(path), "history.db*")); err != nil || len(left) != 1 || left[0] != path {
+		t.Fatalf("the refused copy must keep its own name, got %v (%v)", left, err)
 	}
 }
 
@@ -1010,8 +1053,9 @@ func TestLegacyHistoryCommandsTableIsImported(t *testing.T) {
 	}
 }
 
-// A file that holds nothing this store wrote — neither table — is left exactly
-// where it is, renamed but never rewritten, and the store opens empty.
+// A file that holds nothing this store wrote — neither table — is not a history
+// to import and not one to delete: it goes back under the name it was found
+// under, and the store opens empty.
 func TestLegacyHistoryFileWithoutEitherTableIsUnreadable(t *testing.T) {
 	stateRoot := t.TempDir()
 	path := writeLegacyHistoryFile(t, stateRoot, `CREATE TABLE something_else (id INTEGER PRIMARY KEY)`)
@@ -1023,8 +1067,11 @@ func TestLegacyHistoryFileWithoutEitherTableIsUnreadable(t *testing.T) {
 	if err != nil || stats.TotalCommands != 0 {
 		t.Fatalf("stats = %+v (%v), want an empty table", stats, err)
 	}
-	if matches, err := filepath.Glob(path + ".imported-*"); err != nil || len(matches) != 1 {
-		t.Fatalf("the unreadable file must still be kept, got %v (%v)", matches, err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("a file holding no history of ours must be left where it was: %v", err)
+	}
+	if left, err := filepath.Glob(filepath.Join(filepath.Dir(path), "history.db*")); err != nil || len(left) != 1 || left[0] != path {
+		t.Fatalf("the unreadable file must keep its own name, got %v (%v)", left, err)
 	}
 }
 

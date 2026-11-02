@@ -4,14 +4,19 @@
 // 2026-11-01: one main database), it was a SQLite file of its own at
 // <state root>/state/outfilter/history.db. An install that still has one keeps
 // its records — and the retrieval ids its transcripts cite — because the first
-// open carries them into the main table and renames the file aside as a backup.
-// Nothing here writes to the legacy file, and nothing deletes it.
+// open carries them into the main table and then deletes the file (owner
+// ruling 2026-11-03: the old history.db must go, not be renamed aside). The main
+// database is the history now, and a second copy of it under state/outfilter is
+// the very file on shared storage a replica cannot read safely.
+//
+// Nothing here writes to the legacy file: it is read once and removed.
 package tool
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -53,6 +58,11 @@ var (
 // legacyHistoryRelDir is where the history file lived under a state root.
 var legacyHistoryRelDir = filepath.Join("state", "outfilter")
 
+// legacyClaimSuffix names the file while it is being imported. The suffix is
+// a claim, not a backup: the file is deleted once its rows are in the main
+// table, and only a failed import ever puts the original name back.
+const legacyClaimSuffix = ".importing-"
+
 // legacyHistoryPath is the pre-migration history file for stateRoot, or "" for
 // a caller that has no state root (an embedder's runtime, a unit test) and so
 // cannot have one to import.
@@ -64,14 +74,22 @@ func legacyHistoryPath(stateRoot string) string {
 	return filepath.Join(root, legacyHistoryRelDir, "history.db")
 }
 
-// importLegacyHistory carries an existing history file into the main database.
+// importLegacyHistory carries an existing history file into the main database
+// and deletes it.
 //
 // The file is claimed by renaming it before a single row is read: two processes
 // can open the same home at once (the terminal and the gateway share it), both
-// find the file, and only the one whose rename succeeds imports. The renamed
-// path is both the marker — the file is no longer where the next open looks —
-// and the backup. Rows go in one transaction, so an import that fails part way
-// leaves the main table as it was instead of half a history.
+// find the file, and only the one whose rename succeeds imports. The claimed
+// path is the marker — the file is no longer where the next open looks — and it
+// holds the rows only until they are in the main table. Rows go in one
+// transaction, so an import that fails part way leaves the main table as it was
+// instead of half a history; the claimed name is then put back, which is what
+// makes the next open retry.
+//
+// The file is deleted after that transaction commits, and the directory with it
+// when the file was all it held. A file holding no table this store ever wrote
+// is not a history to carry over and not one to delete: it goes back under the
+// name its owner gave it, and the next open finds the same nothing.
 func (s *Store) importLegacyHistory(ctx context.Context, stateRoot string) error {
 	path := legacyHistoryPath(stateRoot)
 	if path == "" {
@@ -80,21 +98,55 @@ func (s *Store) importLegacyHistory(ctx context.Context, stateRoot string) error
 	if _, err := os.Stat(path); err != nil {
 		return nil // no history file: the ordinary case for every new install
 	}
-	aside := path + ".imported-" + strconv.FormatInt(time.Now().Unix(), 10)
-	if err := os.Rename(path, aside); err != nil {
+	claimed := path + legacyClaimSuffix + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := os.Rename(path, claimed); err != nil {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			return nil // another process claimed it first, and imports it
 		}
 		return err
 	}
-	entries, err := readLegacyOutputRecords(ctx, aside)
+	entries, ours, err := readLegacyOutputRecords(ctx, claimed)
 	if err != nil {
-		return err
+		return restoreLegacyHistoryName(claimed, path, err)
 	}
-	if len(entries) == 0 {
-		return nil
+	if !ours {
+		return restoreLegacyHistoryName(claimed, path, nil)
 	}
-	return s.insertImportedRecords(ctx, entries)
+	if len(entries) > 0 {
+		if err := s.insertImportedRecords(ctx, entries); err != nil {
+			return restoreLegacyHistoryName(claimed, path, err)
+		}
+	}
+	s.deleteLegacyHistoryFile(claimed)
+	return nil
+}
+
+// restoreLegacyHistoryName puts a claimed file back under the name the next
+// open looks for, so an import that failed is retried rather than lost. cause is
+// what the caller reports; a restore that fails on its own is added to it.
+func restoreLegacyHistoryName(claimed, path string, cause error) error {
+	if err := os.Rename(claimed, path); err != nil {
+		if cause == nil {
+			return fmt.Errorf("put the legacy history file back: %w", err)
+		}
+		return fmt.Errorf("%w (and the legacy history file could not be put back: %v)", cause, err)
+	}
+	return cause
+}
+
+// deleteLegacyHistoryFile removes an imported history file, and the directory it
+// lived in when the file was all it held. The rows are already in the main
+// table, so a file that refuses to go is worth one log line and no more: a turn
+// must not fail over a leftover copy of data the database already holds. A
+// directory that is not empty is the ordinary answer from os.Remove, not an
+// error worth reporting.
+func (s *Store) deleteLegacyHistoryFile(claimed string) {
+	if err := os.Remove(claimed); err != nil {
+		slog.Warn("imported the legacy tool-output history but could not delete the file",
+			"path", claimed, "error", err)
+		return
+	}
+	_ = os.Remove(filepath.Dir(claimed))
 }
 
 // legacyEntry is one record read out of the legacy file, with the id it was
@@ -106,30 +158,33 @@ type legacyEntry struct {
 
 // readLegacyOutputRecords reads the file's records, tolerating both shapes it
 // has been released in: the current output_records table, and the earlier
-// commands table, whose columns vary by vintage and so are mapped by name.
-func readLegacyOutputRecords(ctx context.Context, path string) ([]legacyEntry, error) {
+// commands table, whose columns vary by vintage and so are mapped by name. ours
+// reports whether the file held either table; false means the file is not this
+// store's history at all, and nothing in it is ours to import or to delete.
+func readLegacyOutputRecords(ctx context.Context, path string) (entries []legacyEntry, ours bool, err error) {
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro&_busy_timeout=5000")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = db.Close() }()
 	has, err := legacyTableExists(ctx, db, "output_records")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if has {
-		return readLegacyOutputTable(ctx, db)
+		entries, err = readLegacyOutputTable(ctx, db)
+		return entries, true, err
 	}
 	has, err = legacyTableExists(ctx, db, "commands")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !has {
-		// A file with neither table held nothing this store wrote: it is kept
-		// as it was and the import is over.
-		return nil, nil
+		// A file with neither table held nothing this store wrote.
+		return nil, false, nil
 	}
-	return readLegacyCommandsTable(ctx, db)
+	entries, err = readLegacyCommandsTable(ctx, db)
+	return entries, true, err
 }
 
 // legacyTableExists asks the legacy file itself, which is the only place its
@@ -279,7 +334,8 @@ func readLegacyCommandsTable(ctx context.Context, db *sql.DB) ([]legacyEntry, er
 // legacyTimestampMs converts the v0 TEXT timestamp into the milliseconds the
 // v1 table stores. A stamp that does not parse keeps the epoch rather than
 // failing the import: the record is still retrievable by id, only its time is
-// unknown, and the file it came from is kept either way.
+// unknown, and a record kept under an unknown time beats a turn that will not
+// start.
 func legacyTimestampMs(raw string) int64 {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
