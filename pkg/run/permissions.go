@@ -741,6 +741,10 @@ func isShellPermissionKind(kind string) bool {
 	return strings.EqualFold(safety.CanonicalToolName(strings.TrimSpace(kind)), "Bash")
 }
 
+// payloadForcesToolApproval reports whether a payload asks for an approval the
+// permission rules may not settle. ask_even_in_yolo is the stricter marker of
+// the two (see the approval hook): it says the question must be answered by a
+// person, so neither full access nor a never policy answers it (plan 198 §3.5).
 func payloadForcesToolApproval(payload map[string]any) bool {
 	return payloadBool(payload, "force_tool_approval")
 }

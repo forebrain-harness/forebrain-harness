@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -179,4 +180,179 @@ func rememberReadState(t *testing.T, st *State, path string) {
 		t.Fatal(err)
 	}
 	st.RememberRead(path, fi.ModTime(), fi.Size(), raw)
+}
+
+// shellApprovalRecorder stands in for the approval queue: it records every
+// question the shell tool put and answers "pending".
+type shellApprovalRecorder struct {
+	asked  int
+	inputs []map[string]any
+}
+
+func (r *shellApprovalRecorder) hook(_ context.Context, _ string, payload any) (string, bool, error) {
+	r.asked++
+	input, _ := payload.(map[string]any)
+	r.inputs = append(r.inputs, input)
+	return "action-peer", true, nil
+}
+
+// peerShellTool builds a shell tool whose port reports the given same-tree
+// agents, in a directory of its own, with the recorder's hook installed.
+func peerShellTool(t *testing.T, rec *shellApprovalRecorder, peers PeerWorkTree) (*llm.Tool, string) {
+	t.Helper()
+	root := t.TempDir()
+	st := NewState(root)
+	st.SetActionHook(rec.hook)
+	shellTool, err := NewShellTool(st, &AgentToolRuntime{Cfg: &appcfg.Root{}, Peers: peers})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	return shellTool, root
+}
+
+func peerShellCtx(root string) context.Context {
+	return WithToolCompletionCapture(WithProjectRoot(llm.WithAgentSessionID(context.Background(), "sess-peer-git"), root))
+}
+
+// A git command that would sweep this tree is a question whenever another agent
+// is working in it, and the payload names who and what they touched (plan 198
+// §3.5): the command string alone cannot say whether it is safe to run.
+func TestShellToolAsksBeforeAGitSweepWhileAnotherAgentWorks(t *testing.T) {
+	rec := &shellApprovalRecorder{}
+	shellTool, root := peerShellTool(t, rec, &peerWorkTreeFake{peers: []WorkTreePeer{{
+		Name: "b", Kind: "terminal", Status: "busy", Task: "the parser",
+		RecentFiles: []string{"b.go", "pkg/c.go"},
+	}}})
+
+	_, err := shellTool.Handle(peerShellCtx(root), `{"command":"git stash"}`)
+	var pending *RequiresActionError
+	if !errors.As(err, &pending) || pending.ActionKind != "shell" {
+		t.Fatalf("err=%v, want a pending shell approval", err)
+	}
+	if rec.asked != 1 {
+		t.Fatalf("asked=%d, want the one question", rec.asked)
+	}
+	asked := rec.inputs[0]
+	for _, key := range []string{"force_tool_approval", "ask_even_in_yolo"} {
+		if asked[key] != true {
+			t.Fatalf("%s = %#v, want true", key, asked[key])
+		}
+	}
+	if asked["approval_reason"] != "peer_work_tree" {
+		t.Fatalf("approval_reason = %#v, want peer_work_tree", asked["approval_reason"])
+	}
+	if asked["dangerous_rule"] != "git_stash" {
+		t.Fatalf("dangerous_rule = %#v, want git_stash", asked["dangerous_rule"])
+	}
+	if names, _ := asked["peer_names"].([]string); len(names) != 1 || names[0] != "b" {
+		t.Fatalf("peer_names = %#v, want the one peer", asked["peer_names"])
+	}
+	peers, _ := asked["peer_files"].([]map[string]any)
+	if len(peers) != 1 || peers[0]["name"] != "b" {
+		t.Fatalf("peer_files = %#v, want the one peer with its files", asked["peer_files"])
+	}
+	if files, _ := peers[0]["files"].([]string); len(files) != 2 || files[0] != "b.go" {
+		t.Fatalf("peer_files[0].files = %#v, want the files it edited", peers[0]["files"])
+	}
+}
+
+// The same command with nobody else in the tree is nobody else's business: the
+// guard asks nothing and the command runs its ordinary path.
+func TestShellToolLeavesAGitSweepAloneWithoutOtherAgents(t *testing.T) {
+	empty := &shellApprovalRecorder{}
+	shellTool, root := peerShellTool(t, empty, &peerWorkTreeFake{})
+	if _, err := shellTool.Handle(peerShellCtx(root), `{"command":"git stash list"}`); err != nil {
+		t.Fatalf("git stash list: %v", err)
+	}
+	if empty.asked != 0 {
+		t.Fatalf("asked=%d, want no question", empty.asked)
+	}
+
+	readOnly := &shellApprovalRecorder{}
+	shellTool, root = peerShellTool(t, readOnly, &peerWorkTreeFake{peers: []WorkTreePeer{{Name: "b"}}})
+	if _, err := shellTool.Handle(peerShellCtx(root), `{"command":"git stash list"}`); err != nil {
+		t.Fatalf("git stash list with a peer present: %v", err)
+	}
+	if readOnly.asked != 0 {
+		t.Fatalf("asked=%d, want no question for a read-only stash form", readOnly.asked)
+	}
+}
+
+// A batch task has nobody to ask: the task sandbox is the enforcement, so the
+// guard stays out of its way exactly as every other approval does (plan 198
+// §3.5).
+func TestBatchShellGitSweepIsNotPutToAnyone(t *testing.T) {
+	rec := &shellApprovalRecorder{}
+	shellTool, root := peerShellTool(t, rec, &peerWorkTreeFake{peers: []WorkTreePeer{{Name: "b"}}})
+	if _, err := shellTool.Handle(WithBatchBoundary(peerShellCtx(root), BatchBoundary{Workspace: root}), `{"command":"git stash"}`); err != nil {
+		t.Fatalf("batch git stash: %v", err)
+	}
+	if rec.asked != 0 {
+		t.Fatalf("asked=%d, want nobody asked in a batch task", rec.asked)
+	}
+}
+
+// A command that failed while another agent was writing files under the same
+// tree says which ones, so the model attributes the failure instead of
+// repairing somebody else's half-finished edit. The card keeps the command's
+// own output (plan 198 §3.6).
+func TestFailedShellCommandNamesTheFilesAnotherAgentChanged(t *testing.T) {
+	root := t.TempDir()
+	st := NewState(root)
+	peers := &peerWorkTreeFake{touches: []PeerTouch{
+		{Path: "b.go", AgentName: "b", At: time.Now().Add(-time.Minute)},
+		{Path: "pkg/c.go", AgentName: "c", At: time.Now().Add(-20 * time.Second)},
+	}}
+	shellTool, err := NewShellTool(st, &AgentToolRuntime{Cfg: &appcfg.Root{}, Peers: peers})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := peerShellCtx(root)
+	raw, err := shellTool.Handle(ctx, `{"command":"false"}`)
+	if err != nil {
+		t.Fatalf("false: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(fmt.Sprint(raw)), &payload); err != nil {
+		t.Fatalf("payload %v: %v", raw, err)
+	}
+	if payload["exit_code"] != float64(1) {
+		t.Fatalf("exit_code = %#v, want the failing exit", payload["exit_code"])
+	}
+	changed, _ := payload["changed_by_other_agents"].([]any)
+	if len(changed) != 2 {
+		t.Fatalf("changed_by_other_agents = %#v, want both writes", payload["changed_by_other_agents"])
+	}
+	first, _ := changed[0].(map[string]any)
+	if first["path"] != "b.go" || first["agent"] != "b" || first["minutes_ago"] != float64(1) {
+		t.Fatalf("changed[0] = %#v, want the newest write named", first)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected the shell completion")
+	}
+	if _, present := completion.Output["changed_by_other_agents"]; present {
+		t.Fatalf("completion = %#v, want the attribution kept off the card", completion.Output)
+	}
+}
+
+// Nothing else was written while the command ran: a failure stays the model's
+// own to explain.
+func TestFailedShellCommandWithoutOtherAgentsCarriesNoAttribution(t *testing.T) {
+	root := t.TempDir()
+	shellTool, err := NewShellTool(NewState(root), &AgentToolRuntime{Cfg: &appcfg.Root{}, Peers: &peerWorkTreeFake{}})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	raw, err := shellTool.Handle(peerShellCtx(root), `{"command":"false"}`)
+	if err != nil {
+		t.Fatalf("false: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(fmt.Sprint(raw)), &payload); err != nil {
+		t.Fatalf("payload %v: %v", raw, err)
+	}
+	if _, present := payload["changed_by_other_agents"]; present {
+		t.Fatalf("payload = %#v, want no attribution", payload)
+	}
 }

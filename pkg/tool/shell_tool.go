@@ -207,11 +207,29 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				}
 			}
 			approvalRequired := skillAccess != "" || planGate == PlanModeShellAsk || shellAssessmentRequiresApproval(ctx, st, rt, cmd, assessment, readOnlyCommand, requestedBypass, sandboxBypassApproved)
+			// A git command that would sweep this tree is a question for the
+			// user whenever another agent is working in it (plan 198 §3.5): a
+			// preset, an allow rule or full access cannot answer for somebody
+			// else's uncommitted work.
+			sweepRule, sweepsTree := "", false
+			var treePeers []WorkTreePeer
+			if peers := peersOf(rt); peers != nil {
+				sweepRule, sweepsTree = safety.GitSweepsWorkTree(cmd)
+				if sweepsTree {
+					treePeers = peers.WorkTreePeers(ctx, wdAbs)
+				}
+			}
+			if sweepsTree && len(treePeers) > 0 {
+				approvalRequired = true
+			}
 			if approvalRequired && ApprovedActionIDFromContext(ctx) == "" {
 				payload := rewriteResult.applyTo(shellAssessmentApprovalPayload(cmd, in, assessment))
 				markProtectedApproval(payload, skillAccess)
 				if planGate == PlanModeShellAsk {
 					markPlanModeApproval(payload)
+				}
+				if sweepsTree && len(treePeers) > 0 {
+					markPeerWorkTreeApproval(payload, sweepRule, treePeers)
 				}
 				payload["sandbox_profile"] = string(profile)
 				if profileElevation {
@@ -303,6 +321,9 @@ type sandboxedShellRequest struct {
 }
 
 func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRuntime, req sandboxedShellRequest) (string, error) {
+	// When the command started, for the failure attribution below: the window is
+	// what the command could have been misled by, not the whole session.
+	startedAt := time.Now()
 	var snap safety.Snapshot
 	snap = permissionSnapshotForRun(permissionSnapshotForContext(ctx, st, rt), RunIDFromContext(ctx))
 	cfg := sessionConfig(ctx, st, rt)
@@ -655,6 +676,17 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	}
 	if compression.Meta.Applied {
 		resultPayload["output_compression"] = compressionMetaMap(compression.Meta)
+	}
+	// A command that failed in files another agent was writing during the run
+	// says so, so the model attributes the failure instead of repairing somebody
+	// else's half-done edit (plan 198 §3.6). Model-facing only: the card keeps
+	// the command's own output.
+	if exitCode != 0 {
+		if peers := peersOf(rt); peers != nil {
+			if changed := peerChangesDuringRun(ctx, peers, req.cwd, startedAt, time.Now()); len(changed) > 0 {
+				resultPayload["changed_by_other_agents"] = changed
+			}
+		}
 	}
 	// Only surface YOLO/approval-bypass context to the model. The
 	// sandbox_* operational metadata (backend, mode, reason, violations,

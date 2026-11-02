@@ -192,6 +192,44 @@ func markPlanModeApproval(payload map[string]any) {
 // telemetry and every surface can tell them from an ordinary shell prompt.
 const planModeApprovalReason = "plan_mode_unproven_command"
 
+// markPeerWorkTreeApproval marks a shell approval as one the same-tree guard
+// raised: the command would discard or carry off changes another agent has in
+// this work tree (plan 198 §3.5). It is the one approval nothing else may
+// answer — not a preset, not an allow rule the user wrote before anybody else
+// was working here, not full access — which is what ask_even_in_yolo says
+// (pkg/run's approval hook is where that marker is honoured).
+//
+// The peers and the files each of them touched travel with it: the question is
+// not "may I run this git command" but "may I run it while these agents have
+// work in flight", and a surface cannot derive that from the command string.
+func markPeerWorkTreeApproval(payload map[string]any, rule string, peers []WorkTreePeer) {
+	if payload == nil || len(peers) == 0 {
+		return
+	}
+	payload["force_tool_approval"] = true
+	payload["ask_even_in_yolo"] = true
+	payload["approval_reason"] = peerWorkTreeApprovalReason
+	if rule = strings.TrimSpace(rule); rule != "" {
+		payload["dangerous_rule"] = rule
+	}
+	names := make([]string, 0, len(peers))
+	files := make([]map[string]any, 0, len(peers))
+	for _, peer := range peers {
+		name := strings.TrimSpace(peer.Name)
+		recent := peer.RecentFiles
+		if recent == nil {
+			recent = []string{}
+		}
+		names = append(names, name)
+		files = append(files, map[string]any{"name": name, "files": append([]string(nil), recent...)})
+	}
+	payload["peer_names"] = names
+	payload["peer_files"] = files
+}
+
+// peerWorkTreeApprovalReason tags the approvals the same-tree git guard raises.
+const peerWorkTreeApprovalReason = "peer_work_tree"
+
 // planModeApprovalJustification is the one sentence the approval has to show. It
 // names the question - is this command allowed to run while planning? - because
 // the command itself is already on the overlay's Command line above it.

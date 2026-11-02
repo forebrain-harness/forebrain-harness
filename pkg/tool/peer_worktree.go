@@ -60,3 +60,38 @@ func peersOf(rt *AgentToolRuntime) PeerWorkTree {
 	}
 	return rt.Peers
 }
+
+// peerAttributionLimit is how many files a failed command's attribution lists:
+// enough to explain a test failure, few enough to stay one screen.
+const peerAttributionLimit = 20
+
+// peerChangesDuringRun names the files other agents wrote while a command ran,
+// newest first, for the result of a command that failed (plan 198 §3.6). The
+// window starts two minutes before the command did, because a write that landed
+// just before it is exactly what makes a build or a test fail on files this
+// agent never touched.
+func peerChangesDuringRun(ctx context.Context, peers PeerWorkTree, root string, startedAt, finishedAt time.Time) []map[string]any {
+	if peers == nil || root == "" {
+		return nil
+	}
+	touches := peers.TouchesBetween(ctx, root, startedAt.Add(-2*time.Minute), finishedAt)
+	if len(touches) == 0 {
+		return nil
+	}
+	if len(touches) > peerAttributionLimit {
+		touches = touches[:peerAttributionLimit]
+	}
+	changed := make([]map[string]any, 0, len(touches))
+	for _, touch := range touches {
+		minutes := int(finishedAt.Sub(touch.At).Minutes())
+		if minutes < 1 {
+			minutes = 1
+		}
+		changed = append(changed, map[string]any{
+			"path":        touch.Path,
+			"agent":       touch.AgentName,
+			"minutes_ago": minutes,
+		})
+	}
+	return changed
+}

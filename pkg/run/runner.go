@@ -470,6 +470,13 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 	// and by the scope they pick: a turn grant binds to the child's own run ID,
 	// which is why nothing here has to narrow it after the fact.
 	forceToolApproval := exitPlanMode || payloadForcesToolApproval(pay)
+	// askEvenInYOLO marks the questions nobody else can answer for the user:
+	// leaving plan mode, and a git command that would sweep another agent's
+	// uncommitted work in this tree (plan 198 §3.5). Full access and a never
+	// policy both say "do not ask" for every ordinary gate, and both must step
+	// aside here — a user who wrote `git stash` into an allow rule did not know
+	// another agent was working in the same tree.
+	askEvenInYOLO := exitPlanMode || payloadBool(pay, "ask_even_in_yolo")
 	snapshot := r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx))
 	approvalPolicy := snapshot.ApprovalPolicy
 	sessionCfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
@@ -505,7 +512,7 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 		case safety.BehaviorDeny:
 			return "", false, formatPermissionDenyError(decision, kind, pay)
 		case safety.BehaviorAllow:
-			if !exitPlanMode && !strictAutoReview && (!forceToolApproval || decision.Matched != nil) {
+			if !exitPlanMode && !strictAutoReview && (!forceToolApproval || (decision.Matched != nil && !askEvenInYOLO)) {
 				if isRequestPermissions {
 					tool.CapturePolicyApprovalReason(ctx, requestPermissionsApprovalExemptionReason(decision))
 				}
@@ -523,13 +530,13 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 	// with them: bypassing here returned "approved, nothing pending", which the
 	// tool correctly refused to act on, and plan mode became impossible to
 	// leave.
-	if !exitPlanMode && decision.Behavior != safety.BehaviorDeny && r.fullAccessEnabled(tool.ConversationSessionIDFromContext(ctx)) {
+	if !askEvenInYOLO && decision.Behavior != safety.BehaviorDeny && r.fullAccessEnabled(tool.ConversationSessionIDFromContext(ctx)) {
 		if isRequestPermissions {
 			tool.CapturePolicyApprovalReason(ctx, "this conversation runs with full access: nothing is asked")
 		}
 		return "", false, nil
 	}
-	if !exitPlanMode && forceToolApproval && approvalPolicy.Mode == safety.ApprovalNever {
+	if !askEvenInYOLO && forceToolApproval && approvalPolicy.Mode == safety.ApprovalNever {
 		return "", false, fmt.Errorf("permission denied: approval policy is never")
 	}
 	if !forceToolApproval {
