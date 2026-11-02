@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // SHA256Hex is the hex sha256 of content — the digest a file change records
@@ -373,3 +375,35 @@ const rewindVisibleEventsPredicate = `NOT EXISTS (
             AND TRIM(IFNULL(m2.run_id,'')) <> ''
         ), 9223372036854775807))
 )`
+
+// rewindVisibleEventsPredicatePostgres is the same predicate for PostgreSQL:
+// COALESCE in place of IFNULL, and a MIN over an empty set falling back to the
+// largest BIGINT. The correlation is unchanged — PostgreSQL resolves an
+// unqualified name in the innermost scope first too, so the session term keeps
+// carrying the table name.
+const rewindVisibleEventsPredicatePostgres = `NOT EXISTS (
+  SELECT 1 FROM fb_rewinds rw
+  WHERE rw.session_id = fb_session_events.session_id
+    AND rw.hidden_event_seq_from > 0
+    AND fb_session_events.sequence >= rw.hidden_event_seq_from
+    AND (rw.state = 'pending' OR fb_session_events.sequence < COALESCE((
+          SELECT MIN(e2.sequence)
+          FROM fb_session_events e2
+          JOIN fb_messages m2 ON m2.run_id = e2.run_id AND m2.session_id = e2.session_id
+          WHERE m2.session_id = rw.session_id
+            AND m2.role = 'user'
+            AND m2.id > rw.anchor_message_id
+            AND m2.visibility = 'visible'
+            AND TRIM(COALESCE(m2.run_id,'')) <> ''
+        ), 9223372036854775807))
+)`
+
+// rewindVisibleEventsPredicateFor picks the predicate for d. MySQL takes the
+// SQLite text unchanged: IFNULL is MySQL's own function.
+func rewindVisibleEventsPredicateFor(d dbx.Dialect) string {
+	if d == dbx.Postgres {
+		return rewindVisibleEventsPredicatePostgres
+	}
+	return rewindVisibleEventsPredicate
+}
+

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // SessionEventSchemaVersion is the shape of one stored event's payload as the
@@ -43,6 +45,98 @@ type SessionEventPage struct {
 // eventColumns is the one fb_session_events column list; scanSessionEvent is
 // its one reader. run_id is the only nullable column in it and reads as "".
 const eventColumns = `session_id, sequence, event_id, run_id, event_type, payload_json, occurred_at_ms`
+
+// The event log's statements. Each is assembled from eventColumns and the
+// visibility predicates, so all three arms are built the same way and the
+// SQLite arm is the text this file carried before multi-database support.
+// PostgreSQL takes COALESCE where SQLite and MySQL take IFNULL, and numbers its
+// parameters; its NULL-safe comparisons and ordering match SQLite's.
+var (
+	// sessionEventInsertSQL stores the event if and only if its conversation
+	// exists. MySQL has no RETURNING, so it reads the stored row back in the
+	// same transaction (AppendSessionEventOnce) and reports "stored" from the
+	// affected-row count: the no-op duplicate update reports zero.
+	sessionEventInsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms)
+SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM fb_sessions WHERE id=?)
+ON CONFLICT(session_id, event_id) DO NOTHING
+RETURNING ` + eventColumns,
+		MySQL: `INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms)
+SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM fb_sessions WHERE id=?)
+ON DUPLICATE KEY UPDATE sequence=sequence`,
+		Postgres: `INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms)
+SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT 1 FROM fb_sessions WHERE id=$7)
+ON CONFLICT(session_id, event_id) DO NOTHING
+RETURNING ` + eventColumns,
+	}
+	sessionEventReadSQL = dbx.SQL{
+		SQLite: `SELECT ` + eventColumns + `
+FROM fb_session_events WHERE session_id=? AND event_id=?`,
+		MySQL: `SELECT ` + eventColumns + `
+FROM fb_session_events WHERE session_id=? AND event_id=?`,
+		Postgres: `SELECT ` + eventColumns + `
+FROM fb_session_events WHERE session_id=$1 AND event_id=$2`,
+	}
+	sessionEventHighWaterSQL = dbx.SQL{
+		SQLite: `SELECT IFNULL(MAX(sequence), 0) FROM fb_session_events WHERE session_id=? AND ` +
+			rewindVisibleEventsPredicate,
+		MySQL: `SELECT IFNULL(MAX(sequence), 0) FROM fb_session_events WHERE session_id=? AND ` +
+			rewindVisibleEventsPredicate,
+		Postgres: `SELECT COALESCE(MAX(sequence), 0) FROM fb_session_events WHERE session_id=$1 AND ` +
+			rewindVisibleEventsPredicatePostgres,
+	}
+	sessionEventsOfRunSQL = dbx.SQL{
+		SQLite: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE run_id=? AND ` + rewindVisibleEventsPredicate + `
+ORDER BY sequence ASC LIMIT ?`,
+		MySQL: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE run_id=? AND ` + rewindVisibleEventsPredicate + `
+ORDER BY sequence ASC LIMIT ?`,
+		Postgres: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE run_id=$1 AND ` + rewindVisibleEventsPredicatePostgres + `
+ORDER BY sequence ASC LIMIT $2`,
+	}
+	sessionEventsOfTypeSQL = dbx.SQL{
+		SQLite: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE session_id=? AND event_type=? AND ` + rewindVisibleEventsPredicate + `
+ORDER BY sequence DESC LIMIT ?`,
+		MySQL: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE session_id=? AND event_type=? AND ` + rewindVisibleEventsPredicate + `
+ORDER BY sequence DESC LIMIT ?`,
+		Postgres: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE session_id=$1 AND event_type=$2 AND ` + rewindVisibleEventsPredicatePostgres + `
+ORDER BY sequence DESC LIMIT $3`,
+	}
+	sessionEventPageSQL = dbx.SQL{
+		SQLite: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE session_id=? AND sequence>? AND sequence<=? AND ` + rewindVisibleEventsPredicate + `
+ORDER BY sequence ASC LIMIT ?`,
+		MySQL: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE session_id=? AND sequence>? AND sequence<=? AND ` + rewindVisibleEventsPredicate + `
+ORDER BY sequence ASC LIMIT ?`,
+		Postgres: `
+SELECT ` + eventColumns + `
+FROM fb_session_events
+WHERE session_id=$1 AND sequence>$2 AND sequence<=$3 AND ` + rewindVisibleEventsPredicatePostgres + `
+ORDER BY sequence ASC LIMIT $4`,
+	}
+)
 
 func scanSessionEvent(scanner interface{ Scan(...any) error }) (SessionEvent, error) {
 	var evt SessionEvent
@@ -107,12 +201,21 @@ func (s *RunStore) AppendSessionEventOnce(ctx context.Context, in SessionEvent) 
 	if len(payload) == 0 || !json.Valid(payload) {
 		payload = json.RawMessage(`{}`)
 	}
-	stored, err := scanSessionEvent(s.DB.QueryRowContext(ctx, `
-INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms)
-SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM fb_sessions WHERE id=?)
-ON CONFLICT(session_id, event_id) DO NOTHING
-RETURNING `+eventColumns,
-		in.SessionID, nullIfEmpty(in.RunID), in.ID, strings.TrimSpace(in.Type), string(payload), in.CreatedAt.UnixMilli(), in.SessionID))
+	args := []any{in.SessionID, nullIfEmpty(in.RunID), in.ID, strings.TrimSpace(in.Type), string(payload), in.CreatedAt.UnixMilli(), in.SessionID}
+	d := dbx.DialectOf(s.DB)
+	if d == dbx.MySQL {
+		// MySQL has no RETURNING: the write and the read-back that reports the
+		// row are one transaction, so no other writer can slip between them.
+		// The affected-row count is what says whether this call stored the
+		// event — the duplicate branch updates a column to itself and reports
+		// zero, exactly as the other two engines report no returned row.
+		stored, storedNow, err := appendSessionEventMySQL(ctx, s.DB, in.SessionID, in.ID, args)
+		if err != nil {
+			return SessionEvent{}, false, err
+		}
+		return stored, storedNow, nil
+	}
+	stored, err := scanSessionEvent(s.DB.QueryRowContext(ctx, sessionEventInsertSQL.For(d), args...))
 	if err == nil {
 		return stored, true, nil
 	}
@@ -121,9 +224,7 @@ RETURNING `+eventColumns,
 	}
 	// Nothing was stored: the row already existed, so read it back — or there
 	// is no conversation to record it in yet.
-	stored, err = scanSessionEvent(s.DB.QueryRowContext(ctx, `
-SELECT `+eventColumns+`
-FROM fb_session_events WHERE session_id=? AND event_id=?`, in.SessionID, in.ID))
+	stored, err = scanSessionEvent(s.DB.QueryRowContext(ctx, sessionEventReadSQL.For(d), in.SessionID, in.ID))
 	if err == sql.ErrNoRows {
 		return SessionEvent{}, false, ErrSessionNotStarted
 	}
@@ -133,6 +234,40 @@ FROM fb_session_events WHERE session_id=? AND event_id=?`, in.SessionID, in.ID))
 	return stored, false, nil
 }
 
+// appendSessionEventMySQL is the event insert on the engine without RETURNING:
+// the write and the read-back of the stored row are one transaction, so no
+// other writer can change what is read between them. The upsert's duplicate
+// branch sets the primary key to itself, which MySQL reports as zero affected
+// rows — the same fact SQLite and PostgreSQL report by returning no row.
+func appendSessionEventMySQL(ctx context.Context, db *sql.DB, sessionID, eventID string, args []any) (SessionEvent, bool, error) {
+	tx, err := dbx.BeginTx(ctx, db, nil)
+	if err != nil {
+		return SessionEvent{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, sessionEventInsertSQL.For(dbx.MySQL), args...)
+	if err != nil {
+		return SessionEvent{}, false, err
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return SessionEvent{}, false, err
+	}
+	stored, err := scanSessionEvent(tx.QueryRowContext(ctx, sessionEventReadSQL.For(dbx.MySQL), sessionID, eventID))
+	if err == sql.ErrNoRows {
+		// Neither stored now nor stored before: there is no conversation to
+		// record the event in. The deferred rollback releases the write lock.
+		return SessionEvent{}, false, ErrSessionNotStarted
+	}
+	if err != nil {
+		return SessionEvent{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return SessionEvent{}, false, err
+	}
+	return stored, inserted == 1, nil
+}
+
 func (s *RunStore) SessionEventHighWater(ctx context.Context, sessionID string) (int64, error) {
 	if s == nil || s.DB == nil {
 		return 0, fmt.Errorf("nil db")
@@ -140,8 +275,7 @@ func (s *RunStore) SessionEventHighWater(ctx context.Context, sessionID string) 
 	// A conversation with no events yet has no high water: MAX over an empty
 	// set is NULL, and the cursor that no events have been written is zero.
 	var high int64
-	err := s.DB.QueryRowContext(ctx, `SELECT IFNULL(MAX(sequence), 0) FROM fb_session_events WHERE session_id=? AND `+
-		rewindVisibleEventsPredicate, strings.TrimSpace(sessionID)).Scan(&high)
+	err := s.DB.QueryRowContext(ctx, sessionEventHighWaterSQL.For(dbx.DialectOf(s.DB)), strings.TrimSpace(sessionID)).Scan(&high)
 	return high, err
 }
 
@@ -162,11 +296,7 @@ func (s *RunStore) ListRunEvents(ctx context.Context, runID string, limit int) (
 	if limit > 5000 {
 		limit = 5000
 	}
-	rows, err := s.DB.QueryContext(ctx, `
-SELECT `+eventColumns+`
-FROM fb_session_events
-WHERE run_id=? AND `+rewindVisibleEventsPredicate+`
-ORDER BY sequence ASC LIMIT ?`, runID, limit)
+	rows, err := s.DB.QueryContext(ctx, sessionEventsOfRunSQL.For(dbx.DialectOf(s.DB)), runID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -193,15 +323,15 @@ func (s *RunStore) ListRunEventsOfTypes(ctx context.Context, runID string, types
 		return nil, nil
 	}
 	args := []any{runID}
-	marks := make([]string, 0, len(types))
+	d := dbx.DialectOf(s.DB)
 	for _, t := range types {
-		marks = append(marks, "?")
 		args = append(args, t)
 	}
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT `+eventColumns+`
 FROM fb_session_events
-WHERE run_id=? AND event_type IN (`+strings.Join(marks, ",")+`) AND `+rewindVisibleEventsPredicate+`
+WHERE run_id=`+dbx.Placeholder(d, 1)+` AND event_type IN (`+dbx.Placeholders(d, 2, len(types))+`) AND `+
+		rewindVisibleEventsPredicateFor(d)+`
 ORDER BY sequence ASC`, args...)
 	if err != nil {
 		return nil, err
@@ -232,11 +362,7 @@ func (s *RunStore) ListSessionEventsOfType(ctx context.Context, sessionID, event
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.DB.QueryContext(ctx, `
-SELECT `+eventColumns+`
-FROM fb_session_events
-WHERE session_id=? AND event_type=? AND `+rewindVisibleEventsPredicate+`
-ORDER BY sequence DESC LIMIT ?`, sessionID, strings.TrimSpace(eventType), limit)
+	rows, err := s.DB.QueryContext(ctx, sessionEventsOfTypeSQL.For(dbx.DialectOf(s.DB)), sessionID, strings.TrimSpace(eventType), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -283,11 +409,7 @@ func (s *RunStore) ListSessionEvents(ctx context.Context, sessionID string, curs
 	if limit > 5000 {
 		limit = 5000
 	}
-	rows, err := s.DB.QueryContext(ctx, `
-SELECT `+eventColumns+`
-FROM fb_session_events
-WHERE session_id=? AND sequence>? AND sequence<=? AND `+rewindVisibleEventsPredicate+`
-ORDER BY sequence ASC LIMIT ?`, page.SessionID, cursor, highWater, limit+1)
+	rows, err := s.DB.QueryContext(ctx, sessionEventPageSQL.For(dbx.DialectOf(s.DB)), page.SessionID, cursor, highWater, limit+1)
 	if err != nil {
 		return page, err
 	}
@@ -335,6 +457,45 @@ const visibleToolCallPredicate = `event_type='tool_call_completed'
   AND IFNULL(payload_json->>'$.tool_name','') <> 'request_permissions'
   AND NOT (IFNULL(payload_json->>'$.tool_name','') = 'session_todo' AND TRIM(IFNULL(payload_json->>'$.error','')) = '')`
 
+// visibleToolCallPredicateFor is the same predicate for d: MySQL keeps IFNULL
+// and reads the two JSON fields with an explicit unquote, PostgreSQL takes
+// COALESCE and a jsonb cast.
+func visibleToolCallPredicateFor(d dbx.Dialect) string {
+	switch d {
+	case dbx.MySQL:
+		return `event_type='tool_call_completed'
+  AND IFNULL(JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.tool_name')),'') <> 'request_permissions'
+  AND NOT (IFNULL(JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.tool_name')),'') = 'session_todo' AND TRIM(IFNULL(JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.error')),'')) = '')`
+	case dbx.Postgres:
+		return `event_type='tool_call_completed'
+  AND COALESCE(payload_json::jsonb->>'tool_name','') <> 'request_permissions'
+  AND NOT (COALESCE(payload_json::jsonb->>'tool_name','') = 'session_todo' AND TRIM(COALESCE(payload_json::jsonb->>'error','')) = '')`
+	}
+	return visibleToolCallPredicate
+}
+
+// toolPayloadText reads one payload_json field as text on d. SQLite and
+// PostgreSQL both have the unquoting ->> operator; MySQL's JSON functions keep
+// the quotes unless JSON_UNQUOTE is written out.
+func toolPayloadText(d dbx.Dialect, field string) string {
+	switch d {
+	case dbx.MySQL:
+		return `JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.` + field + `'))`
+	case dbx.Postgres:
+		return `payload_json::jsonb->>'` + field + `'`
+	}
+	return `payload_json->>'$.` + field + `'`
+}
+
+// ifNullExpr wraps expr in the dialect's null-coalescing function: IFNULL on
+// SQLite and MySQL, COALESCE on PostgreSQL.
+func ifNullExpr(d dbx.Dialect, expr, fallback string) string {
+	if d == dbx.Postgres {
+		return `COALESCE(` + expr + `,` + fallback + `)`
+	}
+	return `IFNULL(` + expr + `,` + fallback + `)`
+}
+
 // ListSessionToolCalls returns the conversation's newest tool completions,
 // newest first, narrowed to one run and one tool when those are given. The
 // filter runs inside the query, so a narrow request is answered from the
@@ -347,16 +508,25 @@ func (s *RunStore) ListSessionToolCalls(ctx context.Context, sessionID, runID, t
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id required")
 	}
-	query := `SELECT event_id, IFNULL(run_id,''), session_id, IFNULL(payload_json->>'$.tool_name',''), payload_json, occurred_at_ms
+	// The narrowing runs inside the query, so the placeholders are numbered as
+	// the arms below add parameters, in the order SQLite's '?' appear.
+	d := dbx.DialectOf(s.DB)
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
+	query := `SELECT event_id, ` + ifNullExpr(d, `run_id`, `''`) + `, session_id, ` +
+		ifNullExpr(d, toolPayloadText(d, "tool_name"), `''`) + `, payload_json, occurred_at_ms
 FROM fb_session_events
-WHERE session_id=? AND ` + visibleToolCallPredicate + ` AND ` + rewindVisibleEventsPredicate
+WHERE session_id=` + next() + ` AND ` + visibleToolCallPredicateFor(d) + ` AND ` + rewindVisibleEventsPredicateFor(d)
 	args := []any{sessionID}
 	if runID = strings.TrimSpace(runID); runID != "" {
-		query += ` AND run_id=?`
+		query += ` AND run_id=` + next()
 		args = append(args, runID)
 	}
 	if toolName = strings.TrimSpace(toolName); toolName != "" {
-		query += ` AND payload_json->>'$.tool_name'=?`
+		query += ` AND ` + toolPayloadText(d, "tool_name") + `=` + next()
 		args = append(args, toolName)
 	}
 	if limit <= 0 {
@@ -365,7 +535,7 @@ WHERE session_id=? AND ` + visibleToolCallPredicate + ` AND ` + rewindVisibleEve
 	if limit > 5000 {
 		limit = 5000
 	}
-	query += ` ORDER BY sequence DESC LIMIT ?`
+	query += ` ORDER BY sequence DESC LIMIT ` + next()
 	args = append(args, limit)
 	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -395,10 +565,11 @@ func (s *RunStore) CountSessionToolCalls(ctx context.Context, sessionID string) 
 	if sessionID == "" {
 		return nil, 0, fmt.Errorf("session id required")
 	}
+	d := dbx.DialectOf(s.DB)
 	rows, err := s.DB.QueryContext(ctx, `
-SELECT IFNULL(payload_json->>'$.tool_name',''), COUNT(*)
+SELECT `+ifNullExpr(d, toolPayloadText(d, "tool_name"), `''`)+`, COUNT(*)
 FROM fb_session_events
-WHERE session_id=? AND `+visibleToolCallPredicate+` AND `+rewindVisibleEventsPredicate+`
+WHERE session_id=`+dbx.Placeholder(d, 1)+` AND `+visibleToolCallPredicateFor(d)+` AND `+rewindVisibleEventsPredicateFor(d)+`
 GROUP BY 1`, sessionID)
 	if err != nil {
 		return nil, 0, err
