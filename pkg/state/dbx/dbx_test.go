@@ -48,6 +48,25 @@ func TestSQLFor(t *testing.T) {
 	}
 }
 
+func TestPlaceholders(t *testing.T) {
+	for _, tc := range []struct {
+		dialect dbx.Dialect
+		start   int
+		n       int
+		want    string
+	}{
+		{dbx.SQLite, 1, 3, "?,?,?"},
+		{dbx.MySQL, 4, 2, "?,?"},
+		{dbx.Postgres, 1, 1, "$1"},
+		{dbx.Postgres, 2, 3, "$2,$3,$4"},
+		{dbx.Postgres, 7, 0, ""},
+	} {
+		if got := dbx.Placeholders(tc.dialect, tc.start, tc.n); got != tc.want {
+			t.Fatalf("Placeholders(%s, %d, %d) = %q, want %q", tc.dialect, tc.start, tc.n, got, tc.want)
+		}
+	}
+}
+
 func TestDialectOf(t *testing.T) {
 	if got := dbx.DialectOf((*sql.DB)(nil)); got != dbx.SQLite {
 		t.Fatalf("an unregistered handle reads as %s, want sqlite", got)

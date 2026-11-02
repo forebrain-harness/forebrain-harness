@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // LLMAttemptOutcome names how one physical model request ended.
@@ -14,6 +16,85 @@ const (
 	LLMAttemptFailed      = "failed"
 	LLMAttemptKeptPartial = "kept-partial"
 	LLMAttemptCancelled   = "cancelled"
+)
+
+// The attempt ledger's statements. `call` is a MySQL keyword, so the MySQL arms
+// backtick it; fb_runs.rowid is the row_id column on the other two engines.
+var (
+	llmAttemptInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_llm_attempts(run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms, input_tokens, output_tokens, outcome, created_at_ms)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_llm_attempts(run_id, ` + "`call`" + `, attempt, streaming, status, error, wait_ms, elapsed_ms, input_tokens, output_tokens, outcome, created_at_ms)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_llm_attempts(run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms, input_tokens, output_tokens, outcome, created_at_ms)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+	}
+	llmAttemptSelectSQL = dbx.SQL{
+		SQLite: `
+SELECT id, run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms, input_tokens, output_tokens, outcome, created_at_ms
+FROM fb_llm_attempts WHERE run_id=? ORDER BY id ASC LIMIT ?`,
+		MySQL: `
+SELECT id, run_id, ` + "`call`" + `, attempt, streaming, status, error, wait_ms, elapsed_ms, input_tokens, output_tokens, outcome, created_at_ms
+FROM fb_llm_attempts WHERE run_id=? ORDER BY id ASC LIMIT ?`,
+		Postgres: `
+SELECT id, run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms, input_tokens, output_tokens, outcome, created_at_ms
+FROM fb_llm_attempts WHERE run_id=$1 ORDER BY id ASC LIMIT $2`,
+	}
+	latestPrimaryRunSelectSQL = dbx.SQL{
+		SQLite: `
+SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL
+ORDER BY updated_at DESC, rowid DESC LIMIT 1`,
+		MySQL: `
+SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL
+ORDER BY updated_at DESC, row_id DESC LIMIT 1`,
+		Postgres: `
+SELECT id FROM fb_runs WHERE session_id=$1 AND parent_run_id IS NULL
+ORDER BY updated_at DESC, row_id DESC LIMIT 1`,
+	}
+	latestPrimaryRunTreeAttemptsSQL = dbx.SQL{
+		SQLite: `
+WITH RECURSIVE latest AS (
+  SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL
+  ORDER BY updated_at DESC, rowid DESC LIMIT 1
+), run_tree(id) AS (
+  SELECT id FROM latest
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT id, run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms,
+       input_tokens, output_tokens, outcome, created_at_ms
+FROM fb_llm_attempts WHERE run_id IN (SELECT id FROM run_tree)
+ORDER BY id ASC LIMIT ?`,
+		MySQL: `
+WITH RECURSIVE latest AS (
+  SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL
+  ORDER BY updated_at DESC, row_id DESC LIMIT 1
+), run_tree(id) AS (
+  SELECT id FROM latest
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT id, run_id, ` + "`call`" + `, attempt, streaming, status, error, wait_ms, elapsed_ms,
+       input_tokens, output_tokens, outcome, created_at_ms
+FROM fb_llm_attempts WHERE run_id IN (SELECT id FROM run_tree)
+ORDER BY id ASC LIMIT ?`,
+		Postgres: `
+WITH RECURSIVE latest AS (
+  SELECT id FROM fb_runs WHERE session_id=$1 AND parent_run_id IS NULL
+  ORDER BY updated_at DESC, row_id DESC LIMIT 1
+), run_tree(id) AS (
+  SELECT id FROM latest
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT id, run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms,
+       input_tokens, output_tokens, outcome, created_at_ms
+FROM fb_llm_attempts WHERE run_id IN (SELECT id FROM run_tree)
+ORDER BY id ASC LIMIT $2`,
+	}
 )
 
 // LLMAttempt is one row of a run's attempt ledger: one physical model request.
@@ -52,9 +133,7 @@ func (s *RunStore) InsertLLMAttempt(ctx context.Context, in LLMAttempt) error {
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_llm_attempts(run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms, input_tokens, output_tokens, outcome, created_at_ms)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := dbx.Exec(ctx, s.DB, llmAttemptInsertSQL.For(dbx.DialectOf(s.DB)),
 		in.RunID, in.Call, in.Attempt, boolPtrToInt(in.Streaming), in.Status, in.Error,
 		in.WaitMs, in.ElapsedMs, int64PtrToNull(in.InputTokens), int64PtrToNull(in.OutputTokens),
 		in.Outcome, in.CreatedAt.UnixMilli())
@@ -77,9 +156,7 @@ func (s *RunStore) ListLLMAttempts(ctx context.Context, runID string, limit int)
 	if limit > 5000 {
 		limit = 5000
 	}
-	rows, err := s.DB.QueryContext(ctx, `
-SELECT id, run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms, input_tokens, output_tokens, outcome, created_at_ms
-FROM fb_llm_attempts WHERE run_id=? ORDER BY id ASC LIMIT ?`, runID, limit)
+	rows, err := s.DB.QueryContext(ctx, llmAttemptSelectSQL.For(dbx.DialectOf(s.DB)), runID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -125,9 +202,7 @@ func (s *RunStore) LatestPrimaryRunIDForSession(ctx context.Context, sessionID s
 		return "", fmt.Errorf("empty session id")
 	}
 	var runID string
-	err := s.DB.QueryRowContext(ctx, `
-SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL
-ORDER BY updated_at DESC, rowid DESC LIMIT 1`, sid).Scan(&runID)
+	err := s.DB.QueryRowContext(ctx, latestPrimaryRunSelectSQL.For(dbx.DialectOf(s.DB)), sid).Scan(&runID)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -157,19 +232,7 @@ func (s *RunStore) LatestPrimaryRunTreeAttempts(ctx context.Context, sessionID s
 	// One statement, one snapshot: the latest primary run's choice and the
 	// run-tree recursion live in the same query, so no run can slip between
 	// the two reads.
-	rows, err := s.DB.QueryContext(ctx, `
-WITH RECURSIVE latest AS (
-  SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL
-  ORDER BY updated_at DESC, rowid DESC LIMIT 1
-), run_tree(id) AS (
-  SELECT id FROM latest
-  UNION
-  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
-)
-SELECT id, run_id, call, attempt, streaming, status, error, wait_ms, elapsed_ms,
-       input_tokens, output_tokens, outcome, created_at_ms
-FROM fb_llm_attempts WHERE run_id IN (SELECT id FROM run_tree)
-ORDER BY id ASC LIMIT ?`, sid, limit)
+	rows, err := s.DB.QueryContext(ctx, latestPrimaryRunTreeAttemptsSQL.For(dbx.DialectOf(s.DB)), sid, limit)
 	if err != nil {
 		return nil, err
 	}

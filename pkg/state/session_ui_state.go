@@ -7,6 +7,33 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
+)
+
+// The browsing-state statements. The conflict target is the primary key
+// (session_id, surface), which is what MySQL's ON DUPLICATE KEY UPDATE keys on
+// too.
+var (
+	sessionUIStateUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_session_ui_state(session_id,surface,state_json,updated_at)
+VALUES(?,?,?,?)
+ON CONFLICT(session_id,surface) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`,
+		MySQL: `
+INSERT INTO fb_session_ui_state(session_id,surface,state_json,updated_at)
+VALUES(?,?,?,?)
+ON DUPLICATE KEY UPDATE state_json=VALUES(state_json),updated_at=VALUES(updated_at)`,
+		Postgres: `
+INSERT INTO fb_session_ui_state(session_id,surface,state_json,updated_at)
+VALUES($1,$2,$3,$4)
+ON CONFLICT(session_id,surface) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`,
+	}
+	sessionUIStateSelectSQL = dbx.SQL{
+		SQLite:   `SELECT state_json FROM fb_session_ui_state WHERE session_id=? AND surface=?`,
+		MySQL:    `SELECT state_json FROM fb_session_ui_state WHERE session_id=? AND surface=?`,
+		Postgres: `SELECT state_json FROM fb_session_ui_state WHERE session_id=$1 AND surface=$2`,
+	}
 )
 
 // SaveSessionUIState persists browsing-only state independently of messages.
@@ -38,10 +65,7 @@ func (s *SessionStore) SaveSessionUIState(ctx context.Context, sessionID, surfac
 	if !json.Valid(raw) {
 		return fmt.Errorf("invalid session ui state json")
 	}
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO fb_session_ui_state(session_id,surface,state_json,updated_at)
-VALUES(?,?,?,?)
-ON CONFLICT(session_id,surface) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`,
+	_, err = dbx.Exec(ctx, s.db, sessionUIStateUpsertSQL.For(dbx.DialectOf(s.db)),
 		sessionID, surface, string(raw), time.Now().Unix())
 	return err
 }
@@ -58,7 +82,7 @@ func (s *SessionStore) LoadSessionUIState(ctx context.Context, sessionID, surfac
 		return nil, false, err
 	}
 	var raw string
-	err := s.db.QueryRowContext(ctx, `SELECT state_json FROM fb_session_ui_state WHERE session_id=? AND surface=?`, sessionID, surface).Scan(&raw)
+	err := s.db.QueryRowContext(ctx, sessionUIStateSelectSQL.For(dbx.DialectOf(s.db)), sessionID, surface).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
 	}

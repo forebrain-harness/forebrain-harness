@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -58,6 +60,30 @@ func (q SQL) For(d Dialect) string {
 		panic(fmt.Sprintf("dbx: no %s statement for %q", d, q.SQLite))
 	}
 	return stmt
+}
+
+// Placeholder renders the placeholder of the n-th parameter (1-based) on d:
+// PostgreSQL numbers its parameters, SQLite and MySQL write every one as '?'.
+// A statement translated from SQLite numbers its parameters in the order
+// SQLite's '?' appear, so n is the ordinal of the '?' the parameter fills.
+func Placeholder(d Dialect, n int) string {
+	if d == Postgres {
+		return "$" + strconv.Itoa(n)
+	}
+	return "?"
+}
+
+// Placeholders renders n placeholders for a list assembled at run time — an
+// IN (…) whose length only the caller knows — starting at the n-th parameter.
+func Placeholders(d Dialect, start, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	marks := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		marks = append(marks, Placeholder(d, start+i))
+	}
+	return strings.Join(marks, ",")
 }
 
 // handles maps a registered *sql.DB, and a *sql.Conn taken from one through
