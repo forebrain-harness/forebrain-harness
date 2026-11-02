@@ -7,11 +7,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -469,5 +471,160 @@ func TestSeedInstallsTheDeclaredDictionariesIntoTheHome(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(home, DictionaryDir, filepath.FromSlash(file.Name))); err != nil {
 			t.Errorf("%s was not seeded into the home: %v", file.Name, err)
 		}
+	}
+}
+
+// `forebrain assets install|status` is the one place a dictionary download is
+// waited for rather than left in the background: the process reports and exits,
+// so an attempt running behind it would be killed with it.
+func TestDictionariesStatusWaitsForTheDownload(t *testing.T) {
+	originalVersion, originalURL := home.Version, releaseDownloadURL
+	t.Cleanup(func() {
+		home.Version, releaseDownloadURL = originalVersion, originalURL
+		// Resolving the files also fires the background attempt the process
+		// allows itself once; a test leaves that unused for the next one.
+		dictionaryDownloadOnce = sync.Once{}
+	})
+
+	started := make(chan struct{}, 4)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		started <- struct{}{}
+		<-release
+		http.NotFound(w, nil)
+	}))
+	t.Cleanup(server.Close)
+	home.Version = "v1.2.3"
+	releaseDownloadURL = server.URL
+
+	statuses := make(chan []DictionaryStatus, 1)
+	go func() {
+		statuses <- DictionariesStatus(filepath.Join(t.TempDir(), "home"), filepath.Join(t.TempDir(), DictionaryDir))
+	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the status report never attempted the download")
+	}
+	select {
+	case <-statuses:
+		t.Fatal("the status report was answered before the download finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	for _, status := range <-statuses {
+		if status.Err == nil {
+			t.Fatalf("%s resolved with no dictionary anywhere", status.File.Name)
+		}
+	}
+}
+
+// silentListener accepts connections and never answers, the way an intranet
+// firewall that drops the reply to a request it passed leaves a download: it can
+// only end on its own timeout. It returns the base URL a release download is
+// pointed at, and a function reporting how many connections it has taken.
+func silentListener(t *testing.T) (string, func() int) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu       sync.Mutex
+		accepted int
+		held     []net.Conn
+	)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			mu.Lock()
+			accepted++
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return "http://" + listener.Addr().String(), func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return accepted
+	}
+}
+
+// resetSegmentation returns the term cutters and the dictionary download to the
+// state a fresh process starts in: unloaded, with no download attempted. The
+// dictionaries are installed beside the test binary, so the degraded path can
+// only be observed after this — and the caller has to run it again afterwards so
+// the tests that follow load the real dictionaries.
+func resetSegmentation() {
+	chineseOnce = sync.Once{}
+	chineseLoaded, chineseLoadError = nil, nil
+	japaneseOnce = sync.Once{}
+	japaneseLoaded, japaneseLoadError = nil, nil
+	unsegmentedOnce = sync.Once{}
+	unsegmentedSearching.Store(false)
+	dictionaryDownloadOnce = sync.Once{}
+}
+
+// A search answers while the dictionaries are missing and the download that
+// would fetch them never completes. This is the offline intranet: no public
+// network, a request that hangs rather than fails, and a first memory search
+// that used to wait five minutes on it. The text is cut into character pairs
+// instead of words — coarser, which the reader is told once — so the memory is
+// still found inside a bound a conversation can afford.
+func TestSearchWithoutDictionariesAnswersWhileTheDownloadHangs(t *testing.T) {
+	originalVersion, originalURL := home.Version, releaseDownloadURL
+	originalHomeDir, originalShippedDir := dictionaryHomeDir, dictionaryShippedDir
+	t.Cleanup(func() {
+		home.Version, releaseDownloadURL = originalVersion, originalURL
+		dictionaryHomeDir, dictionaryShippedDir = originalHomeDir, originalShippedDir
+		resetSegmentation()
+	})
+
+	home.Version = "v1.2.3"
+	base, accepted := silentListener(t)
+	releaseDownloadURL = base
+	// Both places a search reads dictionaries from hold none of them, and
+	// nothing beside the test binary is consulted.
+	emptyHome := filepath.Join(t.TempDir(), DictionaryDir)
+	dictionaryHomeDir = func() (string, error) { return emptyHome, nil }
+	emptyShipped := filepath.Join(t.TempDir(), DictionaryDir)
+	dictionaryShippedDir = func() (string, error) { return emptyShipped, nil }
+	resetSegmentation()
+
+	b := indexedBackend(t, map[string]string{
+		"MEMORY.md": "行李托运前先确认航班\n无关的一行\n",
+	})
+
+	started := time.Now()
+	response := searchAll(t, b, "行李")
+	elapsed := time.Since(started)
+	if elapsed > 6*time.Second {
+		t.Fatalf("the first search waited %s on the dictionary download; the bound is 6s", elapsed)
+	}
+	if !unsegmentedSearching.Load() {
+		t.Fatal("the search did not fall back to unsegmented terms")
+	}
+	if len(response.Matches) == 0 {
+		t.Fatal("no match while the dictionaries are missing: the fallback must still recall the memory")
+	}
+	// The download was started (its connection taken) and left behind: nothing
+	// about the answer waited for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for accepted() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no background dictionary download was attempted")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

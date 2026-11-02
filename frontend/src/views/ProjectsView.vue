@@ -47,7 +47,9 @@
               {{ row.name }}
             </button>
             <BadgeComponent v-if="row.pinned" class="shrink-0">{{ t('projects.pinned') }}</BadgeComponent>
-            <BadgeComponent v-if="row.trustLevel !== 'trusted'" variant="gray" class="shrink-0">{{ t('projects.untrusted') }}</BadgeComponent>
+            <!-- A batch project has no trust level, so it carries no trust
+                 badge (plans/216 §0.4). -->
+            <BadgeComponent v-if="row.projectType !== 'batch' && row.trustLevel !== 'trusted'" variant="gray" class="shrink-0">{{ t('projects.untrusted') }}</BadgeComponent>
             <BadgeComponent v-if="row.missing" variant="error" class="shrink-0">{{ t('projects.dirMissing') }}</BadgeComponent>
             <BadgeComponent v-if="row.memoryScope === 'project_only'" variant="gray" class="shrink-0">{{ t('projects.memoryProjectOnlyBadge') }}</BadgeComponent>
           </div>
@@ -159,13 +161,6 @@
         </div>
       </div>
 
-      <!-- A batch project runs unattended on this directory, so its trust is
-           part of creating it: without it the gateway refuses the create. -->
-      <div v-if="draft.projectType === 'batch'">
-        <SwitchRow v-model="draft.batchTrust" :title="t('projects.batchTrustLabel')" :hint="t('projects.batchTrustHint')" />
-        <span class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.batchTrustRequired') }}</span>
-      </div>
-
       <p v-if="createError" class="text-[12px] text-[var(--forebrain-danger)]">{{ createError }}</p>
       <template #footer>
         <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeCreate">{{ t('common.cancel') }}</Button>
@@ -217,7 +212,6 @@ import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
-import SwitchRow from '@/components/common/SwitchRow.vue'
 import TablePager from '@/components/common/TablePager.vue'
 import FolderDialog from '@/components/chat/FolderDialog.vue'
 import ProjectDeleteDialog from '@/components/project/ProjectDeleteDialog.vue'
@@ -268,7 +262,7 @@ const folderProjects = ref<ProjectRecord[]>([])
 const createOpen = ref(false)
 const createError = ref('')
 const taken = ref<{ id: string; name: string } | null>(null)
-const draft = reactive({ name: '', root: '', projectType: 'coding' as ProjectType, batchTrust: false })
+const draft = reactive({ name: '', root: '', projectType: 'coding' as ProjectType })
 
 /**
  * The folder's suggested type, as the gateway reads it — the web never repeats
@@ -320,7 +314,6 @@ function closeCreate() {
  *  a pick made in the previous dialog is not the next one's. */
 function openDialogOn(type: ProjectType) {
   draft.projectType = type
-  draft.batchTrust = false
   projectTypeTouched.value = false
   defaultType.value = null
   defaultTypeFailed.value = false
@@ -374,7 +367,6 @@ async function loadDefaultType(root: string) {
 function pickType(type: ProjectType) {
   draft.projectType = type
   projectTypeTouched.value = true
-  if (type !== 'batch') draft.batchTrust = false
 }
 
 /** The note under the cards: the suggestion and its reason, the override once
@@ -403,11 +395,10 @@ const typeHint = computed(() => {
   }
 })
 
-/** A batch project cannot be created without its trust decision, so the
- *  dialog's own create button waits for the tick as the gateway would. */
+/** Nothing about the batch type gates the create: a batch project carries no
+ *  trust decision, so the dialog asks for none (plans/216 §0.4). */
 const canCreate = computed(() =>
-  Boolean(draft.name.trim()) && Boolean(draft.root.trim()) && !submitting.value && !taken.value
-  && (draft.projectType !== 'batch' || draft.batchTrust))
+  Boolean(draft.name.trim()) && Boolean(draft.root.trim()) && !submitting.value && !taken.value)
 
 /** The new-project form's folder picker: the picked directory is the root. */
 async function browse() {
@@ -436,9 +427,9 @@ async function create() {
       root: draft.root.trim(),
       // The dialog always says which type it means: the suggestion it shows is
       // only a suggestion, and the folder's own default is the gateway's to
-      // apply when nothing is asked for.
+      // apply when nothing is asked for. A batch project's trust is the
+      // gateway's to record, not the dialog's to ask for.
       projectType: draft.projectType,
-      ...(draft.projectType === 'batch' ? { trust: draft.batchTrust } : {}),
     })
     closeCreate()
     await load()
@@ -448,8 +439,6 @@ async function create() {
     const code = response?.data?.error
     if (response?.status === 409 && code === 'project_root_taken' && response.data?.project) {
       taken.value = { id: String(response.data.project.id ?? ''), name: String(response.data.project.name ?? '') }
-    } else if (code === 'batch_requires_trust') {
-      createError.value = t('projects.errBatchRequiresTrust')
     } else if (code === 'project_type_invalid') {
       createError.value = t('projects.errTypeInvalid')
     } else {

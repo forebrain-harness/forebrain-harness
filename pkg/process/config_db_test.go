@@ -67,7 +67,7 @@ compact:
   prompt: from-yaml
 `)
 	storeSectionForTest(t, env, ctx, "compact", `{"prompt":"from-db"}`)
-	storeSectionForTest(t, env, ctx, "approvals_reviewer", `"auto_review"`)
+	storeSectionForTest(t, env, ctx, "approval_preset", `"full_access"`)
 
 	composed, err := composeConfig(ctx, env)
 	if err != nil {
@@ -76,13 +76,39 @@ compact:
 	if composed.Compact.Prompt != "from-db" {
 		t.Fatalf("compact.prompt = %q, want the database's value", composed.Compact.Prompt)
 	}
-	if composed.ApprovalsReviewer != "auto_review" {
-		t.Fatalf("approvals_reviewer = %q, want the database's value", composed.ApprovalsReviewer)
+	if composed.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("approval_preset = %q, want the database's value", composed.ApprovalPreset)
 	}
-	// A runtime section the database does not hold reads as its zero value;
-	// the file's copy must not leak back in.
+	// sandbox_mode is no longer a setting at all: the file's copy is dead, and
+	// the derived value stays empty until safety.EffectiveConfig runs.
 	if composed.SandboxMode != "" {
 		t.Fatalf("sandbox_mode = %q, want empty (the file's runtime sections are dead)", composed.SandboxMode)
+	}
+}
+
+// TestComposeConfigPeersSectionIsDatabaseOnly pins the peers section's split
+// (plan 195 §3.1): the row composes into Root, an absent row composes as the
+// interop switch off, and the file's own copy of the section is as dead as
+// every other runtime section's — the database is the only source.
+func TestComposeConfigPeersSectionIsDatabaseOnly(t *testing.T) {
+	env, ctx := composeEnvForTest(t, "gateway:\n  http_addr: 127.0.0.1:6060\npeers:\n  claude_code: false\n")
+	storeSectionForTest(t, env, ctx, "peers", `{"claude_code":true}`)
+
+	composed, err := composeConfig(ctx, env)
+	if err != nil {
+		t.Fatalf("composeConfig: %v", err)
+	}
+	if composed.Peers.ClaudeCode == nil || !*composed.Peers.ClaudeCode {
+		t.Fatalf("peers.claude_code = %v, want the database's true (the file's false is dead)", composed.Peers.ClaudeCode)
+	}
+
+	bare, bctx := composeEnvForTest(t, "gateway:\n  http_addr: 127.0.0.1:6060\n")
+	bareComposed, err := composeConfig(bctx, bare)
+	if err != nil {
+		t.Fatalf("composeConfig without a peers row: %v", err)
+	}
+	if bareComposed.Peers.ClaudeCode != nil {
+		t.Fatalf("peers.claude_code = %v with no row, want nil (the switch off)", bareComposed.Peers.ClaudeCode)
 	}
 }
 
@@ -116,12 +142,12 @@ func TestComposeConfigGatewayAlwaysFromYAML(t *testing.T) {
 // holding an invalid value is a failed load, not a silently accepted one.
 func TestComposeConfigRejectsInvalidSection(t *testing.T) {
 	env, ctx := composeEnvForTest(t, "gateway:\n  http_addr: 127.0.0.1:6060\n")
-	storeSectionForTest(t, env, ctx, "approval_policy", `{"mode":"bogus"}`)
+	storeSectionForTest(t, env, ctx, "approval_preset", `"read_only"`)
 
 	if _, err := composeConfig(ctx, env); err == nil {
-		t.Fatal("composeConfig accepted an invalid approval_policy, want validateLoadedRoot's rejection")
-	} else if !strings.Contains(err.Error(), "invalid approval_policy") {
-		t.Fatalf("composeConfig error = %v, want the approval_policy validation message", err)
+		t.Fatal("composeConfig accepted an invalid approval_preset, want validateLoadedRoot's rejection")
+	} else if !strings.Contains(err.Error(), "approval_preset must be workspace_write or full_access") {
+		t.Fatalf("composeConfig error = %v, want the approval_preset validation message", err)
 	}
 }
 
@@ -290,8 +316,10 @@ func TestSyncConfigFromDBAppliesChangedSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := store.UpdateSection(ctx, "approval_policy", func(cur json.RawMessage) (json.RawMessage, error) {
-		return json.RawMessage(`"never"`), nil
+	// The imported file said full_access; the surface moves it back to the
+	// default, which is the change the sync has to see.
+	if err := store.UpdateSection(ctx, "approval_preset", func(cur json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`"workspace_write"`), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -305,8 +333,8 @@ func TestSyncConfigFromDBAppliesChangedSection(t *testing.T) {
 	if reloaded != 1 {
 		t.Fatalf("config_reloaded events = %d, want 1", reloaded)
 	}
-	if env.RawConfig.ApprovalPolicy.Mode != "never" {
-		t.Fatalf("raw config approval_policy = %q, want the database's never", env.RawConfig.ApprovalPolicy.Mode)
+	if env.RawConfig.ApprovalPreset != appcfg.ApprovalPresetWorkspaceWrite {
+		t.Fatalf("raw config approval_preset = %q, want the database's workspace_write", env.RawConfig.ApprovalPreset)
 	}
 
 	// The fingerprint moved with the application: the next sync stays quiet.
@@ -464,16 +492,16 @@ func TestSyncConfigFromDBComposesFromDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := store.UpdateSection(ctx, "approval_policy", func(cur json.RawMessage) (json.RawMessage, error) {
-		return json.RawMessage(`"never"`), nil
+	if err := store.UpdateSection(ctx, "approval_preset", func(cur json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`"full_access"`), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.SyncConfigFromDB(ctx); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if env.RawConfig.ApprovalPolicy.Mode != "never" {
-		t.Fatalf("applied approval_policy = %q, want the database's never", env.RawConfig.ApprovalPolicy.Mode)
+	if env.RawConfig.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("applied approval_preset = %q, want the database's full_access", env.RawConfig.ApprovalPreset)
 	}
 	// The runtime sections the import moved are still there after the sync:
 	// the file holds none of them.
@@ -490,32 +518,32 @@ func TestSyncConfigFromDBComposesFromDatabase(t *testing.T) {
 func TestUpdateRootSectionValidatesValueDomains(t *testing.T) {
 	env, ctx := composeEnvForTest(t, "gateway:\n  http_addr: 127.0.0.1:6060\n")
 	InstallConfigSectionValidator(env.ConfigPath, env.SQL)
-	// approval_policy is a scalar section: the row holds the mode's own JSON
+	// approval_preset is a scalar section: the row holds the id's own JSON
 	// string, the value its Root field marshals to.
-	storeSectionForTest(t, env, ctx, "approval_policy", `"on-request"`)
+	storeSectionForTest(t, env, ctx, "approval_preset", `"workspace_write"`)
 
 	var invalid *state.InvalidSectionError
-	err := env.UpdateRootSection(ctx, "approval_policy", func(cfg *appcfg.Root) error {
-		cfg.ApprovalPolicy = appcfg.NewApprovalPolicy("bogus")
+	err := env.UpdateRootSection(ctx, "approval_preset", func(cfg *appcfg.Root) error {
+		cfg.ApprovalPreset = appcfg.ApprovalPresetID("bogus")
 		return nil
 	})
 	if !errors.As(err, &invalid) {
 		t.Fatalf("invalid candidate error = %v, want *state.InvalidSectionError", err)
 	}
-	if !strings.Contains(err.Error(), "approval_policy") {
+	if !strings.Contains(err.Error(), "approval_preset") {
 		t.Fatalf("error = %v, want the loader's own sentence", err)
 	}
 	var stored string
-	if err := env.SQL.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = 'approval_policy'`).Scan(&stored); err != nil {
+	if err := env.SQL.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = 'approval_preset'`).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored != `"on-request"` {
-		t.Fatalf("approval_policy after refused write = %s, want the pre-write value", stored)
+	if stored != `"workspace_write"` {
+		t.Fatalf("approval_preset after refused write = %s, want the pre-write value", stored)
 	}
 
 	// A valid candidate lands, and the next compose reads it back.
-	if err := env.UpdateRootSection(ctx, "approval_policy", func(cfg *appcfg.Root) error {
-		cfg.ApprovalPolicy = appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyNever)
+	if err := env.UpdateRootSection(ctx, "approval_preset", func(cfg *appcfg.Root) error {
+		cfg.ApprovalPreset = appcfg.ApprovalPresetFullAccess
 		return nil
 	}); err != nil {
 		t.Fatalf("valid candidate: %v", err)
@@ -524,8 +552,8 @@ func TestUpdateRootSectionValidatesValueDomains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if composed.ApprovalPolicy.Mode != appcfg.ApprovalPolicyNever {
-		t.Fatalf("composed approval_policy = %q, want never", composed.ApprovalPolicy.Mode)
+	if composed.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("composed approval_preset = %q, want full_access", composed.ApprovalPreset)
 	}
 }
 
@@ -586,4 +614,33 @@ func TestUpdateRootSectionZeroValueRemovesRow(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("hooks rows = %d, want 0 (a zero section drops its row)", n)
 	}
+}
+
+// test-only readers for a whole configuration document.
+
+// loadDocumentForTest reads a whole configuration document — stored sections
+// included — the way appcfg.Load read one before plan 207 narrowed forebrain.yaml
+// to its supported keys: parse and normalize, then Load's tail (.env merge,
+// ${ENV} expansion, validation). A test that assembles a runtime configuration
+// in a file goes through here, because the file itself no longer carries those
+// sections.
+func loadDocumentForTest(path string) (appcfg.Root, error) {
+	root, err := loadPersistedDocumentForTest(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	if err := appcfg.FinishLoad(&root); err != nil {
+		return appcfg.Root{}, err
+	}
+	return root, nil
+}
+
+// loadPersistedDocumentForTest is the same read without Load's tail: a ${ENV}
+// reference stays a reference, as appcfg.LoadPersisted left it.
+func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	return appcfg.ParseRootYAML(body)
 }

@@ -138,11 +138,6 @@
       {{ t('projects.typeChangeNote') }}
     </p>
 
-    <div v-if="pendingType === 'batch'" class="mt-3">
-      <SwitchRow v-model="typeChangeTrust" :title="t('projects.batchTrustLabel')" :hint="t('projects.batchTrustHint')" />
-      <span class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.batchTrustRequired') }}</span>
-    </div>
-
     <p
       v-if="currentType === 'batch'"
       class="mt-2 rounded-lg border border-[var(--forebrain-warning)] bg-[var(--forebrain-bg-alt)] px-2.5 py-2 text-[12px] leading-[1.55] text-[var(--forebrain-text-2)]"
@@ -180,7 +175,7 @@
  * in the projects table's pin icon; deleting sits beside saving, behind the
  * same typed confirmation the table uses.
  */
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Repeat } from 'lucide-vue-next'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
@@ -212,11 +207,23 @@ const draft = reactive({
   memoryScope: 'shared',
   resourceAccess: false,
   trust: false,
+  // The batch project's own sandbox switch (plans/216 §3.6). It starts at the
+  // install's batch.sandbox_default and is the project's from then on; for
+  // another project type the field is neither shown nor sent.
+  batchSandbox: true,
 })
 const saving = ref(false)
 const formError = ref('')
 const formNotice = ref('')
 const deleteOpen = ref(false)
+
+/**
+ * Whether this machine has a sandbox at all (plan 215 §3.4). Without one there
+ * is nothing for a batch project's switch to decide — its tasks run with full
+ * access either way — so the row is not offered, and the value it would have
+ * written is not sent.
+ */
+const sandboxVisible = ref(true)
 
 watch(() => props.project, (project) => {
   if (!project) return
@@ -228,8 +235,18 @@ watch(() => props.project, (project) => {
     memoryScope: project.memoryScope || 'shared',
     resourceAccess: Boolean(project.resourceAccess),
     trust: Boolean(project.trusted),
+    batchSandbox: project.batchSandbox !== false,
   })
 }, { immediate: true })
+
+onMounted(async () => {
+  try {
+    sandboxVisible.value = await forebrainApi.approvalPresetsVisible()
+  } catch {
+    // A read that failed keeps the row: the server refuses a write it will not
+    // take anyway.
+  }
+})
 
 const changed = computed(() => {
   const p = props.project
@@ -241,6 +258,7 @@ const changed = computed(() => {
     || draft.memoryScope !== (p.memoryScope || 'shared')
     || draft.resourceAccess !== Boolean(p.resourceAccess)
     || draft.trust !== Boolean(p.trusted)
+    || (currentType.value === 'batch' && draft.batchSandbox !== (p.batchSandbox !== false))
 })
 
 const trustChanged = computed(() => Boolean(props.project) && draft.trust !== Boolean(props.project?.trusted))
@@ -255,10 +273,21 @@ const memoryHint = computed(() => (draft.memoryScope === 'project_only'
   ? t('projects.memoryScopeProjectHint')
   : t('projects.memoryScopeSharedHint')))
 
-const switchRows = computed(() => [
-  { key: 'trust' as const, title: t('projects.trustLabel'), hint: t('projects.trustHint') },
-  { key: 'resourceAccess' as const, title: t('projects.resourceAccessLabel'), hint: t('projects.resourceAccessHint') },
-])
+const switchRows = computed(() => {
+  const rows: { key: 'trust' | 'resourceAccess' | 'batchSandbox'; title: string; hint: string }[] = []
+  // A batch project has no trust level: it is neither shown nor set, and there
+  // is no "stop trusting" it could offer (plans/216 §0.4).
+  if (currentType.value !== 'batch') {
+    rows.push({ key: 'trust', title: t('projects.trustLabel'), hint: t('projects.trustHint') })
+  }
+  rows.push({ key: 'resourceAccess', title: t('projects.resourceAccessLabel'), hint: t('projects.resourceAccessHint') })
+  // 启用沙箱 is a batch project's own decision (plans/216 §3.6), and only where
+  // a sandbox exists to run inside.
+  if (currentType.value === 'batch' && sandboxVisible.value) {
+    rows.push({ key: 'batchSandbox', title: t('projects.batchSandboxLabel'), hint: t('projects.batchSandboxHint') })
+  }
+  return rows
+})
 
 // ---- The project's type (plan 153) ----
 
@@ -268,21 +297,19 @@ const currentTypeOption = computed(() => projectTypeOption(currentType.value))
 const pendingType = ref<ProjectType>('coding')
 const pendingTypeOption = computed(() => projectTypeOption(pendingType.value))
 const typeChangeOpen = ref(false)
-/** The trust the change records when it turns the project into a batch one. */
-const typeChangeTrust = ref(false)
 const savingType = ref(false)
 const typeChangeError = ref('')
 
+/** A batch project carries no trust decision, so nothing about the type gates
+ *  the change (plans/216 §0.4): picking the kind is the whole request. */
 const canChangeType = computed(() =>
-  !savingType.value && pendingType.value !== currentType.value
-  && (pendingType.value !== 'batch' || typeChangeTrust.value))
+  !savingType.value && pendingType.value !== currentType.value)
 
 /** The dialog opens on the next kind rather than the current one, so a click on
  *  确定修改 is the whole change; the cards above it pick any other. */
 function openTypeChange() {
   const next = PROJECT_TYPES[(PROJECT_TYPES.findIndex((option) => option.value === currentType.value) + 1) % PROJECT_TYPES.length]
   pendingType.value = next.value
-  typeChangeTrust.value = false
   typeChangeError.value = ''
   typeChangeOpen.value = true
 }
@@ -292,28 +319,24 @@ function closeTypeChange() {
   typeChangeError.value = ''
 }
 
-/** The change is its own write: it carries the new type (and, for a batch
- *  project, the trust decision with it) and leaves the rest of the form alone. */
+/** The change is its own write: it carries the new type and leaves the rest of
+ *  the form alone. A project that becomes a batch project has its trust record
+ *  written by the gateway — there is no trust level for batch to decide. */
 async function confirmTypeChange() {
   if (!props.project || !canChangeType.value) return
   savingType.value = true
   typeChangeError.value = ''
   try {
-    await forebrainApi.projectUpdate(props.projectId, {
-      projectType: pendingType.value,
-      ...(pendingType.value === 'batch' ? { trust: typeChangeTrust.value } : {}),
-    })
+    await forebrainApi.projectUpdate(props.projectId, { projectType: pendingType.value })
     typeChangeOpen.value = false
     formError.value = ''
     formNotice.value = t('projects.saved')
     emit('saved')
   } catch (cause) {
     const code = (cause as { response?: { data?: { error?: string } } }).response?.data?.error
-    typeChangeError.value = code === 'batch_requires_trust'
-      ? t('projects.errBatchRequiresTrust')
-      : code === 'project_type_invalid'
-        ? t('projects.errTypeInvalid')
-        : getErrorMessage(cause)
+    typeChangeError.value = code === 'project_type_invalid'
+      ? t('projects.errTypeInvalid')
+      : getErrorMessage(cause)
   } finally {
     savingType.value = false
   }
@@ -335,6 +358,7 @@ async function save() {
       memoryScope: string
       resourceAccess: boolean
       trust: boolean
+      batchSandbox: boolean
     }> = {
       name: draft.name.trim(),
       icon: draft.icon.trim(),
@@ -343,6 +367,7 @@ async function save() {
       memoryScope: draft.memoryScope,
       resourceAccess: draft.resourceAccess,
     }
+    if (currentType.value === 'batch' && sandboxVisible.value) payload.batchSandbox = draft.batchSandbox
     if (trustChanged.value) payload.trust = draft.trust
     await forebrainApi.projectUpdate(props.projectId, payload)
     // The project's PATCH can record a trust, never withdraw one; the

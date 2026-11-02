@@ -86,7 +86,6 @@ func seedWorkspace(root string) error {
 const defaultForebrainYAML = `gateway:
   http_addr: "127.0.0.1:6060"
   auth:
-    mode: "token"
     token: "${FOREBRAIN_GATEWAY_TOKEN}"
 # Channels (telegram, slack, feishu, wecom, ...) are not seeded. Add one during
 # first-run setup or by writing its section here by hand; only enabled channels
@@ -96,7 +95,6 @@ approvals_reviewer: "user"
 features:
   exec_permission_approvals: false
   request_permissions_tool: false
-  network_proxy: false
   memories: true
 agents:
   definitions:
@@ -106,10 +104,8 @@ agents:
           model: ""
   defaults:
     context_inject:
-      warn_remaining_tokens: 8000
+      warn_remaining_percent: 12
     guardrails:
       input:
         max_runes: 200000
-      retrieval:
-        max_chunk_runes: 120000
 `

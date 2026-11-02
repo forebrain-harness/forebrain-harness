@@ -231,20 +231,6 @@ func approvalPermissionSuggestionPayload(v any) *event.PermissionSuggestionPaylo
 			_ = json.Unmarshal(encoded, &out.ProposedExecPolicyAmendment)
 		}
 	}
-	if rawAmendments, ok := suggMap["proposed_network_policy_amendments"]; ok {
-		if encoded, err := json.Marshal(rawAmendments); err == nil {
-			_ = json.Unmarshal(encoded, &out.ProposedNetworkPolicyAmendments)
-		}
-	}
-	if rawContext, ok := suggMap["network_approval_context"]; ok {
-		if encoded, err := json.Marshal(rawContext); err == nil {
-			var context safety.NetworkApprovalContext
-			if json.Unmarshal(encoded, &context) == nil && context.Protocol.Valid() && strings.TrimSpace(context.Host) != "" {
-				out.NetworkApproval = &context
-				out.NetworkPort = int(int64Field(suggMap, "network_port"))
-			}
-		}
-	}
 	switch rawOpts := suggMap["destination_options"].(type) {
 	case []any:
 		out.DestinationOptions = make([]safety.PermissionDestination, 0, len(rawOpts))

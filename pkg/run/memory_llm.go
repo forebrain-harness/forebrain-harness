@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,7 +15,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
-	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -50,9 +47,6 @@ func (r *Runner) buildMemoryPipeline() *memory.Pipeline {
 		},
 		Stage1RolloutTokenLimit: func(settings appcfg.MemoriesConfig) int {
 			return memoryStage1RolloutTokenLimit(cfg, agentType, settings.ExtractModel)
-		},
-		RateLimitGuard: func(appcfg.MemoriesConfig) func(context.Context, int) bool {
-			return memoryRateLimitGuard(r.Home, cfg, agentType)
 		},
 	})
 }
@@ -160,54 +154,6 @@ func (w *backgroundMemoryLLM) waitForQuiet(ctx context.Context) {
 	}
 }
 
-func memoryRateLimitGuard(home string, cfg *appcfg.Root, agentType string) func(context.Context, int) bool {
-	provider := resolveMemoryLLMProvider(cfg, agentType, "")
-	if provider == nil || !strings.EqualFold(strings.TrimSpace(provider.Provider), "chatgpt") {
-		return nil
-	}
-	return func(ctx context.Context, minRemaining int) bool {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, openai.UsageURL, nil)
-		if err != nil {
-			return true
-		}
-		client := &http.Client{Transport: &openai.Transport{Path: openai.CredentialsPath(home)}, Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			return true
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return true
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if err != nil {
-			return true
-		}
-		var usage struct {
-			RateLimitReachedType json.RawMessage `json:"rate_limit_reached_type"`
-			RateLimit            *struct {
-				Primary *struct {
-					UsedPercent float64 `json:"used_percent"`
-				} `json:"primary_window"`
-				Secondary *struct {
-					UsedPercent float64 `json:"used_percent"`
-				} `json:"secondary_window"`
-			} `json:"rate_limit"`
-		}
-		if json.Unmarshal(body, &usage) != nil {
-			return true
-		}
-		reached := strings.TrimSpace(string(usage.RateLimitReachedType))
-		if reached != "" && reached != "null" {
-			return false
-		}
-		maxUsed := float64(100 - max(0, min(100, minRemaining)))
-		return usage.RateLimit == nil ||
-			(usage.RateLimit.Primary == nil || usage.RateLimit.Primary.UsedPercent <= maxUsed) &&
-				(usage.RateLimit.Secondary == nil || usage.RateLimit.Secondary.UsedPercent <= maxUsed)
-	}
-}
-
 // buildMemoryLLM resolves the LLM client for an internal memory operation.
 // An explicit model is used when configured; otherwise it falls back to the
 // default provider chain for agentType. Internal memory
@@ -233,7 +179,10 @@ func resolveMemoryLLMProvider(cfg *appcfg.Root, agentType, model string) *LLMPro
 		return nil
 	}
 	model = strings.TrimSpace(model)
-	if model == "" {
+	// current is the stored "run on this conversation's model" (plan 207); it
+	// reads exactly like the empty value did before the setting had a stored
+	// representation.
+	if model == "" || strings.EqualFold(model, appcfg.MemoryModelCurrent) {
 		// The default model for a background pipeline: default_model when the
 		// owning definition names one, otherwise its first entry — the same
 		// resolution the primary path uses, so background and foreground
@@ -587,7 +536,7 @@ func memoryInstructionVariantKey(projectKey string, opts memory.InstructionOptio
 	if opts.Capture {
 		flags[1] = 'c'
 	}
-	if opts.DedicatedTools {
+	if opts.MemoryTools {
 		flags[2] = 't'
 	}
 	if opts.ProjectOnly {
@@ -607,7 +556,7 @@ type memoryCitationLLM struct {
 }
 
 func wrapMemoryCitationLLM(inner llm.LLM, cfg *appcfg.Root, store *memory.Store) llm.LLM {
-	if inner == nil || store == nil || !memory.ReadPathEnabled(cfg) {
+	if inner == nil || store == nil || !memory.Enabled(cfg) {
 		return inner
 	}
 	return &memoryCitationLLM{inner: inner, cfg: cfg, store: store}

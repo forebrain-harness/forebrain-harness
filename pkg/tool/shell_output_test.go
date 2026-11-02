@@ -592,9 +592,7 @@ func TestScopedSandboxRetryIsNotUpgradedToUnsandboxedExecution(t *testing.T) {
 		payload, _ = in.(map[string]any)
 		return "", false, nil
 	})
-	rt := &AgentToolRuntime{Cfg: &appcfg.Root{
-		Features: appcfg.FeaturesSection{ExecPermissionApprovals: appcfg.BoolPtr(true)},
-	}}
+	rt := &AgentToolRuntime{Cfg: &appcfg.Root{}}
 	blocked := t.TempDir()
 	denial := "open " + filepath.Join(blocked, "out.txt") + ": operation not permitted"
 	authorized, err := requestSandboxRetryApproval(WithToolCompletionCapture(context.Background()), st, rt,
@@ -758,7 +756,9 @@ func TestShellRewriteIsDeterministicAcrossReplay(t *testing.T) {
 	}
 }
 
-func TestShellRewriteDisabledByConfig(t *testing.T) {
+// Command rewriting always runs now (plan 203): there is no switch, so every
+// shell command reaches the approval prompt in the form that will actually run.
+func TestShellRewriteIsAlwaysOn(t *testing.T) {
 	ws := t.TempDir()
 	st := NewState(ws)
 
@@ -770,17 +770,11 @@ func TestShellRewriteDisabledByConfig(t *testing.T) {
 		return "act-1", true, nil
 	})
 
-	off := false
-	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}
-	cfg.Tools.CommandRewrite.Enabled = &off
-	rt := &AgentToolRuntime{Cfg: cfg}
+	rt := &AgentToolRuntime{Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}}
 
 	_, _ = invokeShell(t, st, rt, &ShellInput{Command: "npm install lodash", SandboxPermissions: "require_escalated"})
-	if strings.Contains(gotCommand, "--no-progress") || strings.Contains(gotCommand, "--no-color") {
-		t.Fatalf("config disabled rewriting but command was still rewritten: %q", gotCommand)
-	}
-	if gotCommand != "npm install lodash" {
-		t.Errorf("command = %q, want it passed through untouched", gotCommand)
+	if !strings.Contains(gotCommand, "--no-progress") && !strings.Contains(gotCommand, "--no-color") {
+		t.Fatalf("command was not rewritten: %q", gotCommand)
 	}
 }
 
@@ -796,7 +790,7 @@ func TestShellRewriteDisabledByConfig(t *testing.T) {
 // rewritten command, this test fails and says why.
 func TestPermissionsEvaluateOriginalCommandNotRewritten(t *testing.T) {
 	const original = "git log"
-	rewrittenCmd := rewriteShellCommand(context.Background(), nil, original)
+	rewrittenCmd := rewriteShellCommand(context.Background(), original)
 	if !rewrittenCmd.Applied {
 		t.Fatalf("expected %q to be rewritten; the rest of this test is vacuous otherwise", original)
 	}

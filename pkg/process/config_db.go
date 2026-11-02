@@ -9,7 +9,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -31,22 +33,25 @@ import (
 // file concern (plan 187 §1.1). A new Root section must be added here (or
 // deliberately kept out and documented) the moment it is added to Root.
 var rootConfigSections = []string{
-	"approval_policy",
-	"approvals_reviewer",
-	"auto_review",
-	"default_permissions",
-	"permissions",
-	"sandbox_mode",
+	"approval_preset",
 	"sandbox_workspace_write",
 	"compact",
 	"cron",
 	"agents",
 	"hooks",
 	"memories",
-	"tools",
+	"batch",
 	"features",
 	"lsp",
-	"windows",
+	"peers",
+}
+
+// dbOnlyConfigSections are the Root sections forebrain.yaml never sets: they
+// live in the state database only (owner 2026-10-30), so the one-time legacy
+// import skips them — a file-era install cannot have carried one — and the
+// composition's file zeroing already keeps any stray file copy dead.
+var dbOnlyConfigSections = map[string]bool{
+	"peers": true,
 }
 
 // rootConfigSectionFields resolves each section name to its Root field, by
@@ -192,16 +197,14 @@ func ensureStartupConfigFile(cfgPath string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	minimal := struct {
-		Gateway     appcfg.Gateway            `yaml:"gateway,omitempty" json:"gateway,omitempty"`
-		Credentials appcfg.CredentialsSection `yaml:"credentials,omitempty" json:"credentials,omitempty"`
-	}{}
+	// appcfg.FileRoot is exactly the file (plan 207 §3.6): marshaling anything
+	// else — a Root, even a zero one — would drag a stored section along.
 	var body []byte
 	var err error
 	if strings.ToLower(filepath.Ext(cfgPath)) == ".json" {
-		body, err = json.MarshalIndent(minimal, "", "  ")
+		body, err = json.MarshalIndent(appcfg.FileRoot{}, "", "  ")
 	} else {
-		body, err = yaml.Marshal(minimal)
+		body, err = yaml.Marshal(appcfg.FileRoot{})
 	}
 	if err != nil {
 		return err
@@ -252,41 +255,6 @@ func (env *Environment) ConfigStore() (*state.ConfigStore, error) {
 	return env.configStore()
 }
 
-// RenderConfigDocument renders the composed persisted configuration as the
-// YAML text the configuration editor shows (plan 188 W3): the file's gateway
-// section plus every stored runtime section. The credentials pointer is the
-// file's transition-period concern and never appears — the editor must not
-// round-trip it.
-func (env *Environment) RenderConfigDocument(ctx context.Context) ([]byte, error) {
-	root, err := env.ComposedPersistedConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
-	root.Credentials = appcfg.CredentialsSection{}
-	root.SourceFiles = nil
-	out, err := yaml.Marshal(&root)
-	if err != nil {
-		return nil, err
-	}
-	return append([]byte("# runtime sections live in the state database (fb_config); edits apply on the next turn\n"), out...), nil
-}
-
-// StartupSectionsUnchanged reports whether candidate's startup sections —
-// gateway, and the credentials pointer — are the ones the file holds. An
-// editor round-trip that carries them back verbatim is not a write to them;
-// anything else is, and the write paths refuse it.
-func (env *Environment) StartupSectionsUnchanged(ctx context.Context, candidate appcfg.Root) (bool, error) {
-	if env == nil || strings.TrimSpace(env.ConfigPath) == "" {
-		return false, fmt.Errorf("no config path is bound")
-	}
-	persisted, err := appcfg.LoadPersisted(env.ConfigPath)
-	if err != nil {
-		return false, err
-	}
-	return reflect.DeepEqual(persisted.Gateway, candidate.Gateway) &&
-		reflect.DeepEqual(persisted.Credentials, candidate.Credentials), nil
-}
-
 // ComposedPersistedConfig reads the persisted form of the runtime
 // configuration — the YAML's startup sections plus the stored sections, as
 // LoadPersisted composed them: no .env merge, no ${ENV} expansion, no
@@ -300,6 +268,37 @@ func (env *Environment) ComposedPersistedConfig(ctx context.Context) (appcfg.Roo
 		return appcfg.Root{}, fmt.Errorf("no state database")
 	}
 	return composeSectionsFrom(ctx, env.ConfigPath, env.SQL, nil)
+}
+
+// WriteRootSections writes several sections of root in one transaction (plan
+// 191 §3.1): a settings group's items can live in more than one Root section —
+// the approval group spans approval_preset, sandbox_workspace_write and batch —
+// and such a save lands whole or not at all. The caller reads the configuration
+// first (ComposedPersistedConfig), changes the sections it means to change, and
+// hands the result here; each named section is rendered and stored inside the
+// store's single transaction, where the validator still judges it.
+func (env *Environment) WriteRootSections(ctx context.Context, sections []string, root appcfg.Root) error {
+	if env == nil || env.SQL == nil {
+		return fmt.Errorf("no state database")
+	}
+	if len(sections) == 0 {
+		return fmt.Errorf("config section name required")
+	}
+	next := make(map[string]json.RawMessage, len(sections))
+	for _, name := range sections {
+		raw, err := MarshalRootSection(root, name)
+		if err != nil {
+			return err
+		}
+		next[name] = raw
+	}
+	store, err := env.configStore()
+	if err != nil {
+		return err
+	}
+	return store.UpdateSections(ctx, sections, func(map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+		return next, nil
+	})
 }
 
 // UpdateRootSection runs one read-modify-write of one Root section in the
@@ -354,6 +353,66 @@ func (env *Environment) UpdateRootSection(ctx context.Context, section string, f
 		}
 		return out, nil
 	})
+}
+
+// StartupConfig reads the configuration a process starts from before its
+// environment exists: the startup gates (first-setup, startup-config), the
+// pre-session readers, and anything else that must judge the configuration
+// before Open runs. The state database is the source once it holds sections;
+// until then the file is, and it is read whole — a file-era home the legacy
+// import has not reached yet still starts on what its file says (plan 207
+// §3.5), which is also what the import will move into the database.
+//
+// A home with no configuration at all reads as an empty root: a caller that
+// must tell that apart from a configured one asks NeedsFirstSetup.
+func StartupConfig(ctx context.Context, home string) (appcfg.Root, error) {
+	root, fromFile, err := readStartupConfig(ctx, home)
+	if err != nil || !fromFile {
+		return root, err
+	}
+	// The file-era read takes the same tail Load gave it: the home's .env
+	// merge, ${ENV} expansion and validation, so a copied configuration whose
+	// secret is missing reads as missing rather than as a reference that looks
+	// set.
+	if err := appcfg.FinishLoad(&root); err != nil {
+		return appcfg.Root{}, err
+	}
+	return root, nil
+}
+
+// PersistedStartupConfig is StartupConfig without Load's tail: ${ENV}
+// references stay references. It is what a surface that writes the
+// configuration back reads — /connect must not bake one machine's expanded
+// secrets into the file it saves.
+func PersistedStartupConfig(ctx context.Context, home string) (appcfg.Root, error) {
+	root, _, err := readStartupConfig(ctx, home)
+	return root, err
+}
+
+// readStartupConfig is the one decision both readers share: the composed
+// configuration once the state database holds sections, the file's own
+// sections until then (the fromFile flag). The file is read whole for that
+// case, the way the legacy import reads it.
+func readStartupConfig(ctx context.Context, home string) (appcfg.Root, bool, error) {
+	if composed, ok, err := ComposedStartupConfig(ctx, home); err != nil {
+		return appcfg.Root{}, false, err
+	} else if ok {
+		return composed, false, nil
+	}
+	// The same loose path resolution the startup resolve uses: a home with no
+	// config file at all has no configuration either way.
+	cfgPath, err := homepkg.ResolveConfigPath(home)
+	if err != nil {
+		cfgPath = homepkg.ConfigPath(home)
+	}
+	root, err := appcfg.LoadLegacyFileSections(cfgPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return appcfg.Root{}, true, nil
+		}
+		return appcfg.Root{}, true, err
+	}
+	return root, true, nil
 }
 
 // ComposedStartupConfig reads the composed configuration for a process that
@@ -497,4 +556,24 @@ func installCredentialStores(sqlDB *sql.DB) {
 	openaiauth.SetCredentialsStore(dbCredentialStore{store: store, section: "auth.chatgpt"})
 	opencode.SetCredentialsStore(dbCredentialStore{store: store, section: "auth.opencode"})
 	mcp.SetOAuthOverlayStore(dbMCPOAuthStore{store: store})
+}
+
+// ReadConfigFile returns the file's text. A home with no file yet reads as the
+// empty string: the editor has nothing to show, and writes what the user types.
+func ReadConfigFile(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(body), nil
+}
+
+// WriteConfigFile replaces the file with body, atomically — no reader ever sees
+// a half-written configuration — at 0600 for a file it creates and at the mode
+// of the file it replaces. It writes no database row: the file is the user's.
+func WriteConfigFile(path string, body []byte) error {
+	return writeFileAtomic0600(path, body)
 }

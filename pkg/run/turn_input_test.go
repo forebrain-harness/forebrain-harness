@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 func TestRetractSteerRemovesThePendingSteerItNames(t *testing.T) {
@@ -126,6 +127,31 @@ func TestInputQueueSteerAdmission(t *testing.T) {
 	send, restore := q.Next(BoundaryInterrupted)
 	if len(send) != 0 || len(restore) != 1 || !restore[0].Rejected || restore[0].Text != "missed the turn" {
 		t.Fatalf("detached steer = %#v, %#v", send, restore)
+	}
+}
+
+// A closed conversation refuses people and still hears its own agents. A batch
+// task's queue is closed so nobody joins the run, yet the subagent working that
+// task reports to the agent that dispatched it, and that delivery is the
+// message this conversation was waiting for.
+func TestInputQueueSteerFromAgentPassesTheClosedGate(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Close()
+	if q.Steer(Input{Text: "a person joining a batch task"}) {
+		t.Fatal("a closed queue must refuse a person's steer")
+	}
+	if !q.SteerFromAgent(Input{Text: "<agent-message from=\"task-1\">found it</agent-message>"}) {
+		t.Fatal("a closed queue must take a message from its own agent")
+	}
+	got := rt.Snapshot()
+	if len(got) != 1 || got[0].Mode != TurnInputModeSteer {
+		t.Fatalf("agent steer did not reach the runtime: %#v", got)
+	}
+	send, _ := q.Next(BoundaryCompleted)
+	if len(send) != 1 || !strings.Contains(send[0].Text, "found it") {
+		t.Fatalf("agent steer did not land in the steer lane: %#v", send)
 	}
 }
 
@@ -687,5 +713,50 @@ func TestAQueuedSteerWaitsForTheAnswerWithoutEsc(t *testing.T) {
 	}
 	if delivered := q.TakeDelivered(); len(delivered) != 1 || delivered[0].Text != "keep going" {
 		t.Fatalf("delivered = %#v, want the steer the model answered", delivered)
+	}
+}
+
+// A peer message reaches the model as a meta message carrying its origin, all
+// the way through the queue: the entry the runtime hands the model keeps what
+// the surface put on the input (plan 196 §3.1). The origin is what tells the
+// surface the row was not typed here, and it must not be lost between the
+// queue's steer lane and the request.
+func TestInputQueuePeerOriginReachesTheModel(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	envelope := "<cross-session-message from=\"uds:/tmp/fb-socks-1/9.sock\">\nhi\n</cross-session-message>"
+	if !q.Steer(Input{Text: envelope, Parts: []llm.ContentPart{llm.Text(envelope)}, Origin: state.MessageOriginPeer}) {
+		t.Fatal("the peer message did not steer")
+	}
+	entries := rt.DrainSteers()
+	if len(entries) != 1 {
+		t.Fatalf("drained %d entries, want 1", len(entries))
+	}
+	if entries[0].Origin != state.MessageOriginPeer {
+		t.Fatalf("entry origin = %q, want %q", entries[0].Origin, state.MessageOriginPeer)
+	}
+	var w toolOrchestrationLLM
+	msgs := w.steerMessages(context.Background(), entries)
+	if len(msgs) != 1 {
+		t.Fatalf("steerMessages produced %d messages, want 1", len(msgs))
+	}
+	if !msgs[0].IsMeta {
+		t.Fatal("a peer message must reach the model as meta")
+	}
+	if msgs[0].Origin != state.MessageOriginPeer {
+		t.Fatalf("model message origin = %q, want %q", msgs[0].Origin, state.MessageOriginPeer)
+	}
+	if got := msgs[0].TextContent(); got != envelope {
+		t.Fatalf("model message text = %q, want the envelope", got)
+	}
+
+	// A message the person typed is untouched: no meta marker, no origin.
+	if !q.Steer(Input{Text: "typed here"}) {
+		t.Fatal("the typed message did not steer")
+	}
+	plain := w.steerMessages(context.Background(), rt.DrainSteers())
+	if len(plain) != 1 || plain[0].IsMeta || plain[0].Origin != "" {
+		t.Fatalf("typed steer = %+v, want a plain user message", plain)
 	}
 }

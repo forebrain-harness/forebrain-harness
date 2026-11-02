@@ -908,16 +908,18 @@ func TestContextBudgetUsesEachAgentsOwnModel(t *testing.T) {
 	}
 
 	// The configured auto-compact limit is part of the budget, for the
+	// The configured auto-compaction percent is part of the budget, for the
 	// subagent's window as much as the primary's.
-	limited := &appcfg.Root{Agents: cfg.Agents, Compact: appcfg.CompactSection{ModelAutoCompactTokenLimit: 50000}}
+	limited := &appcfg.Root{Agents: cfg.Agents, Compact: appcfg.CompactSection{AutoCompactPercent: 50}}
 	rl := &Runner{Deps: &Deps{AppCfg: limited}}
-	primary, ok := ContextBudget(rl, "conversation-1", nil, 450000)
-	if !ok || primary.AutoCompactThreshold != 50000 || primary.PercentLeft != 0 {
-		t.Fatalf("primary budget past the configured limit = %+v, want threshold 50000 and 0%% left", primary)
+	// Half of the primary's 1M window, and half of the explore agent's 128k.
+	primary, ok := ContextBudget(rl, "conversation-1", nil, 500000)
+	if !ok || primary.AutoCompactThreshold != 500000 || primary.PercentLeft != 0 {
+		t.Fatalf("primary budget at the configured threshold = %+v, want threshold 500000 and 0%% left", primary)
 	}
 	explore, ok := ContextBudget(rl, "conversation-1", &agent.HistoryEntry{TaskID: "task-explore", AgentKind: "typed", AgentType: "explore"}, 28800)
-	if !ok || explore.AutoCompactThreshold != 50000 || explore.PercentLeft != 42 {
-		t.Fatalf("explore budget under the configured limit = %+v, want threshold 50000 and 42%% left", explore)
+	if !ok || explore.AutoCompactThreshold != 64000 || explore.PercentLeft != 55 {
+		t.Fatalf("explore budget under the configured threshold = %+v, want threshold 64000 and 55%% left", explore)
 	}
 }
 
@@ -1365,7 +1367,7 @@ func TestOpenCodeLoginTokenIsWhatLeavesAfterConnect(t *testing.T) {
 		t.Fatalf("save OpenCode login: %v", err)
 	}
 
-	cfg, err := appcfg.LoadPersisted(path)
+	cfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted: %v", err)
 	}
@@ -1383,7 +1385,7 @@ func TestOpenCodeLoginTokenIsWhatLeavesAfterConnect(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	saved, err := appcfg.LoadPersisted(path)
+	saved, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -2079,4 +2081,63 @@ func TestPlanKeptOnlySuppressesImplementationReminder(t *testing.T) {
 	if !strings.Contains(text, "You are the primary executor of an approved plan") {
 		t.Fatalf("office implementation reminder must carry the shared execution contract: %q", text)
 	}
+}
+
+// The plan directory does not exist until the first plan file is written, so a
+// model that lists it first finds nothing there. Every reminder given before a
+// plan file exists says so, so that absence reads as expected rather than as
+// the reason a write failed — and so the model does not reach for a shell
+// mkdir, which the sandbox refuses inside FOREBRAIN_HOME.
+func TestPlanModeReminderSaysWriteFileCreatesThePlanDirectory(t *testing.T) {
+	const note = "write_file creates the directory"
+	for _, tc := range []struct {
+		name       string
+		kind       string
+		planExists bool
+		subagent   bool
+		want       bool
+	}{
+		{name: "full, no plan yet", kind: "full", want: true},
+		{name: "sparse, no plan yet", kind: "sparse", want: true},
+		{name: "subagent full", kind: "full", subagent: true, want: true},
+		{name: "subagent sparse", kind: "sparse", subagent: true, want: true},
+		{name: "full, plan exists", kind: "full", planExists: true, want: false},
+		{name: "sparse, plan exists", kind: "sparse", planExists: true, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildPlanModeReminder("/plans/proj/sid", "/plans/proj/sid/p.md", tc.planExists, tc.kind, false, tc.subagent)
+			if strings.Contains(got, note) != tc.want {
+				t.Fatalf("reminder mentions %q = %v, want %v:\n%s", note, !tc.want, tc.want, got)
+			}
+		})
+	}
+}
+
+// test-only readers for a whole configuration document.
+
+// loadDocumentForTest reads a whole configuration document — stored sections
+// included — the way appcfg.Load read one before plan 207 narrowed forebrain.yaml
+// to its supported keys: parse and normalize, then Load's tail (.env merge,
+// ${ENV} expansion, validation). A test that assembles a runtime configuration
+// in a file goes through here, because the file itself no longer carries those
+// sections.
+func loadDocumentForTest(path string) (appcfg.Root, error) {
+	root, err := loadPersistedDocumentForTest(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	if err := appcfg.FinishLoad(&root); err != nil {
+		return appcfg.Root{}, err
+	}
+	return root, nil
+}
+
+// loadPersistedDocumentForTest is the same read without Load's tail: a ${ENV}
+// reference stays a reference, as appcfg.LoadPersisted left it.
+func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	return appcfg.ParseRootYAML(body)
 }

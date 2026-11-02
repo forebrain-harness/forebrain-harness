@@ -74,7 +74,7 @@ func (s *Server) modelConfig() *config.Root {
 	if s != nil && s.Runner != nil && s.Runner.AppCfg != nil {
 		return s.Runner.AppCfg
 	}
-	return s.liveCfg()
+	return s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 }
 
 // withDetachedGatewayApprovalHooks restores the per-run surface seams for a
@@ -96,13 +96,6 @@ func (s *Server) withDetachedGatewayApprovalHooks(ctx context.Context, sessionID
 			}
 		}
 	}
-	ctx = tool.WithNetworkApprovalPromptHook(ctx, func(approvalCtx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-		executionID := strings.TrimSpace(request.ExecutionID)
-		if executionID == "" {
-			executionID = rid
-		}
-		return s.promptGatewayNetworkApproval(approvalCtx, actionID, payload, request, "", executionID, sid, writeDetached)
-	})
 	ctx = tool.WithSubagentApprovalHook(ctx, func(approvalCtx context.Context, rae *tool.RequiresActionError) (context.Context, error) {
 		return s.promptGatewaySubagentApproval(approvalCtx, rae, "", sid, writeDetached)
 	})
@@ -224,17 +217,6 @@ func approvalWSData(eval turn.ApprovalEvaluator, sessionID, actionID, actionKind
 	if amendment := execAmendment(request.AvailableDecisions); len(amendment) > 0 {
 		item["proposed_execpolicy_amendment"] = amendment
 	}
-	if request.NetworkApproval != nil {
-		item["network_approval_context"] = request.NetworkApproval
-		if request.NetworkPort > 0 {
-			item["network_port"] = request.NetworkPort
-		}
-		host := request.NetworkApproval.Host
-		item["proposed_network_policy_amendments"] = []safety.NetworkPolicyAmendment{
-			{Host: host, Action: safety.NetworkPolicyAllow},
-			{Host: host, Action: safety.NetworkPolicyDeny},
-		}
-	}
 	if eval != nil {
 		item["permission_mode"] = request.PermissionMode
 		item["permission_reason"] = request.PermissionReason
@@ -273,48 +255,11 @@ func gatewayApprovalDecisionWire(options []safety.ApprovalDecisionOption) []any 
 			out = append(out, map[string]any{string(option.Decision): map[string]any{
 				"command_scope": option.CommandScope,
 			}})
-		case safety.DecisionApplyNetworkPolicyAmendment:
-			if option.NetworkPolicyAmendment != nil {
-				out = append(out, map[string]any{string(option.Decision): map[string]any{
-					"network_policy_amendment": *option.NetworkPolicyAmendment,
-				}})
-			}
 		default:
 			out = append(out, string(option.Decision))
 		}
 	}
 	return out
-}
-
-func (s *Server) promptGatewayNetworkApproval(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest, requestID, runID, sessionID string, writeMsg func(wsServerMsg)) (safety.NetworkApprovalDecision, error) {
-	if s == nil || s.Actions == nil {
-		return safety.NetworkApprovalDeny, fmt.Errorf("network approval service is unavailable")
-	}
-	data := approvalWSData(s.sessionPermissions(ctx, request.EnvironmentID), request.EnvironmentID, actionID, "shell", "shell", payload)
-	resolved := false
-	defer func() {
-		if !resolved {
-			_, _ = s.Actions.Cancel(context.Background(), actionID, "network approval was cancelled before a decision was returned")
-		}
-	}()
-	writeMsg(wsServerMsg{Op: "requires_action", RequestID: requestID, RunID: runID, SessionID: sessionID, Data: data, Message: "Awaiting network approval to continue the current command"})
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		action, err := s.Actions.Get(ctx, actionID)
-		if err != nil {
-			return safety.NetworkApprovalDeny, err
-		}
-		if decision, done := turn.NetworkResult(action); done {
-			resolved = true
-			return decision, nil
-		}
-		select {
-		case <-ctx.Done():
-			return safety.NetworkApprovalCancel, ctx.Err()
-		case <-ticker.C:
-		}
-	}
 }
 
 // promptGatewaySubagentApproval answers one subagent's approval gate in place,
@@ -323,10 +268,9 @@ func (s *Server) promptGatewayNetworkApproval(ctx context.Context, actionID stri
 //
 // The web UI's half of this already exists: the pending-actions list renders
 // the request and its decision buttons, and the approve/deny endpoints resolve
-// it. What this adds is the waiting — the same shape promptGatewayNetworkApproval
-// uses, because a subagent's gate is asked from inside a live tool call for the
-// same reason a sandboxed command's network gate is: there is no caller above
-// it that could replay the dispatch.
+// it. What this adds is the waiting, because a subagent's gate is asked from
+// inside a live tool call: there is no caller above it that could replay the
+// dispatch.
 func (s *Server) promptGatewaySubagentApproval(
 	ctx context.Context, rae *tool.RequiresActionError,
 	requestID, sessionID string, writeMsg func(wsServerMsg),
@@ -538,7 +482,7 @@ func (s *Server) handleGatewayApprovalMessage(ctx context.Context, message wsCli
 		choice = "accept"
 	}
 	err := s.resolveGatewayApproval(ctx, actionID, turn.ApprovalReply{
-		Choice: choice, Exec: message.ExecPolicyAmendment, Network: message.NetworkPolicyAmendment,
+		Choice: choice, Exec: message.ExecPolicyAmendment,
 		Permissions: message.RequestPermissions, Reason: "via websocket",
 	})
 	if err != nil {

@@ -176,7 +176,7 @@ agents:
 // headers, the connect bound (startup_timeout, seconds) and the per-call bound
 // (request_timeout, seconds) all land on the entry.
 func TestMCPEntryFieldsLoadWithForebrainSpelling(t *testing.T) {
-	root, err := LoadPersisted(writeConfigFile(t, smartDocConfig))
+	root, err := loadPersistedDocumentForTest(writeConfigFile(t, smartDocConfig))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestMCPEntryFieldsLoadWithForebrainSpelling(t *testing.T) {
 // (decoding is deliberately not strict), they do not fail the load, and they do
 // not disturb the fields forebrain does read.
 func TestMCPForeignTimeoutSpellingsAreIgnored(t *testing.T) {
-	root, err := LoadPersisted(writeConfigFile(t, `
+	root, err := loadDocumentForTest(writeConfigFile(t, `
 agents:
   defaults:
     mcp_servers:
@@ -267,7 +267,7 @@ func TestMCPTimeoutAndEnabledValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := LoadPersisted(writeConfigFile(t, "agents:\n  defaults:\n    mcp_servers:\n      - name: x\n        command: /bin/x\n"+tc.body))
+			_, err := loadDocumentForTest(writeConfigFile(t, "agents:\n  defaults:\n    mcp_servers:\n      - name: x\n        command: /bin/x\n"+tc.body))
 			if err == nil {
 				t.Fatalf("want a load error containing %q", tc.want)
 			}
@@ -282,7 +282,7 @@ func TestMCPTimeoutAndEnabledValidation(t *testing.T) {
 // configuration does not quietly drop what the new fields say: an entry the user
 // switched off stays switched off in the file.
 func TestMCPConfigRoundTripKeepsTheNewFields(t *testing.T) {
-	root, err := LoadPersisted(writeConfigFile(t, `
+	root, err := loadDocumentForTest(writeConfigFile(t, `
 agents:
   defaults:
     mcp_servers:
@@ -313,7 +313,7 @@ agents:
 	if !strings.Contains(text, "request_timeout: 30") {
 		t.Fatalf("request_timeout must survive a save:\n%s", text)
 	}
-	again, err := LoadPersisted(path)
+	again, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -334,7 +334,7 @@ agents:
 // normalization and validation the shared one does — with the error naming the
 // section a reader has to fix.
 func TestAgentDefinitionMCPServers(t *testing.T) {
-	root, err := LoadPersisted(writeConfigFile(t, `
+	root, err := loadPersistedDocumentForTest(writeConfigFile(t, `
 agents:
   definitions:
     alice:
@@ -364,7 +364,7 @@ agents:
 		}
 	}
 
-	_, err = LoadPersisted(writeConfigFile(t, `
+	_, err = loadPersistedDocumentForTest(writeConfigFile(t, `
 agents:
   definitions:
     alice:
@@ -385,7 +385,7 @@ agents:
 // TestAgentDefinitionMCPServersDoNotSerializeOnEveryAgent pins where the list
 // lives: on the definition that needs it, and nowhere else.
 func TestAgentDefinitionMCPServersDoNotSerializeOnEveryAgent(t *testing.T) {
-	root, err := LoadPersisted(writeConfigFile(t, `
+	root, err := loadPersistedDocumentForTest(writeConfigFile(t, `
 agents:
   definitions:
     alice:
@@ -413,7 +413,7 @@ agents:
 // an override of a public built-in and a custom subagent all load, and each
 // field the subagent page edits reads back unchanged.
 func TestLoadReadsPrimaryAgentSubagents(t *testing.T) {
-	root, err := LoadPersisted(writeConfigFile(t, `
+	root, err := loadPersistedDocumentForTest(writeConfigFile(t, `
 agents:
   defaults:
     enable_subagent: true
@@ -563,7 +563,7 @@ func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfigFile(t, "agents:\n  definitions:\n    main:\n      primary: true\n      subagents:\n"+tc.entry)
-			_, err := LoadPersisted(path)
+			_, err := loadPersistedDocumentForTest(path)
 			if err == nil {
 				t.Fatalf("LoadPersisted accepted an invalid subagent entry:\n%s", tc.entry)
 			}

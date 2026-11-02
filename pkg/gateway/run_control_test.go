@@ -899,8 +899,8 @@ func TestRejectingPendingSteersDoesNotPublishIntermediatePreview(t *testing.T) {
 // The web conversation shows the primary agent's answer as it is written: each
 // piece is published on the conversation's event log as it arrives, the same
 // event a subagent's stream is, and kept so a cancelled turn persists what the
-// page already showed. An answer the output guardrail judges whole is not
-// streamed at all.
+// page already showed. Every answer streams; no answer is held back to be
+// judged whole.
 func TestWebAnswerStreamsAsItIsWritten(t *testing.T) {
 	ctx := context.Background()
 	s := cronTestServer(t)
@@ -936,10 +936,9 @@ func TestWebAnswerStreamsAsItIsWritten(t *testing.T) {
 	}
 	require.Contains(t, strings.Join(kept, "|"), "assistant:Hello", "a cancelled turn keeps the answer the page was shown")
 
-	enabled := true
-	s.Env.Deps.AppCfg.Agents.Defaults.Guardrails.Output.Enabled = &enabled
-	require.Nil(t, llm.StreamSinkFrom(s.withAnswerStream(ctx, "r2", "s1", &streamed, &turn.StreamPartial{})),
-		"an answer the output guardrail must judge whole is not streamed")
+	// Every answer streams: nothing judges one whole before it is shown.
+	second := s.withAnswerStream(ctx, "r2", "s1", &streamed, &turn.StreamPartial{})
+	require.NotNil(t, llm.StreamSinkFrom(second), "the answer stream must always be installed")
 }
 
 // recordingRunExecutor answers every turn with a fixed outcome and remembers
@@ -1019,9 +1018,10 @@ func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
 	executor := &recordingRunExecutor{answer: "picked up where it left off"}
 	// The web turn path resolves attachments through the session's runner.
 	cfg := &appcfg.Root{}
-	// An Env turns the control plane's auth on; the fixture's pages are local
-	// test clients, so it runs the mode a local no-auth deployment runs.
-	cfg.Gateway.Auth.Mode = "none"
+	// An Env turns the control plane's auth on, and token auth is the only
+	// authentication there is (plan 206): the fixture's pages present the token
+	// the way a browser presents its cookie.
+	cfg.Gateway.Auth.Token = "gw-secret"
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}},
@@ -1055,10 +1055,18 @@ func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
 	return &autoContinueGateway{server: s, sessions: sessions, executor: executor, cronStore: &state.CronStore{DB: db}, projectID: proj.ID, url: "ws" + strings.TrimPrefix(server.URL, "http")}
 }
 
+// autoContinueGatewayHeaders carries the fixture's gateway token: its Env has a
+// token configured, so the handshake has to present one.
+func autoContinueGatewayHeaders() http.Header {
+	header := http.Header{}
+	header.Set("Authorization", "Bearer gw-secret")
+	return header
+}
+
 // bind opens a page on the session and returns it with its session_bound reply.
 func (g *autoContinueGateway) bind(t *testing.T) (*websocket.Conn, wsServerMsg) {
 	t.Helper()
-	conn, _, err := websocket.DefaultDialer.Dial(g.url, nil)
+	conn, _, err := websocket.DefaultDialer.Dial(g.url, autoContinueGatewayHeaders())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
@@ -2393,5 +2401,81 @@ func TestDetachedBatchTurnCarriesItsTaskInput(t *testing.T) {
 	}
 	if batch || plain.BatchInput != nil {
 		t.Fatalf("an ordinary detached turn was treated as a batch one: %v %+v", batch, plain.BatchInput)
+	}
+}
+
+// TestBatchSessionIsReadOnlyOverTheAPI pins the gateway half of plans/216 §3.4:
+// every request that would change a batch task execution's conversation is
+// refused, and the reads that make it a record stay open.
+//
+// The page hides these controls as well. This is the layer that makes the rule
+// true for any client: the conversation is the business system's record of what
+// the task did, and no client may rewrite it.
+func TestBatchSessionIsReadOnlyOverTheAPI(t *testing.T) {
+	ctx := context.Background()
+	s, projects, _ := newProjectsTestServer(t)
+	project := batchTestProject(t, s)
+	sessionID := state.NewID("sess-batch")
+	batchTestExecution(t, s, project, sessionID)
+	if got, err := projects.SessionProjectType(ctx, sessionID); err != nil || got != state.ProjectTypeBatch {
+		t.Fatalf("session type = %q err=%v, want a batch execution", got, err)
+	}
+
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/title", map[string]any{"title": "renamed"}},
+		{http.MethodPut, "/api/chat/sessions/" + sessionID + "/model", map[string]any{"model": "deepseek/deepseek-v4-flash"}},
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/compact", map[string]any{}},
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/rewind", map[string]any{"message_row": 1}},
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/rewind/undo", map[string]any{}},
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/file-changes/revert", map[string]any{}},
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/interrupt-send", map[string]any{"message": "hi"}},
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/subagents/worker/input", map[string]any{"message": "hi"}},
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/subagents/worker/queued-input", map[string]any{"message": "hi"}},
+	} {
+		rec := doJSON(t, s, tc.method, tc.path, tc.body)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "batch_session_read_only") {
+			t.Fatalf("%s %s = %d %s, want a batch read-only refusal", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Reading the conversation — what the read-only viewer exists for — is
+	// untouched: the message log, the task's todos, and the deliverables.
+	for _, path := range []string{
+		"/api/chat/sessions/" + sessionID,
+		"/api/chat/sessions/" + sessionID + "/messages",
+		"/api/chat/sessions/" + sessionID + "/todos",
+		"/api/chat/sessions/" + sessionID + "/artifacts",
+	} {
+		if rec := doJSON(t, s, http.MethodGet, path, nil); rec.Code == http.StatusConflict {
+			t.Fatalf("GET %s = %d %s, want the read to stay open", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestEditingAnOrdinarySessionIsUnaffected pins the other direction of the same
+// wrapper: a conversation that is not a batch execution keeps every one of
+// these routes.
+func TestEditingAnOrdinarySessionIsUnaffected(t *testing.T) {
+	s, projects, _ := newProjectsTestServer(t)
+	root := projectTempRoot(t)
+	project, err := projects.Create(context.Background(), state.CreateProjectInput{
+		Name: "coding", Root: root, ProjectKey: state.ProjectKeyForRoot(root), ProjectType: state.ProjectTypeCoding,
+	})
+	if err != nil {
+		t.Fatalf("create the project: %v", err)
+	}
+	sessionID := state.NewID("sess-coding")
+	if err := s.Sessions.EnsureAt(context.Background(), sessionID, "chat", state.SessionBirth{
+		Cwd: project.Root, ProjectID: project.ID, Source: state.SessionSourceConversation,
+	}); err != nil {
+		t.Fatalf("create the conversation: %v", err)
+	}
+	rec := doJSON(t, s, http.MethodPost, "/api/chat/sessions/"+sessionID+"/title", map[string]any{"title": "renamed"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("renaming an ordinary conversation = %d %s", rec.Code, rec.Body.String())
 	}
 }

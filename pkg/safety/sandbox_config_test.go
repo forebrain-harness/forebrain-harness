@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 )
 
 // A registered project inside a larger checkout is its own project: the
@@ -120,5 +122,48 @@ func TestProjectSettingsPathTakesTheProjectRootAsGiven(t *testing.T) {
 	}
 	if path != filepath.Join(canonical, ".forebrain", "safety.json") {
 		t.Fatalf("rules path = %q", path)
+	}
+}
+
+// EffectiveConfig is the one place the approval preset becomes the pair the
+// runtime acts on (plan 203). The table is pinned here in full — two presets
+// across the three trust decisions — because every cell is a different answer
+// to "does this ask, and is it contained".
+func TestEffectiveConfigDerivesThePairFromThePreset(t *testing.T) {
+	trusted := ProjectContext{Project: Project{Root: t.TempDir(), VersionControlled: true}, TrustLevel: LevelTrusted}
+	rejected := ProjectContext{Project: Project{Root: t.TempDir(), VersionControlled: true}, TrustLevel: LevelUntrusted}
+	undecided := ProjectContext{Project: Project{Root: t.TempDir(), VersionControlled: true}}
+
+	cases := []struct {
+		name       string
+		preset     appcfg.ApprovalPresetID
+		launch     ProjectContext
+		wantPolicy appcfg.ApprovalPolicyMode
+		wantMode   appcfg.SandboxMode
+	}{
+		{"workspace_write/trusted", appcfg.ApprovalPresetWorkspaceWrite, trusted, appcfg.ApprovalPolicyOnRequest, appcfg.SandboxModeWorkspaceWrite},
+		{"workspace_write/rejected", appcfg.ApprovalPresetWorkspaceWrite, rejected, appcfg.ApprovalPolicyUntrusted, appcfg.SandboxModeWorkspaceWrite},
+		{"workspace_write/undecided", appcfg.ApprovalPresetWorkspaceWrite, undecided, appcfg.ApprovalPolicyOnRequest, appcfg.SandboxModeReadOnly},
+		{"full_access/trusted", appcfg.ApprovalPresetFullAccess, trusted, appcfg.ApprovalPolicyNever, appcfg.SandboxModeDangerFullAccess},
+		{"full_access/rejected", appcfg.ApprovalPresetFullAccess, rejected, appcfg.ApprovalPolicyNever, appcfg.SandboxModeDangerFullAccess},
+		{"full_access/undecided", appcfg.ApprovalPresetFullAccess, undecided, appcfg.ApprovalPolicyNever, appcfg.SandboxModeDangerFullAccess},
+		// An unset preset is the default: empty reaches here only from a
+		// database whose value predates plan 207.
+		{"empty/trusted", "", trusted, appcfg.ApprovalPolicyOnRequest, appcfg.SandboxModeWorkspaceWrite},
+		{"empty/rejected", "", rejected, appcfg.ApprovalPolicyUntrusted, appcfg.SandboxModeWorkspaceWrite},
+		{"empty/undecided", "", undecided, appcfg.ApprovalPolicyOnRequest, appcfg.SandboxModeReadOnly},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EffectiveConfig(appcfg.Root{ApprovalPreset: tc.preset}, tc.launch)
+			if got.ApprovalPolicy.Mode != tc.wantPolicy || got.SandboxMode != tc.wantMode {
+				t.Fatalf("policy=%q sandbox=%q, want %q/%q", got.ApprovalPolicy.Mode, got.SandboxMode, tc.wantPolicy, tc.wantMode)
+			}
+			// The pair is derived in place, so every reader downstream sees the
+			// resolved preset rather than an empty string.
+			if got.ApprovalPreset != appcfg.ApprovalPresetWorkspaceWrite && got.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
+				t.Fatalf("preset = %q, want the effective preset", got.ApprovalPreset)
+			}
+		})
 	}
 }

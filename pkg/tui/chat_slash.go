@@ -77,7 +77,7 @@ func (s *ChatSession) HandleContextSlash(ctx context.Context, sessionID, channel
 	}
 	sessionModel := s.sessionModelState(sid)
 	used, _ := run.ContextOccupancy(ctx, s.sessStore(), sid)
-	src.Gauge = turn.ContextGaugeOf(sessionModel.Provider, sessionModel.Model, used, s.compactExplicitLimit())
+	src.Gauge = turn.ContextGaugeOf(sessionModel.Provider, sessionModel.Model, used, s.compactBudgetOptions())
 	return turn.ContextReport(ctx, src, sid), true
 }
 
@@ -134,9 +134,9 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 		Instructions: instructions,
 		ConfigFiles:  turn.StatusConfigFiles(cfg, cr.MCPProjectStatus().ProjectRoot),
 		SkillOffer:   cfg.EffectiveFeatures().SkillOffer,
-		ContextUsage: func() (int, int) {
+		ContextUsage: func() (int, state.TokenBudgetOptions) {
 			used, _ := run.ContextOccupancy(context.Background(), s.sessStore(), sid)
-			return used, s.compactExplicitLimit()
+			return used, s.compactBudgetOptions()
 		},
 	}
 	if ctl := cr.CodeIntelControl; ctl != nil {
@@ -1372,20 +1372,19 @@ func (s *ChatSession) HandleMemoriesSlash(ctx context.Context, sessionID, channe
 	if len(args) > 0 {
 		return "memories: usage /memories", true
 	}
-	return "Open memory settings to configure memory use and generation.", true
+	return "Open memory settings to switch memory on or off.", true
 }
 
-func (s *ChatSession) MemorySettings() (bool, bool, bool) {
-	settings := memory.SettingsFromConfig(s.cfg())
-	return settings.Enabled, settings.UseMemories, settings.GenerateMemories
+func (s *ChatSession) MemorySettings() bool {
+	return memory.SettingsFromConfig(s.cfg()).Enabled
 }
 
-// UpdateMemorySettings stores the memory switches the settings screen
-// changed (plan 188 W10): features.memories in the features section, the two
-// memory switches in the memories section — each in its own section write,
-// a switch the request did not carry left alone. The change lands on the next
-// turn's configuration sync; nothing reloads here.
-func (s *ChatSession) UpdateMemorySettings(sessionID string, featureEnabled, useMemories, generateMemories *bool) error {
+// UpdateMemorySettings stores the memory switch the settings screen changed
+// (plan 188 W10, one switch since plan 205) and applies it to this session: the
+// switch is features.memories, and the calling session's own row follows it so
+// the turn already in flight is covered. The change lands on the next turn's
+// configuration sync; nothing reloads here.
+func (s *ChatSession) UpdateMemorySettings(sessionID string, featureEnabled *bool) error {
 	if s == nil || s.Env == nil || s.Env.SQL == nil {
 		return fmt.Errorf("memory settings unavailable")
 	}
@@ -1399,24 +1398,9 @@ func (s *ChatSession) UpdateMemorySettings(sessionID string, featureEnabled, use
 			return err
 		}
 	}
-	if useMemories != nil || generateMemories != nil {
-		if err := s.Env.UpdateRootSection(ctx, "memories", func(cfg *appcfg.Root) error {
-			if useMemories != nil {
-				value := *useMemories
-				cfg.Memories.UseMemories = &value
-			}
-			if generateMemories != nil {
-				value := *generateMemories
-				cfg.Memories.GenerateMemories = &value
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-	}
-	if generateMemories != nil && s.memoryStore() != nil {
+	if featureEnabled != nil && s.memoryStore() != nil {
 		mode := memory.ThreadMemoryDisabled
-		if *generateMemories {
+		if *featureEnabled {
 			mode = memory.ThreadMemoryEnabled
 		}
 		return s.memoryStore().SetThreadMemoryMode(ctx, sessionID, mode)

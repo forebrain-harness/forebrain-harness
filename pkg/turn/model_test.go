@@ -87,7 +87,7 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 			last:    state.LastRunUsage{PromptTokens: 4_000, CompletionTokens: 1_200, CacheReadTokens: 42_000, CacheWriteTokens: 2_000},
 		},
 		// The footer's own input: the last API response's whole prompt.
-		ContextUsage: func() (int, int) { return 48_000, 0 },
+		ContextUsage: func() (int, state.TokenBudgetOptions) { return 48_000, state.TokenBudgetOptions{} },
 		Provider:     "openai",
 		Model:        "gpt-main",
 		Endpoint:     "https://user:secret@api.example.com/v1?key=k",
@@ -370,7 +370,7 @@ func newModelSelectionFixture(t *testing.T, selection ModelSelectionState) *mode
 // modelSettings answers from the temp config file, the way a surface's live
 // handler does.
 func (f *modelSelectionFixture) modelSettings(_ string) (ModelSettings, error) {
-	cfg, err := appcfg.LoadPersisted(f.cfgPath)
+	cfg, err := loadPersistedDocumentForTest(f.cfgPath)
 	if err != nil {
 		return ModelSettings{}, err
 	}
@@ -397,7 +397,7 @@ func (f *modelSelectionFixture) choiceLabel(t *testing.T, provider, model string
 
 func (f *modelSelectionFixture) reloadConfig(t *testing.T) *appcfg.Root {
 	t.Helper()
-	cfg, err := appcfg.LoadPersisted(f.cfgPath)
+	cfg, err := loadPersistedDocumentForTest(f.cfgPath)
 	require.NoError(t, err)
 	return &cfg
 }
@@ -777,4 +777,33 @@ func TestModelPickerMarksTheDefaultModelEntry(t *testing.T) {
 	require.True(t, res.Handled)
 	require.Equal(t, -1, slices.Index(f.calls(), "select("), "re-selecting the default applied a live switch: %v", f.calls())
 	require.Equal(t, "Still using deepseek/deepseek-chat.", res.Reply)
+}
+
+// test-only readers for a whole configuration document.
+
+// loadDocumentForTest reads a whole configuration document — stored sections
+// included — the way appcfg.Load read one before plan 207 narrowed forebrain.yaml
+// to its supported keys: parse and normalize, then Load's tail (.env merge,
+// ${ENV} expansion, validation). A test that assembles a runtime configuration
+// in a file goes through here, because the file itself no longer carries those
+// sections.
+func loadDocumentForTest(path string) (appcfg.Root, error) {
+	root, err := loadPersistedDocumentForTest(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	if err := appcfg.FinishLoad(&root); err != nil {
+		return appcfg.Root{}, err
+	}
+	return root, nil
+}
+
+// loadPersistedDocumentForTest is the same read without Load's tail: a ${ENV}
+// reference stays a reference, as appcfg.LoadPersisted left it.
+func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	return appcfg.ParseRootYAML(body)
 }

@@ -205,15 +205,8 @@ func TestLSPToolRegistrationOrder(t *testing.T) {
 		return -1
 	}
 
-	// Without request_permissions the lsp tool follows web_search.
-	names := toolNames(&AgentToolRuntime{CodeIntel: nopCodeIntel{}, CodeIntelTool: true})
-	if got := position(names, "lsp"); got != position(names, "web_search")+1 {
-		t.Fatalf("lsp position = %d in %v, want directly after web_search", got, names)
-	}
-
-	// With request_permissions enabled it follows that tool instead.
-	cfg := &appcfg.Root{Features: appcfg.FeaturesSection{RequestPermissionsTool: appcfg.BoolPtr(true)}}
-	names = toolNames(&AgentToolRuntime{CodeIntel: nopCodeIntel{}, CodeIntelTool: true, Cfg: cfg})
+	// request_permissions is always registered (plan 203), so lsp follows it.
+	names := toolNames(&AgentToolRuntime{CodeIntel: nopCodeIntel{}, CodeIntelTool: true, Cfg: &appcfg.Root{}})
 	if got := position(names, "lsp"); got != position(names, "request_permissions")+1 {
 		t.Fatalf("lsp position = %d in %v, want directly after request_permissions", got, names)
 	}
@@ -228,8 +221,6 @@ func memoryToolsConfig(t *testing.T) *appcfg.Root {
 	t.Helper()
 	cfg := &appcfg.Root{}
 	cfg.Features.Memories = boolRef(true)
-	cfg.Memories.UseMemories = boolRef(true)
-	cfg.Memories.DedicatedTools = boolRef(true)
 	return cfg
 }
 

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 )
 
 type SlashCommandRecord struct {
@@ -142,6 +144,13 @@ func All() []Command {
 	dyn := dynamicCommands()
 	out := make([]Command, 0, len(commands)+len(dyn))
 	for _, cmd := range commands {
+		// No sandbox anywhere on this machine means no approval preset to
+		// choose, so /permissions is not offered at all: it leaves both menus,
+		// and typing it is answered as an unknown command (owner 2026-10-31,
+		// plan 215 §3.4).
+		if cmd.Name == "permissions" && !safety.SandboxAvailable() {
+			continue
+		}
 		out = append(out, normalizeCommand(cmd))
 	}
 	for _, d := range dyn {

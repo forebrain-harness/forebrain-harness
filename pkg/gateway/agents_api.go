@@ -27,8 +27,12 @@ type primaryAgentsResponse struct {
 }
 
 func (s *Server) primaryAgentResolver() (*config.Resolver, error) {
-	var cfg = s.liveCfg()
-	return config.NewResolver(strings.TrimSpace(s.Home), cfg)
+	cfg, err := s.persistedConfig(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	// persistedConfig: management read (plan 217)
+	return config.NewResolver(strings.TrimSpace(s.Home), &cfg)
 }
 
 func (s *Server) activePrimarySummary() (config.Summary, error) {
@@ -241,7 +245,7 @@ func (s *Server) agentSwitchDeps() process.AgentDeps {
 	}
 	deps := process.AgentDeps{
 		Home:   strings.TrimSpace(s.Home),
-		Cfg:    s.liveCfg(),
+		Cfg:    s.liveCfg(), // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 		Runner: s.Runner,
 	}
 	if s.Env != nil {

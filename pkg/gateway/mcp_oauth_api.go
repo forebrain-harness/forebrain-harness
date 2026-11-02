@@ -58,7 +58,7 @@ func (s *Server) mcpPKCETake(state string) (gatewayMcpPKCE, bool) {
 // own, resolved against no launch project. Nil lists mean "no config to read" —
 // callers fall back to whatever they hold.
 func (s *Server) resolvedBaseMCPLayers() (running, kept []appcfg.MCPServerConfig) {
-	lc := s.liveCfg()
+	lc := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if lc == nil || s.Runner == nil {
 		return nil, nil
 	}
@@ -70,7 +70,7 @@ func (s *Server) findMCPServerMerged(name string) (appcfg.MCPServerConfig, error
 	if s == nil {
 		return appcfg.MCPServerConfig{}, fmt.Errorf("nil server")
 	}
-	lc := s.liveCfg()
+	lc := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if lc == nil {
 		return appcfg.MCPServerConfig{}, fmt.Errorf("config unavailable")
 	}
@@ -116,11 +116,13 @@ func (s *Server) handleMCPServersV1(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nil", http.StatusInternalServerError)
 		return
 	}
-	lc := s.liveCfg()
-	if lc == nil {
-		http.Error(w, "config unavailable", http.StatusServiceUnavailable)
+	persisted, err := s.persistedConfig(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	lc := &persisted
+	// persistedConfig: management read (plan 217)
 	var rows []map[string]any
 	// The runtime source is the session's Runner when the caller named one
 	// and it is not the base runner; anything else reports no runtime. A
@@ -358,7 +360,7 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 	workspace := ""
 	agents := appcfg.AgentsSection{}
 	agentName := ""
-	if cfg := s.liveCfg(); cfg != nil {
+	if cfg := s.liveCfg(); cfg != nil { // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 		agents = cfg.Agents
 	}
 	if s.Runner != nil {
@@ -418,7 +420,7 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 		// where "允许 / 拒绝" is offered — while the unpaged answer keeps them
 		// in pending_consent alone.
 		rows := make([]map[string]any, 0, len(res.Servers)+len(pending)+len(declined))
-		lc := s.liveCfg()
+		lc := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 		// The live half of these rows is this project's own runner, never the
 		// base one (it hosts no servers): a project with no live runner shows
 		// rows with no runtime state, which the page renders as "not started".

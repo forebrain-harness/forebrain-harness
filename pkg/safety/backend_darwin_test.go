@@ -208,31 +208,6 @@ func TestDarwinSeatbeltIntegrationReleaseGate(t *testing.T) {
 		t.Fatalf("default network was not blocked: decision=%+v res=%+v err=%v", netDecision, netRes, netErr)
 	}
 
-	managedWorkDir := t.TempDir()
-	outsideDir := t.TempDir()
-	outsideFile := filepath.Join(outsideDir, "secret.txt")
-	if err := os.WriteFile(outsideFile, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	managedCfg := &appcfg.Root{
-		DefaultPermissions: "managed",
-		Permissions: appcfg.PermissionProfiles{"managed": {
-			FileSystem: &appcfg.FileSystemPermissions{Entries: map[string]appcfg.FileSystemPermissionValue{
-				":minimal":         {Access: appcfg.FileSystemAccessRead},
-				":workspace_roots": {Access: appcfg.FileSystemAccessWrite},
-			}},
-		}},
-		SandboxMode: appcfg.SandboxModeWorkspaceWrite,
-	}
-	managedRes, managedDecision, managedErr := NewManager().RunCommand(context.Background(), managedCfg, CommandRequest{
-		ToolKind: ToolKindShell,
-		Command:  "cat " + shellQuote(outsideFile),
-		WorkDir:  managedWorkDir,
-		Timeout:  15 * time.Second,
-	})
-	if !errors.As(managedErr, &denied) || managedDecision.Profile != ProfileManaged || managedRes.ExitCode == 0 {
-		t.Fatalf("managed read boundary failed: decision=%+v res=%+v err=%v", managedDecision, managedRes, managedErr)
-	}
 }
 
 func shellQuote(s string) string {
@@ -308,9 +283,11 @@ func seatbeltWriteAllowLines(profile, path string) []string {
 	return out
 }
 
-// TestBatchSeatbeltHasNoWholeHomeOrTmpWrite pins the profile an exclusive batch
-// request produces (plans/150): the OS runtime stays readable, the workspace is
-// writable, and neither the home nor any system temp space is.
+// TestBatchSeatbeltHasNoWholeHomeOrTmpWrite pins the profile a batch request
+// produces (plans/150, plans/216): the whole filesystem stays readable, the
+// task workspace is writable, the Forebrain home it was carved out of is
+// neither read nor written apart from the named exceptions, and no system temp
+// space is writable.
 func TestBatchSeatbeltHasNoWholeHomeOrTmpWrite(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "tasks", "T", "1")
 	home := "/Users/batch-task-home"
@@ -319,9 +296,9 @@ func TestBatchSeatbeltHasNoWholeHomeOrTmpWrite(t *testing.T) {
 		Profile:                 ProfileWorkspaceWrite,
 		AdditionalWritablePaths: []string{workspace},
 		ExclusiveWritablePaths:  true,
-		AdditionalReadablePaths: []string{workspace, skillRoot},
-		ExclusiveReadablePaths:  true,
-		DeniedReadablePaths:     []string{home},
+		AdditionalReadablePaths: []string{string(filepath.Separator)},
+		DeniedReadableRoots:     []string{home},
+		ReadableExceptions:      []string{workspace, skillRoot},
 		IncludePlatformDefaults: true,
 		AllowNetwork:            true,
 	}, workspace)
@@ -358,7 +335,6 @@ func TestBatchSeatbeltWorkspaceUnderTmpRemainsWritable(t *testing.T) {
 		AdditionalWritablePaths: []string{workspace},
 		ExclusiveWritablePaths:  true,
 		AdditionalReadablePaths: []string{workspace},
-		ExclusiveReadablePaths:  true,
 		IncludePlatformDefaults: true,
 	}, workspace)
 	if err != nil {

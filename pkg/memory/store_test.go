@@ -142,10 +142,10 @@ func TestClaimStage1FiltersThreadsAndHonorsOwnership(t *testing.T) {
 	if claims[0].Thread.GitBranch != "branch/eligible-new" || claims[1].Thread.GitBranch != "branch/eligible-old" {
 		t.Fatalf("git branches = %#v", claims)
 	}
-	if updated, err := store.MarkStage1Succeeded(ctx, "eligible-new", testProjectKey, "wrong-token", now-7*3600, "raw", "summary", nil); err != nil || updated {
+	if updated, err := store.MarkStage1Succeeded(ctx, "eligible-new", testProjectKey, "wrong-token", now-7*3600, "raw", "summary", nil, 0); err != nil || updated {
 		t.Fatalf("wrong ownership updated=%v err=%v", updated, err)
 	}
-	if updated, err := store.MarkStage1Succeeded(ctx, "eligible-new", testProjectKey, claims[0].OwnershipToken, now-7*3600, "raw", "summary", nil); err != nil || !updated {
+	if updated, err := store.MarkStage1Succeeded(ctx, "eligible-new", testProjectKey, claims[0].OwnershipToken, now-7*3600, "raw", "summary", nil, 0); err != nil || !updated {
 		t.Fatalf("owned success updated=%v err=%v", updated, err)
 	}
 	outcome, _, err := store.TryClaimStage1Job(ctx, "eligible-new", now-7*3600, 3600, 2)

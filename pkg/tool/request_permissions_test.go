@@ -749,7 +749,7 @@ func TestResolveGoCacheAccessCreatesIsolatedCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	home := t.TempDir()
-	rt := &AgentToolRuntime{Home: home, Cfg: &appcfg.Root{SandboxWorkspaceWrite: appcfg.SandboxWorkspaceWrite{GoCacheMode: appcfg.GoCacheModeIsolated}}}
+	rt := &AgentToolRuntime{Home: home, Cfg: &appcfg.Root{}}
 	access := resolveGoCacheAccess(context.Background(), rt, project)
 	if len(access.Writable) != 3 {
 		t.Fatalf("writable=%v", access.Writable)
@@ -766,6 +766,28 @@ func TestResolveGoCacheAccessCreatesIsolatedCache(t *testing.T) {
 	for _, key := range []string{"GOCACHE=", "GOMODCACHE=", "GOTMPDIR="} {
 		if !strings.Contains(env, key) {
 			t.Fatalf("missing %s in %q", key, env)
+		}
+	}
+}
+
+// The caches are always isolated: sharing the host's Go caches is not a
+// setting any more (plan 206).
+func TestResolveGoCacheAccessAlwaysIsolatesFromHostCaches(t *testing.T) {
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte("module example.test/project\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	rt := &AgentToolRuntime{Home: home, Cfg: &appcfg.Root{SandboxWorkspaceWrite: appcfg.SandboxWorkspaceWrite{
+		WritableRoots: []string{t.TempDir()},
+	}}}
+	access := resolveGoCacheAccess(context.Background(), rt, project)
+	if len(access.Env) == 0 {
+		t.Fatal("a Go project must get its own cache environment")
+	}
+	for _, path := range access.Writable {
+		if !strings.HasPrefix(path, filepath.Join(home, "cache", "go")) {
+			t.Fatalf("a writable cache escaped the isolated tree: %s", path)
 		}
 	}
 }
@@ -1606,24 +1628,6 @@ func TestIntermediateToolAllowedForExploreSubagent(t *testing.T) {
 	ctx := WithSubagentType(context.Background(), "explore")
 	if err := st.GuardTool(ctx, "intermediate_tool"); err != nil {
 		t.Fatalf("GuardTool explore intermediate_tool: %v", err)
-	}
-}
-
-func TestNetworkSessionDecisionsAreIsolatedBySessionAndTarget(t *testing.T) {
-	state := NewState(t.TempDir())
-	context := safety.NetworkApprovalContext{Host: "API.Example.COM.", Protocol: safety.NetworkApprovalHTTPS}
-	state.SetNetworkSessionDecision("session-a", context, 443, true)
-	rules := state.NetworkSessionRules("session-a")
-	if len(rules) != 1 || !rules[0].Allow || rules[0].Context.Host != "api.example.com" || rules[0].Port != 443 {
-		t.Fatalf("rules=%+v", rules)
-	}
-	if other := state.NetworkSessionRules("session-b"); len(other) != 0 {
-		t.Fatalf("session decision leaked: %+v", other)
-	}
-	state.SetNetworkSessionDecision("session-a", context, 443, false)
-	rules = state.NetworkSessionRules("session-a")
-	if len(rules) != 1 || rules[0].Allow {
-		t.Fatalf("deny did not replace allow: %+v", rules)
 	}
 }
 
@@ -2598,6 +2602,141 @@ func TestRelocatedForebrainHomeStillAllowsPlanWrites(t *testing.T) {
 	}
 	if state.ProtectedWriteReason(ctx, filepath.Join(workspace, "skills", "release", "SKILL.md")) == "" {
 		t.Fatal("workspace skill root would be written without asking while the plan directory was open")
+	}
+}
+
+// The plan directory is a place, not a spelling: a home reached through a
+// symlinked ancestor (macOS's /var -> /private/var, a relocated home) names the
+// same directory two ways, and a plan write through either one lands in it.
+// The region itself does not grow: a subdirectory, another session's
+// directory and the directory itself stay outside it whichever way they are
+// spelled.
+func TestPlanWriteGuardJudgesTheDirectoryAFileLandsIn(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(base, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	rel := filepath.Join("workspace", "plans", "proj", "sid")
+	planDirReal := filepath.Join(realRoot, rel)
+	planDirAlias := filepath.Join(aliasRoot, rel)
+
+	for _, created := range []bool{false, true} {
+		if created {
+			if err := os.MkdirAll(planDirReal, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, tc := range []struct{ name, allowed, target string }{
+			{"allowed through the alias, written through the real path", planDirAlias, filepath.Join(planDirReal, "p.md")},
+			{"allowed through the real path, written through the alias", planDirReal, filepath.Join(planDirAlias, "p.md")},
+		} {
+			ctx := WithMode(WithAllowedPlanPath(context.Background(), tc.allowed), "plan")
+			st := NewState(t.TempDir())
+			if err := st.GuardWrite(ctx, tc.target); err != nil {
+				t.Fatalf("created=%v %s: plan write rejected: %v", created, tc.name, err)
+			}
+			if reason := st.ProtectedWriteReason(ctx, tc.target); reason != "" {
+				t.Fatalf("created=%v %s: plan write would ask for approval: %q", created, tc.name, reason)
+			}
+		}
+
+		ctx := WithMode(WithAllowedPlanPath(context.Background(), planDirAlias), "plan")
+		st := NewState(t.TempDir())
+		for _, outside := range []string{
+			filepath.Join(planDirReal, "nested", "p.md"),
+			filepath.Join(realRoot, "workspace", "plans", "proj", "other-sid", "p.md"),
+			planDirReal,
+			filepath.Join(realRoot, "workspace", "state", "permissions.json"),
+		} {
+			if err := st.GuardWrite(ctx, outside); err == nil {
+				t.Fatalf("created=%v: a path outside the plan directory was writable: %s", created, outside)
+			}
+		}
+	}
+}
+
+// The other half of the plan loop: after exit_plan_mode the implementation
+// record goes into the plan file in a working mode, so GuardWrite passes and
+// ProtectedWriteReason decides whether the user is asked. A write spelled the
+// other way must not tell the user their own approved plan is a change to
+// forebrain's settings.
+func TestPlanWriteGuardDoesNotAskAboutTheImplementationRecord(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(base, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	homeAlias := filepath.Join(aliasRoot, "home")
+	homeReal := filepath.Join(realRoot, "home")
+	workspaceAlias := filepath.Join(homeAlias, "workspace")
+	planDirAlias := filepath.Join(workspaceAlias, "plans", "proj", "sid")
+	planDirReal := filepath.Join(homeReal, "workspace", "plans", "proj", "sid")
+	if err := os.MkdirAll(planDirReal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planFileReal := filepath.Join(planDirReal, "p.md")
+	if err := os.WriteFile(planFileReal, []byte("# Plan\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Working mode: no WithMode("plan"), so GuardWrite passes and only the
+	// approval question is left.
+	ctx := WithAllowedPlanPath(context.Background(), planDirAlias)
+	st := NewState(workspaceAlias)
+	st.SetPrimaryWorkspaceBoundary(homeAlias, workspaceAlias, nil)
+	if reason := st.ProtectedWriteReason(ctx, planFileReal); reason != "" {
+		t.Fatalf("implementation record write through the other spelling asks the user: %q", reason)
+	}
+}
+
+// The write itself, not just the guard: write_file in plan mode, pointed at the
+// plan directory through the other spelling, creates the plan file where the
+// directory really is. The State carries the roots a real session gives it (the
+// workspace root), because a write outside them is refused before the plan
+// policy is ever consulted.
+func TestPlanModeWriteFileReachesThePlanDirectoryThroughAnotherSpelling(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(base, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	sid := "sid-plan-spelling"
+	stateRootAlias := filepath.Join(aliasRoot, ".forebrain", "workspace")
+	planDirAlias := state.PlanDirForSession(stateRootAlias, "proj", sid)
+	planDirReal := state.PlanDirForSession(filepath.Join(realRoot, ".forebrain", "workspace"), "proj", sid)
+
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	ctx = WithMode(ctx, "plan")
+	ctx = WithAllowedPlanPath(ctx, planDirAlias)
+
+	st := NewState(DefaultAllowedRootsForWorkspace("", stateRootAlias)...)
+	writer, err := NewFileWriteTool(st, &AgentToolRuntime{Home: stateRootAlias, WorkspaceRoot: stateRootAlias})
+	if err != nil {
+		t.Fatalf("NewFileWriteTool: %v", err)
+	}
+	args, _ := json.Marshal(FileWriteInput{FilePath: filepath.Join(planDirReal, "spelled-real.md"), Content: "# Plan\n\nstep one\n"})
+	if _, err := writer.Handle(ctx, string(args)); err != nil {
+		t.Fatalf("plan write through the real spelling should succeed, got: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(planDirAlias, "spelled-real.md"))
+	if err != nil {
+		t.Fatalf("plan file not in the plan directory: %v", err)
+	}
+	if !strings.Contains(string(got), "step one") {
+		t.Fatalf("plan file content not written, got %q", got)
 	}
 }
 

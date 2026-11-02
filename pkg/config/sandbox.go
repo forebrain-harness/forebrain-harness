@@ -15,12 +15,18 @@ func validateSandboxConfig(r *Root) error {
 			return err
 		}
 	}
-	switch r.SandboxWorkspaceWrite.EffectiveGoCacheMode() {
-	case GoCacheModeIsolated, GoCacheModeShared, GoCacheModeDisabled:
-	default:
-		return fmt.Errorf("sandbox_workspace_write.go_cache_mode must be isolated, shared, or disabled")
-	}
 	return nil
+}
+
+// DangerFullAccessEnabled reports whether commands run uncontained. It is the
+// derived sandbox mode and nothing else now (plan 203): a permission profile
+// used to outrank it, and profiles are gone, so the sandbox mode the preset
+// derives is the single answer.
+func (r *Root) DangerFullAccessEnabled() bool {
+	if r == nil {
+		return false
+	}
+	return r.SandboxMode == SandboxModeDangerFullAccess
 }
 
 func normalizeSandboxConfig(r *Root) {
@@ -28,21 +34,6 @@ func normalizeSandboxConfig(r *Root) {
 		return
 	}
 	r.SandboxWorkspaceWrite.WritableRoots = normalizePathList(r.SandboxWorkspaceWrite.WritableRoots)
-	r.SandboxWorkspaceWrite.GoCacheMode = strings.ToLower(strings.TrimSpace(r.SandboxWorkspaceWrite.GoCacheMode))
-	r.DefaultPermissions = strings.TrimSpace(r.DefaultPermissions)
-	switch r.DefaultPermissions {
-	case PermissionProfileReadOnly:
-		r.SandboxMode = SandboxModeReadOnly
-	case PermissionProfileWorkspace:
-		r.SandboxMode = SandboxModeWorkspaceWrite
-	case PermissionProfileDangerFullAccess:
-		r.SandboxMode = SandboxModeDangerFullAccess
-	case "":
-	default:
-		// Named profiles use the managed sandbox. Their compiled filesystem
-		// entries decide which paths, if any, are writable.
-		r.SandboxMode = SandboxModeWorkspaceWrite
-	}
 }
 
 func normalizePathList(in []string) []string {

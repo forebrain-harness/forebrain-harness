@@ -29,7 +29,6 @@ const (
 	Issuer       = "https://auth.openai.com"
 	ClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
 	CodexBaseURL = "https://chatgpt.com/backend-api/codex"
-	UsageURL     = "https://chatgpt.com/backend-api/wham/usage"
 
 	// CredentialsFile is the default name of the credentials file, resolved
 	// against FOREBRAIN_HOME so it sits next to forebrain.yaml. The name and the

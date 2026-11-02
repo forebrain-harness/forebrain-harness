@@ -3712,7 +3712,12 @@ func (r *Renderer) composerFooterSidesLocked() (string, string) {
 		// the footer says what the terminal is instead (plan 152).
 		lead = batchReadOnlyFooterLabel
 	} else if r.planMode {
+		// Plan mode outranks full access when both hold: the next turn is
+		// being prepared in plan mode, and the posture it would run under is
+		// the second thing to know, not the first (plan 215 §3.6).
 		lead = planModeFooterLabel
+	} else if r.fullAccess {
+		lead = fullAccessFooterLabel
 	}
 	return joinFooterSegments(lead, r.footer.Model, r.footer.ReasoningEffort),
 		formatComposerTokenStats(r.composerTokens.get(""))

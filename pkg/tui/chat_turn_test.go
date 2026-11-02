@@ -80,8 +80,7 @@ func TestPrepareTUIAgentBaseClosesWithdrawalWindowOnFirstOutput(t *testing.T) {
 // A conversation's turn runs on its project's runner, whose tool state is not
 // the one the surface installs its hooks on. The approval hooks travel on the
 // run's context, or a subagent's approval stops the whole turn — which also
-// kept the subagents of one answer from starting together — and a sandboxed
-// command's network approval is refused.
+// kept the subagents of one answer from starting together.
 func TestPrepareTUIAgentBaseCarriesApprovalHooksOnTheRunContext(t *testing.T) {
 	s, cleanup := newSurfaceTestSession(t)
 	defer cleanup()
@@ -93,7 +92,6 @@ func TestPrepareTUIAgentBaseCarriesApprovalHooksOnTheRunContext(t *testing.T) {
 	ctx, _, cleanupStream = s.prepareTUIAgentBase("sid", context.Background())
 	defer cleanupStream()
 	require.NotNil(t, tool.SubagentApprovalHookFromContext(ctx, nil))
-	require.NotNil(t, tool.NetworkApprovalPromptHookFromContext(ctx, nil))
 }
 
 // A nested/internal call (compaction, an evaluator) runs under a muted sink. It
@@ -145,9 +143,11 @@ func TestWithdrawDuringAutoCompactionCancelsItCleanly(t *testing.T) {
 	s := newCharacterizationSession(t, model)
 	sessionID := "withdraw-during-compaction"
 
-	// Force the threshold low enough that a short seeded history crosses it.
+	// Force the threshold low enough that a short seeded history crosses it:
+	// gpt-main is not in the model catalog, so the configured context window is
+	// the denominator and 45 tokens at the default 90% puts the threshold at 40.
 	// CompactionService reads this config at call time.
-	s.runner().AppCfg.Compact.ModelAutoCompactTokenLimit = 40
+	s.runner().AppCfg.Agents.Defaults.ContextInject.ModelContextTokens = 45
 
 	store := s.sessStore()
 	seedCtx := context.Background()
@@ -289,13 +289,13 @@ func TestSurfaceComposerTokenStatsMatchesLabel(t *testing.T) {
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},              // file default, 1M
+			{Provider: "zhipuai", Model: "glm-5.3", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},           // file default, 1M
 			{Provider: "moonshotai", Model: "kimi-k2.7-code", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"}, // 262144
 			{Provider: "zhipuai", Model: "glm-4.5", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},           // 131072, the pin
 		}},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, *cfg))
-	loaded, err := appcfg.Load(cfgPath)
+	loaded, err := loadDocumentForTest(cfgPath)
 	require.NoError(t, err)
 	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
 	require.NoError(t, err)

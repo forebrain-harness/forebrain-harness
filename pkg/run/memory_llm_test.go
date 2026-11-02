@@ -38,11 +38,9 @@ func (c *instructionCaptureLLM) developerText() string {
 
 const memoryTestProjectKey = "-Test-project"
 
-func memoryTestConfig(use, generate bool) *appcfg.Root {
+func memoryTestConfig() *appcfg.Root {
 	cfg := &appcfg.Root{}
 	cfg.Features.Memories = boolPtr(true)
-	cfg.Memories.UseMemories = boolPtr(use)
-	cfg.Memories.GenerateMemories = boolPtr(generate)
 	return cfg
 }
 
@@ -51,7 +49,7 @@ func memoryTestConfig(use, generate bool) *appcfg.Root {
 // memory would never reach the model, and the store would stay empty forever.
 func TestMemoryInstructionInjectsCaptureRulesWithoutStoredMemory(t *testing.T) {
 	inner := &instructionCaptureLLM{}
-	wrapped := wrapMemoryInstructionLLM(inner, t.TempDir(), memoryTestProjectKey, memoryTestConfig(true, true), nil, false)
+	wrapped := wrapMemoryInstructionLLM(inner, t.TempDir(), memoryTestProjectKey, memoryTestConfig(), nil, false)
 	if _, err := wrapped.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +85,7 @@ func TestMemoryInstructionStaysByteStableWithinASession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wrapped := wrapMemoryInstructionLLM(inner, workspace, memoryTestProjectKey, memoryTestConfig(true, true), sessions, false)
+	wrapped := wrapMemoryInstructionLLM(inner, workspace, memoryTestProjectKey, memoryTestConfig(), sessions, false)
 	ctx := llm.WithAgentSessionID(WithQuerySource(context.Background(), "repl_main_thread"), "session-1")
 	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 		t.Fatal(err)
@@ -120,7 +118,7 @@ func TestMemoryInstructionStaysByteStableWithinASession(t *testing.T) {
 
 	// A different session renders fresh, so nothing captured is stranded.
 	next := &instructionCaptureLLM{}
-	fresh := wrapMemoryInstructionLLM(next, workspace, memoryTestProjectKey, memoryTestConfig(true, true), sessions, false)
+	fresh := wrapMemoryInstructionLLM(next, workspace, memoryTestProjectKey, memoryTestConfig(), sessions, false)
 	nextCtx := llm.WithAgentSessionID(WithQuerySource(context.Background(), "repl_main_thread"), "session-2")
 	if _, err := fresh.Execute(nextCtx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 		t.Fatal(err)
@@ -153,7 +151,7 @@ func TestMemoryInstructionStaysByteStableWhenTheFreezeIsRefused(t *testing.T) {
 	// A store with no row for this session: FreezeSessionPromptState stores
 	// nothing and reports that nothing was frozen.
 	sessions := newPromptStateStore(t)
-	wrapped := wrapMemoryInstructionLLM(inner, workspace, memoryTestProjectKey, memoryTestConfig(true, true), sessions, false)
+	wrapped := wrapMemoryInstructionLLM(inner, workspace, memoryTestProjectKey, memoryTestConfig(), sessions, false)
 	ctx := llm.WithAgentSessionID(WithQuerySource(context.Background(), "repl_main_thread"), "ghost-session")
 	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 		t.Fatal(err)
@@ -182,7 +180,7 @@ func TestMemoryInstructionStaysByteStableWhenTheFreezeIsRefused(t *testing.T) {
 func TestMemoryInstructionSkipsCaptureOffTheMainThread(t *testing.T) {
 	for _, source := range []string{"agent:builtin:explore", "agent:custom", "agent:default", "compact", "hook_agent"} {
 		inner := &instructionCaptureLLM{}
-		wrapped := wrapMemoryInstructionLLM(inner, t.TempDir(), memoryTestProjectKey, memoryTestConfig(true, true), nil, false)
+		wrapped := wrapMemoryInstructionLLM(inner, t.TempDir(), memoryTestProjectKey, memoryTestConfig(), nil, false)
 		ctx := WithQuerySource(context.Background(), source)
 		if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 			t.Fatal(err)
@@ -195,7 +193,7 @@ func TestMemoryInstructionSkipsCaptureOffTheMainThread(t *testing.T) {
 	// is still likely to be carrying the user's own words.
 	for _, source := range []string{"repl_main_thread", "sdk", "side_question", ""} {
 		inner := &instructionCaptureLLM{}
-		wrapped := wrapMemoryInstructionLLM(inner, t.TempDir(), memoryTestProjectKey, memoryTestConfig(true, true), nil, false)
+		wrapped := wrapMemoryInstructionLLM(inner, t.TempDir(), memoryTestProjectKey, memoryTestConfig(), nil, false)
 		ctx := WithQuerySource(context.Background(), source)
 		if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 			t.Fatal(err)
@@ -206,16 +204,16 @@ func TestMemoryInstructionSkipsCaptureOffTheMainThread(t *testing.T) {
 	}
 }
 
-// Generation off means the user does not want new memory written, so the turn
-// must not be told to capture; memory off entirely means no wrapper at all.
+// Memory off entirely means no wrapper at all: with one switch there is no
+// half-on configuration left to keep the capture rules out of.
 func TestMemoryInstructionFollowsSettings(t *testing.T) {
 	inner := &instructionCaptureLLM{}
-	wrapped := wrapMemoryInstructionLLM(inner, t.TempDir(), memoryTestProjectKey, memoryTestConfig(true, false), nil, false)
+	wrapped := wrapMemoryInstructionLLM(inner, t.TempDir(), memoryTestProjectKey, memoryTestConfig(), nil, false)
 	if _, err := wrapped.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(inner.developerText(), "Capturing memory") {
-		t.Fatalf("capture rules injected with generation off:\n%s", inner.developerText())
+	if !strings.Contains(inner.developerText(), "Capturing memory") {
+		t.Fatalf("capture rules missing with the memory switch on:\n%s", inner.developerText())
 	}
 
 	off := &appcfg.Root{}
@@ -252,7 +250,6 @@ func (s *citationStreamingStubLLM) Execute(ctx context.Context, _ []llm.Message,
 func TestWrapMemoryCitationLLM_FiltersStreamingChunks(t *testing.T) {
 	cfg := &appcfg.Root{}
 	cfg.Features.Memories = boolPtr(true)
-	cfg.Memories.UseMemories = boolPtr(true)
 	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("Hello <oai-mem-citation><rollout_ids>\ns1\n</rollout_ids></oai-mem-citation> world")})
 	inner := &citationStreamingStubLLM{
 		chunks: []string{"Hello <oai-mem-", "citation><rollout_ids>\ns1\n</rollout_ids></oai-mem-", "citation> world"},
@@ -286,7 +283,6 @@ func newCitationTestStore(t *testing.T) *memory.Store {
 func TestWrapMemoryCitationLLM_StripsCitationsFromMessage(t *testing.T) {
 	cfg := &appcfg.Root{}
 	cfg.Features.Memories = boolPtr(true)
-	cfg.Memories.UseMemories = boolPtr(true)
 
 	result := &llm.Result{
 		Message: &llm.Message{
@@ -323,7 +319,6 @@ func TestWrapMemoryCitationLLM_StripsCitationsFromMessage(t *testing.T) {
 func TestWrapMemoryCitationLLM_UsageAccountingAcceptsOnlyCanonicalUUIDs(t *testing.T) {
 	cfg := &appcfg.Root{}
 	cfg.Features.Memories = boolPtr(true)
-	cfg.Memories.UseMemories = boolPtr(true)
 	const canonical = "550e8400-e29b-41d4-a716-446655440000"
 	message := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer<oai-mem-citation><rollout_ids>\nnot-a-uuid\n550E8400-E29B-41D4-A716-446655440000\n" + canonical + "\n</rollout_ids></oai-mem-citation>")})
 	ms := newCitationTestStore(t)
@@ -372,7 +367,6 @@ func TestWrapMemoryCitationLLM_PassthroughWhenDisabled(t *testing.T) {
 func TestWrapMemoryCitationLLM_NilStorePassthrough(t *testing.T) {
 	cfg := &appcfg.Root{}
 	cfg.Features.Memories = boolPtr(true)
-	cfg.Memories.UseMemories = boolPtr(true)
 
 	inner := &citationStubLLM{}
 	wrapped := wrapMemoryCitationLLM(inner, cfg, nil)
@@ -384,7 +378,6 @@ func TestWrapMemoryCitationLLM_NilStorePassthrough(t *testing.T) {
 func TestWrapMemoryCitationLLM_StripsFromSessionMessages(t *testing.T) {
 	cfg := &appcfg.Root{}
 	cfg.Features.Memories = boolPtr(true)
-	cfg.Memories.UseMemories = boolPtr(true)
 
 	result := &llm.Result{
 		Message: &llm.Message{Role: llm.RoleAssistant, Parts: []llm.ContentPart{llm.Text("final")}},
@@ -525,7 +518,7 @@ func TestPromptPrefixBlockOrderStable(t *testing.T) {
 	// instruction outside it.
 	wrapped := wrapMemoryInstructionLLM(
 		wrapSkillCatalogLLM(inner, skill.AgentSkillRoots(home, workspace, safety.ProjectContext{}), workspace, sessions, nil),
-		workspace, memoryTestProjectKey, memoryTestConfig(true, true), sessions, false)
+		workspace, memoryTestProjectKey, memoryTestConfig(), sessions, false)
 
 	ctx := llm.WithAgentSessionID(context.Background(), "prefix-order")
 	base := []llm.Message{

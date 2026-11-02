@@ -468,11 +468,7 @@ func (b Backend) search(request SearchRequest) (SearchResponse, error) {
 		return SearchResponse{}, fmt.Errorf("queries must not be empty or contain empty strings")
 	}
 	for _, query := range queries {
-		terms, err := searchTerms(query)
-		if err != nil {
-			return SearchResponse{}, err
-		}
-		if len(terms) == 0 {
+		if len(searchTerms(query)) == 0 {
 			return SearchResponse{}, fmt.Errorf("query '%s' carries no searchable term", query)
 		}
 	}

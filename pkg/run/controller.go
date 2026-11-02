@@ -57,6 +57,11 @@ type Input struct {
 	// dispatched turn.
 	SkillName string
 	SkillPath string
+	// Origin names who wrote this message on the person's behalf when it was
+	// not the person (state.MessageOrigin*): a peer session's message reaches
+	// the model as a meta message carrying that origin. Empty for everything a
+	// person typed here.
+	Origin string
 }
 
 // Preview is the input state visible to adapters.

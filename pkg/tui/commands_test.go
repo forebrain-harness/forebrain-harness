@@ -781,17 +781,17 @@ func TestCommandControllerHandleResumeReturnsSelection(t *testing.T) {
 }
 
 func TestCommandControllerHandlePermissionsAppliesSelectedPreset(t *testing.T) {
-	session := &fakeSession{activePreset: safety.PresetReadOnly}
+	session := &fakeSession{activePreset: safety.PresetWorkspaceWrite}
 	var out bytes.Buffer
-	// Index 2 is Full Access; the picker opens on Read Only because that is the
+	// Index 1 is Full Access; the picker opens on Default because that is the
 	// preset the session reports running under.
-	selector := &stubSelector{selectRichIdx: 2, selectRichOK: true}
+	selector := &stubSelector{selectRichIdx: 1, selectRichOK: true}
 	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
 
 	if !ctrl.handlePermissions("s1") {
 		t.Fatalf("expected permissions command handled")
 	}
-	if got := selector.selectRichDefaultIdx; got != 0 || selector.selectRichItems[0].Label != "Read Only" {
+	if got := selector.selectRichDefaultIdx; got != 0 || selector.selectRichItems[0].Label != "Default" {
 		t.Fatalf("expected the picker to open on the preset in force, got default idx %d", got)
 	}
 	if len(session.appliedPresets) != 1 || session.appliedPresets[0] != safety.PresetFullAccess {
@@ -811,7 +811,7 @@ func TestCommandControllerHandlePermissionsShowsEveryPreset(t *testing.T) {
 	if !ctrl.handlePermissions("s1") {
 		t.Fatalf("expected permissions command handled")
 	}
-	want := []string{"Read Only", "Default", "Full Access"}
+	want := []string{"Default", "Full Access"}
 	if len(selector.selectRichItems) != len(want) {
 		t.Fatalf("unexpected picker items: %#v", selector.selectRichItems)
 	}

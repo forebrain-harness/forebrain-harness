@@ -7,27 +7,45 @@ import (
 	"path/filepath"
 	"strings"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
 const (
 	maxOutputTokensForSummary = 20000
-	// ProactiveCompactFraction automatic compaction starts at
-	// 90% of the model context window. Explicit limits are clamped to this value.
+	// defaultContextWindowTokens is the window used when neither the model
+	// catalog nor the configured context window names one.
+	defaultContextWindowTokens = 200000
+	// DefaultAutoCompactPercent is the share of the effective input window at
+	// which automatic compaction starts when nothing is configured.
 	//
-	// Do not lower this "to save money" on large-window models (e.g. GLM's
-	// 1,000,000-token window): every compaction rewrites history, which starts
-	// a new prompt-cache generation — the dominant term of the hit-rate
+	// Do not lower this default "to save money" on large-window models (e.g.
+	// GLM's 1,000,000-token window): every compaction rewrites history, which
+	// starts a new prompt-cache generation — the dominant term of the hit-rate
 	// equation  hit ≈ 1 − G/N. A lower threshold fires compaction more often,
 	// raises G, and lowers the account-level cache hit rate even while it
 	// lowers absolute cost. Any change here must be validated against the
 	// prefix tracker's generations_per_request before it ships.
-	ProactiveCompactFraction = 0.90
+	DefaultAutoCompactPercent = appcfg.DefaultAutoCompactPercent
 )
 
-// AutoCompactThresholdFraction is kept for external callers that need to
-// compute the proactive threshold from a raw context-window size.
-const AutoCompactThresholdFraction = ProactiveCompactFraction
+// EffectiveInputWindow is the denominator both the auto-compaction threshold
+// and the context-pressure warning are measured against: the model's input
+// limit, else its context window, else the configured context window.
+// fallbackContextTokens is that configured window (agents.defaults
+// context_inject.model_context_tokens); 0 selects the built-in default.
+func EffectiveInputWindow(limits llm.Limits, fallbackContextTokens int) int {
+	if limits.Input > 0 {
+		return limits.Input
+	}
+	if limits.Context > 0 {
+		return limits.Context
+	}
+	if fallbackContextTokens > 0 {
+		return fallbackContextTokens
+	}
+	return defaultContextWindowTokens
+}
 
 type TokenUsage struct {
 	InputTokens              int `json:"input_tokens"`
@@ -48,7 +66,23 @@ type TokenBudget struct {
 }
 
 type TokenBudgetOptions struct {
-	ExplicitLimit int
+	// AutoCompactPercent is the share of the effective input window at which
+	// automatic compaction starts. 0 selects the default; a value outside the
+	// configured range is clamped to it.
+	AutoCompactPercent int
+	// FallbackContextTokens is the configured context window, used when the
+	// model catalog does not know this model's window.
+	FallbackContextTokens int
+}
+
+// autoCompactPercent is the share in force: the configured one, clamped to the
+// range the setting accepts (the config layer stores a value already in range,
+// so this only guards callers that bypass it).
+func (o TokenBudgetOptions) autoCompactPercent() int {
+	if o.AutoCompactPercent <= 0 {
+		return DefaultAutoCompactPercent
+	}
+	return min(max(o.AutoCompactPercent, appcfg.MinAutoCompactPercent), appcfg.MaxAutoCompactPercent)
 }
 
 func TokenUsageFromLLMUsage(usage *llm.Usage) (TokenUsage, bool) {
@@ -217,53 +251,26 @@ func TokenCountWithEstimationFor(turns []Message, e llm.Estimator) int {
 	return estimateTurnsWith(e, turns)
 }
 
-// BodyAfterPrefixTokenCount The first server-observed request input is the absolute prefix baseline; output
-// from that response and all later growth remain countable. Before any server
-// usage is available, estimatedPrefill is the reconstructed window prefix.
-func BodyAfterPrefixTokenCount(turns []Message, estimatedPrefill int) int {
-	return BodyAfterPrefixTokenCountFor(turns, estimatedPrefill, llm.DefaultEstimator())
-}
-
-// BodyAfterPrefixTokenCountFor is BodyAfterPrefixTokenCount against a specific
-// model's estimator, for the same reason as TokenCountWithEstimationFor: the
-// body_after_prefix checkpoint must measure the same suffix the request carries.
-func BodyAfterPrefixTokenCountFor(turns []Message, estimatedPrefill int, e llm.Estimator) int {
-	active := TokenCountWithEstimationFor(turns, e)
-	for _, turn := range turns {
-		usage, ok := usageFromMessage(turn)
-		if !ok {
-			continue
-		}
-		prefill := nonNegative(usage.InputTokens) + nonNegative(usage.CacheCreationInputTokens) + nonNegative(usage.CacheReadInputTokens)
-		return max(0, active-prefill)
-	}
-	return max(0, active-nonNegative(estimatedPrefill))
-}
-
 func CalculateTokenBudget(tokenUsage int, model string, limits llm.Hit) TokenBudget {
 	return CalculateTokenBudgetWithOptions(tokenUsage, model, limits, TokenBudgetOptions{})
 }
 
 func CalculateTokenBudgetWithOptions(tokenUsage int, model string, limits llm.Hit, opts TokenBudgetOptions) TokenBudget {
+	effective := EffectiveInputWindow(limits.Limits(), opts.FallbackContextTokens)
 	contextWindow := int(limits.ContextWindow)
-	inputLimit := int(limits.InputTokenLimit)
-	maxOutput := int(limits.DefaultMaxTokens)
 	if contextWindow <= 0 {
-		contextWindow = 200000
+		contextWindow = opts.FallbackContextTokens
 	}
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindowTokens
+	}
+	maxOutput := int(limits.DefaultMaxTokens)
 	if maxOutput <= 0 {
 		maxOutput = maxOutputTokensForSummary
 	}
-	effective := inputLimit
-	if effective <= 0 {
-		effective = contextWindow
-	}
-	autoThreshold := int(float64(effective) * ProactiveCompactFraction)
+	autoThreshold := effective * opts.autoCompactPercent() / 100
 	if autoThreshold < 1 {
 		autoThreshold = 1
-	}
-	if opts.ExplicitLimit > 0 && opts.ExplicitLimit < autoThreshold {
-		autoThreshold = opts.ExplicitLimit
 	}
 	threshold := autoThreshold
 	percent := int(math.Round((float64(threshold-tokenUsage) / float64(threshold)) * 100))

@@ -9,61 +9,45 @@ import (
 )
 
 type Settings struct {
-	Enabled          bool `json:"enabled"`
-	UseMemories      bool `json:"use_memories"`
-	GenerateMemories bool `json:"generate_memories"`
+	Enabled bool `json:"enabled"`
 }
 
 func SettingsFromConfig(cfg *appcfg.Root) Settings {
 	if cfg == nil {
 		return Settings{}
 	}
-	return Settings{
-		Enabled:          Enabled(cfg),
-		UseMemories:      ReadPathEnabled(cfg),
-		GenerateMemories: GenerationEnabled(cfg),
-	}
+	return Settings{Enabled: Enabled(cfg)}
 }
 
-// SessionModeForConfig returns the memory_mode that should be stored on new
-// sessions: "enabled" when generate_memories is on, "disabled" otherwise.
-func SessionModeForConfig(cfg *appcfg.Root) string {
-	if GenerationEnabled(cfg) {
+// SessionModeFor returns the memory_mode a new session is born with. It is the
+// single switch, so there is nothing else to consult here; a session whose
+// project is a batch project is born disabled inside the store's own INSERT
+// instead, where the project type it is being filed under is resolved (plan
+// 205 §3.2).
+func SessionModeFor(cfg *appcfg.Root) string {
+	if Enabled(cfg) {
 		return ThreadMemoryEnabled
 	}
 	return ThreadMemoryDisabled
 }
 
-// Enabled reports whether the memory system is active at all.
+// Enabled reports whether the memory system is active at all. One switch
+// covers reading stored memories, generating new ones, and the dedicated
+// memories_* tools (owner 2026-10-26): a configuration that keeps them on
+// separate flags lets a turn recall memories it is forbidden to write.
 func Enabled(cfg *appcfg.Root) bool {
 	return cfg != nil && cfg.EffectiveFeatures().Memories
 }
 
-// ReadPathEnabled reports whether stored memories are made available to the
-// model during a turn.
-func ReadPathEnabled(cfg *appcfg.Root) bool {
-	return Enabled(cfg) && cfg.EffectiveMemories().UseMemories
-}
-
-// DedicatedToolsEnabled reports whether the dedicated memory tools are
-// registered for the agent.
-func DedicatedToolsEnabled(cfg *appcfg.Root) bool {
-	return ReadPathEnabled(cfg) && cfg.EffectiveMemories().DedicatedTools
-}
-
-// GenerationEnabled reports whether new memories are generated from turns.
-func GenerationEnabled(cfg *appcfg.Root) bool {
-	return Enabled(cfg) && cfg.EffectiveMemories().GenerateMemories
-}
-
-// InstructionOptionsFromConfig maps the memory settings onto the halves of the
+// InstructionOptionsFromConfig maps the memory switch onto every part of the
 // per-turn instruction, so the prompt a turn receives cannot disagree with what
 // the settings actually allow.
 func InstructionOptionsFromConfig(cfg *appcfg.Root) InstructionOptions {
+	enabled := Enabled(cfg)
 	return InstructionOptions{
-		Recall:         ReadPathEnabled(cfg),
-		Capture:        GenerationEnabled(cfg),
-		DedicatedTools: DedicatedToolsEnabled(cfg),
+		Recall:      enabled,
+		Capture:     enabled,
+		MemoryTools: enabled,
 	}
 }
 
@@ -81,13 +65,17 @@ func redactSecrets(value string) string {
 	return secretValuePattern.ReplaceAllString(value, "$1$2$3[REDACTED_SECRET]")
 }
 
-// MarkPollutedByExternalContext marks the current session polluted when the
-// configured policy disables memory generation after external context use. If
-// the session already contributed to the Phase 2 baseline, it returns true so
-// callers can trigger a same-primary consolidation pass that represents the
-// deletion/forgetting in the workspace diff.
+// MarkPollutedByExternalContext marks the current session polluted after it
+// used external context — web search, web fetch, an MCP tool result, OpenAI's
+// own browsing — so its transcript is never extracted into memory. The rule is
+// not configurable (owner 2026-10-26, plan 205 §0.3): what a browsing session
+// learned may be someone else's content, and keeping it out of durable memory
+// is worth the memories this costs. If the session already contributed to the
+// Phase 2 baseline, it returns true so callers can trigger a same-primary
+// consolidation pass that represents the deletion/forgetting in the workspace
+// diff.
 func MarkPollutedByExternalContext(ctx context.Context, cfg *appcfg.Root, store *Store, sessionID string) (bool, error) {
-	if !Enabled(cfg) || !cfg.EffectiveMemories().DisableOnExternalContext || store == nil {
+	if !Enabled(cfg) || store == nil {
 		return false, nil
 	}
 	scope, selected, err := store.HasSelectedStage1Output(ctx, sessionID)

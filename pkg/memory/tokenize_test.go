@@ -7,11 +7,7 @@ import (
 
 func terms(t *testing.T, text string) string {
 	t.Helper()
-	got, err := searchTerms(text)
-	if err != nil {
-		t.Fatalf("searchTerms(%q): %v", text, err)
-	}
-	return strings.Join(got, "|")
+	return strings.Join(searchTerms(text), "|")
 }
 
 // Each language is cut by its own rules, and a word in a spaced script is kept
@@ -34,6 +30,25 @@ func TestSearchTermsCutEachLanguageByItsOwnRules(t *testing.T) {
 	} {
 		if got := terms(t, tc.text); got != tc.want {
 			t.Errorf("searchTerms(%q) = %q, want %q", tc.text, got, tc.want)
+		}
+	}
+}
+
+// Without its dictionaries a search cannot find word boundaries, so it cuts each
+// stretch of Chinese or Japanese text into the pairs of adjacent characters it is
+// made of: the narrowest term that still means something, and one both the index
+// and the query are cut by, so a word that is written the same way is still found.
+func TestUnsegmentedTermsCutTextIntoCharacterPairs(t *testing.T) {
+	for _, tc := range []struct{ text, want string }{
+		{"行李托运", "行李|李托|托运"},
+		// Spaces and punctuation separate runs: a pair never straddles one.
+		{"审批 浮层", "审批|浮层"},
+		{"审", "审"},
+		{"メモリーの検索", "メモ|モリ|リー|ーの|の検|検索"},
+		{" , 。 + ", ""},
+	} {
+		if got := strings.Join(unsegmentedTerms(tc.text), "|"); got != tc.want {
+			t.Errorf("unsegmentedTerms(%q) = %q, want %q", tc.text, got, tc.want)
 		}
 	}
 }

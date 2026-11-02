@@ -153,23 +153,21 @@ func (e *Engine) Build(req AssemblyRequest) AssemblyResult {
 	return result
 }
 
+// contextPressureForInjectedContext reports the assembly's own view of the
+// injection budget. The injected context reaching its limit is a warning, not a
+// block: pressure has two levels, and the request is never refused for it.
 func contextPressureForInjectedContext(projected, limit int) string {
 	if limit <= 0 {
 		return "ok"
 	}
-	blockAt := limit
 	warnAt := limit - limit/10
 	if warnAt < 1 {
-		warnAt = blockAt
+		warnAt = limit
 	}
-	switch {
-	case projected >= blockAt:
-		return "block"
-	case projected >= warnAt:
+	if projected >= warnAt {
 		return "warn"
-	default:
-		return "ok"
 	}
+	return "ok"
 }
 
 func normalizedSet(items []string) []string {

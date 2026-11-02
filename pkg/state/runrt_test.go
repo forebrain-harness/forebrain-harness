@@ -1069,3 +1069,42 @@ func TestSetWaitSessionSnapshotReplacesOnlyTheSnapshot(t *testing.T) {
 		t.Fatalf("unknown action err = %v, want ErrNoWaitContinuation", err)
 	}
 }
+
+// TestLivePrimaryInputTruncatesAndTracksLiveness pins the peer record's task
+// line (plan 195 §3.3): the input of the session's live primary run, cut at
+// 120 runes, still named while the run waits on an approval, and empty again
+// once the run has ended.
+func TestLivePrimaryInputTruncatesAndTracksLiveness(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	ensureSessionsForRuns(t, db, "s")
+	rt := &RunStore{DB: db}
+
+	if got, err := rt.LivePrimaryInput(ctx, "s"); err != nil || got != "" {
+		t.Fatalf("idle session: LivePrimaryInput = %q, %v; want empty", got, err)
+	}
+
+	run, err := rt.CreateRun(ctx, "s", strings.Repeat("字", 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := rt.LivePrimaryInput(ctx, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runeCount := len([]rune(got)); runeCount != 120 {
+		t.Fatalf("LivePrimaryInput holds %d runes, want the cut at 120", runeCount)
+	}
+
+	seedWait(t, rt, "s", run.ID, Wait{ActionID: "act-live", ToolName: "shell", ToolInputJSON: "{}"})
+	if got, err := rt.LivePrimaryInput(ctx, "s"); err != nil || len([]rune(got)) != 120 {
+		t.Fatalf("waiting run: LivePrimaryInput = %d runes, %v; want the live input", len([]rune(got)), err)
+	}
+
+	if err := rt.SetStatus(ctx, run.ID, RunStatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := rt.LivePrimaryInput(ctx, "s"); err != nil || got != "" {
+		t.Fatalf("ended run: LivePrimaryInput = %q, %v; want empty", got, err)
+	}
+}

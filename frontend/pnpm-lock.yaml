@@ -33,6 +33,9 @@ catalogs:
     '@codemirror/legacy-modes':
       specifier: 6.5.5
       version: 6.5.5
+    '@codemirror/lint':
+      specifier: 6.9.7
+      version: 6.9.7
     '@lezer/highlight':
       specifier: 1.2.5
       version: 1.2.5
@@ -45,6 +48,12 @@ catalogs:
     '@vue/test-utils':
       specifier: ^2.5.1
       version: 2.5.1
+    '@vueuse/core':
+      specifier: ^14.1.0
+      version: 14.2.1
+    ai:
+      specifier: ^6.0.49
+      version: 6.0.159
     codemirror:
       specifier: 6.0.2
       version: 6.0.2
@@ -54,9 +63,30 @@ catalogs:
     jsdom:
       specifier: ^30.1.2
       version: 30.1.2
+    lucide-vue-next:
+      specifier: ^0.555.0
+      version: 0.555.0
+    shiki:
+      specifier: ^3.20.0
+      version: 3.23.0
+    tailwindcss:
+      specifier: ^4.1.17
+      version: 4.3.3
+    typescript:
+      specifier: ^5.9.3
+      version: 5.9.3
+    vue:
+      specifier: ^3.5.25
+      version: 3.5.43
+    vue-sonner:
+      specifier: ^2.0.9
+      version: 2.0.9
     xlsx:
       specifier: https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz
       version: 0.20.3
+    zod:
+      specifier: ^4.6.5
+      version: 4.6.5
 
 overrides:
   semver: 7.7.3
@@ -92,6 +122,9 @@ importers:
       '@codemirror/legacy-modes':
         specifier: 'catalog:'
         version: 6.5.5
+      '@codemirror/lint':
+        specifier: 'catalog:'
+        version: 6.9.7
       '@lezer/highlight':
         specifier: 'catalog:'
         version: 1.2.5

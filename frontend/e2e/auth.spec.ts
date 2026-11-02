@@ -58,7 +58,7 @@ test('sign-in unlocks every page without 401', async ({ page }) => {
   }
   // The endpoints behind the merged settings tabs fire when each tab opens.
   await page.goto('/settings', { waitUntil: 'networkidle' })
-  for (const label of [/语言服务器|Language servers/, /MCP/, /钩子|Hooks/, /记忆开关|Memory switches/]) {
+  for (const label of [/语言服务器|Language servers/, /MCP/, /钩子|Hooks/, /^记忆$|^Memory$/]) {
     await page.locator('[data-testid="settings-tabs"] button', { hasText: label }).click()
     await page.waitForLoadState('networkidle')
   }

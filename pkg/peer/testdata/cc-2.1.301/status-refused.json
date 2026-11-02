@@ -1,0 +1,1 @@
+{"type":"control","action":"peer_message_status","status":"expired","reason":"this session does not accept peer messages","from":"uds:/tmp/cc-socks/50000.sock","orig_msg_id":"11111111-2222-4333-8444-555555555555","status_detail":"refused","msgV":1,"msg_id":"66666666-7777-4888-8999-aaaaaaaaaaaa"}

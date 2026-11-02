@@ -175,6 +175,9 @@ var fanOutBudgets = map[string]fanOutBudget{
 	"home":      {current: 8, target: 8},
 	"telemetry": {current: 8, target: 8},
 	"channel":   {current: 8, target: 8},
+	// peer is the protocol library: the standard library plus x/sys, uuid and
+	// x/text (NFKC), and not one pkg/... import — see packageLayer.
+	"peer": {current: 0, target: 0},
 
 	// The tool layer gained pkg/pdf as a deliberate direct dependency: read_file
 	// hands the model the pixels of a PDF's pages, so the renderer is an
@@ -220,8 +223,9 @@ var fanOutBudgets = map[string]fanOutBudget{
 	// scope stamps) is assembly work that belongs here, not in a lower layer.
 	// The composition root also imports pkg/lsp: it owns the process-wide
 	// language-server pool and hands each runner its view, the same reason
-	// it imports pkg/mcp.
-	"process": {current: 19, target: -1}, // §3.7 sets no limit for the composition root
+	// it imports pkg/mcp, and pkg/peer: the local peer protocol the
+	// composition root runs for both surfaces (plan 195).
+	"process": {current: 20, target: -1}, // §3.7 sets no limit for the composition root
 
 	// The P4–P7 gap. Both may import only process, turn, event, config, llm
 	// and channel; both currently reach eighteen. TUI is at nineteen: /migrate
@@ -370,6 +374,11 @@ func checkOnlyStdlibImports(t *testing.T, root string) {
 var packageLayer = map[string]int{
 	"agent": 0, "llm": 0,
 	"state": 1, "config": 1, "home": 1, "telemetry": 1, "channel": 1,
+	// pkg/peer speaks the local peer-to-peer protocol (registration directory,
+	// sockets, frames, envelopes). It sits beside the machine-level state it
+	// reads and imports no pkg/... package at all: pkg/process is the only
+	// importer, and it reaches the protocol through this library.
+	"peer": 1,
 	// pkg/pdf renders PDF pages to images for the tool layer to hand the model.
 	// It imports pkg/llm for the shared asset-location contract (llm.AssetsDir)
 	// that resolves the packaged fonts' fallback directory, and the tool layer
@@ -925,8 +934,12 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // than off any one chain — a per-chain ledger would restart the call numbers
 // every time a summary or a refusal ran between two chat calls.
 const (
-	runnerFields  = 28
-	runnerMethods = 46
+	runnerFields = 28
+	// BatchBoundaryFor joins the surface with plans/216: the batch execution's
+	// filesystem boundary is resolved where the runtime already resolves the
+	// skill roots it names, and the turn environment (pkg/process) asks for it
+	// through this one method rather than re-deriving the expression.
+	runnerMethods = 47
 )
 
 func TestRunnerOnlyShrinks(t *testing.T) {

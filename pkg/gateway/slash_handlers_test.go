@@ -151,9 +151,21 @@ func TestHandleMCPServersV1MarksOfficialRegistryURLs(t *testing.T) {
 			},
 		},
 	}
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(""), 0o600))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, *cfg)
 	s := &Server{
-		Home: t.TempDir(),
-		Env:  &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Home: home,
+		Env: &process.Environment{
+			Deps:       run.Deps{Home: home, AppCfg: cfg},
+			Root:       home,
+			SQL:        db,
+			ConfigPath: cfgPath,
+		},
 	}
 	rec := httptest.NewRecorder()
 
@@ -211,7 +223,7 @@ func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 
 	chosen := parseSlashCommandWithOptions(s, "s1", "webchat", "/model", turn.Context{}, &turn.SlashChoice{Command: "model", Value: res.Picker.Items[1].Value})
 	require.Equal(t, "Switched to deepseek/deepseek-chat.", chosen.Reply)
-	saved, err := appcfg.LoadPersisted(cfgPath)
+	saved, err := loadPersistedDocumentForTest(cfgPath)
 	require.NoError(t, err)
 	require.Equal(t, "gpt-4o", saved.Agents.Definitions["main"].LLMProviders[0].Model, "the shared config file was rewritten")
 	// The pick is the session's own durable selection; the runner's published
@@ -333,7 +345,10 @@ func TestHandleSandboxSlashStatus(t *testing.T) {
 func TestHandleSandboxSlashDoesNotChangeMode(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	body := "sandbox_mode: read-only\n"
+	// An empty configuration launched in an undecided project derives the
+	// read-only sandbox (plan 203): the trust decision, not a sandbox_mode key,
+	// is what narrows it.
+	body := "{}\n"
 	require.NoError(t, os.WriteFile(cfgPath, []byte(body), 0o600))
 	s := &Server{
 		Home:   home,
@@ -346,7 +361,7 @@ func TestHandleSandboxSlashDoesNotChangeMode(t *testing.T) {
 	// The file states the sandbox the fixture runs under; the server adopts it
 	// as its live configuration (the file is a restart-time source, not a
 	// watched one — plan 189).
-	loaded, err := appcfg.Load(cfgPath)
+	loaded, err := loadDocumentForTest(cfgPath)
 	require.NoError(t, err)
 	effective := safety.EffectiveConfig(loaded, safety.ProjectContext{})
 	s.Env.AdoptConfig(&effective)
@@ -405,10 +420,22 @@ func TestMCPServerToggleSharesTheTerminalsAction(t *testing.T) {
 	if _, err := turn.SetMCPServerDisabled(ws, cfg.Agents.Defaults.MCPServers, nil, "paused", true); err != nil {
 		t.Fatal(err)
 	}
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(""), 0o600))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, *cfg)
 	s := &Server{
-		Home:   t.TempDir(),
+		Home:   home,
 		Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: ws}},
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Env: &process.Environment{
+			Deps:       run.Deps{Home: home, AppCfg: cfg},
+			Root:       home,
+			SQL:        db,
+			ConfigPath: cfgPath,
+		},
 	}
 	post := func(path, body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()

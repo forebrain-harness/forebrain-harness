@@ -40,9 +40,9 @@ func TestApplyComposedConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T)
 	if err := os.WriteFile(cfgPath, []byte(good), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := appcfg.Load(cfgPath)
+	cfg, err := loadDocumentForTest(cfgPath)
 	if err != nil {
-		t.Fatalf("appcfg.Load(good): %v", err)
+		t.Fatalf("loadDocumentForTest(good): %v", err)
 	}
 	live := &cfg
 
@@ -182,7 +182,7 @@ func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(first), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := appcfg.Load(cfgPath)
+	cfg, err := loadDocumentForTest(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(second), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	secondCfg, err := appcfg.Load(cfgPath)
+	secondCfg, err := loadDocumentForTest(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestApplyComposedConfigPropagatesToPoolEntries(t *testing.T) {
 	if err := os.WriteFile(env.ConfigPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	next, err := appcfg.Load(env.ConfigPath)
+	next, err := loadDocumentForTest(env.ConfigPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,5 +408,56 @@ func TestAdoptLaunchTrustRederivesTheSandbox(t *testing.T) {
 	}
 	if gw.LaunchProject != before || gw.Deps.AppCfg != beforeCfg {
 		t.Fatal("a no-launch-project environment must not change on AdoptLaunchTrust")
+	}
+}
+
+// The global approval preset is the posture a session is born with (plan 203
+// §2b), so applying a configuration has to hand the new value to the session
+// store the same way the memory mode does: sessions created from then on are
+// born with it, and the ones already running keep the row they were given.
+func TestApplyComposedConfigSeedsNewSessionsWithTheApprovalPreset(t *testing.T) {
+	ctx := context.Background()
+	env, _, _ := newPoolTestEnv(t)
+	// A session that exists before the change, born under no configured preset.
+	if err := env.Deps.SessionStore.Ensure(ctx, "before", "before"); err != nil {
+		t.Fatalf("ensure before: %v", err)
+	}
+
+	t.Setenv("FOREBRAIN_PRESET_SEED_TEST_KEY", "test-key")
+	body := "approval_preset: full_access\n" +
+		"agents:\n" +
+		"  definitions:\n" +
+		"    main:\n" +
+		"      llm_providers:\n" +
+		"        - provider: openai\n" +
+		"          model: gpt-test\n" +
+		"          api_key: ${FOREBRAIN_PRESET_SEED_TEST_KEY}\n" +
+		"          base_url: http://localhost:0/v1\n"
+	if err := os.WriteFile(env.ConfigPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next, err := loadDocumentForTest(env.ConfigPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := env.applyComposedConfigLocked(next); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	if err := env.Deps.SessionStore.Ensure(ctx, "after", "after"); err != nil {
+		t.Fatalf("ensure after: %v", err)
+	}
+	preset, source, _, stored, err := env.Deps.SessionStore.SessionPermissionPreset(ctx, "after")
+	if err != nil || !stored || preset != "full_access" || source == "" {
+		t.Fatalf("session born after the apply = %q/%q stored=%v err=%v, want full_access", preset, source, stored, err)
+	}
+	if source != state.SessionPresetSourceDefault {
+		t.Fatalf("session born after the apply has source %q, want %q", source, state.SessionPresetSourceDefault)
+	}
+	// The session that already existed was not re-seeded: a configuration
+	// change reaches the sessions created after it, never the row a running
+	// conversation was given.
+	if preset, _, _, _, err := env.Deps.SessionStore.SessionPermissionPreset(ctx, "before"); err != nil || preset != state.SessionPresetWorkspaceWrite {
+		t.Fatalf("existing session preset = %q err=%v, want the workspace_write row it was born with", preset, err)
 	}
 }

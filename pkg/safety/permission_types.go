@@ -19,7 +19,6 @@ const (
 	ModeUnlessTrusted PermissionMode = "unless-trusted"
 	ModeOnRequest     PermissionMode = "on-request"
 	ModeNever         PermissionMode = "never"
-	ModeGranular      PermissionMode = "granular"
 )
 
 type PermissionBehavior string
@@ -45,20 +44,10 @@ const (
 	ApprovalUnlessTrusted AskForApproval = ModeUnlessTrusted
 	ApprovalOnRequest     AskForApproval = ModeOnRequest
 	ApprovalNever         AskForApproval = ModeNever
-	ApprovalGranular      AskForApproval = ModeGranular
 )
 
-type GranularApprovalConfig struct {
-	SandboxApproval    bool `json:"sandbox_approval" yaml:"sandbox_approval"`
-	Rules              bool `json:"rules" yaml:"rules"`
-	SkillApproval      bool `json:"skill_approval" yaml:"skill_approval"`
-	RequestPermissions bool `json:"request_permissions" yaml:"request_permissions"`
-	MCPElicitations    bool `json:"mcp_elicitations" yaml:"mcp_elicitations"`
-}
-
 type ApprovalPolicy struct {
-	Mode     AskForApproval         `json:"mode" yaml:"mode"`
-	Granular GranularApprovalConfig `json:"granular,omitempty" yaml:"granular,omitempty"`
+	Mode AskForApproval `json:"mode" yaml:"mode"`
 }
 
 type PermissionSource string
@@ -584,41 +573,6 @@ type NetworkPermissionGrant struct {
 	RunID     string               `json:"run_id,omitempty"`
 }
 
-type NetworkApprovalProtocol string
-
-const (
-	NetworkApprovalHTTP      NetworkApprovalProtocol = "http"
-	NetworkApprovalHTTPS     NetworkApprovalProtocol = "https"
-	NetworkApprovalSOCKS5TCP NetworkApprovalProtocol = "socks5_tcp"
-	NetworkApprovalSOCKS5UDP NetworkApprovalProtocol = "socks5_udp"
-)
-
-func (p NetworkApprovalProtocol) Valid() bool {
-	switch p {
-	case NetworkApprovalHTTP, NetworkApprovalHTTPS, NetworkApprovalSOCKS5TCP, NetworkApprovalSOCKS5UDP:
-		return true
-	default:
-		return false
-	}
-}
-
-type NetworkApprovalContext struct {
-	Host     string                  `json:"host"`
-	Protocol NetworkApprovalProtocol `json:"protocol"`
-}
-
-type NetworkPolicyRuleAction string
-
-const (
-	NetworkPolicyAllow NetworkPolicyRuleAction = "allow"
-	NetworkPolicyDeny  NetworkPolicyRuleAction = "deny"
-)
-
-type NetworkPolicyAmendment struct {
-	Host   string                  `json:"host"`
-	Action NetworkPolicyRuleAction `json:"action"`
-}
-
 // ExecPolicyAmendment is the token prefix proposed for a persistent command
 // allow rule.
 type ExecPolicyAmendment []string
@@ -651,168 +605,13 @@ type PermissionUpdate struct {
 	StrictAutoReviewRunID string                      `json:"strict_auto_review_run_id,omitempty"`
 }
 
-func compileConfiguredPermissionProfile(sources []SourceSettings, cwd, tempDir string, additionalWorkspaceRoots []string) (RuntimeConfig, bool) {
-	var selected *SourceSettings
-	for i := range sources {
-		if strings.TrimSpace(sources[i].DefaultPermissions) != "" {
-			selected = &sources[i]
-		}
-	}
-	if selected == nil {
-		return RuntimeConfig{}, false
-	}
-	root := &appcfg.Root{DefaultPermissions: selected.DefaultPermissions, Permissions: selected.Permissions}
-	profile, active, err := root.ResolvePermissionProfile()
-	if err != nil || !active {
-		return RuntimeConfig{}, true
-	}
-	workspaceRoots := []string{cwd}
-	for path, enabled := range profile.WorkspaceRoots {
-		if !enabled {
-			continue
-		}
-		workspaceRoots = appendUniquePath(workspaceRoots, resolveProfilePath(path, cwd))
-	}
-	for _, path := range additionalWorkspaceRoots {
-		workspaceRoots = appendUniquePath(workspaceRoots, path)
-	}
-
-	var out RuntimeConfig
-	if profile.FileSystem != nil {
-		out.Filesystem.GlobScanMaxDepth = cloneDepth(profile.FileSystem.GlobScanMaxDepth)
-		for path, value := range profile.FileSystem.Entries {
-			if value.Scoped == nil {
-				compileProfileFileSystemEntry(&out.Filesystem, path, value.Access, cwd, tempDir, workspaceRoots)
-				continue
-			}
-			for subpath, access := range value.Scoped {
-				compileScopedProfileFileSystemEntry(&out.Filesystem, path, subpath, access, cwd, tempDir, workspaceRoots)
-			}
-		}
-	}
-	if profile.Network != nil && profile.Network.Enabled != nil {
-		out.NetworkEnabled = *profile.Network.Enabled
-	}
-	return out, true
-}
-
-func compileProfileFileSystemEntry(out *FilesystemConfig, rawPath string, access appcfg.FileSystemAccess, cwd, tempDir string, workspaceRoots []string) {
-	if out == nil {
-		return
-	}
-	if strings.TrimSpace(rawPath) == ":minimal" {
-		if access == appcfg.FileSystemAccessRead || access == appcfg.FileSystemAccessWrite {
-			out.IncludePlatformDefaults = true
-		}
-		return
-	}
-	if access == appcfg.FileSystemAccessDeny && strings.ContainsAny(rawPath, "*?[]") {
-		out.DenyReadPatterns = appendUniqueString(out.DenyReadPatterns, resolveProfilePattern(rawPath, cwd))
-		return
-	}
-	paths := materializeProfilePath(rawPath, cwd, tempDir, workspaceRoots)
-	for _, path := range paths {
-		applyProfileAccess(out, path, access)
-	}
-}
-
-func compileScopedProfileFileSystemEntry(out *FilesystemConfig, base, subpath string, access appcfg.FileSystemAccess, cwd, tempDir string, workspaceRoots []string) {
-	if subpath == "." {
-		compileProfileFileSystemEntry(out, base, access, cwd, tempDir, workspaceRoots)
-		return
-	}
-	if strings.TrimSpace(base) == ":minimal" {
-		return
-	}
-	bases := materializeProfilePath(base, cwd, tempDir, workspaceRoots)
-	for _, root := range bases {
-		path := filepath.Join(root, filepath.FromSlash(subpath))
-		if access == appcfg.FileSystemAccessDeny && strings.ContainsAny(subpath, "*?[]") {
-			out.DenyReadPatterns = appendUniqueString(out.DenyReadPatterns, path)
-			continue
-		}
-		applyProfileAccess(out, strings.TrimSuffix(path, string(filepath.Separator)+"**"), access)
-	}
-}
-
-func materializeProfilePath(rawPath, cwd, tempDir string, workspaceRoots []string) []string {
-	rawPath = strings.TrimSpace(rawPath)
-	switch rawPath {
-	case ":root":
-		root := string(filepath.Separator)
-		if volume := filepath.VolumeName(cwd); volume != "" {
-			root = volume + string(filepath.Separator)
-		}
-		return []string{root}
-	case ":minimal":
-		return nil
-	case ":workspace_roots":
-		return append([]string(nil), workspaceRoots...)
-	case ":tmpdir":
-		return []string{tempDir}
-	case ":slash_tmp":
-		if filepath.Separator == '/' {
-			return []string{"/tmp"}
-		}
-		return nil
-	default:
-		if strings.HasPrefix(rawPath, ":") {
-			return nil
-		}
-		return []string{strings.TrimSuffix(resolveProfilePath(rawPath, cwd), string(filepath.Separator)+"**")}
-	}
-}
-
-func applyProfileAccess(out *FilesystemConfig, path string, access appcfg.FileSystemAccess) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return
-	}
-	switch access {
-	case appcfg.FileSystemAccessWrite:
-		out.AllowWrite = appendUniquePath(out.AllowWrite, path)
-		out.AllowRead = appendUniquePath(out.AllowRead, path)
-	case appcfg.FileSystemAccessRead:
-		out.AllowRead = appendUniquePath(out.AllowRead, path)
-	case appcfg.FileSystemAccessDeny:
-		out.DenyRead = appendUniquePath(out.DenyRead, path)
-		out.DenyWrite = appendUniquePath(out.DenyWrite, path)
-	}
-}
-
-func resolveProfilePattern(pattern, cwd string) string {
-	pattern = strings.TrimSpace(pattern)
-	if filepath.IsAbs(pattern) {
-		return filepath.Clean(pattern)
-	}
-	if pattern == "~" || strings.HasPrefix(pattern, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(pattern, "~"), "/"))
-		}
-	}
-	return filepath.Join(cwd, filepath.FromSlash(pattern))
-}
-
-func resolveProfilePath(path, cwd string) string {
-	path = strings.TrimSpace(path)
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Clean(filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(path, "~"), "/")))
-		}
-	}
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
-	}
-	return filepath.Clean(filepath.Join(cwd, path))
-}
-
 // Preset ids are the stable wire values; the labels are what a picker shows.
-// Both mirror codex's builtin_approval_presets so the same choice is named the
-// same way on either side.
+// The two ids are the configuration constants themselves, so the value a
+// surface sends, the row the store keeps and the setting the panel writes are
+// one spelling.
 const (
-	PresetReadOnly   = "read-only"
-	PresetDefault    = "auto"
-	PresetFullAccess = "full-access"
+	PresetWorkspaceWrite = string(appcfg.ApprovalPresetWorkspaceWrite)
+	PresetFullAccess     = string(appcfg.ApprovalPresetFullAccess)
 )
 
 // ApprovalPreset pairs an approval policy with a sandbox mode.
@@ -843,14 +642,7 @@ type ApprovalPreset struct {
 func BuiltinApprovalPresets() []ApprovalPreset {
 	return []ApprovalPreset{
 		{
-			ID:          PresetReadOnly,
-			Label:       "Read Only",
-			Description: "Forebrain Harness can read files in the current workspace. Approval is required to edit files.",
-			Approval:    ApprovalOnRequest,
-			SandboxMode: appcfg.SandboxModeReadOnly,
-		},
-		{
-			ID:          PresetDefault,
+			ID:          PresetWorkspaceWrite,
 			Label:       "Default",
 			Description: "Forebrain Harness can read and edit files in the current workspace, and run commands. Approval is required to edit other files.",
 			Approval:    ApprovalOnRequest,
@@ -894,51 +686,40 @@ func ApprovalPresetByID(raw string) (ApprovalPreset, bool) {
 	return ApprovalPreset{}, false
 }
 
-// MatchApprovalPreset reports which preset the current mode and config add up
-// to, so a picker can mark the active choice.
-//
-// Nothing keeps the two halves paired — a config file sets the sandbox, the
-// store holds the mode, and either can move alone — so a state that falls
-// between presets matches none of them rather than the nearest one. The same
-// goes for a named permission profile, which is a finer-grained choice than any
-// preset can express.
-func MatchApprovalPreset(mode PermissionMode, cfg *appcfg.Root) (ApprovalPreset, bool) {
-	if cfg == nil || strings.TrimSpace(cfg.DefaultPermissions) != "" {
-		return ApprovalPreset{}, false
-	}
-	mode = normalizeMode(mode)
+// ApprovalPresetForSandboxMode names the preset a sandbox mode belongs to, so
+// a surface that only knows the mode can still say which preset is running. The
+// preset and the sandbox mode are one decision now (plan 203), which makes this
+// a lookup rather than a match; a mode no preset derives — read-only, the trust
+// narrowing of an undecided project — belongs to none of them rather than to the
+// nearest one.
+func ApprovalPresetForSandboxMode(mode appcfg.SandboxMode) (ApprovalPreset, bool) {
 	for _, preset := range BuiltinApprovalPresets() {
-		if preset.Approval == mode && preset.SandboxMode == cfg.SandboxMode {
+		if preset.SandboxMode == mode {
 			return preset, true
 		}
 	}
 	return ApprovalPreset{}, false
 }
 
-// ApplyToConfig writes the preset's sandbox half into cfg — the configuration
-// being saved as everyone's default. A preset picked for one conversation is
-// SessionUpdates instead: it must not move the configuration every other
-// conversation runs under.
-func (p ApprovalPreset) ApplyToConfig(cfg *appcfg.Root) {
-	if cfg == nil {
-		return
-	}
-	// A named profile outranks sandbox_mode when both are set, so it has to go
-	// for the preset's mode to take effect at all. This mirrors ApplyYOLO,
-	// which drops it for the same reason.
-	cfg.DefaultPermissions = ""
-	cfg.SandboxMode = p.SandboxMode
-}
-
-// SessionUpdates is the preset picked for one conversation alone: its
-// approval mode and its sandbox mode, both scoped to that conversation in
-// the permission store. Nothing is written to the configuration, so the
-// choice neither reaches other conversations nor survives into the next
-// session, and a configuration reload does not undo it.
-func (p ApprovalPreset) SessionUpdates(sessionID string) []PermissionUpdate {
+// SessionUpdatesForLaunch is the preset in force for one conversation alone: its
+// approval mode and its sandbox mode, both scoped to that conversation in the
+// permission store. Nothing is written to the configuration, so the choice
+// neither reaches other conversations nor survives into the next session, and a
+// configuration reload does not undo it.
+//
+// The pair is derived for the launch project exactly as the configuration's own
+// preset is (EffectiveConfig), which is what keeps the two halves meaning the
+// same thing at session scope as at configuration scope. Writing the preset's
+// raw sandbox instead handed every session a writable workspace: the default
+// preset is narrowed to read-only in a project nobody has judged, and the
+// approval half asks more in a project the user rejected. Full access is the
+// exception on both counts — it runs uncontained and asks nothing wherever it
+// was picked — because that is the YOLO posture the preset means.
+func (p ApprovalPreset) SessionUpdatesForLaunch(sessionID string, cfg *appcfg.Root, launch ProjectContext) []PermissionUpdate {
+	derived := EffectiveConfig(appcfg.Root{ApprovalPreset: appcfg.ApprovalPresetID(p.ID)}, launch)
 	return []PermissionUpdate{
-		{Type: UpdateSetMode, Destination: DestinationSession, SessionID: sessionID, Mode: p.Approval},
-		{Type: UpdateSetSandboxMode, Destination: DestinationSession, SessionID: sessionID, SandboxMode: p.SandboxMode},
+		{Type: UpdateSetMode, Destination: DestinationSession, SessionID: sessionID, Mode: PermissionMode(derived.ApprovalPolicy.Mode)},
+		{Type: UpdateSetSandboxMode, Destination: DestinationSession, SessionID: sessionID, SandboxMode: derived.SandboxMode},
 	}
 }
 
@@ -960,8 +741,6 @@ func configForSandboxMode(cfg *appcfg.Root, mode appcfg.SandboxMode) *appcfg.Roo
 		return cfg
 	}
 	scoped := *cfg
-	// Same reason as ApplyToConfig: a named profile would outrank the mode.
-	scoped.DefaultPermissions = ""
 	scoped.SandboxMode = mode
 	return &scoped
 }
@@ -973,7 +752,6 @@ const (
 	DecisionAcceptForSession              ApprovalDecisionName = "accept_for_session"
 	DecisionAcceptAndRemember             ApprovalDecisionName = "accept_and_remember"
 	DecisionAcceptWithExecPolicyAmendment ApprovalDecisionName = "accept_with_execpolicy_amendment"
-	DecisionApplyNetworkPolicyAmendment   ApprovalDecisionName = "apply_network_policy_amendment"
 	DecisionGrantForTurn                  ApprovalDecisionName = "grant_for_turn"
 	DecisionGrantForTurnStrictAutoReview  ApprovalDecisionName = "grant_for_turn_with_strict_auto_review"
 	DecisionGrantForSession               ApprovalDecisionName = "grant_for_session"
@@ -990,8 +768,7 @@ type ApprovalDecisionOption struct {
 	CommandRules []PermissionRuleValue
 	// CommandScope describes what those rules grant, so every surface words
 	// the row from one server-derived answer rather than its own.
-	CommandScope           CommandApprovalScope
-	NetworkPolicyAmendment *NetworkPolicyAmendment
+	CommandScope CommandApprovalScope
 }
 
 // BuildApprovalDecisionOptions is the single service-owned decision proposal
@@ -1001,24 +778,13 @@ func BuildApprovalDecisionOptions(actionKind, toolName string, toolInput any) []
 	if suggestion.PermissionToolName == "" {
 		return nil
 	}
-	if context, _, ok := toolInputNetworkApproval(toolInput); ok {
-		host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(context.Host), "."))
-		if host == "" || !context.Protocol.Valid() {
-			return nil
-		}
-		return []ApprovalDecisionOption{
-			{Decision: DecisionAccept},
-			{Decision: DecisionAcceptForSession},
-			{Decision: DecisionApplyNetworkPolicyAmendment, NetworkPolicyAmendment: &NetworkPolicyAmendment{Host: host, Action: NetworkPolicyAllow}},
-			{Decision: DecisionCancel},
-		}
-	}
 
 	switch {
 	case strings.EqualFold(strings.TrimSpace(actionKind), "request_permissions"):
+		// Three answers and no reviewer: approving a permission request is a
+		// matter of how long the grant lasts, not of who reviews it (plan 203).
 		return []ApprovalDecisionOption{
 			{Decision: DecisionGrantForTurn},
-			{Decision: DecisionGrantForTurnStrictAutoReview},
 			{Decision: DecisionGrantForSession},
 			{Decision: DecisionDecline},
 		}

@@ -104,6 +104,15 @@ const (
 	// subagent is on its subagent_ended payload, so the event is pushed to
 	// whoever is watching and never stored.
 	RunEventFirstToken = "first_token"
+	// RunEventPeerMessageHeld reports a peer message this session is holding
+	// for the person's decision rather than delivering: the sender's permission
+	// mode differs from this session's, or this session bypasses approvals and
+	// the sender asserted no mode at all. The message is delivered only after
+	// the person releases it; the surface asks (plans 196, 199).
+	RunEventPeerMessageHeld = "peer_message_held"
+	// RunEventPeerMessageSettled closes one held peer message with what became
+	// of it: released, denied, or expired without an answer.
+	RunEventPeerMessageSettled = "peer_message_settled"
 )
 
 // IsPushOnlyStreamEvent reports a fragment of a run as it happens — answer and
@@ -357,6 +366,47 @@ type TurnFailedPayload struct {
 	Error   string `json:"error,omitempty"`
 	Message string `json:"message,omitempty"`
 }
+
+// PeerMessageHeldPayload announces a peer message this session is holding for
+// the person to release or deny. Preview is the message's opening, already
+// cut, so a surface can say what arrived without carrying the whole thing;
+// Cause is why it was held — one of PeerHoldCause*.
+type PeerMessageHeldPayload struct {
+	MsgID    string `json:"msg_id"`
+	From     string `json:"from,omitempty"`
+	FromName string `json:"from_name,omitempty"`
+	Preview  string `json:"preview,omitempty"`
+	Cause    string `json:"cause"`
+	HeldAtMs int64  `json:"held_at_ms"`
+}
+
+// PeerMessageSettledPayload closes a held peer message: Outcome is
+// released (delivered after the person allowed it), denied (the person
+// declined it) or expired (nothing decided it in time, or the registration
+// mode changed under it).
+type PeerMessageSettledPayload struct {
+	MsgID   string `json:"msg_id"`
+	Outcome string `json:"outcome"`
+}
+
+// The reasons a peer message is held, carried by PeerMessageHeldPayload.Cause.
+const (
+	// PeerHoldCauseModeMismatch: the sender's permission mode and this
+	// session's differ.
+	PeerHoldCauseModeMismatch = "mode-mismatch"
+	// PeerHoldCauseNoModeAsserted: this session bypasses approval prompts and
+	// the message asserts no mode, so what it assumes cannot be checked.
+	PeerHoldCauseNoModeAsserted = "no-mode-asserted"
+	// PeerHoldCauseHoldAll: this session holds every peer message.
+	PeerHoldCauseHoldAll = "hold-all"
+)
+
+// The outcomes a held peer message can settle with.
+const (
+	PeerOutcomeReleased = "released"
+	PeerOutcomeDenied   = "denied"
+	PeerOutcomeExpired  = "expired"
+)
 
 // ConfigReloadedPayload describes a successful live configuration swap.
 type ConfigReloadedPayload struct {

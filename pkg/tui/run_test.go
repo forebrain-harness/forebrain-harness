@@ -506,7 +506,7 @@ func TestPublishRunEventDrawsTheCompactionLifecycle(t *testing.T) {
 	publish(event.RunEventContextCompactProgress, event.ContextCompactProgressPayload{CompactionID: "c1", Percent: 40, Phase: event.CompactPhaseSummarizing, AgentID: "explorer"})
 	publish(event.RunEventContextCompacted, event.ContextCompactedPayload{
 		CompactionID: "c1", AgentID: "explorer", Strategy: "remote_v2", SummarySource: "remote_compaction",
-		Scope: "total", BoundaryID: "window-3", WindowNumber: 3, Reactive: true, TokensBefore: 182_000, TokensAfter: 64_000,
+		BoundaryID: "window-3", WindowNumber: 3, Reactive: true, TokensBefore: 182_000, TokensAfter: 64_000,
 	})
 	publish(event.RunEventContextCompactError, event.ContextCompactFailedPayload{CompactionID: "c2", Cancelled: true})
 	next := func() any {
@@ -733,8 +733,6 @@ type fakeSession struct {
 	dispatchErr          error
 	preferredSessionID   string
 	memoryEnabled        bool
-	memoryUse            bool
-	memoryGenerate       bool
 	memoryUpdates        []memorySettingsUpdate
 	memoryResetCalls     int
 	memoryResetAllCalls  []bool
@@ -1403,24 +1401,16 @@ func (f *fakeSession) SubagentComposerTokenStats(_ string, _ string) ComposerTok
 type memorySettingsUpdate struct {
 	sessionID string
 	feature   *bool
-	use       *bool
-	generate  *bool
 }
 
-func (f *fakeSession) MemorySettings() (bool, bool, bool) {
-	return f.memoryEnabled, f.memoryUse, f.memoryGenerate
+func (f *fakeSession) MemorySettings() bool {
+	return f.memoryEnabled
 }
 
-func (f *fakeSession) UpdateMemorySettings(sessionID string, featureEnabled, useMemories, generateMemories *bool) error {
-	f.memoryUpdates = append(f.memoryUpdates, memorySettingsUpdate{sessionID: sessionID, feature: featureEnabled, use: useMemories, generate: generateMemories})
+func (f *fakeSession) UpdateMemorySettings(sessionID string, featureEnabled *bool) error {
+	f.memoryUpdates = append(f.memoryUpdates, memorySettingsUpdate{sessionID: sessionID, feature: featureEnabled})
 	if featureEnabled != nil {
 		f.memoryEnabled = *featureEnabled
-	}
-	if useMemories != nil {
-		f.memoryUse = *useMemories
-	}
-	if generateMemories != nil {
-		f.memoryGenerate = *generateMemories
 	}
 	return nil
 }
@@ -1435,7 +1425,7 @@ func (f *fakeSession) ResetMemories(_ context.Context, all bool) error {
 // picking the wrong-labeled row) must never call ResetMemories, and picking
 // either of the two real reset choices must call it with the right scope.
 func TestHandleMemoriesSettingsAndResetAreSeparateActions(t *testing.T) {
-	session := &fakeSession{memoryEnabled: true, memoryUse: true, memoryGenerate: true}
+	session := &fakeSession{memoryEnabled: true}
 	selector := &recordingSelector{selectSteps: []selectorStep{
 		{value: "Reset memories — Clear local memory files and summaries. Threads remain intact.", ok: true},
 		{value: "Go back", ok: true},
@@ -1459,7 +1449,7 @@ func TestHandleMemoriesSettingsAndResetAreSeparateActions(t *testing.T) {
 		t.Fatalf("unexpected selector flow: %#v", selector.selects)
 	}
 
-	session = &fakeSession{memoryEnabled: true, memoryUse: true, memoryGenerate: true}
+	session = &fakeSession{memoryEnabled: true}
 	selector = &recordingSelector{selectSteps: []selectorStep{
 		{value: "Reset memories — Clear local memory files and summaries. Threads remain intact.", ok: true},
 		{value: "Reset this project's memories", ok: true},
@@ -1473,7 +1463,7 @@ func TestHandleMemoriesSettingsAndResetAreSeparateActions(t *testing.T) {
 		t.Fatalf("project reset should pass all=false: %#v", session.memoryResetAllCalls)
 	}
 
-	session = &fakeSession{memoryEnabled: true, memoryUse: true, memoryGenerate: true}
+	session = &fakeSession{memoryEnabled: true}
 	selector = &recordingSelector{selectSteps: []selectorStep{
 		{value: "Reset memories — Clear local memory files and summaries. Threads remain intact.", ok: true},
 		{value: "Reset everything (every project + global)", ok: true},
@@ -1488,20 +1478,25 @@ func TestHandleMemoriesSettingsAndResetAreSeparateActions(t *testing.T) {
 	}
 }
 
+// One switch (plan 205 §3.1): toggling it and saving writes exactly that
+// switch, for the conversation the command runs in.
 func TestHandleMemoriesSettingActionUpdatesOnlySelectedSetting(t *testing.T) {
-	session := &fakeSession{memoryEnabled: true, memoryUse: false, memoryGenerate: true}
+	session := &fakeSession{memoryEnabled: true}
 	selector := &recordingSelector{selectSteps: []selectorStep{
-		{value: "Use memories — Use memories in following threads. Applied at next thread.", ok: true},
-		{value: "Save memory settings", ok: true},
+		{value: memoryFeatureOption, ok: true},
+		{value: memorySaveOption, ok: true},
 	}}
 	var out bytes.Buffer
 	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
 	_ = ctrl.handleMemories("thread-1")
-	if len(session.memoryUpdates) != 1 || session.memoryUpdates[0].use == nil || session.memoryUpdates[0].generate == nil {
-		t.Fatalf("selected use action changed wrong settings: %#v", session.memoryUpdates)
+	if len(session.memoryUpdates) != 1 || session.memoryUpdates[0].feature == nil {
+		t.Fatalf("selected switch action changed wrong settings: %#v", session.memoryUpdates)
 	}
-	if !*session.memoryUpdates[0].use || !*session.memoryUpdates[0].generate {
-		t.Fatal("expected staged settings to be saved together")
+	if *session.memoryUpdates[0].feature {
+		t.Fatal("expected the toggled-off switch to be saved")
+	}
+	if session.memoryUpdates[0].sessionID != "thread-1" {
+		t.Fatalf("update went to %q, want the calling conversation", session.memoryUpdates[0].sessionID)
 	}
 }
 
@@ -3761,29 +3756,37 @@ func TestSwitchStreamSessionBlanksTheBudgetWhenTheStoreCannotAnswer(t *testing.T
 }
 
 // TestSurfaceComposerTokenStatsCountsTheConfiguredCompactLimit pins that the
-// footer seeded at startup and on resume is the live footer: the same budget,
-// the configured auto-compact limit included, so a resumed session about to
-// compact does not read "100%".
-func TestSurfaceComposerTokenStatsCountsTheConfiguredCompactLimit(t *testing.T) {
+// TestSurfaceComposerTokenStatsCountsTheConfiguredAutoCompactPercent pins that
+// the footer seeded at startup and on resume is the live footer: the same
+// budget, the configured auto-compaction percent included, so a resumed session
+// about to compact does not read "100%".
+func TestSurfaceComposerTokenStatsCountsTheConfiguredAutoCompactPercent(t *testing.T) {
 	cfg := appcfg.Root{}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-chat", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}},
 	}}
-	cfg.Compact.ModelAutoCompactTokenLimit = 1000
+	// Half the model's window, instead of the default 90% of it.
+	cfg.Compact.AutoCompactPercent = 50
 	home := t.TempDir()
 	s := sessionEnv{Home: home, Config: cfg, Runner: &runpkg.Runner{Deps: &runpkg.Deps{Home: home, AppCfg: &cfg}}}.session()
 	full := s.SurfaceComposerTokenStats("s-budget", 0)
 	if !full.Active || full.PercentLeft != 100 {
 		t.Fatalf("empty context = %+v, want the full budget", full)
 	}
-	over := s.SurfaceComposerTokenStats("s-budget", 5000)
-	live, ok := s.tokenBudgetMessageFromUsage("s-budget", 5000)
-	if !ok || over != composerTokenStatsFromBudget(live) {
-		t.Fatalf("footer %+v differs from the live budget %+v", over, live)
+	// The threshold is half of whichever window the session's model has, so the
+	// assertion holds whatever the catalog says about it.
+	live, ok := s.tokenBudgetMessageFromUsage("s-budget", 1)
+	if !ok || live.AutoCompactThreshold != live.ContextWindow/2 {
+		t.Fatalf("budget %+v: want a threshold at half of the %d window", live, live.ContextWindow)
+	}
+	over := s.SurfaceComposerTokenStats("s-budget", live.AutoCompactThreshold)
+	atThreshold, ok := s.tokenBudgetMessageFromUsage("s-budget", live.AutoCompactThreshold)
+	if !ok || over != composerTokenStatsFromBudget(atThreshold) {
+		t.Fatalf("footer %+v differs from the live budget %+v", over, atThreshold)
 	}
 	if over.PercentLeft != 0 {
-		t.Fatalf("a context past the configured limit reads %d%% left", over.PercentLeft)
+		t.Fatalf("a context at the configured threshold reads %d%% left", over.PercentLeft)
 	}
 }
 
@@ -4125,33 +4128,106 @@ func TestAgentRosterHotkeyStopNoOpWhenNotFocused(t *testing.T) {
 	}
 }
 
-func TestHotkeyTogglePlanModeFlipsModestoreState(t *testing.T) {
+// Shift+tab cycles the modes instead of toggling one, the way Claude Code's
+// does — in this repository's own words: default → plan mode → full access →
+// default. Full access is the stop that changes the conversation's preset, and
+// it changes it the way /permissions does: the session's own row (plan 215
+// §3.6).
+func TestHotkeyCyclesModeThroughPlanAndFullAccess(t *testing.T) {
 	home := t.TempDir()
 	session := &fakeSession{}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
-	state := &streamState{sessionID: "s1", home: home, workspaceRoot: home}
+	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
+	step := func(want statepkg.Mode) {
+		t.Helper()
+		if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyCycleMode) {
+			t.Fatal("expected the cycle hotkey to be handled")
+		}
+		st, err := statepkg.Get(home, "s1")
+		if err != nil {
+			t.Fatalf("state.Get: %v", err)
+		}
+		if st.Mode != want {
+			t.Fatalf("mode = %q, want %q", st.Mode, want)
+		}
+	}
 
-	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyTogglePlanMode) {
-		t.Fatal("expected hotkey handled")
+	// Default → plan mode, and no preset is written to get there.
+	step(statepkg.ModePlan)
+	if len(session.appliedPresets) != 0 {
+		t.Fatalf("entering plan mode applied %v", session.appliedPresets)
 	}
-	st, err := statepkg.Get(home, "s1")
-	if err != nil {
-		t.Fatalf("state.Get: %v", err)
+	// Plan mode → full access: plan mode ends and the preset is the session's.
+	step(statepkg.ModeAgent)
+	if len(session.appliedPresets) != 1 || session.appliedPresets[0] != safety.PresetFullAccess {
+		t.Fatalf("applied presets = %v, want the full-access one", session.appliedPresets)
 	}
-	if st.Mode != statepkg.ModePlan {
-		t.Fatalf("first toggle: mode=%q want plan", st.Mode)
+	// Full access → default: the preset goes back to the default one.
+	step(statepkg.ModeAgent)
+	if len(session.appliedPresets) != 2 || session.appliedPresets[1] != safety.PresetWorkspaceWrite {
+		t.Fatalf("applied presets = %v, want the default preset last", session.appliedPresets)
+	}
+	// And the cycle starts over.
+	step(statepkg.ModePlan)
+}
+
+// With no sandbox the preset is fixed at full access, so the cycle is the two
+// modes and nothing else: full access ↔ plan mode, and no preset is ever
+// written (plan 215 §3.6).
+func TestHotkeyCyclesOnlyFullAccessAndPlanWithoutASandbox(t *testing.T) {
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	home := t.TempDir()
+	session := &fakeSession{activePreset: safety.PresetFullAccess}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
+	step := func(want statepkg.Mode) {
+		t.Helper()
+		if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyCycleMode) {
+			t.Fatal("expected the cycle hotkey to be handled")
+		}
+		st, err := statepkg.Get(home, "s1")
+		if err != nil {
+			t.Fatalf("state.Get: %v", err)
+		}
+		if st.Mode != want {
+			t.Fatalf("mode = %q, want %q", st.Mode, want)
+		}
 	}
 
-	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyTogglePlanMode) {
-		t.Fatal("expected hotkey handled second time")
+	step(statepkg.ModePlan)
+	step(statepkg.ModeAgent)
+	step(statepkg.ModePlan)
+	if len(session.appliedPresets) != 0 {
+		t.Fatalf("a fixed preset was written: %v", session.appliedPresets)
 	}
-	st, err = statepkg.Get(home, "s1")
-	if err != nil {
-		t.Fatalf("state.Get: %v", err)
+}
+
+// The footer names full access wherever it is in force, and plan mode outranks
+// it when both hold (plan 215 §3.6).
+func TestFooterNamesFullAccessAndPlanModeOutranksIt(t *testing.T) {
+	root := t.TempDir()
+	session := &fakeSession{activePreset: safety.PresetFullAccess}
+	state := &streamState{sessionID: "s1", session: session, home: root, workspaceRoot: root}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	renderer.SetComposerFooter(ComposerFooter{Model: "openai/gpt-5"})
+	footer := func() string {
+		renderer.mu.Lock()
+		defer renderer.mu.Unlock()
+		return renderer.composerFooterText(120)
 	}
-	if st.Mode != statepkg.ModeAgent {
-		t.Fatalf("second toggle: mode=%q want agent", st.Mode)
+
+	syncPlanModeIndicator(renderer, state)
+	if got := footer(); !strings.Contains(got, fullAccessFooterLabel) {
+		t.Fatalf("full access footer = %q", got)
+	}
+	if _, err := statepkg.Switch(root, "s1", statepkg.ModePlan); err != nil {
+		t.Fatal(err)
+	}
+	syncPlanModeIndicator(renderer, state)
+	if got := footer(); !strings.Contains(got, planModeFooterLabel) || strings.Contains(got, fullAccessFooterLabel) {
+		t.Fatalf("plan mode must be the one segment shown: %q", got)
 	}
 }
 
@@ -4843,7 +4919,7 @@ func goldenStatusPanel(t *testing.T, width, tab int) []string {
 			{Name: "FOREBRAIN.md", Loaded: true},
 		},
 		SkillOffer:   true,
-		ContextUsage: func() (int, int) { return 48_000, 0 },
+		ContextUsage: func() (int, statepkg.TokenBudgetOptions) { return 48_000, statepkg.TokenBudgetOptions{} },
 	})
 	panel := &uiPanel{kind: "status", tab: tab, status: &rep}
 	lines, focus := panelTestLines(panel, width, "⠋")
@@ -7141,7 +7217,7 @@ func TestBatchHotkeyDoesNotSwitchMode(t *testing.T) {
 	renderer := NewRenderer(io.Discard, io.Discard)
 	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
 
-	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyTogglePlanMode) {
+	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyCycleMode) {
 		t.Fatal("expected the hotkey to be handled")
 	}
 	if got := rendererFrameContents(renderer); len(got) != 1 || got[0] != "The mode is fixed in batch projects." {
@@ -7197,7 +7273,9 @@ func TestBatchLaunchOpensLatestExecution(t *testing.T) {
 	if emptyState.sessionID != "fresh-2" {
 		t.Fatalf("session on screen = %q, want the launch conversation", emptyState.sessionID)
 	}
-	if got := rendererFrameContents(emptyRenderer); len(got) != 1 || got[0] != "No tasks yet in this batch project." {
+	// The empty state says where a task comes from: this screen only replays
+	// executions, it never creates one (plans/216 §3.4).
+	if got := rendererFrameContents(emptyRenderer); len(got) != 1 || !strings.HasPrefix(got[0], "No tasks yet in this batch project. Create one in the web project space") {
 		t.Fatalf("frames = %q, want the empty-project notice", got)
 	}
 }
@@ -7254,6 +7332,30 @@ func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
 	// the surface, which admits it against the execution.
 	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/continue", nil); handled {
 		t.Fatal("/continue must fall through to the submission path")
+	}
+}
+
+// With no sandbox the terminal has no approval preset to offer, so /permissions
+// is answered the way any other command this surface does not have is — it
+// never reaches the preset picker (owner 2026-10-31, plan 215 §3.4).
+func TestPermissionsLineAnswersAsAnUnknownCommandWithoutASandbox(t *testing.T) {
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	home := t.TempDir()
+	session := &fakeSession{}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
+	cmds := newCommandController(session, renderer, nil, nil, home)
+
+	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/permissions", nil); !handled {
+		t.Fatal("/permissions must be answered, not sent to the model")
+	}
+	if len(session.permissionCalls) != 0 {
+		t.Fatalf("the preset picker ran: %v", session.permissionCalls)
+	}
+	contents := rendererFrameContents(renderer)
+	if len(contents) == 0 || !strings.Contains(contents[len(contents)-1], "There is no /permissions") {
+		t.Fatalf("/permissions answered %q, want the unknown-command sentence", contents)
 	}
 }
 

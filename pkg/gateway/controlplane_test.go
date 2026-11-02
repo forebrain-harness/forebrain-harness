@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -87,21 +86,18 @@ func TestControlPlaneAuthorized(t *testing.T) {
 	}
 }
 
-func tokenAuthEnv(mode, token string) *process.Environment {
+func tokenAuthEnv(token string) *process.Environment {
 	return &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{
 		Gateway: appcfg.Gateway{
-			Auth: appcfg.GatewayAuth{
-				Mode:  mode,
-				Token: token,
-			},
+			Auth: appcfg.GatewayAuth{Token: token},
 		},
 	}}}
 }
 
 func TestControlPlaneHTTPMiddlewareUsesGatewayAuthToken(t *testing.T) {
-	env := tokenAuthEnv("token", "gw-secret")
+	env := tokenAuthEnv("gw-secret")
 	called := false
-	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := ControlPlaneHTTPMiddleware(env, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -120,8 +116,8 @@ func TestControlPlaneHTTPMiddlewareUsesGatewayAuthToken(t *testing.T) {
 }
 
 func TestControlPlaneHTTPMiddlewareRejectsWrongGatewayToken(t *testing.T) {
-	env := tokenAuthEnv("token", "gw-secret")
-	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	env := tokenAuthEnv("gw-secret")
+	handler := ControlPlaneHTTPMiddleware(env, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -136,8 +132,8 @@ func TestControlPlaneHTTPMiddlewareRejectsWrongGatewayToken(t *testing.T) {
 }
 
 func TestControlPlaneHTTPMiddlewareRejectsMissingGatewayToken(t *testing.T) {
-	env := tokenAuthEnv("token", "")
-	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	env := tokenAuthEnv("")
+	handler := ControlPlaneHTTPMiddleware(env, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -151,9 +147,9 @@ func TestControlPlaneHTTPMiddlewareRejectsMissingGatewayToken(t *testing.T) {
 }
 
 func TestControlPlaneHTTPMiddlewareAcceptsWebSessionCookie(t *testing.T) {
-	env := tokenAuthEnv("token", "gw-secret")
+	env := tokenAuthEnv("gw-secret")
 	called := false
-	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := ControlPlaneHTTPMiddleware(env, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -172,8 +168,8 @@ func TestControlPlaneHTTPMiddlewareAcceptsWebSessionCookie(t *testing.T) {
 }
 
 func TestControlPlaneHTTPMiddlewareRejectsForgedWebSessionCookie(t *testing.T) {
-	env := tokenAuthEnv("token", "gw-secret")
-	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	env := tokenAuthEnv("gw-secret")
+	handler := ControlPlaneHTTPMiddleware(env, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -192,8 +188,8 @@ func TestControlPlaneHTTPMiddlewareRejectsForgedWebSessionCookie(t *testing.T) {
 // that page from acting with the user's session. Header credentials are not
 // attached by browsers and stay origin-agnostic.
 func TestControlPlaneHTTPMiddlewareRefusesCrossOriginCookieWrites(t *testing.T) {
-	env := tokenAuthEnv("token", "gw-secret")
-	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	env := tokenAuthEnv("gw-secret")
+	handler := ControlPlaneHTTPMiddleware(env, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	cookie := &http.Cookie{Name: webSessionCookieName("gw-secret"), Value: webSessionValue("gw-secret")}
@@ -234,8 +230,8 @@ func TestControlPlaneHTTPMiddlewareRefusesCrossOriginCookieWrites(t *testing.T) 
 }
 
 func TestControlPlaneHTTPMiddlewareIgnoresQueryToken(t *testing.T) {
-	env := tokenAuthEnv("token", "gw-secret")
-	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	env := tokenAuthEnv("gw-secret")
+	handler := ControlPlaneHTTPMiddleware(env, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -248,10 +244,10 @@ func TestControlPlaneHTTPMiddlewareIgnoresQueryToken(t *testing.T) {
 	}
 }
 
-// TestHandleChatWSFollowsAuthModeNone pins that the WebSocket handshake and
-// the HTTP middleware apply the same auth rules: with mode none the socket is
-// reachable even though a token is configured.
-func TestHandleChatWSFollowsAuthModeNone(t *testing.T) {
+// TestHandleChatWSRefusesWithoutAToken pins that the WebSocket handshake and
+// the HTTP middleware apply the same rule: a gateway with no token has no
+// authentication to offer, so it refuses rather than running open (plan 206).
+func TestHandleChatWSRefusesWithoutAToken(t *testing.T) {
 	home := t.TempDir()
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
 	require.NoError(t, err)
@@ -260,22 +256,19 @@ func TestHandleChatWSFollowsAuthModeNone(t *testing.T) {
 	s := &Server{
 		Home:     home,
 		Sessions: state.NewSessionStore(db, "main"),
-		Env:      tokenAuthEnv("none", "gw-secret"),
+		Env:      tokenAuthEnv(""),
 	}
 	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-		t.Fatalf("status = 401: mode none must not gate the websocket")
+	if err == nil {
+		conn.Close()
+		t.Fatal("a gateway with no token must not accept an unauthenticated socket")
 	}
-	require.NoError(t, err)
-	defer conn.Close()
-	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
-	var connected wsServerMsg
-	require.NoError(t, conn.ReadJSON(&connected))
-	require.Equal(t, "connected", connected.Op)
+	require.NotNil(t, resp)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 // TestHandleChatWSRejectsCrossOriginHandshake pins the default origin check:
@@ -290,7 +283,7 @@ func TestHandleChatWSRejectsCrossOriginHandshake(t *testing.T) {
 	s := &Server{
 		Home:     home,
 		Sessions: state.NewSessionStore(db, "main"),
-		Env:      tokenAuthEnv("token", "gw-secret"),
+		Env:      tokenAuthEnv("gw-secret"),
 	}
 	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
 	defer server.Close()
@@ -308,13 +301,13 @@ func TestHandleChatWSRejectsCrossOriginHandshake(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
-func webSessionTestServer(mode, token string) (*Server, http.HandlerFunc) {
-	s := &Server{Env: tokenAuthEnv(mode, token)}
+func webSessionTestServer(token string) (*Server, http.HandlerFunc) {
+	s := &Server{Env: tokenAuthEnv(token)}
 	return s, s.handleWebSessionCreate
 }
 
 func TestWebSessionCreateSetsCookieForValidToken(t *testing.T) {
-	_, handler := webSessionTestServer("token", "gw-secret")
+	_, handler := webSessionTestServer("gw-secret")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"gw-secret"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -356,7 +349,7 @@ func TestWebSessionCreateSetsCookieForValidToken(t *testing.T) {
 }
 
 func TestWebSessionCreateMarksCookieSecureBehindHTTPS(t *testing.T) {
-	_, handler := webSessionTestServer("token", "gw-secret")
+	_, handler := webSessionTestServer("gw-secret")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"gw-secret"}`))
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -373,7 +366,7 @@ func TestWebSessionCreateMarksCookieSecureBehindHTTPS(t *testing.T) {
 }
 
 func TestWebSessionCreateRejectsWrongToken(t *testing.T) {
-	_, handler := webSessionTestServer("token", "gw-secret")
+	_, handler := webSessionTestServer("gw-secret")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"not-the-token"}`))
 	rr := httptest.NewRecorder()
@@ -390,23 +383,8 @@ func TestWebSessionCreateRejectsWrongToken(t *testing.T) {
 	}
 }
 
-func TestWebSessionCreateModeNoneSetsNoCookie(t *testing.T) {
-	_, handler := webSessionTestServer("none", "gw-secret")
-
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"anything"}`))
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rr.Code)
-	}
-	if len(rr.Result().Cookies()) != 0 {
-		t.Fatal("mode none must not set a cookie")
-	}
-}
-
 func TestWebSessionCreateRejectsOversizedBody(t *testing.T) {
-	_, handler := webSessionTestServer("token", "gw-secret")
+	_, handler := webSessionTestServer("gw-secret")
 
 	big := fmt.Sprintf(`{"token":"%s"}`, strings.Repeat("a", 8192))
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(big))
@@ -422,7 +400,7 @@ func TestWebSessionCreateRejectsOversizedBody(t *testing.T) {
 // itself must pass the middleware without credentials, the probe GET must
 // still require them, and a session cookie must satisfy them.
 func TestWebSessionRoutesThroughFullChain(t *testing.T) {
-	s := &Server{Env: tokenAuthEnv("token", "gw-secret")}
+	s := &Server{Env: tokenAuthEnv("gw-secret")}
 	chain := ServeHTTPChain(s.Env, s, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/auth/session":
@@ -450,7 +428,7 @@ func TestWebSessionRoutesThroughFullChain(t *testing.T) {
 		t.Fatalf("probe status = %d, want 401", rr.Code)
 	}
 
-	// With the cookie the probe answers the auth mode.
+	// With the cookie the probe answers that the caller is signed in.
 	req = httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName("gw-secret"), Value: webSessionValue("gw-secret")})
 	rr = httptest.NewRecorder()
@@ -458,7 +436,7 @@ func TestWebSessionRoutesThroughFullChain(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("probe status = %d, want 200", rr.Code)
 	}
-	if body := rr.Body.String(); body != `{"auth_mode":"token"}` {
+	if body := rr.Body.String(); body != `{"authenticated":true}` {
 		t.Fatalf("probe body = %q", body)
 	}
 }
@@ -467,7 +445,7 @@ func TestWebSessionRoutesThroughFullChain(t *testing.T) {
 // the burst allowed to strangers, so a few reloads used to earn the signed-in
 // owner a 429. Requests without the credentials are still held to the limit.
 func TestRateLimitHoldsStrangersNotTheSignedInOwner(t *testing.T) {
-	s := &Server{Env: tokenAuthEnv("token", "gw-secret")}
+	s := &Server{Env: tokenAuthEnv("gw-secret")}
 	chain := ServeHTTPChain(s.Env, s, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))

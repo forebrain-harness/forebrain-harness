@@ -150,16 +150,14 @@ func TestCompositionIsIdenticalAcrossSurfaces(t *testing.T) {
 	}
 }
 
-const resolveCacheConfig = "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
-	"        - provider: openai\n          model: %MODEL%\n" +
-	"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
+const resolveCacheConfig = "gateway:\n  http_addr: %ADDR%\n"
 
 func TestResolveCacheServesTheSameContextUntilReset(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	writeResolveCacheConfig(t, cfgPath, "gpt-first")
+	writeResolveCacheConfig(t, cfgPath, "127.0.0.1:6101")
 
 	ResetResolve()
 	t.Cleanup(ResetResolve)
@@ -168,17 +166,17 @@ func TestResolveCacheServesTheSameContextUntilReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got := resolveCacheModel(first); got != "gpt-first" {
-		t.Fatalf("model = %q, want gpt-first", got)
+	if got := resolveCacheAddr(first); got != "127.0.0.1:6101" {
+		t.Fatalf("gateway.http_addr = %q, want the first file's address", got)
 	}
 
-	writeResolveCacheConfig(t, cfgPath, "gpt-second")
+	writeResolveCacheConfig(t, cfgPath, "127.0.0.1:6102")
 	cached, err := Resolve()
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got := resolveCacheModel(cached); got != "gpt-first" {
-		t.Fatalf("model = %q, want the cached gpt-first", got)
+	if got := resolveCacheAddr(cached); got != "127.0.0.1:6101" {
+		t.Fatalf("gateway.http_addr = %q, want the cached first address", got)
 	}
 
 	ResetResolve()
@@ -186,8 +184,8 @@ func TestResolveCacheServesTheSameContextUntilReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got := resolveCacheModel(reread); got != "gpt-second" {
-		t.Fatalf("model = %q, want gpt-second after reset", got)
+	if got := resolveCacheAddr(reread); got != "127.0.0.1:6102" {
+		t.Fatalf("gateway.http_addr = %q, want the second file's address after reset", got)
 	}
 }
 
@@ -199,7 +197,7 @@ func TestResolveCacheIsSafeUnderConcurrentReset(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
 	t.Setenv("OPENAI_API_KEY", "test-key")
-	writeResolveCacheConfig(t, filepath.Join(home, "forebrain.yaml"), "gpt-concurrent")
+	writeResolveCacheConfig(t, filepath.Join(home, "forebrain.yaml"), "127.0.0.1:6103")
 
 	ResetResolve()
 	t.Cleanup(ResetResolve)
@@ -232,25 +230,24 @@ func TestResolveCacheIsSafeUnderConcurrentReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got := resolveCacheModel(final); got != "gpt-concurrent" {
-		t.Fatalf("model = %q, want gpt-concurrent", got)
+	if got := resolveCacheAddr(final); got != "127.0.0.1:6103" {
+		t.Fatalf("gateway.http_addr = %q, want the file's address", got)
 	}
 }
 
-func writeResolveCacheConfig(t *testing.T, path, model string) {
+func writeResolveCacheConfig(t *testing.T, path, addr string) {
 	t.Helper()
-	body := strings.ReplaceAll(resolveCacheConfig, "%MODEL%", model)
+	body := strings.ReplaceAll(resolveCacheConfig, "%ADDR%", addr)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 }
 
-func resolveCacheModel(ctx Context) string {
-	def, ok := ctx.Config.Agents.Definitions["main"]
-	if !ok || len(def.LLMProviders) == 0 {
-		return ""
-	}
-	return def.LLMProviders[0].Model
+// resolveCacheAddr reads the setting the resolved context carries straight from
+// the file: forebrain.yaml holds the gateway's address, and the runtime sections
+// come from the state database (plan 207 §3.6).
+func resolveCacheAddr(ctx Context) string {
+	return ctx.Config.Gateway.HTTPAddr
 }
 
 // Two primary agents can run the same kind of channel with different
@@ -603,7 +600,7 @@ func TestAssembleContextSnapshot(t *testing.T) {
 
 	cfg := &appcfg.Root{}
 	cfg.Agents.Defaults.ContextInject.ModelContextTokens = 100
-	cfg.Agents.Defaults.ContextInject.WarnRemainingTokens = 10
+	cfg.Agents.Defaults.ContextInject.WarnRemainingPercent = 10
 	// The conversation's size comes from the session's own messages: the
 	// last response's whole prompt — cache reads included — plus its output.
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))

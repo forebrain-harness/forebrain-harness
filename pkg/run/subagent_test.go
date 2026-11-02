@@ -21,7 +21,6 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
-	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	toolpkg "github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
@@ -999,9 +998,6 @@ func TestAsyncSubagentExecutionKeepsTheDispatchingRunsHooks(t *testing.T) {
 	h := newDispatchHarness(t)
 	recorder := &stepHookRecorder{}
 	dispatch := toolpkg.WithStepHook(h.dispatch, recorder.hook)
-	dispatch = toolpkg.WithNetworkApprovalPromptHook(dispatch, func(context.Context, string, map[string]any, safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-		return safety.NetworkApprovalDeny, nil
-	})
 	dispatch = toolpkg.WithSubagentApprovalHook(dispatch, func(ctx context.Context, _ *toolpkg.RequiresActionError) (context.Context, error) {
 		return ctx, nil
 	})
@@ -1015,9 +1011,6 @@ func TestAsyncSubagentExecutionKeepsTheDispatchingRunsHooks(t *testing.T) {
 	step := toolpkg.StepHookFromContext(captured, nil)
 	if step == nil {
 		t.Fatal("the async subagent execution context carries no step hook: none of its tool steps produces an event, so its view shows no tool card and the event log records none")
-	}
-	if toolpkg.NetworkApprovalPromptHookFromContext(captured, nil) == nil {
-		t.Fatal("the async subagent execution context carries no network approval hook: a sandboxed command's network approval inside it becomes a refusal")
 	}
 	if toolpkg.SubagentApprovalHookFromContext(captured, nil) == nil {
 		t.Fatal("the async subagent execution context carries no subagent approval hook: a gated call inside it fails the whole execution instead of pausing")
@@ -4088,21 +4081,25 @@ func (f *persistenceFixture) workerRows(t *testing.T, workerID string) []llm.Mes
 // armForCompaction gives the fixture's owner the three things CompactionService
 // reads that a dispatch never exercises on it: the summary chain, the
 // transcript a summary request is rebuilt from, and the config the threshold
-// and the compact prompt come from. limit is the auto-compact threshold; zero
-// keeps the default, far above anything these fixtures store.
-func (f *persistenceFixture) armForCompaction(systemPrompt string, limit int, prompt string) {
+// and the compact prompt come from. contextTokens is the configured context
+// window (unused-model is not in the catalog, so it is the whole denominator);
+// zero keeps the built-in window, far above anything these fixtures store.
+func (f *persistenceFixture) armForCompaction(systemPrompt string, contextTokens int, prompt string) {
 	owner := f.fac.Owner
 	owner.summaryLLM = f.llm
 	owner.transcript = transcriptSession{store: f.store, systemPrompt: systemPrompt}
 	owner.AppCfg = &appcfg.Root{
-		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-			// A constructable client for the compaction's fallback path; the
-			// conversation summarizer answers before it is ever dialed.
-			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{Provider: "openai", Model: "unused-model", APIKey: "k", BaseURL: "https://example.invalid"},
-			}},
-		}},
-		Compact: appcfg.CompactSection{ModelAutoCompactTokenLimit: limit, Prompt: prompt},
+		Agents: appcfg.AgentsSection{
+			Definitions: map[string]appcfg.AgentDefinition{
+				// A constructable client for the compaction's fallback path; the
+				// conversation summarizer answers before it is ever dialed.
+				"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+					{Provider: "openai", Model: "unused-model", APIKey: "k", BaseURL: "https://example.invalid"},
+				}},
+			},
+			Defaults: appcfg.AgentDefaults{ContextInject: appcfg.ContextInjectConfig{ModelContextTokens: contextTokens}},
+		},
+		Compact: appcfg.CompactSection{Prompt: prompt},
 	}
 }
 
@@ -6969,4 +6966,105 @@ func TestSubagentTransportRetryIsPublishedAndRetried(t *testing.T) {
 	if !probe.transportRetry[1].Cleared {
 		t.Fatalf("transport_retry events = %#v, want the cleared notice second", probe.transportRetry)
 	}
+}
+
+// TestLiveSubagentsListsTheRunningOnes pins the peer listing's subagent half
+// (plan 195 §3.3): the conversations's channels with an execution in flight,
+// each with the roster key and the title its task carries, in a stable key
+// order — and neither an idle channel of the same conversation nor another
+// conversation's running subagent.
+func TestLiveSubagentsListsTheRunningOnes(t *testing.T) {
+	record := func(task, title, session string) agent.HistoryEntry {
+		return agent.HistoryEntry{
+			TaskID: task, AgentType: "general-purpose", Title: title,
+			WorkerSessionID: "ws-" + task, SessionID: session,
+		}
+	}
+	fac := Factory{AgentName: "main", Home: t.TempDir(), Owner: &Runner{Deps: &Deps{}}}
+	owner := fac.Owner
+	one := subagentChannelFor(fac, record("task-live-1", "审查登录", "conv-live"))
+	two := subagentChannelFor(fac, record("task-live-2", "修复构建", "conv-live"))
+	idle := subagentChannelFor(fac, record("task-live-3", "还没开始", "conv-live"))
+	other := subagentChannelFor(fac, record("task-live-4", "别的会话", "conv-other"))
+
+	start := time.Now()
+	one.setRunning(&subagentExecution{executionID: "exec-live-1", started: start})
+	two.setRunning(&subagentExecution{executionID: "exec-live-2", started: start})
+	other.setRunning(&subagentExecution{executionID: "exec-live-4", started: start})
+
+	got := LiveSubagents(owner, "conv-live")
+	if len(got) != 2 {
+		t.Fatalf("LiveSubagents = %#v, want the two running ones", got)
+	}
+	if got[0].Key != subagentRosterKey(record("task-live-1", "", "conv-live")) || got[0].Title != "审查登录" {
+		t.Fatalf("first live subagent = %#v, want the roster key and the title", got[0])
+	}
+	if got[1].Title != "修复构建" || !got[1].StartedAt.Equal(start) {
+		t.Fatalf("second live subagent = %#v, want the title and the execution start", got[1])
+	}
+
+	two.mu.Lock()
+	two.running = nil
+	two.mu.Unlock()
+	if again := LiveSubagents(owner, "conv-live"); len(again) != 1 || again[0].Key != got[0].Key {
+		t.Fatalf("after one ended LiveSubagents = %#v, want the other one only", again)
+	}
+	if got := LiveSubagents(owner, "conv-other"); len(got) != 1 {
+		t.Fatalf("another conversation's subagents = %#v, want its own running one", got)
+	}
+	if got := LiveSubagents(nil, "conv-live"); got != nil {
+		t.Fatalf("nil runner returned %#v, want nil", got)
+	}
+	_ = idle
+}
+
+// steerRunningSubagent is what a peer message to a live subagent goes through
+// (plan 196 §3.2, step 7): it steers the execution running now, refuses an idle
+// subagent, and — unlike the person's own entry point — never replaces the
+// surface that subagent's view is bound to. A message arriving from another
+// session must not re-point the view the person is looking at.
+func TestSteerRunningSubagentLeavesTheSurfaceAlone(t *testing.T) {
+	if _, err := steerRunningSubagent(nil, Input{Text: "hi"}); !errors.Is(err, ErrSubagentNotRunning) {
+		t.Fatalf("nil channel err = %v, want ErrSubagentNotRunning", err)
+	}
+	ch := &subagentChannel{
+		workerSessionID: "worker-steer-peer",
+		agentKey:        "task-steer-peer",
+		exec:            make(chan struct{}, 1),
+		queue:           NewInputQueue(),
+	}
+	ch.queue.SetChangeHook(ch.queueChanged)
+	// The view's own surface: its queue hook is how this test tells whether
+	// anything re-pointed the channel.
+	viewCalls := 0
+	ch.setSurface(SubagentSurface{OnQueueChanged: func(string, QueuePreview) { viewCalls++ }})
+
+	if _, err := steerRunningSubagent(ch, Input{Text: "idle"}); !errors.Is(err, ErrSubagentNotRunning) {
+		t.Fatalf("idle subagent err = %v, want ErrSubagentNotRunning", err)
+	}
+	if got := ch.queue.Preview(); got.Visible() {
+		t.Fatalf("an idle subagent kept the message: %#v", got)
+	}
+
+	ch.mu.Lock()
+	ch.running = &subagentExecution{executionID: "ex-1", started: time.Now()}
+	ch.mu.Unlock()
+	ch.queue.Attach(NewTurnInputRuntime())
+	delivery, err := steerRunningSubagent(ch, Input{Text: "while it works", Origin: state.MessageOriginPeer})
+	if err != nil || delivery != SubagentDeliverySteered {
+		t.Fatalf("delivery/err = %q/%v, want steered", delivery, err)
+	}
+	ch.mu.Lock()
+	surface := ch.surface
+	ch.mu.Unlock()
+	ch.queueHookMu.Lock()
+	hook := ch.onQueueChanged
+	ch.queueHookMu.Unlock()
+	if surface.OnQueueChanged == nil || hook == nil {
+		t.Fatal("steering cleared the subagent's surface")
+	}
+	if got := ch.queue.Preview(); len(got.Steers) != 1 {
+		t.Fatalf("the steered message is not in the subagent's queue: %#v", got)
+	}
+	ch.queue.Discard()
 }

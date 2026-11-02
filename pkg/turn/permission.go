@@ -28,12 +28,15 @@ func PermissionRuleCount(snapshot safety.Snapshot) int {
 func PermissionsOf(snapshot safety.Snapshot, cfg *appcfg.Root) StatusPermissions {
 	cfg = safety.ConfigForSnapshot(cfg, snapshot)
 	perm := StatusPermissions{Rules: PermissionRuleCount(snapshot)}
-	if preset, ok := safety.MatchApprovalPreset(snapshot.Mode, cfg); ok {
-		perm.Matched, perm.Preset, perm.Description = true, preset.Label, preset.DescriptionFor(cfg)
-		return perm
+	effective := safety.ConfigForSnapshot(cfg, snapshot)
+	if effective != nil {
+		if preset, ok := safety.ApprovalPresetForSandboxMode(effective.SandboxMode); ok {
+			perm.Matched, perm.Preset, perm.Description = true, preset.Label, preset.DescriptionFor(effective)
+			return perm
+		}
 	}
 	perm.Approval = string(snapshot.Mode)
-	perm.Sandbox = safety.SandboxModeLabel(cfg)
+	perm.Sandbox = safety.SandboxModeLabel(effective)
 	return perm
 }
 
@@ -70,8 +73,6 @@ func approvalInWords(mode string) string {
 		return "Forebrain Harness never asks for approval"
 	case safety.ModeUnlessTrusted:
 		return "Forebrain Harness asks before running anything not known to be safe"
-	case safety.ModeGranular:
-		return "approval follows the configured per-kind rules"
 	}
 	return "the approval policy is " + orDash(mode)
 }

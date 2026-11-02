@@ -668,15 +668,14 @@ const (
 )
 
 type MemorySettingsResult struct {
-	Action           MemorySettingsAction
-	UseMemories      bool
-	GenerateMemories bool
+	Action  MemorySettingsAction
+	Enabled bool
 }
 
 // MemorySettingsSelector is an optional capability implemented by Forebrain Harness's
 // selectors without widening the general Selector interface used by callers.
 type MemorySettingsSelector interface {
-	SelectMemorySettings(useMemories, generateMemories bool) (MemorySettingsResult, error)
+	SelectMemorySettings(enabled bool) (MemorySettingsResult, error)
 }
 
 // InfoOverlaySelector shows a read-only report as a dismissable overlay. It is
@@ -842,17 +841,16 @@ func (s *lineSelector) MultiSelect(label string, options []string, defaultOption
 	return selected, true, nil
 }
 
-func (s *lineSelector) SelectMemorySettings(useMemories, generateMemories bool) (MemorySettingsResult, error) {
+func (s *lineSelector) SelectMemorySettings(enabled bool) (MemorySettingsResult, error) {
 	if s == nil || s.readLine == nil {
 		return MemorySettingsResult{Action: MemorySettingsCancel}, nil
 	}
 	for {
 		if s.out != nil {
 			writeSelectorLine(s.out, "Memories")
-			writeSelectorLine(s.out, fmt.Sprintf("  1) [%s] Use memories — Use memories in following threads. Applied at next thread.", memoryCheckbox(useMemories)))
-			writeSelectorLine(s.out, fmt.Sprintf("  2) [%s] Generate memories — Generate memories from following threads. Current thread included.", memoryCheckbox(generateMemories)))
-			writeSelectorLine(s.out, "  3) Reset memories — Clear local memory files and summaries. Threads remain intact.")
-			writeSelectorLine(s.out, "Enter 1 or 2 to toggle, s to save, 3 to reset, or q to cancel.")
+			writeSelectorLine(s.out, fmt.Sprintf("  1) [%s] Memories — Read memories, generate memories from this and following threads, and expose the memories_* tools.", memoryCheckbox(enabled)))
+			writeSelectorLine(s.out, "  2) Reset memories — Clear local memory files and summaries. Threads remain intact.")
+			writeSelectorLine(s.out, "Enter 1 to toggle, s to save, 2 to reset, or q to cancel.")
 			_, _ = fmt.Fprint(s.out, "> ")
 		}
 		line, err := s.readLine(context.Background())
@@ -860,15 +858,13 @@ func (s *lineSelector) SelectMemorySettings(useMemories, generateMemories bool) 
 			return MemorySettingsResult{}, err
 		}
 		switch strings.ToLower(strings.TrimSpace(line)) {
-		case "1", "use", "use memories":
-			useMemories = !useMemories
-		case "2", "generate", "generate memories":
-			generateMemories = !generateMemories
+		case "1", "memories", "use memories", "use", "generate memories", "generate":
+			enabled = !enabled
 		case "", "s", "save":
-			return MemorySettingsResult{Action: MemorySettingsSave, UseMemories: useMemories, GenerateMemories: generateMemories}, nil
+			return MemorySettingsResult{Action: MemorySettingsSave, Enabled: enabled}, nil
 		case "q", "quit", "cancel", "esc", "escape":
 			return MemorySettingsResult{Action: MemorySettingsCancel}, nil
-		case "3", "reset":
+		case "2", "reset":
 			if s.out != nil {
 				writeSelectorLine(s.out, "Reset memories")
 				writeSelectorLine(s.out, "  1) Reset this project's memories")

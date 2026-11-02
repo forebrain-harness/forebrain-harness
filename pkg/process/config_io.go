@@ -47,19 +47,11 @@ func channelMigrationBannerNotes(names []string) []string {
 }
 
 // loadCfg reads the configuration a pre-session reader sees: the composed
-// source when the state database holds sections (plan 187), the file
-// otherwise. A home nothing can read yet reads as no configuration.
+// source when the state database holds sections (plan 187), the file-era
+// configuration otherwise (plan 207 §3.5). A home nothing can read yet reads as
+// no configuration.
 func loadCfg(home string) *appcfg.Root {
-	if composed, ok, err := ComposedStartupConfig(context.Background(), home); err != nil {
-		return nil
-	} else if ok {
-		return &composed
-	}
-	cfgPath, err := homepkg.ResolveConfigPath(home)
-	if err != nil {
-		cfgPath = homepkg.ConfigPath(home)
-	}
-	cfg, err := appcfg.Load(cfgPath)
+	cfg, err := StartupConfig(context.Background(), home)
 	if err != nil {
 		return nil
 	}

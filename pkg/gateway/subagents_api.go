@@ -651,7 +651,7 @@ func (s *Server) handleAgentModelOptions(w http.ResponseWriter, r *http.Request)
 		failSubagentWrite(w, err)
 		return
 	}
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		http.Error(w, "no configuration is bound", http.StatusServiceUnavailable)
 		return

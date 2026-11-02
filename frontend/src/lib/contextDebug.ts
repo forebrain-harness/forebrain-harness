@@ -1,7 +1,7 @@
 import type { SessionContextDebug, SessionContextTimelineEntry } from './api'
 
-export type ContextSignal = 'ok' | 'warn' | 'block'
-export type ContextSignalTone = 'healthy' | 'warning' | 'danger'
+export type ContextSignal = 'ok' | 'warn'
+export type ContextSignalTone = 'healthy' | 'warning'
 
 export interface ContextDebugViewModel {
   signal: ContextSignal
@@ -16,7 +16,6 @@ export interface ContextDebugViewModel {
   usageRatio: number | undefined
   usagePercent: number | undefined
   warningRatio: number | undefined
-  blockingRatio: number | undefined
   itemCount: number
   evictionCount: number
   recoveryCount: number
@@ -37,7 +36,6 @@ export interface ContextDebugRecoveryEvidence {
   strategy: string
   reason: string
   summarySource: string
-  scope: string
   windowNumber: number | undefined
   replacedItems: number | undefined
   summary: string
@@ -77,12 +75,10 @@ export interface ContextDebugTimelineEvidence {
 export function normalizeContextSignal(signal?: string | null): ContextSignal {
   const normalized = String(signal ?? '').trim().toLowerCase()
   if (normalized === 'warn') return 'warn'
-  if (normalized === 'block') return 'block'
   return 'ok'
 }
 
 export function contextSignalTone(signal: ContextSignal): ContextSignalTone {
-  if (signal === 'block') return 'danger'
   if (signal === 'warn') return 'warning'
   return 'healthy'
 }
@@ -130,7 +126,6 @@ export function buildContextDebugModel(data: SessionContextDebug | null): Contex
     usageRatio,
     usagePercent: usageRatio == null ? undefined : Math.round(usageRatio * 100),
     warningRatio: ratio(data?.warningThresholdTokens, window),
-    blockingRatio: ratio(data?.blockingThresholdTokens, window),
     itemCount,
     evictionCount,
     recoveryCount,
@@ -170,7 +165,6 @@ export function buildRecoveryEvidence(data: SessionContextDebug | null): Context
       strategy: String(item.strategy ?? '').trim(),
       reason: String(item.reason ?? '').trim(),
       summarySource: String(item.summarySource ?? '').trim(),
-      scope: String(item.scope ?? '').trim(),
       windowNumber: isFiniteNumber(item.windowNumber) ? item.windowNumber : undefined,
       replacedItems: isFiniteNumber(item.replacedItems) ? item.replacedItems : undefined,
       summary: String(item.summary ?? '').trim(),

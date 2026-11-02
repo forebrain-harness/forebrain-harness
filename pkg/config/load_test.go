@@ -1,12 +1,15 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"go.yaml.in/yaml/v2"
 )
 
 // TestSavePreservesLLMProviderSecretsAfterReorder guards the regression where
@@ -40,7 +43,7 @@ func TestSavePreservesLLMProviderSecretsAfterReorder(t *testing.T) {
 	}
 
 	// LoadPersisted: api_key values are ${...} placeholders (no env merge).
-	cfg, err := LoadPersisted(path)
+	cfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted: %v", err)
 	}
@@ -93,7 +96,7 @@ func TestSavePreservesLLMProviderSecretsAfterReorder(t *testing.T) {
 	}
 
 	// Reload to verify the providers are correctly matched with their secrets.
-	reloaded, err := LoadPersisted(path)
+	reloaded, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -151,7 +154,7 @@ func TestSaveDoesNotLendAnAPIKeyToANewProviderEntry(t *testing.T) {
 			if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 				t.Fatalf("write seed: %v", err)
 			}
-			cfg, err := LoadPersisted(path)
+			cfg, err := loadPersistedDocumentForTest(path)
 			if err != nil {
 				t.Fatalf("LoadPersisted: %v", err)
 			}
@@ -171,7 +174,7 @@ func TestSaveDoesNotLendAnAPIKeyToANewProviderEntry(t *testing.T) {
 				t.Fatalf("Save: %v", err)
 			}
 
-			saved, err := LoadPersisted(path)
+			saved, err := loadPersistedDocumentForTest(path)
 			if err != nil {
 				t.Fatalf("reload: %v", err)
 			}
@@ -218,7 +221,7 @@ func TestSaveDoesNotLendARemovedProvidersKeyToTheNextEntry(t *testing.T) {
 		if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 			t.Fatalf("write seed: %v", err)
 		}
-		cfg, err := LoadPersisted(path)
+		cfg, err := loadPersistedDocumentForTest(path)
 		if err != nil {
 			t.Fatalf("LoadPersisted: %v", err)
 		}
@@ -229,7 +232,7 @@ func TestSaveDoesNotLendARemovedProvidersKeyToTheNextEntry(t *testing.T) {
 		if err := Save(path, cfg); err != nil {
 			t.Fatalf("Save: %v", err)
 		}
-		saved, err := LoadPersisted(path)
+		saved, err := loadPersistedDocumentForTest(path)
 		if err != nil {
 			t.Fatalf("reload: %v", err)
 		}
@@ -249,7 +252,7 @@ func TestSaveDoesNotLendARemovedProvidersKeyToTheNextEntry(t *testing.T) {
 		if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 			t.Fatalf("write seed: %v", err)
 		}
-		cfg, err := LoadPersisted(path)
+		cfg, err := loadPersistedDocumentForTest(path)
 		if err != nil {
 			t.Fatalf("LoadPersisted: %v", err)
 		}
@@ -263,7 +266,7 @@ func TestSaveDoesNotLendARemovedProvidersKeyToTheNextEntry(t *testing.T) {
 		if err := Save(path, cfg); err != nil {
 			t.Fatalf("Save: %v", err)
 		}
-		saved, err := LoadPersisted(path)
+		saved, err := loadPersistedDocumentForTest(path)
 		if err != nil {
 			t.Fatalf("reload: %v", err)
 		}
@@ -294,8 +297,8 @@ func TestSaveDropsAnotherProvidersKeyFromALoginEntry(t *testing.T) {
 			name string
 			fn   func(string) (Root, error)
 		}{
-			{name: "persisted", fn: LoadPersisted},
-			{name: "expanded", fn: Load},
+			{name: "persisted", fn: loadPersistedDocumentForTest},
+			{name: "expanded", fn: loadDocumentForTest},
 		} {
 			for _, envSet := range []bool{true, false} {
 				name := tc.provider + "/" + load.name + "/env set"
@@ -332,7 +335,7 @@ func TestSaveDropsAnotherProvidersKeyFromALoginEntry(t *testing.T) {
 					if err := Save(path, cfg); err != nil {
 						t.Fatalf("Save: %v", err)
 					}
-					saved, err := LoadPersisted(path)
+					saved, err := loadPersistedDocumentForTest(path)
 					if err != nil {
 						t.Fatalf("reload: %v", err)
 					}
@@ -383,7 +386,7 @@ func TestSaveHonoursAClearedKeyWithNoOtherProviderToBlame(t *testing.T) {
 			if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 				t.Fatalf("write seed: %v", err)
 			}
-			cfg, err := LoadPersisted(path)
+			cfg, err := loadPersistedDocumentForTest(path)
 			if err != nil {
 				t.Fatalf("LoadPersisted: %v", err)
 			}
@@ -397,7 +400,7 @@ func TestSaveHonoursAClearedKeyWithNoOtherProviderToBlame(t *testing.T) {
 			if err := Save(path, cfg); err != nil {
 				t.Fatalf("Save: %v", err)
 			}
-			saved, err := LoadPersisted(path)
+			saved, err := loadPersistedDocumentForTest(path)
 			if err != nil {
 				t.Fatalf("reload: %v", err)
 			}
@@ -428,7 +431,7 @@ func TestSaveKeepsAnUnresolvedReference(t *testing.T) {
 			if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 				t.Fatalf("write seed: %v", err)
 			}
-			cfg, err := Load(path)
+			cfg, err := loadDocumentForTest(path)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
@@ -465,7 +468,7 @@ func TestSaveKeepsAKeyModeLoginEntrysOwnReference(t *testing.T) {
 	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
-	cfg, err := LoadPersisted(path)
+	cfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted: %v", err)
 	}
@@ -492,7 +495,7 @@ func mustRead(t *testing.T, path string) []byte {
 func TestExampleConfigLoads(t *testing.T) {
 	// Isolate from the real home so only the file under test contributes.
 	t.Setenv("FOREBRAIN_HOME", t.TempDir())
-	if _, err := Load("../../forebrain.yaml"); err != nil {
+	if _, err := loadDocumentForTest("../../forebrain.yaml"); err != nil {
 		t.Fatalf("example forebrain.yaml failed to load: %v", err)
 	}
 }
@@ -539,11 +542,8 @@ func TestForebrainYamlExampleStaysValid(t *testing.T) {
 	if len(r.LSP.Servers) != 2 || r.LSP.Servers["gopls"].Command != "gopls" || r.LSP.Servers["pyright-diagnostics"].Role != "diagnostics" {
 		t.Fatalf("lsp.servers example wrong: %+v", r.LSP.Servers)
 	}
-	if r.AutoReview.Policy != "" || r.Credentials.ChatGPT != "" {
-		t.Fatalf("auto_review/credentials example wrong: %+v %+v", r.AutoReview, r.Credentials)
-	}
-	if !r.Tools.CommandRewrite.UseRewrite() {
-		t.Fatal("tools.command_rewrite example should resolve to enabled")
+	if r.Credentials.ChatGPT != "" {
+		t.Fatalf("credentials example wrong: %+v", r.Credentials)
 	}
 	f := r.EffectiveFeatures()
 	if !f.Memories && r.Features.Memories == nil || !f.SkillOffer || !f.LSP {
@@ -557,7 +557,7 @@ func TestForebrainYamlExampleStaysValid(t *testing.T) {
 	if r.Agents.Defaults.EnableSubagent != nil && *r.Agents.Defaults.EnableSubagent {
 		t.Fatal("agents.defaults.enable_subagent example should stay off")
 	}
-	if w := r.Compact.ModelAutoCompactTokenLimitScope; w != "total" || r.Compact.ModelAutoCompactTokenLimit != 0 {
+	if r.Compact.AutoCompactPercent != DefaultAutoCompactPercent {
 		t.Fatalf("compact example wrong: %+v", r.Compact)
 	}
 }
@@ -606,7 +606,7 @@ func TestLoadRejectsInvalidTokenEstimate(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, err := Load(path)
+			_, err := loadDocumentForTest(path)
 			if err == nil {
 				t.Fatalf("Load accepted an invalid token_estimate")
 			}
@@ -627,7 +627,7 @@ func TestLoadAcceptsValidTokenEstimate(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r, err := Load(path)
+	r, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -657,7 +657,7 @@ func TestTokenEstimateDownloadAndEmptyHubsSurviveSave(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		r, err := Load(path)
+		r, err := loadDocumentForTest(path)
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
@@ -668,7 +668,7 @@ func TestTokenEstimateDownloadAndEmptyHubsSurviveSave(t *testing.T) {
 	}
 	reload := func(t *testing.T, path string) TokenEstimateConfig {
 		t.Helper()
-		r, err := Load(path)
+		r, err := loadDocumentForTest(path)
 		if err != nil {
 			t.Fatalf("Load after Save: %v", err)
 		}
@@ -756,7 +756,7 @@ func TestDanglingDefaultModelRejectedBothWays(t *testing.T) {
 	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
-	if _, err := LoadPersisted(path); err == nil {
+	if _, err := loadPersistedDocumentForTest(path); err == nil {
 		t.Fatal("load accepted a dangling default_model")
 	} else if !strings.Contains(err.Error(), "agents.definitions.main.default_model") {
 		t.Fatalf("load error does not name the field path: %v", err)
@@ -785,7 +785,123 @@ func TestDanglingDefaultModelRejectedBothWays(t *testing.T) {
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save with resolvable default_model: %v", err)
 	}
-	if _, err := LoadPersisted(path); err != nil {
+	if _, err := loadPersistedDocumentForTest(path); err != nil {
 		t.Fatalf("load after save: %v", err)
 	}
+}
+
+// TestLoadIgnoresUnsupportedFileKeys pins plan 207 §3.6 on the read path: the
+// file carries the gateway's startup sections and the credentials pointer, and
+// every other key in it — including one whose value the section's own type
+// cannot hold, which used to fail the whole load — is ignored without an error.
+func TestLoadIgnoresUnsupportedFileKeys(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", dir)
+	path := filepath.Join(dir, "forebrain.yaml")
+	body := `gateway:
+  http_addr: 127.0.0.1:6099
+  auth:
+    token: ${FOREBRAIN_FILE_SCHEMA_TEST_TOKEN}
+credentials:
+  chatgpt: auth.json
+memories: 5
+approval_policy: never
+sandbox_mode: read-only
+agents:
+  defaults:
+    netwrok_retry_max: 3
+    web_search:
+      provider: tavily
+`
+	t.Setenv("FOREBRAIN_FILE_SCHEMA_TEST_TOKEN", "tok-kept")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("a file carrying unsupported keys must still load: %v", err)
+	}
+	if loaded.Gateway.HTTPAddr != "127.0.0.1:6099" {
+		t.Fatalf("gateway.http_addr = %q, want the file's value", loaded.Gateway.HTTPAddr)
+	}
+	if loaded.Gateway.Auth.Token != "tok-kept" {
+		t.Fatalf("gateway.auth.token = %q, want the file's expanded reference", loaded.Gateway.Auth.Token)
+	}
+	if loaded.Credentials.ChatGPT != "auth.json" {
+		t.Fatalf("credentials.chatgpt = %q, want the file's value", loaded.Credentials.ChatGPT)
+	}
+	// Nothing else came from the file: the stored sections read as unset, and
+	// what the loader's own normalization puts there — the main agent's slot —
+	// is all the agents section holds.
+	if loaded.Memories != (MemorySection{}) {
+		t.Fatalf("memories came from the file: %+v", loaded.Memories)
+	}
+	if loaded.ApprovalPreset != "" {
+		t.Fatalf("approval_preset came from the file: %q", loaded.ApprovalPreset)
+	}
+	if loaded.SandboxWorkspaceWrite.WritableRoots != nil {
+		t.Fatalf("sandbox_workspace_write came from the file: %+v", loaded.SandboxWorkspaceWrite)
+	}
+	if _, ok := loaded.Agents.Definitions["main"]; !ok || len(loaded.Agents.Definitions) != 1 {
+		t.Fatalf("agents.definitions = %v, want only the loader's main slot", loaded.Agents.Definitions)
+	}
+	mainDef := loaded.Agents.Definitions["main"]
+	if len(mainDef.LLMProviders) != 1 {
+		t.Fatalf("agents came from the file: %v", mainDef)
+	}
+	if entry := mainDef.LLMProviders[0]; entry.Provider != "" || entry.Model != "" || entry.APIKey != "" || entry.BaseURL != "" {
+		t.Fatalf("agents came from the file: %+v", entry)
+	}
+	if loaded.Agents.Defaults.NetworkRetryMax != nil || loaded.Agents.Defaults.WebSearch.Provider != "" {
+		t.Fatalf("agents.defaults came from the file: %+v", loaded.Agents.Defaults)
+	}
+}
+
+// loadDocumentForTest reads a whole configuration document the way Load did
+// before plan 207 narrowed the file to its supported keys: every stored section
+// is decoded, then Load's tail runs. A test that pins how a stored section's
+// YAML reads — a field's spelling, its unit, a rejected value — goes through
+// here, because forebrain.yaml itself no longer carries those sections.
+func loadDocumentForTest(path string) (Root, error) {
+	r, err := loadPersistedDocumentForTest(path)
+	if err != nil {
+		return Root{}, err
+	}
+	if err := FinishLoad(&r); err != nil {
+		return Root{}, err
+	}
+	return r, nil
+}
+
+// loadPersistedDocumentForTest is the same read without Load's tail: no .env
+// merge, no ${ENV} expansion, no re-validation. It is what LoadPersisted did
+// before plan 207 narrowed the file.
+func loadPersistedDocumentForTest(path string) (Root, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return Root{}, err
+	}
+	var r Root
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yaml", ".yml":
+		if err := yaml.Unmarshal(body, &r); err != nil {
+			return Root{}, err
+		}
+	case ".json":
+		if err := json.Unmarshal(body, &r); err != nil {
+			return Root{}, err
+		}
+	default:
+		if err := json.Unmarshal(body, &r); err != nil {
+			if err2 := yaml.Unmarshal(body, &r); err2 != nil {
+				return Root{}, err
+			}
+		}
+	}
+	normalize(&r)
+	if err := validateLoadedRoot(&r); err != nil {
+		return Root{}, err
+	}
+	return r, nil
 }

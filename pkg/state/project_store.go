@@ -53,8 +53,15 @@ type Project struct {
 	// TaskNotify is where a batch project's end-of-execution notifications go
 	// when the task did not come in through a channel. Empty means quiet.
 	TaskNotify []TaskNotifyTarget
-	CreatedAt  int64
-	UpdatedAt  int64
+	// BatchSandbox is whether this batch project's tasks run inside their task
+	// boundary (plans/216). A project copies the install's
+	// batch.sandbox_default when it is created, and when its type is changed
+	// to batch, and owns the value from then on. Only a batch project consults
+	// it, and only where a sandbox exists: without one, a batch task runs with
+	// full access whatever this says.
+	BatchSandbox bool
+	CreatedAt    int64
+	UpdatedAt    int64
 }
 
 // TaskNotifyTarget is one place a batch project's task-end notification is
@@ -402,20 +409,22 @@ func (s *ProjectStore) AgentID() string {
 	return s.agentID
 }
 
-const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, project_type, created_at, updated_at, task_notify_json`
+const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, project_type, created_at, updated_at, task_notify_json, batch_sandbox`
 
-const projectColumnCount = 16
+const projectColumnCount = 17
 
 func scanProject(scanner interface{ Scan(...any) error }) (Project, error) {
 	var p Project
 	var resourceAccess int
 	var pinned int
+	var batchSandbox int
 	var taskNotify string
-	if err := scanner.Scan(&p.ID, &p.AgentID, &p.Name, &p.Icon, &p.Description, &p.Instructions, &p.Root, &p.ProjectKey, &p.MemoryScope, &resourceAccess, &pinned, &p.LastAttachDir, &p.ProjectType, &p.CreatedAt, &p.UpdatedAt, &taskNotify); err != nil {
+	if err := scanner.Scan(&p.ID, &p.AgentID, &p.Name, &p.Icon, &p.Description, &p.Instructions, &p.Root, &p.ProjectKey, &p.MemoryScope, &resourceAccess, &pinned, &p.LastAttachDir, &p.ProjectType, &p.CreatedAt, &p.UpdatedAt, &taskNotify, &batchSandbox); err != nil {
 		return Project{}, err
 	}
 	p.ResourceAccess = resourceAccess != 0
 	p.Pinned = pinned != 0
+	p.BatchSandbox = batchSandbox != 0
 	p.MemoryScope = NormalizeProjectMemoryScope(p.MemoryScope)
 	p.ProjectType = NormalizeProjectType(p.ProjectType)
 	p.TaskNotify = decodeTaskNotify(taskNotify)
@@ -436,6 +445,11 @@ type CreateProjectInput struct {
 	// for the root (Git worktree → coding, elsewhere → office), so the two
 	// surfaces opening an unregistered folder land on the same kind.
 	ProjectType string
+	// BatchSandbox is the sandbox switch a batch project starts with; nil
+	// takes the default (on). The caller that knows the install's
+	// batch.sandbox_default passes it, so a new project copies the value in
+	// force at the moment it is created and owns it from then on.
+	BatchSandbox *bool
 }
 
 // Create inserts a project for this agent. A root the agent has already
@@ -474,12 +488,13 @@ func (s *ProjectStore) Create(ctx context.Context, in CreateProjectInput) (Proje
 		ResourceAccess: in.ResourceAccess,
 		Pinned:         false,
 		ProjectType:    projectType,
+		BatchSandbox:   in.BatchSandbox == nil || *in.BatchSandbox,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.LastAttachDir, p.ProjectType, p.CreatedAt, p.UpdatedAt, encodeTaskNotify(p.TaskNotify))
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.LastAttachDir, p.ProjectType, p.CreatedAt, p.UpdatedAt, encodeTaskNotify(p.TaskNotify), boolInt(p.BatchSandbox))
 	if err != nil {
 		if isUniqueConstraint(err) {
 			if existing, ok, getErr := s.GetByRoot(ctx, root); getErr == nil && ok {
@@ -545,13 +560,14 @@ func (s *ProjectStore) FindOrCreateByRoot(ctx context.Context, root string, defa
 		ResourceAccess: defaults.ResourceAccess,
 		Pinned:         false,
 		ProjectType:    projectType,
+		BatchSandbox:   defaults.BatchSandbox == nil || *defaults.BatchSandbox,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(agent_id, root) DO NOTHING`,
-		fresh.ID, fresh.AgentID, fresh.Name, fresh.Icon, fresh.Description, fresh.Instructions, fresh.Root, fresh.ProjectKey, fresh.MemoryScope, boolInt(fresh.ResourceAccess), boolInt(fresh.Pinned), fresh.LastAttachDir, fresh.ProjectType, fresh.CreatedAt, fresh.UpdatedAt, encodeTaskNotify(fresh.TaskNotify)); err != nil {
+		fresh.ID, fresh.AgentID, fresh.Name, fresh.Icon, fresh.Description, fresh.Instructions, fresh.Root, fresh.ProjectKey, fresh.MemoryScope, boolInt(fresh.ResourceAccess), boolInt(fresh.Pinned), fresh.LastAttachDir, fresh.ProjectType, fresh.CreatedAt, fresh.UpdatedAt, encodeTaskNotify(fresh.TaskNotify), boolInt(fresh.BatchSandbox)); err != nil {
 		return Project{}, false, err
 	}
 	stored, ok, err := s.GetByRoot(ctx, canonical)
@@ -619,6 +635,10 @@ type UpdateProjectInput struct {
 	// channel kind exists is the gateway's call, because pkg/state cannot see
 	// the channel registry.
 	TaskNotify *[]TaskNotifyTarget
+	// BatchSandbox sets the batch project's sandbox switch. Unset leaves the
+	// stored value alone; a project that becomes a batch project through
+	// ProjectType is the caller's to seed from the install default.
+	BatchSandbox *bool
 }
 
 // Update applies the set fields and touches updated_at.
@@ -664,9 +684,12 @@ func (s *ProjectStore) Update(ctx context.Context, id string, in UpdateProjectIn
 			current.TaskNotify = []TaskNotifyTarget{}
 		}
 	}
+	if in.BatchSandbox != nil {
+		current.BatchSandbox = *in.BatchSandbox
+	}
 	current.UpdatedAt = time.Now().Unix()
-	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET name=?, icon=?, description=?, instructions=?, memory_scope=?, resource_access=?, project_type=?, task_notify_json=?, updated_at=? WHERE id=? AND agent_id=?`,
-		current.Name, current.Icon, current.Description, current.Instructions, current.MemoryScope, boolInt(current.ResourceAccess), current.ProjectType, encodeTaskNotify(current.TaskNotify), current.UpdatedAt, strings.TrimSpace(id), s.agentID)
+	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET name=?, icon=?, description=?, instructions=?, memory_scope=?, resource_access=?, project_type=?, task_notify_json=?, batch_sandbox=?, updated_at=? WHERE id=? AND agent_id=?`,
+		current.Name, current.Icon, current.Description, current.Instructions, current.MemoryScope, boolInt(current.ResourceAccess), current.ProjectType, encodeTaskNotify(current.TaskNotify), boolInt(current.BatchSandbox), current.UpdatedAt, strings.TrimSpace(id), s.agentID)
 	if err != nil {
 		return Project{}, err
 	}

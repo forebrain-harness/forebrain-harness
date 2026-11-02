@@ -42,21 +42,18 @@ type ApprovalRequestedPayload struct {
 }
 
 type PermissionSuggestionPayload struct {
-	PermissionToolName              string                          `json:"permission_tool_name,omitempty"`
-	PermissionInput                 string                          `json:"permission_input,omitempty"`
-	ExactRuleContent                string                          `json:"exact_rule_content,omitempty"`
-	PrefixRuleContent               string                          `json:"prefix_rule_content,omitempty"`
-	DestinationOptions              []safety.PermissionDestination  `json:"destination_options,omitempty"`
-	SuggestedDestination            safety.PermissionDestination    `json:"suggested_destination,omitempty"`
-	PermissionMode                  safety.PermissionMode           `json:"permission_mode,omitempty"`
-	PermissionReason                string                          `json:"permission_reason,omitempty"`
-	BypassSandbox                   bool                            `json:"bypass_sandbox,omitempty"`
-	OneShotOnly                     bool                            `json:"one_shot_only,omitempty"`
-	AvailableDecisions              []any                           `json:"available_decisions,omitempty"`
-	ProposedExecPolicyAmendment     safety.ExecPolicyAmendment      `json:"proposed_execpolicy_amendment,omitempty"`
-	ProposedNetworkPolicyAmendments []safety.NetworkPolicyAmendment `json:"proposed_network_policy_amendments,omitempty"`
-	NetworkApproval                 *safety.NetworkApprovalContext  `json:"network_approval_context,omitempty"`
-	NetworkPort                     int                             `json:"network_port,omitempty"`
+	PermissionToolName          string                         `json:"permission_tool_name,omitempty"`
+	PermissionInput             string                         `json:"permission_input,omitempty"`
+	ExactRuleContent            string                         `json:"exact_rule_content,omitempty"`
+	PrefixRuleContent           string                         `json:"prefix_rule_content,omitempty"`
+	DestinationOptions          []safety.PermissionDestination `json:"destination_options,omitempty"`
+	SuggestedDestination        safety.PermissionDestination   `json:"suggested_destination,omitempty"`
+	PermissionMode              safety.PermissionMode          `json:"permission_mode,omitempty"`
+	PermissionReason            string                         `json:"permission_reason,omitempty"`
+	BypassSandbox               bool                           `json:"bypass_sandbox,omitempty"`
+	OneShotOnly                 bool                           `json:"one_shot_only,omitempty"`
+	AvailableDecisions          []any                          `json:"available_decisions,omitempty"`
+	ProposedExecPolicyAmendment safety.ExecPolicyAmendment     `json:"proposed_execpolicy_amendment,omitempty"`
 }
 
 // ApprovalResolvedPayload records that a surface showed an approval's outcome.

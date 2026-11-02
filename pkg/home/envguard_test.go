@@ -97,6 +97,48 @@ func TestSafeSubprocessEnvBranches(t *testing.T) {
 	}
 }
 
+// An intranet install resolves its packages through the mirror the operator
+// configured on the gateway, so those names reach every child process — while
+// the proxy and credential names the guard exists for do not.
+func TestSafeSubprocessEnvKeepsTheMirrorConfigurationOnly(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"GOPROXY=http://goproxy.corp",
+		"PIP_INDEX_URL=https://pip.corp/simple",
+		"npm_config_registry=https://npm.corp",
+		"SSL_CERT_FILE=/etc/ssl/corp-ca.pem",
+		"HTTPS_PROXY=http://proxy.corp:3128",
+		"GITHUB_TOKEN=ghp_secret",
+	}
+	got := SafeSubprocessEnv(parent, Options{})
+	joined := map[string]bool{}
+	for _, item := range got {
+		joined[item] = true
+	}
+	for _, want := range []string{
+		"GOPROXY=http://goproxy.corp",
+		"PIP_INDEX_URL=https://pip.corp/simple",
+		"npm_config_registry=https://npm.corp",
+		"SSL_CERT_FILE=/etc/ssl/corp-ca.pem",
+	} {
+		if !joined[want] {
+			t.Errorf("mirror variable %q was dropped: %#v", want, got)
+		}
+	}
+	for _, forbidden := range []string{"HTTPS_PROXY=http://proxy.corp:3128", "GITHUB_TOKEN=ghp_secret"} {
+		if joined[forbidden] {
+			t.Errorf("forbidden env leaked: %s", forbidden)
+		}
+	}
+	// The whitelist stays configuration, never credentials: nothing on it is a
+	// name the secret filter would strip.
+	for _, name := range mirrorEnvAllow {
+		if looksSecretKey(name) {
+			t.Errorf("mirrorEnvAllow lists %q, which the secret filter removes", name)
+		}
+	}
+}
+
 func TestEnvKeyClassifiers(t *testing.T) {
 	if looksSecretKey(" ") {
 		t.Fatal("blank key should not be secret")

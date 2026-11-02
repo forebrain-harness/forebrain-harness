@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
@@ -252,5 +253,62 @@ func TestGuardianCircuitOpensAfterThreeConsecutiveDenials(t *testing.T) {
 	}
 	if client.calls != guardianConsecutive {
 		t.Fatalf("open circuit called model again: calls=%d", client.calls)
+	}
+}
+
+// Full access is the YOLO posture (plan 203): the same decisions come out of a
+// full-access preset as out of FOREBRAIN_YOLO=1, in a trusted project and in
+// one the user rejected — the trust decision never narrows full access. Only an
+// explicit deny rule still refuses.
+func TestFullAccessDecisionsMatchYOLOAcrossTrustDecisions(t *testing.T) {
+	trusted := ProjectContext{Project: Project{Root: t.TempDir(), VersionControlled: true}, TrustLevel: LevelTrusted}
+	rejected := ProjectContext{Project: Project{Root: t.TempDir(), VersionControlled: true}, TrustLevel: LevelUntrusted}
+	calls := []struct{ tool, input string }{
+		{"shell", "make release"},
+		{"shell", "shutdown now"},
+		{"edit_file", "/outside/project.go"},
+	}
+
+	newRuntime := func() *Runtime {
+		rt := NewRuntime()
+		store := rt.Store(nil)
+		store.AddRule(SourceProjectSettings, BehaviorAsk, PermissionRuleValue{ToolName: "Bash", RuleContent: "make release"})
+		store.AddRule(SourceProjectSettings, BehaviorDeny, PermissionRuleValue{ToolName: "Bash", RuleContent: "shutdown:*"})
+		return rt
+	}
+
+	for _, launch := range []ProjectContext{trusted, rejected} {
+		t.Setenv(EnvYOLO, "1")
+		yoloRuntime := newRuntime()
+		cfg := appcfg.Root{}
+		flagged := make([]Decision, 0, len(calls))
+		for _, call := range calls {
+			flagged = append(flagged, yoloRuntime.Evaluate("", call.tool, call.input, &cfg, RuntimeYOLOEnabled()))
+		}
+
+		t.Setenv(EnvYOLO, "")
+		presetRuntime := newRuntime()
+		presetCfg := EffectiveConfig(appcfg.Root{ApprovalPreset: appcfg.ApprovalPresetFullAccess}, launch)
+		if presetCfg.ApprovalPolicy.Mode != appcfg.ApprovalPolicyNever || presetCfg.SandboxMode != appcfg.SandboxModeDangerFullAccess {
+			t.Fatalf("%s: derived config = %+v", launch.TrustLevel, presetCfg)
+		}
+		for i, call := range calls {
+			got := presetRuntime.Evaluate("", call.tool, call.input, &presetCfg, presetCfg.DangerFullAccessEnabled())
+			want := flagged[i]
+			if got.Behavior != want.Behavior || got.Reason != want.Reason || got.BypassSandbox != want.BypassSandbox {
+				t.Fatalf("%s: %s %q = %+v, yolo = %+v", launch.TrustLevel, call.tool, call.input, got, want)
+			}
+		}
+
+		// The explicit deny rule is the one thing full access does not erase,
+		// and the ask rule is allowed rather than refused.
+		denied := presetRuntime.Evaluate("", "shell", "shutdown now", &presetCfg, presetCfg.DangerFullAccessEnabled())
+		if denied.Behavior != BehaviorDeny {
+			t.Fatalf("%s: an explicit deny rule was erased: %+v", launch.TrustLevel, denied)
+		}
+		asked := presetRuntime.Evaluate("", "shell", "make release", &presetCfg, presetCfg.DangerFullAccessEnabled())
+		if asked.Behavior != BehaviorAllow || asked.Reason != ReasonYOLO {
+			t.Fatalf("%s: an ask rule was not allowed: %+v", launch.TrustLevel, asked)
+		}
 	}
 }

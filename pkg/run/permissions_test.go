@@ -545,11 +545,6 @@ func TestApplyPatchDecisionTable(t *testing.T) {
 	outside := map[string]any{"resolved_paths": []string{filepath.Join(string(filepath.Separator), "outside-workspace", "a.go")}}
 	ctx := tool.WithProjectRoot(context.Background(), project)
 
-	granularNoSandbox := safety.ApprovalPolicy{
-		Mode:     safety.ApprovalGranular,
-		Granular: safety.GranularApprovalConfig{Rules: true, MCPElicitations: true},
-	}
-
 	for _, tc := range []struct {
 		name        string
 		mode        appcfg.SandboxMode
@@ -561,11 +556,6 @@ func TestApplyPatchDecisionTable(t *testing.T) {
 		{
 			name: "never rejects a patch reaching outside the workspace",
 			mode: appcfg.SandboxModeWorkspaceWrite, policy: safety.ApprovalPolicy{Mode: safety.ApprovalNever},
-			payload: outside, want: applyPatchReject, wantMessage: "writing outside of the project",
-		},
-		{
-			name: "granular without sandbox approval rejects the same patch",
-			mode: appcfg.SandboxModeWorkspaceWrite, policy: granularNoSandbox,
 			payload: outside, want: applyPatchReject, wantMessage: "writing outside of the project",
 		},
 		{
@@ -655,13 +645,10 @@ func TestActionHookUsesPermissionRequestDecisionBeforeReviewer(t *testing.T) {
 
 func TestPermissionRequestHookPayloads(t *testing.T) {
 	tool, input, aliases := permissionRequestHookPayload("shell", map[string]any{
-		"command": "curl example.com",
-		"network_approval_context": safety.NetworkApprovalContext{
-			Host: "Example.COM.", Protocol: safety.NetworkApprovalHTTPS,
-		},
-		"network_port": 8443,
+		"command":       "curl example.com",
+		"justification": "reach the issue tracker",
 	})
-	if tool != "Bash" || input["command"] != "curl example.com" || input["description"] != "network-access https://example.com:8443" || len(aliases) != 0 {
+	if tool != "Bash" || input["command"] != "curl example.com" || input["description"] != "reach the issue tracker" || len(aliases) != 0 {
 		t.Fatalf("tool=%q input=%+v aliases=%v", tool, input, aliases)
 	}
 	tool, input, aliases = permissionRequestHookPayload("apply_patch", map[string]any{"patch": "*** Begin Patch"})
@@ -941,33 +928,54 @@ func TestRuntimeYOLOOverridesAskRuleConvertedByNeverPolicy(t *testing.T) {
 	}
 }
 
-// Full Access is the config-level half of the same escape: it relaxes the
-// denies the never policy generates for calls no rule mentions, and leaves the
-// rules themselves alone.
-func TestDangerFullAccessRelaxesOnlyPolicyGeneratedDenies(t *testing.T) {
+// Full access *is* the YOLO posture (plan 203): the same decisions come out of
+// a full-access configuration as out of FOREBRAIN_YOLO=1, so a user who picked
+// it gets exactly what --yolo gives. Only an explicit deny rule still refuses.
+func TestFullAccessMatchesTheYOLOEnvironment(t *testing.T) {
 	const sessionID = "session-full-access"
 	cfg := &appcfg.Root{
 		SandboxMode:    appcfg.SandboxModeDangerFullAccess,
 		ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyNever),
 	}
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}}
-	rt := r.permRuntimeGet()
-	rt.LoadFromDisk(r.AppCfg, r.permPaths())
-	rt.Store(r.AppCfg).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
-		ToolName: "Bash", RuleContent: "shutdown:*", SessionID: sessionID,
-	})
-
-	unmatched := r.EvaluatePermissionForSession(sessionID, "edit_file", "/repo/main.go")
-	if unmatched.Behavior != safety.BehaviorAllow || unmatched.Reason != "danger_full_access" || !unmatched.BypassSandbox {
-		t.Fatalf("full access still refuses an unmatched call: %+v", unmatched)
+	newRunner := func() *Runner {
+		r := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}}
+		rt := r.permRuntimeGet()
+		rt.LoadFromDisk(r.AppCfg, r.permPaths())
+		rt.Store(r.AppCfg).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
+			ToolName: "Bash", RuleContent: "shutdown:*", SessionID: sessionID,
+		})
+		return r
 	}
 
-	denied := r.EvaluatePermissionForSession(sessionID, "shell", "shutdown now")
+	// The same three calls, once with the environment flag and once through the
+	// preset, must agree case for case.
+	calls := []struct{ name, input string }{
+		{"edit_file", "/repo/main.go"},
+		{"shell", "shutdown now"},
+		{"shell", "make release"},
+	}
+	t.Setenv(safety.EnvYOLO, "1")
+	flagged := newRunner()
+	t.Setenv(safety.EnvYOLO, "")
+	picked := newRunner()
+
+	for _, call := range calls {
+		want := flagged.EvaluatePermissionForSession(sessionID, call.name, call.input)
+		got := picked.EvaluatePermissionForSession(sessionID, call.name, call.input)
+		if got.Behavior != want.Behavior || got.Reason != want.Reason || got.BypassSandbox != want.BypassSandbox {
+			t.Fatalf("%s %q: full access = %+v, yolo = %+v", call.name, call.input, got, want)
+		}
+	}
+
+	unmatched := picked.EvaluatePermissionForSession(sessionID, "edit_file", "/repo/main.go")
+	if unmatched.Behavior != safety.BehaviorAllow || unmatched.Reason != safety.ReasonYOLO || !unmatched.BypassSandbox {
+		t.Fatalf("full access still refuses an unmatched call: %+v", unmatched)
+	}
+	denied := picked.EvaluatePermissionForSession(sessionID, "shell", "shutdown now")
 	if denied.Behavior != safety.BehaviorDeny {
 		t.Fatalf("full access erased an explicit deny rule: %+v", denied)
 	}
-
-	explained := r.ExplainPermissionForSession(sessionID, "edit_file", "/repo/main.go")
+	explained := picked.ExplainPermissionForSession(sessionID, "edit_file", "/repo/main.go")
 	if explained.Decision.Reason != unmatched.Reason {
 		t.Fatalf("explain diverged from evaluate: explain=%+v evaluate=%+v", explained.Decision, unmatched)
 	}
@@ -1058,7 +1066,11 @@ func mustPreset(t *testing.T, id string) safety.ApprovalPreset {
 func presetSnapshotMatches(t *testing.T, r *Runner, sid string, want safety.ApprovalPreset) {
 	t.Helper()
 	snap := r.PermissionSnapshotForSession(sid)
-	preset, ok := safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(r.AppCfg, snap))
+	cfg := safety.ConfigForSnapshot(r.AppCfg, snap)
+	if cfg == nil {
+		t.Fatalf("live preset after apply: no config for session %q", sid)
+	}
+	preset, ok := safety.ApprovalPresetForSandboxMode(cfg.SandboxMode)
 	if !ok || preset.ID != want.ID {
 		t.Fatalf("live preset after apply = %+v ok=%v, want %q (mode=%q)", preset, ok, want.ID, snap.Mode)
 	}
@@ -1070,17 +1082,17 @@ func presetSnapshotMatches(t *testing.T, r *Runner, sid string, want safety.Appr
 func TestInjectSessionPermissionAppliesStoredRow(t *testing.T) {
 	r, sessions := newPresetTestRunner(t, safety.LevelTrusted)
 	ctx := tool.WithConversationSessionID(context.Background(), "s")
-	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetReadOnly, state.SessionPresetSourcePicker); err != nil {
+	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetWorkspaceWrite, state.SessionPresetSourcePicker); err != nil {
 		t.Fatal(err)
 	}
 	r.injectSessionPermission(ctx)
-	presetSnapshotMatches(t, r, "s", mustPreset(t, safety.PresetReadOnly))
+	presetSnapshotMatches(t, r, "s", mustPreset(t, safety.PresetWorkspaceWrite))
 
 	// The same row again: not re-applied, so a drift introduced after the
 	// first application stays until the row itself moves.
-	readOnly, _ := safety.ApprovalPresetByID(safety.PresetReadOnly)
+	readOnly, _ := safety.ApprovalPresetByID(safety.PresetWorkspaceWrite)
 	fullAccess, _ := safety.ApprovalPresetByID(safety.PresetFullAccess)
-	for _, update := range fullAccess.SessionUpdates("s") {
+	for _, update := range fullAccess.SessionUpdatesForLaunch("s", r.AppCfg, r.LaunchProject) {
 		r.ApplyPermissionUpdate(update)
 	}
 	r.injectSessionPermission(ctx)
@@ -1089,7 +1101,7 @@ func TestInjectSessionPermissionAppliesStoredRow(t *testing.T) {
 	// A moved row wins back: the picker changed it on the other surface. The
 	// sleep crosses a millisecond tick so the row's updated_at really moves.
 	time.Sleep(2 * time.Millisecond)
-	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetReadOnly, state.SessionPresetSourcePicker); err != nil {
+	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetWorkspaceWrite, state.SessionPresetSourcePicker); err != nil {
 		t.Fatal(err)
 	}
 	r.injectSessionPermission(ctx)
@@ -1127,22 +1139,27 @@ func TestInjectSessionPermissionYoloRecordsAndALaterProcessApplies(t *testing.T)
 	presetSnapshotMatches(t, r2, "s", mustPreset(t, safety.PresetFullAccess))
 }
 
-// The trust gate: a persisted full-access executes as Default while the
-// working directory is not trusted; the row keeps the wider choice.
-func TestInjectSessionPermissionTrustGateNarrowsFullAccess(t *testing.T) {
+// No trust gate any more (plan 203): a persisted full-access runs as full
+// access even in a project nobody has judged, exactly as --yolo does. The
+// sandbox and the approval mode both say so.
+func TestInjectSessionPermissionKeepsFullAccessInAnUncertainProject(t *testing.T) {
 	r, sessions := newPresetTestRunner(t, safety.LevelUnknown)
 	ctx := tool.WithConversationSessionID(context.Background(), "s")
 	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetFullAccess, state.SessionPresetSourcePicker); err != nil {
 		t.Fatal(err)
 	}
 	r.injectSessionPermission(ctx)
-	presetSnapshotMatches(t, r, "s", mustPreset(t, safety.PresetDefault))
-	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetFullAccess || got.Effective != safety.PresetDefault {
-		t.Fatalf("preset state under the trust gate = %+v, want current=full-access effective=auto", got)
+	presetSnapshotMatches(t, r, "s", mustPreset(t, safety.PresetFullAccess))
+	snap := r.PermissionSnapshotForSession("s")
+	if snap.ApprovalPolicy.Mode != safety.ApprovalNever || snap.SandboxMode != appcfg.SandboxModeDangerFullAccess {
+		t.Fatalf("full-access session snapshot = policy %q sandbox %q", snap.ApprovalPolicy.Mode, snap.SandboxMode)
+	}
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetFullAccess || got.Effective != safety.PresetFullAccess {
+		t.Fatalf("preset state = %+v, want current and effective both full_access", got)
 	}
 	// The row itself is untouched.
 	if preset, _, _, stored, _ := sessions.SessionPermissionPreset(ctx, "s"); !stored || preset != safety.PresetFullAccess {
-		t.Fatalf("row narrowed by the gate = %q stored=%v, want full-access", preset, stored)
+		t.Fatalf("row = %q stored=%v, want full-access", preset, stored)
 	}
 }
 
@@ -1174,12 +1191,13 @@ func TestSessionPresetForInfersLegacyYoloSessions(t *testing.T) {
 // configuration default; a YOLO environment says full-access without reading
 // anything.
 func TestSessionPresetForFallsBackToConfigAndYOLO(t *testing.T) {
-	// AppCfg stays nil: with no row and no in-memory preset the answer is
-	// the zero state regardless of what the configuration would match.
+	// With no row and no in-memory preset the configured default answers — an
+	// unset configuration is the workspace-write default, which is the same
+	// value Empty means everywhere else.
 	r, _ := newPresetTestRunner(t, safety.LevelTrusted)
 	ctx := tool.WithConversationSessionID(context.Background(), "s")
-	if got := r.SessionPresetFor(ctx, "s"); got.Current != "" || got.Effective != "" || got.Source != "" {
-		t.Fatalf("no row, no memory = %+v, want the zero answer", got)
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetWorkspaceWrite || got.Effective != safety.PresetWorkspaceWrite || got.Source != "" {
+		t.Fatalf("no row, no memory = %+v, want the configured default", got)
 	}
 	t.Setenv(safety.EnvYOLO, "1")
 	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetFullAccess || got.Source != state.SessionPresetSourceYolo {
@@ -1270,16 +1288,71 @@ func TestBatchActionHookNeverAsks(t *testing.T) {
 func TestBatchSessionPresetIsFixed(t *testing.T) {
 	batch := &Runner{Deps: &Deps{ProjectType: state.ProjectTypeBatch}}
 	got := batch.SessionPresetFor(context.Background(), "session-1")
-	if got.Current != PresetBatchSandbox || got.Effective != PresetBatchSandbox || got.Source != "project_type" {
+	if got.Current != PresetBatch || got.Effective != PresetBatch || got.Source != "project_type" {
 		t.Fatalf("batch preset = %+v, want the fixed task sandbox", got)
 	}
 	// YOLO does not describe a batch task either.
 	t.Setenv("FOREBRAIN_YOLO", "1")
-	if got := batch.SessionPresetFor(context.Background(), "session-1"); got.Current != PresetBatchSandbox {
+	if got := batch.SessionPresetFor(context.Background(), "session-1"); got.Current != PresetBatch {
 		t.Fatalf("batch preset under YOLO = %+v, want the fixed task sandbox", got)
 	}
 	coding := &Runner{Deps: &Deps{ProjectType: state.ProjectTypeCoding}}
-	if got := coding.SessionPresetFor(context.Background(), "session-1"); got.Current == PresetBatchSandbox {
+	if got := coding.SessionPresetFor(context.Background(), "session-1"); got.Current == PresetBatch {
 		t.Fatalf("a coding project must not report the batch preset: %+v", got)
+	}
+}
+
+// A session born with the default preset is still narrowed by the launch
+// project's trust decision (plan 203 §0.2): the seeded row records the preset,
+// not a wider sandbox than the preset means here. A project nobody has judged
+// keeps its commands read-only, exactly as the derived configuration does.
+func TestSeededDefaultPresetKeepsTheTrustNarrowing(t *testing.T) {
+	r, sessions := newPresetTestRunner(t, safety.LevelUnknown)
+	ctx := tool.WithConversationSessionID(context.Background(), "seeded")
+	if err := sessions.Ensure(ctx, "seeded", "seeded"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if preset, source, _, stored, err := sessions.SessionPermissionPreset(ctx, "seeded"); err != nil || !stored || preset != "workspace_write" || source != state.SessionPresetSourceDefault {
+		t.Fatalf("seeded row = %q/%q stored=%v err=%v", preset, source, stored, err)
+	}
+	r.injectSessionPermission(ctx)
+	if got := safety.ConfigForSnapshot(r.AppCfg, r.PermissionSnapshotForSession("seeded")).SandboxMode; got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("sandbox of a default-preset session in an undecided project = %q, want read-only", got)
+	}
+}
+
+// A machine with no usable sandbox runs every conversation in full access,
+// whatever row the state database holds — and writes nothing back. The row is
+// the user's own choice, and another machine sharing that database may well
+// have a sandbox (owner 2026-10-31, plan 215 §3.3).
+func TestNoSandboxForcesFullAccessWithoutWritingTheRow(t *testing.T) {
+	r, sessions := newPresetTestRunner(t, safety.LevelUnknown)
+	ctx := tool.WithConversationSessionID(context.Background(), "s")
+	if _, err := sessions.SaveSessionPermissionPreset(ctx, "s", safety.PresetWorkspaceWrite, state.SessionPresetSourcePicker); err != nil {
+		t.Fatal(err)
+	}
+	// This machine has a sandbox: the stored row is the answer, and the trust
+	// decision narrows it at run time as before.
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetWorkspaceWrite || got.Effective != safety.PresetWorkspaceWrite {
+		t.Fatalf("with a sandbox, preset = %+v, want the stored workspace_write", got)
+	}
+	r.injectSessionPermission(ctx)
+	if got := safety.ConfigForSnapshot(r.AppCfg, r.PermissionSnapshotForSession("s")).SandboxMode; got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("with a sandbox, the stored row narrows to %q, want read-only", got)
+	}
+
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	if got := r.SessionPresetFor(ctx, "s"); got.Current != safety.PresetFullAccess || got.Effective != safety.PresetFullAccess {
+		t.Fatalf("without a sandbox, preset = %+v, want full access", got)
+	}
+	r.injectSessionPermission(ctx)
+	presetSnapshotMatches(t, r, "s", mustPreset(t, safety.PresetFullAccess))
+
+	// Nothing was written: the row still names the preset the user picked,
+	// with the source that picked it.
+	presetID, source, _, stored, err := sessions.SessionPermissionPreset(ctx, "s")
+	if err != nil || !stored || presetID != safety.PresetWorkspaceWrite || source != state.SessionPresetSourcePicker {
+		t.Fatalf("stored row after forced full access = %q/%q stored=%v err=%v", presetID, source, stored, err)
 	}
 }

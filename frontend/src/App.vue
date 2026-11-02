@@ -67,6 +67,16 @@
                 <span class="forebrain-tenant-option-path">{{ agent.workspaceRoot }}</span>
               </button>
               <button
+                type="button"
+                class="forebrain-tenant-option-act"
+                :aria-label="t('agents.editAria', { id: agent.id })"
+                v-tip:right="t('agents.editTitle')"
+                data-testid="agent-edit"
+                @click.stop="openEditAgent(agent.id)"
+              >
+                <Pencil class="forebrain-tenant-option-del-ic" aria-hidden="true" />
+              </button>
+              <button
                 v-if="canDeleteAgent(agent.id)"
                 type="button"
                 class="forebrain-tenant-option-del"
@@ -263,6 +273,53 @@
       </template>
     </ForebrainModal>
 
+    <!-- Editing a primary agent's presentation (plan 191 §4.4): the name is the
+         tenant key and read-only; only the display name and the description
+         move, through the gateway's own update. -->
+    <ForebrainModal :open="editAgentId !== ''" size="sm" :title="t('agents.editTitle')" @close="closeEditAgent">
+      <label class="block">
+        <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('agents.editNameLabel') }}</span>
+        <Input
+          :model-value="editAgentId"
+          class="forebrain-field mt-1 h-auto w-full font-mono"
+          readonly
+          autocomplete="off"
+          data-testid="agent-edit-id"
+        />
+      </label>
+      <label class="block">
+        <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('agents.editDisplayName') }}</span>
+        <Input
+          v-model="editAgentName"
+          class="forebrain-field mt-1 h-auto w-full"
+          autocomplete="off"
+          data-testid="agent-edit-name"
+        />
+      </label>
+      <label class="block">
+        <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('agents.editDescription') }}</span>
+        <textarea
+          v-model="editAgentDescription"
+          class="forebrain-field mt-1 h-auto w-full"
+          rows="3"
+          data-testid="agent-edit-description"
+        />
+      </label>
+      <p v-if="editAgentError" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="agent-edit-error">{{ editAgentError }}</p>
+      <template #footer>
+        <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeEditAgent">{{ t('common.cancel') }}</Button>
+        <Button
+          type="button"
+          class="forebrain-btn forebrain-btn-primary h-auto text-xs"
+          :disabled="editAgentBusy"
+          data-testid="agent-edit-save"
+          @click="submitEditAgent"
+        >
+          {{ editAgentBusy ? t('common.loading') : t('common.save') }}
+        </Button>
+      </template>
+    </ForebrainModal>
+
     <!-- Deleting a primary agent: refused for main and the active one (they
          carry no delete control at all). -->
     <ConfirmDialog
@@ -292,6 +349,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   Plug,
   Plus,
   Settings,
@@ -473,6 +531,50 @@ async function submitNewAgent() {
  *  delete control; the server refuses them too. */
 function canDeleteAgent(id: string): boolean {
   return id !== 'main' && id !== activePrimaryId.value
+}
+
+// The pencil dialog's own state: which agent is being edited and what its two
+// editable fields hold. A save that fails keeps the dialog open with the
+// server's words, the way the new-agent dialog does.
+const editAgentId = ref('')
+const editAgentName = ref('')
+const editAgentDescription = ref('')
+const editAgentError = ref('')
+const editAgentBusy = ref(false)
+
+function openEditAgent(id: string) {
+  const agent = primaryRecords.value.find((record) => record.id === id)
+  editAgentId.value = id
+  editAgentName.value = agent?.name ?? ''
+  editAgentDescription.value = agent?.description ?? ''
+  editAgentError.value = ''
+}
+
+function closeEditAgent() {
+  editAgentId.value = ''
+  editAgentName.value = ''
+  editAgentDescription.value = ''
+  editAgentError.value = ''
+}
+
+/** Save the presentation fields; the listing that answers is the record set. */
+async function submitEditAgent() {
+  const id = editAgentId.value
+  if (!id || editAgentBusy.value) return
+  editAgentBusy.value = true
+  editAgentError.value = ''
+  try {
+    const res = await forebrainApi.primaryAgentUpdate(id, {
+      name: editAgentName.value.trim(),
+      description: editAgentDescription.value.trim(),
+    })
+    primaryRecords.value = Array.isArray(res.records) ? res.records : primaryRecords.value
+    closeEditAgent()
+  } catch (cause) {
+    editAgentError.value = getErrorMessage(cause)
+  } finally {
+    editAgentBusy.value = false
+  }
 }
 
 function askDeleteAgent(id: string) {

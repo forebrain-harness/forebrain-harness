@@ -161,7 +161,7 @@ func TestHandleChatSessionContextReadsCompactCheckpoint(t *testing.T) {
 		Payload: event.EncodePayload(event.ContextCompactedPayload{
 			CreatedAtUTC: "2026-09-24T10:00:00Z",
 			Trigger:      "auto", Strategy: "remote_v2", Reason: "context budget",
-			SummarySource: "remote_compaction", Scope: "total", ReplacedItems: 3,
+			SummarySource: "remote_compaction", ReplacedItems: 3,
 			BoundaryID: "window-7", WindowNumber: 7, Summary: "compact checkpoint",
 			TokensBefore: 7000, TokensAfter: 2000,
 		}),

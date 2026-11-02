@@ -31,40 +31,14 @@ type Manager struct {
 	// allowed-roots list is filtered separately.
 	isolatedPeerRoots []string
 	runtimeConfig     RuntimeConfig
-	networkMu         sync.Mutex
-	networkLease      *managedNetworkLease
 }
 
 func NewManager() *Manager { return &Manager{} }
 
-func (m *Manager) Close() {
-	if m == nil {
-		return
-	}
-	m.networkMu.Lock()
-	lease := m.networkLease
-	m.networkLease = nil
-	m.networkMu.Unlock()
-	lease.close()
-}
+func (m *Manager) Close() {}
 
 func profileForSandboxMode(cfg *appcfg.Root) Profile {
-	if cfg != nil && strings.TrimSpace(cfg.DefaultPermissions) != "" {
-		switch strings.TrimSpace(cfg.DefaultPermissions) {
-		case appcfg.PermissionProfileReadOnly:
-			return ProfileReadOnly
-		case appcfg.PermissionProfileWorkspace:
-			return ProfileWorkspaceWrite
-		case appcfg.PermissionProfileDangerFullAccess:
-			return ProfileReadOnly
-		default:
-			return ProfileManaged
-		}
-	}
 	if cfg != nil && cfg.SandboxMode == appcfg.SandboxModeWorkspaceWrite {
-		if detectPlatform() == PlatformWindows && cfg.Windows.Sandbox == "" {
-			return ProfileReadOnly
-		}
 		return ProfileWorkspaceWrite
 	}
 	// When the user explicitly opts into read-only mode, honour that.
@@ -209,9 +183,6 @@ func (m *Manager) DecideShellCommand(cfg *appcfg.Root, _ string, sandboxPermissi
 		return SandboxDecision{Mode: ModeDangerFullAccess, Profile: profile, UseSandbox: false, Reason: "require_escalated", Backend: BackendHost, SandboxType: SandboxTypeNone, RequiresPermission: true}
 	}
 	platform := detectPlatform()
-	if platform == PlatformWindows && cfg.Windows.Sandbox == "" {
-		return SandboxDecision{Mode: ModeSandboxed, Profile: profile, UseSandbox: false, Reason: "windows_sandbox_disabled", Backend: BackendHost, SandboxType: SandboxTypeNone}
-	}
 	if reason := backendUnavailableReason(platform); reason != "" {
 		return SandboxDecision{Mode: ModeSandboxed, Profile: profile, UseSandbox: false, Reason: "sandbox_unavailable", Backend: backendForPlatform(platform), SandboxType: sandboxTypeForPlatform(platform), UnavailableReason: reason}
 	}
@@ -233,25 +204,10 @@ func (m *Manager) Decide(cfg *appcfg.Root, kind ToolKind) SandboxDecision {
 		return SandboxDecision{Mode: ModeDangerFullAccess, UseSandbox: false, Reason: "danger_full_access", Backend: BackendHost, SandboxType: SandboxTypeNone}
 	}
 	platform := detectPlatform()
-	if platform == PlatformWindows && cfg.Windows.Sandbox == "" {
-		return SandboxDecision{Mode: ModeSandboxed, UseSandbox: false, Reason: "windows_sandbox_disabled", Backend: BackendHost, SandboxType: SandboxTypeNone}
-	}
 	if reason := backendUnavailableReason(platform); reason != "" {
 		return SandboxDecision{Mode: ModeSandboxed, UseSandbox: false, Reason: "sandbox_unavailable", Backend: backendForPlatform(platform), SandboxType: sandboxTypeForPlatform(platform), UnavailableReason: reason}
 	}
 	return SandboxDecision{Mode: ModeSandboxed, UseSandbox: true, Reason: string(cfg.SandboxMode), Backend: backendForPlatform(platform), SandboxType: sandboxTypeForPlatform(platform)}
-}
-
-func (m *Manager) StartupCheck(cfg *appcfg.Root) error {
-	cfg = m.cfgOrCached(cfg)
-	if cfg == nil || cfg.DangerFullAccessEnabled() {
-		return nil
-	}
-	decision := m.Decide(cfg, ToolKindShell)
-	if decision.UnavailableReason == "" {
-		return nil
-	}
-	return &UnavailableError{Reason: decision.UnavailableReason}
 }
 
 func (m *Manager) Status(cfg *appcfg.Root) Status {
@@ -276,6 +232,8 @@ func (m *Manager) Status(cfg *appcfg.Root) Status {
 	return st
 }
 
+// Doctor reports the platform facts an operator checks: the backend in use, a
+// missing or unusable dependency, and the platform's own caveats.
 func (m *Manager) Doctor(cfg *appcfg.Root) DoctorReport {
 	platform := detectPlatform()
 	rep := DoctorReport{
@@ -287,6 +245,11 @@ func (m *Manager) Doctor(cfg *appcfg.Root) DoctorReport {
 	}
 	if platform == PlatformLinux || platform == PlatformWSL {
 		rep.DependencyWarning = append(rep.DependencyWarning, "linux_glob_limits_apply")
+	}
+	if platform == PlatformWindows {
+		// Said plainly rather than left to be discovered: the Windows sandbox
+		// bounds writes but cannot bound reads (plan 206 §3.3).
+		rep.DependencyWarning = append(rep.DependencyWarning, "windows_batch_reads_not_isolated")
 	}
 	return rep
 }
@@ -321,12 +284,13 @@ func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandR
 		req.Profile = decision.Profile
 	}
 	if decision.UnavailableReason != "" {
-		// Sandbox backend is unavailable. The LLM-driven command path always fails
-		// closed: dropping to unsandboxed host execution would let a missing
-		// backend silently remove isolation, a worse risk than refusing to run.
-		// StartupCheck enforces the same fail-closed rule at boot whenever the
-		// sandbox is enabled.
-		return CommandResult{}, decision, &UnavailableError{Reason: decision.UnavailableReason}
+		// This machine has no usable sandbox, so the command runs uncontained —
+		// the same way it runs in full access (owner 2026-10-31, plan 215 §0.1).
+		// Refusing here was the "no sandbox, no command" rule the owner ended: a
+		// missing backend is a fact about the host, not a reason to stop working.
+		// What a conversation may do is still the permission engine's answer, and
+		// an unattended batch task is still confined to its own workspace.
+		decision.UseSandbox = false
 	}
 	runtimeCfg := m.runtimeConfigForCommand(cfg, workDirAbs, req)
 	if !decision.UseSandbox {
@@ -345,83 +309,8 @@ func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandR
 	// on the host — a command that could not resolve a name inside a sandbox
 	// that has no network has no other explanation.
 	decision.NetworkBlocked = !req.AllowNetwork
-	networkToken := ""
-	runCtx := ctx
-	var networkProxy *managedNetworkProxy
-	var networkCommandLease *managedNetworkLease
-	constraints := m.networkConstraints()
-	// Proxy configuration and centrally supplied constraints may narrow network
-	// access, but neither is itself a grant. Only attach the bridge after the
-	// active filesystem/network profile or a structured grant enabled network
-	// access for this command.
-	if cfg != nil && req.AllowNetwork {
-		effectiveNetwork, proxyErr := cfg.ResolveNetworkProxyConfigForNetworkEnabledWithConstraints(constraints)
-		if proxyErr != nil {
-			return CommandResult{}, decision, proxyErr
-		}
-		if effectiveNetwork != nil {
-			m.networkMu.Lock()
-			desiredKey := managedNetworkProxyConfigKey(*effectiveNetwork)
-			var oldLease *managedNetworkLease
-			if m.networkLease == nil || m.networkLease.key != desiredKey {
-				var replacement *managedNetworkLease
-				replacement, proxyErr = acquireManagedNetworkProxy(*effectiveNetwork)
-				if proxyErr == nil {
-					oldLease = m.networkLease
-					m.networkLease = replacement
-				}
-			}
-			if proxyErr == nil && m.networkLease != nil {
-				networkCommandLease = m.networkLease.retain()
-				if networkCommandLease != nil {
-					networkProxy = networkCommandLease.proxy
-				}
-			}
-			m.networkMu.Unlock()
-			oldLease.close()
-			if proxyErr != nil {
-				return CommandResult{}, decision, proxyErr
-			}
-			if networkProxy == nil {
-				return CommandResult{}, decision, errors.New("managed network proxy lease is unavailable")
-			}
-			defer networkCommandLease.close()
-			rules := networkRulesFromSnapshot(m.permissionSnapshot())
-			rules = append(rules, networkRulesFromSession(req.SessionNetworkRules)...)
-			if effectiveNetwork.HardDenyAllowlistMisses {
-				rules = networkDenyRulesOnly(rules)
-			}
-			approved := req.ApprovedNetworkAccess
-			if effectiveNetwork.HardDenyAllowlistMisses {
-				approved = nil
-			}
-			policy := networkCommandPolicy{
-				config: *effectiveNetwork, rules: rules,
-				approved: approved,
-				canAsk:   networkApprovalPromptAllowed(m.approvalPolicy()) && !effectiveNetwork.HardDenyAllowlistMisses,
-			}
-			var proxyEnv map[string]string
-			networkToken, proxyEnv, req.ManagedNetwork, proxyErr = networkProxy.register(ctx, policy, req.NetworkApproval, NetworkApprovalRequest{
-				Command: req.Command, WorkDir: workDirAbs, EnvironmentID: req.NetworkEnvironmentID, ExecutionID: req.NetworkExecutionID,
-				CommandEnv: req.Env,
-			})
-			if proxyErr != nil {
-				return CommandResult{}, decision, proxyErr
-			}
-			runCtx = networkProxy.executionContext(networkToken)
-			for key, value := range proxyEnv {
-				req.Env = appendOrReplaceEnv(req.Env, key, value)
-			}
-		}
-	}
-	res, err := runSandboxCommand(runCtx, decision.Backend, cfg, req, workDirAbs)
+	res, err := runSandboxCommand(ctx, decision.Backend, cfg, req, workDirAbs)
 	finalized, finalizeErr := finalizeCommandResult(res, err)
-	if networkProxy != nil && networkToken != "" {
-		finalized.NetworkDenial = networkProxy.unregister(networkToken)
-		if finalized.NetworkDenial != nil && ctx.Err() == nil && errors.Is(finalizeErr, context.Canceled) {
-			finalizeErr = nil
-		}
-	}
 	if finalizeErr != nil {
 		return finalized, decision, finalizeErr
 	}
@@ -429,23 +318,6 @@ func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandR
 		return finalized, decision, &DeniedError{Result: finalized}
 	}
 	return finalized, decision, nil
-}
-
-func (m *Manager) networkConstraints() *appcfg.NetworkConstraints {
-	if m == nil {
-		return nil
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var constraints *appcfg.NetworkConstraints
-	for _, source := range m.sources {
-		if source.NetworkConstraints == nil {
-			continue
-		}
-		copy := *source.NetworkConstraints
-		constraints = &copy
-	}
-	return constraints
 }
 
 func (m *Manager) permissionSnapshot() Snapshot {
@@ -464,10 +336,6 @@ func (m *Manager) approvalPolicy() ApprovalPolicy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.snapshot.ApprovalPolicy
-}
-
-func networkApprovalPromptAllowed(policy ApprovalPolicy) bool {
-	return policy.Mode != ApprovalNever
 }
 
 func appendOrReplaceEnv(env []string, key, value string) []string {
@@ -498,17 +366,11 @@ func applyRuntimeConfigToRequest(req CommandRequest, runtimeCfg RuntimeConfig, c
 	for _, path := range runtimeCfg.Filesystem.DenyWrite {
 		req.DeniedWritablePaths = appendUniquePath(req.DeniedWritablePaths, path)
 	}
-	// A request that resolved its own read set keeps exactly that set, for the
-	// same reason as the write set above: the configured read set is "/" by
-	// default, so a request promising "this directory and the shared skills"
-	// cannot express it by adding paths. Denials and the platform runtime
-	// defaults are unaffected - the first still narrows, the second is the OS,
-	// not the user's data.
-	readRoots := runtimeCfg.Filesystem.AllowRead
-	if req.ExclusiveReadablePaths {
-		readRoots = nil
-	}
-	for _, path := range readRoots {
+	// The configured read set joins whatever the request stated. A deny-list
+	// request reads the whole filesystem already, so adding to it is a no-op
+	// there; denials and the platform runtime defaults are unaffected - the
+	// first still narrows, the second is the OS, not the user's data.
+	for _, path := range runtimeCfg.Filesystem.AllowRead {
 		req.AdditionalReadablePaths = appendUniquePath(req.AdditionalReadablePaths, path)
 	}
 	for _, path := range runtimeCfg.Filesystem.DenyRead {

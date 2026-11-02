@@ -2172,20 +2172,29 @@ func msgKindFromRole(role string) MsgKind {
 	}
 }
 
+// The rows /memories offers when the surface has no overlay of its own. They
+// live here rather than inside the command so the tests drive the same labels
+// the user picks from.
+const (
+	memoryFeatureOption = "Memories — Read memories, generate memories from this and following threads, and expose the memories_* tools."
+	memoryResetOption   = "Reset memories — Clear local memory files and summaries. Threads remain intact."
+	memorySaveOption    = "Save memory settings"
+)
+
 func (c *commandController) handleMemories(sessionID string) bool {
 	if c == nil || c.session == nil || c.selector == nil {
 		return true
 	}
 	memorySession, ok := c.session.(interface {
-		MemorySettings() (enabled, useMemories, generateMemories bool)
-		UpdateMemorySettings(sessionID string, featureEnabled, useMemories, generateMemories *bool) error
+		MemorySettings() bool
+		UpdateMemorySettings(sessionID string, featureEnabled *bool) error
 		ResetMemories(ctx context.Context, all bool) error
 	})
 	if !ok {
 		c.renderer.PrintError(fmt.Errorf("memory settings unavailable"))
 		return true
 	}
-	enabled, useMemories, generateMemories := memorySession.MemorySettings()
+	enabled := memorySession.MemorySettings()
 	if !enabled {
 		enable, ok, err := c.selector.Confirm("Enable memories?", true)
 		if err != nil {
@@ -2195,27 +2204,22 @@ func (c *commandController) handleMemories(sessionID string) bool {
 		if !ok || !enable {
 			return true
 		}
-		if err := memorySession.UpdateMemorySettings(sessionID, boolPointer(true), nil, nil); err != nil {
+		if err := memorySession.UpdateMemorySettings(sessionID, boolPointer(true)); err != nil {
 			c.renderer.PrintError(err)
 			return true
 		}
 		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "memories", Content: "Memories enabled. Start a new thread to use them.", Final: true})
 		return true
 	}
-	const (
-		useOption      = "Use memories — Use memories in following threads. Applied at next thread."
-		generateOption = "Generate memories — Generate memories from following threads. Current thread included."
-		resetOption    = "Reset memories — Clear local memory files and summaries. Threads remain intact."
-	)
 	if selector, ok := c.selector.(MemorySettingsSelector); ok {
-		result, err := selector.SelectMemorySettings(useMemories, generateMemories)
+		result, err := selector.SelectMemorySettings(enabled)
 		if err != nil {
 			c.renderer.PrintError(err)
 			return true
 		}
 		switch result.Action {
 		case MemorySettingsSave:
-			if err := memorySession.UpdateMemorySettings(sessionID, nil, &result.UseMemories, &result.GenerateMemories); err != nil {
+			if err := memorySession.UpdateMemorySettings(sessionID, &result.Enabled); err != nil {
 				c.renderer.PrintError(err)
 				return true
 			}
@@ -2235,10 +2239,10 @@ func (c *commandController) handleMemories(sessionID string) bool {
 		}
 		return true
 	}
-	stagedUse, stagedGenerate := useMemories, generateMemories
-	const saveOption = "Save memory settings"
+	staged := enabled
 	for {
-		selected, ok, err := c.selector.Select("Memories\nConfigure memory use and generation", []string{useOption, generateOption, resetOption, saveOption}, saveOption)
+		selected, ok, err := c.selector.Select("Memories\nConfigure the memory switch",
+			[]string{memoryFeatureOption, memoryResetOption, memorySaveOption}, memorySaveOption)
 		if err != nil {
 			c.renderer.PrintError(err)
 			return true
@@ -2247,16 +2251,14 @@ func (c *commandController) handleMemories(sessionID string) bool {
 			return true
 		}
 		switch strings.TrimSpace(selected) {
-		case useOption:
-			stagedUse = !stagedUse
-		case generateOption:
-			stagedGenerate = !stagedGenerate
-		case saveOption:
-			if err := memorySession.UpdateMemorySettings(sessionID, nil, &stagedUse, &stagedGenerate); err != nil {
+		case memoryFeatureOption:
+			staged = !staged
+		case memorySaveOption:
+			if err := memorySession.UpdateMemorySettings(sessionID, &staged); err != nil {
 				c.renderer.PrintError(err)
 			}
 			return true
-		case resetOption:
+		case memoryResetOption:
 			const (
 				resetProjectOption = "Reset this project's memories"
 				resetAllOption     = "Reset everything (every project + global)"

@@ -156,6 +156,13 @@ type Message struct {
 	ToolCallID string
 	// Name is an optional participant name, used by some providers.
 	Name string
+	// Origin names who wrote this message on the person's behalf — a heartbeat,
+	// a scheduled task, a peer session (state.MessageOrigin*). It is
+	// persistence metadata only: the turn's user row keeps it so a surface can
+	// say where the message came from, and no provider adapter may read it or
+	// serialize it into a request. The model is sent exactly what the same text
+	// typed by hand would send.
+	Origin string `json:"origin,omitempty"`
 	// IsMeta marks a user-role message as a meta/attachment message (e.g.
 	// plan-mode reminders, project-context addenda) rather than genuine user
 	// input. Meta messages are persisted to the transcript and treated as context, but are not
@@ -338,14 +345,6 @@ type StructuredOutputLLM interface {
 	ExecuteStructured(context.Context, []Message, StructuredOutputSpec) (*Result, error)
 }
 
-// CompactMode selects the OpenAI Responses compaction event.
-type CompactMode string
-
-const (
-	CompactModeRemoteV1 CompactMode = "remote_v1"
-	CompactModeRemoteV2 CompactMode = "remote_v2"
-)
-
 // CompactResult is a complete replacement history returned by a provider.
 type CompactResult struct {
 	Messages []Message
@@ -354,8 +353,12 @@ type CompactResult struct {
 
 // ContextCompactor is implemented by providers with native context compaction.
 // Callers must replace, not append to, their active history with Messages.
+//
+// A native checkpoint is provider-private: it holds an opaque item only the
+// provider that issued it can replay. A caller that will next send the request
+// to another provider must summarize locally instead.
 type ContextCompactor interface {
-	Compact(context.Context, []Message, []*Tool, CompactMode) (*CompactResult, error)
+	Compact(context.Context, []Message, []*Tool) (*CompactResult, error)
 }
 
 // LLMMiddleware wraps an LLM, decorating its Execute method with additional behavior.

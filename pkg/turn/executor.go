@@ -1100,9 +1100,10 @@ func copySlashModelSelection(ctx Context, sourceSessionID, targetSessionID strin
 
 // copySlashPermissionPreset makes the fork inherit the source session's
 // approval preset. Unlike the model choice there is nothing to materialise
-// first — the row either exists or it does not — and no row is a quiet no-op:
-// the fork then starts on the configuration default, which is exactly what
-// /new does on purpose.
+// first — the row either exists or it does not. Creating the fork gave it the
+// row every new session is born with (the global preset, plan 203 §2b), so a
+// source with a row overwrites that default with its own, and a source without
+// one leaves the fork on the default /new would have given it too.
 func copySlashPermissionPreset(ctx Context, sourceSessionID, targetSessionID string) error {
 	if ctx.Sessions == nil {
 		return nil

@@ -129,7 +129,26 @@ func fileEntryPartJSON(partType, fileID, label, mimeType string) string {
 const (
 	MessageOriginHeartbeat = "heartbeat"
 	MessageOriginCron      = "cron"
+	// MessageOriginPeer is a message another local session sent this one over
+	// the peer protocol (plans 194-197). Its text is the peer envelope exactly
+	// as it arrived, and the row is meta: it is context, not the person typing.
+	MessageOriginPeer = "peer"
+	// MessageOriginPeerStatus is a peer message's receipt summary, delivered to
+	// the sending conversation as a meta message (plan 197).
+	MessageOriginPeerStatus = "peer_status"
 )
+
+// IsPeerOrigin reports whether an origin marks a message another session wrote
+// over the peer protocol. Those rows are meta: nobody at this terminal typed
+// them, so a model reading the conversation reads them as context the way it
+// reads every other injected note.
+func IsPeerOrigin(origin string) bool {
+	switch strings.TrimSpace(origin) {
+	case MessageOriginPeer, MessageOriginPeerStatus:
+		return true
+	}
+	return false
+}
 
 // WithMessageOrigin returns partsJSON with the origin part appended.
 func WithMessageOrigin(partsJSON, origin string) string {
@@ -249,6 +268,12 @@ func MessagePartsJSON(msg llm.Message, fallbackText string) string {
 	parts := contentBlocksJSON(msg.Parts, fallbackText)
 	if msg.IsMeta {
 		parts = append(parts, map[string]any{"type": PartTypeIsMeta})
+	}
+	// The origin part is display-only (ParseMessageParts ignores it), so what
+	// the model is sent is the same whether the message was typed by hand or
+	// written on the person's behalf.
+	if origin := strings.TrimSpace(msg.Origin); origin != "" {
+		parts = append(parts, map[string]any{"type": PartTypeOrigin, "kind": origin})
 	}
 	switch strings.TrimSpace(msg.Role) {
 	case llm.RoleAssistant:

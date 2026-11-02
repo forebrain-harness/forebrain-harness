@@ -33,35 +33,17 @@ const (
 	windowsWriteRestricted     = 0x08
 	windowsFileDeleteChild     = 0x00000040
 	windowsDesktopAllAccess    = 0x000F01FF
-	windowsDesktopACLAccess    = 0x00060000
-	windowsWindowStationAccess = 0x0000037F
 	windowsProcThreadJobList   = 0x0002000D
-
-	windowsUserPrivUser         = 1
-	windowsUFScript             = 0x0001
-	windowsUFPasswordCantChange = 0x0040
-	windowsUFNormalAccount      = 0x0200
-	windowsUFDontExpirePassword = 0x10000
-	windowsNetUserExists        = 2224
-	windowsLogonInteractive     = 2
-	windowsLogonProviderDefault = 0
 )
 
 var (
 	windowsAdvapi                    = windows.NewLazySystemDLL("advapi32.dll")
-	windowsNetapi                    = windows.NewLazySystemDLL("netapi32.dll")
 	windowsUser32                    = windows.NewLazySystemDLL("user32.dll")
 	windowsCreateRestrictedTokenProc = windowsAdvapi.NewProc("CreateRestrictedToken")
-	windowsLogonUserProc             = windowsAdvapi.NewProc("LogonUserW")
-	windowsNetUserAddProc            = windowsNetapi.NewProc("NetUserAdd")
-	windowsNetUserSetInfoProc        = windowsNetapi.NewProc("NetUserSetInfo")
 	windowsCreateDesktopProc         = windowsUser32.NewProc("CreateDesktopW")
 	windowsCloseDesktopProc          = windowsUser32.NewProc("CloseDesktop")
-	windowsOpenDesktopProc           = windowsUser32.NewProc("OpenDesktopW")
-	windowsGetWindowStationProc      = windowsUser32.NewProc("GetProcessWindowStation")
 
 	windowsCapabilityMu sync.Mutex
-	windowsElevatedMu   sync.Mutex
 )
 
 func windowsSandboxUnavailableReason() string {
@@ -69,8 +51,6 @@ func windowsSandboxUnavailableReason() string {
 		windowsCreateRestrictedTokenProc,
 		windowsCreateDesktopProc,
 		windowsCloseDesktopProc,
-		windowsOpenDesktopProc,
-		windowsGetWindowStationProc,
 	} {
 		if err := proc.Find(); err != nil {
 			return "windows_sandbox_api_unavailable"
@@ -79,41 +59,22 @@ func windowsSandboxUnavailableReason() string {
 	return ""
 }
 
-func runWindowsSandboxCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
+// runWindowsSandboxCommand runs one command in the restricted-token sandbox.
+// There is one Windows sandbox and nothing to configure (owner 2026-10-31, plan
+// 206): writes are bounded by the task's directories, reads are not isolated
+// because a restricted token cannot hold an exclusive read set, and the network
+// is reachable because the token cannot take it away. cfg is the dispatch
+// signature's, unused here: no setting on it changes what the sandbox does.
+func runWindowsSandboxCommand(ctx context.Context, _ *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
 	req = constrainRequestToFilesystemProfile(req, workDir)
-	if cfg == nil {
-		return CommandResult{}, &UnavailableError{Reason: "windows_sandbox_missing_config"}
-	}
-	mode := cfg.Windows.Sandbox
-	if mode != appcfg.WindowsSandboxUnelevated && mode != appcfg.WindowsSandboxElevated {
-		return CommandResult{}, &UnavailableError{Reason: "windows_sandbox_disabled"}
-	}
 
-	policy := windowsNetworkPolicyForRequest(req)
-	if mode == appcfg.WindowsSandboxUnelevated && req.ManagedNetwork != nil {
-		return CommandResult{}, &UnavailableError{Reason: "windows_managed_network_requires_elevated"}
-	}
-	if mode == appcfg.WindowsSandboxElevated {
-		// The offline identity and its firewall rules are machine-wide. Serialize
-		// elevated commands so a concurrent request cannot reconcile the shared
-		// proxy port set while another command is still using it.
-		windowsElevatedMu.Lock()
-		defer windowsElevatedMu.Unlock()
-	}
-
-	baseToken, identitySID, err := windowsSandboxBaseToken(mode, policy)
+	baseToken, err := windowsSandboxBaseToken()
 	if err != nil {
 		return CommandResult{}, err
 	}
 	defer baseToken.Close()
 
-	if mode == appcfg.WindowsSandboxElevated && policy.Offline {
-		if err := reconcileWindowsOfflineFirewall(identitySID.String(), policy); err != nil {
-			return CommandResult{}, err
-		}
-	}
-
-	restrictedToken, logonSID, cleanupMarkers, err := prepareWindowsSandboxToken(mode, baseToken, identitySID, req, workDir)
+	restrictedToken, logonSID, cleanupMarkers, err := prepareWindowsSandboxToken(baseToken, req, workDir)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -121,186 +82,52 @@ func runWindowsSandboxCommand(ctx context.Context, cfg *appcfg.Root, req Command
 	defer cleanupMarkers()
 
 	env := home.SafeSubprocessEnv(nil, home.Options{ExplicitEnv: explicitCommandEnv(req.Env, nil)})
-	if policy.Offline && req.ManagedNetwork == nil {
-		env = applyWindowsNoNetworkEnvironment(env)
-	}
 	runCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 	return spawnWindowsSandboxProcess(
 		runCtx,
 		restrictedToken,
 		logonSID,
-		cfg.Windows.UseSandboxPrivateDesktop(),
-		mode == appcfg.WindowsSandboxElevated,
 		req,
 		workDir,
 		env,
 	)
 }
 
-func windowsSandboxBaseToken(mode appcfg.WindowsSandboxMode, policy windowsNetworkPolicy) (windows.Token, *windows.SID, error) {
-	if mode == appcfg.WindowsSandboxUnelevated {
-		var token windows.Token
-		access := uint32(windows.TOKEN_ASSIGN_PRIMARY | windows.TOKEN_DUPLICATE | windows.TOKEN_QUERY |
-			windows.TOKEN_ADJUST_DEFAULT | windows.TOKEN_ADJUST_SESSIONID | windows.TOKEN_ADJUST_PRIVILEGES)
-		if err := windows.OpenProcessToken(windows.CurrentProcess(), access, &token); err != nil {
-			return 0, nil, fmt.Errorf("open current process token: %w", err)
-		}
-		user, err := token.GetTokenUser()
-		if err != nil {
-			token.Close()
-			return 0, nil, fmt.Errorf("read current token user: %w", err)
-		}
-		sid, err := user.User.Sid.Copy()
-		if err != nil {
-			token.Close()
-			return 0, nil, fmt.Errorf("copy current token user SID: %w", err)
-		}
-		return token, sid, nil
-	}
-
-	account := "ForebrainSandboxOnline"
-	if policy.Offline {
-		account = "ForebrainSandboxOffline"
-	}
-	token, err := ensureAndLogonWindowsSandboxAccount(account)
-	if err != nil {
-		return 0, nil, err
-	}
-	user, err := token.GetTokenUser()
-	if err != nil {
-		token.Close()
-		return 0, nil, fmt.Errorf("read sandbox account SID: %w", err)
-	}
-	sid, err := user.User.Sid.Copy()
-	if err != nil {
-		token.Close()
-		return 0, nil, fmt.Errorf("copy sandbox account SID: %w", err)
-	}
-	return token, sid, nil
-}
-
-type windowsUserInfo1 struct {
-	Name        *uint16
-	Password    *uint16
-	PasswordAge uint32
-	Privilege   uint32
-	HomeDir     *uint16
-	Comment     *uint16
-	Flags       uint32
-	ScriptPath  *uint16
-}
-
-type windowsUserInfo1003 struct {
-	Password *uint16
-}
-
-func ensureAndLogonWindowsSandboxAccount(account string) (windows.Token, error) {
-	passwordBytes := make([]byte, 24)
-	if _, err := rand.Read(passwordBytes); err != nil {
-		return 0, fmt.Errorf("generate sandbox account password: %w", err)
-	}
-	password := fmt.Sprintf("T!%x-aA9", passwordBytes)
-	accountPtr, err := windows.UTF16PtrFromString(account)
-	if err != nil {
-		return 0, err
-	}
-	passwordPtr, err := windows.UTF16PtrFromString(password)
-	if err != nil {
-		return 0, err
-	}
-	info := windowsUserInfo1{
-		Name: accountPtr, Password: passwordPtr, Privilege: windowsUserPrivUser,
-		Flags: windowsUFScript | windowsUFPasswordCantChange | windowsUFNormalAccount | windowsUFDontExpirePassword,
-	}
-	var parameterError uint32
-	status, _, _ := windowsNetUserAddProc.Call(
-		0,
-		1,
-		uintptr(unsafe.Pointer(&info)),
-		uintptr(unsafe.Pointer(&parameterError)),
-	)
-	if status == windowsNetUserExists {
-		passwordInfo := windowsUserInfo1003{Password: passwordPtr}
-		status, _, _ = windowsNetUserSetInfoProc.Call(
-			0,
-			uintptr(unsafe.Pointer(accountPtr)),
-			1003,
-			uintptr(unsafe.Pointer(&passwordInfo)),
-			uintptr(unsafe.Pointer(&parameterError)),
-		)
-	}
-	if status != 0 {
-		return 0, &UnavailableError{Reason: fmt.Sprintf("windows_elevated_account_setup_failed_%d", status)}
-	}
-
-	domain, _ := windows.UTF16PtrFromString(".")
+func windowsSandboxBaseToken() (windows.Token, error) {
 	var token windows.Token
-	ok, _, callErr := windowsLogonUserProc.Call(
-		uintptr(unsafe.Pointer(accountPtr)),
-		uintptr(unsafe.Pointer(domain)),
-		uintptr(unsafe.Pointer(passwordPtr)),
-		windowsLogonInteractive,
-		windowsLogonProviderDefault,
-		uintptr(unsafe.Pointer(&token)),
-	)
-	if ok == 0 {
-		return 0, fmt.Errorf("log on Windows sandbox account: %w", callErr)
+	access := uint32(windows.TOKEN_ASSIGN_PRIMARY | windows.TOKEN_DUPLICATE | windows.TOKEN_QUERY |
+		windows.TOKEN_ADJUST_DEFAULT | windows.TOKEN_ADJUST_SESSIONID | windows.TOKEN_ADJUST_PRIVILEGES)
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), access, &token); err != nil {
+		return 0, fmt.Errorf("open current process token: %w", err)
 	}
 	return token, nil
 }
 
-func prepareWindowsSandboxToken(
-	mode appcfg.WindowsSandboxMode,
-	baseToken windows.Token,
-	identitySID *windows.SID,
-	req CommandRequest,
-	workDir string,
-) (windows.Token, *windows.SID, func(), error) {
+// prepareWindowsSandboxToken builds the restricted token for one command. It
+// bounds writes by the task's directories and leaves reads alone: a restricted
+// token cannot hold an exclusive read set, so there is nothing to enforce and
+// nothing to refuse (plans/150's fail-closed rule is replaced; plan 206).
+func prepareWindowsSandboxToken(baseToken windows.Token, req CommandRequest, workDir string) (windows.Token, *windows.SID, func(), error) {
 	writeRoots := append([]string(nil), req.AdditionalWritablePaths...)
 	if req.Profile.normalized() == ProfileWorkspaceWrite {
 		writeRoots = appendUniquePath(writeRoots, workDir)
 	}
 	writeRoots = normalizeWindowsSandboxPaths(writeRoots)
-	readRoots := append([]string(nil), req.AdditionalReadablePaths...)
-	readRoots = append(readRoots, windowsPlatformReadRoots(req.IncludePlatformDefaults)...)
-	readRoots = normalizeWindowsSandboxPaths(readRoots)
 	deniedWrite := normalizeWindowsSandboxPaths(req.DeniedWritablePaths)
-	deniedRead := normalizeWindowsSandboxPaths(req.DeniedReadablePaths)
-	restrictReads := !windowsRequestHasFullDiskRead(readRoots, deniedRead, workDir)
-	if mode == appcfg.WindowsSandboxUnelevated && restrictReads {
-		return 0, nil, func() {}, &UnavailableError{Reason: "windows_unelevated_restricted_read_requires_elevated"}
-	}
 
-	markerPaths := append([]string(nil), deniedWrite...)
-	if mode == appcfg.WindowsSandboxElevated {
-		markerPaths = append(markerPaths, deniedRead...)
-	}
-	markers, err := prepareWindowsDenyMarkers(markerPaths, writeRoots)
+	markers, err := prepareWindowsDenyMarkers(deniedWrite, writeRoots)
 	if err != nil {
 		return 0, nil, func() {}, err
 	}
 	cleanup := func() { cleanupWindowsDenyMarkers(markers) }
 
-	writeCapabilities, err := windowsCapabilitySIDs("write", writeRoots, append(deniedWrite, deniedRead...))
+	writeCapabilities, err := windowsCapabilitySIDs(writeRoots, deniedWrite)
 	if err != nil {
 		cleanup()
 		return 0, nil, func() {}, err
 	}
-	readCapabilityRoots := make([]string, 0, len(readRoots))
-	if restrictReads {
-		for _, root := range readRoots {
-			if !windowsPathWithinAny(root, writeRoots) {
-				readCapabilityRoots = append(readCapabilityRoots, root)
-			}
-		}
-	}
-	readCapabilities, err := windowsCapabilitySIDs("read", readCapabilityRoots, deniedRead)
-	if err != nil {
-		cleanup()
-		return 0, nil, func() {}, err
-	}
-	capabilitySIDs := windowsCapabilitySIDList(writeCapabilities, readCapabilities)
+	capabilitySIDs := windowsCapabilitySIDList(writeCapabilities)
 	if len(capabilitySIDs) == 0 {
 		readonly, readonlyErr := windowsReadonlyCapabilitySID()
 		if readonlyErr != nil {
@@ -313,31 +140,10 @@ func prepareWindowsSandboxToken(
 	fullAccess := windows.ACCESS_MASK(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE |
 		windows.FILE_GENERIC_EXECUTE | windows.DELETE | windowsFileDeleteChild)
 	writeAccess := windows.ACCESS_MASK(windows.FILE_GENERIC_WRITE | windows.DELETE | windowsFileDeleteChild)
-	readAccess := windows.ACCESS_MASK(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE)
 	for _, capability := range writeCapabilities {
 		if err := mergeWindowsPathACL(capability.Root, capability.SID, windows.GRANT_ACCESS, fullAccess); err != nil {
 			cleanup()
 			return 0, nil, func() {}, fmt.Errorf("grant sandbox write root %s: %w", capability.Root, err)
-		}
-		if mode == appcfg.WindowsSandboxElevated {
-			if err := mergeWindowsPathACL(capability.Root, identitySID, windows.GRANT_ACCESS, fullAccess); err != nil {
-				cleanup()
-				return 0, nil, func() {}, fmt.Errorf("grant sandbox account write root %s: %w", capability.Root, err)
-			}
-		}
-	}
-	for _, capability := range readCapabilities {
-		if err := mergeWindowsPathACL(capability.Root, capability.SID, windows.GRANT_ACCESS, readAccess); err != nil {
-			cleanup()
-			return 0, nil, func() {}, fmt.Errorf("grant sandbox read root %s: %w", capability.Root, err)
-		}
-	}
-	if mode == appcfg.WindowsSandboxElevated {
-		for _, root := range readRoots {
-			if err := mergeWindowsPathACL(root, identitySID, windows.GRANT_ACCESS, readAccess); err != nil {
-				cleanup()
-				return 0, nil, func() {}, fmt.Errorf("grant sandbox account read root %s: %w", root, err)
-			}
 		}
 	}
 	for _, path := range deniedWrite {
@@ -354,24 +160,8 @@ func prepareWindowsSandboxToken(
 			}
 		}
 	}
-	if restrictReads {
-		for _, path := range deniedRead {
-			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			for _, capability := range append(writeCapabilities, readCapabilities...) {
-				if !windowsPathWithinAny(path, []string{capability.Root}) {
-					continue
-				}
-				if err := mergeWindowsPathACL(path, capability.SID, windows.DENY_ACCESS, fullAccess); err != nil {
-					cleanup()
-					return 0, nil, func() {}, fmt.Errorf("deny sandbox read path %s: %w", path, err)
-				}
-			}
-		}
-	}
 
-	restricted, err := createWindowsRestrictedToken(baseToken, capabilitySIDs, restrictReads)
+	restricted, err := createWindowsRestrictedToken(baseToken, capabilitySIDs)
 	if err != nil {
 		cleanup()
 		return 0, nil, func() {}, err
@@ -385,7 +175,7 @@ func prepareWindowsSandboxToken(
 	return restricted, logonSID, cleanup, nil
 }
 
-func createWindowsRestrictedToken(base windows.Token, capabilitySIDs []*windows.SID, restrictReads bool) (windows.Token, error) {
+func createWindowsRestrictedToken(base windows.Token, capabilitySIDs []*windows.SID) (windows.Token, error) {
 	logonSID, err := windowsTokenLogonSID(base)
 	if err != nil {
 		return 0, err
@@ -399,13 +189,10 @@ func createWindowsRestrictedToken(base windows.Token, capabilitySIDs []*windows.
 		entries = append(entries, windows.SIDAndAttributes{Sid: sid})
 	}
 	entries = append(entries, windows.SIDAndAttributes{Sid: logonSID})
-	flags := uintptr(windowsDisableMaxPrivilege | windowsLUAToken)
+	entries = append(entries, windows.SIDAndAttributes{Sid: everyoneSID})
+	flags := uintptr(windowsDisableMaxPrivilege | windowsLUAToken | windowsWriteRestricted)
 	defaultDACL := append([]*windows.SID{logonSID}, capabilitySIDs...)
-	if !restrictReads {
-		entries = append(entries, windows.SIDAndAttributes{Sid: everyoneSID})
-		flags |= windowsWriteRestricted
-		defaultDACL = append(defaultDACL, everyoneSID)
-	}
+	defaultDACL = append(defaultDACL, everyoneSID)
 	var token windows.Token
 	var entriesPtr uintptr
 	if len(entries) > 0 {
@@ -640,20 +427,11 @@ func normalizeWindowsSandboxPaths(paths []string) []string {
 	return out
 }
 
-func windowsPlatformReadRoots(include bool) []string {
-	if !include {
-		return nil
-	}
-	return normalizeWindowsSandboxPaths([]string{
-		os.Getenv("SystemRoot"),
-		os.Getenv("ProgramFiles"),
-		os.Getenv("ProgramFiles(x86)"),
-	})
-}
-
+// windowsCapabilityState is the persisted map of the capability SIDs granted to
+// the write roots the sandbox has seen. Reads carry no capability: a
+// restricted token cannot hold an exclusive read set (plan 206).
 type windowsCapabilityState struct {
 	Readonly string            `json:"readonly"`
-	Readable map[string]string `json:"readable,omitempty"`
 	Writable map[string]string `json:"writable"`
 }
 
@@ -662,7 +440,7 @@ type windowsPathCapability struct {
 	SID  *windows.SID
 }
 
-func windowsCapabilitySIDs(kind string, roots, denied []string) ([]windowsPathCapability, error) {
+func windowsCapabilitySIDs(roots, denied []string) ([]windowsPathCapability, error) {
 	windowsCapabilityMu.Lock()
 	defer windowsCapabilityMu.Unlock()
 	state, path, err := loadWindowsCapabilityState()
@@ -671,16 +449,9 @@ func windowsCapabilitySIDs(kind string, roots, denied []string) ([]windowsPathCa
 	}
 	changed := false
 	values := state.Writable
-	if kind == "read" {
-		values = state.Readable
-	}
 	if values == nil {
 		values = map[string]string{}
-		if kind == "read" {
-			state.Readable = values
-		} else {
-			state.Writable = values
-		}
+		state.Writable = values
 		changed = true
 	}
 	out := make([]windowsPathCapability, 0, len(roots))
@@ -773,7 +544,7 @@ func loadWindowsCapabilityState() (windowsCapabilityState, string, error) {
 		home = filepath.Join(userHome, ".forebrain")
 	}
 	path := filepath.Join(home, "state", "windows_sandbox_capabilities.json")
-	state := windowsCapabilityState{Readable: map[string]string{}, Writable: map[string]string{}}
+	state := windowsCapabilityState{Writable: map[string]string{}}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return state, path, nil
@@ -786,9 +557,6 @@ func loadWindowsCapabilityState() (windowsCapabilityState, string, error) {
 	}
 	if state.Writable == nil {
 		state.Writable = map[string]string{}
-	}
-	if state.Readable == nil {
-		state.Readable = map[string]string{}
 	}
 	return state, path, nil
 }
@@ -851,94 +619,24 @@ func randomWindowsCapabilitySID() (string, error) {
 	), nil
 }
 
-type windowsObjectACLState struct {
-	handle     windows.Handle
-	objectType windows.SE_OBJECT_TYPE
-	descriptor *windows.SECURITY_DESCRIPTOR
-	dacl       *windows.ACL
-}
-
-func (state *windowsObjectACLState) Restore() {
-	if state == nil || state.handle == 0 {
-		return
-	}
-	_ = windows.SetSecurityInfo(
-		state.handle,
-		state.objectType,
-		windows.DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		state.dacl,
-		nil,
-	)
-	runtime.KeepAlive(state.descriptor)
-	state.handle = 0
-}
-
 type windowsPrivateDesktop struct {
-	handle          windows.Handle
-	name            string
-	stationACLState *windowsObjectACLState
-	desktopACLState *windowsObjectACLState
+	handle windows.Handle
+	name   string
 }
 
-func prepareWindowsPrivateDesktop(enabled bool, logonSID *windows.SID, grantWindowStation bool) (*windowsPrivateDesktop, *uint16, error) {
-	name := "Winsta0\\Default"
-	if !enabled && !grantWindowStation {
-		namePtr, err := windows.UTF16PtrFromString(name)
-		return nil, namePtr, err
-	}
+// prepareWindowsPrivateDesktop always creates a private desktop: the desktop a
+// sandboxed command runs on is no longer a setting (owner 2026-10-31, plan
+// 206), and a private one keeps a stray window of the command out of the user's
+// interactive desktop.
+func prepareWindowsPrivateDesktop(logonSID *windows.SID) (*windowsPrivateDesktop, *uint16, error) {
 	desktop := &windowsPrivateDesktop{}
-	if grantWindowStation {
-		handle, _, callErr := windowsGetWindowStationProc.Call()
-		if handle == 0 {
-			return nil, nil, fmt.Errorf("open process Windows station: %w", callErr)
-		}
-		state, err := grantWindowsObjectAccessRestorable(windows.Handle(handle), windows.SE_WINDOW_OBJECT, logonSID, windowsWindowStationAccess)
-		if err != nil {
-			return nil, nil, fmt.Errorf("grant Windows station access: %w", err)
-		}
-		desktop.stationACLState = state
-	}
-	if !enabled {
-		defaultName, err := windows.UTF16PtrFromString("Default")
-		if err != nil {
-			desktop.Close()
-			return nil, nil, err
-		}
-		handle, _, callErr := windowsOpenDesktopProc.Call(
-			uintptr(unsafe.Pointer(defaultName)),
-			0,
-			0,
-			windowsDesktopACLAccess,
-		)
-		if handle == 0 {
-			desktop.Close()
-			return nil, nil, fmt.Errorf("open default Windows desktop: %w", callErr)
-		}
-		desktop.handle = windows.Handle(handle)
-		state, err := grantWindowsObjectAccessRestorable(desktop.handle, windows.SE_WINDOW_OBJECT, logonSID, windowsDesktopAllAccess)
-		if err != nil {
-			desktop.Close()
-			return nil, nil, fmt.Errorf("grant default Windows desktop access: %w", err)
-		}
-		desktop.desktopACLState = state
-		namePtr, err := windows.UTF16PtrFromString(name)
-		if err != nil {
-			desktop.Close()
-			return nil, nil, err
-		}
-		return desktop, namePtr, nil
-	}
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
-		desktop.Close()
 		return nil, nil, err
 	}
 	desktopName := fmt.Sprintf("ForebrainSandboxDesktop-%x", random)
 	desktopNamePtr, err := windows.UTF16PtrFromString(desktopName)
 	if err != nil {
-		desktop.Close()
 		return nil, nil, err
 	}
 	handle, _, callErr := windowsCreateDesktopProc.Call(
@@ -948,7 +646,6 @@ func prepareWindowsPrivateDesktop(enabled bool, logonSID *windows.SID, grantWind
 		0,
 	)
 	if handle == 0 {
-		desktop.Close()
 		return nil, nil, fmt.Errorf("create private Windows desktop: %w", callErr)
 	}
 	desktop.handle = windows.Handle(handle)
@@ -969,12 +666,10 @@ func (desktop *windowsPrivateDesktop) Close() {
 	if desktop == nil {
 		return
 	}
-	desktop.desktopACLState.Restore()
 	if desktop.handle != 0 {
 		windowsCloseDesktopProc.Call(uintptr(desktop.handle))
 		desktop.handle = 0
 	}
-	desktop.stationACLState.Restore()
 }
 
 func grantWindowsObjectAccess(handle windows.Handle, objectType windows.SE_OBJECT_TYPE, sid *windows.SID, access uint32) error {
@@ -1006,44 +701,10 @@ func grantWindowsObjectAccess(handle windows.Handle, objectType windows.SE_OBJEC
 	return windows.SetSecurityInfo(handle, objectType, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
 
-func grantWindowsObjectAccessRestorable(handle windows.Handle, objectType windows.SE_OBJECT_TYPE, sid *windows.SID, access uint32) (*windowsObjectACLState, error) {
-	sd, err := windows.GetSecurityInfo(handle, objectType, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return nil, err
-	}
-	var oldACL *windows.ACL
-	if sd != nil {
-		oldACL, _, err = sd.DACL()
-		if err != nil && !errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
-			return nil, err
-		}
-	}
-	entry := windows.EXPLICIT_ACCESS{
-		AccessPermissions: windows.ACCESS_MASK(access),
-		AccessMode:        windows.GRANT_ACCESS,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeType:  windows.TRUSTEE_IS_UNKNOWN,
-			TrusteeValue: windows.TrusteeValueFromSID(sid),
-		},
-	}
-	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, oldACL)
-	if err != nil {
-		return nil, err
-	}
-	if err := windows.SetSecurityInfo(handle, objectType, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
-		return nil, err
-	}
-	runtime.KeepAlive(sd)
-	return &windowsObjectACLState{handle: handle, objectType: objectType, descriptor: sd, dacl: oldACL}, nil
-}
-
 func spawnWindowsSandboxProcess(
 	ctx context.Context,
 	token windows.Token,
 	logonSID *windows.SID,
-	privateDesktop bool,
-	grantWindowStation bool,
 	req CommandRequest,
 	workDir string,
 	env []string,
@@ -1066,7 +727,7 @@ func spawnWindowsSandboxProcess(
 		return CommandResult{}, err
 	}
 
-	desktop, desktopName, err := prepareWindowsPrivateDesktop(privateDesktop, logonSID, grantWindowStation)
+	desktop, desktopName, err := prepareWindowsPrivateDesktop(logonSID)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -1300,105 +961,6 @@ func windowsEnvironmentBlock(env []string) ([]uint16, error) {
 	}
 	block = append(block, 0)
 	return block, nil
-}
-
-func applyWindowsNoNetworkEnvironment(env []string) []string {
-	values := map[string]string{
-		"SBX_NONET_ACTIVE":              "1",
-		"HTTP_PROXY":                    "http://127.0.0.1:9",
-		"HTTPS_PROXY":                   "http://127.0.0.1:9",
-		"ALL_PROXY":                     "http://127.0.0.1:9",
-		"NO_PROXY":                      "localhost,127.0.0.1,::1",
-		"PIP_NO_INDEX":                  "1",
-		"PIP_DISABLE_PIP_VERSION_CHECK": "1",
-		"NPM_CONFIG_OFFLINE":            "true",
-		"CARGO_NET_OFFLINE":             "true",
-		"GIT_HTTP_PROXY":                "http://127.0.0.1:9",
-		"GIT_HTTPS_PROXY":               "http://127.0.0.1:9",
-		"GIT_SSH_COMMAND":               "cmd /c exit 1",
-		"GIT_ALLOW_PROTOCOLS":           "",
-	}
-	for key, value := range values {
-		env = appendOrReplaceEnvCaseInsensitive(env, key, value)
-	}
-	return env
-}
-
-func appendOrReplaceEnvCaseInsensitive(env []string, key, value string) []string {
-	for index, item := range env {
-		current, _, ok := strings.Cut(item, "=")
-		if ok && strings.EqualFold(current, key) {
-			env[index] = key + "=" + value
-			return env
-		}
-	}
-	return append(env, key+"="+value)
-}
-
-func reconcileWindowsOfflineFirewall(identitySID string, policy windowsNetworkPolicy) error {
-	if !validWindowsSIDString(identitySID) {
-		return errors.New("invalid Windows sandbox identity SID")
-	}
-	powershell := powershellPath()
-	if powershell == "" {
-		return &UnavailableError{Reason: "windows_firewall_powershell_not_found"}
-	}
-	localUser := "O:LSD:(A;;CC;;;" + identitySID + ")"
-	const nonLoopback = "0.0.0.0-126.255.255.255,128.0.0.0-255.255.255.255,::,::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
-	names := []string{
-		"forebrain_sandbox_offline_block_outbound",
-		"forebrain_sandbox_offline_block_loopback_tcp",
-		"forebrain_sandbox_offline_block_loopback_udp",
-	}
-	var script strings.Builder
-	script.WriteString("$ErrorActionPreference='Stop';")
-	for _, name := range names {
-		fmt.Fprintf(&script, "Get-NetFirewallRule -Name '%s' -ErrorAction SilentlyContinue | Remove-NetFirewallRule;", name)
-	}
-	fmt.Fprintf(
-		&script,
-		"New-NetFirewallRule -Name '%s' -DisplayName 'Forebrain Harness Sandbox Offline - Block Non-Loopback Outbound' -Direction Outbound -Action Block -Enabled True -Profile Any -Protocol Any -RemoteAddress '%s' -LocalUser '%s' -Owner '%s' | Out-Null;",
-		names[0], nonLoopback, localUser, identitySID,
-	)
-	if !policy.AllowAllLoopback {
-		blockedUDP := blockedWindowsTCPPorts(policy.AllowedUDPPorts)
-		if blockedUDP != "" {
-			ports := "'" + strings.ReplaceAll(blockedUDP, ",", "','") + "'"
-			fmt.Fprintf(
-				&script,
-				"New-NetFirewallRule -Name '%s' -DisplayName 'Forebrain Harness Sandbox Offline - Block Loopback UDP Except Proxy' -Direction Outbound -Action Block -Enabled True -Profile Any -Protocol UDP -RemoteAddress '127.0.0.0/8','::/127' -RemotePort %s -LocalUser '%s' -Owner '%s' | Out-Null;",
-				names[2], ports, localUser, identitySID,
-			)
-		}
-		blocked := blockedWindowsTCPPorts(policy.AllowedTCPPorts)
-		if blocked != "" {
-			ports := "'" + strings.ReplaceAll(blocked, ",", "','") + "'"
-			fmt.Fprintf(
-				&script,
-				"New-NetFirewallRule -Name '%s' -DisplayName 'Forebrain Harness Sandbox Offline - Block Loopback TCP Except Proxy' -Direction Outbound -Action Block -Enabled True -Profile Any -Protocol TCP -RemoteAddress '127.0.0.0/8','::/127' -RemotePort %s -LocalUser '%s' -Owner '%s' | Out-Null;",
-				names[1], ports, localUser, identitySID,
-			)
-		}
-	}
-	cmd := exec.Command(powershell, "-NoProfile", "-NonInteractive", "-Command", script.String())
-	cmd.Env = home.SafeSubprocessEnv(nil, home.Options{})
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("reconcile Windows sandbox firewall: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func validWindowsSIDString(value string) bool {
-	if !strings.HasPrefix(value, "S-") || len(value) < 4 {
-		return false
-	}
-	for _, char := range value[2:] {
-		if char != '-' && (char < '0' || char > '9') {
-			return false
-		}
-	}
-	return true
 }
 
 // hostShellCommand builds the host shell invocation for a command string on

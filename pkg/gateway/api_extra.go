@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -34,6 +36,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/joho/godotenv"
+	"gopkg.in/yaml.v3"
 )
 
 func (s *Server) AttachExtraRoutes(routes Routes) {
@@ -77,6 +80,11 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	permissions := api.Group("/permissions")
 	permissions.Get("/approval-default", s.handleApprovalDefaultGet)
 	permissions.Put("/approval-default", s.handleApprovalDefaultPut)
+	// The batch project group's one setting (plans/216 §3.6): whether a new
+	// batch project starts with its sandbox on. The value keeps being stored
+	// and read on a machine with no sandbox — the page is what hides it there.
+	permissions.Get("/batch-sandbox-default", s.handleBatchSandboxDefaultGet)
+	permissions.Put("/batch-sandbox-default", s.handleBatchSandboxDefaultPut)
 	permissions.Get("/session-preset", s.handleSessionPresetGet)
 	permissions.Post("/session-preset", s.handleSessionPreset)
 	permissions.Get("/rules", s.handlePermissionRules)
@@ -180,7 +188,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions := api.Group("/chat/sessions")
 	chatSessions.Get("/", s.handleChatSessions)
 	chatSessions.Post("/", s.handleChatSessionCreate)
-	chatSessions.Post("/:id/title", s.handleChatSessionTitle)
+	chatSessions.Post("/:id/title", s.batchReadOnly(s.handleChatSessionTitle))
 	chatSessions.Get("/:id/messages", s.handleChatMessages)
 	// What one user message attached, by the message that holds it: the route a
 	// path-recorded attachment (the terminal's pasted screenshot) is opened by.
@@ -200,32 +208,32 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	// The conversation's own model choice, session-scoped like /model's live
 	// switch: the runner's published default is never touched here.
 	chatSessions.Get("/:id/model", s.handleChatSessionModelGet)
-	chatSessions.Put("/:id/model", s.handleChatSessionModelPut)
+	chatSessions.Put("/:id/model", s.batchReadOnly(s.handleChatSessionModelPut))
 	chatSessions.Get("/:id", s.handleChatSession)
-	chatSessions.Post("/:id/compact", s.handleSessionCompact)
+	chatSessions.Post("/:id/compact", s.batchReadOnly(s.handleSessionCompact))
 	// "Rewind to before a message" (plan 033): preview, run, undo, and the
 	// workbench's changed-files list. All three modes and both surfaces run the
 	// same pkg/turn engine.
 	chatSessions.Get("/:id/rewind-preview", s.handleSessionRewindPreview)
-	chatSessions.Post("/:id/rewind", s.handleSessionRewind)
-	chatSessions.Post("/:id/rewind/undo", s.handleSessionRewindUndo)
+	chatSessions.Post("/:id/rewind", s.batchReadOnly(s.handleSessionRewind))
+	chatSessions.Post("/:id/rewind/undo", s.batchReadOnly(s.handleSessionRewindUndo))
 	chatSessions.Get("/:id/file-changes", s.handleSessionFileChanges)
-	chatSessions.Post("/:id/file-changes/revert", s.handleSessionFileChangesRevert)
+	chatSessions.Post("/:id/file-changes/revert", s.batchReadOnly(s.handleSessionFileChangesRevert))
 	chatSessions.Get("/:id/file-changes/diff", s.handleSessionFileChangesDiff)
 	// Esc in the conversation itself: stop the model call in flight so the
 	// steers queued behind it go now, inside the same turn. The answer is the
 	// engine's, not the surface's guess — false means Esc keeps its other
 	// meaning there and the surface stops the run.
-	chatSessions.Post("/:id/interrupt-send", s.handleSessionInterruptSend)
+	chatSessions.Post("/:id/interrupt-send", s.batchReadOnly(s.handleSessionInterruptSend))
 	// A subagent's own view talks to that subagent through these — the same
 	// semantics the terminal's subagent view has (plan 007), decided in the
 	// engine (plan 005): steer, recall, interrupt-and-send, context, and the
 	// budget it opens with. There is no withdraw (a view only steers a running
 	// execution) and no compact (a subagent's own summary is not the user's to
 	// run) — plan 142.
-	chatSessions.Post("/:id/subagents/:agent/input", s.handleSubagentInput)
-	chatSessions.Post("/:id/subagents/:agent/queued-input", s.handleSubagentQueuedInput)
-	chatSessions.Post("/:id/subagents/:agent/interrupt-send", s.handleSubagentInterruptSend)
+	chatSessions.Post("/:id/subagents/:agent/input", s.batchReadOnly(s.handleSubagentInput))
+	chatSessions.Post("/:id/subagents/:agent/queued-input", s.batchReadOnly(s.handleSubagentQueuedInput))
+	chatSessions.Post("/:id/subagents/:agent/interrupt-send", s.batchReadOnly(s.handleSubagentInterruptSend))
 	chatSessions.Get("/:id/subagents/:agent/context", s.handleSubagentContext)
 	chatSessions.Get("/:id/subagents/:agent/budget", s.handleSubagentBudget)
 
@@ -370,6 +378,15 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 
 	api.Get("/config", s.handleConfigFile)
 	api.Put("/config", s.handleConfigFile)
+	// The settings page's own read and group save (plan 191 §3.1): every item
+	// the page draws, by path, with credentials reduced to whether they are set
+	// and their last four characters.
+	api.Get("/settings", s.handleSettings)
+	api.Patch("/settings", s.handleSettings)
+	// The keys forebrain.yaml supports (plan 207 §3.6): the configuration
+	// editor flags every other key instead of letting a reader believe it
+	// configures something.
+	api.Get("/config/file-schema", s.handleConfigFileSchema)
 	// What the settings page's runtime tab shows: the facts only the gateway
 	// knows. The version and the address the browser reached are the
 	// browser's own.
@@ -882,6 +899,15 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 	writeListPage(w, "rules", page, len(matched), servedPage, q, map[string]any{"mode": snap.Mode})
 }
 
+// fullAccessInForce is "this configuration runs with full access": the
+// environment flag forced it, or the preset it derives is full access. The
+// project-scoped permission endpoints have no conversation to ask, so the
+// configuration is the whole answer — a conversation-scoped call goes through
+// its runner instead, which knows the session's own preset.
+func fullAccessInForce(cfg *config.Root) bool {
+	return safety.RuntimeYOLOEnabled() || (cfg != nil && cfg.DangerFullAccessEnabled())
+}
+
 func (s *Server) handlePermissionEvaluate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -914,7 +940,7 @@ func (s *Server) handlePermissionEvaluate(w http.ResponseWriter, r *http.Request
 			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		d = scope.rt.Evaluate("", body.ToolName, body.Input, scope.cfg, safety.RuntimeYOLOEnabled())
+		d = scope.rt.Evaluate("", body.ToolName, body.Input, scope.cfg, fullAccessInForce(scope.cfg))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(d)
@@ -946,7 +972,7 @@ func (s *Server) handlePermissionExplain(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		ex = scope.rt.Explain("", toolName, input, scope.cfg, safety.RuntimeYOLOEnabled())
+		ex = scope.rt.Explain("", toolName, input, scope.cfg, fullAccessInForce(scope.cfg))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ex)
@@ -1046,7 +1072,7 @@ type permissionScope struct {
 }
 
 func (s *Server) loadPermissionScope(projectRoot string) (permissionScope, bool) {
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		return permissionScope{}, false
 	}
@@ -1851,7 +1877,7 @@ func (s *Server) handleChatSessionModelGet(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "no runner is bound to this session", http.StatusServiceUnavailable)
 		return
 	}
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		http.Error(w, "no configuration is bound", http.StatusServiceUnavailable)
 		return
@@ -1884,7 +1910,7 @@ func (s *Server) handleChatModelDefault(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "no runner is bound", http.StatusServiceUnavailable)
 		return
 	}
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		http.Error(w, "no configuration is bound", http.StatusServiceUnavailable)
 		return
@@ -1949,7 +1975,7 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "no runner is bound to this session", http.StatusServiceUnavailable)
 		return
 	}
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		http.Error(w, "no configuration is bound", http.StatusServiceUnavailable)
 		return
@@ -3121,7 +3147,7 @@ func (s *Server) handleSubagentContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "context unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	workerSessionID, provider, model, used, explicitLimit, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
+	workerSessionID, provider, model, used, budget, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -3131,13 +3157,13 @@ func (s *Server) handleSubagentContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.subagentContextBody(r.Context(), workerSessionID, provider, model, used, explicitLimit))
+	_ = json.NewEncoder(w).Encode(s.subagentContextBody(r.Context(), workerSessionID, provider, model, used, budget))
 }
 
 // subagentContextBody is /context for a subagent: the same report the
 // conversation's own /context returns, fed the subagent's worker session, its
 // model and its own occupancy, so the page draws it with the same component.
-func (s *Server) subagentContextBody(ctx context.Context, workerSessionID, provider, model string, used, explicitLimit int) map[string]any {
+func (s *Server) subagentContextBody(ctx context.Context, workerSessionID, provider, model string, used int, budget state.TokenBudgetOptions) map[string]any {
 	workerSessionID = strings.TrimSpace(workerSessionID)
 	body := map[string]any{}
 	var compactions []event.ContextCompactedPayload
@@ -3156,7 +3182,7 @@ func (s *Server) subagentContextBody(ctx context.Context, workerSessionID, provi
 			}
 		}
 	}
-	gauge := turn.ContextGaugeOf(provider, model, used, explicitLimit)
+	gauge := turn.ContextGaugeOf(provider, model, used, budget)
 	body["model_context_tokens"] = gauge.WindowTokens
 	body["available_window_tokens"] = gauge.WindowTokens
 	body["remaining_context_tokens"] = gauge.UsedTokens
@@ -3884,7 +3910,6 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 		PlanOnly                   bool                               `json:"plan_only,omitempty"`
 		Decision                   string                             `json:"decision,omitempty"`
 		ExecPolicyAmendment        safety.ExecPolicyAmendment         `json:"execpolicy_amendment,omitempty"`
-		NetworkPolicyAmendment     *safety.NetworkPolicyAmendment     `json:"network_policy_amendment,omitempty"`
 		RequestPermissionsResponse *safety.RequestPermissionsResponse `json:"request_permissions_response,omitempty"`
 	}
 	decoder := json.NewDecoder(r.Body)
@@ -3905,7 +3930,7 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 		decision = "accept"
 	}
 	err := s.resolveGatewayApproval(r.Context(), id, turn.ApprovalReply{
-		Choice: decision, Exec: body.ExecPolicyAmendment, Network: body.NetworkPolicyAmendment,
+		Choice: decision, Exec: body.ExecPolicyAmendment,
 		Permissions: body.RequestPermissionsResponse, Update: body.Update, Reason: body.Reason, ClearContext: body.ClearContext, PlanOnly: body.PlanOnly,
 	})
 	if err != nil {
@@ -4554,14 +4579,10 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	if res != nil {
 		ans = res.TextContent()
 	}
-	if lc := s.liveCfg(); lc != nil {
-		ans = safety.SanitizeOutbound(lc, ans)
-	}
 	if strings.TrimSpace(ans) != "" {
 		if !streamed {
-			// Not streamed — sent whole by the provider, or held for the
-			// output guardrail — so it reaches the page once, as the event its
-			// stream would have been.
+			// Not streamed — sent whole by the provider — so it reaches the
+			// page once, as the event its stream would have been.
 			_ = s.RunEvents().Publish(ctx, event.NewRunEvent("", runID, sid, event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: ans}, time.Now()))
 		}
 	}
@@ -5341,35 +5362,43 @@ func failConfigSection(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
-// handleConfigFile serves the settings page's configuration editor (plan 188
-// W3). GET returns the composed document — the file's startup sections plus
-// every stored runtime section, rendered as YAML — so what the editor shows
-// is what the runtime composes; PUT writes each runtime section the body
-// carries into the state database, one section per transaction. The startup
-// sections are not writable here: gateway binds before a database may exist,
-// and credentials is the file's transition-period pointer, so a body naming
-// either is refused the way a hand edit of them would be.
+// handleConfigFileSchema serves the keys forebrain.yaml supports (plan 207
+// §3.6). It is the file's whitelist as one source — config.FileSupportedKeys —
+// read by the settings page's configuration editor, so a key the file does not
+// carry is drawn as not existing rather than left looking configured.
+func (s *Server) handleConfigFileSchema(w http.ResponseWriter, r *http.Request) {
+	writeAgentsJSON(w, map[string]any{"keys": config.FileSupportedKeys()})
+}
+
+// handleConfigFile serves the settings page's configuration editor (plan 191
+// §3.2). GET hands over the text of forebrain.yaml on disk; PUT writes it back
+// after checking nothing but its YAML syntax.
+//
+// The file is not the runtime configuration's source any more — every setting
+// the pages draw is stored in fb_config — so PUT writes the file and no
+// database row, and a key the file does not support (a retired setting, one the
+// pages own, a typo) is not an error: it is saved as written and ignored when
+// the file is read (owner ruling §0.19). Only text that is not YAML at all is
+// refused, with the line and the reason, and then nothing is written.
 func (s *Server) handleConfigFile(w http.ResponseWriter, r *http.Request) {
 	path := s.configPath()
 	switch r.Method {
 	case http.MethodGet:
-		doc, err := s.Env.RenderConfigDocument(r.Context())
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		text, err := process.ReadConfigFile(path)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		active := ""
-		if sum, aerr := s.activePrimarySummary(); aerr == nil {
-			active = sum.ID
-		}
 		writeAgentsJSON(w, map[string]any{
-			"path":     path,
-			"agent_id": active,
-			// The document is the composed configuration the runtime reads,
-			// credentials included in plaintext exactly as they are stored
-			// (owner ruling 2026-10-30): what the editor shows is what the
-			// next turn composes, and what it sends back is what lands.
-			"yaml": string(doc),
+			"path": path,
+			"yaml": text,
+			// Whether the web may offer the approval presets at all: a machine
+			// with no usable sandbox has nothing to configure, so the whole
+			//「审批与沙箱」surface is hidden and the composer's preset switch
+			// reads 完全访问 (plan 215 §3.4). It rides here because this is what
+			// the composer already reads; the settings page gets the same answer
+			// from GET /api/settings, from the same function.
+			"approval_presets_visible": safety.SandboxAvailable(),
 		})
 	case http.MethodPut:
 		var req struct {
@@ -5379,44 +5408,18 @@ func (s *Server) handleConfigFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		next, err := config.ParseRootYAML([]byte(req.YAML))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if syntax := configFileSyntaxError(req.YAML); syntax != nil {
+			writeSettingsJSON(w, http.StatusBadRequest, map[string]any{
+				"line":    syntax.line,
+				"message": syntax.message,
+			})
 			return
 		}
-		// The startup sections are not writable here. A body carrying them
-		// back exactly as the GET rendered them is the editor's round trip;
-		// anything else is an edit the file's owner must make by hand.
-		same, err := s.Env.StartupSectionsUnchanged(r.Context(), next)
-		if err != nil {
+		if err := process.WriteConfigFile(path, []byte(req.YAML)); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if !same {
-			http.Error(w, "gateway/credentials 段只能手编 YAML 并重启生效", http.StatusBadRequest)
-			return
-		}
-		store, err := s.Env.ConfigStore()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		// The document is the whole configuration: every runtime section the
-		// body carries is written, and one the body dropped is removed.
-		for _, name := range process.RootConfigSections() {
-			raw, err := process.MarshalRootSection(next, name)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if err := store.UpdateSection(r.Context(), name, func(json.RawMessage) (json.RawMessage, error) {
-				return raw, nil
-			}); err != nil {
-				failConfigSection(w, err)
-				return
-			}
-		}
-		writeAgentsJSON(w, s.nextTurnConfigWriteResult(""))
+		writeAgentsJSON(w, map[string]any{"saved": true})
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -5775,7 +5778,12 @@ type providerRowDTO struct {
 	APIPath  string   `json:"api_path,omitempty"`
 	Params   string   `json:"params,omitempty"`
 	Models   []string `json:"models"`
-	APIKey   string   `json:"api_key,omitempty"`
+	// The key itself never leaves the gateway (plan 191 §3.3, §0.20): the page
+	// is told whether one is set and its last four characters, and that is what
+	// the masked field shows. The value stays in the section, in plaintext,
+	// exactly as the owner ruling stores it.
+	APIKeySet   bool   `json:"api_key_set"`
+	APIKeyLast4 string `json:"api_key_last4,omitempty"`
 }
 
 // providerListRow is one row of the model-services table: the stored row plus
@@ -6074,13 +6082,15 @@ func providerRowsFor(entries []config.AgentLLMProviderConfig) []providerRowDTO {
 		} else if strings.TrimSpace(item.Model) != "" {
 			models = append(models, item.Model)
 		}
+		key := strings.TrimSpace(item.APIKey)
 		row := providerRowDTO{
-			Provider: strings.TrimSpace(item.Provider),
-			BaseURL:  strings.TrimSpace(item.BaseURL),
-			APIPath:  strings.TrimSpace(item.APIPath),
-			Params:   strings.TrimSpace(string(item.Params)),
-			Models:   models,
-			APIKey:   strings.TrimSpace(item.APIKey),
+			Provider:    strings.TrimSpace(item.Provider),
+			BaseURL:     strings.TrimSpace(item.BaseURL),
+			APIPath:     strings.TrimSpace(item.APIPath),
+			Params:      strings.TrimSpace(string(item.Params)),
+			Models:      models,
+			APIKeySet:   key != "",
+			APIKeyLast4: secretLast4(key),
 		}
 		// Fold only adjacent rows: an interleaved order (deepseek, openai,
 		// deepseek) is stored as three rows on purpose, not one service.
@@ -6491,11 +6501,6 @@ func (s *Server) handleRuntimeInfo(w http.ResponseWriter, r *http.Request) {
 		"logs_dir":  filepath.Join(s.Home, "logs"),
 		"state_dir": filepath.Join(s.Home, "state"),
 	}
-	// A gateway started without a configuration has no auth mode to name; the
-	// key is left out rather than answered with a mode it is not running.
-	if cfg := s.liveCfg(); cfg != nil {
-		payload["auth"] = gatewayAuthMode(cfg)
-	}
 	writeJSON(w, payload)
 }
 
@@ -6875,6 +6880,11 @@ type projectPayload struct {
 	// targets. A pointer, so "not in this request" and "make it empty" are
 	// different requests (plan 151).
 	TaskNotify *[]state.TaskNotifyTarget `json:"task_notify"`
+	// BatchSandbox sets the batch project's sandbox switch (plans/216). A
+	// pointer for the same reason as TaskNotify; unset means "leave it as the
+	// project has it", and a request that switches the project to batch with
+	// the switch unset takes the install's default.
+	BatchSandbox *bool `json:"batch_sandbox"`
 }
 
 // projectIsTrusted reads the persisted trust decision for one project root —
@@ -6891,6 +6901,17 @@ func projectIsTrusted(home string, root string) bool {
 	}
 	trusted, err := safety.IsTrusted(home, project)
 	return err == nil && trusted
+}
+
+// batchSandboxDefault is the install's batch.sandbox_default: the sandbox
+// switch a new batch project starts with, and the one a project takes when it
+// becomes a batch project (plans/216). A build with no configuration loaded
+// answers with the setting's own default, which is what an unset setting means.
+func (s *Server) batchSandboxDefault() bool {
+	if cfg := s.liveCfg(); cfg != nil { // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
+		return cfg.Batch.EffectiveSandboxDefault()
+	}
+	return config.BatchSection{}.EffectiveSandboxDefault()
 }
 
 func (s *Server) projectRow(p state.Project) map[string]any {
@@ -6914,6 +6935,7 @@ func (s *Server) projectRow(p state.Project) map[string]any {
 		"last_attach_dir": p.LastAttachDir,
 		"project_type":    state.NormalizeProjectType(p.ProjectType),
 		"task_notify":     taskNotify,
+		"batch_sandbox":   p.BatchSandbox,
 		"created_at":      p.CreatedAt,
 		"updated_at":      p.UpdatedAt,
 		// The picker reads these two to badge a row: a root that is no longer
@@ -7080,16 +7102,6 @@ func (s *Server) handleProjectsCreate(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "project_type_invalid"})
 		return
 	}
-	if projectType == state.ProjectTypeBatch && !body.Trust {
-		// A batch project's tasks run unattended on the project's own skills
-		// and MCP servers, which load only in a trusted project, and its
-		// sandbox is derived from that trust. Creating one therefore records
-		// the trust decision with it.
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": "batch_requires_trust"})
-		return
-	}
 	p, err := store.Create(r.Context(), state.CreateProjectInput{
 		Name:           body.Name,
 		Icon:           body.Icon,
@@ -7100,6 +7112,9 @@ func (s *Server) handleProjectsCreate(w http.ResponseWriter, r *http.Request) {
 		MemoryScope:    body.MemoryScope,
 		ResourceAccess: resourceAccess,
 		ProjectType:    projectType,
+		// A batch project copies the install's default at the moment it is
+		// created and owns the value from then on (plans/216).
+		BatchSandbox: config.BoolPtr(s.batchSandboxDefault()),
 	})
 	if errors.Is(err, state.ErrProjectRootTaken) {
 		// One project per (agent, root): the row the caller collided with is
@@ -7113,18 +7128,23 @@ func (s *Server) handleProjectsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// A batch project records its trust as part of being created, never as a
+	// decision the client made: a batch project has no trust level at all
+	// (owner 2026-10-31, plans/216 §0.4) — it is not set, not shown, and no
+	// judgement reads it. The record is still written because the loaders that
+	// read it are the same for every project: a batch task loads the project's
+	// skills and MCP servers, and those gates open on the trusted state.
 	trustRecorded := false
-	if body.Trust {
+	if body.Trust || projectType == state.ProjectTypeBatch {
 		if err := safety.MarkTrusted(s.Home, safety.Project{Root: root}); err == nil {
 			trustRecorded = true
 		}
 	}
 	if projectType == state.ProjectTypeBatch && !trustRecorded {
-		// A batch project is only creatable together with its trust record
-		// (its tasks run unattended on trusted-only project skills and MCP).
-		// When the record could not be written the project must not survive:
-		// an untrusted batch project would be force-sandboxed out of the
-		// very things it depends on.
+		// The record could not be written, and a batch project without it would
+		// be force-sandboxed out of the very skills and servers its tasks run
+		// on. Nobody can be asked to retry a decision that is not theirs, so
+		// the project does not survive.
 		_ = store.Delete(r.Context(), p.ID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -7185,19 +7205,20 @@ func (s *Server) handleProjectOne(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": "project_type_invalid"})
 				return
 			}
-			// Changing a project to batch carries the same trust requirement
-			// as creating one: only a project whose root is already trusted
-			// can switch without the request restating the decision.
-			if projectType == state.ProjectTypeBatch && !body.Trust && !projectIsTrusted(s.Home, p.Root) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				_ = json.NewEncoder(w).Encode(map[string]any{"error": "batch_requires_trust"})
-				return
-			}
 			in.ProjectType = &projectType
 		}
 		if body.ResourceAccess != nil {
 			in.ResourceAccess = body.ResourceAccess
+		}
+		if body.BatchSandbox != nil {
+			in.BatchSandbox = body.BatchSandbox
+		} else if body.ProjectType != "" && p.ProjectType != state.ProjectTypeBatch &&
+			strings.TrimSpace(body.ProjectType) == state.ProjectTypeBatch {
+			// A project that becomes a batch project acquires the switch now,
+			// from the install's default: the global value is a starting
+			// point, and changing it later never reaches a project that
+			// already has one (plans/216).
+			in.BatchSandbox = config.BoolPtr(s.batchSandboxDefault())
 		}
 		if body.TaskNotify != nil {
 			if err := validateTaskNotifyTargets(*body.TaskNotify); err != nil {
@@ -7211,7 +7232,12 @@ func (s *Server) handleProjectOne(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if body.Trust {
+		// A batch project carries its trust record from the moment it is one,
+		// and takes it here when this edit is what turns it into one: the
+		// record is what its skill and MCP loaders read, and there is no user
+		// decision behind it (plans/216 §0.4) — a batch project has no trust
+		// level to set, show or judge.
+		if body.Trust || state.NormalizeProjectType(updated.ProjectType) == state.ProjectTypeBatch {
 			_ = safety.MarkTrusted(s.Home, safety.Project{Root: updated.Root})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -8055,22 +8081,29 @@ func (s *Server) handleProjectRuleFile(w http.ResponseWriter, r *http.Request) {
 type approvalDefaultAnswer struct {
 	Current     *string `json:"current"`
 	Description string  `json:"description,omitempty"`
-	// Effective is the preset actually executing after the trust gate (a
-	// persisted full-access in an untrusted directory narrows to Default);
-	// Source is who set the stored row (picker | yolo | observed) — backend
-	// and logs only, the surfaces never label it.
+	// Effective is the preset actually executing. Nothing narrows a stored
+	// preset any more (plan 203): full access runs wherever it was picked, so
+	// Effective equals Current except for the batch posture. Source is who set
+	// the stored row (picker | yolo | observed) — backend and logs only, the
+	// surfaces never label it.
 	Effective *string `json:"effective,omitempty"`
 	Source    string  `json:"source,omitempty"`
 }
 
+// handleApprovalDefaultGet reports the global approval preset: the setting a
+// new conversation starts from (plan 203 §2b). It is the stored value itself
+// rather than a guess matched from a mode and a sandbox mode that used to be
+// configured apart, so the page shows exactly what the next session will copy.
 func (s *Server) handleApprovalDefaultGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	cfg := s.liveCfg()
-	mode := s.permissionRuntimeMode()
-	preset, ok := safety.MatchApprovalPreset(mode, cfg)
+	presetID := config.ApprovalPresetWorkspaceWrite
+	if cfg := s.liveCfg(); cfg != nil { // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
+		presetID = cfg.ApprovalPreset.Effective()
+	}
+	preset, ok := safety.ApprovalPresetByID(string(presetID))
 	if !ok {
 		writeJSON(w, approvalDefaultAnswer{Current: nil})
 		return
@@ -8082,6 +8115,13 @@ func (s *Server) handleApprovalDefaultGet(w http.ResponseWriter, r *http.Request
 func (s *Server) handleApprovalDefaultPut(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	// A machine with no sandbox has one preset and no choice to store, so the
+	// write is answered as a route that does not exist rather than as a
+	// setting that would silently stop applying (plan 215 §3.4).
+	if !safety.SandboxAvailable() {
+		http.NotFound(w, r)
 		return
 	}
 	var req struct {
@@ -8096,27 +8136,11 @@ func (s *Server) handleApprovalDefaultPut(w http.ResponseWriter, r *http.Request
 		http.Error(w, "unknown approval preset", http.StatusBadRequest)
 		return
 	}
-	// ApplyToConfig is the same pairing the terminal preset uses: the named
-	// profile must go for the sandbox half to take effect, and the approval
-	// half persists through the policy mode. The three sections land in
-	// sequence — the same whole-document shape the configuration editor
-	// writes — and every intermediate state is a loadable configuration.
-	if err := s.withConfigSection(r.Context(), "default_permissions", func(cfg *config.Root) error {
-		cfg.DefaultPermissions = ""
-		return nil
-	}); err != nil {
-		failConfigSection(w, err)
-		return
-	}
-	if err := s.withConfigSection(r.Context(), "sandbox_mode", func(cfg *config.Root) error {
-		cfg.SandboxMode = preset.SandboxMode
-		return nil
-	}); err != nil {
-		failConfigSection(w, err)
-		return
-	}
-	if err := s.withConfigSection(r.Context(), "approval_policy", func(cfg *config.Root) error {
-		cfg.ApprovalPolicy = config.NewApprovalPolicy(config.ApprovalPolicyMode(preset.Approval))
+	// One section, one value: the preset is the setting, and the approval
+	// policy and sandbox mode it used to be written to are derived from it at
+	// runtime (plan 203), so there is no pair to keep in step.
+	if err := s.withConfigSection(r.Context(), "approval_preset", func(cfg *config.Root) error {
+		cfg.ApprovalPreset = config.ApprovalPresetID(preset.ID)
 		return nil
 	}); err != nil {
 		failConfigSection(w, err)
@@ -8124,6 +8148,56 @@ func (s *Server) handleApprovalDefaultPut(w http.ResponseWriter, r *http.Request
 	}
 	id := preset.ID
 	writeJSON(w, approvalDefaultAnswer{Current: &id, Description: preset.Description})
+}
+
+// batchSandboxDefaultAnswer is the batch project group's setting as the
+// settings page reads it.
+type batchSandboxDefaultAnswer struct {
+	// SandboxDefault is what a new batch project's sandbox switch starts at.
+	SandboxDefault bool `json:"sandbox_default"`
+}
+
+// handleBatchSandboxDefaultGet answers the install's batch.sandbox_default
+// (plans/216 §3.6): the value a new batch project copies when it is created,
+// and the one a project takes when it becomes a batch project.
+func (s *Server) handleBatchSandboxDefaultGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, batchSandboxDefaultAnswer{SandboxDefault: s.batchSandboxDefault()})
+}
+
+// handleBatchSandboxDefaultPut stores the same setting, through the one
+// section-writing path every stored setting goes through. A machine with no
+// sandbox keeps storing and answering it: the value is what a new project
+// copies, and a machine that acquires a sandbox later should find the choice it
+// was given rather than a default somebody else picked. What the machine
+// without a sandbox hides is the page, not the row.
+func (s *Server) handleBatchSandboxDefaultPut(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		SandboxDefault *bool `json:"sandbox_default"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.SandboxDefault == nil {
+		http.Error(w, "sandbox_default required", http.StatusBadRequest)
+		return
+	}
+	if err := s.withConfigSection(r.Context(), "batch", func(cfg *config.Root) error {
+		cfg.Batch.SandboxDefault = config.BoolPtr(*req.SandboxDefault)
+		return nil
+	}); err != nil {
+		failConfigSection(w, err)
+		return
+	}
+	writeJSON(w, batchSandboxDefaultAnswer{SandboxDefault: s.batchSandboxDefault()})
 }
 
 // handleSessionPreset switches one conversation to a built-in preset for its
@@ -8135,6 +8209,14 @@ func (s *Server) handleApprovalDefaultPut(w http.ResponseWriter, r *http.Request
 func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	// No sandbox, no preset to choose: every conversation already runs in full
+	// access, and a stored choice would describe a posture nothing reads (plan
+	// 215 §3.4). The route answers as missing, which is what the page that no
+	// longer offers it expects.
+	if !safety.SandboxAvailable() {
+		http.NotFound(w, r)
 		return
 	}
 	var req struct {
@@ -8184,7 +8266,7 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 	// next process restore, so a choice that failed to persist never ran
 	// only in memory either.
 	s.saveSessionPresetRow(r.Context(), sid, preset.ID)
-	for _, update := range preset.SessionUpdates(sid) {
+	for _, update := range preset.SessionUpdatesForLaunch(sid, runner.AppCfg, runner.LaunchProject) {
 		runner.ApplyPermissionUpdate(update)
 	}
 	writeJSON(w, map[string]any{"ok": true, "description": preset.Description})
@@ -8206,7 +8288,7 @@ func (s *Server) saveSessionPresetRow(ctx context.Context, sid, presetID string)
 // the shared reading (Runner.SessionPresetFor): the persisted row first (with
 // lazy YOLO inference), the live in-process preset when no row exists, the
 // configuration default last. current is the row's choice, effective what
-// actually executes after the trust gate, and null when nothing matches.
+// actually executes, and null when nothing matches.
 func (s *Server) handleSessionPresetGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -8234,19 +8316,6 @@ func (s *Server) handleSessionPresetGet(w http.ResponseWriter, r *http.Request) 
 		answer.Description = preset.Description
 	}
 	writeJSON(w, answer)
-}
-
-// permissionRuntimeMode reads the live permission mode the way the running
-// process enforces it, falling back to the configured policy when no runtime
-// is mounted yet.
-func (s *Server) permissionRuntimeMode() safety.PermissionMode {
-	if s.Runner != nil && s.Runner.AppCfg != nil && strings.TrimSpace(string(s.Runner.AppCfg.ApprovalPolicy.Mode)) != "" {
-		return safety.PermissionMode(s.Runner.AppCfg.ApprovalPolicy.Mode)
-	}
-	if cfg := s.liveCfg(); cfg != nil {
-		return safety.PermissionMode(cfg.ApprovalPolicy.Mode)
-	}
-	return safety.ApprovalOnRequest
 }
 
 // --- Project permission rules ------------------------------------------------
@@ -8379,7 +8448,7 @@ func (s *Server) handleProjectPermissionExplain(w http.ResponseWriter, r *http.R
 		return
 	}
 	input := strings.TrimSpace(r.URL.Query().Get("input"))
-	writeJSON(w, scope.rt.Explain("", toolName, input, scope.cfg, safety.RuntimeYOLOEnabled()))
+	writeJSON(w, scope.rt.Explain("", toolName, input, scope.cfg, fullAccessInForce(scope.cfg)))
 }
 
 // propagateProjectPermissionUpdate hands a project-settings update to every
@@ -9010,4 +9079,731 @@ func (s *Server) handleTaskOne(w http.ResponseWriter, r *http.Request) {
 		},
 		"executions": map[string]any{"items": items, "total": total},
 	})
+}
+
+// ===== Settings page: the path registry (plan 191 §3.1) =====
+// settingsKind is how a path's value crosses the wire: the same value types the
+// page's field controls produce.
+type settingsKind string
+
+const (
+	settingsBool       settingsKind = "bool"
+	settingsNumber     settingsKind = "num"
+	settingsText       settingsKind = "text"
+	settingsStrings    settingsKind = "strings"
+	settingsTokenizers settingsKind = "tokenizers"
+)
+
+// settingsField is one registered configuration item.
+type settingsField struct {
+	// path is the dotted path a request names, matching the prototype's F().
+	path string
+	// section is the Root section the path lives in — the unit one save
+	// writes, and the unit the composition validates.
+	section string
+	// secret items never leave the gateway as plaintext: GET answers whether
+	// one is set and its last four characters (plan 191 §0.20).
+	secret bool
+	kind   settingsKind
+	// def is the value the item has when the stored one is unset — the
+	// resolution the runtime already applies (the config package's own
+	// Effective* getters and Default* constants). A nil def means the stored
+	// zero value *is* the value (an empty provider means "not enabled", an
+	// empty list means "none").
+	def any
+	// rule is the Chinese description of the values the item accepts, shown
+	// when the gateway refuses a save. Empty means only the type is checked
+	// and the reason is generic.
+	rule string
+}
+
+// settingsFieldList is the registry, in the order the page draws the items so a
+// save is applied — and a refusal attributed — in a stable order.
+var settingsFieldList = []settingsField{
+	// 审批与沙箱
+	{path: "approval_preset", section: "approval_preset", kind: settingsText,
+		def: string(config.ApprovalPresetWorkspaceWrite), rule: "默认，或完全访问"},
+	{path: "sandbox_workspace_write.writable_roots", section: "sandbox_workspace_write", kind: settingsStrings},
+	{path: "sandbox_workspace_write.network_access", section: "sandbox_workspace_write", kind: settingsBool, def: true},
+	{path: "batch.sandbox_default", section: "batch", kind: settingsBool, def: true},
+
+	// 子代理
+	{path: "agents.defaults.enable_subagent", section: "agents", kind: settingsBool, def: false},
+	{path: "agents.defaults.execution.max_parallel_subagents", section: "agents", kind: settingsNumber,
+		def: config.DefaultMaxParallelSubagents()},
+
+	// 对等通信（只存库的段；行仅在检测到 Claude Code 时显示，见 meta）
+	{path: "peers.claude_code", section: "peers", kind: settingsBool, def: false},
+
+	// 联网工具
+	{path: "agents.defaults.web_search.provider", section: "agents", kind: settingsText,
+		rule: "Tavily、Brave、百度、DeepSeek，或不启用"},
+	{path: "agents.defaults.web_search.tavily.api_key", section: "agents", secret: true, kind: settingsText},
+	{path: "agents.defaults.web_search.tavily.search_depth", section: "agents", kind: settingsText,
+		def: "basic", rule: "基础，或深入"},
+	{path: "agents.defaults.web_search.brave.api_key", section: "agents", secret: true, kind: settingsText},
+	{path: "agents.defaults.web_search.baidu.api_key", section: "agents", secret: true, kind: settingsText},
+	{path: "agents.defaults.web_search.deepseek.api_key", section: "agents", secret: true, kind: settingsText},
+	{path: "agents.defaults.web_fetch.provider", section: "agents", kind: settingsText,
+		rule: "内置抓取，或 DeepSeek"},
+	{path: "agents.defaults.web_fetch.deepseek.api_key", section: "agents", secret: true, kind: settingsText},
+	{path: "agents.defaults.web_fetch.allow_private_ip", section: "agents", kind: settingsBool, def: false},
+
+	// 会话
+	{path: "compact.auto_compact_percent", section: "compact", kind: settingsNumber,
+		def: config.DefaultAutoCompactPercent, rule: "50–90 %"},
+	{path: "compact.prompt", section: "compact", kind: settingsText, def: assembly.DefaultPrompt},
+	{path: "agents.defaults.network_retry_max", section: "agents", kind: settingsNumber,
+		def: config.DefaultNetworkRetryMax, rule: "0–15 次"},
+	{path: "agents.defaults.stream_idle_timeout_seconds", section: "agents", kind: settingsNumber,
+		def: config.DefaultStreamIdleTimeoutSeconds, rule: "0–1800 秒"},
+	{path: "agents.defaults.context_inject.model_context_tokens", section: "agents", kind: settingsNumber,
+		def: 200000, rule: "0 或更多词元"},
+	{path: "agents.defaults.context_inject.warn_remaining_percent", section: "agents", kind: settingsNumber,
+		def: config.DefaultWarnRemainingPercent, rule: "1–50 %"},
+	{path: "agents.defaults.context_inject.max_pre_hook_rules_chars", section: "agents", kind: settingsNumber,
+		def: 120000, rule: "0 或更多字"},
+	{path: "agents.defaults.guardrails.input.max_runes", section: "agents", kind: settingsNumber,
+		def: config.DefaultGuardrailsMaxRunes, rule: "0 或更多字"},
+	{path: "agents.defaults.guardrails.input.block_substrings", section: "agents", kind: settingsStrings},
+	{path: "agents.defaults.token_estimate.download", section: "agents", kind: settingsBool, def: true},
+	{path: "agents.defaults.token_estimate.hubs", section: "agents", kind: settingsStrings,
+		def: []string{"huggingface", "modelscope"}},
+	{path: "agents.defaults.token_estimate.huggingface_endpoint", section: "agents", kind: settingsText,
+		def: "https://huggingface.co"},
+	{path: "agents.defaults.token_estimate.modelscope_endpoint", section: "agents", kind: settingsText,
+		def: "https://modelscope.cn"},
+	{path: "agents.defaults.token_estimate.default_tokenizer", section: "agents", kind: settingsText,
+		def: "gpt-o200k"},
+	{path: "agents.defaults.token_estimate.tokenizers", section: "agents", kind: settingsTokenizers},
+
+	// 记忆
+	{path: "features.memories", section: "features", kind: settingsBool, def: true},
+	{path: "memories.extract_model", section: "memories", kind: settingsText, def: config.MemoryModelCurrent},
+	{path: "memories.consolidation_model", section: "memories", kind: settingsText, def: config.MemoryModelCurrent},
+	{path: "memories.search_top_k", section: "memories", kind: settingsNumber, def: 5, rule: "1–20 条"},
+	{path: "memories.max_raw_memories_for_consolidation", section: "memories", kind: settingsNumber,
+		def: 256, rule: "1–4096 条"},
+	{path: "memories.max_unused_days", section: "memories", kind: settingsNumber, def: 30, rule: "0–365 天"},
+	{path: "memories.max_rollout_age_days", section: "memories", kind: settingsNumber, def: 10, rule: "0–90 天"},
+	{path: "memories.max_rollouts_per_startup", section: "memories", kind: settingsNumber,
+		def: 2, rule: "1–128 个会话"},
+	{path: "memories.min_rollout_idle_hours", section: "memories", kind: settingsNumber,
+		def: 6, rule: "1–48 小时"},
+
+	// 定时任务
+	{path: "cron.retention_days", section: "cron", kind: settingsNumber,
+		def: config.DefaultCronRetentionDays, rule: "1–3650 天"},
+
+	// 共享技能、语言服务器
+	{path: "features.skill_offer", section: "features", kind: settingsBool, def: true},
+	{path: "features.lsp", section: "features", kind: settingsBool, def: true},
+	{path: "lsp.recommendations", section: "lsp", kind: settingsBool, def: true},
+	{path: "lsp.diagnostics.after_edit", section: "lsp", kind: settingsBool, def: true},
+	{path: "lsp.max_servers", section: "lsp", kind: settingsNumber, def: 6, rule: "1–32 台"},
+	{path: "lsp.idle_timeout", section: "lsp", kind: settingsNumber, def: 600, rule: "0，或 60–86400 秒"},
+	{path: "lsp.request_timeout", section: "lsp", kind: settingsNumber, def: 30, rule: "1–600 秒"},
+	{path: "lsp.diagnostics.wait_ms", section: "lsp", kind: settingsNumber, def: 2500, rule: "0–30000 毫秒"},
+	{path: "lsp.diagnostics.min_severity", section: "lsp", kind: settingsText, def: "warning",
+		rule: "错误、警告、信息，或提示"},
+	{path: "lsp.diagnostics.max_per_file", section: "lsp", kind: settingsNumber, def: 20, rule: "1–200 条"},
+	{path: "lsp.diagnostics.max_files", section: "lsp", kind: settingsNumber, def: 10, rule: "1–50 个"},
+	{path: "lsp.diagnostics.late_delivery", section: "lsp", kind: settingsBool, def: true},
+}
+
+// settingsIndex is the registry resolved against config.Root: the field index
+// path of each item, its Go type, and the lookup by path. A path the Root type
+// cannot resolve, or whose type is not what the kind says, panics at init — the
+// table and the configuration cannot drift apart silently (plan 191 §3.1's
+// coverage requirement is this check plus TestSettingsPathsResolveInRoot).
+var (
+	settingsByPath = map[string]*settingsResolvedField{}
+	settingsOrder  []string
+)
+
+type settingsResolvedField struct {
+	settingsField
+	// index is the field index path from config.Root, resolved by yaml tag.
+	index []int
+	// typ is the field's own type, pointers included.
+	typ reflect.Type
+}
+
+func init() {
+	for i := range settingsFieldList {
+		field := settingsFieldList[i]
+		index, typ, err := resolveSettingsPath(field.path)
+		if err != nil {
+			panic(fmt.Sprintf("settings path %q: %v", field.path, err))
+		}
+		if err := checkSettingsKind(field.path, field.kind, typ); err != nil {
+			panic(err)
+		}
+		if _, dup := settingsByPath[field.path]; dup {
+			panic(fmt.Sprintf("settings path %q is registered twice", field.path))
+		}
+		settingsByPath[field.path] = &settingsResolvedField{settingsField: field, index: index, typ: typ}
+		settingsOrder = append(settingsOrder, field.path)
+	}
+}
+
+// resolveSettingsPath walks config.Root by yaml tag, segment by segment, and
+// returns the field index path and the field's type.
+func resolveSettingsPath(path string) ([]int, reflect.Type, error) {
+	typ := reflect.TypeOf(config.Root{})
+	var index []int
+	for _, segment := range strings.Split(path, ".") {
+		for typ.Kind() == reflect.Pointer {
+			typ = typ.Elem()
+		}
+		if typ.Kind() != reflect.Struct {
+			return nil, nil, fmt.Errorf("%q is not a section", segment)
+		}
+		found := false
+		for i := 0; i < typ.NumField(); i++ {
+			if strings.Split(typ.Field(i).Tag.Get("yaml"), ",")[0] != segment {
+				continue
+			}
+			index = append(index, i)
+			typ = typ.Field(i).Type
+			found = true
+			break
+		}
+		if !found {
+			return nil, nil, fmt.Errorf("%q names no field", segment)
+		}
+	}
+	return index, typ, nil
+}
+
+// checkSettingsKind reports whether typ can carry the value kind.
+func checkSettingsKind(path string, kind settingsKind, typ reflect.Type) error {
+	base := typ
+	for base.Kind() == reflect.Pointer {
+		base = base.Elem()
+	}
+	want := func(k settingsKind) error {
+		return fmt.Errorf("settings path %q is %s, the registry says %s", path, base, k)
+	}
+	switch kind {
+	case settingsBool:
+		if base.Kind() != reflect.Bool {
+			return want(kind)
+		}
+	case settingsNumber:
+		if base.Kind() != reflect.Int {
+			return want(kind)
+		}
+	case settingsText:
+		if base.Kind() != reflect.String {
+			return want(kind)
+		}
+	case settingsStrings:
+		if base != reflect.TypeOf([]string{}) {
+			return want(kind)
+		}
+	case settingsTokenizers:
+		if base != reflect.TypeOf([]config.TokenizerOverride{}) {
+			return want(kind)
+		}
+	default:
+		return fmt.Errorf("settings path %q has unknown kind %q", path, kind)
+	}
+	return nil
+}
+
+// settingsFieldFor returns the registered field for a path.
+func settingsFieldFor(path string) (*settingsResolvedField, bool) {
+	field, ok := settingsByPath[strings.TrimSpace(path)]
+	return field, ok
+}
+
+// settingsFieldValue returns the value the field holds in root, with the
+// registry's default standing in for an unset one, so the page always shows a
+// value (owner ruling 191 §0.4: everything stored has a value to show).
+func (f *settingsResolvedField) settingsFieldValue(root config.Root) any {
+	v, ok := settingsFieldTarget(reflect.ValueOf(&root).Elem(), f.index, false)
+	var stored any
+	if ok {
+		if v.Kind() == reflect.Pointer {
+			if !v.IsNil() {
+				stored = v.Elem().Interface()
+			}
+		} else {
+			stored = v.Interface()
+		}
+	}
+	return settingsEffectiveValue(f.settingsField, f.typ, stored)
+}
+
+// settingsSecretValue is what GET answers for a credential: whether one is set
+// and the last four characters of it — never the value itself (plan 191 §0.20).
+// Fewer than four characters is answered as no hint at all: the page draws the
+// bullets and nothing more.
+func settingsSecretValue(stored any) map[string]any {
+	text, _ := stored.(string)
+	return map[string]any{"set": text != "", "last4": secretLast4(text)}
+}
+
+// secretLast4 is the four characters a masked credential shows: its last four,
+// or nothing at all when it is shorter than that — the page then draws the
+// bullets and no tail (plan 191 §3.3). It never returns the value.
+func secretLast4(text string) string {
+	if len(text) < 4 {
+		return ""
+	}
+	return text[len(text)-4:]
+}
+
+// settingsEffectiveValue resolves a stored value against the field's default: a
+// pointer field's nil and a value field's zero both mean "unset" when the
+// registry names a default.
+func settingsEffectiveValue(field settingsField, typ reflect.Type, stored any) any {
+	isPointer := typ.Kind() == reflect.Pointer
+	if stored == nil {
+		if field.def != nil {
+			return field.def
+		}
+		return zeroSettingsValue(field.kind)
+	}
+	// An empty list is a value — "no directories", "no overrides" — and the
+	// page draws it as one; only an unset list takes the default.
+	if value := reflect.ValueOf(stored); value.Kind() == reflect.Slice {
+		if value.Len() == 0 && field.def != nil {
+			return field.def
+		}
+		if value.Len() == 0 && value.IsNil() {
+			return zeroSettingsValue(field.kind)
+		}
+		return stored
+	}
+	if !isPointer && field.def != nil && reflect.ValueOf(stored).IsZero() {
+		return field.def
+	}
+	return stored
+}
+
+// zeroSettingsValue is the value of an unset field with no default.
+func zeroSettingsValue(kind settingsKind) any {
+	switch kind {
+	case settingsBool:
+		return false
+	case settingsNumber:
+		return 0
+	case settingsStrings:
+		return []string{}
+	case settingsTokenizers:
+		return []config.TokenizerOverride{}
+	default:
+		return ""
+	}
+}
+
+// settingsFieldTarget walks index from v, dereferencing pointers. With
+// allocate, a nil pointer on the way is created — which is how a nested item
+// such as agents.defaults.web_search.tavily.api_key is written into a section
+// that has no tavily entry yet. ok is false when a pointer on the way is nil
+// and allocate is false.
+func settingsFieldTarget(v reflect.Value, index []int, allocate bool) (reflect.Value, bool) {
+	for _, i := range index {
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				if !allocate {
+					return reflect.Value{}, false
+				}
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return reflect.Value{}, false
+		}
+		v = v.Field(i)
+	}
+	return v, true
+}
+
+// settingsAssign writes raw — one JSON value of the field's kind — into root's
+// field, creating the pointers on the way. A value of the wrong type is the
+// request's error, reported with the path it named.
+func (f *settingsResolvedField) settingsAssign(root *config.Root, raw json.RawMessage) error {
+	target, ok := settingsFieldTarget(reflect.ValueOf(root).Elem(), f.index, true)
+	if !ok {
+		return fmt.Errorf("path %q names no field", f.path)
+	}
+	holder := reflect.New(f.typ)
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(holder.Interface()); err != nil {
+		return settingsRefused(f.path, f.rule, "取值格式不正确")
+	}
+	if f.kind == settingsStrings || f.kind == settingsTokenizers {
+		if holder.Elem().IsNil() {
+			// An empty list is a value — "no directories", "no overrides" —
+			// not a missing one.
+			holder.Elem().Set(reflect.MakeSlice(f.typ, 0, 0))
+		}
+	}
+	target.Set(holder.Elem())
+	return nil
+}
+
+// settingsPatchError is the body a refused save answers with: the path that was
+// refused and the reason, in Chinese, for the page to show under that row
+// (plan 191 §3.1, §0.1 — a raw backend message never reaches the screen).
+type settingsPatchError struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
+// settingsRefused builds the refusal for a path.
+func settingsRefused(path, rule, fallback string) error {
+	message := fallback
+	if strings.TrimSpace(rule) != "" {
+		message = fmt.Sprintf("%s（可填 %s）", fallback, rule)
+	}
+	return &settingsPatchRefusal{body: settingsPatchError{Path: path, Message: message}}
+}
+
+// settingsPatchRefusal carries a refusal through the write path, so the handler
+// answers it as 400 with its body rather than as a failure.
+type settingsPatchRefusal struct {
+	body settingsPatchError
+}
+
+func (e *settingsPatchRefusal) Error() string { return e.body.Message }
+
+// settingsRangeRefused is the refusal for a value the loader's own validation
+// turned down, attributed to the path whose save reached it.
+func settingsRangeRefused(field *settingsResolvedField) error {
+	return settingsRefused(field.path, field.rule, "取值不在允许范围内")
+}
+
+// ===== Settings page: GET/PATCH /api/settings (plan 191 §3.1) =====
+// handleSettings serves the settings page's reads and group saves.
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.getSettings(w, r)
+	case http.MethodPatch:
+		s.patchSettings(w, r)
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+// getSettings answers every registered path's current value.
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	root, err := s.persistedConfig(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	values := make(map[string]any, len(settingsOrder))
+	secrets := make(map[string]any)
+	for _, path := range settingsOrder {
+		field := settingsByPath[path]
+		value := field.settingsFieldValue(root)
+		if field.secret {
+			secrets[path] = settingsSecretValue(value)
+			continue
+		}
+		values[path] = value
+	}
+	writeSettingsJSON(w, http.StatusOK, map[string]any{
+		"values":  values,
+		"secrets": secrets,
+		"meta": map[string]any{
+			// A machine with no usable sandbox has nothing to configure: the
+			// whole 审批与沙箱 surface is hidden and the composer's preset
+			// reads 完全访问 (plans 215, 191 §0.12, §0.22). One flag stands for
+			// the whole section on purpose — the 允许联网 switch lives in it,
+			// and a second flag describing the same screen is how the two
+			// drift apart.
+			"approval_presets_visible": safety.SandboxAvailable(),
+			// The interop switch is offered only on a machine that has
+			// Claude Code's session directory: without it the switch would
+			// promise an interop that cannot run (owner 2026-10-30, plan
+			// 195 §3.7). The stored value stays whatever it is while the
+			// row is hidden.
+			"claude_code_available": process.ClaudeCodeDetected(),
+			// The handoff prompt's 恢复默认 button needs the prompt it restores
+			// to: the reply never invents its own copy (plan 191 §0.13).
+			"builtin_handoff_prompt": assembly.DefaultPrompt,
+		},
+	})
+}
+
+// patchSettings applies one group's changes.
+func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Values  map[string]json.RawMessage `json:"values"`
+		Secrets map[string]string          `json:"secrets"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Message: "请求格式不正确"})
+		return
+	}
+	wrote := map[string]any{"saved": true, "applies": "next_turn"}
+	if len(req.Values) == 0 && len(req.Secrets) == 0 {
+		writeSettingsJSON(w, http.StatusOK, wrote)
+		return
+	}
+	// Every named path must be one the page draws, and a credential may only
+	// arrive through the secrets field: nothing is read or written before that
+	// is settled.
+	for path := range req.Values {
+		field, ok := settingsFieldFor(path)
+		if !ok {
+			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: "没有这个配置项"})
+			return
+		}
+		if field.secret {
+			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: "凭据请通过 secrets 字段提交"})
+			return
+		}
+	}
+	for path := range req.Secrets {
+		field, ok := settingsFieldFor(path)
+		if !ok {
+			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: "没有这个配置项"})
+			return
+		}
+		if !field.secret {
+			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: "这个配置项不是凭据"})
+			return
+		}
+	}
+
+	base, err := s.persistedConfig(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	candidate, err := cloneSettingsRoot(base)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	applied := make([]*settingsResolvedField, 0, len(req.Values)+len(req.Secrets))
+	for _, path := range settingsOrder {
+		field := settingsByPath[path]
+		raw, ok := req.Values[path]
+		if !ok {
+			// An empty secret is "leave it alone" — the page's 更换 box is
+			// opened, then left blank (plan 191 §0.20).
+			if text, has := req.Secrets[path]; has && strings.TrimSpace(text) != "" {
+				raw, ok = mustSettingsJSON(text), true
+			}
+		}
+		if !ok {
+			continue
+		}
+		if err := field.settingsAssign(&candidate, raw); err != nil {
+			var refusal *settingsPatchRefusal
+			if errors.As(err, &refusal) {
+				writeSettingsJSON(w, http.StatusBadRequest, refusal.body)
+				return
+			}
+			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: "取值格式不正确"})
+			return
+		}
+		// The item just written is the one a value-domain refusal names: the
+		// loader's own checks are what judge it, and its Chinese range
+		// description is what the page shows (plan 191 §0.1, §0.20).
+		if err := settingsCandidateLoads(candidate); err != nil {
+			refusal := settingsRangeRefused(field).(*settingsPatchRefusal)
+			writeSettingsJSON(w, http.StatusBadRequest, refusal.body)
+			return
+		}
+		applied = append(applied, field)
+	}
+	if len(applied) == 0 {
+		writeSettingsJSON(w, http.StatusOK, wrote)
+		return
+	}
+
+	sections := settingsSectionsOf(applied)
+	if err := s.Env.WriteRootSections(r.Context(), sections, candidate); err != nil {
+		var refused *configSectionError
+		var invalid *state.InvalidSectionError
+		switch {
+		case errors.As(err, &refused):
+			writeSettingsJSON(w, refused.status, settingsPatchError{Message: refused.msg})
+		case errors.As(err, &invalid):
+			writeSettingsJSON(w, http.StatusBadRequest,
+				settingsPatchError{Path: settingsFirstPathIn(applied, invalid.Section), Message: "这个组里有取值不被接受"})
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	writeSettingsJSON(w, http.StatusOK, wrote)
+}
+
+// settingsCandidateLoads runs the loader's own checks over the candidate
+// configuration. Nothing it changes is written: the answer is only whether the
+// configuration would start.
+func settingsCandidateLoads(candidate config.Root) error {
+	probe, err := cloneSettingsRoot(candidate)
+	if err != nil {
+		return err
+	}
+	return config.FinishLoad(&probe)
+}
+
+// cloneSettingsRoot deep-copies a root, so a candidate can be changed and
+// validated without touching the configuration the copy came from — a shallow
+// copy would share the sections' maps and slices.
+func cloneSettingsRoot(root config.Root) (config.Root, error) {
+	raw, err := json.Marshal(root)
+	if err != nil {
+		return config.Root{}, err
+	}
+	var out config.Root
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return config.Root{}, err
+	}
+	return out, nil
+}
+
+// settingsSectionsOf lists the sections the applied items belong to, once each,
+// in registry order.
+func settingsSectionsOf(applied []*settingsResolvedField) []string {
+	seen := make(map[string]bool, len(applied))
+	out := make([]string, 0, len(applied))
+	for _, field := range applied {
+		if seen[field.section] {
+			continue
+		}
+		seen[field.section] = true
+		out = append(out, field.section)
+	}
+	return out
+}
+
+// settingsFirstPathIn names the first applied path of a section, so a refusal
+// the store produced without a path still points at a row.
+func settingsFirstPathIn(applied []*settingsResolvedField, section string) string {
+	for _, field := range applied {
+		if field.section == section {
+			return field.path
+		}
+	}
+	return ""
+}
+
+// mustSettingsJSON renders a string as the JSON value it is; a string always
+// renders, so there is nothing to fail on.
+func mustSettingsJSON(text string) json.RawMessage {
+	raw, err := json.Marshal(text)
+	if err != nil {
+		return json.RawMessage(fmt.Sprintf("%q", text))
+	}
+	return raw
+}
+
+// writeSettingsJSON answers with a JSON body and its status.
+func writeSettingsJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// ===== Configuration editor: what stops a save (plan 191 §3.2) =====
+// configFileSyntax is the first line the parser refuses, and why, in Chinese
+// for the editor to show above itself (plan 191 §0.19). The line is 1-based.
+type configFileSyntax struct {
+	line    int
+	message string
+}
+
+var (
+	// yamlErrorLine is where yaml.v3 says the trouble is.
+	yamlErrorLine = regexp.MustCompile(`line (\d+):`)
+	// yamlKeyLine is a line that names a key, which is what a mapping body is
+	// made of.
+	yamlKeyLine = regexp.MustCompile(`^\s*[^:#\s][^:#]*:(\s|$)`)
+	// yamlKeyLookingLine is a line that looks like a key with its colon lost:
+	// an identifier, a space, and something after it.
+	yamlKeyLookingLine = regexp.MustCompile(`^\s*[A-Za-z_][\w.-]*\s+\S`)
+)
+
+// configFileSyntaxError reports the first thing that makes text unusable, or
+// nil when it is YAML the runtime could read.
+func configFileSyntaxError(text string) *configFileSyntax {
+	if syntax := yamlParseSyntax(text); syntax != nil {
+		return syntax
+	}
+	return missingColonSyntax(text)
+}
+
+// yamlParseSyntax runs the parser and translates its refusal. The parser is the
+// authority for tabs and unterminated quotes, which it cannot read at all.
+func yamlParseSyntax(text string) *configFileSyntax {
+	var document yaml.Node
+	err := yaml.Unmarshal([]byte(text), &document)
+	if err == nil {
+		return nil
+	}
+	reason := err.Error()
+	line := 0
+	if match := yamlErrorLine.FindStringSubmatch(reason); len(match) == 2 {
+		if n, convErr := strconv.Atoi(match[1]); convErr == nil {
+			line = n
+		}
+	}
+	message := "不是合法的 YAML"
+	switch {
+	case strings.Contains(reason, "cannot start any token"):
+		message = "缩进不能用 Tab"
+	case strings.Contains(reason, "unexpected end of stream"):
+		message = "引号没有闭合"
+	case strings.Contains(reason, "could not find expected ':'"):
+		message = "缺少冒号"
+	case strings.Contains(reason, "did not find expected"),
+		strings.Contains(reason, "mapping values are not allowed"):
+		message = "缩进不正确"
+	}
+	if line < 1 {
+		line = 1
+	}
+	return &configFileSyntax{line: line, message: message}
+}
+
+// missingColonSyntax catches the one mistake the parser forgives: a key whose
+// colon is gone. YAML reads `token abc` inside a mapping as the plain scalar
+// "token abc", so the document still parses — and the setting simply vanishes,
+// which is the outcome the editor must refuse instead (the prototype's own
+// 配置文件 scene is exactly this line).
+func missingColonSyntax(text string) *configFileSyntax {
+	parentIndent := -1
+	// parentIsKey says whether the block the current line sits in was opened by
+	// a key, which is what makes a colonless line a mistake rather than a
+	// continuation of a list item or a block scalar's own text.
+	parentIsKey := true
+	for i, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if trimmed == "-" || strings.HasPrefix(trimmed, "- ") {
+			parentIndent, parentIsKey = indent, false
+			continue
+		}
+		if yamlKeyLine.MatchString(line) {
+			// A block scalar's body is text, not keys: it goes unexamined.
+			value := strings.TrimSpace(line[strings.Index(line, ":")+1:])
+			blockScalar := strings.HasPrefix(value, "|") || strings.HasPrefix(value, ">")
+			parentIndent, parentIsKey = indent, !blockScalar
+			continue
+		}
+		if parentIsKey && indent > parentIndent && yamlKeyLookingLine.MatchString(line) {
+			return &configFileSyntax{line: i + 1, message: "缺少冒号"}
+		}
+		parentIndent, parentIsKey = indent, false
+	}
+	return nil
 }

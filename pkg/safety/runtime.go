@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -133,34 +132,32 @@ func (rt *Runtime) SnapshotForSession(sessionID string, cfg *appcfg.Root) Snapsh
 	return store.SnapshotForSession(sessionID)
 }
 
-// Evaluate returns the decision for a tool call, with the runtime YOLO and
-// danger-full-access overrides layered on top of the matched rule.
-func (rt *Runtime) Evaluate(sessionID, toolName, input string, cfg *appcfg.Root, yolo bool) Decision {
+// Evaluate returns the decision for a tool call, with the full-access (YOLO)
+// override layered on top of the matched rule.
+func (rt *Runtime) Evaluate(sessionID, toolName, input string, cfg *appcfg.Root, fullAccess bool) Decision {
 	toolName = strings.TrimSpace(toolName)
 	input = strings.TrimSpace(input)
 	store, engine := rt.storeAndEngine(cfg)
-	dangerFullAccess := sessionDangerFullAccess(store, sessionID, cfg)
-	return applyRuntimePermissionOverrides(engine.EvaluateForSession(store, sessionID, toolName, input), yolo, dangerFullAccess)
+	return applyRuntimePermissionOverrides(engine.EvaluateForSession(store, sessionID, toolName, input), fullAccess)
 }
 
 // Explain is Evaluate's read-only counterpart for `/permissions explain`: it
 // must apply the same overrides Evaluate does, so the explanation never
 // diverges from the decision the runtime would actually make.
-func (rt *Runtime) Explain(sessionID, toolName, input string, cfg *appcfg.Root, yolo bool) ExplainResult {
+func (rt *Runtime) Explain(sessionID, toolName, input string, cfg *appcfg.Root, fullAccess bool) ExplainResult {
 	toolName = strings.TrimSpace(toolName)
 	input = strings.TrimSpace(input)
 	store, engine := rt.storeAndEngine(cfg)
-	dangerFullAccess := sessionDangerFullAccess(store, sessionID, cfg)
 	out := engine.ExplainForSession(store, sessionID, toolName, input)
-	out.Decision = applyRuntimePermissionOverrides(out.Decision, yolo, dangerFullAccess)
+	out.Decision = applyRuntimePermissionOverrides(out.Decision, fullAccess)
 	return out
 }
 
-// EvaluateRaw is the engine decision with no YOLO/danger-full-access
-// overrides applied — used only to check whether a specific path already has
-// a session-scoped approval (apply_patch's per-path check), which must not be
-// widened by the same process-level escapes Evaluate layers on for the
-// operator-facing decision.
+// EvaluateRaw is the engine decision with no full-access override applied. It
+// exists to check whether a specific path already has a session-scoped
+// approval (apply_patch's per-path check), which must not be widened by the
+// same process-level escape Evaluate layers on for the operator-facing
+// decision.
 func (rt *Runtime) EvaluateRaw(sessionID, toolName, input string, cfg *appcfg.Root) Decision {
 	toolName = strings.TrimSpace(toolName)
 	input = strings.TrimSpace(input)
@@ -457,17 +454,8 @@ func approvalPolicyFromConfig(cfg *appcfg.Root) ApprovalPolicy {
 		policy.Mode = ApprovalUnlessTrusted
 	case appcfg.ApprovalPolicyNever:
 		policy.Mode = ApprovalNever
-	case appcfg.ApprovalPolicyGranular:
-		policy.Mode = ApprovalGranular
 	default:
 		policy.Mode = ApprovalOnRequest
-	}
-	policy.Granular = GranularApprovalConfig{
-		SandboxApproval:    cfg.ApprovalPolicy.Granular.SandboxApproval,
-		Rules:              cfg.ApprovalPolicy.Granular.Rules,
-		SkillApproval:      cfg.ApprovalPolicy.Granular.SkillApproval,
-		RequestPermissions: cfg.ApprovalPolicy.Granular.RequestPermissions,
-		MCPElicitations:    cfg.ApprovalPolicy.Granular.MCPElicitations,
 	}
 	return policy
 }
@@ -531,14 +519,6 @@ func atomicWritePermissionFile(target string, content []byte) error {
 	return replacePermissionFile(tmp, target)
 }
 
-// sessionDangerFullAccess reports whether a conversation runs with full
-// access: under its own sandbox mode when it picked one, and under the
-// configured one otherwise.
-func sessionDangerFullAccess(store *Store, sessionID string, cfg *appcfg.Root) bool {
-	cfg = configForSandboxMode(cfg, store.sessionSandboxMode(sessionID))
-	return cfg != nil && cfg.DangerFullAccessEnabled()
-}
-
 // shellSandboxAvailable reports whether a shell command will be contained.
 // Full access is an explicit decision to run uncontained, so it counts as no
 // sandbox for this purpose.
@@ -549,22 +529,23 @@ func shellSandboxAvailable(cfg *appcfg.Root) bool {
 	return NewManager().Decide(cfg, ToolKindShell).UseSandbox
 }
 
-// applyRuntimePermissionOverrides layers the two process-wide escapes over an
-// engine decision. Evaluate and Explain must apply them through this one
-// function: `/permissions explain` exists to say what the runtime would do, so
-// a second copy of the rules is a copy that will eventually describe a
-// decision the runtime does not make.
-func applyRuntimePermissionOverrides(decision Decision, yolo, dangerFullAccess bool) Decision {
+// applyRuntimePermissionOverrides layers the operator escape over an engine
+// decision. Evaluate and Explain must apply it through this one function:
+// `/permissions explain` exists to say what the runtime would do, so a second
+// copy of the rules is a copy that will eventually describe a decision the
+// runtime does not make.
+//
+// fullAccess is "this conversation's preset is full access", whether the
+// environment flag forced it or the user picked it; full access *is* the YOLO
+// posture (plan 203), which is why one flag covers both and a full-access
+// session cannot drift from what --yolo does.
+func applyRuntimePermissionOverrides(decision Decision, fullAccess bool) Decision {
 	switch {
 	case explicitPermissionDeny(decision):
 		return decision
-	case yolo:
+	case fullAccess:
 		decision.Behavior = BehaviorAllow
 		decision.Reason = ReasonYOLO
-		decision.BypassSandbox = true
-	case dangerFullAccessAllowsDefaultDeny(dangerFullAccess, decision):
-		decision.Behavior = BehaviorAllow
-		decision.Reason = ReasonDangerFullAccess
 		decision.BypassSandbox = true
 	}
 	return decision
@@ -587,15 +568,6 @@ func explicitPermissionDeny(decision Decision) bool {
 		decision.Matched.Behavior == BehaviorDeny
 }
 
-// dangerFullAccessAllowsDefaultDeny reconciles the two halves of the Full
-// Access preset. ApprovalNever turns unmatched asks into denies, while a
-// danger-full-access execution profile says those same unmatched calls may run
-// on the host. Only policy-generated default denies are relaxed; explicit ask
-// and deny rules continue to refuse execution.
-func dangerFullAccessAllowsDefaultDeny(enabled bool, decision Decision) bool {
-	return enabled && decision.Behavior == BehaviorDeny && decision.Matched == nil
-}
-
 type ToolApprovalSuggestion struct {
 	PermissionToolName string
 	PermissionInput    string
@@ -605,30 +577,11 @@ type ToolApprovalSuggestion struct {
 	OneShotOnly        bool
 }
 
-const NetworkAccessPermissionTool = "NetworkAccess"
-
 func BuildToolApprovalSuggestion(toolName string, toolInput any) ToolApprovalSuggestion {
 	name := strings.TrimSpace(toolName)
 	canonical := CanonicalToolName(name)
 	switch {
 	case strings.EqualFold(canonical, "Bash"):
-		if context, port, ok := toolInputNetworkApproval(toolInput); ok {
-			host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(context.Host), "."))
-			if host == "" || !context.Protocol.Valid() {
-				return ToolApprovalSuggestion{}
-			}
-			base := string(context.Protocol) + "://" + host
-			exact := base
-			if port > 0 {
-				exact += ":" + strconv.Itoa(port)
-			}
-			return ToolApprovalSuggestion{
-				PermissionToolName: NetworkAccessPermissionTool,
-				PermissionInput:    exact,
-				ExactRuleContent:   exact,
-				PrefixRuleContent:  base,
-			}
-		}
 		cmd := strings.TrimSpace(toolInputCommand(toolInput))
 		if cmd == "" {
 			return ToolApprovalSuggestion{}
@@ -824,37 +777,6 @@ func bannedExecPolicyPrefix(tokens []string) bool {
 	default:
 		return false
 	}
-}
-
-func toolInputNetworkApproval(toolInput any) (NetworkApprovalContext, int, bool) {
-	m := toolInputMap(toolInput)
-	raw, ok := m["network_approval_context"]
-	if !ok {
-		return NetworkApprovalContext{}, 0, false
-	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return NetworkApprovalContext{}, 0, false
-	}
-	var context NetworkApprovalContext
-	if json.Unmarshal(b, &context) != nil {
-		return NetworkApprovalContext{}, 0, false
-	}
-	port := 0
-	switch value := m["network_port"].(type) {
-	case int:
-		port = value
-	case int64:
-		port = int(value)
-	case float64:
-		if value == float64(int(value)) {
-			port = int(value)
-		}
-	}
-	if port < 0 || port > 65535 {
-		port = 0
-	}
-	return context, port, true
 }
 
 func toolInputResolvedPaths(toolInput any) []string {

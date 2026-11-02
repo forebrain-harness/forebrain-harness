@@ -38,23 +38,36 @@ const (
 // configField describes one editable field of one section. Path is the
 // field's place inside the section's own JSON (dot-separated); the empty path
 // means the section's value itself, which is how a section that is a bare
-// string — sandbox_mode, approvals_reviewer — carries its one setting.
+// string — approval_preset — carries its one setting.
 type configField struct {
 	Path    string
 	Label   string
 	Kind    configFieldKind
 	Options []string // configFieldEnum: the values the loader accepts
-	Min     int      // configFieldNumber: the smallest accepted value
-	Max     int      // configFieldNumber: the largest accepted value, 0 = none
+	// OptionLabels names an enum option in Chinese on the picker's rows. The
+	// stored value stays the one the loader accepts; only the wording changes,
+	// so a reader of this panel chooses a behavior rather than an english
+	// configuration key (plan 203 §0.8).
+	OptionLabels map[string]string
+	// DefaultValue is the option to preselect when the field has no value yet,
+	// for a setting whose empty value means one of its own options.
+	DefaultValue string
+	Min          int // configFieldNumber: the smallest accepted value
+	Max          int // configFieldNumber: the largest accepted value, 0 = none
 	// Clamp makes an over-Max value land on Max instead of being refused,
 	// the way the loader treats a limit it can simply honour: the panel
 	// shows the clamped value it stored, never a number that did not land.
 	Clamp bool
 	// List marks a configFieldRows field whose rows are list elements rather
-	// than a map's keys — writable_roots is a list, permissions a map. An
-	// unset field has no value to read the shape from, so the descriptor
-	// carries it.
+	// than a map's keys — writable_roots is a list, hooks a map. An unset
+	// field has no value to read the shape from, so the descriptor carries
+	// it.
 	List bool
+	// ClaudeCodeOnly hides the field unless this machine has Claude Code
+	// installed: the interop switch has nothing to act on without it (owner
+	// 2026-10-30). A hidden field's stored value stays as it is; the panel
+	// writes it back untouched when it saves the section.
+	ClaudeCodeOnly bool
 	// Hint is the one line the row carries under its value: what the field
 	// means, and what leaving it unset does.
 	Hint string
@@ -81,7 +94,7 @@ type configSectionSchema struct {
 }
 
 // The picker's tabs. A terminal is wide enough for four short headings, and
-// four is what keeps the 16 stored sections reachable without a filter.
+// four is what keeps the 11 stored sections reachable without a filter.
 const (
 	configTabApproval = "审批与沙箱"
 	configTabSession  = "会话与记忆"
@@ -90,43 +103,19 @@ const (
 )
 
 // configSectionSchemas lists every section of the runtime configuration: the
-// 16 the state database stores, then the two forebrain.yaml keeps. The order
+// 11 the state database stores, then the two forebrain.yaml keeps. The order
 // inside a tab is the order a user tunes these settings in, roughly: the
 // switch that decides everything else first.
 var configSectionSchemas = []configSectionSchema{
 	{
-		Name: "approval_policy", Title: "审批策略", Tab: configTabApproval,
-		Summary: "什么情况下向人请求批准",
+		Name: "approval_preset", Title: "审批预设", Tab: configTabApproval,
+		Summary: "新会话默认的审批模式",
 		Fields: []configField{{
-			Label: "模式", Kind: configFieldEnum,
-			Options: []string{"untrusted", "on-request", "never"},
-			Hint:    "默认按项目信任度推导；granular 是子对象，选中后按行编辑",
-		}},
-	},
-	{
-		Name: "approvals_reviewer", Title: "审批复核人", Tab: configTabApproval,
-		Summary: "批准请求由谁复核",
-		Fields: []configField{{
-			Label: "复核人", Kind: configFieldEnum,
-			Options: []string{"user", "auto_review"},
-			Hint:    "user 由你亲自批准；auto_review 交给模型复核",
-		}},
-	},
-	{
-		Name: "auto_review", Title: "自动复核", Tab: configTabApproval,
-		Summary: "自动复核的策略文本",
-		Fields: []configField{{
-			Path: "policy", Label: "策略", Kind: configFieldText,
-			Hint: "原样交给复核模型；留空用内置策略",
-		}},
-	},
-	{
-		Name: "sandbox_mode", Title: "沙箱模式", Tab: configTabApproval,
-		Summary: "命令在什么沙箱里运行",
-		Fields: []configField{{
-			Label: "模式", Kind: configFieldEnum,
-			Options: []string{"read-only", "workspace-write", "danger-full-access"},
-			Hint:    "默认跟随 default_permissions",
+			Label: "审批预设", Kind: configFieldEnum,
+			Options:      []string{"workspace_write", "full_access"},
+			OptionLabels: map[string]string{"workspace_write": "默认", "full_access": "完全访问"},
+			DefaultValue: "workspace_write",
+			Hint:         "默认：工作区内的读写照常，超出工作区才问；完全访问：除明确拒绝外都不问。改这里只影响新会话。",
 		}},
 	},
 	{
@@ -135,30 +124,7 @@ var configSectionSchemas = []configSectionSchema{
 		Fields: []configField{
 			{Path: "writable_roots", Label: "额外可写根目录", Kind: configFieldRows, List: true, Hint: "每行一个绝对路径"},
 			{Path: "network_access", Label: "允许联网", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "exclude_tmpdir_env_var", Label: "排除 TMPDIR 环境变量", Kind: configFieldBool3, Hint: "默认关"},
-			{Path: "exclude_slash_tmp", Label: "排除 /tmp", Kind: configFieldBool3, Hint: "默认关"},
-			{
-				Path: "go_cache_mode", Label: "Go 缓存模式", Kind: configFieldEnum,
-				Options: []string{"isolated", "shared", "disabled"},
-				Hint:    "默认 isolated；shared 让沙箱命令复用宿主 Go 缓存",
-			},
 		},
-	},
-	{
-		Name: "permissions", Title: "权限档案", Tab: configTabApproval,
-		Summary: "具名权限档案（profiles）",
-		Fields: []configField{{
-			Label: "权限档案", Kind: configFieldRows,
-			Hint: "每行一个档案名；行内是 description、extends、filesystem、network",
-		}},
-	},
-	{
-		Name: "default_permissions", Title: "默认权限档案", Tab: configTabApproval,
-		Summary: "默认使用哪个权限档案",
-		Fields: []configField{{
-			Label: "档案名", Kind: configFieldText,
-			Hint: ":read-only / :workspace / :danger-full-access，或 permissions 段里的档案名",
-		}},
 	},
 	{
 		Name: "compact", Title: "上下文压缩", Tab: configTabSession,
@@ -166,35 +132,36 @@ var configSectionSchemas = []configSectionSchema{
 		Fields: []configField{
 			{Path: "prompt", Label: "交接提示词", Kind: configFieldText, Hint: "留空用内置提示词"},
 			{
-				Path: "model_auto_compact_token_limit", Label: "自动压缩阈值(令牌)", Kind: configFieldNumber,
-				Min: 0, Hint: "0 表示按模型上下文窗口决定；上限为窗口的 90%",
+				Path: "auto_compact_percent", Label: "自动压缩阈值(%)", Kind: configFieldNumber,
+				Min: 50, Max: 90, Clamp: true,
+				Hint: "默认 90；窗口用到这个百分比时自动压缩，范围 50–90，超过按 90 存",
 			},
-			{
-				Path: "model_auto_compact_token_limit_scope", Label: "阈值口径", Kind: configFieldEnum,
-				Options: []string{"total", "body_after_prefix"},
-				Hint:    "默认 total",
-			},
-			{Path: "remote_compaction", Label: "远程压缩", Kind: configFieldBool3, Hint: "默认关；开启后只能由同一家 provider 回放"},
-			{Path: "remote_compaction_v2", Label: "远程压缩 v2", Kind: configFieldBool3, Hint: "默认开"},
 		},
 	},
 	{
+		Name: "batch", Title: "跑批项目", Tab: configTabApproval,
+		Summary: "新跑批项目默认启用的沙箱",
+		Fields: []configField{{
+			Path: "sandbox_default", Label: "启用沙箱", Kind: configFieldBool3,
+			Hint: "默认开；新建跑批项目沿用这里的值，之后各项目自己管",
+		}},
+	},
+	{
 		Name: "memories", Title: "记忆", Tab: configTabSession,
-		Summary: "记忆的开关、预算与模型",
+		Summary: "记忆的预算与模型；开关在「功能开关」的「记忆功能」",
 		Fields: []configField{
-			{Path: "use_memories", Label: "使用记忆", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "generate_memories", Label: "生成记忆", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "dedicated_tools", Label: "专用工具", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "disable_on_external_context", Label: "外部上下文时停用", Kind: configFieldBool3, Hint: "默认关"},
 			{Path: "search_top_k", Label: "检索返回条数", Kind: configFieldNumber, Min: 1, Max: 20, Clamp: true, Hint: "默认 5；超过 20 按 20 存"},
 			{Path: "max_raw_memories_for_consolidation", Label: "整合的原始记忆上限", Kind: configFieldNumber, Min: 1, Max: 4096, Clamp: true, Hint: "默认 256"},
 			{Path: "max_unused_days", Label: "未使用过期天数", Kind: configFieldNumber, Min: 0, Max: 365, Clamp: true, Hint: "默认 30"},
 			{Path: "max_rollout_age_days", Label: "记录保留天数", Kind: configFieldNumber, Min: 0, Max: 90, Clamp: true, Hint: "默认 10"},
 			{Path: "max_rollouts_per_startup", Label: "每次启动处理的记录数", Kind: configFieldNumber, Min: 1, Max: 128, Clamp: true, Hint: "默认 2"},
 			{Path: "min_rollout_idle_hours", Label: "记录空闲小时数", Kind: configFieldNumber, Min: 1, Max: 48, Clamp: true, Hint: "默认 6"},
-			{Path: "min_rate_limit_remaining_percent", Label: "限流余量百分比", Kind: configFieldNumber, Min: 0, Max: 100, Clamp: true, Hint: "默认 25"},
-			{Path: "extract_model", Label: "抽取模型", Kind: configFieldText, Hint: "留空用当前模型"},
-			{Path: "consolidation_model", Label: "整合模型", Kind: configFieldText, Hint: "留空用当前模型"},
+			// The stored value is a model name or the explicit "current" (the
+			// conversation's own model, plan 207 §3.3): the database always
+			// holds one, so the row shows what is in force instead of a
+			// "leave it empty" placeholder.
+			{Path: "extract_model", Label: "抽取模型", Kind: configFieldText, Hint: "current＝当前模型；也可填模型名"},
+			{Path: "consolidation_model", Label: "整合模型", Kind: configFieldText, Hint: "current＝当前模型；也可填模型名"},
 		},
 	},
 	{
@@ -207,37 +174,11 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		Name: "features", Title: "功能开关", Tab: configTabSession,
-		Summary: "特性开关与网络代理",
+		Summary: "特性开关",
 		Fields: []configField{
 			{Path: "memories", Label: "记忆功能", Kind: configFieldBool3, Hint: "默认开"},
 			{Path: "skill_offer", Label: "技能推荐", Kind: configFieldBool3, Hint: "默认开"},
 			{Path: "lsp", Label: "语言服务器", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "exec_permission_approvals", Label: "命令执行审批", Kind: configFieldBool3, Hint: "默认关"},
-			{Path: "request_permissions_tool", Label: "权限申请工具", Kind: configFieldBool3, Hint: "默认关"},
-			{Path: "network_proxy.enabled", Label: "网络代理", Kind: configFieldBool3, Hint: "默认关"},
-			{
-				Path: "network_proxy.mode", Label: "网络代理模式", Kind: configFieldEnum,
-				Options: []string{"limited", "full"}, Hint: "留空不限",
-			},
-			{Path: "network_proxy.proxy_url", Label: "代理地址", Kind: configFieldText, Hint: "例如 http://127.0.0.1:3128"},
-			{Path: "network_proxy.socks_url", Label: "SOCKS 地址", Kind: configFieldText, Hint: "例如 http://127.0.0.1:8081"},
-			{Path: "network_proxy.allow_upstream_proxy", Label: "允许上游代理", Kind: configFieldBool3, Hint: "默认关"},
-			{Path: "network_proxy.allow_local_binding", Label: "允许本地监听", Kind: configFieldBool3, Hint: "默认关"},
-			{Path: "network_proxy.dangerously_allow_non_loopback_proxy", Label: "允许非回环代理", Kind: configFieldBool3, Hint: "默认关；危险选项"},
-			{Path: "network_proxy.dangerously_allow_all_unix_sockets", Label: "允许所有 Unix socket", Kind: configFieldBool3, Hint: "默认关；危险选项"},
-			{Path: "network_proxy.domains", Label: "域名规则", Kind: configFieldRows, Hint: "每行一个域名模式，行内填 allow 或 deny"},
-			{Path: "network_proxy.unix_sockets", Label: "Unix socket 规则", Kind: configFieldRows, Hint: "每行一个绝对路径，行内填 allow 或 deny"},
-		},
-	},
-	{
-		Name: "windows", Title: "Windows 沙箱", Tab: configTabSession,
-		Summary: "Windows 上的沙箱形态",
-		Fields: []configField{
-			{
-				Path: "sandbox", Label: "沙箱形态", Kind: configFieldEnum,
-				Options: []string{"unelevated", "elevated"}, Hint: "留空按平台决定",
-			},
-			{Path: "sandbox_private_desktop", Label: "独立桌面", Kind: configFieldBool3, Hint: "默认开"},
 		},
 	},
 	{
@@ -257,16 +198,13 @@ var configSectionSchemas = []configSectionSchema{
 				Min: 0, Max: 1800, Clamp: true, Hint: "默认 300；0 关闭看门狗",
 			},
 			{Path: "defaults.enable_subagent", Label: "启用子代理", Kind: configFieldBool3, Hint: "默认按内置设置"},
+			{
+				Path: "defaults.context_inject.warn_remaining_percent", Label: "提醒余量(%)", Kind: configFieldNumber,
+				Min: 1, Max: 50, Clamp: true,
+				Hint: "默认 12；剩余可用窗口低于这个百分比时提醒，范围 1–50",
+			},
 			{Path: "defaults.mcp_servers", Label: "共享 MCP 服务器", Kind: configFieldRows, Hint: "每行一个服务器"},
 		},
-	},
-	{
-		Name: "tools", Title: "工具", Tab: configTabAgents,
-		Summary: "内置工具的行为",
-		Fields: []configField{{
-			Path: "command_rewrite.enabled", Label: "命令改写", Kind: configFieldBool3,
-			Hint: "默认开；在审批前插入仅影响呈现的参数",
-		}},
 	},
 	{
 		Name: "hooks", Title: "钩子", Tab: configTabAgents,
@@ -295,6 +233,14 @@ var configSectionSchemas = []configSectionSchema{
 			{Path: "diagnostics.max_files", Label: "文件数上限", Kind: configFieldNumber, Min: 0, Max: 50, Hint: "默认 10；范围 1–50"},
 			{Path: "diagnostics.late_delivery", Label: "迟到诊断", Kind: configFieldBool3, Hint: "默认开"},
 		},
+	},
+	{
+		Name: "peers", Title: "对等通信", Tab: configTabAgents,
+		Summary: "本机代理进程之间互发消息",
+		Fields: []configField{{
+			Path: "claude_code", Label: "与 Claude Code 互通", Kind: configFieldBool3, ClaudeCodeOnly: true,
+			Hint: "默认关；开关不同的 forebrain 进程互相看不见",
+		}},
 	},
 	{
 		Name: "gateway", Title: "网关", Tab: configTabFile,

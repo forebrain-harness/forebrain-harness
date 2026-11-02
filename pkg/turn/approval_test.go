@@ -90,21 +90,6 @@ func (e approvalEval) EvaluatePermissionForSession(string, string, string) safet
 	return e.d
 }
 
-func TestBuildToolApprovalRequestUsesCanonicalNetworkContext(t *testing.T) {
-	req, _, _ := BuildToolApprovalRequest(ApprovalSource{
-		SessionID: "sid", ActionID: "aid", RunID: "rid", ToolName: "shell", ActionKind: "shell",
-		ToolInput: map[string]any{
-			"command":                  "curl https://example.com",
-			"network_approval_context": map[string]any{"host": "Example.COM.", "protocol": "https"},
-			"network_port":             443,
-		},
-	}, approvalEval{})
-	require.NotNil(t, req.NetworkApproval)
-	require.Equal(t, "example.com", req.NetworkApproval.Host)
-	require.Equal(t, 443, req.NetworkPort)
-	require.Equal(t, []safety.PermissionDestination{safety.DestinationSession, safety.DestinationLocalSettings}, req.DestinationOptions)
-}
-
 func TestBuildToolApprovalRequestNormalizesJSONInput(t *testing.T) {
 	fromObject, _, _ := BuildToolApprovalRequest(ApprovalSource{ToolName: "shell", ActionKind: "shell", ToolInput: map[string]any{"command": "npm run build"}}, approvalEval{})
 	fromJSON, _, _ := BuildToolApprovalRequest(ApprovalSource{ToolName: "shell", ActionKind: "shell", ToolInput: `{"command":"npm run build"}`}, approvalEval{})
@@ -194,20 +179,6 @@ func TestApprovalServiceRequestPermissionsExactRetryIsIdempotent(t *testing.T) {
 
 	_, err = service.Decide(context.Background(), store.action.ID, ApprovalReply{Choice: "grant_for_turn"})
 	require.ErrorIs(t, err, ErrApprovalConflict)
-}
-
-func TestNetworkResultUsesPersistedAnswer(t *testing.T) {
-	decision, done := NetworkResult(&state.Action{Status: state.ActionApproved, AnswerJSON: `{"decision":"apply_network_policy_amendment","network_policy_amendment":{"host":"example.com","action":"deny"}}`})
-	if !done || decision != safety.NetworkApprovalDenyForSession {
-		t.Fatalf("decision=%q done=%t", decision, done)
-	}
-	decision, done = NetworkResult(&state.Action{Status: state.ActionExpired})
-	if !done || decision != safety.NetworkApprovalCancel {
-		t.Fatalf("expired decision=%q done=%t", decision, done)
-	}
-	if _, done := NetworkResult(&state.Action{Status: state.ActionPending}); done {
-		t.Fatal("pending action resolved")
-	}
 }
 
 func TestActionClearedContext(t *testing.T) {
@@ -340,17 +311,6 @@ func TestRequestPermissionsFromJSON(t *testing.T) {
 	require.NotNil(t, response)
 	require.Len(t, response.Permissions.FileSystem.Entries, 1)
 	require.Nil(t, RequestPermissionsFromJSON(ctx, "shell", `{}`))
-}
-
-func TestValidateNetworkSessionUpdate(t *testing.T) {
-	update := safety.PermissionUpdate{
-		Type: safety.UpdateAddRules, Destination: safety.DestinationSession, Behavior: safety.BehaviorAllow,
-		Rules: []safety.PermissionRuleValue{{ToolName: safety.NetworkAccessPermissionTool, RuleContent: "https://example.com:443"}},
-	}
-	err := ValidateNetworkSessionUpdate(update, safety.NetworkApprovalContext{Host: "example.com", Protocol: safety.NetworkApprovalHTTPS}, 443)
-	require.NoError(t, err)
-	update.Rules[0].RuleContent = "https://other.example"
-	require.Error(t, ValidateNetworkSessionUpdate(update, safety.NetworkApprovalContext{Host: "example.com", Protocol: safety.NetworkApprovalHTTPS}, 443))
 }
 
 // fakeApprovalRuns is the run-store slice PendingApprovalGate reads.

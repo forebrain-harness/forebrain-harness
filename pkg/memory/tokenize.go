@@ -2,9 +2,11 @@ package memory
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 
@@ -38,6 +40,30 @@ import (
 // terms the two sides spell differently.
 const TermsRevision = 4
 
+// unsegmentedTermsRevision is the revision rows written while this process has
+// no usable dictionaries record. It sits a fixed distance above TermsRevision,
+// far above any revision the constant will reach by counting up, so the two
+// values can never collide: a row cut into character pairs must never be read as
+// one the dictionary cut into words, or the index and the query would spell
+// their terms differently and a Chinese search would come back empty instead of
+// merely coarser.
+const unsegmentedTermsRevision = TermsRevision + 1_000_000
+
+// termsRevisionInForce is the revision rows written right now record. It is the
+// constant revision, unless this process searches without its dictionaries — the
+// rows of that mode are cut by other rules and have to be re-indexed when a
+// dictionary arrives, exactly as they are when the rules themselves change.
+//
+// A row written before the first Chinese or Japanese text turned the fallback on
+// is unaffected: a line that needs no dictionary to be cut is cut identically
+// either way.
+func termsRevisionInForce() int64 {
+	if unsegmentedSearching.Load() {
+		return unsegmentedTermsRevision
+	}
+	return TermsRevision
+}
+
 // searchTerms splits text into terms: the terms a line is stored under, and the
 // terms a query is asked with, cut by the same rules.
 //
@@ -50,13 +76,13 @@ const TermsRevision = 4
 // out of the text first and kept whole, and only what is left is segmented.
 //
 // Terms are lowercased because FTS5's tokenizer folds case, so a term that
-// reached the index in another case would never be found again. A dictionary
-// that cannot be read is an error of the search, reported as the file system
-// reported it.
-func searchTerms(text string) ([]string, error) {
+// reached the index in another case would never be found again. A language whose
+// dictionary cannot be read falls back to cutting it without segmentation (see
+// unsegmentedTerms), so a search never fails on a missing download.
+func searchTerms(text string) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return nil, nil
+		return nil
 	}
 	var raw []string
 	for _, run := range splitWordRuns(text) {
@@ -64,11 +90,7 @@ func searchTerms(text string) ([]string, error) {
 			raw = append(raw, run.text)
 			continue
 		}
-		cut, err := segmentRun(run.text)
-		if err != nil {
-			return nil, err
-		}
-		raw = append(raw, cut...)
+		raw = append(raw, segmentRun(run.text)...)
 	}
 	terms := make([]string, 0, len(raw))
 	seen := make(map[string]struct{}, len(raw))
@@ -83,7 +105,7 @@ func searchTerms(text string) ([]string, error) {
 		seen[term] = struct{}{}
 		terms = append(terms, term)
 	}
-	return terms, nil
+	return terms
 }
 
 // segmentRun cuts the text between two words into terms. What is there is text
@@ -91,27 +113,19 @@ func searchTerms(text string) ([]string, error) {
 // punctuation around it; each stretch of it is cut by the rules of its
 // language, and a stretch that is only spaces, punctuation or symbols holds no
 // term at all.
-func segmentRun(text string) ([]string, error) {
+func segmentRun(text string) []string {
 	var terms []string
 	for _, piece := range scriptPieces(text) {
 		switch piece.language {
 		case languageKorean:
 			terms = append(terms, koreanTerms(piece.text)...)
 		case languageJapanese:
-			cut, err := japaneseTerms(piece.text)
-			if err != nil {
-				return nil, err
-			}
-			terms = append(terms, cut...)
+			terms = append(terms, japaneseTerms(piece.text)...)
 		case languageChinese:
-			cut, err := chineseTerms(piece.text)
-			if err != nil {
-				return nil, err
-			}
-			terms = append(terms, cut...)
+			terms = append(terms, chineseTerms(piece.text)...)
 		}
 	}
-	return terms, nil
+	return terms
 }
 
 type language int
@@ -185,11 +199,14 @@ func koreanTerms(word string) []string {
 // analyzer, in its search mode, which also splits a long compound into the
 // words it is built from. Particles, auxiliary verbs and symbols are dropped:
 // they occur in nearly every line, and a term that matches everything adds
-// candidates without adding evidence.
-func japaneseTerms(text string) ([]string, error) {
+// candidates without adding evidence. An analyzer that cannot be read — its
+// dictionary is missing and could not be downloaded — cuts the text without
+// segmentation instead of failing the search.
+func japaneseTerms(text string) []string {
 	analyzer, err := japaneseAnalyzer()
 	if err != nil {
-		return nil, err
+		noteUnsegmentedSearch(err)
+		return unsegmentedTerms(text)
 	}
 	var terms []string
 	for _, token := range analyzer.Analyze(text, tokenizer.Search) {
@@ -201,7 +218,7 @@ func japaneseTerms(text string) ([]string, error) {
 		}
 		terms = append(terms, token.Surface)
 	}
-	return terms, nil
+	return terms
 }
 
 // japaneseFunctionWords are the parts of speech a Japanese term is never made
@@ -210,11 +227,13 @@ var japaneseFunctionWords = map[string]bool{"助詞": true, "助動詞": true, "
 
 // chineseTerms cuts Chinese text into its words with the Chinese dictionary,
 // and drops the stop words — function words and punctuation that occur in
-// nearly every line.
-func chineseTerms(text string) ([]string, error) {
+// nearly every line. A dictionary that cannot be read — missing, and not yet
+// downloaded — cuts the text without segmentation instead of failing the search.
+func chineseTerms(text string) []string {
 	segmenter, err := chineseSegmenter()
 	if err != nil {
-		return nil, err
+		noteUnsegmentedSearch(err)
+		return unsegmentedTerms(text)
 	}
 	var terms []string
 	for _, term := range segmenter.CutTrim(text, true) {
@@ -223,7 +242,45 @@ func chineseTerms(text string) ([]string, error) {
 		}
 		terms = append(terms, term)
 	}
-	return terms, nil
+	return terms
+}
+
+// unsegmentedTerms cuts a stretch of Chinese or Japanese text into the pairs of
+// adjacent characters it is made of.
+//
+// It is what search does when the language's dictionary is unavailable, and it
+// is the same shape Korean takes for the opposite reason — Korean needs no
+// dictionary because its words are spelled syllable by syllable. Without a
+// dictionary a word boundary cannot be found, so a character pair is the
+// narrowest term that still means something: "检索" stays one term, and a longer
+// phrase is found by the pairs it is built from. Precision drops — a pair occurs
+// inside unrelated words — which is what the fallback warns about once; recall
+// does not, because the index and the query are cut by this same rule.
+func unsegmentedTerms(text string) []string {
+	var terms []string
+	var run []rune
+	flush := func() {
+		switch {
+		case len(run) == 1:
+			terms = append(terms, string(run))
+		case len(run) > 1:
+			for index := 0; index+1 < len(run); index++ {
+				terms = append(terms, string(run[index:index+2]))
+			}
+		}
+		run = run[:0]
+	}
+	for _, char := range text {
+		// The spaces and punctuation between the characters separate runs the
+		// way a word boundary would: a pair may never straddle one.
+		if unicode.IsSpace(char) || unicode.IsPunct(char) || unicode.IsSymbol(char) {
+			flush()
+			continue
+		}
+		run = append(run, char)
+	}
+	flush()
+	return terms
 }
 
 var (
@@ -235,6 +292,27 @@ var (
 	japaneseLoaded    *tokenizer.Tokenizer
 	japaneseLoadError error
 )
+
+// unsegmentedSearching records that this process had to search without its
+// dictionaries. It is set at most once — the loaders cache their failure, so a
+// dictionary that could not be read never becomes readable again in this
+// process — and read from every index write (termsRevisionInForce).
+var (
+	unsegmentedOnce      sync.Once
+	unsegmentedSearching atomic.Bool
+)
+
+// noteUnsegmentedSearch reports, once, that a dictionary could not be read, so
+// the reader knows why Chinese or Japanese results are coarser than usual: the
+// text is cut into character pairs instead of words, and a pair occurs inside
+// unrelated words too.
+func noteUnsegmentedSearch(err error) {
+	unsegmentedSearching.Store(true)
+	unsegmentedOnce.Do(func() {
+		slog.Warn("memory search dictionaries are unavailable; cutting Chinese and Japanese text without word segmentation, which lowers precision",
+			"err", err)
+	})
+}
 
 // chineseSegmenter reads the Chinese dictionary once, the first time Chinese
 // text is cut. It costs seconds and a large share of memory to load, so a

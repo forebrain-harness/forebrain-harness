@@ -73,7 +73,7 @@ func TestApplyAgentLLMClearsAKeyTheLoginReplaces(t *testing.T) {
 			if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 				t.Fatalf("write seed: %v", err)
 			}
-			cfg, err := appcfg.LoadPersisted(path)
+			cfg, err := loadPersistedDocumentForTest(path)
 			if err != nil {
 				t.Fatalf("LoadPersisted: %v", err)
 			}
@@ -93,7 +93,7 @@ func TestApplyAgentLLMClearsAKeyTheLoginReplaces(t *testing.T) {
 			if err := appcfg.Save(path, cfg); err != nil {
 				t.Fatalf("Save: %v", err)
 			}
-			saved, err := appcfg.LoadPersisted(path)
+			saved, err := loadPersistedDocumentForTest(path)
 			if err != nil {
 				t.Fatalf("reload: %v", err)
 			}
@@ -153,7 +153,7 @@ func TestApplyAgentLLMSameProviderModelsPersistBothEntries(t *testing.T) {
 	if err := appcfg.Save(cfgPath, cfg); err != nil {
 		t.Fatalf("save first connect: %v", err)
 	}
-	persisted, err := appcfg.LoadPersisted(cfgPath)
+	persisted, err := loadPersistedDocumentForTest(cfgPath)
 	if err != nil {
 		t.Fatalf("load persisted: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestApplyAgentLLMSameProviderModelsPersistBothEntries(t *testing.T) {
 		t.Fatalf("save second connect: %v", err)
 	}
 
-	final, err := appcfg.LoadPersisted(cfgPath)
+	final, err := loadPersistedDocumentForTest(cfgPath)
 	if err != nil {
 		t.Fatalf("reload persisted: %v", err)
 	}

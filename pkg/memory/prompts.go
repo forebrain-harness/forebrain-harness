@@ -5,8 +5,20 @@ import _ "embed"
 //go:embed templates/stage_one_system.md
 var stageOneSystem string
 
+// stageOneSystemIncremental is the system prompt of a continued extraction:
+// the same rollout, read again from where the last pass stopped. It is a
+// separate constant rather than the same prompt with an added paragraph,
+// because a first extraction and a merge are different instructions — and
+// because each of them is a provider-cached prefix that must stay byte-stable.
+//
+//go:embed templates/stage_one_system_incremental.md
+var stageOneSystemIncremental string
+
 //go:embed templates/stage_one_input.md
 var stageOneInput string
+
+//go:embed templates/stage_one_input_incremental.md
+var stageOneInputIncremental string
 
 //go:embed templates/consolidation_project.md
 var consolidationProjectInstruction string

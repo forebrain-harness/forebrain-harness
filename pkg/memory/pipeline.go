@@ -16,8 +16,12 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
+// TranscriptSource is the append-only transcript a thread's extraction reads.
+// afterRowID limits the read to what was stored after that row (0 = the whole
+// transcript), and the returned row id is the cursor the extraction stores so
+// the next pass over the same thread reads only its new turns.
 type TranscriptSource interface {
-	ListMemoryTranscriptMessages(ctx context.Context, threadID string, limit int) ([]llm.Message, error)
+	ListMemoryTranscriptMessagesAfter(ctx context.Context, threadID string, afterRowID int64) ([]llm.Message, int64, error)
 }
 
 type ConsolidationRunner interface {
@@ -38,7 +42,6 @@ type Pipeline struct {
 	Transcripts             TranscriptSource
 	ExtractLLM              llm.LLM
 	Consolidator            ConsolidationRunner
-	RateLimitGuard          func(context.Context, int) bool
 	Stage1RolloutTokenLimit int
 }
 
@@ -86,9 +89,6 @@ func (p *Pipeline) Run(ctx context.Context, currentThreadID string) error {
 	} else {
 		slog.Warn("prune rollout evidence", "error", err)
 	}
-	if !p.acquireRateLimit(ctx, settings) {
-		return nil
-	}
 	claims, err := p.Store.ClaimStage1JobsForStartup(ctx, currentThreadID,
 		settings.MaxRolloutAgeDays, settings.MinRolloutIdleHours, settings.MaxRolloutsPerStartup)
 	if err != nil {
@@ -106,9 +106,8 @@ func (p *Pipeline) Run(ctx context.Context, currentThreadID string) error {
 // stage 2 makes the pass incremental over whatever changed since the last
 // baseline. It deliberately skips the prune and the stage-1 claims of Run:
 // neither is the migration's data, and running them would charge this import
-// for native rollouts it never touched. Scope preparation and the rate-limit
-// guard stay: the workspace must exist before it can be consolidated, and
-// the guard is an account-level protection, not a stage-1 concern.
+// for native rollouts it never touched. Scope preparation stays: the workspace
+// must exist before it can be consolidated.
 func (p *Pipeline) ConsolidateWorkspace(ctx context.Context) error {
 	if p == nil || p.Store == nil || !Enabled(p.Cfg) {
 		return nil
@@ -118,9 +117,6 @@ func (p *Pipeline) ConsolidateWorkspace(ctx context.Context) error {
 		return err
 	}
 	settings := p.Cfg.EffectiveMemories()
-	if !p.acquireRateLimit(ctx, settings) {
-		return nil
-	}
 	p.runPhase2Scopes(ctx, scopes, settings)
 	return nil
 }
@@ -139,11 +135,6 @@ func (p *Pipeline) prepareScopes(ctx context.Context) ([]Scope, error) {
 		}
 	}
 	return scopes, nil
-}
-
-// acquireRateLimit reports whether this pass may spend LLM budget.
-func (p *Pipeline) acquireRateLimit(ctx context.Context, settings appcfg.MemoriesConfig) bool {
-	return p.RateLimitGuard == nil || p.RateLimitGuard(ctx, settings.MinRateLimitRemainingPercent)
 }
 
 // runPhase2Scopes consolidates each scope's workspace. Its inputs are the
@@ -244,9 +235,28 @@ func (p *Pipeline) runStage1(ctx context.Context, claim Stage1JobClaim) error {
 		_, _ = p.Store.MarkStage1Failed(ctx, claim.Thread.ThreadID, claim.OwnershipToken, err.Error())
 		return err
 	}
-	messages, err := p.Transcripts.ListMemoryTranscriptMessages(ctx, claim.Thread.ThreadID, 0)
+	// What the last pass over this thread left behind decides the shape of this
+	// one: with a cursor it is a continued extraction that reads only the new
+	// turns and merges them into the previous result, without one it is a full
+	// extraction that re-reads everything (plan 205 §3.4).
+	previous, hasPrevious, err := p.Store.Stage1OutputForThread(ctx, claim.Thread.ThreadID)
 	if err != nil {
 		_, _ = p.Store.MarkStage1Failed(ctx, claim.Thread.ThreadID, claim.OwnershipToken, err.Error())
+		return err
+	}
+	incremental := hasPrevious && previous.LastMessageRowID.Valid
+	messages, lastRowID, err := p.Transcripts.ListMemoryTranscriptMessagesAfter(ctx, claim.Thread.ThreadID, previous.LastMessageRowID.Int64)
+	if err != nil {
+		_, _ = p.Store.MarkStage1Failed(ctx, claim.Thread.ThreadID, claim.OwnershipToken, err.Error())
+		return err
+	}
+	if incremental && len(messages) == 0 {
+		// The thread said nothing since the last extraction. There is no input
+		// to hand a model and nothing to replace, so the pass only records that
+		// the thread is current: the job closes and the cursor and timestamp
+		// move forward, which is what keeps the same idle thread from being
+		// claimed again for a pass that would read no messages.
+		_, err = p.Store.AdvanceStage1Watermark(ctx, claim.Thread.ThreadID, claim.OwnershipToken, claim.Thread.UpdatedAt, lastRowID)
 		return err
 	}
 	serialized, err := serializeTranscriptForMemories(messages)
@@ -259,7 +269,15 @@ func (p *Pipeline) runStage1(ctx context.Context, claim Stage1JobClaim) error {
 		rolloutLimit = Stage1RolloutAbsoluteCap
 	}
 	rolloutPath := root.rolloutEvidencePath(claim.Thread.ThreadID, claim.Thread.UpdatedAt)
+	systemPrompt := stageOneSystem
 	input := renderStageOneInput(claim.Thread, rolloutPath, truncateTokens(serialized, rolloutLimit))
+	if incremental {
+		// The previous result is the input's first block and is never
+		// truncated: it is what the new turns are merged into, and a shortened
+		// one would silently drop memories the merge is supposed to carry.
+		systemPrompt = stageOneSystemIncremental
+		input = renderStageOneIncrementalInput(claim.Thread, rolloutPath, renderStageOnePreviousExtraction(previous), truncateTokens(serialized, rolloutLimit))
+	}
 	structured, ok := p.ExtractLLM.(llm.StructuredOutputLLM)
 	if !ok {
 		err = fmt.Errorf("extraction model does not support strict structured output")
@@ -267,7 +285,7 @@ func (p *Pipeline) runStage1(ctx context.Context, claim Stage1JobClaim) error {
 		return err
 	}
 	result, err := structured.ExecuteStructured(ctx, []llm.Message{
-		llm.SystemMessage(stageOneSystem),
+		llm.SystemMessage(systemPrompt),
 		{Role: llm.RoleUser, Parts: []llm.ContentPart{llm.Text(input)}},
 	}, stage1OutputSpec())
 	if err != nil || result == nil || result.Message == nil {
@@ -289,6 +307,16 @@ func (p *Pipeline) runStage1(ctx context.Context, claim Stage1JobClaim) error {
 		parsed.RolloutSlug = &redacted
 	}
 	if parsed.RawMemory == "" || parsed.RolloutSummary == "" {
+		// An empty answer means "what this pass read is not worth remembering".
+		// On a continued extraction that is a statement about the new turns
+		// only, so the accumulated row stays and only its cursors move: deleting
+		// it would throw away the earlier extraction over a quiet stretch of the
+		// same conversation. A first extraction has nothing to keep, so the row
+		// (which may be the one a wanted forget emptied) goes.
+		if incremental {
+			_, err = p.Store.AdvanceStage1Watermark(ctx, claim.Thread.ThreadID, claim.OwnershipToken, claim.Thread.UpdatedAt, lastRowID)
+			return err
+		}
 		var updated bool
 		updated, err = p.Store.MarkStage1SucceededNoOutput(ctx, claim.Thread.ThreadID, claim.OwnershipToken)
 		if err == nil && updated {
@@ -302,7 +330,7 @@ func (p *Pipeline) runStage1(ctx context.Context, claim Stage1JobClaim) error {
 		return err
 	}
 	owned, err := p.Store.CompleteStage1WithEvidence(ctx, claim.Thread.ThreadID, projectKey, claim.OwnershipToken,
-		claim.Thread.UpdatedAt, parsed.RawMemory, parsed.RolloutSummary, parsed.RolloutSlug, stagedPath, canonicalPath)
+		claim.Thread.UpdatedAt, parsed.RawMemory, parsed.RolloutSummary, parsed.RolloutSlug, lastRowID, stagedPath, canonicalPath)
 	if err != nil {
 		return err
 	}
@@ -357,6 +385,35 @@ func renderStageOneInput(thread SessionCandidate, rolloutPath, transcript string
 	})
 }
 
+func renderStageOneIncrementalInput(thread SessionCandidate, rolloutPath, previousExtraction, transcript string) string {
+	return renderTemplate(stageOneInputIncremental, map[string]string{
+		"rollout_path":        rolloutPath,
+		"rollout_cwd":         thread.Cwd,
+		"previous_extraction": previousExtraction,
+		"rollout_contents":    transcript,
+	})
+}
+
+// stage1PreviousExtraction is the block a continued extraction is handed: what
+// the last pass concluded, in the same JSON shape the model returns, so merging
+// is a matter of extending fields it already knows instead of reconciling two
+// prose formats.
+type stage1PreviousExtraction struct {
+	RawMemory      string  `json:"raw_memory"`
+	RolloutSummary string  `json:"rollout_summary"`
+	RolloutSlug    *string `json:"rollout_slug"`
+}
+
+func renderStageOnePreviousExtraction(previous Stage1Output) string {
+	carry := stage1PreviousExtraction{RawMemory: previous.RawMemory, RolloutSummary: previous.RolloutSummary}
+	if previous.RolloutSlug.Valid {
+		slug := previous.RolloutSlug.String
+		carry.RolloutSlug = &slug
+	}
+	// Three strings, one behind a pointer: encoding cannot fail.
+	encoded, _ := json.Marshal(carry)
+	return string(encoded)
+}
 func truncateTokens(value string, limit int) string {
 	return MiddleTokens(value, limit)
 }
@@ -612,10 +669,9 @@ type PipelineDeps struct {
 	// ConsolidateRunner the one that rewrites a scope's memory file.
 	ExtractLLM        func(settings appcfg.MemoriesConfig) llm.LLM
 	ConsolidateRunner func(settings appcfg.MemoriesConfig) ConsolidationRunner
-	// Stage1RolloutTokenLimit and RateLimitGuard depend on which provider the
-	// extract model resolves to, which again only the runtime knows.
+	// Stage1RolloutTokenLimit depends on which provider the extract model
+	// resolves to, which again only the runtime knows.
 	Stage1RolloutTokenLimit func(settings appcfg.MemoriesConfig) int
-	RateLimitGuard          func(settings appcfg.MemoriesConfig) func(context.Context, int) bool
 }
 
 // NewPipeline assembles the background memory pipeline, or returns nil when
@@ -649,9 +705,6 @@ func NewPipeline(deps PipelineDeps) *Pipeline {
 	}
 	if deps.Stage1RolloutTokenLimit != nil {
 		p.Stage1RolloutTokenLimit = deps.Stage1RolloutTokenLimit(settings)
-	}
-	if deps.RateLimitGuard != nil {
-		p.RateLimitGuard = deps.RateLimitGuard(settings)
 	}
 	return p
 }

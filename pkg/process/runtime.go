@@ -93,22 +93,14 @@ func resolveUncachedWithHooks(hooks StartupHooks) (Context, error) {
 		return Context{}, err
 	}
 	MigrateLegacyChannels(cfgPath)
-	cfg, err := appcfg.Load(cfgPath)
+	// The state database is the configuration's source once it holds sections
+	// (plan 187); a home the legacy import has not reached yet still starts
+	// from its file, read whole (plan 207 §3.5). Both halves live in
+	// StartupConfig so the startup gates judge the same configuration this
+	// resolve hands the surfaces.
+	cfg, err := StartupConfig(context.Background(), home)
 	if err != nil {
-		if os.IsNotExist(err) && cfgPath == homepkg.ConfigPath(home) {
-			cfg = appcfg.Root{}
-		} else {
-			return Context{}, err
-		}
-	}
-	// The composed source wins once the state database holds sections (plan
-	// 187): the file's runtime sections are dead after the legacy import, so
-	// a reader that kept reading them would see an empty configuration after
-	// any database-era write (plan 188 W9).
-	if composed, ok, cerr := ComposedStartupConfig(context.Background(), home); cerr != nil {
-		return Context{}, cerr
-	} else if ok {
-		cfg = composed
+		return Context{}, err
 	}
 	// Initialize the global model catalog so that provider validation and
 	// token-limit lookups are available to all downstream code: the home gets

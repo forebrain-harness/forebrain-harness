@@ -6,6 +6,7 @@ import {
   buildTimelineEvidence,
   buildTokenAttribution,
   compactTokenCount,
+  contextSignalTone,
   normalizeContextSignal,
 } from './contextDebug'
 
@@ -17,7 +18,7 @@ describe('context debug', () => {
       projectedContextTokens: 180_000,
       contextTimeline: [{
         kind: 'compact', trigger: 'auto', strategy: 'remote_v2',
-        summarySource: 'remote_compaction', scope: 'total', boundaryId: 'window-2',
+        summarySource: 'remote_compaction', boundaryId: 'window-2',
         windowNumber: 2, replacedItems: 8, tokensBefore: 180_000, tokensAfter: 60_000,
       }],
     }
@@ -41,8 +42,13 @@ describe('context debug', () => {
     expect(got.freedTokens).toBe(7000)
   })
 
+  // Pressure has two levels. A stale `block` from an older server reads as ok
+  // rather than inventing a third tier, and no tone is harsher than warning.
   it('formats stable signal and token values', () => {
-    expect(normalizeContextSignal('BLOCK')).toBe('block')
+    expect(normalizeContextSignal('WARN')).toBe('warn')
+    expect(normalizeContextSignal('BLOCK')).toBe('ok')
+    expect(contextSignalTone('warn')).toBe('warning')
+    expect(contextSignalTone('ok')).toBe('healthy')
     expect(compactTokenCount(182000)).toBe('182k')
   })
 })

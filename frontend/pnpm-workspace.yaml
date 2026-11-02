@@ -21,6 +21,7 @@ catalog:
   '@codemirror/lang-yaml': 6.1.3
   '@codemirror/language': 6.13.1
   '@codemirror/legacy-modes': 6.5.5
+  '@codemirror/lint': 6.9.7
   '@lezer/highlight': 1.2.5
   '@milkdown/crepe': 7.22.3
   '@tanstack/vue-table': ^8.21.3

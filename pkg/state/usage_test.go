@@ -119,18 +119,66 @@ func TestNativeUsageAnchorsAfterImportedRows(t *testing.T) {
 	}
 }
 
-// BodyAfterPrefixTokenCount reads the first server-observed request input as
-// the absolute prefix. An imported row's input measured another harness's
-// prefix, so the baseline must come from the first forebrain-sent request.
-func TestBodyAfterPrefixIgnoresImportedBaseline(t *testing.T) {
-	turns := []Message{
-		{Role: "assistant", Content: "imported", UsageJSON: `{"input_tokens":890000,"output_tokens":10}`},
-		{Role: "assistant", Content: "native", RunID: "run-1", UsageJSON: `{"input_tokens":100,"output_tokens":25}`},
-		{Role: "user", Content: stringsOfLen(80)},
+// EffectiveInputWindow is the single denominator the compaction threshold and
+// the context-pressure warning share, so its three sources are pinned here:
+// the model's input limit wins, then its context window, then the configured
+// window, and only then the built-in default.
+func TestEffectiveInputWindowSources(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		limits   llm.Limits
+		fallback int
+		want     int
+	}{
+		{name: "input limit", limits: llm.Limits{Context: 200000, Input: 180000}, fallback: 128000, want: 180000},
+		{name: "context window", limits: llm.Limits{Context: 200000}, fallback: 128000, want: 200000},
+		{name: "configured window", limits: llm.Limits{}, fallback: 128000, want: 128000},
+		{name: "built-in default", limits: llm.Limits{}, want: 200000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveInputWindow(tc.limits, tc.fallback); got != tc.want {
+				t.Fatalf("window = %d, want %d", got, tc.want)
+			}
+		})
 	}
-	// Active usage is the native 125 plus the estimated 24-token suffix; the
-	// 100-token first forebrain request input is the window prefix, leaving 49.
-	if got := BodyAfterPrefixTokenCount(turns, 9999); got != 49 {
-		t.Fatalf("body tokens=%d want 49", got)
+}
+
+// The threshold is a percentage of that window. The configured percent is
+// clamped to the range the setting accepts, and an unset one selects the
+// default.
+func TestAutoCompactThresholdIsAPercentOfTheWindow(t *testing.T) {
+	limits := llm.Hit{ContextWindow: 1000}
+	for _, tc := range []struct {
+		percent int
+		want    int
+	}{
+		{percent: 50, want: 500},
+		{percent: 90, want: 900},
+		{percent: 95, want: 900},
+		{percent: 30, want: 500},
+		{percent: 0, want: 900},
+	} {
+		got := CalculateTokenBudgetWithOptions(0, "test-model", limits, TokenBudgetOptions{AutoCompactPercent: tc.percent})
+		if got.AutoCompactThreshold != tc.want {
+			t.Fatalf("percent %d: threshold = %d, want %d", tc.percent, got.AutoCompactThreshold, tc.want)
+		}
+		if got.EffectiveContextWindow != 1000 {
+			t.Fatalf("percent %d: effective window = %d, want 1000", tc.percent, got.EffectiveContextWindow)
+		}
+	}
+}
+
+// A model the catalog does not know is measured against the configured context
+// window rather than a hardcoded 200000 — the same number hook.go warns on.
+func TestUncataloguedModelUsesTheConfiguredWindow(t *testing.T) {
+	got := CalculateTokenBudgetWithOptions(0, "uncatalogued", llm.Hit{}, TokenBudgetOptions{
+		AutoCompactPercent:    50,
+		FallbackContextTokens: 128000,
+	})
+	if got.EffectiveContextWindow != 128000 || got.ContextWindow != 128000 {
+		t.Fatalf("window = %d/%d, want the configured 128000", got.ContextWindow, got.EffectiveContextWindow)
+	}
+	if got.AutoCompactThreshold != 64000 {
+		t.Fatalf("threshold = %d, want 64000", got.AutoCompactThreshold)
 	}
 }

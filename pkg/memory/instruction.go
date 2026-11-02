@@ -40,15 +40,13 @@ func SummaryPath(root Root) string {
 // who turned off generation still expects stored memory to be used.
 type InstructionOptions struct {
 	// Recall renders stored memory — the summary plus notes Phase 2 has not
-	// consolidated yet — and the rules for using and citing it. Follows
-	// use_memories.
+	// consolidated yet — and the rules for using and citing it.
 	Recall bool
-	// Capture renders the rules for writing new memory during a turn. Follows
-	// generate_memories.
+	// Capture renders the rules for writing new memory during a turn.
 	Capture bool
-	// DedicatedTools reports whether the memories_* tools are exposed, which
+	// MemoryTools reports whether the memories_* tools are exposed, which
 	// decides how the instruction tells the model to address memory files.
-	DedicatedTools bool
+	MemoryTools bool
 	// ProjectOnly limits recall to the session's own project scope: the
 	// global cross-project preferences block is not rendered. A project whose
 	// sessions must not read outside their own memory sets this.
@@ -116,7 +114,7 @@ func RenderTurnInstruction(roots Roots, projectKey string, opts InstructionOptio
 	projectKey = strings.TrimSpace(projectKey)
 	sections := make([]string, 0, 3)
 	if opts.Recall {
-		recall, err := renderRecallSection(roots, projectKey, opts.DedicatedTools, opts.ProjectOnly)
+		recall, err := renderRecallSection(roots, projectKey, opts.MemoryTools, opts.ProjectOnly)
 		if err != nil {
 			return "", err
 		}
@@ -128,7 +126,7 @@ func RenderTurnInstruction(roots Roots, projectKey string, opts InstructionOptio
 		}
 	}
 	if opts.Capture {
-		sections = append(sections, renderCaptureSection(roots, projectKey, opts.DedicatedTools))
+		sections = append(sections, renderCaptureSection(roots, projectKey, opts.MemoryTools))
 	}
 	return strings.Join(sections, "\n"), nil
 }

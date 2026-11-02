@@ -63,7 +63,7 @@
         </template>
         <template #cell-key="{ row }">
           <BadgeComponent v-if="row.apiKeySet" variant="success" :data-testid="`provider-key-saved-${rowIndex(row)}`">
-            {{ t('providers.keySavedBadge', { hint: row.apiKeyHint ?? '' }) }}
+            {{ t('providers.keySavedBadge', { hint: row.apiKeyLast4 ?? '' }) }}
           </BadgeComponent>
           <BadgeComponent v-else variant="warning" :data-testid="`provider-key-unset-${rowIndex(row)}`">{{ t('providers.unsetKey') }}</BadgeComponent>
         </template>
@@ -170,7 +170,7 @@
             class="flex h-9 min-w-0 flex-1 items-center rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 font-mono text-[12px] text-[var(--forebrain-text-2)]"
             data-testid="provider-key-saved"
           >
-            {{ t('providers.keySaved', { hint: form.apiKeyHint ?? '' }) }}
+            {{ t('providers.keySaved', { hint: form.apiKeyLast4 ?? '' }) }}
           </span>
           <Button
             type="button"
@@ -466,7 +466,7 @@ type ProviderDraft = {
   paramsText: string
   models: string[]
   apiKeySet: boolean
-  apiKeyHint?: string
+  apiKeyLast4?: string
   keyEdit: boolean
   apiKeyPlain: string
 }
@@ -750,7 +750,7 @@ function toDraft(record: ProviderRecord): ProviderDraft {
     paramsText: typeof record.params === 'string' ? record.params : record.params ? JSON.stringify(record.params) : '',
     models: [...(record.models ?? [])],
     apiKeySet: Boolean(record.apiKeySet),
-    apiKeyHint: record.apiKeyHint,
+    apiKeyLast4: record.apiKeyLast4,
     keyEdit: false,
     apiKeyPlain: '',
   }
@@ -766,12 +766,12 @@ function toBody(entry: ProviderEntry): Record<string, unknown> {
   }
   const params = typeof entry.params === 'string' ? entry.params.trim() : entry.params ? JSON.stringify(entry.params) : ''
   if (params) body.params = JSON.parse(params)
-  // The key travels only when the user typed one; an untouched key is the
-  // server's to keep.
-  if (entry.apiKeyPlain?.trim()) body.api_key_plain = entry.apiKeyPlain.trim()
-  // A row the user emptied states that on the wire: the empty string is the
-  // clear. Absent (never set here) means the same as an untouched key.
-  if (entry.apiKey !== undefined) body.api_key = entry.apiKey
+  // The key travels only when the user typed one, as api_key — the wire's one
+  // key field, a pointer: absent is "keep the stored key", present is the
+  // value, present and empty is the clear. The draft's apiKeyPlain only names
+  // which box the value came from.
+  if (entry.apiKeyPlain?.trim()) body.api_key = entry.apiKeyPlain.trim()
+  else if (entry.apiKey !== undefined) body.api_key = entry.apiKey
   if (entry.replaces) {
     body.replaces = {
       provider: entry.replaces.provider,
@@ -876,9 +876,9 @@ async function modalSave() {
     models: [...form.models],
     apiKeyPlain: form.apiKeyPlain,
   }
-  // Emptying the field of a row that had a key *is* the clear: the page says so
-  // with an empty api_key. A typed key travels as api_key_plain instead, and a
-  // row whose key the user never opened sends neither.
+  // Emptying the field of a row that had a key *is* the clear: the page says
+  // so with an empty api_key. A typed key travels as api_key too (toBody), and
+  // a row whose key the user never opened sends no key field at all.
   if (form.apiKeySet && form.keyEdit && !form.apiKeyPlain.trim()) entry.apiKey = ''
   modalError.value = ''
   // The write can be refused (a model service that signs in with a key cannot
@@ -1184,7 +1184,9 @@ async function saveConnectModel() {
       all[at] = { ...all[at], models, baseUrl, replaces: rowAsLoaded(all[at]) }
       return
     }
-    all.push({ provider, models: [model], baseUrl, apiPath: '', params: '', apiKeyPlain: '' })
+    // A login service's row carries no key: the field stays absent, which is
+    // the wire's "nothing to state" — the login is the credential.
+    all.push({ provider, models: [model], baseUrl, apiPath: '', params: '' })
   })
 }
 

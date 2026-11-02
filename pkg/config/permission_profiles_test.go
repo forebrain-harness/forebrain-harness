@@ -57,9 +57,9 @@ func TestProjectExampleForebrainYAMLLoads(t *testing.T) {
 	t.Setenv("FOREBRAIN_HOME", t.TempDir())
 
 	path := filepath.Clean(filepath.Join("..", "..", "forebrain.yaml"))
-	cfg, err := Load(path)
+	cfg, err := loadDocumentForTest(path)
 	if err != nil {
-		t.Fatalf("Load(%s): %v", path, err)
+		t.Fatalf("loadDocumentForTest(%s): %v", path, err)
 	}
 
 	if len(cfg.Agents.Defaults.MCPServers) < 2 {
@@ -153,21 +153,6 @@ func TestLLMRequestParamsAndProviderHelpers(t *testing.T) {
 	}
 }
 
-func TestGoCacheModeDefaultsAndValidation(t *testing.T) {
-	if got := (SandboxWorkspaceWrite{}).EffectiveGoCacheMode(); got != GoCacheModeIsolated {
-		t.Fatalf("default mode=%q want=%q", got, GoCacheModeIsolated)
-	}
-	for _, mode := range []string{GoCacheModeIsolated, GoCacheModeShared, GoCacheModeDisabled, " SHARED "} {
-		cfg := &Root{SandboxWorkspaceWrite: SandboxWorkspaceWrite{GoCacheMode: mode}}
-		if err := validateSandboxConfig(cfg); err != nil {
-			t.Fatalf("mode %q rejected: %v", mode, err)
-		}
-	}
-	if err := validateSandboxConfig(&Root{SandboxWorkspaceWrite: SandboxWorkspaceWrite{GoCacheMode: "host"}}); err == nil {
-		t.Fatal("invalid Go cache mode was accepted")
-	}
-}
-
 func TestChatGPTProviderDoesNotRequireAPIKeyInConfig(t *testing.T) {
 	cfg := &Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
 		"main": {LLMProviders: []AgentLLMProviderConfig{{
@@ -211,7 +196,7 @@ func TestMCPToolApprovalModeValidation(t *testing.T) {
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil {
+	if _, err := loadDocumentForTest(path); err == nil {
 		t.Fatal("invalid MCP tool approval mode was accepted")
 	}
 }
@@ -226,7 +211,7 @@ func saveAndRead(t *testing.T, r Root) (Root, string) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	loaded, err := Load(path)
+	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -245,8 +230,8 @@ func TestSaveWritesNoEmptyMappings(t *testing.T) {
 	}
 	// The sections that used to be written as `{}` now carry their defaults.
 	for _, want := range []string{
-		"features:", "memories:", "command_rewrite:", "compact:",
-		"memories: true", "generate_memories: true", "enabled: true", "remote_compaction_v2: true",
+		"features:", "memories:", "compact:",
+		"memories: true", "max_unused_days: 30",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("persisted config missing %q:\n%s", want, text)
@@ -267,19 +252,6 @@ func TestSavedDefaultsMatchRuntimeDefaults(t *testing.T) {
 	if got, want := loaded.EffectiveMemories(), unset.EffectiveMemories(); !reflect.DeepEqual(got, want) {
 		t.Errorf("memories: persisted %+v, runtime %+v\n%s", got, want, text)
 	}
-	for _, c := range []struct {
-		name      string
-		got, want bool
-	}{
-		{"assembly.remote_compaction", loaded.Compact.UseRemoteCompaction(), unset.Compact.UseRemoteCompaction()},
-		{"assembly.remote_compaction_v2", loaded.Compact.UseRemoteV2(), unset.Compact.UseRemoteV2()},
-		{"tools.command_rewrite", loaded.Tools.CommandRewrite.UseRewrite(), unset.Tools.CommandRewrite.UseRewrite()},
-		{"windows.sandbox_private_desktop", loaded.Windows.UseSandboxPrivateDesktop(), unset.Windows.UseSandboxPrivateDesktop()},
-	} {
-		if c.got != c.want {
-			t.Errorf("%s: persisted %v, runtime %v\n%s", c.name, c.got, c.want, text)
-		}
-	}
 }
 
 // Materializing defaults must never overwrite a choice the user made, in
@@ -287,22 +259,14 @@ func TestSavedDefaultsMatchRuntimeDefaults(t *testing.T) {
 func TestSaveKeepsExplicitFalseOverDefaultTrue(t *testing.T) {
 	r := Root{}
 	r.Features.Memories = BoolPtr(false)
-	r.Memories.GenerateMemories = BoolPtr(false)
-	r.Tools.CommandRewrite.Enabled = BoolPtr(false)
-	r.Windows.SandboxPrivateDesktop = BoolPtr(false)
+	r.Features.LSP = BoolPtr(false)
 
 	loaded, text := saveAndRead(t, r)
 	if loaded.EffectiveFeatures().Memories {
 		t.Errorf("features.memories reverted to its default:\n%s", text)
 	}
-	if loaded.EffectiveMemories().GenerateMemories {
-		t.Errorf("memories.generate_memories reverted to its default:\n%s", text)
-	}
-	if loaded.Tools.CommandRewrite.UseRewrite() {
-		t.Errorf("tools.command_rewrite.enabled reverted to its default:\n%s", text)
-	}
-	if loaded.Windows.UseSandboxPrivateDesktop() {
-		t.Errorf("windows.sandbox_private_desktop reverted to its default:\n%s", text)
+	if loaded.EffectiveFeatures().LSP {
+		t.Errorf("features.lsp reverted to its default:\n%s", text)
 	}
 }
 
@@ -334,284 +298,18 @@ func TestSaveKeepsConfiguredLLMProvider(t *testing.T) {
 	}
 }
 
-func TestPermissionProfileLoadsAndResolvesInheritance(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "forebrain.yaml")
-	data := []byte(`
-default_permissions: locked
-permissions:
-  locked:
-    description: Restricted workspace
-    extends: ":workspace"
-    workspace_roots:
-      ../shared: true
-    filesystem:
-      glob_scan_max_depth: 4
-      ":workspace_roots":
-        ".": write
-        "**/.env": deny
-      "/var/cache/**": write
-    network:
-      enabled: true
-      mode: limited
-      domains:
-        "example.com": allow
-        "blocked.example": deny
-`)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := LoadPersisted(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.SandboxMode != SandboxModeWorkspaceWrite {
-		t.Fatalf("sandbox mode=%q", cfg.SandboxMode)
-	}
-	profile, active, err := cfg.ResolvePermissionProfile()
-	if err != nil || !active {
-		t.Fatalf("active=%t err=%v", active, err)
-	}
-	if profile.Description != "Restricted workspace" || profile.FileSystem == nil || profile.FileSystem.GlobScanMaxDepth == nil || *profile.FileSystem.GlobScanMaxDepth != 4 {
-		t.Fatalf("profile=%+v", profile)
-	}
-	if _, ok := profile.FileSystem.Entries[":root"]; !ok {
-		t.Fatalf("built-in parent entries were not inherited: %+v", profile.FileSystem.Entries)
-	}
-	if profile.Network == nil || profile.Network.Enabled == nil || !*profile.Network.Enabled || profile.Network.Domains["example.com"] != NetworkAccessAllow {
-		t.Fatalf("network=%+v", profile.Network)
-	}
-}
-
-func TestPermissionProfileValidation(t *testing.T) {
-	for name, body := range map[string]string{
-		"missing selection": "permissions:\n  custom: {}\n",
-		"reserved name":     "default_permissions: ':read-only'\npermissions:\n  ':custom': {}\n",
-		"cycle":             "default_permissions: a\npermissions:\n  a: {extends: b}\n  b: {extends: a}\n",
-		"bad glob":          "default_permissions: a\npermissions:\n  a:\n    filesystem:\n      '/tmp/*/x': write\n",
-		"bad depth":         "default_permissions: a\npermissions:\n  a:\n    filesystem:\n      glob_scan_max_depth: 0\n",
-		"parent subpath":    "default_permissions: a\npermissions:\n  a:\n    filesystem:\n      ':workspace_roots':\n        '..': deny\n",
-		"dot subpath":       "default_permissions: a\npermissions:\n  a:\n    filesystem:\n      ':workspace_roots':\n        'dir/./file': deny\n",
-		"empty action":      "default_permissions: a\npermissions:\n  a:\n    network:\n      mitm:\n        actions:\n          redact: {}\n",
-		"empty hook action": "default_permissions: a\npermissions:\n  a:\n    network:\n      mitm:\n        hooks:\n          api:\n            host: example.com\n            methods: [GET]\n            path_prefixes: ['/']\n            action: []\n",
-		"inactive bad mode": "default_permissions: a\npermissions:\n  a: {}\n  b:\n    network:\n      mode: invalid\n",
-		"profile field":     "default_permissions: a\npermissions:\n  a:\n    unexpected: true\n",
-		"network field":     "default_permissions: a\npermissions:\n  a:\n    network:\n      unexpected: true\n",
-		"mitm field":        "default_permissions: a\npermissions:\n  a:\n    network:\n      mitm:\n        unexpected: true\n",
-		"hook field":        "default_permissions: a\npermissions:\n  a:\n    network:\n      mitm:\n        hooks:\n          api:\n            host: example.com\n            methods: [GET]\n            path_prefixes: ['/']\n            action: [redact]\n            unexpected: true\n",
-		"missing hook host": "default_permissions: a\npermissions:\n  a:\n    network:\n      mitm:\n        hooks:\n          api:\n            methods: [GET]\n            path_prefixes: ['/']\n            action: [redact]\n",
-		"unknown subpath":   "default_permissions: a\npermissions:\n  a:\n    filesystem:\n      ':future':\n        '../secret': deny\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "forebrain.yaml")
-			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := LoadPersisted(path); err == nil {
-				t.Fatal("expected validation error")
-			}
-		})
-	}
-}
-
-func TestPermissionProfileNetworkInheritance(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "forebrain.yaml")
-	data := []byte(`
-default_permissions: child
-permissions:
-  parent:
-    network:
-      proxy_url: http://127.0.0.1:3128
-      domains:
-        "EXAMPLE.COM.:443": deny
-      mitm:
-        actions:
-          redact:
-            strip_request_headers: [authorization]
-        hooks:
-          api:
-            host: api.example.com
-            methods: [GET]
-            path_prefixes: ['/v1']
-            query:
-              source: [parent]
-            action: [redact]
-  child:
-    extends: parent
-    network:
-      proxy_url: ""
-      domains:
-        "example.com": allow
-      mitm:
-        actions:
-          inject:
-            inject_request_headers:
-              - name: x-secret
-                secret_env_var: API_SECRET
-        hooks:
-          api:
-            host: api.example.com
-            methods: [POST]
-            path_prefixes: ['/v2']
-            headers:
-              x-client: [forebrain]
-            action: [inject]
-`)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := LoadPersisted(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile, active, err := cfg.ResolvePermissionProfile()
-	if err != nil || !active || profile.Network == nil {
-		t.Fatalf("active=%t profile=%+v err=%v", active, profile, err)
-	}
-	network := profile.Network
-	if network.ProxyURL == nil || *network.ProxyURL != "" {
-		t.Fatalf("proxy_url=%v", network.ProxyURL)
-	}
-	if len(network.Domains) != 1 || network.Domains["example.com"] != NetworkAccessAllow {
-		t.Fatalf("domains=%+v", network.Domains)
-	}
-	if network.MITM == nil || len(network.MITM.Actions) != 2 {
-		t.Fatalf("mitm=%+v", network.MITM)
-	}
-	hook := network.MITM.Hooks["api"]
-	if len(hook.Methods) != 1 || hook.Methods[0] != "POST" || hook.Body != nil || hook.Query["source"][0] != "parent" || hook.Headers["x-client"][0] != "forebrain" {
-		t.Fatalf("hook=%+v", hook)
-	}
-}
-
-func TestBuiltInPermissionProfileSelectionSetsSandboxMode(t *testing.T) {
-	for profile, mode := range map[string]SandboxMode{
-		PermissionProfileReadOnly:         SandboxModeReadOnly,
-		PermissionProfileWorkspace:        SandboxModeWorkspaceWrite,
-		PermissionProfileDangerFullAccess: SandboxModeDangerFullAccess,
-	} {
-		cfg := Root{DefaultPermissions: profile}
-		normalizeSandboxConfig(&cfg)
-		if cfg.SandboxMode != mode {
-			t.Fatalf("%s selected mode %s", profile, cfg.SandboxMode)
-		}
-	}
-}
-
-func TestDangerFullAccessUsesSelectedPermissionConfiguration(t *testing.T) {
-	if (&Root{SandboxMode: SandboxModeDangerFullAccess, DefaultPermissions: "restricted"}).DangerFullAccessEnabled() {
-		t.Fatal("a named permission configuration must take precedence over sandbox_mode")
-	}
-	if !(&Root{SandboxMode: SandboxModeReadOnly, DefaultPermissions: PermissionProfileDangerFullAccess}).DangerFullAccessEnabled() {
-		t.Fatal("the unrestricted built-in permission configuration must disable the sandbox")
-	}
+// DangerFullAccessEnabled reads the derived sandbox mode and nothing else: a
+// named permission profile used to outrank it, and profiles are gone (plan
+// 203), so the mode the preset derives is the single answer.
+func TestDangerFullAccessEnabledFollowsSandboxMode(t *testing.T) {
 	if !(&Root{SandboxMode: SandboxModeDangerFullAccess}).DangerFullAccessEnabled() {
-		t.Fatal("danger-full-access sandbox mode must disable the sandbox when no permission configuration is selected")
+		t.Fatal("danger-full-access sandbox mode must disable the sandbox")
 	}
-}
-
-func TestExplicitBuiltInWorkspaceIgnoresWorkspaceSettings(t *testing.T) {
-	cfg := Root{
-		DefaultPermissions: PermissionProfileWorkspace,
-		SandboxWorkspaceWrite: SandboxWorkspaceWrite{
-			WritableRoots:       []string{"/configured/root"},
-			NetworkAccess:       BoolPtr(true),
-			ExcludeTmpdirEnvVar: true,
-			ExcludeSlashTmp:     true,
-		},
+	if (&Root{SandboxMode: SandboxModeWorkspaceWrite}).DangerFullAccessEnabled() {
+		t.Fatal("workspace-write must keep the sandbox")
 	}
-	profile, active, err := cfg.ResolvePermissionProfile()
-	if err != nil || !active {
-		t.Fatalf("active=%t err=%v", active, err)
-	}
-	if profile.FileSystem == nil {
-		t.Fatal("missing filesystem profile")
-	}
-	if _, ok := profile.FileSystem.Entries[":tmpdir"]; !ok {
-		t.Fatal("explicit workspace profile must include tmpdir")
-	}
-	if _, ok := profile.FileSystem.Entries[":slash_tmp"]; !ok {
-		t.Fatal("explicit workspace profile must include /tmp")
-	}
-	if _, ok := profile.FileSystem.Entries["/configured/root"]; ok {
-		t.Fatal("configured writable roots must not become explicit profile entries")
-	}
-	if profile.Network != nil {
-		t.Fatalf("network=%+v", profile.Network)
-	}
-}
-
-func TestFilesystemDepthRejectsFractionalJSON(t *testing.T) {
-	var filesystem FileSystemPermissions
-	if err := json.Unmarshal([]byte(`{"glob_scan_max_depth":1.5}`), &filesystem); err == nil {
-		t.Fatal("fractional glob_scan_max_depth was accepted")
-	}
-}
-
-func TestResolvePermissionProfileErrorsNameTheSettingAtFault(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		selected string
-		profiles PermissionProfiles
-		want     string
-	}{
-		{
-			name:     "undefined selection blames default_permissions",
-			selected: "missing",
-			want:     `default_permissions refers to undefined profile "missing"`,
-		},
-		{
-			name:     "unknown built-in selection is rejected as built-in",
-			selected: ":nope",
-			want:     `default_permissions refers to unknown built-in profile ":nope"`,
-		},
-		{
-			// default_permissions is correct here; the typo is in the parent.
-			name:     "undefined parent blames the profile that extends it",
-			selected: "team",
-			profiles: PermissionProfiles{"team": {Extends: "bse"}},
-			want:     `permissions profile "team" extends undefined profile "bse"`,
-		},
-		{
-			name:     "a built-in that cannot be extended says so",
-			selected: "team",
-			profiles: PermissionProfiles{"team": {Extends: PermissionProfileDangerFullAccess}},
-			want:     `permissions profile "team" cannot extend unsupported built-in profile ":danger-full-access"`,
-		},
-		{
-			name:     "a cycle reports the path that closes it",
-			selected: "a",
-			profiles: PermissionProfiles{"a": {Extends: "b"}, "b": {Extends: "a"}},
-			want:     "permissions profile inheritance cycle detected: a -> b -> a",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			root := &Root{DefaultPermissions: tc.selected, Permissions: tc.profiles}
-			_, ok, err := root.ResolvePermissionProfile()
-			if err == nil {
-				t.Fatalf("expected an error, got ok=%v", ok)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %q, want it to contain %q", err.Error(), tc.want)
-			}
-		})
-	}
-}
-
-// Only the two profiles that describe a sandbox may be extended; the
-// full-access profile describes the absence of one.
-func TestResolvePermissionProfileExtendsBuiltIns(t *testing.T) {
-	for _, parent := range []string{PermissionProfileReadOnly, PermissionProfileWorkspace} {
-		root := &Root{
-			DefaultPermissions: "team",
-			Permissions:        PermissionProfiles{"team": {Extends: parent}},
-		}
-		profile, ok, err := root.ResolvePermissionProfile()
-		if err != nil || !ok {
-			t.Fatalf("extends %s: ok=%v err=%v", parent, ok, err)
-		}
-		if profile.FileSystem == nil || profile.FileSystem.Entries[":root"].Access != FileSystemAccessRead {
-			t.Fatalf("extends %s did not inherit the parent filesystem: %+v", parent, profile.FileSystem)
-		}
+	if (&Root{}).DangerFullAccessEnabled() {
+		t.Fatal("an unset mode must not report full access")
 	}
 }
 
@@ -769,7 +467,7 @@ func TestLoadAllowsEnvReferenceSecret(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if _, err := Load(path); err != nil {
+	if _, err := loadDocumentForTest(path); err != nil {
 		t.Fatalf("Load error = %v, want env reference secret allowed", err)
 	}
 }
@@ -789,7 +487,7 @@ func TestLoadExpandsYAMLEnvReferenceFromProcess(t *testing.T) {
 	}
 	t.Setenv("FOREBRAIN_GATEWAY_TOKEN", "from-process-env")
 
-	cfg, err := Load(path)
+	cfg, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -810,7 +508,7 @@ func TestLoadExpandsOnlyBracedYAMLEnvReference(t *testing.T) {
 	t.Setenv("BRACED_TOKEN", "expanded")
 	t.Setenv("UNBRACED_TOKEN", "must-not-expand")
 
-	cfg, err := Load(path)
+	cfg, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -835,7 +533,7 @@ func TestLoadExpandsYAMLEnvReferenceFromForebrainDotEnv(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -856,7 +554,7 @@ func TestLoadPersistedKeepsYAMLEnvReference(t *testing.T) {
 	}
 	t.Setenv("FOREBRAIN_GATEWAY_TOKEN", "runtime-secret")
 
-	cfg, err := LoadPersisted(path)
+	cfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted error: %v", err)
 	}
@@ -876,7 +574,7 @@ func TestLoadAllowsGatewayAuthModeBoolFreeConfig(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if _, err := Load(path); err != nil {
+	if _, err := loadDocumentForTest(path); err != nil {
 		t.Fatalf("Load error = %v, want non-secret gateway auth fields allowed", err)
 	}
 }
@@ -902,7 +600,7 @@ func TestLoadPersistedSkipsRuntimeEnvSecretsForReadModifyWrite(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runtimeCfg, err := Load(path)
+	runtimeCfg, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -910,7 +608,7 @@ func TestLoadPersistedSkipsRuntimeEnvSecretsForReadModifyWrite(t *testing.T) {
 		t.Fatalf("runtime Load API key = %q, want env override", got)
 	}
 
-	persistedCfg, err := LoadPersisted(path)
+	persistedCfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted error: %v", err)
 	}
@@ -940,7 +638,7 @@ func TestSaveDoesNotPersistRuntimeEnvSecretsLoadedFromDotEnv(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
@@ -971,10 +669,7 @@ func TestGatewayHelpers(t *testing.T) {
 	t.Parallel()
 	root := &Root{
 		Gateway: Gateway{
-			Auth: GatewayAuth{
-				Mode:  "token",
-				Token: "gw-token",
-			},
+			Auth: GatewayAuth{Token: "gw-token"},
 		},
 		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
 			"main": {},
@@ -1009,7 +704,7 @@ func TestGatewayHelpers(t *testing.T) {
 	if !GatewayAllowsAnonymousGET("/docs") {
 		t.Fatal("docs path should allow anonymous GET")
 	}
-	if root.Gateway.Auth.Mode != "token" || root.Gateway.Auth.Token != "gw-token" {
+	if root.Gateway.Auth.Token != "gw-token" {
 		t.Fatalf("gateway auth helpers returned unexpected config: %+v", root.Gateway.Auth)
 	}
 }

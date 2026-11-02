@@ -156,7 +156,7 @@ func (e *Engine) EvaluateForSession(store *Store, sessionID, toolName, input str
 			return Decision{Behavior: BehaviorAsk, Mode: mode, Reason: "shell_unsafe_default_ask"}
 		}
 		switch policy {
-		case ApprovalNever, ApprovalOnRequest, ApprovalGranular:
+		case ApprovalNever, ApprovalOnRequest:
 			return Decision{Behavior: BehaviorAllow, Mode: mode, Reason: "shell_default_allow"}
 		}
 	}

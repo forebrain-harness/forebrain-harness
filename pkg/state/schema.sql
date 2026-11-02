@@ -25,6 +25,12 @@ CREATE TABLE fb_projects (
   -- copies it into fb_sessions.project_type when it is born, so changing it
   -- only reaches the conversations started afterwards.
   project_type TEXT NOT NULL DEFAULT 'coding' CHECK (project_type IN ('office', 'coding', 'batch')),
+  -- Whether this batch project's tasks run inside their task boundary. A
+  -- project copies the install's batch.sandbox_default when it is created, or
+  -- when its type is changed to batch, and owns the value from then on.
+  -- Meaningless outside a batch project, and meaningless where no sandbox
+  -- exists at all — there a batch task runs with full access either way.
+  batch_sandbox INTEGER NOT NULL DEFAULT 1 CHECK (batch_sandbox IN (0, 1)),
   -- Where a batch project's end-of-execution notifications go: a JSON array of
   -- {"channel","target"} pairs, written from the project's settings page. A
   -- task that came in through a channel answers its own chat instead; an empty
@@ -429,6 +435,13 @@ CREATE TABLE fb_memory_stage1_outputs (
   last_usage INTEGER,
   selected_for_phase2 INTEGER NOT NULL DEFAULT 0 CHECK (selected_for_phase2 IN (0, 1)),
   selected_for_phase2_source_updated_at INTEGER,
+  -- How far into the thread's transcript this extraction read: the id of the
+  -- last fb_messages row it consumed. The next extraction of the same thread
+  -- reads only what came after it and hands the model this row's result
+  -- alongside, so re-extracting a long conversation costs the new turns, not
+  -- the whole history. NULL means no row id was recorded (a row written before
+  -- this column existed), which costs that thread one more full read.
+  last_message_row_id INTEGER,
   -- The thread's tenant is the session's; the composite key makes the database
   -- hold them equal instead of trusting every writer to.
   FOREIGN KEY (thread_id, agent_id) REFERENCES fb_sessions(id, agent_id) ON DELETE CASCADE
@@ -683,3 +696,26 @@ CREATE TABLE fb_mcp_oauth (
   updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY (project_key, server_name)
 ) STRICT;
+
+-- The read baseline a conversation keeps across processes (plan 183): for a
+-- path read_file put in front of the model, the version it showed — mtime, size
+-- and the SHA-256 of the whole file — plus which tenant read it and when. No
+-- file bytes are stored: only the version facts edit_file's overwrite check
+-- compares against, so a session resumed in a new process does not have to
+-- pretend that a paged preview was the file. A baseline is not an
+-- authorization: path policy, approvals, old_string and the current disk hash
+-- all still have to pass, and a file changed outside the conversation still
+-- reads as "file changed since last read". agent_id is the tenant the row
+-- belongs to; every read and write names it beside session_id and path, and
+-- deleting the session releases its rows.
+CREATE TABLE fb_file_read_states (
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
+  path TEXT NOT NULL,
+  mod_time_ns INTEGER NOT NULL,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  read_at_ns INTEGER NOT NULL,
+  touch_kind TEXT NOT NULL DEFAULT 'read' CHECK (touch_kind = 'read'),
+  PRIMARY KEY (session_id, path)
+) STRICT, WITHOUT ROWID;

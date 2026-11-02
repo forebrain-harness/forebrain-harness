@@ -232,7 +232,7 @@ func TestLoadAndSaveJSONYAML(t *testing.T) {
 	if !json.Valid(raw) {
 		t.Fatalf("saved json is invalid: %s", raw)
 	}
-	loaded, err := Load(jsonPath)
+	loaded, err := loadDocumentForTest(jsonPath)
 	if err != nil {
 		t.Fatalf("Load json: %v", err)
 	}
@@ -253,10 +253,9 @@ func TestLoadAndSaveJSONYAML(t *testing.T) {
 	}
 	text := string(rawYAML)
 	for _, want := range []string{
-		"warn_remaining_tokens: 25000",
-		"block_remaining_tokens: 13000",
+		"warn_remaining_percent: 12",
+		"auto_compact_percent: 90",
 		"max_runes: 200000",
-		"max_chunk_runes: 120000",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("saved yaml missing %q:\n%s", want, text)
@@ -286,7 +285,7 @@ func TestLoadAndSaveJSONYAML(t *testing.T) {
 	if err := os.WriteFile(unknownPath, []byte("gateway:\n  http_addr: 127.0.0.1:6060\n"), 0o600); err != nil {
 		t.Fatalf("write unknown ext config: %v", err)
 	}
-	if _, err := Load(unknownPath); err != nil {
+	if _, err := loadDocumentForTest(unknownPath); err != nil {
 		t.Fatalf("Load unknown extension as yaml: %v", err)
 	}
 
@@ -294,7 +293,7 @@ func TestLoadAndSaveJSONYAML(t *testing.T) {
 	if err := os.WriteFile(badPath, []byte("{bad json and: [bad yaml"), 0o600); err != nil {
 		t.Fatalf("write bad config: %v", err)
 	}
-	if _, err := Load(badPath); err == nil {
+	if _, err := loadDocumentForTest(badPath); err == nil {
 		t.Fatal("Load bad config error = nil")
 	}
 }
@@ -366,7 +365,7 @@ agents:
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	cfg, err := LoadPersisted(path)
+	cfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted: %v", err)
 	}
@@ -451,7 +450,7 @@ func TestPrimaryAgentsConfigDefaultsMainDefinition(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := LoadPersisted(path)
+	cfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted: %v", err)
 	}
@@ -482,7 +481,7 @@ agents:
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := LoadPersisted(path)
+	cfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted: %v", err)
 	}
@@ -516,7 +515,7 @@ agents:
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := LoadPersisted(path)
+	cfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted: %v", err)
 	}
@@ -543,7 +542,7 @@ agents:
 		t.Fatalf("write config: %v", err)
 	}
 
-	_, err := LoadPersisted(path)
+	_, err := loadPersistedDocumentForTest(path)
 	if err == nil || !strings.Contains(err.Error(), "Bad") {
 		t.Fatalf("LoadPersisted error = %v, want invalid agent id error", err)
 	}
@@ -656,15 +655,15 @@ func TestCurrentApprovalAndSandboxDefaults(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(path)
+	cfg, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Like sandbox_mode below, an omitted approval_policy stays unset so the
-	// launch project's trust decision can resolve it. String() still reports the
-	// display fallback.
-	if cfg.ApprovalPolicy.Mode != "" || cfg.ApprovalsReviewer != "user" {
-		t.Fatalf("approval defaults = %q/%q", cfg.ApprovalPolicy.Mode, cfg.ApprovalsReviewer)
+	// An omitted approval_preset stays unset so the state database's value can
+	// fill it in, and the derived pair stays empty until safety.EffectiveConfig
+	// runs. String() still reports the display fallback.
+	if cfg.ApprovalPreset != "" || cfg.ApprovalPolicy.Mode != "" {
+		t.Fatalf("approval defaults = %q/%q", cfg.ApprovalPreset, cfg.ApprovalPolicy.Mode)
 	}
 	if got := cfg.ApprovalPolicy.String(); got != string(ApprovalPolicyOnRequest) {
 		t.Fatalf("approval display fallback = %q", got)
@@ -698,36 +697,27 @@ hooks:
           once: false
           async: false
           async_rewake: false
-approval_policy:
-  granular:
-    sandbox_approval: false
-    rules: false
-    skill_approval: false
-    request_permissions: false
-    mcp_elicitations: false
-memories:
-  disable_on_external_context: false
 `), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if ext == "json" {
-				if err := os.WriteFile(path, []byte(`{"agents":{"definitions":{"main":{"channels":{"weixin":{"enabled":false,"silk_voice_decode":false}}},"worker":{"primary":false}}},"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"echo test","once":false,"async":false,"async_rewake":false}]}]},"approval_policy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":false}},"memories":{"disable_on_external_context":false}}`), 0o600); err != nil {
+				if err := os.WriteFile(path, []byte(`{"agents":{"definitions":{"main":{"channels":{"weixin":{"enabled":false,"silk_voice_decode":false}}},"worker":{"primary":false}}},"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"echo test","once":false,"async":false,"async_rewake":false}]}]},"approval_policy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":false}}}`), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
 
-			cfg, err := Load(path)
+			cfg, err := loadDocumentForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := Save(path, cfg); err != nil {
 				t.Fatal(err)
 			}
-			got, err := Load(path)
+			got, err := loadDocumentForTest(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Agents.Definitions["worker"].Primary || got.ApprovalPolicy.Granular.SandboxApproval || got.ApprovalPolicy.Granular.Rules || got.ApprovalPolicy.Granular.SkillApproval || got.ApprovalPolicy.Granular.RequestPermissions || got.ApprovalPolicy.Granular.MCPElicitations || got.Memories.DisableOnExternalContext == nil || *got.Memories.DisableOnExternalContext {
+			if got.Agents.Definitions["worker"].Primary || got.Memories.MaxUnusedDays == nil || *got.Memories.MaxUnusedDays != 30 {
 				t.Fatalf("explicit false values changed after Save: %+v", got)
 			}
 			hook := got.Hooks["PreToolUse"][0].Hooks[0]
@@ -797,21 +787,21 @@ func TestDotEnvAfterNormalizeBranches(t *testing.T) {
 
 func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := Load(filepath.Join(dir, "missing.yaml")); err == nil {
+	if _, err := loadDocumentForTest(filepath.Join(dir, "missing.yaml")); err == nil {
 		t.Fatal("Load missing file error = nil")
 	}
 	badYAML := filepath.Join(dir, "bad.yaml")
 	if err := os.WriteFile(badYAML, []byte("x: ["), 0o600); err != nil {
 		t.Fatalf("write bad yaml: %v", err)
 	}
-	if _, err := Load(badYAML); err == nil {
+	if _, err := loadDocumentForTest(badYAML); err == nil {
 		t.Fatal("Load bad yaml error = nil")
 	}
 	badJSON := filepath.Join(dir, "bad.json")
 	if err := os.WriteFile(badJSON, []byte("{"), 0o600); err != nil {
 		t.Fatalf("write bad json: %v", err)
 	}
-	if _, err := Load(badJSON); err == nil {
+	if _, err := loadDocumentForTest(badJSON); err == nil {
 		t.Fatal("Load bad json error = nil")
 	}
 
@@ -831,7 +821,7 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write normalize config: %v", err)
 	}
-	cfg, err := Load(path)
+	cfg, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load normalize config: %v", err)
 	}
@@ -847,7 +837,7 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 	if err := os.WriteFile(unknownConfigPath, []byte(unknownConfigBody), 0o600); err != nil {
 		t.Fatalf("write unknown top-level config: %v", err)
 	}
-	unknownConfig, err := Load(unknownConfigPath)
+	unknownConfig, err := loadDocumentForTest(unknownConfigPath)
 	if err != nil {
 		t.Fatalf("Load unknown top-level config: %v", err)
 	}
@@ -873,7 +863,7 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 	if err := os.WriteFile(loadPath, []byte("gateway:\n  http_addr: 127.0.0.1:6060\n"), 0o600); err != nil {
 		t.Fatalf("write load config: %v", err)
 	}
-	if _, err := Load(loadPath); err == nil {
+	if _, err := loadDocumentForTest(loadPath); err == nil {
 		t.Fatal("Load with bad dotenv error = nil")
 	}
 }
@@ -912,7 +902,7 @@ func TestSavePreservesSecretEnvRefs(t *testing.T) {
 	}
 
 	// Load expands the env ref to plaintext in memory.
-	loaded, err := Load(path)
+	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -936,7 +926,7 @@ func TestSavePreservesSecretEnvRefs(t *testing.T) {
 	}
 
 	// The saved file must load again without the plaintext-secret rejection.
-	if _, err := Load(path); err != nil {
+	if _, err := loadDocumentForTest(path); err != nil {
 		t.Fatalf("reload after save: %v", err)
 	}
 }
@@ -1049,7 +1039,7 @@ func TestExecutionMaxParallelSubagentsDefaultUsesLogicalCoresMinusOne(t *testing
 	if err := os.WriteFile(path, []byte("agents:\n  defaults: {}\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	loaded, err := Load(path)
+	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1068,7 +1058,7 @@ func TestExecutionMaxParallelSubagentsExplicitZeroMeansMainAgentOnly(t *testing.
 	if err := os.WriteFile(path, []byte("agents:\n  defaults:\n    execution:\n      max_parallel_subagents: 0\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	loaded, err := Load(path)
+	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1095,7 +1085,7 @@ func TestNetworkRetryMaxDefaultsToTenAndRoundTrips(t *testing.T) {
 	if err := os.WriteFile(path, []byte("agents:\n  defaults: {}\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	loaded, err := Load(path)
+	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1107,7 +1097,7 @@ func TestNetworkRetryMaxDefaultsToTenAndRoundTrips(t *testing.T) {
 	if err := Save(path, Root{Agents: AgentsSection{Defaults: AgentDefaults{NetworkRetryMax: &four}}}); err != nil {
 		t.Fatalf("save 4: %v", err)
 	}
-	reloaded, err := Load(path)
+	reloaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("reload 4: %v", err)
 	}
@@ -1142,7 +1132,7 @@ func TestNetworkRetryMaxLoadRejectsNegativeAndAllowsAnyLargerValue(t *testing.T)
 	if err := os.WriteFile(path, []byte("agents:\n  defaults:\n    network_retry_max: -1\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "agents.defaults.network_retry_max must be non-negative") {
+	if _, err := loadDocumentForTest(path); err == nil || !strings.Contains(err.Error(), "agents.defaults.network_retry_max must be non-negative") {
 		t.Fatalf("negative load error = %v, want agents.defaults.network_retry_max must be non-negative", err)
 	}
 
@@ -1151,7 +1141,7 @@ func TestNetworkRetryMaxLoadRejectsNegativeAndAllowsAnyLargerValue(t *testing.T)
 	if err := os.WriteFile(path, []byte("agents:\n  defaults:\n    network_retry_max: 100\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	loaded, err := Load(path)
+	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("Load 100: %v", err)
 	}
@@ -1187,7 +1177,7 @@ func TestStreamIdleTimeoutLoadRejectsNegative(t *testing.T) {
 	if err := os.WriteFile(path, []byte("agents:\n  defaults:\n    stream_idle_timeout_seconds: -1\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "agents.defaults.stream_idle_timeout_seconds must be non-negative") {
+	if _, err := loadDocumentForTest(path); err == nil || !strings.Contains(err.Error(), "agents.defaults.stream_idle_timeout_seconds must be non-negative") {
 		t.Fatalf("negative load error = %v, want agents.defaults.stream_idle_timeout_seconds must be non-negative", err)
 	}
 }
@@ -1280,7 +1270,7 @@ func TestSkillOfferIsPartOfTheResolvedFeatureSet(t *testing.T) {
 	}
 	// The other flags must not have moved: the new field joins the set, it does
 	// not replace it.
-	if unset.Memories != set.Memories || unset.ExecPermissionApprovals != set.ExecPermissionApprovals {
+	if unset.Memories != set.Memories || unset.LSP != set.LSP {
 		t.Fatalf("resolving skill_offer changed an unrelated flag: %+v vs %+v", unset, set)
 	}
 }
@@ -1340,7 +1330,7 @@ func TestCronRetentionDaysAndSaveRoundTrip(t *testing.T) {
 	if strings.Contains(string(raw), "cron:") {
 		t.Fatalf("an unset retention materialised into the file:\n%s", raw)
 	}
-	reloaded, err := Load(path)
+	reloaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("reload unset: %v", err)
 	}
@@ -1352,7 +1342,7 @@ func TestCronRetentionDaysAndSaveRoundTrip(t *testing.T) {
 	if err := Save(path, Root{Cron: CronSection{RetentionDays: &seven}}); err != nil {
 		t.Fatalf("save 7: %v", err)
 	}
-	reloaded, err = Load(path)
+	reloaded, err = loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("reload 7: %v", err)
 	}

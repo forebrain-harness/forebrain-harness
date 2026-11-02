@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -562,14 +563,26 @@ func TestStateV16UpgradesToV17AddsPermissionState(t *testing.T) {
 		}
 	}
 
-	// Old data survives untouched; the new table starts empty.
+	// Old data survives untouched. The v16→v17 step adds the table empty and
+	// infers nothing from history — a legacy --yolo session is recognised at
+	// read time, never by a scan — but the schema does not stop there: plan
+	// 203's backfill gives the session the default row a new one is born with.
+	// What this test still pins is that the row is that default, not an
+	// inferred full-access one.
 	var model string
 	if err := migrated.QueryRowContext(ctx, `SELECT model FROM fb_session_model_state WHERE session_id='s'`).Scan(&model); err != nil || model != "deepseek-v4-pro" {
 		t.Fatalf("v16 model row after upgrade = %q err=%v, want deepseek-v4-pro", model, err)
 	}
 	var rows17 int
-	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_permission_state`).Scan(&rows17); err != nil || rows17 != 0 {
-		t.Fatalf("fb_session_permission_state after migration has %d rows err=%v, want 0 (no backfill)", rows17, err)
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_permission_state`).Scan(&rows17); err != nil || rows17 != 1 {
+		t.Fatalf("fb_session_permission_state after migration has %d rows err=%v, want 1 (the default row for the session that had none)", rows17, err)
+	}
+	var preset, source string
+	if err := migrated.QueryRowContext(ctx, `SELECT preset, source FROM fb_session_permission_state WHERE session_id='s'`).Scan(&preset, &source); err != nil {
+		t.Fatal(err)
+	}
+	if preset != "workspace_write" || source != "default" {
+		t.Fatalf("backfilled row = %q/%q, want workspace_write/default (never an inferred yolo row)", preset, source)
 	}
 }
 
@@ -3174,4 +3187,652 @@ func TestStateV22UpgradesToV23AddsTaskNotify(t *testing.T) {
 	if got, err := store.ExecutionNotifyError(ctx, "s"); err != nil || got != "channel unreachable" {
 		t.Fatalf("delivery failure after writing it = %q err=%v", got, err)
 	}
+}
+
+// TestStateV28UpgradesToV29AddsBatchSandbox carries a v28 state file forward
+// (plans/216): the batch project's sandbox column arrives, every existing
+// project reads as "sandbox on" — the value a new batch project starts with
+// and the only safe reading for a task nobody watches — and a project's own
+// switch is readable and writable through the store afterwards.
+func TestStateV28UpgradesToV29AddsBatchSandbox(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_projects(id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, project_type, created_at, updated_at)
+		 VALUES('prj','main','batch','','','','/repo/batch','-repo-batch','shared',1,0,'','batch',10,10)`,
+		`ALTER TABLE fb_projects DROP COLUMN batch_sandbox`,
+		`PRAGMA user_version = 28`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v28 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	store := NewProjectStore(migrated, "main")
+	p, err := store.Get(ctx, "prj")
+	if err != nil {
+		t.Fatalf("read the migrated project: %v", err)
+	}
+	if !p.BatchSandbox {
+		t.Fatal("an existing project must read as sandbox on")
+	}
+	off := false
+	updated, err := store.Update(ctx, p.ID, UpdateProjectInput{BatchSandbox: &off})
+	if err != nil {
+		t.Fatalf("turn the switch off: %v", err)
+	}
+	if updated.BatchSandbox {
+		t.Fatal("the project's own switch did not take the stored value")
+	}
+	reloaded, err := store.Get(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("read the project back: %v", err)
+	}
+	if reloaded.BatchSandbox {
+		t.Fatal("the switch did not survive the round trip")
+	}
+}
+
+// TestCreateProjectCopiesTheGlobalBatchSandbox pins the copy the owner ruled on
+// (plans/216 §3.6): a project takes the install's batch.sandbox_default when it
+// is created, and a project that already exists keeps its own value afterwards.
+func TestCreateProjectCopiesTheGlobalBatchSandbox(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := NewProjectStore(db, "main")
+	on, off := true, false
+
+	// The caller that knows the global value passes it in; unset takes the
+	// default, which is on.
+	defaulted, err := store.Create(ctx, CreateProjectInput{Name: "default", Root: t.TempDir(), ProjectType: ProjectTypeBatch})
+	if err != nil {
+		t.Fatalf("create with no explicit switch: %v", err)
+	}
+	if !defaulted.BatchSandbox {
+		t.Fatal("a new batch project must start with the sandbox on")
+	}
+	explicit, err := store.Create(ctx, CreateProjectInput{Name: "explicit", Root: t.TempDir(), ProjectType: ProjectTypeBatch, BatchSandbox: &off})
+	if err != nil {
+		t.Fatalf("create with the switch off: %v", err)
+	}
+	if explicit.BatchSandbox {
+		t.Fatal("a new batch project did not take the value it was created with")
+	}
+	// A second project created with the global value on changes nothing about
+	// the first: the global value is a starting point, never a live override.
+	if _, err := store.Create(ctx, CreateProjectInput{Name: "later", Root: t.TempDir(), ProjectType: ProjectTypeBatch, BatchSandbox: &on}); err != nil {
+		t.Fatalf("create a second project: %v", err)
+	}
+	kept, err := store.Get(ctx, explicit.ID)
+	if err != nil {
+		t.Fatalf("read the existing project: %v", err)
+	}
+	if kept.BatchSandbox {
+		t.Fatal("an existing project changed its switch")
+	}
+}
+
+// TestFileReadStateMigrationFromV24AddsTheTable carries a v24 state file
+// forward: the read-baseline table arrives with the columns the store reads and
+// writes, an existing conversation keeps everything it had, and the table
+// starts empty (a baseline is a fact of a read, never something a migration can
+// invent).
+func TestFileReadStateMigrationFromV24AddsTheTable(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s','main','kept',10,10,'/repo/app')`,
+		`INSERT INTO fb_messages(session_id, role, content, created_at, message_id) VALUES('s','user','hello',11,'m-1')`,
+		`DROP TABLE fb_file_read_states`,
+		`PRAGMA user_version = 24`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v24 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	var columns []string
+	rows, err := migrated.QueryContext(ctx, `SELECT name FROM pragma_table_info('fb_file_read_states')`)
+	if err != nil {
+		t.Fatalf("a v24 file did not gain fb_file_read_states: %v", err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	_ = rows.Close()
+	want := []string{"session_id", "agent_id", "path", "mod_time_ns", "size", "sha256", "read_at_ns", "touch_kind"}
+	if strings.Join(columns, ",") != strings.Join(want, ",") {
+		t.Fatalf("fb_file_read_states columns = %v, want %v", columns, want)
+	}
+
+	// The conversation kept its rows, and the new table is empty: a migration
+	// never manufactures a read nobody performed.
+	var messages int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_messages WHERE session_id='s'`).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 1 {
+		t.Fatalf("messages after the upgrade = %d, want the one already there", messages)
+	}
+	var states int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_file_read_states`).Scan(&states); err != nil {
+		t.Fatal(err)
+	}
+	if states != 0 {
+		t.Fatalf("read baselines after the upgrade = %d, want none", states)
+	}
+
+	// The upgraded file is usable through the store the new shape describes.
+	store := NewSessionStore(migrated, "main")
+	if err := store.SaveFileReadState(ctx, FileReadState{
+		SessionID: "s",
+		Path:      "/repo/app/notes.txt",
+		ModTimeNS: 1700000000000000000,
+		Size:      12,
+		SHA256:    strings.Repeat("a", 64),
+		ReadAtNS:  1700000000000000001,
+	}); err != nil {
+		t.Fatalf("write a baseline on the migrated database: %v", err)
+	}
+	if got, ok, err := store.FileReadStateForSession(ctx, "s", "/repo/app/notes.txt"); err != nil || !ok || got.Size != 12 {
+		t.Fatalf("baseline after writing it = %+v ok=%v err=%v", got, ok, err)
+	}
+}
+
+// TestStateV25UpgradesToV26RewritesStoredPresets pins both halves of the preset
+// migration (plan 203).
+//
+// The rewrite: the three ids the old presets stored become the two that exist
+// now. A read-only session becomes the default rather than losing its row — a
+// deleted row would make the session follow the global preset, which widens it
+// exactly when the global one is full access — and a value this binary does not
+// know is left alone instead of being guessed at.
+//
+// The backfill: a session that predates §0.2b and has no row is given the
+// workspace_write/default row a new session is now born with, so its posture
+// lives in its own row like every other session's. A batch task is skipped (its
+// posture is the project type's), and a session that already has a row keeps it
+// untouched.
+func TestStateV25UpgradesToV26RewritesStoredPresets(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('read-only','main','s',10,10,'/repo/s')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('auto','main','s',10,10,'/repo/s')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('full-access','main','s',10,10,'/repo/s')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('unknown','main','s',10,10,'/repo/s')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('unseeded','main','s',10,10,'/repo/s')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd, project_type) VALUES('batch-run','main','s',10,10,'/repo/s','batch')`,
+		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at) VALUES('read-only','read-only','picker',10)`,
+		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at) VALUES('auto','auto','picker',11)`,
+		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at) VALUES('full-access','full-access','yolo',12)`,
+		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at) VALUES('unknown','something-else','picker',13)`,
+		`PRAGMA user_version = 25`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v25 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	want := map[string]string{
+		"read-only":   "workspace_write",
+		"auto":        "workspace_write",
+		"full-access": "full_access",
+		"unknown":     "something-else",
+	}
+	for sessionID, preset := range want {
+		var got string
+		if err := migrated.QueryRowContext(ctx, `SELECT preset FROM fb_session_permission_state WHERE session_id=?`, sessionID).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", sessionID, err)
+		}
+		if got != preset {
+			t.Fatalf("%s preset after the upgrade = %q, want %q", sessionID, got, preset)
+		}
+	}
+
+	// The session that had no row is born with the default one, and a batch
+	// task is left without: a row for it would describe a posture it never runs
+	// under.
+	var preset, source string
+	var updatedAt int64
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT preset, source, updated_at FROM fb_session_permission_state WHERE session_id='unseeded'`,
+	).Scan(&preset, &source, &updatedAt); err != nil {
+		t.Fatalf("backfilled row: %v", err)
+	}
+	if preset != "workspace_write" || source != "default" || updatedAt != 1700000000000 {
+		t.Fatalf("backfilled row = %q/%q@%d, want workspace_write/default@1700000000000", preset, source, updatedAt)
+	}
+	if _, _, _, stored, err := NewSessionStore(migrated, "main").SessionPermissionPreset(ctx, "batch-run"); err != nil || stored {
+		t.Fatalf("batch session row after the upgrade: stored=%v err=%v, want none", stored, err)
+	}
+	// The sessions that already had a row kept the row they had — the backfill
+	// is guarded by NOT EXISTS, so a picker's choice is not re-labelled as the
+	// default.
+	for _, sessionID := range []string{"read-only", "auto", "full-access", "unknown"} {
+		var gotSource string
+		if err := migrated.QueryRowContext(ctx, `SELECT source FROM fb_session_permission_state WHERE session_id=?`, sessionID).Scan(&gotSource); err != nil {
+			t.Fatalf("%s source: %v", sessionID, err)
+		}
+		want := "picker"
+		if sessionID == "full-access" {
+			want = "yolo"
+		}
+		if gotSource != want {
+			t.Fatalf("%s source after the backfill = %q, want the original %q", sessionID, gotSource, want)
+		}
+	}
+}
+
+// TestStateV26UpgradesToV27RetractsBatchMemories pins both halves of plan 205's
+// migration.
+//
+// The retraction: an existing batch conversation becomes memory-disabled and
+// the stage-1 outputs extracted from it are deleted — those rows are the
+// memories a batch project must not have contributed. Where such a row had
+// already been selected as phase-2 input, its scope is enqueued for another
+// consolidation pass, because deleting the row only reaches the consolidated
+// memory when phase 2 runs again. An ordinary conversation keeps its output and
+// its mode.
+//
+// The cursor: fb_memory_stage1_outputs gains last_message_row_id, and every row
+// that predates it reads NULL — one more full extraction, then incremental.
+func TestStateV26UpgradesToV27RetractsBatchMemories(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		// Two batch task conversations in one project, one ordinary
+		// conversation in that same project: the retraction must reach only
+		// the batch threads.
+		`INSERT INTO fb_projects(id, agent_id, name, root, project_key, project_type, created_at, updated_at) VALUES('p','main','batch','/repo/batch','-repo-batch','batch',10,10)`,
+		`INSERT INTO fb_sessions(id, agent_id, title, project_type, memory_mode, created_at, updated_at, cwd, project_id) VALUES('batch-selected','main','s','batch','enabled',10,10,'/repo/batch','p')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, project_type, memory_mode, created_at, updated_at, cwd, project_id) VALUES('batch-plain','main','s','batch','enabled',10,10,'/repo/batch','p')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, project_type, memory_mode, created_at, updated_at, cwd, project_id) VALUES('coding','main','s','coding','enabled',10,10,'/repo/batch','p')`,
+		`INSERT INTO fb_memory_stage1_outputs(thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, generated_at, selected_for_phase2)
+			VALUES('batch-selected','main','-repo-batch',100,'batch learned this','batch summary',100,1)`,
+		`INSERT INTO fb_memory_stage1_outputs(thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, generated_at, selected_for_phase2)
+			VALUES('batch-plain','main','-repo-batch',100,'batch learned that','batch summary',100,0)`,
+		`INSERT INTO fb_memory_stage1_outputs(thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, generated_at, selected_for_phase2)
+			VALUES('coding','main','-repo-batch',100,'the user wants root-cause fixes','coding summary',100,0)`,
+		// A consolidation pass that already ran for the scope: retracting the
+		// batch contribution has to re-open it, which is what the watermark
+		// bump of the copied statement does.
+		`INSERT INTO fb_memory_jobs(kind, job_key, agent_id, status, finished_at, retry_remaining, input_watermark, last_success_watermark)
+			VALUES('memory_consolidate_global','main|project:-repo-batch','main','done',90,3,5,5)`,
+		`PRAGMA user_version = 26`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v26 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	for _, sessionID := range []string{"batch-selected", "batch-plain"} {
+		var mode string
+		if err := migrated.QueryRowContext(ctx, `SELECT memory_mode FROM fb_sessions WHERE id=?`, sessionID).Scan(&mode); err != nil {
+			t.Fatalf("%s: %v", sessionID, err)
+		}
+		if mode != "disabled" {
+			t.Fatalf("%s memory_mode after the upgrade = %q, want disabled", sessionID, mode)
+		}
+	}
+	var codingMode string
+	if err := migrated.QueryRowContext(ctx, `SELECT memory_mode FROM fb_sessions WHERE id='coding'`).Scan(&codingMode); err != nil {
+		t.Fatal(err)
+	}
+	if codingMode != "enabled" {
+		t.Fatalf("an ordinary conversation's memory_mode = %q, want it untouched", codingMode)
+	}
+
+	var batchRows int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE thread_id IN ('batch-selected','batch-plain')`).Scan(&batchRows); err != nil {
+		t.Fatal(err)
+	}
+	if batchRows != 0 {
+		t.Fatalf("%d batch stage-one outputs survived the retraction", batchRows)
+	}
+	var rawMemory string
+	var lastRowID sql.NullInt64
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT raw_memory, last_message_row_id FROM fb_memory_stage1_outputs WHERE thread_id='coding'`).Scan(&rawMemory, &lastRowID); err != nil {
+		t.Fatalf("the ordinary conversation's output after the upgrade: %v", err)
+	}
+	if rawMemory != "the user wants root-cause fixes" {
+		t.Fatalf("the ordinary conversation's output was rewritten: %q", rawMemory)
+	}
+	if lastRowID.Valid {
+		t.Fatalf("a pre-existing row's cursor = %v, want NULL for one more full extraction", lastRowID)
+	}
+
+	// The selected batch output's scope owes a consolidation pass, which the
+	// pipeline would otherwise be the only thing able to enqueue. The job is
+	// re-opened (pending, finished_at cleared) and its watermark moves past the
+	// pass that consumed the now-deleted row, so the retraction is not skipped
+	// as already-consolidated input.
+	var status string
+	var watermark int64
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT status, input_watermark FROM fb_memory_jobs WHERE kind='memory_consolidate_global' AND agent_id='main' AND job_key='main|project:-repo-batch'`,
+	).Scan(&status, &watermark); err != nil {
+		t.Fatalf("phase-two job after the retraction: %v", err)
+	}
+	if status != "pending" || watermark != 6 {
+		t.Fatalf("phase-two job = %s@%d, want pending@6", status, watermark)
+	}
+}
+
+// TestStateV27UpgradesToV28PrunesRetiredConfig pins plan 207's configuration
+// cleanup: the section rows 203–206 deleted are gone, the settings those plans
+// removed from the sections that stayed are gone, the four string settings
+// whose empty value meant the runtime default carry their explicit
+// representation, every other stored value is untouched, and the non-Root rows
+// (the credential sections and the observed gateway address) are left exactly
+// as they were.
+func TestStateV27UpgradesToV28PrunesRetiredConfig(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]string{
+		// The sections 203 and 206 retired.
+		"approval_policy":     `{"mode":"on-request","granular":{"enabled":true}}`,
+		"approvals_reviewer":  `"user"`,
+		"auto_review":         `{"policy":"strict"}`,
+		"default_permissions": `{"profile":"read-only"}`,
+		"permissions":         `{"profiles":[{"name":"p"}]}`,
+		"sandbox_mode":        `"workspace-write"`,
+		"tools":               `{"command_rewrite":{"enabled":true}}`,
+		"windows":             `{"sandbox":"elevated","sandbox_private_desktop":true}`,
+		// Sections that stay, each carrying the settings 203–206 removed next
+		// to the ones that are still settings.
+		"compact":                 `{"model_auto_compact_token_limit":100000,"model_auto_compact_token_limit_scope":"total","remote_compaction":true,"remote_compaction_v2":{"enabled":true},"auto_compact_percent":70,"prompt":"keep me"}`,
+		"memories":                `{"use_memories":true,"generate_memories":true,"dedicated_tools":false,"disable_on_external_context":true,"min_rate_limit_remaining_percent":25,"extract_model":"","consolidation_model":"gpt-kept","search_top_k":7}`,
+		"features":                `{"exec_permission_approvals":true,"request_permissions_tool":true,"network_proxy":{"dangerously_allow_non_loopback_proxy":true},"memories":false}`,
+		"sandbox_workspace_write": `{"go_cache_mode":"shared","exclude_tmpdir_env_var":true,"exclude_slash_tmp":true,"network_access":false,"writable_roots":["/kept"]}`,
+		"agents":                  `{"defaults":{"context_inject":{"warn_remaining_tokens":20000,"block_remaining_tokens":5000,"warn_remaining_percent":12},"guardrails":{"output":{"enabled":true},"retrieval":{"enabled":true},"input":{"max_runes":200000}},"network_retry_max":4,"web_search":{"provider":""},"web_fetch":{"provider":""}},"definitions":{"main":{"primary":true,"llm_providers":[{"provider":"openai","model":"gpt-kept","api_key":"sk-kept"}]}}}`,
+		// Non-Root rows: the credential sections and plan 206's observed
+		// address. A configuration cleanup must not touch them.
+		"auth.chatgpt":            `{"auth_mode":"chatgpt","tokens":{"access_token":"at","refresh_token":"rt"}}`,
+		"auth.opencode":           `{"access_token":"oat"}`,
+		"gateway.observed_origin": `{"origin":"https://work.example"}`, //nolint:gofmt
+	}
+	for section, value := range rows {
+		stmt := `INSERT INTO fb_config(section, value_json, updated_at_ms) VALUES(?,?,10)`
+		if _, err := conn.ExecContext(ctx, stmt, section, value); err != nil {
+			_ = conn.Close()
+			t.Fatalf("insert %s: %v", section, err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA user_version = 27`); err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v27 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	stored := map[string]map[string]any{}
+	query, err := migrated.QueryContext(ctx, `SELECT section, value_json FROM fb_config`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for query.Next() {
+		var section, value string
+		if err := query.Scan(&section, &value); err != nil {
+			query.Close()
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(value), &doc); err != nil {
+			query.Close()
+			t.Fatalf("section %s is not an object: %v", section, err)
+		}
+		stored[section] = doc
+	}
+	query.Close()
+	if err := query.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, section := range []string{
+		"approval_policy", "approvals_reviewer", "auto_review", "default_permissions",
+		"permissions", "sandbox_mode", "tools", "windows",
+	} {
+		if _, ok := stored[section]; ok {
+			t.Errorf("retired section %s survived the migration", section)
+		}
+	}
+
+	// The retired settings are gone and the ones that are still settings are
+	// exactly what they were.
+	requireStoredPaths(t, stored, "compact", map[string]any{
+		"auto_compact_percent": float64(70),
+		"prompt":               "keep me",
+	}, "model_auto_compact_token_limit", "model_auto_compact_token_limit_scope",
+		"remote_compaction", "remote_compaction_v2")
+	requireStoredPaths(t, stored, "memories", map[string]any{
+		"consolidation_model": "gpt-kept",
+		"extract_model":       "current",
+		"search_top_k":        float64(7),
+	}, "use_memories", "generate_memories", "dedicated_tools",
+		"disable_on_external_context", "min_rate_limit_remaining_percent")
+	requireStoredPaths(t, stored, "features", map[string]any{
+		"memories": false,
+	}, "exec_permission_approvals", "request_permissions_tool", "network_proxy")
+	requireStoredPaths(t, stored, "sandbox_workspace_write", map[string]any{
+		"network_access": false,
+		"writable_roots": []any{"/kept"},
+	}, "go_cache_mode", "exclude_tmpdir_env_var", "exclude_slash_tmp")
+
+	agents := stored["agents"]
+	defaults, _ := agents["defaults"].(map[string]any)
+	if defaults == nil {
+		t.Fatalf("agents.defaults disappeared: %v", agents)
+	}
+	contextInject, _ := defaults["context_inject"].(map[string]any)
+	if _, ok := contextInject["warn_remaining_tokens"]; ok {
+		t.Errorf("agents.defaults.context_inject.warn_remaining_tokens survived: %v", contextInject)
+	}
+	if _, ok := contextInject["block_remaining_tokens"]; ok {
+		t.Errorf("agents.defaults.context_inject.block_remaining_tokens survived: %v", contextInject)
+	}
+	if got := contextInject["warn_remaining_percent"]; got != float64(12) {
+		t.Errorf("agents.defaults.context_inject.warn_remaining_percent = %v, want 12", got)
+	}
+	guardrails, _ := defaults["guardrails"].(map[string]any)
+	if _, ok := guardrails["output"]; ok {
+		t.Errorf("agents.defaults.guardrails.output survived: %v", guardrails)
+	}
+	if _, ok := guardrails["retrieval"]; ok {
+		t.Errorf("agents.defaults.guardrails.retrieval survived: %v", guardrails)
+	}
+	if input, _ := guardrails["input"].(map[string]any); input["max_runes"] != float64(200000) {
+		t.Errorf("agents.defaults.guardrails.input = %v, want it untouched", guardrails["input"])
+	}
+	webSearch, _ := defaults["web_search"].(map[string]any)
+	if got := webSearch["provider"]; got != "none" {
+		t.Errorf("agents.defaults.web_search.provider = %v, want the explicit none", got)
+	}
+	webFetch, _ := defaults["web_fetch"].(map[string]any)
+	if got := webFetch["provider"]; got != "builtin" {
+		t.Errorf("agents.defaults.web_fetch.provider = %v, want the explicit builtin", got)
+	}
+	if got := defaults["network_retry_max"]; got != float64(4) {
+		t.Errorf("agents.defaults.network_retry_max = %v, want 4", got)
+	}
+	definitions, _ := agents["definitions"].(map[string]any)
+	mainDef, _ := definitions["main"].(map[string]any)
+	providers, _ := mainDef["llm_providers"].([]any)
+	if len(providers) != 1 {
+		t.Fatalf("agents.definitions.main.llm_providers = %v, want the stored entry", mainDef)
+	}
+	if entry, _ := providers[0].(map[string]any); entry["api_key"] != "sk-kept" {
+		t.Errorf("the stored provider entry was rewritten: %v", providers[0])
+	}
+
+	// Non-Root rows are byte-for-byte what they were.
+	for section, want := range map[string]string{
+		"auth.chatgpt":            `{"auth_mode":"chatgpt","tokens":{"access_token":"at","refresh_token":"rt"}}`,
+		"auth.opencode":           `{"access_token":"oat"}`,
+		"gateway.observed_origin": `{"origin":"https://work.example"}`,
+	} {
+		var got string
+		if err := migrated.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section=?`, section).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", section, err)
+		}
+		if got != want {
+			t.Errorf("%s = %s, want it left alone as %s", section, got, want)
+		}
+	}
+}
+
+// requireStoredPaths asserts one migrated section no longer holds the retired
+// paths (dotted, nested) and still holds the values the caller names.
+func requireStoredPaths(t *testing.T, stored map[string]map[string]any, section string, keep map[string]any, gone ...string) {
+	t.Helper()
+	doc, ok := stored[section]
+	if !ok {
+		t.Fatalf("section %s disappeared", section)
+	}
+	for _, path := range gone {
+		if _, present := configPathValue(doc, path); present {
+			t.Errorf("%s.%s survived the migration", section, path)
+		}
+	}
+	for path, want := range keep {
+		got, present := configPathValue(doc, path)
+		if !present {
+			t.Errorf("%s.%s is missing after the migration", section, path)
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s.%s = %v, want %v", section, path, got, want)
+		}
+	}
+}
+
+func configPathValue(doc map[string]any, path string) (any, bool) {
+	var current any = doc
+	for _, key := range strings.Split(path, ".") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[key]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }

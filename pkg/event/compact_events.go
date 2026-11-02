@@ -17,7 +17,6 @@ type ContextCompactedPayload struct {
 	Strategy      string `json:"strategy,omitempty"`
 	Reason        string `json:"reason,omitempty"`
 	SummarySource string `json:"summary_source,omitempty"`
-	Scope         string `json:"scope,omitempty"`
 	ReplacedItems int    `json:"replaced_items,omitempty"`
 	WindowNumber  int    `json:"window_number,omitempty"`
 	Summary       string `json:"summary,omitempty"`
@@ -36,7 +35,6 @@ func (p ContextCompactedPayload) Canonicalized() ContextCompactedPayload {
 	p.Strategy = strings.TrimSpace(p.Strategy)
 	p.Reason = strings.TrimSpace(p.Reason)
 	p.SummarySource = strings.TrimSpace(p.SummarySource)
-	p.Scope = strings.TrimSpace(p.Scope)
 	p.Summary = strings.TrimSpace(p.Summary)
 	p.BoundaryID = strings.TrimSpace(p.BoundaryID)
 	return p

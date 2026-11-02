@@ -513,3 +513,52 @@ func TestOpenBaseRunnerHostsNoMCP(t *testing.T) {
 		t.Fatalf("startup snapshot servers = %+v, want none", got)
 	}
 }
+
+// --yolo forces the effective approval preset to full access, and the
+// derivation that runs afterwards turns it into the pair full access means:
+// never ask, run uncontained. A project nobody has judged is not an exception —
+// the trust decision does not narrow full access.
+func TestEffectiveForAppliesYOLOAsFullAccess(t *testing.T) {
+	t.Setenv("FOREBRAIN_YOLO", "1")
+	untried := safety.ProjectContext{Project: safety.Project{Root: t.TempDir(), VersionControlled: true}}
+	cfg := effectiveFor(appcfg.Root{}, untried)
+	if cfg.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("preset = %q, want full_access", cfg.ApprovalPreset)
+	}
+	if cfg.ApprovalPolicy.Mode != appcfg.ApprovalPolicyNever || !cfg.DangerFullAccessEnabled() {
+		t.Fatalf("derived pair = policy %q sandbox %q, want never + danger-full-access", cfg.ApprovalPolicy.Mode, cfg.SandboxMode)
+	}
+
+	// Without the flag the same configuration derives the preset it declares.
+	t.Setenv("FOREBRAIN_YOLO", "")
+	plain := effectiveFor(appcfg.Root{}, untried)
+	if plain.ApprovalPreset != appcfg.ApprovalPresetWorkspaceWrite || plain.SandboxMode != appcfg.SandboxModeReadOnly {
+		t.Fatalf("plain config = preset %q sandbox %q, want workspace_write + read-only", plain.ApprovalPreset, plain.SandboxMode)
+	}
+}
+
+// A host with no usable sandbox starts anyway: the sandbox is used when there
+// is one and skipped when there is not, so Open records the fact and carries on
+// rather than refusing to boot (owner 2026-10-31, plan 215 §3.1).
+func TestOpenSucceedsWithoutASandbox(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
+		"        - provider: openai\n          model: gpt-main\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := Open(ctx, OpenOptions{Home: home, ConfigPath: cfgPath, LaunchDir: project, SessionSource: memory.SessionSourceTUI})
+	if err != nil {
+		t.Fatalf("Open without a sandbox: %v", err)
+	}
+	defer env.Close()
+	if env.Runner == nil {
+		t.Fatal("Open without a sandbox produced no runner")
+	}
+}

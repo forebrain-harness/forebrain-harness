@@ -129,7 +129,7 @@ func TestAdditionalPermissionsPreapprovedWithSessionSnapshotOnly(t *testing.T) {
 		Enabled: true, Scope: safety.GrantScopeSession, SessionID: "session-1",
 	}}}
 	rt := &AgentToolRuntime{
-		Cfg: &appcfg.Root{Features: appcfg.FeaturesSection{RequestPermissionsTool: appcfg.BoolPtr(true)}},
+		Cfg: &appcfg.Root{},
 		PermissionSnapshotForSession: func(sessionID string) safety.Snapshot {
 			if sessionID != "session-1" {
 				return safety.Snapshot{}
@@ -334,8 +334,13 @@ func TestShellToolEmitsOutputDeltasWithToolStepID(t *testing.T) {
 	}
 }
 
-func TestShellToolFailsClosedWhenSandboxUnavailableAndConfiguredToFail(t *testing.T) {
-	t.Setenv("PATH", "")
+// A host with no usable sandbox runs the command instead of refusing it: the
+// owner's rule is that a sandbox is used when there is one and skipped when
+// there is not (plan 215 §0.1). What the conversation may do was decided before
+// this tool ran.
+func TestShellToolRunsOnTheHostWhenNoSandboxIsAvailable(t *testing.T) {
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
 	st := NewState(t.TempDir())
 	tool, err := NewShellTool(st, &AgentToolRuntime{
 		Cfg: &appcfg.Root{
@@ -345,32 +350,12 @@ func TestShellToolFailsClosedWhenSandboxUnavailableAndConfiguredToFail(t *testin
 	if err != nil {
 		t.Fatalf("NewShellTool: %v", err)
 	}
-	_, err = tool.Handle(context.Background(), `{"command":"pwd"}`)
-	if err == nil {
-		t.Fatalf("expected sandbox unavailable error")
-	}
-	if !strings.Contains(err.Error(), "sandbox unavailable") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestShellToolDoesNotFallbackToHostWhenSandboxUnavailable(t *testing.T) {
-	t.Setenv("PATH", "")
-	st := NewState(t.TempDir())
-	tool, err := NewShellTool(st, &AgentToolRuntime{
-		Cfg: &appcfg.Root{
-			SandboxMode: appcfg.SandboxModeWorkspaceWrite,
-		},
-	})
+	out, err := tool.Handle(context.Background(), `{"command":"printf ran-uncontained"}`)
 	if err != nil {
-		t.Fatalf("NewShellTool: %v", err)
+		t.Fatalf("a missing sandbox must not fail the command: %v", err)
 	}
-	_, err = tool.Handle(context.Background(), `{"command":"pwd"}`)
-	if err == nil {
-		t.Fatalf("expected sandbox unavailable error")
-	}
-	if !strings.Contains(err.Error(), "sandbox unavailable") {
-		t.Fatalf("unexpected error: %v", err)
+	if body, _ := out.(string); !strings.Contains(body, "ran-uncontained") {
+		t.Fatalf("result = %q, want the command's own output", body)
 	}
 }
 
@@ -507,10 +492,10 @@ func TestShellToolAllowsExplicitUseDefaultWithJustification(t *testing.T) {
 }
 
 func TestShellToolSchemaKeepsEscalationFieldsOptional(t *testing.T) {
-	for _, execApprovals := range []bool{false, true} {
+	for _, execApprovals := range []bool{true} {
 		st := NewState(t.TempDir())
 		tool, err := NewShellTool(st, &AgentToolRuntime{
-			Cfg: &appcfg.Root{Features: appcfg.FeaturesSection{ExecPermissionApprovals: appcfg.BoolPtr(execApprovals)}},
+			Cfg: &appcfg.Root{},
 		})
 		if err != nil {
 			t.Fatalf("NewShellTool: %v", err)
@@ -620,10 +605,7 @@ func TestShellToolRunsWithStringEncodedPrefixRule(t *testing.T) {
 func TestShellToolTreatsEmptyAdditionalPermissionsAsUnset(t *testing.T) {
 	st := NewState(t.TempDir())
 	tool, err := NewShellTool(st, &AgentToolRuntime{
-		Cfg: &appcfg.Root{
-			SandboxMode: appcfg.SandboxModeDangerFullAccess,
-			Features:    appcfg.FeaturesSection{ExecPermissionApprovals: appcfg.BoolPtr(true)},
-		},
+		Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
 	})
 	if err != nil {
 		t.Fatalf("NewShellTool: %v", err)
@@ -658,7 +640,6 @@ func TestShellToolRejectsFreshSandboxOverrideOutsideOnRequest(t *testing.T) {
 	for _, policy := range []safety.ApprovalPolicy{
 		{Mode: safety.ApprovalUnlessTrusted},
 		{Mode: safety.ApprovalNever},
-		{Mode: safety.ApprovalGranular, Granular: safety.GranularApprovalConfig{SandboxApproval: true}},
 	} {
 		t.Run(string(policy.Mode), func(t *testing.T) {
 			st := NewState(t.TempDir())
@@ -697,8 +678,6 @@ func TestSandboxRetryApprovalPolicy(t *testing.T) {
 		{policy: safety.ApprovalPolicy{Mode: safety.ApprovalNever}},
 		// An unset policy is resolved to on-request before it reaches here.
 		{policy: safety.ApprovalPolicy{}, want: true},
-		{policy: safety.ApprovalPolicy{Mode: safety.ApprovalGranular, Granular: safety.GranularApprovalConfig{SandboxApproval: true}}, want: true},
-		{policy: safety.ApprovalPolicy{Mode: safety.ApprovalGranular}},
 	}
 	for _, tc := range cases {
 		if got := sandboxRetryApprovalAllowed(tc.policy); got != tc.want {
@@ -1599,46 +1578,129 @@ func TestShellToolCardKeepsTheOriginalOutputWhenTheModelGetsItCompressed(t *test
 	}
 }
 
-// TestBatchShellRequestShape pins the boundary a batch task's shell command is
-// assembled from, without needing an OS sandbox: the task's directory is the
-// whole write set, the read set is that directory plus the shared skill roots,
-// and the project root and Forebrain home are denied (plans/150). The merge
-// that turns those paths into the request a backend receives — and the way a
-// configured allow_read "/" is kept out of it — is pinned by
-// pkg/safety's TestExclusiveReadablePathsDoesNotInheritAllowRead.
-func TestBatchShellRequestShape(t *testing.T) {
+// TestBatchShellBoundary pins the boundary a batch task's shell command is
+// assembled from, without needing an OS sandbox (plans/216 §3.1): the task's
+// directory is the whole write set, the whole filesystem is readable except the
+// Forebrain home and a project root outside it, and the task's workspace plus
+// the project's skill directories are the exceptions carved back out of those
+// denials. The merge that turns the boundary into the request a backend
+// receives is pinned by pkg/safety's
+// TestDenyListRequestKeepsItsBoundaryAcrossTheMerge.
+func TestBatchShellBoundary(t *testing.T) {
 	base := t.TempDir()
-	project := filepath.Join(base, "project")
-	workspace := filepath.Join(project, "tasks", "T", "1")
+	outside := filepath.Join(base, "project")
+	workspace := filepath.Join(outside, "tasks", "T", "1")
 	home := filepath.Join(base, "home")
-	skillRoot := filepath.Join(home, "skills", "demo")
+	siblingWorkspace := filepath.Join(outside, "tasks", "T", "2")
+	globalSkill := filepath.Join(home, "skills", "demo")
+	projectSkill := filepath.Join(outside, ".forebrain", "skills")
+	crossToolSkill := filepath.Join(base, "user", ".claude", "skills")
 
-	boundary := batchShellBoundary(workspace, []string{skillRoot}, nil, project, home)
-	if want := []string{workspace}; !reflect.DeepEqual(boundary.writable, want) {
-		t.Fatalf("writable = %#v, want %#v", boundary.writable, want)
+	// The project root lives outside the Forebrain home: both trees are denied.
+	boundary := NewBatchBoundary(workspace, outside, home, []string{globalSkill, projectSkill, crossToolSkill})
+	if want := []string{workspace}; !reflect.DeepEqual(boundary.Writable, want) {
+		t.Fatalf("writable = %#v, want %#v", boundary.Writable, want)
 	}
-	wantRead := []string{workspace, skillRoot}
-	if !reflect.DeepEqual(boundary.readable, wantRead) {
-		t.Fatalf("readable = %#v, want %#v", boundary.readable, wantRead)
+	if len(boundary.Denied) != 2 || boundary.Denied[0] != home || boundary.Denied[1] != outside {
+		t.Fatalf("denied = %#v, want the home and the project root", boundary.Denied)
 	}
-	if len(boundary.denied) != 2 || boundary.denied[0] != project || boundary.denied[1] != home {
-		t.Fatalf("denied = %#v, want the project root and the home", boundary.denied)
+	// The workspace, the home's skills and the project's own skills are the
+	// exceptions; a skill root outside every denied root needs none.
+	wantReadable := []string{workspace, globalSkill, projectSkill}
+	if !reflect.DeepEqual(boundary.Readable, wantReadable) {
+		t.Fatalf("readable = %#v, want %#v", boundary.Readable, wantReadable)
 	}
-	// A configured deny survives: the batch boundary narrows, never widens.
-	withDeny := batchShellBoundary(workspace, []string{skillRoot}, []string{filepath.Join(project, "private")}, project, home)
-	if !pathWithinAny(filepath.Join(project, "private"), withDeny.denied) {
-		t.Fatalf("denied = %#v, want the configured deny kept", withDeny.denied)
+	for _, denied := range []string{
+		filepath.Join(home, "state", "forebrain.state.sqlite"),
+		filepath.Join(home, "forebrain.yaml"),
+		siblingWorkspace,
+		filepath.Join(outside, "README.md"),
+	} {
+		if !boundary.DeniesRead(denied) {
+			t.Fatalf("%s must not be readable", denied)
+		}
+	}
+	for _, readable := range []string{
+		workspace,
+		filepath.Join(workspace, "outputs", "a.txt"),
+		globalSkill,
+		projectSkill,
+		crossToolSkill,
+		"/etc/hosts",
+		filepath.Join(base, "user", ".npmrc"),
+	} {
+		if boundary.DeniesRead(readable) {
+			t.Fatalf("%s must stay readable", readable)
+		}
+	}
+	// A walk prunes the denied subtrees it can skip and keeps walking the
+	// ancestors of an exception, so the workspace stays reachable.
+	if boundary.PrunesReadDir(filepath.Join(home, "state")) != true {
+		t.Fatal("a denied directory with no exception beneath it is prunable")
+	}
+	if boundary.PrunesReadDir(home) {
+		t.Fatal("the home holds the skills, so a walk of it must continue")
+	}
+	if boundary.PrunesReadDir(outside) {
+		t.Fatal("the project root holds the workspace, so a walk of it must continue")
+	}
+
+	// A project root inside the Forebrain home is covered by the home's denial:
+	// one root, not two overlapping ones.
+	homeProject := filepath.Join(home, "workspace", "projects", "p")
+	inside := NewBatchBoundary(filepath.Join(homeProject, "tasks", "T", "1"), homeProject, home, nil)
+	if len(inside.Denied) != 1 || inside.Denied[0] != home {
+		t.Fatalf("denied = %#v, want only the home", inside.Denied)
 	}
 
 	// YOLO and danger-full-access are an operator's choices for an interactive
-	// session, and neither may reach a batch task's shell.
+	// session, and neither may lift a contained batch task's sandbox.
 	t.Setenv("FOREBRAIN_YOLO", "1")
-	batchCfg := batchSandboxConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess})
-	if batchCfg.SandboxMode != appcfg.SandboxModeWorkspaceWrite || batchCfg.DefaultPermissions != "" {
-		t.Fatalf("batch config = %+v, want workspace-write with no named profile", batchCfg)
+	contained := batchSandboxConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}, true)
+	if contained.SandboxMode != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("batch config = %+v, want workspace-write", contained)
 	}
-	if batchCfg.DangerFullAccessEnabled() {
-		t.Fatal("a batch task's config must never be danger-full-access")
+	if contained.DangerFullAccessEnabled() {
+		t.Fatal("a contained batch task's config must never be danger-full-access")
+	}
+	// Open — no sandbox on this machine, or the project turned its switch off —
+	// it is forced the other way, so the config cannot quietly contain a task
+	// the owner ruled must run.
+	open := batchSandboxConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}, false)
+	if !open.DangerFullAccessEnabled() {
+		t.Fatalf("an open batch task's config = %+v, want danger-full-access", open)
+	}
+}
+
+// TestBatchCacheEnv pins where a contained task's package managers cache
+// (plans/216 §3.1): inside the task's own workspace, because the real home is
+// denied across its boundary.
+func TestBatchCacheEnv(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "tasks", "T", "1")
+	cache := filepath.Join(workspace, ".cache")
+	want := map[string]string{
+		"XDG_CACHE_HOME":       cache,
+		"npm_config_cache":     filepath.Join(cache, "npm"),
+		"npm_config_store_dir": filepath.Join(cache, "pnpm"),
+		"PIP_CACHE_DIR":        filepath.Join(cache, "pip"),
+		"UV_CACHE_DIR":         filepath.Join(cache, "uv"),
+		"GOCACHE":              filepath.Join(cache, "go-build"),
+		"GOMODCACHE":           filepath.Join(cache, "go-mod"),
+		"GOPATH":               filepath.Join(cache, "go"),
+		"YARN_CACHE_FOLDER":    filepath.Join(cache, "yarn"),
+	}
+	env := batchCacheEnv(workspace)
+	if len(env) != len(want) {
+		t.Fatalf("env = %#v, want %d entries", env, len(want))
+	}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("malformed entry %q", entry)
+		}
+		if want[key] != value {
+			t.Fatalf("%s = %q, want %q", key, value, want[key])
+		}
 	}
 }
 
@@ -1656,7 +1718,7 @@ func TestBatchShellRejectsEscalationRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewShellTool: %v", err)
 	}
-	ctx := WithTaskWorkspace(context.Background(), workspace)
+	ctx := WithBatchBoundary(context.Background(), NewBatchBoundary(workspace, filepath.Dir(workspace), "", nil))
 	for _, input := range []map[string]any{
 		{"command": "echo x > escalated.txt", "sandbox_permissions": "require_escalated"},
 		{"command": "echo x > escalated.txt", "sandbox_permissions": "with_additional_permissions",
@@ -1672,10 +1734,101 @@ func TestBatchShellRejectsEscalationRequests(t *testing.T) {
 	}
 }
 
+// A machine without a sandbox runs a batch task's command rather than refusing
+// it, and still asks nobody: the task's posture is no approvals (owner
+// 2026-10-31, plan 215 §3.5). What the task may reach is the permission
+// engine's and the request boundary's business, not this tool's.
+func TestBatchShellRunsWithoutASandboxAndAsksNobody(t *testing.T) {
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	workspace := filepath.Join(t.TempDir(), "tasks", "T", "1")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := NewState(workspace)
+	var asks atomic.Int32
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		asks.Add(1)
+		return "", false, nil
+	})
+	shellTool, err := NewShellTool(st, &AgentToolRuntime{Cfg: &appcfg.Root{}})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithBatchBoundary(context.Background(), NewBatchBoundary(workspace, filepath.Dir(workspace), "", nil))
+	raw, _ := json.Marshal(map[string]any{"command": "printf batch-ran"})
+	out, handleErr := shellTool.Handle(ctx, string(raw))
+	if handleErr != nil {
+		t.Fatalf("a batch command without a sandbox must run: %v", handleErr)
+	}
+	if body, _ := out.(string); !strings.Contains(body, "batch-ran") {
+		t.Fatalf("result = %q, want the command's own output", body)
+	}
+	if got := asks.Load(); got != 0 {
+		t.Fatalf("a batch command raised %d approval request(s)", got)
+	}
+}
+
+// TestBatchShellWithTheSandboxOffRunsWithFullAccess pins the other half of
+// plans/216 §3.2: a project that turned its sandbox switch off runs its tasks
+// with full access — no boundary, no approval — exactly as a machine without a
+// sandbox does. Both cases are the same decision, so both are exercised here.
+func TestBatchShellWithTheSandboxOffRunsWithFullAccess(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("the two sandbox cases this covers only exist on macOS and Linux")
+	}
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	workspace := filepath.Join(project, "tasks", "T", "1")
+	home := filepath.Join(base, "home")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{workspace, home, outside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	boundary := NewBatchBoundary(workspace, project, home, nil)
+
+	run := func(t *testing.T, sandboxAvailable, projectSwitch bool) {
+		t.Helper()
+		restore := safety.SetSandboxAvailableForTest(sandboxAvailable)
+		defer restore()
+		st := NewState(project)
+		var asks atomic.Int32
+		st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+			asks.Add(1)
+			return "", false, nil
+		})
+		shellTool, err := NewShellTool(st, &AgentToolRuntime{
+			Home: home, WorkspaceRoot: project, Cfg: &appcfg.Root{}, BatchSandbox: projectSwitch,
+		})
+		if err != nil {
+			t.Fatalf("NewShellTool: %v", err)
+		}
+		ctx := WithProjectRoot(context.Background(), project)
+		ctx = WithTaskWorkspace(ctx, workspace)
+		ctx = WithBatchBoundary(ctx, boundary)
+
+		target := filepath.Join(outside, "full-access.txt")
+		raw, _ := json.Marshal(map[string]any{"command": "printf ran > " + target})
+		if _, handleErr := shellTool.Handle(ctx, string(raw)); handleErr != nil {
+			t.Fatalf("a batch command with no boundary must run: %v", handleErr)
+		}
+		if _, statErr := os.Stat(target); statErr != nil {
+			t.Fatalf("the command did not run on the host: %v", statErr)
+		}
+		if got := asks.Load(); got != 0 {
+			t.Fatalf("a batch command raised %d approval request(s); it must ask nobody", got)
+		}
+	}
+	t.Run("the machine has no sandbox", func(t *testing.T) { run(t, false, true) })
+	t.Run("the project turned its sandbox off", func(t *testing.T) { run(t, true, false) })
+}
+
 // TestBatchShellIsConfinedToTheTaskWorkspace runs the real seatbelt sandbox
-// against a batch task's boundary (plans/150). Nothing here is mocked: every
-// case is a command the OS must run or must refuse, and the whole turn must ask
-// nobody anything.
+// against a batch task's boundary (plans/150, plans/216). Nothing here is
+// mocked: every case is a command the OS must run or must refuse, and the whole
+// turn must ask nobody anything.
 func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("the seatbelt sandbox only exists on macOS")
@@ -1684,7 +1837,7 @@ func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 		t.Skip("runs real sandboxed commands")
 	}
 	// YOLO is an operator's choice for an interactive session; it must change
-	// nothing for an unattended batch task.
+	// nothing for a batch task running inside its boundary.
 	t.Setenv("FOREBRAIN_YOLO", "1")
 
 	base := t.TempDir()
@@ -1692,11 +1845,13 @@ func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 	workspace := filepath.Join(project, "tasks", "T", "1")
 	sibling := filepath.Join(project, "tasks", "T2", "1")
 	home := filepath.Join(base, "home")
-	skillRoot := filepath.Join(home, "skills", "demo")
+	skillRoots := filepath.Join(home, "skills")
+	skillRoot := filepath.Join(skillRoots, "demo")
+	userHome := filepath.Join(base, "user-home")
 	outside := filepath.Join(base, "outside")
 	for _, dir := range []string{
 		filepath.Join(workspace, "inputs"), filepath.Join(workspace, "outputs"), filepath.Join(workspace, ".work"),
-		sibling, skillRoot, filepath.Join(home, "other"), outside,
+		sibling, skillRoot, filepath.Join(home, "other"), filepath.Join(home, "state"), userHome, outside,
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -1712,6 +1867,8 @@ func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 	writeFile(filepath.Join(project, "shared.txt"), "project secret")
 	writeFile(filepath.Join(skillRoot, "SKILL.md"), "# demo skill\n")
 	writeFile(filepath.Join(home, "other", "private.txt"), "home secret")
+	writeFile(filepath.Join(home, "state", "forebrain.state.sqlite"), "state secret")
+	writeFile(filepath.Join(userHome, ".npmrc"), "registry=https://registry.example\n")
 	writeFile(filepath.Join(outside, "private.txt"), "outside secret")
 	// The home the command is given is the test's own: the boundary denies it,
 	// and that must hold whatever the operator's real home looks like.
@@ -1734,7 +1891,7 @@ func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 		Scope: safety.GrantScopeSession,
 	}}}
 	shellTool, err := NewShellTool(st, &AgentToolRuntime{
-		Home: home, WorkspaceRoot: project, Cfg: &appcfg.Root{},
+		Home: home, WorkspaceRoot: project, Cfg: &appcfg.Root{}, BatchSandbox: true,
 		PermissionSnapshot: func() safety.Snapshot { return snapshot },
 	})
 	if err != nil {
@@ -1742,6 +1899,7 @@ func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 	}
 	ctx := WithProjectRoot(context.Background(), project)
 	ctx = WithTaskWorkspace(ctx, workspace)
+	ctx = WithBatchBoundary(ctx, NewBatchBoundary(workspace, project, home, []string{skillRoots}))
 
 	type shellOutcome struct {
 		stdout   string
@@ -1828,12 +1986,30 @@ func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 			t.Fatalf("skill read = %q", got)
 		}
 	})
-
-	t.Run("the home and the outside world stay unreadable", func(t *testing.T) {
+	t.Run("the home and the project's own files stay unreadable", func(t *testing.T) {
 		mustNotLeak(t, "cat "+filepath.Join(home, "other", "private.txt"), "home secret")
+		mustNotLeak(t, "cat "+filepath.Join(home, "state", "forebrain.state.sqlite"), "state secret")
+		mustNotLeak(t, "cat "+filepath.Join(project, "shared.txt"), "project secret")
+		// The Forebrain home is the task's own too: its profile is not the
+		// real one, so nothing is read out of the real home either.
 		mustNotLeak(t, "cat $HOME/other/private.txt", "home secret")
-		mustNotLeak(t, "cat "+filepath.Join(outside, "private.txt"), "outside secret")
+	})
+
+	t.Run("the rest of the filesystem is read-only, not denied", func(t *testing.T) {
+		// A batch task reads the whole machine outside its boundary — that is
+		// the point of the deny list: a package manager's configuration and
+		// the toolchain live out there. What it may not do is write.
 		mustSucceed(t, "cat /etc/hosts")
+		if got := mustSucceed(t, "cat "+filepath.Join(userHome, ".npmrc")); !strings.Contains(got, "registry.example") {
+			t.Fatalf("package manager configuration read = %q", got)
+		}
+		if got := mustSucceed(t, "cat "+filepath.Join(outside, "private.txt")); !strings.Contains(got, "outside secret") {
+			t.Fatalf("a file outside the boundary read = %q", got)
+		}
+		mustFail(t, "echo x > "+filepath.Join(outside, "written.txt"))
+		if _, statErr := os.Stat(filepath.Join(outside, "written.txt")); statErr == nil {
+			t.Fatal("a batch task wrote outside its workspace and its boundary")
+		}
 	})
 
 	t.Run("the temp directory is the task's own", func(t *testing.T) {

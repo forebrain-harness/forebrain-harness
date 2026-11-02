@@ -181,7 +181,9 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 			}
 			fi, err := statFile(abs)
 			if err == nil {
-				st.RememberRead(abs, fi.ModTime(), fi.Size(), raw)
+				if err := st.RememberReadForSession(ctx, abs, fi.ModTime(), fi.Size(), raw); err != nil {
+					return "", err
+				}
 			}
 			if observer := st.ReadObserver(); observer != nil {
 				observer(ctx, abs, raw)
@@ -261,6 +263,15 @@ func authorizeRead(ctx context.Context, st *State, toolName, filePath string) (r
 	if isBlockedReadDevicePath(abs) {
 		return readPathResolution{}, fmt.Errorf("refusing to read blocking or infinite device path")
 	}
+	// Deny rules settle before the FOREBRAIN_HOME question does: a path the
+	// session may not read is refused, never asked about — an approval could not
+	// grant it. That is also what keeps a batch task from putting a question to
+	// nobody: its boundary denies the home outright (plans/216), and
+	// ReadPathDeniedIn already lets the loaded skill roots through.
+	if st.ReadPathDeniedIn(ctx, abs) && !st.PathUnderLoadedSkillRoot(abs) {
+		CaptureToolError(ctx, ErrPathReadDenied)
+		return readPathResolution{}, fmt.Errorf("%w: %s", ErrPathReadDenied, abs)
+	}
 	// FOREBRAIN_HOME is asked about rather than refused -- unless the user
 	// has already approved a write to this very file, in which case the
 	// question was asked and answered. An embedder with no approval hook
@@ -283,10 +294,6 @@ func authorizeRead(ctx context.Context, st *State, toolName, filePath string) (r
 			CaptureToolRequiresAction(ctx, id, toolName, map[string]any{"requires_action": true})
 			return readPathResolution{}, &RequiresActionError{ActionID: id, ActionKind: toolName, ToolName: toolName, ToolInput: payload}
 		}
-	}
-	if st.ReadPathDeniedIn(ctx, abs) && !st.PathUnderLoadedSkillRoot(abs) {
-		CaptureToolError(ctx, ErrPathReadDenied)
-		return readPathResolution{}, fmt.Errorf("%w: %s", ErrPathReadDenied, abs)
 	}
 	return resolution, nil
 }
@@ -884,7 +891,13 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			var before []byte
 			existed := false
 			if fi, err := statFile(abs); err == nil && fi != nil {
-				rs, ok := st.GetReadState(abs)
+				// Overwriting a file this process read, or one the conversation
+				// read before a /resume put it here: a candidate baseline whose
+				// stat and content hash still have to match.
+				rs, ok, rsErr := st.readStateForEdit(ctx, abs)
+				if rsErr != nil {
+					return "", rsErr
+				}
 				if ok {
 					if fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size {
 						return "", fmt.Errorf("file changed since last read")
@@ -1084,7 +1097,14 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			}
 			unlock := lockFileWrite(abs)
 			defer unlock()
-			rs, ok := st.GetReadState(abs)
+			// The baseline may be this process's own read, or the one the
+			// conversation took before a /resume put it in this one. Either
+			// way it is only a candidate: the stat and the content hash below
+			// decide.
+			rs, ok, err := st.readStateForEdit(ctx, abs)
+			if err != nil {
+				return "", err
+			}
 			mapped := false
 			if !ok {
 				// A redirected edit still owes the read it would have owed on

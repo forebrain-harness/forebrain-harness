@@ -89,7 +89,7 @@ func TestReadRawInputEventsShiftTabEmitsTogglePlanMode(t *testing.T) {
 		t.Fatalf("write shift-tab: %v", err)
 	}
 	ev := nextNonDraftEvent(t, events)
-	if ev.kind != inputEventHotkey || ev.hotkey != hotkeyTogglePlanMode {
+	if ev.kind != inputEventHotkey || ev.hotkey != hotkeyCycleMode {
 		t.Fatalf("expected toggle-plan-mode hotkey, got %#v", ev)
 	}
 	_ = w.Close()

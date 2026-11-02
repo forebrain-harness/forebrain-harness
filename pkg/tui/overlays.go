@@ -125,13 +125,12 @@ type overlayChoice struct {
 	// editor rather than deciding, the way Claude Code's own No row is an
 	// input field — empty Enter refuses without words, written Enter refuses
 	// with them (plan 129).
-	feedbackInput          bool
-	isPlanReview           bool
-	clearContext           bool
-	planOnly               bool
-	strictReview           bool
-	networkPolicyAmendment *safety.NetworkPolicyAmendment
-	commandPrefix          safety.ExecPolicyAmendment
+	feedbackInput bool
+	isPlanReview  bool
+	clearContext  bool
+	planOnly      bool
+	strictReview  bool
+	commandPrefix safety.ExecPolicyAmendment
 	// commandRules is the server-proposed rule set a remembered Bash command
 	// stores, which replaces ruleContent when the row carries one.
 	commandRules []safety.PermissionRuleValue
@@ -225,8 +224,6 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 				label = "Yes, search the web"
 			} else if isApprovalWebFetch(req) {
 				label = "Yes, fetch the page"
-			} else if req.NetworkApproval != nil {
-				label = "Yes, just this once"
 			}
 			choices = append(choices, overlayChoice{label: label, allowOnce: true})
 		case safety.DecisionAcceptForSession:
@@ -234,8 +231,6 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 			switch {
 			case req.RequestedPermissions != nil:
 				label = "Yes, grant these permissions for this session"
-			case req.NetworkApproval != nil:
-				label = "Yes, and allow this host for this conversation"
 			case isApprovalFileMutation(req):
 				label = "Yes, and don't ask again for these files"
 			case safety.ApprovalFileTool(approvalToolName(req)):
@@ -263,15 +258,6 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 					label: rememberCommandLabel(option.CommandScope), dst: safety.DestinationLocalSettings,
 					commandPrefix: append(safety.ExecPolicyAmendment(nil), option.ExecPolicyAmendment...),
 				})
-			}
-		case safety.DecisionApplyNetworkPolicyAmendment:
-			if option.NetworkPolicyAmendment != nil {
-				label := "Yes, and allow this host in the future"
-				if option.NetworkPolicyAmendment.Action == safety.NetworkPolicyDeny {
-					label = "No, and deny this host in the future"
-				}
-				amendment := *option.NetworkPolicyAmendment
-				choices = append(choices, overlayChoice{label: label, networkPolicyAmendment: &amendment})
 			}
 		case safety.DecisionGrantForTurn:
 			choices = append(choices, overlayChoice{label: "Yes, grant these permissions for this turn", allowOnce: true})
@@ -1394,16 +1380,6 @@ func (o *approvalOverlay) commit() turn.ToolApprovalDecision {
 	}
 	if choice.cancel {
 		return turn.ToolApprovalDecision{Cancelled: true}
-	}
-	if choice.networkPolicyAmendment != nil {
-		if o.req.NetworkApproval == nil || strings.TrimSpace(o.req.NetworkApproval.Host) == "" {
-			return turn.ToolApprovalDecision{Cancelled: true}
-		}
-		amendment := *choice.networkPolicyAmendment
-		return turn.ToolApprovalDecision{
-			Approved:               true,
-			NetworkPolicyAmendment: &amendment,
-		}
 	}
 	if len(choice.commandPrefix) > 0 {
 		return turn.ToolApprovalDecision{Approved: true, Update: &safety.PermissionUpdate{
@@ -4369,12 +4345,11 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 	}
 }
 
-// memorySettingsPanel is the /memories panel: the two switches and the reset
+// memorySettingsPanel is the /memories panel: the one switch and the reset
 // row, or, once reset is chosen, what to reset.
-func memorySettingsPanel(cursor int, useMemories, generateMemories, confirming bool) slashPanel {
+func memorySettingsPanel(cursor int, enabled, confirming bool) slashPanel {
 	rows := []string{
-		"Use memories — Use memories in following threads. Applied at next thread.",
-		"Generate memories — Generate memories from following threads. Current thread included.",
+		"Memories — Read memories, generate memories from this and following threads, and expose the memories_* tools.",
 		"Reset memories — Clear local memory files and summaries. Threads remain intact.",
 	}
 	b := newPanelBuilder()
@@ -4388,13 +4363,9 @@ func memorySettingsPanel(cursor int, useMemories, generateMemories, confirming b
 	}
 	for i, row := range rows {
 		box := ""
-		if !confirming && i < 2 {
-			checked := useMemories
-			if i == 1 {
-				checked = generateMemories
-			}
+		if !confirming && i == 0 {
 			box = "[ ] "
-			if checked {
+			if enabled {
 				box = "[x] "
 			}
 		}
@@ -4403,7 +4374,7 @@ func memorySettingsPanel(cursor int, useMemories, generateMemories, confirming b
 	return b.panel()
 }
 
-func (s *rawSelector) SelectMemorySettings(useMemories, generateMemories bool) (MemorySettingsResult, error) {
+func (s *rawSelector) SelectMemorySettings(enabled bool) (MemorySettingsResult, error) {
 	release, err := s.acquireComposerInput()
 	if err != nil {
 		return MemorySettingsResult{}, err
@@ -4413,7 +4384,7 @@ func (s *rawSelector) SelectMemorySettings(useMemories, generateMemories bool) (
 	cursor := 0
 	confirming := false
 	render := func() {
-		s.showPanel(memorySettingsPanel(cursor, useMemories, generateMemories, confirming))
+		s.showPanel(memorySettingsPanel(cursor, enabled, confirming))
 	}
 	render()
 	for {
@@ -4421,7 +4392,7 @@ func (s *rawSelector) SelectMemorySettings(useMemories, generateMemories bool) (
 		if err != nil {
 			return MemorySettingsResult{}, err
 		}
-		count := 3
+		count := 2
 		switch key.kind {
 		case rawKeyNone:
 			continue
@@ -4437,13 +4408,8 @@ func (s *rawSelector) SelectMemorySettings(useMemories, generateMemories bool) (
 				cursor++
 			}
 		case rawKeySpace:
-			if !confirming {
-				switch cursor {
-				case 0:
-					useMemories = !useMemories
-				case 1:
-					generateMemories = !generateMemories
-				}
+			if !confirming && cursor == 0 {
+				enabled = !enabled
 			}
 		case rawKeyEnter:
 			if confirming {
@@ -4454,20 +4420,20 @@ func (s *rawSelector) SelectMemorySettings(useMemories, generateMemories bool) (
 					return MemorySettingsResult{Action: MemorySettingsResetAll}, nil
 				default:
 					confirming = false
-					cursor = 2
+					cursor = 1
 				}
-			} else if cursor == 2 {
+			} else if cursor == 1 {
 				confirming = true
 				// Default to "Go back" (the last, safest row) so confirming a
 				// destructive reset always takes a deliberate Up before Enter.
 				cursor = 2
 			} else {
-				return MemorySettingsResult{Action: MemorySettingsSave, UseMemories: useMemories, GenerateMemories: generateMemories}, nil
+				return MemorySettingsResult{Action: MemorySettingsSave, Enabled: enabled}, nil
 			}
 		case rawKeyEscape:
 			if confirming {
 				confirming = false
-				cursor = 2
+				cursor = 1
 			} else {
 				return MemorySettingsResult{Action: MemorySettingsCancel}, nil
 			}

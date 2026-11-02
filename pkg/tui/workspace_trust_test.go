@@ -90,10 +90,19 @@ type trustRecordingSession struct {
 	pendingErr error
 	trustErr   error
 	trustCalls int
+	// batchFolder is the directory this session reports as a batch project's
+	// root, "" for none.
+	batchFolder string
 }
 
 func (s *trustRecordingSession) WorkspaceTrustPending() (string, bool, error) {
 	return s.folder, s.pending, s.pendingErr
+}
+
+// BatchFolderProject is the batch half: it answers for the folder it was given
+// at construction.
+func (s *trustRecordingSession) BatchFolderProject(folder string) bool {
+	return s.batchFolder != "" && s.batchFolder == folder
 }
 
 func (s *trustRecordingSession) TrustWorkspace() error {
@@ -190,6 +199,30 @@ func TestAskWorkspaceTrust(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, quit)
 	require.Equal(t, 1, session.trustCalls)
+}
+
+// TestAskWorkspaceTrustSkipsBatchProjects pins plans/216 §3.5 at the launch: a
+// batch project has no trust level, so the question is not put — the viewer just
+// opens, whatever the trust store would have said.
+func TestAskWorkspaceTrustSkipsBatchProjects(t *testing.T) {
+	session := &trustRecordingSession{
+		fakeSession: &fakeSession{}, folder: "/tmp/batch-project", pending: true,
+		batchFolder: "/tmp/batch-project",
+	}
+	selector := &trustRecordingSelector{trusted: true}
+	quit, err := runAskWorkspaceTrust(t, session, selector)
+	require.NoError(t, err)
+	require.False(t, quit)
+	require.Zero(t, selector.reviews, "a batch project must not be asked about")
+	require.Zero(t, session.trustCalls, "a batch project must not record a trust decision")
+
+	// The same folder as an ordinary project is still asked about.
+	session = &trustRecordingSession{fakeSession: &fakeSession{}, folder: "/tmp/plain-project", pending: true}
+	selector = &trustRecordingSelector{}
+	quit, err = runAskWorkspaceTrust(t, session, selector)
+	require.NoError(t, err)
+	require.True(t, quit)
+	require.Equal(t, 1, selector.reviews)
 }
 
 // TestWorkspaceTrustFolderIsTheLaunchDirectory pins the launch contract (R2)

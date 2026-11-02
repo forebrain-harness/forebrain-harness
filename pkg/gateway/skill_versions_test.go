@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,16 +22,22 @@ import (
 // works in <home>/workspaces/review, and returns that agent's skill root.
 func newSkillVersionsServer(t *testing.T, home string) (*Server, string) {
 	t.Helper()
-	cfg := &appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main":   {},
-		"review": {Primary: true},
-	}
-	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(home, "state", "primary-agent.json"), []byte(`{"active":"review"}`+"\n"), 0o600))
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	seed := "agents:\n  definitions:\n    main: {}\n    review:\n      primary: true\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+	cfg, err := loadPersistedDocumentForTest(cfgPath)
+	require.NoError(t, err)
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, cfg)
 	skillsRoot := filepath.Join(home, "workspaces", "review", "skills")
 	require.NoError(t, os.MkdirAll(skillsRoot, 0o755))
-	return &Server{Home: home, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}}}, skillsRoot
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "state", "primary-agent.json"), []byte(`{"active":"review"}`+"\n"), 0o600))
+	env := &process.Environment{Deps: run.Deps{AppCfg: &cfg}, Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	return &Server{Home: home, Env: env}, skillsRoot
 }
 
 // versionRouteReq builds a request whose context carries the route params the

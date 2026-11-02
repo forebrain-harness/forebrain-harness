@@ -18,16 +18,14 @@ import (
 )
 
 type memoriesSettingsRequest struct {
-	FeatureEnabled   *bool  `json:"feature_enabled"`
-	UseMemories      *bool  `json:"use_memories"`
-	GenerateMemories *bool  `json:"generate_memories"`
-	ThreadID         string `json:"thread_id"`
+	FeatureEnabled *bool  `json:"feature_enabled"`
+	ThreadID       string `json:"thread_id"`
 }
 
 func (s *Server) handleMemoriesSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeMemoriesSettings(w, memory.SettingsFromConfig(s.liveCfg()))
+		writeMemoriesSettings(w, memory.SettingsFromConfig(s.liveCfg())) // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	case http.MethodPost:
 		if s == nil || s.Env == nil || s.Env.SQL == nil {
 			http.Error(w, "memory settings unavailable", http.StatusServiceUnavailable)
@@ -45,15 +43,13 @@ func (s *Server) handleMemoriesSettings(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "trailing JSON content", http.StatusBadRequest)
 			return
 		}
-		if req.GenerateMemories != nil && strings.TrimSpace(req.ThreadID) != "" && (s.MemoryStore == nil || s.MemoryStore.DB == nil) {
+		if req.FeatureEnabled != nil && strings.TrimSpace(req.ThreadID) != "" && (s.MemoryStore == nil || s.MemoryStore.DB == nil) {
 			http.Error(w, "memory settings unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		// The switches are stored in their sections in the state database
-		// (plan 188 W10): features.memories in features, the two memory
-		// switches in memories — each in its own section write, a switch the
-		// request did not carry left alone. The change lands on the next
-		// turn's configuration sync; nothing reloads here.
+		// The switch is stored in features.memories (plan 188 W10, one switch
+		// since plan 205): the change lands on the next turn's configuration
+		// sync; nothing reloads here.
 		if req.FeatureEnabled != nil {
 			if err := s.withConfigSection(r.Context(), "features", func(cfg *appcfg.Root) error {
 				value := *req.FeatureEnabled
@@ -64,29 +60,13 @@ func (s *Server) handleMemoriesSettings(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 		}
-		if req.UseMemories != nil || req.GenerateMemories != nil {
-			if err := s.withConfigSection(r.Context(), "memories", func(cfg *appcfg.Root) error {
-				if req.UseMemories != nil {
-					value := *req.UseMemories
-					cfg.Memories.UseMemories = &value
-				}
-				if req.GenerateMemories != nil {
-					value := *req.GenerateMemories
-					cfg.Memories.GenerateMemories = &value
-				}
-				return nil
-			}); err != nil {
-				failConfigSection(w, err)
-				return
-			}
-		}
-		if req.GenerateMemories != nil && strings.TrimSpace(req.ThreadID) != "" && s.MemoryStore != nil {
+		if req.FeatureEnabled != nil && strings.TrimSpace(req.ThreadID) != "" && s.MemoryStore != nil {
 			mode := memory.ThreadMemoryDisabled
-			if *req.GenerateMemories {
+			if *req.FeatureEnabled {
 				mode = memory.ThreadMemoryEnabled
 			}
 			if err := s.MemoryStore.SetThreadMemoryMode(r.Context(), req.ThreadID, mode); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), http.StatusConflict)
 				return
 			}
 		}

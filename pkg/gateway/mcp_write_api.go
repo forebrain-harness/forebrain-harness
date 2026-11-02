@@ -158,7 +158,8 @@ func readMCPServerWrite(stored appcfg.MCPServerConfig) map[string]any {
 		"enabled":                     appcfg.ServerEnabled(stored),
 		"startup_timeout":             stored.StartupTimeout,
 		"request_timeout":             stored.RequestTimeout,
-		"headers":                     plaintextMCPSecretMap(stored.Headers),
+		"headers":                     redactedMCPSecretMap(stored.Headers),
+		"secrets":                     mcpSecretFacts(stored),
 		"env":                         plaintextMCPSecretMap(stored.Env),
 		"inherit_parent_env":          stored.InheritParentEnv != nil && *stored.InheritParentEnv,
 		"disable_standalone_sse":      stored.DisableStandaloneSSE != nil && *stored.DisableStandaloneSSE,
@@ -176,16 +177,69 @@ func readMCPServerWrite(stored appcfg.MCPServerConfig) map[string]any {
 func readMCPOAuthWrite(o appcfg.MCPOAuthConfig) map[string]any {
 	return map[string]any{
 		"mode":              strings.TrimSpace(o.Mode),
-		"access_token":      strings.TrimSpace(o.AccessToken),
+		"access_token":      maskedMCPSecret(o.AccessToken),
 		"token_type":        strings.TrimSpace(o.TokenType),
 		"client_id":         strings.TrimSpace(o.ClientID),
-		"client_secret":     strings.TrimSpace(o.ClientSecret),
+		"client_secret":     maskedMCPSecret(o.ClientSecret),
 		"token_url":         strings.TrimSpace(o.TokenURL),
 		"authorization_url": strings.TrimSpace(o.AuthorizationURL),
 		"redirect_url":      strings.TrimSpace(o.RedirectURL),
-		"refresh_token":     strings.TrimSpace(o.RefreshToken),
+		"refresh_token":     maskedMCPSecret(o.RefreshToken),
 		"scopes":            append([]string(nil), o.Scopes...),
 	}
+}
+
+// maskedMCPSecret is what a surface receives in place of a credential it may
+// not read (plan 191 §3.3, §0.20): the placeholder when one is stored, empty
+// when none is — the difference between「已设置」and「没设置」— and never the
+// value. Sending the placeholder back, or sending nothing, keeps what is
+// stored.
+func maskedMCPSecret(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return appcfg.RedactedSecretPlaceholder
+}
+
+// mcpCredentialHeader names the request headers that carry a credential: their
+// values are masked on the way out and kept on the way in, the way the OAuth
+// block's three fields are.
+func mcpCredentialHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "authorization", "proxy-authorization", "x-api-key", "api-key":
+		return true
+	default:
+		return false
+	}
+}
+
+// redactedMCPSecretMap renders a header map for a surface: every header as
+// stored, except the credential ones, whose values become the placeholder.
+func redactedMCPSecretMap(in map[string]string) map[string]string {
+	out := plaintextMCPSecretMap(in)
+	for key := range out {
+		if mcpCredentialHeader(key) {
+			out[key] = maskedMCPSecret(in[key])
+		}
+	}
+	return out
+}
+
+// mcpSecretFacts answers what a surface may know about each credential: whether
+// one is set and its last four characters (plan 191 §3.3). The keys are the
+// field paths the drawer's secret rows read.
+func mcpSecretFacts(stored appcfg.MCPServerConfig) map[string]map[string]any {
+	out := map[string]map[string]any{}
+	for key, value := range stored.Headers {
+		if mcpCredentialHeader(key) {
+			out["headers."+strings.TrimSpace(key)] = settingsSecretValue(strings.TrimSpace(value))
+		}
+	}
+	oauth := stored.OAuth
+	out["oauth.client_secret"] = settingsSecretValue(strings.TrimSpace(oauth.ClientSecret))
+	out["oauth.access_token"] = settingsSecretValue(strings.TrimSpace(oauth.AccessToken))
+	out["oauth.refresh_token"] = settingsSecretValue(strings.TrimSpace(oauth.RefreshToken))
+	return out
 }
 
 // plaintextMCPSecretMap renders an env or header map for a surface with its
@@ -367,6 +421,9 @@ func mergeMCPSecretMap(stored, in map[string]string) map[string]string {
 		case value == appcfg.RedactedSecretPlaceholder:
 			// Keep what is stored: a surface sends the placeholder back for
 			// every secret it was not allowed to read.
+		case strings.TrimSpace(value) == "" && mcpCredentialHeader(key):
+			// A credential nobody typed stays as it is (plan 191 §3.3): the
+			// page's 更换 box opens and is left blank.
 		case strings.TrimSpace(value) == "":
 			delete(out, key)
 		default:
@@ -396,8 +453,11 @@ func applyMCPOAuthWrite(stored appcfg.MCPOAuthConfig, in mcpOAuthWrite) appcfg.M
 	}
 }
 
+// applyMCPSecretValue is what a submitted credential means: the placeholder — a
+// surface sending back what it was not allowed to read — and an empty value both
+// keep the stored one (plan 191 §3.3); anything else replaces it.
 func applyMCPSecretValue(stored, in string) string {
-	if in == appcfg.RedactedSecretPlaceholder {
+	if in == appcfg.RedactedSecretPlaceholder || strings.TrimSpace(in) == "" {
 		return stored
 	}
 	return strings.TrimSpace(in)

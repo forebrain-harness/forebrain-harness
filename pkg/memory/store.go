@@ -50,9 +50,14 @@ type Stage1Output struct {
 	LastUsage                        sql.NullInt64
 	SelectedForPhase2                bool
 	SelectedForPhase2SourceUpdatedAt sql.NullInt64
-	Cwd                              string
-	RolloutPath                      string
-	GitBranch                        string
+	// LastMessageRowID is how far into the thread's transcript the extraction
+	// that wrote this row read. Invalid means no cursor was recorded (a row
+	// written before the column existed), which costs the thread one more full
+	// extraction.
+	LastMessageRowID sql.NullInt64
+	Cwd              string
+	RolloutPath      string
+	GitBranch        string
 }
 
 type Status struct {
@@ -109,6 +114,25 @@ func ValidThreadMemoryMode(mode string) bool {
 	return mode == ThreadMemoryEnabled || mode == ThreadMemoryDisabled
 }
 
+// ErrBatchProjectUsesNoMemory refuses to switch memory on for a batch project's
+// conversation. The text is user-facing: the surfaces that offer the
+// single-session toggle print this error as it stands, and a batch task runs
+// unattended for a business system, so its transcript is not somewhere durable
+// memory may be drawn from (owner 2026-10-26, plan 205 §0.2).
+var ErrBatchProjectUsesNoMemory = errors.New("后台跑批项目不使用记忆")
+
+// sessionProjectTypeBatch mirrors state.ProjectTypeBatch. This package does not
+// import state, so the one value it must recognise is repeated here.
+const sessionProjectTypeBatch = "batch"
+
+// SetThreadMemoryMode flips one conversation's memory switch.
+//
+// A batch project's conversation is the one case this refuses: it is born
+// disabled (the birth INSERT in pkg/state resolves the project type it is filed
+// under), and this is the only path that could turn it back on — which would
+// hand the extraction and phase-2 queries a batch transcript to remember. The
+// switch that disables memory on such a conversation is allowed, since a caller
+// storing the value the session already has is not a widening.
 func (s *Store) SetThreadMemoryMode(ctx context.Context, threadID, mode string) error {
 	if s == nil || s.DB == nil {
 		return nil
@@ -124,6 +148,16 @@ func (s *Store) SetThreadMemoryMode(ctx context.Context, threadID, mode string) 
 	agentID, err := s.agent()
 	if err != nil {
 		return err
+	}
+	if mode == ThreadMemoryEnabled {
+		var projectType string
+		switch err := s.DB.QueryRowContext(ctx, `SELECT project_type FROM fb_sessions WHERE id=? AND agent_id=?`, threadID, agentID).Scan(&projectType); {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return err
+		case projectType == sessionProjectTypeBatch:
+			return ErrBatchProjectUsesNoMemory
+		}
 	}
 	_, err = s.DB.ExecContext(ctx, `UPDATE fb_sessions SET memory_mode=? WHERE id=? AND agent_id=?`, mode, threadID, agentID)
 	return err
@@ -163,8 +197,8 @@ func (s *Store) UpsertStage1Output(ctx context.Context, out Stage1Output) error 
 	}
 	_, err = s.DB.ExecContext(ctx, `INSERT INTO fb_memory_stage1_outputs(
 		thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at,
-		usage_count, last_usage, selected_for_phase2, selected_for_phase2_source_updated_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		usage_count, last_usage, selected_for_phase2, selected_for_phase2_source_updated_at, last_message_row_id
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(thread_id) DO UPDATE SET
 		agent_id=excluded.agent_id,
 		project_key=excluded.project_key,
@@ -172,11 +206,13 @@ func (s *Store) UpsertStage1Output(ctx context.Context, out Stage1Output) error 
 		raw_memory=excluded.raw_memory,
 		rollout_summary=excluded.rollout_summary,
 		rollout_slug=excluded.rollout_slug,
-		generated_at=excluded.generated_at
+		generated_at=excluded.generated_at,
+		last_message_row_id=excluded.last_message_row_id
 	WHERE excluded.source_updated_at>=fb_memory_stage1_outputs.source_updated_at
 	  AND fb_memory_stage1_outputs.agent_id=excluded.agent_id`,
 		threadID, agentID, projectKey, out.SourceUpdatedAt, out.RawMemory, out.RolloutSummary, nullStringValue(out.RolloutSlug), generatedAt,
-		out.UsageCount.Int64, nullIntValue(out.LastUsage), boolInt(out.SelectedForPhase2), nullIntValue(out.SelectedForPhase2SourceUpdatedAt))
+		out.UsageCount.Int64, nullIntValue(out.LastUsage), boolInt(out.SelectedForPhase2), nullIntValue(out.SelectedForPhase2SourceUpdatedAt),
+		nullIntValue(out.LastMessageRowID))
 	return err
 }
 
@@ -211,6 +247,74 @@ func (s *Store) DeleteThreadMemory(ctx context.Context, threadID string) error {
 		}
 		return nil
 	})
+}
+
+// Stage1OutputForThread returns the row this thread's last extraction wrote,
+// and whether there is one. An incremental pass starts from it: its content is
+// what the new turns are merged into, and its row id is where its read stopped.
+func (s *Store) Stage1OutputForThread(ctx context.Context, threadID string) (Stage1Output, bool, error) {
+	if s == nil || s.DB == nil {
+		return Stage1Output{}, false, nil
+	}
+	agentID, err := s.agent()
+	if err != nil {
+		return Stage1Output{}, false, err
+	}
+	var out Stage1Output
+	var selected int
+	err = s.DB.QueryRowContext(ctx, `SELECT thread_id, project_key, source_updated_at, raw_memory, rollout_summary,
+		rollout_slug, generated_at, usage_count, last_usage, selected_for_phase2, last_message_row_id
+	FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`, strings.TrimSpace(threadID), agentID).
+		Scan(&out.ThreadID, &out.ProjectKey, &out.SourceUpdatedAt, &out.RawMemory, &out.RolloutSummary,
+			&out.RolloutSlug, &out.GeneratedAt, &out.UsageCount, &out.LastUsage, &selected, &out.LastMessageRowID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Stage1Output{}, false, nil
+	}
+	if err != nil {
+		return Stage1Output{}, false, err
+	}
+	out.SelectedForPhase2 = selected != 0
+	return out, true, nil
+}
+
+// AdvanceStage1Watermark records that a thread's extraction is current again
+// without changing what it extracted — the case of a thread that gained no
+// messages a model would need to see. The job is closed exactly as a completed
+// extraction closes it, and the row's source_updated_at and cursor move
+// forward, which is what stops the same idle thread from being claimed again
+// for work that produced nothing. No phase-2 pass is enqueued: nothing in the
+// memory the consolidation reads has changed.
+func (s *Store) AdvanceStage1Watermark(ctx context.Context, threadID, ownershipToken string, sourceUpdatedAt, lastMessageRowID int64) (bool, error) {
+	if s == nil || s.DB == nil {
+		return false, nil
+	}
+	agentID, err := s.agent()
+	if err != nil {
+		return false, err
+	}
+	threadID = strings.TrimSpace(threadID)
+	owned := false
+	err = s.withImmediate(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE fb_memory_jobs SET status=?,finished_at=?,lease_until=NULL,last_error=NULL,last_success_watermark=input_watermark
+			WHERE kind=? AND job_key=? AND agent_id=? AND status=? AND ownership_token=?`,
+			jobStatusDone, time.Now().Unix(), JobKindStage1, threadID, agentID, jobStatusRunning, ownershipToken)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil || affected == 0 {
+			return err
+		}
+		owned = true
+		var cursor any
+		if lastMessageRowID > 0 {
+			cursor = lastMessageRowID
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE fb_memory_stage1_outputs SET source_updated_at=?, last_message_row_id=?
+			WHERE thread_id=? AND agent_id=?`, sourceUpdatedAt, cursor, threadID, agentID)
+		return err
+	})
+	return owned, err
 }
 
 // HasSelectedStage1Output reports whether threadID's stage-1 output is

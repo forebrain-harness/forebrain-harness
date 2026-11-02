@@ -283,7 +283,7 @@ func (s *Store) TryClaimStage1Job(ctx context.Context, threadID string, sourceUp
 	return outcome, token, nil
 }
 
-func (s *Store) MarkStage1Succeeded(ctx context.Context, threadID, projectKey, ownershipToken string, sourceUpdatedAt int64, rawMemory, rolloutSummary string, rolloutSlug *string) (bool, error) {
+func (s *Store) MarkStage1Succeeded(ctx context.Context, threadID, projectKey, ownershipToken string, sourceUpdatedAt int64, rawMemory, rolloutSummary string, rolloutSlug *string, lastMessageRowID int64) (bool, error) {
 	if s == nil || s.DB == nil {
 		return false, nil
 	}
@@ -294,7 +294,7 @@ func (s *Store) MarkStage1Succeeded(ctx context.Context, threadID, projectKey, o
 	owned := false
 	err = s.withImmediate(ctx, func(tx *sql.Tx) error {
 		var err error
-		owned, err = markStage1SucceededOn(ctx, tx, agentID, threadID, projectKey, ownershipToken, sourceUpdatedAt, rawMemory, rolloutSummary, rolloutSlug)
+		owned, err = markStage1SucceededOn(ctx, tx, agentID, threadID, projectKey, ownershipToken, sourceUpdatedAt, rawMemory, rolloutSummary, rolloutSlug, lastMessageRowID)
 		return err
 	})
 	return owned, err
@@ -304,8 +304,10 @@ func (s *Store) MarkStage1Succeeded(ctx context.Context, threadID, projectKey, o
 // that thread's project scope for its next phase-2 pass. projectKey must be
 // the project scope the thread's cwd resolved to at claim time — every row in
 // fb_memory_stage1_outputs is required to carry one (see the schema comment),
-// so a caller that has none has nothing valid to write.
-func markStage1SucceededOn(ctx context.Context, tx *sql.Tx, agentID, threadID, projectKey, ownershipToken string, sourceUpdatedAt int64, rawMemory, rolloutSummary string, rolloutSlug *string) (bool, error) {
+// so a caller that has none has nothing valid to write. lastMessageRowID is the
+// transcript cursor the extraction ended on: it replaces the row's previous
+// one, so the next pass starts after exactly the messages this one consumed.
+func markStage1SucceededOn(ctx context.Context, tx *sql.Tx, agentID, threadID, projectKey, ownershipToken string, sourceUpdatedAt int64, rawMemory, rolloutSummary string, rolloutSlug *string, lastMessageRowID int64) (bool, error) {
 	projectKey = strings.TrimSpace(projectKey)
 	if projectKey == "" {
 		return false, fmt.Errorf("project_key is required")
@@ -324,11 +326,16 @@ func markStage1SucceededOn(ctx context.Context, tx *sql.Tx, agentID, threadID, p
 	if rolloutSlug != nil {
 		slug = *rolloutSlug
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO fb_memory_stage1_outputs(thread_id,agent_id,project_key,source_updated_at,raw_memory,rollout_summary,rollout_slug,generated_at)
-		VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET project_key=excluded.project_key,source_updated_at=excluded.source_updated_at,
-		raw_memory=excluded.raw_memory,rollout_summary=excluded.rollout_summary,rollout_slug=excluded.rollout_slug,generated_at=excluded.generated_at
+	var cursor any
+	if lastMessageRowID > 0 {
+		cursor = lastMessageRowID
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO fb_memory_stage1_outputs(thread_id,agent_id,project_key,source_updated_at,raw_memory,rollout_summary,rollout_slug,generated_at,last_message_row_id)
+		VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET project_key=excluded.project_key,source_updated_at=excluded.source_updated_at,
+		raw_memory=excluded.raw_memory,rollout_summary=excluded.rollout_summary,rollout_slug=excluded.rollout_slug,generated_at=excluded.generated_at,
+		last_message_row_id=excluded.last_message_row_id
 		WHERE excluded.source_updated_at>=fb_memory_stage1_outputs.source_updated_at
-		  AND fb_memory_stage1_outputs.agent_id=excluded.agent_id`, strings.TrimSpace(threadID), agentID, projectKey, sourceUpdatedAt, rawMemory, rolloutSummary, slug, now); err != nil {
+		  AND fb_memory_stage1_outputs.agent_id=excluded.agent_id`, strings.TrimSpace(threadID), agentID, projectKey, sourceUpdatedAt, rawMemory, rolloutSummary, slug, now, cursor); err != nil {
 		return false, err
 	}
 	scope, ok := ProjectScope(projectKey)
@@ -341,7 +348,7 @@ func markStage1SucceededOn(ctx context.Context, tx *sql.Tx, agentID, threadID, p
 	return true, nil
 }
 
-func (s *Store) CompleteStage1WithEvidence(ctx context.Context, threadID, projectKey, ownershipToken string, sourceUpdatedAt int64, rawMemory, rolloutSummary string, rolloutSlug *string, stagedPath, canonicalPath string) (bool, error) {
+func (s *Store) CompleteStage1WithEvidence(ctx context.Context, threadID, projectKey, ownershipToken string, sourceUpdatedAt int64, rawMemory, rolloutSummary string, rolloutSlug *string, lastMessageRowID int64, stagedPath, canonicalPath string) (bool, error) {
 	if s == nil || s.DB == nil {
 		_ = os.Remove(stagedPath)
 		return false, nil
@@ -356,7 +363,7 @@ func (s *Store) CompleteStage1WithEvidence(ctx context.Context, threadID, projec
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	owned, err := markStage1SucceededOn(ctx, tx, agentID, threadID, projectKey, ownershipToken, sourceUpdatedAt, rawMemory, rolloutSummary, rolloutSlug)
+	owned, err := markStage1SucceededOn(ctx, tx, agentID, threadID, projectKey, ownershipToken, sourceUpdatedAt, rawMemory, rolloutSummary, rolloutSlug, lastMessageRowID)
 	if err != nil {
 		return false, err
 	}

@@ -50,6 +50,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { EditorView, basicSetup } from 'codemirror'
+import { linter } from '@codemirror/lint'
 import { markdown } from '@codemirror/lang-markdown'
 import { Crepe } from '@milkdown/crepe'
 
@@ -70,6 +71,9 @@ const props = defineProps<{
   readonly?: boolean
   /** Optional fixed height for the editing area. */
   height?: string
+  /** Wavy lines under the editor's lines (the configuration file's lint,
+   * plan 191 §4.3): each entry is a zero-based line and the hover text. */
+  lint?: (text: string) => { line: number; message: string }[]
 }>()
 
 const emit = defineEmits<{
@@ -260,6 +264,24 @@ async function mountCodeMirror(el: HTMLElement, id: number) {
   } else {
     const description = languageForPath(props.path)
     if (description) extensions.push(await description.load())
+  }
+  // The caller's own diagnostics, drawn the way CodeMirror draws its own: a
+  // wavy line down the whole line and the message on hover. `props.lint` is
+  // read on every run so a whitelist that arrives late is picked up.
+  if (props.lint) {
+    const source = props.lint
+    extensions.push(
+      linter((view) => {
+        const doc = view.state.doc
+        return source(doc.toString())
+          .map((diagnostic) => {
+            const at = Math.min(diagnostic.line + 1, doc.lines)
+            const line = doc.line(at)
+            return { from: line.from, to: line.to, severity: 'error' as const, message: diagnostic.message }
+          })
+          .filter((diagnostic) => diagnostic.from <= diagnostic.to)
+      }),
+    )
   }
   if (props.readonly) extensions.push(EditorView.editable.of(false))
   if (id !== runId) return

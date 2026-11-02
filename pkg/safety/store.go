@@ -179,7 +179,7 @@ func (s *Store) SetApprovalPolicy(policy ApprovalPolicy) {
 		return
 	}
 	switch policy.Mode {
-	case ApprovalUnlessTrusted, ApprovalOnRequest, ApprovalNever, ApprovalGranular:
+	case ApprovalUnlessTrusted, ApprovalOnRequest, ApprovalNever:
 	default:
 		policy.Mode = ApprovalOnRequest
 	}
@@ -824,7 +824,7 @@ func normalizeDestination(d PermissionDestination) PermissionDestination {
 
 func normalizeMode(m PermissionMode) PermissionMode {
 	switch m {
-	case ModeUnlessTrusted, ModeOnRequest, ModeNever, ModeGranular:
+	case ModeUnlessTrusted, ModeOnRequest, ModeNever:
 		return m
 	default:
 		return ModeOnRequest
@@ -1003,9 +1003,6 @@ func ExplainRefusedUpdate(dst PermissionDestination, behavior PermissionBehavior
 type Resolved struct {
 	InputMaxRunes  int
 	InputBlockSubs []string
-	OutputEnabled  bool
-
-	RetrievalMaxChunk int
 }
 
 func ResolveFromRoot(cfg *appcfg.Root) *Resolved {
@@ -1017,10 +1014,8 @@ func ResolveFromRoot(cfg *appcfg.Root) *Resolved {
 
 func StrictDefaults() *Resolved {
 	return &Resolved{
-		InputMaxRunes:     200000,
-		InputBlockSubs:    nil,
-		OutputEnabled:     false,
-		RetrievalMaxChunk: 120000,
+		InputMaxRunes:  200000,
+		InputBlockSubs: nil,
 	}
 }
 
@@ -1034,12 +1029,6 @@ func ResolveGuardrails(g appcfg.GuardrailsConfig) *Resolved {
 	}
 	if len(g.Input.BlockSubstrings) > 0 {
 		r.InputBlockSubs = append([]string(nil), g.Input.BlockSubstrings...)
-	}
-	if g.Output.Enabled != nil {
-		r.OutputEnabled = *g.Output.Enabled
-	}
-	if g.Retrieval.MaxChunkRunes > 0 {
-		r.RetrievalMaxChunk = g.Retrieval.MaxChunkRunes
 	}
 	return r
 }
@@ -1057,13 +1046,20 @@ type RejectReason struct {
 	Reason string
 }
 
+// retrievalMaxChunkRunes is the per-chunk cap on injected retrieval context.
+// It is a constant, not a setting: a chunk larger than this is a whole file
+// handed over instead of a retrieved passage, and the model is better served by
+// a tool read than by a context injection of that size.
+const retrievalMaxChunkRunes = 120000
+
+// EvaluateRetrieval keeps the injected context to whole passages: an empty
+// chunk and an oversized one are dropped. It reads no wording — matching
+// injection phrases in retrieved text dropped legitimate documentation that
+// quoted them, and a rail that judges prose belongs to the model, not to a
+// substring list.
 func EvaluateRetrieval(r *Resolved, chunks []Chunk) ([]Chunk, []RejectReason) {
 	if r == nil {
 		return chunks, nil
-	}
-	maxR := r.RetrievalMaxChunk
-	if maxR <= 0 {
-		maxR = 120000
 	}
 	var kept []Chunk
 	var rejects []RejectReason
@@ -1073,13 +1069,8 @@ func EvaluateRetrieval(r *Resolved, chunks []Chunk) ([]Chunk, []RejectReason) {
 			rejects = append(rejects, RejectReason{Source: ch.Source, Reason: "empty_chunk"})
 			continue
 		}
-		if utf8.RuneCountInString(t) > maxR {
+		if utf8.RuneCountInString(t) > retrievalMaxChunkRunes {
 			rejects = append(rejects, RejectReason{Source: ch.Source, Reason: "oversized_chunk"})
-			continue
-		}
-		lt := strings.ToLower(t)
-		if strings.Contains(lt, "ignore previous instructions") || strings.Contains(lt, "disregard the above") {
-			rejects = append(rejects, RejectReason{Source: ch.Source, Reason: "injection_substring"})
 			continue
 		}
 		kept = append(kept, ch)
@@ -1252,12 +1243,15 @@ func RuntimeYOLOEnabled() bool {
 	return false
 }
 
+// ApplyYOLO forces the effective approval preset to full access. It is the
+// whole of what the environment flag means now (plan 203): full access already
+// carries the YOLO semantics, so the flag selects the preset instead of
+// patching a policy and a sandbox mode of its own. EffectiveConfig derives the
+// pair from it, which is why this must run before that derivation.
 func ApplyYOLO(cfg *appcfg.Root) bool {
 	if cfg == nil || !RuntimeYOLOEnabled() {
 		return false
 	}
-	cfg.DefaultPermissions = ""
-	cfg.SandboxMode = appcfg.SandboxModeDangerFullAccess
-	cfg.ApprovalPolicy = appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyNever)
+	cfg.ApprovalPreset = appcfg.ApprovalPresetFullAccess
 	return true
 }

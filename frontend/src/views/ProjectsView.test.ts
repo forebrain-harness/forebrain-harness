@@ -196,7 +196,7 @@ describe('project types (plan 153)', () => {
     expect(wrapper.find('[data-testid="project-type-badge-p-batch"]').text()).toBe('后台跑批')
   })
 
-  it('offers the three kinds with one line each, and will not create a batch project untrusted', async () => {
+  it('offers the three kinds with one line each, and creates a batch project without asking about trust', async () => {
     const wrapper = await mountPage({ realTeleport: true })
     const create = vi.mocked(forebrainApi.projectCreate)
     await openDialog(wrapper)
@@ -209,17 +209,16 @@ describe('project types (plan 153)', () => {
     await field('[data-testid="project-type-batch"]').trigger('click')
     await flushPromises()
 
-    // The trust is part of what a batch project is: no tick, no create.
+    // A batch project has no trust level (plans/216 §0.4): the dialog asks
+    // nothing and the create button is ready as soon as the form is.
     const createButton = field('[data-testid="project-create"]')
-    expect(dialogText()).toContain('跑批任务无人值守')
-    expect(createButton.attributes('disabled')).toBeDefined()
-
-    await field('[role="switch"]').trigger('click')
+    expect(document.body.querySelector('[role="switch"]')).toBeNull()
     expect(createButton.attributes('disabled')).toBeUndefined()
+
     await createButton.trigger('click')
     await flushPromises()
 
-    expect(create).toHaveBeenCalledWith({ name: 'ibs', root: '/tmp/ibs', projectType: 'batch', trust: true })
+    expect(create).toHaveBeenCalledWith({ name: 'ibs', root: '/tmp/ibs', projectType: 'batch' })
   })
 
   it('preselects the folder\'s suggestion and says why, and sends the type it shows', async () => {
@@ -305,7 +304,7 @@ describe('project types (plan 153)', () => {
 
   it('names the gateway\'s refusals in Chinese', async () => {
     vi.mocked(forebrainApi.projectCreate).mockRejectedValue({
-      response: { status: 409, data: { error: 'batch_requires_trust' } },
+      response: { status: 400, data: { error: 'project_type_invalid' } },
     })
     const wrapper = await mountPage({ realTeleport: true })
     await openDialog(wrapper)
@@ -314,6 +313,31 @@ describe('project types (plan 153)', () => {
     await field('[data-testid="project-create"]').trigger('click')
     await flushPromises()
 
-    expect(dialogText()).toContain('跑批项目必须信任此目录，请勾选信任后再创建。')
+    expect(dialogText()).toContain('项目类型无效')
+  })
+
+  it('creates a batch project with no trust decision at all', async () => {
+    // A batch project has no trust level (plans/216 §0.4): the dialog asks for
+    // none, gates nothing on one, and sends none — the gateway records the
+    // trust its skill and MCP loaders read.
+    const wrapper = await mountPage({ realTeleport: true })
+    await openDialog(wrapper)
+    await field('[data-testid="project-root"]').setValue('/tmp/ibs')
+    await settle()
+    await field('[data-testid="project-type-batch"]').trigger('click')
+
+    // No trust switch anywhere in the dialog, and no "required" line under the
+    // type cards.
+    expect(document.body.querySelector('[role="switch"]')).toBeNull()
+    expect(dialogText()).not.toContain('信任此目录')
+    expect(field('[data-testid="project-create"]').attributes('disabled')).toBeUndefined()
+
+    await field('[data-testid="project-create"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.projectCreate).toHaveBeenCalledTimes(1)
+    const sent = vi.mocked(forebrainApi.projectCreate).mock.calls[0][0]
+    expect(sent).toMatchObject({ projectType: 'batch' })
+    expect(sent).not.toHaveProperty('trust')
   })
 })

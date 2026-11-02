@@ -1548,18 +1548,18 @@ func (c *commandController) handleConnect(ctx context.Context, sessionID string)
 // back.
 //
 // It deliberately does not reuse the config Resolve() cached. That copy is the
-// file as it was when this process started, and setup writes the whole document
-// back: everything changed since — /model, /sandbox, an edit made in another
-// terminal — would be reverted by a command the user ran to change one
+// configuration as it was when this process started, and setup writes the whole
+// document back: everything changed since — /model, /sandbox, an edit made in
+// another terminal — would be reverted by a command the user ran to change one
 // provider. It reads the persisted form for the same reason /model does, since
 // Load expands ${ENV} references and writing the expansion back would bake one
-// machine's environment into the file.
+// machine's environment into the configuration.
 func connectRuntimeContext() (process.Context, error) {
 	rt, err := process.Resolve()
 	if err != nil {
 		return rt, err
 	}
-	persisted, err := appcfg.LoadPersisted(rt.ConfigPath)
+	persisted, err := process.PersistedStartupConfig(context.Background(), rt.Home)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No file yet (first run): the resolved empty config is the base.

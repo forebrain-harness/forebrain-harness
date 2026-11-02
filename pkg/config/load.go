@@ -97,55 +97,42 @@ func loadPersisted(path string) (Root, error) {
 	if err := rejectPlaintextConfigSecrets(path, b); err != nil {
 		return Root{}, err
 	}
-	// approval_policy is deliberately left at its zero value: an empty mode is
-	// how "not configured" reaches sandboxrt.EffectiveConfig, which derives the
-	// policy from the launch project's trust decision. Seeding a concrete mode
-	// here would make every configuration look explicitly configured.
-	r := Root{ApprovalsReviewer: "user"}
+	// Only the supported keys come out of the file (plan 207 §3.6): the file
+	// is where the gateway's startup sections and the credentials pointer
+	// live, and every runtime setting is stored in fb_config. Parsing into
+	// FileRoot rather than Root is what makes a key the file still carries —
+	// an install whose import has not rewritten it yet, or a hand edit —
+	// ignored rather than refused, and what keeps a stored section's value
+	// from failing the startup by having the wrong type.
+	var file FileRoot
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".yaml", ".yml":
-		if err := yaml.Unmarshal(b, &r); err != nil {
+		if err := yaml.Unmarshal(b, &file); err != nil {
 			return Root{}, err
 		}
 	case ".json":
-		if err := json.Unmarshal(b, &r); err != nil {
+		if err := json.Unmarshal(b, &file); err != nil {
 			return Root{}, err
 		}
 	default:
-		if err := json.Unmarshal(b, &r); err != nil {
-			if err2 := yaml.Unmarshal(b, &r); err2 != nil {
+		if err := json.Unmarshal(b, &file); err != nil {
+			if err2 := yaml.Unmarshal(b, &file); err2 != nil {
 				return Root{}, err
 			}
 		}
 	}
+	// ApprovalPreset is deliberately left at its zero value: the file never
+	// carries it, and empty is how "not configured" reaches
+	// safety.EffectiveConfig, which reads it as the workspace-write default.
+	r := Root{Gateway: file.Gateway, Credentials: file.Credentials}
 	normalize(&r)
 	return r, nil
 }
 
 func validateLoadedRoot(r *Root) error {
-	switch r.ApprovalPolicy.Mode {
-	case "", ApprovalPolicyUntrusted, ApprovalPolicyOnRequest, ApprovalPolicyNever, ApprovalPolicyGranular:
-	default:
-		return fmt.Errorf("invalid approval_policy")
-	}
-	switch strings.ToLower(strings.TrimSpace(r.ApprovalsReviewer)) {
-	case "", "user", "auto_review":
-	default:
-		return fmt.Errorf("approvals_reviewer must be user or auto_review")
-	}
-	switch r.SandboxMode {
-	case "", SandboxModeReadOnly, SandboxModeWorkspaceWrite, SandboxModeDangerFullAccess:
-	default:
-		return fmt.Errorf("sandbox_mode must be read-only, workspace-write, or danger-full-access")
-	}
-	switch r.Windows.Sandbox {
-	case "", WindowsSandboxUnelevated, WindowsSandboxElevated:
-	default:
-		return fmt.Errorf("windows.sandbox must be unelevated or elevated")
-	}
-	if r.Compact.ModelAutoCompactTokenLimit < 0 {
-		return fmt.Errorf("assembly.model_auto_compact_token_limit must be non-negative")
+	if !r.ApprovalPreset.Valid() {
+		return fmt.Errorf("approval_preset must be workspace_write or full_access")
 	}
 	if v := r.Agents.Defaults.NetworkRetryMax; v != nil && *v < 0 {
 		return fmt.Errorf("agents.defaults.network_retry_max must be non-negative")
@@ -153,17 +140,7 @@ func validateLoadedRoot(r *Root) error {
 	if v := r.Agents.Defaults.StreamIdleTimeoutSeconds; v != nil && *v < 0 {
 		return fmt.Errorf("agents.defaults.stream_idle_timeout_seconds must be non-negative")
 	}
-	scope := strings.TrimSpace(r.Compact.ModelAutoCompactTokenLimitScope)
-	if scope != "" && scope != "total" && scope != "body_after_prefix" {
-		return fmt.Errorf("assembly.model_auto_compact_token_limit_scope must be total or body_after_prefix")
-	}
 	if err := validateSandboxConfig(r); err != nil {
-		return err
-	}
-	if err := validatePermissionProfiles(r); err != nil {
-		return err
-	}
-	if err := validateNetworkProxyFeature(r.Features.NetworkProxy); err != nil {
 		return err
 	}
 	if err := validateMCPToolApprovalModes(r); err != nil {
@@ -278,7 +255,11 @@ func Save(path string, r Root) error {
 		return err
 	}
 
-	if persisted, err := LoadPersisted(path); err == nil {
+	// Save rewrites a whole file, runtime sections included, so the copy it
+	// restores secrets from is the whole file too (LoadLegacyFileSections):
+	// reading only the supported keys here would clear the very references
+	// this write is supposed to preserve.
+	if persisted, err := LoadLegacyFileSections(path); err == nil {
 		restorePersistedSecrets(&r, persisted)
 	}
 	dropPlaceholderLLMProviders(&r)
@@ -623,16 +604,27 @@ func containsSecretConfigField(t reflect.Type) bool {
 	return false
 }
 
+// clampPercent holds a configured percent inside [lo, hi]. Unset (0) stays 0 so
+// the runtime can select its own default; any other value is clamped instead of
+// rejected, which is what these settings promise ("above 90 is stored as 90").
+func clampPercent(p, lo, hi int) int {
+	if p <= 0 {
+		return 0
+	}
+	return min(max(p, lo), hi)
+}
+
 func normalize(r *Root) {
-	r.ApprovalsReviewer = strings.ToLower(strings.TrimSpace(r.ApprovalsReviewer))
-	r.AutoReview.Policy = strings.TrimSpace(r.AutoReview.Policy)
 	r.Compact.Prompt = strings.TrimSpace(r.Compact.Prompt)
-	r.Compact.ModelAutoCompactTokenLimitScope = strings.TrimSpace(r.Compact.ModelAutoCompactTokenLimitScope)
+	// The stored percent is what the runtime will read back, so it is held to
+	// the range the setting accepts rather than rejected: "above 90 is stored as
+	// 90" is the rule, not a load failure (plan 204 §0.3).
+	r.Compact.AutoCompactPercent = clampPercent(r.Compact.AutoCompactPercent, MinAutoCompactPercent, MaxAutoCompactPercent)
+	// Same rule for the warning's share of the window.
+	r.Agents.Defaults.ContextInject.WarnRemainingPercent = clampPercent(
+		r.Agents.Defaults.ContextInject.WarnRemainingPercent, MinWarnRemainingPercent, MaxWarnRemainingPercent)
 	if r.Gateway.HTTPAddr == "" {
 		r.Gateway.HTTPAddr = "127.0.0.1:6060"
-	}
-	if strings.TrimSpace(r.Gateway.Auth.Mode) == "" {
-		r.Gateway.Auth.Mode = "token"
 	}
 	if r.Agents.Definitions == nil {
 		r.Agents.Definitions = map[string]AgentDefinition{}
@@ -783,25 +775,21 @@ func applyPersistedDefaults(r *Root) {
 	f := false
 
 	r.Gateway.HTTPAddr = strings.TrimSpace(r.Gateway.HTTPAddr)
-	r.Gateway.Auth.Mode = strings.TrimSpace(r.Gateway.Auth.Mode)
 
-	if r.Agents.Defaults.ContextInject.WarnRemainingTokens <= 0 {
-		r.Agents.Defaults.ContextInject.WarnRemainingTokens = 25000
+	if r.Agents.Defaults.ContextInject.WarnRemainingPercent <= 0 {
+		r.Agents.Defaults.ContextInject.WarnRemainingPercent = DefaultWarnRemainingPercent
 	}
-	if r.Agents.Defaults.ContextInject.BlockRemainingTokens <= 0 {
-		r.Agents.Defaults.ContextInject.BlockRemainingTokens = 13000
+	if r.Compact.AutoCompactPercent <= 0 {
+		r.Compact.AutoCompactPercent = DefaultAutoCompactPercent
 	}
 
 	if r.Agents.Defaults.Guardrails.Input.MaxRunes <= 0 {
-		r.Agents.Defaults.Guardrails.Input.MaxRunes = 200000
+		r.Agents.Defaults.Guardrails.Input.MaxRunes = DefaultGuardrailsMaxRunes
 	}
 	if r.Agents.Defaults.EnableSubagent == nil {
 		// Subagent tools (subagent_run, subagent_fanout, etc.) are opt-in:
 		// they must be enabled explicitly via agents.defaults.enable_subagent.
 		r.Agents.Defaults.EnableSubagent = &f
-	}
-	if r.Agents.Defaults.Guardrails.Retrieval.MaxChunkRunes <= 0 {
-		r.Agents.Defaults.Guardrails.Retrieval.MaxChunkRunes = 120000
 	}
 
 	materializeOptionalDefaults(r)
@@ -818,8 +806,6 @@ func applyPersistedDefaults(r *Root) {
 // meaning "unset" in memory.
 func materializeOptionalDefaults(r *Root) {
 	features := r.EffectiveFeatures()
-	r.Features.ExecPermissionApprovals = BoolPtr(features.ExecPermissionApprovals)
-	r.Features.RequestPermissionsTool = BoolPtr(features.RequestPermissionsTool)
 	r.Features.Memories = BoolPtr(features.Memories)
 	r.Features.LSP = BoolPtr(features.LSP)
 
@@ -831,23 +817,13 @@ func materializeOptionalDefaults(r *Root) {
 	r.LSP.Diagnostics.WaitMS = &waitMS
 
 	memories := r.EffectiveMemories()
-	r.Memories.DisableOnExternalContext = BoolPtr(memories.DisableOnExternalContext)
-	r.Memories.GenerateMemories = BoolPtr(memories.GenerateMemories)
-	r.Memories.UseMemories = BoolPtr(memories.UseMemories)
-	r.Memories.DedicatedTools = BoolPtr(memories.DedicatedTools)
 	r.Memories.MaxRawMemoriesForConsolidation = intPtr(memories.MaxRawMemoriesForConsolidation)
 	r.Memories.MaxUnusedDays = intPtr(memories.MaxUnusedDays)
 	r.Memories.MaxRolloutAgeDays = intPtr(memories.MaxRolloutAgeDays)
 	r.Memories.MaxRolloutsPerStartup = intPtr(memories.MaxRolloutsPerStartup)
 	r.Memories.MinRolloutIdleHours = intPtr(memories.MinRolloutIdleHours)
-	r.Memories.MinRateLimitRemainingPercent = intPtr(memories.MinRateLimitRemainingPercent)
-
-	r.Compact.RemoteCompaction = BoolPtr(r.Compact.UseRemoteCompaction())
-	r.Compact.RemoteCompactionV2 = BoolPtr(r.Compact.UseRemoteV2())
-	r.Tools.CommandRewrite.Enabled = BoolPtr(r.Tools.CommandRewrite.UseRewrite())
 
 	r.SandboxWorkspaceWrite.NetworkAccess = BoolPtr(r.SandboxWorkspaceWrite.EffectiveNetworkAccess())
-	r.Windows.SandboxPrivateDesktop = BoolPtr(r.Windows.UseSandboxPrivateDesktop())
 }
 
 func IsEffectivePrimaryAgent(id string, def AgentDefinition) bool {
@@ -897,7 +873,7 @@ func validatePrimaryAgents(r *Root) error {
 // text therefore gets the same verdict the loader would give the file, before
 // anything is written to disk.
 func ParseRootYAML(b []byte) (Root, error) {
-	r := Root{ApprovalsReviewer: "user"}
+	var r Root
 	if err := yaml.Unmarshal(b, &r); err != nil {
 		return Root{}, err
 	}

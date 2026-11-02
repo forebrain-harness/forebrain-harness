@@ -3100,7 +3100,14 @@ func subagentCallApplyResult(call *event.SubagentCall, tool string, result map[s
 		if len(call.Tasks) != 1 {
 			return false
 		}
-		subagentApplyRecordTask(&call.Tasks[0], result)
+		// A status answers with the record under "record", beside the live
+		// progress; a row recorded before that carries the record itself, and
+		// a replayed transcript still holds one.
+		record, ok := result["record"].(map[string]any)
+		if !ok {
+			record = result
+		}
+		subagentApplyRecordTask(&call.Tasks[0], record)
 		return true
 	case "subagent_wait", "subagent_continue":
 		if len(call.Tasks) != 1 {

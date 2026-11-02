@@ -1182,6 +1182,38 @@ SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL ORDER BY cre
 	return id, nil
 }
 
+// LivePrimaryInput returns the input of the session's live primary run — the
+// one line that says what the conversation is doing right now — truncated to
+// 120 runes, or the empty string when the session is idle (plan 195 §3.3).
+// Waiting on an approval counts as live: the question it stopped on is still
+// what it is doing.
+func (s *RunStore) LivePrimaryInput(ctx context.Context, sessionID string) (string, error) {
+	if s == nil || s.DB == nil {
+		return "", fmt.Errorf("nil db")
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return "", nil
+	}
+	var input string
+	err := s.DB.QueryRowContext(ctx, `
+SELECT input_text FROM fb_runs
+WHERE session_id=? AND parent_run_id IS NULL AND status IN (?, ?)
+ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+		sid, string(RunStatusRunning), string(RunStatusWaitingAction)).Scan(&input)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	runes := []rune(input)
+	if len(runes) > 120 {
+		return string(runes[:120]), nil
+	}
+	return input, nil
+}
+
 // HoldOwnerLease registers this store's owner and keeps its heartbeat fresh
 // until the returned stop is called. Registration happens synchronously — a
 // caller that ignored an error here would create runs no lease vouches for.

@@ -1,117 +1,23 @@
 <template>
-  <!-- The global approval default, flat in its tab (owner 2026-10-18): the one
-       choice, what each preset means, and the save that writes it to
-       forebrain.yaml. -->
-  <div class="grid gap-3">
-    <div class="grid gap-1.5">
-      <RadioField
-        :model-value="chosen"
-        :label="t('approval.title')"
-        name="approval-default"
-        :options="options"
-        vertical
-        data-testid="approval-default"
-        @update:model-value="chosen = $event"
-      />
-      <!-- The help names the two configuration keys in monospace, so it is
-           split around the placeholder and drawn here rather than as the
-           group's plain hint. -->
-      <p class="forebrain-list-note">
-        {{ helpParts[0] }}<span class="font-mono">{{ t('approval.configPathHint') }}</span>{{ helpParts[1] }}
-      </p>
-    </div>
-
-    <p v-if="current === null && loaded" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('approval.custom') }}</p>
-    <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
-    <p v-if="notice" class="text-[12px] text-[var(--forebrain-text-2)]">{{ notice }}</p>
-
-    <div>
-      <Button
-        type="button"
-        class="forebrain-btn forebrain-btn-primary h-auto text-xs"
-        :disabled="!changed || saving"
-        data-testid="approval-save"
-        @click="save"
-      >
-        {{ saving ? t('common.loading') : t('common.save') }}
-      </Button>
-    </div>
-  </div>
+  <!-- 审批与沙箱 (plan 191 §0.12, §4.3): the preset with its two described
+       choices and the note saying who it applies to, the sandbox's writable
+       workspace that unfolds only while 默认 is chosen, and the batch project
+       group whose lone switch keeps its name. -->
+  <SettingsTabForm :tab="tab" :form="form" />
 </template>
 
 <script setup lang="ts">
 /**
- * The global approval default: the same three presets the terminal's
- * /permissions offers, as one standard radio group. The choice is written to
- * forebrain.yaml by the save at the bottom; sessions may override their own
- * view from the composer.
+ * The approval preset replaced the approval policy and the sandbox mode (plan
+ * 203 §0): the one choice a user makes, with the workspace sandbox's own
+ * settings folded under it and the batch projects' default beside it. Every row
+ * comes from the schema; the tab exists so the page can name the surface.
  */
-import { computed, onMounted, ref } from 'vue'
-import { Button } from '@repo/shadcn-vue/components/ui/button'
-import RadioField from '@/components/common/RadioField.vue'
-import { getErrorMessage, forebrainApi } from '@/lib/api'
-import { tIn, useI18n, type I18nKey } from '@/locales'
+import SettingsTabForm from '@/components/settings/form/SettingsTabForm.vue'
+import type { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 
-const { t } = useI18n()
-
-/**
- * One preset's two names. This page names a preset in both languages —
- * `只读 · Read Only` — so a reader of either manual finds the same word here
- * as in the configuration file and in the terminal's /permissions.
- */
-function bothNames(key: I18nKey): string {
-  return `${tIn('zh', key)} · ${tIn('en', key)}`
-}
-
-const options = computed(() => [
-  { value: 'read-only', label: bothNames('approval.readOnly'), description: t('approval.readOnlyDescription') },
-  { value: 'auto', label: bothNames('approval.default'), description: t('approval.defaultDescription') },
-  { value: 'full-access', label: bothNames('approval.fullAccess'), description: t('approval.fullAccessDescription') },
-])
-
-/** The help sentence, split around the configuration keys it names. */
-const helpParts = computed(() => t('approval.help').split('{path}'))
-
-const current = ref<string | null>(null)
-const chosen = ref('')
-const loaded = ref(false)
-const saving = ref(false)
-const error = ref('')
-const notice = ref('')
-
-const changed = computed(() => loaded.value && chosen.value !== (current.value ?? ''))
-
-async function load() {
-  error.value = ''
-  try {
-    const res = await forebrainApi.approvalDefault()
-    current.value = res.current
-    chosen.value = res.current ?? ''
-  } catch (cause) {
-    error.value = getErrorMessage(cause)
-  } finally {
-    loaded.value = true
-  }
-}
-
-async function save() {
-  if (!changed.value || saving.value) return
-  saving.value = true
-  error.value = ''
-  notice.value = ''
-  try {
-    const res = await forebrainApi.saveApprovalDefault(chosen.value)
-    current.value = res.current
-    chosen.value = res.current ?? ''
-    notice.value = t('approval.saved')
-  } catch (cause) {
-    error.value = getErrorMessage(cause)
-  } finally {
-    saving.value = false
-  }
-}
-
-onMounted(() => {
-  void load()
-})
+defineProps<{
+  tab: string
+  form: ReturnType<typeof useSettingsForm>
+}>()
 </script>

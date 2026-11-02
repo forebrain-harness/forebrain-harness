@@ -36,7 +36,7 @@ function project(overrides: Partial<ProjectRecord> = {}): ProjectRecord {
 }
 
 const tabRoutes = [
-  'project-overview', 'project-rules', 'project-sessions', 'project-memory', 'project-perm',
+  'project-overview', 'project-rules', 'project-sessions', 'project-tasks', 'project-memory', 'project-perm',
   'project-mcp', 'project-lsp', 'project-skills', 'project-cron', 'project-channels',
 ]
 
@@ -138,6 +138,23 @@ describe('ProjectDetailView', () => {
     const nodes = leadingNodes()
     expect(nodes[2].props?.variant).toBe('gray')
     expect((nodes[2].children as { default: () => string }).default()).toBe('未信任')
+
+    wrapper.unmount()
+  })
+
+  it('shows no trust badge for a batch project', async () => {
+    // A batch project has no trust level (plans/216 §0.4): its tasks run
+    // unattended under their own sandbox switch, so the row keeps the layer,
+    // the name and the directory and stops there — no badge, and no trust
+    // control anywhere in the project space.
+    const wrapper = await mountShell({ projectType: 'batch' })
+
+    const nodes = leadingNodes()
+    // The layer/name crumb, the directory, and nothing else: no trust badge.
+    expect(nodes.map((node) => node.props?.['data-testid'] ?? null)).toEqual([null, 'project-crumb-root'])
+    expect(nodes.some((node) => node.props?.['data-testid'] === 'project-crumb-trust')).toBe(false)
+    expect(wrapper.find('[data-testid="project-crumb-trust"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('信任此目录')
 
     wrapper.unmount()
   })

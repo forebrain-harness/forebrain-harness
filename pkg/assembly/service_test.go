@@ -49,7 +49,7 @@ type remoteFallbackTestLLM struct {
 	executeCalls   int
 }
 
-func (f *remoteFallbackTestLLM) Compact(context.Context, []llm.Message, []*llm.Tool, llm.CompactMode) (*llm.CompactResult, error) {
+func (f *remoteFallbackTestLLM) Compact(context.Context, []llm.Message, []*llm.Tool) (*llm.CompactResult, error) {
 	f.compactCalls++
 	return nil, f.compactErr
 }
@@ -208,8 +208,8 @@ func TestLocalCompactShrinksHistoryUntilItFits(t *testing.T) {
 func TestRemoteFailureFallsBackToActivePrimaryLocalSummary(t *testing.T) {
 	ctx := context.Background()
 	model := &remoteFallbackTestLLM{compactErr: errors.New("context_length_exceeded during compact"), executeSummary: "active primary summary"}
-	svc := Service{CompactLLM: func(context.Context) llm.LLM { return model }, RemoteCompaction: true}
-	replacement, res, err := svc.compactMessages(ctx, []llm.Message{llm.UserMessage(llm.Text("important user context"))}, nil, "s1", "auto", "", nil, nil)
+	svc := Service{CompactLLM: func(context.Context) llm.LLM { return model }}
+	replacement, res, err := svc.compactMessages(ctx, []llm.Message{llm.UserMessage(llm.Text("important user context"))}, nil, "s1", "auto", "", nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestRemoteFailureFallsBackToActivePrimaryLocalSummary(t *testing.T) {
 
 func TestRemoteAndLocalFailuresReturnBothReasons(t *testing.T) {
 	model := &remoteFallbackTestLLM{compactErr: errors.New("status 500 remote compact"), executeErr: errors.New("local prompt failed")}
-	_, _, err := (Service{CompactLLM: func(context.Context) llm.LLM { return model }, RemoteCompaction: true}).compactMessages(context.Background(), []llm.Message{llm.UserMessage(llm.Text("history"))}, nil, "s1", "auto", "", nil, nil)
+	_, _, err := (Service{CompactLLM: func(context.Context) llm.LLM { return model }}).compactMessages(context.Background(), []llm.Message{llm.UserMessage(llm.Text("history"))}, nil, "s1", "auto", "", nil, nil, false)
 	if err == nil || !strings.Contains(err.Error(), "status 500 remote compact") || !strings.Contains(err.Error(), "local summary fallback failed") || !strings.Contains(err.Error(), "local prompt failed") {
 		t.Fatalf("err=%v", err)
 	}
@@ -239,7 +239,7 @@ func TestRemoteCancellationDoesNotFallback(t *testing.T) {
 	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
 		t.Run(fmt.Sprint(err), func(t *testing.T) {
 			model := &remoteFallbackTestLLM{compactErr: err, executeSummary: "should not run"}
-			_, _, gotErr := (Service{CompactLLM: func(context.Context) llm.LLM { return model }, RemoteCompaction: true}).compactMessages(context.Background(), []llm.Message{llm.UserMessage(llm.Text("history"))}, nil, "s1", "auto", "", nil, nil)
+			_, _, gotErr := (Service{CompactLLM: func(context.Context) llm.LLM { return model }}).compactMessages(context.Background(), []llm.Message{llm.UserMessage(llm.Text("history"))}, nil, "s1", "auto", "", nil, nil, false)
 			if !errors.Is(gotErr, err) || model.executeCalls != 0 {
 				t.Fatalf("err=%v executeCalls=%d", gotErr, model.executeCalls)
 			}
@@ -254,16 +254,16 @@ func TestCompactUserTruncationPreservesPrefixAndSuffix(t *testing.T) {
 }
 
 func TestModelChangeCompactionReasons(t *testing.T) {
-	if got := modelChangeCompactReason(1, "total", 90, llm.Hit{CompHash: "old"}, llm.Hit{CompHash: "new"}); got != "comp_hash_changed" {
+	if got := modelChangeCompactReason(1, 90, llm.Hit{CompHash: "old"}, llm.Hit{CompHash: "new"}); got != "comp_hash_changed" {
 		t.Fatalf("hash reason=%q", got)
 	}
 	previous := llm.Hit{ContextWindow: 200}
 	current := llm.Hit{ContextWindow: 100}
-	if got := modelChangeCompactReason(91, "total", 90, previous, current); got != "model_downshift" {
+	if got := modelChangeCompactReason(91, 90, previous, current); got != "model_downshift" {
 		t.Fatalf("downshift reason=%q", got)
 	}
-	if got := modelChangeCompactReason(91, "body_after_prefix", 90, previous, current); got != "" {
-		t.Fatalf("body scope must wait for hard cap, got %q", got)
+	if got := modelChangeCompactReason(60, 90, previous, current); got != "" {
+		t.Fatalf("usage under the new window and threshold must not compact, got %q", got)
 	}
 }
 
@@ -325,7 +325,7 @@ func TestProviderSwitchDeclaresPrefixGenerationWithoutCompacting(t *testing.T) {
 // history is an opaque item only the issuing provider can replay.
 type opaqueRemoteCompactor struct{ calls int }
 
-func (f *opaqueRemoteCompactor) Compact(_ context.Context, _ []llm.Message, _ []*llm.Tool, _ llm.CompactMode) (*llm.CompactResult, error) {
+func (f *opaqueRemoteCompactor) Compact(_ context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.CompactResult, error) {
 	f.calls++
 	return &llm.CompactResult{Messages: []llm.Message{
 		{Compaction: &llm.CompactionState{ID: "cmp_provider_a", EncryptedContent: "opaque-blob-only-provider-a-can-read"}},
@@ -337,14 +337,13 @@ func (f *opaqueRemoteCompactor) Execute(context.Context, []llm.Message, []*llm.T
 	return &llm.Result{Message: &msg}, nil
 }
 
-// Compaction must support multi-round conversations that switch provider and
-// model. With remote compaction left at its default (disabled), the checkpoint
-// is built by local summarization and is therefore plain, portable messages
-// that any provider can replay.
-func TestDefaultCheckpointIsPortableAcrossProviders(t *testing.T) {
+// A client that can compact natively does so with no switch to turn on: the
+// capability is the configuration. The checkpoint it produces is the provider's
+// opaque item, marked with the remote strategy so a later provider switch knows
+// the history is not portable.
+func TestCapableClientCompactsRemotelyWithoutASwitch(t *testing.T) {
 	ctx, sess := context.Background(), newCompactTestStore(t)
-	sid := "portable"
-
+	sid := "capable"
 	for i := 0; i < 4; i++ {
 		if _, err := sess.Append(ctx, sid, "user", strings.Repeat("requirement detail. ", 50)); err != nil {
 			t.Fatal(err)
@@ -355,45 +354,217 @@ func TestDefaultCheckpointIsPortableAcrossProviders(t *testing.T) {
 	}
 
 	remote := &opaqueRemoteCompactor{}
-	// Default Service: RemoteCompaction is not set, so it stays disabled.
 	svc := Service{
 		Sessions:     sess,
 		CompactLLM:   func(context.Context) llm.LLM { return remote },
 		PrimaryModel: func(context.Context) (string, string) { return "openai", "gpt-test" },
 	}
-
 	if _, err := svc.ManualCompactSession(ctx, sid, "manual"); err != nil {
 		t.Fatal(err)
 	}
-	if remote.calls != 0 {
-		t.Fatalf("remote compaction ran %d times despite being disabled by default", remote.calls)
+	if remote.calls != 1 {
+		t.Fatalf("remote compaction ran %d times, want the one manual checkpoint", remote.calls)
 	}
-
 	_, part, err := sess.LatestCompactBoundary(ctx, sid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(part.ReplacementHistory) == 0 {
-		t.Fatal("checkpoint has no replacement history: model-context readers would fall back to the full transcript")
+	if part.Strategy != strategyRemote {
+		t.Fatalf("checkpoint strategy = %q, want %q", part.Strategy, strategyRemote)
+	}
+	if !isRemoteCompactStrategy(part.Strategy) {
+		t.Fatal("a provider-native checkpoint must read back as remote")
+	}
+	opaque := false
+	for _, msg := range part.ReplacementHistory {
+		if msg.Compaction != nil {
+			opaque = true
+		}
+	}
+	if !opaque {
+		t.Fatalf("remote checkpoint carries no opaque item: %+v", part.ReplacementHistory)
+	}
+}
+
+// A client that cannot compact natively is summarized locally, and the
+// checkpoint it leaves is plain messages any provider can replay.
+func TestLocalClientSummarizesLocally(t *testing.T) {
+	ctx, sess := context.Background(), newCompactTestStore(t)
+	sid := "local"
+	for i := 0; i < 4; i++ {
+		if _, err := sess.Append(ctx, sid, "user", strings.Repeat("requirement detail. ", 50)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sess.Append(ctx, sid, "assistant", "answer"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	svc := Service{
+		Sessions:     sess,
+		CompactLLM:   func(context.Context) llm.LLM { return checkpointTestLLM{summary: "handoff"} },
+		PrimaryModel: func(context.Context) (string, string) { return "deepseek", "deepseek-chat" },
+	}
+	if _, err := svc.ManualCompactSession(ctx, sid, "manual"); err != nil {
+		t.Fatal(err)
+	}
+	_, part, err := sess.LatestCompactBoundary(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if part.Strategy != strategyLocal {
+		t.Fatalf("checkpoint strategy = %q, want %q", part.Strategy, strategyLocal)
 	}
 	for i, msg := range part.ReplacementHistory {
 		if msg.Compaction != nil {
-			t.Fatalf("checkpoint message %d carries a provider-specific opaque item, so switching provider would strand the session", i)
+			t.Fatalf("checkpoint message %d carries a provider-specific opaque item", i)
 		}
 		if strings.TrimSpace(msg.Role) == "" {
 			t.Fatalf("checkpoint message %d has no role and cannot be replayed", i)
 		}
 	}
+}
 
-	// The projection must be usable regardless of which provider runs next.
-	projected, err := sess.ListTranscriptMessages(ctx, sid, 5000)
+// The cross-provider case: ChatGPT (a native compactor) produced the newest
+// checkpoint, and the next turn runs on DeepSeek. Sending that opaque item to
+// another provider would be unreadable, so the switch re-summarizes locally
+// first — with the current model, not through the compactor — and the request
+// that follows carries no opaque item.
+func TestCrossProviderSwitchResummarizesLocally(t *testing.T) {
+	ctx, sess := context.Background(), newCompactTestStore(t)
+	sid := "provider-switch"
+
+	if _, err := sess.Append(ctx, sid, "user", strings.Repeat("early requirement. ", 40)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.AppendStructuredMessage(ctx, sid, "assistant", "early answer",
+		"msg-1", `[{"type":"text","text":"early answer"}]`, "gpt-5.6", "", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// ChatGPT compacts natively: the newest checkpoint is provider-private.
+	remote := &opaqueRemoteCompactor{}
+	chatgpt := Service{
+		Sessions:     sess,
+		CompactLLM:   func(context.Context) llm.LLM { return remote },
+		PrimaryModel: func(context.Context) (string, string) { return "openai", "gpt-5.6" },
+	}
+	if _, err := chatgpt.ManualCompactSession(ctx, sid, "manual"); err != nil {
+		t.Fatal(err)
+	}
+	if _, part, err := sess.LatestCompactBoundary(ctx, sid); err != nil {
+		t.Fatal(err)
+	} else if !isRemoteCompactStrategy(part.Strategy) {
+		t.Fatalf("checkpoint strategy = %q, want a remote one", part.Strategy)
+	}
+	// The conversation keeps going on ChatGPT: one more answered turn, which is
+	// what names the provider the next request would have gone to.
+	if _, err := sess.Append(ctx, sid, "user", "follow-up question"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.AppendStructuredMessage(ctx, sid, "assistant", "follow-up answer",
+		"msg-2", `[{"type":"text","text":"follow-up answer"}]`, "gpt-5.6", "", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The next turn runs on DeepSeek: a different provider.
+	local := &countingSummaryLLM{summary: "portable handoff"}
+	deepseek := Service{
+		Sessions: sess,
+		CompactLLM: func(context.Context) llm.LLM {
+			return local
+		},
+		PrimaryModel:  func(context.Context) (string, string) { return "deepseek", "deepseek-chat" },
+		ModelProvider: func(string) string { return "openai" },
+	}
+	decision, err := deepseek.autoCompactDecision(ctx, sid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projected) == 0 {
-		t.Fatal("projection is empty after compaction")
+	if !decision.Should || decision.Reason != reasonRemoteCheckpointProviderSwitch {
+		t.Fatalf("decision = %+v, want the provider-switch reason", decision)
 	}
-	t.Logf("portable checkpoint: %d messages, ~%d tokens", len(projected), llm.EstimateMessages(projected))
+	if decision.PreviousModel != "" {
+		t.Fatalf("previous model = %q, want empty: the switch summarizes with the current one", decision.PreviousModel)
+	}
+	if _, did, err := deepseek.AutoCompactSession(ctx, sid, ""); err != nil || !did {
+		t.Fatalf("AutoCompactSession did=%v err=%v", did, err)
+	}
+	if remote.calls != 1 {
+		t.Fatalf("the compactor ran %d times; the switch's checkpoint must not go through it", remote.calls)
+	}
+	if local.calls == 0 {
+		t.Fatal("the current model never summarized the switch's checkpoint")
+	}
+	_, part, err := sess.LatestCompactBoundary(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if part.Strategy != strategyLocal {
+		t.Fatalf("checkpoint strategy = %q, want %q", part.Strategy, strategyLocal)
+	}
+	for i, msg := range part.ReplacementHistory {
+		if msg.Compaction != nil {
+			t.Fatalf("the checkpoint the next provider would read carries an opaque item at %d", i)
+		}
+	}
+}
+
+// A model switch inside one provider keeps the remote checkpoint: the opaque
+// item is still replayable, so the switch is not a reason to re-summarize.
+func TestSameProviderModelSwitchKeepsTheRemoteCheckpoint(t *testing.T) {
+	ctx, sess := context.Background(), newCompactTestStore(t)
+	sid := "same-provider"
+
+	if _, err := sess.Append(ctx, sid, "user", strings.Repeat("early requirement. ", 40)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.AppendStructuredMessage(ctx, sid, "assistant", "early answer",
+		"msg-1", `[{"type":"text","text":"early answer"}]`, "gpt-5.6", "", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+	remote := &opaqueRemoteCompactor{}
+	svc := Service{
+		Sessions:     sess,
+		CompactLLM:   func(context.Context) llm.LLM { return remote },
+		PrimaryModel: func(context.Context) (string, string) { return "openai", "gpt-5.6" },
+	}
+	if _, err := svc.ManualCompactSession(ctx, sid, "manual"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same provider, a different model.
+	next := Service{
+		Sessions:      sess,
+		CompactLLM:    func(context.Context) llm.LLM { return checkpointTestLLM{summary: "unused"} },
+		PrimaryModel:  func(context.Context) (string, string) { return "openai", "gpt-5.7" },
+		ModelProvider: func(string) string { return "openai" },
+	}
+	decision, err := next.autoCompactDecision(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Reason == reasonRemoteCheckpointProviderSwitch {
+		t.Fatal("a same-provider model switch must keep the remote checkpoint")
+	}
+	if _, part, err := sess.LatestCompactBoundary(ctx, sid); err != nil {
+		t.Fatal(err)
+	} else if !isRemoteCompactStrategy(part.Strategy) {
+		t.Fatalf("checkpoint strategy = %q, want the remote one to survive", part.Strategy)
+	}
+}
+
+// countingSummaryLLM is a local summarizer: it counts the calls it answered and
+// never advertises provider-native compaction.
+type countingSummaryLLM struct {
+	summary string
+	calls   int
+}
+
+func (f *countingSummaryLLM) Execute(_ context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	f.calls++
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text(f.summary)})
+	return &llm.Result{Message: &msg}, nil
 }
 
 // systemOnlyCompactor is a remote ContextCompactor whose replacement history
@@ -401,7 +572,7 @@ func TestDefaultCheckpointIsPortableAcrossProviders(t *testing.T) {
 // stripInitialContext.
 type systemOnlyCompactor struct{ calls int }
 
-func (f *systemOnlyCompactor) Compact(_ context.Context, _ []llm.Message, _ []*llm.Tool, _ llm.CompactMode) (*llm.CompactResult, error) {
+func (f *systemOnlyCompactor) Compact(_ context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.CompactResult, error) {
 	f.calls++
 	return &llm.CompactResult{Messages: []llm.Message{llm.SystemMessage("compacted state")}}, nil
 }
@@ -449,10 +620,9 @@ func TestEmptyReplacementMustNotPersistDeadCheckpoint(t *testing.T) {
 
 	remote := &systemOnlyCompactor{}
 	svc := Service{
-		Sessions:         sess,
-		CompactLLM:       func(context.Context) llm.LLM { return remote },
-		PrimaryModel:     func(context.Context) (string, string) { return "openai", "gpt-test" },
-		RemoteCompaction: true, // opt in to remote path
+		Sessions:     sess,
+		CompactLLM:   func(context.Context) llm.LLM { return remote },
+		PrimaryModel: func(context.Context) (string, string) { return "openai", "gpt-test" },
 	}
 
 	res, did, err := svc.AutoCompactSession(ctx, sid, "")
@@ -812,7 +982,7 @@ func TestLocalCompactBudgetsWithSessionEstimator(t *testing.T) {
 		return &llm.Result{Message: &msg}, nil
 	}
 	client := &recordingSummaryLLM{}
-	replacement, result, err := svc.compactMessages(ctx, history, nil, "s1", "auto", "", client, conversation)
+	replacement, result, err := svc.compactMessages(ctx, history, nil, "s1", "auto", "", client, conversation, false)
 	if err != nil {
 		t.Fatal(err)
 	}

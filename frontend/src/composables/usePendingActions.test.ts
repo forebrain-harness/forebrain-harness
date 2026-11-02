@@ -54,11 +54,6 @@ describe('usePendingActions approvalDecisionLabel', () => {
       ['shell', 'cancel', '不要运行'],
       ['shell_outside_sandbox', 'accept', '在沙箱外运行'],
       ['shell_outside_sandbox', 'cancel', '不要运行'],
-      // A host on the public network.
-      ['network_host', 'accept', '允许'],
-      ['network_host', 'accept_for_session', '本会话都允许'],
-      ['network_host', 'apply_network_policy_amendment', '以后都允许'],
-      ['network_host', 'cancel', '不要访问'],
       // A permission request.
       ['request_permissions', 'grant_for_turn', '本轮允许'],
       ['request_permissions', 'grant_for_turn_with_strict_auto_review', '本轮允许，自动审查'],
@@ -114,12 +109,12 @@ describe('usePendingActions approvalDecisionLabel', () => {
     // so this file keeps the retirement grep over the tree at zero hits.
     const retiredWords = ['批' + '准一次', '拒绝并中' + '断本轮']
     const families: ApprovalFacts['family'][] = [
-      'file_write', 'file_edit', 'apply_patch', 'shell', 'shell_outside_sandbox', 'network_host',
+      'file_write', 'file_edit', 'apply_patch', 'shell', 'shell_outside_sandbox',
       'request_permissions', 'enter_plan_mode', 'mcp_tool', 'protected_read', 'web_search', 'memory_note', 'fallback',
     ]
     const decisions = [
       'accept', 'accept_for_session', 'accept_and_remember', 'accept_with_execpolicy_amendment',
-      'apply_network_policy_amendment', 'grant_for_turn', 'grant_for_turn_with_strict_auto_review',
+      'grant_for_turn', 'grant_for_turn_with_strict_auto_review',
       'grant_for_session', 'decline', 'cancel',
     ] as const
     for (const family of families) {
@@ -138,7 +133,6 @@ describe('usePendingActions approvalDecisionLabel', () => {
     expect(label('accept', 'file_write', { removed: 3 })).toBe('Overwrite')
     expect(label('accept', 'shell_outside_sandbox')).toBe('Run outside the sandbox')
     expect(label('grant_for_turn_with_strict_auto_review', 'request_permissions')).toBe('Allow this turn, auto-reviewed')
-    expect(label('accept_for_session', 'network_host')).toBe('Allow all this session')
     expect(label('cancel', 'protected_read')).toBe("Don't read")
     expect(label('decline', 'memory_note')).toBe("Don't keep it")
     expect(label('cancel', 'fallback')).toBe("Don't allow")

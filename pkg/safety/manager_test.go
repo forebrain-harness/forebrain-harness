@@ -34,22 +34,6 @@ func TestDecideShell(t *testing.T) {
 	}
 }
 
-func TestSelectedPermissionConfigurationTakesPrecedenceOverSandboxMode(t *testing.T) {
-	cfg := &appcfg.Root{
-		DefaultPermissions: "restricted",
-		Permissions: appcfg.PermissionProfiles{"restricted": {
-			FileSystem: &appcfg.FileSystemPermissions{Entries: map[string]appcfg.FileSystemPermissionValue{
-				":root": {Access: appcfg.FileSystemAccessRead},
-			}},
-		}},
-		SandboxMode: appcfg.SandboxModeDangerFullAccess,
-	}
-	decision := NewManager().Decide(cfg, ToolKindShell)
-	if decision.Mode != ModeSandboxed {
-		t.Fatalf("decision=%+v", decision)
-	}
-}
-
 func TestMissingSandboxConfigFailsClosed(t *testing.T) {
 	decision := NewManager().DecideShellCommand(nil, "pwd", SandboxPermissionsUseDefault, ProfileWorkspaceWrite, false)
 	if decision.UseSandbox || decision.Mode != ModeSandboxed || decision.Reason != "sandbox_unavailable" || decision.UnavailableReason == "" {
@@ -99,26 +83,6 @@ func TestDecideReportsUnavailableReasonWhenSandboxBackendMissing(t *testing.T) {
 	d := m.Decide(cfg, ToolKindShell)
 	if !strings.Contains(d.UnavailableReason, "_not_found") {
 		t.Fatalf("expected *_not_found, got %+v", d)
-	}
-}
-
-func TestStartupCheckFailsWhenSandboxEnabledAndBackendMissing(t *testing.T) {
-	t.Setenv("PATH", "")
-	m := NewManager()
-	cfg := &appcfg.Root{}
-	cfg.SandboxMode = appcfg.SandboxModeWorkspaceWrite
-	if err := m.StartupCheck(cfg); err == nil {
-		t.Fatalf("expected startup check failure")
-	}
-}
-
-func TestStartupCheckPassesWhenSandboxDisabled(t *testing.T) {
-	t.Setenv("PATH", "")
-	m := NewManager()
-	cfg := &appcfg.Root{}
-	cfg.SandboxMode = appcfg.SandboxModeDangerFullAccess
-	if err := m.StartupCheck(cfg); err != nil {
-		t.Fatalf("expected no startup failure when sandbox disabled, got %v", err)
 	}
 }
 
@@ -199,26 +163,31 @@ func TestRunCommandStreamsOutputBeforeCompletion(t *testing.T) {
 	}
 }
 
-func TestRunCommandFailsClosedWhenBackendUnavailable(t *testing.T) {
-	// The LLM-driven shell tool must never silently drop to unsandboxed host
-	// execution when the backend is missing. It always fails closed whenever
-	// the sandbox is enabled.
+// A machine with no sandbox runs the command anyway: the backend being missing
+// is a fact about the host, not a refusal (owner 2026-10-31, plan 215 §0.1).
+// What a conversation may do is the permission engine's answer, made before
+// this call.
+func TestRunCommandRunsOnTheHostWhenTheBackendIsUnavailable(t *testing.T) {
 	t.Setenv("PATH", "")
+	restore := SetSandboxAvailableForTest(false)
+	defer restore()
 	m := NewManager()
 	cfg := &appcfg.Root{}
 	cfg.SandboxMode = appcfg.SandboxModeWorkspaceWrite
-	_, decision, err := m.RunCommand(context.Background(), cfg, CommandRequest{
+	res, decision, err := m.RunCommand(context.Background(), cfg, CommandRequest{
 		ToolKind: ToolKindShell,
-		Command:  "printf should-not-run",
+		Command:  "printf ran-uncontained",
 		WorkDir:  t.TempDir(),
 		Timeout:  10 * time.Second,
 	})
-	if decision.UnavailableReason == "" {
-		t.Skipf("backend available in this environment, cannot exercise fail-closed: %+v", decision)
+	if decision.UnavailableReason == "" || decision.UseSandbox {
+		t.Fatalf("decision = %+v, want an unusable sandbox and no containment", decision)
 	}
-	var unavailable *UnavailableError
-	if !errors.As(err, &unavailable) {
-		t.Fatalf("expected UnavailableError, got %v", err)
+	if err != nil {
+		t.Fatalf("a missing backend must not fail the command: %v", err)
+	}
+	if res.Stdout != "ran-uncontained" {
+		t.Fatalf("stdout = %q, want the command's own output", res.Stdout)
 	}
 }
 
@@ -465,60 +434,53 @@ func TestRunHostCommandTimeout(t *testing.T) {
 
 // TestSandboxStatusLineReadsTheEffectiveStatus pins the /status sandbox row to
 // the status /sandbox reports: a full-access configuration is never shown as
-// enforced by the platform backend, and a named profile outranks sandbox_mode.
+// enforced by the platform backend.
 func TestSandboxStatusLineReadsTheEffectiveStatus(t *testing.T) {
 	full := &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}
 	if got := SandboxStatusLine(full); got != "danger-full-access · not enforced" {
 		t.Fatalf("full access line = %q", got)
 	}
-	profile := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite, DefaultPermissions: appcfg.PermissionProfileDangerFullAccess}
-	if got := SandboxModeLabel(profile); got != appcfg.PermissionProfileDangerFullAccess {
-		t.Fatalf("profile label = %q, want the profile to outrank sandbox_mode", got)
-	}
-	if got := SandboxStatusLine(profile); got != appcfg.PermissionProfileDangerFullAccess+" · not enforced" {
-		t.Fatalf("profile line = %q", got)
+	if got := SandboxModeLabel(full); got != string(appcfg.SandboxModeDangerFullAccess) {
+		t.Fatalf("label = %q", got)
 	}
 }
 
-// TestExclusiveReadablePathsDoesNotInheritAllowRead pins the merge that makes a
-// batch task's read boundary hold (plans/150): the configured read set is "/" by
-// default, so an exclusive request must not inherit it — while an ordinary
-// request still does, and denials still narrow either one.
-func TestExclusiveReadablePathsDoesNotInheritAllowRead(t *testing.T) {
+// TestDenyListRequestKeepsItsBoundaryAcrossTheMerge pins the merge a batch
+// task's boundary survives (plans/216): the configured read set joins a
+// deny-list request without changing its meaning — the request already reads
+// "/" — the write set stays the task workspace alone, the boundary roots reach
+// the backend untouched, and the configured deny_read entry is still appended
+// as a narrowing of the result.
+func TestDenyListRequestKeepsItsBoundaryAcrossTheMerge(t *testing.T) {
 	cwd := t.TempDir()
 	runtimeCfg := RuntimeConfig{}
 	runtimeCfg.Filesystem.AllowRead = []string{string(filepath.Separator)}
 	runtimeCfg.Filesystem.AllowWrite = []string{cwd}
 	runtimeCfg.Filesystem.DenyRead = []string{filepath.Join(cwd, "private")}
 	workspace := filepath.Join(cwd, "tasks", "T", "1")
+	home := filepath.Join(cwd, "home")
 
 	merged, err := applyRuntimeConfigToRequest(CommandRequest{
 		AdditionalWritablePaths: []string{workspace},
 		ExclusiveWritablePaths:  true,
-		AdditionalReadablePaths: []string{workspace},
-		ExclusiveReadablePaths:  true,
+		AdditionalReadablePaths: []string{string(filepath.Separator)},
+		DeniedReadableRoots:     []string{home},
+		ReadableExceptions:      []string{workspace},
 	}, runtimeCfg, cwd)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
-	for _, readable := range merged.AdditionalReadablePaths {
-		if filepath.Clean(readable) == string(filepath.Separator) {
-			t.Fatalf("an exclusive read set inherited the ambient root: %#v", merged.AdditionalReadablePaths)
-		}
-	}
 	if len(merged.AdditionalWritablePaths) != 1 || merged.AdditionalWritablePaths[0] != workspace {
 		t.Fatalf("writable = %#v, want only the task workspace", merged.AdditionalWritablePaths)
 	}
+	if len(merged.DeniedReadableRoots) != 1 || merged.DeniedReadableRoots[0] != filepath.Clean(home) {
+		t.Fatalf("denied roots = %#v, want the boundary untouched", merged.DeniedReadableRoots)
+	}
+	if len(merged.ReadableExceptions) != 1 || merged.ReadableExceptions[0] != filepath.Clean(workspace) {
+		t.Fatalf("exceptions = %#v, want the workspace", merged.ReadableExceptions)
+	}
 	if !containsPath(merged.DeniedReadablePaths, filepath.Join(cwd, "private")) {
 		t.Fatalf("denied = %#v, want the configured deny kept", merged.DeniedReadablePaths)
-	}
-
-	ordinary, err := applyRuntimeConfigToRequest(CommandRequest{AdditionalReadablePaths: []string{workspace}}, runtimeCfg, cwd)
-	if err != nil {
-		t.Fatalf("merge: %v", err)
-	}
-	if !containsPath(ordinary.AdditionalReadablePaths, string(filepath.Separator)) {
-		t.Fatalf("an ordinary request keeps the configured read set: %#v", ordinary.AdditionalReadablePaths)
 	}
 }
 

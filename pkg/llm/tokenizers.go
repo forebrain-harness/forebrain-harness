@@ -909,8 +909,13 @@ func downloadTokenizerFiles(settings estimatorSettings, bt BuiltinTokenizer) err
 // downloadFromHub fetches bt's files from one hub into the cache. A converted
 // id (Source set) fetches only its source tokenizer.json and converts it;
 // otherwise every file of bt.Files is fetched as-is.
+//
+// The transfer keeps a long bound — a tokenizer file is tens of megabytes —
+// but this runs only from the background goroutine resolveTokenizer starts, and
+// its connection attempt is bounded short, so a build that cannot reach a hub
+// falls back to estimating without ever holding a conversation.
 func downloadFromHub(settings estimatorSettings, bt BuiltinTokenizer, base, repo, ref string) error {
-	client := &http.Client{Timeout: 10 * time.Minute}
+	client := downloadClient(10 * time.Minute)
 	cacheDir := filepath.Join(settings.cacheDir, bt.ID)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return err

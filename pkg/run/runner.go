@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -108,6 +107,11 @@ type Deps struct {
 	// never the project's current type. The runner pool keys its entries by it,
 	// so one runner never serves two types. Empty reads as coding.
 	ProjectType string
+	// BatchSandbox is the batch project's own sandbox switch (plans/216):
+	// whether its tasks run inside their task boundary. Read only for a batch
+	// project, and only where a sandbox exists — without one a batch task runs
+	// with full access whatever this says.
+	BatchSandbox bool
 	// LaunchProject is the frozen launch-project trust decision this runtime
 	// was built from. The TUI's is the directory it started in; a project
 	// runner's is the project it serves. Zero means no launch project, and
@@ -475,9 +479,7 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 		if constrained && sandboxAvailable && approvalPolicy.Mode != safety.ApprovalUnlessTrusted {
 			return "", false, nil
 		}
-		rejectsSandboxApproval := approvalPolicy.Mode == safety.ApprovalNever ||
-			(approvalPolicy.Mode == safety.ApprovalGranular && !approvalPolicy.Granular.SandboxApproval)
-		if rejectsSandboxApproval {
+		if approvalPolicy.Mode == safety.ApprovalNever {
 			if sessionCfg != nil && sessionCfg.SandboxMode == appcfg.SandboxModeReadOnly {
 				return "", false, fmt.Errorf("patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings")
 			}
@@ -513,9 +515,9 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 	// with them: bypassing here returned "approved, nothing pending", which the
 	// tool correctly refused to act on, and plan mode became impossible to
 	// leave.
-	if !exitPlanMode && decision.Behavior != safety.BehaviorDeny && r.yoloEnabled() {
+	if !exitPlanMode && decision.Behavior != safety.BehaviorDeny && r.fullAccessEnabled(tool.ConversationSessionIDFromContext(ctx)) {
 		if isRequestPermissions {
-			tool.CapturePolicyApprovalReason(ctx, "approvals and sandbox are globally bypassed")
+			tool.CapturePolicyApprovalReason(ctx, "this conversation runs with full access: nothing is asked")
 		}
 		return "", false, nil
 	}
@@ -532,10 +534,6 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 				return "", false, nil
 			}
 		}
-	}
-	if approvalPolicy.Mode == safety.ApprovalGranular &&
-		!granularApprovalPromptEnabled(approvalPolicy.Granular, kind, pay, decision) {
-		return "", false, fmt.Errorf("approval prompt disabled by granular approval policy for %q", kind)
 	}
 	// A call started while its response still streams never asks anyone and
 	// never runs a reviewer: it waits for the stream to end and asks then,
@@ -559,6 +557,11 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 			return "", false, fmt.Errorf("permission denied by PermissionRequest hook: %s", hookMessage)
 		}
 	}
+	// The strict auto-review decision (grant_for_turn_with_strict_auto_review)
+	// is no longer offered on any surface, so nothing can turn this on. The
+	// whole guardian path is kept as dead code rather than deleted: approval is
+	// handed to a person now (owner 2026-10-31), and the reviewer is a feature
+	// that may come back.
 	if strictAutoReview && !exitPlanMode {
 		if r.permRuntimeGet().Guardian() == nil {
 			return "", false, fmt.Errorf("automatic approval review is unavailable")
@@ -573,26 +576,6 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 		}
 		if review.Outcome != "allow" {
 			return "", false, fmt.Errorf("permission denied by automatic approval review (%s): %s", review.RiskLevel, review.Rationale)
-		}
-		return "", false, nil
-	}
-	if !exitPlanMode && r.autoReviewApprovalsEnabled(approvalPolicy) {
-		transcript, transcriptErr := r.guardianTranscript(ctx)
-		if transcriptErr != nil {
-			return "", false, fmt.Errorf("guardian approval review failed closed: %w", transcriptErr)
-		}
-		review, reviewErr := r.permRuntimeGet().Guardian().Review(ctx, tool.RunIDFromContext(ctx), transcript, kind, pay)
-		if reviewErr != nil {
-			return "", false, reviewErr
-		}
-		if review.Outcome != "allow" {
-			if payloadBool(pay, "request_permissions") {
-				return "", false, tool.ErrRequestPermissionsDenied
-			}
-			return "", false, fmt.Errorf("permission denied by guardian (%s): %s", review.RiskLevel, review.Rationale)
-		}
-		if isRequestPermissions {
-			tool.CapturePolicyApprovalReason(ctx, "automatically approved by the auto-review approvals reviewer")
 		}
 		return "", false, nil
 	}
@@ -741,13 +724,6 @@ func permissionRequestHookPayload(kind string, payload map[string]any) (string, 
 	case strings.EqualFold(kind, "shell"):
 		input := map[string]any{"command": payloadString(payload, "command")}
 		description := strings.TrimSpace(payloadString(payload, "justification"))
-		if context, port, ok := permissionRequestNetworkTarget(payload); ok {
-			target := string(context.Protocol) + "://" + context.Host
-			if port > 0 {
-				target += ":" + strconv.Itoa(port)
-			}
-			description = "network-access " + target
-		}
 		if description != "" {
 			input["description"] = description
 		}
@@ -757,40 +733,6 @@ func permissionRequestHookPayload(kind string, payload map[string]any) (string, 
 	default:
 		return kind, payload, nil
 	}
-}
-
-func permissionRequestNetworkTarget(payload map[string]any) (safety.NetworkApprovalContext, int, bool) {
-	var context safety.NetworkApprovalContext
-	switch value := payload["network_approval_context"].(type) {
-	case safety.NetworkApprovalContext:
-		context = value
-	case *safety.NetworkApprovalContext:
-		if value != nil {
-			context = *value
-		}
-	case map[string]any:
-		context.Host, _ = value["host"].(string)
-		if protocol, ok := value["protocol"].(string); ok {
-			context.Protocol = safety.NetworkApprovalProtocol(protocol)
-		}
-	}
-	context.Host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(context.Host), "."))
-	if context.Host == "" || !context.Protocol.Valid() {
-		return safety.NetworkApprovalContext{}, 0, false
-	}
-	port := 0
-	switch value := payload["network_port"].(type) {
-	case int:
-		port = value
-	case float64:
-		if value >= 0 && value <= 65535 && value == math.Trunc(value) {
-			port = int(value)
-		}
-	}
-	if port < 0 || port > 65535 {
-		return safety.NetworkApprovalContext{}, 0, false
-	}
-	return context, port, true
 }
 
 func (r *Runner) approvalHookModel(ctx context.Context) string {
@@ -872,13 +814,6 @@ func (r *Runner) applyPatchSessionApproval(ctx context.Context, payload map[stri
 	return true, nil
 }
 
-func (r *Runner) autoReviewApprovalsEnabled(policy safety.ApprovalPolicy) bool {
-	if r == nil || r.AppCfg == nil || !strings.EqualFold(strings.TrimSpace(r.AppCfg.ApprovalsReviewer), "auto_review") {
-		return false
-	}
-	return policy.Mode == safety.ApprovalOnRequest || policy.Mode == safety.ApprovalGranular
-}
-
 func (r *Runner) guardianTranscript(ctx context.Context) ([]llm.Message, error) {
 	if r == nil || r.SessionStore == nil {
 		return nil, nil
@@ -888,28 +823,6 @@ func (r *Runner) guardianTranscript(ctx context.Context) ([]llm.Message, error) 
 		return nil, nil
 	}
 	return r.SessionStore.ListTranscriptMessages(ctx, sessionID, 40)
-}
-
-func granularApprovalPromptEnabled(cfg safety.GranularApprovalConfig, kind string, payload map[string]any, decision safety.Decision) bool {
-	if _, ok := payload["network_approval_context"]; ok {
-		return true
-	}
-	if decision.Matched != nil && decision.Matched.Behavior == safety.BehaviorAsk {
-		return cfg.Rules
-	}
-	if payloadBool(payload, "request_permissions") {
-		return cfg.RequestPermissions
-	}
-	if payloadBool(payload, "mcp_elicitation") {
-		return cfg.MCPElicitations
-	}
-	if strings.EqualFold(strings.TrimSpace(payloadString(payload, "category")), "mcp") {
-		return true
-	}
-	if strings.EqualFold(strings.TrimSpace(payloadString(payload, "category")), "skill") {
-		return cfg.SkillApproval
-	}
-	return cfg.SandboxApproval
 }
 
 func payloadString(payload map[string]any, key string) string {
@@ -1002,17 +915,14 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		}
 	}
 	r.permRuntimeGet().SetGuardian(nil, "")
-	autoReviewer := strings.EqualFold(strings.TrimSpace(r.AppCfg.ApprovalsReviewer), "auto_review")
 	guardianLLM, guardianErr := NewLLMForAgentType(r.AppCfg, "guardian")
 	if guardianErr != nil {
-		if autoReviewer {
-			return fmt.Errorf("initialize guardian approval reviewer: %w", guardianErr)
-		}
 		slog.Warn("initialize automatic approval reviewer", "err", guardianErr)
 	} else if guardianLLM != nil {
-		r.permRuntimeGet().SetGuardian(guardianLLM, r.AppCfg.AutoReview.Policy)
-	} else if autoReviewer {
-		return fmt.Errorf("initialize guardian approval reviewer: no LLM configured")
+		// The policy text the auto-review configuration used to carry is gone
+		// with the configuration (plan 203); the guardian client itself stays
+		// wired for the kept-dead-code path.
+		r.permRuntimeGet().SetGuardian(guardianLLM, "")
 	}
 	// Build per-type LLM clients for built-in typed subagents (explore, plan,
 	// verification, general-purpose) so each can use a dedicated provider/model
@@ -1122,6 +1032,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	llmClient = wrapLSPDiagnosticsReminderLLM(llmClient, r.CodeIntel)
 	// Build compactDeps for the checkpoint path. SessionID is
 	// extracted from context at LLM call time.
+	compactBudget := CompactBudgetOptions(r.AppCfg)
 	compactSvc := assembly.Service{
 		Sessions: r.SessionStore,
 		PrimaryModel: func(ctx context.Context) (string, string) {
@@ -1135,11 +1046,11 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 			_, c, _ := NewLLMForAgentModel(r.AppCfg, r.activeAgentNameForModel(), model)
 			return c
 		},
-		Prompt:           r.AppCfg.Compact.Prompt,
-		RemoteCompaction: r.AppCfg.Compact.UseRemoteCompaction(),
-		RemoteV1:         !r.AppCfg.Compact.UseRemoteV2(),
-		ExplicitLimit:    r.AppCfg.Compact.ModelAutoCompactTokenLimit,
-		LimitScope:       r.AppCfg.Compact.ModelAutoCompactTokenLimitScope,
+		Prompt: r.AppCfg.Compact.Prompt,
+		// The threshold and the context-pressure warning divide by the same
+		// window, so both read the same two settings.
+		AutoCompactPercent:  compactBudget.AutoCompactPercent,
+		ConfigContextTokens: compactBudget.FallbackContextTokens,
 		PreCompact: func(ctx context.Context, sid, trigger string) error {
 			return r.runCompactHook(ctx, hook.EventPreCompact, sid, trigger)
 		},
@@ -1149,8 +1060,8 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		Events: event.SinkFunc(r.publishSurfaceEvent),
 	}
 	compactDeps := &CompactChainDeps{
-		ExplicitLimit: r.AppCfg.Compact.ModelAutoCompactTokenLimit,
-		LimitScope:    strings.TrimSpace(r.AppCfg.Compact.ModelAutoCompactTokenLimitScope),
+		AutoCompactPercent:  compactBudget.AutoCompactPercent,
+		ConfigContextTokens: compactBudget.FallbackContextTokens,
 		// Observed window behaviour is per-model, so the checkpoint path needs
 		// the same identity the compact service resolves.
 		ActiveModel: func(ctx context.Context) (string, string) {
@@ -1219,8 +1130,12 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	r.tools.SetImageInputGate(r.ImageInputRefusal)
 	// File tools report every write to the session store's ledger, which backs
 	// "rewind to before a message" and the workbench's changed-files list.
+	// The same store holds the read baselines, so a conversation resumed in a
+	// new process resumes the files it already read instead of owing a fresh
+	// read before every edit.
 	if r.SessionStore != nil {
 		r.tools.SetFileChangeRecorder(r.SessionStore)
+		r.tools.SetReadStateStore(r.SessionStore)
 	}
 	// The user's project directory is already the first allowed root (see
 	// DefaultAllowedRootsForWorkspace above), so it is not prepended again here.
@@ -1324,7 +1239,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		r.tools.SetActionHook(r.actionHook)
 	}
 	rt := &tool.AgentToolRuntime{
-		Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectKey: r.ProjectKey, ProjectType: r.ProjectType(), Cfg: r.AppCfg, YOLO: r.yoloEnabled(), Sess: r.SessionStore, Actions: r.Actions, RunRT: r.RunRT,
+		Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectKey: r.ProjectKey, ProjectType: r.ProjectType(), BatchSandbox: r.Deps.BatchSandbox, Cfg: r.AppCfg, YOLO: safety.RuntimeYOLOEnabled(), Sess: r.SessionStore, Actions: r.Actions, RunRT: r.RunRT,
 		PolicyRunID:                  r.policyRunIDForTool,
 		PermissionSnapshot:           r.PermissionSnapshot,
 		PermissionSnapshotForSession: r.PermissionSnapshotForSession,
@@ -3637,6 +3552,22 @@ func (r *Runner) ProjectType() string {
 		return state.ProjectTypeCoding
 	}
 	return state.NormalizeProjectType(r.Deps.ProjectType)
+}
+
+// BatchBoundaryFor is the filesystem boundary of one batch execution of this
+// runtime (plans/216): its workspace, the project it was carved out of, this
+// runtime's Forebrain home, and the skill directories the project may load.
+//
+// The skill roots are resolved here rather than passed in because this is the
+// runtime that already resolves them for the prompt catalog — the same expression,
+// the same frozen launch project — so the directories a task may read and the
+// directories its skills load from cannot drift apart.
+func (r *Runner) BatchBoundaryFor(workspace string) tool.BatchBoundary {
+	if r == nil || r.Deps == nil {
+		return tool.BatchBoundary{}
+	}
+	home := r.Home
+	return tool.NewBatchBoundary(workspace, r.launchProjectRoot(), home, skill.AgentSkillRoots(home, r.workspaceRoot(), r.LaunchProject))
 }
 
 // ProjectInstructionsFor returns the frozen project instructions for one

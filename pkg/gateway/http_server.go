@@ -699,7 +699,7 @@ func (s *Server) runtimeDangerWarning() (string, map[string]any, bool) {
 	if s == nil || s.Runner == nil || !safety.RuntimeYOLOEnabled() {
 		return "", nil, false
 	}
-	return "YOLO / danger-full-access is enabled; approvals are bypassed and executable tools run on the host.", map[string]any{
+	return "Full access is enabled; approvals are bypassed and executable tools run on the host.", map[string]any{
 		"yolo":                      true,
 		"sandbox_mode":              "danger-full-access",
 		"approval_bypassed_by_yolo": true,

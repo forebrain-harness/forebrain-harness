@@ -589,6 +589,11 @@ type subagentChannel struct {
 	mu      sync.Mutex
 	running *subagentExecution
 	surface SubagentSurface
+	// title is the task title the record the channel was built from carried,
+	// so a listing of live subagents (LiveSubagents) can show it without
+	// re-reading the ledger. Written under subagentChannelsMu, the lock the
+	// channel table itself sits under, and read under the same lock.
+	title string
 	// firstTokenExecID/firstTokenStarted/firstTokenWait (mu-guarded) are the
 	// first-token window of the execution that currently holds the channel's
 	// exec slot: the window opens when the execution starts, the execution's
@@ -610,6 +615,9 @@ type subagentChannel struct {
 // stopped.
 type subagentExecution struct {
 	executionID string
+	// started is when this execution took the channel's exec slot — the
+	// moment a live-subagent listing reports the subagent as busy since.
+	started time.Time
 	// cancel stops the attempt running now; it is replaced at every attempt.
 	cancel context.CancelCauseFunc
 	// boundary is how the current attempt is being stopped, when it is; the
@@ -665,6 +673,9 @@ func subagentChannelFor(fac Factory, record agent.HistoryEntry) *subagentChannel
 	// would have reached.
 	if conv, task := strings.TrimSpace(record.SessionID), strings.TrimSpace(record.TaskID); conv != "" && task != "" {
 		subagentChannelsByTask[subagentTaskKey{conversationSessionID: conv, taskID: task}] = ch
+	}
+	if title := strings.TrimSpace(record.Title); title != "" {
+		ch.title = title
 	}
 	return ch
 }
@@ -827,6 +838,7 @@ func steerEntries(steers []Input) []TurnInputEntry {
 		out = append(out, TurnInputEntry{
 			Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq,
 			SkillName: strings.TrimSpace(in.SkillName), SkillPath: strings.TrimSpace(in.SkillPath),
+			Origin: strings.TrimSpace(in.Origin),
 		})
 	}
 	return out
@@ -929,7 +941,7 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 	if executionID == "" {
 		executionID = uuid.NewString()
 	}
-	ex := &subagentExecution{executionID: executionID}
+	ex := &subagentExecution{executionID: executionID, started: time.Now()}
 	// The first-token window opens where the execution does — the same moment
 	// the spawned notification announced it — so the wait a subagent view
 	// shows is measured from the start its "Worked for" clock counts.
@@ -1291,6 +1303,9 @@ func runForkSubagent(ctx context.Context, fac Factory, prep preparedSubagent) (s
 					if ws := tool.TaskWorkspaceFromContext(ctx); ws != "" {
 						agentCtx = tool.WithTaskWorkspace(agentCtx, ws)
 						agentCtx = tool.WithTaskContext(agentCtx, tool.TaskContextFromContext(ctx))
+						if boundary, ok := tool.BatchBoundaryFromContext(ctx); ok {
+							agentCtx = tool.WithBatchBoundary(agentCtx, boundary)
+						}
 					}
 					agentCtx = tool.WithWorkspaceRoot(agentCtx, fac.ActiveWorkspaceRoot())
 					rosterKey := subagentRosterKey(prep.entry)
@@ -1541,6 +1556,9 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	if ws := tool.TaskWorkspaceFromContext(baseCtx); ws != "" {
 		cctx = tool.WithTaskWorkspace(cctx, ws)
 		cctx = tool.WithTaskContext(cctx, tool.TaskContextFromContext(baseCtx))
+		if boundary, ok := tool.BatchBoundaryFromContext(baseCtx); ok {
+			cctx = tool.WithBatchBoundary(cctx, boundary)
+		}
 	}
 	if wsRoot := strings.TrimSpace(fac.ActiveWorkspaceRoot()); wsRoot != "" {
 		cctx = tool.WithWorkspaceRoot(cctx, wsRoot)
@@ -1864,9 +1882,6 @@ func asyncSubagentContext(ctx context.Context) context.Context {
 	if hook := tool.StepHookFromContext(ctx, nil); hook != nil {
 		base = tool.WithStepHook(base, hook)
 	}
-	if hook := tool.NetworkApprovalPromptHookFromContext(ctx, nil); hook != nil {
-		base = tool.WithNetworkApprovalPromptHook(base, hook)
-	}
 	if hook := tool.SubagentApprovalHookFromContext(ctx, nil); hook != nil {
 		base = tool.WithSubagentApprovalHook(base, hook)
 	}
@@ -2095,6 +2110,9 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	if ws := tool.TaskWorkspaceFromContext(ctx); ws != "" {
 		hostCtx = tool.WithTaskWorkspace(hostCtx, ws)
 		hostCtx = tool.WithTaskContext(hostCtx, tool.TaskContextFromContext(ctx))
+		if boundary, ok := tool.BatchBoundaryFromContext(ctx); ok {
+			hostCtx = tool.WithBatchBoundary(hostCtx, boundary)
+		}
 	}
 	if wsRoot := strings.TrimSpace(fac.ActiveWorkspaceRoot()); wsRoot != "" {
 		hostCtx = tool.WithWorkspaceRoot(hostCtx, wsRoot)
@@ -2223,6 +2241,19 @@ func SendToSubagent(ctx context.Context, r *Runner, surface SubagentSurface, con
 		return "", err
 	}
 	ch.setSurface(surface)
+	return steerRunningSubagent(ch, in)
+}
+
+// steerRunningSubagent delivers a message to a subagent that is running now:
+// the execution takes it at its next tool boundary, or the queue keeps it for
+// the attempt that will. An idle subagent takes no message — the agent that
+// dispatched it decides what it does next — so the two callers that may speak
+// to a subagent, the user's surface and the dispatching agent itself, answer
+// that refusal the same way.
+func steerRunningSubagent(ch *subagentChannel, in Input) (SubagentDelivery, error) {
+	if ch == nil {
+		return "", ErrSubagentNotRunning
+	}
 	ch.mu.Lock()
 	running := ch.running
 	ch.mu.Unlock()
@@ -2238,6 +2269,22 @@ func SendToSubagent(ctx context.Context, r *Runner, surface SubagentSurface, con
 	// keeps the message, and the execution's end hands it back if no attempt
 	// took it.
 	return SubagentDeliveryQueued, nil
+}
+
+// SteerLiveSubagent delivers a message from another session to one of a
+// conversation's subagents, through the channel this process already holds for
+// it: the execution running now takes it at its next tool boundary. It is
+// steerRunningSubagent with the lookup in front — no surface is involved and
+// none is replaced, because the sender is another session rather than the
+// person in front of that subagent's view. An execution that has ended refuses
+// it with ErrSubagentNotRunning, and a key the ledger does not know answers
+// ErrSubagentNotFound.
+func SteerLiveSubagent(r *Runner, conversationSessionID, agentKey string, in Input) (SubagentDelivery, error) {
+	ch, _, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
+	if err != nil {
+		return "", err
+	}
+	return steerRunningSubagent(ch, in)
 }
 
 // StartSubagentAutoContinue starts an execution of one subagent for its
@@ -2321,6 +2368,51 @@ func SubagentRunning(r *Runner, conversationSessionID, agentKey string) bool {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
 	return ch.running != nil
+}
+
+// LiveSubagent is one subagent of a conversation with an execution in flight,
+// as a listing shows it (plan 195 §3.3): the roster key a surface names it by,
+// the title its task carries, and when this execution started.
+type LiveSubagent struct {
+	Key       string
+	Title     string
+	StartedAt time.Time
+}
+
+// LiveSubagents lists the subagents of one conversation whose execution is in
+// flight in this process, ordered by key for a stable listing. A subagent
+// running in another process is not this process's to list, and one whose
+// execution ended is not live — the channel table only holds what this
+// process runs.
+func LiveSubagents(r *Runner, conversationSessionID string) []LiveSubagent {
+	conv := strings.TrimSpace(conversationSessionID)
+	if r == nil || conv == "" {
+		return nil
+	}
+	subagentChannelsMu.Lock()
+	defer subagentChannelsMu.Unlock()
+	var out []LiveSubagent
+	for key, ch := range subagentChannelsByTask {
+		if key.conversationSessionID != conv {
+			continue
+		}
+		ch.mu.Lock()
+		ex := ch.running
+		ch.mu.Unlock()
+		if ex == nil {
+			continue
+		}
+		out = append(out, LiveSubagent{Key: ch.agentKey, Title: ch.title, StartedAt: ex.started})
+	}
+	// Insertion sort keeps the listing stable without a new import — the
+	// channel table is a map, and an unordered listing would re-order the
+	// record that lists it on every read.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1].Key > out[j].Key; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
 }
 
 // cancelRunning stops the running execution, restoring everything it never
@@ -2461,26 +2553,24 @@ func SubagentContextBudget(ctx context.Context, r *Runner, conversationSessionID
 // SubagentContextGauge is what /context reports about a subagent's context
 // when it is run from that subagent's view: the worker session the report
 // reads, the model the gauge is sized by, the measured occupancy, and the
-// configured explicit limit — the inputs the shared report builder and the
+// budget the gauge divides by — the inputs the shared report builder and the
 // primary session's HandleContextSlash are fed with.
-func SubagentContextGauge(ctx context.Context, r *Runner, conversationSessionID, agentKey string) (workerSessionID, provider, model string, used, explicitLimit int, err error) {
+func SubagentContextGauge(ctx context.Context, r *Runner, conversationSessionID, agentKey string) (workerSessionID, provider, model string, used int, budget state.TokenBudgetOptions, err error) {
 	record, ok, err := mergedSubagentRecord(r, conversationSessionID, agentKey)
 	if err != nil {
-		return "", "", "", 0, 0, err
+		return "", "", "", 0, state.TokenBudgetOptions{}, err
 	}
 	if !ok {
-		return "", "", "", 0, 0, fmt.Errorf("subagent %s not found", agentKey)
+		return "", "", "", 0, state.TokenBudgetOptions{}, fmt.Errorf("subagent %s not found", agentKey)
 	}
 	provider, model, _ = AgentModel(r, conversationSessionID, &record)
 	var store *state.SessionStore
 	if r != nil && r.Deps != nil {
 		store = r.Deps.SessionStore
-		if r.AppCfg != nil {
-			explicitLimit = r.AppCfg.Compact.ModelAutoCompactTokenLimit
-		}
+		budget = CompactBudgetOptions(r.AppCfg)
 	}
 	used, _ = ContextOccupancy(ctx, store, record.WorkerSessionID)
-	return record.WorkerSessionID, provider, model, used, explicitLimit, nil
+	return record.WorkerSessionID, provider, model, used, budget, nil
 }
 
 // publishSubagentContextBudget pushes the gauge of a subagent's own context
@@ -2964,7 +3054,10 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 			InputSchema:     subagentSchemaRaw(cat, reflect.TypeOf(FanoutInput{}), []string{"properties", "tasks", "items", "properties", "subagent_type"}),
 		})
 	}
-	return registerSubagentLifecycleTools(a, fac, cat)
+	if err := registerSubagentLifecycleTools(a, fac, cat); err != nil {
+		return err
+	}
+	return registerPeerTools(a, fac)
 }
 
 func maxParallelSubagentsFromFactory(fac Factory) int {
@@ -3018,7 +3111,7 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 		return err
 	}
 	if err := addSubagentLifecycleTool(a, fac, cat, "subagent_list",
-		"List recent subagents scoped to the current session and parent run when available.",
+		"List recent subagents scoped to the current session and parent run when available, each with a short progress summary.",
 		func(ctx context.Context, in *SubagentListInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_list"); err != nil {
 				return "", err
@@ -3035,14 +3128,19 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if err != nil {
 				return "", err
 			}
-			b, _ := json.Marshal(map[string]any{"records": list})
+			rows := make([]subagentListRow, 0, len(list))
+			for _, record := range list {
+				progress := subagentProgressShortOf(buildSubagentProgress(ctx, fac, record))
+				rows = append(rows, subagentListRow{HistoryEntry: record, Progress: &progress})
+			}
+			b, _ := json.Marshal(map[string]any{"records": rows})
 			return string(b), nil
 		},
 	); err != nil {
 		return err
 	}
 	if err := addSubagentLifecycleTool(a, fac, cat, "subagent_status",
-		"Use when polling a sent subagent without blocking: gets its latest status by task_id or run_id. If both are empty, returns the latest scoped subagent.",
+		"Use when checking on a subagent without interrupting it: returns its status and live progress (current step, recent steps, todos, latest message, token usage) by task_id or run_id. If both are empty, returns the latest scoped subagent.",
 		func(ctx context.Context, in *SubagentLookupInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_status"); err != nil {
 				return "", err
@@ -3054,14 +3152,17 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if !ok {
 				return "", fmt.Errorf("subagent not found")
 			}
-			b, _ := json.Marshal(record)
+			b, _ := json.Marshal(map[string]any{
+				"record":   record,
+				"progress": buildSubagentProgress(ctx, fac, record),
+			})
 			return string(b), nil
 		},
 	); err != nil {
 		return err
 	}
 	if err := addSubagentLifecycleTool(a, fac, cat, "subagent_wait",
-		"Use when blocking until a previously-sent subagent finishes: waits by task_id or run_id. Returns the latest status even when the wait times out.",
+		"Use when blocking until a previously-sent subagent finishes: waits by task_id or run_id. Returns the latest status and progress even when the wait times out, and returns early when one of your subagents sends you a message.",
 		func(ctx context.Context, in *SubagentLookupInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_wait"); err != nil {
 				return "", err
@@ -3074,12 +3175,16 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if handle, ok := agent.RegistryFor(fac.subagentScopeRoot()).Get(query); ok && handle != nil {
 				waitCtx, cancel := context.WithTimeout(ctx, timeout)
 				defer cancel()
-				record, waitErr := handle.Wait(waitCtx)
+				wait := awaitSubagent(handle, waitCtx, tool.ConversationSessionIDFromContext(ctx))
 				resp := map[string]any{
-					"record": record,
+					"record":   wait.record,
+					"progress": buildSubagentProgress(ctx, fac, wait.record),
 				}
-				if waitErr != nil {
+				if wait.timedOut {
 					resp["timed_out"] = true
+				}
+				if wait.messaged {
+					resp["message_from_subagent"] = true
 				}
 				b, _ := json.Marshal(resp)
 				return string(b), nil
@@ -3091,7 +3196,10 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if !ok {
 				return "", fmt.Errorf("subagent not found")
 			}
-			b, _ := json.Marshal(map[string]any{"record": record})
+			b, _ := json.Marshal(map[string]any{
+				"record":   record,
+				"progress": buildSubagentProgress(ctx, fac, record),
+			})
 			return string(b), nil
 		},
 	); err != nil {

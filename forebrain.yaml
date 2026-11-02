@@ -2,42 +2,17 @@
 # This file is intentionally verbose and documents the current settings in internal/config.
 # Secret-like fields must use ${ENV_NAME} placeholders or stay empty, otherwise config.Load will reject the file.
 
-# Default: derived per project — untrusted for untrusted projects, on-request otherwise.
-# Example: explicit policy. Values: untrusted, on-request, never, granular, or the
-# legacy alias on-failure (normalized to on-request). granular is an object with
-# required sandbox_approval, rules, and mcp_elicitations fields.
-approval_policy: "on-request"
-# Default: "user". Values: user or auto_review (auto_review requires the guardian
-# reviewer to be resolvable; see auto_review below).
-approvals_reviewer: "user"
-# Default: empty.
-# Example: extra policy text appended to the guardian reviewer's prompt when
-# approvals_reviewer is auto_review and a guardian LLM is configured. Free text,
-# no fixed value set.
-auto_review:
-  policy: ""
-gateway:
-  # Default: 127.0.0.1:6060.
-  # Example: local HTTP listen address for the Forebrain Harness gateway.
-  http_addr: "127.0.0.1:6060"
-  # Default: none.
-  # Example: gateway auth settings.
-  auth:
-    # Default: token.
-    # Example: token auth for the control plane.
-    mode: "token"
-    # Default: empty.
-    # Example: token read from env.
-    token: "${FOREBRAIN_GATEWAY_TOKEN}"
-  # Default: empty (task-end notifications carry no link).
-  # Example: the address the web UI is reached at from outside, used to build
-  # the "view it" link in a batch task's notification. It does not change what
-  # the gateway listens on.
-  # public_url: https://forebrain.example.com
-# Default when omitted: workspace-write for a trusted Git project; read-only
-# for untrusted, unknown, or non-Git directories.
-# Example: explicit sandbox mode override for model-generated commands.
-sandbox_mode: "workspace-write"
+# Default: workspace_write. Values: workspace_write (默认) or full_access
+# (完全访问). This is the only approval setting there is: the approval policy and
+# the sandbox mode are derived from it, so how much the sandbox permits and
+# when forebrain stops to ask can never be chosen apart. An untrusted or
+# unjudged project narrows the sandbox further, which is a trust decision
+# rather than a preset. A batch project does not use this value at all.
+# full_access is the same posture as --yolo / FOREBRAIN_YOLO: only an explicit
+# deny rule refuses, and the project's trust decision does not narrow it.
+# Stored in the state database (fb_config), not in this file; plan 207 writes
+# the default row.
+# approval_preset: "workspace_write"
 
 # Defaults: empty writable_roots, network_access enabled (nil means true; unset
 # does not cut the network), and both temporary roots included.
@@ -51,72 +26,13 @@ sandbox_workspace_write:
   # disabled leaves Go's environment unchanged.
   go_cache_mode: "isolated"
 
-# Named permission profiles are optional. When used, default_permissions selects
-# one profile and sandbox_mode is not used. Built-ins are :read-only, :workspace,
-# and :danger-full-access. User profile names cannot start with a colon.
-#
-# default_permissions: "development"
-# permissions:
-#   development:
-#     description: "Workspace plus a shared cache"
-#     extends: ":workspace"
-#     workspace_roots:
-#       "../shared": true
-#     filesystem:
-#       # Default: unset. Set a positive depth to bound deny-glob expansion.
-#       glob_scan_max_depth: 4
-#       ":workspace_roots":
-#         ".": write
-#         "**/.env": deny
-#       "~/.cache/build/**": write
-#     network:
-#       # Default: false.
-#       enabled: false
-#       # Managed-proxy defaults: http://127.0.0.1:3128, SOCKS5 enabled at
-#       # http://127.0.0.1:8081, SOCKS5 UDP enabled, upstream proxy allowed,
-#       # full mode, local binding disabled, and dangerous allowances disabled.
-#       proxy_url: "http://127.0.0.1:3128"
-#       enable_socks5: true
-#       socks_url: "http://127.0.0.1:8081"
-#       enable_socks5_udp: true
-#       allow_upstream_proxy: true
-#       dangerously_allow_non_loopback_proxy: false
-#       dangerously_allow_all_unix_sockets: false
-#       mode: "full"
-#       domains:
-#         "example.com": allow
-#         "blocked.example": deny
-#       unix_sockets:
-#         "/var/run/example.sock": allow
-#       allow_local_binding: false
-#       # Default: none. MITM interception hooks for the managed proxy;
-#       # only permission-profile networks have this, the features.network_proxy
-#       # object form does not.
-#       mitm:
-#         # Default: none. Strip these request headers before forwarding.
-#         strip_request_headers:
-#           - "Authorization"
-#         # Default: none. Inject headers, optionally per host/method/path match.
-#         inject_headers:
-#           - name: "X-Static-Token"
-#             value: "${MITM_TOKEN}"
-#             host: "api.example.com"
-#         # Default: none. Trigger outbound HTTP hooks on matching requests.
-#         hooks:
-#           - url: "http://127.0.0.1:9999/mitm"
-#             host: "api.example.com"
-#             method: "POST"
-#             path: "/v1/upload"
-
-# Permission-expansion and managed-network features default to false; memories,
-# skill offering, and language servers default to true.
+# Managed-network features default to false; memories, skill offering, and
+# language servers default to true. Command rewriting, command-execution
+# approvals and the request_permissions tool are always on and have no switch.
 features:
-  exec_permission_approvals: false
-  request_permissions_tool: false
-  # A boolean enables the managed proxy with profile/default settings. The
-  # object form accepts enabled plus the proxy_url, SOCKS5, mode, domains,
-  # unix_sockets, local-binding, upstream-proxy, and dangerous-listener fields
-  # shown under a permission profile above (it has no mitm sub-object).
+  # A boolean enables the managed proxy with default settings. The object form
+  # accepts enabled plus the proxy_url, SOCKS5, mode, domains, unix_sockets,
+  # local-binding, upstream-proxy, and dangerous-listener fields below.
   # network_proxy:
   #   enabled: true
   #   proxy_url: "http://127.0.0.1:3128"
@@ -151,26 +67,13 @@ windows:
 
 # Default: automatic and manual replacement-history compaction.
 compact:
-  # Default: 0, meaning the model's automatic-compaction limit (at most 90% of
-  # its context window). A positive value triggers compaction earlier and is
-  # clamped to that 90% ceiling; negative values are rejected at load.
-  model_auto_compact_token_limit: 0
-  # Default: total. Also accepts body_after_prefix.
-  model_auto_compact_token_limit_scope: "total"
+  # Default: 90. Share of the model's effective input window at which automatic
+  # compaction starts. Range 50–90; a higher value is stored as 90. The same
+  # window is what the context-pressure warning measures against.
+  auto_compact_percent: 90
   # Default: empty, which uses the built-in local-compaction handoff prompt.
   # Example: override the prompt a compaction checkpoint hands to the model.
   prompt: ""
-  # Default: false. Local summarization builds a checkpoint out of plain messages,
-  # so a session can keep switching provider and model across rounds.
-  # Provider-native compaction instead stores an opaque item only the issuing
-  # provider can replay: after switching provider that checkpoint is unusable and
-  # the session falls back to re-reading its whole history every round.
-  # Enable this only when the session stays on a single provider.
-  remote_compaction: false
-  # Default: true. Only consulted when remote_compaction is enabled.
-  # OpenAI Responses uses the normal /responses endpoint with a compaction trigger.
-  # Set false only when the provider requires the legacy /responses/compact protocol.
-  remote_compaction_v2: true
 
 # Default: none.
 # Example: agent defaults and named definitions.
@@ -205,12 +108,11 @@ agents:
       # Default: none.
       # Example: explicit model context window in tokens.
       model_context_tokens: 128000
-      # Default: 25000 when persisted; 0 or unset at runtime means no warning.
-      # Example: warn once remaining tokens drop below this threshold.
-      warn_remaining_tokens: 8000
-      # Default: 13000 when persisted; 0 or unset at runtime never blocks.
-      # Example: remaining tokens below this enter the "block" pressure tier.
-      block_remaining_tokens: 13000
+      # Default: 12. Share of the effective input window (input limit, else the
+      # context window, else model_context_tokens above) that may be left before
+      # the context warning fires. Range 1–50; it is the only pressure threshold,
+      # and pressure has two levels: ok and warn.
+      warn_remaining_percent: 12
     # Default: none.
     # Example: declarative MCP server registry used by agents.
     mcp_servers:
@@ -368,7 +270,8 @@ agents:
         # Example: unused placeholder hash.
         expected_command_sha256: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
     # Default: none.
-    # Example: input/output/retrieval guardrails.
+    # Example: input guardrails. The input rail is always on and cannot be
+    # disabled; answers are never scanned or withheld.
     guardrails:
       # Default: none.
       # Example: input filtering guardrails.
@@ -381,18 +284,6 @@ agents:
         block_substrings:
           - "DROP TABLE"
           - "rm -rf /"
-      # The input and retrieval rails are always on and cannot be disabled;
-      # the output rail is on unless explicitly disabled here.
-      # Default: unset (nil), which keeps the output rail enabled.
-      output:
-        # Example: the only rail that can be turned off.
-        enabled: true
-      # Default: none.
-      # Example: retrieval guardrails.
-      retrieval:
-        # Default: 120000.
-        # Example: max retrieval chunk size in runes.
-        max_chunk_runes: 120000
     # Default: none.
     # Example: local token estimation settings. Each model is counted with its
     # own tokenizer; built-in ids and the model names they cover are listed in
@@ -1396,15 +1287,6 @@ memories:
   # Empty uses the active provider's default model.
   extract_model: ""
   consolidation_model: ""
-
-# Default: none.
-# Example: tool-level settings. command_rewrite inserts display-only flags
-# (no pager, no color) into shell commands before they are shown for approval,
-# so what the person approves is exactly what runs.
-tools:
-  command_rewrite:
-    # Default: true (unset means enabled).
-    enabled: true
 
 # Default: none.
 # Example: credential files kept outside forebrain.yaml. They hold OAuth

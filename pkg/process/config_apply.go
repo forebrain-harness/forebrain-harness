@@ -30,9 +30,6 @@ func (env *Environment) applyComposedConfigLocked(loaded appcfg.Root) error {
 	// trust), so the base runner's derived values must not be what they receive.
 	env.RawConfig = loaded
 	next := effectiveFor(loaded, env.LaunchProject)
-	if err := safety.NewManager().StartupCheck(next); err != nil {
-		return err
-	}
 	if env.Sandbox == nil {
 		env.Sandbox = safety.NewManager()
 	}
@@ -77,7 +74,11 @@ func (env *Environment) applyComposedConfigLocked(loaded appcfg.Root) error {
 		// Only the mode follows the configuration. The session's source and
 		// project identity were decided once in Open and applying a
 		// configuration has no standing to move them.
-		env.Deps.SessionStore.SetMemoryMode(memory.SessionModeForConfig(next))
+		env.Deps.SessionStore.SetMemoryMode(memory.SessionModeFor(next))
+		// The approval preset follows the same rule (plan 203 §2b): a new
+		// setting is what the sessions created from now on are born with, and
+		// the ones already running keep the row they were given.
+		env.Deps.SessionStore.SetApprovalPresetDefault(string(next.ApprovalPreset.Effective()))
 	}
 	env.refreshSandboxRuntimeLocked()
 	if env.rulesHook != nil {

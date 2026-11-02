@@ -121,7 +121,9 @@ func (h *Hook) Assemble(ctx context.Context, hc hook.HookContext, text string) (
 		}
 		res.ModelContextTokens = limits.Context
 		res.MaxOutputTokens = limits.EffectiveOutputReserve()
-		effInput := limits.EffectiveInputLimit()
+		// The same denominator the auto-compaction threshold divides by, so the
+		// warning and the checkpoint agree on how full the window is.
+		effInput := state.EffectiveInputWindow(limits, h.Cfg.Agents.Defaults.ContextInject.ModelContextTokens)
 		res.EffectiveInputTokens = effInput
 		// Conversation size: the whole prompt the model last reported (cache
 		// reads and writes included) plus its output, then a local estimate of
@@ -146,17 +148,13 @@ func (h *Hook) Assemble(ctx context.Context, hc hook.HookContext, text string) (
 			remaining := effInput - projected
 			res.ProjectedContextTokens = projected
 			res.RemainingContextTokens = remaining
-			blockAt := h.Cfg.Agents.Defaults.ContextInject.BlockRemainingTokens
-			warnAt := h.Cfg.Agents.Defaults.ContextInject.WarnRemainingTokens
-			if warnAt < blockAt {
-				warnAt = blockAt
-			}
-			switch {
-			case remaining <= blockAt:
-				res.ContextPressure = "block"
-			case remaining <= warnAt:
+			// Two levels only: the warning says room is running out, and the
+			// compaction threshold — the same window at a larger share — is what
+			// acts on it.
+			warnAt := effInput * h.Cfg.Agents.Defaults.ContextInject.EffectiveWarnRemainingPercent() / 100
+			if remaining < warnAt {
 				res.ContextPressure = "warn"
-			default:
+			} else {
 				res.ContextPressure = "ok"
 			}
 		}

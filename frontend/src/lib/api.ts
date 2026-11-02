@@ -311,10 +311,10 @@ export interface TaskBoard {
   records: TaskBoardCard[]
 }
 
+// One switch covers reading stored memories, generating new ones, and the
+// memories_* tools (plan 205 §3.1).
 export interface MemorySettings {
   enabled: boolean
-  useMemories: boolean
-  generateMemories: boolean
 }
 
 export interface SessionContextBudget {
@@ -365,7 +365,6 @@ export interface SessionContextTimelineEntry {
   strategy?: string
   reason?: string
   summarySource?: string
-  scope?: string
   boundaryId?: string
   replacedItems?: number
   windowNumber?: number
@@ -404,7 +403,6 @@ export interface SessionContextDebug {
   availableWindowTokens?: number
   reserveTokens?: number
   warningThresholdTokens?: number
-  blockingThresholdTokens?: number
   remainingContextTokens?: number
   conversationTokens?: number
   projectedContextTokens?: number
@@ -628,6 +626,11 @@ export interface McpServerRow {
   defaultToolsApprovalMode: string
   oauth: McpServerOAuthRecord
   scope: McpLayer
+  /** What a surface may know about each stored credential (plan 191 §3.3):
+   * keyed by its field path (`oauth.client_secret`,
+   * `headers.Authorization`), carrying only whether one is set and its last
+   * four characters. */
+  secrets?: Record<string, SettingsSecretFact>
   /** The config file the entry came from. */
   source?: string
   urlSet?: boolean
@@ -967,6 +970,11 @@ export interface ProjectRecord {
   pinned: boolean
   /** The project's current kind — what a conversation born now would get. */
   projectType?: ProjectType
+  /** Whether this batch project's tasks run inside their task boundary
+   *  (plans/216). Copied from the install's batch.sandbox_default when the
+   *  project is created, and the project's own from then on. Meaningless for
+   *  another kind, and meaningless where no sandbox exists. */
+  batchSandbox?: boolean
   /** Where a batch project's finished runs are announced. */
   taskNotify?: TaskNotifyTarget[]
   /** The directory the "save to" dialog last uploaded into, relative to the
@@ -1284,8 +1292,6 @@ export interface HookRowRecord {
 /** What the gateway knows about itself for the settings page's runtime tab. */
 export interface RuntimeInfo {
   status: string
-  /** The control plane's auth mode; absent when no configuration is bound. */
-  auth?: string
   /** How many primary agents are configured. */
   agents: number
   home: string
@@ -1293,9 +1299,32 @@ export interface RuntimeInfo {
   stateDir: string
 }
 
+/** What the settings page may know about one credential: whether one is stored
+ * and its last four characters — never the value (plan 191 §0.20). */
+export interface SettingsSecretFact {
+  set: boolean
+  last4: string
+}
+
+/** GET /api/settings: every drawn setting's value, the credentials' facts, and
+ * the two environment facts the page lays itself out from. */
+export interface SettingsSnapshot {
+  values: Record<string, unknown>
+  secrets: Record<string, SettingsSecretFact>
+  meta: {
+    /** False on a machine with no usable sandbox: one posture, nothing to pick. */
+    approvalPresetsVisible: boolean
+    /** Whether Claude Code is installed: the interop switch is shown only then. */
+    claudeCodeAvailable: boolean
+    /** The handoff prompt's 恢复默认 button restores this text. */
+    builtinHandoffPrompt: string
+  }
+}
+
 /** One model-service row as the web surface edits it. The key never travels
- * back: apiKeySet says whether one is stored and apiKeyHint is its masked
- * tail; a save carries a key only when the user typed one. */
+ * back: apiKeySet says whether one is stored and apiKeyLast4 is its last four
+ * characters (plan 191 §0.20); a save carries a key only when the user typed
+ * one. */
 export interface ProviderRecord {
   provider: string
   models: string[]
@@ -1304,7 +1333,7 @@ export interface ProviderRecord {
   /** The provider request params as JSON text, keys verbatim. */
   params?: string
   apiKeySet?: boolean
-  apiKeyHint?: string
+  apiKeyLast4?: string
   /**
    * The row's position in the whole stored list — a stable row id across
    * pages, not a priority.
@@ -1312,9 +1341,11 @@ export interface ProviderRecord {
   index?: number
 }
 
-/** The PUT shape: apiKeyPlain is a freshly typed key (stored as an ${ENV}
- * reference server-side); apiKey carries an explicit reference for advanced
- * use; both empty means "keep the stored key". */
+/** The PUT shape: apiKey is the row's key as the wire's one key field states
+ * it — a pointer, so absent is "keep the stored key", a value is stored as
+ * sent (plaintext or a ${ENV} reference), and empty is the clear. The page's
+ * draft keeps a freshly typed key under apiKeyPlain until toBody puts it in
+ * apiKey; it never travels under its own name. */
 export interface ProviderSaveRecord extends ProviderRecord {
   model?: string
   apiKey?: string
@@ -1377,7 +1408,6 @@ export interface ActionApprovalBody {
    *  a choice no option list carries (plan 129's refuse-with-words). */
   decision?: import('./approvalSuggestions').ApprovalDecisionName | 'deny'
   execpolicyAmendment?: string[]
-  networkPolicyAmendment?: import('./approvalSuggestions').NetworkPolicyAmendment
   requestPermissionsResponse?: RequestPermissionsResponse
   /**
    * Approve an office plan as "keep the plan only" (plan 148/153): the plan
@@ -2269,6 +2299,18 @@ function mcpRowFromWire(wire: Record<string, unknown>): McpServerRow {
     },
     scope: text('scope') as McpLayer,
   }
+  // The credential facts a surface may know: set + last four, keyed by field
+  // path, never the value itself.
+  if (wire.secrets && typeof wire.secrets === 'object') {
+    row.secrets = Object.fromEntries(
+      Object.entries(wire.secrets as Record<string, unknown>)
+        .filter(([, entry]) => entry && typeof entry === 'object')
+        .map(([path, entry]) => {
+          const fact = entry as { set?: unknown; last4?: unknown }
+          return [path, { set: fact.set === true, last4: String(fact.last4 ?? '') }]
+        }),
+    )
+  }
   // The runtime half exists only on a view that could ask a runner; a field
   // the answer never carried stays absent rather than false.
   if ('source' in wire) row.source = text('source')
@@ -2338,6 +2380,16 @@ export const forebrainApi = {
 
   createPrimaryAgent(body: { id: string; name?: string; description?: string; workspaceRoot?: string }) {
     return postJson<PrimaryAgentsResponse, { id: string; name?: string; description?: string; workspaceRoot?: string }>('/agents/primary', body)
+  },
+
+  /**
+   * Changes a primary agent's presentation (plan 191 §4.4): the id is the
+   * tenant key and never moves; only the display name and the description are
+   * editable, from the dropdown's pencil dialog. The answer is the listing,
+   * the way every primary-agent write answers.
+   */
+  primaryAgentUpdate(id: string, body: { name?: string; description?: string }) {
+    return putRaw<PrimaryAgentsResponse>(`/agents/primary/${encodeURIComponent(id)}`, body)
   },
 
   deletePrimaryAgent(id: string) {
@@ -3203,12 +3255,7 @@ export const forebrainApi = {
     return api.get<{ settings: MemorySettings }>('/memories/settings').then((res) => res.data.settings)
   },
 
-  updateMemorySettings(body: {
-    featureEnabled?: boolean
-    useMemories?: boolean
-    generateMemories?: boolean
-    threadId?: string
-  }) {
+  updateMemorySettings(body: { featureEnabled?: boolean; threadId?: string }) {
     return postJson<{ settings: MemorySettings }, typeof body>('/memories/settings', body).then((res) => res.settings)
   },
 
@@ -3310,7 +3357,6 @@ export const forebrainApi = {
         ...(body?.clearContext ? { clearContext: true } : {}),
         ...(body?.decision ? { decision: body.decision } : {}),
         ...(body?.execpolicyAmendment ? { execpolicyAmendment: body.execpolicyAmendment } : {}),
-        ...(body?.networkPolicyAmendment ? { networkPolicyAmendment: body.networkPolicyAmendment } : {}),
         ...(body?.requestPermissionsResponse ? { requestPermissionsResponse: body.requestPermissionsResponse } : {}),
         ...(body?.planOnly ? { planOnly: true } : {}),
       })),
@@ -3630,7 +3676,7 @@ export const forebrainApi = {
     return api.get<ProjectRecord>(`/v1/projects/${encodeURIComponent(id)}`).then((res) => res.data)
   },
 
-  projectUpdate(id: string, body: Partial<{ name: string; icon: string; description: string; instructions: string; memoryScope: string; resourceAccess: boolean; trust: boolean; projectType: ProjectType; taskNotify: TaskNotifyTarget[] }>) {
+  projectUpdate(id: string, body: Partial<{ name: string; icon: string; description: string; instructions: string; memoryScope: string; resourceAccess: boolean; trust: boolean; projectType: ProjectType; taskNotify: TaskNotifyTarget[]; batchSandbox: boolean }>) {
     return api
       // axios reads the second type argument as the whole response, not the
       // request body, so naming the body there left res.data as unknown.
@@ -3966,6 +4012,16 @@ export const forebrainApi = {
     return putRaw<{ current: string; description?: string }>('/permissions/approval-default', { preset })
   },
 
+  /** The install's batch.sandbox_default: what a new batch project's sandbox
+   *  switch starts at (plans/216). */
+  batchSandboxDefault() {
+    return api.get<{ sandbox_default: boolean }>('/permissions/batch-sandbox-default').then((res) => res.data)
+  },
+
+  saveBatchSandboxDefault(sandboxDefault: boolean) {
+    return putRaw<{ sandbox_default: boolean }>('/permissions/batch-sandbox-default', { sandbox_default: sandboxDefault })
+  },
+
   sessionPreset(sessionId: string, preset: string) {
     return postJson<{ ok: boolean; description?: string }, { sessionId: string; preset: string }>('/permissions/session-preset', { sessionId, preset })
   },
@@ -3974,8 +4030,90 @@ export const forebrainApi = {
     return api.get<{ path: string; agentId?: string; yaml: string }>('/config').then((res) => res.data)
   },
 
+  /**
+   * The keys forebrain.yaml supports, from the loader's own list (plan 207
+   * §3.6): the configuration editor's「不存在」lines read it rather than a copy,
+   * so the file's whitelist has one source.
+   */
+  configFileSchema() {
+    return api.get<{ keys: string[] }>('/config/file-schema').then((res) => res.data)
+  },
+
+  /**
+   * Every setting the settings page draws, by configuration path (plan 191
+   * §3.1): the value each one holds, and — for a credential — only whether it
+   * is set and its last four characters. `meta` carries the two facts the page
+   * lays itself out from: whether this machine has a sandbox to configure at
+   * all, and the built-in handoff prompt the field's 恢复默认 button restores.
+   */
+  settings() {
+    // Read raw, not through the axios interceptor: the snapshot's values and
+    // secrets are keyed by configuration path (`cron.retention_days`,
+    // `approval_preset`), and a deep key rewrite would rename every one of
+    // them — the page would then read its own defaults as if they were the
+    // stored values. Only meta is the gateway's snake_case, translated here
+    // and only here (the same rule getRawJSON's readers follow).
+    return gatewayFetch(`${API_BASE}/settings`).then(async (res) => {
+      if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
+      const raw = (await res.json()) as {
+        values?: Record<string, unknown>
+        secrets?: Record<string, { set?: boolean; last4?: unknown }>
+        meta?: {
+          approval_presets_visible?: boolean
+          builtin_handoff_prompt?: string
+          claude_code_available?: boolean
+        }
+      }
+      const snapshot: SettingsSnapshot = {
+        values: raw.values ?? {},
+        secrets: Object.fromEntries(
+          Object.entries(raw.secrets ?? {}).map(([path, fact]) => [
+            path,
+            { set: fact?.set === true, last4: String(fact?.last4 ?? '') },
+          ]),
+        ),
+        meta: {
+          approvalPresetsVisible: raw.meta?.approval_presets_visible !== false,
+          builtinHandoffPrompt: raw.meta?.builtin_handoff_prompt ?? '',
+          claudeCodeAvailable: raw.meta?.claude_code_available === true,
+        },
+      }
+      return snapshot
+    })
+  },
+
+  /**
+   * Saves one group: the paths whose value changed, and the credentials the user
+   * replaced. A credential left out — or sent empty — keeps what is stored, and
+   * one request's paths are written together or not at all.
+   */
+  saveSettings(values: Record<string, unknown>, secrets: Record<string, string> = {}) {
+    return api
+      .patch<{ saved: boolean; applies: string }>('/settings', { values, secrets })
+      .then((res) => res.data)
+  },
+
+  /**
+   * Whether this machine may offer the approval presets at all. A gateway with
+   * no usable sandbox has one posture — full access — so the settings tab is
+   * gone and the composer's switch is fixed; the answer is the same field the
+   * settings page reads for the sandbox's own switches (plan 215 §3.4).
+   */
+  approvalPresetsVisible() {
+    // Raw for the same reason settings() is: the field's own name is the
+    // gateway's snake_case, and the interceptor would rename it into one this
+    // read never finds — making every machine look like it has a sandbox.
+    return gatewayFetch(`${API_BASE}/config`).then(async (res) => {
+      if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
+      const raw = (await res.json()) as { approval_presets_visible?: boolean }
+      return raw.approval_presets_visible !== false
+    })
+  },
+
   saveConfigFile(yaml: string) {
-    return postJson<{ path: string; applied: boolean }, { yaml: string }>('/config', { yaml })
+    // PUT, the method the file's endpoint answers; a POST here would be a 405
+    // the page would only show as the transport's own words.
+    return putRaw<{ saved: boolean }>('/config', { yaml })
   },
 
   // Channels belong to a project, so they are read and written through the

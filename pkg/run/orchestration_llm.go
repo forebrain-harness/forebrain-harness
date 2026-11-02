@@ -177,9 +177,22 @@ func (w *toolOrchestrationLLM) steerMessages(ctx context.Context, entries []Turn
 				out = append(out, msg)
 			}
 		}
-		out = append(out, llm.UserMessage(entry.Parts...))
+		out = append(out, steerMessage(entry))
 	}
 	return out
+}
+
+// steerMessage is the steer itself, as the model reads it. A steer written on
+// the person's behalf — another local session's peer message — is marked meta
+// and keeps its origin: the model reads it as context, and the surface that
+// replays the run can say where it came from.
+func steerMessage(entry TurnInputEntry) llm.Message {
+	msg := llm.UserMessage(entry.Parts...)
+	if origin := strings.TrimSpace(entry.Origin); origin != "" {
+		msg.IsMeta = true
+		msg.Origin = origin
+	}
+	return msg
 }
 
 // WrapToolOrchestrationLLM exposes the canonical execution-chain wrapper used

@@ -19,7 +19,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
-	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -312,7 +311,7 @@ func (s *Server) deliverBatchNotify(ctx context.Context, end turn.BatchExecution
 		// chat waiting for its result.
 		return
 	}
-	text := s.sanitizeBatchNotify(s.batchNotifyText(ctx, end))
+	text := s.batchNotifyText(ctx, end)
 	var failures []string
 	for _, target := range project.TaskNotify {
 		deliveryErr := s.Channels.Deliver(ctx, channel.Outbound{
@@ -333,15 +332,6 @@ func (s *Server) deliverBatchNotify(ctx context.Context, end turn.BatchExecution
 	if err := store.SetExecutionNotifyError(ctx, end.SessionID, detail); err != nil {
 		slog.Warn("batch notify: record the failure", "session", end.SessionID, "err", err)
 	}
-}
-
-// sanitizeBatchNotify runs the outbound sanitizer a chat reply gets, when a
-// live configuration is there to run it with.
-func (s *Server) sanitizeBatchNotify(text string) string {
-	if cfg := s.liveCfg(); cfg != nil {
-		return safety.SanitizeOutbound(cfg, text)
-	}
-	return text
 }
 
 // batchNotifyText is the notification's fixed Chinese template. Every field a
@@ -373,7 +363,7 @@ func (s *Server) batchNotifyText(ctx context.Context, end turn.BatchExecutionEnd
 	if deliverables := batchNotifyDeliverables(end.Artifacts); deliverables != "" {
 		lines = append(lines, "生成物："+deliverables)
 	}
-	if link := batchNotifyLink(s.liveCfg(), end.Task.ProjectID, end.Task.ID); link != "" {
+	if link := s.batchNotifyLink(ctx, end.Task.ProjectID, end.Task.ID); link != "" {
 		lines = append(lines, "查看："+link)
 	}
 	return strings.Join(lines, "\n")
@@ -457,13 +447,12 @@ func batchNotifyDeliverables(artifacts []state.Artifact) string {
 	return list
 }
 
-// batchNotifyLink is the address a person opens to see the task, or "" when the
-// gateway has no public URL to build one from.
-func batchNotifyLink(cfg *config.Root, projectID, taskID string) string {
-	if cfg == nil {
-		return ""
-	}
-	base := strings.TrimRight(strings.TrimSpace(cfg.Gateway.PublicURL), "/")
+// batchNotifyLink is the address a person opens to see the task, or "" when no
+// browser has reached this gateway yet. The address is the one the control
+// plane observed, not a configured one: nobody is asked where the gateway is
+// reachable from (plan 206 §3.1).
+func (s *Server) batchNotifyLink(ctx context.Context, projectID, taskID string) string {
+	base := strings.TrimRight(s.observedWebOrigin(ctx), "/")
 	if base == "" || strings.TrimSpace(projectID) == "" || strings.TrimSpace(taskID) == "" {
 		return ""
 	}
@@ -651,7 +640,7 @@ func (s *Server) notifyRuntimeHook(ctx context.Context, req tool.NotificationReq
 	rt := &hook.Runtime{
 		Home:          s.Home,
 		WorkspaceRoot: s.stateRoot(),
-		Cfg:           s.liveCfg(),
+		Cfg:           s.liveCfg(), // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 		Sess:          s.Sessions,
 		NewPromptRunner: func(label string) (hook.PromptRun, error) {
 			fac := run.Factory{
@@ -660,7 +649,7 @@ func (s *Server) notifyRuntimeHook(ctx context.Context, req tool.NotificationReq
 				WorkspaceRoot: s.Runner.StateRoot(),
 				ProjectRoot:   s.Runner.ProjectRoot,
 				MemoryStore:   s.MemoryStore,
-				AppCfg:        s.liveCfg(),
+				AppCfg:        s.liveCfg(), // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 			}
 			rr := fac.NewIsolatedRunner(label)
 			if rr == nil {

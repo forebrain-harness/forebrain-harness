@@ -389,15 +389,22 @@ func TestGatewaySkillsListUsesActivePrimaryWorkspace(t *testing.T) {
 
 func newActiveReviewGatewayServer(t *testing.T, home string) *Server {
 	t.Helper()
-	cfg := &appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main":   {},
-		"review": {Primary: true},
-	}
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	seed := "agents:\n  definitions:\n    main: {}\n    review:\n      primary: true\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+	cfg, err := loadPersistedDocumentForTest(cfgPath)
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "state", "primary-agent.json"), []byte(`{"active":"review"}`+"\n"), 0o600))
-	_ = context.Background()
-	return &Server{Home: home, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}}}
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, cfg)
+	skillsRoot := filepath.Join(home, "workspaces", "review", "skills")
+	_ = skillsRoot
+	env := &process.Environment{Deps: run.Deps{AppCfg: &cfg}, Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	return &Server{Home: home, Env: env}
 }
 
 func TestWebchatStepDisplayBodyMatchesAgentnotifyFormatter(t *testing.T) {
@@ -1215,6 +1222,19 @@ func TestRuntimeWarningPayloadIncludesYOLOFields(t *testing.T) {
 	}
 }
 
+// Full access that comes from the machine rather than the environment is not a
+// banner: a gateway with no sandbox runs that way silently, and the one place it
+// says so is the composer's fixed switch (owner 2026-10-31, plan 215 §3.4).
+func TestRuntimeWarningStaysQuietWithNoSandbox(t *testing.T) {
+	t.Setenv(safety.EnvYOLO, "")
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	if msg, data, ok := s.runtimeDangerWarning(); ok {
+		t.Fatalf("a sandbox-less gateway raised a banner: %q %#v", msg, data)
+	}
+}
+
 // TestHandleModelsListSkipsNonChatModels pins the reference-data/chat-list
 // split on the HTTP surface: models.json records image, speech, transcription,
 // embedding and decision models for reference, and none of them may be offered
@@ -1259,11 +1279,16 @@ func batchChannelGateway(t *testing.T) (*Server, state.Project, *batchNotifyChan
 	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	cfg := &appcfg.Root{}
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	seed := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n      - provider: openai\n        model: gpt-5\n        api_key: ${TEST_KEY}\n        base_url: http://127.0.0.1:9/v1\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+	cfg, err := loadPersistedDocumentForTest(cfgPath)
+	require.NoError(t, err)
+	seedConfigRoot(t, db, cfg)
 	s := &Server{
 		Home:     home,
 		RunRT:    &state.RunStore{DB: db},
-		Env:      &process.Environment{SQL: db, Deps: run.Deps{AppCfg: cfg}},
+		Env:      &process.Environment{SQL: db, ConfigPath: cfgPath, Deps: run.Deps{AppCfg: &cfg}},
 		Sessions: state.NewSessionStore(db, "main"),
 		Channels: channel.NewRegistry(),
 	}
@@ -1453,14 +1478,37 @@ func TestBatchEndNotifiesTheOriginChat(t *testing.T) {
 	require.Contains(t, text, "任务 tsk-abc · 第 2 次执行 · 用时 1m23s")
 	require.Contains(t, text, "汇总.xlsx（2.0 KB）")
 	require.Contains(t, text, "明细.csv（512 B）")
-	require.NotContains(t, text, "查看：", "no public URL, no link")
+	require.NotContains(t, text, "查看：", "no observed origin, no link")
 	require.Equal(t, "u1", rec.delivered()[0].SessionID, "the notification goes back to the chat the task came from")
 
-	// With a public URL configured the notification points at the task.
-	s.Env.Deps.AppCfg.Gateway.PublicURL = "https://forebrain.example.com/"
+	// A cookie-session write tells the gateway which address a browser reached
+	// it at, and the notification links there — nobody configures it (plan 206
+	// §3.1). A loopback write afterwards must not displace it.
+	s.Env.Deps.AppCfg.Gateway.Auth.Token = "gw-secret"
+	cookieWrite := func(host, origin string) {
+		inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+		req := httptest.NewRequest(http.MethodPost, "/api/resources", nil)
+		req.Host = host
+		req.AddCookie(&http.Cookie{Name: webSessionCookieName("gw-secret"), Value: webSessionValue("gw-secret")})
+		req.Header.Set("Origin", origin)
+		recorder := httptest.NewRecorder()
+		ControlPlaneHTTPMiddleware(s.Env, s, inner).ServeHTTP(recorder, req)
+		require.Equal(t, http.StatusNoContent, recorder.Code)
+	}
+	cookieWrite("forebrain.corp.example", "https://forebrain.corp.example")
 	s.notifyBatchExecutionEnd(ctx, end)
 	require.Eventually(t, func() bool { return len(rec.delivered()) == 2 }, 5*time.Second, 10*time.Millisecond)
-	require.Contains(t, rec.texts()[1], "查看：https://forebrain.example.com/projects/"+project.ID+"/tasks/tsk-abc")
+	link := "https://forebrain.corp.example/projects/" + project.ID + "/tasks/tsk-abc"
+	require.Contains(t, rec.texts()[1], "查看："+link)
+
+	cookieWrite("127.0.0.1:8787", "http://127.0.0.1:8787")
+	s.notifyBatchExecutionEnd(ctx, end)
+	require.Eventually(t, func() bool { return len(rec.delivered()) == 3 }, 5*time.Second, 10*time.Millisecond)
+	require.Contains(t, rec.texts()[2], "查看："+link, "a loopback address must not replace the address other people use")
+
+	// The row is the truth: a restarted gateway reads the same address back.
+	restarted := &Server{Home: s.Home, Env: s.Env, Sessions: s.Sessions, Channels: s.Channels, Projects: s.Projects}
+	require.Equal(t, link, restarted.batchNotifyLink(ctx, project.ID, task.ID))
 }
 
 // A task that did not come in through a channel goes to the project's own

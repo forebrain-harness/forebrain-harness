@@ -23,7 +23,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
-	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -59,6 +58,32 @@ func queuedInputReply(item run.Input, accepted bool, preview turn.PendingInputPr
 		"attachments":    item.Attachments,
 		"mention_images": item.MentionImages,
 		"preview":        preview,
+	}
+}
+
+// batchReadOnly refuses a request that would change a batch conversation
+// (plans/216 §3.4).
+//
+// A batch conversation is a task execution: it replayed, inspected and
+// downloaded, and the only things a person may do to it are the task controls
+// — stop, continue, run again — which go through the run and task routes, never
+// through these. Renaming it, switching its model or its mode, compacting it,
+// rewinding it, reverting its files, or typing into it would all change what
+// the execution is, and the execution is the business system's record.
+//
+// The refusal is here, in the gateway, rather than only in the page: the web is
+// one client of this API, and a read-only conversation that is read-only
+// because the page hid a button is not read-only at all.
+func (s *Server) batchReadOnly(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+		if store := s.projectStore(); store != nil && sid != "" {
+			if ptype, err := store.SessionProjectType(r.Context(), sid); err == nil && ptype == state.ProjectTypeBatch {
+				writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "batch_session_read_only"})
+				return
+			}
+		}
+		h(w, r)
 	}
 }
 
@@ -459,12 +484,8 @@ func (s *Server) appendTranscriptTurns(ctx context.Context, sessionID string, op
 // withAnswerStream streams the primary agent's answer to the page as it is
 // written: published on the conversation's event log, as every subagent's
 // stream is, and collected so a cancelled turn keeps what was already shown.
-// An answer the output guardrail must judge whole is not streamed; it is sent
-// once, judged, when the run ends.
+// The answer is always streamed — nothing judges it whole first.
 func (s *Server) withAnswerStream(ctx context.Context, runID, sessionID string, streamed *bool, partial *turn.StreamPartial) context.Context {
-	if safety.OutputRailEnabled(s.liveCfg()) {
-		return ctx
-	}
 	stream := run.EventStreamSink(context.WithoutCancel(ctx), s.RunEvents(), runID, sessionID, "", streamed)
 	// Register the in-flight block so a page that arrives mid-turn is shown the
 	// answer and reasoning the push-only deltas carried and no log keeps. The
@@ -775,11 +796,11 @@ func (s *Server) autoCompactBeforeUserAppend(ctx context.Context, sessionID stri
 	return err
 }
 
-func (s *Server) compactExplicitLimit() int {
-	if s == nil || s.Runner == nil || s.Runner.AppCfg == nil {
-		return 0
+func (s *Server) compactBudgetOptions() state.TokenBudgetOptions {
+	if s == nil || s.Runner == nil {
+		return state.TokenBudgetOptions{}
 	}
-	return s.Runner.AppCfg.Compact.ModelAutoCompactTokenLimit
+	return run.CompactBudgetOptions(s.Runner.AppCfg)
 }
 
 // Auto-continue on the web: the engine's continuation of a conversation stopped
@@ -1032,12 +1053,9 @@ func (s *Server) runDetachedTurn(runCtx context.Context, t detachedTurn, runID s
 	if outcome.Result != nil {
 		answer = outcome.Result.TextContent()
 	}
-	if lc := s.liveCfg(); lc != nil {
-		answer = safety.SanitizeOutbound(lc, answer)
-	}
 	if strings.TrimSpace(answer) != "" && !streamed {
-		// Not streamed — sent whole by the provider, or held for the output
-		// guardrail — so it reaches the page once, as its stream would have.
+		// Not streamed — sent whole by the provider — so it reaches the page
+		// once, as its stream would have.
 		_ = s.RunEvents().Publish(ctx, event.NewRunEvent("", runID, sid, event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: answer}, time.Now()))
 	}
 	s.finishSuccessfulTurn(ctx, gatewayPostTurnOptions{

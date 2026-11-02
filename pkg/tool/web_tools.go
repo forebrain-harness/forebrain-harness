@@ -50,8 +50,9 @@ func webFetchAllowPrivateIP(rt *AgentToolRuntime) bool {
 
 // resolveWebFetchDeepSeek reports the DeepSeek Fetch endpoint and key when the
 // operator explicitly routed web_fetch at DeepSeek (WebFetchConfig.Provider ==
-// "deepseek"). An empty provider keeps the built-in direct fetcher: routing is
-// never automatic.
+// "deepseek"). Every other value — the stored "builtin" of plan 207 and the
+// empty one before it — keeps the built-in direct fetcher: routing is never
+// automatic.
 func resolveWebFetchDeepSeek(rt *AgentToolRuntime) (endpoint, key string, ok bool, err error) {
 	if rt == nil || rt.Cfg == nil {
 		return "", "", false, nil
@@ -1156,7 +1157,10 @@ func webSearchTavilyDepth(cfg appcfg.WebSearchConfig) string {
 func resolveWebSearchExec(rt *AgentToolRuntime) (webSearchExec, error) {
 	cfg := webSearchDefaults(rt)
 	prov := strings.ToLower(strings.TrimSpace(cfg.Provider))
-	if prov == "" || prov == "auto" {
+	// none is the stored "no service chosen" (plan 207): the runtime still
+	// takes the first provider it has a key for, which is exactly what the
+	// empty value did before the setting had a stored representation.
+	if prov == "" || prov == "auto" || prov == appcfg.WebSearchProviderNone {
 		if k := firstNonEmpty(os.Getenv("TAVILY_API_KEY"), webSearchTavilyKey(cfg)); k != "" {
 			return buildTavilyExec(cfg, k)
 		}

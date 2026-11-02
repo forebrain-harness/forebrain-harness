@@ -19,10 +19,15 @@ import { pickOption, seedProject, signIn } from './support'
 /** The review's own screenshot directory, outside the run's shots dir. */
 const shots = process.env.TMPDIR ?? '/tmp'
 
-/** The settings tabs, in the order the sub-navigation lists them. */
+/** The settings tabs, in the order the sub-navigation lists them. The approval
+ * tab exists only where the machine has a sandbox (plan 215); the e2e host
+ * has one. */
 const SETTINGS_TABS = [
   'appearance',
+  'session',
   'approval',
+  'subagents',
+  'net',
   'mcp',
   'lsp',
   'hooks',
@@ -92,14 +97,16 @@ test('the sub-navigation is three labelled groups in the design order', async ({
   expect(structure).toEqual([
     'group:常规',
     'tab:外观',
-    'tab:审批默认',
+    'tab:会话',
+    'tab:审批与沙箱',
     'tab:子代理',
+    'tab:联网工具',
     'group:全局服务',
     'tab:MCP',
     'tab:语言服务器',
     'tab:钩子',
     'tab:定时任务',
-    'tab:记忆开关',
+    'tab:记忆',
     'tab:共享技能',
     'group:高级',
     'tab:配置文件',
@@ -107,19 +114,20 @@ test('the sub-navigation is three labelled groups in the design order', async ({
   ])
 })
 
-test('none of the ten settings tabs draws a heading or a card', async ({ page }) => {
+test('none of the settings tabs draws a page heading or a card', async ({ page }) => {
   test.info().setTimeout(180_000)
   await signIn(page)
 
   for (const tab of SETTINGS_TABS) {
     await openTab(page, tab)
     // The tab's own name in the sub-navigation says what it is; the content
-    // starts with the first field, row or table.
-    await expect(page.locator('main h2, main h3'), `${tab} still draws a heading`).toHaveCount(0)
+    // starts with the first group, row or table. A group's own title (h3) is
+    // the prototype's; a page heading is not.
+    await expect(page.locator('main h2'), `${tab} still draws a heading`).toHaveCount(0)
     await expect(page.locator('main .forebrain-card'), `${tab} still draws a card`).toHaveCount(0)
     await expect(page.locator('[data-testid="settings-tabs"] button[aria-selected="true"]')).toHaveCount(1)
-    await page.mouse.move(2, 2)
-    await page.screenshot({ path: `${shots}/076-settings-${tab}.png`, fullPage: true })
+    page.mouse.move(2, 2)
+    await page.screenshot({ path: `${shots}/191-settings-${tab}.png`, fullPage: true })
   }
 })
 
@@ -154,57 +162,110 @@ test('the appearance tab is standard radio groups that apply at once', async ({ 
   await expect(page.locator('[data-testid="appearance-brand"]')).toContainText('Stored in this browser only.')
 })
 
-test('the approval default is one vertical radio group saved from the bottom', async ({ page }) => {
+test('the approval preset is one vertical radio group saved from its group bar', async ({ page }) => {
   await signIn(page)
   await openTab(page, 'approval')
 
-  const group = page.locator('[data-testid="approval-default"]')
-  await expect(group).toHaveAttribute('role', 'radiogroup')
-  // An option row is `.forebrain-radio` around the library's `role="radio"`
-  // button and its `<label for>` words (plan 096).
-  const options = group.locator('.forebrain-radio')
-  await expect(options).toHaveCount(3)
+  // The preset group, with the note saying whom it applies to (plan 191 §0.12).
+  const group = page.locator('[data-group="preset"]')
+  const radios = group.locator('[role="radiogroup"]')
+  await expect(radios).toBeVisible()
+  await expect(group.locator('h3')).toHaveText('审批预设')
+  await expect(group.locator('.settings-group__head p')).toHaveText('只对办公创作、创意编程项目生效')
 
-  // Vertical, one option per line, each naming both languages and explaining
-  // itself on its own second line.
+  const options = radios.locator('.settings-radio')
+  await expect(options).toHaveCount(2)
+
+  // Vertical, one option per line, each explaining itself on its own line.
   const boxes = []
-  for (const index of [0, 1, 2]) boxes.push(await options.nth(index).boundingBox())
+  for (const index of [0, 1]) boxes.push(await options.nth(index).boundingBox())
   expect(boxes.map((box) => Math.round(box?.y ?? 0))).toEqual([...new Set(boxes.map((box) => Math.round(box?.y ?? 0)))])
   expect(boxes[1]!.y).toBeGreaterThan(boxes[0]!.y + 1)
-  expect(boxes[2]!.y).toBeGreaterThan(boxes[1]!.y + 1)
-  await expect(options.nth(0)).toContainText('只读 · Read Only')
-  await expect(options.nth(1)).toContainText('默认 · Default')
-  await expect(options.nth(2)).toContainText('完全访问 · Full Access')
-  for (const index of [0, 1, 2]) {
-    const description = options.nth(index).locator('.forebrain-radio-desc span')
-    expect((await description.innerText()).trim().length, `option ${index} carries no description`).toBeGreaterThan(0)
-  }
+  await expect(options.nth(0)).toContainText('默认')
+  await expect(options.nth(1)).toContainText('完全访问')
 
-  // The save is the last thing in the tab and writes nothing until the choice
+  // The sandbox group unfolds only while 默认 is the choice.
+  await expect(page.locator('[data-group="sww"]')).toBeVisible()
+  await group.locator('[role="radio"][value="full_access"]').click()
+  await expect(page.locator('[data-group="sww"]')).toHaveCount(0)
+
+  // The save is the group's own bar and writes nothing until the choice
   // changes.
-  const save = page.locator('[data-testid="approval-save"]')
-  await expect(save).toBeDisabled()
-  const saveBox = await save.boundingBox()
-  expect(saveBox!.y).toBeGreaterThan(boxes[2]!.y + boxes[2]!.height - 1)
-
-  await group.locator('[role="radio"][value="full-access"]').click()
+  const save = group.locator('[data-save="preset"]')
   await expect(save).toBeEnabled()
   await save.click()
-  await expect(page.getByText(/已保存为全局默认。|Saved as the global default\./).first()).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText('已保存，下一轮生效').first()).toBeVisible({ timeout: 10_000 })
 
-  // The write is in forebrain.yaml: a reload opens on the new choice, with the
-  // save disabled again.
+  // The write is in the state database: a reload opens on the new choice,
+  // with the sandbox group folded and the bar gone.
   await page.reload({ waitUntil: 'networkidle' })
-  await expect(page.locator('[data-testid="approval-default"] [role="radio"][value="full-access"]')).toHaveAttribute(
+  await expect(page.locator('[data-group="preset"] [role="radio"][value="full_access"]')).toHaveAttribute(
     'aria-checked',
     'true',
   )
-  await expect(page.locator('[data-testid="approval-save"]')).toBeDisabled()
+  await expect(page.locator('[data-group="sww"]')).toHaveCount(0)
+  await expect(page.locator('[data-save="preset"]')).toHaveCount(0)
 
   // Restore the safe default for the rest of the suite.
-  await page.locator('[data-testid="approval-default"] [role="radio"][value="auto"]').click()
-  await page.locator('[data-testid="approval-save"]').click()
-  await expect(page.getByText(/已保存为全局默认。|Saved as the global default\./).first()).toBeVisible({ timeout: 10_000 })
+  await page.locator('[data-group="preset"] [role="radio"][value="workspace_write"]').click()
+  await page.locator('[data-save="preset"]').click()
+  await expect(page.getByText('已保存，下一轮生效').first()).toBeVisible({ timeout: 10_000 })
+})
+
+test('a changed compaction threshold survives a reload (plan 191 §5)', async ({ page }) => {
+  await signIn(page)
+  await openTab(page, 'session')
+
+  const group = page.locator('[data-group="cp"]')
+  const threshold = group.locator('[data-num="compact.auto_compact_percent"]')
+  await expect(threshold).toHaveValue('90')
+
+  await threshold.fill('70')
+  await group.locator('[data-save="cp"]').click()
+  await expect(page.getByText('已保存，下一轮生效').first()).toBeVisible({ timeout: 10_000 })
+
+  await page.reload({ waitUntil: 'networkidle' })
+  await expect(page.locator('[data-group="cp"] [data-num="compact.auto_compact_percent"]')).toHaveValue('70')
+
+  // Back to the default for the rest of the suite.
+  await page.locator('[data-group="cp"] [data-num="compact.auto_compact_percent"]').fill('90')
+  await page.locator('[data-group="cp"] [data-save="cp"]').click()
+  await expect(page.getByText('已保存，下一轮生效').first()).toBeVisible({ timeout: 10_000 })
+})
+
+test('a misspelled key in forebrain.yaml saves and stays underlined after a reload (plan 191 §5)', async ({ page }) => {
+  await signIn(page)
+  await openTab(page, 'config')
+
+  // Type a key the file does not support — misspelled on purpose.
+  const editor = page.locator('.cm-content')
+  await editor.click()
+  await page.keyboard.press('ControlOrMeta+End')
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('gateway_url: https://forebrain.example.com\n')
+
+  // The wavy line appears without a save and the save takes the file as
+  // written: only YAML syntax errors are refused.
+  await expect(page.locator('.cm-lintRange-error').first()).toBeVisible({ timeout: 10_000 })
+  await page.locator('[data-testid="config-apply"]').click()
+  await expect(page.getByText('已保存，重启后生效')).toBeVisible({ timeout: 10_000 })
+
+  // A reload re-reads the file from disk: the key is still there and still
+  // underlined — saved as written, ignored when the file is read.
+  await page.reload({ waitUntil: 'networkidle' })
+  await expect(page.locator('.cm-content')).toContainText('gateway_url')
+  await expect(page.locator('.cm-lintRange-error').first()).toBeVisible({ timeout: 10_000 })
+
+  // Take the key back out: the file the suite leaves behind is the one it
+  // found, and the wavy line goes with it.
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('ControlOrMeta+End')
+  for (let i = 0; i < 'gateway_url: https://forebrain.example.com'.length + 1; i += 1) {
+    await page.keyboard.press('Backspace')
+  }
+  await expect(page.locator('.cm-lintRange-error')).toHaveCount(0, { timeout: 10_000 })
+  await page.locator('[data-testid="config-apply"]').click()
+  await expect(page.getByText('已保存，重启后生效')).toBeVisible({ timeout: 10_000 })
 })
 
 test('the table tabs open with a search box, a pager and icon-only actions', async ({ page }) => {
@@ -289,9 +350,11 @@ test('the runtime tab is one flat list that answers from the gateway', async ({ 
     }
     return out
   })
-  expect(Object.keys(pairs)).toEqual(['状态', '版本', '监听地址', '鉴权', '主代理', '主目录', '日志', '状态库', '技能'])
+  // No auth row: authentication is fixed token (plan 206 deleted the mode), and
+  // a fact that cannot vary is not one this list reports.
+  expect(Object.keys(pairs)).toEqual(['状态', '版本', '监听地址', '主代理', '主目录', '日志', '状态库', '技能'])
 
-  for (const label of ['状态', '版本', '监听地址', '鉴权', '主代理', '主目录', '日志', '状态库', '技能']) {
+  for (const label of ['状态', '版本', '监听地址', '主代理', '主目录', '日志', '状态库', '技能']) {
     expect(pairs[label], `${label} is empty`).toBeTruthy()
     expect(pairs[label], `${label} answered nothing`).not.toBe('—')
   }

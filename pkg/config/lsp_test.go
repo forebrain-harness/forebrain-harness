@@ -155,14 +155,14 @@ lsp:
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	cfg, err := Load(path)
+	cfg, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	reloaded, err := Load(path)
+	reloaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestValidateLSPSectionRejects(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tt.raw), 0o600); err != nil {
 				t.Fatalf("write config: %v", err)
 			}
-			_, err := Load(path)
+			_, err := loadDocumentForTest(path)
 			if err == nil {
 				t.Fatalf("load error = nil for %q", tt.raw)
 			}

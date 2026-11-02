@@ -16,7 +16,7 @@
              未运行 like any other silent entry, and the words beside it say why
              (the prototype's `row.over`). -->
         <span v-if="shadowedHint" class="mcp-key" data-testid="mcp-state-shadowed">{{ shadowedHint }}</span>
-        <span v-else-if="row.disabledByConfig" class="mcp-key">enabled: false</span>
+        <span v-else-if="row.disabledByConfig" class="mcp-hint">{{ t('mcp.status.disabledByConfig') }}</span>
         <span v-else-if="row.disabledNextSession" class="mcp-key">{{ t('mcp.notLoadedNextSession') }}</span>
         <BadgeComponent v-if="readonly && row.officialUrl" data-testid="mcp-state-official">{{ t('mcp.official') }}</BadgeComponent>
       </div>
@@ -43,7 +43,7 @@
 
     <div class="mcp-grid2">
       <label class="mcp-field">
-        <span class="mcp-label">{{ t('common.name') }}<span class="mcp-key">name</span></span>
+        <span class="mcp-label">{{ t('common.name') }}</span>
         <Input
           v-model="form.name"
           class="forebrain-field h-[34px] font-mono"
@@ -58,8 +58,7 @@
            answer one click with two. -->
       <div class="mcp-field">
         <Label for="mcp-transport" class="mcp-label block text-[12px] leading-[normal]">
-          {{ t('mcp.fieldTransport') }}<span class="mcp-key">transport</span>
-        </Label>
+          {{ t('mcp.fieldTransport') }}        </Label>
         <Select
           :model-value="form.transport"
           @update:model-value="(value) => (form.transport = value === 'streamable_http' ? 'streamable_http' : 'stdio')"
@@ -116,7 +115,7 @@
 
     <div class="mcp-grid2">
       <label class="mcp-field">
-        <span class="mcp-label">{{ t('mcp.fieldStartupTimeout') }}<span class="mcp-key">startup_timeout</span></span>
+        <span class="mcp-label">{{ t('mcp.fieldStartupTimeout') }}</span>
         <Input
           v-model="form.startupTimeout"
           class="forebrain-field h-[34px] font-mono"
@@ -128,7 +127,7 @@
         />
       </label>
       <label class="mcp-field">
-        <span class="mcp-label">{{ t('mcp.fieldRequestTimeout') }}<span class="mcp-key">request_timeout</span></span>
+        <span class="mcp-label">{{ t('mcp.fieldRequestTimeout') }}</span>
         <Input
           v-model="form.requestTimeout"
           class="forebrain-field h-[34px] font-mono"
@@ -153,7 +152,7 @@
       </summary>
       <div class="mcp-adv-body">
         <template v-if="isStdio">
-          <span class="mcp-label">{{ t('mcp.fieldEnv') }}<span class="mcp-key">env</span></span>
+          <span class="mcp-label">{{ t('mcp.fieldEnv') }}</span>
           <McpKeyValueRows v-model="form.env" :add-label="t('mcp.kvAddEnv')" :readonly="readonly" />
           <div class="mcp-switch-row">
             <SwitchComponent
@@ -163,13 +162,11 @@
               data-testid="mcp-inherit-parent-env"
             />
             <span class="mcp-label">
-              {{ t('mcp.fieldInheritParentEnv') }}<span class="mcp-key">inherit_parent_env</span>
-            </span>
+              {{ t('mcp.fieldInheritParentEnv') }}            </span>
           </div>
           <label class="mcp-field">
             <span class="mcp-label">
-              {{ t('mcp.fieldCommandSha256') }}<span class="mcp-key">expected_command_sha256</span>
-            </span>
+              {{ t('mcp.fieldCommandSha256') }}            </span>
             <Input
               v-model="form.expectedCommandSha256"
               class="forebrain-field h-[34px] font-mono"
@@ -181,8 +178,8 @@
           </label>
         </template>
         <template v-else>
-          <span class="mcp-label">{{ t('mcp.fieldHeaders') }}<span class="mcp-key">headers</span></span>
-          <McpKeyValueRows v-model="form.headers" :add-label="t('mcp.kvAddHeaders')" :readonly="readonly" />
+          <span class="mcp-label">{{ t('mcp.fieldHeaders') }}</span>
+          <McpKeyValueRows v-model="form.headers" :add-label="t('mcp.kvAddHeaders')" :readonly="readonly" :secret-facts="headerSecretFacts" />
           <div class="mcp-switch-row">
             <SwitchComponent
               v-model="form.disableStandaloneSse"
@@ -191,14 +188,12 @@
               data-testid="mcp-disable-standalone-sse"
             />
             <span class="mcp-label">
-              {{ t('mcp.fieldDisableSse') }}<span class="mcp-key">disable_standalone_sse</span>
-            </span>
+              {{ t('mcp.fieldDisableSse') }}            </span>
           </div>
-          <span class="mcp-label">OAuth<span class="mcp-key">oauth</span></span>
+          <span class="mcp-label">OAuth</span>
           <div class="mcp-field">
             <Label for="mcp-oauth-mode" class="mcp-label block text-[12px] leading-[normal]">
-              {{ t('mcp.fieldOAuthMode') }}<span class="mcp-key">mode</span>
-            </Label>
+              {{ t('mcp.fieldOAuthMode') }}            </Label>
             <Select
               :model-value="toChoice(form.oauth.mode)"
               @update:model-value="(value) => (form.oauth.mode = fromChoice(value))"
@@ -222,8 +217,7 @@
           <div class="mcp-grid2">
             <label class="mcp-field">
               <span class="mcp-label">
-                {{ t('mcp.fieldAuthorizationUrl') }}<span class="mcp-key">authorization_url</span>
-              </span>
+                {{ t('mcp.fieldAuthorizationUrl') }}              </span>
               <Input
                 v-model="form.oauth.authorizationUrl"
                 class="forebrain-field h-[34px] font-mono"
@@ -234,7 +228,7 @@
               />
             </label>
             <label class="mcp-field">
-              <span class="mcp-label">{{ t('mcp.fieldTokenUrl') }}<span class="mcp-key">token_url</span></span>
+              <span class="mcp-label">{{ t('mcp.fieldTokenUrl') }}</span>
               <Input
                 v-model="form.oauth.tokenUrl"
                 class="forebrain-field h-[34px] font-mono"
@@ -247,7 +241,7 @@
           </div>
           <div class="mcp-grid2">
             <label class="mcp-field">
-              <span class="mcp-label">client_id</span>
+              <span class="mcp-label">{{ t('mcp.fieldClientId') }}</span>
               <Input
                 v-model="form.oauth.clientId"
                 class="forebrain-field h-[34px] font-mono"
@@ -257,21 +251,46 @@
                 data-testid="mcp-oauth-client-id"
               />
             </label>
-            <label class="mcp-field">
-              <span class="mcp-label">client_secret</span>
-              <Input
-                v-model="form.oauth.clientSecret"
-                class="forebrain-field h-[34px] font-mono"
-                :readonly="readonly"
-                :placeholder="readonly ? t('mcp.unsetValue') : ''"
-                autocomplete="off"
-                data-testid="mcp-oauth-client-secret"
-              />
-            </label>
+            <div class="mcp-field">
+              <span class="mcp-label">{{ t('mcp.fieldClientSecret') }}</span>
+              <!-- A stored credential is never readable: bullets and the last
+                   four, 更换 opens a password box, a blank one keeps what is
+                   stored, 取消 goes back to the mask (plan 191 §0.20). -->
+              <span v-if="clientSecretMasked && !clientSecretEditing" class="mcp-kv-mask">
+                ••••••••<b>{{ clientSecretFact?.last4 }}</b>
+                <button
+                  v-if="!readonly"
+                  type="button"
+                  class="mcp-secret-btn"
+                  data-testid="mcp-oauth-client-secret-edit"
+                  @click="clientSecretEditing = true"
+                >{{ t('settings.secretChange') }}</button>
+              </span>
+              <span v-else class="mcp-kv-secret">
+                <Input
+                  :type="clientSecretMasked ? 'password' : 'password'"
+                  :model-value="clientSecretMasked ? clientSecretTyped : form.oauth.clientSecret"
+                  class="forebrain-field h-[34px] font-mono"
+                  :readonly="readonly"
+                  :placeholder="clientSecretMasked ? t('settings.secretPlaceholder') : ''"
+                  autocomplete="new-password"
+                  spellcheck="false"
+                  data-testid="mcp-oauth-client-secret"
+                  @update:model-value="(value) => (clientSecretMasked ? (clientSecretTyped = String(value)) : (form.oauth.clientSecret = String(value)))"
+                />
+                <button
+                  v-if="clientSecretMasked && clientSecretEditing"
+                  type="button"
+                  class="mcp-secret-btn"
+                  data-testid="mcp-oauth-client-secret-cancel"
+                  @click="cancelClientSecret"
+                >{{ t('common.cancel') }}</button>
+              </span>
+            </div>
           </div>
           <div class="mcp-grid2">
             <label class="mcp-field">
-              <span class="mcp-label">scopes</span>
+              <span class="mcp-label">{{ t('mcp.fieldScopes') }}</span>
               <Input
                 v-model="form.oauth.scopes"
                 class="forebrain-field h-[34px] font-mono"
@@ -282,7 +301,7 @@
               />
             </label>
             <label class="mcp-field">
-              <span class="mcp-label">redirect_url</span>
+              <span class="mcp-label">{{ t('mcp.fieldRedirectUrl') }}</span>
               <Input
                 v-model="form.oauth.redirectUrl"
                 class="forebrain-field h-[34px] font-mono"
@@ -297,8 +316,7 @@
 
         <div class="mcp-field">
           <Label for="mcp-default-approval" class="mcp-label block text-[12px] leading-[normal]">
-            {{ t('mcp.fieldDefaultApproval') }}<span class="mcp-key">default_tools_approval_mode</span>
-          </Label>
+            {{ t('mcp.fieldDefaultApproval') }}          </Label>
           <!-- 跟随全局 is the empty string on the wire, which a SelectItem may
                not carry: the sentinel stands in for it on both sides. -->
           <Select
@@ -446,7 +464,7 @@ import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { useI18n } from '@/locales'
 
 import McpKeyValueRows from './McpKeyValueRows.vue'
-import { mcpEditPlace, mcpFormOf, mcpStatus, mcpWritePayload, type McpServerForm } from './mcpRows'
+import { MCP_REDACTED, mcpEditPlace, mcpFormOf, mcpStatus, mcpWritePayload, type McpServerForm } from './mcpRows'
 
 const props = defineProps<{
   /** 'new' adds an entry, 'edit' changes one, 'view' only reads one. */
@@ -476,6 +494,44 @@ const saving = ref(false)
 const saveError = ref('')
 const advancedOpen = ref(props.mode === 'view')
 const stateToolsOpen = ref(false)
+
+/** The client secret's own little state machine (plan 191 §0.20): the stored
+ * value arrives masked and stays that way in the form; what the user types
+ * lives apart, and only a non-empty typed value ever replaces it. */
+const clientSecretEditing = ref(false)
+const clientSecretTyped = ref('')
+const clientSecretMasked = computed(() => form.oauth.clientSecret === MCP_REDACTED)
+const clientSecretFact = computed(() => row.value?.secrets?.['oauth.client_secret'])
+
+/** The credential-header facts, keyed by the header's own name — the gateway
+ * answers `headers.<NAME>` paths, and the table speaks header names. */
+const headerSecretFacts = computed<Record<string, { set: boolean; last4: string }>>(() => {
+  const facts: Record<string, { set: boolean; last4: string }> = {}
+  for (const [path, fact] of Object.entries(row.value?.secrets ?? {})) {
+    if (path.startsWith('headers.')) facts[path.slice('headers.'.length)] = fact
+  }
+  return facts
+})
+
+function cancelClientSecret(): void {
+  clientSecretEditing.value = false
+  clientSecretTyped.value = ''
+}
+
+/** What a save submits as the client secret: a typed value replaces, anything
+ * else keeps the stored one (the placeholder is what "keep" spells on the
+ * wire). */
+function clientSecretPayload(): string {
+  if (!clientSecretMasked.value) return form.oauth.clientSecret.trim()
+  const typed = clientSecretTyped.value.trim()
+  return typed !== '' ? typed : MCP_REDACTED
+}
+
+/** The form as a save submits it: what the operator sees, except that the
+ * client secret's blank box never travels as a removal. */
+function payloadForm(): McpServerForm {
+  return { ...form, oauth: { ...form.oauth, clientSecret: clientSecretPayload() } }
+}
 
 /** What one connection test is doing, or what it found: nothing, running, a
  * server that answered, a server that did not. */
@@ -599,7 +655,7 @@ async function save() {
   saving.value = true
   saveError.value = ''
   try {
-    const body = mcpWritePayload(row.value, form)
+    const body = mcpWritePayload(row.value, payloadForm())
     const result =
       props.mode === 'new'
         ? await forebrainApi.mcpCreate(props.scope, ownerId.value, body)
@@ -624,7 +680,7 @@ async function runTest() {
   testResult.value = null
   testToolsOpen.value = false
   try {
-    const result = await forebrainApi.mcpTest(props.scope, ownerId.value, mcpWritePayload(null, form))
+    const result = await forebrainApi.mcpTest(props.scope, ownerId.value, mcpWritePayload(null, payloadForm()))
     if (result?.ok) {
       testResult.value = result
       testState.value = 'ok'
@@ -687,6 +743,48 @@ async function runTest() {
   font-size: 12px;
   font-weight: 500;
   color: var(--forebrain-text-2);
+}
+
+/* A credential as the owner ruled it shown (§0.20): bullets and the last four,
+   never the value; 更换 opens the password box beside it. */
+.mcp-kv-mask {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  font-family: var(--forebrain-mono-font);
+  font-size: 12.5px;
+  color: var(--forebrain-text-2);
+}
+
+.mcp-kv-mask b {
+  font-weight: 500;
+  color: var(--forebrain-text);
+}
+
+.mcp-kv-secret {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mcp-kv-secret .forebrain-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mcp-secret-btn {
+  flex: none;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+}
+
+.mcp-secret-btn:hover {
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-text);
 }
 
 .mcp-field {

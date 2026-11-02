@@ -29,7 +29,7 @@ function provider(overrides: Partial<ProviderRecord> = {}): ProviderRecord {
     baseUrl: 'https://api.deepseek.com',
     apiPath: '',
     apiKeySet: true,
-    apiKeyHint: '3f9a',
+    apiKeyLast4: '3f9a',
     index: 0,
     ...overrides,
   }
@@ -44,7 +44,7 @@ async function mountPage(): Promise<VueWrapper> {
 /** The page with its own default: the mock is replaced before the page reads it. */
 async function mountPageWithDefault(defaultModel: string): Promise<VueWrapper> {
   vi.mocked(forebrainApi.providersPage).mockResolvedValue({
-    rows: [provider(), provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyHint: '', index: 1 })],
+    rows: [provider(), provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyLast4: '', index: 1 })],
     total: 2,
     page: 1,
     pageSize: 10,
@@ -70,7 +70,7 @@ describe('ProvidersView', () => {
 
   beforeEach(() => {
     vi.spyOn(forebrainApi, 'providersPage').mockResolvedValue({
-      rows: [provider(), provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyHint: '', index: 1 })],
+      rows: [provider(), provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyLast4: '', index: 1 })],
       total: 2,
       page: 1,
       pageSize: 10,
@@ -79,7 +79,7 @@ describe('ProvidersView', () => {
     vi.spyOn(forebrainApi, 'providers').mockResolvedValue({
       providers: [
         provider(),
-        provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyHint: '', index: 1 }),
+        provider({ provider: 'openai', models: ['gpt-5', 'gpt-5-mini'], baseUrl: 'https://api.openai.com/v1', apiKeySet: false, apiKeyLast4: '', index: 1 }),
       ],
       defaultModel: 'deepseek/deepseek-v4',
     })
@@ -153,8 +153,9 @@ describe('ProvidersView', () => {
     // exactly as it was read.
     expect(call[0].map((entry) => entry.provider)).toEqual(['deepseek', 'openai'])
     expect(call[1]).toBe('openai/gpt-5')
-    // The untouched key does not travel: only a typed one is sent.
-    expect(call[0][1].api_key_plain).toBeUndefined()
+    // The untouched key does not travel: only a typed one is sent, and it
+    // goes as api_key — the wire's one key field.
+    expect(call[0][1].api_key).toBeUndefined()
   })
 
   // A row can serve several models, and the default is one model of it: the
@@ -646,7 +647,7 @@ describe('ProvidersView sign-in', () => {
       base_url: answeredRoot,
     })
     // A signed-in service has no typed key: the credential is the login's.
-    expect(saved[1].api_key_plain).toBeUndefined()
+    expect(saved[1].api_key).toBeUndefined()
     // Saving closes the modal.
     expect(wrapper.find('[data-testid="provider-login-save"]').exists()).toBe(false)
   })
@@ -659,7 +660,7 @@ describe('ProvidersView sign-in', () => {
       models: ['glm-5.3'],
       baseUrl: 'https://opencode.ai/zen/go/v1',
       apiKeySet: false,
-      apiKeyHint: '',
+      apiKeyLast4: '',
       index: 1,
     })
     const rows = [provider(), existing]

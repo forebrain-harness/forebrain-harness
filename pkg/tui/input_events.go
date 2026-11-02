@@ -59,7 +59,7 @@ const (
 	hotkeyOverlayUp          inputHotkey = "overlay_up"
 	hotkeyOverlayDown        inputHotkey = "overlay_down"
 	hotkeyOverlayAccept      inputHotkey = "overlay_accept"
-	hotkeyTogglePlanMode     inputHotkey = "toggle_plan_mode"
+	hotkeyCycleMode          inputHotkey = "cycle_mode"
 	hotkeyPanelLeft          inputHotkey = "panel_left"
 	hotkeyPanelRight         inputHotkey = "panel_right"
 	hotkeyPanelTab           inputHotkey = "panel_tab"
@@ -1274,7 +1274,7 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 							}
 							if bytes.Equal(pendingEscape, []byte{0x1b, '[', 'Z'}) {
 								pendingEscape = pendingEscape[:0]
-								ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyTogglePlanMode}
+								ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyCycleMode}
 								continue
 							}
 							if bytes.Equal(pendingEscape, []byte{0x1b, '[', 'I'}) {

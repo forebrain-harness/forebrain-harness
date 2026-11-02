@@ -16,7 +16,6 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -139,7 +138,7 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			// execution all observe one identical command string. The user
 			// therefore approves the command that actually runs, never a
 			// pre-rewrite form. Fail-open: on any doubt cmd is unchanged.
-			rewriteResult := rewriteShellCommand(ctx, rt, cmd)
+			rewriteResult := rewriteShellCommand(ctx, cmd)
 			cmd = rewriteResult.Command
 			// A persisted approval that carries bypass_sandbox is applied here as
 			// well as in the tool-permission middleware, and against the rewritten
@@ -162,23 +161,22 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				return "", err
 			}
 			// A batch task (plans/150) has nobody to ask and nothing to escalate
-			// to: it runs inside its task sandbox, and the only permission set it
-			// can carry is the default one. Asking for more is a refusal, not a
-			// prompt — a model that reached for the escalation fields must not
-			// learn that asking works.
-			if ws := strings.TrimSpace(TaskWorkspaceFromContext(ctx)); ws != "" {
+			// to: the only permission set it can carry is the default one. Asking
+			// for more is a refusal, not a prompt — a model that reached for the
+			// escalation fields must not learn that asking works.
+			if boundary, ok := BatchBoundaryFromContext(ctx); ok {
 				if in.SandboxPermissions != safety.SandboxPermissionsUseDefault || in.AdditionalPermissions != nil || sandboxBypassApproved {
 					return "", fmt.Errorf("batch tasks run inside their task sandbox; additional or escalated permissions are not available")
 				}
 				// The whole approval block below is skipped on purpose: the task
-				// sandbox and the workspace guards are the enforcement, so there is
-				// no question to put to anyone and no rule to check first.
+				// boundary is the enforcement, so there is no question to put to
+				// anyone and no rule to check first.
 				editDiff := beginShellEditDiff(ctx, cmd, wdAbs, false)
 				defer editDiff.release()
 				return runSandboxedShellCommand(ctx, st, rt, sandboxedShellRequest{
 					command: cmd, timeoutMs: in.TimeoutMs, sandboxPermissions: safety.SandboxPermissionsUseDefault,
 					profile: safety.ProfileWorkspaceWrite, cwd: wdAbs, toolName: "shell", toolDescription: shellToolDescription,
-					editDiff: editDiff, taskWorkspace: ws,
+					editDiff: editDiff, boundary: boundary,
 				})
 			}
 			assessment := safety.AssessShellCommand(cmd)
@@ -274,9 +272,6 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := finalizeShellToolSchema(tool, execPermissionApprovalsEnabled(rt)); err != nil {
-		return nil, err
-	}
 	return tool, nil
 }
 
@@ -292,11 +287,12 @@ type sandboxedShellRequest struct {
 	// whole write policy rather than additions to the configured workspace
 	// roots. promoteReadOnlyWriteScope sets it when it promotes the profile.
 	exclusiveWritablePaths bool
-	// taskWorkspace is the batch execution's own directory (plans/150). Non-empty
-	// means the command runs for an unattended batch task: it must stay inside
-	// the OS sandbox, may write only this directory, may read only it plus the
-	// shared skill roots and the OS runtime, and never escalates out of either.
-	taskWorkspace   string
+	// boundary is a batch execution's filesystem boundary (plans/216). A
+	// non-empty Workspace means the command runs for an unattended batch task:
+	// it is contained in the OS sandbox where one exists and the project kept
+	// its switch on, may write only the task's own directory, and never
+	// escalates out of either.
+	boundary        BatchBoundary
 	cwd             string
 	toolName        string
 	toolDescription string
@@ -310,14 +306,22 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	var snap safety.Snapshot
 	snap = permissionSnapshotForRun(permissionSnapshotForContext(ctx, st, rt), RunIDFromContext(ctx))
 	cfg := sessionConfig(ctx, st, rt)
-	batch := strings.TrimSpace(req.taskWorkspace) != ""
+	boundary := req.boundary
+	batch := boundary.Workspace != ""
+	// A batch execution is contained only where there is a sandbox to contain
+	// it and the project still has its switch on (plans/216). Anywhere else it
+	// runs with full access — the owner's ruling: a machine without a sandbox
+	// must not stop the task, and a project that turned the sandbox off asked
+	// for exactly this.
+	batchSandboxed := batch && safety.SandboxAvailable() && (rt == nil || rt.BatchSandbox)
 	if batch {
-		// A copy, and a deliberate one: workspace-write with no named profile
-		// ignores FOREBRAIN_YOLO and a danger-full-access configuration, both of
-		// which are choices an operator makes for an interactive session. A batch
-		// task has nobody watching it, so nothing may lift the sandbox it
-		// promises.
-		cfg = batchSandboxConfig(cfg)
+		// A copy, and a deliberate one. Contained, the config is forced to
+		// workspace-write with no named profile: FOREBRAIN_YOLO and a
+		// danger-full-access configuration are choices an operator makes for an
+		// interactive session, and a batch task has nobody watching it. Open,
+		// it is forced the other way, so the decision here — not whatever the
+		// session or the environment carries — is the one that runs.
+		cfg = batchSandboxConfig(cfg, batchSandboxed)
 	}
 	manager := safety.NewManager()
 	defer manager.Close()
@@ -464,17 +468,17 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		}
 		denyRead = MergeAllowedRootPaths(denyRead, expanded)
 	}
+	// A batch execution's whole filesystem boundary, in the request's own terms
+	// (plans/216): the task may write its workspace and nothing else, may read
+	// the whole filesystem except the Forebrain home (and a project root that
+	// lives outside it), and the two exceptions to that denial — the workspace
+	// and the project's skill directories — are named separately so a backend
+	// can order the deny before them. The user's own deny_read list still
+	// narrows the result.
 	if batch {
-		projectRoot := strings.TrimSpace(ProjectRootFromContext(ctx))
-		home := ""
-		if rt != nil {
-			home = strings.TrimSpace(rt.Home)
-		}
-		boundary := batchShellBoundary(req.taskWorkspace, st.LoadedSkillRoots(), denyRead, projectRoot, home)
-		extraBinds = boundary.writable
+		extraBinds = boundary.Writable
 		req.exclusiveWritablePaths = true
-		allowRead = boundary.readable
-		denyRead = boundary.denied
+		allowRead = []string{string(filepath.Separator)}
 		allowNetwork = true
 	}
 	timeout := defaultShellCommandTimeout
@@ -514,13 +518,11 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	// would otherwise carry cold, Forebrain-owned caches onto the host.
 	shellEnv := append(planModeShellEnv(ctx, rt), agentRuntimeEnv(rt)...)
 	includePlatformDefaults := runtimeCfg.Filesystem.IncludePlatformDefaults
-	networkApproval := shellNetworkApprovalHandler(st, rt)
-	approvedNetwork := approvedNetworkAccessForSandbox(ctx)
 	if batch {
 		// The task's scratch space lives in its own workspace: the OS temp
 		// directory is exactly the shared space a batch task must not have, and
 		// TMPDIR is the variable every runtime honours.
-		tmpDir := filepath.Join(filepath.Clean(req.taskWorkspace), ".work", "tmp")
+		tmpDir := filepath.Join(filepath.Clean(boundary.Workspace), ".work", "tmp")
 		if mkErr := os.MkdirAll(tmpDir, 0o755); mkErr != nil {
 			return "", mkErr
 		}
@@ -533,41 +535,44 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		// "sh: /Users/<user>/.profile: Operation not permitted" on stderr of
 		// every command the task runs. Appended last so no earlier entry
 		// overrides it.
-		homeDir := filepath.Join(filepath.Clean(req.taskWorkspace), ".work", "home")
+		homeDir := filepath.Join(filepath.Clean(boundary.Workspace), ".work", "home")
 		if mkErr := os.MkdirAll(homeDir, 0o755); mkErr != nil {
 			return "", mkErr
 		}
 		shellEnv = append(shellEnv, "HOME="+homeDir)
-		// No one is available to answer a network question and no outside
-		// authorization applies to this task: the network grant is the batch
-		// request's own (plans/150).
+		// A contained task's package managers write their caches into its own
+		// workspace as well: the real home is denied, so npm, pip, uv, go and
+		// yarn would otherwise fail on the cache write before the install
+		// started. Only when contained — an open task has the real home back,
+		// and pointing its caches somewhere else would be a surprise nobody
+		// asked for.
+		if batchSandboxed {
+			shellEnv = append(shellEnv, batchCacheEnv(boundary.Workspace)...)
+		}
 		includePlatformDefaults = true
-		networkApproval = nil
-		approvedNetwork = nil
 	}
 	spoolDir := ""
 	if rt != nil && strings.TrimSpace(rt.StateRoot()) != "" {
 		spoolDir = filepath.Join(rt.StateRoot(), "state", "tool-output")
 	}
-	commandRequest := func(sandboxPermissions safety.SandboxPermissions, approvedNetwork *safety.ApprovedNetworkAccess) safety.CommandRequest {
+	commandRequest := func(sandboxPermissions safety.SandboxPermissions) safety.CommandRequest {
 		return safety.CommandRequest{
 			ToolKind: safety.ToolKindShell, Command: req.command, WorkDir: req.cwd, Timeout: timeout,
 			Profile: req.profile, SandboxPermissions: sandboxPermissions,
 			AdditionalWritablePaths: extraBinds, ExclusiveWritablePaths: req.exclusiveWritablePaths,
 			DeniedWritablePaths:     denyWrite,
-			AdditionalReadablePaths: allowRead, DeniedReadablePaths: denyRead, ExclusiveReadablePaths: batch,
+			AdditionalReadablePaths: allowRead, DeniedReadablePaths: denyRead,
+			DeniedReadableRoots: boundary.Denied, ReadableExceptions: boundary.Readable,
 			DeniedReadablePatterns: denyReadPatterns, IncludePlatformDefaults: includePlatformDefaults,
-			AllowNetwork: allowNetwork, ApprovedNetworkAccess: approvedNetwork,
-			NetworkApproval: networkApproval, NetworkEnvironmentID: ConversationSessionIDFromContext(ctx), NetworkExecutionID: RunIDFromContext(ctx),
-			SessionNetworkRules: st.NetworkSessionRules(ConversationSessionIDFromContext(ctx)),
-			Env:                 shellAttemptEnv(shellEnv, goCache.Env, contained(sandboxPermissions)),
-			OnOutput:            onOutput, OutputSpoolDir: spoolDir,
+			AllowNetwork: allowNetwork,
+			Env:          shellAttemptEnv(shellEnv, goCache.Env, contained(sandboxPermissions)),
+			OnOutput:     onOutput, OutputSpoolDir: spoolDir,
 		}
 	}
-	if batch && !contained(safety.SandboxPermissionsUseDefault) {
-		return "", fmt.Errorf("batch tasks need the OS sandbox, which is not available on this host; the command was not run")
-	}
-	res, decision, runErr := manager.RunCommand(ctx, cfg, commandRequest(effectiveSandboxPermissions, approvedNetwork))
+	// A machine with no sandbox runs a batch task's command the way it runs
+	// every other one: uncontained, and still confined to its own workspace by
+	// the request above (owner 2026-10-31, plans 215 §3.5 and 216).
+	res, decision, runErr := manager.RunCommand(ctx, cfg, commandRequest(effectiveSandboxPermissions))
 	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 		return "", runErr
 	}
@@ -577,7 +582,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	// whether it may run outside the sandbox, and the answer this whole branch
 	// exists to obtain - an exception to the sandbox - is the one thing a batch
 	// task never gets (plans/150).
-	if !batch && denied && res.NetworkDenial == nil && req.sandboxPermissions == safety.SandboxPermissionsUseDefault &&
+	if !batch && denied && req.sandboxPermissions == safety.SandboxPermissionsUseDefault &&
 		sandboxRetryApprovalAllowed(snap.ApprovalPolicy) && !denyReadRestricted {
 		// An approved replay retries directly; otherwise the approval surface
 		// decides. It answers "no approval needed" whenever policy already
@@ -601,40 +606,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 			retry = authorized
 		}
 		if retry {
-			res, decision, runErr = manager.RunCommand(ctx, cfg, commandRequest(safety.SandboxPermissionsRequireEscalated, nil))
-			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
-				return "", runErr
-			}
-			denied = decision.UseSandbox && safety.IsLikelySandboxDenied(decision, res)
-		}
-	}
-	if denied && res.NetworkDenial != nil && res.NetworkDenial.Decision == "ask" && !alreadyApproved {
-		if hook := st.ActionHook(); hook != nil {
-			networkContext := safety.NetworkApprovalContext{Host: res.NetworkDenial.Host, Protocol: res.NetworkDenial.Protocol}
-			retryReason := fmt.Sprintf("Network access to %q is blocked by policy.", res.NetworkDenial.Host)
-			payload := map[string]any{
-				"command": req.command, "timeout_ms": req.timeoutMs,
-				"sandbox_permissions": string(safety.SandboxPermissionsUseDefault),
-				"justification":       retryReason, "force_tool_approval": true,
-				"approval_reason": "network_denied", "sandbox_denial_reason": retryReason,
-				"network_approval_context": networkContext, "network_port": res.NetworkDenial.Port,
-				"session_id": ConversationSessionIDFromContext(ctx),
-			}
-			id, pending, approvalErr := hook(WithApprovedActionID(ctx, ""), "shell", payload)
-			if approvalErr != nil {
-				return "", approvalErr
-			}
-			if pending && id != "" {
-				CaptureToolRequiresAction(ctx, id, "shell", appendToolExecutionMetadata(ctx, st, map[string]any{
-					"requires_action": true, "network_retry": true,
-				}, rt, safety.ToolKindShell))
-				return "", &RequiresActionError{
-					RunID: RunIDFromContext(ctx), AgentID: HookAgentIDFromContext(ctx), SubagentType: SubagentTypeFromContext(ctx),
-					ActionID: id, ActionKind: "shell", ToolName: "shell", ToolInput: payload,
-				}
-			}
-			approved := &safety.ApprovedNetworkAccess{Context: networkContext, Port: res.NetworkDenial.Port}
-			res, decision, runErr = manager.RunCommand(ctx, cfg, commandRequest(effectiveSandboxPermissions, approved))
+			res, decision, runErr = manager.RunCommand(ctx, cfg, commandRequest(safety.SandboxPermissionsRequireEscalated))
 			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 				return "", runErr
 			}
@@ -751,42 +723,53 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	return string(b), nil
 }
 
-// batchShellBoundary is the whole filesystem boundary of a batch task's shell
-// command (plans/150): the task's own directory is the entire write set, that
-// directory plus the shared skill roots the entire readable application data,
-// and the project root it was carved out of and the Forebrain home are denied
-// outright. Everything the configuration or an authorization granted is
-// replaced rather than narrowed, because the ambient read set is "/" — there is
-// no path-by-path narrowing of that. Denying the project root is what makes the
-// sibling task directories and the rest of the project invisible.
-type batchShellPaths struct {
-	writable []string
-	readable []string
-	denied   []string
-}
-
-func batchShellBoundary(workspace string, skillRoots, denyRead []string, projectRoot, home string) batchShellPaths {
-	ws := filepath.Clean(workspace)
-	return batchShellPaths{
-		writable: []string{ws},
-		readable: MergeAllowedRootPaths(nil, append([]string{ws}, skillRoots...)),
-		denied:   MergeAllowedRootPaths(denyRead, nonEmptyPaths(projectRoot, home)),
-	}
-}
-
 // batchSandboxConfig is the configuration a batch task's shell runs under
-// whatever the session or the environment asked for: workspace-write, with no
-// named permission profile in force. FOREBRAIN_YOLO and a danger-full-access
-// configuration are an operator's choices for an interactive session; a batch
-// task runs unattended, so neither may lift the sandbox it promises (plans/150).
-func batchSandboxConfig(cfg *appcfg.Root) *appcfg.Root {
+// whatever the session or the environment asked for: workspace-write while it
+// is contained, danger-full-access while it is not.
+//
+// Contained, FOREBRAIN_YOLO and the full-access preset are an operator's
+// choices for an interactive session; a batch task runs unattended, so neither
+// may lift the sandbox it promises (plans/150). Open, the same reasoning runs
+// the other way: a machine with no sandbox, or a project that turned its
+// sandbox off, has told this process there is nothing to contain the task with,
+// and the owner's ruling is that the task still runs rather than fails
+// (plans/215 §3.5, plans/216 §3.2).
+func batchSandboxConfig(cfg *appcfg.Root, sandboxed bool) *appcfg.Root {
 	scoped := appcfg.Root{}
 	if cfg != nil {
 		scoped = *cfg
 	}
-	scoped.DefaultPermissions = ""
-	scoped.SandboxMode = appcfg.SandboxModeWorkspaceWrite
+	if sandboxed {
+		scoped.SandboxMode = appcfg.SandboxModeWorkspaceWrite
+	} else {
+		scoped.SandboxMode = appcfg.SandboxModeDangerFullAccess
+	}
 	return &scoped
+}
+
+// batchCacheEnv points every package manager's cache at the task's own
+// workspace (plans/216 §3.1). The real home is denied across the task boundary,
+// so npm, pip, uv, go and yarn would otherwise fail on the cache write before
+// the install began — and a cache in the workspace is also what keeps the
+// boundary meaningful: the task may reinstall freely without being handed the
+// host's shared caches.
+//
+// HOME itself is left alone (the caller has already moved it inside the
+// workspace); these are the per-tool overrides for the managers that do not
+// read XDG_CACHE_HOME.
+func batchCacheEnv(workspace string) []string {
+	cache := filepath.Join(filepath.Clean(workspace), ".cache")
+	return []string{
+		"XDG_CACHE_HOME=" + cache,
+		"npm_config_cache=" + filepath.Join(cache, "npm"),
+		"npm_config_store_dir=" + filepath.Join(cache, "pnpm"),
+		"PIP_CACHE_DIR=" + filepath.Join(cache, "pip"),
+		"UV_CACHE_DIR=" + filepath.Join(cache, "uv"),
+		"GOCACHE=" + filepath.Join(cache, "go-build"),
+		"GOMODCACHE=" + filepath.Join(cache, "go-mod"),
+		"GOPATH=" + filepath.Join(cache, "go"),
+		"YARN_CACHE_FOLDER=" + filepath.Join(cache, "yarn"),
+	}
 }
 
 func filesystemAllowsWriteAt(roots []string, target string) bool {
@@ -805,63 +788,6 @@ func filesystemAllowsWriteAt(roots []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func shellNetworkApprovalHandler(st *State, rt *AgentToolRuntime) safety.NetworkApprovalHandler {
-	if st == nil {
-		return nil
-	}
-	return func(ctx context.Context, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-		// Both hooks may be installed after the shell tool is constructed (the
-		// TUI does this when an interactive surface attaches), or supplied only
-		// for this gateway run through ctx. Resolve them at request time so the
-		// handler neither captures a stale surface nor permanently disables
-		// approval because startup ordering happened to leave a hook nil.
-		actionHook := st.ActionHook()
-		promptHook := NetworkApprovalPromptHookFromContext(ctx, st)
-		if actionHook == nil || promptHook == nil {
-			return safety.NetworkApprovalDeny, fmt.Errorf("network approval is unavailable")
-		}
-		target := string(request.Context.Protocol) + "://" + request.Context.Host
-		if request.Port > 0 {
-			target += ":" + strconv.Itoa(request.Port)
-		}
-		reason := fmt.Sprintf("Network access to %q is blocked by policy.", target)
-		payload := map[string]any{
-			"command": request.Command, "sandbox_permissions": string(safety.SandboxPermissionsUseDefault),
-			"justification": reason, "force_tool_approval": true, "approval_reason": "network_denied",
-			"sandbox_denial_reason": reason, "network_approval_context": request.Context,
-			"network_port": request.Port, "network_inline": true, "session_id": request.EnvironmentID,
-		}
-		actionID, pending, err := actionHook(WithApprovedActionID(ctx, ""), "shell", payload)
-		if err != nil {
-			return safety.NetworkApprovalDeny, err
-		}
-		if !pending || strings.TrimSpace(actionID) == "" {
-			return safety.NetworkApprovalAllowOnce, nil
-		}
-		if rt != nil && rt.RunRT != nil && strings.TrimSpace(request.ExecutionID) != "" {
-			defer func() { _ = rt.RunRT.ClearWait(context.Background(), request.ExecutionID) }()
-		}
-		decision, promptErr := promptHook(ctx, actionID, payload, request)
-		if promptErr == nil {
-			switch decision {
-			case safety.NetworkApprovalAllowForSession, safety.NetworkApprovalAllowInFuture:
-				st.SetNetworkSessionDecision(request.EnvironmentID, request.Context, request.Port, true)
-			case safety.NetworkApprovalDenyForSession:
-				st.SetNetworkSessionDecision(request.EnvironmentID, request.Context, request.Port, false)
-			}
-		}
-		return decision, promptErr
-	}
-}
-
-func approvedNetworkAccessForSandbox(ctx context.Context) *safety.ApprovedNetworkAccess {
-	access, ok := ApprovedNetworkAccessFromContext(ctx)
-	if !ok {
-		return nil
-	}
-	return &safety.ApprovedNetworkAccess{Context: access.Context, Port: access.Port}
 }
 
 func appendUniqueText(values []string, value string) []string {
@@ -920,7 +846,7 @@ func requestSandboxRetryApproval(ctx context.Context, st *State, rt *AgentToolRu
 	}
 	// Prefer a path-scoped sandbox capability over host execution whenever the
 	// denial names a concrete write target and structured approvals are enabled.
-	if path := sandboxDeniedWriteRoot(denialReason); path != "" && execPermissionApprovalsEnabled(rt) {
+	if path := sandboxDeniedWriteRoot(denialReason); path != "" {
 		additional := &safety.RequestPermissionProfile{FileSystem: &safety.FileSystemPermissionProfile{
 			Entries: []safety.FileSystemPermissionEntry{{Path: safety.NewFileSystemPermissionPath(path), Access: safety.FileSystemAccessWrite}},
 		}}
@@ -1045,8 +971,6 @@ func sandboxRetryApprovalAllowed(policy safety.ApprovalPolicy) bool {
 	switch policy.Mode {
 	case safety.ApprovalNever:
 		return false
-	case safety.ApprovalGranular:
-		return policy.Granular.SandboxApproval
 	default:
 		return true
 	}
@@ -1059,10 +983,6 @@ func sandboxRetryApprovalAllowed(policy safety.ApprovalPolicy) bool {
 func sandboxDenialReason(decision safety.SandboxDecision, res safety.CommandResult, runErr error) string {
 	const maxReasonLen = 512
 	parts := make([]string, 0, 1)
-	if denial := res.NetworkDenial; denial != nil {
-		detail := fmt.Sprintf("network access to %q was blocked: %s", denial.Host, denial.Reason)
-		parts = append(parts, detail)
-	}
 	if detail := safety.SandboxDenialDetail(decision, res); detail != "" {
 		parts = append(parts, detail)
 	}
@@ -1247,19 +1167,11 @@ func validateShellAdditionalPermissions(ctx context.Context, in *ShellInput, rt 
 		return fmt.Errorf("`additional_permissions` must include at least one requested permission in `network` or `file_system`")
 	}
 	in.AdditionalPermissions = &normalized.Permissions
-	if !execPermissionApprovalsEnabled(rt) && !additionalPermissionsPreapproved(ctx, rt, normalized.Permissions) {
-		return fmt.Errorf("additional permissions are disabled; enable `features.exec_permission_approvals` before using `with_additional_permissions`")
-	}
 	return nil
 }
 
-func execPermissionApprovalsEnabled(rt *AgentToolRuntime) bool {
-	return rt != nil && rt.Cfg != nil && rt.Cfg.EffectiveFeatures().ExecPermissionApprovals
-}
-
 func additionalPermissionsPreapproved(ctx context.Context, rt *AgentToolRuntime, requested safety.RequestPermissionProfile) bool {
-	if rt == nil || rt.Cfg == nil || !rt.Cfg.EffectiveFeatures().RequestPermissionsTool ||
-		(rt.PermissionSnapshotForSession == nil && rt.PermissionSnapshot == nil) {
+	if rt == nil || (rt.PermissionSnapshotForSession == nil && rt.PermissionSnapshot == nil) {
 		return false
 	}
 	snapshot := permissionSnapshotForRun(permissionSnapshotForContext(ctx, nil, rt), RunIDFromContext(ctx))
@@ -1299,51 +1211,6 @@ func additionalPermissionsPreapproved(ctx context.Context, rt *AgentToolRuntime,
 		cwd,
 	)
 	return err == nil && reflect.DeepEqual(materialized.Permissions, covered.Permissions)
-}
-
-// finalizeShellToolSchema adjusts the reflected shell schema before it reaches
-// the model. The shell tool is declared with `json:",omitempty"` on its
-// escalation-only fields (`justification`, `prefix_rule`,
-// `additional_permissions`), so the reflected schema already marks them
-// optional — the model may omit them instead of being forced to emit them.
-// This was previously worked around with nullable union types, which weaker
-// models frequently mis-handle by emitting string-encoded arrays/objects.
-//
-// When per-command additional permissions are disabled, its field and enum
-// value are dropped so the model is never offered a mode it cannot use.
-func finalizeShellToolSchema(tool *llm.Tool, execApprovals bool) error {
-	if tool == nil {
-		return nil
-	}
-	raw, err := json.Marshal(tool.InputSchema())
-	if err != nil {
-		return err
-	}
-	var schema map[string]any
-	if err := json.Unmarshal(raw, &schema); err != nil {
-		return err
-	}
-	properties, _ := schema["properties"].(map[string]any)
-	if !execApprovals {
-		delete(properties, "additional_permissions")
-		if required, ok := schema["required"].([]any); ok {
-			filtered := required[:0]
-			for _, value := range required {
-				if value != "additional_permissions" {
-					filtered = append(filtered, value)
-				}
-			}
-			schema["required"] = filtered
-		}
-		if property, ok := properties["sandbox_permissions"].(map[string]any); ok {
-			property["enum"] = []any{string(safety.SandboxPermissionsUseDefault), string(safety.SandboxPermissionsRequireEscalated)}
-			// with_additional_permissions is gone from the enum, so drop it from
-			// the description too; otherwise the model is told about a mode it
-			// cannot use.
-			property["description"] = "Per-command sandbox override. Defaults to use_default; use require_escalated for unsandboxed execution."
-		}
-	}
-	return tool.SetInputSchema(schema)
 }
 
 func shellBuiltinRequiresApproval(cmd string) bool {
@@ -1949,12 +1816,9 @@ type shellRewriteOutcome struct {
 
 // rewriteShellCommand applies presentation-flag rewriting to a shell command.
 // It is fail-open by construction: any doubt returns the original command.
-func rewriteShellCommand(ctx context.Context, rt *AgentToolRuntime, cmd string) shellRewriteOutcome {
+func rewriteShellCommand(ctx context.Context, cmd string) shellRewriteOutcome {
 	out := shellRewriteOutcome{Command: cmd, Original: cmd}
 	if strings.TrimSpace(cmd) == "" {
-		return out
-	}
-	if !shellRewriteEnabled(rt) {
 		return out
 	}
 	res := safety.Rewrite(cmd)
@@ -1972,15 +1836,6 @@ func rewriteShellCommand(ctx context.Context, rt *AgentToolRuntime, cmd string) 
 		"session", llm.AgentSessionIDFromContext(ctx),
 	)
 	return out
-}
-
-// shellRewriteEnabled reports whether rewriting is on. Config wins when it
-// speaks; otherwise safety's command-rewriting environment override decides.
-func shellRewriteEnabled(rt *AgentToolRuntime) bool {
-	if rt == nil || rt.Cfg == nil {
-		return true
-	}
-	return rt.Cfg.Tools.CommandRewrite.UseRewrite()
 }
 
 // applyTo records the rewrite on an approval payload so the user can see that
@@ -2023,12 +1878,11 @@ var goCachePruneMu sync.Mutex
 // resolveGoCacheAccess installs cache capabilities for every command launched
 // from a Go project, so wrappers such as make, task, and project scripts inherit
 // them without brittle shell parsing.
+//
+// The caches are always Forebrain's own, per project: sharing the host's Go
+// caches with a sandboxed command is not a setting any more (plan 206).
 func resolveGoCacheAccess(ctx context.Context, rt *AgentToolRuntime, cwd string) goCacheAccess {
 	if rt == nil || rt.Cfg == nil || strings.TrimSpace(rt.Home) == "" {
-		return goCacheAccess{}
-	}
-	mode := rt.Cfg.SandboxWorkspaceWrite.EffectiveGoCacheMode()
-	if mode == appcfg.GoCacheModeDisabled {
 		return goCacheAccess{}
 	}
 	projectRoot := findGoProjectRoot(cwd)
@@ -2038,9 +1892,6 @@ func resolveGoCacheAccess(ctx context.Context, rt *AgentToolRuntime, cwd string)
 	host, ok := queryHostGoEnv(ctx)
 	if !ok {
 		return goCacheAccess{}
-	}
-	if mode == appcfg.GoCacheModeShared {
-		return goCacheAccess{Writable: nonEmptyPaths(host.GOCACHE, host.GOMODCACHE)}
 	}
 
 	sum := sha256.Sum256([]byte(filepath.Clean(projectRoot)))
@@ -2125,16 +1976,6 @@ func prependGoProxy(local, original string) string {
 		return original
 	}
 	return local + "," + original
-}
-
-func nonEmptyPaths(paths ...string) []string {
-	var out []string
-	for _, path := range paths {
-		if path = strings.TrimSpace(path); path != "" {
-			out = append(out, filepath.Clean(path))
-		}
-	}
-	return out
 }
 
 type goCacheDirInfo struct {

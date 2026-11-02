@@ -26,31 +26,60 @@ import (
 	"go.yaml.in/yaml/v2"
 )
 
+// legacyImportMarkerSection is the fb_config row that records the one-time
+// import of a file-era configuration (plan 207 §3.5). It replaces the old
+// "the whole table is empty" test, which could not survive a startup that
+// writes every stored default: defaults are rows, so "no rows yet" would be
+// true only before the very first one.
+const legacyImportMarkerSection = "meta.legacy_yaml_imported"
+
 // importLegacyConfigIfNeeded runs the one-time move of a file-era install's
 // configuration into the state database. It runs after the database opens and
-// before the first compose; every part is gated on its destination being
-// empty, so it does its work on the first startup and nothing on the ones
-// after. The sections themselves are re-read in their persisted form
-// (LoadPersisted) so ${ENV} references are still references when they reach
-// the resolver, not values the load already expanded.
+// after the migration has pruned the rows plans 203–206 retired, and before the
+// startup writes the stored defaults — so a file's own values win over a
+// default and only the keys the file did not carry are filled.
+//
+// What says whether the import still owes work is the marker row, not the
+// table's emptiness: an install imported by a 187-era binary has rows but no
+// marker, so it only takes the marker (its configuration is already in the
+// database, and the file has been rewritten down to its startup sections); an
+// install the import has already run on takes nothing; a file-era install with
+// an empty table is the one case that still imports.
+//
+// The sections are read by the one whole-file reader the codebase keeps
+// (appcfg.LoadLegacyFileSections): the file's runtime sections, with ${ENV}
+// references still references, so they reach the resolver as references rather
+// than values a load already expanded.
 //
 // A failure fails the startup: an install whose configuration did not make
 // it into the database must not come up silently running on defaults.
 func importLegacyConfigIfNeeded(ctx context.Context, sqlDB *sql.DB, home, cfgPath string) error {
 	store := &state.ConfigStore{DB: sqlDB}
 
-	persisted, err := appcfg.LoadPersisted(cfgPath)
-	if err != nil {
-		return fmt.Errorf("read persisted config %s: %w", cfgPath, err)
-	}
-
-	// A. The file's runtime sections become fb_config rows, and the file is
-	// rewritten down to its startup sections.
 	sections, err := store.LoadSections(ctx)
 	if err != nil {
 		return fmt.Errorf("read stored config sections: %w", err)
 	}
-	if len(sections) == 0 {
+	if _, imported := sections[legacyImportMarkerSection]; imported {
+		return nil
+	}
+
+	persisted, err := appcfg.LoadLegacyFileSections(cfgPath)
+	if err != nil {
+		return fmt.Errorf("read persisted config %s: %w", cfgPath, err)
+	}
+	// peers is a database-only section (owner 2026-10-30): a copy in the file
+	// is never imported and never takes effect, and the file is not touched —
+	// the user's own edit is only worth a line in the log.
+	if !reflect.ValueOf(persisted.Peers).IsZero() {
+		slog.Warn("forebrain.yaml peers section is ignored; peer settings live in the state database")
+	}
+
+	// A. A file-era file's runtime sections become fb_config rows, and the
+	// file is rewritten down to its supported keys. An install that already
+	// holds Root rows was imported before the marker existed: its file is
+	// already the rewritten one, so it only takes the marker.
+	if !storedRootSectionPresent(sections) {
 		if imported, err := importLegacyYAMLSections(ctx, store, home, cfgPath, persisted); err != nil {
 			return err
 		} else if imported != nil {
@@ -59,7 +88,6 @@ func importLegacyConfigIfNeeded(ctx context.Context, sqlDB *sql.DB, home, cfgPat
 				"backup", imported.backup)
 		}
 	}
-
 	// B. The login files become the auth.* credential rows. The files stay
 	// where they are — the runtime no longer reads them, but they are the
 	// user's own copy and nothing deletes them.
@@ -81,12 +109,35 @@ func importLegacyConfigIfNeeded(ctx context.Context, sqlDB *sql.DB, home, cfgPat
 	}
 
 	// C. The MCP OAuth overlay tree becomes fb_mcp_oauth rows.
-	return importLegacyMCPOAuth(ctx, sqlDB, store, home, persisted)
+	if err := importLegacyMCPOAuth(ctx, sqlDB, store, home, persisted); err != nil {
+		return err
+	}
+
+	// The marker lands last: a startup that failed partway left it unwritten,
+	// so the next one tries again instead of taking a half-imported install for
+	// a finished one. Every part is gated on its own destination anyway.
+	if err := store.SaveCredential(ctx, legacyImportMarkerSection, json.RawMessage(`true`)); err != nil {
+		return fmt.Errorf("record the legacy import: %w", err)
+	}
+	return nil
 }
 
 type legacyImportResult struct {
 	sections []string
 	backup   string
+}
+
+// storedRootSectionPresent reports whether the database already holds a
+// configuration section — the fact that says a file-era install was imported
+// before the marker row existed (plan 207 §3.5). Credential rows do not count:
+// they land on every install, including one whose sections never made it in.
+func storedRootSectionPresent(sections map[string]json.RawMessage) bool {
+	for name := range sections {
+		if _, ok := rootConfigSectionFields[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // importLegacyYAMLSections stores the file's non-zero runtime sections and
@@ -106,6 +157,9 @@ func importLegacyYAMLSections(ctx context.Context, store *state.ConfigStore, hom
 	names := make([]string, 0, len(rootConfigSections))
 	src := reflect.ValueOf(&persisted).Elem()
 	for _, name := range rootConfigSections {
+		if dbOnlyConfigSections[name] {
+			continue
+		}
 		field := src.FieldByIndex(rootConfigSectionFields[name])
 		if field.IsZero() {
 			continue
@@ -131,7 +185,10 @@ func importLegacyYAMLSections(ctx context.Context, store *state.ConfigStore, hom
 	if err := store.ReplaceAll(ctx, sections); err != nil {
 		return nil, fmt.Errorf("store runtime sections: %w", err)
 	}
-	backup, err := rewriteMinimalConfigFile(cfgPath, persisted)
+	backup, err := rewriteMinimalConfigFile(cfgPath, appcfg.FileRoot{
+		Gateway:     persisted.Gateway,
+		Credentials: persisted.Credentials,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -242,11 +299,12 @@ func resolveEnvRef(s string, envValues map[string]string) (string, bool) {
 }
 
 // rewriteMinimalConfigFile backs the config file up and rewrites it holding
-// only the startup sections: gateway, and credentials for the transition
-// period (the read side still points ChatGPT logins at the file). The
-// original bytes are copied verbatim; the rewrite is a fresh marshal of the
-// two sections, so nothing else the file carried survives into it.
-func rewriteMinimalConfigFile(cfgPath string, persisted appcfg.Root) (string, error) {
+// only the supported keys (plan 207 §3.6): gateway, and credentials for the
+// transition period (the read side still points ChatGPT logins at the file).
+// The original bytes are copied verbatim; the rewrite is a fresh marshal of
+// appcfg.FileRoot — the type that is exactly the file — so nothing else the
+// file carried survives into it.
+func rewriteMinimalConfigFile(cfgPath string, minimal appcfg.FileRoot) (string, error) {
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return "", fmt.Errorf("read %s for backup: %w", cfgPath, err)
@@ -260,14 +318,6 @@ func rewriteMinimalConfigFile(cfgPath string, persisted appcfg.Root) (string, er
 		return "", fmt.Errorf("back up %s: %w", cfgPath, err)
 	}
 
-	// A shadow type, not appcfg.Root itself: the sandbox section's yaml tags
-	// carry no omitempty, so marshaling a Root — even a zero one — always
-	// renders a sandbox_workspace_write block. The file must hold exactly
-	// the two startup sections, and nothing else.
-	minimal := struct {
-		Gateway     appcfg.Gateway            `yaml:"gateway,omitempty" json:"gateway,omitempty"`
-		Credentials appcfg.CredentialsSection `yaml:"credentials,omitempty" json:"credentials,omitempty"`
-	}{Gateway: persisted.Gateway, Credentials: persisted.Credentials}
 	var body []byte
 	if strings.ToLower(filepath.Ext(cfgPath)) == ".json" {
 		body, err = json.MarshalIndent(minimal, "", "  ")

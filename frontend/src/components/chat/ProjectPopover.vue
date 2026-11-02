@@ -45,7 +45,9 @@
         <Folder v-else class="ic" aria-hidden="true" />
         <span class="nm">{{ p.name }}</span>
         <span v-if="p.missing" class="badge err" style="height: 18px">{{ t('chat.dirMissing') }}</span>
-        <span v-else-if="trustOf(p) === 'unknown'" class="badge warn" style="height: 18px">{{ t('chat.trustUnknown') }}</span>
+        <!-- A batch project has no trust level, so it carries no trust badge
+             (plans/216 §3.5). -->
+        <span v-else-if="p.projectType !== 'batch' && trustOf(p) === 'unknown'" class="badge warn" style="height: 18px">{{ t('chat.trustUnknown') }}</span>
         <span class="pth">{{ p.root }}</span>
         <Check v-if="p.id === selected?.projectId" class="ck" aria-hidden="true" />
         <span v-else class="spc" />

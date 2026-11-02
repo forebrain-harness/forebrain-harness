@@ -2218,136 +2218,6 @@ func TestSetPrimaryModelRollsBackOnLoadFailure(t *testing.T) {
 	}
 }
 
-// TestSetPrimaryModelRuntimeUncertainFailsClosed injects a build failure the
-// rollback cannot escape: with auto_review on, the guardian reviewer resolves
-// config order, so a config whose first entry cannot build fails every load —
-// the candidate's and the snapshot rebuild's alike.
-func TestSetPrimaryModelRuntimeUncertainFailsClosed(t *testing.T) {
-	t.Setenv(primaryModelTestKeyEnv, "test-key")
-	restore := SetLLMOverrideForTest(stubPrimaryModelLLM{})
-	defer restore()
-	key := "${" + primaryModelTestKeyEnv + "}"
-	good := newPrimaryModelRoot(
-		primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil),
-		primaryModelEntry("openai", "gpt-b", key, "http://b.test/v1", nil),
-	)
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: good}}
-	if err := r.Load(); err != nil {
-		t.Fatalf("Runner.Load: %v", err)
-	}
-
-	broken := newPrimaryModelRoot(
-		primaryModelEntry("unknownprov", "x", "k", "http://x.test/v1", nil),
-		primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil),
-		primaryModelEntry("openai", "gpt-b", key, "http://b.test/v1", nil),
-	)
-	broken.ApprovalsReviewer = "auto_review"
-	// The broken pointer is what the switch must build against; writing it
-	// directly is the injection, LoadConfig is not used here because its own
-	// rollback would swap the pointer back before the switch runs.
-	r.mu.load.Lock()
-	r.AppCfg = broken
-	switchErr := r.loadWithIntentLocked(primaryModelExplicit, "openai", "gpt-b", nil, false)
-	r.mu.load.Unlock()
-
-	if !IsPrimaryModelRuntimeUncertain(switchErr) {
-		t.Fatalf("double failure classified as %v, want runtime-uncertain", switchErr)
-	}
-	if err := r.runtimeHealthErr(); err == nil || !errors.Is(err, errRuntimeNeedsReload) {
-		t.Fatalf("unhealthy runner gate = %v", err)
-	}
-	if _, err := r.RunContent(context.Background(), nil); !errors.Is(err, errRuntimeNeedsReload) {
-		t.Fatalf("RunContent on an unhealthy runner = %v, want the reload error", err)
-	}
-	// A complete successful build clears the flag and restores service.
-	r.mu.load.Lock()
-	r.AppCfg = good
-	recoverErr := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, false)
-	r.mu.load.Unlock()
-	if recoverErr != nil {
-		t.Fatalf("recovery load: %v", recoverErr)
-	}
-	if r.runtimeHealthErr() != nil {
-		t.Fatal("runner still unhealthy after a successful rebuild")
-	}
-	requireSelection(t, r, "openai", "gpt-a", "")
-}
-
-// TestLoadConfigRollbackFailureIsVisible injects an initial load failure and
-// a rollback failure: the config object the rollback would restore is mutated
-// in place to be unloadable first (the shared file going bad between the
-// original load and the reload), so both builds fail and neither error may be
-// hidden — LoadConfig returns the runtime-uncertain error, the old pointer is
-// restored, and the runner refuses work.
-func TestLoadConfigRollbackFailureIsVisible(t *testing.T) {
-	t.Setenv(primaryModelTestKeyEnv, "test-key")
-	restore := SetLLMOverrideForTest(stubPrimaryModelLLM{})
-	defer restore()
-	key := "${" + primaryModelTestKeyEnv + "}"
-	good := newPrimaryModelRoot(primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil))
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: good}}
-	if err := r.Load(); err != nil {
-		t.Fatalf("Runner.Load: %v", err)
-	}
-	// Mutate the rollback target in place: auto_review plus an unloadable
-	// first entry fails every later build of this object, including the one
-	// LoadConfig's rollback would run.
-	good.Agents.Definitions["main"] = appcfg.AgentDefinition{Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-		primaryModelEntry("unknownprov", "x", "k", "http://x.test/v1", nil),
-		primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil),
-	}}
-	good.ApprovalsReviewer = "auto_review"
-
-	broken := newPrimaryModelRoot(
-		primaryModelEntry("unknownprov", "y", "k", "http://y.test/v1", nil),
-		primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil),
-	)
-	broken.ApprovalsReviewer = "auto_review"
-	err := r.LoadConfig(broken)
-	if !IsPrimaryModelRuntimeUncertain(err) {
-		t.Fatalf("LoadConfig double failure = %v, want runtime-uncertain", err)
-	}
-	if r.AppCfg != good {
-		t.Fatal("config pointer not restored after a failed reload")
-	}
-	if _, err := r.RunContent(context.Background(), nil); !errors.Is(err, errRuntimeNeedsReload) {
-		t.Fatalf("RunContent after an uncertain reload = %v, want the reload error", err)
-	}
-}
-
-// TestLoadConfigRollbackRecoversAndReportsPlainError pins the other half: when
-// the rollback rebuild succeeds, the returned error is the load failure (not
-// an uncertainty the recovery resolved), the old pointer is back, and the
-// runner keeps serving on the previous selection.
-func TestLoadConfigRollbackRecoversAndReportsPlainError(t *testing.T) {
-	key := "${" + primaryModelTestKeyEnv + "}"
-	good := newPrimaryModelRoot(primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil))
-	r := loadPrimaryModelRunner(t, good)
-
-	broken := newPrimaryModelRoot(
-		primaryModelEntry("unknownprov", "x", "k", "http://x.test/v1", nil),
-		primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil),
-	)
-	broken.ApprovalsReviewer = "auto_review"
-	err := r.LoadConfig(broken)
-	if err == nil {
-		t.Fatal("LoadConfig with an unloadable config = nil, want an error")
-	}
-	if IsPrimaryModelRuntimeUncertain(err) {
-		t.Fatalf("successful rollback classified uncertain: %v", err)
-	}
-	if r.AppCfg != good {
-		t.Fatal("config pointer not restored")
-	}
-	requireSelection(t, r, "openai", "gpt-a", "")
-	if r.Agent() == nil {
-		t.Fatal("rollback did not restore a published agent")
-	}
-	if r.runtimeHealthErr() != nil {
-		t.Fatalf("runner unhealthy after a successful rollback: %v", r.runtimeHealthErr())
-	}
-}
-
 func TestLoadResetsPinWhenAgentChanges(t *testing.T) {
 	key := "${" + primaryModelTestKeyEnv + "}"
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
@@ -2852,7 +2722,7 @@ func TestTokenEstimateOptionsMapsDownload(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			root, err := appcfg.Load(path)
+			root, err := loadDocumentForTest(path)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
@@ -2930,5 +2800,49 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 	}
 	if !strings.Contains(batch, "You cannot ask anyone anything.") {
 		t.Error("batch system prompt no longer forbids asking")
+	}
+}
+
+// TestBatchToolSetAsksNobodyAnything pins the tool table a batch conversation
+// gets (plans/216 §3.3): the tools that exist to put a question to a person,
+// and the tool that asks for more permission, are not offered at all — a task
+// that called one would either block for good or learn that asking works.
+// Everything the work itself needs stays.
+func TestBatchToolSetAsksNobodyAnything(t *testing.T) {
+	home := t.TempDir()
+	st := tool.NewState(t.TempDir())
+	a, err := agent.New(noopLLM{}, "batch", "test")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	// Subagents are on: their absence would then be the switch's doing, not the
+	// batch posture's.
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Defaults: appcfg.AgentDefaults{EnableSubagent: appcfg.BoolPtr(true)}}}
+	rt := &tool.AgentToolRuntime{
+		Home: home, WorkspaceRoot: t.TempDir(), ProjectType: state.ProjectTypeBatch, Cfg: cfg,
+	}
+	if err := tool.RegisterDefaultTools(a, st, rt); err != nil {
+		t.Fatalf("RegisterDefaultTools: %v", err)
+	}
+	// The subagent tools are the runner's to register, and a batch task keeps
+	// them: dispatching is work, not a question.
+	if err := RegisterSubagentTool(a, (&Runner{Deps: &Deps{Home: home, AppCfg: cfg, ProjectType: state.ProjectTypeBatch}}).subagentFactory()); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	registered := map[string]bool{}
+	for _, entry := range debuglogToolsView(a) {
+		registered[entry.Name()] = true
+	}
+	for _, banned := range []string{"user_interaction", "enter_plan_mode", "exit_plan_mode", "request_permissions"} {
+		if registered[banned] {
+			t.Fatalf("a batch conversation must not offer %s; it has %v", banned, registered)
+		}
+	}
+	// Everything the work itself needs stays, subagents included: dispatching
+	// is work, not a question.
+	for _, wanted := range []string{"present_files", "read_file", "write_file", "edit_file", "shell", "subagent_run"} {
+		if !registered[wanted] {
+			t.Fatalf("a batch conversation must still offer %s; it has %v", wanted, registered)
+		}
 	}
 }

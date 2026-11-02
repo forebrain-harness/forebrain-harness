@@ -1,9 +1,9 @@
 package gateway
 
 import (
-	"database/sql"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -489,12 +489,32 @@ func TestHeartbeatRoundTripsThroughTheAPI(t *testing.T) {
 	}
 }
 
-// The configuration editor must never hand a secret back to the browser, and
-// must refuse text that would not load as a appcfg.
-func TestConfigEndpointRedactsSecretsAndRefusesInvalidText(t *testing.T) {
+// GET /api/config/file-schema names the keys forebrain.yaml supports (plan 207
+// §3.6): the configuration editor draws every other key as not existing instead
+// of leaving it looking configured.
+func TestConfigFileSchemaNamesTheSupportedKeys(t *testing.T) {
+	s := cronTestServer(t)
+	rec := cronRequest(t, s, http.MethodGet, "/api/config/file-schema", nil, s.handleConfigFileSchema)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Keys []string `json:"keys"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, []string{"gateway.http_addr", "gateway.auth.token", "credentials.chatgpt"}, got.Keys)
+}
+
+// The configuration editor edits forebrain.yaml as a file (plan 191 §3.2):
+// GET hands over the text on disk — not the composed runtime configuration, and
+// with no credential in it unless the file itself carries one — PUT writes it
+// back, and only text that is not YAML at all is refused.
+func TestConfigEndpointEditsTheFileOnDisk(t *testing.T) {
 	s := cronTestServer(t)
 	path := filepath.Join(s.Home, "forebrain.yaml")
 	seedConfigDocument(t, s.Env.SQL, "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n      - provider: deepseek\n        model: deepseek-v4\n        api_key: super-secret\n        base_url: https://api.deepseek.com\n")
+	onDisk := "gateway:\n  http_addr: 127.0.0.1:6060\n"
+	require.NoError(t, os.WriteFile(path, []byte(onDisk), 0o600))
 
 	rec := cronRequest(t, s, http.MethodGet, "/api/config", nil, s.handleConfigFile)
 	if rec.Code != http.StatusOK {
@@ -507,32 +527,102 @@ func TestConfigEndpointRedactsSecretsAndRefusesInvalidText(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// The editor is handed the composed document with its credentials in
-	// plaintext (owner ruling 2026-10-30, plan 188 W3): what it shows is what
-	// the runtime composes, and what it sends back is what lands.
-	if !strings.Contains(got.YAML, "super-secret") {
-		t.Fatalf("the editor must be handed the stored document:\n%s", got.YAML)
-	}
-	if !strings.Contains(got.YAML, "agents:") {
-		t.Fatalf("the stored runtime sections belong to the document:\n%s", got.YAML)
-	}
-	if strings.Contains(got.YAML, "credentials:") {
-		t.Fatalf("the credentials pointer never appears:\n%s", got.YAML)
-	}
 	if got.Path != path {
 		t.Fatalf("path = %q", got.Path)
 	}
+	// The file's own text, and nothing composed from the database.
+	if got.YAML != onDisk {
+		t.Fatalf("the editor must be handed the file on disk, got:\n%s", got.YAML)
+	}
+	if strings.Contains(got.YAML, "super-secret") || strings.Contains(got.YAML, "agents:") {
+		t.Fatalf("a stored section must not appear in the file's text:\n%s", got.YAML)
+	}
+	// The web may offer the approval presets — and with them the sandbox's own
+	// settings — only where a sandbox exists to configure (plan 215 §3.4).
+	var flag struct {
+		PresetsVisible *bool `json:"approval_presets_visible"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &flag); err != nil {
+		t.Fatalf("decode flag: %v", err)
+	}
+	if flag.PresetsVisible == nil || *flag.PresetsVisible != safety.SandboxAvailable() {
+		t.Fatalf("approval_presets_visible = %v, want this machine's sandbox answer", flag.PresetsVisible)
+	}
 
-	// An unparsable body changes nothing.
+	// A key the file does not support is saved as written and stores nothing:
+	// the file is not the runtime configuration's source any more.
 	if !configSectionAbsent(t, s.Env.SQL, "hooks") {
 		t.Fatal("precondition: hooks holds no row")
 	}
-	bad := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{"yaml": "hooks: [unclosed"}, s.handleConfigFile)
+	edited := onDisk + "hooks:\n  pre_tool_use: []\ngateway_url: http://typo\n"
+	saved := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{"yaml": edited}, s.handleConfigFile)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", saved.Code, saved.Body.String())
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(body) != edited {
+		t.Fatalf("the file must carry what was saved, got:\n%s", body)
+	}
+	if !configSectionAbsent(t, s.Env.SQL, "hooks") {
+		t.Fatal("the editor writes the file, never the database")
+	}
+
+	// Text that is not YAML is refused with the line and a Chinese reason, and
+	// the file is left exactly as it was.
+	bad := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{"yaml": "gateway:\n\thttp_addr: x\n"}, s.handleConfigFile)
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("unparsable config = %d %s", bad.Code, bad.Body.String())
 	}
-	if !configSectionAbsent(t, s.Env.SQL, "hooks") {
-		t.Fatal("a refused editor write must store nothing")
+	var refusal struct {
+		Line    int    `json:"line"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(bad.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("decode refusal: %v", err)
+	}
+	if refusal.Line != 2 || refusal.Message != "缩进不能用 Tab" {
+		t.Fatalf("refusal = %#v", refusal)
+	}
+	if body, err := os.ReadFile(path); err != nil || string(body) != edited {
+		t.Fatalf("a refused save must not touch the file:\n%s", body)
+	}
+}
+
+// The three syntax mistakes the editor draws a wavy line under are the three the
+// gateway refuses (plan 191 §0.19): a lost colon — which YAML would otherwise
+// read as a plain scalar — a tab, and a quote left open.
+func TestConfigFileSyntaxRefusals(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		line int
+		want string
+	}{
+		{"missing colon", "gateway:\n  auth:\n    token fbg_2b7d9c41\n", 3, "缺少冒号"},
+		{"tab indent", "gateway:\n\thttp_addr: 127.0.0.1:6060\n", 2, "缩进不能用 Tab"},
+		{"open quote", "gateway:\n  auth:\n    token: \"fbg_2b7d\n", 3, "引号没有闭合"},
+	}
+	for _, tc := range cases {
+		syntax := configFileSyntaxError(tc.text)
+		require.NotNil(t, syntax, tc.name)
+		require.Equal(t, tc.line, syntax.line, tc.name)
+		require.Equal(t, tc.want, syntax.message, tc.name)
+	}
+	// A file the runtime can read raises nothing, block scalars and lists
+	// included.
+	for _, ok := range []string{
+		"",
+		"gateway:\n  http_addr: 127.0.0.1:6060\n",
+		"gateway:\n  http_addr: 127.0.0.1:6060 # the address the browser reaches\n",
+		"credentials:\n  chatgpt: ~/.codex/auth.json\n",
+		"gateway:\n  auth:\n    token: |\n      a multi line\n      value\n",
+		"gateway:\n  auth:\n    token: \"${FOREBRAIN_TOKEN}\"\n",
+		"a:\n- one\n- two\n",
+	} {
+		require.Nil(t, configFileSyntaxError(ok), "text must be accepted:\n%s", ok)
 	}
 }
 
@@ -657,16 +747,16 @@ func TestHooksEndpointPagesTheFlattenedTable(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), `"rows"`)
 }
 
-// GET /api/runtime names the state, the auth mode, the primary-agent count and
-// the three directories the settings page's runtime tab lists; the version and
-// the address are the browser's own and are not repeated here.
+// GET /api/runtime names the state, the primary-agent count and the three
+// directories the settings page's runtime tab lists; the version and the
+// address are the browser's own and are not repeated here, and token auth is
+// the only authentication so there is no mode to report (plan 206).
 func TestRuntimeInfoReportsHomeAndDirs(t *testing.T) {
 	s := cronTestServer(t)
 	rec := cronRequest(t, s, http.MethodGet, "/api/runtime", nil, s.handleRuntimeInfo)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var got struct {
 		Status   string `json:"status"`
-		Auth     string `json:"auth"`
 		Agents   int    `json:"agents"`
 		Home     string `json:"home"`
 		LogsDir  string `json:"logs_dir"`
@@ -674,8 +764,7 @@ func TestRuntimeInfoReportsHomeAndDirs(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Equal(t, "ok", got.Status)
-	// cronTestServer binds a configuration with the default auth mode.
-	require.Equal(t, "token", got.Auth)
+	require.NotContains(t, rec.Body.String(), `"auth"`)
 	require.Equal(t, 1, got.Agents)
 	require.Equal(t, s.Home, got.Home)
 	require.Equal(t, filepath.Join(s.Home, "logs"), got.LogsDir)
@@ -702,12 +791,21 @@ func newProjectsTestServer(t *testing.T) (*Server, *state.ProjectStore, string) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	seed := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n      - provider: openai\n        model: gpt-5\n        api_key: ${TEST_KEY}\n        base_url: http://127.0.0.1:9/v1\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+	cfg, err := loadPersistedDocumentForTest(cfgPath)
+	require.NoError(t, err)
+	seedConfigRoot(t, db, cfg)
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}}
+	env := &process.Environment{Deps: run.Deps{Home: home}, Root: home, SQL: db}
+	env.ConfigPath = cfgPath
 	s := &Server{
 		Home:     home,
 		Runner:   runner,
 		Projects: state.NewProjectStore(db, "main"),
 		Sessions: state.NewSessionStore(db, "main"),
+		Env:      env,
 	}
 	return s, s.Projects, home
 }
@@ -992,31 +1090,67 @@ func TestProjectsCreateRejectsUnknownProjectType(t *testing.T) {
 	}
 }
 
-// TestProjectsBatchRequiresTrust pins the creation gate (owner 2026-10-26): a
-// batch project exists only together with its trust decision.
-func TestProjectsBatchRequiresTrust(t *testing.T) {
+// TestProjectsBatchRecordsTrustWithoutADecision pins the creation rule of plans
+// 216 §0.4: a batch project has no trust level, so creating one asks for no
+// trust decision and refuses nothing for the lack of it — the record the skill
+// and MCP loaders read is written as part of being a batch project.
+func TestProjectsBatchRecordsTrustWithoutADecision(t *testing.T) {
 	s, store, home := newProjectsTestServer(t)
 	root := projectTempRoot(t)
 
+	// No `trust` field at all: the create succeeds and the project reads as
+	// trusted, which is what its loaders will consult.
 	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "batch", "root": root, "project_type": "batch"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("batch without trust: %d %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "batch_requires_trust") {
-		t.Fatalf("body must name the error: %s", rec.Body.String())
-	}
-	projects, err := store.ListProjects(context.Background(), state.ListProjectsOptions{}, 50, 0)
-	if err != nil || len(projects) != 0 {
-		t.Fatalf("a refused batch create must leave no project behind: %v %+v", err, projects)
-	}
-
-	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "batch", "root": root, "project_type": "batch", "trust": true})
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("batch with trust: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("batch without a trust field: %d %s", rec.Code, rec.Body.String())
+	}
+	var row map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatalf("decode the created project: %v", err)
+	}
+	if row["trust_recorded"] != true {
+		t.Fatalf("trust_recorded = %v, want true", row["trust_recorded"])
 	}
 	trusted, err := safety.IsTrusted(home, safety.Project{Root: root})
 	if err != nil || !trusted {
-		t.Fatalf("the batch create must record trust: %v %v", trusted, err)
+		t.Fatalf("a created batch project must be recorded trusted: %v %v", trusted, err)
+	}
+	// The record is what the skill and MCP loaders read, so the detail read
+	// must report it too: an untrusted batch project would be force-sandboxed
+	// out of the very things its tasks run on.
+	id, _ := row["id"].(string)
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail read: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode the project detail: %v", err)
+	}
+	if detail["trusted"] != true {
+		t.Fatalf("the created batch project reads as trusted = %v, want true", detail["trusted"])
+	}
+
+	// The same creation with a client claiming trust is not a different
+	// request: the decision is not the client's to make either way.
+	otherRoot := projectTempRoot(t)
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "batch", "root": otherRoot, "project_type": "batch", "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("batch with a trust field: %d %s", rec.Code, rec.Body.String())
+	}
+	projects, err := store.ListProjects(context.Background(), state.ListProjectsOptions{}, 50, 0)
+	if err != nil || len(projects) != 2 {
+		t.Fatalf("two created batch projects expected, got %v %+v", err, projects)
+	}
+
+	// A non-batch project is unchanged: its trust is still the caller's.
+	plainRoot := projectTempRoot(t)
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "plain", "root": plainRoot, "project_type": "coding"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("coding create: %d %s", rec.Code, rec.Body.String())
+	}
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: plainRoot}); err != nil || trusted {
+		t.Fatalf("a coding project must not be trusted on its own: %v %v", trusted, err)
 	}
 }
 
@@ -1083,11 +1217,12 @@ func TestProjectPatchTypeReachesOnlyNewSessions(t *testing.T) {
 	}
 }
 
-// TestProjectPatchToBatchRequiresTrust pins the PATCH gate: switching to batch
-// needs either a request that restates the trust decision or a root already
-// trusted.
-func TestProjectPatchToBatchRequiresTrust(t *testing.T) {
-	s, _, _ := newProjectsTestServer(t)
+// TestProjectPatchToBatchRecordsTrustWithoutADecision pins the PATCH half of the
+// same rule (plans/216 §0.4): switching a project to batch asks for no trust
+// decision — the switch succeeds on its own and records the trust its loaders
+// read.
+func TestProjectPatchToBatchRecordsTrustWithoutADecision(t *testing.T) {
+	s, _, home := newProjectsTestServer(t)
 	root := projectTempRoot(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "switch", "root": root})
 	if rec.Code != http.StatusCreated {
@@ -1098,17 +1233,14 @@ func TestProjectPatchToBatchRequiresTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	id, _ := row["id"].(string)
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: root}); err != nil || trusted {
+		t.Fatalf("a coding project must start untrusted: %v %v", trusted, err)
+	}
 
+	// No `trust` field in the request: the switch is the whole request.
 	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, map[string]any{"project_type": "batch"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("patch to batch without trust: %d %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "batch_requires_trust") {
-		t.Fatalf("body must name the error: %s", rec.Body.String())
-	}
-	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, map[string]any{"project_type": "batch", "trust": true})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("patch to batch with trust: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("patch to batch without a trust field: %d %s", rec.Code, rec.Body.String())
 	}
 	patched := map[string]any{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
@@ -1116,6 +1248,9 @@ func TestProjectPatchToBatchRequiresTrust(t *testing.T) {
 	}
 	if patched["project_type"] != "batch" {
 		t.Fatalf("patched project_type = %v, want batch", patched["project_type"])
+	}
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: root}); err != nil || !trusted {
+		t.Fatalf("a project that became batch must be recorded trusted: %v %v", trusted, err)
 	}
 }
 
@@ -1884,6 +2019,21 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	chatSessions := rest.Group("/api/chat/sessions")
 	chatSessions.Post("/", s.handleChatSessionCreate)
 	chatSessions.Get("/:id", s.handleChatSession)
+	// A batch conversation's read-only rule, mirroring the production
+	// wrappers: every route that would change it is refused in the gateway
+	// (plans/216 §3.4).
+	chatSessions.Get("/:id/messages", s.handleChatMessages)
+	chatSessions.Get("/:id/todos", s.handleSessionTodos)
+	chatSessions.Get("/:id/artifacts", s.handleSessionArtifacts)
+	chatSessions.Post("/:id/title", s.batchReadOnly(s.handleChatSessionTitle))
+	chatSessions.Put("/:id/model", s.batchReadOnly(s.handleChatSessionModelPut))
+	chatSessions.Post("/:id/compact", s.batchReadOnly(s.handleSessionCompact))
+	chatSessions.Post("/:id/rewind", s.batchReadOnly(s.handleSessionRewind))
+	chatSessions.Post("/:id/rewind/undo", s.batchReadOnly(s.handleSessionRewindUndo))
+	chatSessions.Post("/:id/file-changes/revert", s.batchReadOnly(s.handleSessionFileChangesRevert))
+	chatSessions.Post("/:id/interrupt-send", s.batchReadOnly(s.handleSessionInterruptSend))
+	chatSessions.Post("/:id/subagents/:agent/input", s.batchReadOnly(s.handleSubagentInput))
+	chatSessions.Post("/:id/subagents/:agent/queued-input", s.batchReadOnly(s.handleSubagentQueuedInput))
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
 	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
@@ -3518,34 +3668,52 @@ func TestProjectRuleFilesListsTheChainAndCreatableLayers(t *testing.T) {
 	require.JSONEq(t, `{"dir":"docs","exists":true,"content":"docs rules"}`, rr.Body.String())
 }
 
+// The settings page reads and writes one thing: the approval preset (plan 203).
+// The GET answers the stored value (an unset one is the workspace-write
+// default), and the PUT writes that one section — no sandbox mode and no
+// approval policy row appears in fb_config, because neither is a setting any
+// more.
 func TestApprovalDefaultGetPut(t *testing.T) {
 	s, _, _ := rulesServer(t)
-	// The Default preset is on-request + workspace-write; a config carrying
-	// exactly that pair matches it, anything else (including a blank config)
-	// reads as custom.
-	s.Env.Deps.AppCfg.ApprovalPolicy = appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)
-	s.Env.Deps.AppCfg.SandboxMode = appcfg.SandboxModeWorkspaceWrite
 
 	rr := httptest.NewRecorder()
 	s.handleApprovalDefaultGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/approval-default", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"current":"auto"`)
+	require.Contains(t, rr.Body.String(), `"current":"workspace_write"`)
 
 	rr = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/permissions/approval-default", strings.NewReader(`{"preset":"full-access"}`))
+	req := httptest.NewRequest(http.MethodPut, "/api/permissions/approval-default", strings.NewReader(`{"preset":"full_access"}`))
 	s.handleApprovalDefaultPut(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), `"current":"full-access"`)
+	require.Contains(t, rr.Body.String(), `"current":"full_access"`)
 
 	persisted, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, appcfg.ApprovalPolicyNever, persisted.ApprovalPolicy.Mode)
-	require.Equal(t, appcfg.SandboxModeDangerFullAccess, persisted.SandboxMode)
+	require.Equal(t, appcfg.ApprovalPresetFullAccess, persisted.ApprovalPreset)
 
-	rr = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPut, "/api/permissions/approval-default", strings.NewReader(`{"preset":"yolo"}`))
-	s.handleApprovalDefaultPut(rr, req)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
+	var written []string
+	rows, err := s.Env.SQL.Query(`SELECT section FROM fb_config`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var section string
+		require.NoError(t, rows.Scan(&section))
+		written = append(written, section)
+	}
+	require.NoError(t, rows.Err())
+	require.Contains(t, written, "approval_preset")
+	for _, gone := range []string{"sandbox_mode", "approval_policy", "default_permissions", "approvals_reviewer", "auto_review"} {
+		require.NotContains(t, written, gone, "the PUT must not write %q", gone)
+	}
+
+	// Neither the deleted read-only preset nor the old spellings resolve; a
+	// client still holding one is told so instead of being silently moved.
+	for _, bad := range []string{"yolo", "read_only", "read-only", "auto", "full-access"} {
+		rr = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodPut, "/api/permissions/approval-default", strings.NewReader(`{"preset":"`+bad+`"}`))
+		s.handleApprovalDefaultPut(rr, req)
+		require.Equal(t, http.StatusBadRequest, rr.Code, bad)
+	}
 }
 
 func TestSessionPresetValidates(t *testing.T) {
@@ -3567,12 +3735,41 @@ func TestSessionPresetValidates(t *testing.T) {
 	s.handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset", nil))
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 
-	// Without a mounted runner the endpoint reports unavailability rather
-	// than pretending to have applied anything.
+	// The deleted read-only preset is refused outright.
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"read-only"}`))
 	s.handleSessionPreset(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "unknown approval preset")
+
+	// Without a mounted runner the endpoint reports unavailability rather
+	// than pretending to have applied anything.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full_access"}`))
+	s.handleSessionPreset(rr, req)
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+}
+
+// With no sandbox there is one preset and nothing to choose, so both write
+// routes are answered as missing — the page that no longer offers them reads a
+// 404, not a setting that would stop applying (plan 215 §3.4).
+func TestPresetWriteRoutesAreMissingWithoutASandbox(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+
+	rr := httptest.NewRecorder()
+	s.handleApprovalDefaultPut(rr, httptest.NewRequest(http.MethodPut, "/api/permissions/approval-default", strings.NewReader(`{"preset":"full_access"}`)))
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+
+	rr = httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full_access"}`)))
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+
+	// Nothing was written on the way to the 404.
+	persisted, err := s.persistedConfig(context.Background())
+	require.NoError(t, err)
+	require.NotEqual(t, appcfg.ApprovalPresetFullAccess, persisted.ApprovalPreset)
 }
 
 // A preset picked in the web dropdown is durable: a server (and runner)
@@ -3594,19 +3791,21 @@ func TestSessionPresetSurvivesServerRestart(t *testing.T) {
 	s := newServer()
 
 	rr := httptest.NewRecorder()
-	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full-access"}`)))
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full_access"}`)))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	// The "other process": a fresh Server and Runner, nothing in memory.
 	rr = httptest.NewRecorder()
 	newServer().handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset?session_id=s1", nil))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), `"current":"full-access"`)
+	require.Contains(t, rr.Body.String(), `"current":"full_access"`)
 	require.Contains(t, rr.Body.String(), `"source":"picker"`)
 }
 
 // A session that ran under TUI --yolo before presets were persisted is read
-// back as full-access once its own tool results carry the bypass marker.
+// back as full-access once its own tool results carry the bypass marker. Such a
+// session has no preset row — that is what makes it a legacy one, and what the
+// fixture restores after Ensure gave it the row every new session gets.
 func TestSessionPresetGetInfersLegacyYoloSession(t *testing.T) {
 	home := t.TempDir()
 	ctx := context.Background()
@@ -3615,6 +3814,8 @@ func TestSessionPresetGetInfersLegacyYoloSession(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	sessions := state.NewSessionStore(db, "main")
 	require.NoError(t, sessions.Ensure(ctx, "yoloed", "yoloed"))
+	_, err = db.Exec(`DELETE FROM fb_session_permission_state WHERE session_id='yoloed'`)
+	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES('yoloed','tool','visible','{"output":"ok","approval_bypassed_by_yolo":true}',10)`)
 	require.NoError(t, err)
 
@@ -3625,7 +3826,7 @@ func TestSessionPresetGetInfersLegacyYoloSession(t *testing.T) {
 	rr := httptest.NewRecorder()
 	s.handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset?session_id=yoloed", nil))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), `"current":"full-access"`)
+	require.Contains(t, rr.Body.String(), `"current":"full_access"`)
 	require.Contains(t, rr.Body.String(), `"source":"observed"`)
 }
 
@@ -3639,7 +3840,7 @@ func TestSessionPresetBelongsToItsConversation(t *testing.T) {
 	s := &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
 
 	rr := httptest.NewRecorder()
-	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full-access"}`)))
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full_access"}`)))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, cfg.SandboxMode)
@@ -3651,13 +3852,16 @@ func TestSessionPresetBelongsToItsConversation(t *testing.T) {
 		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 		return rr.Body.String()
 	}
-	require.Contains(t, current("s1"), `"current":"full-access"`)
-	require.Contains(t, current("s2"), `"current":"auto"`)
+	require.Contains(t, current("s1"), `"current":"full_access"`)
+	require.Contains(t, current("s2"), `"current":"workspace_write"`)
 
+	// Full access is the YOLO posture: the owning conversation bypasses the
+	// sandbox and the ask, and the other one keeps the configured behavior.
 	owning := runner.EvaluatePermissionForSession("s1", "shell", "rm -rf /tmp/build-output")
-	require.Equal(t, "danger_full_access", owning.Reason)
+	require.Equal(t, safety.ReasonYOLO, owning.Reason)
+	require.True(t, owning.BypassSandbox)
 	other := runner.EvaluatePermissionForSession("s2", "shell", "rm -rf /tmp/build-output")
-	require.NotEqual(t, "danger_full_access", other.Reason)
+	require.NotEqual(t, safety.ReasonYOLO, other.Reason)
 	require.False(t, other.BypassSandbox)
 }
 
@@ -3684,7 +3888,7 @@ func TestSessionScopedPermissionWritesRefuseAnotherAgentsSession(t *testing.T) {
 	require.NoError(t, s.Sessions.Ensure(ctx, "rule-session", "rule-session"))
 
 	rr := httptest.NewRecorder()
-	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"their-session","preset":"full-access"}`)))
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"their-session","preset":"full_access"}`)))
 	require.Equal(t, http.StatusNotFound, rr.Code)
 	foreign := runner.EvaluatePermissionForSession("their-session", "shell", "rm -rf /tmp/build-output")
 	require.NotEqual(t, "danger_full_access", foreign.Reason, "another agent's session gained a preset")
@@ -3707,9 +3911,9 @@ func TestSessionScopedPermissionWritesRefuseAnotherAgentsSession(t *testing.T) {
 	}
 
 	rr = httptest.NewRecorder()
-	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"my-session","preset":"full-access"}`)))
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"my-session","preset":"full_access"}`)))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	require.Equal(t, "danger_full_access", runner.EvaluatePermissionForSession("my-session", "shell", "rm -rf /tmp/build-output").Reason)
+	require.Equal(t, safety.ReasonYOLO, runner.EvaluatePermissionForSession("my-session", "shell", "rm -rf /tmp/build-output").Reason)
 
 	update.SessionID = "rule-session"
 	raw, err = json.Marshal(update)
@@ -3747,6 +3951,21 @@ func providersGet(t *testing.T, s *Server) []map[string]any {
 	return out.Providers
 }
 
+// persistedConfigEntryKeys lists the stored api_key of each of the active
+// agent's expanded provider entries — where a row's real value still lives now
+// that the wire only carries a mask (plan 191 §3.3).
+func persistedConfigEntryKeys(t *testing.T, s *Server) []string {
+	t.Helper()
+	cfg, err := s.persistedConfig(context.Background())
+	require.NoError(t, err)
+	entries := cfg.Agents.Definitions["main"].LLMProviders
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.APIKey)
+	}
+	return out
+}
+
 func providersPut(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rr := httptest.NewRecorder()
@@ -3781,9 +4000,12 @@ func TestProvidersDTORoundTripStoresKeyInPlaintext(t *testing.T) {
 	rows := providersGet(t, s)
 	require.Len(t, rows, 1)
 	require.Equal(t, "deepseek", rows[0]["provider"])
-	require.Equal(t, "sk-live-plain-9876", rows[0]["api_key"], "the GET answers the stored plaintext")
-	require.NotContains(t, rows[0], "api_key_set")
-	require.NotContains(t, rows[0], "api_key_hint")
+	// The key itself never travels back (plan 191 §3.3): the row answers
+	// whether one is set and its last four characters, and the page draws the
+	// masked field with that tail.
+	require.NotContains(t, rows[0], "api_key", "the GET must not answer a key")
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "9876", rows[0]["api_key_last4"])
 	models := rows[0]["models"].([]any)
 	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, models)
 }
@@ -3809,8 +4031,14 @@ func TestProviderKeyBackfillFollowsTheEntryNotTheProvider(t *testing.T) {
 	require.Len(t, rows, 2)
 	require.Equal(t, "https://a.example", rows[0]["base_url"])
 	require.Equal(t, "https://b.example", rows[1]["base_url"])
-	require.Equal(t, "${ZHIPUAI_A_KEY}", rows[0]["api_key"], "a.example 必须还是 A 的 key")
-	require.Equal(t, "${ZHIPUAI_B_KEY}", rows[1]["api_key"], "b.example 不许继承 A 的 key")
+	// The keys themselves never travel back; what tells the two endpoints
+	// apart is what is stored, so that is what is asserted here (plan 191
+	// §3.3). Each row reports a key is set.
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, true, rows[1]["api_key_set"])
+	entries := persistedConfigEntryKeys(t, s)
+	require.Equal(t, "${ZHIPUAI_A_KEY}", entries[0], "a.example 必须还是 A 的 key")
+	require.Equal(t, "${ZHIPUAI_B_KEY}", entries[1], "b.example 不许继承 A 的 key")
 }
 
 func TestProviderKeyBackfillNeverCrossesEndpoints(t *testing.T) {
@@ -3915,7 +4143,7 @@ func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
 	require.Len(t, rows, 2)
 	require.Equal(t, "deepseek", rows[0]["provider"])
 	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, rows[0]["models"].([]any))
-	require.Equal(t, "${DEEPSEEK_API_KEY}", rows[0]["api_key"])
+	require.Equal(t, true, rows[0]["api_key_set"])
 	require.Equal(t, "openai", rows[1]["provider"])
 
 	// An interleaved order is a fallback order, not one service: it stays
@@ -3954,7 +4182,8 @@ func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
 	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
 	rows := providersGet(t, s)
 	require.Len(t, rows, 1)
-	require.Equal(t, "sk-live-keep-4321", rows[0]["api_key"])
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "4321", rows[0]["api_key_last4"], "the kept key is the one the page shows a tail of")
 	require.Equal(t, []any{"deepseek-v4", "deepseek-r2"}, rows[0]["models"].([]any))
 
 	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "sk-live-keep-4321")
@@ -3997,8 +4226,8 @@ func TestProvidersDTOKeyClearOnAFallbackIsRefused(t *testing.T) {
 	// The untouched table still reads back with both keys.
 	rows := providersGet(t, s)
 	require.Len(t, rows, 2)
-	require.Equal(t, "${DEEPSEEK_API_KEY}", rows[0]["api_key"])
-	require.Equal(t, "${ARCEE_AI_API_KEY}", rows[1]["api_key"])
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, true, rows[1]["api_key_set"])
 }
 
 // The login-backed services are the one shape an empty key is correct for:
@@ -4035,7 +4264,7 @@ func TestProvidersDTOLoginBackedFallbackMayStayKeyless(t *testing.T) {
 	require.Empty(t, entries[1].APIKey, "a login-backed row carries no key")
 	rows := providersGet(t, s)
 	require.Len(t, rows, 2)
-	require.Empty(t, rows[1]["api_key"])
+	require.Equal(t, false, rows[1]["api_key_set"], "a login-backed row reports no key")
 }
 
 // A key-mode provider cannot be left keyless when it is the primary: the
@@ -4083,7 +4312,7 @@ func TestProvidersDTOTypedSecretWinsOverAnEmptyReference(t *testing.T) {
 
 	rows := providersGet(t, s)
 	require.Len(t, rows, 1)
-	require.Equal(t, "sk-typed-1234", rows[0]["api_key"])
+	require.Equal(t, "1234", rows[0]["api_key_last4"])
 }
 
 func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
@@ -4099,27 +4328,32 @@ func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
 	require.Contains(t, row, "sk-new-bbbb")
 	require.NotContains(t, row, "sk-old-aaaa")
 	rows := providersGet(t, s)
-	require.Equal(t, "sk-new-bbbb", rows[0]["api_key"])
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "bbbb", rows[0]["api_key_last4"], "the rotated key's tail is what the page shows")
 }
 
-// A short key is stored and answered whole: plaintext in, plaintext out, at
-// any length (plan 188 W4).
-func TestProvidersDTOShortKeyHintIsFullyMasked(t *testing.T) {
+// A key shorter than four characters has no tail to show: the row is reported
+// set with an empty hint, never with the key (plan 191 §3.3).
+func TestProvidersDTOShortKeyHintIsEmpty(t *testing.T) {
 	s, _ := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
 		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"ab"}]}`).Code)
 	rows := providersGet(t, s)
-	require.Equal(t, "ab", rows[0]["api_key"])
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.NotContains(t, rows[0], "api_key_last4", "a key too short to have a tail shows bullets only")
 }
 
-// An explicit api_key value (a pasted ${ENV} reference) passes through as-is.
+// An explicit api_key value (a pasted ${ENV} reference) is stored as sent and
+// masked on the way back like any other credential: what the page shows is a
+// tail, not the reference.
 func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
 	s, _ := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
 		`{"providers":[{"provider":"openai","base_url":"https://llm.example.test/v1","models":["m"],"api_key":"${MY_CUSTOM_KEY}"}]}`).Code)
 	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "${MY_CUSTOM_KEY}")
 	rows := providersGet(t, s)
-	require.Equal(t, "${MY_CUSTOM_KEY}", rows[0]["api_key"])
+	require.NotContains(t, rows[0], "api_key")
+	require.Equal(t, true, rows[0]["api_key_set"])
 }
 
 // The settings page never sees a stored key — it shows a hint and sends
@@ -4165,7 +4399,7 @@ func TestProvidersDTOHealsALoginRowCarryingAnotherProvidersKey(t *testing.T) {
 	// The healed row reads as keyless to the next page load.
 	rows := providersGet(t, s)
 	require.Len(t, rows, 2)
-	require.Empty(t, rows[1]["api_key"])
+	require.Equal(t, false, rows[1]["api_key_set"])
 }
 
 // The expanded per-model entries the DTO writes are what the engine itself
@@ -5228,7 +5462,7 @@ func TestCronSettingsRoundTrip(t *testing.T) {
 	if eff := stored.CronRetentionDays(); eff != 7 {
 		t.Fatalf("stored retention after the write = %d, want 7", eff)
 	}
-	if eff := s.liveCfg().CronRetentionDays(); eff == 7 {
+	if eff := s.liveCfg().CronRetentionDays(); eff == 7 { // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 		t.Fatal("the live configuration must not adopt a section write before its next turn")
 	}
 	rec = cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
@@ -5291,22 +5525,44 @@ func TestCronSettingsPutBoundsRequestBody(t *testing.T) {
 	}
 }
 
-// The YAML editor and the structured endpoint share one validation: what the
-// editor submits is parsed exactly the way the loader reads a file, so a
-// retention the loader would refuse never reaches disk from there either.
-func TestCronSettingsSharedValidationWithTheYAMLEditor(t *testing.T) {
+// The YAML editor and the structured endpoints deliberately do not share a
+// validation (plan 191 §3.2): the editor writes the disk file and nothing
+// else, so a value the settings or cron endpoint would refuse is still saved
+// as written — silently ignored when the file is read, which is the owner's
+// ruling for anything the file does not support — and the store never moves.
+// The bounds themselves stay where they belong: the cron endpoint's own
+// refusal is pinned one test up, the settings PATCH's below.
+func TestConfigFilePutWritesTheFileAndNotTheStore(t *testing.T) {
 	s := cronTestServer(t)
 	path := filepath.Join(s.Home, "forebrain.yaml")
 	s.Env.ConfigPath = path
 
-	rec := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{
-		"yaml": "cron:\n  retention_days: 0\n",
-	}, s.handleConfigFile)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("yaml editor with retention 0 = %d %s, want 400", rec.Code, rec.Body.String())
+	// A stored cron section, so "the editor did not write the store" is a row
+	// that exists and did not move rather than an absent one.
+	if rec := cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": 7}, s.handleCronSettings); rec.Code != http.StatusOK {
+		t.Fatalf("seed cron settings = %d %s", rec.Code, rec.Body.String())
 	}
-	if !configSectionAbsent(t, s.Env.SQL, "cron") {
-		t.Fatalf("a rejected editor write reached the store: %s", configSectionRow(t, s.Env.SQL, "cron"))
+
+	// The same retention the cron endpoint refuses (retention 0, pinned one
+	// test up) sails through the editor: the file is the user's own.
+	rec := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{
+		"yaml": "gateway:\n  http_addr: 127.0.0.1:6060\ncron:\n  retention_days: 0\n",
+	}, s.handleConfigFile)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("yaml editor with retention 0 = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"saved":true`) {
+		t.Fatalf("editor answer = %s, want saved", body)
+	}
+	if row := configSectionRow(t, s.Env.SQL, "cron"); !strings.Contains(row, `"retention_days":7`) {
+		t.Fatalf("an editor write reached the store: %s", row)
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file back: %v", err)
+	}
+	if !strings.Contains(string(onDisk), "retention_days: 0") {
+		t.Fatalf("file on disk = %q, want the text as written", onDisk)
 	}
 }
 
@@ -5852,7 +6108,6 @@ func newSubagentViewTestServer(t *testing.T) (*Server, string) {
 	sessions := state.NewSessionStore(db, "main")
 	require.NoError(t, sessions.Ensure(context.Background(), "sid", "sid"))
 	cfg := &appcfg.Root{}
-	cfg.Compact.ModelAutoCompactTokenLimit = 200_000
 	// A production runner always carries the controller: a subagent's channel
 	// keeps its queue there, and a steer is only deliverable through it.
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main"}, Control: run.NewController()}
@@ -6633,7 +6888,7 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 	t.Setenv("FOREBRAIN_MCP_WRITE_TEST_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	root := appcfg.Root{ApprovalsReviewer: "user"}
+	var root appcfg.Root
 	root.Agents.Definitions = map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: mcpWriteProvider()},
 	}
@@ -6643,7 +6898,7 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 	if err := appcfg.Save(cfgPath, root); err != nil {
 		t.Fatalf("save fixture config: %v", err)
 	}
-	cfg, err := appcfg.LoadPersisted(cfgPath)
+	cfg, err := loadPersistedDocumentForTest(cfgPath)
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
@@ -6677,7 +6932,7 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 	// start does — ${ENV} references resolved, the launch project's trust
 	// applied — because the file is a restart-time source, not a watched one
 	// (plan 189).
-	loaded, err := appcfg.Load(cfgPath)
+	loaded, err := loadDocumentForTest(cfgPath)
 	if err != nil {
 		t.Fatalf("load fixture config: %v", err)
 	}
@@ -6955,12 +7210,13 @@ func TestMCPServerWriteKeepsUntouchedFieldsAndTargets(t *testing.T) {
 // sending the placeholder back keeps the stored value, and a plaintext secret
 // written by hand is refused rather than saved into a file the loader would then
 // refuse to read.
-// TestMCPServerWriteReturnsStoredCredentialsInPlaintext pins the owner's
-// 2026-10-30 ruling (plan 188 W8): a stored literal credential travels back
-// to the surface in plaintext, and a plaintext value a surface sends is
-// stored in the section as sent. The placeholder keep semantics and the
-// empty-value removal stay as they were.
-func TestMCPServerWriteReturnsStoredCredentialsInPlaintext(t *testing.T) {
+// TestMCPServerWriteMasksStoredCredentials pins the direction that matters
+// (plan 191 §3.3, §0.20): the credentials an MCP entry carries — the
+// Authorization-style request headers and the OAuth block's three secrets —
+// travel back as the placeholder plus whether they are set and their last four
+// characters, never as their value. Sending the placeholder back, or sending
+// nothing, keeps what is stored; a value the surface types replaces it.
+func TestMCPServerWriteMasksStoredCredentials(t *testing.T) {
 	entry := appcfg.MCPServerConfig{
 		Name:      "secretive",
 		Transport: "streamable_http",
@@ -6968,6 +7224,7 @@ func TestMCPServerWriteReturnsStoredCredentialsInPlaintext(t *testing.T) {
 		Headers: map[string]string{
 			"Authorization": "Bearer eyJhbGciOiJSUzI1NiJ9",
 			"x-api-key":     "${DOCS_API_KEY}",
+			"X-Trace":       "plain",
 		},
 		OAuth: appcfg.MCPOAuthConfig{ClientSecret: "${DOCS_OAUTH_SECRET}"},
 	}
@@ -6984,24 +7241,34 @@ func TestMCPServerWriteReturnsStoredCredentialsInPlaintext(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
 	}
+	if strings.Contains(rec.Body.String(), "eyJhbGciOiJSUzI1NiJ9") {
+		t.Fatalf("the list must never carry a credential's plaintext: %s", rec.Body.String())
+	}
 	row := mcpServerRow(t, decodeMCPServersBody(t, rec), "secretive")
 	headers := row["headers"].(map[string]any)
-	if headers["Authorization"] != "Bearer eyJhbGciOiJSUzI1NiJ9" {
-		t.Fatalf("headers = %+v, want the stored literal in plaintext", headers)
+	if headers["Authorization"] != appcfg.RedactedSecretPlaceholder {
+		t.Fatalf("headers = %+v, want the placeholder", headers)
 	}
-	if headers["x-api-key"] != "" {
-		t.Fatalf("a reference the load resolved (its env is unset) reads empty: %+v", headers)
+	if headers["X-Trace"] != "plain" {
+		t.Fatalf("a header that is not a credential stays readable: %+v", headers)
+	}
+	if headers["x-api-key"] != appcfg.RedactedSecretPlaceholder {
+		t.Fatalf("a reference that persistedConfig keeps reads as a set credential: %+v", headers)
+	}
+	secrets := row["secrets"].(map[string]any)
+	auth := secrets["headers.Authorization"].(map[string]any)
+	if auth["set"] != true || auth["last4"] != "NiJ9" {
+		t.Fatalf("the credential must be reported as set with its last four: %+v", auth)
 	}
 	oauth := row["oauth"].(map[string]any)
-	if oauth["client_secret"] != "" {
-		t.Fatalf("a secret reference the load resolved (its env is unset) reads empty: %+v", oauth)
+	if oauth["client_secret"] != appcfg.RedactedSecretPlaceholder {
+		t.Fatalf("a secret reference persistedConfig keeps reads as set: %+v", oauth)
 	}
 	if row["oauth_overlay"] != true {
 		t.Fatalf("the list must say a stored credential exists: %+v", row)
 	}
 
-	// A plaintext value the surface sends is stored as sent, in the section's
-	// own JSON.
+	// A value the surface types is stored as sent, in the section's own JSON.
 	before := mustRead(t, f.cfgPath)
 	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/secretive", map[string]any{
 		"headers": map[string]string{"x-api-key": "sk-live-plaintext"},
@@ -7011,17 +7278,18 @@ func TestMCPServerWriteReturnsStoredCredentialsInPlaintext(t *testing.T) {
 	}
 	saved := findServer(t, f.shared(t), "secretive")
 	if saved.Headers["x-api-key"] != "sk-live-plaintext" {
-		t.Fatalf("headers = %+v, want the plaintext value stored", saved.Headers)
+		t.Fatalf("headers = %+v, want the value stored", saved.Headers)
 	}
 	if !strings.Contains(configSectionRow(t, f.server.Env.SQL, "agents"), "sk-live-plaintext") {
-		t.Fatal("the stored agents section must carry the plaintext credential")
+		t.Fatal("the stored agents section must carry the credential")
 	}
 	if mustRead(t, f.cfgPath) != before {
 		t.Fatal("the configuration file must not be touched by a section write")
 	}
 
-	// The placeholder still means "leave what is stored" for a sender that
-	// uses it, and an empty value removes exactly the key it names.
+	// The placeholder and an empty value both mean "leave what is stored" for
+	// a credential; a header that is not one is still removed by an empty
+	// value.
 	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/secretive", map[string]any{
 		"headers": map[string]string{"x-api-key": "", "Authorization": appcfg.RedactedSecretPlaceholder},
 	})
@@ -7029,8 +7297,8 @@ func TestMCPServerWriteReturnsStoredCredentialsInPlaintext(t *testing.T) {
 		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
 	}
 	saved = findServer(t, f.shared(t), "secretive")
-	if _, ok := saved.Headers["x-api-key"]; ok {
-		t.Fatalf("an empty value must remove the key: %+v", saved.Headers)
+	if saved.Headers["x-api-key"] != "sk-live-plaintext" {
+		t.Fatalf("an empty credential value must keep it: %+v", saved.Headers)
 	}
 	if saved.Headers["Authorization"] != "Bearer eyJhbGciOiJSUzI1NiJ9" {
 		t.Fatalf("the placeholder must keep the stored literal: %+v", saved.Headers)
@@ -8609,8 +8877,8 @@ func TestWithConfigSectionSerialisesWriters(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = s.withConfigSection(context.Background(), "compact", func(cfg *appcfg.Root) error {
-				limit := cfg.Compact.ModelAutoCompactTokenLimit + 1
-				cfg.Compact.ModelAutoCompactTokenLimit = limit
+				percent := cfg.Compact.AutoCompactPercent + 1
+				cfg.Compact.AutoCompactPercent = percent
 				return nil
 			})
 		}(i)
@@ -8622,7 +8890,10 @@ func TestWithConfigSectionSerialisesWriters(t *testing.T) {
 	}
 	cfg, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, writers, cfg.Compact.ModelAutoCompactTokenLimit,
+	// A section written to the store is stored verbatim — the runtime clamps a
+	// percent to its range when it reads it — so the increments count from zero
+	// and none is lost.
+	require.Equal(t, writers, cfg.Compact.AutoCompactPercent,
 		"every writer's increment must have landed")
 }
 
@@ -9981,4 +10252,287 @@ func TestProjectChannelTargetsRequiresTheProject(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("channel-targets for a missing project = %d %s, want 404", rec.Code, rec.Body.String())
 	}
+}
+
+// test-only readers for a whole configuration document.
+
+// loadDocumentForTest reads a whole configuration document — stored sections
+// included — the way appcfg.Load read one before plan 207 narrowed forebrain.yaml
+// to its supported keys: parse and normalize, then Load's tail (.env merge,
+// ${ENV} expansion, validation). A test that assembles a runtime configuration
+// in a file goes through here, because the file itself no longer carries those
+// sections.
+func loadDocumentForTest(path string) (appcfg.Root, error) {
+	root, err := loadPersistedDocumentForTest(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	if err := appcfg.FinishLoad(&root); err != nil {
+		return appcfg.Root{}, err
+	}
+	return root, nil
+}
+
+// loadPersistedDocumentForTest is the same read without Load's tail: a ${ENV}
+// reference stays a reference, as appcfg.LoadPersisted left it.
+func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	return appcfg.ParseRootYAML(body)
+}
+
+// ===== Settings page: GET/PATCH /api/settings (plan 191 §3.1) =====
+//
+// The endpoint's own guarantees: the read never carries a credential's
+// plaintext, a group save spanning sections lands whole or not at all, a
+// credential nobody sent keeps its value, and a value the loader refuses comes
+// back as the path that caused it.
+
+// settingsServer is a gateway over a fresh home whose configuration the
+// section validator can judge, the way the running process's own is.
+func settingsServer(t *testing.T) (*Server, *sql.DB) {
+	t.Helper()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(
+		"gateway:\n  http_addr: 127.0.0.1:6060\n"), 0o600))
+	process.InstallConfigSectionValidator(cfgPath, db)
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
+	s := &Server{Home: home, Env: &process.Environment{
+		Root:       home,
+		ConfigPath: cfgPath,
+		SQL:        db,
+		Deps:       run.Deps{Home: home, AppCfg: &appcfg.Root{}},
+	}}
+	return s, db
+}
+
+// settingsCall runs one request against the settings endpoint.
+func settingsCall(t *testing.T, s *Server, method string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader *strings.Reader
+	if body == nil {
+		reader = strings.NewReader("")
+	} else {
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		reader = strings.NewReader(string(raw))
+	}
+	recorder := httptest.NewRecorder()
+	s.handleSettings(recorder, httptest.NewRequest(method, "/api/settings", reader))
+	return recorder
+}
+
+// settingsGet is the read, decoded.
+func settingsGet(t *testing.T, s *Server) (values map[string]any, secrets map[string]map[string]any, meta map[string]any, body string) {
+	t.Helper()
+	recorder := settingsCall(t, s, http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var out struct {
+		Values  map[string]any            `json:"values"`
+		Secrets map[string]map[string]any `json:"secrets"`
+		Meta    map[string]any            `json:"meta"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &out), recorder.Body.String())
+	return out.Values, out.Secrets, out.Meta, recorder.Body.String()
+}
+
+// settingsPatch is one group save.
+func settingsPatch(t *testing.T, s *Server, values map[string]any, secrets map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := map[string]any{}
+	if values != nil {
+		body["values"] = values
+	}
+	if secrets != nil {
+		body["secrets"] = secrets
+	}
+	return settingsCall(t, s, http.MethodPatch, body)
+}
+
+// TestSettingsGetMasksCredentials pins §0.20 on the wire: a credential the page
+// can show is reported as set plus its last four characters, and its plaintext
+// appears nowhere in the reply.
+func TestSettingsGetMasksCredentials(t *testing.T) {
+	s, _ := settingsServer(t)
+	const key = "tvly-dev-0123456789abcdefY1s8"
+
+	saved := settingsPatch(t, s, map[string]any{"agents.defaults.web_search.provider": "tavily"},
+		map[string]string{"agents.defaults.web_search.tavily.api_key": key})
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+
+	values, secrets, meta, body := settingsGet(t, s)
+	require.NotContains(t, body, key, "the reply must never carry a credential's plaintext")
+	require.Equal(t, "tavily", values["agents.defaults.web_search.provider"])
+
+	secret, ok := secrets["agents.defaults.web_search.tavily.api_key"]
+	require.True(t, ok, "the credential is reported through secrets")
+	require.Equal(t, true, secret["set"])
+	require.Equal(t, "Y1s8", secret["last4"])
+
+	_, inValues := values["agents.defaults.web_search.tavily.api_key"]
+	require.False(t, inValues, "a credential never reaches values")
+
+	// The two facts the page lays itself out from.
+	require.Contains(t, meta, "approval_presets_visible")
+	require.Equal(t, assemblyDefaultPromptForTest(), meta["builtin_handoff_prompt"])
+}
+
+// assemblyDefaultPromptForTest is the builtin handoff prompt the meta carries.
+func assemblyDefaultPromptForTest() any {
+	return settingsByPath["compact.prompt"].def
+}
+
+// TestSettingsPatchWritesAcrossSections pins the group save: one request whose
+// items live in three different Root sections writes all three.
+func TestSettingsPatchWritesAcrossSections(t *testing.T) {
+	s, _ := settingsServer(t)
+
+	saved := settingsPatch(t, s, map[string]any{
+		"approval_preset":                            "full_access",
+		"sandbox_workspace_write.writable_roots":     []string{"/tmp/extra-writable"},
+		"sandbox_workspace_write.network_access":     false,
+		"batch.sandbox_default":                      false,
+		"agents.defaults.web_fetch.allow_private_ip": true,
+	}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+
+	root, err := s.persistedConfig(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, appcfg.ApprovalPresetFullAccess, root.ApprovalPreset)
+	require.Equal(t, []string{"/tmp/extra-writable"}, root.SandboxWorkspaceWrite.WritableRoots)
+	require.NotNil(t, root.SandboxWorkspaceWrite.NetworkAccess)
+	require.False(t, *root.SandboxWorkspaceWrite.NetworkAccess)
+	require.NotNil(t, root.Batch.SandboxDefault)
+	require.False(t, *root.Batch.SandboxDefault)
+	require.True(t, root.Agents.Defaults.WebFetch.AllowPrivateIP)
+}
+
+// TestSettingsPatchKeepsUnsentCredentials pins §0.20's 留空即不改: a save that
+// does not mention a credential — or mentions it with an empty value — leaves
+// the stored one exactly as it was.
+func TestSettingsPatchKeepsUnsentCredentials(t *testing.T) {
+	s, _ := settingsServer(t)
+	const key = "sk-7d2e94b1c05a4f38a6e1b9d0c3f7a254"
+
+	require.Equal(t, http.StatusOK, settingsPatch(t, s,
+		map[string]any{"agents.defaults.web_search.provider": "deepseek"},
+		map[string]string{"agents.defaults.web_search.deepseek.api_key": key}).Code)
+
+	// A save of a different row in the same section, then one that opens the
+	// 更换 box and leaves it blank.
+	require.Equal(t, http.StatusOK, settingsPatch(t, s,
+		map[string]any{"agents.defaults.web_search.tavily.search_depth": "advanced"}, nil).Code)
+	require.Equal(t, http.StatusOK, settingsPatch(t, s,
+		map[string]any{"agents.defaults.web_search.provider": "tavily"},
+		map[string]string{"agents.defaults.web_search.deepseek.api_key": ""}).Code)
+
+	root, err := s.persistedConfig(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, root.Agents.Defaults.WebSearch.DeepSeek)
+	require.Equal(t, key, root.Agents.Defaults.WebSearch.DeepSeek.APIKey,
+		"an unsent or empty credential keeps its stored value")
+	require.Equal(t, "advanced", root.Agents.Defaults.WebSearch.Tavily.SearchDepth)
+}
+
+// TestSettingsPatchRefusesOutOfRangeWithPath pins the failure contract: a value
+// the loader refuses answers 400 with the path it came from and a Chinese
+// reason, and nothing lands.
+func TestSettingsPatchRefusesOutOfRangeWithPath(t *testing.T) {
+	s, _ := settingsServer(t)
+
+	// 30 seconds is neither "never exit" (0) nor inside 60–86400.
+	recorder := settingsPatch(t, s, map[string]any{"lsp.idle_timeout": 30}, nil)
+	require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	var refusal settingsPatchError
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &refusal))
+	require.Equal(t, "lsp.idle_timeout", refusal.Path)
+	require.NotEmpty(t, refusal.Message)
+	require.NotContains(t, refusal.Message, "lsp.idle_timeout", "the reason is not a raw backend message")
+
+	root, err := s.persistedConfig(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, root.LSP.IdleTimeout, "a refused value lands nowhere")
+
+	// The same for an unknown path and for a type that is not the item's.
+	unknown := settingsPatch(t, s, map[string]any{"lsp.no_such_setting": 1}, nil)
+	require.Equal(t, http.StatusBadRequest, unknown.Code)
+	require.Contains(t, unknown.Body.String(), "lsp.no_such_setting")
+
+	wrongType := settingsPatch(t, s, map[string]any{"compact.auto_compact_percent": "高"}, nil)
+	require.Equal(t, http.StatusBadRequest, wrongType.Code)
+	require.Contains(t, wrongType.Body.String(), "compact.auto_compact_percent")
+}
+
+// TestSettingsPathsCoverConfiguration is the registry's coverage test (plan 191
+// §3.1, §7): every path resolves to a field the configuration actually holds,
+// its section is one fb_config persists, and every item the page draws answers
+// a value — the page has no empty row (owner ruling §0.4).
+func TestSettingsPathsCoverConfiguration(t *testing.T) {
+	persisted := map[string]bool{}
+	for _, name := range process.RootConfigSections() {
+		persisted[name] = true
+	}
+	require.NotEmpty(t, settingsOrder)
+
+	var empty appcfg.Root
+	seen := map[string]bool{}
+	for _, path := range settingsOrder {
+		require.False(t, seen[path], "path %q is registered twice", path)
+		seen[path] = true
+
+		index, typ, err := resolveSettingsPath(path)
+		require.NoError(t, err, "path %q must resolve in appcfg.Root", path)
+		require.NotEmpty(t, index)
+		require.NoError(t, checkSettingsKind(path, settingsByPath[path].kind, typ), "path %q", path)
+
+		field := settingsByPath[path]
+		require.True(t, persisted[field.section],
+			"path %q lives in section %q, which fb_config does not persist", path, field.section)
+		value := field.settingsFieldValue(empty)
+		require.NotNil(t, value, "path %q answers no value on an empty configuration", path)
+		if field.def != nil {
+			require.Equal(t, field.def, value,
+				"path %q must answer its default on an empty configuration", path)
+			continue
+		}
+		// An item with no default answers its zero value, which is itself a
+		// value the page draws (an empty provider is 「不启用」, an empty list
+		// is 「没有」) — never a missing row.
+		if reflected := reflect.ValueOf(value); reflected.Kind() == reflect.Slice {
+			require.Zero(t, reflected.Len(), "path %q", path)
+		}
+	}
+}
+
+// TestWriteRootSectionsIsAllOrNothing pins the transaction a group save leans
+// on: a save whose second section would not compose leaves the first untouched.
+func TestWriteRootSectionsIsAllOrNothing(t *testing.T) {
+	s, _ := settingsServer(t)
+	ctx := context.Background()
+
+	require.Equal(t, http.StatusOK, settingsPatch(t, s,
+		map[string]any{"compact.auto_compact_percent": 70}, nil).Code)
+
+	candidate, err := s.persistedConfig(ctx)
+	require.NoError(t, err)
+	candidate.Compact.AutoCompactPercent = 50
+	// The validator refuses this section: 30 seconds is not a legal idle
+	// timeout. It is written second, so the first section is inside the
+	// transaction already when the refusal comes.
+	candidate.LSP.IdleTimeout = 30
+
+	err = s.Env.WriteRootSections(ctx, []string{"compact", "lsp"}, candidate)
+	require.Error(t, err, "the refused section must fail the save")
+
+	stored, err := s.persistedConfig(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 70, stored.Compact.AutoCompactPercent,
+		"the section written before the refusal must have been rolled back")
+	require.Zero(t, stored.LSP.IdleTimeout)
 }

@@ -82,13 +82,9 @@ func seatbeltProfile(cfg *appcfg.Root, req CommandRequest, workDir string) (stri
 		// states its own complete write set has decided against them, temp
 		// spaces included. That is what keeps an unattended command out of every
 		// other task's directory when the workspace happens to live under a temp
-		// root (plans/150).
-		if cfg == nil || !cfg.SandboxWorkspaceWrite.ExcludeTmpdirEnvVar {
-			allowWrites = append(allowWrites, os.TempDir())
-		}
-		if cfg == nil || !cfg.SandboxWorkspaceWrite.ExcludeSlashTmp {
-			allowWrites = append(allowWrites, "/tmp")
-		}
+		// root (plans/150). The temp roots themselves are always writable: the
+		// sandbox has no setting to withhold them (plan 206).
+		allowWrites = append(allowWrites, os.TempDir(), "/tmp")
 	}
 	denyWrites := append([]string{}, req.DeniedWritablePaths...)
 
@@ -99,19 +95,50 @@ func seatbeltProfile(cfg *appcfg.Root, req CommandRequest, workDir string) (stri
 	normalizedDeny := normalizeSeatbeltPaths(denyWrites)
 	normalizedAllowRead := normalizeSeatbeltPaths(allowReads)
 	normalizedDenyRead := normalizeSeatbeltPaths(denyReads)
+	normalizedBoundary := normalizeSeatbeltPaths(req.DeniedReadableRoots)
+	normalizedExceptions := normalizeSeatbeltPaths(req.ReadableExceptions)
 	for _, path := range normalizedDenyRead {
 		normalizedDeny = appendUniquePath(normalizedDeny, path)
 	}
+	// Everything no rule below may re-open: the user's own deny_read list plus
+	// the deny-list boundary's roots. The read grants and the platform defaults
+	// are all filtered by it, so neither can quietly hand a denied root back.
+	narrowed := append(append([]string{}, normalizedDenyRead...), normalizedBoundary...)
 
 	var b strings.Builder
 	b.WriteString(seatbeltBasePolicy)
 	b.WriteByte('\n')
 	for _, p := range normalizedAllowRead {
-		writeSeatbeltAccessRule(&b, "file-read* file-test-existence", p, normalizedDenyRead)
+		writeSeatbeltAccessRule(&b, "file-read* file-test-existence", p, narrowed)
 	}
-	for _, p := range normalizedAllow {
-		writeSeatbeltAccessRule(&b, "file-read* file-test-existence", p, normalizedDenyRead)
-		writeSeatbeltAccessRule(&b, "file-write*", p, normalizedDeny)
+	if len(normalizedBoundary) > 0 {
+		// Last matching rule wins, so the boundary is denied *after* the read
+		// grant that covers it and the workspace and the skills are carved
+		// back out *after* that (plans/216).
+		for _, p := range normalizedBoundary {
+			b.WriteString("(deny file-read* file-write* (subpath ")
+			b.WriteString(strconv.Quote(p))
+			b.WriteString("))\n")
+		}
+		for _, p := range normalizedExceptions {
+			writeSeatbeltAccessRule(&b, "file-read* file-test-existence", p, nil)
+		}
+		for _, p := range normalizedAllow {
+			writeSeatbeltAccessRule(&b, "file-read* file-test-existence", p, nil)
+			writeSeatbeltAccessRule(&b, "file-write*", p, nil)
+		}
+		// The user's own deny_read is the last word: an exception to the
+		// boundary may not be an exception to it.
+		for _, p := range normalizedDenyRead {
+			b.WriteString("(deny file-read* (subpath ")
+			b.WriteString(strconv.Quote(p))
+			b.WriteString("))\n")
+		}
+	} else {
+		for _, p := range normalizedAllow {
+			writeSeatbeltAccessRule(&b, "file-read* file-test-existence", p, normalizedDenyRead)
+			writeSeatbeltAccessRule(&b, "file-write*", p, normalizedDeny)
+		}
 	}
 	for _, pattern := range req.DeniedReadablePatterns {
 		if regex := seatbeltRegexForUnreadableGlob(pattern); regex != "" {
@@ -127,60 +154,13 @@ func seatbeltProfile(cfg *appcfg.Root, req CommandRequest, workDir string) (stri
 		}
 	}
 	if req.IncludePlatformDefaults {
-		writeSeatbeltMinimalPolicy(&b, normalizedDenyRead, normalizedDeny, !req.ExclusiveWritablePaths)
+		writeSeatbeltMinimalPolicy(&b, narrowed, normalizedDeny, !req.ExclusiveWritablePaths)
 	}
-	if req.ManagedNetwork != nil {
-		writeManagedSeatbeltNetworkPolicy(&b, *req.ManagedNetwork)
-	} else if req.AllowNetwork {
+	if req.AllowNetwork {
 		b.WriteString("(allow network-outbound)\n(allow network-inbound)\n")
 		b.WriteString(seatbeltNetworkSupportPolicy)
 	}
 	return b.String(), nil
-}
-
-func writeManagedSeatbeltNetworkPolicy(b *strings.Builder, network ManagedNetworkCommand) {
-	if b == nil {
-		return
-	}
-	if network.AllowLocalBinding {
-		b.WriteString("; allow local binding and loopback traffic\n")
-		b.WriteString("(allow network-bind (local ip \"*:*\"))\n")
-		b.WriteString("(allow network-inbound (local ip \"localhost:*\"))\n")
-		b.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
-		if network.HTTPPort > 0 || network.SOCKSPort > 0 || network.SOCKSUDPPort > 0 {
-			b.WriteString("(allow network-outbound (remote ip \"*:53\"))\n")
-		}
-	}
-	seen := map[int]struct{}{}
-	for _, port := range []int{network.HTTPPort, network.SOCKSPort, network.SOCKSUDPPort} {
-		if port <= 0 || port > 65535 {
-			continue
-		}
-		if _, ok := seen[port]; ok {
-			continue
-		}
-		seen[port] = struct{}{}
-		b.WriteString("(allow network-outbound (remote ip \"localhost:")
-		b.WriteString(strconv.Itoa(port))
-		b.WriteString("\"))\n")
-	}
-	if network.AllowAllUnixSockets || len(network.AllowedUnixSockets) > 0 {
-		b.WriteString("(allow system-socket (socket-domain AF_UNIX))\n")
-		if network.AllowAllUnixSockets {
-			b.WriteString("(allow network-bind (local unix-socket))\n")
-			b.WriteString("(allow network-outbound (remote unix-socket))\n")
-		} else {
-			for _, path := range normalizeSeatbeltPaths(network.AllowedUnixSockets) {
-				b.WriteString("(allow network-bind (local unix-socket (subpath ")
-				b.WriteString(strconv.Quote(path))
-				b.WriteString(")))\n")
-				b.WriteString("(allow network-outbound (remote unix-socket (subpath ")
-				b.WriteString(strconv.Quote(path))
-				b.WriteString(")))\n")
-			}
-		}
-	}
-	b.WriteString(seatbeltNetworkSupportPolicy)
 }
 
 func writeSeatbeltAccessRule(b *strings.Builder, operations, root string, denied []string) {

@@ -521,20 +521,38 @@ func TestConvertToRuntimeConfigMergesWorkspaceRoots(t *testing.T) {
 	assertContains(t, cfg.Filesystem.AllowWrite, filepath.Join(cfgRoot, "cache"))
 }
 
-func TestConvertToRuntimeConfigHonorsWorkspaceTempExclusions(t *testing.T) {
+func TestConvertToRuntimeConfigAlwaysAllowsWorkspaceTempRoots(t *testing.T) {
 	cwd := t.TempDir()
 	tempDir := t.TempDir()
 	cfg := ConvertToRuntimeConfig([]SourceSettings{{
 		Source:      SettingsLocal,
 		RootPath:    cwd,
 		SandboxMode: appcfg.SandboxModeWorkspaceWrite,
-		SandboxWorkspaceWrite: appcfg.SandboxWorkspaceWrite{
-			ExcludeTmpdirEnvVar: true,
-			ExcludeSlashTmp:     true,
-		},
 	}}, Snapshot{}, cwd, cwd, tempDir, nil)
-	assertNotContains(t, cfg.Filesystem.AllowWrite, tempDir)
-	assertNotContains(t, cfg.Filesystem.AllowWrite, "/tmp")
+	// The sandbox's temp roots are not a setting: a workspace-write command
+	// can always use them (plan 206).
+	assertContains(t, cfg.Filesystem.AllowWrite, tempDir)
+	assertContains(t, cfg.Filesystem.AllowWrite, "/tmp")
+}
+
+// SandboxNetworkInWords has two sentences: the sandbox allows the internet or
+// it does not. There is no proxy sentence left to say (plan 206).
+func TestSandboxNetworkInWordsHasTwoSentences(t *testing.T) {
+	allowed := &appcfg.Root{SandboxWorkspaceWrite: appcfg.SandboxWorkspaceWrite{NetworkAccess: appcfg.BoolPtr(true)}}
+	blocked := &appcfg.Root{SandboxWorkspaceWrite: appcfg.SandboxWorkspaceWrite{NetworkAccess: appcfg.BoolPtr(false)}}
+	if got := SandboxNetworkInWords(allowed); got != "commands can reach the internet." {
+		t.Fatalf("allowed = %q", got)
+	}
+	want := "commands can reach the internet."
+	if detectPlatform() != PlatformWindows {
+		want = "commands cannot reach the internet; approval is required to."
+	}
+	if got := SandboxNetworkInWords(blocked); got != want {
+		t.Fatalf("blocked = %q, want %q", got, want)
+	}
+	if got := SandboxNetworkInWords(nil); got != "commands can reach the internet." {
+		t.Fatalf("nil config = %q", got)
+	}
 }
 
 func TestConvertToRuntimeConfigAppliesFileSystemGrants(t *testing.T) {
@@ -625,39 +643,19 @@ func TestEffectiveConfigDerivesOnlyOmittedSandboxMode(t *testing.T) {
 	}
 }
 
-// Windows without a configured sandbox cannot enforce a writable workspace, so
-// the derivation stays read-only there no matter what the user decided.
-func TestEffectiveSandboxModeRequiresEnforcementOnWindows(t *testing.T) {
+// Every platform has a sandbox to enforce a writable workspace now, Windows
+// included, so the trust decision alone decides the mode (plan 206).
+func TestEffectiveSandboxModeFollowsTheTrustDecisionEverywhere(t *testing.T) {
 	for _, level := range []Level{LevelTrusted, LevelUntrusted} {
 		launch := ProjectContext{Project: Project{Root: t.TempDir(), VersionControlled: true}, TrustLevel: level}
-
-		if got := effectiveSandboxMode(launch, PlatformWindows, ""); got != appcfg.SandboxModeReadOnly {
-			t.Errorf("%s on windows without a sandbox = %q, want read-only", level, got)
-		}
-		if got := effectiveSandboxMode(launch, PlatformWindows, appcfg.WindowsSandboxUnelevated); got != appcfg.SandboxModeWorkspaceWrite {
-			t.Errorf("%s on windows with a sandbox = %q, want workspace-write", level, got)
-		}
-		if got := effectiveSandboxMode(launch, PlatformDarwin, ""); got != appcfg.SandboxModeWorkspaceWrite {
-			t.Errorf("%s off windows = %q, want workspace-write", level, got)
+		if got := effectiveSandboxMode(appcfg.ApprovalPresetWorkspaceWrite, launch); got != appcfg.SandboxModeWorkspaceWrite {
+			t.Errorf("%s project = %q, want workspace-write", level, got)
 		}
 	}
 
 	undecided := ProjectContext{Project: Project{Root: t.TempDir(), VersionControlled: true}}
-	if got := effectiveSandboxMode(undecided, PlatformDarwin, ""); got != appcfg.SandboxModeReadOnly {
+	if got := effectiveSandboxMode(appcfg.ApprovalPresetWorkspaceWrite, undecided); got != appcfg.SandboxModeReadOnly {
 		t.Errorf("undecided project = %q, want read-only", got)
-	}
-}
-
-func TestEffectiveConfigPreservesExplicitModesAndPermissionProfiles(t *testing.T) {
-	launch := ProjectContext{Project: Project{VersionControlled: true}, TrustLevel: LevelTrusted}
-	for _, mode := range []appcfg.SandboxMode{appcfg.SandboxModeReadOnly, appcfg.SandboxModeWorkspaceWrite, appcfg.SandboxModeDangerFullAccess} {
-		if got := EffectiveConfig(appcfg.Root{SandboxMode: mode}, launch).SandboxMode; got != mode {
-			t.Fatalf("explicit mode = %q, want %q", got, mode)
-		}
-	}
-	cfg := EffectiveConfig(appcfg.Root{DefaultPermissions: "custom"}, launch)
-	if cfg.DefaultPermissions != "custom" || cfg.SandboxMode != "" {
-		t.Fatalf("named profile was changed: %+v", cfg)
 	}
 }
 
@@ -692,53 +690,6 @@ func TestEffectiveConfigDerivesApprovalPolicyFromTrust(t *testing.T) {
 	}
 }
 
-func TestEffectiveConfigKeepsConfiguredApprovalPolicy(t *testing.T) {
-	untrusted := ProjectContext{TrustLevel: LevelUntrusted}
-	for _, mode := range []appcfg.ApprovalPolicyMode{
-		appcfg.ApprovalPolicyOnRequest, appcfg.ApprovalPolicyNever, appcfg.ApprovalPolicyUntrusted,
-	} {
-		cfg := appcfg.Root{ApprovalPolicy: appcfg.NewApprovalPolicy(mode)}
-		if got := EffectiveConfig(cfg, untrusted).ApprovalPolicy.Mode; got != mode {
-			t.Fatalf("configured policy %q became %q", mode, got)
-		}
-	}
-
-	granular := appcfg.ApprovalPolicyConfig{
-		Mode:     appcfg.ApprovalPolicyGranular,
-		Granular: appcfg.GranularApprovalConfig{SandboxApproval: true, Rules: true, MCPElicitations: true},
-	}
-	got := EffectiveConfig(appcfg.Root{ApprovalPolicy: granular}, untrusted).ApprovalPolicy
-	if got.Mode != appcfg.ApprovalPolicyGranular || !got.Granular.SandboxApproval {
-		t.Fatalf("granular policy was rewritten: %+v", got)
-	}
-}
-
-// The two derivations are independent: configuring one must not freeze the
-// other at its unresolved value.
-func TestEffectiveConfigDerivesApprovalPolicyAlongsideExplicitSandbox(t *testing.T) {
-	untrusted := ProjectContext{TrustLevel: LevelUntrusted}
-
-	cfg := EffectiveConfig(appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}, untrusted)
-	if cfg.ApprovalPolicy.Mode != appcfg.ApprovalPolicyUntrusted {
-		t.Errorf("explicit sandbox mode suppressed the approval derivation: %q", cfg.ApprovalPolicy.Mode)
-	}
-	if cfg.SandboxMode != appcfg.SandboxModeDangerFullAccess {
-		t.Errorf("explicit sandbox mode = %q", cfg.SandboxMode)
-	}
-
-	cfg = EffectiveConfig(appcfg.Root{DefaultPermissions: "custom"}, untrusted)
-	if cfg.ApprovalPolicy.Mode != appcfg.ApprovalPolicyUntrusted {
-		t.Errorf("named permission profile suppressed the approval derivation: %q", cfg.ApprovalPolicy.Mode)
-	}
-
-	cfg = EffectiveConfig(appcfg.Root{ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyNever)}, ProjectContext{
-		Project: Project{Root: t.TempDir(), VersionControlled: true}, TrustLevel: LevelTrusted,
-	})
-	if cfg.SandboxMode != appcfg.SandboxModeWorkspaceWrite {
-		t.Errorf("explicit approval policy suppressed the sandbox derivation: %q", cfg.SandboxMode)
-	}
-}
-
 // Persisting the derived value would pin one branch of the derivation, so an
 // unconfigured policy must survive a save/load cycle as unconfigured.
 func TestUnconfiguredApprovalPolicyIsNotPersisted(t *testing.T) {
@@ -746,7 +697,7 @@ func TestUnconfiguredApprovalPolicyIsNotPersisted(t *testing.T) {
 	if err := appcfg.Save(path, appcfg.Root{}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	loaded, err := appcfg.Load(path)
+	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -862,40 +813,6 @@ func errLLM(err error) *stubLLM {
 	}}
 }
 
-type outputFixtureFile struct {
-	Cases []struct {
-		ID                string `yaml:"id"`
-		AssistantText     string `yaml:"assistant_text"`
-		ExpectOutputBlock bool   `yaml:"expect_output_block"`
-	} `yaml:"cases"`
-}
-
-// TestRedteamOutputFixtures exercises the output rail against red-team fixtures.
-// The retrieval half lives in internal/guardrails (TestRedteamFixtures).
-func TestRedteamOutputFixtures(t *testing.T) {
-	raw, err := os.ReadFile("redteam/fixtures.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var f outputFixtureFile
-	if err := yaml.Unmarshal(raw, &f); err != nil {
-		t.Fatal(err)
-	}
-	r := StrictDefaults()
-	for _, c := range f.Cases {
-		if c.AssistantText == "" {
-			continue
-		}
-		t.Run(c.ID, func(t *testing.T) {
-			_, err := ApplyOutputRail(r, c.AssistantText)
-			blocked := err != nil
-			if blocked != c.ExpectOutputBlock {
-				t.Fatalf("output block=%v want=%v err=%v", blocked, c.ExpectOutputBlock, err)
-			}
-		})
-	}
-}
-
 func TestRunInputRules(t *testing.T) {
 	r := StrictDefaults()
 	r.InputMaxRunes = 10
@@ -922,12 +839,6 @@ func passMessageGuard(_ context.Context, _ []llm.Message) error { return nil }
 
 // blockMessageGuard is a MessageGuard that always blocks.
 func blockMessageGuard(_ context.Context, _ []llm.Message) error { return errGuard }
-
-// passResultGuard is a ResultGuard that always passes.
-func passResultGuard(_ context.Context, _ *llm.Result) error { return nil }
-
-// blockResultGuard is a ResultGuard that always blocks.
-func blockResultGuard(_ context.Context, _ *llm.Result) error { return errGuard }
 
 // TestGuardrails_NoGuards verifies that with no guards the result is passed through unchanged.
 func TestGuardrails_NoGuards(t *testing.T) {
@@ -984,54 +895,6 @@ func TestGuardrails_MessageGuard_Block(t *testing.T) {
 	}
 }
 
-// TestGuardrails_ResultGuard_Pass verifies that a passing output guard lets the result through.
-func TestGuardrails_ResultGuard_Pass(t *testing.T) {
-	mw := NewGuardrails(WithResultGuard("allow-all", passResultGuard))
-	client := llm.Use(okLLM("ok"), mw)
-
-	result, err := client.Execute(context.Background(), nil, nil)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if result.Message.TextContent() != "ok" {
-		t.Fatalf("got %q, want %q", result.Message.TextContent(), "ok")
-	}
-}
-
-// TestGuardrails_ResultGuard_Block verifies that a failing output guard rejects the result.
-func TestGuardrails_ResultGuard_Block(t *testing.T) {
-	mw := NewGuardrails(WithResultGuard("block", blockResultGuard))
-	client := llm.Use(okLLM("ok"), mw)
-
-	_, err := client.Execute(context.Background(), nil, nil)
-
-	var gErr *GuardrailError
-	if !errors.As(err, &gErr) {
-		t.Fatalf("got %T %v, want GuardrailError", err, err)
-	}
-	if gErr.Stage != "output" {
-		t.Fatalf("Stage=%q, want %q", gErr.Stage, "output")
-	}
-	if gErr.Name != "block" {
-		t.Fatalf("Name=%q, want %q", gErr.Name, "block")
-	}
-	if !errors.Is(err, errGuard) {
-		t.Fatal("Unwrap should yield errGuard")
-	}
-}
-
-// TestGuardrails_InnerError verifies that inner LLM errors bypass result guards.
-func TestGuardrails_InnerError(t *testing.T) {
-	sentinel := errors.New("inner error")
-	mw := NewGuardrails(WithResultGuard("block", blockResultGuard))
-	client := llm.Use(errLLM(sentinel), mw)
-
-	_, err := client.Execute(context.Background(), nil, nil)
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("got %v, want sentinel inner error", err)
-	}
-}
-
 // TestGuardrails_GuardOrder verifies that guards are checked in the order added.
 func TestGuardrails_GuardOrder(t *testing.T) {
 	order := []string{}
@@ -1062,19 +925,12 @@ func TestSetMode_OverwritesApprovalPolicy(t *testing.T) {
 	store := NewStore()
 
 	// Set up an approval policy
-	customPolicy := ApprovalPolicy{
-		Mode: ApprovalGranular,
-		Granular: GranularApprovalConfig{
-			SkillApproval:   true,
-			MCPElicitations: true,
-		},
-	}
-	store.SetApprovalPolicy(customPolicy)
+	store.SetApprovalPolicy(ApprovalPolicy{Mode: ApprovalUnlessTrusted})
 
 	// Verify the policy is set
 	policy := store.ApprovalPolicy()
-	if policy.Mode != ApprovalGranular {
-		t.Fatalf("expected granular mode, got %s", policy.Mode)
+	if policy.Mode != ApprovalUnlessTrusted {
+		t.Fatalf("expected unless-trusted mode, got %s", policy.Mode)
 	}
 
 	// SetMode (not SetModeWithoutPolicySync) should overwrite policy
@@ -1142,56 +998,26 @@ func TestCommandCaptureRemovesSpoolForSmallOutput(t *testing.T) {
 	}
 }
 
-func TestConvertToRuntimeConfigCompilesNamedPermissionProfile(t *testing.T) {
-	cwd := t.TempDir()
-	tempDir := t.TempDir()
-	extraRoot := filepath.Join(t.TempDir(), "shared")
-	depth := 3
-	enabled := true
-	cfg := &appcfg.Root{
-		DefaultPermissions: "locked",
-		Permissions: appcfg.PermissionProfiles{"locked": {
-			WorkspaceRoots: map[string]bool{extraRoot: true},
-			FileSystem: &appcfg.FileSystemPermissions{GlobScanMaxDepth: &depth, Entries: map[string]appcfg.FileSystemPermissionValue{
-				":minimal":           {Access: appcfg.FileSystemAccessRead},
-				":workspace_roots":   {Access: appcfg.FileSystemAccessWrite},
-				":tmpdir":            {Access: appcfg.FileSystemAccessWrite},
-				"/private/secret":    {Access: appcfg.FileSystemAccessDeny},
-				"/workspace/**/.env": {Access: appcfg.FileSystemAccessDeny},
-			}},
-			Network: &appcfg.NetworkPermissionConfig{Enabled: &enabled},
-		}},
-	}
-	runtimeCfg := ConvertToRuntimeConfig(LocalConfigSources(cwd, cfg), Snapshot{}, cwd, cwd, tempDir, nil)
-	assertContains(t, runtimeCfg.Filesystem.AllowWrite, cwd)
-	assertContains(t, runtimeCfg.Filesystem.AllowWrite, extraRoot)
-	assertContains(t, runtimeCfg.Filesystem.AllowWrite, tempDir)
-	assertContains(t, runtimeCfg.Filesystem.DenyRead, "/private/secret")
-	if len(runtimeCfg.Filesystem.DenyReadPatterns) != 1 || runtimeCfg.Filesystem.GlobScanMaxDepth == nil || *runtimeCfg.Filesystem.GlobScanMaxDepth != depth {
-		t.Fatalf("glob policy=%+v", runtimeCfg.Filesystem)
-	}
-	if !runtimeCfg.NetworkEnabled || !runtimeCfg.Filesystem.IncludePlatformDefaults || ProfileForConfig(cfg) != ProfileManaged {
-		t.Fatalf("network=%t profile=%s", runtimeCfg.NetworkEnabled, ProfileForConfig(cfg))
-	}
-}
-
-func TestBuiltInReadOnlyProfileHasNoWritablePaths(t *testing.T) {
-	cfg := &appcfg.Root{DefaultPermissions: appcfg.PermissionProfileReadOnly, SandboxMode: appcfg.SandboxModeReadOnly}
+// A read-only sandbox grants no writable path, which is what an undecided
+// project runs under until its trust decision is made.
+func TestReadOnlySandboxHasNoWritablePaths(t *testing.T) {
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly}
 	runtimeCfg := ConvertToRuntimeConfig(LocalConfigSources(t.TempDir(), cfg), Snapshot{}, t.TempDir(), t.TempDir(), t.TempDir(), nil)
 	if len(runtimeCfg.Filesystem.AllowWrite) != 0 {
 		t.Fatalf("allow write=%v", runtimeCfg.Filesystem.AllowWrite)
 	}
 }
 
-// The three presets and their pairings mirror codex's builtin_approval_presets.
+// There are exactly two presets (plan 203): the read-only one is gone, because
+// a read-only sandbox is the trust narrowing of an undecided project rather
+// than a choice a user makes.
 func TestBuiltinApprovalPresets(t *testing.T) {
 	presets := BuiltinApprovalPresets()
-	if len(presets) != 3 {
-		t.Fatalf("expected three presets, got %d", len(presets))
+	if len(presets) != 2 {
+		t.Fatalf("expected two presets, got %d", len(presets))
 	}
 	want := []ApprovalPreset{
-		{ID: PresetReadOnly, Label: "Read Only", Approval: ApprovalOnRequest, SandboxMode: appcfg.SandboxModeReadOnly},
-		{ID: PresetDefault, Label: "Default", Approval: ApprovalOnRequest, SandboxMode: appcfg.SandboxModeWorkspaceWrite},
+		{ID: PresetWorkspaceWrite, Label: "Default", Approval: ApprovalOnRequest, SandboxMode: appcfg.SandboxModeWorkspaceWrite},
 		{ID: PresetFullAccess, Label: "Full Access", Approval: ApprovalNever, SandboxMode: appcfg.SandboxModeDangerFullAccess},
 	}
 	for i, w := range want {
@@ -1206,68 +1032,36 @@ func TestBuiltinApprovalPresets(t *testing.T) {
 }
 
 func TestApprovalPresetByIDAcceptsIDAndLabel(t *testing.T) {
-	for _, raw := range []string{"full-access", "Full Access", "FULL ACCESS"} {
+	for _, raw := range []string{"full_access", "Full Access", "FULL ACCESS"} {
 		preset, ok := ApprovalPresetByID(raw)
 		if !ok || preset.ID != PresetFullAccess {
 			t.Fatalf("ApprovalPresetByID(%q) = %+v, %v", raw, preset, ok)
 		}
 	}
-	for _, raw := range []string{"", "  ", "yolo", "danger-full-access"} {
+	// The deleted read-only preset and both old spellings are unknown, so a
+	// client still holding one is told so rather than silently moved.
+	for _, raw := range []string{"", "  ", "yolo", "danger-full-access", "read_only", "read-only", "auto", "full-access"} {
 		if _, ok := ApprovalPresetByID(raw); ok {
 			t.Fatalf("ApprovalPresetByID(%q) unexpectedly resolved", raw)
 		}
 	}
 }
 
-func TestMatchApprovalPreset(t *testing.T) {
-	// Read Only and Default share an approval mode, so only the sandbox tells
-	// them apart — the match has to consider both halves.
-	readOnly := &appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly}
-	if preset, ok := MatchApprovalPreset(ModeOnRequest, readOnly); !ok || preset.ID != PresetReadOnly {
-		t.Fatalf("read-only match = %+v, %v", preset, ok)
+// The preset and the sandbox mode are one decision now, so naming the running
+// preset from its mode is a lookup. Read-only belongs to no preset: it is the
+// trust narrowing of a project nobody has judged.
+func TestApprovalPresetForSandboxMode(t *testing.T) {
+	if preset, ok := ApprovalPresetForSandboxMode(appcfg.SandboxModeWorkspaceWrite); !ok || preset.ID != PresetWorkspaceWrite {
+		t.Fatalf("workspace-write = %+v, %v", preset, ok)
 	}
-	workspace := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}
-	if preset, ok := MatchApprovalPreset(ModeOnRequest, workspace); !ok || preset.ID != PresetDefault {
-		t.Fatalf("default match = %+v, %v", preset, ok)
+	if preset, ok := ApprovalPresetForSandboxMode(appcfg.SandboxModeDangerFullAccess); !ok || preset.ID != PresetFullAccess {
+		t.Fatalf("danger-full-access = %+v, %v", preset, ok)
 	}
-
-	// A state between presets matches none of them rather than the nearest one.
-	if preset, ok := MatchApprovalPreset(ModeNever, readOnly); ok {
-		t.Fatalf("expected no match for a never-mode read-only sandbox, got %+v", preset)
+	for _, mode := range []appcfg.SandboxMode{appcfg.SandboxModeReadOnly, ""} {
+		if preset, ok := ApprovalPresetForSandboxMode(mode); ok {
+			t.Fatalf("%q unexpectedly named preset %+v", mode, preset)
+		}
 	}
-	if preset, ok := MatchApprovalPreset(ModeUnlessTrusted, workspace); ok {
-		t.Fatalf("expected no match for unless-trusted, got %+v", preset)
-	}
-	if preset, ok := MatchApprovalPreset(ModeOnRequest, nil); ok {
-		t.Fatalf("expected no match for a nil config, got %+v", preset)
-	}
-
-	// A named profile is finer-grained than any preset expresses.
-	named := &appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly, DefaultPermissions: appcfg.PermissionProfileReadOnly}
-	if preset, ok := MatchApprovalPreset(ModeOnRequest, named); ok {
-		t.Fatalf("expected no match while a named profile is selected, got %+v", preset)
-	}
-}
-
-// A named profile outranks sandbox_mode, so applying a preset has to clear it
-// or the preset's sandbox would be selected and then ignored.
-func TestApprovalPresetApplyToConfigClearsNamedProfile(t *testing.T) {
-	cfg := &appcfg.Root{
-		SandboxMode:        appcfg.SandboxModeReadOnly,
-		DefaultPermissions: appcfg.PermissionProfileReadOnly,
-	}
-	preset, ok := ApprovalPresetByID(PresetFullAccess)
-	if !ok {
-		t.Fatal("full-access preset missing")
-	}
-	preset.ApplyToConfig(cfg)
-	if cfg.SandboxMode != appcfg.SandboxModeDangerFullAccess {
-		t.Fatalf("sandbox mode = %q", cfg.SandboxMode)
-	}
-	if cfg.DefaultPermissions != "" {
-		t.Fatalf("default permissions = %q, want cleared", cfg.DefaultPermissions)
-	}
-	preset.ApplyToConfig(nil) // must not panic
 }
 
 // A preset picked for one conversation scopes both halves to it: the
@@ -1282,7 +1076,8 @@ func TestApprovalPresetSessionUpdatesScopeBothHalvesToTheConversation(t *testing
 	if !ok {
 		t.Fatal("full-access preset missing")
 	}
-	for _, update := range preset.SessionUpdates("s1") {
+	trusted := ProjectContext{Project: Project{VersionControlled: true}, TrustLevel: LevelTrusted}
+	for _, update := range preset.SessionUpdatesForLaunch("s1", cfg, trusted) {
 		rt.ApplyUpdate(update, cfg, Paths{})
 	}
 
@@ -1304,10 +1099,13 @@ func TestApprovalPresetSessionUpdatesScopeBothHalvesToTheConversation(t *testing
 		t.Fatal("a conversation without its own sandbox must run under the configuration itself")
 	}
 
-	if d := rt.Evaluate("s1", "shell", "rm -rf /tmp/build-output", cfg, false); d.Reason != "danger_full_access" {
+	// Full access is the YOLO posture, so the caller passes what its own
+	// preset answer computed: true for the conversation that picked it, false
+	// for the one that did not.
+	if d := rt.Evaluate("s1", "shell", "rm -rf /tmp/build-output", cfg, true); d.Reason != ReasonYOLO || !d.BypassSandbox {
 		t.Fatalf("owning decision = %+v", d)
 	}
-	if d := rt.Evaluate("s2", "shell", "rm -rf /tmp/build-output", cfg, false); d.Reason == "danger_full_access" || d.BypassSandbox {
+	if d := rt.Evaluate("s2", "shell", "rm -rf /tmp/build-output", cfg, false); d.Reason == ReasonYOLO || d.BypassSandbox {
 		t.Fatalf("other decision = %+v", d)
 	}
 	if rt.Store(cfg).sandboxAvailableForSession("s2") != rt.Store(cfg).SandboxAvailable() {
@@ -1506,8 +1304,9 @@ type fixtureFile struct {
 	} `yaml:"cases"`
 }
 
-// TestRedteamFixtures exercises the retrieval filter against red-team fixtures.
-// The output-rail half lives in internal/llm/middleware (TestRedteamOutputFixtures).
+// TestRedteamFixtures exercises the retrieval filter against red-team fixtures:
+// what is dropped is a passage that cannot be injected whole, not one whose
+// wording looks like an attack.
 func TestRedteamFixtures(t *testing.T) {
 	raw, err := os.ReadFile("redteam/fixtures.yaml")
 	if err != nil {
@@ -1798,9 +1597,6 @@ func TestStrictDefaults(t *testing.T) {
 	r := StrictDefaults()
 	if r.InputMaxRunes != 200000 {
 		t.Errorf("InputMaxRunes = %d; want 200000", r.InputMaxRunes)
-	}
-	if r.RetrievalMaxChunk != 120000 {
-		t.Errorf("RetrievalMaxChunk = %d; want 120000", r.RetrievalMaxChunk)
 	}
 }
 
@@ -2700,14 +2496,6 @@ func TestBuildApprovalDecisionOptionsUsesOnlyProposedCapabilities(t *testing.T) 
 		t.Fatalf("patch decisions = %#v", patch)
 	}
 
-	network := BuildApprovalDecisionOptions("shell", "shell", map[string]any{
-		"command":                  "curl https://example.com",
-		"network_approval_context": map[string]any{"host": "Example.COM.", "protocol": "https"},
-	})
-	if len(network) != 4 || network[2].NetworkPolicyAmendment == nil || network[2].NetworkPolicyAmendment.Host != "example.com" ||
-		network[2].NetworkPolicyAmendment.Action != NetworkPolicyAllow || network[3].Decision != DecisionCancel {
-		t.Fatalf("network decisions = %#v", network)
-	}
 }
 
 func TestCanonicalToolName(t *testing.T) {
@@ -3025,48 +2813,6 @@ func TestWebFetchRuleMatchesURLWildcard(t *testing.T) {
 	}
 }
 
-func TestWindowsNetworkPolicyUsesOnlineIdentityOnlyForUnrestrictedNetwork(t *testing.T) {
-	policy := windowsNetworkPolicyForRequest(CommandRequest{AllowNetwork: true})
-	if policy.Offline {
-		t.Fatalf("policy=%+v", policy)
-	}
-}
-
-func TestWindowsNetworkPolicyLimitsOfflineIdentityToManagedProxy(t *testing.T) {
-	policy := windowsNetworkPolicyForRequest(CommandRequest{
-		AllowNetwork: true,
-		ManagedNetwork: &ManagedNetworkCommand{
-			HTTPPort:     3128,
-			SOCKSPort:    1080,
-			SOCKSUDPPort: 1080,
-		},
-	})
-	if !policy.Offline || policy.AllowAllLoopback || !reflect.DeepEqual(policy.AllowedTCPPorts, []int{1080, 3128}) {
-		t.Fatalf("policy=%+v", policy)
-	}
-	if got := blockedWindowsTCPPorts(policy.AllowedTCPPorts); got != "1-1079,1081-3127,3129-65535" {
-		t.Fatalf("blocked ports=%q", got)
-	}
-	if !reflect.DeepEqual(policy.AllowedUDPPorts, []int{1080}) {
-		t.Fatalf("udp ports=%v", policy.AllowedUDPPorts)
-	}
-}
-
-func TestWindowsNetworkPolicyCanExplicitlyAllowLoopback(t *testing.T) {
-	policy := windowsNetworkPolicyForRequest(CommandRequest{
-		ManagedNetwork: &ManagedNetworkCommand{AllowLocalBinding: true},
-	})
-	if !policy.Offline || !policy.AllowAllLoopback {
-		t.Fatalf("policy=%+v", policy)
-	}
-}
-
-func TestBlockedWindowsTCPPortsNormalizesInvalidAndDuplicatePorts(t *testing.T) {
-	if got := blockedWindowsTCPPorts([]int{0, 65536, 80, 80, 1, 65535}); got != "2-79,81-65534" {
-		t.Fatalf("blocked ports=%q", got)
-	}
-}
-
 func TestRuntimeYOLOEnabledFromEnv(t *testing.T) {
 	t.Setenv(EnvYOLO, "1")
 	if !RuntimeYOLOEnabled() {
@@ -3074,14 +2820,21 @@ func TestRuntimeYOLOEnabledFromEnv(t *testing.T) {
 	}
 }
 
-func TestApplyYOLOForcesDangerFullAccessConfig(t *testing.T) {
+// YOLO is "force the effective preset to full access": it rewrites the preset
+// and nothing else, and the derivation that runs afterwards produces the pair
+// full access means (plan 203).
+func TestApplyYOLOForcesFullAccessPreset(t *testing.T) {
 	t.Setenv(EnvYOLO, "1")
-	cfg := &appcfg.Root{DefaultPermissions: "restricted"}
+	cfg := &appcfg.Root{ApprovalPreset: appcfg.ApprovalPresetWorkspaceWrite}
 	if !ApplyYOLO(cfg) {
 		t.Fatalf("expected ApplyYOLO to report active override")
 	}
-	if cfg.DefaultPermissions != "" || cfg.SandboxMode != appcfg.SandboxModeDangerFullAccess || cfg.ApprovalPolicy.Mode != appcfg.ApprovalPolicyNever {
-		t.Fatalf("unexpected YOLO config: %+v", cfg)
+	if cfg.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("preset = %q, want full_access", cfg.ApprovalPreset)
+	}
+	derived := EffectiveConfig(*cfg, ProjectContext{TrustLevel: LevelUntrusted})
+	if derived.SandboxMode != appcfg.SandboxModeDangerFullAccess || derived.ApprovalPolicy.Mode != appcfg.ApprovalPolicyNever {
+		t.Fatalf("derived config: %+v", derived)
 	}
 }
 
@@ -3282,4 +3035,60 @@ func TestNetworkBlockedIgnoresAmbiguousConnectErrors(t *testing.T) {
 			t.Fatalf("ambiguous connect error was misclassified as a denial: %q", output)
 		}
 	}
+}
+
+// Approving a permission request is a question of how long the grant lasts, not
+// of who reviews it (plan 203): three answers, no reviewer, and no strict
+// auto-review answer at all.
+func TestRequestPermissionsOffersThreeDecisions(t *testing.T) {
+	options := BuildApprovalDecisionOptions("request_permissions", "request_permissions", map[string]any{
+		"permissions": map[string]any{"network": map[string]any{"enabled": true}},
+	})
+	got := make([]ApprovalDecisionName, 0, len(options))
+	for _, option := range options {
+		got = append(got, option.Decision)
+	}
+	want := []ApprovalDecisionName{DecisionGrantForTurn, DecisionGrantForSession, DecisionDecline}
+	if len(got) != len(want) {
+		t.Fatalf("decisions = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("decisions = %v, want %v", got, want)
+		}
+	}
+	for _, decision := range got {
+		if decision == DecisionGrantForTurnStrictAutoReview {
+			t.Fatalf("the strict auto-review answer is still offered: %v", got)
+		}
+	}
+}
+
+// test-only readers for a whole configuration document.
+
+// loadDocumentForTest reads a whole configuration document — stored sections
+// included — the way appcfg.Load read one before plan 207 narrowed forebrain.yaml
+// to its supported keys: parse and normalize, then Load's tail (.env merge,
+// ${ENV} expansion, validation). A test that assembles a runtime configuration
+// in a file goes through here, because the file itself no longer carries those
+// sections.
+func loadDocumentForTest(path string) (appcfg.Root, error) {
+	root, err := loadPersistedDocumentForTest(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	if err := appcfg.FinishLoad(&root); err != nil {
+		return appcfg.Root{}, err
+	}
+	return root, nil
+}
+
+// loadPersistedDocumentForTest is the same read without Load's tail: a ${ENV}
+// reference stays a reference, as appcfg.LoadPersisted left it.
+func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	return appcfg.ParseRootYAML(body)
 }

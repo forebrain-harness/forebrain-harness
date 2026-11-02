@@ -1,8 +1,8 @@
 <template>
   <div class="min-h-[calc(100dvh-0px)] bg-[var(--forebrain-bg)] px-4 py-8">
     <div class="mx-auto max-w-6xl space-y-6">
-      <div class="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
-        <nav class="settings-tabs" :aria-label="t('settings.title')" data-testid="settings-tabs">
+      <div class="settings-layout">
+        <nav class="settings-tabs" :aria-label="t('settings.narrowTabs')" data-testid="settings-tabs">
           <template v-for="group in tabGroups" :key="group.key">
             <div class="settings-group" :data-group="group.key">{{ group.label }}</div>
             <button
@@ -22,13 +22,15 @@
 
         <section class="min-w-0">
           <AppearanceTab v-if="activeTab === 'appearance'" />
-          <SettingsApprovalTab v-else-if="activeTab === 'approval'" />
-          <SettingsSubagentsTab v-else-if="activeTab === 'subagents'" />
+          <SettingsSessionTab v-else-if="activeTab === 'session'" tab="session" :form="form" />
+          <SettingsApprovalTab v-else-if="activeTab === 'approval'" tab="approval" :form="form" />
+          <SettingsSubagentsTab v-else-if="activeTab === 'subagents'" tab="subagents" :form="form" />
+          <SettingsWebToolsTab v-else-if="activeTab === 'net'" tab="net" :form="form" />
           <McpTab v-else-if="activeTab === 'mcp'" />
           <LspTab v-else-if="activeTab === 'lsp'" />
           <HooksTab v-else-if="activeTab === 'hooks'" />
-          <CronSettingsTab v-else-if="activeTab === 'cron'" />
-          <MemorySwitchesTab v-else-if="activeTab === 'memory'" />
+          <CronSettingsTab v-else-if="activeTab === 'cron'" tab="cron" :form="form" />
+          <MemorySwitchesTab v-else-if="activeTab === 'memory'" tab="memory" :form="form" />
           <ConfigTab v-else-if="activeTab === 'config'" />
           <RuntimeStatusTab v-else-if="activeTab === 'runtime'" />
           <SettingsSharedSkillsTab v-else-if="activeTab === 'shared-skills'" />
@@ -39,32 +41,41 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+/**
+ * Settings is the global scope: everything that is not bound to a primary agent
+ * or a project lives behind these tabs. The tabs and their groups are the
+ * prototype's (plan 191 §0, §4.2) — 常规〔外观 / 会话 / 审批与沙箱 / 子代理 /
+ * 联网工具〕· 全局服务〔MCP / 语言服务器 / 钩子 / 定时任务 / 记忆 / 共享技能〕·
+ * 高级〔配置文件 / 运行状态〕 — and the ones built from the schema share one
+ * form, so a value read once serves every tab.
+ *
+ * `?tab=<key>` is the tab's key, not its position. Narrow screens turn the
+ * sub-navigation into a horizontal strip of tabs instead of a column.
+ */
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppearanceTab from '@/components/settings/AppearanceTab.vue'
-import SettingsApprovalTab from '@/components/settings/SettingsApprovalTab.vue'
 import ConfigTab from '@/components/settings/ConfigTab.vue'
 import CronSettingsTab from '@/components/settings/CronSettingsTab.vue'
 import HooksTab from '@/components/settings/HooksTab.vue'
+import { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 import McpTab from '@/components/settings/McpTab.vue'
 import LspTab from '@/components/settings/LspTab.vue'
 import MemorySwitchesTab from '@/components/settings/MemorySwitchesTab.vue'
 import RuntimeStatusTab from '@/components/settings/RuntimeStatusTab.vue'
+import SettingsApprovalTab from '@/components/settings/SettingsApprovalTab.vue'
+import SettingsSessionTab from '@/components/settings/SettingsSessionTab.vue'
 import SettingsSharedSkillsTab from '@/components/settings/SettingsSharedSkillsTab.vue'
 import SettingsSubagentsTab from '@/components/settings/SettingsSubagentsTab.vue'
+import SettingsWebToolsTab from '@/components/settings/SettingsWebToolsTab.vue'
 import { useI18n } from '@/locales'
 
-/**
- * Settings is the global scope: everything that is not bound to a primary
- * agent or a project lives behind these tabs. The tabs are grouped (owner
- * 2026-10-18, after the design's sub-navigation): what every visitor tunes,
- * the services that run for every primary agent, and the expert surfaces.
- * Later plans append a tab by adding it to its group; `?tab=<key>` is the
- * key of the tab, not its position.
- */
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
+
+/** The one form the schema-driven tabs share: read once, saved per group. */
+const form = useSettingsForm()
 
 const tabGroups = computed(() => [
   {
@@ -72,8 +83,12 @@ const tabGroups = computed(() => [
     label: t('settings.groupGeneral'),
     tabs: [
       { key: 'appearance', label: t('settings.tabAppearance') },
-      { key: 'approval', label: t('settings.tabApproval') },
+      { key: 'session', label: t('settings.tabSession') },
+      // A machine with no sandbox has nothing to configure here: one posture,
+      // no choice, so the whole tab is gone (plan 215 §3.4, 191 §0.12).
+      ...(form.approvalPresetsVisible.value ? [{ key: 'approval', label: t('settings.tabApproval') }] : []),
       { key: 'subagents', label: t('settings.tabSubagents') },
+      { key: 'net', label: t('settings.tabWebTools') },
     ],
   },
   {
@@ -100,8 +115,7 @@ const tabGroups = computed(() => [
 
 const tabs = computed(() => tabGroups.value.flatMap((group) => group.tabs))
 
-// The tab lives in ?tab=<key> so other pages can link straight to one. The
-// appearance tab is the default: it is the one thing every visitor can act
+// The appearance tab is the default: it is the one thing every visitor can act
 // on, and the visual spec's entry point.
 function tabFromRoute(): string {
   const tab = route.query.tab
@@ -123,9 +137,22 @@ watch(
 watch(activeTab, (tab) => {
   if (route.query.tab !== tab) void router.replace({ query: { ...route.query, tab } })
 })
+
+// The sandbox answer arrives with the settings read, so a page opened straight
+// on the approval tab is moved to the one that exists only once the tabs are
+// known — the same fallback an unknown ?tab= gets, not a blank page.
+onMounted(async () => {
+  await form.load()
+  if (!tabs.value.some((entry) => entry.key === activeTab.value)) activeTab.value = tabFromRoute()
+})
 </script>
 
 <style scoped>
+.settings-layout {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 220px minmax(0, 1fr);
+}
 .settings-tabs {
   display: flex;
   flex-direction: column;
@@ -154,5 +181,26 @@ watch(activeTab, (tab) => {
   font-size: 11px;
   letter-spacing: 0.04em;
   color: var(--forebrain-muted-text);
+}
+/* A narrow window turns the column into a horizontal strip of tabs (the
+   prototype's 窄屏 scene): the group headings go, and the tabs scroll. */
+@media (max-width: 720px) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-tabs {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 6px;
+    padding-bottom: 2px;
+  }
+  .settings-tabs .settings-group {
+    display: none;
+  }
+  .settings-tab {
+    white-space: nowrap;
+    padding: 6px 12px;
+    border: 1px solid var(--forebrain-divider);
+  }
 }
 </style>

@@ -1,36 +1,41 @@
-import { readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
 
 import { signIn } from './support'
 
 /**
- * Retention is install-level configuration with a web form (plan 006): the
- * settings tab opens from ?tab=cron, a save lands the key in forebrain.yaml
- * and survives a reload, and restoring the default removes the key again.
+ * Retention is install-level configuration with a web form (plans 006, 191):
+ * the settings tab opens from ?tab=cron on the value the state database holds,
+ * a group save writes it there, and the value survives a reload — the file on
+ * disk has nothing to do with it any more.
  */
-const home = process.env.E2E_HOME ?? ''
-
-test.skip(!home, 'E2E_HOME missing')
-
-test('retention is set from the settings tab and resettable', async ({ page }) => {
+test('retention is set from the settings tab and survives a reload', async ({ page }) => {
+  // The design's copy is Chinese; the assertions read the prototype's words.
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  // /settings?tab=cron opens the scheduled-tasks tab with the default in force.
+  // /settings?tab=cron opens the scheduled-tasks tab on the stored value; the
+  // group is the tab's only one, so the row carries the field's own name.
   await page.goto('/settings?tab=cron', { waitUntil: 'networkidle' })
-  const days = page.getByTestId('cron-retention-days')
-  await expect(days).toHaveValue('30')
-  await expect(page.getByText(/30 days when not set\.|未设置时为 30 天。/)).toBeVisible()
+  const days = page.locator('[data-num="cron.retention_days"]')
+  await expect(days).toBeVisible()
+  await expect(page.locator('[data-field="cron.retention_days"] b')).toHaveText('执行记录保留')
+  await expect(page.locator('.settings-num__range')).toHaveText('1–3650')
+  const initial = await days.inputValue()
 
   // Saving 7 writes the key and keeps it across a reload.
   await days.fill('7')
-  await page.getByTestId('cron-retention-save').click()
-  await expect(page.getByText(/Saved; it applies from the next cleanup\.|已保存，下一次清理时生效。/)).toBeVisible()
+  await page.locator('[data-save="cn"]').click()
+  await expect(page.getByText('已保存，下一轮生效').first()).toBeVisible({ timeout: 10_000 })
   await page.reload({ waitUntil: 'networkidle' })
-  await expect(page.getByTestId('cron-retention-days')).toHaveValue('7')
-  expect(readFileSync(`${home}/forebrain.yaml`, 'utf8')).toContain('retention_days: 7')
+  await expect(page.locator('[data-num="cron.retention_days"]')).toHaveValue('7')
 
-  // Restoring the default removes the key from the file.
-  await page.getByTestId('cron-retention-reset').click()
-  await expect(page.getByTestId('cron-retention-days')).toHaveValue('30')
-  expect(readFileSync(`${home}/forebrain.yaml`, 'utf8')).not.toContain('retention_days')
+  // A number past the range turns red in place — the prototype's own rule —
+  // and the gateway refuses it naming the row.
+  await page.locator('[data-num="cron.retention_days"]').fill('4000')
+  await expect(page.locator('.settings-num__box')).toHaveClass(/is-bad/)
+
+  // Back to what the install had.
+  await page.locator('[data-num="cron.retention_days"]').fill(initial)
+  await page.locator('[data-save="cn"]').click()
+  await expect(page.getByText('已保存，下一轮生效').first()).toBeVisible({ timeout: 10_000 })
 })

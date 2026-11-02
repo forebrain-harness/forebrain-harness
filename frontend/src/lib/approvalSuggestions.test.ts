@@ -54,58 +54,37 @@ describe('approval suggestions', () => {
     ])
   })
 
-  it('normalizes snake-case network decisions embedded in payload JSON', () => {
-    const suggestion = permissionSuggestionFromAction({
-      id: 'act-2',
-      kind: 'shell',
-      status: 'pending',
-      payloadJson: JSON.stringify({
-        permission_suggestion: {
-          permission_tool_name: 'Bash',
-          available_decisions: [
-            'accept_for_session',
-            {
-              apply_network_policy_amendment: {
-                host: 'Example.COM.',
-                action: 'allow',
-              },
-            },
-          ],
-          network_approval_context: { host: 'Example.COM.', protocol: 'https' },
-          network_port: 443,
-          one_shot_only: false,
-        },
-      }),
+  it('drops the retired network-policy decision', () => {
+    // The managed network proxy and its per-host approvals are gone (plan 206):
+    // a stale payload naming one must contribute no button at all.
+    const suggestion = approvalDecisions({
+      permissionToolName: 'Bash',
+      permissionInput: 'curl https://example.com',
+      availableDecisions: [
+        'accept',
+        { apply_network_policy_amendment: { network_policy_amendment: { host: 'example.com', action: 'allow' } } },
+        'cancel',
+      ],
     })
 
-    expect(suggestion?.networkApprovalContext).toEqual({ host: 'example.com', protocol: 'https' })
-    expect(suggestion?.networkPort).toBe(443)
-    expect(approvalDecisions(suggestion)).toEqual([
-      { decision: 'accept_for_session' },
-      {
-        decision: 'apply_network_policy_amendment',
-        networkPolicyAmendment: { host: 'example.com', action: 'allow' },
-      },
-    ])
+    expect(suggestion.map((item) => item.decision)).toEqual(['accept', 'cancel'])
   })
 
-  it('keeps request_permissions choices supplied by the server', () => {
+  it('keeps request_permissions choices supplied by the server, without a reviewer', () => {
     const decisions = approvalDecisions({
       permissionToolName: 'request_permissions',
-      availableDecisions: [
-        'grant_for_turn',
-        'grant_for_turn_with_strict_auto_review',
-        'grant_for_session',
-        'decline',
-      ],
+      availableDecisions: ['grant_for_turn', 'grant_for_session', 'decline'],
     })
 
     expect(decisions.map((item) => item.decision)).toEqual([
       'grant_for_turn',
-      'grant_for_turn_with_strict_auto_review',
       'grant_for_session',
       'decline',
     ])
+    // Approving a permission request is a question of how long the grant lasts,
+    // not of who reviews it: the strict auto-review answer is gone from every
+    // surface (plan 203), and the frontend never adds it on its own.
+    expect(decisions.map((item) => item.decision)).not.toContain('grant_for_turn_with_strict_auto_review')
   })
 })
 

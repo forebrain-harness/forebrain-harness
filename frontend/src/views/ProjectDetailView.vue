@@ -75,6 +75,11 @@ const tabs = computed(() => {
  * directory it is bound to, and whether that directory is trusted. The
  * factory runs inside the shell's render, so saving the project's settings
  * (which reloads it) moves the badge without the page re-registering.
+ *
+ * A batch project shows no trust badge (plans/216 §3.5): it has no trust level
+ * to show — its tasks run unattended under their own sandbox switch, and the
+ * trust decision an interactive project's tools consult is not part of what a
+ * batch task is.
  */
 const { set: setTopbar } = useTopbar()
 
@@ -98,7 +103,7 @@ setTopbar({
       ...(current?.root
         ? [h('span', { class: 'forebrain-topbar-meta font-mono', 'data-testid': 'project-crumb-root' }, current.root)]
         : []),
-      ...(current
+      ...(current && !batchProject.value
         ? [h(BadgeComponent, {
           variant: current.trusted ? 'success' : 'gray',
           'data-testid': 'project-crumb-trust',

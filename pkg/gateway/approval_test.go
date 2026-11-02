@@ -456,8 +456,8 @@ func postApprovalDecision(t *testing.T, s *Server, actionID string, body any) *h
 	return rr
 }
 
-func (s *Server) applyGatewayApprovalDecision(action *state.Action, choice string, network *safety.NetworkPolicyAmendment, exec safety.ExecPolicyAmendment) error {
-	effect, err := s.approvalService().Prepare(action, turn.ApprovalReply{Choice: choice, Network: network, Exec: exec})
+func (s *Server) applyGatewayApprovalDecision(action *state.Action, choice string, exec safety.ExecPolicyAmendment) error {
+	effect, err := s.approvalService().Prepare(action, turn.ApprovalReply{Choice: choice, Exec: exec})
 	if err == nil {
 		effect()
 	}
@@ -569,10 +569,10 @@ func TestGatewayExecPolicyDecisionOnlyAppliesProposedAmendment(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"command": "go test ./...", "session_id": "s1"})
 	action := &state.Action{Kind: "shell", PayloadJSON: string(payload)}
 
-	if err := s.applyGatewayApprovalDecision(action, "accept_with_execpolicy_amendment", nil, safety.ExecPolicyAmendment{"go"}); err == nil {
+	if err := s.applyGatewayApprovalDecision(action, "accept_with_execpolicy_amendment", safety.ExecPolicyAmendment{"go"}); err == nil {
 		t.Fatal("expected a widened amendment to be rejected")
 	}
-	if err := s.applyGatewayApprovalDecision(action, "accept_with_execpolicy_amendment", nil, safety.ExecPolicyAmendment{"go", "test"}); err != nil {
+	if err := s.applyGatewayApprovalDecision(action, "accept_with_execpolicy_amendment", safety.ExecPolicyAmendment{"go", "test"}); err != nil {
 		t.Fatal(err)
 	}
 	decision := runner.EvaluatePermission("Bash", "go test ./pkg/tui -run TestX")
@@ -592,38 +592,9 @@ func TestGatewayExecPolicyDecisionRejectsExistingPolicyMatch(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"command": "npm run build", "session_id": "s1"})
 	action := &state.Action{Kind: "shell", PayloadJSON: string(payload)}
 	if err := s.applyGatewayApprovalDecision(
-		action, "accept_with_execpolicy_amendment", nil, safety.ExecPolicyAmendment{"npm", "run", "build"},
+		action, "accept_with_execpolicy_amendment", safety.ExecPolicyAmendment{"npm", "run", "build"},
 	); err == nil {
 		t.Fatal("expected an exec amendment driven by an existing policy match to be rejected")
-	}
-}
-
-func TestApprovalWSDataIncludesTypedDecisionInputsForActionPayloadJSON(t *testing.T) {
-	payload, err := json.Marshal(map[string]any{
-		"command":                  "curl https://example.com",
-		"network_approval_context": map[string]any{"host": "Example.COM.", "protocol": "https"},
-		"network_port":             443,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := approvalWSData(fakePermissionEvaluator{}, "session-1", "a4", "shell", "shell", string(payload))
-	raw := data["permission_suggestion"].(map[string]any)
-	if raw["network_port"] != 443 {
-		t.Fatalf("network_port=%#v", raw["network_port"])
-	}
-	context, ok := raw["network_approval_context"].(*safety.NetworkApprovalContext)
-	if !ok || context.Host != "example.com" || context.Protocol != safety.NetworkApprovalHTTPS {
-		t.Fatalf("network context=%#v", raw["network_approval_context"])
-	}
-	decisions, ok := raw["available_decisions"].([]any)
-	if !ok || len(decisions) != 4 {
-		t.Fatalf("available_decisions=%#v", raw["available_decisions"])
-	}
-	allowContainer, ok := decisions[2].(map[string]any)["apply_network_policy_amendment"].(map[string]any)
-	allow, ok := allowContainer["network_policy_amendment"].(safety.NetworkPolicyAmendment)
-	if !ok || allow.Action != safety.NetworkPolicyAllow || decisions[3] != "cancel" {
-		t.Fatalf("persistent allow decision=%#v", decisions)
 	}
 }
 
@@ -632,7 +603,7 @@ func TestGatewayPatchSessionDecisionDoesNotCrossSessions(t *testing.T) {
 	s := &Server{Runner: runner}
 	payload, _ := json.Marshal(map[string]any{"resolved_paths": []string{"/repo/a.go", "/repo/b.go"}, "session_id": "s1"})
 	action := &state.Action{SessionID: "s1", Kind: "apply_patch", PayloadJSON: string(payload)}
-	if err := s.applyGatewayApprovalDecision(action, "accept_for_session", nil, nil); err != nil {
+	if err := s.applyGatewayApprovalDecision(action, "accept_for_session", nil); err != nil {
 		t.Fatal(err)
 	}
 	if decision := runner.EvaluatePermissionForSession("s1", "apply_patch", "/repo/a.go"); decision.Matched == nil || !decision.BypassSandbox {
@@ -686,7 +657,7 @@ func TestGatewayRememberDecisionPersistsTheExactCommand(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"command": command, "session_id": "s1"})
 	action := &state.Action{Kind: "shell", PayloadJSON: string(payload)}
 
-	if err := s.applyGatewayApprovalDecision(action, "accept_and_remember", nil, nil); err != nil {
+	if err := s.applyGatewayApprovalDecision(action, "accept_and_remember", nil); err != nil {
 		t.Fatal(err)
 	}
 	decision := runner.EvaluatePermission("Bash", command)
@@ -704,7 +675,7 @@ func TestGatewayRememberDecisionPersistsWebFetchDomain(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"url": "https://example.com/docs", "session_id": "s1"})
 	action := &state.Action{Kind: "WebFetch", PayloadJSON: string(payload)}
 
-	if err := s.applyGatewayApprovalDecision(action, "accept_and_remember", nil, nil); err != nil {
+	if err := s.applyGatewayApprovalDecision(action, "accept_and_remember", nil); err != nil {
 		t.Fatal(err)
 	}
 	if decision := runner.EvaluatePermission("WebFetch", "https://example.com/other"); decision.Behavior != safety.BehaviorAllow {
@@ -721,7 +692,7 @@ func TestGatewayRememberDecisionRejectsToolsWithNothingProposed(t *testing.T) {
 	s := &Server{Runner: &run.Runner{Deps: &run.Deps{Home: t.TempDir()}}}
 	payload, _ := json.Marshal(map[string]any{"query": "golang generics", "session_id": "s1"})
 	action := &state.Action{Kind: "WebSearch", PayloadJSON: string(payload)}
-	if err := s.applyGatewayApprovalDecision(action, "accept_and_remember", nil, nil); err == nil {
+	if err := s.applyGatewayApprovalDecision(action, "accept_and_remember", nil); err == nil {
 		t.Fatal("expected accept_and_remember to be unavailable for WebSearch")
 	}
 }
@@ -739,7 +710,7 @@ func TestGatewayExecPolicyDecisionAllowsUpgradingAMatchedAllowRule(t *testing.T)
 	payload, _ := json.Marshal(map[string]any{"command": "go test ./...", "session_id": "s1"})
 	action := &state.Action{Kind: "shell", PayloadJSON: string(payload)}
 	if err := s.applyGatewayApprovalDecision(
-		action, "accept_with_execpolicy_amendment", nil, safety.ExecPolicyAmendment{"go", "test"},
+		action, "accept_with_execpolicy_amendment", safety.ExecPolicyAmendment{"go", "test"},
 	); err != nil {
 		t.Fatal(err)
 	}

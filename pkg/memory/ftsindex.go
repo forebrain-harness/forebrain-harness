@@ -88,7 +88,7 @@ func (s *searchIndex) sync(ctx context.Context, root string, files []indexedFile
 	for _, file := range files {
 		present[file.path] = struct{}{}
 		prev, known := stored[file.path]
-		if known && prev.size == file.size && prev.mtime == file.modTime.Unix() && prev.revision == TermsRevision {
+		if known && prev.size == file.size && prev.mtime == file.modTime.Unix() && prev.revision == termsRevisionInForce() {
 			continue
 		}
 		if err := replaceFileRows(ctx, tx, root, file, prev); err != nil {
@@ -173,10 +173,7 @@ func replaceFileRows(ctx context.Context, tx *sql.Tx, root string, file indexedF
 	defer insert.Close()
 	var lineCount int64
 	for index, line := range textLines(file.content) {
-		terms, err := searchTerms(line)
-		if err != nil {
-			return err
-		}
+		terms := searchTerms(line)
 		if len(terms) == 0 {
 			continue
 		}
@@ -188,7 +185,7 @@ func replaceFileRows(ctx context.Context, tx *sql.Tx, root string, file indexedF
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO fb_memory_index_files(root, path, size, mtime_unix, terms_revision, first_rowid, line_count) VALUES(?,?,?,?,?,?,?)
 		 ON CONFLICT(root, path) DO UPDATE SET size = excluded.size, mtime_unix = excluded.mtime_unix, terms_revision = excluded.terms_revision, first_rowid = excluded.first_rowid, line_count = excluded.line_count`,
-		root, file.path, file.size, file.modTime.Unix(), TermsRevision, firstRowid, lineCount)
+		root, file.path, file.size, file.modTime.Unix(), termsRevisionInForce(), firstRowid, lineCount)
 	return err
 }
 
@@ -204,10 +201,7 @@ func (s *searchIndex) signals(ctx context.Context, root string, queries []string
 	queryTerms := make([][]string, len(queries))
 	var all []string
 	for index, query := range queries {
-		terms, err := searchTerms(query)
-		if err != nil {
-			return nil, err
-		}
+		terms := searchTerms(query)
 		queryTerms[index] = terms
 		all = append(all, queryTerms[index]...)
 	}

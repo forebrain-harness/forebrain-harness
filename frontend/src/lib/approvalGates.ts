@@ -1,6 +1,4 @@
 import { t, type I18nKey } from '@/locales'
-import type { PermissionSuggestionRecord } from '@/lib/approvalSuggestions'
-import { permissionSuggestionFromAction } from '@/lib/approvalSuggestions'
 import { parseUnifiedDiff, type DiffRow } from '@/lib/unifiedDiff'
 import type { ShellCardFile } from '@/composables/useChatStream'
 
@@ -22,7 +20,6 @@ export type ApprovalFamily =
   | 'apply_patch'
   | 'shell'
   | 'shell_outside_sandbox'
-  | 'network_host'
   | 'request_permissions'
   | 'enter_plan_mode'
   | 'mcp_tool'
@@ -44,10 +41,6 @@ export interface ApprovalFacts {
   /** Lines added / removed, when the engine can count them. */
   added?: number
   removed?: number
-  /** The host a network approval is about. */
-  host?: string
-  protocol?: string
-  port?: number
   /** The entries a permission request is asking for. */
   permissions?: { access: 'read' | 'write'; path: string }[]
   /** Whether a permission request would open the network. The engine's profile
@@ -74,18 +67,16 @@ export function parseApprovalPayload(payloadJson: string): Record<string, unknow
 
 /**
  * Which family a pending approval belongs to. The order is the engine's
- * evaluation order and must not be reshuffled: a network approval rides on a
- * shell payload, and a sandbox-denied retry can also be a shell action, so
- * those checks come before the kind's own branch.
+ * evaluation order and must not be reshuffled: a sandbox-denied retry can also
+ * be a shell action, so that check comes before the kind's own branch.
  */
-export function approvalFamily(kind: string, payload: Record<string, unknown>, suggestion: PermissionSuggestionRecord | null): ApprovalFamily {
+export function approvalFamily(kind: string, payload: Record<string, unknown>): ApprovalFamily {
   const k = String(kind ?? '').trim().toLowerCase()
   if (k === 'exit_plan_mode') return 'exit_plan_mode'
   // user_interaction is a question, not an approval; a caller that reaches
   // this function with one has miscalled it, and fallback is the two-choice
   // card that says only what it truly knows.
   if (k === 'user_interaction') return 'fallback'
-  if (suggestion?.networkApprovalContext) return 'network_host'
   if (payload.approval_reason === 'sandbox_denied' || payload.sandbox_permissions === 'require_escalated' || payload.profile_elevation === true) {
     return 'shell_outside_sandbox'
   }
@@ -349,8 +340,8 @@ function permissionNetworkEnabled(permissions: unknown): boolean {
  * it, for the reason pkg/tui/overlays.go:1842-1848 records: enumerating tags
  * means every new reason silently renders as a bare question.
  */
-export function approvalFacts(family: ApprovalFamily, payload: Record<string, unknown>, suggestion: PermissionSuggestionRecord | null): ApprovalFacts {
-  return withRationale(familyFacts(family, payload, suggestion), payload)
+export function approvalFacts(family: ApprovalFamily, payload: Record<string, unknown>): ApprovalFacts {
+  return withRationale(familyFacts(family, payload), payload)
 }
 
 /** The engine's sentence, once. The sandbox branch already renders the denial
@@ -366,7 +357,7 @@ function withRationale(facts: ApprovalFacts, payload: Record<string, unknown>): 
   return { ...facts, rationale, facts: [rationale, ...facts.facts] }
 }
 
-function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>, suggestion: PermissionSuggestionRecord | null): ApprovalFacts {
+function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>): ApprovalFacts {
   switch (family) {
     case 'file_write': {
       const content = String(payload.content ?? '')
@@ -451,19 +442,6 @@ function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>, s
         facts: denial
           ? [t('chat.approvalFactsSandboxBlocked'), denial]
           : [t('chat.approvalFactsSandboxBlocked')],
-      }
-    }
-    case 'network_host': {
-      const context = suggestion?.networkApprovalContext
-      const port = suggestion?.networkPort
-      const parts = [context?.host ?? '', context ? context.protocol.toUpperCase() : '', port ? String(port) : '']
-        .filter(Boolean)
-      return {
-        family,
-        host: context?.host,
-        protocol: context?.protocol,
-        ...(port ? { port } : {}),
-        facts: [parts.join(' · ')],
       }
     }
     case 'request_permissions': {
@@ -556,8 +534,6 @@ export function approvalQuestion(family: ApprovalFamily, kind: string, payload: 
       return t('chat.approvalShellQuestion')
     case 'shell_outside_sandbox':
       return t('chat.approvalShellOutsideQuestion')
-    case 'network_host':
-      return t('chat.approvalNetworkQuestion')
     case 'request_permissions':
       return t('chat.approvalPermissionsQuestion')
     case 'enter_plan_mode':
@@ -587,14 +563,12 @@ export function approvalQuestion(family: ApprovalFamily, kind: string, payload: 
 
 /**
  * One pending action's family, facts, and question, read from the action row
- * alone — the payload is the engine's own record of what it wants, and the
- * suggestion carries the network approval the payload alone cannot name. The
- * pure reader behind the store's `approvalGate`, so the card that hangs on the
- * gated call reads the same gate wherever it is drawn, provider or none.
+ * alone — the payload is the engine's own record of what it wants. The pure
+ * reader behind the store's `approvalGate`, so the card that hangs on the gated
+ * call reads the same gate wherever it is drawn, provider or none.
  */
-export function approvalGateOf(action: { kind: string; payloadJson: string; permissionSuggestion?: unknown }): { facts: ApprovalFacts; question: string } {
+export function approvalGateOf(action: { kind: string; payloadJson: string }): { facts: ApprovalFacts; question: string } {
   const payload = parseApprovalPayload(action.payloadJson)
-  const suggestion = permissionSuggestionFromAction(action as Parameters<typeof permissionSuggestionFromAction>[0])
-  const family = approvalFamily(action.kind, payload, suggestion)
-  return { facts: approvalFacts(family, payload, suggestion), question: approvalQuestion(family, action.kind, payload) }
+  const family = approvalFamily(action.kind, payload)
+  return { facts: approvalFacts(family, payload), question: approvalQuestion(family, action.kind, payload) }
 }

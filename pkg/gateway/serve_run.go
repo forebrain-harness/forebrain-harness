@@ -170,6 +170,28 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		Recover: func(context.Context) { gw.recoverResolvedApprovalWaitsOnce() },
 	}.Start(ctx)
 	defer stopReaper()
+	// The gateway registers as a local peer too (plan 195): the same
+	// per-process service the TUI runs, carrying the gateway's own agent
+	// list. Stopped with the reaper, before the environment goes away.
+	stopPeers := h.StartPeers(ctx, process.PeerSurface{
+		Kind:    "gateway",
+		Publish: gw.publishGatewayRunEvent,
+		Wake: func(ctx context.Context, p process.PeerPrompt) error {
+			if gw == nil || gw.Core == nil {
+				return process.ErrPeerWakeUnavailable
+			}
+			_, err := gw.startDetachedTurn(detachedTurn{
+				SessionID:    p.SessionID,
+				Prompt:       p.Text,
+				Trigger:      "peer",
+				Origin:       turn.Origin{Surface: turn.SurfaceWebChat, ChannelID: "peer"},
+				Unattended:   true,
+				PromptOrigin: state.MessageOriginPeer,
+			})
+			return err
+		},
+	})
+	defer stopPeers()
 	stopApprovalExpiry := state.StartExpireSweeper(ctx, actionSvc, state.ExpireSweeperConfig{
 		TTL:    process.ApprovalTTLFromEnv(),
 		Reason: "approval_ttl_expired",
@@ -233,14 +255,12 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	gddHandler := httpSrv.Handler
 	httpSrv.Handler = ServeHTTPChain(h, gw, gddHandler)
 
-	authMode := gatewayAuthMode(h.Deps.AppCfg)
 	signInToken := ""
-	if opts.SignInLink && authMode == "token" {
+	if opts.SignInLink {
 		signInToken = strings.TrimSpace(h.Deps.AppCfg.Gateway.Auth.Token)
 	}
 	banner := startupBanner{
 		Version:     opts.Version,
-		AuthMode:    authMode,
 		SignInToken: signInToken,
 		WebUI:       gw.resolveStaticFS() != nil,
 		Notes:       h.ChannelMigrationNotes,
@@ -263,9 +283,8 @@ const bannerArt = " _____              _               _\n" +
 type startupBanner struct {
 	Version     string   // this build's version, "" prints no version line suffix
 	Addr        net.Addr // the address actually bound
-	AuthMode    string
-	SignInToken string // set only when a sign-in link is to be printed
-	WebUI       bool   // true when the web UI is being served
+	SignInToken string   // set only when a sign-in link is to be printed
+	WebUI       bool     // true when the web UI is being served
 	// Notes are one-off startup notices, printed under the banner. The
 	// primary-agent-level channel removal is the first: a channel that was
 	// enabled when plan 035 retired the section is named once here.
@@ -310,7 +329,7 @@ func writeStartupBanner(w io.Writer, b startupBanner) {
 	if b.SignInToken != "" {
 		fmt.Fprintf(&out, "Sign in      %s/login#token=%s\n", base, signInFragmentValue(b.SignInToken))
 	}
-	fmt.Fprintf(&out, "Auth         %s\n", strings.TrimSpace(b.AuthMode))
+	fmt.Fprintf(&out, "Auth         token\n")
 	fmt.Fprintf(&out, "Listening on http://%s\n", b.Addr.String())
 	for _, note := range b.Notes {
 		if n := strings.TrimSpace(note); n != "" {

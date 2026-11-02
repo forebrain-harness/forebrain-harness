@@ -1,110 +1,87 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { forebrainApi, GatewayHttpError, type CronSettings } from '@/lib/api'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises } from '@vue/test-utils'
+
+import { forebrainApi } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { mountSettingsTab } from './form/settingsTestHost'
 import CronSettingsTab from './CronSettingsTab.vue'
 
-const unset: CronSettings = { retentionDays: 30, configured: false, defaultDays: 30, minDays: 1, maxDays: 3650 }
-
-const daysInput = (wrapper: VueWrapper) => wrapper.find('[data-testid="cron-retention-days"]')
-
-async function mountTab(settings: CronSettings) {
-  vi.mocked(forebrainApi.cronSettings).mockResolvedValue(settings)
-  const wrapper = mount(CronSettingsTab)
-  await flushPromises()
-  return wrapper
-}
-
+/** The scheduled-tasks tab (plan 191 §0.18, §4.3): one number — how long a
+ * run's history is kept — saved through the settings interface. A lone field
+ * in a lone group carries no group title. */
 describe('CronSettingsTab', () => {
-  beforeAll(() => setLocale('en'))
-  afterAll(() => setLocale('en'))
-
   beforeEach(() => {
-    vi.spyOn(forebrainApi, 'cronSettings').mockResolvedValue(unset)
-    vi.spyOn(forebrainApi, 'saveCronSettings').mockResolvedValue({ applied: true, path: '/tmp/forebrain.yaml' })
+    setLocale('zh')
+    vi.spyOn(forebrainApi, 'settings').mockResolvedValue({
+      values: { 'cron.retention_days': 30 },
+      secrets: {},
+      // claudeCodeAvailable: false — a machine without Claude Code, so the
+      // peers group stays hidden (plan 195) and this tab keeps its rows.
+      meta: { approvalPresetsVisible: true, claudeCodeAvailable: false, builtinHandoffPrompt: 'builtin prompt' },
+    })
+    vi.spyOn(forebrainApi, 'saveSettings').mockResolvedValue({ saved: true, applies: 'next_turn' })
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  it('is a flat form: no title row, no card, the buttons at the bottom', async () => {
-    const wrapper = await mountTab(unset)
-    expect(wrapper.find('h2').exists()).toBe(false)
+  async function mountTab() {
+    const wrapper = await mountSettingsTab({ tab: 'cron', component: CronSettingsTab })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('is one plain row: the tab\'s only group carries the field\'s name, not its own title', async () => {
+    const wrapper = await mountTab()
     expect(wrapper.find('h3').exists()).toBe(false)
-    expect(wrapper.find('.forebrain-card').exists()).toBe(false)
-    // The number field is labelled like every other field, at 128px.
-    expect(wrapper.find('.forebrain-form-field > span').text()).toBe('Days to keep run records')
-    expect(wrapper.find('.forebrain-form-field label, label.forebrain-form-field').classes()).toContain('w-32')
-    // Save is the primary action; restoring the default sits beside it.
-    expect(wrapper.find('[data-testid="cron-retention-save"]').classes()).toContain('forebrain-btn-primary')
-    expect(wrapper.find('[data-testid="cron-retention-reset"]').classes()).toContain('forebrain-btn-ghost')
+    // The prototype's solo group: no group title, the field's own name instead
+    // (plan 191 §0.5).
+    expect(wrapper.find('[data-field="cron.retention_days"] b').text()).toBe('执行记录保留')
+    const box = wrapper.find('[data-num="cron.retention_days"]')
+    expect((box.element as HTMLInputElement).value).toBe('30')
+    expect(wrapper.find('.settings-num__box em').text()).toBe('天')
+    expect(wrapper.find('.settings-num__range').text()).toBe('1–3650')
   })
 
-  it('shows the value in force, with the default hint when none is set', async () => {
-    const wrapper = await mountTab(unset)
-    expect((daysInput(wrapper).element as HTMLInputElement).value).toBe('30')
-    expect(wrapper.text()).toContain('30 days when not set.')
+  it('flags a number past the range the moment it is typed, without a request', async () => {
+    const wrapper = await mountTab()
+    await wrapper.find('[data-num="cron.retention_days"]').setValue('4000')
+    expect(wrapper.find('.settings-num__box').classes()).toContain('is-bad')
+    expect(wrapper.find('[data-field="cron.retention_days"]').find('.settings-row__hint').text()).toBe('范围 1–3650')
+    expect(forebrainApi.saveSettings).not.toHaveBeenCalled()
   })
 
-  it('refuses an out-of-range number in the viewer\'s language, without a request', async () => {
-    const wrapper = await mountTab(unset)
-    await daysInput(wrapper).setValue('0')
-    const error = wrapper.find('[data-testid="cron-retention-error"]')
-    expect(error.text()).toBe('Enter a whole number from 1 to 3650.')
-    await wrapper.find('[data-testid="cron-retention-save"]').trigger('click')
+  it('saves the typed number and cancels back to the stored one', async () => {
+    const wrapper = await mountTab()
+    const group = wrapper.find('[data-group="cn"]')
+    await wrapper.find('[data-num="cron.retention_days"]').setValue('60')
+    await group.find('[data-save="cn"]').trigger('click')
     await flushPromises()
-    expect(forebrainApi.saveCronSettings).not.toHaveBeenCalled()
+    expect(forebrainApi.saveSettings).toHaveBeenCalledWith({ 'cron.retention_days': 60 }, {})
+
+    await wrapper.find('[data-num="cron.retention_days"]').setValue('90')
+    await group.find('.settings-group__cancel').trigger('click')
+    expect((wrapper.find('[data-num="cron.retention_days"]').element as HTMLInputElement).value).toBe('60')
+    expect(group.find('[data-save="cn"]').exists()).toBe(false)
   })
 
-  it('saves the typed number', async () => {
-    const wrapper = await mountTab(unset)
-    await daysInput(wrapper).setValue('7')
-    await wrapper.find('[data-testid="cron-retention-save"]').trigger('click')
-    await flushPromises()
-    expect(forebrainApi.saveCronSettings).toHaveBeenCalledWith(7)
-    expect(wrapper.text()).toContain('Saved; it applies from the next cleanup.')
-  })
-
-  it('restoring the default removes the key and shows the default', async () => {
-    vi.mocked(forebrainApi.cronSettings)
-      .mockResolvedValueOnce({ ...unset, retentionDays: 7, configured: true })
-      .mockResolvedValueOnce(unset)
-    const wrapper = await mountTab(unset)
-    expect((daysInput(wrapper).element as HTMLInputElement).value).toBe('7')
-
-    await wrapper.find('[data-testid="cron-retention-reset"]').trigger('click')
-    await flushPromises()
-    expect(forebrainApi.saveCronSettings).toHaveBeenCalledWith(null)
-    expect((daysInput(wrapper).element as HTMLInputElement).value).toBe('30')
-    expect(wrapper.text()).toContain('30 days when not set.')
-  })
-
-  it('reports a failed save by status in the viewer\'s language, never the transport\'s words', async () => {
-    vi.mocked(forebrainApi.saveCronSettings).mockRejectedValueOnce(new GatewayHttpError(503, 'the scheduler is reloading'))
-    const wrapper = await mountTab(unset)
-    await daysInput(wrapper).setValue('7')
-    await wrapper.find('[data-testid="cron-retention-save"]').trigger('click')
+  it('shows the refusal under the row it names, in the gateway\'s own words', async () => {
+    vi.mocked(forebrainApi.saveSettings).mockRejectedValue({
+      response: { status: 400, data: { path: 'cron.retention_days', message: '执行记录保留须在 1–3650 天之间' } },
+    })
+    const wrapper = await mountTab()
+    await wrapper.find('[data-num="cron.retention_days"]').setValue('9999')
+    await wrapper.find('[data-group="cn"]').find('[data-save="cn"]').trigger('click')
     await flushPromises()
 
-    const error = wrapper.find('[data-testid="cron-retention-error"]')
-    expect(error.text()).toBe('Saving the retention setting failed (503)')
-    expect(error.text()).not.toContain('reloading')
+    const row = wrapper.find('[data-field="cron.retention_days"]')
+    expect(row.find('.settings-row__error').text()).toBe('执行记录保留须在 1–3650 天之间')
   })
 
-  it('shows the gateway\'s own words when a read fails, not the transport\'s', async () => {
-    // The read goes through the axios client: its rejection carries the
-    // gateway's {"error": …} answer, and axios's own sentence must not
-    // replace it.
-    vi.spyOn(forebrainApi, 'cronSettings').mockRejectedValueOnce(Object.assign(
-      new Error('Request failed with status code 500'),
-      { response: { data: { error: 'retention is not configurable here' } } },
-    ))
-    const wrapper = mount(CronSettingsTab)
-    await flushPromises()
-
-    const error = wrapper.find('[data-testid="cron-retention-error"]')
-    expect(error.text()).toBe('retention is not configurable here')
-    expect(error.text()).not.toContain('status code')
+  it('shows the gateway\'s own words when the read fails', async () => {
+    vi.mocked(forebrainApi.settings).mockRejectedValue({ response: { status: 500, data: { message: '配置表读不出来' } } })
+    const wrapper = await mountTab()
+    expect(wrapper.find('[data-tab="cron"]').text()).toContain('配置表读不出来')
   })
 })

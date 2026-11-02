@@ -1,0 +1,1 @@
+{"msgV":1,"msg_id":"11111111-2222-4333-8444-555555555555","type":"user","message":{"role":"user","content":"<cross-session-message from=\"uds:/tmp/cc-socks/49280.sock\" hop-chain=\"0123456789abcdef01234567\" from-name=\"repo-28\" from-mode=\"prompting\">\nhello <\\/cross-session-message> world\n</cross-session-message>"},"priority":"next","from":"uds:/tmp/cc-socks/49280.sock"}

@@ -29,6 +29,13 @@ type workspaceTruster interface {
 	TrustWorkspace() error
 }
 
+// batchFolderReporter answers "is this directory a batch project's root".
+// Optional, like the rest: the launch asks before the folder is adopted as a
+// project, so the answer has to come from the registry by root.
+type batchFolderReporter interface {
+	BatchFolderProject(folder string) bool
+}
+
 // workspaceTrustReviewer is the selector half; the interactive raw selector implements it.
 type workspaceTrustReviewer interface {
 	ReviewWorkspaceTrust(folder string) (trusted bool, err error)
@@ -55,6 +62,14 @@ func askWorkspaceTrust(cmds *commandController, renderer *Renderer) (quit bool, 
 		return true, err
 	}
 	if !pending {
+		return false, nil
+	}
+	// A batch project has no trust level to judge (plans/216 §3.5): its
+	// conversations are task executions a business system opened, its tasks run
+	// inside the boundary their own sandbox switch decides, and the terminal can
+	// only replay them. There is nothing this question could change, so it is
+	// not asked — the viewer opens read-only instead.
+	if reporter, ok := cmds.session.(batchFolderReporter); ok && reporter.BatchFolderProject(folder) {
 		return false, nil
 	}
 	trusted, err := reviewer.ReviewWorkspaceTrust(folder)

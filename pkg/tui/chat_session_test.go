@@ -16,12 +16,10 @@ import (
 	"log"
 	"log/slog"
 	"math"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1484,7 +1482,7 @@ func TestApplyPermissionPresetSetsSandboxAndApproval(t *testing.T) {
 	} {
 		decision := s.runner().EvaluatePermissionForSession("s1", call.tool, call.input)
 		require.Equal(t, safety.BehaviorAllow, decision.Behavior, call)
-		require.Equal(t, "danger_full_access", decision.Reason, call)
+		require.Equal(t, safety.ReasonYOLO, decision.Reason, call)
 		require.True(t, decision.BypassSandbox, call)
 	}
 
@@ -1494,9 +1492,9 @@ func TestApplyPermissionPresetSetsSandboxAndApproval(t *testing.T) {
 	require.Equal(t, safety.ModeOnRequest, other.Mode)
 	require.Empty(t, other.SandboxMode)
 	_, otherCurrent := s.PermissionPresets("s2")
-	require.Equal(t, safety.PresetDefault, otherCurrent)
+	require.Equal(t, safety.PresetWorkspaceWrite, otherCurrent)
 	decision := s.runner().EvaluatePermissionForSession("s2", "shell", "rm -rf /tmp/build-output")
-	require.NotEqual(t, "danger_full_access", decision.Reason)
+	require.NotEqual(t, safety.ReasonYOLO, decision.Reason)
 	require.False(t, decision.BypassSandbox)
 
 	// Nothing was written to forebrain.yaml.
@@ -1535,34 +1533,40 @@ func TestApplyPermissionPresetSurvivesConfigApply(t *testing.T) {
 	sessionSandbox := func() appcfg.SandboxMode {
 		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("s1")).SandboxMode
 	}
-	_, err := s.ApplyPermissionPreset("s1", safety.PresetReadOnly)
+	// The session picks the default preset. This launch project is undecided, so
+	// the preset means read-only here — the trust narrowing applies to the
+	// session's own pick exactly as it does to the configuration — which is
+	// what makes the survival assertions below mean something: the file is
+	// about to say full access instead.
+	_, err := s.ApplyPermissionPreset("s1", safety.PresetWorkspaceWrite)
 	require.NoError(t, err)
 	require.NoError(t, seedConfigFromFile(s))
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
 	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 
 	// The file changing under the session does not undo the choice either: an
 	// edit made elsewhere reaches the session through the same reload.
 	require.NoError(t, os.WriteFile(cfgPath, []byte(
-		"sandbox_mode: danger-full-access\n"+
+		"approval_preset: full_access\n"+
 			"agents:\n  definitions:\n    main:\n      llm_providers:\n"+
 			"        - provider: openai\n          model: gpt-old\n"+
 			"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n",
 	), 0o600))
 	require.NoError(t, seedConfigFromFile(s))
+	require.Equal(t, appcfg.ApprovalPresetFullAccess, s.cfg().ApprovalPreset)
 	require.Equal(t, appcfg.SandboxModeDangerFullAccess, s.cfg().SandboxMode)
-	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox(), "the session's own pick outranks the file's full access")
 	decision := s.runner().EvaluatePermissionForSession("s1", "shell", "rm -rf /tmp/build-output")
-	require.NotEqual(t, "danger_full_access", decision.Reason, "the session's read-only choice outranks the file's full access")
+	require.NotEqual(t, safety.ReasonYOLO, decision.Reason, "the session's own preset outranks the file's full access")
 
 	// Picking another preset is how the choice moves, and it moves both halves.
-	_, err = s.ApplyPermissionPreset("s1", safety.PresetDefault)
+	_, err = s.ApplyPermissionPreset("s1", safety.PresetFullAccess)
 	require.NoError(t, err)
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, sessionSandbox())
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, sessionSandbox())
 	require.NoError(t, seedConfigFromFile(s))
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, sessionSandbox())
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, sessionSandbox())
 	_, current := s.PermissionPresets("s1")
-	require.Equal(t, safety.PresetDefault, current)
+	require.Equal(t, safety.PresetFullAccess, current)
 }
 
 // Picking a model rewrites forebrain.yaml, and the session's live config is more
@@ -1610,12 +1614,12 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"), Sandbox: safety.NewManager(), Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
 	require.NoError(t, seedConfigFromFile(s))
 
-	_, err = s.ApplyPermissionPreset("s1", safety.PresetReadOnly)
+	_, err = s.ApplyPermissionPreset("s1", safety.PresetFullAccess)
 	require.NoError(t, err)
 	sessionSandbox := func() appcfg.SandboxMode {
 		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("s1")).SandboxMode
 	}
-	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, sessionSandbox())
 
 	reply := chooseInSession(t, s, "model", "openai/gpt-new").Reply
 	require.Equal(t, "Switched to openai/gpt-new.", reply)
@@ -1624,8 +1628,8 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	// the preset is still the session's sandbox. The configured default —
 	// which every other process and every conversation that has not chosen
 	// reads — is untouched.
-	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, sessionSandbox())
+	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
 	require.Equal(t, "gpt-old", appcfg.EffectiveDefaultLLM(s.cfg().Agents.Definitions["main"]).Model, "the shared config file was rewritten")
 	require.Same(t, s.cfg(), s.runner().AppCfg)
 	sel, hasRow, selErr := s.sessStore().SessionModelSelection(context.Background(), "s1")
@@ -1973,7 +1977,7 @@ func TestChooseModelEffortLeavesTheConfigFileAlone(t *testing.T) {
 	require.Equal(t, model, sel.Model)
 	require.Equal(t, "xhigh", sel.Effort)
 
-	saved, err := appcfg.Load(filepath.Join(home, "forebrain.yaml"))
+	saved, err := loadDocumentForTest(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
 	got := saved.Agents.Definitions["main"].LLMProviders[0]
 	require.Equal(t, "https://fast.example/v1", got.BaseURL)
@@ -2038,7 +2042,7 @@ func TestChooseModelInTheTerminalLeavesTheConfigFileAlone(t *testing.T) {
 	require.Equal(t, "gpt-4o-mini", row.Model)
 	require.Equal(t, "high", row.Effort)
 
-	saved, err := appcfg.Load(filepath.Join(home, "forebrain.yaml"))
+	saved, err := loadDocumentForTest(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
 	got := saved.Agents.Definitions["main"].LLMProviders[0]
 	require.Equal(t, "gpt-4o", got.Model, "the shared config file was rewritten")
@@ -2097,7 +2101,7 @@ func TestChooseModelResolvesAgainstTheActiveAgent(t *testing.T) {
 	require.True(t, sel.Set)
 	require.Equal(t, "gpt-4o-mini", sel.Model)
 
-	saved, err := appcfg.Load(filepath.Join(home, "forebrain.yaml"))
+	saved, err := loadDocumentForTest(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
 	require.Equal(t, "gpt-4o", saved.Agents.Definitions["main"].LLMProviders[0].Model)
 	got := saved.Agents.Definitions["writer"].LLMProviders[0]
@@ -3836,17 +3840,7 @@ func withServiceDecisions(req turn.ToolApprovalRequest) turn.ToolApprovalRequest
 		actionKind = toolName
 	}
 	var input any = req.ToolInputJSON
-	if req.NetworkApproval != nil {
-		if toolName == "" {
-			toolName = "shell"
-			actionKind = "shell"
-		}
-		input = map[string]any{
-			"command":                  req.PermissionInput,
-			"network_approval_context": *req.NetworkApproval,
-			"network_port":             req.NetworkPort,
-		}
-	} else if strings.TrimSpace(req.ToolInputJSON) == "" {
+	if strings.TrimSpace(req.ToolInputJSON) == "" {
 		input = map[string]any{
 			"command":   req.ExactRuleContent,
 			"file_path": req.ExactRuleContent,
@@ -3888,11 +3882,14 @@ func TestApprovalOverlayRequestPermissionsScopeChoices(t *testing.T) {
 	if err != nil || !turnDecision.Approved || turnDecision.RequestPermissionsResponse == nil || turnDecision.RequestPermissionsResponse.Scope != safety.GrantScopeTurn {
 		t.Fatalf("turn decision=%+v err=%v", turnDecision, err)
 	}
-	strictDecision, err := runOverlayWithKeys(t, req, []byte{'r'})
-	if err != nil || !strictDecision.Approved || strictDecision.RequestPermissionsResponse == nil || strictDecision.RequestPermissionsResponse.Scope != safety.GrantScopeTurn || !strictDecision.RequestPermissionsResponse.StrictAutoReview {
-		t.Fatalf("strict decision=%+v err=%v", strictDecision, err)
+	// Three rows and no reviewer: the option list carries no strict auto-review
+	// choice any more (plan 203), so a second row down is "for this session".
+	for _, choice := range buildOverlayChoices(req, 0) {
+		if choice.strictReview {
+			t.Fatalf("the request_permissions overlay still offers strict auto review: %+v", choice)
+		}
 	}
-	sessionDecision, err := runOverlayWithKeys(t, req, []byte{0x1b, '[', 'B', 0x1b, '[', 'B', '\r'})
+	sessionDecision, err := runOverlayWithKeys(t, req, []byte{0x1b, '[', 'B', '\r'})
 	if err != nil || !sessionDecision.Approved || sessionDecision.RequestPermissionsResponse == nil || sessionDecision.RequestPermissionsResponse.Scope != safety.GrantScopeSession {
 		t.Fatalf("session decision=%+v err=%v", sessionDecision, err)
 	}
@@ -4980,23 +4977,6 @@ func TestApprovalOverlay_CommandPolicyChoiceUsesServerProposedPrefix(t *testing.
 	if !decision.Approved || decision.Update == nil || len(decision.Update.Rules) != 1 ||
 		!slices.Equal(decision.Update.Rules[0].CommandPrefix, []string{"go", "test", "./..."}) {
 		t.Fatalf("decision did not preserve the server-proposed prefix: %#v", decision)
-	}
-}
-
-func TestApprovalOverlay_NetworkOffersPersistentAllow(t *testing.T) {
-	req := turn.ToolApprovalRequest{
-		NetworkApproval: &safety.NetworkApprovalContext{Host: "Example.COM.", Protocol: safety.NetworkApprovalHTTPS},
-	}
-	choices := buildOverlayChoices(withServiceDecisions(req), 0)
-	if len(choices) != 4 || choices[2].networkPolicyAmendment == nil ||
-		choices[2].networkPolicyAmendment.Action != safety.NetworkPolicyAllow || !choices[3].cancel {
-		t.Fatalf("network choices=%+v", choices)
-	}
-	overlay := &approvalOverlay{out: io.Discard, req: req, options: choices, cursor: 2}
-	decision := overlay.commit()
-	if !decision.Approved || decision.NetworkPolicyAmendment == nil ||
-		decision.NetworkPolicyAmendment.Action != safety.NetworkPolicyAllow || decision.NetworkPolicyAmendment.Host != "example.com" {
-		t.Fatalf("persistent allow decision=%+v", decision)
 	}
 }
 
@@ -7197,16 +7177,15 @@ func TestCharacterizationApprovalSurvivesProcessRestart(t *testing.T) {
 }
 
 // TestCharacterizationRequestPermissions covers P0-8's request_permissions
-// scenario: the tool is gated behind the RequestPermissionsTool feature flag
-// (confirmed empirically — without it, the model's call fails with "unknown
-// tool"), always requires approval on first use regardless of sandbox
-// settings (unlike shell, which only needs approval when escalated), and a
-// grant scoped to the turn lets the resumed run's tool call succeed for real.
+// scenario: the tool is registered for every interactive conversation (plan
+// 203 fixed its switch on), always requires approval on first use regardless
+// of sandbox settings (unlike shell, which only needs approval when
+// escalated), and a grant scoped to the turn lets the resumed run's tool call
+// succeed for real.
 func TestCharacterizationRequestPermissions(t *testing.T) {
 	s := newCharacterizationSession(t, nil)
 	s.runner().ProjectRoot = s.home()
 	s.runner().WorkspaceRoot = filepath.Join(s.home(), "workspace")
-	s.runner().AppCfg.Features.RequestPermissionsTool = appcfg.BoolPtr(true)
 	toolArgs, err := json.Marshal(map[string]any{
 		"reason":      "need to write output file",
 		"permissions": map[string]any{"file_system": map[string]any{"write": []string{s.runner().WorkspaceRoot}}},
@@ -8363,143 +8342,6 @@ func TestCharacterizationModelSwitchAppliesWithinSession(t *testing.T) {
 	}
 }
 
-// TestCharacterizationNetworkApproval covers P0-8's last remaining
-// scenario: a plain (non-escalated) shell call attempting outbound network
-// access, gated through pkg/safety's managed network proxy rather than the
-// require_escalated permission gate every other approval scenario in this
-// file uses. Getting the setup right took two corrected assumptions, both
-// worth recording since neither is obvious from the task alone:
-//
-//  1. A plain shell call with no sandbox_permissions override already runs
-//     under a real sandbox on this host (confirmed: this Darwin machine has
-//     `sandbox-exec`, and pkg/safety.Manager.DecideShellCommand's default
-//     branch resolves to Backend: seatbelt, UseSandbox: true — unlike every
-//     other scenario in this file, which uses require_escalated and gets
-//     Backend: host, UseSandbox: false, i.e. no real sandboxing at all).
-//  2. Two more corrected assumptions about what actually gates the
-//     approval prompt: SandboxWorkspaceWrite.NetworkAccess defaults to true
-//     (network conceptually allowed) and setting it false produces a flat,
-//     silent, hard OS-level deny (curl fails to resolve the host, no
-//     approval action, no prompt) — the opposite of what "deny network"
-//     sounds like it should trigger. The actual gate is a separate feature
-//     flag, Features.NetworkProxy, off by default: leaving NetworkAccess at
-//     its default true but enabling this flag (with no domain rules, so
-//     example.com is unlisted) is what routes the request through the
-//     managed proxy and, for an unlisted domain, prompts for approval — a
-//     third, distinct outcome from either the flat allow or the hard deny.
-//
-// Golden shape, confirmed empirically: approving creates one shell action
-// with approval_reason "network_denied" and a network_approval_context
-// carrying the blocked host/port, the SAME curl call then actually succeeds
-// (the approval unblocks that specific in-flight request rather than
-// starting a new one), and the transcript is the familiar single-tool-call
-// shape (user, assistant tool_calls, tool result, final assistant) — no
-// extra messages from the approval detour, since it resolves within the one
-// executeToolCalls invocation the tool call was already inside.
-func TestCharacterizationNetworkApproval(t *testing.T) {
-	// Unlike every other scenario in this file, this one is not hermetic: it
-	// depends on a real OS sandbox (only verified against macOS's
-	// sandbox-exec) actually blocking the network so the proxy has
-	// something real to gate, and on genuine internet access to observe the
-	// approved call succeed. Skip cleanly rather than fail somewhere deep in
-	// the sandbox/proxy stack on a host that can't support either.
-	if runtime.GOOS != "darwin" {
-		t.Skipf("network approval scenario only verified against macOS seatbelt sandboxing, not %s", runtime.GOOS)
-	}
-	if _, err := exec.LookPath("sandbox-exec"); err != nil {
-		t.Skip("sandbox-exec not available on this host")
-	}
-	// The managed proxy performs the approved fetch from this test process
-	// (http.Transport with ProxyFromEnvironment, AllowUpstreamProxy default
-	// true), so probe example.com with the same egress policy: if this
-	// process cannot reach it, the in-test curl cannot either, and the
-	// contract above says skip, not fail. 4s < curl's --max-time 5 so a
-	// probe failure predicts the timeout. Any completed response (any
-	// status code) proves reachability.
-	probe := &http.Client{Timeout: 4 * time.Second}
-	probeResp, err := probe.Get("https://example.com")
-	if err != nil {
-		t.Skipf("skipping: no internet access from the test process (example.com: %v); the approved-fetch assertion needs genuine connectivity", err)
-	}
-	_ = probeResp.Body.Close()
-	s := newCharacterizationSession(t, nil)
-	s.runner().ProjectRoot = s.home()
-	// SandboxWorkspaceWrite.NetworkAccess defaults to true (network
-	// conceptually allowed), and Features.NetworkProxy is off by default —
-	// confirmed empirically that leaving both at their defaults lets network
-	// through with a flat seatbelt allow, never touching the managed proxy
-	// or the approval handler at all. Enabling the proxy feature (with no
-	// domain rules, so example.com is unlisted) is what actually routes the
-	// request through pkg/safety's managed network proxy and, for an
-	// unlisted domain, prompts for approval instead of a flat allow or a
-	// hard OS-level deny (confirmed as a third, distinct outcome from
-	// either of those two).
-	proxyEnabled := true
-	s.cfg().Features.NetworkProxy.Enabled = &proxyEnabled
-	s.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Approved: true}}})
-	toolArgs, err := json.Marshal(map[string]string{
-		"command": "curl -sS --max-time 5 https://example.com >/dev/null && echo network-ok", "description": "probe network",
-	})
-	if err != nil {
-		t.Fatalf("marshal tool args: %v", err)
-	}
-	toolCallMsg := llm.AssistantMessage(nil, llm.ToolCall{
-		ID: "call-1", Type: llm.ToolTypeFunction,
-		Function: llm.FunctionCall{Name: "shell", Arguments: string(toolArgs)},
-	})
-	finalMsg := llm.AssistantMessage([]llm.ContentPart{llm.Text("Ran it")})
-	restore := run.SetLLMOverrideForTest(&sequencedLLM{results: []*llm.Result{{Message: &toolCallMsg}, {Message: &finalMsg}}})
-	t.Cleanup(restore)
-	if err := s.runner().Load(); err != nil {
-		t.Fatalf("Runner.Load: %v", err)
-	}
-
-	sessionID := "char-network-approval"
-	dispatchErr := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{
-		SessionID: sessionID,
-		UserText:  "check network access",
-	})
-	if dispatchErr != nil {
-		t.Fatalf("DispatchSurfaceTurn = %v, want nil (the registered sink resolves the approval synchronously)", dispatchErr)
-	}
-
-	got := awaitResumedRun(t, s, sessionID)
-	if len(got.Waits) != 0 {
-		t.Fatalf("Waits = %+v, want none once the approval has resolved", got.Waits)
-	}
-	if len(got.Actions) != 1 {
-		t.Fatalf("Actions = %+v, want exactly 1 network approval action", got.Actions)
-	}
-	action := got.Actions[0]
-	if action.Kind != "shell" || action.Status != state.ActionApproved {
-		t.Fatalf("Actions[0] = %+v, want kind=shell status=approved", action)
-	}
-	if !strings.Contains(action.PayloadJSON, `"approval_reason":"network_denied"`) {
-		t.Fatalf("Actions[0].PayloadJSON = %q, want an approval_reason of network_denied", action.PayloadJSON)
-	}
-	if !strings.Contains(action.PayloadJSON, `"host":"example.com"`) {
-		t.Fatalf("Actions[0].PayloadJSON = %q, want the blocked host recorded", action.PayloadJSON)
-	}
-	if len(got.Runs) != 1 || got.Runs[0].Status != state.RunStatusDone {
-		t.Fatalf("Runs = %+v, want exactly 1 done run", got.Runs)
-	}
-	wantRoles := []string{"user", "assistant", "tool", "assistant"}
-	if len(got.Messages) != len(wantRoles) {
-		t.Fatalf("Messages = %d, want %d (user, tool_calls, tool result, final — the network detour adds no extra messages): %+v", len(got.Messages), len(wantRoles), got.Messages)
-	}
-	for i, want := range wantRoles {
-		if got.Messages[i].Role != want {
-			t.Fatalf("Messages[%d].Role = %q, want %q (full transcript: %+v)", i, got.Messages[i].Role, want, got.Messages)
-		}
-	}
-	if !strings.Contains(got.Messages[2].Content, "network-ok") {
-		t.Fatalf("Messages[2].Content = %q, want the curl call to have actually succeeded after approval", got.Messages[2].Content)
-	}
-	if got.Messages[3].Content != "Ran it" {
-		t.Fatalf("Messages[3].Content = %q, want the final assistant text", got.Messages[3].Content)
-	}
-}
-
 // prefixCapturingLLM records a canonical, comparable snapshot of the system
 // prompt and tool definitions on every call — the "stable prefix" P0-5a
 // asks to be byte-identical across calls in the same session, as opposed to
@@ -9571,7 +9413,7 @@ func TestComposerPreviewShortcutLinesPacksHintsPerRow(t *testing.T) {
 	}
 }
 
-const connectTestConfig = "sandbox_mode: %MODE%\n" +
+const connectTestConfig = "approval_preset: %MODE%\n" +
 	"agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
 	"        - provider: openai\n          model: %MODEL%\n" +
 	"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
@@ -9587,14 +9429,14 @@ func writeConnectConfig(t *testing.T, path, mode, model string) {
 
 // /connect saves the whole config document. Resolve() caches the file as it was
 // when the process started, so writing that copy back would revert everything
-// changed since — the sandbox picked with /sandbox, the model picked with
+// changed since — the preset picked with /permissions, the model picked with
 // /model — as a side effect of configuring one provider.
 func TestConnectRuntimeContextReadsCurrentFileNotStartupCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	writeConnectConfig(t, cfgPath, "read-only", "gpt-startup")
+	writeConnectConfig(t, cfgPath, "workspace_write", "gpt-startup")
 
 	process.ResetResolve()
 	t.Cleanup(process.ResetResolve)
@@ -9602,15 +9444,15 @@ func TestConnectRuntimeContextReadsCurrentFileNotStartupCache(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	// Something else in the session rewrites the file, as /sandbox and /model do.
-	writeConnectConfig(t, cfgPath, "danger-full-access", "gpt-chosen-in-session")
+	// Something else in the session rewrites the file, as /permissions and /model do.
+	writeConnectConfig(t, cfgPath, "full_access", "gpt-chosen-in-session")
 
 	rt, err := connectRuntimeContext()
 	if err != nil {
 		t.Fatalf("connectRuntimeContext: %v", err)
 	}
-	if got := rt.Config.SandboxMode; got != appcfg.SandboxModeDangerFullAccess {
-		t.Fatalf("sandbox_mode = %q, want the value on disk; saving this back would revert it", got)
+	if got := rt.Config.ApprovalPreset; got != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("approval_preset = %q, want the value on disk; saving this back would revert it", got)
 	}
 	p := connectCurrentLLM(&rt.Config, "main")
 	if p == nil || p.Model != "gpt-chosen-in-session" {
@@ -11479,49 +11321,49 @@ func TestLineSelectorInputAllowsEmptyValue(t *testing.T) {
 }
 
 func TestLineSelectorMemorySettingsTransactionalFlow(t *testing.T) {
-	lines := []string{"1", "2", "save"}
+	lines := []string{"1", "save"}
 	index := 0
 	selector := NewSelector(&strings.Builder{}, func(context.Context) (string, error) {
 		value := lines[index]
 		index++
 		return value, nil
 	}).(MemorySettingsSelector)
-	result, err := selector.SelectMemorySettings(false, true)
+	result, err := selector.SelectMemorySettings(false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != MemorySettingsSave || !result.UseMemories || result.GenerateMemories {
+	if result.Action != MemorySettingsSave || !result.Enabled {
 		t.Fatalf("result=%#v", result)
 	}
 }
 
 func TestLineSelectorMemoryResetGoBackRetainsStagedSettings(t *testing.T) {
-	// 1=toggle use, 3=open the reset submenu, 3=go back within it, save.
-	lines := []string{"1", "3", "3", "save"}
+	// 1=toggle the switch, 2=open the reset submenu, 3=go back within it, save.
+	lines := []string{"1", "2", "3", "save"}
 	index := 0
 	selector := NewSelector(&strings.Builder{}, func(context.Context) (string, error) {
 		value := lines[index]
 		index++
 		return value, nil
 	}).(MemorySettingsSelector)
-	result, err := selector.SelectMemorySettings(false, false)
+	result, err := selector.SelectMemorySettings(false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != MemorySettingsSave || !result.UseMemories || result.GenerateMemories {
+	if result.Action != MemorySettingsSave || !result.Enabled {
 		t.Fatalf("result=%#v", result)
 	}
 }
 
 func TestLineSelectorMemoryResetConfirmsProjectScope(t *testing.T) {
-	lines := []string{"3", "1"}
+	lines := []string{"2", "1"}
 	index := 0
 	selector := NewSelector(&strings.Builder{}, func(context.Context) (string, error) {
 		value := lines[index]
 		index++
 		return value, nil
 	}).(MemorySettingsSelector)
-	result, err := selector.SelectMemorySettings(false, false)
+	result, err := selector.SelectMemorySettings(false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -11531,14 +11373,14 @@ func TestLineSelectorMemoryResetConfirmsProjectScope(t *testing.T) {
 }
 
 func TestLineSelectorMemoryResetConfirmsEverything(t *testing.T) {
-	lines := []string{"3", "2"}
+	lines := []string{"2", "2"}
 	index := 0
 	selector := NewSelector(&strings.Builder{}, func(context.Context) (string, error) {
 		value := lines[index]
 		index++
 		return value, nil
 	}).(MemorySettingsSelector)
-	result, err := selector.SelectMemorySettings(false, false)
+	result, err := selector.SelectMemorySettings(false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -16369,15 +16211,13 @@ func TestRawSelectorMemorySettingsStagesAndSaves(t *testing.T) {
 	sel := newRawSelector(r, nil)
 	go func() {
 		_, _ = w.Write([]byte{' '})
-		_, _ = w.Write([]byte{0x1b, '[', 'B'})
-		_, _ = w.Write([]byte{' '})
 		_, _ = w.Write([]byte{'\r'})
 	}()
-	result, err := sel.SelectMemorySettings(false, true)
+	result, err := sel.SelectMemorySettings(false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != MemorySettingsSave || !result.UseMemories || result.GenerateMemories {
+	if result.Action != MemorySettingsSave || !result.Enabled {
 		t.Fatalf("result=%#v", result)
 	}
 }
@@ -16392,14 +16232,13 @@ func TestRawSelectorMemorySettingsConfirmationEscapeReturnsToSettings(t *testing
 	sel := newRawSelector(r, nil)
 	go func() {
 		_, _ = w.Write([]byte{0x1b, '[', 'B'})
-		_, _ = w.Write([]byte{0x1b, '[', 'B'})
 		_, _ = w.Write([]byte{'\r'})
 		time.Sleep(75 * time.Millisecond)
 		_, _ = w.Write([]byte{0x1b})
 		time.Sleep(75 * time.Millisecond)
 		_, _ = w.Write([]byte{0x1b})
 	}()
-	result, err := sel.SelectMemorySettings(true, false)
+	result, err := sel.SelectMemorySettings(true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -16420,12 +16259,11 @@ func TestRawSelectorMemorySettingsConfirmsResetEverything(t *testing.T) {
 	sel := newRawSelector(r, nil)
 	go func() {
 		_, _ = w.Write([]byte{0x1b, '[', 'B'})
-		_, _ = w.Write([]byte{0x1b, '[', 'B'})
 		_, _ = w.Write([]byte{'\r'})
 		_, _ = w.Write([]byte{0x1b, '[', 'A'})
 		_, _ = w.Write([]byte{'\r'})
 	}()
-	result, err := sel.SelectMemorySettings(true, true)
+	result, err := sel.SelectMemorySettings(true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -16446,13 +16284,12 @@ func TestRawSelectorMemorySettingsConfirmsResetProject(t *testing.T) {
 	sel := newRawSelector(r, nil)
 	go func() {
 		_, _ = w.Write([]byte{0x1b, '[', 'B'})
-		_, _ = w.Write([]byte{0x1b, '[', 'B'})
 		_, _ = w.Write([]byte{'\r'})
 		_, _ = w.Write([]byte{0x1b, '[', 'A'})
 		_, _ = w.Write([]byte{0x1b, '[', 'A'})
 		_, _ = w.Write([]byte{'\r'})
 	}()
-	result, err := sel.SelectMemorySettings(true, true)
+	result, err := sel.SelectMemorySettings(true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28972,29 +28809,32 @@ func TestCharacterizationConfigApplyKeepsTheSessionPermissionPreset(t *testing.T
 		t.Fatalf("appcfg.Save: %v", err)
 	}
 
-	// The user then picks the more restrictive preset for this session only.
-	if _, err := s.ApplyPermissionPreset("char-preset", string(safety.PresetReadOnly)); err != nil {
+	// The user then picks the wider preset for this session only.
+	if _, err := s.ApplyPermissionPreset("char-preset", string(safety.PresetFullAccess)); err != nil {
 		t.Fatalf("ApplyPermissionPreset: %v", err)
 	}
 	sessionSandbox := func() appcfg.SandboxMode {
 		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("char-preset")).SandboxMode
 	}
-	if got := sessionSandbox(); got != appcfg.SandboxModeReadOnly {
-		t.Fatalf("session sandbox after preset = %q, want %q", got, appcfg.SandboxModeReadOnly)
+	if got := sessionSandbox(); got != appcfg.SandboxModeDangerFullAccess {
+		t.Fatalf("session sandbox after preset = %q, want %q", got, appcfg.SandboxModeDangerFullAccess)
 	}
 
 	// Applying the same unchanged configuration must not undo that.
 	if err := seedConfigFromFile(s); err != nil {
 		t.Fatalf("seedConfigFromFile: %v", err)
 	}
-	if got := sessionSandbox(); got != appcfg.SandboxModeReadOnly {
+	if got := sessionSandbox(); got != appcfg.SandboxModeDangerFullAccess {
 		t.Fatalf("session sandbox after the application = %q, want the session preset %q to survive: "+
 			"applying the configuration must not silently restore the sandbox the user moved away from",
-			got, appcfg.SandboxModeReadOnly)
+			got, appcfg.SandboxModeDangerFullAccess)
 	}
-	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
-		t.Fatalf("live config sandbox = %q, want the file's %q: a session preset must not move the config other conversations run under",
-			got, appcfg.SandboxModeWorkspaceWrite)
+	// The file carries no approval setting of its own, so its derived sandbox
+	// is read-only (this launch project is undecided) and the session's own
+	// danger-full-access must not have moved it.
+	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("live config sandbox = %q, want the file's derived %q: a session preset must not move the config other conversations run under",
+			got, appcfg.SandboxModeReadOnly)
 	}
 }
 
@@ -29013,7 +28853,7 @@ func TestCharacterizationConfigApplyLetsYOLOOutrankTheSessionPreset(t *testing.T
 	if err := appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()); err != nil {
 		t.Fatalf("appcfg.Save: %v", err)
 	}
-	if _, err := s.ApplyPermissionPreset("char-preset-yolo", string(safety.PresetReadOnly)); err != nil {
+	if _, err := s.ApplyPermissionPreset("char-preset-yolo", string(safety.PresetWorkspaceWrite)); err != nil {
 		t.Fatalf("ApplyPermissionPreset: %v", err)
 	}
 
@@ -29049,7 +28889,7 @@ func TestConfigApplyRepointsEveryConfigHolder(t *testing.T) {
 		"        - provider: openai\n          model: gpt-old\n" +
 		"          api_key: ${FOREBRAIN_REPOINT_TEST_KEY}\n          base_url: http://localhost:0/v1\n"
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-	cfg, err := appcfg.Load(path)
+	cfg, err := loadDocumentForTest(path)
 	require.NoError(t, err)
 
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg}}
@@ -29169,24 +29009,26 @@ func seedConfigFromFile(s *ChatSession) error {
 	if path == "" {
 		return fmt.Errorf("chat session has no config path")
 	}
-	loaded, err := appcfg.Load(path)
+	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		return fmt.Errorf("load %s: %w", path, err)
 	}
 	safety.ApplyYOLO(&loaded)
 	effective := safety.EffectiveConfig(loaded, s.LaunchProject)
-	if err := safety.NewManager().StartupCheck(&effective); err != nil {
-		return fmt.Errorf("sandbox startup check: %w", err)
-	}
 	if r := s.runner(); r != nil {
 		if err := r.LoadConfig(&effective); err != nil {
 			return fmt.Errorf("load runner: %w", err)
 		}
 	}
 	s.Env.AdoptConfig(&effective)
+	// AdoptConfig re-reads the file for the raw configuration the project pool
+	// derives from, and forebrain.yaml carries only its supported keys (plan
+	// 207 §3.6) — the fixture keeps the whole document it just read, which is
+	// what this session is meant to run on.
+	s.Env.RawConfig = loaded
 	s.adoptConfig(&effective)
 	if st := s.sessStore(); st != nil {
-		st.SetMemoryMode(memory.SessionModeForConfig(s.cfg()))
+		st.SetMemoryMode(memory.SessionModeFor(s.cfg()))
 	}
 	return nil
 }
@@ -29313,7 +29155,7 @@ func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
 // the live functions underneath.
 
 // OpenChatSessionWithConfig is a variant of OpenChatSession that accepts a
-// pre-loaded config, skipping the redundant appcfg.Load() call inside
+// pre-loaded config, skipping the redundant loadDocumentForTest() call inside
 // openChatSession. Use this when the caller (e.g. the TUI startup flow) has
 // already loaded the config via process.Resolve().
 func OpenChatSessionWithConfig(ctx context.Context, cfg appcfg.Root) (*ChatSession, error) {
@@ -30865,7 +30707,7 @@ func newCrossProcessFixture(t *testing.T) *crossProcessFixture {
 // reads the file as it stands, exactly as a process start does.
 func (f *crossProcessFixture) loadRuntime(t *testing.T, sessionID string) *ChatSession {
 	t.Helper()
-	loaded, err := appcfg.Load(f.cfgPath)
+	loaded, err := loadDocumentForTest(f.cfgPath)
 	require.NoError(t, err)
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(f.home, "state.db"))
 	require.NoError(t, err)
@@ -31064,45 +30906,6 @@ func TestApplyConfigFromDiskKeepsServingWhenProvidersEmptied(t *testing.T) {
 	sel := run.PrimaryModelSelection(s.runner())
 	require.True(t, sel.Set)
 	require.Equal(t, "gpt-a", sel.Model, "the runner keeps serving the snapshot's model")
-}
-
-func TestApplyConfigFromDiskRollbackFailureIsVisible(t *testing.T) {
-	t.Setenv("FOREBRAIN_TUI_RELOAD_TEST_KEY", "test-key")
-	restore := run.SetLLMOverrideForTest(tuiStubLLM{})
-	defer restore()
-	home := t.TempDir()
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	good := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-a",
-			APIKey: "${FOREBRAIN_TUI_RELOAD_TEST_KEY}", BaseURL: "http://a.test/v1",
-		}}},
-	}}}
-	require.NoError(t, appcfg.Save(cfgPath, good))
-	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"),
-		Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
-	require.NoError(t, seedConfigFromFile(s))
-	// Mutate the live config in place into an unloadable shape: the rollback
-	// the next reload would run rebuilds against this same object and fails
-	// too, so neither failure may be hidden.
-	s.cfg().Agents.Definitions["main"] = appcfg.AgentDefinition{Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-		{Provider: "unknownprov", Model: "x", APIKey: "k", BaseURL: "http://x.test/v1"},
-		{Provider: "openai", Model: "gpt-a", APIKey: "${FOREBRAIN_TUI_RELOAD_TEST_KEY}", BaseURL: "http://a.test/v1"},
-	}}
-	s.cfg().ApprovalsReviewer = "auto_review"
-
-	broken := good
-	broken.Agents.Definitions["main"] = appcfg.AgentDefinition{Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-		{Provider: "unknownprov", Model: "y", APIKey: "k", BaseURL: "http://y.test/v1"},
-	}}
-	broken.ApprovalsReviewer = "auto_review"
-	require.NoError(t, appcfg.Save(cfgPath, broken))
-	err = seedConfigFromFile(s)
-	require.Error(t, err)
-	require.True(t, run.IsPrimaryModelRuntimeUncertain(err), "a discarded rollback failure must surface as runtime-uncertain, got %v", err)
 }
 
 func TestSelectModelConcurrentWithConfigApply(t *testing.T) {
@@ -31914,4 +31717,33 @@ func TestApprovalOverlayNoRowShowsThePlaceholder(t *testing.T) {
 	if !strings.Contains(plain, "> "+approvalRefusalPlaceholder) {
 		t.Fatalf("the empty editor must show the placeholder:\n%s", plain)
 	}
+}
+
+// test-only readers for a whole configuration document.
+
+// loadDocumentForTest reads a whole configuration document — stored sections
+// included — the way appcfg.Load read one before plan 207 narrowed forebrain.yaml
+// to its supported keys: parse and normalize, then Load's tail (.env merge,
+// ${ENV} expansion, validation). A test that assembles a runtime configuration
+// in a file goes through here, because the file itself no longer carries those
+// sections.
+func loadDocumentForTest(path string) (appcfg.Root, error) {
+	root, err := loadPersistedDocumentForTest(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	if err := appcfg.FinishLoad(&root); err != nil {
+		return appcfg.Root{}, err
+	}
+	return root, nil
+}
+
+// loadPersistedDocumentForTest is the same read without Load's tail: a ${ENV}
+// reference stays a reference, as appcfg.LoadPersisted left it.
+func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return appcfg.Root{}, err
+	}
+	return appcfg.ParseRootYAML(body)
 }

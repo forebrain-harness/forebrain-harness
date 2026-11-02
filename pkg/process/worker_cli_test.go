@@ -689,7 +689,7 @@ func TestTypedSubagentContinuationCompactsFirstWhenItNoLongerFits(t *testing.T) 
 	env, srv := envWithScriptedLLMOnModel(t, "gpt-compact-003", []scriptedReply{
 		{text: "summary of the work so far"},
 		{text: "continuation answer"},
-	}, "compact:\n  model_auto_compact_token_limit: 100000\n")
+	}, "compact:\n  auto_compact_percent: 50\n")
 	const (
 		conversationID = "conv-compact"
 		workerID       = "main:conv-compact:worker:11111111-2222-3333-4444-555555555555"

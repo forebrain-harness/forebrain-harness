@@ -95,7 +95,8 @@ func TestMemoriesResetClearsStoreAndFiles(t *testing.T) {
 func TestMemoriesSettingsValidRequestUpdatesConfig(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, "forebrain.yaml")
-	if err := os.WriteFile(configPath, []byte("features:\n  memories: true\nmemories:\n  use_memories: true\n"), 0o600); err != nil {
+	const document = "features:\n  memories: true\nmemories:\n  max_unused_days: 30\n"
+	if err := os.WriteFile(configPath, []byte(document), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
@@ -103,11 +104,11 @@ func TestMemoriesSettingsValidRequestUpdatesConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	seedConfigDocument(t, db, "features:\n  memories: true\nmemories:\n  use_memories: true\n")
+	seedConfigDocument(t, db, document)
 	env := &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{}}, Root: home, ConfigPath: configPath, SQL: db}
 	server := &Server{Home: home, Env: env}
 	recorder := httptest.NewRecorder()
-	server.handleMemoriesSettings(recorder, httptest.NewRequest(http.MethodPost, "/memories/settings", strings.NewReader(`{"use_memories":false}`)))
+	server.handleMemoriesSettings(recorder, httptest.NewRequest(http.MethodPost, "/memories/settings", strings.NewReader(`{"feature_enabled":false}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
@@ -115,18 +116,18 @@ func TestMemoriesSettingsValidRequestUpdatesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.EffectiveMemories().UseMemories {
-		t.Fatal("valid request did not update use_memories")
+	if loaded.EffectiveFeatures().Memories {
+		t.Fatal("valid request did not turn the memory switch off")
 	}
-	if row := configSectionRow(t, db, "features"); !strings.Contains(row, `"memories":true`) {
-		t.Fatalf("a switch the request did not carry must keep its stored value: %s", row)
+	if row := configSectionRow(t, db, "memories"); !strings.Contains(row, `"max_unused_days":30`) {
+		t.Fatalf("a setting the request did not carry must keep its stored value: %s", row)
 	}
 }
 
 func TestMemoriesSettingsStrictJSONAndStorePrecondition(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, "forebrain.yaml")
-	original := "features:\n  memories: true\nmemories:\n  generate_memories: true\n"
+	original := "features:\n  memories: true\nmemories:\n  max_unused_days: 30\n"
 	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -145,14 +146,14 @@ func TestMemoriesSettingsStrictJSONAndStorePrecondition(t *testing.T) {
 		}
 	}
 	recorder := httptest.NewRecorder()
-	server.handleMemoriesSettings(recorder, httptest.NewRequest(http.MethodPost, "/memories/settings", strings.NewReader(`{"thread_id":"thread","generate_memories":false}`)))
+	server.handleMemoriesSettings(recorder, httptest.NewRequest(http.MethodPost, "/memories/settings", strings.NewReader(`{"thread_id":"thread","feature_enabled":false}`)))
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("missing store status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 	if raw, err := os.ReadFile(configPath); err != nil || string(raw) != original {
 		t.Fatalf("config file changed before store precondition: %q (%v)", raw, err)
 	}
-	if row := configSectionRow(t, db, "memories"); !strings.Contains(row, `"generate_memories":true`) {
+	if row := configSectionRow(t, db, "memories"); !strings.Contains(row, `"max_unused_days":30`) {
 		t.Fatalf("stored section changed before store precondition: %s", row)
 	}
 }

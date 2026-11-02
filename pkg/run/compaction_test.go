@@ -27,15 +27,17 @@ func TestCompactModelLimitDoesNotRequireSnapshot(t *testing.T) {
 	for _, tc := range []struct {
 		name, provider, model string
 		snapshot              json.RawMessage
+		configContextTokens   int
 		want                  int
 	}{
 		{name: "catalog without snapshot", provider: provider, model: model, want: hit.Limits().EffectiveInputLimit()},
 		{name: "current model overrides stale snapshot", provider: provider, model: model, snapshot: json.RawMessage(`{"effective_input_tokens":9999999}`), want: hit.Limits().EffectiveInputLimit()},
 		{name: "snapshot fallback", model: "uncatalogued-compact-test", snapshot: json.RawMessage(`{"effective_input_tokens":12345}`), want: 12345},
 		{name: "same fallback as pre-turn", model: "uncatalogued-compact-test", want: 200000},
+		{name: "configured window stands in for an uncatalogued model", model: "uncatalogued-compact-test", configContextTokens: 128000, want: 128000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := compactModelLimit(tc.snapshot, tc.provider, tc.model); got != tc.want {
+			if got := compactModelLimit(tc.snapshot, tc.provider, tc.model, tc.configContextTokens); got != tc.want {
 				t.Fatalf("window=%d want %d", got, tc.want)
 			}
 		})
@@ -70,7 +72,7 @@ func TestOrchestrationAutoCompactsDuringTurnWithoutSnapshot(t *testing.T) {
 			compactions := 0
 			inner := &growingCompactTestLLM{t: t, compactions: &compactions}
 			recoverable := WrapRecoverableLLM(inner, snapshot.read, &CompactChainDeps{
-				ExplicitLimit: 500,
+				ConfigContextTokens: 500,
 				TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
 					compactions++
 					if messages[len(messages)-1].Role != llm.RoleTool {
@@ -554,7 +556,7 @@ func TestCompactionKeepsInFlightSteersOutOfTheCheckpoint(t *testing.T) {
 	var compacted [][]llm.Message
 	inner := &steerCompactLLM{}
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
-		ExplicitLimit: 500,
+		ConfigContextTokens: 500,
 		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
@@ -592,7 +594,7 @@ func TestRetractionDuringCompactionKeepsTheCheckpoint(t *testing.T) {
 	var compactCtxErr error
 	inner := &steerCompactLLM{}
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
-		ExplicitLimit: 500,
+		ConfigContextTokens: 500,
 		TryCompact: func(ctx context.Context, _ []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
 			compactions++
 			if _, ok := q.Recall(); !ok {
@@ -642,17 +644,17 @@ func TestShouldCompactMessagesUsesActiveModelEstimator(t *testing.T) {
 	const provider, model = "test-provider", "model-x"
 	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("x", 3000)))}
 
-	if shouldCompactMessages(msgs, modelLimit, nil, -1, nil, provider, model) {
+	if shouldCompactMessages(msgs, modelLimit, nil, nil, provider, model) {
 		t.Fatal("default estimator compacted below the threshold")
 	}
 
 	restore := llm.SetEstimatorForTest(provider, model, scaledEstimator{})
-	should := shouldCompactMessages(msgs, modelLimit, nil, -1, nil, provider, model)
+	should := shouldCompactMessages(msgs, modelLimit, nil, nil, provider, model)
 	restore()
 	if !should {
 		t.Fatal("shouldCompactMessages did not use the active model's estimator")
 	}
-	if shouldCompactMessages(msgs, modelLimit, nil, -1, nil, provider, model) {
+	if shouldCompactMessages(msgs, modelLimit, nil, nil, provider, model) {
 		t.Fatal("restored estimator still compacted")
 	}
 }
@@ -767,7 +769,7 @@ func TestCompactionGuardKeepsAHistorysCheckpointToItself(t *testing.T) {
 	inner := &steerCompactLLM{}
 	compactions := 0
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
-		ExplicitLimit: 500,
+		ConfigContextTokens: 500,
 		TryCompact: func(_ context.Context, _ []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
 			compactions++
 			return []llm.Message{llm.UserMessage(llm.Text(fmt.Sprintf("checkpoint-%d", compactions)))}, true, nil
@@ -802,7 +804,7 @@ func TestCompactionGuardCachesNothingWithoutARunID(t *testing.T) {
 	inner := &steerCompactLLM{}
 	var compacted [][]llm.Message
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
-		ExplicitLimit: 500,
+		ConfigContextTokens: 500,
 		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
@@ -846,7 +848,7 @@ func TestCompactionSkipsACallWhoseProvisionalTailCannotBeHonored(t *testing.T) {
 	var compacted [][]llm.Message
 	inner := &steerCompactLLM{}
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
-		ExplicitLimit: 500,
+		ConfigContextTokens: 500,
 		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
@@ -887,7 +889,7 @@ func TestCompactionOfAHistoryThatCarriesAnotherHistorysTail(t *testing.T) {
 	inner := &steerCompactLLM{}
 	var compacted [][]llm.Message
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
-		ExplicitLimit: 500,
+		ConfigContextTokens: 500,
 		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
@@ -909,44 +911,5 @@ func TestCompactionOfAHistoryThatCarriesAnotherHistorysTail(t *testing.T) {
 	}
 	if len(compacted) != 1 || len(compacted[0]) != len(history) {
 		t.Fatalf("compactions=%d, first input=%v; want the child's own history compacted whole", len(compacted), roles(compacted[0]))
-	}
-}
-
-// The prefill baseline counts the history only when the guard has none for it:
-// a later call on the same history, or one after a checkpoint was set, reuses
-// the recorded value without counting again.
-func TestPrefillEstimateIsLazy(t *testing.T) {
-	guard := newCompactRunGuard()
-	calls := 0
-	count := func(n int) func() int {
-		return func() int {
-			calls++
-			return n
-		}
-	}
-
-	if got := guard.prefill("run\x00a", count(120)); got != 120 {
-		t.Fatalf("first prefill = %d, want 120", got)
-	}
-	if got := guard.prefill("run\x00a", count(999)); got != 120 {
-		t.Fatalf("second prefill = %d, want the recorded 120", got)
-	}
-	if calls != 1 {
-		t.Fatalf("count ran %d times for two prefills of one history, want 1", calls)
-	}
-
-	guard.set("run\x00b", []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, 42)
-	if got := guard.prefill("run\x00b", count(999)); got != 42 {
-		t.Fatalf("prefill after set = %d, want the checkpoint's 42", got)
-	}
-	if got := guard.prefill("", count(999)); got != -1 {
-		t.Fatalf("prefill without a history key = %d, want -1", got)
-	}
-	var nilGuard *compactRunGuard
-	if got := nilGuard.prefill("run\x00c", count(999)); got != -1 {
-		t.Fatalf("prefill on a nil guard = %d, want -1", got)
-	}
-	if calls != 1 {
-		t.Fatalf("count ran %d times, want only the first history's one", calls)
 	}
 }

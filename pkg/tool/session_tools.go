@@ -79,7 +79,7 @@ func registerSessionAndMemoryTools(a ToolAdder, st *State, rt *AgentToolRuntime)
 	}
 	// A batch task has no memory: it runs for a business system, not for the
 	// person whose preferences and history the memory tools serve.
-	if rt != nil && memory.DedicatedToolsEnabled(rt.Cfg) && !batchProject(rt) {
+	if rt != nil && memory.Enabled(rt.Cfg) && !batchProject(rt) {
 		tools, err := newDedicatedMemoryTools(st, rt)
 		if err != nil {
 			return err

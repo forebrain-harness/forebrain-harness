@@ -56,6 +56,35 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 	return s.dispatchSurfaceContent(ctx, sessionID, ch, submission, nil)
 }
 
+// DispatchPeerTurn runs a peer message as a turn of its conversation (plan 196
+// §3.5). The envelope goes to the model exactly as it arrived, and nothing about
+// it is parsed: not a slash command, not a skill reference, not an attachment.
+// That is the whole difference from DispatchSurfaceTurn, and the reason a peer
+// message enters here rather than there — the sender is another session, not
+// somebody typing in this one.
+//
+// The row the turn leaves behind is meta with the origin "peer", so a replay
+// draws it as the message from elsewhere that it is.
+func (s *ChatSession) DispatchPeerTurn(ctx context.Context, sessionID, envelope string) error {
+	if s == nil {
+		return nil
+	}
+	s.surfaceSyncResume.Store(true)
+	defer s.surfaceSyncResume.Store(false)
+	s.syncToolApprovalHooks()
+	defer s.discardTUITurnInput()
+	text := strings.TrimSpace(envelope)
+	if text == "" {
+		return nil
+	}
+	parts := []llm.ContentPart{llm.Text(text)}
+	row := llm.UserMessage(parts...)
+	row.IsMeta = true
+	row.Origin = state.MessageOriginPeer
+	return s.dispatchUserTurnContent(ctx, strings.TrimSpace(sessionID), "peer", text, text, parts,
+		state.MessagePartsJSON(row, text), nil, "", "", "", nil, nil, false, "peer", io.Discard)
+}
+
 // dispatchSurfaceContent is everything a submission does once it is allowed to
 // be one: the slash command table, the skills a plain message names, its
 // attachments, and the turn itself.
@@ -198,7 +227,7 @@ func (s *ChatSession) dispatchSurfaceContent(ctx context.Context, sessionID, ch 
 	// request is refused: the message is still stored, so after /model the
 	// conversation continues with every image in it.
 	imageRefusal := run.ImageTurnRefusal(ctx, s.runner(), sessionID, len(submission.Attachments) > 0)
-	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, imageRefusal, goalObjective, skillName, skillPath, skills, batchInput, submission.CallerRendersReturnedError, io.Discard); err != nil {
+	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, imageRefusal, goalObjective, skillName, skillPath, skills, batchInput, submission.CallerRendersReturnedError, "", io.Discard); err != nil {
 		return err
 	}
 	sink := s.toolApprovalSinkGet()
@@ -503,79 +532,16 @@ func (s *ChatSession) syncToolApprovalHooks() {
 	}
 	sink := s.toolApprovalSinkGet()
 	if sink == nil {
-		s.Env.Tools().SetNetworkApprovalPromptHook(nil)
 		s.Env.Tools().SetSubagentApprovalHook(nil)
 		s.Env.Tools().SetInlineApprovalHook(nil)
 		return
 	}
-	s.Env.Tools().SetNetworkApprovalPromptHook(s.promptInlineNetworkApproval)
 	// A subagent that hits an approval gate is asked here too, so its run and
 	// the tool call that dispatched it both stay alive while the user answers.
 	s.Env.Tools().SetSubagentApprovalHook(s.resolveSubagentApproval)
 	// The primary agent's own gates are asked here as well, where the call is,
 	// so the turn keeps running while the user answers (plan 127).
 	s.Env.Tools().SetInlineApprovalHook(s.resolveInlineApproval)
-}
-
-func (s *ChatSession) promptInlineNetworkApproval(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-	if s == nil {
-		return safety.NetworkApprovalDeny, fmt.Errorf("nil session")
-	}
-	s.networkApprovalMu.Lock()
-	defer s.networkApprovalMu.Unlock()
-	resolved := false
-	defer func() {
-		if !resolved && s.actionSvc() != nil {
-			_, _ = s.actionSvc().Cancel(context.Background(), actionID, "network approval was cancelled before a decision was returned")
-		}
-	}()
-	sink := s.toolApprovalSinkGet()
-	if sink == nil {
-		return safety.NetworkApprovalDeny, fmt.Errorf("network approval requires an interactive surface")
-	}
-	description := fmt.Sprintf("Network access to %q is blocked by policy.", strings.TrimSpace(request.Context.Host))
-	// A blocked host is reported from inside the shell call that hit it, so the
-	// execution context still names the agent that made the call. Carrying it
-	// onto the request is what tells the overlay which subagent is asking and
-	// keeps the confirmation in that subagent's own view.
-	approvalRequest, _, _ := s.baseApprovalRequest(turn.ApprovalSource{
-		SessionID: request.EnvironmentID, ActionID: actionID, RunID: request.ExecutionID,
-		ToolName: "shell", ActionKind: "shell", ToolInput: payload,
-		AgentID: tool.HookAgentIDFromContext(ctx), SubagentType: tool.SubagentTypeFromContext(ctx),
-	})
-	approvalRequest.Description = description
-	approvalRequest.Reason = description
-	approvalRequest.DestinationOptions = []safety.PermissionDestination{
-		safety.DestinationSession, safety.DestinationLocalSettings,
-	}
-	approvalRequest.SuggestedDestination = safety.DestinationLocalSettings
-	// The gate knows the host and port first-hand; the payload copy is only
-	// there for the overlay to display.
-	approvalRequest.NetworkApproval = &request.Context
-	approvalRequest.NetworkPort = request.Port
-	decision, err := sink.PromptToolApproval(ctx, approvalRequest)
-	if err != nil {
-		return safety.NetworkApprovalDeny, err
-	}
-	if err := s.completeSurfaceToolApprovalDecision(ctx, actionID, decision); err != nil {
-		return safety.NetworkApprovalDeny, err
-	}
-	resolved = true
-	switch {
-	case decision.NetworkPolicyAmendment != nil && decision.Approved:
-		if decision.NetworkPolicyAmendment.Action == safety.NetworkPolicyDeny {
-			return safety.NetworkApprovalDenyForSession, nil
-		}
-		return safety.NetworkApprovalAllowInFuture, nil
-	case decision.Update != nil && decision.Update.Destination == safety.DestinationSession && decision.Approved:
-		return safety.NetworkApprovalAllowForSession, nil
-	case decision.Approved:
-		return safety.NetworkApprovalAllowOnce, nil
-	case decision.Cancelled:
-		return safety.NetworkApprovalCancel, nil
-	default:
-		return safety.NetworkApprovalDeny, nil
-	}
 }
 
 func (s *ChatSession) baseApprovalRequest(src turn.ApprovalSource) (turn.ToolApprovalRequest, safety.ToolApprovalSuggestion, bool) {
@@ -736,11 +702,8 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 	}
 	choice := approvalChoice(act, decision)
 	service := turn.ApprovalService{Actions: s.actionSvc(), Policy: s.runner()}
-	if s.runner() != nil {
-		service.Network = s.Env.Tools()
-	}
 	result, err := service.Decide(ctx, actionID, turn.ApprovalReply{
-		Choice: choice, Update: decision.Update, Network: decision.NetworkPolicyAmendment,
+		Choice: choice, Update: decision.Update,
 		// The stored reason is the user's own words: it is what the denial
 		// card and the approval-resolved event print. The reviews a denied
 		// plan collected reach the model when the denial is resumed, composed
@@ -877,9 +840,6 @@ func approvalChoice(act *state.Action, decision turn.ToolApprovalDecision) strin
 	}
 	if !decision.Approved {
 		return "deny"
-	}
-	if decision.NetworkPolicyAmendment != nil {
-		return "apply_network_policy_amendment"
 	}
 	if act != nil && strings.EqualFold(act.Kind, "request_permissions") {
 		if response := decision.RequestPermissionsResponse; response != nil {

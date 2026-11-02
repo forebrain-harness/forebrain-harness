@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/stretchr/testify/require"
 )
 
@@ -380,6 +381,25 @@ func TestLSPCommandTables(t *testing.T) {
 		}
 		require.Contains(t, names, "lsp", "surface %s: %v", surface, names)
 	}
+}
+
+// With no sandbox on this machine there is no approval preset to choose, so
+// /permissions leaves the table entirely: neither surface lists it, and typing
+// it is answered as an unknown command (plan 215 §3.4).
+func TestPermissionsCommandLeavesTheTableWithoutASandbox(t *testing.T) {
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	// The name stays reserved: a skill called "permissions" must not take over
+	// a command the machine simply does not offer.
+	require.True(t, IsBuiltinName("permissions"))
+	_, ok := Find("permissions")
+	require.False(t, ok, "/permissions must not resolve without a sandbox")
+	for _, surface := range []Surface{SurfaceWebChat, SurfaceTUI} {
+		for _, c := range VisibleWithOptions(surface, DiscoveryOptions{}) {
+			require.NotEqual(t, "permissions", c.Name, "surface %s still lists /permissions", surface)
+		}
+	}
+	require.NotContains(t, CommandCatalog(SurfaceTUI, DiscoveryOptions{}), "/permissions")
 }
 
 // Every built-in command declares how it behaves in a subagent's own view

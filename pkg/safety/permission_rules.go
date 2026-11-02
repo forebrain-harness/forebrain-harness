@@ -10,12 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"unicode/utf8"
 
-	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
@@ -399,10 +397,6 @@ func toolInputMap(toolInput any) map[string]any {
 // Returning a non-nil error blocks execution.
 type MessageGuard func(ctx context.Context, messages []llm.Message) error
 
-// ResultGuard checks the model result after the call completes successfully.
-// Returning a non-nil error rejects the result and returns that error to the caller.
-type ResultGuard func(ctx context.Context, result *llm.Result) error
-
 // GuardrailError wraps a named guard failure.
 type GuardrailError struct {
 	// Stage identifies whether the failure happened on input or output.
@@ -431,14 +425,8 @@ type namedMessageGuard struct {
 	guard MessageGuard
 }
 
-type namedResultGuard struct {
-	name  string
-	guard ResultGuard
-}
-
 type guardrailConfig struct {
 	messageGuards []namedMessageGuard
-	resultGuards  []namedResultGuard
 }
 
 // WithMessageGuard adds a named input guard that inspects messages before the
@@ -449,16 +437,9 @@ func WithMessageGuard(name string, guard MessageGuard) GuardrailOption {
 	}
 }
 
-// WithResultGuard adds a named output guard that inspects the result after the
-// model call completes successfully.
-func WithResultGuard(name string, guard ResultGuard) GuardrailOption {
-	return func(cfg *guardrailConfig) {
-		cfg.resultGuards = append(cfg.resultGuards, namedResultGuard{name: name, guard: guard})
-	}
-}
-
 // NewGuardrails returns an llm.LLMMiddleware that executes message guards
-// before the model call and result guards after a successful response.
+// before the model call. Guards judge the request only: an answer is never
+// inspected or held back.
 //
 // Guards are executed in the order they are added. The first failing guard stops
 // the request and its error is wrapped in GuardrailError.
@@ -485,26 +466,14 @@ type guardrailsLLM struct {
 	cfg   *guardrailConfig
 }
 
-// Execute validates input messages, delegates to inner, and validates the result.
+// Execute validates input messages and delegates to inner.
 func (g *guardrailsLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	for _, guard := range g.cfg.messageGuards {
 		if err := guard.guard(ctx, messages); err != nil {
 			return nil, &GuardrailError{Stage: "input", Name: guard.name, Err: err}
 		}
 	}
-
-	result, err := g.inner.Execute(ctx, messages, tools)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, guard := range g.cfg.resultGuards {
-		if err := guard.guard(ctx, result); err != nil {
-			return nil, &GuardrailError{Stage: "output", Name: guard.name, Err: err}
-		}
-	}
-
-	return result, nil
+	return g.inner.Execute(ctx, messages, tools)
 }
 
 // ErrInputBlocked is returned when guardrails reject user input.
@@ -532,157 +501,6 @@ func RunInputRules(r *Resolved, text string) error {
 		}
 	}
 	return nil
-}
-
-// OutputBlockedError is returned when guardrails reject model output.
-// The Reason field indicates which rule triggered the block.
-type OutputBlockedError struct {
-	Reason string // output_sys_leak | output_js_url | output_url_scheme
-}
-
-// Error implements the error interface.
-func (e *OutputBlockedError) Error() string {
-	return fmt.Sprintf("guardrails: output blocked: %s", e.Reason)
-}
-
-// Is allows errors.Is(err, &OutputBlockedError{}) to work as a sentinel check.
-func (e *OutputBlockedError) Is(target error) bool {
-	_, ok := target.(*OutputBlockedError)
-	return ok
-}
-
-var (
-	grSysLeakRe   = regexp.MustCompile(`(?i)(ignore\s+(all\s+)?previous\s+instructions|disregard\s+(the\s+)?(above|prior)|you\s+are\s+now\s+(in\s+)?developer\s+mode)`)
-	grJSURLRe     = regexp.MustCompile(`(?i)javascript\s*:`)
-	grOpaqueURLRe = regexp.MustCompile(`(?i)\b(?:mailto:[^\s<>\[\]()"']+|data:[^\s<>\[\]()"']+)`)
-)
-
-// ApplyOutputRail scans model output for system-leak phrases and unsafe URLs.
-// The output rail is always on.
-func ApplyOutputRail(r *Resolved, text string) (string, error) {
-	if r == nil {
-		return text, nil
-	}
-	if strings.TrimSpace(text) == "" {
-		return text, nil
-	}
-	if grSysLeakRe.MatchString(text) {
-		incBlocked("output_sys_leak")
-		return "", &OutputBlockedError{Reason: "output_sys_leak"}
-	}
-	if grJSURLRe.MatchString(text) {
-		incBlocked("output_js_url")
-		return "", &OutputBlockedError{Reason: "output_js_url"}
-	}
-	for _, raw := range grExtractURLs(text) {
-		u, err := url.Parse(raw)
-		if err != nil || u.Scheme == "" {
-			continue
-		}
-		s := strings.ToLower(u.Scheme)
-		if s != "http" && s != "https" && s != "mailto" {
-			incBlocked("output_url_scheme")
-			return "", &OutputBlockedError{Reason: "output_url_scheme"}
-		}
-	}
-	return text, nil
-}
-
-func grIsSchemeFirst(b byte) bool {
-	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
-}
-
-func grIsSchemeChar(b byte) bool {
-	return grIsSchemeFirst(b) || (b >= '0' && b <= '9') || b == '+' || b == '-' || b == '.'
-}
-
-func grTrimTrailingURLPunct(s string) string {
-	for len(s) > 0 {
-		switch s[len(s)-1] {
-		case '.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'':
-			s = s[:len(s)-1]
-		default:
-			return s
-		}
-	}
-	return s
-}
-
-func grExtractHierarchicalURLs(s string) []string {
-	var out []string
-	i := 0
-	for i < len(s) {
-		j := strings.Index(s[i:], "://")
-		if j < 0 {
-			break
-		}
-		colon := i + j
-		start := colon
-		for start > 0 && grIsSchemeChar(s[start-1]) {
-			start--
-		}
-		if start >= colon || !grIsSchemeFirst(s[start]) {
-			i = colon + 3
-			continue
-		}
-		end := colon + 3
-		for end < len(s) {
-			c := s[end]
-			if c <= ' ' || c == ')' || c == ']' || c == '}' || c == '"' || c == '\'' || c == '<' || c == '>' || c == ',' || c == ';' {
-				break
-			}
-			end++
-		}
-		out = append(out, grTrimTrailingURLPunct(s[start:end]))
-		i = colon + 3
-	}
-	return out
-}
-
-func grExtractURLs(s string) []string {
-	seen := make(map[string]struct{})
-	var out []string
-	add := func(raw string) {
-		raw = strings.TrimSpace(grTrimTrailingURLPunct(raw))
-		if raw == "" {
-			return
-		}
-		if _, ok := seen[raw]; ok {
-			return
-		}
-		seen[raw] = struct{}{}
-		out = append(out, raw)
-	}
-	for _, m := range grOpaqueURLRe.FindAllString(s, -1) {
-		add(m)
-	}
-	for _, m := range grExtractHierarchicalURLs(s) {
-		add(m)
-	}
-	return out
-}
-
-// OutputRailEnabled reports whether answers pass the output guardrail, which
-// judges an answer whole: a surface that would otherwise stream it must hold
-// it until it is complete.
-func OutputRailEnabled(cfg *appcfg.Root) bool {
-	r := ResolveFromRoot(cfg)
-	return r != nil && r.OutputEnabled
-}
-
-// SanitizeOutbound applies the output rail to text destined for an external
-// channel, returning a withheld placeholder when the rail blocks it.
-// Returns text unchanged when the output rail is disabled via config.
-func SanitizeOutbound(cfg *appcfg.Root, text string) string {
-	r := ResolveFromRoot(cfg)
-	if r == nil || !r.OutputEnabled {
-		return text
-	}
-	out, err := ApplyOutputRail(r, text)
-	if err != nil {
-		return "[withheld: output guardrails]"
-	}
-	return out
 }
 
 var guardrailBlockedTotal int64

@@ -14,7 +14,14 @@ import { mcpKeyValuePayload, MCP_REDACTED, type McpKeyValueRow } from './mcpRows
  * save is `mcpKeyValuePayload`'s decision, so the last test walks the two
  * together.
  */
-function mountRows(props: { modelValue?: McpKeyValueRow[]; addLabel?: string; readonly?: boolean } = {}): VueWrapper {
+function mountRows(
+  props: {
+    modelValue?: McpKeyValueRow[]
+    addLabel?: string
+    readonly?: boolean
+    secretFacts?: Record<string, { set: boolean; last4: string }>
+  } = {},
+): VueWrapper {
   return mount(McpKeyValueRows, {
     props: { modelValue: [], addLabel: '添加环境变量', ...props },
     global: { directives: { tip } },
@@ -56,19 +63,37 @@ describe('McpKeyValueRows', () => {
     expect(reported(two)).toEqual([{ key: '', value: '' }])
   })
 
-  it('shows a stored secret as the placeholder a save sends back, and a removal as an empty value', async () => {
+  it('masks a stored credential; 更换 types a new one and a blank box keeps it', async () => {
     const stored = { TOKEN: MCP_REDACTED, GONE: 'x' }
     const asRead: McpKeyValueRow[] = [
       { key: 'TOKEN', value: MCP_REDACTED },
       { key: 'GONE', value: 'x' },
     ]
-    const wrapper = mountRows({ modelValue: asRead })
+    const wrapper = mountRows({
+      modelValue: asRead,
+      secretFacts: { TOKEN: { set: true, last4: 'a1b2' } },
+    })
 
-    // The value the form holds is the placeholder itself: nothing else about
-    // the stored secret is knowable, and the payload reads it back as "keep".
-    expect(wrapper.findAll('[data-kv-value]')[0].element).toHaveProperty('value', MCP_REDACTED)
+    // The stored credential is not readable: bullets and its last four, no
+    // value input for that row, and the payload says "keep" for it.
+    expect(wrapper.findAll('[data-kv-value]')).toHaveLength(1)
+    const mask = wrapper.find('.mcp-kv-mask')
+    expect(mask.text()).toContain('a1b2')
+    expect(mask.text()).not.toContain('REDACTED')
     expect(mcpKeyValuePayload(stored, asRead)).toBeNull()
 
+    // 更换 opens a blank password box: typing replaces, blank keeps, 取消
+    // puts the mask back.
+    await wrapper.find('[data-kv-secret-edit="0"]').trigger('click')
+    await wrapper.findAll('[data-kv-value]')[0].setValue('')
+    expect(mcpKeyValuePayload(stored, reported(wrapper))).toBeNull()
+    await wrapper.findAll('[data-kv-value]')[0].setValue('newsec')
+    expect(mcpKeyValuePayload(stored, reported(wrapper))).toEqual({ TOKEN: 'newsec', GONE: MCP_REDACTED })
+    await wrapper.find('[data-kv-secret-cancel="0"]').trigger('click')
+    expect(mcpKeyValuePayload(stored, reported(wrapper))).toBeNull()
+
+    // A row's delete button is how a key is removed: an empty value on the
+    // wire, exactly as before.
     await wrapper.findAll('[data-kv-remove]')[1].trigger('click')
     const rows = reported(wrapper)
     expect(rows).toEqual([{ key: 'TOKEN', value: MCP_REDACTED }])

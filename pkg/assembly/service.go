@@ -25,6 +25,27 @@ const (
 	summaryInputFraction = 0.85
 )
 
+// A checkpoint's strategy, as persisted in its boundary metadata. It says which
+// compaction produced the checkpoint, which is what tells a reader whether the
+// replacement history is portable: strategyRemote holds a provider-private
+// opaque item that only its issuing provider can replay.
+const (
+	strategyLocal  = "local"
+	strategyRemote = "remote_v2"
+)
+
+// reasonRemoteCheckpointProviderSwitch is the auto-compaction reason for the
+// one case where a switch itself forces a checkpoint: the next request goes to
+// a different provider than the one that produced the newest remote checkpoint.
+const reasonRemoteCheckpointProviderSwitch = "remote_checkpoint_provider_switch"
+
+// isRemoteCompactStrategy reports whether a checkpoint's strategy names a
+// provider-native compaction. "remote_v1" is the retired spelling; checkpoints
+// written by it are still on disk and are just as provider-private.
+func isRemoteCompactStrategy(strategy string) bool {
+	return strings.HasPrefix(strings.TrimSpace(strategy), "remote")
+}
+
 const DefaultPrompt = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
 Include:
@@ -52,15 +73,15 @@ type Service struct {
 	ModelProvider      func(model string) string
 	CompactLLMForModel func(model string) llm.LLM
 	Prompt             string
-	// RemoteCompaction opts in to provider-native compaction (default: false).
-	// Remote checkpoints store provider-specific opaque items that cannot be
-	// replayed by a different provider; local summarization is the safe default.
-	RemoteCompaction bool
-	RemoteV1         bool
-	ExplicitLimit    int
-	LimitScope       string
-	PreCompact       func(context.Context, string, string) error
-	PostCompact      func(context.Context, string, string) error
+	// AutoCompactPercent is the share of the effective input window at which
+	// automatic compaction starts; ConfigContextTokens is the configured
+	// context window used when the model catalog knows no window for this
+	// model. Both come from the runtime configuration and must match what the
+	// context-pressure warning measures against, so the two agree.
+	AutoCompactPercent  int
+	ConfigContextTokens int
+	PreCompact          func(context.Context, string, string) error
+	PostCompact         func(context.Context, string, string) error
 	// Events receives every compaction's lifecycle: started, progress, and
 	// how it ended. It is the surface's own run-event sink.
 	Events event.Sink
@@ -85,7 +106,6 @@ type Result struct {
 	Strategy      string
 	Reason        string
 	SummarySource string
-	Scope         string
 	Summary       string
 	BoundaryID    string
 	ReplacedTurns int
@@ -116,7 +136,7 @@ func (s Service) ManualCompactSession(ctx context.Context, sessionID, trigger st
 		return Result{}, err
 	}
 	ctx, run := s.beginCompaction(ctx, sid, trigger, llm.EstimateMessagesWith(s.estimator(ctx), messages))
-	res, err := s.compactSession(ctx, sid, messages, trigger, "", "")
+	res, err := s.compactSession(ctx, sid, messages, trigger, "", "", false)
 	if err != nil {
 		run.fail(err)
 		return Result{}, err
@@ -135,7 +155,8 @@ func (s Service) AutoCompactSession(ctx context.Context, sessionID, _ string) (R
 		return Result{}, false, err
 	}
 	ctx, run := s.beginCompaction(ctx, sid, "auto", decision.Usage)
-	res, err := s.compactSession(ctx, sid, messages, "auto", decision.Reason, decision.PreviousModel)
+	// A provider switch re-summarizes locally: its checkpoint must be portable.
+	res, err := s.compactSession(ctx, sid, messages, "auto", decision.Reason, decision.PreviousModel, decision.Reason == reasonRemoteCheckpointProviderSwitch)
 	if err != nil {
 		run.fail(err)
 		return Result{}, false, err
@@ -149,7 +170,8 @@ func (s Service) AutoCompactSession(ctx context.Context, sessionID, _ string) (R
 
 // compactSession replaces a stored session's history with one checkpoint. The
 // previous model, when set, summarizes first: the history was written for it.
-func (s Service) compactSession(ctx context.Context, sid string, messages []llm.Message, trigger, reason, previousModel string) (Result, error) {
+// local forces the portable summarizer, which a provider switch needs.
+func (s Service) compactSession(ctx context.Context, sid string, messages []llm.Message, trigger, reason, previousModel string, local bool) (Result, error) {
 	if len(messages) == 0 {
 		return Result{}, errors.New(ErrorMessageNotEnoughMessages)
 	}
@@ -172,10 +194,10 @@ func (s Service) compactSession(ctx context.Context, sid string, messages []llm.
 	if previousClient != nil {
 		summarizeAsConversation = nil
 	}
-	replacement, res, err := s.compactMessages(ctx, messages, nil, sid, trigger, reason, previousClient, summarizeAsConversation)
+	replacement, res, err := s.compactMessages(ctx, messages, nil, sid, trigger, reason, previousClient, summarizeAsConversation, local)
 	if err != nil && previousClient != nil {
 		if _, remote := previousClient.(llm.ContextCompactor); remote && shouldRetryWithCurrentModel(err) {
-			replacement, res, err = s.compactMessages(ctx, messages, nil, sid, trigger, reason, nil, conversation)
+			replacement, res, err = s.compactMessages(ctx, messages, nil, sid, trigger, reason, nil, conversation, local)
 		}
 	}
 	if err != nil {
@@ -229,7 +251,10 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 	est := llm.EstimatorFor(provider, model)
 	usage := state.TokenCountWithEstimationFor(turns, est)
 	limits, _ := llm.Lookup(provider, model)
-	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{ExplicitLimit: s.ExplicitLimit})
+	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{
+		AutoCompactPercent:    s.AutoCompactPercent,
+		FallbackContextTokens: s.ConfigContextTokens,
+	})
 	previousModel := lastAssistantModel(turns)
 	if previousModel != "" {
 		previousProvider := ""
@@ -242,8 +267,22 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 			previousLimits, previousKnown := llm.Lookup(previousProvider, previousModel)
 			currentLimits, currentKnown := llm.Lookup(provider, model)
 			if previousKnown && currentKnown {
-				if reason := modelChangeCompactReason(usage, s.LimitScope, budget.AutoCompactThreshold, previousLimits, currentLimits); reason != "" {
+				if reason := modelChangeCompactReason(usage, budget.AutoCompactThreshold, previousLimits, currentLimits); reason != "" {
 					return autoCompactDecision{Should: true, Usage: usage, Reason: reason, PreviousModel: previousModel}, nil
+				}
+			}
+			if providerChanged {
+				// The newest checkpoint, when a provider-native compaction
+				// produced it, carries an opaque item only its own provider can
+				// replay. Handing it to the next provider would send bytes that
+				// provider cannot read, so the history is summarized locally
+				// first and the new provider starts from a portable checkpoint.
+				_, checkpoint, checkpointErr := s.Sessions.LatestCompactBoundary(ctx, sid)
+				if checkpointErr != nil {
+					return autoCompactDecision{}, checkpointErr
+				}
+				if isRemoteCompactStrategy(checkpoint.Strategy) {
+					return autoCompactDecision{Should: true, Usage: usage, Reason: reasonRemoteCheckpointProviderSwitch}, nil
 				}
 			}
 			// Provider/model switch without compaction. The new provider's
@@ -262,20 +301,10 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 	if usage >= budget.EffectiveContextWindow {
 		return autoCompactDecision{Should: true, Usage: usage, Reason: "model_context_window_pressure"}, nil
 	}
-	thresholdUsage := usage
-	if normalizedScope(s.LimitScope) == "body_after_prefix" {
-		estimatedPrefill := usage
-		if _, checkpoint, checkpointErr := s.Sessions.LatestCompactBoundary(ctx, sid); checkpointErr != nil {
-			return autoCompactDecision{}, checkpointErr
-		} else if len(checkpoint.ReplacementHistory) > 0 {
-			estimatedPrefill = llm.EstimateMessagesWith(est, checkpoint.ReplacementHistory)
-		}
-		thresholdUsage = state.BodyAfterPrefixTokenCountFor(turns, estimatedPrefill, est)
-	}
-	return autoCompactDecision{Should: thresholdUsage >= threshold, Usage: usage, Reason: "model_context_window_pressure"}, nil
+	return autoCompactDecision{Should: usage >= threshold, Usage: usage, Reason: "model_context_window_pressure"}, nil
 }
 
-func modelChangeCompactReason(usage int, scope string, currentAutoLimit int, previous, current llm.Hit) string {
+func modelChangeCompactReason(usage int, currentAutoLimit int, previous, current llm.Hit) string {
 	if previous.CompHash != "" && current.CompHash != "" && previous.CompHash != current.CompHash {
 		return "comp_hash_changed"
 	}
@@ -287,7 +316,7 @@ func modelChangeCompactReason(usage int, scope string, currentAutoLimit int, pre
 	if usage >= currentLimit {
 		return "model_downshift"
 	}
-	if normalizedScope(scope) == "total" && usage > currentAutoLimit {
+	if usage > currentAutoLimit {
 		return "model_downshift"
 	}
 	return ""
@@ -326,7 +355,7 @@ func (s Service) compactLiveMessages(ctx context.Context, messages []llm.Message
 		// just refused as too large; it cannot carry the summary either.
 		conversation = nil
 	}
-	replacement, result, err := s.compactMessages(ctx, messages, nil, sessionID, "auto", reason, nil, conversation)
+	replacement, result, err := s.compactMessages(ctx, messages, nil, sessionID, "auto", reason, nil, conversation, false)
 	if err != nil {
 		return nil, Result{}, err
 	}
@@ -338,7 +367,10 @@ func (s Service) compactLiveMessages(ctx context.Context, messages []llm.Message
 	return replacement, result, nil
 }
 
-func (s Service) compactMessages(ctx context.Context, messages []llm.Message, tools []*llm.Tool, sessionID, trigger, reason string, client llm.LLM, conversation ConversationSummarizer) ([]llm.Message, Result, error) {
+// compactMessages replaces a history with one checkpoint. local forces the
+// portable path: a provider switch must not carry the previous provider's
+// opaque item into its new checkpoint.
+func (s Service) compactMessages(ctx context.Context, messages []llm.Message, tools []*llm.Tool, sessionID, trigger, reason string, client llm.LLM, conversation ConversationSummarizer, local bool) ([]llm.Message, Result, error) {
 	if client == nil && s.CompactLLM != nil {
 		client = s.CompactLLM(ctx)
 	}
@@ -351,15 +383,13 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 	before := llm.EstimateMessagesWith(est, messages)
 	var replacement []llm.Message
 	var summary, strategy, source string
-	if remote, ok := client.(llm.ContextCompactor); ok && s.RemoteCompaction {
-		mode := llm.CompactModeRemoteV1
-		if !s.RemoteV1 {
-			mode = llm.CompactModeRemoteV2
-		}
+	// A client that can compact natively does so: provider-native compaction is
+	// on wherever the client supports it, and nowhere else.
+	if remote, ok := client.(llm.ContextCompactor); ok && !local {
 		// Provider-native compaction streams nothing: the whole call is
 		// the model reading the history, and it ends with the reply.
 		stopReading := startReadingProgress(ctx, before)
-		out, err := remote.Compact(ctx, messages, tools, mode)
+		out, err := remote.Compact(ctx, messages, tools)
 		stopReading()
 		if err == nil && (out == nil || len(out.Messages) == 0) {
 			err = errors.New("compact: provider returned empty replacement history")
@@ -381,7 +411,7 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 		if err != nil {
 			if fallback, fallbackSummary, fallbackErr := s.localFallbackAfterRemoteFailure(ctx, client, messages, conversation, err, est); fallbackErr == nil {
 				replacement, summary = fallback, fallbackSummary
-				strategy, source = "local", "model_summary"
+				strategy, source = strategyLocal, "model_summary"
 			} else {
 				return nil, Result{}, fallbackErr
 			}
@@ -389,7 +419,7 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 			// Provider-native compaction streams nothing to measure; its
 			// summarizing phase completes when the reply lands.
 			replacement = remoteReplacement
-			strategy, source = string(mode), "remote_compaction"
+			strategy, source = strategyRemote, "remote_compaction"
 			reportCompactProgress(ctx, summaryEndPercent, event.CompactPhaseSummarizing)
 		}
 	} else {
@@ -398,7 +428,7 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 		if err != nil {
 			return nil, Result{}, err
 		}
-		strategy, source = "local", "model_summary"
+		strategy, source = strategyLocal, "model_summary"
 	}
 	if strings.TrimSpace(reason) == "" {
 		reason = "model_context_window_pressure"
@@ -412,7 +442,6 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 		Strategy:      strategy,
 		Reason:        reason,
 		SummarySource: source,
-		Scope:         normalizedScope(s.LimitScope),
 		Summary:       summary,
 		ReplacedTurns: max(0, len(stripInitialContext(messages))-len(replacement)),
 		TokensBefore:  before,
@@ -870,10 +899,4 @@ func normalizedTrigger(s string) string {
 		return "manual"
 	}
 	return strings.TrimSpace(s)
-}
-func normalizedScope(s string) string {
-	if strings.TrimSpace(s) == "body_after_prefix" {
-		return "body_after_prefix"
-	}
-	return "total"
 }

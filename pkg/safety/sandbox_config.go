@@ -142,28 +142,34 @@ type CommandRequest struct {
 	// This narrows what the request may write. Denials are unaffected: the
 	// protected-path deny list is not a grant that needs narrowing.
 	ExclusiveWritablePaths bool
-	// ExclusiveReadablePaths declares AdditionalReadablePaths to be this
-	// command's complete application-data read set. Configured allow-read roots
-	// are not added on top. IncludePlatformDefaults and explicit deny rules are
-	// independent: the first supplies the OS runtime, the second still narrows.
+	// DeniedReadableRoots names directories a deny-list request may neither
+	// read nor write while the rest of the filesystem stays readable. It is
+	// the opposite shape to DeniedReadablePaths: that one narrows a readable
+	// set, this one is the readable set's own exception list.
 	//
-	// It exists for the unattended request whose promise is "this workspace, the
-	// shared skills and nothing else the user owns" (plans/150). The configured
-	// read set is "/" by default, so narrowing it path by path cannot express
-	// that promise -- only replacing it can.
-	ExclusiveReadablePaths  bool
+	// It exists for the unattended batch task whose promise is "the task
+	// workspace, the project's skills, and nothing else of the user's"
+	// (plans/216): the whole filesystem is readable — a package manager's
+	// configuration and the OS runtime live outside the boundary and have to
+	// be — while the Forebrain home and, when it lives elsewhere, the project
+	// root are not. ReadableExceptions carves the parts of them the task does
+	// need back out.
+	//
+	// Denial is order-sensitive in both Unix backends — seatbelt's last
+	// matching rule wins and bubblewrap's later mounts stack on earlier ones —
+	// so a backend must emit the read grant, then these denials, then the
+	// exceptions, and a user's own deny_read last of all.
+	DeniedReadableRoots []string
+	// ReadableExceptions names subpaths of DeniedReadableRoots that stay
+	// readable. A path that is also in AdditionalWritablePaths stays writable
+	// as well.
+	ReadableExceptions      []string
 	DeniedWritablePaths     []string
 	AdditionalReadablePaths []string
 	DeniedReadablePaths     []string
 	DeniedReadablePatterns  []string
 	IncludePlatformDefaults bool
 	AllowNetwork            bool
-	ManagedNetwork          *ManagedNetworkCommand
-	ApprovedNetworkAccess   *ApprovedNetworkAccess
-	NetworkApproval         NetworkApprovalHandler
-	NetworkEnvironmentID    string
-	NetworkExecutionID      string
-	SessionNetworkRules     []SessionNetworkRule
 	Env                     []string
 	// OutputSpoolDir is a Forebrain-owned directory used to preserve large output
 	// without retaining it in memory. Empty falls back to the OS temp dir.
@@ -196,65 +202,6 @@ type CommandResult struct {
 	OutputSpoolOmittedBytes int64
 	ExitCode                int
 	ExecutionTiming         llm.ExecutionTiming
-	NetworkDenial           *NetworkDenial
-}
-
-type ManagedNetworkCommand struct {
-	HTTPPort            int
-	SOCKSPort           int
-	SOCKSUDPPort        int
-	AllowLocalBinding   bool
-	AllowedUnixSockets  []string
-	AllowAllUnixSockets bool
-}
-
-type ApprovedNetworkAccess struct {
-	Context NetworkApprovalContext
-	Port    int
-}
-
-type NetworkApprovalDecision string
-
-const (
-	NetworkApprovalAllowOnce       NetworkApprovalDecision = "allow_once"
-	NetworkApprovalAllowForSession NetworkApprovalDecision = "allow_for_session"
-	NetworkApprovalAllowInFuture   NetworkApprovalDecision = "allow_in_future"
-	NetworkApprovalDeny            NetworkApprovalDecision = "deny"
-	NetworkApprovalDenyForSession  NetworkApprovalDecision = "deny_for_session"
-	NetworkApprovalCancel          NetworkApprovalDecision = "cancel"
-)
-
-func (d NetworkApprovalDecision) Allows() bool {
-	return d == NetworkApprovalAllowOnce || d == NetworkApprovalAllowForSession || d == NetworkApprovalAllowInFuture
-}
-
-type NetworkApprovalRequest struct {
-	Context       NetworkApprovalContext `json:"context"`
-	Port          int                    `json:"port"`
-	Command       string                 `json:"command,omitempty"`
-	WorkDir       string                 `json:"work_dir,omitempty"`
-	EnvironmentID string                 `json:"environment_id,omitempty"`
-	ExecutionID   string                 `json:"execution_id,omitempty"`
-	CommandEnv    []string               `json:"-"`
-}
-
-type SessionNetworkRule struct {
-	Context NetworkApprovalContext
-	Port    int
-	Allow   bool
-}
-
-type NetworkApprovalHandler func(context.Context, NetworkApprovalRequest) (NetworkApprovalDecision, error)
-
-type NetworkDenial struct {
-	Host     string                  `json:"host"`
-	Reason   string                  `json:"reason"`
-	Method   string                  `json:"method,omitempty"`
-	Mode     string                  `json:"mode,omitempty"`
-	Protocol NetworkApprovalProtocol `json:"protocol"`
-	Decision string                  `json:"decision"`
-	Source   string                  `json:"source,omitempty"`
-	Port     int                     `json:"port,omitempty"`
 }
 
 type UnavailableError struct {
@@ -320,48 +267,33 @@ type RuntimeConfig struct {
 
 func ConvertToRuntimeConfig(sources []SourceSettings, snap Snapshot, cwd, originalCwd, tempDir string, additionalDirs []string) RuntimeConfig {
 	var out RuntimeConfig
-	profileConfig, profileActive := compileConfiguredPermissionProfile(sources, cwd, tempDir, additionalDirs)
-	if profileActive {
-		out = profileConfig
+	root := string(filepath.Separator)
+	if volume := filepath.VolumeName(cwd); volume != "" {
+		root = volume + string(filepath.Separator)
 	}
-
-	excludeTmpdirEnvVar := false
-	excludeSlashTmp := false
+	out.Filesystem.AllowRead = appendUniquePath(out.Filesystem.AllowRead, root)
+	workspaceWrite := false
 	for _, src := range sources {
-		excludeTmpdirEnvVar = excludeTmpdirEnvVar || src.SandboxWorkspaceWrite.ExcludeTmpdirEnvVar
-		excludeSlashTmp = excludeSlashTmp || src.SandboxWorkspaceWrite.ExcludeSlashTmp
+		workspaceWrite = workspaceWrite || src.SandboxMode == appcfg.SandboxModeWorkspaceWrite
 	}
-	if !profileActive {
-		root := string(filepath.Separator)
-		if volume := filepath.VolumeName(cwd); volume != "" {
-			root = volume + string(filepath.Separator)
+	if workspaceWrite {
+		out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, cwd)
+		// The sandbox's own temp directory and /tmp are writable by definition:
+		// there is no setting that withholds them (plan 206).
+		out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, tempDir)
+		if filepath.Separator == '/' {
+			out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, "/tmp")
 		}
-		out.Filesystem.AllowRead = appendUniquePath(out.Filesystem.AllowRead, root)
-		workspaceWrite := false
-		for _, src := range sources {
-			workspaceWrite = workspaceWrite || src.SandboxMode == appcfg.SandboxModeWorkspaceWrite
-		}
-		if workspaceWrite {
-			out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, cwd)
-			if !excludeTmpdirEnvVar {
-				out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, tempDir)
-			}
-			if !excludeSlashTmp && filepath.Separator == '/' {
-				out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, "/tmp")
-			}
-			for _, p := range additionalDirs {
-				out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, p)
-			}
+		for _, p := range additionalDirs {
+			out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, p)
 		}
 	}
 
 	for _, src := range sources {
-		if !profileActive {
-			for _, p := range src.SandboxWorkspaceWrite.WritableRoots {
-				out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, resolveSandboxPath(src.RootPath, p))
-			}
-			out.NetworkEnabled = out.NetworkEnabled || src.SandboxWorkspaceWrite.EffectiveNetworkAccess()
+		for _, p := range src.SandboxWorkspaceWrite.WritableRoots {
+			out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, resolveSandboxPath(src.RootPath, p))
 		}
+		out.NetworkEnabled = out.NetworkEnabled || src.SandboxWorkspaceWrite.EffectiveNetworkAccess()
 	}
 
 	for _, grant := range snap.FileSystemGrants {
@@ -549,51 +481,57 @@ func ResolveRegisteredContext(home, root string) (ProjectContext, error) {
 	return ProjectContext{Project: project, TrustLevel: level}, nil
 }
 
-// EffectiveConfig derives the settings a launch project leaves unspecified and
-// returns them in a copy of cfg. Configured values always win; only omitted
-// settings are derived. The two derivations are independent: an explicit
-// sandbox mode does not freeze the approval policy, and vice versa.
+// EffectiveConfig is the one place the approval preset becomes the pair the
+// runtime acts on: an approval policy and a sandbox mode. Both are derived
+// every time, never read from the configuration, so the two halves of one
+// decision cannot be chosen apart (plan 203).
+//
+// The table is:
+//
+//	preset            trusted / rejected         undecided
+//	workspace_write   on-request + workspace-write   on-request + read-only
+//	full_access       never + danger-full-access     same as trusted
+//
+// A rejected project keeps a writable workspace: its policy asks before
+// anything that is not provably safe, which is the backstop. A project nobody
+// has judged yet has no such backstop, so the sandbox is what protects it.
+// Full access is the YOLO posture — it asks nothing and runs uncontained — and
+// the trust decision does not narrow it, because narrowing it would be the
+// "asks everything in a full-access sandbox" state the presets exist to
+// prevent.
+//
+// The derived pair is runtime state. It must never be written back as
+// configuration: persisting it would pin one branch of this derivation and the
+// project's trust decision could no longer move.
 func EffectiveConfig(cfg appcfg.Root, launch ProjectContext) appcfg.Root {
-	cfg.ApprovalPolicy = effectiveApprovalPolicy(cfg.ApprovalPolicy, launch)
-	if strings.TrimSpace(cfg.DefaultPermissions) != "" || cfg.SandboxMode != "" {
-		return cfg
-	}
-	cfg.SandboxMode = effectiveSandboxMode(launch, detectPlatform(), cfg.Windows.Sandbox)
+	cfg.ApprovalPreset = cfg.ApprovalPreset.Effective()
+	cfg.ApprovalPolicy = effectiveApprovalPolicy(cfg.ApprovalPreset, launch)
+	cfg.SandboxMode = effectiveSandboxMode(cfg.ApprovalPreset, launch)
 	return cfg
 }
 
-// effectiveSandboxMode resolves the sandbox mode for a project that does not
-// configure one.
-//
-// Any explicit trust decision earns a writable workspace, including a
-// rejection: a rejected project is held back by its approval policy, which asks
-// before anything that is not provably safe, rather than by a read-only
-// filesystem. A project nobody has judged yet has no such backstop — its policy
-// only asks when work leaves the sandbox — so the sandbox is what protects it
-// and it stays read-only.
-//
-// Windows without a configured sandbox has no enforcement to fall back on, so
-// it stays read-only whatever the trust decision.
-func effectiveSandboxMode(launch ProjectContext, platform Platform, windowsSandbox appcfg.WindowsSandboxMode) appcfg.SandboxMode {
+// effectiveSandboxMode resolves the sandbox half of the preset for this launch
+// project. Every platform has a sandbox to enforce workspace-write now, Windows
+// included: its restricted-token sandbox is always there and no longer depends
+// on being configured (owner 2026-10-31, plan 206).
+func effectiveSandboxMode(preset appcfg.ApprovalPresetID, launch ProjectContext) appcfg.SandboxMode {
+	if preset == appcfg.ApprovalPresetFullAccess {
+		return appcfg.SandboxModeDangerFullAccess
+	}
 	decided := launch.IsTrusted() || launch.IsUntrusted()
-	sandboxUnavailable := platform == PlatformWindows && strings.TrimSpace(string(windowsSandbox)) == ""
-	if decided && !sandboxUnavailable {
+	if decided {
 		return appcfg.SandboxModeWorkspaceWrite
 	}
 	return appcfg.SandboxModeReadOnly
 }
 
-// effectiveApprovalPolicy resolves the approval policy for a project that does
-// not configure one. A project the user has explicitly rejected asks before
-// anything that is not provably safe; a trusted project, and equally a project
-// nobody has judged yet, asks only when work needs to leave the sandbox.
-//
-// The derived value is runtime state. It must never be written back to
-// forebrain.yaml: persisting it would pin one branch of this derivation and the
-// project's trust decision could no longer change the policy.
-func effectiveApprovalPolicy(configured appcfg.ApprovalPolicyConfig, launch ProjectContext) appcfg.ApprovalPolicyConfig {
-	if configured.Mode != "" {
-		return configured
+// effectiveApprovalPolicy resolves the approval half of the preset. A project
+// the user has explicitly rejected asks before anything that is not provably
+// safe; a trusted project, and equally a project nobody has judged yet, asks
+// only when work needs to leave the sandbox.
+func effectiveApprovalPolicy(preset appcfg.ApprovalPresetID, launch ProjectContext) appcfg.ApprovalPolicyConfig {
+	if preset == appcfg.ApprovalPresetFullAccess {
+		return appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyNever)
 	}
 	if launch.IsUntrusted() {
 		return appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyUntrusted)
@@ -625,11 +563,8 @@ const (
 type SourceSettings struct {
 	Source                SettingsSource
 	RootPath              string
-	DefaultPermissions    string
-	Permissions           appcfg.PermissionProfiles
 	SandboxMode           appcfg.SandboxMode
 	SandboxWorkspaceWrite appcfg.SandboxWorkspaceWrite
-	NetworkConstraints    *appcfg.NetworkConstraints
 }
 
 type MergedSettings struct {
@@ -656,8 +591,6 @@ func LocalConfigSources(home string, cfg *appcfg.Root) []SourceSettings {
 	return []SourceSettings{{
 		Source:                SettingsLocal,
 		RootPath:              strings.TrimSpace(home),
-		DefaultPermissions:    strings.TrimSpace(cfg.DefaultPermissions),
-		Permissions:           cfg.Permissions,
 		SandboxMode:           cfg.SandboxMode,
 		SandboxWorkspaceWrite: cfg.SandboxWorkspaceWrite,
 	}}

@@ -444,6 +444,23 @@
   height: 14px;
 }
 
+/* The row's pencil: the delete control's footprint without its danger hover —
+   it opens the edit dialog and destroys nothing (plan 191 §4.4). */
+.forebrain-tenant-option-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--rail-fg-2);
+}
+.forebrain-tenant-option-act:hover {
+  background: var(--rail-hover);
+  color: var(--rail-fg);
+}
+
 .forebrain-tenant-dot {
   width: 6px;
   height: 6px;

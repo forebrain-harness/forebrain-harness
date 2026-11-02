@@ -975,9 +975,12 @@ func TestMemoryTranscriptIgnoresCompactionProjection(t *testing.T) {
 	}
 	_, _ = s.Append(ctx, "memory-history", "assistant", "new answer")
 
-	messages, err := s.ListMemoryTranscriptMessages(ctx, "memory-history", 5000)
+	messages, lastRowID, err := s.ListMemoryTranscriptMessagesAfter(ctx, "memory-history", 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if lastRowID == 0 {
+		t.Fatal("a transcript with visible rows reported no cursor")
 	}
 	if len(messages) != 2 || messages[0].TextContent() != "old transcript evidence" || messages[1].TextContent() != "new answer" {
 		t.Fatalf("memory transcript = %#v", messages)
@@ -1401,7 +1404,7 @@ func TestConversationsAreInvisibleToOtherPrimaryAgents(t *testing.T) {
 		if _, err := globex.ListTranscriptMessages(ctx, "acme-session", 100); !errors.Is(err, ErrSessionNotOwned) {
 			t.Fatalf("ListTranscriptMessages err=%v, want ErrSessionNotOwned", err)
 		}
-		if _, err := globex.ListMemoryTranscriptMessages(ctx, "acme-session", 100); !errors.Is(err, ErrSessionNotOwned) {
+		if _, _, err := globex.ListMemoryTranscriptMessagesAfter(ctx, "acme-session", 0); !errors.Is(err, ErrSessionNotOwned) {
 			t.Fatalf("ListMemoryTranscriptMessages err=%v, want ErrSessionNotOwned", err)
 		}
 		if _, err := globex.ListAllMessages(ctx, "acme-session", 100); !errors.Is(err, ErrSessionNotOwned) {
@@ -1531,29 +1534,6 @@ func TestTokenCountWithEstimationWalksBackAcrossSplitAssistantResponse(t *testin
 	}
 }
 
-func TestBodyAfterPrefixUsesFirstServerInputAsBaseline(t *testing.T) {
-	turns := []Message{
-		{Role: "user", Content: stringsOfLen(400)},
-		{Role: "assistant", Content: "answer", RunID: "run-1", UsageJSON: `{"input_tokens":100,"output_tokens":25}`},
-		{Role: "user", Content: stringsOfLen(80)},
-	}
-	// Active usage is 125 plus the estimated 24-token suffix (20 tokens of text
-	// plus the per-message framing every occupancy estimate carries). The
-	// 100-token first request input is the window prefix, leaving 49 body tokens.
-	if got := BodyAfterPrefixTokenCount(turns, 9999); got != 49 {
-		t.Fatalf("body tokens=%d want 49", got)
-	}
-}
-
-func TestBodyAfterPrefixUsesEstimatedResumePrefixBeforeServerUsage(t *testing.T) {
-	turns := []Message{{Role: "user", Content: stringsOfLen(400)}}
-	// 100 tokens of text plus the per-message framing, against a 100-token
-	// estimated prefix.
-	if got := BodyAfterPrefixTokenCount(turns, 100); got != 4 {
-		t.Fatalf("body tokens=%d want 4", got)
-	}
-}
-
 func TestTokenBudgetMatchesAutoCompactFormula(t *testing.T) {
 	b := CalculateTokenBudget(1000, "test-model", llm.Hit{
 		ContextWindow:    200000,
@@ -1605,8 +1585,8 @@ func TestTokenBudgetUsesExplicitInputLimitAndExplicitCompactLimit(t *testing.T) 
 	limited := CalculateTokenBudgetWithOptions(75_000, "gpt-5.6-sol", llm.Hit{
 		ContextWindow:   1050000,
 		InputTokenLimit: 922000,
-	}, TokenBudgetOptions{ExplicitLimit: 100000})
-	if limited.AutoCompactThreshold != 100000 || limited.PercentLeft != 25 {
+	}, TokenBudgetOptions{AutoCompactPercent: 50})
+	if limited.AutoCompactThreshold != 461000 || limited.PercentLeft != 84 {
 		t.Fatalf("limited=%+v", limited)
 	}
 }

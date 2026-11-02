@@ -41,8 +41,15 @@ func TestPrimaryAgentsAPIListsAndSwitches(t *testing.T) {
 			}},
 		},
 	}
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, *cfg)
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}}
-	s := &Server{Home: home, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}}, Runner: runner}
+	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	env.ConfigPath = filepath.Join(home, "forebrain.yaml")
+	_ = os.WriteFile(env.ConfigPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600)
+	s := &Server{Home: home, Env: env, Runner: runner}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/agents/primary", nil)
@@ -73,7 +80,14 @@ func TestAgentRosterIncludesPrimaryAndLiveSubagent(t *testing.T) {
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
 		"main": {},
 	}
-	s := &Server{Home: home, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}}}
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, *cfg)
+	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	env.ConfigPath = filepath.Join(home, "forebrain.yaml")
+	_ = os.WriteFile(env.ConfigPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600)
+	s := &Server{Home: home, Env: env}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	h := agent.RegistryFor(s.stateRoot()).Start(agent.HistoryEntry{
@@ -124,9 +138,13 @@ func TestAgentRosterPagesRunningRowsWithSessionTitles(t *testing.T) {
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, *cfg)
+	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	env.ConfigPath = filepath.Join(home, "forebrain.yaml")
+	_ = os.WriteFile(env.ConfigPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600)
 	s := &Server{
 		Home:     home,
-		Env:      &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}},
+		Env:      env,
 		Sessions: state.NewSessionStore(db, "main"),
 	}
 	now := time.Now().Unix()
@@ -265,7 +283,7 @@ func crudServer(t *testing.T) (*Server, string) {
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	seed := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n      - provider: openai\n        model: gpt-5\n        api_key: ${TEST_KEY}\n        base_url: http://127.0.0.1:9/v1\n"
 	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
-	cfg, err := appcfg.LoadPersisted(cfgPath)
+	cfg, err := loadPersistedDocumentForTest(cfgPath)
 	require.NoError(t, err)
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
 	require.NoError(t, err)

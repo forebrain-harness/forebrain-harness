@@ -133,39 +133,44 @@ test('permissions page adds a rule through a modal and removes it', async ({ pag
 test('settings approval tab persists the preset', async ({ page }) => {
   await signIn(page)
   await page.goto('/settings', { waitUntil: 'networkidle' })
-  await page.locator('[data-testid="settings-tabs"] button', { hasText: /审批默认|Approval default/ }).click()
-  // The presets are one standard radio group and the write is the save at the
-  // bottom of the tab (plan 076), not a click on the choice itself.
-  await page.locator('[data-testid="approval-default"] [role="radio"][value="full-access"]').click()
-  await page.locator('[data-testid="approval-save"]').click()
-  await expect(page.getByText(/已保存为全局默认|Saved as the global default/).first()).toBeVisible({ timeout: 10_000 })
+  await page.locator('[data-testid="settings-tabs"] button', { hasText: /审批与沙箱|Approval & sandbox/ }).click()
+  // The presets are one standard radio group and the write is the group's own
+  // save bar (plan 191), not a click on the choice itself.
+  await page.locator('[data-group="preset"] [role="radio"][value="full_access"]').click()
+  await page.locator('[data-save="preset"]').click()
+  await expect(page.getByText(/已保存，下一轮生效|Saved, applies/).first()).toBeVisible({ timeout: 10_000 })
   // Reopening keeps the selection.
   await page.reload({ waitUntil: 'networkidle' })
-  await page.locator('[data-testid="settings-tabs"] button', { hasText: /审批默认|Approval default/ }).click()
-  await expect(page.locator('[data-testid="approval-default"] [role="radio"][value="full-access"]')).toHaveAttribute(
+  await page.locator('[data-testid="settings-tabs"] button', { hasText: /审批与沙箱|Approval & sandbox/ }).click()
+  await expect(page.locator('[data-group="preset"] [role="radio"][value="full_access"]')).toHaveAttribute(
     'aria-checked',
     'true',
     { timeout: 10_000 },
   )
   // Restore the safe default.
-  await page.locator('[data-testid="approval-default"] [role="radio"][value="auto"]').click()
-  await page.locator('[data-testid="approval-save"]').click()
-  await expect(page.getByText(/已保存为全局默认|Saved as the global default/).first()).toBeVisible({ timeout: 10_000 })
+  await page.locator('[data-group="preset"] [role="radio"][value="workspace_write"]').click()
+  await page.locator('[data-save="preset"]').click()
+  await expect(page.getByText(/已保存，下一轮生效|Saved, applies/).first()).toBeVisible({ timeout: 10_000 })
 })
 
 test('session picker switches the approval preset', async ({ page }) => {
   await signIn(page)
   await page.goto('/', { waitUntil: 'networkidle' })
-  // Without a session the picker is inert.
-  await expect(page.locator('[data-testid="approval-picker"]')).toBeDisabled()
+  // Without a session the picker holds a draft for the conversation the next
+  // message opens: it is usable, showing the agent default (plan 203).
+  const picker = page.locator('[data-testid="approval-picker"]')
+  await expect(picker).toBeEnabled()
+  await expect(picker).toContainText(/默认|Default/)
   // Open a conversation (plan 029: every conversation belongs to a project).
   const readOnlySession = await seedProjectSession(page, 'rules-a')
   await page.goto(`/?session=${readOnlySession}`, { waitUntil: 'networkidle' })
   await page.waitForSelector('[data-testid="approval-picker"]:not([disabled])', { timeout: 15_000 })
   await page.click('[data-testid="approval-picker"]')
-  await page.click('[data-testid="approval-option-read-only"]')
+  // Two presets and no read-only one (plan 215): the choice this conversation
+  // alone keeps.
+  await page.click('[data-testid="approval-option-full_access"]')
   // The choice is accepted (no error surface) and the picker shows it.
-  await expect(page.locator('[data-testid="approval-picker"]')).toContainText(/只读|Read Only/)
+  await expect(page.locator('[data-testid="approval-picker"]')).toContainText(/完全访问|Full Access/)
   const readOnlyURL = page.url()
   // The preset is this conversation's alone: another one does not inherit it.
   const otherSession = await seedProjectSession(page, 'rules-b')
@@ -175,10 +180,10 @@ test('session picker switches the approval preset', async ({ page }) => {
   await page.goto(`/?session=${otherSession}`, { waitUntil: 'networkidle' })
   expect((await otherRead).ok()).toBe(true)
   await page.waitForSelector('[data-testid="approval-picker"]:not([disabled])', { timeout: 15_000 })
-  await expect(page.locator('[data-testid="approval-picker"]')).not.toContainText(/只读|Read Only/)
+  await expect(page.locator('[data-testid="approval-picker"]')).not.toContainText(/完全访问|Full Access/)
   // Coming back to the first conversation finds its own choice still there.
   await page.goto(readOnlyURL, { waitUntil: 'networkidle' })
-  await expect(page.locator('[data-testid="approval-picker"]')).toContainText(/只读|Read Only/, { timeout: 10_000 })
+  await expect(page.locator('[data-testid="approval-picker"]')).toContainText(/完全访问|Full Access/, { timeout: 10_000 })
 })
 
 test('project perm tab gates on trust', async ({ page }) => {

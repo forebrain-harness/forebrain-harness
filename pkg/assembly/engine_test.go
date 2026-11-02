@@ -53,8 +53,10 @@ func TestEngineBuildTracksContextPressureAndEvictions(t *testing.T) {
 	if res.ProjectedContextTokens <= 0 {
 		t.Fatalf("expected projected context tokens, got %+v", res)
 	}
-	if res.ContextPressure != "block" {
-		t.Fatalf("expected context pressure to be block, got %q with budget %+v", res.ContextPressure, res.Budget)
+	// Reaching the injection budget is a warning: pressure has two levels, and
+	// nothing refuses the request over it.
+	if res.ContextPressure != "warn" {
+		t.Fatalf("expected context pressure to be warn, got %q with budget %+v", res.ContextPressure, res.Budget)
 	}
 	if len(res.EvictionDetails) == 0 {
 		t.Fatalf("expected eviction details, got none: %+v", res.Provenance)

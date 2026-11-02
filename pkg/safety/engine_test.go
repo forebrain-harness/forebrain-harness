@@ -797,7 +797,6 @@ func TestDefaultsWithNoRules(t *testing.T) {
 		// unattended, so with one present the ordinary command just runs.
 		{ApprovalOnRequest, "Bash", "mkdir tmpdir", true, BehaviorAllow, "shell_default_allow"},
 		{ApprovalNever, "Bash", "mkdir tmpdir", true, BehaviorAllow, "shell_default_allow"},
-		{ApprovalGranular, "Bash", "mkdir tmpdir", true, BehaviorAllow, "shell_default_allow"},
 		// unless-trusted is the one policy that still asks about ordinary shell.
 		{ApprovalUnlessTrusted, "Bash", "mkdir tmpdir", true, BehaviorAsk, "default_ask"},
 

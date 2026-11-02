@@ -202,6 +202,10 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 		}
 		agBase = tool.WithTaskWorkspace(agBase, exec.Workspace)
 		agBase = tool.WithTaskContext(agBase, turn.BatchTaskContext(task, exec))
+		// The execution's filesystem boundary travels with the turn, one value
+		// for both enforcement layers: the OS sandbox pkg/safety builds and the
+		// read/write checks of every in-process file tool (plans/216).
+		agBase = tool.WithBatchBoundary(agBase, runner.BatchBoundaryFor(exec.Workspace))
 		if x.env.Control != nil {
 			x.env.Control.SessionQueue(sid).Close()
 		}

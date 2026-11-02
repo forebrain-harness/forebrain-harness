@@ -20,15 +20,43 @@
           data-kv-key
           @update:model-value="(value) => setKey(index, String(value))"
         />
-        <Input
-          class="forebrain-field h-[34px] font-mono"
-          :model-value="row.value"
-          :aria-label="t('mcp.kvValue')"
-          :readonly="readonly"
-          autocomplete="off"
-          data-kv-value
-          @update:model-value="(value) => setValue(index, String(value))"
-        />
+        <!-- A stored credential value is the gateway's placeholder: the reader
+             sees bullets and the last four instead, 更换 opens a password box,
+             and a blank box keeps what is stored (plan 191 §0.20). -->
+        <span v-if="row.value === MCP_REDACTED && !secretEditing.has(index)" class="mcp-kv-mask">
+          ••••••••<b>{{ secretFactOf(row.key)?.last4 }}</b>
+          <button
+            v-if="!readonly"
+            type="button"
+            class="mcp-secret-btn"
+            :data-kv-secret-edit="index"
+            @click="openSecret(index)"
+          >
+            {{ t('settings.secretChange') }}
+          </button>
+        </span>
+        <span v-else class="mcp-kv-secret">
+          <Input
+            :type="isCredentialKey(row.key) ? 'password' : 'text'"
+            class="forebrain-field h-[34px] font-mono"
+            :model-value="row.value"
+            :aria-label="t('mcp.kvValue')"
+            :readonly="readonly"
+            :autocomplete="isCredentialKey(row.key) ? 'new-password' : 'off'"
+            :spellcheck="false"
+            data-kv-value
+            @update:model-value="(value) => setValue(index, String(value))"
+          />
+          <button
+            v-if="row.value === MCP_REDACTED && !readonly"
+            type="button"
+            class="mcp-secret-btn"
+            :data-kv-secret-cancel="index"
+            @click="cancelSecret(index)"
+          >
+            {{ t('common.cancel') }}
+          </button>
+        </span>
         <button
           v-if="!readonly"
           v-tip:top="t('common.delete')"
@@ -70,14 +98,14 @@
  * button, every field `readonly`, and an empty map says `未设置` instead of
  * showing nothing at all.
  */
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { Plus, Trash2 } from 'lucide-vue-next'
 
 import { useI18n } from '@/locales'
 
-import type { McpKeyValueRow } from './mcpRows'
+import { MCP_REDACTED, type McpKeyValueRow } from './mcpRows'
 
 const props = withDefaults(
   defineProps<{
@@ -87,8 +115,11 @@ const props = withDefaults(
     addLabel: string
     /** A viewer: no add, no delete, every field read-only. */
     readonly?: boolean
+    /** The credential facts of the stored headers, keyed by header name:
+     * whether one is set and its last four characters. */
+    secretFacts?: Record<string, { set: boolean; last4: string }>
   }>(),
-  { readonly: false },
+  { readonly: false, secretFacts: () => ({}) },
 )
 
 const emit = defineEmits<{
@@ -99,8 +130,45 @@ const { t } = useI18n()
 
 const rows = computed(() => props.modelValue ?? [])
 
+/** Which credential rows are open for a replacement. */
+const secretEditing = reactive(new Set<number>())
+
+/** The header names the gateway masks the value of — the same list its
+ * `mcpCredentialHeader` keeps (pkg/gateway/mcp_write_api.go). */
+function isCredentialKey(key: string): boolean {
+  switch (key.trim().toLowerCase()) {
+    case 'authorization':
+    case 'proxy-authorization':
+    case 'x-api-key':
+    case 'api-key':
+      return true
+    default:
+      return false
+  }
+}
+
+function secretFactOf(key: string): { set: boolean; last4: string } | undefined {
+  return props.secretFacts[key.trim()]
+}
+
+/** 更换: the row opens as a blank password box — the placeholder it held is
+ * what "keep" spells on the wire, and it goes back if nothing is typed. */
+function openSecret(index: number) {
+  secretEditing.add(index)
+  setValue(index, '')
+}
+
+function cancelSecret(index: number) {
+  secretEditing.delete(index)
+  setValue(index, MCP_REDACTED)
+}
+
 function emitRows(next: McpKeyValueRow[]) {
   emit('update:modelValue', next)
+  // A row the table no longer holds cannot stay open for editing.
+  for (const index of [...secretEditing]) {
+    if (index >= next.length) secretEditing.delete(index)
+  }
 }
 
 function setKey(index: number, key: string) {
@@ -147,6 +215,47 @@ function add() {
 
 .mcp-kv-remove {
   color: var(--forebrain-danger);
+}
+
+/* A stored credential's mask (plan 191 §0.20) and the 更换/取消 beside it. */
+.mcp-kv-mask {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--forebrain-mono-font);
+  font-size: 12.5px;
+  color: var(--forebrain-text-2);
+}
+
+.mcp-kv-mask b {
+  font-weight: 500;
+  color: var(--forebrain-text);
+}
+
+.mcp-kv-secret {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mcp-kv-secret .forebrain-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mcp-secret-btn {
+  flex: none;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+}
+
+.mcp-secret-btn:hover {
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-text);
 }
 
 /* The add button sits under the key it appends to, not across the drawer. */

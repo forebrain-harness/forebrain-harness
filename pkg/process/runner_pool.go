@@ -840,6 +840,7 @@ func poolKey(agentID string, project state.Project) string {
 		fmt.Sprintf("%t", project.ResourceAccess),
 		fmt.Sprintf("%d", project.UpdatedAt),
 		state.NormalizeProjectType(project.ProjectType),
+		fmt.Sprintf("%t", project.BatchSandbox),
 	}, "\x1f")
 	sum := sha256.Sum256([]byte(body))
 	return strings.TrimSpace(agentID) + "\x00" + strings.TrimSpace(project.ID) + "\x00" + hex.EncodeToString(sum[:])
@@ -1076,6 +1077,7 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	}
 	deps.ProjectMemoryOnly = state.NormalizeProjectMemoryScope(project.MemoryScope) == state.ProjectMemoryProjectOnly
 	deps.ProjectType = state.NormalizeProjectType(project.ProjectType)
+	deps.BatchSandbox = project.BatchSandbox
 	deps.ProjectInstructionsFor = func(sessionID string) string {
 		return entry.frozenInstructions(sessionID)
 	}

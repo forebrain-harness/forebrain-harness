@@ -51,6 +51,10 @@ export default defineConfig({
     emptyOutDir: false,
   },
   server: {
+    // The settings page's prototype under docs/plan is its acceptance
+    // standard, and the parity test reads the HTML itself (`?raw`); the
+    // serving allow list otherwise stops at this package.
+    fs: { allow: [root] },
     port: 3000,
     proxy: {
       '/api': {

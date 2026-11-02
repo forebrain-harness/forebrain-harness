@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -70,7 +71,10 @@ var DictionaryFiles = []DictionaryFile{
 // laid out as under DictionaryDir.
 const dictionaryBundle = "forebrain-dict.tar.gz"
 
-const releaseDownloadURL = "https://github.com/forebrain-harness/forebrain-harness/releases/download"
+// releaseDownloadURL is where a release's assets are downloaded from. It is a
+// variable, not a constant, so a test can point it at a local listener that
+// never answers — the offline intranet a search has to survive.
+var releaseDownloadURL = "https://github.com/forebrain-harness/forebrain-harness/releases/download"
 
 // releaseVersion matches the versions that have a release to download from:
 // strict vX.Y.Z tags. A pseudo-version, a prerelease, a "+dirty" build or a
@@ -86,10 +90,19 @@ func dictionaryBundleURL(version string) (string, bool) {
 	return releaseDownloadURL + "/" + version + "/" + dictionaryBundle, true
 }
 
-// dictionaryHomeDir is the home-level dictionary directory, <FOREBRAIN_HOME>/dict:
-// the same name a binary's own copy uses, and the location every forebrain
-// sharing that home reads.
-func dictionaryHomeDir() (string, error) {
+// dictionaryHomeDir and dictionaryShippedDir are the two directories a search
+// reads its dictionaries from. They are variables so a test can stand up an
+// install with no dictionaries at all — the state an offline intranet starts in —
+// without moving the real ones.
+var (
+	dictionaryHomeDir    = defaultDictionaryHomeDir
+	dictionaryShippedDir = defaultDictionaryShippedDir
+)
+
+// defaultDictionaryHomeDir is the home-level dictionary directory,
+// <FOREBRAIN_HOME>/dict: the same name a binary's own copy uses, and the
+// location every forebrain sharing that home reads.
+func defaultDictionaryHomeDir() (string, error) {
 	root, err := home.Root()
 	if err != nil {
 		return "", err
@@ -97,12 +110,12 @@ func dictionaryHomeDir() (string, error) {
 	return filepath.Join(root, DictionaryDir), nil
 }
 
-// dictionaryShippedDir is the dictionary directory beside the running binary,
-// which is where a packaged install puts it — make build, the npm packages, the
-// container image, the test drivers. It is read through symlinks so a linked
-// launcher (the npm bin shim, /usr/local/bin) finds the directory holding the
-// real binary.
-func dictionaryShippedDir() (string, error) {
+// defaultDictionaryShippedDir is the dictionary directory beside the running
+// binary, which is where a packaged install puts it — make build, the npm
+// packages, the container image, the test drivers. It is read through symlinks
+// so a linked launcher (the npm bin shim, /usr/local/bin) finds the directory
+// holding the real binary.
+func defaultDictionaryShippedDir() (string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -140,9 +153,11 @@ func dictionaryPath(name string) (string, error) {
 // later. A home that cannot be written is not a failure: the shipped copy is
 // read where it stands, because an install that came with its dictionaries must
 // search out of the box. Only when neither holds the declared bytes is this
-// version's release bundle downloaded. A copy that does not match the declared
-// checksum is never read: the index and the query must be cut by the bytes this
-// binary declared, or the two sides spell terms differently.
+// version's release bundle downloaded — in the background, so a search that
+// finds none of them proceeds without word segmentation instead of waiting on a
+// network it may not have. A copy that does not match the declared checksum is
+// never read: the index and the query must be cut by the bytes this binary
+// declared, or the two sides spell terms differently.
 func resolveDictionaryFile(homeDir, shippedDir, name string, files []DictionaryFile) (string, error) {
 	installed := filepath.Join(homeDir, filepath.FromSlash(name))
 	if dictionaryBytesMatch(installed, name, files) {
@@ -157,13 +172,15 @@ func resolveDictionaryFile(homeDir, shippedDir, name string, files []DictionaryF
 		}
 		return installed, nil
 	}
-	if err := installMissingDictionaries(homeDir); err != nil {
-		return "", err
+	// Neither the home nor the binary holds the declared bytes: start the
+	// background download and answer with the paths a search can use meanwhile.
+	// Waiting here is what made a first memory search in an offline intranet
+	// hang for up to five minutes on a connection that never completes.
+	if _, downloadable := dictionaryBundleURL(home.Version); downloadable {
+		startDictionaryDownload(home.Version, homeDir)
+		return "", fmt.Errorf("memory search dictionaries are missing from %s; this version's release bundle is downloaded in the background, and a search meanwhile works without word segmentation", homeDir)
 	}
-	if !dictionaryBytesMatch(installed, name, files) {
-		return "", fmt.Errorf("memory search dictionaries are missing from %s", homeDir)
-	}
-	return installed, nil
+	return "", dictionariesMissingError(homeDir, shippedDir)
 }
 
 // dictionaryBytesMatch reports whether path holds exactly the bytes this binary
@@ -267,30 +284,52 @@ func dictionariesMissingError(homeDir, shippedDir string) error {
 		homeDir, shippedDir)
 }
 
-// dictionaryInstallOnce makes the process attempt the download at most once:
-// the dictionaries are tens of megabytes, and a failed attempt must not repeat
-// on every search.
-var (
-	dictionaryInstallOnce sync.Once
-	dictionaryInstallErr  error
-)
+// dictionaryDownloadTimeout is the overall bound of one dictionary download. A
+// bundle of tens of megabytes needs minutes on a slow link, and it is fine that
+// it takes them: the transfer only ever runs in the background (see
+// startDictionaryDownload), so nothing waits on it.
+const dictionaryDownloadTimeout = 5 * time.Minute
 
-// installMissingDictionaries downloads this version's dictionary bundle into
-// dictDir, the home-level dictionary directory. A build that is not a release
-// version has no release to download from — its message names the product
-// command that puts a copy in place.
-func installMissingDictionaries(dictDir string) error {
-	dictionaryInstallOnce.Do(func() {
-		url, ok := dictionaryBundleURL(home.Version)
-		if !ok {
-			shippedDir, _ := dictionaryShippedDir()
-			dictionaryInstallErr = dictionariesMissingError(dictDir, shippedDir)
-			return
-		}
-		client := &http.Client{Timeout: 5 * time.Minute}
-		dictionaryInstallErr = downloadDictionaries(context.Background(), client, url, dictDir, DictionaryFiles)
+// dictionaryDownloadClient bounds the connection attempt short and the whole
+// transfer long. An intranet firewall that drops the packets silently leaves a
+// dial waiting for the whole overall timeout, and that wait would be spent in a
+// background attempt that could have failed at once.
+func dictionaryDownloadClient() *http.Client {
+	return &http.Client{
+		Timeout: dictionaryDownloadTimeout,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout: 5 * time.Second,
+		},
+	}
+}
+
+// dictionaryDownloadOnce makes the process start the download at most once: the
+// dictionaries are tens of megabytes, and an attempt that failed must not repeat
+// on every search, nor race a second search's own attempt into the same
+// directory.
+var dictionaryDownloadOnce sync.Once
+
+// startDictionaryDownload begins, once per process, the download of version's
+// dictionary bundle into dictDir. It returns immediately and reports nothing:
+// the dictionaries only improve how Chinese and Japanese text is cut, so a
+// search that runs before they arrive cuts it without segmentation instead of
+// waiting, and a download that fails leaves the process searching the same way.
+// A version with no release has nothing to download and starts nothing.
+func startDictionaryDownload(version, dictDir string) {
+	url, ok := dictionaryBundleURL(version)
+	if !ok {
+		return
+	}
+	dictionaryDownloadOnce.Do(func() {
+		go func() {
+			if err := downloadDictionaries(context.Background(), dictionaryDownloadClient(), url, dictDir, DictionaryFiles); err != nil {
+				slog.Warn("memory search dictionary download failed; Chinese and Japanese text stays searched without word segmentation",
+					"url", url, "err", err)
+			}
+		}()
 	})
-	return dictionaryInstallErr
 }
 
 // Seed ensures $FOREBRAIN_HOME/dict holds every dictionary file this binary
@@ -318,7 +357,9 @@ func Seed(forebrainHome, version string) error {
 // the bytes from the copy beside the binary (shippedDir) when it holds them and
 // only otherwise from this version's release bundle. A home copy that already
 // matches is left alone. It never reaches the network while shippedDir holds
-// every declared file, so a packaged install seeds its home offline.
+// every declared file, so a packaged install seeds its home offline; the release
+// bundle itself is fetched in the background, so a start that cannot reach it
+// waits for nothing.
 func seedDictionaries(dictDir, shippedDir, version string, files []DictionaryFile) error {
 	if dictionarySetMatches(dictDir, files) {
 		return nil
@@ -336,12 +377,11 @@ func seedDictionaries(dictDir, shippedDir, version string, files []DictionaryFil
 		}
 		return nil
 	}
-	url, ok := dictionaryBundleURL(version)
-	if !ok {
+	if _, downloadable := dictionaryBundleURL(version); !downloadable {
 		return dictionariesMissingError(dictDir, shippedDir)
 	}
-	client := &http.Client{Timeout: 5 * time.Minute}
-	return downloadDictionaries(context.Background(), client, url, dictDir, files)
+	startDictionaryDownload(version, dictDir)
+	return nil
 }
 
 // DictionaryStatus is one declared dictionary file and where this binary reads
@@ -356,18 +396,39 @@ type DictionaryStatus struct {
 // reading exactly as a search does — the home copy first, then sourceDir (the
 // copy beside the binary for the CLI, or a developer's FOREBRAIN_ASSETS_DIR),
 // then this version's release bundle — and reports each file's read path. It is
-// for the `assets` command: because resolving seeds the home and may download,
-// asking for status is also a repair. One entry per declared file is returned,
-// in DictionaryFiles order, so a caller can report each and fail only if some
-// could not be resolved.
+// for the `assets` command: resolving seeds the home, and an explicit install or
+// status request is the one place a download is waited for, because the user
+// asked this process to put the files in place and it exits as soon as it has
+// reported. One entry per declared file is returned, in DictionaryFiles order, so
+// a caller can report each and fail only if some could not be resolved.
 func DictionariesStatus(forebrainHome, sourceDir string) []DictionaryStatus {
 	homeDir := filepath.Join(forebrainHome, DictionaryDir)
+	installDictionariesForStatus(homeDir, sourceDir)
 	statuses := make([]DictionaryStatus, 0, len(DictionaryFiles))
 	for _, file := range DictionaryFiles {
 		path, err := resolveDictionaryFile(homeDir, sourceDir, file.Name, DictionaryFiles)
 		statuses = append(statuses, DictionaryStatus{File: file, Path: path, Err: err})
 	}
 	return statuses
+}
+
+// installDictionariesForStatus downloads this version's release bundle into
+// homeDir when neither the home nor sourceDir already holds every declared file.
+// It is the synchronous counterpart of startDictionaryDownload, and the only
+// caller: everything else — a search, a start — starts the download in the
+// background instead. A failure is not fatal here, since the caller reports each
+// file it could not resolve.
+func installDictionariesForStatus(homeDir, sourceDir string) {
+	if dictionarySetMatches(homeDir, DictionaryFiles) || dictionarySetMatches(sourceDir, DictionaryFiles) {
+		return
+	}
+	url, ok := dictionaryBundleURL(home.Version)
+	if !ok {
+		return
+	}
+	if err := downloadDictionaries(context.Background(), dictionaryDownloadClient(), url, homeDir, DictionaryFiles); err != nil {
+		slog.Warn("memory search dictionary download failed", "url", url, "err", err)
+	}
 }
 
 // downloadDictionaries downloads the dictionary bundle at url, checks every

@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -156,6 +158,36 @@ var modelsReleaseVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 // server.
 var modelsJSONURLTemplate = "https://raw.githubusercontent.com/forebrain-harness/forebrain-harness/%s/assets/models.json"
 
+// modelsJSONTimeout bounds one whole download of models.json. The asset is a
+// few hundred kilobytes, so half a minute is already generous; what matters is
+// that an install which cannot reach the release page — an offline intranet —
+// fails within a bounded time instead of holding startup for the two minutes
+// the default client allowed. It is a variable so a test can prove that path
+// without waiting for the real bound.
+var modelsJSONTimeout = 30 * time.Second
+
+// downloadDialTimeout bounds the connection attempt of every automatic
+// download. A firewall that drops packets silently leaves a dial waiting for
+// whatever the client's overall timeout is, and that wait is what a start or a
+// conversation must never pay: the connection is the step that has to fail
+// fast, while the transfer itself keeps the longer bound.
+const downloadDialTimeout = 5 * time.Second
+
+// downloadClient builds the client every automatic download uses: a short
+// connect timeout, the caller's overall bound, and the process's proxy settings
+// (a developer reaching GitHub through a proxy, an intranet reaching a mirror
+// directly).
+func downloadClient(overall time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: overall,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         (&net.Dialer{Timeout: downloadDialTimeout, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout: downloadDialTimeout,
+		},
+	}
+}
+
 // sourceModelsJSON returns the bytes to seed $FOREBRAIN_HOME/models.json with:
 // the catalog beside the binary when it is there, otherwise a download from
 // this version's release. A build that is not a release version has no release
@@ -181,22 +213,56 @@ func sourceModelsJSON(version string) ([]byte, error) {
 }
 
 // downloadModelsJSON fetches version's models.json from its GitHub release.
+// The attempt is made at most once per process and URL: two startup steps
+// install the catalog, and repeating a download that just failed against the
+// same unreachable release page can only add a second wait to a start that is
+// already degraded.
 func downloadModelsJSON(version string) ([]byte, error) {
 	url := fmt.Sprintf(modelsJSONURLTemplate, version)
-	client := &http.Client{Timeout: 2 * time.Minute}
+	if err := modelsJSONFailure(url); err != nil {
+		return nil, err
+	}
+	client := downloadClient(modelsJSONTimeout)
 	response, err := client.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("modelcatalog: download %s: %w", url, err)
+		return nil, rememberModelsJSONFailure(url, fmt.Errorf("modelcatalog: download %s: %w", url, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("modelcatalog: download %s: %s", url, response.Status)
+		return nil, rememberModelsJSONFailure(url, fmt.Errorf("modelcatalog: download %s: %s", url, response.Status))
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
 	if err != nil {
-		return nil, fmt.Errorf("modelcatalog: download %s: %w", url, err)
+		return nil, rememberModelsJSONFailure(url, fmt.Errorf("modelcatalog: download %s: %w", url, err))
 	}
 	return data, nil
+}
+
+// modelsJSONFailures records the downloads this process has already given up
+// on and the error each one reported, so a later caller is answered from the
+// first attempt instead of paying for another one.
+var modelsJSONFailures struct {
+	mu   sync.Mutex
+	errs map[string]error
+}
+
+// modelsJSONFailure returns the error the process already got for url, or nil
+// when that download has not been tried yet.
+func modelsJSONFailure(url string) error {
+	modelsJSONFailures.mu.Lock()
+	defer modelsJSONFailures.mu.Unlock()
+	return modelsJSONFailures.errs[url]
+}
+
+// rememberModelsJSONFailure records err for url and returns it.
+func rememberModelsJSONFailure(url string, err error) error {
+	modelsJSONFailures.mu.Lock()
+	defer modelsJSONFailures.mu.Unlock()
+	if modelsJSONFailures.errs == nil {
+		modelsJSONFailures.errs = map[string]error{}
+	}
+	modelsJSONFailures.errs[url] = err
+	return err
 }
 
 // writeCatalogAtomic writes data to path through a temporary file in the same

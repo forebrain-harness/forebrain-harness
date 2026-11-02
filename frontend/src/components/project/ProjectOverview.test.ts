@@ -64,6 +64,7 @@ describe('ProjectOverview', () => {
     vi.spyOn(forebrainApi, 'projectDelete').mockResolvedValue({ ok: true })
     vi.spyOn(forebrainApi, 'projectDeletePreview').mockResolvedValue({ sessions: 2, cron_jobs: 1, running: false })
     vi.spyOn(forebrainApi, 'hostTrustSet').mockResolvedValue({ ok: true, level: 'untrusted' })
+    vi.spyOn(forebrainApi, 'approvalPresetsVisible').mockResolvedValue(true)
   })
 
   afterEach(() => {
@@ -113,8 +114,7 @@ describe('ProjectOverview', () => {
     expect(wrapper.find('[data-testid="project-settings-delete"]').text()).toBe('删除项目')
   })
 
-  it('keeps 保存 disabled until something changes, then sends instructions alone', async () => {
-    const wrapper = await mountTab()
+  it('keeps 保存 disabled until something changes, then sends instructions alone', async () => {    const wrapper = await mountTab()
     const save = wrapper.find('[data-testid="project-settings-save"]')
     const update = vi.mocked(forebrainApi.projectUpdate)
 
@@ -160,6 +160,47 @@ describe('ProjectOverview', () => {
     // directory's own record is what the gates read.
     expect(forebrainApi.hostTrustSet).toHaveBeenCalledWith('/Users/me/alpha', false)
     expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('offers the sandbox switch to a batch project, and only where a sandbox exists', async () => {
+    // 启用沙箱 belongs to a batch project's settings (plans/216 §3.6): it starts
+    // at the install's default and is the project's own from then on.
+    const batch = await mountTab({ projectType: 'batch', batchSandbox: true })
+    const batchSwitches = batch.findAll('[role="switch"]')
+    expect(batchSwitches.map((row) => row.attributes('aria-label'))).toContain('启用沙箱')
+    expect(batch.text()).toContain('任务只能读写自己的工作区')
+
+    // Turning it off is a change the form saves with the rest of the settings.
+    const index = batchSwitches.findIndex((row) => row.attributes('aria-label') === '启用沙箱')
+    await batchSwitches[index].trigger('click')
+    await batch.find('form').trigger('submit')
+    await flushPromises()
+    expect(vi.mocked(forebrainApi.projectUpdate).mock.calls[0][1]).toMatchObject({ batchSandbox: false })
+
+    // A machine with no sandbox hides it: there is nothing for the switch to
+    // decide, because every batch task runs with full access there.
+    vi.mocked(forebrainApi.approvalPresetsVisible).mockResolvedValue(false)
+    const sandboxless = await mountTab({ projectType: 'batch', batchSandbox: true })
+    expect(sandboxless.findAll('[role="switch"]').map((row) => row.attributes('aria-label'))).not.toContain('启用沙箱')
+
+    // And a project of another kind never shows it, whatever the machine has.
+    const coding = await mountTab({ projectType: 'coding' })
+    expect(coding.findAll('[role="switch"]').map((row) => row.attributes('aria-label'))).not.toContain('启用沙箱')
+  })
+
+  it('offers no trust control at all for a batch project', async () => {
+    // A batch project has no trust level (plans/216 §0.4): it is not shown, not
+    // set, and there is no "stop trusting" it could offer. Every other kind
+    // keeps the switch and the badge.
+    const batch = await mountTab({ projectType: 'batch' })
+    const batchLabels = batch.findAll('[role="switch"]').map((row) => row.attributes('aria-label'))
+    expect(batchLabels).not.toContain('信任此目录')
+    expect(batch.text()).not.toContain('信任此目录')
+    // The rest of the settings are still there.
+    expect(batchLabels).toContain('允许读取项目目录之外的资料')
+
+    const coding = await mountTab({ projectType: 'coding' })
+    expect(coding.findAll('[role="switch"]').map((row) => row.attributes('aria-label'))).toContain('信任此目录')
   })
 
   it('explains the memory scope that is chosen', async () => {
@@ -218,7 +259,9 @@ describe('ProjectOverview', () => {
     expect(wrapper.emitted('saved')).toHaveLength(1)
   })
 
-  it('will not turn a project into a batch one without trusting its directory', async () => {
+  it('turns a project into a batch one without asking about trust', async () => {
+    // A batch project has no trust level (plans/216 §0.4): the type change asks
+    // nothing for it and sends nothing beyond the new kind.
     const wrapper = await mountTab({ projectType: 'office' })
     const update = vi.mocked(forebrainApi.projectUpdate)
 
@@ -229,19 +272,13 @@ describe('ProjectOverview', () => {
 
     const confirm = () => document.body.querySelector('[data-testid="project-type-confirm"]') as HTMLButtonElement
     const modal = document.body.querySelector('.forebrain-modal')
-    expect(modal?.textContent).toContain('跑批任务无人值守：沙箱隔离、只写本次执行的工作区，调用任何工具都免审批。')
-    expect(confirm().disabled).toBe(true)
-
-    // The trust switch in the dialog is the decision the create form asks for.
-    const trust = Array.from(document.body.querySelectorAll('[role="switch"]'))
-      .find((row) => row.getAttribute('aria-label') === '信任此目录') as HTMLElement
-    trust.click()
-    await flushPromises()
+    expect(modal?.querySelector('[role="switch"]')).toBeNull()
+    expect(modal?.textContent).not.toContain('信任此目录')
     expect(confirm().disabled).toBe(false)
 
     confirm().click()
     await flushPromises()
-    expect(update).toHaveBeenCalledWith('p-alpha', { projectType: 'batch', trust: true })
+    expect(update).toHaveBeenCalledWith('p-alpha', { projectType: 'batch' })
   })
 
   it('says what leaving batch takes away', async () => {

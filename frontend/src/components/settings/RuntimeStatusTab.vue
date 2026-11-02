@@ -19,9 +19,6 @@
       <dt>{{ t('settings.runtimeAddress') }}</dt>
       <dd class="font-mono">{{ address || '—' }}</dd>
 
-      <dt>{{ t('settings.runtimeAuth') }}</dt>
-      <dd>{{ info?.auth || '—' }}</dd>
-
       <dt>{{ t('settings.runtimeAgents') }}</dt>
       <dd>{{ agentsText }}</dd>
 
@@ -43,14 +40,16 @@
 <script setup lang="ts">
 /**
  * The gateway's runtime facts, read-only: its health, the build the browser is
- * running, the address it reached, the auth mode, the primary agents and the
- * directories the gateway keeps its data in, plus the skill census the
- * settings page has always shown.
+ * running, the address it reached, the primary agents and the directories the
+ * gateway keeps its data in, plus the skill census the settings page has
+ * always shown.
  *
  * Everything but the version and the address comes from the gateway
  * (`/api/runtime`, plan 076); the version is this build's own constant and the
  * address is the one the browser used to reach it, which is the only address a
- * reader can act on.
+ * reader can act on. There is no auth row: authentication is fixed token
+ * (plan 206 §A-8.24 deleted the mode), and a fact that cannot vary is not a
+ * runtime fact this list reports.
  */
 import { computed, onMounted, ref } from 'vue'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'

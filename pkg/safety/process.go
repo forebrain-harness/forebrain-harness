@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 )
@@ -321,9 +322,6 @@ func IsLikelySandboxDenied(decision SandboxDecision, result CommandResult) bool 
 	if !decision.UseSandbox {
 		return false
 	}
-	if result.NetworkDenial != nil {
-		return true
-	}
 	// A command that ran in a sandbox with no network path and reported a
 	// network failure was denied by the sandbox, whatever its exit status: a
 	// shell chain the model wrote itself (`curl … || echo failed`) hands back 0
@@ -402,14 +400,11 @@ func containsAny(line string, needles []string) bool {
 	return false
 }
 
-// SandboxModeLabel is the sandbox mode the configuration selects: a named
-// permission profile outranks sandbox_mode, exactly as /sandbox reports it.
+// SandboxModeLabel is the sandbox mode the preset derives, as /sandbox
+// reports it.
 func SandboxModeLabel(cfg *appcfg.Root) string {
 	if cfg == nil {
 		return ""
-	}
-	if selected := strings.TrimSpace(cfg.DefaultPermissions); selected != "" {
-		return selected
 	}
 	return strings.TrimSpace(string(cfg.SandboxMode))
 }
@@ -484,6 +479,10 @@ func SandboxReasonInWords(code string) string {
 		return "sandbox-exec is not on PATH"
 	case "bubblewrap_not_found":
 		return "bubblewrap (bwrap) is not installed"
+	case "bubblewrap_unusable":
+		return "bubblewrap is installed but cannot start a sandbox here (the kernel or a security profile refuses its namespaces)"
+	case "seatbelt_unusable":
+		return "sandbox-exec is installed but cannot start a sandbox here"
 	case "wsl1_unsupported":
 		return "WSL 1 cannot run the sandbox; WSL 2 can"
 	case "platform_unsupported":
@@ -492,37 +491,23 @@ func SandboxReasonInWords(code string) string {
 		return "there is no sandbox configuration"
 	case "linux_glob_limits_apply":
 		return "on Linux, path patterns in the rules match only what exists when a command starts"
-	case "windows_sandbox_disabled":
-		return "the Windows sandbox is turned off (windows.sandbox)"
-	case "windows_sandbox_missing_config":
-		return "the Windows sandbox is not configured"
 	case "windows_sandbox_wrong_platform":
 		return "the Windows sandbox runs only on Windows"
 	case "windows_sandbox_api_unavailable":
 		return "the Windows sandbox API is not available on this system"
-	case "windows_firewall_powershell_not_found":
-		return "PowerShell, which sets the sandbox's firewall rules, was not found"
-	case "windows_managed_network_requires_elevated":
-		return "network rules need the elevated Windows sandbox"
-	case "windows_unelevated_restricted_read_requires_elevated":
-		return "restricting reads needs the elevated Windows sandbox"
+	case "windows_batch_reads_not_isolated":
+		return "on Windows a batch task's writes stay inside its own directory, but its reads are not isolated: a restricted token cannot hold an exclusive read set"
 	}
 	return code
 }
 
 // sandboxFilesInWords is what the sandbox lets commands do with files.
 func sandboxFilesInWords(cfg *appcfg.Root) string {
-	if profile := strings.TrimSpace(cfg.DefaultPermissions); profile != "" && profileForSandboxMode(cfg) == ProfileManaged {
-		return "the " + profile + " permission profile decides which files commands can read and change."
-	}
 	if profileForSandboxMode(cfg) != ProfileWorkspaceWrite {
 		return "commands can read files but not change them."
 	}
-	places := []string{"the workspace"}
-	if !cfg.SandboxWorkspaceWrite.ExcludeTmpdirEnvVar {
-		places = append(places, "$TMPDIR")
-	}
-	if !cfg.SandboxWorkspaceWrite.ExcludeSlashTmp {
+	places := []string{"the workspace", "$TMPDIR"}
+	if filepath.Separator == '/' {
 		places = append(places, "/tmp")
 	}
 	places = append(places, cfg.SandboxWorkspaceWrite.WritableRoots...)
@@ -531,18 +516,18 @@ func sandboxFilesInWords(cfg *appcfg.Root) string {
 
 // SandboxNetworkInWords is what commands in the sandbox can reach on the
 // network, which the sandbox's network settings decide.
+//
+// Windows is always the open sentence: its restricted token cannot take the
+// network away, so the blocked sentence would describe isolation that is not
+// there (owner 2026-10-31, plan 206).
 func SandboxNetworkInWords(cfg *appcfg.Root) string {
 	if cfg == nil {
 		cfg = &appcfg.Root{}
 	}
-	switch {
-	case !cfg.SandboxWorkspaceWrite.EffectiveNetworkAccess():
+	if detectPlatform() != PlatformWindows && !cfg.SandboxWorkspaceWrite.EffectiveNetworkAccess() {
 		return "commands cannot reach the internet; approval is required to."
-	case cfg.Features.NetworkProxy.EnabledValue():
-		return "commands reach the internet through Forebrain Harness's proxy, which asks before contacting a site it has not been allowed."
-	default:
-		return "commands can reach the internet."
 	}
+	return "commands can reach the internet."
 }
 
 func backendInWords(backend BackendName) string {
@@ -600,34 +585,140 @@ func isWSL1() bool {
 	return strings.Contains(t, "microsoft") && !strings.Contains(t, "wsl2")
 }
 
+// backendUnavailableReason names why commands cannot be contained here: the
+// backend is missing, or it is installed and cannot actually run. The second
+// half is what a bare presence check cannot see — a container commonly ships
+// bubblewrap and then blocks the namespaces it needs, so "installed" alone
+// turned every command into a failure (owner 2026-10-31, plan 215 §3.1).
 func backendUnavailableReason(platform Platform) string {
 	switch platform {
 	case PlatformDarwin:
 		if _, err := exec.LookPath("sandbox-exec"); err != nil {
 			return "seatbelt_not_found"
 		}
-		return ""
 	case PlatformLinux:
-		if _, err := exec.LookPath("bwrap"); err != nil {
-			if _, err2 := exec.LookPath("bubblewrap"); err2 != nil {
-				return "bubblewrap_not_found"
-			}
+		if _, err := lookBubblewrap(); err != nil {
+			return "bubblewrap_not_found"
 		}
-		return ""
 	case PlatformWSL:
 		if isWSL1() {
 			return "wsl1_unsupported"
 		}
-		if _, err := exec.LookPath("bwrap"); err != nil {
-			if _, err2 := exec.LookPath("bubblewrap"); err2 != nil {
-				return "bubblewrap_not_found"
-			}
+		if _, err := lookBubblewrap(); err != nil {
+			return "bubblewrap_not_found"
 		}
-		return ""
 	case PlatformWindows:
 		return windowsSandboxUnavailableReason()
 	default:
 		return "platform_unsupported"
+	}
+	return probeSandboxReason(platform)
+}
+
+// lookBubblewrap finds the bubblewrap binary under either of the two names
+// distributions ship it as.
+func lookBubblewrap() (string, error) {
+	if p, err := exec.LookPath("bwrap"); err == nil {
+		return p, nil
+	}
+	return exec.LookPath("bubblewrap")
+}
+
+// sandboxProbeTimeout bounds the one real command a probe runs. A backend that
+// hangs is as unusable as one that fails, and this answer gates every command
+// the process runs.
+const sandboxProbeTimeout = 5 * time.Second
+
+// sandboxProbe caches the probe for the life of the process: the answer is a
+// property of this machine, and running it per command would cost a process
+// launch each time. forced is what a test pinned it to — nil in the product.
+var sandboxProbe struct {
+	mu     sync.Mutex
+	done   bool
+	reason string
+	forced *string
+}
+
+// probeSandboxReason is the cached probe answer, or "" when the sandbox really
+// runs here.
+func probeSandboxReason(platform Platform) string {
+	sandboxProbe.mu.Lock()
+	defer sandboxProbe.mu.Unlock()
+	if sandboxProbe.forced != nil {
+		return *sandboxProbe.forced
+	}
+	if !sandboxProbe.done {
+		sandboxProbe.reason = probeSandbox(platform)
+		sandboxProbe.done = true
+	}
+	return sandboxProbe.reason
+}
+
+// probeSandbox runs the backend once on a command that does nothing and
+// reports "" for a sandbox that works. The arguments are the ones a real
+// command gets, narrowed to the part a broken container or seccomp profile
+// refuses: a namespace to run in, a read-only root to start from, and the two
+// filesystems that make it usable.
+func probeSandbox(platform Platform) string {
+	switch platform {
+	case PlatformDarwin:
+		return runSandboxProbe("sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true")
+	case PlatformLinux, PlatformWSL:
+		bwrap, err := lookBubblewrap()
+		if err != nil {
+			return "bubblewrap_not_found"
+		}
+		return runSandboxProbe(bwrap,
+			"--unshare-user", "--unshare-pid", "--die-with-parent",
+			"--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--", "true")
+	}
+	// Windows keeps its API check (backendUnavailableReason reports it before
+	// the probe), and a platform with no backend is already unsupported.
+	return ""
+}
+
+// runSandboxProbe runs one command under one backend, describing a failure as
+// the backend being unusable. No output is kept: the exit status is the whole
+// answer, and a probe must not leave a process behind — the deadline kills
+// one that hangs, and bubblewrap's own --die-with-parent covers its children.
+func runSandboxProbe(name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
+	defer cancel()
+	if err := exec.CommandContext(ctx, name, args...).Run(); err != nil {
+		if strings.Contains(name, "sandbox-exec") {
+			return "seatbelt_unusable"
+		}
+		return "bubblewrap_unusable"
+	}
+	return ""
+}
+
+// SandboxAvailable reports whether this machine can actually contain a command
+// right now — the backend is installed and a real command under it succeeds.
+// It answers about the machine, not about a configuration or a preset: a
+// conversation that chose full access runs uncontained on a machine that has a
+// sandbox, and the two questions are different (plan 215 §3.1).
+func SandboxAvailable() bool {
+	return probeSandboxReason(detectPlatform()) == ""
+}
+
+// SetSandboxAvailableForTest pins the machine's answer and returns the
+// restore. It exists because a "machine without a sandbox" is the one thing a
+// test cannot arrange on a machine that has one; nothing in the product calls
+// it.
+func SetSandboxAvailableForTest(available bool) (restore func()) {
+	sandboxProbe.mu.Lock()
+	prev := sandboxProbe.forced
+	reason := ""
+	if !available {
+		reason = "bubblewrap_not_found"
+	}
+	sandboxProbe.forced = &reason
+	sandboxProbe.mu.Unlock()
+	return func() {
+		sandboxProbe.mu.Lock()
+		sandboxProbe.forced = prev
+		sandboxProbe.mu.Unlock()
 	}
 }
 

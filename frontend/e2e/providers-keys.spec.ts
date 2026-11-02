@@ -1,21 +1,22 @@
 import { expect, test, type Page } from '@playwright/test'
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { pickOption, shot, signIn } from './support'
 
 /**
  * The model-service list: row order is pure storage, models are chips, and an
- * API key is typed once and never seen again — the config keeps a ${ENV}
- * reference and the plaintext lives in .env with owner-only permissions.
- * Adding and editing happen in a modal; every change round-trips the whole
- * stored list, and the default model is a named default_model the 设为默认
- * action retargets.
+ * API key is typed once and never seen again (plan 191 §0.20): the page is told
+ * only that one is set and its last four characters, and the key itself lives
+ * in the state database in plaintext (owner ruling 2026-10-30) — never in
+ * forebrain.yaml, never in any answer the gateway sends back. Adding and
+ * editing happen in a modal; every change round-trips the whole stored list,
+ * and the default model is a named default_model the 设为默认 action
+ * retargets.
  */
 
 const home = process.env.E2E_HOME ?? ''
 const configPath = home ? join(home, 'forebrain.yaml') : ''
-const envPath = home ? join(home, '.env') : ''
 
 test.describe.configure({ mode: 'serial' })
 
@@ -23,6 +24,15 @@ async function rowOf(page: Page, name: string) {
   const index = await page.locator('[data-provider-row]').evaluateAll(
     (rows, want) => rows.findIndex((row) => row.getAttribute('data-provider-row') === want), name)
   return { index, row: page.locator(`[data-provider-row="${name}"]`) }
+}
+
+/** The list's raw answer: no client-side casing sits between the gateway's own
+ * words and the assertion, so "the key never travels" is checked on the wire's
+ * own spelling. */
+async function rawList(page: Page): Promise<string> {
+  const res = await page.request.get('/api/providers')
+  expect(res.ok(), `providers list failed: ${res.status()}`).toBe(true)
+  return res.text()
 }
 
 test('a new service with chips and a masked key saves', async ({ page }) => {
@@ -46,18 +56,20 @@ test('a new service with chips and a masked key saves', async ({ page }) => {
 
   await page.click('[data-testid="provider-save"]')
   // The saved badge is the reloaded state: it appears only after the PUT
-  // round-tripped and the page refetched, which is when the files hold the
-  // new row.
+  // round-tripped and the page refetched, and its last four characters are all
+  // the page ever learns about the stored key.
   await expect(page.locator('[data-provider-row="arcee-ai"] [data-testid^="provider-key-saved-"]')).toContainText('9931', { timeout: 15_000 })
 
-  // The yaml holds a reference and no plaintext; .env holds the plaintext
-  // with owner-only permissions.
+  // The store is the state database, not the file: forebrain.yaml carries only
+  // the gateway's own startup keys, and the wire answers set + last four with
+  // no plaintext anywhere in it.
   const config = readFileSync(configPath, 'utf8')
-  expect(config).toContain('${ARCEE_AI_API_KEY}')
   expect(config).not.toContain('sk-e2e-secret-9931')
-  const env = readFileSync(envPath, 'utf8')
-  expect(env).toContain('sk-e2e-secret-9931')
-  expect(statSync(envPath).mode & 0o077).toBe(0)
+  expect(config).not.toContain('arcee-ai')
+  const list = await rawList(page)
+  expect(list).toContain('api_key_set')
+  expect(list).toContain('9931')
+  expect(list).not.toContain('sk-e2e-secret-9931')
 })
 
 test('reload shows the masked key and leaks nothing', async ({ page }) => {
@@ -72,8 +84,7 @@ test('reload shows the masked key and leaks nothing', async ({ page }) => {
   expect(body).not.toContain('[REDACTED]')
 })
 
-test('editing models without touching the key keeps .env unchanged', async ({ page }) => {
-  const before = readFileSync(envPath, 'utf8')
+test('editing models without touching the key keeps the stored key', async ({ page }) => {
   await signIn(page)
   await page.goto('/providers', { waitUntil: 'networkidle' })
   const { index } = await rowOf(page, 'arcee-ai')
@@ -99,11 +110,13 @@ test('editing models without touching the key keeps .env unchanged', async ({ pa
   await expect(page.locator('[data-testid="model-chips"] [data-chip="e2e-model-c"]')).toBeVisible()
   await page.click('[data-testid="provider-save"]')
   await expect(page.locator('[data-provider-row="arcee-ai"]')).toContainText('e2e-model-c', { timeout: 15_000 })
-  await page.waitForTimeout(300)
-  expect(readFileSync(envPath, 'utf8')).toBe(before)
+  // A save that sent no key field kept the stored one: the badge still names
+  // its tail, and the plaintext still travels nowhere.
+  await expect(page.locator('[data-provider-row="arcee-ai"] [data-testid^="provider-key-saved-"]')).toContainText('9931')
+  expect(await rawList(page)).not.toContain('sk-e2e-secret-9931')
 })
 
-test('changing the key rotates .env', async ({ page }) => {
+test('changing the key replaces the stored one', async ({ page }) => {
   await signIn(page)
   await page.goto('/providers', { waitUntil: 'networkidle' })
   const { index } = await rowOf(page, 'arcee-ai')
@@ -112,9 +125,10 @@ test('changing the key rotates .env', async ({ page }) => {
   await page.fill('[data-testid="provider-key-input"]', 'sk-e2e-rotated-4455')
   await page.click('[data-testid="provider-save"]')
   await expect(page.locator('[data-provider-row="arcee-ai"] [data-testid^="provider-key-saved-"]')).toContainText('4455', { timeout: 15_000 })
-  const env = readFileSync(envPath, 'utf8')
-  expect(env).toContain('sk-e2e-rotated-4455')
-  expect(env).not.toContain('sk-e2e-secret-9931')
+  const list = await rawList(page)
+  expect(list).toContain('4455')
+  expect(list).not.toContain('sk-e2e-rotated-4455')
+  expect(list).not.toContain('sk-e2e-secret-9931')
 })
 
 test('rows keep their stored order and the default is a named choice', async ({ page }) => {
@@ -137,13 +151,14 @@ test('rows keep their stored order and the default is a named choice', async ({ 
   await expect(page.locator('[data-provider-row]').last()).toHaveAttribute('data-provider-row', 'moonshotai')
   await shot(page, 'providers-form')
 
-  // 设为默认 retargets default_model — badge moves, rows do not.
+  // 设为默认 retargets default_model — badge moves, rows do not. The choice is
+  // storage in the state database now, so its witness is the badge the refetch
+  // draws, on this load and after a reload.
   await page.locator('[data-provider-row="moonshotai"]').locator('[data-testid^="provider-default-set-"]').click()
   // The badge is asserted by its class, not its text: the e2e gateway runs
   // the English locale (the zh wording is pinned by the unit tests).
   const badgeOf = (name: string) => page.locator(`[data-provider-row="${name}"]`).locator('.forebrain-badge--default')
   await expect(badgeOf('moonshotai')).toHaveCount(1, { timeout: 15_000 })
-  expect(readFileSync(configPath, 'utf8')).toContain('default_model: moonshotai/kimi-e2e-model')
   await page.reload({ waitUntil: 'networkidle' })
   await expect(badgeOf('moonshotai')).toHaveCount(1)
   await expect(page.locator('[data-provider-row]').last()).toHaveAttribute('data-provider-row', 'moonshotai')
@@ -211,10 +226,12 @@ test('the format is picked from a list and the params are edited as JSON', async
   await page.click('[data-testid="provider-save"]')
   await expect(page.locator('[data-provider-row="moonshotai"]')).toHaveCount(1, { timeout: 15_000 })
 
-  // The two answers land where the engine reads them.
-  const config = readFileSync(configPath, 'utf8')
-  expect(config).toContain('api_path: /v1/messages')
-  expect(config).toContain('temperature')
+  // The two answers land where the engine reads them: the state database's own
+  // row as the wire spells it.
+  const list = await rawList(page)
+  expect(list).toContain('api_path')
+  expect(list).toContain('/v1/messages')
+  expect(list).toContain('temperature')
 
   // Leave the suite's providers as they were for the specs that follow.
   const { index } = await rowOf(page, 'moonshotai')
@@ -301,7 +318,7 @@ test('a refused key clear reports inside the dialog and writes nothing', async (
   await page.goto('/providers', { waitUntil: 'networkidle' })
 
   const beforeConfig = readFileSync(configPath, 'utf8')
-  const beforeEnv = readFileSync(envPath, 'utf8')
+  const beforeList = await rawList(page)
 
   // Row 0 is the suite's primary: a key-mode service with a stored key.
   await page.click('[data-testid="provider-edit-0"]')
@@ -329,12 +346,12 @@ test('a refused key clear reports inside the dialog and writes nothing', async (
   await expect(page.getByText('needs api_key')).toHaveCount(1)
   await shot(page, 'providers-save-refused')
 
-  // Cancel leaves the files exactly as they were: a refused clear is not a
-  // write.
+  // Cancel leaves the store and the file exactly as they were: a refused clear
+  // is not a write.
   await page.click('[data-testid="provider-cancel"]')
   await expect(page.locator('.forebrain-modal')).toHaveCount(0)
   expect(readFileSync(configPath, 'utf8')).toBe(beforeConfig)
-  expect(readFileSync(envPath, 'utf8')).toBe(beforeEnv)
+  expect(await rawList(page)).toBe(beforeList)
 
   // The row is still usable, and the refusal does not greet the next open.
   await page.click('[data-testid="provider-edit-0"]')

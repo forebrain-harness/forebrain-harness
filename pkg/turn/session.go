@@ -299,6 +299,9 @@ func PersistUserTurn(ctx context.Context, store UserTurnStore, in UserTurn) (int
 		if len(in.Parts) > 0 {
 			msg = llm.UserMessage(in.Parts...)
 		}
+		// A peer message is not something the person typed at this terminal: it
+		// is context, the way an injected note is, and the row says so.
+		msg.IsMeta = state.IsPeerOrigin(in.Origin)
 		partsJSON = state.MessagePartsJSON(msg, modelInput)
 	}
 	if in.Origin != "" {

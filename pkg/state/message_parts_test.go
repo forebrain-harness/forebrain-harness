@@ -45,6 +45,44 @@ func TestWithMessageOriginLeavesTheParsedMessageUnchanged(t *testing.T) {
 	}
 }
 
+// TestPeerMessagePartsCarryTheOriginAndNothingElse pins what a message written
+// on the person's behalf by another session persists (plan 196 §4.1): the row
+// carries both markers, the origin reads back for the surfaces, and the message
+// the model is sent is exactly the message an unmarked row would send.
+func TestPeerMessagePartsCarryTheOriginAndNothingElse(t *testing.T) {
+	envelope := "<cross-session-message from=\"uds:/tmp/fb-socks-1/7.sock\">\nhi\n</cross-session-message>"
+	msg := llm.UserMessage(llm.Text(envelope))
+	msg.IsMeta = true
+	msg.Origin = MessageOriginPeer
+	partsJSON := MessagePartsJSON(msg, envelope)
+
+	if !strings.Contains(partsJSON, `"type":"`+PartTypeIsMeta+`"`) {
+		t.Fatalf("parts missing the meta marker: %s", partsJSON)
+	}
+	if !strings.Contains(partsJSON, `"kind":"`+MessageOriginPeer+`"`) || !strings.Contains(partsJSON, `"type":"`+PartTypeOrigin+`"`) {
+		t.Fatalf("parts missing the peer origin: %s", partsJSON)
+	}
+	if got := MessageOrigin(partsJSON); got != MessageOriginPeer {
+		t.Fatalf("MessageOrigin = %q, want %q", got, MessageOriginPeer)
+	}
+	parsed, ok := ParseMessage(llm.RoleUser, envelope, partsJSON)
+	if !ok {
+		t.Fatal("the marked message did not parse")
+	}
+	if !parsed.IsMeta {
+		t.Fatal("the parsed message lost IsMeta")
+	}
+	if parsed.Origin != "" {
+		t.Fatalf("parsed origin = %q, want it left to persistence", parsed.Origin)
+	}
+	plain := MessagePartsJSON(llm.UserMessage(llm.Text(envelope)), envelope)
+	want, _, _, _ := ParseMessageParts(plain, envelope)
+	got, _, _, _ := ParseMessageParts(partsJSON, envelope)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("model-visible parts changed by the peer markers: %+v vs %+v", got, want)
+	}
+}
+
 func TestMessagePartsRoundTripPreservesToolDisplay(t *testing.T) {
 	original := llm.ToolResultMessage("call-edit", llm.Text("ok"))
 	original.ToolDisplay = &llm.ToolDisplayState{

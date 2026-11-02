@@ -60,7 +60,7 @@ type Server struct {
 	NotificationHook tool.NotificationHook
 
 	StaticDist string
-	StaticFS  fs.FS
+	StaticFS   fs.FS
 
 	runControlMu     sync.Mutex
 	runControl       *run.Controller
@@ -79,6 +79,13 @@ type Server struct {
 
 	runEventsOnce sync.Once
 	runEvents     *runEventBus
+
+	// observedOriginMu guards observedOrigin, the address a browser last
+	// reached this gateway at. It mirrors the gateway.observed_origin row that
+	// batch notification links are built from (plan 206 §3.1): the row is the
+	// truth, and this only spares a database read per notification.
+	observedOriginMu sync.Mutex
+	observedOrigin   string
 
 	streamPartsOnce  sync.Once
 	streamPartsCache *streamParts
@@ -316,12 +323,10 @@ func (s *Server) sessionOwned(ctx context.Context, sessionID string) (bool, erro
 
 func (s *Server) approvalService() turn.ApprovalService {
 	var policy turn.ApprovalPolicy
-	var network turn.ApprovalNetwork
 	if s != nil && s.Runner != nil {
 		policy = s.Runner
-		network = s.Env.Tools()
 	}
-	return turn.ApprovalService{Actions: s.Actions, Policy: policy, Network: network}
+	return turn.ApprovalService{Actions: s.Actions, Policy: policy}
 }
 
 func actionPayloadBool(raw, key string) bool {
@@ -525,7 +530,7 @@ func (s *Server) stateRoot() string {
 	if s == nil {
 		return ""
 	}
-	return config.ActiveStateRoot(s.Home, s.liveCfg())
+	return config.ActiveStateRoot(s.Home, s.liveCfg()) // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 }
 
 // sessionProjectKey resolves one conversation's project key: the identity its
@@ -574,37 +579,20 @@ func (s *Server) DeliverChannelOutbound(ctx context.Context, channelID, sessionI
 	channelBus{s: s}.deliverOutbound(ctx, channelID, sessionID, text)
 }
 
-func (b channelBus) deliverOutbound(ctx context.Context, channelID string, sessionID string, text string) {
-	b.deliverOutboundMaybeSanitized(ctx, channelID, sessionID, text, false)
-}
-
-func (b channelBus) deliverOutboundPresanitized(ctx context.Context, channelID string, sessionID string, text string) {
-	b.deliverOutboundMaybeSanitized(ctx, channelID, sessionID, text, true)
-}
-
-// deliverOutboundMaybeSanitized applies the two things that are the gateway's
-// to apply — outbound sanitizing, which needs the live config, and unwrapping
-// the channel-prefixed session ID — and hands the rest to the registry, which
-// owns channel resolution and transport.
+// deliverOutbound hands a reply to the registry, which owns channel resolution
+// and transport, after unwrapping the channel-prefixed session ID. The reply is
+// the reply: nothing rewrites an answer on its way out.
 //
-// The two halves stay here for different reasons, and only one of them is
-// enforced. Sanitizing needs pkg/safety, which is Layer 2 to channel's Layer 1:
-// moving it would trip TestLayerCeiling. Unwrapping needs pkg/state, which is
-// Layer 1 too, so the ceiling would permit it — keeping it out is a choice, to
-// avoid a same-layer sibling dependency of the kind C7 forbids for
-// skill/memory. If that ever stops being worth it, the honest move is to give
-// pkg/channel the channel-session prefix helpers outright (they are about
-// channel identity, and pkg/state uses them nowhere else) rather than to have
-// channel import state.
-func (b channelBus) deliverOutboundMaybeSanitized(ctx context.Context, channelID string, sessionID string, text string, skipOutboundSanitize bool) {
+// Unwrapping needs pkg/state, which is Layer 1 like channel, so the layer
+// ceiling would permit it inside channel — keeping it out is a choice, to avoid
+// a same-layer sibling dependency of the kind C7 forbids for skill/memory. If
+// that ever stops being worth it, the honest move is to give pkg/channel the
+// channel-session prefix helpers outright (they are about channel identity, and
+// pkg/state uses them nowhere else) rather than to have channel import state.
+func (b channelBus) deliverOutbound(ctx context.Context, channelID string, sessionID string, text string) {
 	chID := strings.TrimSpace(channelID)
 	if chID == "" || strings.TrimSpace(text) == "" || b.s == nil || b.s.Channels == nil {
 		return
-	}
-	if !skipOutboundSanitize {
-		if lc := b.s.liveCfg(); lc != nil {
-			text = safety.SanitizeOutbound(lc, text)
-		}
 	}
 	projectID, rawSession := state.UnwrapProjectChannelSession(chID, sessionID)
 	err := b.s.Channels.Deliver(ctx, channel.Outbound{
@@ -665,9 +653,6 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 			{
 				ctxBg := context.Background()
 				out := res.TextContent()
-				if lc := b.s.liveCfg(); lc != nil {
-					out = safety.SanitizeOutbound(lc, out)
-				}
 				finishedAt := time.Now()
 				b.s.finishSuccessfulTurn(ctxBg, gatewayPostTurnOptions{
 					SessionID:       sid,
@@ -680,7 +665,7 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 					RunFinishedAt:   finishedAt,
 					WorkedMs:        outcome.Duration.Milliseconds(),
 				})
-				b.deliverOutboundPresanitized(context.Background(), ch, sid, out)
+				b.deliverOutbound(context.Background(), ch, sid, out)
 			}
 			return
 		}
@@ -702,7 +687,7 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 			rt := &hook.Runtime{
 				Home:          b.s.Home,
 				WorkspaceRoot: b.s.stateRoot(),
-				Cfg:           b.s.liveCfg(),
+				Cfg:           b.s.liveCfg(), // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 				Sess:          b.s.Sessions,
 				NewPromptRunner: func(label string) (hook.PromptRun, error) {
 					fac := run.Factory{
@@ -711,7 +696,7 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 						WorkspaceRoot: b.s.Runner.StateRoot(),
 						ProjectRoot:   b.s.Runner.ProjectRoot,
 						MemoryStore:   b.s.MemoryStore,
-						AppCfg:        b.s.liveCfg(),
+						AppCfg:        b.s.liveCfg(), // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 					}
 					rr := fac.NewIsolatedRunner(label)
 					if rr == nil {
@@ -763,9 +748,6 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 		{
 			ctxBg := context.Background()
 			out := res.TextContent()
-			if lc := b.s.liveCfg(); lc != nil {
-				out = safety.SanitizeOutbound(lc, out)
-			}
 			finishedAt := time.Now()
 			b.s.finishSuccessfulTurn(ctxBg, gatewayPostTurnOptions{
 				SessionID:       sid,
@@ -778,7 +760,7 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 				RunFinishedAt:   finishedAt,
 				WorkedMs:        outcome.Duration.Milliseconds(),
 			})
-			b.deliverOutboundPresanitized(context.Background(), ch, m.SessionID, out)
+			b.deliverOutbound(context.Background(), ch, m.SessionID, out)
 		}
 	}()
 	return nil
@@ -823,20 +805,19 @@ type wsClientMsg struct {
 	// AgentID names the subagent a client op targets, for the ops that act on
 	// one subagent of a conversation (cancelling its auto-continue). Empty
 	// means the conversation itself.
-	AgentID                string                             `json:"agent_id"`
-	CreateBy               string                             `json:"create_by"`
-	ModelID                string                             `json:"model_id"`
-	Mode                   string                             `json:"mode"`
-	Phase                  string                             `json:"phase"`
-	Answers                any                                `json:"answers"`
-	ApprovalDecision       string                             `json:"approval_decision"`
-	NetworkPolicyAmendment *safety.NetworkPolicyAmendment     `json:"network_policy_amendment"`
-	ExecPolicyAmendment    safety.ExecPolicyAmendment         `json:"execpolicy_amendment"`
-	RequestPermissions     *safety.RequestPermissionsResponse `json:"request_permissions_response"`
-	Request                event.GatewayControlPayload        `json:"request"`
-	Message                wsClientMessage                    `json:"message"`
-	Content                string                             `json:"content"`
-	Cursor                 int64                              `json:"cursor"`
+	AgentID             string                             `json:"agent_id"`
+	CreateBy            string                             `json:"create_by"`
+	ModelID             string                             `json:"model_id"`
+	Mode                string                             `json:"mode"`
+	Phase               string                             `json:"phase"`
+	Answers             any                                `json:"answers"`
+	ApprovalDecision    string                             `json:"approval_decision"`
+	ExecPolicyAmendment safety.ExecPolicyAmendment         `json:"execpolicy_amendment"`
+	RequestPermissions  *safety.RequestPermissionsResponse `json:"request_permissions_response"`
+	Request             event.GatewayControlPayload        `json:"request"`
+	Message             wsClientMessage                    `json:"message"`
+	Content             string                             `json:"content"`
+	Cursor              int64                              `json:"cursor"`
 }
 
 // wsClientMessage is the user turn a web client submits.
@@ -901,9 +882,11 @@ func runEventToWSMessage(requestID, traceID string, evt event.RunEvent) wsServer
 
 func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 	if s != nil && s.Env != nil && s.Env.Deps.AppCfg != nil {
-		if err := authorizeControlPlane(r, s.Env.Deps.AppCfg); err != nil {
+		if origin, err := authorizeControlPlane(r, s.Env.Deps.AppCfg); err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
+		} else if origin != "" {
+			s.noteWebOrigin(origin)
 		}
 	}
 	c, err := upgrader.Upgrade(w, r, nil)
@@ -1955,7 +1938,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			rt := &hook.Runtime{
 				Home:          s.Home,
 				WorkspaceRoot: s.stateRoot(),
-				Cfg:           s.liveCfg(),
+				Cfg:           s.liveCfg(), // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 				Sess:          s.Sessions,
 				NewPromptRunner: func(label string) (hook.PromptRun, error) {
 					fac := run.Factory{
@@ -1964,7 +1947,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 						WorkspaceRoot: s.Runner.StateRoot(),
 						ProjectRoot:   s.Runner.ProjectRoot,
 						MemoryStore:   s.MemoryStore,
-						AppCfg:        s.liveCfg(),
+						AppCfg:        s.liveCfg(), // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 					}
 					rr := fac.NewIsolatedRunner(label)
 					if rr == nil {
@@ -2184,9 +2167,6 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if s.RunRT != nil && s.Runner != nil {
 			if err := s.Runner.Load(); err == nil {
 				if tools := s.Env.Tools(); tools != nil {
-					agCtx = tool.WithNetworkApprovalPromptHook(agCtx, func(approvalCtx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-						return s.promptGatewayNetworkApproval(approvalCtx, actionID, payload, request, m.RequestID, runID, sid, writeMsg)
-					})
 					// A subagent this turn dispatches gets its approvals put to
 					// this websocket's user the same way, so a fanout child's
 					// gate pauses that child instead of failing its task.
@@ -2515,9 +2495,6 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		out := ""
 		if res != nil {
 			out = res.TextContent()
-		}
-		if lc := s.liveCfg(); lc != nil {
-			out = safety.SanitizeOutbound(lc, out)
 		}
 		s.finishSuccessfulTurn(r.Context(), gatewayPostTurnOptions{
 			SessionID:       sid,

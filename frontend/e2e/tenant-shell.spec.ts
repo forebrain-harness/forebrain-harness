@@ -31,9 +31,9 @@ test('settings shows the merged tab bar with appearance as the default', async (
   await signIn(page)
   await page.goto('/settings', { waitUntil: 'networkidle' })
   const tabs = (await page.locator('[data-testid="settings-tabs"] button').allInnerTexts()).map((tab) => tab.trim())
-  const expectedEn = ['Appearance', 'Approval default', 'Subagents', 'MCP', 'Language servers', 'Hooks', 'Scheduled tasks', 'Memory switches', 'Config file', 'Runtime status', 'Shared skills']
-  const expectedZh = ['外观', '审批默认', '子代理', 'MCP', '语言服务器', '钩子', '定时任务', '记忆开关', '配置文件', '运行状态', '共享技能']
-  expect(tabs.length).toBe(11)
+  const expectedEn = ['Appearance', 'Session', 'Approval & sandbox', 'Subagents', 'Web tools', 'MCP', 'Language servers', 'Hooks', 'Scheduled tasks', 'Memory', 'Config file', 'Runtime status', 'Shared skills']
+  const expectedZh = ['外观', '会话', '审批与沙箱', '子代理', '联网工具', 'MCP', '语言服务器', '钩子', '定时任务', '记忆', '配置文件', '运行状态', '共享技能']
+  expect(tabs.length).toBe(13)
   expect(expectedEn.every((tab) => tabs.includes(tab)) || expectedZh.every((tab) => tabs.includes(tab))).toBe(true)
   // The appearance card is visible without clicking (default tab) — the
   // brand radiogroup is its content.

@@ -2519,3 +2519,320 @@ func TestListMessagesBeforePagesWithoutGapsOrRepeats(t *testing.T) {
 		t.Fatalf("pages = %d, want three pages of two at most", pages)
 	}
 }
+
+// newFileReadStateStore returns a store for agent over a fresh state file with
+// sessionID ensured, which is what a resumed process's baseline lookups land on.
+func newFileReadStateStore(t *testing.T, agent, sessionID string) *SessionStore {
+	t.Helper()
+	store := NewSessionStore(openStateDB(t), agent)
+	if err := store.Ensure(context.Background(), sessionID, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func fileReadStateFor(path, sha string) FileReadState {
+	return FileReadState{
+		SessionID: "s",
+		Path:      path,
+		ModTimeNS: 1700000000000000000,
+		Size:      12,
+		SHA256:    sha,
+		ReadAtNS:  1700000000000000001,
+		TouchKind: "read",
+	}
+}
+
+// TestFileReadStateRoundTrip pins the whole row: every fact read_file saw comes
+// back the way it was written, including the tenant the store filed it under.
+func TestFileReadStateRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newFileReadStateStore(t, "main", "s")
+	in := fileReadStateFor("/repo/app/notes.txt", strings.Repeat("a", 64))
+	if err := store.SaveFileReadState(ctx, in); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, ok, err := store.FileReadStateForSession(ctx, "s", "/repo/app/notes.txt")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !ok {
+		t.Fatal("baseline missing after save")
+	}
+	want := in
+	want.AgentID = "main"
+	if got != want {
+		t.Fatalf("baseline = %+v, want %+v", got, want)
+	}
+	// A path the conversation never read has no baseline, and asking is not an
+	// error.
+	if _, ok, err := store.FileReadStateForSession(ctx, "s", "/repo/app/other.txt"); err != nil || ok {
+		t.Fatalf("unread path: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestFileReadStateRepeatedReadOverwrites pins what a later read of the same
+// path means: the newest version replaces the old one, because that is the
+// version the model last saw.
+func TestFileReadStateRepeatedReadOverwrites(t *testing.T) {
+	ctx := context.Background()
+	store := newFileReadStateStore(t, "main", "s")
+	if err := store.SaveFileReadState(ctx, fileReadStateFor("/repo/app/notes.txt", strings.Repeat("a", 64))); err != nil {
+		t.Fatal(err)
+	}
+	second := fileReadStateFor("/repo/app/notes.txt", strings.Repeat("b", 64))
+	second.Size = 40
+	second.ModTimeNS = 1700000000000000009
+	second.ReadAtNS = 1700000000000000010
+	if err := store.SaveFileReadState(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := store.FileReadStateForSession(ctx, "s", "/repo/app/notes.txt")
+	if err != nil || !ok {
+		t.Fatalf("query after the second read: ok=%v err=%v", ok, err)
+	}
+	if got.SHA256 != second.SHA256 || got.Size != second.Size || got.ModTimeNS != second.ModTimeNS || got.ReadAtNS != second.ReadAtNS {
+		t.Fatalf("baseline after the second read = %+v, want the second version", got)
+	}
+	var rows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_file_read_states`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("rows after two reads of one path = %d, want one", rows)
+	}
+}
+
+// TestFileReadStateIsSessionScoped pins that a baseline belongs to the
+// conversation that read the file: another conversation of the same agent holds
+// nothing for the same path.
+func TestFileReadStateIsSessionScoped(t *testing.T) {
+	ctx := context.Background()
+	store := newFileReadStateStore(t, "main", "reader")
+	if err := store.Ensure(ctx, "bystander", "bystander"); err != nil {
+		t.Fatal(err)
+	}
+	read := fileReadStateFor("/repo/app/notes.txt", strings.Repeat("a", 64))
+	read.SessionID = "reader"
+	if err := store.SaveFileReadState(ctx, read); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.FileReadStateForSession(ctx, "bystander", "/repo/app/notes.txt"); err != nil || ok {
+		t.Fatalf("another conversation saw a baseline: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestFileReadStateIsTenantData pins the agent scope: one primary agent's store
+// cannot read another's baseline for the same session id and path, and cannot
+// file one under it either.
+func TestFileReadStateIsTenantData(t *testing.T) {
+	ctx := context.Background()
+	ours := newFileReadStateStore(t, "owner", "s")
+	theirs := NewSessionStore(ours.db, "other")
+	if err := ours.SaveFileReadState(ctx, fileReadStateFor("/repo/app/notes.txt", strings.Repeat("a", 64))); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := theirs.FileReadStateForSession(ctx, "s", "/repo/app/notes.txt"); err != nil || ok {
+		t.Fatalf("another tenant saw a baseline: ok=%v err=%v", ok, err)
+	}
+	err := theirs.SaveFileReadState(ctx, fileReadStateFor("/repo/app/notes.txt", strings.Repeat("c", 64)))
+	if !errors.Is(err, ErrSessionNotOwned) {
+		t.Fatalf("write under another tenant err=%v, want ErrSessionNotOwned", err)
+	}
+	got, ok, qerr := ours.FileReadStateForSession(ctx, "s", "/repo/app/notes.txt")
+	if qerr != nil || !ok || got.SHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("the refused write changed the baseline: %+v ok=%v err=%v", got, ok, qerr)
+	}
+}
+
+// TestFileReadStateCascadesWithSession pins that a deleted conversation takes
+// its baselines with it: the state file holds them only as long as the
+// conversation they describe exists.
+func TestFileReadStateCascadesWithSession(t *testing.T) {
+	ctx := context.Background()
+	store := newFileReadStateStore(t, "main", "s")
+	if err := store.SaveFileReadState(ctx, fileReadStateFor("/repo/app/notes.txt", strings.Repeat("a", 64))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM fb_sessions WHERE id='s'`); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	var rows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_file_read_states`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("rows after deleting the session = %d, want the baselines released with it", rows)
+	}
+}
+
+// TestFileReadStateRejectsInvalidInput pins the writer's refusals: a row the
+// overwrite check cannot trust must not land, so each of these is an error and
+// leaves the table empty.
+func TestFileReadStateRejectsInvalidInput(t *testing.T) {
+	ctx := context.Background()
+	store := newFileReadStateStore(t, "main", "s")
+	cases := map[string]FileReadState{
+		"no session":     {Path: "/repo/app/notes.txt", SHA256: strings.Repeat("a", 64)},
+		"no path":        {SessionID: "s", SHA256: strings.Repeat("a", 64)},
+		"relative path":  {SessionID: "s", Path: "notes.txt", SHA256: strings.Repeat("a", 64)},
+		"short sha":      {SessionID: "s", Path: "/repo/app/notes.txt", SHA256: strings.Repeat("a", 63)},
+		"upper-case sha": {SessionID: "s", Path: "/repo/app/notes.txt", SHA256: strings.Repeat("A", 64)},
+		"not a hex sha":  {SessionID: "s", Path: "/repo/app/notes.txt", SHA256: strings.Repeat("z", 64)},
+		"a write touch":  {SessionID: "s", Path: "/repo/app/notes.txt", SHA256: strings.Repeat("a", 64), TouchKind: "write"},
+	}
+	for name, in := range cases {
+		if err := store.SaveFileReadState(ctx, in); err == nil {
+			t.Fatalf("%s: save accepted %+v", name, in)
+		}
+	}
+	var rows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_file_read_states`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("rows after rejected writes = %d, want none", rows)
+	}
+}
+
+// A session is born with the global approval preset (plan 203 §2b): the setting
+// is the default a new session starts from, and creation copies it into the
+// session's own row so the picker and the next process have one answer to read.
+// A batch task is the exception — its posture is the project type's — and a row
+// that already exists (a picker's choice) is never overwritten, because the
+// append path runs this upsert on every write.
+func TestEnsureSeedsTheSessionApprovalPreset(t *testing.T) {
+	ctx := context.Background()
+	projects, store := newProjectStoreForTest(t, "main")
+	batch, err := projects.Create(ctx, CreateProjectInput{Name: "batch", Root: t.TempDir(), ProjectType: ProjectTypeBatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An install that has not set a preset gets the workspace-write default.
+	if err := store.Ensure(ctx, "coding", "coding"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	preset, source, updatedAt, stored, err := store.SessionPermissionPreset(ctx, "coding")
+	if err != nil || !stored || preset != SessionPresetWorkspaceWrite || source != SessionPresetSourceDefault {
+		t.Fatalf("seeded row = %q/%q stored=%v err=%v, want workspace_write/default", preset, source, stored, err)
+	}
+	if updatedAt <= 0 {
+		t.Fatalf("seeded row updated_at = %d, want a millisecond stamp", updatedAt)
+	}
+
+	// A configured default is what the next session is born with.
+	store.SetApprovalPresetDefault("full_access")
+	if err := store.Ensure(ctx, "later", "later"); err != nil {
+		t.Fatalf("ensure after the default moved: %v", err)
+	}
+	if preset, _, _, stored, err := store.SessionPermissionPreset(ctx, "later"); err != nil || !stored || preset != "full_access" {
+		t.Fatalf("seeded row after the default moved = %q stored=%v err=%v, want full_access", preset, stored, err)
+	}
+	// An empty value means the default, not "store nothing".
+	store.SetApprovalPresetDefault("")
+	if err := store.Ensure(ctx, "cleared", "cleared"); err != nil {
+		t.Fatalf("ensure after clearing the default: %v", err)
+	}
+	if preset, _, _, stored, err := store.SessionPermissionPreset(ctx, "cleared"); err != nil || !stored || preset != SessionPresetWorkspaceWrite {
+		t.Fatalf("seeded row after clearing the default = %q stored=%v err=%v, want workspace_write", preset, stored, err)
+	}
+
+	// A row somebody already chose survives the next append: Ensure runs again
+	// on every write to a session, and nothing about appending may move the
+	// posture.
+	if _, err := store.SaveSessionPermissionPreset(ctx, "coding", "full_access", SessionPresetSourcePicker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, "coding", "user", "hello"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := store.Ensure(ctx, "coding", "coding"); err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if preset, source, _, _, err := store.SessionPermissionPreset(ctx, "coding"); err != nil || preset != "full_access" || source != SessionPresetSourcePicker {
+		t.Fatalf("picker row after a re-ensure = %q/%q err=%v, want full_access/picker", preset, source, err)
+	}
+
+	// A batch task runs in its own fixed posture, so it gets no row at all.
+	if err := store.EnsureAt(ctx, "batch-run", "batch-run", SessionBirth{ProjectID: batch.ID}); err != nil {
+		t.Fatalf("ensure batch: %v", err)
+	}
+	if _, _, _, stored, err := store.SessionPermissionPreset(ctx, "batch-run"); err != nil || stored {
+		t.Fatalf("batch session has a preset row: stored=%v err=%v", stored, err)
+	}
+}
+
+// The seeded row is exactly one row per session, not one per append: the
+// store's write paths run the session upsert repeatedly, and a duplicate would
+// be a second, silently-different answer.
+func TestEnsureSeedsOnePresetRowPerSession(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+	for i := 0; i < 3; i++ {
+		if _, err := store.Append(ctx, "s", "user", "hello"); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	var rows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_permission_state WHERE session_id='s'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("preset rows for one session = %d, want 1", rows)
+	}
+}
+
+// TestRecentlyActiveSessionsFeedsThePeerListing pins the gateway peer record's
+// agent list source (plan 195 §3.3): the agent's own conversations touched
+// inside the window, newest first, with the directory each is about — and
+// neither batch executions, stale conversations, nor another tenant's rows.
+func TestRecentlyActiveSessionsFeedsThePeerListing(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+	if err := store.EnsureAt(ctx, "s1", "t", SessionBirth{Cwd: "/w/one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureAt(ctx, "s2", "t", SessionBirth{Cwd: "/w/two"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	insert := func(id string, agent string, cwd string, projectType string, updated int64) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO fb_sessions(id, title, updated_at, created_at, agent_id, source, cwd, project_type)
+			 VALUES(?,?,?,?,?,?,?,?)`,
+			id, id, updated, updated, agent, "conversation", cwd, projectType); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("s-batch", "main", "/w/batch", "batch", now)
+	insert("s-stale", "main", "/w/stale", "coding", now-48*3600)
+	insert("s-other", "other", "/w/other", "coding", now)
+
+	got, err := store.RecentlyActiveSessions(ctx, time.Now().Add(-24*time.Hour), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids, cwds []string
+	for _, r := range got {
+		ids = append(ids, r.ID)
+		cwds = append(cwds, r.Cwd)
+	}
+	if !slices.Equal(ids, []string{"s1", "s2"}) {
+		t.Fatalf("RecentlyActiveSessions ids = %v, want this agent's fresh conversations newest first", ids)
+	}
+	if !slices.Equal(cwds, []string{"/w/one", "/w/two"}) {
+		t.Fatalf("RecentlyActiveSessions cwds = %v, want each conversation's own directory", cwds)
+	}
+
+	limited, err := store.RecentlyActiveSessions(ctx, time.Now().Add(-24*time.Hour), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 1 || limited[0].ID != "s1" {
+		t.Fatalf("limit 1 returned %v, want the newest one only", limited)
+	}
+}

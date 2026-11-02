@@ -228,6 +228,12 @@ type Renderer struct {
 	// planMode is whether the conversation is in Plan mode; the footer says so
 	// for as long as it lasts.
 	planMode bool
+	// fullAccess is whether the conversation on screen runs with full access:
+	// the preset it is under, whether a person picked it or /permissions, the
+	// environment or a machine with no sandbox put it there. The footer names
+	// it, because a posture that asks nothing is worth saying out loud (plan
+	// 215 §3.6).
+	fullAccess bool
 	// batchReadOnly is whether the conversation on screen is a batch
 	// execution, which the terminal shows read-only (plan 152): the footer
 	// says so, and Plan mode never applies there.
@@ -3490,8 +3496,27 @@ func (r *Renderer) SetPlanMode(on bool) {
 }
 
 // planModeFooterLabel is the footer's Plan-mode segment, which also says how
-// to leave it.
-const planModeFooterLabel = "plan mode (shift+tab to exit)"
+// to leave it. Shift+tab cycles the modes now rather than toggling one, so the
+// segment says what the key does rather than what leaving would mean.
+const planModeFooterLabel = "plan mode (shift+tab to cycle)"
+
+// fullAccessFooterLabel is the footer's full-access segment: the one posture
+// with no questions left, so it is named wherever it is in force — picked with
+// /permissions, forced by the environment, or the only posture a machine with
+// no sandbox can run (plan 215 §3.6).
+const fullAccessFooterLabel = "full access (shift+tab to cycle)"
+
+// SetFullAccess says whether the conversation on screen runs with full access.
+// Plan mode outranks it in the footer when both hold: plan mode is the state
+// the next turn is prepared in, and full access is what it will run under.
+func (r *Renderer) SetFullAccess(on bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fullAccess = on
+}
 
 // batchReadOnlyFooterLabel is the footer's segment in a batch project: nothing
 // typed here runs, so the footer names what the terminal is instead of what

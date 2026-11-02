@@ -65,7 +65,7 @@ func TestRecallInstructionExplainsToolPathsWhenToolsAreExposed(t *testing.T) {
 	root := roots.Scope(Scope{Kind: ScopeProject, Key: projectKey})
 	writeSummary(t, root, "- prefers concise updates")
 
-	withTools, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Recall: true, DedicatedTools: true})
+	withTools, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Recall: true, MemoryTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestCaptureInstructionRendersBeforeAnyMemoryExists(t *testing.T) {
 	roots, projectKey := newInstructionRoots(t)
 	root := roots.Scope(Scope{Kind: ScopeProject, Key: projectKey})
 
-	instruction, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Capture: true, DedicatedTools: true})
+	instruction, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Capture: true, MemoryTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,9 +135,9 @@ func TestCaptureInstructionRendersBeforeAnyMemoryExists(t *testing.T) {
 }
 
 // Nothing in the instruction may describe a capability the settings withhold: a
-// turn told to capture with generation off would write notes the user disabled,
-// and a turn told to recall with use_memories off would surface memory they
-// asked not to see.
+// turn told to capture with the memory switch off would write notes the user
+// disabled, and a turn told to recall would surface memory they asked not to
+// see.
 func TestTurnInstructionHalvesFollowTheirSettings(t *testing.T) {
 	roots, projectKey := newInstructionRoots(t)
 	root := roots.Scope(Scope{Kind: ScopeProject, Key: projectKey})
@@ -187,7 +187,7 @@ func TestPendingNotesAreSurfacedUntilConsolidated(t *testing.T) {
 	if err := markConsolidationStart(root, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	instruction, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Recall: true, DedicatedTools: true})
+	instruction, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Recall: true, MemoryTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestPendingNotesAreSurfacedUntilConsolidated(t *testing.T) {
 	if err := markConsolidationStart(root, time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	after, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Recall: true, DedicatedTools: true})
+	after, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Recall: true, MemoryTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,32 +258,45 @@ func TestPendingNotesAreCappedNewestFirst(t *testing.T) {
 	}
 }
 
-func TestDedicatedToolsRequireReadPath(t *testing.T) {
-	truth := true
-	falsy := false
+// TestMemorySwitchGatesEveryMemoryPath pins the owner's one-switch rule (plan
+// 205 §3.1): reading stored memories, generating new ones, and the dedicated
+// memories_* tools are all the same decision, so a configuration can never
+// enable one half of the feature without the others.
+func TestMemorySwitchGatesEveryMemoryPath(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		feature   *bool
-		use       *bool
-		dedicated *bool
-		want      bool
+		name    string
+		feature *bool
+		want    bool
 	}{
-		{name: "all enabled", feature: &truth, use: &truth, dedicated: &truth, want: true},
-		{name: "read disabled", feature: &truth, use: &falsy, dedicated: &truth, want: false},
-		{name: "feature disabled", feature: &falsy, use: &truth, dedicated: &truth, want: false},
-		{name: "tools disabled", feature: &truth, use: &truth, dedicated: &falsy, want: false},
-		{name: "feature nil defaults to true", feature: nil, use: &truth, dedicated: &truth, want: true},
+		{name: "switch on", feature: appcfg.BoolPtr(true), want: true},
+		{name: "switch off", feature: appcfg.BoolPtr(false), want: false},
+		{name: "unset defaults to on", feature: nil, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := &appcfg.Root{}
 			cfg.Features.Memories = test.feature
-			cfg.Memories.UseMemories = test.use
-			cfg.Memories.DedicatedTools = test.dedicated
-			if got := DedicatedToolsEnabled(cfg); got != test.want {
-				t.Fatalf("DedicatedToolsEnabled=%v want %v", got, test.want)
+			if got := Enabled(cfg); got != test.want {
+				t.Fatalf("Enabled=%v want %v", got, test.want)
+			}
+			if got := SettingsFromConfig(cfg).Enabled; got != test.want {
+				t.Fatalf("SettingsFromConfig().Enabled=%v want %v", got, test.want)
+			}
+			opts := InstructionOptionsFromConfig(cfg)
+			if opts.Recall != test.want || opts.Capture != test.want || opts.MemoryTools != test.want {
+				t.Fatalf("instruction options = %#v want every switch %v", opts, test.want)
+			}
+			if got := SessionModeFor(cfg); got != expectedMemoryMode(test.want) {
+				t.Fatalf("SessionModeFor=%q want %q", got, expectedMemoryMode(test.want))
 			}
 		})
 	}
+}
+
+func expectedMemoryMode(enabled bool) string {
+	if enabled {
+		return ThreadMemoryEnabled
+	}
+	return ThreadMemoryDisabled
 }
 
 // TestSyncGlobalPhase2InputsGathersEveryProjectsCandidates covers the
@@ -544,8 +557,7 @@ func TestExternalContextPollutesSelectedThreadAndEnqueuesForgetting(t *testing.T
 	if updated, err := store.MarkGlobalPhase2Succeeded(ctx, scope, claim.OwnershipToken, now, []Stage1Output{{ThreadID: "thread", ProjectKey: testProjectKey, SourceUpdatedAt: now - 100}}); err != nil || !updated {
 		t.Fatalf("selection updated=%v err=%v", updated, err)
 	}
-	enabled := true
-	cfg := &appcfg.Root{Features: appcfg.FeaturesSection{Memories: appcfg.BoolPtr(true)}, Memories: appcfg.MemorySection{DisableOnExternalContext: &enabled}}
+	cfg := &appcfg.Root{Features: appcfg.FeaturesSection{Memories: appcfg.BoolPtr(true)}}
 	forget, err := MarkPollutedByExternalContext(ctx, cfg, store, "thread")
 	if err != nil || !forget {
 		t.Fatalf("forget=%v err=%v", forget, err)
@@ -764,7 +776,7 @@ func TestSessionWithoutAProjectGetsGlobalOnly(t *testing.T) {
 	}
 	writeSummary(t, globalRoot, "v1\n\n- answer in the user's own language")
 
-	instruction, err := RenderTurnInstruction(roots, "", InstructionOptions{Recall: true, Capture: true, DedicatedTools: true})
+	instruction, err := RenderTurnInstruction(roots, "", InstructionOptions{Recall: true, Capture: true, MemoryTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1150,7 +1162,7 @@ func TestRenderTurnInstructionProjectOnlyRecall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := InstructionOptions{Recall: true, DedicatedTools: true}
+	opts := InstructionOptions{Recall: true, MemoryTools: true}
 
 	shared, err := RenderTurnInstruction(roots, "-p-one", opts)
 	if err != nil {

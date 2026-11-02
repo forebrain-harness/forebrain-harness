@@ -213,6 +213,9 @@ describe('McpServerDrawer', () => {
     const wrapper = mountDrawer({ mode: 'edit', row: row({ env: { TOKEN: MCP_REDACTED, KEEP: '1' } }) })
 
     await wrapper.find('[data-testid="mcp-target"]').setValue('/bin/docs2')
+    // A stored credential opens for a replacement first: the mask never shows
+    // the value, so 更换 is the only way to type over it.
+    await wrapper.find('[data-kv-secret-edit="0"]').trigger('click')
     await wrapper.findAll('[data-kv-value]')[0].setValue('typed')
     await wrapper.find('[data-testid="mcp-save"]').trigger('click')
     await flushPromises()

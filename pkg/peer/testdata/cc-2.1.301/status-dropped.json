@@ -1,0 +1,1 @@
+{"type":"control","action":"peer_message_status","status":"dropped","reason":"sender exceeded the peer message rate limit","from":"uds:/tmp/cc-socks/50000.sock","orig_msg_id":"11111111-2222-4333-8444-555555555555","drop_reason":"rate-limited","dropped_msg_ids":[],"msgV":1,"msg_id":"66666666-7777-4888-8999-aaaaaaaaaaaa"}

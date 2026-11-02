@@ -3,14 +3,17 @@ package llm
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // swapURLTemplate points the release download at an httptest server for the
@@ -139,6 +142,85 @@ func TestInstallDownloadsModelsJSONForReleaseVersion(t *testing.T) {
 			t.Fatalf("models.json must not be written, stat err=%v", statErr)
 		}
 	})
+}
+
+// silentListener accepts connections and never answers, the way an intranet
+// firewall leaves a request it passed: the download can only end on its own
+// timeout, which is the whole budget an offline start may spend.
+func silentListener(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu   sync.Mutex
+		held []net.Conn
+	)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return "http://" + listener.Addr().String()
+}
+
+// A build with no models.json beside it and a release page that never answers
+// reports the failure inside the download's bound instead of holding startup:
+// the catalog is a convenience (an unknown model falls back to the configured
+// context window), so the startup path logs this and continues.
+//
+// The bound itself is shortened here — waiting half a minute in a unit test
+// proves nothing the constant does not — and asserted separately, because the
+// number is the contract.
+func TestInstallBoundsAnUnreachableModelsJSONDownload(t *testing.T) {
+	if modelsJSONTimeout != 30*time.Second {
+		t.Fatalf("modelsJSONTimeout is %s; an offline start must give up within 30s", modelsJSONTimeout)
+	}
+	original := modelsJSONTimeout
+	modelsJSONTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { modelsJSONTimeout = original })
+
+	base := silentListener(t)
+	defer swapURLTemplate(base + "/%s/assets/models.json")()
+	t.Setenv(AssetsDirEnv, t.TempDir())
+
+	home := t.TempDir()
+	started := time.Now()
+	err := Install(home, "v9.9.9")
+	if err == nil {
+		t.Fatal("an unreachable download was accepted")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Install waited %s on an unanswered download", elapsed)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, "models.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("models.json must not be written, stat err=%v", statErr)
+	}
+
+	// A second caller in the same process — startup installs the catalog twice —
+	// is answered from the first attempt rather than paying for another one.
+	second := time.Now()
+	if err := Install(home, "v9.9.9"); err == nil {
+		t.Fatal("the repeated download was retried and accepted")
+	}
+	if elapsed := time.Since(second); elapsed > 50*time.Millisecond {
+		t.Fatalf("the repeated download waited %s; the process must remember its failure", elapsed)
+	}
 }
 
 func TestInstallAssetsCopiesEntries(t *testing.T) {

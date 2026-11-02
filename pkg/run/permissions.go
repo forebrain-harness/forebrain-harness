@@ -59,9 +59,6 @@ func (r *Runner) newToolPermissionMiddleware() llm.ToolMiddleware {
 				if r.approvedActionBypassesSandbox(ctx) {
 					approvedCtx = tool.WithSandboxBypassApproved(approvedCtx, true)
 				}
-				if access, ok := r.approvedActionNetworkAccess(ctx); ok {
-					approvedCtx = tool.WithApprovedNetworkAccess(approvedCtx, access)
-				}
 				if requestPermissions {
 					tool.CapturePolicyApprovalReason(approvedCtx, "the user approved this request in an approval prompt")
 				}
@@ -100,10 +97,6 @@ func (r *Runner) newToolPermissionMiddleware() llm.ToolMiddleware {
 				return next(tool.WithPolicyApproved(ctx, true), arguments)
 			}
 			if requestPermissions {
-				policy := r.PermissionSnapshotForSession(sessionID).ApprovalPolicy
-				if policy.Mode == safety.ApprovalGranular && !policy.Granular.RequestPermissions {
-					return deniedRequestPermissionsResult(ctx, next, arguments, "request_permissions approval prompts are disabled by the granular approval policy")
-				}
 				// The tool normalizes paths and owns the structured permission
 				// approval event. Generic middleware must not pre-authorize it.
 				return next(ctx, arguments)
@@ -478,30 +471,6 @@ func (r *Runner) approvedActionBypassesSandbox(ctx context.Context) bool {
 	)
 }
 
-func (r *Runner) approvedActionNetworkAccess(ctx context.Context) (tool.ApprovedNetworkAccess, bool) {
-	if r == nil || r.Actions == nil {
-		return tool.ApprovedNetworkAccess{}, false
-	}
-	actionID := strings.TrimSpace(tool.ApprovedActionIDFromContext(ctx))
-	if actionID == "" {
-		return tool.ApprovedNetworkAccess{}, false
-	}
-	action, err := r.Actions.Get(ctx, actionID)
-	if err != nil || action == nil || action.Status != state.ActionApproved {
-		return tool.ApprovedNetworkAccess{}, false
-	}
-	var payload struct {
-		Context safety.NetworkApprovalContext `json:"network_approval_context"`
-		Port    int                           `json:"network_port"`
-	}
-	if json.Unmarshal([]byte(action.PayloadJSON), &payload) != nil ||
-		strings.TrimSpace(payload.Context.Host) == "" || !payload.Context.Protocol.Valid() ||
-		payload.Port < 0 || payload.Port > 65535 {
-		return tool.ApprovedNetworkAccess{}, false
-	}
-	return tool.ApprovedNetworkAccess{Context: payload.Context, Port: payload.Port}, true
-}
-
 func toolArgumentsMap(arguments string) map[string]any {
 	arguments = strings.TrimSpace(arguments)
 	if arguments == "" {
@@ -761,9 +730,6 @@ func (r *Runner) rewrittenShellPermissionInput(kind, input string) string {
 	if !isShellPermissionKind(kind) || strings.TrimSpace(input) == "" {
 		return ""
 	}
-	if r != nil && r.AppCfg != nil && !r.AppCfg.Tools.CommandRewrite.UseRewrite() {
-		return ""
-	}
 	result := safety.Rewrite(input)
 	if !result.Applied {
 		return ""
@@ -815,18 +781,24 @@ func (r *Runner) permPaths() safety.Paths {
 	return safety.Paths{Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectRoot: r.ProjectRoot}
 }
 
-// yoloEnabled reports whether YOLO / danger-full-access is on.
+// fullAccessEnabled reports whether this conversation runs with full access:
+// the environment flag forced it, or the preset in force for the session is
+// full access.
 //
-// It reads the environment rather than a field on the Runner. The Runner used
-// to cache safety.RuntimeYOLOEnabled() in a YOLO field, but every production
-// writer set that field to exactly that call and this reader then OR'd it with
-// the same call, so the copy could never carry information the environment did
-// not already have -- an I6 dual owner with only one real owner.
-func (r *Runner) yoloEnabled() bool {
+// Full access is the YOLO posture (plan 203) — never ask, only an explicit
+// deny rule refuses — so this one answer feeds both the decision overrides and
+// the approval hook. Reading the environment alone was enough while YOLO was
+// the only way to get that posture; now a picked preset gets exactly the same
+// treatment.
+func (r *Runner) fullAccessEnabled(sessionID string) bool {
 	if r == nil {
 		return false
 	}
-	return safety.RuntimeYOLOEnabled()
+	if safety.RuntimeYOLOEnabled() {
+		return true
+	}
+	cfg := safety.ConfigForSnapshot(r.AppCfg, r.PermissionSnapshotForSession(sessionID))
+	return cfg != nil && cfg.DangerFullAccessEnabled()
 }
 
 func (r *Runner) PermissionSnapshot() safety.Snapshot {
@@ -851,7 +823,7 @@ func (r *Runner) EvaluatePermissionForSession(sessionID, toolName, input string)
 	if r == nil {
 		return safety.Decision{Behavior: safety.BehaviorAsk, Mode: safety.ModeOnRequest, Reason: "nil_runner"}
 	}
-	return r.permRuntimeGet().Evaluate(sessionID, toolName, input, r.AppCfg, r.yoloEnabled())
+	return r.permRuntimeGet().Evaluate(sessionID, toolName, input, r.AppCfg, r.fullAccessEnabled(sessionID))
 }
 
 func (r *Runner) ExplainPermission(toolName, input string) safety.ExplainResult {
@@ -868,7 +840,7 @@ func (r *Runner) ExplainPermissionForSession(sessionID, toolName, input string) 
 			},
 		}
 	}
-	return r.permRuntimeGet().Explain(sessionID, toolName, input, r.AppCfg, r.yoloEnabled())
+	return r.permRuntimeGet().Explain(sessionID, toolName, input, r.AppCfg, r.fullAccessEnabled(sessionID))
 }
 
 // ResetRuntimePermissionGrants drops approvals scoped to the running agent so
@@ -889,20 +861,28 @@ func (r *Runner) ResetRuntimePermissionGrants() {
 
 // SessionPresetState is one conversation's approval-preset answer, the one
 // reading both surfaces show: which preset is in force ("" when none — the
-// configuration default), which preset actually executes after the trust
-// gate, and who set the stored row (picker | yolo | observed; backend and
-// logs only, never a surface label).
+// configuration default), which preset actually executes, and who set the
+// stored row (picker | yolo | observed; backend and logs only, never a surface
+// label). Nothing narrows a stored preset any more (plan 203), so Effective
+// equals Current outside the batch posture.
 type SessionPresetState struct {
 	Current   string
 	Effective string
 	Source    string
 }
 
-// PresetBatchSandbox names the approval posture a batch task runs under: the
-// task sandbox with no approvals at all. It is not one of the three built-in
-// presets and cannot be picked — a batch project's conversations are fixed to
-// it (plans/150) — so a surface only reads it.
-const PresetBatchSandbox = "batch-sandbox"
+// PresetBatch names the approval posture a batch task runs under: no approvals
+// at all. It is not one of the two pickable presets and cannot be picked — a
+// batch project's conversations are fixed to it (plans/150) — so a surface
+// only reads it. The name says nothing about a sandbox: a machine that has none
+// runs a batch task the same way it runs everything else, in full access (plan
+// 215 §3.5).
+const PresetBatch = "batch"
+
+// sessionPresetSourceNoSandbox marks a preset the machine decided rather than a
+// person: there is no sandbox here, so every conversation runs with full
+// access. Backend and logs only — never a surface label, and never a stored row.
+const sessionPresetSourceNoSandbox = "no_sandbox"
 
 // SessionPresetFor names the preset one conversation runs under. The live
 // in-process preset wins (the store is the truth of what executes this
@@ -918,17 +898,23 @@ func (r *Runner) SessionPresetFor(ctx context.Context, sessionID string) Session
 	// picker wrote earlier cannot describe it. Answering first is what keeps a
 	// surface from showing a preset that does not apply.
 	if r.ProjectType() == state.ProjectTypeBatch {
-		return SessionPresetState{Current: PresetBatchSandbox, Effective: PresetBatchSandbox, Source: "project_type"}
+		return SessionPresetState{Current: PresetBatch, Effective: PresetBatch, Source: "project_type"}
+	}
+	// A machine with no usable sandbox has nothing to ask about and nothing to
+	// contain: every conversation runs in full access, whatever row the state
+	// database holds — the row belongs to the user, and another machine sharing
+	// that database may well have a sandbox (owner 2026-10-31, plan 215 §3.3).
+	if !safety.SandboxAvailable() {
+		return SessionPresetState{Current: safety.PresetFullAccess, Effective: safety.PresetFullAccess, Source: sessionPresetSourceNoSandbox}
 	}
 	if safety.RuntimeYOLOEnabled() {
 		return SessionPresetState{Current: safety.PresetFullAccess, Effective: safety.PresetFullAccess, Source: state.SessionPresetSourceYolo}
 	}
 	sid := strings.TrimSpace(sessionID)
 	// The stored row outranks the in-process state: every write path persists
-	// first (picker) or is the row itself (yolo, observed), so a live preset
-	// that disagrees with the row is the trust gate narrowing execution, and
-	// the row is what the picker must show and the next process restores.
-	// The in-memory preset answers only when no row exists — a write that
+	// first (picker) or is the row itself (yolo, observed), so the row is what
+	// the picker must show and what the next process restores. The in-memory
+	// preset answers only when no row exists — a write that
 	// failed to persist still leaves the user's just-made choice visible.
 	if r.Deps != nil && r.Deps.SessionStore != nil && sid != "" && ctx != nil {
 		presetID, source, _, stored, err := r.Deps.SessionStore.SessionPermissionPreset(ctx, sid)
@@ -949,46 +935,36 @@ func (r *Runner) SessionPresetFor(ctx context.Context, sessionID string) Session
 	if preset, ok := r.matchLivePreset(sid); ok {
 		return SessionPresetState{Current: preset.ID, Effective: preset.ID, Source: state.SessionPresetSourcePicker}
 	}
-	if preset, ok := safety.MatchApprovalPreset(r.permissionRuntimeModeOf(), r.AppCfg); ok {
-		return SessionPresetState{Current: preset.ID, Effective: preset.ID}
+	// Nothing chosen for this conversation: the configured default is the
+	// answer, and it is the preset the setting names rather than a guess
+	// matched from a mode and a sandbox mode that used to be set apart.
+	if r.AppCfg != nil {
+		if preset, ok := safety.ApprovalPresetByID(string(r.AppCfg.ApprovalPreset.Effective())); ok {
+			return SessionPresetState{Current: preset.ID, Effective: preset.ID}
+		}
 	}
 	return SessionPresetState{}
 }
 
-// presetStateFromRow is the stored row as an answer: the row names the
-// preset, the trust gate decides what actually executes — a persisted
-// full-access is honoured only while the working directory is trusted, and
-// narrows to Default otherwise, while the row itself stays as written.
+// presetStateFromRow is the stored row as an answer. Current and Effective are
+// the same value: the project's trust decision no longer narrows a stored
+// preset (plan 203) — full access is the YOLO posture and runs wherever it was
+// picked, and the default preset's narrowing is a sandbox decision the sandbox
+// makes, not a different preset.
 func (r *Runner) presetStateFromRow(presetID, source string) SessionPresetState {
-	effective := presetID
-	if presetID == safety.PresetFullAccess && !r.launchProjectTrusted() {
-		effective = safety.PresetDefault
-	}
-	return SessionPresetState{Current: presetID, Effective: effective, Source: source}
+	return SessionPresetState{Current: presetID, Effective: presetID, Source: source}
 }
 
 // matchLivePreset reports the preset the in-process permission store is
-// running this session under right now, when its mode and sandbox add up to
-// one of the built-ins.
+// running this session under right now. The sandbox mode the store holds for
+// the session is the whole answer, because the preset is what derives it.
 func (r *Runner) matchLivePreset(sessionID string) (safety.ApprovalPreset, bool) {
 	snap := r.PermissionSnapshotForSession(sessionID)
-	return safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(r.AppCfg, snap))
-}
-
-// permissionRuntimeModeOf is the configured policy mode, the fallback answer
-// for a runner whose permission runtime has nothing session-scoped to read.
-func (r *Runner) permissionRuntimeModeOf() safety.PermissionMode {
-	if r.AppCfg != nil && strings.TrimSpace(string(r.AppCfg.ApprovalPolicy.Mode)) != "" {
-		return safety.PermissionMode(r.AppCfg.ApprovalPolicy.Mode)
+	cfg := safety.ConfigForSnapshot(r.AppCfg, snap)
+	if cfg == nil {
+		return safety.ApprovalPreset{}, false
 	}
-	return safety.ApprovalOnRequest
-}
-
-// launchProjectTrusted reports the frozen launch-project trust decision this
-// runtime was built from — the trust gate a persisted full-access preset must
-// pass to execute as full-access.
-func (r *Runner) launchProjectTrusted() bool {
-	return safety.TrustedRoot(r.LaunchProject) != ""
+	return safety.ApprovalPresetForSandboxMode(cfg.SandboxMode)
 }
 
 // persistSessionPreset stores the row, idempotently: a write failure (or a
@@ -1024,6 +1000,17 @@ func (r *Runner) injectSessionPermission(ctx context.Context) context.Context {
 	if sid == "" {
 		return ctx
 	}
+	// No usable sandbox on this machine: the conversation runs in full access,
+	// applied here so every decision downstream — the engine overrides, the
+	// shell tool's plan-mode gate, the sandbox decision itself — reads one
+	// configuration, exactly as if the user had picked full access. Deliberately
+	// before the stored row is read and with nothing written back: the row is
+	// the user's choice and another machine sharing this state database may
+	// have a sandbox (owner 2026-10-31, plan 215 §3.3).
+	if !safety.SandboxAvailable() {
+		r.applySandboxlessFullAccess(sid)
+		return ctx
+	}
 	if safety.RuntimeYOLOEnabled() {
 		r.recordYoloPreset(ctx, sid)
 		return ctx
@@ -1051,21 +1038,43 @@ func (r *Runner) injectSessionPermission(ctx context.Context) context.Context {
 			return ctx
 		}
 	}
-	effective := presetID
-	// The trust gate: a persisted full-access executes as full-access only
-	// while the working directory is trusted; otherwise Default runs and the
-	// row keeps the wider choice for when it is.
-	if effective == safety.PresetFullAccess && !r.launchProjectTrusted() {
-		effective = safety.PresetDefault
-	}
-	preset, ok := safety.ApprovalPresetByID(effective)
+	preset, ok := safety.ApprovalPresetByID(presetID)
 	if !ok {
 		return ctx
 	}
-	for _, update := range preset.SessionUpdates(sid) {
+	// The pair is derived for this process's launch project, so a stored
+	// default preset stays narrowed exactly as the configuration's own preset
+	// is: an undecided project keeps its commands read-only.
+	for _, update := range preset.SessionUpdatesForLaunch(sid, r.AppCfg, r.LaunchProject) {
 		r.ApplyPermissionUpdate(update)
 	}
 	return ctx
+}
+
+// sandboxlessPresetStamp is the applied-preset stamp for the full access a
+// machine without a sandbox forces. It is negative because stored rows stamp
+// their own updated_at, which is never negative, so the two can never be
+// mistaken for each other.
+const sandboxlessPresetStamp int64 = -1
+
+// applySandboxlessFullAccess makes full access true for one conversation in
+// this process: the same permission update a picked full-access preset
+// applies, without the row that choice would write. One application per
+// session, tracked in the same map the stored rows are, so a turn does not
+// re-derive the filesystem policy it already has.
+func (r *Runner) applySandboxlessFullAccess(sid string) {
+	if prev, applied := r.sessionPerm.Swap(sid, sandboxlessPresetStamp); applied {
+		if prevStamp, _ := prev.(int64); prevStamp == sandboxlessPresetStamp {
+			return
+		}
+	}
+	preset, ok := safety.ApprovalPresetByID(safety.PresetFullAccess)
+	if !ok {
+		return
+	}
+	for _, update := range preset.SessionUpdatesForLaunch(sid, r.AppCfg, r.LaunchProject) {
+		r.ApplyPermissionUpdate(update)
+	}
 }
 
 // recordYoloPreset writes the full-access row a --yolo process runs under,

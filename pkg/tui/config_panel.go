@@ -14,12 +14,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"go.yaml.in/yaml/v2"
 )
 
@@ -53,11 +55,13 @@ const (
 )
 
 // configPanelSnapshot is what the panel reads when it opens: the stored
-// runtime sections as their own JSON, and the forebrain.yaml sections as the
-// YAML text a reader would edit by hand.
+// runtime sections as their own JSON, the forebrain.yaml sections as the
+// YAML text a reader would edit by hand, and whether this machine has Claude
+// Code — the condition the interop switch is shown under (owner 2026-10-30).
 type configPanelSnapshot struct {
-	Stored map[string]json.RawMessage
-	File   map[string]string
+	Stored     map[string]json.RawMessage
+	File       map[string]string
+	ClaudeCode bool
 }
 
 // configPanelSession is what /config needs from a session — an optional
@@ -101,7 +105,9 @@ func (s *ChatSession) ConfigPanelSections(ctx context.Context) (configPanelSnaps
 	}{Credentials: root.Credentials}); err == nil {
 		file["credentials"] = string(body)
 	}
-	return configPanelSnapshot{Stored: stored, File: file}, nil
+	// Judged once per open: the interop switch is shown only on a machine
+	// that has Claude Code's directory (plan 195 §3.7).
+	return configPanelSnapshot{Stored: stored, File: file, ClaudeCode: process.ClaudeCodeDetected()}, nil
 }
 
 // UpdateConfigSection stores one section's JSON as its fb_config row — nil
@@ -138,6 +144,9 @@ type configPanel struct {
 	session  configPanelSession
 	raw      map[string]json.RawMessage
 	file     map[string]string
+	// claudeCode is whether this machine has Claude Code, read when the
+	// panel opened: a ClaudeCodeOnly field is offered only while it holds.
+	claudeCode bool
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
@@ -164,9 +173,10 @@ func (c *commandController) handleConfig(ctx context.Context, args []string) boo
 	}
 	panel.raw = snapshot.Stored
 	panel.file = snapshot.File
+	panel.claudeCode = snapshot.ClaudeCode
 	start := ""
 	if len(args) > 0 {
-		schema, known := configSectionSchemaFor(args[0])
+		schema, known := panelSectionSchemaFor(args[0])
 		if !known {
 			c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "config", Content: "/config " + args[0] + " 不是已知配置段。\n可用：" + strings.Join(configSectionNames(), "、"), Final: true})
 			return true
@@ -212,13 +222,48 @@ func (p *configPanel) chooseSection() (string, bool) {
 	return names[idx], true
 }
 
+// panelSections is the section table as this machine offers it: the whole
+// table, minus the approval-and-sandbox tab when there is no sandbox to
+// configure. A setting that cannot take effect is not shown at all — neither
+// its section nor its tab heading, which disappears with the last section
+// carrying it (owner 2026-10-31, plan 215 §3.4). The table itself stays whole,
+// because it is also the coverage list every configuration section must appear
+// in.
+func panelSections() []configSectionSchema {
+	if safety.SandboxAvailable() {
+		return configSectionSchemas
+	}
+	out := make([]configSectionSchema, 0, len(configSectionSchemas))
+	for _, schema := range configSectionSchemas {
+		if schema.Tab == configTabApproval {
+			continue
+		}
+		out = append(out, schema)
+	}
+	return out
+}
+
+// panelSectionSchemaFor is configSectionSchemaFor over the sections this
+// machine offers: a section hidden by panelSections answers as unknown, so
+// /config <hidden-section> behaves like the list that no longer holds it.
+func panelSectionSchemaFor(name string) (configSectionSchema, bool) {
+	name = strings.TrimSpace(name)
+	for _, schema := range panelSections() {
+		if schema.Name == name {
+			return schema, true
+		}
+	}
+	return configSectionSchema{}, false
+}
+
 // sectionItems is the section list: the name the user types, and a
 // description carrying its Chinese title, what it is for, and whether it is
 // set today.
 func (p *configPanel) sectionItems() ([]SelectItem, []string) {
-	items := make([]SelectItem, 0, len(configSectionSchemas))
-	names := make([]string, 0, len(configSectionSchemas))
-	for _, schema := range configSectionSchemas {
+	sections := panelSections()
+	items := make([]SelectItem, 0, len(sections))
+	names := make([]string, 0, len(sections))
+	for _, schema := range sections {
 		items = append(items, SelectItem{
 			Label:       schema.Name,
 			Description: p.sectionDescription(schema),
@@ -299,6 +344,9 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 	items := make([]SelectItem, 0, len(schema.Fields)+2)
 	owners := make([]int, 0, len(schema.Fields)+2)
 	for i, field := range schema.Fields {
+		if !configFieldListed(field, p.claudeCode) {
+			continue
+		}
 		items = append(items, SelectItem{Label: field.Label, Description: configFieldDescription(doc, field)})
 		owners = append(owners, i)
 	}
@@ -308,6 +356,23 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 	)
 	owners = append(owners, configRowSave, configRowBack)
 	return items, owners
+}
+
+// configFieldListed reports whether the panel offers one field on this machine.
+// 「允许联网」is not offered on Windows: the restricted-token sandbox cannot take
+// the network away, so the switch would control nothing (plan 206 §3.2). The
+// platform that decides is the one running the sandbox, not the one a browser
+// happens to be on. A ClaudeCodeOnly field is offered only where Claude Code
+// is installed: without its directory the interop switch would point at
+// nothing (plan 195 §3.7) — and the stored value rides along untouched.
+func configFieldListed(field configField, claudeCode bool) bool {
+	if runtime.GOOS == "windows" && field.Path == "network_access" {
+		return false
+	}
+	if field.ClaudeCodeOnly && !claudeCode {
+		return false
+	}
+	return true
 }
 
 // sectionPrompt is the section page's heading: what the section is, what it
@@ -397,8 +462,9 @@ func (p *configPanel) sectionDoc(name string) any {
 // configSectionNames lists the section names in the panel's own order, for
 // the sentence an unknown /config argument gets.
 func configSectionNames() []string {
-	names := make([]string, 0, len(configSectionSchemas))
-	for _, schema := range configSectionSchemas {
+	sections := panelSections()
+	names := make([]string, 0, len(sections))
+	for _, schema := range sections {
 		names = append(names, schema.Name)
 	}
 	return names
@@ -460,17 +526,29 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 }
 
 // editEnum picks one of the values the loader accepts, so free text can never
-// reach the store with a mode it would reject.
+// reach the store with a mode it would reject. An option with a Chinese label
+// shows the label alone: the reader is choosing a behavior, not a
+// configuration key (plan 203 §0.8).
 func (p *configPanel) editEnum(doc any, path []string, field configField, cur any) (any, string) {
 	items := make([]SelectItem, 0, len(field.Options)+1)
 	for _, option := range field.Options {
-		items = append(items, SelectItem{Label: option, Description: "写入 " + option})
+		item := SelectItem{Label: option, Description: "写入 " + option}
+		if label := field.OptionLabels[option]; label != "" {
+			item = SelectItem{Label: label}
+		}
+		items = append(items, item)
 	}
 	items = append(items, SelectItem{Label: configUnsetLabel, Description: "不写这个键，用内置默认"})
 	defaultIdx := len(items) - 1
 	if text, ok := cur.(string); ok {
 		for i, option := range field.Options {
 			if option == text {
+				defaultIdx = i
+			}
+		}
+	} else if field.DefaultValue != "" {
+		for i, option := range field.Options {
+			if option == field.DefaultValue {
 				defaultIdx = i
 			}
 		}
@@ -1009,6 +1087,9 @@ func configFieldValueText(field configField, value any, exists bool) string {
 			return configBoolOffLabel
 		}
 	}
+	// A stored section always carries its settings (plan 207 §3.2), so this is
+	// reached only by a leaf inside a table row — an optional field of an MCP
+	// server or an LSP server, which no registered default covers.
 	if !exists || value == nil {
 		return "未设置"
 	}

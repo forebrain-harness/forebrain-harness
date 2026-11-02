@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
@@ -421,6 +422,53 @@ func TestSearchRebuildsRowsFromAnOlderTermsRevision(t *testing.T) {
 	if len(response.Matches) != 1 || response.Matches[0].MatchLineNumber != 1 {
 		t.Fatalf("stale rows were not rebuilt: %+v", response.Matches)
 	}
+}
+
+// Rows cut with the dictionaries are rebuilt by a process that has none.
+//
+// The two modes spell a Chinese term differently — a word against the pairs of
+// characters it is made of — so an index left as it was would answer a Chinese
+// query with nothing rather than with coarser matches. The rows therefore carry
+// the revision of the mode that wrote them (plans/208).
+func TestSearchRebuildsDictionaryRowsWhenTheProcessHasNoDictionaries(t *testing.T) {
+	originalVersion, originalURL := home.Version, releaseDownloadURL
+	originalHomeDir, originalShippedDir := dictionaryHomeDir, dictionaryShippedDir
+	t.Cleanup(func() {
+		home.Version, releaseDownloadURL = originalVersion, originalURL
+		dictionaryHomeDir, dictionaryShippedDir = originalHomeDir, originalShippedDir
+		resetSegmentation()
+	})
+
+	b := indexedBackend(t, map[string]string{"MEMORY.md": "行李托运前先确认航班\n"})
+	searchAll(t, b, "行李")
+	if got := termsRevisionOf(t, b, "MEMORY.md"); got != TermsRevision {
+		t.Fatalf("rows written with the dictionaries record revision %d, want %d", got, TermsRevision)
+	}
+
+	// The same home and the same index, read by a process with no dictionaries
+	// anywhere and no release to download them from.
+	home.Version = "(devel)"
+	dictionaryHomeDir = func() (string, error) { return filepath.Join(t.TempDir(), DictionaryDir), nil }
+	dictionaryShippedDir = func() (string, error) { return filepath.Join(t.TempDir(), DictionaryDir), nil }
+	resetSegmentation()
+
+	response := searchAll(t, b, "行李")
+	if len(response.Matches) == 0 {
+		t.Fatal("the unsegmented search found nothing; the dictionary rows were not rebuilt")
+	}
+	if got := termsRevisionOf(t, b, "MEMORY.md"); got != unsegmentedTermsRevision {
+		t.Fatalf("rows written without the dictionaries record revision %d, want %d", got, unsegmentedTermsRevision)
+	}
+}
+
+// termsRevisionOf reports the revision the index row for path records.
+func termsRevisionOf(t *testing.T, b Backend, path string) int64 {
+	t.Helper()
+	var revision int64
+	if err := b.index.db.QueryRow(`SELECT terms_revision FROM fb_memory_index_files WHERE path = ?`, path).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	return revision
 }
 
 // Re-indexing one file drops only that file's rows. The file row records the

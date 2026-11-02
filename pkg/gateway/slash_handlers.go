@@ -65,13 +65,13 @@ func (s *Server) HandleContextSlash(ctx context.Context, sessionID, channel stri
 	}
 	provider, model := run.PrimaryModelForSession(r, s.Sessions, sessionID)
 	used, _ := run.ContextOccupancy(ctx, s.Sessions, sessionID)
-	src.Gauge = turn.ContextGaugeOf(provider, model, used, s.compactExplicitLimit())
+	src.Gauge = turn.ContextGaugeOf(provider, model, used, s.compactBudgetOptions())
 	return turn.ContextReport(ctx, src, sessionID), true
 }
 
 func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string, bool) {
 	_ = channel
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		return "status: unavailable", true
 	}
@@ -107,9 +107,9 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 		MCP:         s.mcpInventorySource(r, cfg),
 		ConfigFiles: turn.StatusConfigFiles(cfg, r.MCPProjectStatus().ProjectRoot),
 		SkillOffer:  cfg.EffectiveFeatures().SkillOffer,
-		ContextUsage: func() (int, int) {
+		ContextUsage: func() (int, state.TokenBudgetOptions) {
 			used, _ := run.ContextOccupancy(ctx, s.Sessions, sessionID)
-			return used, s.compactExplicitLimit()
+			return used, s.compactBudgetOptions()
 		},
 	}
 	if r.CodeIntelControl != nil {
@@ -134,7 +134,7 @@ func (s *Server) HandlePermissionsSlash(sessionID, channel string, args []string
 	}
 	if len(args) == 0 {
 		snap := r.PermissionSnapshotForSession(sessionID)
-		return turn.PermissionsReport(turn.PermissionsOf(snap, s.liveCfg()), snap), true
+		return turn.PermissionsReport(turn.PermissionsOf(snap, s.liveCfg()), snap), true // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
 	case "explain":
@@ -146,7 +146,7 @@ func (s *Server) HandlePermissionsSlash(sessionID, channel string, args []string
 
 func (s *Server) HandleMCPSlash(sessionID, channel string) (string, bool) {
 	_ = channel
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	r := s.runnerFor(context.Background(), sessionID)
 	if r == nil {
 		r = s.Runner
@@ -204,7 +204,7 @@ func (s *Server) mcpInventorySource(r *run.Runner, cfg *appcfg.Root) turn.MCPInv
 // belongs anyway.
 func (s *Server) HandleSandboxSlash(sessionID, channel string, args []string) (string, bool) {
 	_, _, _ = sessionID, channel, args
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		return "sandbox: unavailable", true
 	}
@@ -224,7 +224,7 @@ func (s *Server) HandleSandboxSlash(sessionID, channel string, args []string) (s
 // a config reload propagates to every live pooled runner, so the catalog and
 // every marker describe the same provider set.
 func (s *Server) ModelSettings(sessionID string) (turn.ModelSettings, error) {
-	cfg := s.liveCfg()
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		return turn.ModelSettings{}, fmt.Errorf("no configuration is bound")
 	}

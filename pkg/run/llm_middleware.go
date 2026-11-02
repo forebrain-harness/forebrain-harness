@@ -136,8 +136,6 @@ type compactRunGuard struct {
 type compactRunGuardEntry struct {
 	compactedBase []llm.Message
 	baseLen       int
-	prefillTokens int
-	prefillSet    bool
 }
 
 // compactRunGuardCap bounds the number of histories one Runner's guard
@@ -181,10 +179,7 @@ func (g *compactRunGuard) get(key string) (base []llm.Message, baseLen int, ok b
 	return entry.compactedBase, entry.baseLen, true
 }
 
-// set caches the compacted base for the given history. prefillTokens is the
-// compacted base's token count, computed by the caller with the session's own
-// model's estimator so this prefix baseline shares the unit of the compaction
-// decision and the observed overhead.
+// set caches the compacted base for the given history.
 //
 // baseLen is stored as the compacted length because the orchestration loop
 // adopts the compacted history (see compactionAdoptionSink): the next call's
@@ -192,7 +187,7 @@ func (g *compactRunGuard) get(key string) (base []llm.Message, baseLen int, ok b
 // base + messages[baseLen:] is an identity that appends only genuinely-new
 // messages. Anchoring on the pre-compaction length instead would, on an
 // unusually long turn, slice past newly produced messages and drop them.
-func (g *compactRunGuard) set(key string, compacted []llm.Message, prefillTokens int) {
+func (g *compactRunGuard) set(key string, compacted []llm.Message) {
 	if g == nil || key == "" || len(compacted) == 0 {
 		return
 	}
@@ -209,49 +204,7 @@ func (g *compactRunGuard) set(key string, compacted []llm.Message, prefillTokens
 	g.entries[key] = compactRunGuardEntry{
 		compactedBase: compacted,
 		baseLen:       len(compacted),
-		prefillTokens: max(0, prefillTokens),
-		prefillSet:    true,
 	}
-}
-
-// prefill returns the prefix token baseline recorded for this history's last
-// checkpoint, recording the current size on the first call. A history that has
-// never compacted answers -1, which tells the caller to derive the baseline
-// from the slice it is holding.
-//
-// current counts the current size. It runs only when no baseline is recorded
-// yet — counting a whole history is the expensive part of a model call — and
-// outside the lock, so other histories sharing the guard are not held up.
-func (g *compactRunGuard) prefill(key string, current func() int) int {
-	if g == nil || key == "" {
-		return -1
-	}
-	g.mu.Lock()
-	if entry, ok := g.entries[key]; ok && entry.prefillSet {
-		g.mu.Unlock()
-		return entry.prefillTokens
-	}
-	g.mu.Unlock()
-	currentTokens := current()
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	entry, ok := g.entries[key]
-	if !ok {
-		entry = compactRunGuardEntry{}
-		g.order = append(g.order, key)
-		for len(g.order) > compactRunGuardCap {
-			oldest := g.order[0]
-			g.order = g.order[1:]
-			delete(g.entries, oldest)
-		}
-	}
-	if !entry.prefillSet {
-		entry.prefillTokens = max(0, currentTokens)
-		entry.prefillSet = true
-		g.entries[key] = entry
-	}
-	return entry.prefillTokens
 }
 
 // withImageHeal attaches the one retry a refused image gets: when the
@@ -549,8 +502,6 @@ func blankOutputError(err error) error {
 // at all.
 func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, est llm.Estimator) ([]llm.Message, int, bool) {
 	key := historyKey(ctx)
-	history := messages
-	prefillTokens := r.runGuard.prefill(key, func() int { return llm.EstimateMessagesWith(est, history) })
 	tail, separable := provisionalTailLen(ctx, len(messages))
 	if base, baseLen, ok := r.runGuard.get(key); ok && baseLen <= len(messages) {
 		newMsgs := messages[baseLen:]
@@ -584,12 +535,12 @@ func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []ll
 		}
 	}
 	compactCtx, release := compactionContext(ctx)
-	head, compacted := compactIfNeeded(compactCtx, head, snapshotRaw, r.compactDeps, prefillTokens, tools)
+	head, compacted := compactIfNeeded(compactCtx, head, snapshotRaw, r.compactDeps, tools)
 	release()
 	if !compacted {
 		return messages, tail, false
 	}
-	r.runGuard.set(key, head, llm.EstimateMessagesWith(est, head))
+	r.runGuard.set(key, head)
 	return joinProvisionalTail(head, provisional), tail, true
 }
 
@@ -632,7 +583,7 @@ func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message
 	if !ok {
 		return messages, false
 	}
-	r.runGuard.set(historyKey(ctx), compacted, llm.EstimateMessagesWith(est, compacted))
+	r.runGuard.set(historyKey(ctx), compacted)
 	return joinProvisionalTail(compacted, provisional), true
 }
 
@@ -677,8 +628,9 @@ func (d *guardrailRunDedup) markChecked(runID string) bool {
 // LLM client:
 //   - deterministic input rails (length / blocklist) run once
 //     per foreground main-thread turn, on the turn-initiating call only.
-//   - output rail runs on foreground main-thread final answers (results with no
-//     tool calls), never on intermediate tool-calling steps.
+//
+// There is no output rail: answers are not scanned, and nothing holds an answer
+// back to judge it whole.
 //
 // Gating applies to explicit foreground main-thread queries and skips empty or
 // slash-command input.
@@ -710,26 +662,8 @@ func wrapGuardrailsLLM(inner llm.LLM, cfg *appcfg.Root, dedup *guardrailRunDedup
 		return nil
 	}
 
-	outputGuard := func(ctx context.Context, result *llm.Result) error {
-		if !r.OutputEnabled {
-			return nil
-		}
-		if result == nil || result.Message == nil {
-			return nil
-		}
-		if len(result.Message.ToolCalls) > 0 {
-			return nil // intermediate tool-calling step; not a final answer
-		}
-		if !explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
-			return nil
-		}
-		_, err := safety.ApplyOutputRail(r, result.Message.TextContent())
-		return err
-	}
-
 	mw := safety.NewGuardrails(
 		safety.WithMessageGuard("input-rail", inputGuard),
-		safety.WithResultGuard("output-rail", outputGuard),
 	)
 	return llm.Use(inner, mw)
 }
@@ -921,12 +855,12 @@ type usageAccountingCompactor struct {
 	*usageAccountingLLM
 }
 
-func (w *usageAccountingCompactor) Compact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, mode llm.CompactMode) (*llm.CompactResult, error) {
+func (w *usageAccountingCompactor) Compact(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.CompactResult, error) {
 	if w == nil || w.usageAccountingLLM == nil || w.inner == nil {
 		return nil, nil
 	}
 	compactor := w.inner.(llm.ContextCompactor)
-	result, err := compactor.Compact(ctx, messages, tools, mode)
+	result, err := compactor.Compact(ctx, messages, tools)
 	if result != nil && result.Usage != nil {
 		if acc := internalLLMUsageAccumulatorFrom(ctx); acc != nil {
 			acc.ObserveUsage(*result.Usage)

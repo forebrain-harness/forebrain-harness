@@ -2258,7 +2258,22 @@ func TestSubagentCallFromStep(t *testing.T) {
 			want: &event.SubagentCall{Verb: "status", Tasks: []event.SubagentCallTask{{Index: 0, Key: "task-7"}}},
 		},
 		{
-			name: "status settled is the record itself",
+			// A status written after the live progress joined it: the record
+			// travels under its own key, and the card settles from it.
+			name: "status settled carries the record beside the progress",
+			evt: toolCall(completed, "subagent_status", queryInput(), mustJSON(map[string]any{
+				"record":   record("running", 0),
+				"progress": map[string]any{"phase": "running", "steps": 3},
+			})),
+			want: &event.SubagentCall{Verb: "status", Tasks: []event.SubagentCallTask{{
+				Index: 0, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",
+				Status: "running", ExecutionID: "exec-7", StartedAt: 1700000000,
+			}}},
+		},
+		{
+			// A status row recorded before the progress existed is the record
+			// itself, and a replayed transcript of it still renders.
+			name: "status settled of an older row is the record itself",
 			evt:  toolCall(completed, "subagent_status", queryInput(), mustJSON(record("running", 0))),
 			want: &event.SubagentCall{Verb: "status", Tasks: []event.SubagentCallTask{{
 				Index: 0, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",

@@ -12,6 +12,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
@@ -146,14 +147,45 @@ func TestConfigPanelListsEverySection(t *testing.T) {
 	}
 }
 
+// With no sandbox the panel lists nothing about approvals: the whole
+// 审批与沙箱 tab is gone with its two sections, and naming one of them directly
+// is answered like any other unknown section (owner 2026-10-31, plan 215 §3.4).
+func TestConfigPanelHidesTheApprovalSectionsWithoutASandbox(t *testing.T) {
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	session := newConfigPanelSession(nil)
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, nil, nil)
+
+	if len(selector.richItems) != 1 {
+		t.Fatalf("expected the section list alone, got %d pages", len(selector.richItems))
+	}
+	for _, item := range selector.richItems[0] {
+		if item.Category == configTabApproval {
+			t.Errorf("段 %q 在没有沙箱时仍在列表里", item.Label)
+		}
+	}
+	if _, ok := panelSectionSchemaFor("approval_preset"); ok {
+		t.Fatal("approval_preset must not resolve without a sandbox")
+	}
+	if _, ok := panelSectionSchemaFor("sandbox_workspace_write"); ok {
+		t.Fatal("sandbox_workspace_write must not resolve without a sandbox")
+	}
+	for _, name := range configSectionNames() {
+		if name == "approval_preset" || name == "sandbox_workspace_write" {
+			t.Fatalf("段 %q 仍在可用清单里", name)
+		}
+	}
+}
+
 // A tri-state boolean lands as true, and only a save writes anything: the
 // panel says when a change takes effect instead of applying it.
 func TestConfigPanelSavesATriStateBoolean(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
-		{label: "memories", ok: true},
-		{label: "使用记忆", ok: true},
+		{label: "features", ok: true},
+		{label: "记忆功能", ok: true},
 		{label: configBoolOnLabel, ok: true},
 		{label: configSaveRowLabel, ok: true},
 		{ok: false},
@@ -163,10 +195,10 @@ func TestConfigPanelSavesATriStateBoolean(t *testing.T) {
 		t.Fatalf("expected one write, got %d", len(session.writes))
 	}
 	write := session.writes[0]
-	if write.section != "memories" {
-		t.Fatalf("section = %q, want memories", write.section)
+	if write.section != "features" {
+		t.Fatalf("section = %q, want features", write.section)
 	}
-	if string(write.raw) != `{"use_memories":true}` {
+	if string(write.raw) != `{"memories":true}` {
 		t.Fatalf("raw = %s", write.raw)
 	}
 	if text := frameText(renderer); !strings.Contains(text, configSavedNotice) {
@@ -177,11 +209,11 @@ func TestConfigPanelSavesATriStateBoolean(t *testing.T) {
 // Clearing a switch deletes the key rather than storing false, because nil is
 // what selects the setting's default.
 func TestConfigPanelClearsAFieldToItsDefault(t *testing.T) {
-	session := newConfigPanelSession(map[string]string{"memories": `{"use_memories":false}`})
+	session := newConfigPanelSession(map[string]string{"features": `{"memories":false}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "memories", ok: true},
-		{label: "使用记忆", ok: true},
+		{label: "features", ok: true},
+		{label: "记忆功能", ok: true},
 		{label: configBoolUnsetLabel, ok: true},
 		{label: configSaveRowLabel, ok: true},
 		{ok: false},
@@ -250,8 +282,8 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 	session.writeErr = errStubConfigRefusal
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
-		{label: "memories", ok: true},
-		{label: "使用记忆", ok: true},
+		{label: "features", ok: true},
+		{label: "记忆功能", ok: true},
 		{label: configBoolOnLabel, ok: true},
 		{label: configSaveRowLabel, ok: true},
 		{ok: false},
@@ -294,7 +326,7 @@ func TestConfigPanelRejectsAnUnknownSectionName(t *testing.T) {
 		t.Fatalf("no picker may open for an unknown section, got %d", len(selector.richItems))
 	}
 	text := frameText(renderer)
-	if !strings.Contains(text, "不是已知配置段") || !strings.Contains(text, "sandbox_mode") {
+	if !strings.Contains(text, "不是已知配置段") || !strings.Contains(text, "approval_preset") {
 		t.Fatalf("frames:\n%s", text)
 	}
 }
@@ -320,14 +352,13 @@ func TestConfigPanelShowsAFileSectionReadOnly(t *testing.T) {
 }
 
 // A table is edited one row at a time, and a row holding a table opens its own
-// rows: permissions profiles, MCP servers and agent definitions all take this
-// one path.
+// rows: agent definitions, MCP servers and LSP servers all take this one path.
 func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
-	session := newConfigPanelSession(map[string]string{"permissions": `{"work":{"description":"旧"}}`})
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"work":{"description":"旧"}}}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "permissions", ok: true},
-		{label: "权限档案", ok: true},
+		{label: "agents", ok: true},
+		{label: "代理定义", ok: true},
 		{label: "work", ok: true},
 		{label: configRowOpenLabel, ok: true},
 		{label: "description", ok: true},
@@ -342,7 +373,7 @@ func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 	if len(session.writes) != 1 {
 		t.Fatalf("expected one write, got %d", len(session.writes))
 	}
-	if raw := string(session.writes[0].raw); raw != `{"work":{"description":"新"}}` {
+	if raw := string(session.writes[0].raw); raw != `{"definitions":{"work":{"description":"新"}}}` {
 		t.Fatalf("raw = %s", raw)
 	}
 }
@@ -398,11 +429,11 @@ func TestConfigPanelAddsToAnUnsetList(t *testing.T) {
 // Esc backs out one level at a time: from a row page to its parent, from a
 // section to the list, and from the list out of the panel.
 func TestConfigPanelEscBacksOutOneLevel(t *testing.T) {
-	session := newConfigPanelSession(map[string]string{"permissions": `{"work":{}}`})
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"work":{}}}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "permissions", ok: true},
-		{label: "权限档案", ok: true},
+		{label: "agents", ok: true},
+		{label: "代理定义", ok: true},
 		{ok: false}, // the row page closes
 		{ok: false}, // the section page closes
 	}, nil)
@@ -452,14 +483,14 @@ func TestConfigPanelWritesTheSectionAndLeavesTheFileAlone(t *testing.T) {
 	env.ConfigPath = cfgPath
 	session := &ChatSession{Env: env}
 
-	if err := session.UpdateConfigSection(ctx, "memories", json.RawMessage(`{"use_memories":true}`)); err != nil {
+	if err := session.UpdateConfigSection(ctx, "memories", json.RawMessage(`{"max_unused_days":30}`)); err != nil {
 		t.Fatalf("a loadable section must be storeable: %v", err)
 	}
 	snapshot, err := session.ConfigPanelSections(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(snapshot.Stored["memories"]); got != `{"use_memories":true}` {
+	if got := string(snapshot.Stored["memories"]); got != `{"max_unused_days":30}` {
 		t.Fatalf("stored memories = %s", got)
 	}
 	if body, err := os.ReadFile(cfgPath); err != nil || string(body) != seed {
@@ -479,7 +510,7 @@ func TestConfigPanelWritesTheSectionAndLeavesTheFileAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(after.Stored["memories"]); got != `{"use_memories":true}` {
+	if got := string(after.Stored["memories"]); got != `{"max_unused_days":30}` {
 		t.Fatalf("a refused write changed the row: %s", got)
 	}
 }
@@ -524,7 +555,7 @@ func jsonFieldNames(typ reflect.Type) []string {
 }
 
 // Every Root section has a descriptor, every descriptor names a Root section,
-// and the two kinds line up with the store's own section table: the 16 rows
+// and the two kinds line up with the store's own section table: the 11 rows
 // fb_config holds are editable, gateway and credentials are not.
 //
 // This is the panel's one hard constraint on new work: add a section to Root

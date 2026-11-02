@@ -1076,7 +1076,7 @@ func buildPlanModeReminder(planDir, planFile string, planExists bool, kind strin
 	if isSubagent {
 		if kind == "sparse" {
 			return fmt.Sprintf(
-				"Plan mode active (subagent). Write/edit plan files only inside %s - all other writes blocked. Use AskUserQuestion to clarify the approach.",
+				"Plan mode active (subagent). Write/edit plan files only inside %s (write_file creates the directory if it does not exist yet - do not create it with shell) - all other writes blocked. Use AskUserQuestion to clarify the approach.",
 				planDir,
 			)
 		}
@@ -1086,7 +1086,7 @@ You are a subagent operating in plan mode. You MUST NOT make any edits to the co
 
   %s
 
-Files directly in this directory are the ONLY files you are allowed to edit. All write_file/edit_file calls to paths outside this directory are blocked.
+Files directly in this directory are the ONLY files you are allowed to edit. The directory may not exist yet: write_file creates the directory on the first plan file, so do not create it with shell. All write_file/edit_file calls to paths outside this directory are blocked.
 
 ## Tool guidance in subagent plan mode
 
@@ -1114,11 +1114,11 @@ Files directly in this directory are the ONLY files you are allowed to edit. All
 			)
 		}
 		return fmt.Sprintf(
-			"Plan mode active. Write/edit plan files only inside %s - all other writes blocked. No plan file yet: create a NEW <descriptive-name>.md file (do NOT use plan.md). Call exit_plan_mode when plan ready.",
+			"Plan mode active. Write/edit plan files only inside %s - all other writes blocked. No plan file yet: create a NEW <descriptive-name>.md file (do NOT use plan.md; write_file creates the directory if it does not exist yet - do not create it with shell). Call exit_plan_mode when plan ready.",
 			planDir,
 		)
 	}
-	exists := "(no plan file exists yet - create a NEW <descriptive-name>.md file, e.g. 'add-auth-validation.md'. Do NOT name it plan.md)"
+	exists := "(no plan file exists yet - create a NEW <descriptive-name>.md file, e.g. 'add-auth-validation.md'. Do NOT name it plan.md. The directory may not exist yet: write_file creates the directory on the first plan file, so do not create it with shell)"
 	if planExists {
 		exists = fmt.Sprintf("(current plan file %s already has content - edit_file to refine it, or create a NEW .md file to start a fresh plan)", planFile)
 	}
@@ -2396,11 +2396,11 @@ func ContextOccupancy(ctx context.Context, store *state.SessionStore, sessionID 
 func ContextBudget(r *Runner, conversationSessionID string, subagent *agent.HistoryEntry, usage int) (event.TokenBudgetUpdatedPayload, bool) {
 	provider, model, _ := AgentModel(r, conversationSessionID, subagent)
 	limits, _ := llm.Lookup(provider, model)
-	explicitLimit := 0
-	if r != nil && r.AppCfg != nil {
-		explicitLimit = r.AppCfg.Compact.ModelAutoCompactTokenLimit
+	var cfg *appcfg.Root
+	if r != nil {
+		cfg = r.AppCfg
 	}
-	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{ExplicitLimit: explicitLimit})
+	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, CompactBudgetOptions(cfg))
 	if usage > 0 {
 		// A measured context reports unless the calculation itself produced
 		// nothing to show — the same condition the surface footers used

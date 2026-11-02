@@ -1,19 +1,8 @@
-export interface NetworkApprovalContext {
-  host: string
-  protocol: string
-}
-
-export interface NetworkPolicyAmendment {
-  host: string
-  action: 'allow' | 'deny'
-}
-
 export type ApprovalDecisionName =
   | 'accept'
   | 'accept_for_session'
   | 'accept_and_remember'
   | 'accept_with_execpolicy_amendment'
-  | 'apply_network_policy_amendment'
   | 'grant_for_turn'
   | 'grant_for_turn_with_strict_auto_review'
   | 'grant_for_session'
@@ -37,7 +26,6 @@ export interface ApprovalDecisionOption {
   decision: ApprovalDecisionName
   execpolicyAmendment?: string[]
   commandScope?: CommandApprovalScope
-  networkPolicyAmendment?: NetworkPolicyAmendment
 }
 
 export interface PermissionSuggestionRecord {
@@ -51,9 +39,6 @@ export interface PermissionSuggestionRecord {
   bypassSandbox?: boolean
   availableDecisions?: unknown[]
   proposedExecpolicyAmendment?: string[]
-  proposedNetworkPolicyAmendments?: NetworkPolicyAmendment[]
-  networkApprovalContext?: NetworkApprovalContext
-  networkPort?: number
   oneShotOnly?: boolean
 }
 
@@ -108,15 +93,6 @@ function normalizeDecision(input: unknown): ApprovalDecisionOption | null {
     const scope = normalizeCommandScope(readField(rememberValue as Record<string, unknown>, 'commandScope', 'command_scope'))
     return { decision: 'accept_and_remember', ...(scope ? { commandScope: scope } : {}) }
   }
-  const networkValue = readField(record, 'applyNetworkPolicyAmendment', 'apply_network_policy_amendment')
-  if (networkValue && typeof networkValue === 'object') {
-    const value = networkValue as Record<string, unknown>
-    const nested = readField(value, 'networkPolicyAmendment', 'network_policy_amendment')
-    const amendment = normalizeNetworkAmendment((nested && typeof nested === 'object' ? nested : value) as Record<string, unknown>)
-    if (amendment) {
-      return { decision: 'apply_network_policy_amendment', networkPolicyAmendment: amendment }
-    }
-  }
   return null
 }
 
@@ -125,12 +101,6 @@ function normalizeSuggestion(input: PermissionSuggestionRecord | null | undefine
   const record = input as PermissionSuggestionRecord & Record<string, unknown>
   const toolName = String(readField(record, 'permissionToolName', 'permission_tool_name') ?? '').trim()
   if (!toolName) return null
-  const proposedNetwork = arrayField(record, 'proposedNetworkPolicyAmendments', 'proposed_network_policy_amendments')
-    .map((item) => normalizeNetworkAmendment(item))
-    .filter((item): item is NetworkPolicyAmendment => item !== null)
-  const networkContextRaw = readField(record, 'networkApprovalContext', 'network_approval_context')
-  const networkApprovalContext = normalizeNetworkContext(networkContextRaw)
-  const networkPort = Number(readField(record, 'networkPort', 'network_port'))
   const prefixRuleContent = optionalString(readField(record, 'prefixRuleContent', 'prefix_rule_content'))
   return {
     permissionToolName: toolName,
@@ -141,9 +111,6 @@ function normalizeSuggestion(input: PermissionSuggestionRecord | null | undefine
     bypassSandbox: readField(record, 'bypassSandbox', 'bypass_sandbox') === true,
     availableDecisions: arrayField(record, 'availableDecisions', 'available_decisions'),
     proposedExecpolicyAmendment: commandTokenArray(readField(record, 'proposedExecpolicyAmendment', 'proposed_execpolicy_amendment')),
-    proposedNetworkPolicyAmendments: proposedNetwork,
-    ...(networkApprovalContext ? { networkApprovalContext } : {}),
-    ...(Number.isInteger(networkPort) && networkPort > 0 && networkPort <= 65535 ? { networkPort } : {}),
     oneShotOnly: readField(record, 'oneShotOnly', 'one_shot_only') === true,
   }
 }
@@ -177,23 +144,6 @@ function normalizeCommandScope(input: unknown): CommandApprovalScope | null {
     kind,
     ...(prefixes.length ? { prefixes } : {}),
   }
-}
-
-function normalizeNetworkAmendment(input: unknown): NetworkPolicyAmendment | null {
-  if (!input || typeof input !== 'object') return null
-  const record = input as Record<string, unknown>
-  const host = String(record.host ?? '').trim().toLowerCase().replace(/\.$/, '')
-  const action = String(record.action ?? '').trim().toLowerCase()
-  if (!host || (action !== 'allow' && action !== 'deny')) return null
-  return { host, action }
-}
-
-function normalizeNetworkContext(input: unknown): NetworkApprovalContext | null {
-  if (!input || typeof input !== 'object') return null
-  const record = input as Record<string, unknown>
-  const host = String(record.host ?? '').trim().toLowerCase().replace(/\.$/, '')
-  const protocol = String(record.protocol ?? '').trim()
-  return host && protocol ? { host, protocol } : null
 }
 
 function readField(record: Record<string, unknown>, camel: string, snake: string): unknown {

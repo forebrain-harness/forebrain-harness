@@ -593,8 +593,6 @@ type ToolApprovalRequest struct {
 	RequestedPermissions *safety.RequestPermissionsResponse
 	OneShotOnly          bool
 	AvailableDecisions   []safety.ApprovalDecisionOption
-	NetworkApproval      *safety.NetworkApprovalContext
-	NetworkPort          int
 	PlanReviewModels     []PlanReviewModelOption
 	PlanReviews          []PlanReviewNote
 	// ProjectType is the type of the conversation the gate belongs to. The
@@ -631,7 +629,6 @@ type ToolApprovalDecision struct {
 	Update                     *safety.PermissionUpdate
 	AskAnswerJSON              string
 	RequestPermissionsResponse *safety.RequestPermissionsResponse
-	NetworkPolicyAmendment     *safety.NetworkPolicyAmendment
 	ClearContext               bool
 	PlanOnly                   bool
 	DenyReason                 string
@@ -785,9 +782,9 @@ type StatusSource struct {
 	// SkillOffer is the resolved features.skill_offer value.
 	SkillOffer bool
 	// ContextUsage feeds the gauge: the same token count (the last API
-	// response's whole prompt) and explicit limit the surface's footer uses,
-	// so the two cannot disagree.
-	ContextUsage func() (tokenUsage, explicitLimit int)
+	// response's whole prompt) and the same budget options the surface's
+	// footer uses, so the two cannot disagree.
+	ContextUsage func() (tokenUsage int, budget state.TokenBudgetOptions)
 }
 
 // BuildStatusReport assembles the /status projection for a session. Errors in
@@ -844,11 +841,11 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 	}
 	// Usage tab.
 	estimated := 0
-	explicitLimit := 0
+	var budget state.TokenBudgetOptions
 	if src.ContextUsage != nil {
-		estimated, explicitLimit = src.ContextUsage()
+		estimated, budget = src.ContextUsage()
 	}
-	rep.Context = ContextGaugeOf(src.Provider, src.Model, estimated, explicitLimit)
+	rep.Context = ContextGaugeOf(src.Provider, src.Model, estimated, budget)
 	if src.RunStore != nil {
 		if totals, err := src.RunStore.SessionUsageForSession(ctx, sid); err == nil {
 			rep.Session = SessionUsageTotalsOf(totals)
@@ -1008,7 +1005,12 @@ func StatusFacts(rep StatusReport) []StatusFact {
 	add("Model", rep.ModelLine)
 	add("Endpoint", rep.Endpoint)
 	add("Permissions", RenderPermissionsLine(rep.Permissions))
-	add("Sandbox", rep.Sandbox)
+	// A machine with no sandbox has nothing to report about one: the row would
+	// say "not enforced" and a reason code, which is a fact about the host and
+	// not about this conversation (owner 2026-10-31, plan 215 §3.4).
+	if safety.SandboxAvailable() {
+		add("Sandbox", rep.Sandbox)
+	}
 	if counts := rep.MCP.Render(); counts != "" {
 		add("MCP servers", counts+" · /mcp")
 	}

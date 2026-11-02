@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { DOMWrapper, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { defineComponent, h, onMounted } from 'vue'
 
@@ -118,6 +118,90 @@ describe('App shell page key', () => {
     // the shell was on, so the new tenant gets a new one.
     expect(mounts).toHaveLength(2)
     expect(wrapper.find('[data-testid="probe"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+describe('App primary-agent pencil dialog', () => {
+  beforeAll(() => setLocale('zh'))
+
+  beforeEach(() => {
+    const { activeId, records } = usePrimaryAgents()
+    activeId.value = ''
+    records.value = []
+    vi.stubGlobal('matchMedia', () => ({
+      matches: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  /** The shell with a real modal behind it, attached to the document so the
+   * dialog's teleported body is reachable. */
+  async function mountShellWithModal(): Promise<VueWrapper> {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(App, {
+      attachTo: document.body,
+      global: { plugins: [router], directives: { tip }, stubs: { ChatDrawer: true } },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('edits the display name and the description; the name stays read-only', async () => {
+    vi.spyOn(forebrainApi, 'primaryAgents').mockResolvedValue(
+      roster('main') as PrimaryAgentsResponse,
+    )
+    const updated = {
+      activeId: 'main',
+      records: [
+        { ...agent('main', true), name: 'main', description: '' },
+        { ...agent('other'), name: '调研助手', description: '读论文、查资料、写调研摘要。' },
+      ],
+    } as PrimaryAgentsResponse
+    vi.spyOn(forebrainApi, 'primaryAgentUpdate').mockResolvedValue(updated)
+    const wrapper = await mountShellWithModal()
+    await vi.waitFor(() => expect(usePrimaryAgents().activeId.value).toBe('main'))
+
+    // Every row carries the pencil, main included: editing is not deleting.
+    // The dropdown teleports to the body, so the document is where its rows
+    // live.
+    await wrapper.find('[aria-label="主代理"]').trigger('click')
+    const pencils = [...document.querySelectorAll('[data-testid="agent-edit"]')]
+    expect(pencils).toHaveLength(2)
+
+    pencils[1].dispatchEvent(new Event('click', { bubbles: true }))
+    await flushPromises()
+    const id = document.querySelector('[data-testid="agent-edit-id"]') as HTMLInputElement
+    expect(id.readOnly).toBe(true)
+    expect(id.value).toBe('other')
+    const name = document.querySelector('[data-testid="agent-edit-name"]') as HTMLInputElement
+    const description = document.querySelector('[data-testid="agent-edit-description"]') as HTMLTextAreaElement
+    expect(name.value).toBe('')
+    expect(description.value).toBe('')
+
+    await new DOMWrapper(name).setValue('调研助手')
+    await new DOMWrapper(description).setValue('读论文、查资料、写调研摘要。')
+    await new DOMWrapper(document.querySelector('[data-testid="agent-edit-save"]') as HTMLElement).trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.primaryAgentUpdate).toHaveBeenCalledWith('other', {
+      name: '调研助手',
+      description: '读论文、查资料、写调研摘要。',
+    })
+    // The listing that answers is the record set; the dialog closes on it.
+    expect(usePrimaryAgents().records.value[1]?.name).toBe('调研助手')
+    expect(document.querySelector('[data-testid="agent-edit-save"]')).toBeNull()
     wrapper.unmount()
   })
 })

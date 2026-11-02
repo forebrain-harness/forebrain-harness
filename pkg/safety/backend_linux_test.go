@@ -135,6 +135,69 @@ func TestBuildBubblewrapArgsRebindsAllowedReadAfterDeny(t *testing.T) {
 	}
 }
 
+// TestBuildBubblewrapArgsDenyListBoundary pins the mount order a batch task's
+// deny-list boundary needs (plans/216): the whole root is a read-only bind, each
+// boundary root is a tmpfs over it, and the workspace and the skill roots are
+// bound back in *after* their parent — bubblewrap stacks later mounts on
+// earlier ones, so that order is what makes an exception an exception.
+func TestBuildBubblewrapArgsDenyListBoundary(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	workspace := filepath.Join(project, "tasks", "T", "1")
+	home := filepath.Join(base, "home")
+	skillRoots := filepath.Join(home, "skills")
+	for _, dir := range []string{workspace, skillRoots} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	args := buildBubblewrapArgs(&appcfg.Root{}, CommandRequest{
+		Command:                 "true",
+		Profile:                 ProfileWorkspaceWrite,
+		AdditionalReadablePaths: []string{string(filepath.Separator)},
+		AdditionalWritablePaths: []string{workspace},
+		ExclusiveWritablePaths:  true,
+		DeniedReadableRoots:     []string{home, project},
+		ReadableExceptions:      []string{workspace, skillRoots},
+		IncludePlatformDefaults: true,
+	}, workspace)
+
+	idx := func(want ...string) int {
+		for i := 0; i+len(want) <= len(args); i++ {
+			match := true
+			for j := range want {
+				if args[i+j] != want[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return i
+			}
+		}
+		return -1
+	}
+	rootRead := idx("--ro-bind", "/", "/")
+	homeDeny := idx("--tmpfs", home)
+	projectDeny := idx("--tmpfs", project)
+	workspaceBind := idx("--bind", workspace, workspace)
+	skillBind := idx("--ro-bind", skillRoots, skillRoots)
+	if rootRead < 0 || homeDeny < 0 || projectDeny < 0 || workspaceBind < 0 || skillBind < 0 {
+		t.Fatalf("expected the root read bind, both boundary masks and both exceptions, got: %v", args)
+	}
+	for name, at := range map[string]int{"the home mask": homeDeny, "the project mask": projectDeny} {
+		if at < rootRead {
+			t.Fatalf("%s must come after the root bind (last mount wins), root=%d mask=%d", name, rootRead, at)
+		}
+	}
+	for name, at := range map[string]int{"the workspace": workspaceBind, "the skill roots": skillBind} {
+		if at < homeDeny || at < projectDeny {
+			t.Fatalf("%s must be bound back after the masks, mask=%d/%d bind=%d", name, homeDeny, projectDeny, at)
+		}
+	}
+}
+
 func TestReadOnlyProfileBindsWorkspaceReadOnlyAndOmitsWriteGrants(t *testing.T) {
 	workspace := t.TempDir()
 	grant := t.TempDir()

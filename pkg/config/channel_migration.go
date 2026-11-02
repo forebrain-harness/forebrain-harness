@@ -79,7 +79,10 @@ func MigrateLegacyAgentChannels(path string) (LegacyChannelsMigration, error) {
 	if err := os.WriteFile(backup, raw, 0o600); err != nil {
 		return out, fmt.Errorf("back up %s: %w", p, err)
 	}
-	root, err := LoadPersisted(p)
+	// The whole file is rewritten here, so it is read whole: LoadPersisted
+	// sees only the supported keys (plan 207 §3.6), and a rewrite from it
+	// would drop the runtime sections this migration is not about.
+	root, err := LoadLegacyFileSections(p)
 	if err != nil {
 		return out, fmt.Errorf("load config to strip channels: %w", err)
 	}

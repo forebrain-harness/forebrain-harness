@@ -49,11 +49,6 @@ type ApprovalPolicy interface {
 	ApplyPermissionUpdate(safety.PermissionUpdate)
 }
 
-// ApprovalNetwork records a temporary network decision for one session.
-type ApprovalNetwork interface {
-	SetNetworkSessionDecision(string, safety.NetworkApprovalContext, int, bool)
-}
-
 // ApprovalStore persists approval actions.
 type ApprovalStore interface {
 	Get(context.Context, string) (*state.Action, error)
@@ -68,7 +63,6 @@ type ApprovalStore interface {
 type ApprovalReply struct {
 	Choice        string
 	Exec          safety.ExecPolicyAmendment
-	Network       *safety.NetworkPolicyAmendment
 	Permissions   *safety.RequestPermissionsResponse
 	Update        *safety.PermissionUpdate
 	Reason        string
@@ -187,7 +181,6 @@ func DeliverPlanReview(ctx context.Context, actions ApprovalStore, actionID stri
 type ApprovalService struct {
 	Actions ApprovalStore
 	Policy  ApprovalPolicy
-	Network ApprovalNetwork
 }
 
 // ApplyResolvedEffect replays the durable policy half of an approved action.
@@ -217,12 +210,11 @@ func (s ApprovalService) ApplyResolvedEffect(action *state.Action, runID string)
 		return nil
 	}
 	var answer struct {
-		Decision     string                         `json:"decision"`
-		Exec         safety.ExecPolicyAmendment     `json:"execpolicy_amendment"`
-		Network      *safety.NetworkPolicyAmendment `json:"network_policy_amendment"`
-		Update       *safety.PermissionUpdate       `json:"update"`
-		ClearContext bool                           `json:"clear_context"`
-		PlanOnly     bool                           `json:"plan_only"`
+		Decision     string                     `json:"decision"`
+		Exec         safety.ExecPolicyAmendment `json:"execpolicy_amendment"`
+		Update       *safety.PermissionUpdate   `json:"update"`
+		ClearContext bool                       `json:"clear_context"`
+		PlanOnly     bool                       `json:"plan_only"`
 	}
 	if raw := strings.TrimSpace(action.AnswerJSON); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &answer); err != nil {
@@ -234,7 +226,7 @@ func (s ApprovalService) ApplyResolvedEffect(action *state.Action, runID string)
 		choice = "accept"
 	}
 	effect, err := s.effect(action, choice, ApprovalReply{
-		Choice: choice, Exec: answer.Exec, Network: answer.Network,
+		Choice: choice, Exec: answer.Exec,
 		Update: answer.Update, ClearContext: answer.ClearContext, PlanOnly: answer.PlanOnly,
 	})
 	if err != nil {
@@ -301,7 +293,7 @@ func (s ApprovalService) Decide(ctx context.Context, actionID string, reply Appr
 		return ApprovalResult{}, fmt.Errorf("request_permissions_response is only valid for request_permissions actions")
 	}
 	if choice == "cancel" {
-		if len(reply.Exec) > 0 || reply.Network != nil {
+		if len(reply.Exec) > 0 {
 			return ApprovalResult{}, fmt.Errorf("policy amendments are not valid for cancel")
 		}
 		next, err := s.Actions.Cancel(ctx, act.ID, approvalReason(reply.Reason, "cancelled"))
@@ -312,13 +304,12 @@ func (s ApprovalService) Decide(ctx context.Context, actionID string, reply Appr
 		return ApprovalResult{}, err
 	}
 	answer, err := json.Marshal(struct {
-		Decision     string                         `json:"decision"`
-		Exec         safety.ExecPolicyAmendment     `json:"execpolicy_amendment,omitempty"`
-		Network      *safety.NetworkPolicyAmendment `json:"network_policy_amendment,omitempty"`
-		Update       *safety.PermissionUpdate       `json:"update,omitempty"`
-		ClearContext bool                           `json:"clear_context,omitempty"`
-		PlanOnly     bool                           `json:"plan_only,omitempty"`
-	}{Decision: choice, Exec: reply.Exec, Network: reply.Network, Update: reply.Update, ClearContext: reply.ClearContext, PlanOnly: reply.PlanOnly})
+		Decision     string                     `json:"decision"`
+		Exec         safety.ExecPolicyAmendment `json:"execpolicy_amendment,omitempty"`
+		Update       *safety.PermissionUpdate   `json:"update,omitempty"`
+		ClearContext bool                       `json:"clear_context,omitempty"`
+		PlanOnly     bool                       `json:"plan_only,omitempty"`
+	}{Decision: choice, Exec: reply.Exec, Update: reply.Update, ClearContext: reply.ClearContext, PlanOnly: reply.PlanOnly})
 	if err != nil {
 		return ApprovalResult{}, err
 	}
@@ -374,23 +365,22 @@ func sameApprovedReply(act *state.Action, choice string, reply ApprovalReply) bo
 		return err == nil && reflect.DeepEqual(got, want)
 	}
 	var answer struct {
-		Decision     string                         `json:"decision"`
-		Exec         safety.ExecPolicyAmendment     `json:"execpolicy_amendment"`
-		Network      *safety.NetworkPolicyAmendment `json:"network_policy_amendment"`
-		Update       *safety.PermissionUpdate       `json:"update"`
-		ClearContext bool                           `json:"clear_context"`
-		PlanOnly     bool                           `json:"plan_only"`
+		Decision     string                     `json:"decision"`
+		Exec         safety.ExecPolicyAmendment `json:"execpolicy_amendment"`
+		Update       *safety.PermissionUpdate   `json:"update"`
+		ClearContext bool                       `json:"clear_context"`
+		PlanOnly     bool                       `json:"plan_only"`
 	}
 	if json.Unmarshal([]byte(act.AnswerJSON), &answer) != nil {
-		return choice == "accept" && len(reply.Exec) == 0 && reply.Network == nil && reply.Update == nil && !reply.ClearContext && !reply.PlanOnly
+		return choice == "accept" && len(reply.Exec) == 0 && reply.Update == nil && !reply.ClearContext && !reply.PlanOnly
 	}
 	return answer.Decision == choice && reflect.DeepEqual(answer.Exec, reply.Exec) &&
-		reflect.DeepEqual(answer.Network, reply.Network) && reflect.DeepEqual(answer.Update, reply.Update) &&
+		reflect.DeepEqual(answer.Update, reply.Update) &&
 		answer.ClearContext == reply.ClearContext && answer.PlanOnly == reply.PlanOnly
 }
 
 func (s ApprovalService) decideAsk(ctx context.Context, act *state.Action, choice string, reply ApprovalReply) (ApprovalResult, error) {
-	if reply.Update != nil || len(reply.Exec) > 0 || reply.Network != nil || reply.Permissions != nil || reply.ClearContext || reply.PlanOnly {
+	if reply.Update != nil || len(reply.Exec) > 0 || reply.Permissions != nil || reply.ClearContext || reply.PlanOnly {
 		return ApprovalResult{}, fmt.Errorf("user_interaction does not accept approval policy options")
 	}
 	if choice == "cancel" {
@@ -409,7 +399,7 @@ func (s ApprovalService) decideAsk(ctx context.Context, act *state.Action, choic
 }
 
 func (s ApprovalService) decidePermissions(ctx context.Context, act *state.Action, choice string, reply ApprovalReply) (ApprovalResult, error) {
-	if len(reply.Exec) > 0 || reply.Network != nil || reply.Update != nil {
+	if len(reply.Exec) > 0 || reply.Update != nil {
 		return ApprovalResult{}, fmt.Errorf("request_permissions does not accept policy amendments")
 	}
 	validated, err := normalizedPermissionsDecision(act, choice, reply.Permissions)
@@ -425,7 +415,10 @@ func (s ApprovalService) decidePermissions(ctx context.Context, act *state.Actio
 }
 
 func normalizedPermissionsDecision(act *state.Action, choice string, response *safety.RequestPermissionsResponse) (safety.RequestPermissionsResponse, error) {
-	if choice != "grant_for_turn" && choice != "grant_for_turn_with_strict_auto_review" && choice != "grant_for_session" {
+	// The strict auto-review answer is not one of the options the service
+	// offers (plan 203), so a client that sends it is refused like any other
+	// name outside the list rather than quietly downgraded to a plain grant.
+	if choice != "grant_for_turn" && choice != "grant_for_session" {
 		return safety.RequestPermissionsResponse{}, fmt.Errorf("unsupported request_permissions decision %q", choice)
 	}
 	if act == nil {
@@ -440,10 +433,11 @@ func normalizedPermissionsDecision(act *state.Action, choice string, response *s
 	}
 	copy := *response
 	copy.Scope = safety.GrantScopeTurn
-	copy.StrictAutoReview = choice == "grant_for_turn_with_strict_auto_review"
+	// No surface offers strict auto review any more, and the answer that asked
+	// for it is refused above; the reviewer path stays as dead code, closed.
+	copy.StrictAutoReview = false
 	if choice == "grant_for_session" {
 		copy.Scope = safety.GrantScopeSession
-		copy.StrictAutoReview = false
 	}
 	return tool.ValidateRequestPermissionsResponseForAction(act.Kind, act.PayloadJSON, copy)
 }
@@ -458,9 +452,6 @@ func (s ApprovalService) effect(act *state.Action, choice string, reply Approval
 	if choice != "accept_with_execpolicy_amendment" && len(reply.Exec) > 0 {
 		return nil, fmt.Errorf("exec policy amendment is not valid for %q", choice)
 	}
-	if choice != "apply_network_policy_amendment" && reply.Network != nil {
-		return nil, fmt.Errorf("network policy amendment is not valid for %q", choice)
-	}
 	if choice == "accept" {
 		return func() {}, nil
 	}
@@ -469,62 +460,26 @@ func (s ApprovalService) effect(act *state.Action, choice string, reply Approval
 		return nil, err
 	}
 	suggestion := safety.BuildToolApprovalSuggestion(act.Kind, payload)
-	network, port := ParseNetworkApproval(act.PayloadJSON)
-	sessionID := act.SessionID
 	switch choice {
 	case "accept_for_session":
-		if network != nil {
-			if sessionID == "" || s.Network == nil {
-				return nil, fmt.Errorf("network session approval service is unavailable")
-			}
-			return func() { s.Network.SetNetworkSessionDecision(sessionID, *network, port, true) }, nil
-		}
 		if suggestion.OneShotOnly || (!strings.EqualFold(strings.TrimSpace(act.Kind), "apply_patch") &&
 			!strings.HasPrefix(strings.ToLower(strings.TrimSpace(suggestion.PermissionToolName)), "mcp__") && !safety.ApprovalFileTool(suggestion.PermissionToolName)) {
 			return nil, fmt.Errorf("accept_for_session is not available for %q", act.Kind)
 		}
 		return s.rememberEffect(act, payload, suggestion, safety.DestinationSession, nil)
 	case "accept_and_remember":
-		if network != nil {
-			return nil, fmt.Errorf("network approvals use a network policy amendment")
-		}
 		return s.rememberEffect(act, payload, suggestion, safety.DestinationLocalSettings, nil)
 	case "accept_with_execpolicy_amendment":
-		if network != nil || !strings.EqualFold(safety.CanonicalToolName(suggestion.PermissionToolName), "Bash") || safety.ToolApprovalHasAdditionalPermissions(payload) || len(reply.Exec) == 0 {
+		if !strings.EqualFold(safety.CanonicalToolName(suggestion.PermissionToolName), "Bash") || safety.ToolApprovalHasAdditionalPermissions(payload) || len(reply.Exec) == 0 {
 			return nil, fmt.Errorf("exec policy amendment is not available for %q", act.Kind)
 		}
 		return s.rememberEffect(act, payload, suggestion, safety.DestinationLocalSettings, reply.Exec)
-	case "apply_network_policy_amendment":
-		if network == nil || reply.Network == nil || (reply.Network.Action != safety.NetworkPolicyAllow && reply.Network.Action != safety.NetworkPolicyDeny) || normalizeNetworkHost(reply.Network.Host) != network.Host || s.Policy == nil {
-			return nil, fmt.Errorf("invalid network policy amendment")
-		}
-		behavior := safety.BehaviorAllow
-		if reply.Network.Action == safety.NetworkPolicyDeny {
-			behavior = safety.BehaviorDeny
-		}
-		update := safety.PermissionUpdate{Type: safety.UpdateAddRules, Destination: safety.DestinationLocalSettings, Behavior: behavior, Rules: []safety.PermissionRuleValue{{ToolName: safety.NetworkAccessPermissionTool, RuleContent: string(network.Protocol) + "://" + network.Host}}}
-		return func() { s.Policy.ApplyPermissionUpdate(update) }, nil
 	default:
 		return nil, fmt.Errorf("unsupported approval decision %q", choice)
 	}
 }
 
 func (s ApprovalService) updateEffect(act *state.Action, update safety.PermissionUpdate) (func(), error) {
-	network, port := ParseNetworkApproval(act.PayloadJSON)
-	if network != nil && update.Destination == safety.DestinationSession {
-		if err := ValidateNetworkSessionUpdate(update, *network, port); err != nil || s.Network == nil {
-			if err != nil {
-				return nil, err
-			}
-			return nil, fmt.Errorf("network session approval service is unavailable")
-		}
-		sessionID := act.SessionID
-		if sessionID == "" {
-			return nil, fmt.Errorf("network session approval is missing a session id")
-		}
-		allow := update.Behavior != safety.BehaviorDeny
-		return func() { s.Network.SetNetworkSessionDecision(sessionID, *network, port, allow) }, nil
-	}
 	normalized, err := tool.ValidateApprovalUpdateForAction(act.Kind, act.PayloadJSON, act.SessionID, update)
 	if err != nil {
 		return nil, err
@@ -662,43 +617,6 @@ func approvalReason(value, fallback string) string {
 	return fallback
 }
 
-func normalizeNetworkHost(host string) string {
-	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-}
-
-// NetworkResult translates a persisted network approval action.
-func NetworkResult(action *state.Action) (safety.NetworkApprovalDecision, bool) {
-	if action == nil {
-		return safety.NetworkApprovalDeny, false
-	}
-	switch action.Status {
-	case state.ActionApproved:
-		var answer struct {
-			Decision string                         `json:"decision"`
-			Network  *safety.NetworkPolicyAmendment `json:"network_policy_amendment"`
-		}
-		_ = json.Unmarshal([]byte(action.AnswerJSON), &answer)
-		switch strings.ToLower(strings.TrimSpace(answer.Decision)) {
-		case "accept_for_session":
-			return safety.NetworkApprovalAllowForSession, true
-		case "apply_network_policy_amendment":
-			if answer.Network != nil && answer.Network.Action == safety.NetworkPolicyDeny {
-				return safety.NetworkApprovalDenyForSession, true
-			}
-			return safety.NetworkApprovalAllowInFuture, true
-		default:
-			return safety.NetworkApprovalAllowOnce, true
-		}
-	case state.ActionDenied:
-		return safety.NetworkApprovalDeny, true
-	case state.ActionCancelled, state.ActionExpired, state.ActionError:
-		return safety.NetworkApprovalCancel, true
-	default:
-		return safety.NetworkApprovalDeny, false
-	}
-}
-
-// ActionClearedContext reports whether an approved action reset its context.
 func ActionClearedContext(action *state.Action) bool {
 	if action == nil || action.Status != state.ActionApproved {
 		return false
@@ -776,7 +694,6 @@ func BuildToolApprovalRequest(src ApprovalSource, eval ApprovalEvaluator) (ToolA
 		decisions = safety.WithoutPersistentCommandChoices(decisions)
 	}
 	raw := approvalInputJSON(src.ToolInput)
-	network, port := ParseNetworkApproval(raw)
 	req := ToolApprovalRequest{
 		SessionID:          strings.TrimSpace(src.SessionID),
 		ActionID:           strings.TrimSpace(src.ActionID),
@@ -796,8 +713,6 @@ func BuildToolApprovalRequest(src ApprovalSource, eval ApprovalEvaluator) (ToolA
 		ToolStepID:         strings.TrimSpace(src.ToolStepID),
 		OneShotOnly:        suggestion.OneShotOnly,
 		AvailableDecisions: decisions,
-		NetworkApproval:    network,
-		NetworkPort:        port,
 	}
 	setApprovalDestinations(&req, suggestion, blocked)
 	return req, suggestion, blocked
@@ -808,9 +723,6 @@ func setApprovalDestinations(req *ToolApprovalRequest, suggestion safety.ToolApp
 		return
 	}
 	switch {
-	case req.NetworkApproval != nil:
-		req.DestinationOptions = []safety.PermissionDestination{safety.DestinationSession, safety.DestinationLocalSettings}
-		req.SuggestedDestination = safety.DestinationLocalSettings
 	case suggestion.OneShotOnly:
 	case strings.EqualFold(req.ToolName, "apply_patch"):
 		req.DestinationOptions = []safety.PermissionDestination{safety.DestinationSession}
@@ -867,22 +779,6 @@ func normalizeApprovalInput(input any) any {
 	return input
 }
 
-// ParseNetworkApproval extracts validated network approval data from input.
-func ParseNetworkApproval(raw string) (*safety.NetworkApprovalContext, int) {
-	var payload struct {
-		Context *safety.NetworkApprovalContext `json:"network_approval_context"`
-		Port    int                            `json:"network_port"`
-	}
-	if json.Unmarshal([]byte(strings.TrimSpace(raw)), &payload) != nil || payload.Context == nil ||
-		strings.TrimSpace(payload.Context.Host) == "" || !payload.Context.Protocol.Valid() ||
-		payload.Port < 0 || payload.Port > 65535 {
-		return nil, 0
-	}
-	context := *payload.Context
-	context.Host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(context.Host), "."))
-	return &context, payload.Port
-}
-
 // RequestPermissionsFromJSON decodes the canonical request_permissions input,
 // resolving any relative grant paths against the turn's working directory.
 func RequestPermissionsFromJSON(ctx context.Context, kind, raw string) *safety.RequestPermissionsResponse {
@@ -907,24 +803,6 @@ func RequestPermissionsFromJSON(ctx context.Context, kind, raw string) *safety.R
 		return nil
 	}
 	return &response
-}
-
-// ValidateNetworkSessionUpdate ensures a session rule matches its approval.
-func ValidateNetworkSessionUpdate(update safety.PermissionUpdate, network safety.NetworkApprovalContext, port int) error {
-	if update.Type != safety.UpdateAddRules || update.Destination != safety.DestinationSession ||
-		(update.Behavior != safety.BehaviorAllow && update.Behavior != safety.BehaviorDeny) || len(update.Rules) != 1 {
-		return fmt.Errorf("unsupported network session update")
-	}
-	expected := string(network.Protocol) + "://" + network.Host
-	if port > 0 {
-		expected += fmt.Sprintf(":%d", port)
-	}
-	rule := update.Rules[0]
-	if !strings.EqualFold(strings.TrimSpace(rule.ToolName), safety.NetworkAccessPermissionTool) ||
-		strings.TrimSpace(rule.RuleContent) != expected || len(rule.CommandPrefix) > 0 || rule.BypassSandbox {
-		return fmt.Errorf("network session update does not match the pending destination")
-	}
-	return nil
 }
 
 const clearedResumeAnchor = "Context cleared by user. Proceed with the approved action."
@@ -1861,10 +1739,9 @@ func shellApprovalNarrative(toolName, toolInputJSON string) (description, reason
 		return "", ""
 	}
 	var input struct {
-		Description         string                         `json:"description"`
-		Justification       string                         `json:"justification"`
-		SandboxDenialReason string                         `json:"sandbox_denial_reason"`
-		NetworkApproval     *safety.NetworkApprovalContext `json:"network_approval_context"`
+		Description         string `json:"description"`
+		Justification       string `json:"justification"`
+		SandboxDenialReason string `json:"sandbox_denial_reason"`
 	}
 	if err := json.Unmarshal([]byte(toolInputJSON), &input); err != nil {
 		return "", ""
@@ -1874,8 +1751,6 @@ func shellApprovalNarrative(toolName, toolInputJSON string) (description, reason
 	if reason == "" {
 		if denial := strings.TrimSpace(input.SandboxDenialReason); denial != "" {
 			reason = "The command was blocked by the sandbox: " + denial
-		} else if input.NetworkApproval != nil {
-			reason = fmt.Sprintf("Network access to %q is blocked by policy.", strings.TrimSpace(input.NetworkApproval.Host))
 		}
 	}
 	return description, reason

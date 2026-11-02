@@ -101,7 +101,7 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 	} else if rt != nil && rt.PermissionSnapshot != nil {
 		st.SetRuntimeValue("permission_snapshot", rt.PermissionSnapshot)
 	}
-	if rt != nil && memory.ReadPathEnabled(rt.Cfg) && !batchProject(rt) {
+	if rt != nil && memory.Enabled(rt.Cfg) && !batchProject(rt) {
 		// StateRoot, not Home: widening the read allowlist to a home-derived
 		// memory root would let this agent's read_file reach every other
 		// primary agent's memory. Scoped to this session's own project plus
@@ -158,7 +158,7 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 	t17.SetContainsExternalContext(true)
 	registerMeta(t17, "Use when you need current information from the public web (Tavily, Brave, Baidu Qianfan, or DeepSeek)", "web", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
 	var t21 *llm.Tool
-	if requestPermissionsToolEnabled(rt) && !batchProject(rt) {
+	if !batchProject(rt) {
 		t21, err = NewRequestPermissionsTool(st, rt)
 		if err != nil {
 			return err
@@ -204,10 +204,6 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 		_ = st.Register(a, tPresent)
 	}
 	return registerSessionAndMemoryTools(a, st, rt)
-}
-
-func requestPermissionsToolEnabled(rt *AgentToolRuntime) bool {
-	return rt != nil && rt.Cfg != nil && rt.Cfg.EffectiveFeatures().RequestPermissionsTool
 }
 
 // batchProject reports whether this tool runtime serves a batch conversation.
@@ -315,8 +311,17 @@ type AgentToolRuntime struct {
 	ProjectKey          string
 	// ProjectType is the session's project type; office and batch
 	// conversations register present_files, coding keeps today's tool set.
-	ProjectType                  string
-	Cfg                          *appcfg.Root
+	ProjectType string
+	// BatchSandbox is the batch project's sandbox switch (plans/216): with it
+	// off — and on a machine with no sandbox to begin with — a batch task's
+	// shell runs with full access instead of inside its task boundary.
+	BatchSandbox bool
+	Cfg          *appcfg.Root
+	// YOLO marks a call's result with the approvals-bypassed marker. It is
+	// the process-wide environment flag, not the conversation's preset: the
+	// marker exists so a session that ran under --yolo before presets were
+	// persisted can be recognised afterwards, and a preset-picked session
+	// already has its own stored row.
 	YOLO                         bool
 	Sess                         *state.SessionStore
 	Actions                      *state.ActionService

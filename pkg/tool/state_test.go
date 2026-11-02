@@ -11,31 +11,21 @@ import (
 	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
-	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 )
 
 func TestPerRunHooksOverrideSharedStateWithoutCrossRouting(t *testing.T) {
 	st := NewState(t.TempDir())
 	var fallbackSteps, firstSteps, secondSteps atomic.Int32
 	st.SetStepHook(func(context.Context, StepEvent) { fallbackSteps.Add(1) })
-	st.SetNetworkApprovalPromptHook(func(context.Context, string, map[string]any, safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-		return safety.NetworkApprovalDeny, nil
-	})
 	st.SetSubagentApprovalHook(func(ctx context.Context, _ *RequiresActionError) (context.Context, error) {
 		return context.WithValue(ctx, ctxKey("hook_result"), "fallback"), nil
 	})
 
 	first := WithStepHook(context.Background(), func(context.Context, StepEvent) { firstSteps.Add(1) })
-	first = WithNetworkApprovalPromptHook(first, func(context.Context, string, map[string]any, safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-		return safety.NetworkApprovalAllowOnce, nil
-	})
 	first = WithSubagentApprovalHook(first, func(ctx context.Context, _ *RequiresActionError) (context.Context, error) {
 		return context.WithValue(ctx, ctxKey("hook_result"), "first"), nil
 	})
 	second := WithStepHook(context.Background(), func(context.Context, StepEvent) { secondSteps.Add(1) })
-	second = WithNetworkApprovalPromptHook(second, func(context.Context, string, map[string]any, safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-		return safety.NetworkApprovalAllowForSession, nil
-	})
 	second = WithSubagentApprovalHook(second, func(ctx context.Context, _ *RequiresActionError) (context.Context, error) {
 		return context.WithValue(ctx, ctxKey("hook_result"), "second"), nil
 	})
@@ -45,15 +35,6 @@ func TestPerRunHooksOverrideSharedStateWithoutCrossRouting(t *testing.T) {
 	StepHookFromContext(context.Background(), st)(context.Background(), StepEvent{})
 	if firstSteps.Load() != 1 || secondSteps.Load() != 1 || fallbackSteps.Load() != 1 {
 		t.Fatalf("step routing first=%d second=%d fallback=%d", firstSteps.Load(), secondSteps.Load(), fallbackSteps.Load())
-	}
-	if got, _ := NetworkApprovalPromptHookFromContext(first, st)(first, "", nil, safety.NetworkApprovalRequest{}); got != safety.NetworkApprovalAllowOnce {
-		t.Fatalf("first network decision = %q", got)
-	}
-	if got, _ := NetworkApprovalPromptHookFromContext(second, st)(second, "", nil, safety.NetworkApprovalRequest{}); got != safety.NetworkApprovalAllowForSession {
-		t.Fatalf("second network decision = %q", got)
-	}
-	if got, _ := NetworkApprovalPromptHookFromContext(context.Background(), st)(context.Background(), "", nil, safety.NetworkApprovalRequest{}); got != safety.NetworkApprovalDeny {
-		t.Fatalf("fallback network decision = %q", got)
 	}
 	for _, tc := range []struct {
 		name string
@@ -168,15 +149,6 @@ func setContextShotForTest(st *State, sid string) {
 	st.mu.Unlock()
 }
 
-func setNetworkDecisionForTest(st *State, sid string) {
-	st.mu.Lock()
-	if st.networkSessionDecisions == nil {
-		st.networkSessionDecisions = make(map[string]map[networkSessionKey]bool)
-	}
-	st.networkSessionDecisions[sid] = make(map[networkSessionKey]bool)
-	st.mu.Unlock()
-}
-
 func setRuntimeModeForTest(st *State, sid string) {
 	st.mu.Lock()
 	if st.sessionRuntimeModes == nil {
@@ -214,20 +186,19 @@ func TestSessionIDsListsEverySessionKeyedMap(t *testing.T) {
 	}
 	setContextShotForTest(st, "s-shot")
 	st.RecordToolResultSpill(ToolResultSpill{SessionID: "s-spill", RunID: "r-2", Path: "/tmp/x"})
-	setNetworkDecisionForTest(st, "s-net")
 	setRuntimeModeForTest(st, "s-mode")
 
 	got := map[string]bool{}
 	for _, sid := range st.SessionIDs() {
 		got[sid] = true
 	}
-	for _, want := range []string{"s-shot", "s-spill", "s-net", "s-mode"} {
+	for _, want := range []string{"s-shot", "s-spill", "s-mode"} {
 		if !got[want] {
 			t.Fatalf("SessionIDs = %v, missing %s", got, want)
 		}
 	}
-	if len(got) != 4 {
-		t.Fatalf("SessionIDs = %v, want exactly the four sessions", got)
+	if len(got) != 3 {
+		t.Fatalf("SessionIDs = %v, want exactly the three sessions", got)
 	}
 }
 
@@ -236,7 +207,6 @@ func TestDropSessionsForgetsEverythingTheSessionLeft(t *testing.T) {
 	setContextShotForTest(st, "gone")
 	st.RecordToolResultSpill(ToolResultSpill{SessionID: "gone", RunID: "r-gone", Path: "/tmp/g"})
 	st.RecordToolResultSpill(ToolResultSpill{SessionID: "kept", RunID: "r-kept", Path: "/tmp/k"})
-	setNetworkDecisionForTest(st, "gone")
 	setRuntimeModeForTest(st, "gone")
 
 	if dropped := st.DropSessions([]string{"gone"}); dropped != 1 {
@@ -512,8 +482,10 @@ func TestReadPathDeniedInForBatch(t *testing.T) {
 	workspace := filepath.Join(project, "tasks", "T", "1")
 	sibling := filepath.Join(project, "tasks", "T2", "1")
 	home := filepath.Join(base, "home")
-	skillRoot := filepath.Join(home, "skills", "demo")
-	for _, dir := range []string{workspace, sibling, skillRoot, filepath.Join(home, "other")} {
+	skillRoots := filepath.Join(home, "skills")
+	skillRoot := filepath.Join(skillRoots, "demo")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{workspace, sibling, skillRoot, filepath.Join(home, "other"), outside} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -521,10 +493,13 @@ func TestReadPathDeniedInForBatch(t *testing.T) {
 	st := NewState(project)
 	st.ReplaceLoadedSkillCatalog([]LoadedSkill{{Name: "demo", RootDir: skillRoot}})
 	batchCtx := WithTaskWorkspace(context.Background(), workspace)
+	batchCtx = WithBatchBoundary(batchCtx, NewBatchBoundary(workspace, project, home, []string{skillRoots}))
 
 	for name, path := range map[string]string{
-		"the workspace":  filepath.Join(workspace, "inputs", "a.txt"),
-		"a shared skill": filepath.Join(skillRoot, "SKILL.md"),
+		"the workspace":               filepath.Join(workspace, "inputs", "a.txt"),
+		"a skill under the home":      filepath.Join(skillRoot, "SKILL.md"),
+		"a file outside the boundary": filepath.Join(outside, "notes.txt"),
+		"the system's own files":      "/etc/hosts",
 	} {
 		if st.ReadPathDeniedIn(batchCtx, path) {
 			t.Fatalf("%s must stay readable", name)
@@ -534,6 +509,7 @@ func TestReadPathDeniedInForBatch(t *testing.T) {
 		"the project root": filepath.Join(project, "shared.txt"),
 		"a sibling task":   filepath.Join(sibling, "secret.txt"),
 		"the home":         filepath.Join(home, "other", "private.txt"),
+		"the state file":   filepath.Join(home, "state", "forebrain.state.sqlite"),
 	} {
 		if !st.ReadPathDeniedIn(batchCtx, path) {
 			t.Fatalf("reading %s must be denied", name)
@@ -542,11 +518,17 @@ func TestReadPathDeniedInForBatch(t *testing.T) {
 	if !st.ReadDirPrunableIn(batchCtx, sibling) {
 		t.Fatal("a sibling task's directory is prunable in a batch walk")
 	}
+	if !st.ReadDirPrunableIn(batchCtx, filepath.Join(home, "other")) {
+		t.Fatal("a home directory with no exception under it is prunable")
+	}
 	if st.ReadDirPrunableIn(batchCtx, project) || st.ReadDirPrunableIn(batchCtx, workspace) {
 		t.Fatal("the project root is walkable down to the workspace, and the workspace itself is not prunable")
 	}
+	if st.ReadDirPrunableIn(batchCtx, skillRoots) {
+		t.Fatal("the skill roots hold the exceptions, so a walk of them must continue")
+	}
 
-	// Without a task workspace the runner's deny list answers, exactly as before.
+	// Without a boundary the runner's deny list answers, exactly as before.
 	denied := filepath.Join(project, "private")
 	st.SetReadPolicy([]string{denied}, nil, nil, project)
 	ordinaryCtx := WithProjectRoot(context.Background(), project)
@@ -555,5 +537,69 @@ func TestReadPathDeniedInForBatch(t *testing.T) {
 	}
 	if st.ReadPathDeniedIn(ordinaryCtx, filepath.Join(project, "shared.txt")) {
 		t.Fatal("a non-batch turn must not deny an undeniied path")
+	}
+}
+
+// TestBatchFileToolRefusesTheHomeWithoutAsking pins the other enforcement
+// layer of a batch task's boundary (plans/216 §3.1): a read the boundary denies
+// is refused outright rather than offered to the approval path. Outside a batch
+// turn the same file is asked about (a person can say yes); inside one there is
+// nobody to ask, and the answer would be no anyway.
+func TestBatchFileToolRefusesTheHomeWithoutAsking(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	workspace := filepath.Join(project, "tasks", "T", "1")
+	home := filepath.Join(base, "home")
+	skillRoots := filepath.Join(home, "skills")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{workspace, skillRoots, outside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile := func(path, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(filepath.Join(home, "forebrain.yaml"), "gateway:\n")
+	writeFile(filepath.Join(skillRoots, "demo", "SKILL.md"), "# demo\n")
+	writeFile(filepath.Join(outside, "notes.txt"), "outside notes")
+
+	st := NewState(project)
+	st.SetPrimaryWorkspaceBoundary(home, project, nil)
+	var asks atomic.Int32
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		asks.Add(1)
+		return "", false, nil
+	})
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	ctx := WithProjectRoot(context.Background(), project)
+	ctx = WithTaskWorkspace(ctx, workspace)
+	ctx = WithBatchBoundary(ctx, NewBatchBoundary(workspace, project, home, []string{skillRoots}))
+
+	body, _ := json.Marshal(map[string]any{"file_path": filepath.Join(home, "forebrain.yaml")})
+	if _, readErr := readTool.Handle(ctx, string(body)); readErr == nil {
+		t.Fatal("the boundary's own home must not be readable")
+	}
+	if got := asks.Load(); got != 0 {
+		t.Fatalf("a denied batch read asked for approval %d time(s); it must ask nobody", got)
+	}
+
+	for name, path := range map[string]string{
+		"a skill under the home":      filepath.Join(skillRoots, "demo", "SKILL.md"),
+		"a file outside the boundary": filepath.Join(outside, "notes.txt"),
+	} {
+		body, _ := json.Marshal(map[string]any{"file_path": path})
+		if _, readErr := readTool.Handle(ctx, string(body)); readErr != nil {
+			t.Fatalf("reading %s must succeed: %v", name, readErr)
+		}
 	}
 }

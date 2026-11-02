@@ -166,6 +166,10 @@ type ChatSession struct {
 	// before the environment: the owner lease must outlive the reaper that
 	// may still report on this process's behalf.
 	stopAbandonedRunReaper func()
+	// stopPeers ends this process's peer registration (plan 195): Close
+	// stops it with the reaper, before the environment it reads from goes
+	// away.
+	stopPeers func()
 
 	// planReviewerFactory overrides how a reviewer is built for a chosen model.
 	// Left nil outside tests, where the shared reviewer in pkg/process is used.
@@ -347,6 +351,29 @@ func (s *ChatSession) BatchProject(ctx context.Context) bool {
 	}
 	p, err := store.Get(ctx, projectID)
 	if err != nil {
+		return false
+	}
+	return state.NormalizeProjectType(p.ProjectType) == state.ProjectTypeBatch
+}
+
+// BatchFolderProject reports whether dir is the root of a batch project this
+// agent has registered (plans/216 §3.5). The launch asks before the folder is
+// adopted as a project, so the answer comes from the registry by root rather
+// than from the launch project the session does not have yet.
+func (s *ChatSession) BatchFolderProject(dir string) bool {
+	if s == nil || strings.TrimSpace(dir) == "" {
+		return false
+	}
+	store := s.projectStoreFor()
+	if store == nil {
+		return false
+	}
+	root, err := filepath.Abs(strings.TrimSpace(dir))
+	if err != nil {
+		return false
+	}
+	p, ok, err := store.GetByRoot(context.Background(), filepath.Clean(root))
+	if err != nil || !ok {
 		return false
 	}
 	return state.NormalizeProjectType(p.ProjectType) == state.ProjectTypeBatch
@@ -957,6 +984,12 @@ func (s *ChatSession) Close() error {
 	if s.stopAbandonedRunReaper != nil {
 		s.stopAbandonedRunReaper()
 		s.stopAbandonedRunReaper = nil
+	}
+	// The peer registration reads the same environment; it goes with the
+	// reaper.
+	if s.stopPeers != nil {
+		s.stopPeers()
+		s.stopPeers = nil
 	}
 	var errs []error
 	if s.chatLog != nil {
@@ -2185,7 +2218,7 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, compl
 	})
 }
 
-func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, imageRefusal error, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, batchInput *turn.BatchTurnInput, callerRendersReturnedError bool, out io.Writer) (retErr error) {
+func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, imageRefusal error, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, batchInput *turn.BatchTurnInput, callerRendersReturnedError bool, trigger string, out io.Writer) (retErr error) {
 	s.dispatchTurnMu.Lock()
 	defer s.dispatchTurnMu.Unlock()
 	foreground := foregroundTurnFrom(ctx)
@@ -2413,6 +2446,9 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		SkillPath:     skillPath,
 		Skills:        skills,
 		BatchInput:    batchInput,
+		// Trigger names what caused the turn to hooks and telemetry. Empty is
+		// an ordinary message the person sent; a peer message says so.
+		Trigger: trigger,
 	}, nil)
 	res := outcome.Result
 	runIDOut = outcome.RunID
@@ -2688,7 +2724,7 @@ func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string,
 			}})
 		}
 	}
-	for _, update := range preset.SessionUpdates(sessionID) {
+	for _, update := range preset.SessionUpdatesForLaunch(sessionID, s.runner().AppCfg, s.runner().LaunchProject) {
 		s.runner().ApplyPermissionUpdate(update)
 	}
 	cfg := safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession(sessionID))

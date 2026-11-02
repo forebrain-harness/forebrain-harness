@@ -10,9 +10,14 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
-func TestRequestPermissionsToolFeature(t *testing.T) {
+// The permission-request tool is offered to every interactive conversation and
+// to none of a batch task's (plan 203 fixed its switch on; the batch rule is
+// plans/150's). A batch task runs unattended, so a tool whose whole purpose is
+// to ask a person cannot be there.
+func TestRequestPermissionsRegistration(t *testing.T) {
 	newAgent := func(t *testing.T) *agent.Agent {
 		t.Helper()
 		a, err := agent.New(noopLLM{}, "test", "test")
@@ -26,45 +31,46 @@ func TestRequestPermissionsToolFeature(t *testing.T) {
 	if err := RegisterDefaultTools(newAgent(t), st, &AgentToolRuntime{Cfg: &appcfg.Root{}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := st.ToolMetaByName("request_permissions"); ok {
-		t.Fatal("request_permissions registered while feature is disabled")
-	}
-
-	st = NewState(t.TempDir())
-	cfg := &appcfg.Root{Features: appcfg.FeaturesSection{RequestPermissionsTool: appcfg.BoolPtr(true)}}
-	if err := RegisterDefaultTools(newAgent(t), st, &AgentToolRuntime{Cfg: cfg}); err != nil {
-		t.Fatal(err)
-	}
 	if _, ok := st.ToolMetaByName("request_permissions"); !ok {
-		t.Fatal("request_permissions missing while feature is enabled")
+		t.Fatal("request_permissions missing for an interactive conversation")
+	}
+
+	batch := NewState(t.TempDir())
+	if err := RegisterDefaultTools(newAgent(t), batch, &AgentToolRuntime{Cfg: &appcfg.Root{}, ProjectType: state.ProjectTypeBatch}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := batch.ToolMetaByName("request_permissions"); ok {
+		t.Fatal("request_permissions registered for an unattended batch task")
 	}
 }
 
-func TestShellAdditionalPermissionsFeature(t *testing.T) {
-	disabled, err := NewShellTool(NewState(t.TempDir()), &AgentToolRuntime{Cfg: &appcfg.Root{}})
+// The shell schema offers sandbox-external permissions unconditionally now:
+// there is no switch to turn them off, so a model that needs a path outside the
+// sandbox can always ask for it through the approval prompt.
+func TestShellAdditionalPermissionsAreAlwaysOffered(t *testing.T) {
+	shell, err := NewShellTool(NewState(t.TempDir()), &AgentToolRuntime{Cfg: &appcfg.Root{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	properties, _ := disabled.InputSchema()["properties"].(map[string]any)
-	if _, ok := properties["additional_permissions"]; ok {
-		t.Fatal("additional_permissions present while feature is disabled")
-	}
-	if _, err := disabled.Handle(context.Background(), `{"command":"true","sandbox_permissions":"with_additional_permissions","additional_permissions":{"network":{"enabled":true}}}`); err == nil {
-		t.Fatal("with_additional_permissions accepted while feature is disabled")
-	}
-
-	enabledCfg := &appcfg.Root{Features: appcfg.FeaturesSection{ExecPermissionApprovals: appcfg.BoolPtr(true)}}
-	enabled, err := NewShellTool(NewState(t.TempDir()), &AgentToolRuntime{Cfg: enabledCfg})
-	if err != nil {
-		t.Fatal(err)
-	}
-	properties, _ = enabled.InputSchema()["properties"].(map[string]any)
+	properties, _ := shell.InputSchema()["properties"].(map[string]any)
 	if _, ok := properties["additional_permissions"]; !ok {
-		t.Fatal("additional_permissions missing while feature is enabled")
+		t.Fatal("additional_permissions missing from the shell schema")
+	}
+	ctx := WithProjectRoot(context.Background(), t.TempDir())
+	in := &ShellInput{
+		Command:               "true",
+		SandboxPermissions:    safety.SandboxPermissionsWithAdditionalPermissions,
+		AdditionalPermissions: &safety.RequestPermissionProfile{Network: safety.NewNetworkPermissionProfile(true)},
+	}
+	if err := validateShellAdditionalPermissions(ctx, in, &AgentToolRuntime{Cfg: &appcfg.Root{}}); err != nil {
+		t.Fatalf("with_additional_permissions refused: %v", err)
 	}
 }
 
-func TestPermissionProfilePathsAreAvailableToInProcessFileTools(t *testing.T) {
+// A granted path outside the workspace is readable and writable by the
+// in-process file tools: the grant is what carries the permission now that
+// permission profiles are gone (plan 203).
+func TestGrantedPathsAreAvailableToInProcessFileTools(t *testing.T) {
 	project := t.TempDir()
 	external := t.TempDir()
 	readPath := filepath.Join(external, "read.txt")
@@ -72,18 +78,15 @@ func TestPermissionProfilePathsAreAvailableToInProcessFileTools(t *testing.T) {
 	if err := os.WriteFile(readPath, []byte("ok"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &appcfg.Root{
-		DefaultPermissions: "custom",
-		Permissions: appcfg.PermissionProfiles{"custom": {
-			FileSystem: &appcfg.FileSystemPermissions{Entries: map[string]appcfg.FileSystemPermissionValue{
-				readPath:  {Access: appcfg.FileSystemAccessRead},
-				writePath: {Access: appcfg.FileSystemAccessWrite},
-			}},
-		}},
-		SandboxMode: appcfg.SandboxModeWorkspaceWrite,
+	entry := func(path string, access safety.FileSystemPermissionAccess) safety.FileSystemPermissionEntry {
+		return safety.FileSystemPermissionEntry{Path: safety.NewFileSystemPermissionPath(path), Access: access}
 	}
+	snap := safety.Snapshot{FileSystemGrants: []safety.FileSystemPermissionGrant{
+		{Entry: entry(readPath, safety.FileSystemAccessRead), Scope: safety.GrantScopeSession},
+		{Entry: entry(writePath, safety.FileSystemAccessWrite), Scope: safety.GrantScopeSession},
+	}}
 	st := NewState(project)
-	ApplyFilesystemPolicy(st, project, project, cfg, safety.Snapshot{})
+	ApplyFilesystemPolicy(st, project, project, &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}, snap)
 	if got, err := resolveReadFilePath(context.Background(), st, readPath); err != nil || got.Abs != readPath {
 		t.Fatalf("read path=%q err=%v", got.Abs, err)
 	}
@@ -127,6 +130,25 @@ func TestBuiltinSubagentToolsTier(t *testing.T) {
 	// tells it not to use any.
 	if guardian := BuiltinSubagentToolsTier("guardian"); guardian != SubagentToolsNone {
 		t.Fatalf("guardian = %q, want %q", guardian, SubagentToolsNone)
+	}
+}
+
+// A custom subagent in pick mode is held to the tools it was given, except for
+// the pair it reports back with: talking to the agent that dispatched it is
+// structural, not one more capability to tick.
+func TestSubagentToolPolicyNeverBlocksPeerTools(t *testing.T) {
+	policy := SubagentToolPolicy{Mode: appcfg.SubagentToolsPick, Allowed: map[string]struct{}{"read_file": {}}}
+	if policy.Blocks("peer_send") {
+		t.Fatal("pick mode blocked peer_send: reporting back to the dispatcher is structural")
+	}
+	if policy.Blocks("peer_list") {
+		t.Fatal("pick mode blocked peer_list: naming the dispatcher is structural")
+	}
+	if !policy.Blocks("write_file") {
+		t.Fatal("pick mode let through a tool it did not select")
+	}
+	if !policy.Blocks("subagent_run") {
+		t.Fatal("every mode must keep the subagent family blocked")
 	}
 }
 

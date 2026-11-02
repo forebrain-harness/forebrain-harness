@@ -23,6 +23,12 @@ type SessionStore struct {
 	cwd          string
 	gitBranch    string
 	projectID    string
+	// approvalPreset is the global approval preset a session is born with
+	// (plan 203 §2b). It is copied into the new session's own permission row
+	// at creation and never read again for that session: afterwards the
+	// session's picker owns the row, which is why changing this value reaches
+	// only sessions created after it.
+	approvalPreset string
 
 	agentMu sync.RWMutex
 	agentID string
@@ -135,6 +141,28 @@ func (s *SessionStore) SetMemoryMode(memoryMode string) {
 	s.memoryMode = strings.TrimSpace(memoryMode)
 }
 
+// SetApprovalPresetDefault names the global approval preset (plan 203) that a
+// session created from now on is born with. An empty value is the
+// workspace-write default, which is what an install whose configuration has not
+// filled the setting in yet means.
+//
+// It shares the defaults lock with the other birth defaults and, like
+// SetMemoryMode, is safe to call from a configuration reload: the copy into a
+// session's row happens once, at creation, so a reload reaches only the
+// sessions born after it and never rewrites a choice a picker already made.
+func (s *SessionStore) SetApprovalPresetDefault(preset string) {
+	if s == nil {
+		return
+	}
+	preset = strings.TrimSpace(preset)
+	if preset == "" {
+		preset = SessionPresetWorkspaceWrite
+	}
+	s.defaultsMu.Lock()
+	defer s.defaultsMu.Unlock()
+	s.approvalPreset = preset
+}
+
 // ConfigureProjectDefault names the project a session is filed under when its
 // creator gave it none of its own. It is the project twin of
 // ConfigureMemoryDefaults and shares its lock: the interactive surface
@@ -214,9 +242,13 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	cwd := strings.TrimSpace(s.cwd)
 	branch := strings.TrimSpace(s.gitBranch)
 	defaultProject := strings.TrimSpace(s.projectID)
+	bornPreset := strings.TrimSpace(s.approvalPreset)
 	s.defaultsMu.RUnlock()
 	if mode == "" {
 		mode = "disabled"
+	}
+	if bornPreset == "" {
+		bornPreset = SessionPresetWorkspaceWrite
 	}
 	// Cwd and GitBranch are a pair. A session born with a directory carries
 	// that directory's branch too; a session born without one takes both
@@ -283,6 +315,25 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	}
 	if affected == 0 {
 		return fmt.Errorf("%w: %s", ErrSessionNotOwned, id)
+	}
+	// The session is born with the global approval preset (plan 203 §2b): the
+	// setting is the default a new session starts from, and it is copied into
+	// the session's own row here — in this same handle, so a session never
+	// exists for a moment without the posture it will run under. Two guards
+	// make the copy safe to run on every append: a batch task runs in its own
+	// fixed posture and gets no row at all, and an existing row (a picker's
+	// choice, a --yolo one, an inferred one) is never overwritten. The SELECT
+	// ends with a WHERE clause so SQLite binds ON CONFLICT to the insert.
+	nowMillis := time.Now().UnixMilli()
+	if _, err := q.ExecContext(ctx,
+		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT id, ?, ?, ? FROM fb_sessions
+		WHERE id=? AND agent_id=? AND project_type <> 'batch'
+			AND NOT EXISTS (SELECT 1 FROM fb_session_permission_state p WHERE p.session_id=?)
+		ON CONFLICT(session_id) DO NOTHING`,
+		bornPreset, SessionPresetSourceDefault, nowMillis, id, s.AgentID(), id,
+	); err != nil {
+		return fmt.Errorf("seed session approval preset: %w", err)
 	}
 	return nil
 }
@@ -710,6 +761,50 @@ type SessionSummary struct {
 	// SessionSourceWorkshop, or SessionSourceCron. The chat drawer filters
 	// on it.
 	Source string
+}
+
+// RecentSession is one row of the gateway process's peer listing: a
+// conversation this process could be reached through, and the directory it is
+// about (plan 195 §3.3) — the peer record's extension block names these as
+// the process's addressable primary agents.
+type RecentSession struct {
+	ID        string
+	Cwd       string
+	UpdatedAt int64
+}
+
+// RecentlyActiveSessions lists this agent's conversations touched since the
+// given time, newest first, leaving out batch executions — the batch runs
+// without a person's ear and refuses peer input anyway. Every source counts:
+// the question is which conversations this process can answer for, not which
+// surface opened them (plan 195 §3.3).
+func (s *SessionStore) RecentlyActiveSessions(ctx context.Context, since time.Time, limit int) ([]RecentSession, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 64
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, COALESCE(cwd, ''), updated_at
+		 FROM fb_sessions
+		 WHERE agent_id = ? AND updated_at >= ? AND project_type <> 'batch'
+		 ORDER BY updated_at DESC, id ASC
+		 LIMIT ?`,
+		s.AgentID(), since.Unix(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]RecentSession, 0, limit)
+	for rows.Next() {
+		var r RecentSession
+		if err := rows.Scan(&r.ID, &r.Cwd, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *SessionStore) ListChildSessionsRecent(ctx context.Context, parentSessionID string, limit int) ([]SessionSummary, error) {
@@ -1524,15 +1619,30 @@ func (s *SessionStore) LastAssistantTextForRun(ctx context.Context, runID string
 	return strings.TrimSpace(content), nil
 }
 
-// ListMemoryTranscriptMessages returns the append-only transcript without
-// applying model-context compaction or clear cursors. Memory extraction needs
-// the complete thread evidence, not only the current inference window.
-func (s *SessionStore) ListMemoryTranscriptMessages(ctx context.Context, sessionID string, limit int) ([]llm.Message, error) {
-	rows, err := s.listAllStoredMessages(ctx, sessionID, limit)
-	if err != nil {
-		return nil, err
+// ListMemoryTranscriptMessagesAfter returns the append-only transcript without
+// applying model-context compaction or clear cursors — memory extraction needs
+// the complete thread evidence, not only the current inference window — limited
+// to the rows stored after afterRowID (0 reads the whole transcript).
+//
+// The second result is the id of the last stored row read, or afterRowID when
+// nothing newer exists: it is the cursor an incremental extraction stores and
+// resumes from (plan 205 §3.4). Ordering is by that id, and the transcript is
+// append-only, so the id is a stable high-water mark — a later read with the
+// same cursor returns exactly the rows appended since, and a compaction
+// boundary or a context reset does not move it.
+func (s *SessionStore) ListMemoryTranscriptMessagesAfter(ctx context.Context, sessionID string, afterRowID int64) ([]llm.Message, int64, error) {
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return nil, 0, err
 	}
-	return messagesFromStoredRows(rows), nil
+	rows, err := s.listStoredMessagesSince(ctx, s.db, sessionID, afterRowID, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	lastRowID := afterRowID
+	if len(rows) > 0 {
+		lastRowID = rows[len(rows)-1].ID
+	}
+	return messagesFromStoredRows(rows), lastRowID, nil
 }
 
 func messagesFromStoredRows(rows []storedMessage) []llm.Message {
@@ -3350,6 +3460,10 @@ func (s *SessionStore) SessionFactsForModelDefault(ctx context.Context, sessionI
 // Session-preset sources, the "who set this row" half of
 // fb_session_permission_state. Backend and logs only — never a surface label.
 const (
+	// SessionPresetSourceDefault marks the row a session was born with: the
+	// global approval preset copied in at creation (plan 203 §2b). It is what
+	// tells an untouched session apart from one somebody chose for.
+	SessionPresetSourceDefault = "default"
 	// SessionPresetSourcePicker is a deliberate choice in a preset picker
 	// (web dropdown, /permissions).
 	SessionPresetSourcePicker = "picker"
@@ -3361,6 +3475,13 @@ const (
 	// as full-access instead of re-inferring on every read.
 	SessionPresetSourceObserved = "observed"
 )
+
+// SessionPresetWorkspaceWrite is the preset id a session is born with when the
+// install has no global preset of its own. It is the same wire value
+// pkg/config's ApprovalPresetWorkspaceWrite holds; it is repeated here because
+// this package stores the row and must not import the configuration to name a
+// default it writes on its own.
+const SessionPresetWorkspaceWrite = "workspace_write"
 
 // SaveSessionPermissionPreset stores the approval preset one session runs
 // under, last-write-wins, the persistence twin of the in-process session

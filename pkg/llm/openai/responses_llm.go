@@ -874,64 +874,43 @@ func agentMessageRawInput(message *llm.AgentMessageState) map[string]any {
 	return out
 }
 
-func (c *openAIResponsesLLM) Compact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, mode llm.CompactMode) (*llm.CompactResult, error) {
-	switch mode {
-	case llm.CompactModeRemoteV2:
-		params := c.newResponseParams(ctx, messages, tools, true)
-		// A synchronous request gives the same replacement semantics and avoids
-		// surfacing compaction bytes through the ordinary assistant stream.
-		resp, err := c.remoteV2CompactResponse(ctx, params)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateRemoteV2CompactionStatus(resp.Object, resp.Status); err != nil {
-			return nil, err
-		}
-		items := remoteCompactionItems(resp.Output)
-		if len(items) != 1 {
-			return nil, fmt.Errorf("openai responses remote v2: expected exactly one compaction item, got %d", len(items))
-		}
-		item := items[0]
-		if strings.TrimSpace(item.EncryptedContent) == "" {
-			return nil, errors.New("openai responses remote v2: compaction checkpoint missing encrypted_content")
-		}
-		replacement := compactWireOutputToReplacement(resp.Output)
-		if len(replacement) == 1 && replacement[0].Compaction != nil {
-			replacement = nil
-		}
-		if len(replacement) == 0 {
-			replacement = retainedRemoteMessages(messages, 64_000)
-			replacement = append(replacement, llm.Message{Compaction: &llm.CompactionState{
-				Type: item.Type, ID: item.ID, EncryptedContent: item.EncryptedContent,
-			}})
-		}
-		return &llm.CompactResult{Messages: replacement, Usage: openAIUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.InputTokensDetails.CachedTokens)}, nil
-	case llm.CompactModeRemoteV1:
-		params := c.newResponseParams(ctx, messages, tools, false)
-		var response struct {
-			Output []json.RawMessage `json:"output"`
-			Usage  struct {
-				InputTokens        int `json:"input_tokens"`
-				OutputTokens       int `json:"output_tokens"`
-				InputTokensDetails struct {
-					CachedTokens int `json:"cached_tokens"`
-				} `json:"input_tokens_details"`
-			} `json:"usage"`
-		}
-		if err := c.client.Post(ctx, "responses/compact", params, &response); err != nil {
-			return nil, err
-		}
-		replacement := compactWireOutputToReplacement(response.Output)
-		if len(replacement) == 0 {
-			return nil, errors.New("openai responses remote v1: empty replacement history")
-		}
-		return &llm.CompactResult{Messages: replacement, Usage: openAIUsage(int64(response.Usage.InputTokens), int64(response.Usage.OutputTokens), int64(response.Usage.InputTokensDetails.CachedTokens))}, nil
-	default:
-		return nil, fmt.Errorf("unsupported remote compaction mode %q", mode)
+// Compact asks for the provider's native checkpoint: an ordinary /responses
+// request carrying the compaction trigger, whose reply holds the one opaque
+// item that stands in for the history. That item can be replayed to this
+// provider only; see llm.ContextCompactor.
+func (c *openAIResponsesLLM) Compact(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.CompactResult, error) {
+	params := c.newResponseParams(ctx, messages, tools, true)
+	// A synchronous request gives the same replacement semantics and avoids
+	// surfacing compaction bytes through the ordinary assistant stream.
+	resp, err := c.remoteCompactResponse(ctx, params)
+	if err != nil {
+		return nil, err
 	}
+	if err := validateCompactionStatus(resp.Object, resp.Status); err != nil {
+		return nil, err
+	}
+	items := remoteCompactionItems(resp.Output)
+	if len(items) != 1 {
+		return nil, fmt.Errorf("openai responses compaction: expected exactly one compaction item, got %d", len(items))
+	}
+	item := items[0]
+	if strings.TrimSpace(item.EncryptedContent) == "" {
+		return nil, errors.New("openai responses compaction: checkpoint missing encrypted_content")
+	}
+	replacement := compactWireOutputToReplacement(resp.Output)
+	if len(replacement) == 1 && replacement[0].Compaction != nil {
+		replacement = nil
+	}
+	if len(replacement) == 0 {
+		replacement = retainedRemoteMessages(messages, 64_000)
+		replacement = append(replacement, llm.Message{Compaction: &llm.CompactionState{
+			Type: item.Type, ID: item.ID, EncryptedContent: item.EncryptedContent,
+		}})
+	}
+	return &llm.CompactResult{Messages: replacement, Usage: openAIUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.InputTokensDetails.CachedTokens)}, nil
 }
 
-type remoteV2CompactResponse struct {
+type remoteCompactResponse struct {
 	Object string            `json:"object"`
 	Status string            `json:"status"`
 	Output []json.RawMessage `json:"output"`
@@ -950,15 +929,15 @@ type remoteCompactionItem struct {
 	EncryptedContent string `json:"encrypted_content"`
 }
 
-func (c *openAIResponsesLLM) remoteV2CompactResponse(ctx context.Context, params responses.ResponseNewParams) (*remoteV2CompactResponse, error) {
-	var resp remoteV2CompactResponse
+func (c *openAIResponsesLLM) remoteCompactResponse(ctx context.Context, params responses.ResponseNewParams) (*remoteCompactResponse, error) {
+	var resp remoteCompactResponse
 	if err := c.client.Post(ctx, "responses", params, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func validateRemoteV2CompactionStatus(object, status string) error {
+func validateCompactionStatus(object, status string) error {
 	object = strings.TrimSpace(object)
 	status = strings.TrimSpace(status)
 	if status == "" {

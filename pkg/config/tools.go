@@ -18,7 +18,17 @@ type WebSearchDeepSeek struct {
 	APIKey string `yaml:"api_key,omitempty" json:"api_key"`
 }
 
+// WebSearchProviderNone is the stored agents.defaults.web_search.provider of an
+// install that chose no service. It means exactly what the empty value meant
+// before plan 207 started writing the setting into the database: the runtime
+// picks the first provider it has a key for, so an install that never chose one
+// keeps working. The web settings page shows it as 「不启用」.
+const WebSearchProviderNone = "none"
+
 type WebSearchConfig struct {
+	// Provider selects the search service: none, tavily, brave, baidu or
+	// deepseek. Empty is the same as none and is only what a configuration
+	// written before plan 207 still carries.
 	Provider string             `yaml:"provider,omitempty" json:"provider"`
 	Tavily   *WebSearchTavily   `yaml:"tavily,omitempty" json:"tavily,omitempty"`
 	Brave    *WebSearchBrave    `yaml:"brave,omitempty" json:"brave,omitempty"`
@@ -37,11 +47,19 @@ type WebFetchDeepSeek struct {
 	APIKey string `yaml:"api_key,omitempty" json:"api_key"`
 }
 
+// WebFetchProviderBuiltin is the stored agents.defaults.web_fetch.provider of an
+// install fetching through the built-in direct HTTP fetcher — the value the web
+// settings page shows as 「内置抓取」, and the meaning the empty value had before
+// plan 207 started writing it into the database.
+const WebFetchProviderBuiltin = "builtin"
+
 type WebFetchConfig struct {
-	// Provider selects the fetch path. Empty means the built-in direct HTTP
-	// fetcher and is never auto-routed away from: only an explicit "deepseek"
-	// switches fetches to DeepSeek's Fetch API (server-side rendering to
-	// Markdown), so an unchanged install keeps its default behavior.
+	// Provider selects the fetch path: builtin or deepseek. Empty is the same
+	// as builtin and is only what a configuration written before plan 207
+	// still carries. The built-in fetcher is never auto-routed away from: only
+	// an explicit "deepseek" switches fetches to DeepSeek's Fetch API
+	// (server-side rendering to Markdown), so an unchanged install keeps its
+	// default behavior.
 	Provider       string            `yaml:"provider,omitempty" json:"provider"`
 	DeepSeek       *WebFetchDeepSeek `yaml:"deepseek,omitempty" json:"deepseek,omitempty"`
 	AllowPrivateIP bool              `yaml:"allow_private_ip,omitempty" json:"allow_private_ip"`
@@ -98,11 +116,33 @@ type TokenizerOverride struct {
 	Path      string `yaml:"path,omitempty" json:"path,omitempty"`           // an absolute path to a local tokenizer.json
 }
 
+// The context-pressure warning fires when this share of the effective input
+// window is all that is left. It is the only pressure threshold: pressure has
+// two levels, ok and warn.
+const (
+	MinWarnRemainingPercent     = 1
+	MaxWarnRemainingPercent     = 50
+	DefaultWarnRemainingPercent = 12
+)
+
 type ContextInjectConfig struct {
 	MaxPreHookRulesChars int `yaml:"max_pre_hook_rules_chars,omitempty" json:"max_pre_hook_rules_chars,omitempty"`
-	ModelContextTokens   int `yaml:"model_context_tokens,omitempty" json:"model_context_tokens,omitempty"`
-	WarnRemainingTokens  int `yaml:"warn_remaining_tokens,omitempty" json:"warn_remaining_tokens,omitempty"`
-	BlockRemainingTokens int `yaml:"block_remaining_tokens,omitempty" json:"block_remaining_tokens,omitempty"`
+	// ModelContextTokens is the configured context window, used when the model
+	// catalog knows no window for the model in play. Both the auto-compaction
+	// threshold and the pressure warning measure against it as a fallback.
+	ModelContextTokens int `yaml:"model_context_tokens,omitempty" json:"model_context_tokens,omitempty"`
+	// WarnRemainingPercent is the share of the effective input window that may
+	// be left before the context warning fires. Unset (0) selects the default.
+	WarnRemainingPercent int `yaml:"warn_remaining_percent,omitempty" json:"warn_remaining_percent,omitempty"`
+}
+
+// EffectiveWarnRemainingPercent is the share of the window that may be left
+// before the warning fires: the configured percent, or the default when unset.
+func (c ContextInjectConfig) EffectiveWarnRemainingPercent() int {
+	if c.WarnRemainingPercent > 0 {
+		return c.WarnRemainingPercent
+	}
+	return DefaultWarnRemainingPercent
 }
 
 func (c ContextInjectConfig) MaxPreHookRulesCharsOr(defaultN int) int {

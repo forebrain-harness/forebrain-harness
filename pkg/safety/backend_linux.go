@@ -4,26 +4,17 @@ package safety
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
 	"syscall"
-	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
-	"golang.org/x/sys/unix"
 )
 
 func runBubblewrapCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
@@ -39,15 +30,7 @@ func runBubblewrapCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequ
 	for _, marker := range markers {
 		req.DeniedReadablePaths = appendUniquePath(req.DeniedReadablePaths, marker.path)
 	}
-	var bridge *linuxNetworkBridge
-	if req.ManagedNetwork != nil {
-		bridge, err = prepareLinuxNetworkBridge(*req.ManagedNetwork)
-		if err != nil {
-			return CommandResult{}, err
-		}
-		defer bridge.close()
-	}
-	cmd := exec.Command(bwrapPath, buildBubblewrapArgsWithBridge(cfg, req, workDir, bridge)...)
+	cmd := exec.Command(bwrapPath, buildBubblewrapArgs(cfg, req, workDir)...)
 	cmd.Env = home.SafeSubprocessEnv(nil, home.Options{ExplicitEnv: explicitCommandEnv(req.Env, nil)})
 	capture := newCommandCapture(req)
 	cmd.Stdout = capture.writer(OutputStreamStdout)
@@ -87,23 +70,8 @@ func finalizeExec(res CommandResult, err, stopErr error) (CommandResult, error) 
 	return res, err
 }
 
-func lookBubblewrap() (string, error) {
-	if p, err := exec.LookPath("bwrap"); err == nil {
-		return p, nil
-	}
-	return exec.LookPath("bubblewrap")
-}
-
 func buildBubblewrapArgs(cfg *appcfg.Root, req CommandRequest, workDir string) []string {
-	return buildBubblewrapArgsWithBridge(cfg, req, workDir, nil)
-}
-
-func buildBubblewrapArgsWithBridge(cfg *appcfg.Root, req CommandRequest, workDir string, bridge *linuxNetworkBridge) []string {
 	args := bubblewrapBaseArgs(cfg, req, workDir)
-	if bridge != nil {
-		args = append(args, "--ro-bind", bridge.dir, bridge.dir)
-		return append(args, bridge.helperPath, linuxNetworkBridgeArgument, bridge.encodedSpec, "/bin/sh", "-lc", req.Command)
-	}
 	return append(args, "/bin/sh", "-lc", req.Command)
 }
 
@@ -116,7 +84,7 @@ func bubblewrapBaseArgs(cfg *appcfg.Root, req CommandRequest, workDir string) []
 		"--unshare-uts",
 		"--unshare-ipc",
 	}
-	if !req.AllowNetwork || req.ManagedNetwork != nil {
+	if !req.AllowNetwork {
 		args = append(args, "--unshare-net")
 	}
 	if filesystemRulesContainRootRead(req) {
@@ -176,6 +144,17 @@ func appendFilesystemPolicyArgs(args []string, req CommandRequest) []string {
 	}
 	for _, path := range req.DeniedReadablePaths {
 		rules = append(rules, filesystemMountRule{path: path, access: filesystemMountDeny, priority: 3})
+	}
+	// A deny-list request's boundary roots are denied the same way as a
+	// deny_read entry: a tmpfs over each one. Its readable exceptions are
+	// ordinary read rules, and the depth-sorted mount order is what makes them
+	// exceptions at all — bubblewrap stacks later mounts on earlier ones, so a
+	// bind nested under a tmpfs re-opens exactly that subpath (plans/216).
+	for _, path := range req.DeniedReadableRoots {
+		rules = append(rules, filesystemMountRule{path: path, access: filesystemMountDeny, priority: 3})
+	}
+	for _, path := range req.ReadableExceptions {
+		rules = append(rules, filesystemMountRule{path: path, access: filesystemMountRead, priority: 0})
 	}
 
 	normalized := make([]filesystemMountRule, 0, len(rules))
@@ -263,316 +242,6 @@ func deniedDirHasNestedRule(rules []filesystemMountRule, dir string) bool {
 		return true
 	}
 	return false
-}
-
-const linuxNetworkBridgeArgument = "__forebrain_internal_network_bridge__"
-
-type linuxNetworkBridgeSpec struct {
-	Routes []linuxNetworkBridgeRoute `json:"routes"`
-}
-
-type linuxNetworkBridgeRoute struct {
-	Port       int    `json:"port"`
-	StreamPath string `json:"stream_path"`
-	PacketPath string `json:"packet_path"`
-}
-
-type linuxNetworkBridge struct {
-	dir         string
-	helperPath  string
-	encodedSpec string
-	closers     []io.Closer
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-}
-
-func prepareLinuxNetworkBridge(command ManagedNetworkCommand) (*linuxNetworkBridge, error) {
-	ports := []int{command.HTTPPort, command.SOCKSPort, command.SOCKSUDPPort}
-	seen := map[int]struct{}{}
-	valid := ports[:0]
-	for _, port := range ports {
-		if port <= 0 || port > 65535 {
-			continue
-		}
-		if _, ok := seen[port]; ok {
-			continue
-		}
-		seen[port] = struct{}{}
-		valid = append(valid, port)
-	}
-	if len(valid) == 0 {
-		return nil, fmt.Errorf("managed proxy mode requires loopback proxy endpoints")
-	}
-	sort.Ints(valid)
-	dir, err := os.MkdirTemp("", "forebrain-network-bridge-")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, err
-	}
-	bridge := &linuxNetworkBridge{dir: dir}
-	ctx, cancel := context.WithCancel(context.Background())
-	bridge.cancel = cancel
-	spec := linuxNetworkBridgeSpec{}
-	for index, port := range valid {
-		route := linuxNetworkBridgeRoute{
-			Port:       port,
-			StreamPath: filepath.Join(dir, "stream-"+strconv.Itoa(index)+".sock"),
-			PacketPath: filepath.Join(dir, "packet-"+strconv.Itoa(index)+".sock"),
-		}
-		streamListener, err := net.ListenUnix("unix", &net.UnixAddr{Name: route.StreamPath, Net: "unix"})
-		if err != nil {
-			bridge.close()
-			return nil, err
-		}
-		_ = os.Chmod(route.StreamPath, 0o600)
-		packetListener, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: route.PacketPath, Net: "unixgram"})
-		if err != nil {
-			_ = streamListener.Close()
-			bridge.close()
-			return nil, err
-		}
-		_ = os.Chmod(route.PacketPath, 0o600)
-		bridge.closers = append(bridge.closers, streamListener, packetListener)
-		bridge.wg.Add(2)
-		go bridge.runHostStreamBridge(ctx, streamListener, port)
-		go bridge.runHostPacketBridge(ctx, packetListener, port)
-		spec.Routes = append(spec.Routes, route)
-	}
-	helperPath := filepath.Join(dir, "bridge-helper")
-	if err := installBridgeHelper(helperPath); err != nil {
-		bridge.close()
-		return nil, err
-	}
-	bridge.helperPath = helperPath
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		bridge.close()
-		return nil, err
-	}
-	bridge.encodedSpec = base64.RawURLEncoding.EncodeToString(raw)
-	return bridge, nil
-}
-
-func installBridgeHelper(target string) error {
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if err := os.Link(executable, target); err == nil {
-		return nil
-	}
-	source, err := os.Open(executable)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-	destination, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(destination, source)
-	closeErr := destination.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
-}
-
-func (bridge *linuxNetworkBridge) close() {
-	if bridge == nil {
-		return
-	}
-	if bridge.cancel != nil {
-		bridge.cancel()
-	}
-	for _, closer := range bridge.closers {
-		_ = closer.Close()
-	}
-	bridge.wg.Wait()
-	if bridge.dir != "" {
-		_ = os.RemoveAll(bridge.dir)
-	}
-}
-
-func (bridge *linuxNetworkBridge) runHostStreamBridge(ctx context.Context, listener *net.UnixListener, port int) {
-	defer bridge.wg.Done()
-	for {
-		unixConn, err := listener.AcceptUnix()
-		if err != nil {
-			return
-		}
-		go func() {
-			tcpConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-			if err != nil {
-				_ = unixConn.Close()
-				return
-			}
-			proxyTunnel(unixConn, tcpConn)
-		}()
-	}
-}
-
-func (bridge *linuxNetworkBridge) runHostPacketBridge(ctx context.Context, listener *net.UnixConn, port int) {
-	defer bridge.wg.Done()
-	buffer := make([]byte, 65535)
-	for {
-		count, peer, err := listener.ReadFromUnix(buffer)
-		if err != nil {
-			return
-		}
-		packet := append([]byte(nil), buffer[:count]...)
-		go func() {
-			upstream, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
-			if err != nil {
-				return
-			}
-			defer upstream.Close()
-			_ = upstream.SetDeadline(deadlineFromContext(ctx))
-			if _, err := upstream.Write(packet); err != nil {
-				return
-			}
-			response := make([]byte, 65535)
-			count, err := upstream.Read(response)
-			if err == nil {
-				_, _ = listener.WriteToUnix(response[:count], peer)
-			}
-		}()
-	}
-}
-
-func deadlineFromContext(ctx context.Context) time.Time {
-	if deadline, ok := ctx.Deadline(); ok {
-		return deadline
-	}
-	return time.Now().Add(30 * time.Second)
-}
-
-func RunInternalNetworkBridge() (int, bool) {
-	if len(os.Args) < 5 || os.Args[1] != linuxNetworkBridgeArgument {
-		return 0, false
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(os.Args[2])
-	if err != nil {
-		return 125, true
-	}
-	var spec linuxNetworkBridgeSpec
-	if json.Unmarshal(raw, &spec) != nil || len(spec.Routes) == 0 {
-		return 125, true
-	}
-	if err := enableLinuxLoopback(); err != nil {
-		return 125, true
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var closers []io.Closer
-	for _, route := range spec.Routes {
-		stream, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(route.Port)))
-		if err != nil {
-			return 125, true
-		}
-		packet, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: route.Port})
-		if err != nil {
-			_ = stream.Close()
-			return 125, true
-		}
-		closers = append(closers, stream, packet)
-		go runNamespaceStreamBridge(ctx, stream, route.StreamPath)
-		go runNamespacePacketBridge(ctx, packet, route.PacketPath)
-	}
-	command := exec.Command(os.Args[3], os.Args[4:]...)
-	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	command.Env = os.Environ()
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	signals := make(chan os.Signal, 4)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(signals)
-	if err := command.Start(); err != nil {
-		return 125, true
-	}
-	go func() {
-		for sig := range signals {
-			if signalValue, ok := sig.(syscall.Signal); ok {
-				_ = syscall.Kill(-command.Process.Pid, signalValue)
-			}
-		}
-	}()
-	err = command.Wait()
-	for _, closer := range closers {
-		_ = closer.Close()
-	}
-	if err == nil {
-		return 0, true
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode(), true
-	}
-	return 125, true
-}
-
-func enableLinuxLoopback() error {
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(fd)
-	request, err := unix.NewIfreq("lo")
-	if err != nil {
-		return err
-	}
-	if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, request); err != nil {
-		return err
-	}
-	request.SetUint16(request.Uint16() | unix.IFF_UP)
-	return unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, request)
-}
-
-func runNamespaceStreamBridge(ctx context.Context, listener net.Listener, path string) {
-	for {
-		client, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		go func() {
-			host, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
-			if err != nil {
-				_ = client.Close()
-				return
-			}
-			proxyTunnel(client, host)
-		}()
-	}
-}
-
-func runNamespacePacketBridge(ctx context.Context, listener *net.UDPConn, path string) {
-	buffer := make([]byte, 65535)
-	for {
-		count, client, err := listener.ReadFromUDP(buffer)
-		if err != nil {
-			return
-		}
-		packet := append([]byte(nil), buffer[:count]...)
-		go func() {
-			localPath := "@forebrain-packet-" + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-			unixConn, err := net.DialUnix("unixgram", &net.UnixAddr{Name: localPath, Net: "unixgram"}, &net.UnixAddr{Name: path, Net: "unixgram"})
-			if err != nil {
-				return
-			}
-			defer unixConn.Close()
-			_ = unixConn.SetDeadline(deadlineFromContext(ctx))
-			if _, err := unixConn.Write(packet); err != nil {
-				return
-			}
-			response := make([]byte, 65535)
-			count, err := unixConn.Read(response)
-			if err == nil {
-				_, _ = listener.WriteToUDP(response[:count], client)
-			}
-		}()
-	}
 }
 
 type linuxMissingDenyMarker struct {

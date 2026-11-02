@@ -298,6 +298,13 @@ export function mcpKeyValuePayload(
       payload[key] = MCP_REDACTED
       continue
     }
+    if (before === MCP_REDACTED && value === '') {
+      // A credential's 更换 box left blank keeps what is stored (plan 191
+      // §0.20) — a blank never removes a value the editor never let the
+      // operator see. Removing one is the row's delete button.
+      payload[key] = MCP_REDACTED
+      continue
+    }
     if (before === undefined && value === '') continue
     payload[key] = value
     changed = true

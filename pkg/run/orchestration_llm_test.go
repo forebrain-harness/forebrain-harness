@@ -285,10 +285,10 @@ func TestToolSchemasCountTowardOccupancy(t *testing.T) {
 	// but the tiny message alone does not.
 	modelLimit := int(float64(schemaTokens) * 1.05)
 	msgs := []llm.Message{llm.UserMessage(llm.Text("hi"))}
-	if shouldCompactMessages(msgs, modelLimit, nil, -1, nil, "", "") {
+	if shouldCompactMessages(msgs, modelLimit, nil, nil, "", "") {
 		t.Fatal("tiny history without tools must not trigger compaction")
 	}
-	if !shouldCompactMessages(msgs, modelLimit, nil, -1, []*llm.Tool{tool}, "", "") {
+	if !shouldCompactMessages(msgs, modelLimit, nil, []*llm.Tool{tool}, "", "") {
 		t.Fatalf("tool schema (%d tokens) must push occupancy over the threshold (limit=%d)", schemaTokens, modelLimit)
 	}
 }
@@ -804,6 +804,31 @@ func TestExitPlanModeActionHookAlwaysRequiresApprovalUnderYOLO(t *testing.T) {
 	}
 }
 
+// A machine without a sandbox runs every conversation in full access, and that
+// is still not a licence to skip what a person decides: leaving plan mode stays
+// a question (owner 2026-10-31, plan 215 §3.3). The YOLO twin above is the same
+// rule from the other direction.
+func TestExitPlanModeActionHookAlwaysRequiresApprovalWithoutASandbox(t *testing.T) {
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	ctx := llm.WithAgentSessionID(context.Background(), "session-1")
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	defer db.Close()
+	ensureRunSessions(t, db, "session-1")
+
+	r := &Runner{Deps: &Deps{Actions: &state.ActionService{DB: db}}, permRuntime: safety.NewRuntimeWithStore(safety.NewStore())}
+	id, pending, err := r.actionHook(ctx, "exit_plan_mode", map[string]any{"session_id": "session-1", "force_tool_approval": true})
+	if err != nil {
+		t.Fatalf("actionHook: %v", err)
+	}
+	if !pending || id == "" {
+		t.Fatalf("no sandbox must not answer for exit_plan_mode: id=%q pending=%v", id, pending)
+	}
+}
+
 func TestForcedSandboxEscalationCannotOverrideDenyRule(t *testing.T) {
 	ctx := llm.WithAgentSessionID(context.Background(), "session-1")
 	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
@@ -1242,10 +1267,6 @@ func outsideWorkspaceRunner(t *testing.T, projectRoot string, mode safety.AskFor
 	permissionStore.SetApprovalPolicy(safety.ApprovalPolicy{Mode: mode})
 	cfg := &appcfg.Root{
 		SandboxMode: appcfg.SandboxModeWorkspaceWrite,
-		SandboxWorkspaceWrite: appcfg.SandboxWorkspaceWrite{
-			ExcludeTmpdirEnvVar: true,
-			ExcludeSlashTmp:     true,
-		},
 	}
 	st := toolpkg.NewState(projectRoot)
 	r := &Runner{Deps: &Deps{Actions: &state.ActionService{DB: db}, AppCfg: cfg, ProjectRoot: projectRoot}, permRuntime: safety.NewRuntimeWithStore(permissionStore), tools: st}
@@ -1265,7 +1286,18 @@ func outsideWorkspaceFile(t *testing.T) (projectRoot, target string) {
 	if err := os.WriteFile(target, []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	moveSandboxTempRootOff(t)
 	return projectRoot, target
+}
+
+// moveSandboxTempRootOff gives the sandbox a temp root that does not contain
+// the directories a test has already created. The sandbox's temp space is
+// writable by definition now (plan 206) and every test directory lives under
+// the process temp directory, so this is what leaves a target outside the
+// writable boundary — the shape the "outside the workspace" tests are about.
+func moveSandboxTempRootOff(t *testing.T) {
+	t.Helper()
+	t.Setenv("TMPDIR", t.TempDir())
 }
 
 func editOutsideWorkspace(t *testing.T, r *Runner, st *toolpkg.State, ctx context.Context, target string) (any, error) {
@@ -1375,6 +1407,7 @@ func TestEditInsideAnotherPrimaryWorkspaceStaysRefused(t *testing.T) {
 	if err := os.WriteFile(target, []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	moveSandboxTempRootOff(t)
 	r, st := outsideWorkspaceRunner(t, activeWS, safety.ApprovalOnRequest)
 	st.SetPrimaryWorkspaceBoundary(home, activeWS, []string{siblingWS})
 	ctx := llm.WithAgentSessionID(context.Background(), "session-1")
@@ -1593,49 +1626,6 @@ func (g *guardianScriptLLM) Execute(_ context.Context, messages []llm.Message, t
 	return &llm.Result{Message: &msg}, nil
 }
 
-func TestActionHookUsesGuardianForOnRequestButNotExitPlan(t *testing.T) {
-	client := &guardianScriptLLM{outputs: []string{`{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"requested"}`}}
-	store := safety.NewStore()
-	store.SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
-	permRT := safety.NewRuntimeWithStore(store)
-	permRT.SetGuardian(client, "")
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{ApprovalsReviewer: "auto_review"}}, permRuntime: permRT}
-	_, pending, err := runner.actionHook(context.Background(), "shell", map[string]any{
-		"command":             "make release",
-		"force_tool_approval": true,
-		"sandbox_permissions": "require_escalated",
-	})
-	if err != nil || pending {
-		t.Fatalf("guardian allow should proceed: pending=%v err=%v", pending, err)
-	}
-	if client.calls != 1 {
-		t.Fatalf("guardian calls=%d want=1", client.calls)
-	}
-	_, _, err = runner.actionHook(context.Background(), "exit_plan_mode", map[string]any{"session_id": "s1"})
-	if err == nil || !strings.Contains(err.Error(), "actions service is unavailable") {
-		t.Fatalf("exit_plan_mode must retain user approval path, got %v", err)
-	}
-	if client.calls != 1 {
-		t.Fatal("guardian must not review exit_plan_mode")
-	}
-}
-
-func TestRequestPermissionsGuardianDenialUsesEmptyGrantSignal(t *testing.T) {
-	client := &guardianScriptLLM{outputs: []string{`{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"not authorized"}`}}
-	store := safety.NewStore()
-	store.SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
-	permRT := safety.NewRuntimeWithStore(store)
-	permRT.SetGuardian(client, "")
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{ApprovalsReviewer: "auto_review"}}, permRuntime: permRT}
-	_, pending, err := runner.actionHook(context.Background(), "request_permissions", map[string]any{
-		"request_permissions": true,
-		"permissions":         map[string]any{"file_system": map[string]any{"read": []string{"/tmp/external"}}},
-	})
-	if pending || !errors.Is(err, toolpkg.ErrRequestPermissionsDenied) {
-		t.Fatalf("guardian denial must resolve to the dedicated empty-grant signal: pending=%v err=%v", pending, err)
-	}
-}
-
 func TestStrictAutoReviewForcesGuardianUnderNeverPolicy(t *testing.T) {
 	client := &guardianScriptLLM{outputs: []string{`{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"approved for this turn"}`}}
 	store := safety.NewStore()
@@ -1644,7 +1634,7 @@ func TestStrictAutoReviewForcesGuardianUnderNeverPolicy(t *testing.T) {
 	store.SetSandboxAvailable(true)
 	permRT := safety.NewRuntimeWithStore(store)
 	permRT.SetGuardian(client, "")
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{ApprovalsReviewer: "user"}}, permRuntime: permRT}
+	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}, permRuntime: permRT}
 	ctx := toolpkg.WithRunID(context.Background(), "run-strict")
 	_, pending, err := runner.actionHook(ctx, "shell", map[string]any{"command": "make release"})
 	if err != nil || pending {
@@ -2072,7 +2062,7 @@ func TestUsageAccountingLLMSkipsSinkWhenNoAccumulator(t *testing.T) {
 	}
 }
 
-func TestUsageAccountingWrapperDoesNotAdvertiseRemoteCompactionForLocalClient(t *testing.T) {
+func TestUsageAccountingWrapperDoesNotAdvertiseCompactionForLocalClient(t *testing.T) {
 	wrapped := wrapUsageAccountingLLM(scriptedUsageLLM{})
 	if _, ok := wrapped.(llm.ContextCompactor); ok {
 		t.Fatalf("local client wrapper %T incorrectly advertises remote compaction", wrapped)
@@ -3579,13 +3569,34 @@ func TestInputPreview(t *testing.T) {
 	}
 }
 
-func TestExplicitLimitIsClampedBelowDefault(t *testing.T) {
-	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("x", 1200)))}
-	if !shouldCompactMessages(msgs, 1000, &CompactChainDeps{ExplicitLimit: 100}, -1, nil, "", "") {
-		t.Fatal("explicit lower threshold ignored")
+// The mid-turn checkpoint fires at the configured share of the window, and a
+// share outside the range the setting accepts is clamped rather than obeyed.
+func TestAutoCompactPercentSetsTheMidTurnThreshold(t *testing.T) {
+	// ~600 tokens: past half of a 1000-token window, well under 90% of it.
+	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("x", 2400)))}
+	if !shouldCompactMessages(msgs, 1000, &CompactChainDeps{AutoCompactPercent: 50}, nil, "", "") {
+		t.Fatal("a 50% threshold must fire at 60% occupancy")
 	}
-	if shouldCompactMessages(msgs, 10000, &CompactChainDeps{ExplicitLimit: 9000}, -1, nil, "", "") {
-		t.Fatal("explicit limit above 90% must not raise the default threshold")
+	if shouldCompactMessages(msgs, 1000, &CompactChainDeps{AutoCompactPercent: 90}, nil, "", "") {
+		t.Fatal("a 90% threshold must not fire at 60% occupancy")
+	}
+	if shouldCompactMessages(msgs, 1000, nil, nil, "", "") {
+		t.Fatal("an unset percent must keep the default threshold")
+	}
+	for _, tc := range []struct{ in, want int }{
+		{0, appcfg.DefaultAutoCompactPercent},
+		{50, 50},
+		{70, 70},
+		{90, 90},
+		{95, 90},
+		{30, 50},
+	} {
+		if got := autoCompactPercent(&CompactChainDeps{AutoCompactPercent: tc.in}); got != tc.want {
+			t.Fatalf("percent %d = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+	if got := autoCompactPercent(nil); got != appcfg.DefaultAutoCompactPercent {
+		t.Fatalf("percent without deps = %d, want the default", got)
 	}
 }
 
@@ -3595,17 +3606,6 @@ func TestModelContextLimitPrefersEffectiveInputFromSnapshot(t *testing.T) {
 	}
 	if got := modelContextLimitFromSnapshot(json.RawMessage(`{"model_context_tokens":1050000}`)); got != 1050000 {
 		t.Fatalf("fallback limit=%d want 1050000", got)
-	}
-}
-
-func TestBodyAfterPrefixScopeStillHonorsHardWindow(t *testing.T) {
-	msgs := []llm.Message{llm.SystemMessage(strings.Repeat("s", 12000)), llm.UserMessage(llm.Text("short"))}
-	deps := &CompactChainDeps{LimitScope: "body_after_prefix"}
-	if shouldCompactMessages(msgs, 2000, deps, -1, nil, "", "") != true {
-		t.Fatal("hard full-window cap must trigger")
-	}
-	if shouldCompactMessages(msgs, 10000, deps, -1, nil, "", "") {
-		t.Fatal("prefix should be excluded below hard cap")
 	}
 }
 
@@ -3631,7 +3631,7 @@ func TestCompactIfNeededUsesSingleCheckpointPath(t *testing.T) {
 		assertAndExerciseMutedCompactionSink(t, ctx)
 		return []llm.Message{llm.UserMessage(llm.Text("replacement"))}, true, nil
 	}}
-	out, did := compactIfNeeded(ctx, msgs, json.RawMessage(`{"model_context_tokens":100}`), deps, -1, callTools)
+	out, did := compactIfNeeded(ctx, msgs, json.RawMessage(`{"model_context_tokens":100}`), deps, callTools)
 	if !did || called != 1 || len(out) != 1 || out[0].TextContent() != "replacement" {
 		t.Fatalf("did=%v called=%d out=%+v", did, called, out)
 	}
@@ -3646,7 +3646,7 @@ func TestCompactIfNeededKeepsTheHistoryWhenCompactionFails(t *testing.T) {
 	deps := &CompactChainDeps{TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool) ([]llm.Message, bool, error) {
 		return nil, false, errors.New("provider compact failed")
 	}}
-	out, did := compactIfNeeded(context.Background(), msgs, json.RawMessage(`{"model_context_tokens":100}`), deps, -1, nil)
+	out, did := compactIfNeeded(context.Background(), msgs, json.RawMessage(`{"model_context_tokens":100}`), deps, nil)
 	if did || len(out) != len(msgs) || out[0].TextContent() != msgs[0].TextContent() {
 		t.Fatalf("did=%v out=%+v", did, out)
 	}
@@ -8434,22 +8434,6 @@ func TestMCPToolApprovalHonorsOperatorOverrides(t *testing.T) {
 	})
 	if denied.Behavior != safety.BehaviorDeny {
 		t.Fatalf("deny rule was bypassed: %+v", denied)
-	}
-}
-
-func TestGranularMCPToolApprovalIsIndependentFromElicitations(t *testing.T) {
-	cfg := safety.GranularApprovalConfig{}
-	decision := safety.Decision{Behavior: safety.BehaviorAsk, Reason: "mcp_tool_requires_approval"}
-	if !granularApprovalPromptEnabled(cfg, "mcp__server__tool", map[string]any{"category": "mcp"}, decision) {
-		t.Fatal("MCP tool-call approval must remain available")
-	}
-	if granularApprovalPromptEnabled(cfg, "mcp__server__tool", map[string]any{"category": "mcp", "mcp_elicitation": true}, decision) {
-		t.Fatal("MCP elicitation must honor the granular elicitation setting")
-	}
-	matched := safety.PermissionRule{Behavior: safety.BehaviorAsk}
-	decision.Matched = &matched
-	if granularApprovalPromptEnabled(cfg, "mcp__server__tool", map[string]any{"category": "mcp"}, decision) {
-		t.Fatal("rule-driven approval must honor the granular rules setting")
 	}
 }
 

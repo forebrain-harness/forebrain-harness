@@ -98,7 +98,7 @@ func TestOpenAIResponsesRemoteV2UsesTriggerAndReturnsOpaqueCheckpoint(t *testing
 	}
 	result, err := compactor.Compact(context.Background(), []llm.Message{
 		llm.UserMessage(llm.Text("keep me")), llm.AssistantMessage([]llm.ContentPart{llm.Text("discard me")}),
-	}, nil, llm.CompactModeRemoteV2)
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestOpenAIResponsesRemoteV2AcceptsCompactionResponseWireShape(t *testing.T)
 	compactor := client.(llm.ContextCompactor)
 	result, err := compactor.Compact(context.Background(), []llm.Message{
 		llm.UserMessage(llm.Text("old oversized history")),
-	}, nil, llm.CompactModeRemoteV2)
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestRemoteV2RetentionPreservesImagesAndEligibleAgentMessages(t *testing.T) 
 	}
 }
 
-func TestRemoteCompactionParsesAgentMessage(t *testing.T) {
+func TestCompactionParsesAgentMessage(t *testing.T) {
 	items := []json.RawMessage{json.RawMessage(`{"type":"agent_message","id":"amsg_1","author":"worker","recipient":"root","content":[{"type":"input_text","text":"result"},{"type":"encrypted_content","encrypted_content":"opaque"}]}`)}
 	got := compactWireOutputToReplacement(items)
 	if len(got) != 1 || got[0].AgentMessage == nil || len(got[0].AgentMessage.Content) != 2 || got[0].AgentMessage.Content[1].EncryptedContent != "opaque" {
@@ -205,7 +205,7 @@ func TestRemoteCompactionParsesAgentMessage(t *testing.T) {
 	}
 }
 
-func TestRemoteCompactionParsesCompactionSummary(t *testing.T) {
+func TestCompactionParsesCompactionSummary(t *testing.T) {
 	items := []json.RawMessage{json.RawMessage(`{"type":"compaction_summary","id":"cmp_sum_1","encrypted_content":"opaque"}`)}
 	got := compactWireOutputToReplacement(items)
 	if len(got) != 1 || got[0].Compaction == nil || got[0].Compaction.Type != "compaction_summary" || got[0].Compaction.EncryptedContent != "opaque" {

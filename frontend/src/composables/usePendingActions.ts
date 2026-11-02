@@ -325,7 +325,6 @@ export function usePendingActions(options: {
       reason: `web:${option.decision}`,
       decision: option.decision,
       ...(option.execpolicyAmendment ? { execpolicyAmendment: option.execpolicyAmendment } : {}),
-      ...(option.networkPolicyAmendment ? { networkPolicyAmendment: option.networkPolicyAmendment } : {}),
     }))
   }
 
@@ -429,8 +428,8 @@ export function usePendingActions(options: {
 
   // One gate's family, facts, and question, read from the action the card
   // holds: the payload is the engine's own record of what it wants, and the
-  // suggestion carries the network approval the payload alone cannot name.
-  // Both surfaces ask through here, so a gate reads identically in the thread
+  // suggestion carries the rule an approval writes. Both surfaces ask through
+  // here, so a gate reads identically in the thread
   // and above the workshop's composer.
   function approvalGate(a: ActionRow): { facts: ApprovalFacts; question: string } {
     return approvalGateOf(a)
@@ -488,12 +487,10 @@ export function usePendingActions(options: {
           default: return t('chat.approvalYesAllow')
         }
       case 'accept_for_session':
-        return family === 'network_host' ? t('chat.approvalScopeSessionAll')
-          : family === 'shell' || family === 'shell_outside_sandbox' ? t('chat.approvalScopeThisCommand')
-            : t('chat.approvalScopeThisSession')
+        return family === 'shell' || family === 'shell_outside_sandbox' ? t('chat.approvalScopeThisCommand')
+          : t('chat.approvalScopeThisSession')
       case 'accept_and_remember': return t('chat.approvalScopeAlways')
       case 'accept_with_execpolicy_amendment': return t('chat.approvalScopeThisCommand')
-      case 'apply_network_policy_amendment': return t('chat.approvalScopeAlwaysAllow')
       case 'grant_for_turn': return t('chat.approvalYesGrantTurn')
       case 'grant_for_turn_with_strict_auto_review': return t('chat.approvalYesGrantTurnReviewed')
       case 'grant_for_session': return t('chat.approvalYesGrantSession')
@@ -505,7 +502,6 @@ export function usePendingActions(options: {
           case 'apply_patch': return t('chat.approvalNoApply')
           case 'shell':
           case 'shell_outside_sandbox': return t('chat.approvalNoRun')
-          case 'network_host': return t('chat.approvalNoAccess')
           case 'mcp_tool': return t('chat.approvalNoCall')
           case 'protected_read': return t('chat.approvalNoRead')
           case 'enter_plan_mode': return t('chat.approvalNoEnter')

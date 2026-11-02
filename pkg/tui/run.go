@@ -19,7 +19,9 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	statepkg "github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/mattn/go-runewidth"
@@ -301,6 +303,9 @@ func Run(ctx context.Context, opts Options) error {
 			return
 		case SubagentQueueChangedMsg:
 			handleSubagentQueueChangedMsg(renderer, &state, msg)
+			return
+		}
+		if handlePeerWakeNotification(&state, m) {
 			return
 		}
 		if handleAutoContinueNotification(renderer, &state, m) {
@@ -722,6 +727,18 @@ func Run(ctx context.Context, opts Options) error {
 					continuation = next
 				}
 				postTurnCompletionNotification(outSync, disposition, state.terminalFocused, continuation)
+				continue
+			}
+		}
+		// A peer message waiting for this conversation runs the way a due
+		// continuation does: the loop owns the turn, and the conversation has
+		// no run, so nothing is waiting behind it.
+		if state.panel == nil {
+			if prompt, due := state.takePeerDue(); due {
+				sessionTouched = true
+				if _, err := executePeerTurn(ctx, events, notifyCh, processUINotification, opts.Session, renderer, tracker, &state, prompt, opts.Clipboard, cmds, &turnWorkedStatus); err != nil {
+					return err
+				}
 				continue
 			}
 		}
@@ -1226,7 +1243,13 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		return true, false, ComposerSubmission{}, false
 	case "permissions":
 		// Bare /permissions is the preset picker; its one inline form,
-		// explain <tool>, is answered as a report.
+		// explain <tool>, is answered as a report. With no sandbox there is no
+		// preset to pick and nothing to explain, and the command is not in the
+		// table either — this line falls through to the unknown-command answer
+		// every other missing command gets (plan 215 §3.4).
+		if !safety.SandboxAvailable() {
+			break
+		}
 		if len(args) > 0 {
 			_ = cmds.handlePermissionsReport(state.sessionID, args)
 			return true, false, ComposerSubmission{}, false
@@ -1647,6 +1670,9 @@ type streamState struct {
 	// delivered when its notice arrives, so it has no separate due slot.
 	autoContinue    map[string]*autoContinueView
 	autoContinueDue *ComposerSubmission
+	// peerDue is a peer message waiting for a turn of this conversation: the
+	// idle loop runs it, the way it runs a due continuation.
+	peerDue *process.PeerPrompt
 	// panel is the interactive slash panel (/status, /mcp) owned by this
 	// loop. It is composer state, not a modal: keys arrive through the same
 	// event stream, notifications keep flowing, and the transcript keeps
@@ -1746,9 +1772,10 @@ func (s *streamState) stateRoot() string {
 // syncPlanModeIndicator reads the conversation's mode — which the hotkey,
 // /plan, the model's enter_plan_mode and exit_plan_mode and a session change
 // can all move — and has the footer show it. The same read answers whether the
-// conversation is a batch execution, because both are properties of the
-// conversation on screen: a switch onto one — /resume in a batch project, the
-// viewer's own opening — must move the footer with it.
+// conversation is a batch execution and which approval preset it runs under,
+// because all three are properties of the conversation on screen: a switch onto
+// one — /resume in a batch project, the viewer's own opening — must move the
+// footer with it.
 func syncPlanModeIndicator(renderer *Renderer, state *streamState) {
 	if renderer == nil || state == nil || strings.TrimSpace(state.sessionID) == "" {
 		return
@@ -1756,6 +1783,15 @@ func syncPlanModeIndicator(renderer *Renderer, state *streamState) {
 	st, _ := statepkg.Get(state.stateRoot(), state.sessionID)
 	renderer.SetPlanMode(st.Mode == statepkg.ModePlan)
 	renderer.SetBatchReadOnly(state.batchReadOnlySession())
+	// Full access is the preset in force, not a mode: it shows whether a person
+	// picked it (/permissions, the shift+tab cycle), the environment forced it,
+	// or the machine has no sandbox to run anything else in (plan 215 §3.6).
+	fullAccess := false
+	if state.session != nil {
+		_, current := state.session.PermissionPresets(state.sessionID)
+		fullAccess = current == safety.PresetFullAccess
+	}
+	renderer.SetFullAccess(fullAccess)
 	state.recordModeChange(st)
 }
 
@@ -3724,6 +3760,19 @@ const (
 // forcing the escalation to restart from "cancel" on every chained turn and
 // making sustained Ctrl+C presses unable to ever reach "quit".
 func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, line string, displayText string, rawInput string, attachments []InputAttachment, goalObjective string, skillName string, skillPath string, clipboard ClipboardImageReader, cmds *commandController, turnWorkedStatus *string, resetCtrlCOnEntry bool) (runTurnDisposition, error) {
+	return runTurnWithDispatch(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, line, displayText, rawInput, attachments, goalObjective, skillName, skillPath, nil, clipboard, cmds, turnWorkedStatus, resetCtrlCOnEntry)
+}
+
+// turnDispatch runs one turn's submission. It is a parameter because one kind of
+// turn is not a sub-
+// mission the conversation parses: a peer message goes to the conversation's
+// turn as the envelope it is (plan 196 §3.5). Everything else about running a
+// turn — the foreground record, cancellation, streaming, the worked line — is
+// the same for both, so both come through here.
+type turnDispatch func(ctx context.Context, session Session) error
+
+// runTurnWithDispatch is runTurnWithSkill with the dispatch itself supplied.
+func runTurnWithDispatch(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, line string, displayText string, rawInput string, attachments []InputAttachment, goalObjective string, skillName string, skillPath string, dispatch turnDispatch, clipboard ClipboardImageReader, cmds *commandController, turnWorkedStatus *string, resetCtrlCOnEntry bool) (runTurnDisposition, error) {
 	errCh := make(chan error, 1)
 	ctxDone := ctx.Done()
 	signalInterrupted := false
@@ -3793,6 +3842,12 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 	go func() {
 		if strings.HasPrefix(strings.TrimSpace(line), "!") {
 			errCh <- session.RunSurfaceShellCommand(ctx, sessionID, "tui", line)
+			return
+		}
+		if dispatch != nil {
+			err := dispatch(ctx, session)
+			foreground.finish()
+			errCh <- err
 			return
 		}
 		err := session.DispatchSurfaceTurn(ctx, turn.TurnSubmission{
@@ -3994,6 +4049,49 @@ func executeComposerSubmission(ctx context.Context, sigCh <-chan os.Signal, even
 	// not reset the Ctrl+C escalation sequence - see the comment on
 	// runTurnWithSkill's resetCtrlCOnEntry parameter.
 	return runTurnWithSkill(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, actualText, displayText, submission.RawInput, attachments, submission.GoalObjective, submission.SkillName, submission.SkillPath, clipboard, cmds, turnWorkedStatus, !preserveComposer)
+}
+
+// peerTurnDispatcher is the optional half of Session that runs a peer message as
+// a turn of its conversation without parsing it. Optional, so a surface without
+// an engine behind it (tests, replay) need not grow a method it would stub.
+type peerTurnDispatcher interface {
+	DispatchPeerTurn(ctx context.Context, sessionID, envelope string) error
+}
+
+// executePeerTurn runs one peer message as a turn of the conversation on screen.
+// It is executeComposerSubmission's counterpart for a message nobody typed here:
+// the transcript line says where the message came from, and the dispatch goes
+// straight to the conversation's turn — no slash command, no skill reference, no
+// attachment is read out of the envelope.
+func executePeerTurn(ctx context.Context, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, prompt process.PeerPrompt, clipboard ClipboardImageReader, cmds *commandController, turnWorkedStatus *string) (runTurnDisposition, error) {
+	dispatcher, ok := session.(peerTurnDispatcher)
+	if !ok {
+		return runTurnCompleted, nil
+	}
+	defer syncPlanModeIndicator(renderer, state)
+	if turnWorkedStatus != nil {
+		*turnWorkedStatus = ""
+	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(ctx)
+	defer cancel()
+	foreground := &foregroundTurn{cancel: cancel}
+	ctx = context.WithValue(ctx, foregroundTurnKey{}, foreground)
+	state.activeForeground = foreground
+	defer func() { state.activeForeground = nil }()
+	// The line names the sender: the reader is looking at a conversation that
+	// started talking to someone else's session, and the row must not read as
+	// something they typed.
+	title := "peer"
+	if name := strings.TrimSpace(prompt.FromName); name != "" {
+		title = "peer · " + name
+	}
+	renderer.RenderFrame(Frame{Kind: FrameUser, Title: title, Content: prompt.Text, Final: true, turn: foreground})
+	sessionID, envelope := strings.TrimSpace(prompt.SessionID), prompt.Text
+	dispatch := func(ctx context.Context, session Session) error {
+		return dispatcher.DispatchPeerTurn(ctx, sessionID, envelope)
+	}
+	return runTurnWithDispatch(ctx, nil, events, notifyCh, processNotify, session, renderer, tracker, state, envelope, "", "", nil, "", "", "", dispatch, clipboard, cmds, turnWorkedStatus, false)
 }
 
 func drainActiveRunEvents(ctx context.Context, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, clipboard ClipboardImageReader, cmds *commandController) <-chan inputEvent {
@@ -4203,7 +4301,7 @@ func openLatestBatchExecution(ctx context.Context, session Session, cmds *comman
 		renderer.RenderFrame(Frame{
 			Kind:    FrameSystem,
 			Title:   "batch",
-			Content: "No tasks yet in this batch project.",
+			Content: "No tasks yet in this batch project. Create one in the web project space; this screen only replays them.",
 			Final:   true,
 		})
 		return false
@@ -5187,7 +5285,7 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 			Content: fmt.Sprintf("primary %d · subagents %d", summary.Main, summary.Subagents),
 		})
 		return true
-	case hotkeyTogglePlanMode:
+	case hotkeyCycleMode:
 		state.agentControlPrefixArmed = false
 		// A batch execution runs unattended: there is nobody to answer a plan
 		// approval, so its mode is fixed (plan 152). The key says so instead of
@@ -5197,19 +5295,59 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 			return true
 		}
 		st, _ := statepkg.Get(state.stateRoot(), state.sessionID)
-		target := statepkg.ModePlan
-		if st.Mode == statepkg.ModePlan {
-			target = st.PrePlanMode
+		currentPreset := ""
+		if session != nil {
+			_, currentPreset = session.PermissionPresets(state.sessionID)
+		}
+		fullAccess := currentPreset == safety.PresetFullAccess
+		// Switch keeps the pre-plan mode and the exited-plan flag intact, so
+		// moving by hotkey behaves like enter_plan_mode / exit_plan_mode.
+		switchMode := func(target statepkg.Mode) bool {
+			if _, err := statepkg.Switch(state.stateRoot(), state.sessionID, target); err != nil {
+				renderer.PrintError(err)
+				return false
+			}
+			return true
+		}
+		// The preset is written the way /permissions writes it — the session's
+		// own row, applied to this conversation only — because the footer's
+		// full-access segment and the next turn's posture must be the same
+		// fact, whichever key put them there (plan 215 §3.6).
+		setPreset := func(id string) bool {
+			if session == nil {
+				return false
+			}
+			if _, err := session.ApplyPermissionPreset(state.sessionID, id); err != nil {
+				renderer.PrintError(err)
+				return false
+			}
+			return true
+		}
+		switch {
+		case st.Mode == statepkg.ModePlan:
+			// Plan mode is the second stop of the cycle, so leaving it hands the
+			// conversation to full access. With no sandbox the preset is already
+			// the only one there is, and the cycle is just the two modes.
+			target := st.PrePlanMode
 			if strings.TrimSpace(string(target)) == "" {
 				target = statepkg.ModeAgent
 			}
-		}
-		// Switch keeps the pre-plan mode and the exited-plan flag intact, so
-		// toggling by hotkey behaves like enter_plan_mode / exit_plan_mode.
-		// The footer is the answer: it names Plan mode while it lasts.
-		if _, err := statepkg.Switch(state.stateRoot(), state.sessionID, target); err != nil {
-			renderer.PrintError(err)
-			return true
+			if !switchMode(target) {
+				return true
+			}
+			if safety.SandboxAvailable() && !fullAccess {
+				setPreset(safety.PresetFullAccess)
+			}
+		case fullAccess && safety.SandboxAvailable():
+			// Full access is the third stop: the way out of it is the default
+			// preset, which asks again outside the workspace.
+			if !setPreset(safety.PresetWorkspaceWrite) {
+				return true
+			}
+		default:
+			if !switchMode(statepkg.ModePlan) {
+				return true
+			}
 		}
 		syncPlanModeIndicator(renderer, state)
 		return true

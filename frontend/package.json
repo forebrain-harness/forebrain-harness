@@ -26,6 +26,7 @@
     "@codemirror/lang-yaml": "catalog:",
     "@codemirror/language": "catalog:",
     "@codemirror/legacy-modes": "catalog:",
+    "@codemirror/lint": "catalog:",
     "@lezer/highlight": "catalog:",
     "@milkdown/crepe": "catalog:",
     "@repo/elements": "workspace:*",

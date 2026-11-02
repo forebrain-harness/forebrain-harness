@@ -1,84 +1,102 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises } from '@vue/test-utils'
 
-import { forebrainApi, type MemorySettings } from '@/lib/api'
+import { forebrainApi } from '@/lib/api'
 import { setLocale } from '@/locales'
+import { mountSettingsTab } from './form/settingsTestHost'
 import MemorySwitchesTab from './MemorySwitchesTab.vue'
 
-/** The three global memory switches, flat in their tab, saved from the bottom. */
+/** The memory tab (plan 191 §0.16, §4.3): the one switch drawn in the
+ * group-title type with its own explanation, the three groups that follow it
+ * only while the switch is on — following the form's value, not the stored
+ * one — and 重置记忆, which is always there. */
 describe('MemorySwitchesTab', () => {
-  beforeAll(() => setLocale('en'))
-  afterAll(() => setLocale('en'))
-
-  const off: MemorySettings = { enabled: false, useMemories: false, generateMemories: false }
-
   beforeEach(() => {
-    vi.spyOn(forebrainApi, 'memorySettings').mockResolvedValue({ ...off })
-    vi.spyOn(forebrainApi, 'updateMemorySettings').mockResolvedValue({ enabled: true, useMemories: false, generateMemories: false })
+    setLocale('zh')
+    vi.spyOn(forebrainApi, 'settings').mockResolvedValue({
+      values: {
+        'features.memories': true,
+        'memories.extract_model': '',
+        'memories.consolidation_model': '',
+        'memories.search_top_k': 5,
+        'memories.max_raw_memories_for_consolidation': 256,
+        'memories.max_unused_days': 30,
+        'memories.max_rollout_age_days': 10,
+        'memories.max_rollouts_per_startup': 2,
+        'memories.min_rollout_idle_hours': 6,
+      },
+      secrets: {},
+      // claudeCodeAvailable: false — a machine without Claude Code, so the
+      // peers group stays hidden (plan 195) and this tab keeps its rows.
+      meta: { approvalPresetsVisible: true, claudeCodeAvailable: false, builtinHandoffPrompt: 'builtin prompt' },
+    })
+    vi.spyOn(forebrainApi, 'saveSettings').mockResolvedValue({ saved: true, applies: 'next_turn' })
     vi.spyOn(forebrainApi, 'resetMemories').mockResolvedValue({ ok: true })
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
-    vi.unstubAllGlobals()
   })
 
   async function mountTab() {
-    const wrapper = mount(MemorySwitchesTab)
+    const wrapper = await mountSettingsTab({ tab: 'memory', component: MemorySwitchesTab })
     await flushPromises()
     return wrapper
   }
 
-  const saveButton = (wrapper: Awaited<ReturnType<typeof mountTab>>) => wrapper.find('[data-testid="memory-switches-save"]')
-
-  it('is a flat form: no title row, no card, no frame around the switches', async () => {
+  it('draws the switch in the group-title type with the prototype\'s explanation', async () => {
     const wrapper = await mountTab()
-    expect(wrapper.find('h2').exists()).toBe(false)
-    expect(wrapper.find('h3').exists()).toBe(false)
-    expect(wrapper.find('.forebrain-card').exists()).toBe(false)
-    expect(wrapper.find('.forebrain-list-boxed').exists()).toBe(false)
+    const head = wrapper.find('[data-group="ms"]')
+    expect(head.find('h3').exists()).toBe(false)
+    const name = head.find('[data-field="features.memories"] b')
+    expect(name.text()).toBe('记忆功能')
+    expect(name.classes()).toContain('settings-row__title')
+    expect(head.find('[data-field="features.memories"]').find('.settings-row__hint').text()).toBe(
+      '记下你的偏好与要点，供以后的会话使用；仅对办公创作和创意编程类项目生效。跑批项目无记忆功能',
+    )
   })
 
-  it('draws the three switches as rows, each with its title and hint', async () => {
+  it('shows the three groups while the switch is on and folds them the moment it goes off', async () => {
     const wrapper = await mountTab()
-    const rows = wrapper.findAll('[data-testid^="memory-switch-"]')
-    expect(rows).toHaveLength(3)
-    expect(rows[0].text()).toContain('Enable memories')
-    expect(rows[0].text()).toContain('Turns on memory capabilities')
-    expect(rows[2].text()).toContain('Generate memories')
-    expect(wrapper.findAll('[role="switch"]')).toHaveLength(3)
+    expect(wrapper.find('[data-group="mr"]').find('h3').text()).toBe('模型')
+    expect(wrapper.find('[data-group="mq"]').find('h3').text()).toBe('检索与整合')
+    const sessions = wrapper.find('[data-group="mo"]')
+    expect(sessions.find('h3').text()).toBe('会话处理')
+    expect(sessions.find('.settings-group__head p').text()).toContain('你在终端或网页的会话里每发一条消息')
+
+    // The fold follows the form's own value, before anything is saved (§0.16).
+    await wrapper.find('[data-switch="features.memories"]').trigger('click')
+    expect(wrapper.find('[data-group="mr"]').exists()).toBe(false)
+    expect(wrapper.find('[data-group="mq"]').exists()).toBe(false)
+    expect(wrapper.find('[data-group="mo"]').exists()).toBe(false)
+
+    await wrapper.find('[data-switch="features.memories"]').trigger('click')
+    expect(wrapper.find('[data-group="mr"]').exists()).toBe(true)
   })
 
-  it('explains what the switches cover, under the rows', async () => {
+  it('saves the switch off through the settings interface and says when it applies', async () => {
     const wrapper = await mountTab()
-    expect(wrapper.find('.forebrain-list-note').text()).toContain('Applies to every primary agent')
-  })
-
-  it('saves all three from the bottom button, which waits for a change', async () => {
-    const wrapper = await mountTab()
-    expect(saveButton(wrapper).attributes('disabled')).toBeDefined()
-
-    await wrapper.findAll('[role="switch"]')[0].trigger('click')
-    expect(saveButton(wrapper).attributes('disabled')).toBeUndefined()
-    await saveButton(wrapper).trigger('click')
+    const head = wrapper.find('[data-group="ms"]')
+    await head.find('[data-switch="features.memories"]').trigger('click')
+    await head.find('[data-save="ms"]').trigger('click')
     await flushPromises()
 
-    expect(forebrainApi.updateMemorySettings).toHaveBeenCalledWith({
-      featureEnabled: true,
-      useMemories: false,
-      generateMemories: false,
-    })
-    expect(wrapper.text()).toContain('Memory settings saved.')
+    expect(forebrainApi.saveSettings).toHaveBeenCalledWith({ 'features.memories': false }, {})
+    expect(head.find('.settings-group__saved').text()).toBe('已保存，下一轮生效')
   })
 
-  it('keeps the reset beside the save, behind its confirmation', async () => {
+  it('keeps 重置记忆 behind its confirmation, always drawn', async () => {
     const wrapper = await mountTab()
     const reset = wrapper.find('[data-testid="memory-switches-reset"]')
-    expect(reset.classes()).toContain('forebrain-btn--danger')
+    expect(reset.exists()).toBe(true)
 
-    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    await reset.trigger('click')
+    expect(forebrainApi.resetMemories).not.toHaveBeenCalled()
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     await reset.trigger('click')
     await flushPromises()
-    expect(forebrainApi.resetMemories).toHaveBeenCalledTimes(1)
+    expect(forebrainApi.resetMemories).toHaveBeenCalled()
   })
 })

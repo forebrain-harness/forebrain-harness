@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,9 +122,9 @@ type Environment struct {
 	// LSP is the process-wide language-server pool; lspManager is the
 	// primary runner's view of it. Project runners get their own managers
 	// from the same pool (see RunnerPool).
-	LSP        *lsp.Pool
-	lspManager *lsp.Manager
-	cronOnce   sync.Once
+	LSP            *lsp.Pool
+	lspManager     *lsp.Manager
+	cronOnce       sync.Once
 	cron           *CronService
 	rulesHook      *assembly.PreHook
 	ctxHook        *assembly.Hook
@@ -136,6 +137,9 @@ type Environment struct {
 	OnSubagentExecution *SubagentExecutionHooks
 	telShutdown         func(context.Context) error
 	approvalSweepStop   func()
+	// peers is this process's peer registration (plan 195); Close stops it
+	// before anything it reads from goes away.
+	peers *peerService
 	// ownerLeaseStop deregisters this process's run-owner lease. It runs
 	// after the runners are closed and before the SQL handle is: while any
 	// runner lives it may still settle runs under this owner, and the DELETE
@@ -149,6 +153,13 @@ func (env *Environment) Close() {
 	}
 	if env.approvalSweepStop != nil {
 		env.approvalSweepStop()
+	}
+	// The peer registration reads the controller and the stores below; stop
+	// it before they go. Its own stop is once-guarded, so the surface's
+	// separate stop function stays safe to call.
+	if svc := env.peers; svc != nil {
+		svc.stop()
+		env.peers = nil
 	}
 	// The primary Runner is closed exactly where the pooled ones are, and
 	// before telemetry and SQL: its MCP sessions are children of this process,
@@ -220,19 +231,22 @@ func ApprovalTTLFromEnv() time.Duration {
 }
 
 // effectiveFor derives the runtime configuration for one launch project from
-// the raw on-disk configuration: EffectiveConfig fills the sandbox mode and
-// approval policy a project left unspecified from its own trust decision, and
-// ApplyYOLO applies the process-wide YOLO override last. The order matches the
-// base runner's own derivation in Open, so a project runner and the base runner
-// see the same configured values, derived for different projects.
+// the raw on-disk configuration. ApplyYOLO runs first, because YOLO now forces
+// the effective approval preset (plan 203) rather than patching a policy and a
+// sandbox mode of its own: the derivation right after it turns that preset into
+// the pair full access means, so a --yolo process runs exactly as a picked
+// full-access preset does. EffectiveConfig then fills the approval policy and
+// sandbox mode the preset implies for this project's trust decision. The order
+// matches the base runner's own derivation in Open, so a project runner and the
+// base runner see the same configured values, derived for different projects.
 //
 // The raw configuration is passed by value and never mutated: safety.EffectiveConfig
 // returns a copy, and the pointer returned is the caller's to own.
 func effectiveFor(raw appcfg.Root, launch safety.ProjectContext) *appcfg.Root {
+	safety.ApplyYOLO(&raw)
 	effective := safety.EffectiveConfig(raw, launch)
 	out := new(appcfg.Root)
 	*out = effective
-	safety.ApplyYOLO(out)
 	return out
 }
 
@@ -336,6 +350,24 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// candidate must compose with this install's configuration and pass the
 	// loader's value-domain checks before it lands.
 	InstallConfigSectionValidator(cfgPath, sqlDB)
+	// Every stored section gets the settings the database does not hold yet
+	// (plan 207 §3.2): after the migration has cleaned the rows and after the
+	// legacy import has put the file's values in, so the file wins over the
+	// defaults and only the missing keys are filled. A new install and a
+	// migrated one take this same path, which is what makes "an old install is
+	// completed the way a new one is born" true rather than a second,
+	// hand-written migration per setting.
+	if opts.Config == nil {
+		store, err := (&Environment{Root: root, ConfigPath: cfgPath, SQL: sqlDB}).configStore()
+		if err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("open config store: %w", err)
+		}
+		if err := ensureStoredConfigDefaults(ctx, store); err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("seed stored configuration defaults: %w", err)
+		}
+	}
 	// The one-time final sync of plan 188 W12: the 187→188 transition kept
 	// writing the login files and the MCP overlay tree, so whichever side is
 	// newer wins into the database here — and nothing writes those files
@@ -365,9 +397,14 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		configFingerprint = fp
 	}
 	cfgRoot := effectiveFor(loaded, launchProject)
-	if err := safety.NewManager().StartupCheck(cfgRoot); err != nil {
-		_ = sqlDB.Close()
-		return nil, err
+	// A sandbox is used when there is one and skipped when there is not (owner
+	// 2026-10-31, plan 215 §0.1): a host without a usable bubblewrap runs in
+	// full access rather than refusing to start, so this is an operations note
+	// — the one line an operator reads in the log — and never a surface
+	// notice. The probe behind it is a real run of the backend, which is why
+	// the reason is worth recording even though nothing is refused.
+	if !safety.SandboxAvailable() {
+		slog.Info("no sandbox available; every conversation runs with full access", "platform", runtime.GOOS)
 	}
 	// Every per-agent seam below (sessions, memories, the runner's
 	// workspace, the project channels) hangs off the active primary agent, so
@@ -490,7 +527,11 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// it recalls land in the same scope. The agent workspace root is state, not
 	// a project, and naming it here would send every extracted memory to a scope
 	// nothing reads.
-	sessStore.ConfigureMemoryDefaults(memory.SessionModeForConfig(cfgRoot), source, launchDir, memory.GitBranch(launchDir))
+	sessStore.ConfigureMemoryDefaults(memory.SessionModeFor(cfgRoot), source, launchDir, memory.GitBranch(launchDir))
+	// The global approval preset is the posture a session is born with (plan
+	// 203 §2b): it is copied into each new session's own permission row, so a
+	// later change here reaches only the sessions created afterwards.
+	sessStore.SetApprovalPresetDefault(string(cfgRoot.ApprovalPreset.Effective()))
 	// Store uploaded originals under the active agent's workspace so they fall
 	// inside the agent's allowed roots and can be opened by its file tools.
 	fileSvc.WorkspaceRoot = runner.WorkspaceRoot

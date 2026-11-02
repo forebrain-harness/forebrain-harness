@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,19 +26,10 @@ import (
 // control plane has always answered with, except a cross-origin cookie write,
 // which is authenticated but not allowed (403).
 var (
-	errGatewayAuthModeUnsupported = errors.New("unsupported gateway auth mode")
-	errGatewayTokenMissing        = errors.New("gateway token missing")
-	errGatewayUnauthorized        = errors.New("unauthorized")
-	errGatewayCrossOrigin         = errors.New("cross-origin request refused")
+	errGatewayTokenMissing = errors.New("gateway token missing")
+	errGatewayUnauthorized = errors.New("unauthorized")
+	errGatewayCrossOrigin  = errors.New("cross-origin request refused")
 )
-
-func gatewayAuthMode(cfg *appcfg.Root) string {
-	mode := strings.ToLower(strings.TrimSpace(cfg.Gateway.Auth.Mode))
-	if mode == "" {
-		mode = "token"
-	}
-	return mode
-}
 
 func ControlPlaneTokenFromRequest(r *http.Request) string {
 	if r == nil {
@@ -81,28 +73,148 @@ func ControlPlaneAuthorized(r *http.Request, expected string) bool {
 // handler without a CORS preflight. The Origin a browser stamps on such a
 // request is what tells the two apart — the same comparison the WebSocket
 // upgrade applies to its handshake.
-func authorizeControlPlane(r *http.Request, cfg *appcfg.Root) error {
-	switch mode := gatewayAuthMode(cfg); mode {
-	case "none":
-		return nil
-	case "token":
-	default:
-		return errGatewayAuthModeUnsupported
-	}
+//
+// The returned origin is the address a browser reached this gateway at, for the
+// cookie-session write the public-address auto-detection records (plan 206
+// §3.1); every other passing request reports "".
+func authorizeControlPlane(r *http.Request, cfg *appcfg.Root) (string, error) {
 	expected := strings.TrimSpace(cfg.Gateway.Auth.Token)
 	if expected == "" {
-		return errGatewayTokenMissing
+		return "", errGatewayTokenMissing
 	}
 	if ControlPlaneAuthorized(r, expected) {
-		return nil
+		return "", nil
 	}
 	if webSessionCookieValid(r, expected) {
 		if !requestOriginMatchesHost(r) {
-			return errGatewayCrossOrigin
+			return "", errGatewayCrossOrigin
 		}
-		return nil
+		return cookieSessionOrigin(r), nil
 	}
-	return errGatewayUnauthorized
+	return "", errGatewayUnauthorized
+}
+
+// cookieSessionOrigin is the Origin of a state-changing request only: a page
+// load says nothing about where the person will open a link from, and a
+// cross-origin write never gets this far.
+func cookieSessionOrigin(r *http.Request) string {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return ""
+	}
+	return normalizeWebOrigin(r.Header.Get("Origin"))
+}
+
+// observedOriginSection is the fb_config row that remembers the address the
+// last browser write request came from. It is deliberately not a Root section:
+// it is not a setting a person chooses, it is what the control plane observed,
+// and composeSectionsFrom only composes the sections Root declares.
+const observedOriginSection = "gateway.observed_origin"
+
+// normalizeWebOrigin reduces an Origin header to scheme://host[:port]. A value
+// that is not an absolute http(s) URL — an opaque "null" origin included — has
+// nothing a link can be built from, and reads as "".
+func normalizeWebOrigin(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	return scheme + "://" + strings.ToLower(u.Host)
+}
+
+// isLoopbackOrigin reports whether origin names this machine. A login from the
+// host itself is not the address other people open, so it never displaces one
+// that is (plan 206 §3.1).
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := strings.Trim(strings.ToLower(u.Hostname()), "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// noteWebOrigin records origin as the address batch notifications link to. An
+// unchanged value is not rewritten, and a loopback address does not replace a
+// stored non-loopback one. Recording never fails a request: without a stored
+// origin the notification simply carries no link.
+func (s *Server) noteWebOrigin(origin string) {
+	if s == nil || s.Env == nil || s.Env.SQL == nil {
+		return
+	}
+	origin = normalizeWebOrigin(origin)
+	if origin == "" {
+		return
+	}
+	s.observedOriginMu.Lock()
+	defer s.observedOriginMu.Unlock()
+	if origin == s.observedOrigin {
+		return
+	}
+	store := &state.ConfigStore{DB: s.Env.SQL}
+	ctx := context.Background()
+	stored, err := readObservedOrigin(ctx, store)
+	if err != nil {
+		slog.Warn("gateway observed origin: read", "err", err)
+		return
+	}
+	if stored == origin {
+		s.observedOrigin = origin
+		return
+	}
+	if isLoopbackOrigin(origin) && stored != "" && !isLoopbackOrigin(stored) {
+		s.observedOrigin = stored
+		return
+	}
+	encoded, err := json.Marshal(origin)
+	if err != nil {
+		return
+	}
+	if err := store.SaveCredential(ctx, observedOriginSection, encoded); err != nil {
+		slog.Warn("gateway observed origin: save", "err", err)
+		return
+	}
+	s.observedOrigin = origin
+}
+
+// observedWebOrigin is the address links are built from, or "" when no browser
+// has reached this gateway yet.
+func (s *Server) observedWebOrigin(ctx context.Context) string {
+	if s == nil || s.Env == nil || s.Env.SQL == nil {
+		return ""
+	}
+	s.observedOriginMu.Lock()
+	defer s.observedOriginMu.Unlock()
+	if s.observedOrigin != "" {
+		return s.observedOrigin
+	}
+	origin, err := readObservedOrigin(ctx, &state.ConfigStore{DB: s.Env.SQL})
+	if err != nil {
+		slog.Warn("gateway observed origin: read", "err", err)
+		return ""
+	}
+	s.observedOrigin = origin
+	return origin
+}
+
+func readObservedOrigin(ctx context.Context, store *state.ConfigStore) (string, error) {
+	raw, err := store.LoadCredential(ctx, observedOriginSection)
+	if err != nil || len(raw) == 0 {
+		return "", err
+	}
+	var origin string
+	if err := json.Unmarshal(raw, &origin); err != nil {
+		return "", err
+	}
+	return normalizeWebOrigin(origin), nil
 }
 
 // requestOriginMatchesHost reports whether a cookie-carrying request may act.
@@ -135,8 +247,6 @@ func writeControlPlaneUnauthorized(w http.ResponseWriter, body string) {
 
 func writeControlPlaneAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, errGatewayAuthModeUnsupported):
-		writeControlPlaneUnauthorized(w, `{"error":"unsupported gateway auth mode"}`)
 	case errors.Is(err, errGatewayTokenMissing):
 		slog.Error("gateway control plane token missing", "path", r.URL.Path)
 		writeControlPlaneUnauthorized(w, `{"error":"gateway token missing"}`)
@@ -151,7 +261,7 @@ func writeControlPlaneAuthError(w http.ResponseWriter, r *http.Request, err erro
 	}
 }
 
-func ControlPlaneHTTPMiddleware(env *process.Environment, inner http.Handler) http.Handler {
+func ControlPlaneHTTPMiddleware(env *process.Environment, gw *Server, inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if env == nil || env.Deps.AppCfg == nil {
 			inner.ServeHTTP(w, r)
@@ -179,9 +289,13 @@ func ControlPlaneHTTPMiddleware(env *process.Environment, inner http.Handler) ht
 			inner.ServeHTTP(w, r)
 			return
 		}
-		if err := authorizeControlPlane(r, cfg); err != nil {
+		origin, err := authorizeControlPlane(r, cfg)
+		if err != nil {
 			writeControlPlaneAuthError(w, r, err)
 			return
+		}
+		if origin != "" {
+			gw.noteWebOrigin(origin)
 		}
 		inner.ServeHTTP(w, r)
 	})
@@ -213,7 +327,7 @@ func ServeHTTPChain(env *process.Environment, gw *Server, inner http.Handler) ht
 	rl := newIPRateLimiter(40, 120)
 	// The channel dispatcher is built once and consults the registry per
 	// request, so it always reflects the currently bound agent.
-	withChannels := ControlPlaneHTTPMiddleware(env, gw.channelHandler(inner))
+	withChannels := ControlPlaneHTTPMiddleware(env, gw, gw.channelHandler(inner))
 	// The access log wraps the whole chain, limiter and websocket included, so
 	// every request an operator could wonder about is reported.
 	return telemetry.AccessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +359,8 @@ func requestAuthorized(env *process.Environment, r *http.Request) bool {
 	if env == nil || env.Deps.AppCfg == nil {
 		return false
 	}
-	return authorizeControlPlane(r, env.Deps.AppCfg) == nil
+	_, err := authorizeControlPlane(r, env.Deps.AppCfg)
+	return err == nil
 }
 
 // envAgentID names the primary agent this process is serving. The runner is
@@ -320,16 +435,7 @@ type webSessionRequest struct {
 // browser has nothing else to present yet. The token itself never becomes a
 // browser-readable value.
 func (s *Server) handleWebSessionCreate(w http.ResponseWriter, r *http.Request) {
-	cfg := s.liveCfg()
-	mode := gatewayAuthMode(cfg)
-	if mode == "none" {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if mode != "token" {
-		writeControlPlaneUnauthorized(w, `{"error":"unsupported gateway auth mode"}`)
-		return
-	}
+	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	var req webSessionRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	decoder.DisallowUnknownFields()
@@ -360,8 +466,9 @@ func (s *Server) handleWebSessionCreate(w http.ResponseWriter, r *http.Request) 
 
 // handleWebSessionProbe answers whether the caller already holds a valid
 // session: reaching it at all means the control-plane middleware let the
-// request through, so the body only reports the configured auth mode.
+// request through, which is the whole answer now that token auth is the only
+// authentication there is (plan 206).
 func (s *Server) handleWebSessionProbe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"auth_mode":"` + gatewayAuthMode(s.liveCfg()) + `"}`))
+	_, _ = w.Write([]byte(`{"authenticated":true}`))
 }

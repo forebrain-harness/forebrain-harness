@@ -1108,7 +1108,9 @@ func TestHandleChatWSStoppingPreTurnCompactionWithdrawsTheTurn(t *testing.T) {
 			before, err := sessions.ListAllMessages(ctx, "session-ws", 0)
 			require.NoError(t, err)
 			cfg := &appcfg.Root{}
-			cfg.Compact.ModelAutoCompactTokenLimit = 100
+			// gpt-main is not in the model catalog, so the configured window is
+			// the denominator and 100 tokens puts the threshold at 90.
+			cfg.Agents.Defaults.ContextInject.ModelContextTokens = 100
 			cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 				Primary:      true,
 				LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: model.URL + "/v1"}},

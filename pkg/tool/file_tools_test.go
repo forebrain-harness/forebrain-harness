@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
@@ -2668,4 +2669,279 @@ func testRC4Crypt(key, data []byte) []byte {
 	out := make([]byte, len(data))
 	cipher.XORKeyStream(out, data)
 	return out
+}
+
+// resumeProofStore ensures a session on a real state file and returns the store,
+// which is what a resumed process installs as its read-baseline store.
+func resumeProofStore(t *testing.T, sessionID string) *state.SessionStore {
+	t.Helper()
+	store := newStateSessionStoreForTest(t)
+	if err := store.Ensure(context.Background(), sessionID, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// resumeProofState builds a tool state the way a fresh process does: no read
+// baselines of its own, the conversation's durable store installed.
+func resumeProofState(t *testing.T, root string, store ReadStateStore) *State {
+	t.Helper()
+	st := NewState(root)
+	if store != nil {
+		st.SetReadStateStore(store)
+	}
+	return st
+}
+
+// readForTest runs read_file for path under ctx and returns the absolute path it
+// read, which is the key the baseline is filed under.
+func readForTest(t *testing.T, ctx context.Context, st *State, path string) string {
+	t.Helper()
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	if _, err := readTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(path)+`"}`); err != nil {
+		t.Fatalf("read_file %s: %v", path, err)
+	}
+	// The tool resolves the path it was given, so the baseline's own key is the
+	// honest answer to "which path did it read".
+	states := st.ReadStates()
+	if len(states) != 1 {
+		t.Fatalf("read_file %s recorded %d baselines, want one", path, len(states))
+	}
+	return states[0].AbsPath
+}
+
+func editForTest(st *State) func(context.Context, string, string, string) error {
+	return func(ctx context.Context, path, oldString, newString string) error {
+		editTool, err := NewFileEditTool(st)
+		if err != nil {
+			return err
+		}
+		args, err := json.Marshal(FileEditInput{FilePath: path, OldString: oldString, NewString: newString})
+		if err != nil {
+			return err
+		}
+		_, err = editTool.Handle(ctx, string(args))
+		return err
+	}
+}
+
+// TestEditFileAfterResumeRestoresReadBaseline is plan 183's defect, end to end:
+// a conversation reads a file in one process, and the process that resumes it
+// edits that file without reading it again. The baseline comes back from the
+// state file, the file is unchanged, and the edit lands.
+func TestEditFileAfterResumeRestoresReadBaseline(t *testing.T) {
+	ctx := WithConversationSessionID(context.Background(), "resume-reader")
+	store := resumeProofStore(t, "resume-reader")
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "notes.md")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before := resumeProofState(t, tmp, store)
+	abs := readForTest(t, ctx, before, path)
+
+	after := resumeProofState(t, tmp, store)
+	if _, ok := after.GetReadState(abs); ok {
+		t.Fatal("the second state must start with no in-memory baseline")
+	}
+	if err := editForTest(after)(ctx, path, "beta", "gamma"); err != nil {
+		t.Fatalf("edit after resume: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "alpha\ngamma\n" {
+		t.Fatalf("file after the resumed edit = %q, want only the target replacement", got)
+	}
+}
+
+// TestEditFileAfterResumeStillRejectsExternalChange pins that the restored
+// baseline is a version to compare against, not permission: a file rewritten
+// outside the conversation — same size, same mtime, different bytes — is still
+// refused, and the external content survives.
+func TestEditFileAfterResumeStillRejectsExternalChange(t *testing.T) {
+	ctx := WithConversationSessionID(context.Background(), "resume-external")
+	store := resumeProofStore(t, "resume-external")
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "notes.md")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := resumeProofState(t, tmp, store)
+	abs := readForTest(t, ctx, before, path)
+
+	persisted, ok, err := store.FileReadStateForSession(ctx, "resume-external", abs)
+	if err != nil || !ok {
+		t.Fatalf("baseline in the state file: ok=%v err=%v", ok, err)
+	}
+	external := []byte("alpha\nBETA\n")
+	if err := os.WriteFile(path, external, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Same clock as the read: only the content hash can tell the two versions
+	// apart, which is the check the overwrite guard rests on.
+	mod := time.Unix(0, persisted.ModTimeNS)
+	if err := os.Chtimes(path, mod, mod); err != nil {
+		t.Fatal(err)
+	}
+
+	after := resumeProofState(t, tmp, store)
+	err = editForTest(after)(ctx, path, "beta", "gamma")
+	if err == nil || !strings.Contains(err.Error(), "file changed since last read") {
+		t.Fatalf("edit after an external change err=%v, want file changed since last read", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, external) {
+		t.Fatalf("file after the refused edit = %q, want the external content kept", got)
+	}
+}
+
+// TestReadBaselineDoesNotCrossSessions pins the boundary: a baseline belongs to
+// the conversation that took it, so a second conversation of the same agent,
+// editing the same unchanged file, still owes its own read.
+func TestReadBaselineDoesNotCrossSessions(t *testing.T) {
+	readCtx := WithConversationSessionID(context.Background(), "reader")
+	store := resumeProofStore(t, "reader")
+	if err := store.Ensure(context.Background(), "bystander", "bystander"); err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "notes.md")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readForTest(t, readCtx, resumeProofState(t, tmp, store), path)
+
+	other := resumeProofState(t, tmp, store)
+	editCtx := WithConversationSessionID(context.Background(), "bystander")
+	err := editForTest(other)(editCtx, path, "beta", "gamma")
+	if err == nil || !strings.Contains(err.Error(), "must read_file before edit") {
+		t.Fatalf("edit from a conversation that read nothing err=%v, want must read_file before edit", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "alpha\nbeta\n" {
+		t.Fatalf("file after the refused edit = %q, want it untouched", got)
+	}
+}
+
+// failingReadStateStore answers every baseline lookup with one error, which is
+// the shape of a state file that cannot be opened rather than of a file the
+// model never read.
+type failingReadStateStore struct{ err error }
+
+func (f failingReadStateStore) SaveFileReadState(context.Context, state.FileReadState) error {
+	return nil
+}
+
+func (f failingReadStateStore) FileReadStateForSession(context.Context, string, string) (state.FileReadState, bool, error) {
+	return state.FileReadState{}, false, f.err
+}
+
+// TestReadBaselinePersistenceErrorDoesNotMasqueradeAsUnread pins the difference
+// between "this conversation has no baseline" and "the baselines could not be
+// read": a store failure surfaces as itself, and never as an instruction to
+// re-read — nor as a write.
+func TestReadBaselinePersistenceErrorDoesNotMasqueradeAsUnread(t *testing.T) {
+	sentinel := errors.New("state database is locked")
+	ctx := WithConversationSessionID(context.Background(), "reader")
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "notes.md")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := resumeProofState(t, tmp, failingReadStateStore{err: sentinel})
+	err := editForTest(st)(ctx, path, "beta", "gamma")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("edit error = %v, want the store's own failure", err)
+	}
+	if strings.Contains(err.Error(), "must read_file") {
+		t.Fatalf("a store failure was reported as an unread file: %v", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "alpha\nbeta\n" {
+		t.Fatalf("file after the failed lookup = %q, want it untouched", got)
+	}
+}
+
+// TestWriteFileAfterResumeRestoresReadBaseline pins the same recovery for the
+// other tool that guards an existing file: an overwriting write_file resumes
+// from the persisted baseline, and still refuses a file that changed outside the
+// conversation.
+func TestWriteFileAfterResumeRestoresReadBaseline(t *testing.T) {
+	ctx := WithConversationSessionID(context.Background(), "resume-writer")
+	store := resumeProofStore(t, "resume-writer")
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "notes.md")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readForTest(t, ctx, resumeProofState(t, tmp, store), path)
+
+	write := func(st *State, content string) error {
+		writeTool, err := NewFileWriteTool(st, nil)
+		if err != nil {
+			return err
+		}
+		args, err := json.Marshal(FileWriteInput{FilePath: path, Content: content})
+		if err != nil {
+			return err
+		}
+		_, err = writeTool.Handle(ctx, string(args))
+		return err
+	}
+	after := resumeProofState(t, tmp, store)
+	if err := write(after, "rewritten after resume\n"); err != nil {
+		t.Fatalf("write after resume: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "rewritten after resume\n" {
+		t.Fatalf("file after the resumed write = %q", got)
+	}
+
+	// The external-change half: a file rewritten behind the conversation's back
+	// is refused even though a baseline exists.
+	other := filepath.Join(tmp, "other.md")
+	if err := os.WriteFile(other, []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readForTest(t, ctx, resumeProofState(t, tmp, store), other)
+	if err := os.WriteFile(other, []byte("one\nTWO\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refusing := resumeProofState(t, tmp, store)
+	writeTool, err := NewFileWriteTool(refusing, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := json.Marshal(FileWriteInput{FilePath: other, Content: "clobbered\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeTool.Handle(ctx, string(args)); err == nil || !strings.Contains(err.Error(), "file changed since last read") {
+		t.Fatalf("write over an externally changed file err=%v, want file changed since last read", err)
+	}
+	kept, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(kept) != "one\nTWO\n" {
+		t.Fatalf("file after the refused write = %q, want the external content kept", kept)
+	}
 }

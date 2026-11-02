@@ -234,14 +234,6 @@ describe('ApprovalCard', () => {
       question: '沙箱拦下了这条命令，要在沙箱外运行吗？', facts: ['可写 /tmp/out'], buttons: ['在沙箱外运行', '这类命令不再问', '不要运行'],
     },
     {
-      id: 'act-network', kind: 'shell',
-      payload: { command: 'gh issue list', approval_reason: 'network_denied' },
-      decisions: ['accept', 'accept_for_session', { apply_network_policy_amendment: { network_policy_amendment: { host: 'api.github.com', action: 'allow' } } }, 'cancel'],
-      question: '要让它访问外网吗？', facts: ['api.github.com · HTTPS · 443'],
-      buttons: ['允许', '本会话都允许', '以后都允许', '不要访问'],
-      suggestion: { networkApprovalContext: { host: 'api.github.com', protocol: 'https' }, networkPort: 443 },
-    },
-    {
       id: 'act-permissions', kind: 'request_permissions',
       payload: {
         request_permissions: true,

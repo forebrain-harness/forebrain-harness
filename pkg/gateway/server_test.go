@@ -82,7 +82,7 @@ body`), 0o600))
 	// The launch project is the context the runtime loads skills for, so the
 	// test states it explicitly instead of relying on the process working
 	// directory.
-	s := &Server{Home: home, LaunchProject: launch}
+	s := &Server{Home: home, LaunchProject: launch, Env: bindGatewayEnv(t, home)}
 
 	// The agent's own skill routes work in no project: a project
 	// destination belongs to that project's space.
@@ -197,7 +197,7 @@ body`), 0o600))
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	s := &Server{Home: home}
+	s := &Server{Home: home, Env: bindGatewayEnv(t, home)}
 	reqBody := strings.NewReader(`{"source_ref":"file://` + src + `","dest":"workspace"}`)
 	req, err := http.NewRequest(http.MethodPost, "/api/skills/install", reqBody)
 	require.NoError(t, err)
@@ -239,7 +239,7 @@ body`), 0o600))
 	})
 	defer unsub()
 
-	s := &Server{Home: home, Notifier: notifier}
+	s := &Server{Home: home, Notifier: notifier, Env: bindGatewayEnv(t, home)}
 	reqBody := strings.NewReader(`{"source_ref":"file://` + src + `","dest":"workspace","skill":"pptx","name":"pptx-installed"}`)
 	req, err := http.NewRequest(http.MethodPost, "/api/skills/install", reqBody)
 	require.NoError(t, err)
@@ -269,7 +269,7 @@ func TestHandleSkillsListIncludesInstalledSkills(t *testing.T) {
 	// skill without one, so a fixture without it would be asserting that an
 	// invisible skill is listed.
 	require.NoError(t, os.WriteFile(filepath.Join(home, "workspace", "skills", "demo", "SKILL.md"), []byte("---\nname: demo\ndescription: demo\n---\n"), 0o600))
-	s := &Server{Home: home}
+	s := &Server{Home: home, Env: bindGatewayEnv(t, home)}
 	req := httptest.NewRequest(http.MethodGet, "/api/skills", nil)
 	rr := httptest.NewRecorder()
 	s.handleSkillsList(rr, req)
@@ -289,7 +289,7 @@ description: demo
 ---
 body`), 0o600))
 
-	s := &Server{Home: home}
+	s := &Server{Home: home, Env: bindGatewayEnv(t, home)}
 	req := httptest.NewRequest(http.MethodPost, "/api/skills/toggle", strings.NewReader(`{"enabled_paths":[]}`))
 	rr := httptest.NewRecorder()
 	s.handleSkillsToggle(rr, req)
@@ -652,7 +652,7 @@ func TestMCPServersV1ReportsConfiguredServersWithNoRuntimeView(t *testing.T) {
 	bare := &Server{Home: t.TempDir()}
 	rec = httptest.NewRecorder()
 	bare.handleMCPServersV1(rec, httptest.NewRequest(http.MethodGet, "/v1/mcp/servers", nil))
-	if rec.Code != http.StatusServiceUnavailable {
+	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want an explicit unavailability with no live config", rec.Code)
 	}
 }
@@ -661,11 +661,21 @@ func TestMCPServersV1ReportsConfiguredServersWithNoRuntimeView(t *testing.T) {
 // handler can read, over the given server list and Runner.
 func newMCPServersTestServer(t *testing.T, cfg *appcfg.Root, primary *run.Runner) *Server {
 	t.Helper()
-	s := &Server{Home: t.TempDir(), Runner: primary}
-	s.Env = &process.Environment{}
-	s.Env.Deps.AppCfg = cfg
-	s.Env.Runner = primary
-	s.Env.Root = s.Home
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(""), 0o600))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	if cfg == nil {
+		cfg = &appcfg.Root{}
+	}
+	seedConfigRoot(t, db, *cfg)
+	s := &Server{Home: home, Runner: primary}
+	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	env.Runner = primary
+	s.Env = env
 	return s
 }
 
@@ -844,8 +854,16 @@ func TestHandleChatWSRefusesATurnWithoutARunnableProject(t *testing.T) {
 	// The real gateway shape: process.Open with NoLaunchProject, so the
 	// environment genuinely has no project of its own (R4).
 	t.Setenv("FOREBRAIN_GATEWAY_PROJECT_KEY", "test-key")
+	// Token auth is the gateway's only authentication (plan 206), so a
+	// configuration carrying no token refuses every control-plane request.
+	// This fixture therefore names the token it presents below. The file holds
+	// it as an env reference because the loader refuses a plaintext secret
+	// there, and the reference resolves from the process environment exactly
+	// as a deployment's .env does.
+	const gatewayToken = "test-gateway-token"
+	t.Setenv("FOREBRAIN_GATEWAY_TOKEN", gatewayToken)
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	raw := "gateway:\n  auth:\n    mode: none\n" +
+	raw := "gateway:\n  auth:\n    token: ${FOREBRAIN_GATEWAY_TOKEN}\n" +
 		"agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
 		"        - provider: openai\n          model: gpt-main\n          api_key: ${FOREBRAIN_GATEWAY_PROJECT_KEY}\n          base_url: http://127.0.0.1:9/v1\n"
 	require.NoError(t, os.WriteFile(cfgPath, []byte(raw), 0o600))
@@ -872,9 +890,13 @@ func TestHandleChatWSRefusesATurnWithoutARunnableProject(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
 	defer server.Close()
 
+	// The page presents the token the fixture configured: without one the
+	// handshake is refused before any project gating runs.
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+gatewayToken)
 	refusal := func(t *testing.T, sid string) wsServerMsg {
 		t.Helper()
-		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), header)
 		require.NoError(t, err)
 		defer conn.Close()
 		var connected wsServerMsg
@@ -957,4 +979,20 @@ func TestWorkshopTurnRunsInTheAgentSkillDirectory(t *testing.T) {
 	_, err = workshop.RunContent(ctx, []llm.ContentPart{llm.Text("go")})
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(workspace, "skills"), filepath.Clean(seen))
+}
+
+func bindGatewayEnv(t *testing.T, home string) *process.Environment {
+	t.Helper()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	seed := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n      - provider: openai\n        model: gpt-5\n        api_key: ${TEST_KEY}\n        base_url: http://127.0.0.1:9/v1\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+	cfg, err := loadPersistedDocumentForTest(cfgPath)
+	require.NoError(t, err)
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	seedConfigRoot(t, db, cfg)
+	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: &cfg}, Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	return env
 }

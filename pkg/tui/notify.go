@@ -1708,6 +1708,16 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 		Publish: s.publishTUIRunEvent,
 		Recover: func(context.Context) { s.recoverResolvedApprovalWaitsOnce(s.preferredSessionIDForFast()) },
 	}.Start(ctx)
+	// This process registers itself as a local peer (plan 195): one socket,
+	// one rendezvous record kept current with this surface's session and
+	// status. Close stops it alongside the reaper above; the environment's
+	// own Close is the second, idempotent stop.
+	s.stopPeers = env.StartPeers(ctx, process.PeerSurface{
+		Kind:           "tui",
+		CurrentSession: s.currentSessionID,
+		Publish:        s.publishPeerRunEvent,
+		Wake:           s.wakeForPeer,
+	})
 	env.OnConfigReload = func(next *config.Root) {
 		if next == nil {
 			return
@@ -2188,6 +2198,47 @@ type AutoContinueDueMsg struct {
 	Prompt    string
 }
 
+// PeerWakeMsg carries a peer message to the event loop, which owns the
+// transcript and cancellation: the message runs as a turn of the conversation on
+// screen (plan 196 §3.5). The engine only asks when that conversation is idle, so
+// the loop's own decision is whether it is still the conversation on screen.
+type PeerWakeMsg struct {
+	SessionID string
+	Prompt    process.PeerPrompt
+}
+
+// wakeForPeer is the engine's port into this surface for a peer message that
+// needs a turn of its own. The turn is not run here: it is handed to the event
+// loop, exactly as a continuation after a usage limit is. A terminal with no
+// attached UI cannot run it, and says so instead of keeping the message.
+func (s *ChatSession) wakeForPeer(_ context.Context, p process.PeerPrompt) error {
+	if s == nil {
+		return process.ErrPeerWakeUnavailable
+	}
+	s.tuiMu.Lock()
+	attached := s.uiNotify != nil
+	s.tuiMu.Unlock()
+	if !attached {
+		return process.ErrPeerWakeUnavailable
+	}
+	s.notifyUI(PeerWakeMsg{SessionID: strings.TrimSpace(p.SessionID), Prompt: p})
+	return nil
+}
+
+// publishPeerRunEvent records a peer message's fate on the conversation's log.
+// The fact belongs to no run — the message is waiting, or was answered, before
+// any turn exists — so it is written the way a run-less event is: on the
+// conversation's own log, which is what a replay reads.
+func (s *ChatSession) publishPeerRunEvent(ctx context.Context, sessionID, runID, eventType string, payload any) error {
+	if s == nil {
+		return nil
+	}
+	if strings.TrimSpace(runID) == "" {
+		return s.publishRunEvent(ctx, event.NewRunEvent("", "", strings.TrimSpace(sessionID), eventType, payload, time.Now()))
+	}
+	return s.publishTUIRunEvent(ctx, sessionID, runID, eventType, payload)
+}
+
 // autoContinueView is what the event loop knows about one pending continuation.
 type autoContinueView struct {
 	sessionID string
@@ -2291,6 +2342,27 @@ func autoContinueUIMessage(evt event.RunEvent) (any, bool) {
 		return AutoContinueCancelledMsg{SessionID: evt.SessionID, AgentID: strings.TrimSpace(p.AgentID), Reason: p.Reason, Error: p.Error}, true
 	}
 	return nil, false
+}
+
+// handlePeerWakeNotification hands one peer wake to the event loop's state,
+// reporting false for any other message. The turn itself runs from the idle
+// loop, which is the only place a turn may start.
+func handlePeerWakeNotification(state *streamState, m any) bool {
+	msg, ok := m.(PeerWakeMsg)
+	if !ok {
+		return false
+	}
+	if state == nil {
+		return true
+	}
+	// A message for a conversation this terminal is not showing has nowhere to
+	// land here: the engine asked the surface that owns the conversation, and
+	// this is not it any more (the person switched conversations in between).
+	if !sameSessionID(msg.SessionID, state.sessionID) {
+		return true
+	}
+	state.setPeerDue(msg.Prompt)
+	return true
 }
 
 // handleAutoContinueNotification applies one auto-continue message to the
@@ -2482,6 +2554,24 @@ func (s *streamState) takeAutoContinueDue() (ComposerSubmission, bool) {
 	sub := *s.autoContinueDue
 	s.autoContinueDue = nil
 	return sub, true
+}
+
+// setPeerDue records a peer message waiting for the loop to run it.
+func (s *streamState) setPeerDue(prompt process.PeerPrompt) {
+	if s == nil {
+		return
+	}
+	s.peerDue = &prompt
+}
+
+// takePeerDue hands the loop a peer message waiting for a turn, once.
+func (s *streamState) takePeerDue() (process.PeerPrompt, bool) {
+	if s == nil || s.peerDue == nil {
+		return process.PeerPrompt{}, false
+	}
+	prompt := *s.peerDue
+	s.peerDue = nil
+	return prompt, true
 }
 
 // autoContinueWake tells the idle loop's wait to return so it can run a due

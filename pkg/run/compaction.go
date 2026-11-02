@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -16,7 +17,7 @@ import (
 // compactModelLimit resolves the budget independently of the optional context
 // snapshot. Resume and worker runs may never execute the interactive assembly
 // hook, and a snapshot can describe a previously selected model.
-func compactModelLimit(snapshotRaw json.RawMessage, provider, model string) int {
+func compactModelLimit(snapshotRaw json.RawMessage, provider, model string, configContextTokens int) int {
 	limits, known := llm.Lookup(provider, model)
 	window := limits.Limits().EffectiveInputLimit()
 	if !known || window <= 0 {
@@ -24,18 +25,12 @@ func compactModelLimit(snapshotRaw json.RawMessage, provider, model string) int 
 	}
 	if window <= 0 {
 		// Match the pre-turn path's fallback for uncatalogued models, including
-		// explicit thresholds; a missing snapshot must not disable compaction.
-		window = state.CalculateTokenBudget(0, model, limits).EffectiveContextWindow
+		// the configured context window; a missing snapshot must not disable
+		// compaction.
+		window = state.EffectiveInputWindow(limits.Limits(), configContextTokens)
 	}
 	return llm.EffectiveWindow(provider, model, window)
 }
-
-const (
-	// proactiveCompactThreshold is the fraction of the model's effective context
-	// window at which proactive compaction triggers — same fraction used by
-	// session.CalculateTokenBudget (ProactiveCompactFraction).
-	proactiveCompactThreshold = 0.90
-)
 
 // estimateToolsTokens estimates the tool-schema block sent with every request.
 // This is part of the model's input on each call and is often the largest fixed
@@ -83,9 +78,13 @@ type CompactChainDeps struct {
 	// TryCompact checkpoints the live history — messages and tools are the
 	// request the agent is about to make. Reactive marks a compaction forced by
 	// the provider rejecting that request as too large.
-	TryCompact    func(ctx context.Context, messages []llm.Message, tools []*llm.Tool, reactive bool) ([]llm.Message, bool, error)
-	ExplicitLimit int
-	LimitScope    string
+	TryCompact func(ctx context.Context, messages []llm.Message, tools []*llm.Tool, reactive bool) ([]llm.Message, bool, error)
+	// AutoCompactPercent is the share of the effective input window at which
+	// this checkpoint fires, and ConfigContextTokens the configured context
+	// window used when the catalog knows none — the same two the pre-turn
+	// checkpoint measures against, so both fire at the same real size.
+	AutoCompactPercent  int
+	ConfigContextTokens int
 	// ActiveModel identifies the model the next call will use, so observed
 	// context-window behaviour can be attributed to it. It takes the calling
 	// context because a shared runner may serve conversations on different
@@ -110,19 +109,19 @@ func (d *CompactChainDeps) tryCompact(ctx context.Context, messages []llm.Messag
 	return compacted, ok && err == nil
 }
 
-// compactIfNeeded implements the single checkpoint path. Crossing 90%
-// replaces the active history with one compact checkpoint.
+// compactIfNeeded implements the single checkpoint path. Crossing the
+// configured percent of the window replaces the active history with one compact
+// checkpoint.
 func compactIfNeeded(
 	ctx context.Context,
 	messages []llm.Message,
 	snapshotRaw json.RawMessage,
 	deps *CompactChainDeps,
-	bodyPrefixTokens int,
 	tools []*llm.Tool,
 ) ([]llm.Message, bool) {
 	provider, model := deps.activeModel(ctx)
-	modelLimit := compactModelLimit(snapshotRaw, provider, model)
-	if modelLimit <= 0 || deps == nil || deps.TryCompact == nil || !shouldCompactMessages(messages, modelLimit, deps, bodyPrefixTokens, tools, provider, model) {
+	modelLimit := compactModelLimit(snapshotRaw, provider, model, deps.ConfigContextTokens)
+	if modelLimit <= 0 || deps == nil || deps.TryCompact == nil || !shouldCompactMessages(messages, modelLimit, deps, tools, provider, model) {
 		return messages, false
 	}
 	compacted, ok := deps.tryCompact(ctx, messages, tools, false)
@@ -132,7 +131,7 @@ func compactIfNeeded(
 	return compacted, true
 }
 
-func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *CompactChainDeps, bodyPrefixTokens int, tools []*llm.Tool, provider, model string) bool {
+func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *CompactChainDeps, tools []*llm.Tool, provider, model string) bool {
 	if modelLimit <= 0 {
 		return false
 	}
@@ -153,41 +152,19 @@ func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *Compact
 	if total >= modelLimit {
 		return true
 	}
-	threshold := int(float64(modelLimit) * proactiveCompactThreshold)
-	if deps != nil && deps.ExplicitLimit > 0 && deps.ExplicitLimit < threshold {
-		threshold = deps.ExplicitLimit
-	}
-	used := total
-	if deps != nil && deps.LimitScope == "body_after_prefix" {
-		if bodyPrefixTokens >= 0 {
-			used = max(0, total-bodyPrefixTokens)
-		} else {
-			used = bodyAfterPrefixTokens(est, messages, total)
-		}
-	}
-	return used >= threshold
+	threshold := modelLimit * autoCompactPercent(deps) / 100
+	return total >= threshold
 }
 
-func bodyAfterPrefixTokens(e llm.Estimator, messages []llm.Message, total int) int {
-	checkpoint := -1
-	for i, msg := range messages {
-		if msg.Compaction != nil || (msg.Role == llm.RoleUser && strings.HasPrefix(strings.TrimSpace(msg.TextContent()), assembly.SummaryPrefix+"\n")) {
-			checkpoint = i
-		}
+// autoCompactPercent is the configured share of the window this checkpoint
+// fires at. A deps value outside the range the setting accepts is clamped the
+// same way the pre-turn checkpoint clamps it.
+func autoCompactPercent(deps *CompactChainDeps) int {
+	percent := appcfg.DefaultAutoCompactPercent
+	if deps != nil && deps.AutoCompactPercent > 0 {
+		percent = deps.AutoCompactPercent
 	}
-	prefixEnd := checkpoint
-	if prefixEnd < 0 {
-		for i, msg := range messages {
-			if msg.Role != llm.RoleSystem {
-				break
-			}
-			prefixEnd = i
-		}
-	}
-	if prefixEnd < 0 {
-		return total
-	}
-	return max(0, total-llm.EstimateMessagesWith(e, messages[:prefixEnd+1]))
+	return min(max(percent, appcfg.MinAutoCompactPercent), appcfg.MaxAutoCompactPercent)
 }
 
 // compactionAdoptionSink is a context-scoped, one-shot channel that lets an
@@ -344,6 +321,21 @@ func joinProvisionalTail(head, tail []llm.Message) []llm.Message {
 	return append(out, tail...)
 }
 
+// CompactBudgetOptions is the budget every gauge and the compaction decision
+// divide by: the configured auto-compaction percent and the configured context
+// window, which stands in when the model catalog knows no window for a model.
+// One reader for both surfaces, so the footer, /context and the checkpoint that
+// fires cannot measure against different denominators.
+func CompactBudgetOptions(cfg *appcfg.Root) state.TokenBudgetOptions {
+	if cfg == nil {
+		return state.TokenBudgetOptions{}
+	}
+	return state.TokenBudgetOptions{
+		AutoCompactPercent:    cfg.Compact.EffectiveAutoCompactPercent(),
+		FallbackContextTokens: cfg.Agents.Defaults.ContextInject.ModelContextTokens,
+	}
+}
+
 // CompactionService assembles the compaction service for an explicit /compact.
 //
 // It was implemented twice, byte for byte, in the TUI and the gateway, and the
@@ -361,10 +353,9 @@ func CompactionService(r *Runner, sessions *state.SessionStore) assembly.Service
 	out.PrimaryModel = func(ctx context.Context) (string, string) { return r.agentModelFor(ctx) }
 	if r.AppCfg != nil {
 		out.Prompt = r.AppCfg.Compact.Prompt
-		out.RemoteCompaction = r.AppCfg.Compact.UseRemoteCompaction()
-		out.RemoteV1 = !r.AppCfg.Compact.UseRemoteV2()
-		out.ExplicitLimit = r.AppCfg.Compact.ModelAutoCompactTokenLimit
-		out.LimitScope = r.AppCfg.Compact.ModelAutoCompactTokenLimitScope
+		opts := CompactBudgetOptions(r.AppCfg)
+		out.AutoCompactPercent = opts.AutoCompactPercent
+		out.ConfigContextTokens = opts.FallbackContextTokens
 	}
 	out.PreCompact = func(ctx context.Context, sid, trigger string) error {
 		return r.RunCompactHook(ctx, "PreCompact", sid, trigger)

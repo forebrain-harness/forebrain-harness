@@ -35,7 +35,7 @@ func newPoolTestEnv(t *testing.T) (*Environment, *state.ProjectStore, *sql.DB) {
 	if err := osWriteFile(cfgPath, body); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := appcfg.Load(cfgPath)
+	cfg, err := loadDocumentForTest(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -923,7 +923,7 @@ func reorderedPoolConfig(t *testing.T, cfgPath string) *appcfg.Root {
 	if err := osWriteFile(cfgPath, body); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := appcfg.Load(cfgPath)
+	cfg, err := loadDocumentForTest(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1089,7 +1089,7 @@ func TestProjectRunnerDerivesSandboxFromItsOwnTrust(t *testing.T) {
 		"          api_key: ${FOREBRAIN_POOL_TRUST_KEY}\n" +
 		"          base_url: http://localhost:0/v1\n"
 	require.NoError(t, os.WriteFile(cfgPath, []byte(body), 0o600))
-	cfg, err := appcfg.Load(cfgPath)
+	cfg, err := loadDocumentForTest(cfgPath)
 	require.NoError(t, err)
 	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
 	require.NoError(t, err)

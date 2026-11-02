@@ -152,6 +152,84 @@ ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json, updated_at_
 	return tx.Commit()
 }
 
+// UpdateSections runs one read-modify-write of several sections in a single
+// transaction (plan 191 §3.1). The settings page saves a group, and a group's
+// items can live in more than one Root section — the approval group spans
+// approval_preset, sandbox_workspace_write and batch — so such a save either
+// lands whole or leaves every section exactly as it was. fn receives the
+// current value of each named section (nil when absent) and returns the ones to
+// write; a nil value for a name removes that section. Every written or removed
+// section runs the same validator UpdateSection runs, inside the same
+// transaction, so a group that would not compose is refused as a whole.
+func (s *ConfigStore) UpdateSections(ctx context.Context, sections []string, fn func(cur map[string]json.RawMessage) (map[string]json.RawMessage, error)) error {
+	if !s.ok() {
+		return fmt.Errorf("config store unavailable")
+	}
+	if fn == nil {
+		return fmt.Errorf("config section update needs a function")
+	}
+	names := make([]string, 0, len(sections))
+	seen := make(map[string]bool, len(sections))
+	for _, name := range sections {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return fmt.Errorf("config section name required")
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("config section name required")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	cur := make(map[string]json.RawMessage, len(names))
+	for _, name := range names {
+		var raw []byte
+		switch err := tx.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = ?`, name).Scan(&raw); {
+		case err == sql.ErrNoRows:
+			cur[name] = nil
+		case err != nil:
+			return err
+		default:
+			cur[name] = json.RawMessage(raw)
+		}
+	}
+	next, err := fn(cur)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	for _, name := range names {
+		value, ok := next[name]
+		if !ok {
+			continue
+		}
+		if verr := validateSection(ctx, name, value); verr != nil {
+			return verr
+		}
+		if value == nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM fb_config WHERE section = ?`, name); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES (?,?,?)
+ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms`,
+			name, string(value), now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ReplaceAll swaps the table's whole contents for sections in one
 // transaction. It exists for the one-time legacy import at startup, which
 // must not leave a half-imported configuration behind; every later write

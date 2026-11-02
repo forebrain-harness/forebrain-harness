@@ -29,6 +29,10 @@ type TurnInputEntry struct {
 	// steer activates that skill. Empty for every other entry.
 	SkillName string
 	SkillPath string
+	// Origin names who wrote this entry on the person's behalf when it was not
+	// the person (state.MessageOrigin*): the message the model reads is marked
+	// meta and carries it. Empty for everything a person typed here.
+	Origin string
 }
 
 type TurnInputRuntime struct {
@@ -68,7 +72,7 @@ func (r *TurnInputRuntime) enqueueEntry(entry TurnInputEntry) {
 	}
 	cloned := append([]llm.ContentPart(nil), entry.Parts...)
 	r.mu.Lock()
-	r.pending = append(r.pending, TurnInputEntry{Mode: entry.Mode, Parts: cloned, Seq: entry.Seq, SkillName: entry.SkillName, SkillPath: entry.SkillPath})
+	r.pending = append(r.pending, TurnInputEntry{Mode: entry.Mode, Parts: cloned, Seq: entry.Seq, SkillName: entry.SkillName, SkillPath: entry.SkillPath, Origin: entry.Origin})
 	r.mu.Unlock()
 }
 
@@ -106,6 +110,7 @@ func (r *TurnInputRuntime) takeSteersLocked(ctx context.Context) []TurnInputEntr
 				Seq:       entry.Seq,
 				SkillName: entry.SkillName,
 				SkillPath: entry.SkillPath,
+				Origin:    entry.Origin,
 			})
 			continue
 		}
@@ -444,6 +449,7 @@ func (r *TurnInputRuntime) DrainAll() []TurnInputEntry {
 			Seq:       entry.Seq,
 			SkillName: entry.SkillName,
 			SkillPath: entry.SkillPath,
+			Origin:    entry.Origin,
 		})
 	}
 	r.pending = nil
@@ -497,6 +503,7 @@ func (r *TurnInputRuntime) Snapshot() []TurnInputEntry {
 			Seq:       entry.Seq,
 			SkillName: entry.SkillName,
 			SkillPath: entry.SkillPath,
+			Origin:    entry.Origin,
 		})
 	}
 	return out
@@ -736,6 +743,22 @@ func (q *InputQueue) SetChangeHook(hook func()) {
 // has no turn to deliver into: the message is kept as a rejected steer
 // rather than waiting for a turn it was never queued for.
 func (q *InputQueue) Steer(in Input) bool {
+	return q.steer(in, true)
+}
+
+// SteerFromAgent delivers a message one of this conversation's own agents sent
+// it — a subagent writing to the primary agent that dispatched it. It is Steer
+// with one difference: a closed conversation still takes the message, because
+// closing a conversation refuses people, not its own agents. A batch task runs
+// unattended and nobody may join it, yet the agent working the task talks to
+// the subagents it dispatched and hears them back; both sides go through here.
+func (q *InputQueue) SteerFromAgent(in Input) bool {
+	return q.steer(in, false)
+}
+
+// steer is Steer and SteerFromAgent: the sanitizing and the enqueue, with
+// respectClosed deciding whose message the closed gate refuses.
+func (q *InputQueue) steer(in Input, respectClosed bool) bool {
 	if q == nil {
 		return false
 	}
@@ -750,7 +773,7 @@ func (q *InputQueue) Steer(in Input) bool {
 		return false
 	}
 	q.mu.Lock()
-	if q.closed {
+	if q.closed && respectClosed {
 		// A closed conversation takes nothing, and keeps nothing either: a
 		// batch task has no later turn this message could be handed to.
 		q.mu.Unlock()
@@ -776,6 +799,7 @@ func (q *InputQueue) Steer(in Input) bool {
 	q.rt.enqueueEntry(TurnInputEntry{
 		Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq,
 		SkillName: strings.TrimSpace(in.SkillName), SkillPath: strings.TrimSpace(in.SkillPath),
+		Origin: strings.TrimSpace(in.Origin),
 	})
 	hook := q.hook
 	q.mu.Unlock()

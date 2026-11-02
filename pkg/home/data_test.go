@@ -138,7 +138,7 @@ func TestEnsure_CreatesDefaultConfig(t *testing.T) {
 	}
 	text := string(data)
 	for _, want := range []string{
-		"warn_remaining_tokens: 8000",
+		"warn_remaining_percent: 12",
 		"provider: \"\"",
 		"model: \"\"",
 		"approval_policy: \"on-request\"",

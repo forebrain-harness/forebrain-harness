@@ -100,12 +100,14 @@ func ContextReport(ctx context.Context, src ContextSources, sessionID string) st
 
 // ContextGaugeOf is how full the context window is, from the conversation's
 // size and the model's limits: the one computation behind the /status gauge,
-// the /context report and the composer footer, so they cannot disagree.
-func ContextGaugeOf(provider, model string, usage, explicitCompactLimit int) StatusContext {
+// the /context report and the composer footer, so they cannot disagree. opts
+// carries the auto-compaction percent and the configured context window, the
+// same two the compaction decision reads.
+func ContextGaugeOf(provider, model string, usage int, opts state.TokenBudgetOptions) StatusContext {
 	// The footer ignores Lookup's ok flag and feeds whatever the model table
 	// yields (its defaults included); every reader must get the same answer.
 	limits, _ := llm.Lookup(strings.TrimSpace(provider), strings.TrimSpace(model))
-	budget := state.CalculateTokenBudgetWithOptions(usage, strings.TrimSpace(model), limits, state.TokenBudgetOptions{ExplicitLimit: explicitCompactLimit})
+	budget := state.CalculateTokenBudgetWithOptions(usage, strings.TrimSpace(model), limits, opts)
 	return StatusContext{
 		PercentLeft:   budget.PercentLeft,
 		UsedTokens:    budget.TokenUsage,

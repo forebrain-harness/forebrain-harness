@@ -766,6 +766,21 @@ func isSubagentManagementToolName(name string) bool {
 	}
 }
 
+// isPeerToolName reports whether name is one of the two tools the agents of one
+// conversation address each other with: the dispatcher and the subagents it
+// dispatched. Like the one-level rule above it is a structural fact, not a
+// capability a configuration grants or withholds — a worker that could not
+// report back would leave its dispatcher waiting on a task it can no longer ask
+// about, and a dispatcher that could not ask would see only the final answer.
+func isPeerToolName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "peer_list", "peer_send":
+		return true
+	default:
+		return false
+	}
+}
+
 var typedSubagentDisallowedTools = map[string]map[string]struct{}{
 	"explore": {
 		"write_file": {}, "edit_file": {},

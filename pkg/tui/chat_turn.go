@@ -586,12 +586,10 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 	// The approval hooks ride on the run's context too. A conversation's turn
 	// runs on its project's runner, whose tool state is not the one
 	// syncToolApprovalHooks installs on, so a hook left only on that state
-	// never reaches the turn: a sandboxed command's network approval became a
-	// refusal, and a subagent's approval stopped the whole turn instead of
-	// pausing that subagent — which also kept the subagents of one answer from
-	// starting together.
+	// never reaches the turn: a subagent's approval stopped the whole turn
+	// instead of pausing that subagent — which also kept the subagents of one
+	// answer from starting together.
 	if s.toolApprovalSinkGet() != nil {
-		agBase = tool.WithNetworkApprovalPromptHook(agBase, s.promptInlineNetworkApproval)
 		agBase = tool.WithSubagentApprovalHook(agBase, s.resolveSubagentApproval)
 		agBase = tool.WithInlineApprovalHook(agBase, s.resolveInlineApproval)
 	}
@@ -948,9 +946,6 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 	if !v.denied && !v.stopped && s.actionSvc() != nil && s.runner() != nil {
 		if act, aerr := s.actionSvc().Get(context.Background(), actionID); aerr == nil && act != nil && act.Status == state.ActionApproved {
 			service := turn.ApprovalService{Actions: s.actionSvc(), Policy: s.runner()}
-			if s.Env != nil {
-				service.Network = s.Env.Tools()
-			}
 			if effectErr := service.ApplyResolvedEffect(act, p.RunID); effectErr != nil {
 				explained := llm.ExplainError(effectErr)
 				if s.runSvc() != nil {
@@ -1567,11 +1562,11 @@ func (s *ChatSession) SurfaceComposerTokenStats(sessionID string, usage int) Com
 	return composerTokenStatsFromBudget(msg)
 }
 
-func (s *ChatSession) compactExplicitLimit() int {
-	if s == nil || s.runner() == nil || s.runner().AppCfg == nil {
-		return 0
+func (s *ChatSession) compactBudgetOptions() state.TokenBudgetOptions {
+	if s == nil || s.runner() == nil {
+		return state.TokenBudgetOptions{}
 	}
-	return s.runner().AppCfg.Compact.ModelAutoCompactTokenLimit
+	return run.CompactBudgetOptions(s.runner().AppCfg)
 }
 
 // turnCompletion is the single authoritative completion snapshot for a turn.

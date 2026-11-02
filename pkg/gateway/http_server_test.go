@@ -52,7 +52,6 @@ func TestWriteStartupBannerGolden(t *testing.T) {
 	writeStartupBanner(&buf, startupBanner{
 		Version:     "v0.3.0",
 		Addr:        bannerAddr(t, "127.0.0.1:6060"),
-		AuthMode:    "token",
 		SignInToken: "tok",
 		WebUI:       true,
 	})
@@ -88,9 +87,8 @@ func TestSignInFragmentValueRoundTripsFreeTextTokens(t *testing.T) {
 func TestWriteStartupBannerOmitsSignInWithoutToken(t *testing.T) {
 	var buf bytes.Buffer
 	writeStartupBanner(&buf, startupBanner{
-		Version:  "v0.3.0",
-		Addr:     bannerAddr(t, "127.0.0.1:6060"),
-		AuthMode: "none",
+		Version: "v0.3.0",
+		Addr:    bannerAddr(t, "127.0.0.1:6060"),
 	})
 	if strings.Contains(buf.String(), "Sign in") {
 		t.Fatalf("banner must omit the sign-in line without a token:\n%s", buf.String())
@@ -103,10 +101,9 @@ func TestWriteStartupBannerOmitsSignInWithoutToken(t *testing.T) {
 func TestWriteStartupBannerUnspecifiedHost(t *testing.T) {
 	var buf bytes.Buffer
 	writeStartupBanner(&buf, startupBanner{
-		Version:  "v0.3.0",
-		Addr:     bannerAddr(t, "0.0.0.0:6060"),
-		AuthMode: "token",
-		WebUI:    true,
+		Version: "v0.3.0",
+		Addr:    bannerAddr(t, "0.0.0.0:6060"),
+		WebUI:   true,
 	})
 	if !strings.Contains(buf.String(), "Web UI       http://127.0.0.1:6060/") {
 		t.Fatalf("clickable URLs must use 127.0.0.1 for an unspecified bind:\n%s", buf.String())
@@ -119,8 +116,7 @@ func TestWriteStartupBannerUnspecifiedHost(t *testing.T) {
 func TestWriteStartupBannerNoVersion(t *testing.T) {
 	var buf bytes.Buffer
 	writeStartupBanner(&buf, startupBanner{
-		Addr:     bannerAddr(t, "127.0.0.1:6060"),
-		AuthMode: "token",
+		Addr: bannerAddr(t, "127.0.0.1:6060"),
 	})
 	if !strings.Contains(buf.String(), "Forebrain Harness Gateway\n") {
 		t.Fatalf("version-less banner must still name the product:\n%s", buf.String())

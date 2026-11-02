@@ -15,6 +15,31 @@ var defaultAllow = []string{
 	"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "USER", "SHELL", "TERM",
 }
 
+// mirrorEnvAllow is the package-mirror and certificate environment a child
+// process inherits. An intranet deployment has no public network: every command
+// there resolves its packages through the mirror the operator configured on the
+// gateway, and dropping these names made `go mod download`, `pip install` and
+// `npm install` reach for the internet and fail. They are configuration, not
+// credentials — a value that carries one (https://user:pass@mirror) is passed
+// through as the operator wrote it — and looksSecretKey still filters the list
+// below. Proxy variables (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY) are
+// deliberately absent: an intranet install reaches its mirror directly.
+var mirrorEnvAllow = []string{
+	// Go modules.
+	"GOPROXY", "GONOPROXY", "GOPRIVATE", "GONOSUMDB", "GONOSUMCHECK", "GOSUMDB", "GOINSECURE",
+	"GOTOOLCHAIN",
+	// pip and uv.
+	"PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST", "PIP_CERT",
+	"UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL", "UV_INDEX", "UV_INSECURE_HOST",
+	// npm, yarn and pnpm. npm itself looks its configuration up
+	// case-insensitively, so both spellings of every name are listed.
+	"NPM_CONFIG_REGISTRY", "npm_config_registry", "NPM_CONFIG_CAFILE", "npm_config_cafile",
+	"NPM_CONFIG_STRICT_SSL", "npm_config_strict_ssl",
+	"YARN_REGISTRY", "YARN_NPM_REGISTRY_SERVER",
+	// The enterprise CA an internal mirror's HTTPS certificate is signed with.
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "CURL_CA_BUNDLE",
+}
+
 var explicitRuntimeAllow = map[string]struct{}{
 	"FOREBRAIN_HOME":           {},
 	"FOREBRAIN_RUN_ID":         {},
@@ -28,8 +53,13 @@ func SafeSubprocessEnv(parent []string, opts Options) []string {
 	if len(parent) == 0 {
 		parent = os.Environ()
 	}
-	allowSet := make(map[string]struct{}, len(defaultAllow))
+	allowSet := make(map[string]struct{}, len(defaultAllow)+len(mirrorEnvAllow))
 	for _, k := range defaultAllow {
+		allowSet[k] = struct{}{}
+	}
+	// Names match exactly, and the secret filter below still applies to the
+	// merged set: this adds the mirror's configuration, never credentials.
+	for _, k := range mirrorEnvAllow {
 		allowSet[k] = struct{}{}
 	}
 	out := make([]string, 0, len(parent)+len(opts.ExplicitEnv))

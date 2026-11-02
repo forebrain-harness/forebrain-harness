@@ -65,11 +65,6 @@
               class="context-debug-threshold context-debug-threshold-warn"
               :style="{ left: `${view.warningRatio * 100}%` }"
             />
-            <span
-              v-if="view.blockingRatio != null"
-              class="context-debug-threshold context-debug-threshold-block"
-              :style="{ left: `${view.blockingRatio * 100}%` }"
-            />
           </div>
           <div class="context-debug-track-labels">
             <span>{{ t('chat.contextConversationTokens') }} {{ compactNumber(view.conversationTokens) }}</span>
@@ -273,7 +268,6 @@ import {
   CircleAlert,
   Gauge,
   RefreshCw,
-  ShieldAlert,
   TriangleAlert,
 } from 'lucide-vue-next'
 
@@ -323,25 +317,21 @@ watch(evictedItems, (items) => {
 
 const signalLabel = computed(() => {
   if (view.value.signal === 'warn') return t('chat.contextSignalWarn')
-  if (view.value.signal === 'block') return t('chat.contextSignalBlock')
   return t('chat.contextSignalOk')
 })
 
 const signalIcon = computed(() => {
-  if (view.value.signal === 'block') return ShieldAlert
   if (view.value.signal === 'warn') return TriangleAlert
   return CheckCircle2
 })
 
 const signalClass = computed(() => {
   if (view.value.tone === 'warning') return 'context-debug-signal-warn'
-  if (view.value.tone === 'danger') return 'context-debug-signal-danger'
   return 'context-debug-signal-ok'
 })
 
 const usageBarClass = computed(() => {
   if (view.value.tone === 'warning') return 'context-debug-track-fill-warn'
-  if (view.value.tone === 'danger') return 'context-debug-track-fill-danger'
   return 'context-debug-track-fill-ok'
 })
 
@@ -370,7 +360,6 @@ function compactContent(content?: string) {
 }
 
 function recoveryToneClass(tone: ContextSignalTone) {
-  if (tone === 'danger') return 'context-debug-dot-danger'
   if (tone === 'warning') return 'context-debug-dot-warn'
   return 'context-debug-dot-ok'
 }
@@ -461,12 +450,6 @@ const MetricCell = defineComponent({
   border-color: var(--forebrain-warning);
   background: var(--forebrain-warning-soft);
   color: var(--forebrain-warning);
-}
-
-.context-debug-signal-danger {
-  border-color: var(--forebrain-danger);
-  background: var(--forebrain-bg-alt);
-  color: var(--forebrain-danger);
 }
 
 .context-debug-refresh {
@@ -612,10 +595,6 @@ const MetricCell = defineComponent({
   background: var(--forebrain-warning);
 }
 
-.context-debug-track-fill-danger {
-  background: var(--forebrain-danger);
-}
-
 .context-debug-threshold {
   position: absolute;
   top: -3px;
@@ -625,10 +604,6 @@ const MetricCell = defineComponent({
 
 .context-debug-threshold-warn {
   background: var(--forebrain-warning);
-}
-
-.context-debug-threshold-block {
-  background: var(--forebrain-danger);
 }
 
 .context-debug-track-labels {
@@ -792,10 +767,6 @@ const MetricCell = defineComponent({
 
 .context-debug-dot-warn {
   background: var(--forebrain-warning);
-}
-
-.context-debug-dot-danger {
-  background: var(--forebrain-danger);
 }
 
 .context-debug-code-pill,

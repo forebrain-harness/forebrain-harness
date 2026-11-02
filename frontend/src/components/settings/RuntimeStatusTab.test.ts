@@ -11,7 +11,6 @@ import RuntimeStatusTab from './RuntimeStatusTab.vue'
  */
 const INFO: RuntimeInfo = {
   status: 'ok',
-  auth: 'token',
   agents: 3,
   home: '/h',
   logsDir: '/h/logs',
@@ -49,7 +48,7 @@ describe('RuntimeStatusTab', () => {
     vi.restoreAllMocks()
   })
 
-  it('draws one flat list of the nine facts, with no card and no title', async () => {
+  it('draws one flat list of the eight facts, with no card and no title', async () => {
     const wrapper = await mountTab()
 
     expect(wrapper.find('h2').exists()).toBe(false)
@@ -58,7 +57,6 @@ describe('RuntimeStatusTab', () => {
       '状态',
       '版本',
       '监听地址',
-      '鉴权',
       '主代理',
       '主目录',
       '日志',
@@ -73,7 +71,6 @@ describe('RuntimeStatusTab', () => {
     expect(valueOf(wrapper, '状态')).toContain('正常')
     expect(valueOf(wrapper, '版本')).toBe(__FOREBRAIN_VERSION__)
     expect(valueOf(wrapper, '监听地址')).toBe(window.location.host)
-    expect(valueOf(wrapper, '鉴权')).toBe('token')
     expect(valueOf(wrapper, '主代理')).toBe('3 个')
     expect(valueOf(wrapper, '主目录')).toBe('/h')
     expect(valueOf(wrapper, '日志')).toBe('/h/logs')
@@ -86,7 +83,6 @@ describe('RuntimeStatusTab', () => {
     vi.mocked(forebrainApi.skillsOverview).mockRejectedValueOnce(new Error('not available'))
     const wrapper = await mountTab()
 
-    expect(valueOf(wrapper, '鉴权')).toBe('—')
     expect(valueOf(wrapper, '主代理')).toBe('—')
     expect(valueOf(wrapper, '主目录')).toBe('—')
     expect(valueOf(wrapper, '日志')).toBe('—')

@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 24
+const stateSchemaVersion = 29
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -63,6 +63,11 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 22, apply: migrateStateV21ToV22},
 	{version: 23, apply: migrateStateV22ToV23},
 	{version: 24, apply: migrateStateV23ToV24},
+	{version: 25, apply: migrateStateV24ToV25},
+	{version: 26, apply: migrateStateV25ToV26},
+	{version: 27, apply: migrateStateV26ToV27},
+	{version: 28, apply: migrateStateV27ToV28},
+	{version: 29, apply: migrateStateV28ToV29},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -986,16 +991,423 @@ CREATE TABLE IF NOT EXISTS fb_mcp_oauth (
 	return nil
 }
 
-// sqlInListV11 renders a comma-separated list of single-quoted literals for an
-// IN (...) clause. The values are the frozen constants above, never user
-// input, so there is no injection surface and no per-call bind-parameter list
-// to thread through the queries.
+// migrateStateV24ToV25 adds fb_file_read_states (plan 183): the read baseline a
+// conversation keeps across processes, so a session resumed in a new one is
+// checked against the version the model actually read instead of being told to
+// read a file it read minutes ago in the previous process. Only version facts
+// are stored — mtime, size and the whole file's SHA-256, never the bytes — and
+// the table is a pure addition: it starts empty, nothing existing is rewritten,
+// and a fixture built from the current schema.sql with a lowered user_version
+// skips the statement instead of failing on a duplicate. The table text matches
+// schema.sql byte for byte, which is what the migration-vs-fresh-schema test
+// compares in sqlite_master.
+func migrateStateV24ToV25(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_file_read_states (
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
+  path TEXT NOT NULL,
+  mod_time_ns INTEGER NOT NULL,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  read_at_ns INTEGER NOT NULL,
+  touch_kind TEXT NOT NULL DEFAULT 'read' CHECK (touch_kind = 'read'),
+  PRIMARY KEY (session_id, path)
+) STRICT, WITHOUT ROWID`); err != nil {
+		return fmt.Errorf("create fb_file_read_states: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV25ToV26 gives every existing session the approval-preset row a
+// new one is now born with, then rewrites the preset ids to the two the presets
+// use now (plan 203).
+//
+// The backfill is the second half of §0.2b: from this version on, a session's
+// posture lives in its own row — the global preset is only the value a session
+// is created from — so a session that predates the rule and has no row would
+// otherwise keep following a global setting the surfaces no longer show it as
+// following. Batch sessions are skipped: their posture comes from the project
+// type, and a row would describe a session that never runs that way. A session
+// that does have a row keeps it untouched, whatever wrote it. The timestamp is
+// one fixed value rather than "now", because a migration states a fact about
+// rows that already existed and must produce the same file twice.
+//
+// The rewrite covers the sessions that were here before: the read-only preset is
+// gone, and its sessions become workspace_write rather than losing their row — a
+// deleted row would make the session follow the global preset, which widens it
+// whenever the global one is full access. "auto" is the old spelling of the same
+// preset, and "full-access" only gained the underscore the configuration constant
+// uses. A preset outside that set is left alone: the value was written by a
+// binary this migration does not know about, and guessing at it would be worse
+// than keeping the string, which the runtime already treats as "not full access".
+func migrateStateV25ToV26(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+SELECT s.id, 'workspace_write', 'default', 1700000000000
+FROM fb_sessions s
+WHERE s.project_type <> 'batch'
+  AND NOT EXISTS (SELECT 1 FROM fb_session_permission_state p WHERE p.session_id = s.id)`); err != nil {
+		return fmt.Errorf("backfill session approval presets: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+UPDATE fb_session_permission_state SET preset = CASE preset
+  WHEN 'read-only' THEN 'workspace_write'
+  WHEN 'auto' THEN 'workspace_write'
+  WHEN 'full-access' THEN 'full_access'
+  ELSE preset
+END`); err != nil {
+		return fmt.Errorf("rewrite stored approval presets: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV26ToV27 carries two halves of plan 205, in one version because
+// they are one release of one decision.
+//
+// The first half is owner ruling §0.2: a batch project's conversations never
+// use memory. Every existing batch conversation becomes memory-disabled, and
+// the stage-1 outputs extracted from them are deleted — those rows are exactly
+// the memories a batch project must not have contributed. Where such a row had
+// already been selected as a phase-2 input, the scope is enqueued for another
+// pass: deleting the row only takes the contribution out of the consolidated
+// memory once phase 2 runs over the workspace again, and a migration cannot
+// call the Go pipeline that would otherwise do the enqueueing.
+//
+// That enqueue is the statement pkg/memory's EnqueueGlobalPhase2 writes
+// (enqueueGlobalPhase2On), reproduced here with its literal values because a
+// migration may not import pkg/memory: kind 'memory_consolidate_global', key
+// <agent_id>|<scope>, pending with the 3-retry budget and a zero watermark that
+// the conflict clause bumps by one, which is what makes an unchanged watermark
+// still force a pass. The stage-1 job rows of the deleted outputs are left in
+// place: their sessions are disabled now, so the claim query can never pick
+// them up again, and a migration that rewrote them would be inventing
+// bookkeeping no reader consults.
+//
+// The second half is §3.4: fb_memory_stage1_outputs records how far into the
+// transcript its extraction read, so the next extraction of the same thread
+// reads only what came after. Old rows keep NULL, which means "no row id yet"
+// and costs those threads one more full extraction.
+func migrateStateV26ToV27(ctx context.Context, conn *sql.Conn) error {
+	var column int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_memory_stage1_outputs') WHERE name='last_message_row_id'`).Scan(&column); err != nil {
+		return err
+	}
+	if column == 0 {
+		if _, err := conn.ExecContext(ctx,
+			`ALTER TABLE fb_memory_stage1_outputs ADD COLUMN last_message_row_id INTEGER`); err != nil {
+			return fmt.Errorf("add fb_memory_stage1_outputs.last_message_row_id: %w", err)
+		}
+	}
+
+	scopes, err := batchMemoryRetractionScopesV27(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `
+DELETE FROM fb_memory_stage1_outputs WHERE thread_id IN (
+  SELECT s.id FROM fb_sessions s WHERE s.project_type = 'batch')`); err != nil {
+		return fmt.Errorf("delete batch stage-one outputs: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+UPDATE fb_sessions SET memory_mode = 'disabled'
+WHERE project_type = 'batch' AND memory_mode <> 'disabled'`); err != nil {
+		return fmt.Errorf("disable memory on batch sessions: %w", err)
+	}
+	for _, scope := range scopes {
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO fb_memory_jobs(kind,job_key,agent_id,status,retry_remaining,input_watermark,last_success_watermark)
+VALUES('memory_consolidate_global',?,?,'pending',3,0,0) ON CONFLICT(kind,job_key) DO UPDATE SET
+  status=CASE WHEN fb_memory_jobs.status='running' THEN 'running' ELSE 'pending' END,
+  retry_at=CASE WHEN fb_memory_jobs.status='running' THEN fb_memory_jobs.retry_at ELSE NULL END,
+  retry_remaining=MAX(fb_memory_jobs.retry_remaining,excluded.retry_remaining),
+  input_watermark=CASE WHEN excluded.input_watermark>COALESCE(fb_memory_jobs.input_watermark,0)
+    THEN excluded.input_watermark ELSE COALESCE(fb_memory_jobs.input_watermark,0)+1 END
+WHERE fb_memory_jobs.agent_id=excluded.agent_id`,
+			scope.agentID+"|project:"+scope.projectKey, scope.agentID); err != nil {
+			return fmt.Errorf("enqueue phase two for %s: %w", scope.projectKey, err)
+		}
+	}
+	return nil
+}
+
+// memoryRetractionScopeV27 is one project scope that has to be consolidated
+// again: the agent whose workspace holds it and the project key naming it.
+type memoryRetractionScopeV27 struct {
+	agentID    string
+	projectKey string
+}
+
+// batchMemoryRetractionScopesV27 lists the scopes whose phase-2 selection
+// included a stage-1 output extracted from a batch project's conversation —
+// exactly the contributions this migration deletes and phase 2 must therefore
+// consolidate away.
+func batchMemoryRetractionScopesV27(ctx context.Context, conn *sql.Conn) ([]memoryRetractionScopeV27, error) {
+	rows, err := conn.QueryContext(ctx, `
+SELECT DISTINCT o.agent_id, o.project_key
+FROM fb_memory_stage1_outputs o
+JOIN fb_sessions s ON s.id = o.thread_id AND s.agent_id = o.agent_id
+WHERE s.project_type = 'batch' AND o.selected_for_phase2 <> 0
+ORDER BY o.agent_id, o.project_key`)
+	if err != nil {
+		return nil, fmt.Errorf("list scopes to re-consolidate: %w", err)
+	}
+	defer rows.Close()
+	var scopes []memoryRetractionScopeV27
+	for rows.Next() {
+		var scope memoryRetractionScopeV27
+		if err := rows.Scan(&scope.agentID, &scope.projectKey); err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes, rows.Err()
+}
+
+// The configuration cleanup plan 207 §3.4 makes, in one version: the rows of
+// the sections 203–206 deleted, the settings those plans removed from the
+// sections that stayed, and the explicit representation of the four string
+// settings whose empty value used to mean "the runtime default".
+//
+// Every list is written out here rather than derived from config.Root: a
+// migration describes the database it upgrades, not the structures whatever
+// binary is running happens to have. The settings plan 207 introduced —
+// auto_compact_percent, warn_remaining_percent, approval_preset — are not
+// written here either; the startup top-up stores them for every install, fresh
+// or migrated, through one path.
+var (
+	// retireSectionsV28 are the section rows that no longer name a setting:
+	// 203 folded approval_policy, sandbox_mode, the permission profiles,
+	// approvals_reviewer, auto_review and tools into approval_preset, and 206
+	// removed the windows section.
+	retireSectionsV28 = []string{
+		"approval_policy",
+		"approvals_reviewer",
+		"auto_review",
+		"default_permissions",
+		"permissions",
+		"sandbox_mode",
+		"tools",
+		"windows",
+	}
+	// retireFieldsV28 are the settings removed from a section that stays, by
+	// the path they hold inside that section's own JSON.
+	retireFieldsV28 = map[string][]string{
+		"compact": {
+			"model_auto_compact_token_limit",
+			"model_auto_compact_token_limit_scope",
+			"remote_compaction",
+			"remote_compaction_v2",
+		},
+		"memories": {
+			"use_memories",
+			"generate_memories",
+			"dedicated_tools",
+			"disable_on_external_context",
+			"min_rate_limit_remaining_percent",
+		},
+		"features": {
+			"exec_permission_approvals",
+			"request_permissions_tool",
+			"network_proxy",
+		},
+		"sandbox_workspace_write": {
+			"go_cache_mode",
+			"exclude_tmpdir_env_var",
+			"exclude_slash_tmp",
+		},
+		// Only agents.defaults carries these: a primary agent's definition has
+		// no context_inject or guardrails block to override, so the same paths
+		// cannot exist under agents.definitions.
+		"agents": {
+			"defaults.context_inject.warn_remaining_tokens",
+			"defaults.context_inject.block_remaining_tokens",
+			"defaults.guardrails.output",
+			"defaults.guardrails.retrieval",
+		},
+	}
+	// explicitRepresentationV28 replaces an empty string whose meaning was the
+	// runtime default with the value that carries it (plan 207 §3.3), so a
+	// migrated database reads the way a fresh one does. A key that is absent
+	// from a stored section is left to the startup top-up: it owns "a section
+	// is missing a setting", this migration owns "a stored setting is retired".
+	explicitRepresentationV28 = map[string]map[string]string{
+		"agents": {
+			"defaults.web_search.provider": "none",
+			"defaults.web_fetch.provider":  "builtin",
+		},
+		"memories": {
+			"extract_model":       "current",
+			"consolidation_model": "current",
+		},
+	}
+)
+
+func migrateStateV27ToV28(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx,
+		`DELETE FROM fb_config WHERE section IN (`+sqlInListV11(retireSectionsV28)+`)`); err != nil {
+		return fmt.Errorf("delete retired config sections: %w", err)
+	}
+	for _, section := range sortedKeys(retireFieldsV28) {
+		if err := rewriteStoredConfigV28(ctx, conn, section, retireFieldsV28[section], nil); err != nil {
+			return err
+		}
+	}
+	for _, section := range sortedKeys(explicitRepresentationV28) {
+		if err := rewriteStoredConfigV28(ctx, conn, section, nil, explicitRepresentationV28[section]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateStateV28ToV29 adds the batch project's own sandbox switch (plans/216).
+// One plain ADD COLUMN, so a database that already carries it (a fixture built
+// from the current schema.sql with a lowered user_version) skips the ALTER
+// instead of failing on a duplicate. Every existing project reads as "sandbox
+// on" — the value a new batch project starts at, and the only safe reading for
+// a task nobody watches — and only batch projects consult it.
+func migrateStateV28ToV29(ctx context.Context, conn *sql.Conn) error {
+	var sandboxCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_projects') WHERE name='batch_sandbox'`).Scan(&sandboxCol); err != nil {
+		return err
+	}
+	if sandboxCol > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_projects ADD COLUMN batch_sandbox INTEGER NOT NULL DEFAULT 1 CHECK (batch_sandbox IN (0, 1))`); err != nil {
+		return fmt.Errorf("add fb_projects.batch_sandbox: %w", err)
+	}
+	return nil
+}
+
+// rewriteStoredConfigV28 removes the paths from one stored section and writes
+// the explicit representation over an empty string, in one read-modify-write of
+// that row. A section the database does not hold is nothing to rewrite.
+func rewriteStoredConfigV28(ctx context.Context, conn *sql.Conn, section string, remove []string, represent map[string]string) error {
+	var stored string
+	switch err := conn.QueryRowContext(ctx,
+		`SELECT value_json FROM fb_config WHERE section = ?`, section).Scan(&stored); {
+	case err == sql.ErrNoRows:
+		return nil
+	case err != nil:
+		return fmt.Errorf("read config section %s: %w", section, err)
+	}
+	var doc any
+	if err := json.Unmarshal([]byte(stored), &doc); err != nil {
+		return fmt.Errorf("read config section %s: %w", section, err)
+	}
+	changed := false
+	for _, path := range remove {
+		if deleteConfigPathV28(doc, path) {
+			changed = true
+		}
+	}
+	for _, path := range sortedKeys(represent) {
+		if writeEmptyRepresentationV28(doc, path, represent[path]) {
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	next, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("render config section %s: %w", section, err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE fb_config SET value_json = ? WHERE section = ?`, string(next), section); err != nil {
+		return fmt.Errorf("rewrite config section %s: %w", section, err)
+	}
+	return nil
+}
+
+// deleteConfigPathV28 removes a dot-separated path from a decoded section and
+// reports whether it was there. An object left empty by the removal is dropped
+// from its parent: a stored `context_inject: {}` documents nothing, and the
+// settings pages would show an empty block instead of an absent one.
+func deleteConfigPathV28(doc any, path string) bool {
+	object, ok := doc.(map[string]any)
+	if !ok {
+		return false
+	}
+	keys := strings.Split(path, ".")
+	for _, key := range keys[:len(keys)-1] {
+		next, ok := object[key].(map[string]any)
+		if !ok {
+			return false
+		}
+		object = next
+	}
+	last := keys[len(keys)-1]
+	if _, present := object[last]; !present {
+		return false
+	}
+	delete(object, last)
+	if len(keys) > 1 && len(object) == 0 {
+		// The parent object carried only this setting; drop it whole.
+		dropEmptyParentV28(doc, keys[:len(keys)-1])
+	}
+	return true
+}
+
+func dropEmptyParentV28(doc any, keys []string) {
+	object, ok := doc.(map[string]any)
+	if !ok {
+		return
+	}
+	for _, key := range keys[:len(keys)-1] {
+		next, ok := object[key].(map[string]any)
+		if !ok {
+			return
+		}
+		object = next
+	}
+	delete(object, keys[len(keys)-1])
+}
+
+// writeEmptyRepresentationV28 writes representation over the empty string at
+// path and reports whether it did. A key that is absent, holds a value, or has
+// no parent object (the section itself is not an object) is left alone.
+func writeEmptyRepresentationV28(doc any, path, representation string) bool {
+	object, ok := doc.(map[string]any)
+	if !ok {
+		return false
+	}
+	keys := strings.Split(path, ".")
+	for _, key := range keys[:len(keys)-1] {
+		next, ok := object[key].(map[string]any)
+		if !ok {
+			return false
+		}
+		object = next
+	}
+	last := keys[len(keys)-1]
+	if value, ok := object[last].(string); ok && value == "" {
+		object[last] = representation
+		return true
+	}
+	return false
+}
+
 func sqlInListV11(values []string) string {
 	quoted := make([]string, len(values))
 	for i, v := range values {
 		quoted[i] = "'" + v + "'"
 	}
 	return strings.Join(quoted, ",")
+}
+
+// sortedKeys returns a map's keys in a stable order, so a migration that walks
+// a table of sections rewrites them the same way every run.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // deleteMainAgentStreamDeltasV11 removes the main agent's own stream deltas —

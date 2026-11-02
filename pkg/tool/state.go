@@ -69,7 +69,6 @@ type ContextTimelineEntry struct {
 	WindowNumber  int       `json:"window_number,omitempty"`
 	Summary       string    `json:"summary,omitempty"`
 	SummarySource string    `json:"summary_source,omitempty"`
-	Scope         string    `json:"scope,omitempty"`
 	TokensBefore  int       `json:"tokens_before,omitempty"`
 	TokensAfter   int       `json:"tokens_after,omitempty"`
 	Reactive      bool      `json:"reactive,omitempty"`
@@ -89,17 +88,30 @@ type FileChangeRecorder interface {
 	RecordFileChange(ctx context.Context, c state.FileChange) error
 }
 
+// ReadStateStore is where a read baseline outlives the process that took it.
+// A conversation resumed in a new process has no in-memory read states, and
+// without these two calls the file it read before the resume owes a fresh read
+// before every edit — so the state persists a whole-file read and looks the
+// baseline back up when an edit asks what this conversation has seen.
+//
+// It is a narrow interface, not the session store itself: pkg/tool needs
+// exactly these two calls, and *state.SessionStore is one implementation of
+// them.
+type ReadStateStore interface {
+	SaveFileReadState(ctx context.Context, in state.FileReadState) error
+	FileReadStateForSession(ctx context.Context, sessionID, path string) (state.FileReadState, bool, error)
+}
+
 type State struct {
-	mu                      sync.Mutex
-	readFiles               map[string]ReadState
-	toolMetas               map[string]event.ToolMeta
-	loadedSkills            map[string]LoadedSkill
-	skillDraftResolve       SkillDraftResolver
-	contextShots            map[string]json.RawMessage
-	toolSpills              map[string][]ToolResultSpill
-	sessionSpills           map[string][]ToolResultSpill
-	sessionRuntimeModes     map[string]runtimeSessionMode
-	networkSessionDecisions map[string]map[networkSessionKey]bool
+	mu                  sync.Mutex
+	readFiles           map[string]ReadState
+	toolMetas           map[string]event.ToolMeta
+	loadedSkills        map[string]LoadedSkill
+	skillDraftResolve   SkillDraftResolver
+	contextShots        map[string]json.RawMessage
+	toolSpills          map[string][]ToolResultSpill
+	sessionSpills       map[string][]ToolResultSpill
+	sessionRuntimeModes map[string]runtimeSessionMode
 	// toolMiddlewares wrap every tool this state registers. They belong to the
 	// runtime that built them, which is why they are here and not in a package
 	// variable every runtime in the process would share.
@@ -120,9 +132,9 @@ type State struct {
 	historyDir                   string
 	toolResultDir                string
 	fileChangeRecorder           FileChangeRecorder
+	readStateStore               ReadStateStore
 	runtimeValues                map[string]any
 	actionHook                   func(ctx context.Context, kind string, payload any) (actionID string, ok bool, err error)
-	networkApprovalPromptHook    func(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error)
 	subagentApprovalHook         SubagentApprovalHook
 	inlineApprovalHook           InlineApprovalHook
 	stepHook                     func(ctx context.Context, evt StepEvent)
@@ -170,7 +182,6 @@ const (
 	ctxKeyTurnAnchorMessageID  ctxKey = "forebrain_turn_anchor_message_id"
 	ctxKeyPolicyApproved       ctxKey = "forebrain_policy_approved"
 	ctxKeySandboxBypass        ctxKey = "forebrain_sandbox_bypass_approved"
-	ctxKeyNetworkAccess        ctxKey = "forebrain_network_access_approved"
 	ctxKeyHookAgentID          ctxKey = "forebrain_hook_agent_id"
 	ctxKeyHookTranscript       ctxKey = "forebrain_hook_transcript_path"
 	ctxKeySystemAddendum       ctxKey = "forebrain_system_addendum"
@@ -178,7 +189,6 @@ const (
 	ctxKeyRequestPermDeny      ctxKey = "forebrain_request_permissions_denied"
 	ctxKeyPolicyApprovalReason ctxKey = "forebrain_policy_approval_reason_capture"
 	ctxKeyStepHook             ctxKey = "forebrain_step_hook"
-	ctxKeyNetworkApprovalHook  ctxKey = "forebrain_network_approval_hook"
 	ctxKeySubagentApprovalHook ctxKey = "forebrain_subagent_approval_hook"
 	ctxKeyInlineApprovalHook   ctxKey = "forebrain_inline_approval_hook"
 	ctxKeyApprovalSlotHolder   ctxKey = "forebrain_approval_slot_holder"
@@ -248,12 +258,6 @@ type ToolCompletionPayload struct {
 type toolCompletionCapture struct {
 	payload  *ToolCompletionPayload
 	attempts []ToolCompletionPayload
-}
-
-type networkSessionKey struct {
-	Host     string
-	Protocol safety.NetworkApprovalProtocol
-	Port     int
 }
 
 func WithRunID(ctx context.Context, runID string) context.Context {
@@ -377,48 +381,6 @@ func (s *State) SetRuntimeSessionMode(ctx context.Context, sessionID, mode, plan
 		planPath: strings.TrimSpace(planPath),
 		runID:    RunIDFromContext(ctx),
 	}
-}
-
-func (s *State) SetNetworkSessionDecision(sessionID string, context safety.NetworkApprovalContext, port int, allow bool) {
-	if s == nil {
-		return
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	context.Host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(context.Host), "."))
-	if sessionID == "" || context.Host == "" || !context.Protocol.Valid() || port < 0 || port > 65535 {
-		return
-	}
-	key := networkSessionKey{Host: context.Host, Protocol: context.Protocol, Port: port}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.networkSessionDecisions == nil {
-		s.networkSessionDecisions = make(map[string]map[networkSessionKey]bool)
-	}
-	if s.networkSessionDecisions[sessionID] == nil {
-		s.networkSessionDecisions[sessionID] = make(map[networkSessionKey]bool)
-	}
-	s.networkSessionDecisions[sessionID][key] = allow
-}
-
-func (s *State) NetworkSessionRules(sessionID string) []safety.SessionNetworkRule {
-	if s == nil {
-		return nil
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	decisions := s.networkSessionDecisions[sessionID]
-	out := make([]safety.SessionNetworkRule, 0, len(decisions))
-	for key, allow := range decisions {
-		out = append(out, safety.SessionNetworkRule{
-			Context: safety.NetworkApprovalContext{Host: key.Host, Protocol: key.Protocol},
-			Port:    key.Port, Allow: allow,
-		})
-	}
-	return out
 }
 
 func (s *State) ContextWithRuntimeSessionMode(ctx context.Context) context.Context {
@@ -587,6 +549,14 @@ func (p SubagentToolPolicy) Blocks(toolName string) bool {
 	name := strings.ToLower(strings.TrimSpace(toolName))
 	if strings.HasPrefix(name, "subagent_") {
 		return true
+	}
+	// Talking to the agent that dispatched this subagent is structural, not a
+	// capability anyone configures: the dispatcher is the only one the worker
+	// can address, and a worker that could not report back would leave its
+	// dispatcher waiting on a task it can no longer ask about. So the peer_*
+	// pair is never blocked, in any mode.
+	if isPeerToolName(name) {
+		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(p.Mode)) {
 	case appcfg.SubagentToolsReadOnly:
@@ -1053,33 +1023,6 @@ func SandboxBypassApprovedFromContext(ctx context.Context) bool {
 	return v
 }
 
-type ApprovedNetworkAccess struct {
-	Context safety.NetworkApprovalContext
-	Port    int
-}
-
-func WithApprovedNetworkAccess(ctx context.Context, access ApprovedNetworkAccess) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	access.Context.Host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(access.Context.Host), "."))
-	if access.Port < 0 || access.Port > 65535 {
-		access.Port = 0
-	}
-	return context.WithValue(ctx, ctxKeyNetworkAccess, access)
-}
-
-func ApprovedNetworkAccessFromContext(ctx context.Context) (ApprovedNetworkAccess, bool) {
-	if ctx == nil {
-		return ApprovedNetworkAccess{}, false
-	}
-	access, ok := ctx.Value(ctxKeyNetworkAccess).(ApprovedNetworkAccess)
-	if !ok || access.Context.Host == "" || !access.Context.Protocol.Valid() {
-		return ApprovedNetworkAccess{}, false
-	}
-	return access, true
-}
-
 func WithHookAgentID(ctx context.Context, agentID string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1174,6 +1117,13 @@ func (s *State) ProtectedWriteReason(ctx context.Context, absPath string) string
 // plan files with semantic names there) and reject the directory itself,
 // sub-directories, and traversal outside it. Keep an exact-match fallback for
 // any caller that still pins a single plan file path.
+//
+// The region is a place, not a spelling. A home reached through a symlinked
+// ancestor names the plan directory two ways (macOS's /var and /private/var),
+// and a model may write through either, so both sides are compared by the
+// directory they really are. Only the file's parent is resolved, never the file
+// itself: a write lands as an entry of that directory (atomicWrite renames into
+// it), so the parent is what decides where the plan file ends up.
 func isSanctionedPlanWrite(ctx context.Context, absPath string) bool {
 	allowed := strings.TrimSpace(AllowedPlanPathFromContext(ctx))
 	if allowed == "" || strings.TrimSpace(absPath) == "" {
@@ -1181,7 +1131,11 @@ func isSanctionedPlanWrite(ctx context.Context, absPath string) bool {
 	}
 	cleanAbs := filepath.Clean(absPath)
 	cleanAllowed := filepath.Clean(allowed)
-	return isWithinDir(cleanAbs, cleanAllowed) || cleanAbs == cleanAllowed
+	if isWithinDir(cleanAbs, cleanAllowed) || cleanAbs == cleanAllowed {
+		return true
+	}
+	realTarget := filepath.Join(normalizeRootPath(filepath.Dir(cleanAbs)), filepath.Base(cleanAbs))
+	return isWithinDir(realTarget, normalizeRootPath(cleanAllowed))
 }
 
 // protectedMetadataDirNames are the directories no tool may write into. They
@@ -1451,9 +1405,6 @@ func (s *State) SessionIDs() []string {
 	for sid := range s.sessionRuntimeModes {
 		seen[sid] = struct{}{}
 	}
-	for sid := range s.networkSessionDecisions {
-		seen[sid] = struct{}{}
-	}
 	for sid := range seen {
 		if sid = strings.TrimSpace(sid); sid != "" {
 			out = append(out, sid)
@@ -1496,10 +1447,6 @@ func (s *State) DropSessions(sessionIDs []string) int {
 		}
 		if _, ok := s.sessionRuntimeModes[sid]; ok {
 			delete(s.sessionRuntimeModes, sid)
-			before = true
-		}
-		if _, ok := s.networkSessionDecisions[sid]; ok {
-			delete(s.networkSessionDecisions, sid)
 			before = true
 		}
 		if before {
@@ -1697,7 +1644,6 @@ func buildContextTimelineEntries(compacts []event.ContextCompactedPayload, spill
 			Summary:       strings.TrimSpace(item.Summary),
 			Strategy:      strings.TrimSpace(item.Strategy),
 			SummarySource: strings.TrimSpace(item.SummarySource),
-			Scope:         strings.TrimSpace(item.Scope),
 			TokensBefore:  item.TokensBefore,
 			TokensAfter:   item.TokensAfter,
 			Reactive:      item.Reactive,
@@ -1873,6 +1819,29 @@ func (s *State) FileChangeRecorder() FileChangeRecorder {
 	return s.fileChangeRecorder
 }
 
+// SetReadStateStore installs where read baselines are persisted. The runner
+// sets it once per Load, from the session store; a state with no store keeps
+// its baselines in memory only, the way every tool test and every embedded
+// use without a conversation does.
+func (s *State) SetReadStateStore(store ReadStateStore) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readStateStore = store
+}
+
+// ReadStateStore returns the installed baseline store, or nil.
+func (s *State) ReadStateStore() ReadStateStore {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readStateStore
+}
+
 // recordFileChange reports one file-tool write to the recorder, stamped with
 // the conversation, run, step and anchor message the context carries. A state
 // with no recorder, or a context with no conversation, records nothing. The
@@ -1959,24 +1928,6 @@ func (s *State) ActionHook() func(ctx context.Context, kind string, payload any)
 	return s.actionHook
 }
 
-func (s *State) SetNetworkApprovalPromptHook(h func(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error)) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.networkApprovalPromptHook = h
-}
-
-func (s *State) NetworkApprovalPromptHook() func(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error) {
-	if s == nil {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.networkApprovalPromptHook
-}
-
 // SubagentApprovalHook resolves one approval a subagent raised while working on
 // its task and returns the context that subagent's run resumes under, carrying
 // the approved action id and the resume state.
@@ -1985,11 +1936,8 @@ func (s *State) NetworkApprovalPromptHook() func(ctx context.Context, actionID s
 // agent uses. A subagent dispatched from inside a running tool call cannot
 // unwind: its dispatcher (subagent_fanout above all) is still holding the
 // results of its siblings, and there is nothing above it that could replay the
-// dispatch. So the surface is asked here, while the child's run stays alive,
-// exactly as NetworkApprovalPromptHook is asked from inside the shell tool.
+// dispatch. So the surface is asked here, while the child's run stays alive.
 type SubagentApprovalHook func(ctx context.Context, rae *RequiresActionError) (context.Context, error)
-
-type NetworkApprovalPromptHook func(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error)
 
 // InlineApprovalHook answers one of the primary agent's own approval gates
 // where the call is, while the turn keeps running, and returns the context the
@@ -2046,25 +1994,6 @@ func InlineApprovalHookFromContext(ctx context.Context, fallback *State) InlineA
 		return nil
 	}
 	return fallback.InlineApprovalHook()
-}
-
-func WithNetworkApprovalPromptHook(ctx context.Context, hook NetworkApprovalPromptHook) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, ctxKeyNetworkApprovalHook, hook)
-}
-
-func NetworkApprovalPromptHookFromContext(ctx context.Context, fallback *State) NetworkApprovalPromptHook {
-	if ctx != nil {
-		if hook, _ := ctx.Value(ctxKeyNetworkApprovalHook).(NetworkApprovalPromptHook); hook != nil {
-			return hook
-		}
-	}
-	if fallback == nil {
-		return nil
-	}
-	return fallback.NetworkApprovalPromptHook()
 }
 
 func WithStepHook(ctx context.Context, hook StepHook) context.Context {
@@ -2740,45 +2669,39 @@ func (s *State) ReadDirPrunable(dir string) bool {
 }
 
 // ReadPathDeniedIn is ReadPathDenied with the batch task's read boundary
-// applied (plans/150): a task may read its own workspace and the shared skill
-// roots, and nothing else — not the project root it was carved out of, not the
-// Forebrain home, not another task's directory. Outside a batch turn it is
-// exactly ReadPathDenied.
+// applied (plans/216): a task may read the whole filesystem except the
+// Forebrain home and the project root it was carved out of, where its own
+// workspace and the project's skill directories are the exceptions. That is the
+// same value the OS sandbox is handed, so the in-process tools refuse exactly
+// what the sandbox would refuse. Outside a batch turn it is exactly
+// ReadPathDenied, and the user's own deny_read list narrows both.
 func (s *State) ReadPathDeniedIn(ctx context.Context, path string) bool {
-	ws := strings.TrimSpace(TaskWorkspaceFromContext(ctx))
-	if ws == "" {
+	boundary, ok := BatchBoundaryFromContext(ctx)
+	if !ok {
 		return s.ReadPathDenied(path)
-	}
-	p := strings.TrimSpace(path)
-	if p == "" {
-		return false
 	}
 	if s == nil {
 		return true
 	}
-	return !pathWithinRoot(p, ws) && !s.PathUnderLoadedSkillRoot(p)
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	return boundary.DeniesRead(path) || s.ReadPathDenied(path)
 }
 
 // ReadDirPrunableIn is ReadDirPrunable with the batch task's read boundary
-// applied: a batch walk may skip any directory that is neither inside the task
-// workspace nor an ancestor of the workspace or of a shared skill root.
+// applied: a batch walk may skip any directory the boundary denies outright,
+// while the ancestors of the workspace and of the skill roots — the project
+// root, the Forebrain home — are walked so the exceptions stay reachable.
 func (s *State) ReadDirPrunableIn(ctx context.Context, dir string) bool {
-	ws := strings.TrimSpace(TaskWorkspaceFromContext(ctx))
-	if ws == "" {
+	boundary, ok := BatchBoundaryFromContext(ctx)
+	if !ok {
 		return s.ReadDirPrunable(dir)
 	}
 	if s == nil {
 		return true
 	}
-	if pathWithinRoot(dir, ws) || pathWithinRoot(ws, dir) {
-		return false
-	}
-	for _, root := range s.LoadedSkillRoots() {
-		if pathWithinRoot(dir, root) || pathWithinRoot(root, dir) {
-			return false
-		}
-	}
-	return true
+	return boundary.PrunesReadDir(dir) || s.ReadDirPrunable(dir)
 }
 
 // pathWithinAny reports whether target equals or is nested under any of roots.
@@ -2857,22 +2780,56 @@ func (s *State) RememberRead(absPath string, mod time.Time, size int64, content 
 	s.rememberTouch(absPath, mod, size, content, "read")
 }
 
+// RememberReadForSession records a whole-file read for the conversation the
+// context names: in memory, as RememberRead does, and — when a state store is
+// installed and the context carries a conversation — in the state file first,
+// so the next process to open this conversation resumes with the same baseline
+// edit_file checks against.
+//
+// The durable half is written before the memory half on purpose: a read the
+// model is told succeeded must not be one the next /resume silently forgets.
+// A state store failure is therefore a failed read_file, not a log line.
+func (s *State) RememberReadForSession(ctx context.Context, absPath string, mod time.Time, size int64, content []byte) error {
+	if s == nil {
+		return nil
+	}
+	rs := newReadState(absPath, mod, size, content, "read")
+	if store := s.ReadStateStore(); store != nil {
+		if sessionID := ConversationSessionIDFromContext(ctx); sessionID != "" {
+			if err := store.SaveFileReadState(ctx, state.FileReadState{
+				SessionID: sessionID,
+				Path:      rs.AbsPath,
+				ModTimeNS: rs.ModTime.UnixNano(),
+				Size:      rs.Size,
+				SHA256:    rs.SHA256Hex,
+				ReadAtNS:  rs.ReadAt.UnixNano(),
+				TouchKind: rs.TouchKind,
+			}); err != nil {
+				return fmt.Errorf("remember read of %s: %w", absPath, err)
+			}
+		}
+	}
+	s.rememberReadState(rs)
+	return nil
+}
+
+// RememberWrite records a write for the writes this process makes. It is not
+// persisted: a write's baseline follows from the content this process just
+// wrote, and a conversation resuming in a new process owes the read of a file
+// it never read, which is the safe direction.
 func (s *State) RememberWrite(absPath string, mod time.Time, size int64, content []byte) {
 	s.rememberTouch(absPath, mod, size, content, "write")
 }
 
-func (s *State) rememberTouch(absPath string, mod time.Time, size int64, content []byte, kind string) {
-	if s == nil {
-		return
-	}
+// newReadState is the one place a baseline is built, so the in-memory and the
+// persisted halves can never hash or stamp a read differently.
+func newReadState(absPath string, mod time.Time, size int64, content []byte, kind string) ReadState {
 	sum := sha256.Sum256(content)
 	kind = strings.TrimSpace(kind)
 	if kind == "" {
 		kind = "read"
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.readFiles[absPath] = ReadState{
+	return ReadState{
 		AbsPath:   absPath,
 		ModTime:   mod,
 		Size:      size,
@@ -2880,6 +2837,60 @@ func (s *State) rememberTouch(absPath string, mod time.Time, size int64, content
 		ReadAt:    time.Now(),
 		TouchKind: kind,
 	}
+}
+
+func (s *State) rememberTouch(absPath string, mod time.Time, size int64, content []byte, kind string) {
+	if s == nil {
+		return
+	}
+	s.rememberReadState(newReadState(absPath, mod, size, content, kind))
+}
+
+func (s *State) rememberReadState(rs ReadState) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readFiles[rs.AbsPath] = rs
+}
+
+// readStateForEdit returns the baseline an overwrite check may start from: the
+// one this process took, else the one the conversation persisted before a
+// resume. It is a candidate only — every caller still stats the file and
+// compares its SHA-256, so a baseline restored from the state file cannot
+// authorize overwriting a file that changed while no process was looking.
+//
+// A store failure is returned as an error and never as "not read": telling the
+// model to re-read is a different answer from failing to open the state file,
+// and only one of them is true.
+func (s *State) readStateForEdit(ctx context.Context, absPath string) (ReadState, bool, error) {
+	if rs, ok := s.GetReadState(absPath); ok {
+		return rs, true, nil
+	}
+	store := s.ReadStateStore()
+	if store == nil {
+		return ReadState{}, false, nil
+	}
+	sessionID := ConversationSessionIDFromContext(ctx)
+	if sessionID == "" {
+		return ReadState{}, false, nil
+	}
+	persisted, ok, err := store.FileReadStateForSession(ctx, sessionID, absPath)
+	if err != nil {
+		return ReadState{}, false, err
+	}
+	if !ok {
+		return ReadState{}, false, nil
+	}
+	return ReadState{
+		AbsPath:   absPath,
+		ModTime:   time.Unix(0, persisted.ModTimeNS),
+		Size:      persisted.Size,
+		SHA256Hex: persisted.SHA256,
+		ReadAt:    time.Unix(0, persisted.ReadAtNS),
+		TouchKind: persisted.TouchKind,
+	}, true, nil
 }
 
 func (s *State) GetReadState(absPath string) (ReadState, bool) {
