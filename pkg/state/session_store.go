@@ -707,10 +707,11 @@ func touchSessionModelSelectionSQL(d dbx.Dialect) string {
 		  AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = ? AND source IN (?, ?))`
 	}
 }
+
 // deleteSessionsSpillPathsSQL reads the spilled-output paths a session's tool
 // rows point at. SQLite's json_valid has no PostgreSQL 14 built-in; the column
 // holds what the append paths validated with encoding/json or the empty
-// default, so NULLIF(…, '') excludes the one value that is not JSON.
+// default, so NULLIF(…, ”) excludes the one value that is not JSON.
 func deleteSessionsSpillPathsSQL(d dbx.Dialect, placeholders string) string {
 	if d == dbx.Postgres {
 		return `

@@ -706,9 +706,9 @@ const (
 	// clockExpr is the reap's end-of-run clock: the owner's last heartbeat,
 	// falling back to the row's own last write, and never earlier than the
 	// run's start.
-	clockExpr               = `MAX(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
-	reapClockExprMySQL      = `GREATEST(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
-	reapClockExprPostgres   = `GREATEST(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
+	clockExpr             = `MAX(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
+	reapClockExprMySQL    = `GREATEST(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
+	reapClockExprPostgres = `GREATEST(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
 )
 
 func (s *RunStore) CreateRun(ctx context.Context, sessionID, inputText string) (*Run, error) {
