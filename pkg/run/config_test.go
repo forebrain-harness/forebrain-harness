@@ -2141,3 +2141,228 @@ func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
 	}
 	return appcfg.ParseRootYAML(body)
 }
+
+// peerTreeCtx is one run of one conversation in a directory, the way the
+// orchestration loop calls the model: the run id keys what this run was told,
+// and the project root is the tree the guards compare against.
+func peerTreeCtx(t *testing.T, runID string) context.Context {
+	t.Helper()
+	ctx := tool.WithProjectRoot(context.Background(), t.TempDir())
+	return tool.WithRunID(ctx, runID)
+}
+
+// peerReminderMessages is what the wrapper appended to the request the inner
+// client saw.
+func peerReminderMessages(inner *lspRecordingLLM) []string {
+	var out []string
+	for _, msg := range inner.gotMsgs {
+		if msg.IsMeta {
+			out = append(out, llm.TextContent(msg.Parts...))
+		}
+	}
+	return out
+}
+
+// peerReminderGolden is the roster the plan's §3.3 template describes, verbatim:
+// who is here, what they are on, and what they changed lately.
+const peerReminderGolden = "<system-reminder>\n" +
+	"Other agents are working in this directory tree right now:\n" +
+	"- b (terminal, busy) — task: refactoring the parser; recently edited: b.go, pkg/c.go (+2 more)\n" +
+	"Coordinate through peer_send before editing files another agent is working on. " +
+	"Do not revert, stash, discard or commit changes you did not make; if a build or test fails " +
+	"in files you did not touch, ask the agent working on them instead of fixing it yourself.\n" +
+	"</system-reminder>"
+
+func peerWorkTreeListing() []tool.WorkTreePeer {
+	return []tool.WorkTreePeer{{
+		Name: "b", Kind: "terminal", Status: "busy", Task: "refactoring the parser",
+		RecentFiles: []string{"b.go", "pkg/c.go"}, MoreFiles: 2,
+	}}
+}
+
+// The first request of a run tells the model who else is in this tree, in the
+// exact words the plan fixed: this is the one place a model can learn that a
+// file it is about to edit belongs to somebody else.
+func TestPeerAwarenessReminderOnTheFirstRequestOfARun(t *testing.T) {
+	port := &fakePeerDirectory{workTree: peerWorkTreeListing()}
+	inner := &lspRecordingLLM{}
+	w := wrapPeerAwarenessReminderLLM(inner, func() PeerDirectory { return port })
+	ctx := peerTreeCtx(t, "run-peer-first")
+	base := []llm.Message{llm.UserMessage(llm.Text("continue"))}
+	if _, err := w.Execute(ctx, base, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	got := peerReminderMessages(inner)
+	if len(got) != 1 {
+		t.Fatalf("reminders = %#v, want exactly one", got)
+	}
+	if got[0] != peerReminderGolden {
+		t.Fatalf("reminder = %q, want %q", got[0], peerReminderGolden)
+	}
+	// The caller's slice is appended to, never mutated in place.
+	if len(base) != 1 {
+		t.Fatalf("caller's slice mutated: %d", len(base))
+	}
+	// And the roster names no vendor: this reminder is forebrain's own.
+	for _, banned := range []string{"claude", "anthropic", "openai", "gemini"} {
+		if strings.Contains(strings.ToLower(got[0]), banned) {
+			t.Fatalf("reminder names %q: %q", banned, got[0])
+		}
+	}
+}
+
+// A second request in the same run, with the tree unchanged, says nothing: the
+// model already knows, and every repetition is a message the conversation keeps.
+func TestPeerAwarenessReminderIsSilentWhileTheTreeDoesNotChange(t *testing.T) {
+	port := &fakePeerDirectory{workTree: peerWorkTreeListing()}
+	inner := &lspRecordingLLM{}
+	w := wrapPeerAwarenessReminderLLM(inner, func() PeerDirectory { return port })
+	ctx := peerTreeCtx(t, "run-peer-stable")
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	inner.gotMsgs = nil
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("two"))}, nil); err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	if got := peerReminderMessages(inner); len(got) != 0 {
+		t.Fatalf("reminders = %#v, want none while the tree is unchanged", got)
+	}
+	// A different run is told about the same tree: the record is per run.
+	inner.gotMsgs = nil
+	other := peerTreeCtx(t, "run-peer-other")
+	if _, err := w.Execute(other, []llm.Message{llm.UserMessage(llm.Text("three"))}, nil); err != nil {
+		t.Fatalf("other run: %v", err)
+	}
+	if got := peerReminderMessages(inner); len(got) != 1 {
+		t.Fatalf("reminders = %#v, want the other run told once", got)
+	}
+}
+
+// A tree that changed is reported again, because the new agent is one the model
+// has not been told about.
+func TestPeerAwarenessReminderRepeatsWhenTheTreeChanges(t *testing.T) {
+	port := &fakePeerDirectory{workTree: peerWorkTreeListing()}
+	inner := &lspRecordingLLM{}
+	w := wrapPeerAwarenessReminderLLM(inner, func() PeerDirectory { return port })
+	ctx := peerTreeCtx(t, "run-peer-change")
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	// Same roster in another order is not a change: the listing order is not
+	// the model's business.
+	inner.gotMsgs = nil
+	port.workTree = append(peerWorkTreeListing(), tool.WorkTreePeer{Name: "c", Kind: "gateway conversation", Status: "idle"})
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("two"))}, nil); err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	got := peerReminderMessages(inner)
+	if len(got) != 1 {
+		t.Fatalf("reminders = %#v, want the changed tree reported", got)
+	}
+	if !strings.Contains(got[0], "- c (gateway conversation, idle)") {
+		t.Fatalf("reminder = %q, want the new agent named", got[0])
+	}
+	if strings.Contains(got[0], "— task:") && strings.Count(got[0], "- ") != 2 {
+		t.Fatalf("reminder = %q, want one line per agent", got[0])
+	}
+}
+
+// Everybody left: the model was told they were here, so it is told when they
+// are not — otherwise it keeps deferring to an agent that is gone.
+func TestPeerAwarenessReminderSaysWhenTheOtherAgentsLeave(t *testing.T) {
+	port := &fakePeerDirectory{workTree: peerWorkTreeListing()}
+	inner := &lspRecordingLLM{}
+	w := wrapPeerAwarenessReminderLLM(inner, func() PeerDirectory { return port })
+	ctx := peerTreeCtx(t, "run-peer-leave")
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	inner.gotMsgs = nil
+	port.workTree = nil
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("two"))}, nil); err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	got := peerReminderMessages(inner)
+	want := "<system-reminder>\n" + peerReminderLeftText + "\n</system-reminder>"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("reminders = %#v, want %q", got, want)
+	}
+	// And once more: the emptiness has been reported, so it stays quiet.
+	inner.gotMsgs = nil
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("three"))}, nil); err != nil {
+		t.Fatalf("third request: %v", err)
+	}
+	if got := peerReminderMessages(inner); len(got) != 0 {
+		t.Fatalf("reminders = %#v, want the empty tree reported once", got)
+	}
+}
+
+// An empty tree on a run's first request says nothing at all: there is no news,
+// and a run that never had neighbours does not need to be told it still has
+// none.
+func TestPeerAwarenessReminderIsSilentWhenTheTreeWasNeverOccupied(t *testing.T) {
+	port := &fakePeerDirectory{}
+	inner := &lspRecordingLLM{}
+	w := wrapPeerAwarenessReminderLLM(inner, func() PeerDirectory { return port })
+	if _, err := w.Execute(peerTreeCtx(t, "run-peer-empty"), []llm.Message{llm.UserMessage(llm.Text("go"))}, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got := peerReminderMessages(inner); len(got) != 0 {
+		t.Fatalf("reminders = %#v, want none", got)
+	}
+}
+
+// A request that failed never reached the model, so the run has not been told
+// anything and the next request says it again.
+func TestPeerAwarenessReminderIsNotRecordedWhenTheCallFails(t *testing.T) {
+	port := &fakePeerDirectory{workTree: peerWorkTreeListing()}
+	inner := &lspRecordingLLM{err: errors.New("provider down")}
+	w := wrapPeerAwarenessReminderLLM(inner, func() PeerDirectory { return port })
+	ctx := peerTreeCtx(t, "run-peer-fail")
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err == nil {
+		t.Fatal("inner error must propagate")
+	}
+	inner.err = nil
+	inner.gotMsgs = nil
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("two"))}, nil); err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	if got := peerReminderMessages(inner); len(got) != 1 {
+		t.Fatalf("reminders = %#v, want the roster offered again after a failed call", got)
+	}
+}
+
+// No port at all: the wrapper is the identity, so a machine without peer
+// coordination pays nothing for a guard it cannot use. And a port installed
+// later — the composition root's schedule — is read at call time, not at wrap
+// time, which is why the same wrapper starts reporting without being rebuilt.
+func TestPeerAwarenessReminderFollowsThePortInstalledLater(t *testing.T) {
+	inner := &lspRecordingLLM{}
+	var port PeerDirectory
+	w := wrapPeerAwarenessReminderLLM(inner, func() PeerDirectory { return port })
+	ctx := peerTreeCtx(t, "run-peer-late-port")
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
+		t.Fatalf("execute without a port: %v", err)
+	}
+	if got := peerReminderMessages(inner); len(got) != 0 {
+		t.Fatalf("reminders = %#v, want none without a port", got)
+	}
+	port = &fakePeerDirectory{workTree: peerWorkTreeListing()}
+	inner.gotMsgs = nil
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("two"))}, nil); err != nil {
+		t.Fatalf("execute with a port: %v", err)
+	}
+	if got := peerReminderMessages(inner); len(got) != 1 {
+		t.Fatalf("reminders = %#v, want the roster once the port exists", got)
+	}
+}
+
+// A nil port closure leaves the chain untouched: there is nobody to ask and
+// nothing to wrap.
+func TestPeerAwarenessReminderWithoutAClosureIsTheIdentity(t *testing.T) {
+	inner := &lspRecordingLLM{}
+	if got := wrapPeerAwarenessReminderLLM(inner, nil); got != inner {
+		t.Fatalf("a nil closure must leave the chain unchanged, got %T", got)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1458,6 +1459,188 @@ func (w lspDiagnosticsReminderLLM) Execute(ctx context.Context, msgs []llm.Messa
 		w.ci.AckLate(sid, token)
 	}
 	return res, err
+}
+
+// peerAwarenessReminderLLM tells the model who else is working in this
+// directory tree (plan 198 §3.3, owner ruling 3). It joins the chain the same
+// way the late-diagnostics reminder does and for the same reasons: the text is
+// appended at the end of the request so the cached prefix is untouched, and it
+// is injected once per change rather than on every call, because each injected
+// reminder is a message the conversation keeps.
+//
+// The port is read at call time, because the composition root installs it on
+// its own schedule — the chain can be built before there is anything to ask.
+type peerAwarenessReminderLLM struct {
+	inner llm.LLM
+	peers func() PeerDirectory
+	runs  *peerAwarenessRuns
+}
+
+func wrapPeerAwarenessReminderLLM(inner llm.LLM, peers func() PeerDirectory) llm.LLM {
+	if inner == nil || peers == nil {
+		return inner
+	}
+	return peerAwarenessReminderLLM{inner: inner, peers: peers, runs: newPeerAwarenessRuns()}
+}
+
+func (w peerAwarenessReminderLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	text, key, ok := w.reminder(ctx)
+	if !ok {
+		return w.inner.Execute(ctx, msgs, tools)
+	}
+	message := planReminderMessage(text)
+	recordReminderAdoption(ctx, message, len(msgs))
+	res, err := w.inner.Execute(ctx, append(append([]llm.Message(nil), msgs...), message), tools)
+	// Injected means the model has seen it: a call that failed leaves the run's
+	// record untouched, so the reminder is offered again on the next request.
+	if err == nil {
+		w.runs.record(strings.TrimSpace(tool.RunIDFromContext(ctx)), key)
+	}
+	return res, err
+}
+
+// peerReminderLeftText is what the tree looks like once everybody else has
+// gone: the model was told they were here, so it is told when they are not.
+const peerReminderLeftText = "No other agents are working in this directory tree any more."
+
+// reminder renders this request's reminder and the fingerprint it stands for.
+// A run is told about the tree on its first request and again only when the
+// tree changed since the last thing it was told — including when it emptied.
+func (w peerAwarenessReminderLLM) reminder(ctx context.Context) (string, string, bool) {
+	port := w.peers()
+	if port == nil {
+		return "", "", false
+	}
+	// The session's own directory, asked exactly the way the file tools ask it
+	// for the write hint: a batch task's workspace first, then the project root
+	// the run carries, then this process's directory. Two guards that disagreed
+	// about which tree "this" is would report different neighbours for the same
+	// file.
+	root, err := tool.WorkingDir(ctx)
+	if root = strings.TrimSpace(root); err != nil || root == "" {
+		return "", "", false
+	}
+	peers := port.WorkTreePeers(ctx, root)
+	key := peerReminderFingerprint(peers)
+	last, seen := w.runs.last(strings.TrimSpace(tool.RunIDFromContext(ctx)))
+	if seen && last == key {
+		return "", "", false
+	}
+	if len(peers) == 0 {
+		if !seen {
+			// Nothing to report and nothing was reported before.
+			return "", "", false
+		}
+		return peerReminderLeftText, key, true
+	}
+	return peerReminderText(peers), key, true
+}
+
+// peerReminderText words the roster: who is here, what they are doing, and what
+// they changed lately. A peer that said nothing about its task and has not
+// written a file yet gets neither clause — an empty one would read as a fact.
+func peerReminderText(peers []tool.WorkTreePeer) string {
+	var b strings.Builder
+	b.WriteString("Other agents are working in this directory tree right now:")
+	for _, peer := range peers {
+		b.WriteString("\n- ")
+		b.WriteString(peerReminderSubject(peer))
+		if task := strings.TrimSpace(peer.Task); task != "" {
+			b.WriteString(" — task: ")
+			b.WriteString(task)
+		}
+		if len(peer.RecentFiles) > 0 {
+			b.WriteString("; recently edited: ")
+			files := make([]string, 0, len(peer.RecentFiles))
+			for _, file := range peer.RecentFiles {
+				if file = strings.TrimSpace(file); file != "" {
+					files = append(files, file)
+				}
+			}
+			b.WriteString(strings.Join(files, ", "))
+			if peer.MoreFiles > 0 {
+				b.WriteString(" (+" + fmt.Sprint(peer.MoreFiles) + " more)")
+			}
+		}
+	}
+	b.WriteString("\nCoordinate through peer_send before editing files another agent is working on. " +
+		"Do not revert, stash, discard or commit changes you did not make; if a build or test fails " +
+		"in files you did not touch, ask the agent working on them instead of fixing it yourself.")
+	return b.String()
+}
+
+// peerReminderSubject is one peer as the roster names it: what it is and how it
+// answers, with whichever of the two it has.
+func peerReminderSubject(peer tool.WorkTreePeer) string {
+	name := strings.TrimSpace(peer.Name)
+	parts := make([]string, 0, 2)
+	for _, part := range []string{peer.Kind, peer.Status} {
+		if part = strings.TrimSpace(part); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 {
+		return name
+	}
+	return name + " (" + strings.Join(parts, ", ") + ")"
+}
+
+// peerReminderFingerprint is the roster reduced to one value: what changed, not
+// merely that something did. Order does not matter — the port's listing order
+// is not the model's business — so the entries are sorted before hashing.
+func peerReminderFingerprint(peers []tool.WorkTreePeer) string {
+	lines := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		lines = append(lines, strings.Join([]string{
+			strings.TrimSpace(peer.Name),
+			strings.TrimSpace(peer.Kind),
+			strings.TrimSpace(peer.Status),
+			strings.TrimSpace(peer.Task),
+			strings.Join(peer.RecentFiles, ","),
+			fmt.Sprint(peer.MoreFiles),
+		}, "\x1f"))
+	}
+	sort.Strings(lines)
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(lines, "\x1e"))))
+}
+
+// peerAwarenessRuns remembers, per run, the roster fingerprint that run was last
+// told about. It is the same shape as reminderRunAnchor's cache: a run has no
+// end callback at this layer, so the map is bounded instead.
+type peerAwarenessRuns struct {
+	mu    sync.Mutex
+	keys  map[string]string
+	order []string
+}
+
+func newPeerAwarenessRuns() *peerAwarenessRuns {
+	return &peerAwarenessRuns{keys: make(map[string]string)}
+}
+
+func (s *peerAwarenessRuns) last(runID string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.keys[runID]
+	return key, ok
+}
+
+func (s *peerAwarenessRuns) record(runID, key string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.keys[runID]; !ok {
+		s.order = append(s.order, runID)
+		if len(s.order) > reminderRunCacheCap {
+			delete(s.keys, s.order[0])
+			s.order = s.order[1:]
+		}
+	}
+	s.keys[runID] = key
 }
 
 // clampPlanReminderIndex resolves where a reminder goes in msgs. An

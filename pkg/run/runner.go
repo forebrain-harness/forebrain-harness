@@ -1045,6 +1045,11 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// to the conversation's next request, and a compaction's summary request
 	// must neither consume nor acknowledge it.
 	llmClient = wrapLSPDiagnosticsReminderLLM(llmClient, r.CodeIntel)
+	// The same-tree reminder joins here for the same reason (plan 198 §3.3): it
+	// belongs to this conversation's next request, and a compaction's summary
+	// request must not consume it. The port is read at call time, because the
+	// composition root installs it after this chain is built.
+	llmClient = wrapPeerAwarenessReminderLLM(llmClient, r.peerDirectory)
 	// Build compactDeps for the checkpoint path. SessionID is
 	// extracted from context at LLM call time.
 	compactBudget := CompactBudgetOptions(r.AppCfg)
@@ -3640,6 +3645,17 @@ func (r *Runner) LoadedTools() []*llm.Tool {
 	r.mu.load.RLock()
 	defer r.mu.load.RUnlock()
 	return cloneToolSlice(debuglogToolsView(r.main))
+}
+
+// peerDirectory is this runtime's port onto the agents of the other processes
+// (plan 197), which the same-tree guards also ask (plan 198). A runtime built
+// without one — a platform with no peer protocol, or a test that built a bare
+// Runner — answers nil, and every guard that reads it does nothing.
+func (r *Runner) peerDirectory() PeerDirectory {
+	if r == nil || r.Deps == nil {
+		return nil
+	}
+	return r.Deps.Peers
 }
 
 func (r *Runner) workspaceRoot() string {
