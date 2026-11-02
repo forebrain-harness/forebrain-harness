@@ -79,31 +79,47 @@ func mustWaitAction(t *testing.T, db *sql.DB, sessionID, actionID string) {
 }
 
 func TestClaimWaitResumeBranches(t *testing.T) {
-	nowMs := time.Now().UTC().UnixMilli()
-	staleMs := nowMs - int64(WaitResumeLease.Milliseconds()) - 1000
 	cases := []struct {
 		name    string
-		seed    *Wait
+		seed    func(nowMs, staleMs int64) *Wait
 		owner   string
 		refresh bool
 		want    bool // ClaimWaitResume result
 	}{
 		{name: "no continuation row", seed: nil, owner: "p1", want: false},
-		{name: "unowned wait is claimable", seed: &Wait{}, owner: "p1", want: true},
-		{name: "legacy owner without timestamp is stale", seed: &Wait{ResumeOwner: "p0"}, owner: "p1", want: true},
-		{name: "another live owner blocks the claim", seed: &Wait{ResumeOwner: "p0", ResumeClaimedAt: nowMs}, owner: "p1", want: false},
-		{name: "own live lease is not re-claimed", seed: &Wait{ResumeOwner: "p1", ResumeClaimedAt: nowMs}, owner: "p1", want: false},
-		{name: "another owner with a stale lease is taken over", seed: &Wait{ResumeOwner: "p0", ResumeClaimedAt: staleMs}, owner: "p1", want: true},
-		{name: "own stale lease is re-claimed", seed: &Wait{ResumeOwner: "p1", ResumeClaimedAt: staleMs}, owner: "p1", want: true},
-		{name: "execution fence blocks any other owner", seed: &Wait{ResumeOwner: "p0", ResumeClaimedAt: nowMs, ResumePhase: WaitResumePhaseExecutionStarted}, owner: "p1", want: false},
-		{name: "execution fence blocks even its own owner without refresh", seed: &Wait{ResumeOwner: "p1", ResumeClaimedAt: nowMs, ResumePhase: WaitResumePhaseExecutionStarted}, owner: "p1", want: false},
-		{name: "uncertain outcome blocks the claim", seed: &Wait{ResumeOwner: "p0", ResumeClaimedAt: nowMs, ResumePhase: WaitResumePhaseUncertain}, owner: "p1", want: false},
+		{name: "unowned wait is claimable", seed: func(int64, int64) *Wait { return &Wait{} }, owner: "p1", want: true},
+		{name: "legacy owner without timestamp is stale", seed: func(int64, int64) *Wait { return &Wait{ResumeOwner: "p0"} }, owner: "p1", want: true},
+		{name: "another live owner blocks the claim", seed: func(nowMs, _ int64) *Wait {
+			return &Wait{ResumeOwner: "p0", ResumeClaimedAt: nowMs}
+		}, owner: "p1", want: false},
+		{name: "own live lease is not re-claimed", seed: func(nowMs, _ int64) *Wait {
+			return &Wait{ResumeOwner: "p1", ResumeClaimedAt: nowMs}
+		}, owner: "p1", want: false},
+		{name: "another owner with a stale lease is taken over", seed: func(_, staleMs int64) *Wait {
+			return &Wait{ResumeOwner: "p0", ResumeClaimedAt: staleMs}
+		}, owner: "p1", want: true},
+		{name: "own stale lease is re-claimed", seed: func(_, staleMs int64) *Wait {
+			return &Wait{ResumeOwner: "p1", ResumeClaimedAt: staleMs}
+		}, owner: "p1", want: true},
+		{name: "execution fence blocks any other owner", seed: func(nowMs, _ int64) *Wait {
+			return &Wait{ResumeOwner: "p0", ResumeClaimedAt: nowMs, ResumePhase: WaitResumePhaseExecutionStarted}
+		}, owner: "p1", want: false},
+		{name: "execution fence blocks even its own owner without refresh", seed: func(nowMs, _ int64) *Wait {
+			return &Wait{ResumeOwner: "p1", ResumeClaimedAt: nowMs, ResumePhase: WaitResumePhaseExecutionStarted}
+		}, owner: "p1", want: false},
+		{name: "uncertain outcome blocks the claim", seed: func(nowMs, _ int64) *Wait {
+			return &Wait{ResumeOwner: "p0", ResumeClaimedAt: nowMs, ResumePhase: WaitResumePhaseUncertain}
+		}, owner: "p1", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// The lease window is read at the subtest's start, not the parent's:
+			// a slow engine runs the later subtests past a parent-wide stamp.
+			nowMs := time.Now().UTC().UnixMilli()
+			staleMs := nowMs - int64(WaitResumeLease.Milliseconds()) - 1000
 			rt, runID := newLeaseTestStore(t)
 			if tc.seed != nil {
-				w := *tc.seed
+				w := *tc.seed(nowMs, staleMs)
 				w.ActionID = "act-" + tc.name
 				w.ToolName = "shell"
 				seedWait(t, rt, "s", runID, w)
@@ -128,21 +144,29 @@ func TestClaimWaitResumeBranches(t *testing.T) {
 }
 
 func TestMarkWaitResumeOwnerBranches(t *testing.T) {
-	nowMs := time.Now().UTC().UnixMilli()
 	cases := []struct {
 		name         string
-		seed         Wait
+		seed         func(nowMs int64) Wait
 		wantErr      string // "" means nil
 		wantNotFound bool
 	}{
-		{name: "own live lease refreshes", seed: Wait{ResumeOwner: "p1", ResumeClaimedAt: nowMs}},
-		{name: "own fenced lease still refreshes", seed: Wait{ResumeOwner: "p1", ResumeClaimedAt: nowMs, ResumePhase: WaitResumePhaseExecutionStarted}},
-		{name: "another live owner is refused", seed: Wait{ResumeOwner: "p0", ResumeClaimedAt: nowMs}, wantErr: "owned by another live process"},
+		{name: "own live lease refreshes", seed: func(nowMs int64) Wait {
+			return Wait{ResumeOwner: "p1", ResumeClaimedAt: nowMs}
+		}},
+		{name: "own fenced lease still refreshes", seed: func(nowMs int64) Wait {
+			return Wait{ResumeOwner: "p1", ResumeClaimedAt: nowMs, ResumePhase: WaitResumePhaseExecutionStarted}
+		}},
+		{name: "another live owner is refused", seed: func(nowMs int64) Wait {
+			return Wait{ResumeOwner: "p0", ResumeClaimedAt: nowMs}
+		}, wantErr: "owned by another live process"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// The lease window is read at the subtest's start, not the parent's:
+			// a slow engine runs the later subtests past a parent-wide stamp.
+			nowMs := time.Now().UTC().UnixMilli()
 			rt, runID := newLeaseTestStore(t)
-			w := tc.seed
+			w := tc.seed(nowMs)
 			w.ActionID, w.ToolName = "act", "shell"
 			seedWait(t, rt, "s", runID, w)
 			err := rt.MarkWaitResumeOwner(context.Background(), runID, "act", "p1")
