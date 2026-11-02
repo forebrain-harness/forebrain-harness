@@ -18,6 +18,22 @@ import (
 	openaiauth "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
+)
+
+// The stamp reads the transition sync compares a file's mtime against: one row
+// per credential section and one per MCP OAuth overlay, both by primary key.
+var (
+	processCredentialStampSQL = dbx.SQL{
+		SQLite:   `SELECT updated_at_ms FROM fb_config WHERE section = ?`,
+		MySQL:    `SELECT updated_at_ms FROM fb_config WHERE section = ?`,
+		Postgres: `SELECT updated_at_ms FROM fb_config WHERE section = $1`,
+	}
+	processMCPOAuthStampSQL = dbx.SQL{
+		SQLite:   `SELECT updated_at_ms FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`,
+		MySQL:    `SELECT updated_at_ms FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`,
+		Postgres: `SELECT updated_at_ms FROM fb_mcp_oauth WHERE project_key = $1 AND server_name = $2`,
+	}
 )
 
 // syncLegacyCredentialFilesIfNeeded compares the two login files and the MCP
@@ -56,7 +72,7 @@ func syncCredentialFileRow(ctx context.Context, sqlDB *sql.DB, store *state.Conf
 		return err
 	}
 	var stamp int64
-	switch err := sqlDB.QueryRowContext(ctx, `SELECT updated_at_ms FROM fb_config WHERE section = ?`, section).Scan(&stamp); {
+	switch err := sqlDB.QueryRowContext(ctx, processCredentialStampSQL.For(dbx.DialectOf(sqlDB)), section).Scan(&stamp); {
 	case err == sql.ErrNoRows:
 		// No row: the login happened after the import, on the file side.
 	case err != nil:
@@ -124,8 +140,7 @@ func syncLegacyMCPOAuthRows(ctx context.Context, sqlDB *sql.DB, store *state.Con
 			return nil
 		}
 		var stamp int64
-		switch err := sqlDB.QueryRowContext(ctx,
-			`SELECT updated_at_ms FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`,
+		switch err := sqlDB.QueryRowContext(ctx, processMCPOAuthStampSQL.For(dbx.DialectOf(sqlDB)),
 			target.projectKey, target.serverName).Scan(&stamp); {
 		case err == sql.ErrNoRows:
 		case err != nil:

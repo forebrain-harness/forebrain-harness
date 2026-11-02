@@ -24,6 +24,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -112,6 +113,13 @@ func existingFilesRoot(root string) (string, error) {
 	return root, nil
 }
 
+// sessionSourceSQL reads one conversation's purpose, under its tenant.
+var sessionSourceSQL = dbx.SQL{
+	SQLite:   `SELECT COALESCE(source, '') FROM fb_sessions WHERE id = ? AND agent_id = ?`,
+	MySQL:    `SELECT COALESCE(source, '') FROM fb_sessions WHERE id = ? AND agent_id = ?`,
+	Postgres: `SELECT COALESCE(source, '') FROM fb_sessions WHERE id = $1 AND agent_id = $2`,
+}
+
 // sessionSource reads one conversation's purpose (fb_sessions.source): empty
 // for an ordinary conversation, "workshop" for a primary-agent workshop task.
 // The project store owns the session table's project binding but exposes no
@@ -122,8 +130,7 @@ func (s *Server) sessionSource(ctx context.Context, sessionID string) (string, e
 		return "", nil
 	}
 	var source string
-	err := s.Sessions.DB().QueryRowContext(ctx,
-		`SELECT COALESCE(source, '') FROM fb_sessions WHERE id = ? AND agent_id = ?`,
+	err := s.Sessions.DB().QueryRowContext(ctx, sessionSourceSQL.For(dbx.DialectOf(s.Sessions.DB())),
 		strings.TrimSpace(sessionID), s.Sessions.AgentID()).Scan(&source)
 	if err != nil {
 		return "", err

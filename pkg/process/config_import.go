@@ -22,8 +22,23 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/joho/godotenv"
 	"go.yaml.in/yaml/v2"
+)
+
+// The two reads the legacy import makes of the state database.
+var (
+	processProjectKeysSQL = dbx.SQL{
+		SQLite:   `SELECT DISTINCT project_key FROM fb_projects`,
+		MySQL:    `SELECT DISTINCT project_key FROM fb_projects`,
+		Postgres: `SELECT DISTINCT project_key FROM fb_projects`,
+	}
+	processMCPOAuthCountSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_mcp_oauth`,
+		MySQL:    `SELECT COUNT(*) FROM fb_mcp_oauth`,
+		Postgres: `SELECT COUNT(*) FROM fb_mcp_oauth`,
+	}
 )
 
 // legacyImportMarkerSection is the fb_config row that records the one-time
@@ -411,7 +426,7 @@ func mcpOverlayCandidates(ctx context.Context, sqlDB *sql.DB, persisted appcfg.R
 	}
 
 	projectKeys := make(map[string][]string)
-	prows, err := sqlDB.QueryContext(ctx, `SELECT DISTINCT project_key FROM fb_projects`)
+	prows, err := sqlDB.QueryContext(ctx, processProjectKeysSQL.For(dbx.DialectOf(sqlDB)))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -446,7 +461,7 @@ func mcpOverlayCandidates(ctx context.Context, sqlDB *sql.DB, persisted appcfg.R
 // nothing is lost and a later configuration can still adopt it by hand.
 func importLegacyMCPOAuth(ctx context.Context, sqlDB *sql.DB, store *state.ConfigStore, home string, persisted appcfg.Root) error {
 	var rows int
-	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_mcp_oauth`).Scan(&rows); err != nil {
+	if err := sqlDB.QueryRowContext(ctx, processMCPOAuthCountSQL.For(dbx.DialectOf(sqlDB))).Scan(&rows); err != nil {
 		return err
 	}
 	if rows > 0 {

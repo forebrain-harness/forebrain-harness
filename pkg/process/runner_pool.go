@@ -57,6 +57,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
@@ -716,6 +717,13 @@ func (p *RunnerPool) RunnerForTurn(ctx context.Context, sessionID string) (*run.
 	return nil, ErrSessionHasNoProject
 }
 
+// sessionSourceSQL reads one conversation's purpose, under its tenant.
+var sessionSourceSQL = dbx.SQL{
+	SQLite:   `SELECT source FROM fb_sessions WHERE id=? AND agent_id=?`,
+	MySQL:    `SELECT source FROM fb_sessions WHERE id=? AND agent_id=?`,
+	Postgres: `SELECT source FROM fb_sessions WHERE id=$1 AND agent_id=$2`,
+}
+
 // sessionSource reads one conversation's purpose (fb_sessions.source). It is
 // empty for an ordinary conversation, "workshop" for a primary-agent workshop
 // task, "cron" for a scheduled fire. The project store owns the session table's
@@ -731,8 +739,7 @@ func (p *RunnerPool) sessionSource(ctx context.Context, sessionID string) (strin
 		agentID = p.projects.AgentID()
 	}
 	var source sql.NullString
-	err := p.env.SQL.QueryRowContext(ctx,
-		`SELECT source FROM fb_sessions WHERE id=? AND agent_id=?`,
+	err := p.env.SQL.QueryRowContext(ctx, sessionSourceSQL.For(dbx.DialectOf(p.env.SQL)),
 		strings.TrimSpace(sessionID), agentID).Scan(&source)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
