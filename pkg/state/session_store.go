@@ -3258,7 +3258,7 @@ func (s *SessionStore) setMessageVisibility(ctx context.Context, q dbtx, rowID i
 	// still matched it, so ask the row itself.
 	probeWhere, probeArgs := matchWhere(1)
 	var exists int
-	if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fb_messages WHERE `+probeWhere+`)`, probeArgs...).Scan(&exists); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT CASE WHEN EXISTS(SELECT 1 FROM fb_messages WHERE `+probeWhere+`) THEN 1 ELSE 0 END`, probeArgs...).Scan(&exists); err != nil {
 		return false, err
 	}
 	return exists == 1, nil
