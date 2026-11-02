@@ -855,26 +855,29 @@ const MinIndexRelevance = -2.5
 // keeps on the same store, which is what
 // TestRelevanceFloorKeepsTheSameRowsOnEveryDialect measures.
 //
-// Measured on the same-store corpora that test seeds (the weakest line that is
-// on the query's subject against the strongest line that only shares a common
-// term):
+// Measured on the corpora that test seeds — every line on the query's subject
+// against every line that only shares a common term:
 //
 //	MySQL      -4.85 … -0.15   InnoDB's MATCH relevance, negated; it grows with
-//	                           the store, so it lands both far below bm25 on a
-//	                           rare term and much closer to zero on a common one
-//	PostgreSQL -5.52 … -0.90   the IDF sum ftsindex.go builds on bm25's scale
-//	                           for the GIN index, negated like bm25
+//	                           the store, so a rare term lands far below bm25
+//	                           and a common one much closer to zero
+//	PostgreSQL -2.35 … -1.11   the IDF sum ftsindex.go builds for the GIN
+//	                           index, negated like bm25; it knows nothing of
+//	                           term frequency, so a line bm25 rewards for
+//	                           repeating the term scores no lower here
 //
-// Each value sits at the midpoint of its own engine's gap, which is where a
-// row has the most room before the other side of the band reaches it.
+// Each value is the midpoint of its own engine's gap, which is where a row has
+// the most room before the other side of the band reaches it.
 const (
-	// mysqlMinIndexRelevance is the midpoint of MySQL's measured gap
-	// (-4.9029 for the weakest subject line, -0.1550 for the strongest noise
-	// line).
+	// mysqlMinIndexRelevance is the midpoint of MySQL's gap: -4.9029 for the
+	// weakest line on the subject, -0.1550 for the strongest noise line.
 	mysqlMinIndexRelevance = -2.5
-	// postgresMinIndexRelevance is the midpoint of PostgreSQL's measured gap
-	// (-5.5167 and -0.9015).
-	postgresMinIndexRelevance = -3.2
+	// postgresMinIndexRelevance is the midpoint of PostgreSQL's gap, which is
+	// narrower and sits far closer to zero than SQLite's: -2.3522 for the
+	// weakest line on the subject (a store where thirty notes all say
+	// "deploy"), -1.1105 for the strongest line that only shares a common
+	// term.
+	postgresMinIndexRelevance = -1.7
 )
 
 // minIndexRelevance is the weakest score a match may have on d. The three

@@ -15,6 +15,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
 )
@@ -802,7 +803,8 @@ func TestEvictStaleEntriesRefusesRecentEntries(t *testing.T) {
 // delete path would, so a test can make a session's liveness unanswerable.
 func evictTestDeleteSession(t *testing.T, env *Environment, sessionID string) error {
 	t.Helper()
-	_, err := env.SQL.ExecContext(context.Background(), `DELETE FROM fb_sessions WHERE id=? AND agent_id=?`, sessionID, env.Deps.AgentName)
+	_, err := env.SQL.ExecContext(context.Background(),
+		dbx.Rebind(dbx.DialectOf(env.SQL), `DELETE FROM fb_sessions WHERE id=? AND agent_id=?`), sessionID, env.Deps.AgentName)
 	return err
 }
 
@@ -886,7 +888,8 @@ func TestSweepToolStateCleansBaseAndPooledRunners(t *testing.T) {
 	// threshold only after every binding has resolved, so nothing re-stamps
 	// them.
 	if _, err := env.SQL.ExecContext(ctx,
-		`UPDATE fb_sessions SET updated_at=? WHERE id IN (?,?)`, time.Now().Add(-2*runnerPoolSessionEviction).Unix(), "base-quiet", "pool-quiet"); err != nil {
+		dbx.Rebind(dbx.DialectOf(env.SQL), `UPDATE fb_sessions SET updated_at=? WHERE id IN (?,?)`),
+		time.Now().Add(-2*runnerPoolSessionEviction).Unix(), "base-quiet", "pool-quiet"); err != nil {
 		t.Fatal(err)
 	}
 	baseState.RecordToolResultSpill(tool.ToolResultSpill{SessionID: "base-quiet", RunID: "r-bq", Path: "/tmp/bq"})

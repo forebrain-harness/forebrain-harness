@@ -26,6 +26,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // peerTestView is the surface a test hands the service: it records what the
@@ -417,7 +418,8 @@ func seedPeerSessionOfType(t *testing.T, store *state.SessionStore, id, cwd, pro
 	t.Helper()
 	seedPeerSession(t, store, id, cwd)
 	if _, err := store.DB().ExecContext(context.Background(),
-		`UPDATE fb_sessions SET project_type=? WHERE id=? AND agent_id=?`, projectType, id, store.AgentID()); err != nil {
+		dbx.Rebind(dbx.DialectOf(store.DB()), `UPDATE fb_sessions SET project_type=? WHERE id=? AND agent_id=?`),
+		projectType, id, store.AgentID()); err != nil {
 		t.Fatalf("freeze %s as %s: %v", id, projectType, err)
 	}
 }

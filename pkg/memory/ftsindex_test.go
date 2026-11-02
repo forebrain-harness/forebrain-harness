@@ -688,6 +688,22 @@ var calibrationCorpora = []struct {
 		query: "审批 release",
 	},
 	{
+		// The store memories_search's top-k test seeds: thirty equally good
+		// answers and nothing else, which is the case a floor must keep rather
+		// than drop.
+		name: "thirty notes that all say the same word",
+		files: func() map[string]string {
+			var lines []string
+			for index := 0; index < 30; index++ {
+				lines = append(lines, fmt.Sprintf("- deploy note %d", index))
+			}
+			body := strings.Join(lines, "\n") + "\n" +
+				strings.Repeat("the quick brown fox jumps over the lazy dog while nothing happens\n", 200)
+			return map[string]string{"MEMORY.md": body}
+		},
+		query: "deploy",
+	},
+	{
 		name: "a term most of the store shares",
 		files: func() map[string]string {
 			files := map[string]string{}
