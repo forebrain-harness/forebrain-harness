@@ -224,6 +224,493 @@ func liveRunArgs(now time.Time) []any {
 		now.UnixMilli() - RunOwnerLease.Milliseconds()}
 }
 
+// livePrimaryRunConditionFor is livePrimaryRunCondition with the dialect's
+// placeholders: SQLite and MySQL write '?', PostgreSQL numbers its parameters
+// from start. The alias is the fb_runs alias the predicate qualifies.
+func livePrimaryRunConditionFor(d dbx.Dialect, alias string, start int) string {
+	ph := func(n int) string { return dbx.Placeholder(d, start+n) }
+	return `(status = ` + ph(0) + ` OR (status = ` + ph(1) + ` AND EXISTS (
+  SELECT 1 FROM fb_run_owners o WHERE o.owner = ` + alias + `.owner AND o.heartbeat_at_ms >= ` + ph(2) + `)))`
+}
+
+// The run store's statements. Each SQLite arm is the text this file carried
+// before multi-database support; PostgreSQL numbers its parameters and takes
+// COALESCE where the others take IFNULL, and MySQL has no RETURNING — the one
+// statement that reports what it wrote (ReapAbandonedRuns) reads the row back
+// inside the same transaction there.
+var (
+	createSubagentRunInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, owner, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, owner, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, owner, created_at, updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+	}
+	setRunningDescendantsStatusSQL = dbx.SQL{
+		SQLite: `
+WITH RECURSIVE descendants(id) AS (
+	SELECT id FROM fb_runs WHERE parent_run_id=?
+	UNION ALL
+	SELECT child.id FROM fb_runs child JOIN descendants parent ON child.parent_run_id=parent.id
+)
+UPDATE fb_runs SET status=?, updated_at=?
+WHERE id IN (SELECT id FROM descendants) AND (status=? OR status=?)`,
+		MySQL: `
+WITH RECURSIVE descendants(id) AS (
+	SELECT id FROM fb_runs WHERE parent_run_id=?
+	UNION ALL
+	SELECT child.id FROM fb_runs child JOIN descendants parent ON child.parent_run_id=parent.id
+)
+UPDATE fb_runs SET status=?, updated_at=?
+WHERE id IN (SELECT id FROM descendants) AND (status=? OR status=?)`,
+		Postgres: `
+WITH RECURSIVE descendants(id) AS (
+	SELECT id FROM fb_runs WHERE parent_run_id=$1
+	UNION ALL
+	SELECT child.id FROM fb_runs child JOIN descendants parent ON child.parent_run_id=parent.id
+)
+UPDATE fb_runs SET status=$2, updated_at=$3
+WHERE id IN (SELECT id FROM descendants) AND (status=$4 OR status=$5)`,
+	}
+	sessionUsageSQL = dbx.SQL{
+		SQLite: `
+WITH RECURSIVE run_tree(id) AS (
+  SELECT id FROM fb_runs WHERE session_id=?
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT IFNULL(SUM(usage_prompt_tokens),0), IFNULL(SUM(usage_completion_tokens),0),
+       IFNULL(SUM(usage_cache_read_tokens),0), IFNULL(SUM(usage_cache_creation_tokens),0),
+       IFNULL(SUM(usage_llm_calls),0), IFNULL(SUM(usage_llm_ms),0)
+FROM fb_runs WHERE id IN (SELECT id FROM run_tree)`,
+		MySQL: `
+WITH RECURSIVE run_tree(id) AS (
+  SELECT id FROM fb_runs WHERE session_id=?
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT IFNULL(SUM(usage_prompt_tokens),0), IFNULL(SUM(usage_completion_tokens),0),
+       IFNULL(SUM(usage_cache_read_tokens),0), IFNULL(SUM(usage_cache_creation_tokens),0),
+       IFNULL(SUM(usage_llm_calls),0), IFNULL(SUM(usage_llm_ms),0)
+FROM fb_runs WHERE id IN (SELECT id FROM run_tree)`,
+		Postgres: `
+WITH RECURSIVE run_tree(id) AS (
+  SELECT id FROM fb_runs WHERE session_id=$1
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT COALESCE(SUM(usage_prompt_tokens),0), COALESCE(SUM(usage_completion_tokens),0),
+       COALESCE(SUM(usage_cache_read_tokens),0), COALESCE(SUM(usage_cache_creation_tokens),0),
+       COALESCE(SUM(usage_llm_calls),0), COALESCE(SUM(usage_llm_ms),0)
+FROM fb_runs WHERE id IN (SELECT id FROM run_tree)`,
+	}
+	lastRunUsageSQL = dbx.SQL{
+		SQLite: `
+SELECT usage_prompt_tokens, usage_completion_tokens,
+       usage_cache_read_tokens, usage_cache_creation_tokens,
+       usage_llm_calls, usage_llm_ms
+FROM fb_runs WHERE session_id=? AND status=? AND parent_run_id IS NULL
+ORDER BY updated_at DESC LIMIT 1`,
+		MySQL: `
+SELECT usage_prompt_tokens, usage_completion_tokens,
+       usage_cache_read_tokens, usage_cache_creation_tokens,
+       usage_llm_calls, usage_llm_ms
+FROM fb_runs WHERE session_id=? AND status=? AND parent_run_id IS NULL
+ORDER BY updated_at DESC LIMIT 1`,
+		Postgres: `
+SELECT usage_prompt_tokens, usage_completion_tokens,
+       usage_cache_read_tokens, usage_cache_creation_tokens,
+       usage_llm_calls, usage_llm_ms
+FROM fb_runs WHERE session_id=$1 AND status=$2 AND parent_run_id IS NULL
+ORDER BY updated_at DESC LIMIT 1`,
+	}
+	sessionOutputRateSQL = dbx.SQL{
+		SQLite: `
+WITH RECURSIVE run_tree(id) AS (
+  SELECT id FROM fb_runs WHERE session_id=?
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT IFNULL(SUM(usage_completion_tokens),0), IFNULL(SUM(usage_llm_ms),0)
+FROM fb_runs WHERE id IN (SELECT id FROM run_tree) AND usage_llm_ms > 0`,
+		MySQL: `
+WITH RECURSIVE run_tree(id) AS (
+  SELECT id FROM fb_runs WHERE session_id=?
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT IFNULL(SUM(usage_completion_tokens),0), IFNULL(SUM(usage_llm_ms),0)
+FROM fb_runs WHERE id IN (SELECT id FROM run_tree) AND usage_llm_ms > 0`,
+		Postgres: `
+WITH RECURSIVE run_tree(id) AS (
+  SELECT id FROM fb_runs WHERE session_id=$1
+  UNION
+  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
+)
+SELECT COALESCE(SUM(usage_completion_tokens),0), COALESCE(SUM(usage_llm_ms),0)
+FROM fb_runs WHERE id IN (SELECT id FROM run_tree) AND usage_llm_ms > 0`,
+	}
+	setRunUsageSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_runs SET usage_prompt_tokens=?, usage_completion_tokens=?,
+  usage_cache_read_tokens=?, usage_cache_creation_tokens=?, usage_llm_calls=?,
+  usage_llm_ms=?, updated_at=? WHERE id=?`,
+		MySQL: `
+UPDATE fb_runs SET usage_prompt_tokens=?, usage_completion_tokens=?,
+  usage_cache_read_tokens=?, usage_cache_creation_tokens=?, usage_llm_calls=?,
+  usage_llm_ms=?, updated_at=? WHERE id=?`,
+		Postgres: `
+UPDATE fb_runs SET usage_prompt_tokens=$1, usage_completion_tokens=$2,
+  usage_cache_read_tokens=$3, usage_cache_creation_tokens=$4, usage_llm_calls=$5,
+  usage_llm_ms=$6, updated_at=$7 WHERE id=$8`,
+	}
+	// setWaitingActionUpsertSQL keys on fb_run_waits.run_id, the primary key.
+	setWaitingActionUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_run_waits(run_id, action_id, tool_name, tool_input_json, session_snapshot_json,
+  agent_id, subagent_type, subagent_run_id, sandbox_profile, requested_profile, profile_elevation,
+  resume_owner, resume_claimed_at_ms, resume_phase, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(run_id) DO UPDATE SET
+  action_id=excluded.action_id,
+  tool_name=excluded.tool_name,
+  tool_input_json=excluded.tool_input_json,
+  session_snapshot_json=excluded.session_snapshot_json,
+  agent_id=excluded.agent_id,
+  subagent_type=excluded.subagent_type,
+  subagent_run_id=excluded.subagent_run_id,
+  sandbox_profile=excluded.sandbox_profile,
+  requested_profile=excluded.requested_profile,
+  profile_elevation=excluded.profile_elevation,
+  resume_owner=excluded.resume_owner,
+  resume_claimed_at_ms=excluded.resume_claimed_at_ms,
+  resume_phase=excluded.resume_phase,
+  updated_at=excluded.updated_at`,
+		MySQL: `
+INSERT INTO fb_run_waits(run_id, action_id, tool_name, tool_input_json, session_snapshot_json,
+  agent_id, subagent_type, subagent_run_id, sandbox_profile, requested_profile, profile_elevation,
+  resume_owner, resume_claimed_at_ms, resume_phase, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON DUPLICATE KEY UPDATE
+  action_id=VALUES(action_id),
+  tool_name=VALUES(tool_name),
+  tool_input_json=VALUES(tool_input_json),
+  session_snapshot_json=VALUES(session_snapshot_json),
+  agent_id=VALUES(agent_id),
+  subagent_type=VALUES(subagent_type),
+  subagent_run_id=VALUES(subagent_run_id),
+  sandbox_profile=VALUES(sandbox_profile),
+  requested_profile=VALUES(requested_profile),
+  profile_elevation=VALUES(profile_elevation),
+  resume_owner=VALUES(resume_owner),
+  resume_claimed_at_ms=VALUES(resume_claimed_at_ms),
+  resume_phase=VALUES(resume_phase),
+  updated_at=VALUES(updated_at)`,
+		Postgres: `
+INSERT INTO fb_run_waits(run_id, action_id, tool_name, tool_input_json, session_snapshot_json,
+  agent_id, subagent_type, subagent_run_id, sandbox_profile, requested_profile, profile_elevation,
+  resume_owner, resume_claimed_at_ms, resume_phase, created_at, updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+ON CONFLICT(run_id) DO UPDATE SET
+  action_id=excluded.action_id,
+  tool_name=excluded.tool_name,
+  tool_input_json=excluded.tool_input_json,
+  session_snapshot_json=excluded.session_snapshot_json,
+  agent_id=excluded.agent_id,
+  subagent_type=excluded.subagent_type,
+  subagent_run_id=excluded.subagent_run_id,
+  sandbox_profile=excluded.sandbox_profile,
+  requested_profile=excluded.requested_profile,
+  profile_elevation=excluded.profile_elevation,
+  resume_owner=excluded.resume_owner,
+  resume_claimed_at_ms=excluded.resume_claimed_at_ms,
+  resume_phase=excluded.resume_phase,
+  updated_at=excluded.updated_at`,
+	}
+	setRunWaitingActionSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_runs SET status=?, updated_at=? WHERE id=?`,
+		MySQL:    `UPDATE fb_runs SET status=?, updated_at=? WHERE id=?`,
+		Postgres: `UPDATE fb_runs SET status=$1, updated_at=$2 WHERE id=$3`,
+	}
+	setWaitSessionSnapshotSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_run_waits SET session_snapshot_json=?, updated_at=? WHERE run_id=? AND action_id=?`,
+		MySQL: `
+UPDATE fb_run_waits SET session_snapshot_json=?, updated_at=? WHERE run_id=? AND action_id=?`,
+		Postgres: `
+UPDATE fb_run_waits SET session_snapshot_json=$1, updated_at=$2 WHERE run_id=$3 AND action_id=$4`,
+	}
+	sessionHasRunWaitingOnToolApprovalSQL = dbx.SQL{
+		SQLite:   `SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=? AND status=?)`,
+		MySQL:    `SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=? AND status=?)`,
+		Postgres: `SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=$1 AND status=$2)`,
+	}
+	firstWaitingRunIDForSessionSQL = dbx.SQL{
+		SQLite: `
+SELECT id FROM fb_runs WHERE session_id=? AND status=? ORDER BY updated_at ASC LIMIT 1`,
+		MySQL: `
+SELECT id FROM fb_runs WHERE session_id=? AND status=? ORDER BY updated_at ASC LIMIT 1`,
+		Postgres: `
+SELECT id FROM fb_runs WHERE session_id=$1 AND status=$2 ORDER BY updated_at ASC LIMIT 1`,
+	}
+	waitResumeOwnedBySQL = dbx.SQL{
+		SQLite:   `SELECT resume_owner = ? FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		MySQL:    `SELECT resume_owner = ? FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		Postgres: `SELECT resume_owner = $1 FROM fb_run_waits WHERE run_id=$2 AND action_id=$3`,
+	}
+	releaseWaitResumeOwnerUpdateSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_run_waits
+SET resume_owner='', resume_claimed_at_ms=NULL, resume_phase='', updated_at=?
+WHERE run_id=? AND action_id=? AND resume_owner=? AND resume_phase NOT IN (?, ?)`,
+		MySQL: `
+UPDATE fb_run_waits
+SET resume_owner='', resume_claimed_at_ms=NULL, resume_phase='', updated_at=?
+WHERE run_id=? AND action_id=? AND resume_owner=? AND resume_phase NOT IN (?, ?)`,
+		Postgres: `
+UPDATE fb_run_waits
+SET resume_owner='', resume_claimed_at_ms=NULL, resume_phase='', updated_at=$1
+WHERE run_id=$2 AND action_id=$3 AND resume_owner=$4 AND resume_phase NOT IN ($5, $6)`,
+	}
+	releaseWaitResumeOwnerSelectSQL = dbx.SQL{
+		SQLite:   `SELECT resume_owner, resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		MySQL:    `SELECT resume_owner, resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		Postgres: `SELECT resume_owner, resume_phase FROM fb_run_waits WHERE run_id=$1 AND action_id=$2`,
+	}
+	beginWaitResumeExecutionUpdateSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_run_waits
+SET resume_phase=?, resume_claimed_at_ms=?, updated_at=?
+WHERE run_id=? AND action_id=? AND resume_owner=? AND resume_phase NOT IN (?, ?)`,
+		MySQL: `
+UPDATE fb_run_waits
+SET resume_phase=?, resume_claimed_at_ms=?, updated_at=?
+WHERE run_id=? AND action_id=? AND resume_owner=? AND resume_phase NOT IN (?, ?)`,
+		Postgres: `
+UPDATE fb_run_waits
+SET resume_phase=$1, resume_claimed_at_ms=$2, updated_at=$3
+WHERE run_id=$4 AND action_id=$5 AND resume_owner=$6 AND resume_phase NOT IN ($7, $8)`,
+	}
+	beginWaitResumeExecutionSelectSQL = dbx.SQL{
+		SQLite:   `SELECT resume_owner, resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		MySQL:    `SELECT resume_owner, resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		Postgres: `SELECT resume_owner, resume_phase FROM fb_run_waits WHERE run_id=$1 AND action_id=$2`,
+	}
+	markWaitResumeUncertainUpdateSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_run_waits SET resume_phase=?, updated_at=?
+WHERE run_id=? AND action_id=? AND resume_phase=?`,
+		MySQL: `
+UPDATE fb_run_waits SET resume_phase=?, updated_at=?
+WHERE run_id=? AND action_id=? AND resume_phase=?`,
+		Postgres: `
+UPDATE fb_run_waits SET resume_phase=$1, updated_at=$2
+WHERE run_id=$3 AND action_id=$4 AND resume_phase=$5`,
+	}
+	markWaitResumeUncertainSelectSQL = dbx.SQL{
+		SQLite:   `SELECT resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		MySQL:    `SELECT resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		Postgres: `SELECT resume_phase FROM fb_run_waits WHERE run_id=$1 AND action_id=$2`,
+	}
+	claimWaitResumeUpdateSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_run_waits
+SET resume_owner = ?, resume_claimed_at_ms = ?,
+    resume_phase = CASE WHEN resume_phase = '' THEN ? ELSE resume_phase END,
+    updated_at = ?
+WHERE run_id = ? AND action_id = ?
+  AND (
+    (? AND resume_owner = ?)
+    OR (resume_phase NOT IN (?, ?)
+        AND (resume_owner = '' OR resume_claimed_at_ms IS NULL OR resume_claimed_at_ms < ?))
+  )`,
+		MySQL: `
+UPDATE fb_run_waits
+SET resume_owner = ?, resume_claimed_at_ms = ?,
+    resume_phase = CASE WHEN resume_phase = '' THEN ? ELSE resume_phase END,
+    updated_at = ?
+WHERE run_id = ? AND action_id = ?
+  AND (
+    (? AND resume_owner = ?)
+    OR (resume_phase NOT IN (?, ?)
+        AND (resume_owner = '' OR resume_claimed_at_ms IS NULL OR resume_claimed_at_ms < ?))
+  )`,
+		Postgres: `
+UPDATE fb_run_waits
+SET resume_owner = $1, resume_claimed_at_ms = $2,
+    resume_phase = CASE WHEN resume_phase = '' THEN $3 ELSE resume_phase END,
+    updated_at = $4
+WHERE run_id = $5 AND action_id = $6
+  AND (
+    ($7 AND resume_owner = $8)
+    OR (resume_phase NOT IN ($9, $10)
+        AND (resume_owner = '' OR resume_claimed_at_ms IS NULL OR resume_claimed_at_ms < $11))
+  )`,
+	}
+	claimWaitResumeSelectSQL = dbx.SQL{
+		SQLite:   `SELECT resume_owner FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		MySQL:    `SELECT resume_owner FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+		Postgres: `SELECT resume_owner FROM fb_run_waits WHERE run_id=$1 AND action_id=$2`,
+	}
+	clearWaitSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_run_waits WHERE run_id=?`,
+		MySQL:    `DELETE FROM fb_run_waits WHERE run_id=?`,
+		Postgres: `DELETE FROM fb_run_waits WHERE run_id=$1`,
+	}
+	setRunStatusRunningSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_runs SET status=?, owner=?, updated_at=? WHERE id=? AND status IN (?, ?)`,
+		MySQL: `
+UPDATE fb_runs SET status=?, owner=?, updated_at=? WHERE id=? AND status IN (?, ?)`,
+		Postgres: `
+UPDATE fb_runs SET status=$1, owner=$2, updated_at=$3 WHERE id=$4 AND status IN ($5, $6)`,
+	}
+	setRunStatusTerminalSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_runs SET status=?, updated_at=? WHERE id=? AND status IN (?, ?)`,
+		MySQL: `
+UPDATE fb_runs SET status=?, updated_at=? WHERE id=? AND status IN (?, ?)`,
+		Postgres: `
+UPDATE fb_runs SET status=$1, updated_at=$2 WHERE id=$3 AND status IN ($4, $5)`,
+	}
+	setRunStatusWaitingSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_runs SET status=?, updated_at=? WHERE id=? AND status=?`,
+		MySQL: `
+UPDATE fb_runs SET status=?, updated_at=? WHERE id=? AND status=?`,
+		Postgres: `
+UPDATE fb_runs SET status=$1, updated_at=$2 WHERE id=$3 AND status=$4`,
+	}
+	// firstPrimaryRunIDSQL and livePrimaryInputSQL order same-timestamp runs by
+	// fb_runs.rowid, which is the explicit row_id column on the other engines.
+	firstPrimaryRunIDSQL = dbx.SQL{
+		SQLite: `
+SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+		MySQL: `
+SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL ORDER BY created_at ASC, row_id ASC LIMIT 1`,
+		Postgres: `
+SELECT id FROM fb_runs WHERE session_id=$1 AND parent_run_id IS NULL ORDER BY created_at ASC, row_id ASC LIMIT 1`,
+	}
+	livePrimaryInputSQL = dbx.SQL{
+		SQLite: `
+SELECT input_text FROM fb_runs
+WHERE session_id=? AND parent_run_id IS NULL AND status IN (?, ?)
+ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+		MySQL: `
+SELECT input_text FROM fb_runs
+WHERE session_id=? AND parent_run_id IS NULL AND status IN (?, ?)
+ORDER BY created_at DESC, row_id DESC LIMIT 1`,
+		Postgres: `
+SELECT input_text FROM fb_runs
+WHERE session_id=$1 AND parent_run_id IS NULL AND status IN ($2, $3)
+ORDER BY created_at DESC, row_id DESC LIMIT 1`,
+	}
+	runOwnerLeaseUpsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES(?, ?)
+ON CONFLICT(owner) DO UPDATE SET heartbeat_at_ms=excluded.heartbeat_at_ms`,
+		MySQL: `
+INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES(?, ?)
+ON DUPLICATE KEY UPDATE heartbeat_at_ms=VALUES(heartbeat_at_ms)`,
+		Postgres: `
+INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES($1, $2)
+ON CONFLICT(owner) DO UPDATE SET heartbeat_at_ms=excluded.heartbeat_at_ms`,
+	}
+	runOwnerLeaseDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_run_owners WHERE owner=?`,
+		MySQL:    `DELETE FROM fb_run_owners WHERE owner=?`,
+		Postgres: `DELETE FROM fb_run_owners WHERE owner=$1`,
+	}
+	reapAbandonedRunsSelectSQL = dbx.SQL{
+		SQLite: `
+SELECT id, session_id, parent_run_id, owner FROM fb_runs
+WHERE status=?
+  AND NOT EXISTS (SELECT 1 FROM fb_run_waits w WHERE w.run_id=fb_runs.id)
+  AND (? = '' OR owner <> ? OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner))
+  AND (owner=''
+       OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner)
+       OR (SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner) < ?)
+ORDER BY created_at ASC, id ASC`,
+		MySQL: `
+SELECT id, session_id, parent_run_id, owner FROM fb_runs
+WHERE status=?
+  AND NOT EXISTS (SELECT 1 FROM fb_run_waits w WHERE w.run_id=fb_runs.id)
+  AND (? = '' OR owner <> ? OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner))
+  AND (owner=''
+       OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner)
+       OR (SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner) < ?)
+ORDER BY created_at ASC, id ASC`,
+		Postgres: `
+SELECT id, session_id, parent_run_id, owner FROM fb_runs
+WHERE status=$1
+  AND NOT EXISTS (SELECT 1 FROM fb_run_waits w WHERE w.run_id=fb_runs.id)
+  AND ($2 = '' OR owner <> $3 OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner))
+  AND (owner=''
+       OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner)
+       OR (SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner) < $4)
+ORDER BY created_at ASC, id ASC`,
+	}
+	// reapAbandonedRunUpdateSQL reports the clock it stamped through RETURNING,
+	// which only SQLite and PostgreSQL have; MySQL moves the row and reads the
+	// clock back in the same transaction instead.
+	reapAbandonedRunUpdateSQL = dbx.SQL{
+		SQLite: `
+UPDATE fb_runs
+SET status=?, updated_at=?,
+    started_at_ms=COALESCE(started_at_ms, created_at*1000),
+    finished_at_ms=COALESCE(finished_at_ms, ` + clockExpr + `),
+    worked_ms=COALESCE(worked_ms, ` + clockExpr + `-created_at*1000)
+WHERE id=? AND status=? AND owner=?
+RETURNING finished_at_ms`,
+		Postgres: `
+UPDATE fb_runs
+SET status=$1, updated_at=$2,
+    started_at_ms=COALESCE(started_at_ms, created_at*1000),
+    finished_at_ms=COALESCE(finished_at_ms, ` + reapClockExprPostgres + `),
+    worked_ms=COALESCE(worked_ms, ` + reapClockExprPostgres + `-created_at*1000)
+WHERE id=$3 AND status=$4 AND owner=$5
+RETURNING finished_at_ms`,
+	}
+	reapAbandonedRunUpdateMySQLSQL = dbx.SQL{
+		MySQL: `
+UPDATE fb_runs
+SET status=?, updated_at=?,
+    started_at_ms=COALESCE(started_at_ms, created_at*1000),
+    finished_at_ms=COALESCE(finished_at_ms, ` + reapClockExprMySQL + `),
+    worked_ms=COALESCE(worked_ms, ` + reapClockExprMySQL + `-created_at*1000)
+WHERE id=? AND status=? AND owner=?`,
+	}
+	reapAbandonedRunClockMySQLSQL = dbx.SQL{
+		MySQL: `SELECT finished_at_ms FROM fb_runs WHERE id=?`,
+	}
+	reapAbandonedOwnersDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_run_owners WHERE heartbeat_at_ms < ?`,
+		MySQL:    `DELETE FROM fb_run_owners WHERE heartbeat_at_ms < ?`,
+		Postgres: `DELETE FROM fb_run_owners WHERE heartbeat_at_ms < $1`,
+	}
+	listRunsBySessionSQL = dbx.SQL{
+		SQLite:   `SELECT ` + runColumns + "\nFROM fb_runs WHERE session_id=? ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+		MySQL:    `SELECT ` + runColumns + "\nFROM fb_runs WHERE session_id=? ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+		Postgres: `SELECT ` + runColumns + "\nFROM fb_runs WHERE session_id=$1 ORDER BY updated_at DESC, created_at DESC LIMIT $2",
+	}
+)
+
+// reapClockExprMySQL and reapClockExprPostgres are clockExpr with the scalar
+// two-argument max the other engines spell GREATEST; SQLite's max(X,Y) is not
+// an aggregate and has no counterpart there.
+const (
+	// clockExpr is the reap's end-of-run clock: the owner's last heartbeat,
+	// falling back to the row's own last write, and never earlier than the
+	// run's start.
+	clockExpr               = `MAX(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
+	reapClockExprMySQL      = `GREATEST(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
+	reapClockExprPostgres   = `GREATEST(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
+)
+
 func (s *RunStore) CreateRun(ctx context.Context, sessionID, inputText string) (*Run, error) {
 	if s == nil || s.DB == nil {
 		return nil, fmt.Errorf("nil db")
@@ -248,13 +735,16 @@ func (s *RunStore) CreateRun(ctx context.Context, sessionID, inputText string) (
 	// the reaper is on its way to end it.
 	args := append([]any{r.ID, r.SessionID, r.InputText, string(r.Status), strings.TrimSpace(s.Owner), r.CreatedAt, r.UpdatedAt,
 		r.SessionID}, liveRunArgs(now)...)
-	res, err := s.DB.ExecContext(ctx, `
+	d := dbx.DialectOf(s.DB)
+	ph := func(n int) string { return dbx.Placeholder(d, n) }
+	query := `
 INSERT INTO fb_runs(id, session_id, input_text, status, owner, created_at, updated_at)
-SELECT ?, ?, ?, ?, ?, ?, ?
+SELECT ` + ph(1) + `, ` + ph(2) + `, ` + ph(3) + `, ` + ph(4) + `, ` + ph(5) + `, ` + ph(6) + `, ` + ph(7) + `
 WHERE NOT EXISTS (
   SELECT 1 FROM fb_runs r
-  WHERE r.session_id = ? AND r.parent_run_id IS NULL
-    AND `+fmt.Sprintf(livePrimaryRunCondition, "r")+`)`, args...)
+  WHERE r.session_id = ` + ph(8) + ` AND r.parent_run_id IS NULL
+    AND ` + livePrimaryRunConditionFor(d, "r", 9) + `)`
+	res, err := dbx.Exec(ctx, s.DB, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -286,12 +776,15 @@ func (s *RunStore) liveRunRefusal(ctx context.Context, sessionID string, now tim
 	// that is gone.
 	var status, owner string
 	var ownerLive int
-	err = s.DB.QueryRowContext(ctx, `
+	d := dbx.DialectOf(s.DB)
+	ph := func(n int) string { return dbx.Placeholder(d, n) }
+	query := `
 SELECT r.status, r.owner,
-  EXISTS(SELECT 1 FROM fb_run_owners o WHERE o.owner = r.owner AND o.heartbeat_at_ms >= ?)
+  EXISTS(SELECT 1 FROM fb_run_owners o WHERE o.owner = r.owner AND o.heartbeat_at_ms >= ` + ph(1) + `)
 FROM fb_runs r
-WHERE r.session_id = ? AND r.parent_run_id IS NULL AND `+fmt.Sprintf(livePrimaryRunCondition, "r")+`
-ORDER BY r.updated_at DESC LIMIT 1`,
+WHERE r.session_id = ` + ph(2) + ` AND r.parent_run_id IS NULL AND ` + livePrimaryRunConditionFor(d, "r", 3) + `
+ORDER BY r.updated_at DESC LIMIT 1`
+	err = s.DB.QueryRowContext(ctx, query,
 		append([]any{now.UnixMilli() - RunOwnerLease.Milliseconds(), strings.TrimSpace(sessionID)}, liveRunArgs(now)...)...).Scan(&status, &owner, &ownerLive)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -362,9 +855,7 @@ func (s *RunStore) CreateSubagentRun(ctx context.Context, parentRunID, sessionID
 	}
 	// No session-exclusivity check: a subagent run belongs to a parent run
 	// that is alive, and several of them may share one session.
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, owner, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?)`,
+	_, err := dbx.Exec(ctx, s.DB, createSubagentRunInsertSQL.For(dbx.DialectOf(s.DB)),
 		r.ID, r.SessionID, r.ParentRunID, r.InputText, string(r.Status), strings.TrimSpace(s.Owner), r.CreatedAt, r.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -391,14 +882,7 @@ func (s *RunStore) setRunningDescendantsStatus(ctx context.Context, parentRunID 
 		return nil
 	}
 	now := time.Now().Unix()
-	_, err := s.DB.ExecContext(ctx, `
-WITH RECURSIVE descendants(id) AS (
-	SELECT id FROM fb_runs WHERE parent_run_id=?
-	UNION ALL
-	SELECT child.id FROM fb_runs child JOIN descendants parent ON child.parent_run_id=parent.id
-)
-UPDATE fb_runs SET status=?, updated_at=?
-WHERE id IN (SELECT id FROM descendants) AND (status=? OR status=?)`,
+	_, err := dbx.Exec(ctx, s.DB, setRunningDescendantsStatusSQL.For(dbx.DialectOf(s.DB)),
 		parentRunID, string(status), now, string(RunStatusRunning), string(RunStatusWaitingAction))
 	return err
 }
@@ -409,7 +893,7 @@ func (s *RunStore) GetRun(ctx context.Context, id string) (*Run, error) {
 	}
 	r, err := scanRun(s.DB.QueryRowContext(ctx, `
 SELECT `+runColumns+`
-FROM fb_runs WHERE id=?`, id))
+FROM fb_runs WHERE id=`+dbx.Placeholder(dbx.DialectOf(s.DB), 1), id))
 	if err == sql.ErrNoRows {
 		return nil, ErrRunNotFound
 	}
@@ -466,16 +950,7 @@ func (s *RunStore) SessionUsageForSession(ctx context.Context, sessionID string)
 	if sid == "" {
 		return out, fmt.Errorf("empty session id")
 	}
-	err := s.DB.QueryRowContext(ctx, `
-WITH RECURSIVE run_tree(id) AS (
-  SELECT id FROM fb_runs WHERE session_id=?
-  UNION
-  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
-)
-SELECT IFNULL(SUM(usage_prompt_tokens),0), IFNULL(SUM(usage_completion_tokens),0),
-       IFNULL(SUM(usage_cache_read_tokens),0), IFNULL(SUM(usage_cache_creation_tokens),0),
-       IFNULL(SUM(usage_llm_calls),0), IFNULL(SUM(usage_llm_ms),0)
-FROM fb_runs WHERE id IN (SELECT id FROM run_tree)`,
+	err := s.DB.QueryRowContext(ctx, sessionUsageSQL.For(dbx.DialectOf(s.DB)),
 		sid).Scan(
 		&out.PromptTokens, &out.CompletionTokens,
 		&out.CacheReadTokens, &out.CacheWriteTokens,
@@ -496,12 +971,7 @@ func (s *RunStore) LastRunUsageForSession(ctx context.Context, sessionID string)
 	if sid == "" {
 		return out, fmt.Errorf("empty session id")
 	}
-	err := s.DB.QueryRowContext(ctx, `
-SELECT usage_prompt_tokens, usage_completion_tokens,
-       usage_cache_read_tokens, usage_cache_creation_tokens,
-       usage_llm_calls, usage_llm_ms
-FROM fb_runs WHERE session_id=? AND status=? AND parent_run_id IS NULL
-ORDER BY updated_at DESC LIMIT 1`,
+	err := s.DB.QueryRowContext(ctx, lastRunUsageSQL.For(dbx.DialectOf(s.DB)),
 		sid, string(RunStatusDone)).Scan(
 		&out.PromptTokens, &out.CompletionTokens,
 		&out.CacheReadTokens, &out.CacheWriteTokens,
@@ -521,14 +991,7 @@ func (s *RunStore) SessionOutputRate(ctx context.Context, sessionID string) (com
 	if sid == "" {
 		return 0, 0, fmt.Errorf("empty session id")
 	}
-	err = s.DB.QueryRowContext(ctx, `
-WITH RECURSIVE run_tree(id) AS (
-  SELECT id FROM fb_runs WHERE session_id=?
-  UNION
-  SELECT r.id FROM fb_runs r JOIN run_tree t ON r.parent_run_id=t.id
-)
-SELECT IFNULL(SUM(usage_completion_tokens),0), IFNULL(SUM(usage_llm_ms),0)
-FROM fb_runs WHERE id IN (SELECT id FROM run_tree) AND usage_llm_ms > 0`,
+	err = s.DB.QueryRowContext(ctx, sessionOutputRateSQL.For(dbx.DialectOf(s.DB)),
 		sid).Scan(&completionTokens, &llmMs)
 	return completionTokens, llmMs, err
 }
@@ -564,10 +1027,7 @@ func (s *RunStore) SetRunUsage(ctx context.Context, runID string, usage LastRunU
 		usage.LLMMs = 0
 	}
 	now := time.Now().Unix()
-	_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_runs SET usage_prompt_tokens=?, usage_completion_tokens=?,
-  usage_cache_read_tokens=?, usage_cache_creation_tokens=?, usage_llm_calls=?,
-  usage_llm_ms=?, updated_at=? WHERE id=?`,
+	_, err := dbx.Exec(ctx, s.DB, setRunUsageSQL.For(dbx.DialectOf(s.DB)),
 		usage.PromptTokens, usage.CompletionTokens,
 		usage.CacheReadTokens, usage.CacheWriteTokens, usage.LLMCalls,
 		usage.LLMMs, now, runID)
@@ -588,32 +1048,13 @@ func (s *RunStore) SetWaitingAction(ctx context.Context, runID string, w Wait) e
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.ExecContext(ctx, `
-INSERT INTO fb_run_waits(run_id, action_id, tool_name, tool_input_json, session_snapshot_json,
-  agent_id, subagent_type, subagent_run_id, sandbox_profile, requested_profile, profile_elevation,
-  resume_owner, resume_claimed_at_ms, resume_phase, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(run_id) DO UPDATE SET
-  action_id=excluded.action_id,
-  tool_name=excluded.tool_name,
-  tool_input_json=excluded.tool_input_json,
-  session_snapshot_json=excluded.session_snapshot_json,
-  agent_id=excluded.agent_id,
-  subagent_type=excluded.subagent_type,
-  subagent_run_id=excluded.subagent_run_id,
-  sandbox_profile=excluded.sandbox_profile,
-  requested_profile=excluded.requested_profile,
-  profile_elevation=excluded.profile_elevation,
-  resume_owner=excluded.resume_owner,
-  resume_claimed_at_ms=excluded.resume_claimed_at_ms,
-  resume_phase=excluded.resume_phase,
-  updated_at=excluded.updated_at`,
+	if _, err = tx.ExecContext(ctx, setWaitingActionUpsertSQL.For(tx.Dialect()),
 		runID, w.ActionID, w.ToolName, w.ToolInputJSON, MarshalWaitSessionSnapshot(w.SessionSnapshot),
 		w.AgentID, w.SubagentType, nullIfEmpty(w.SubagentRunID), w.SandboxProfile, w.RequestedProfile, boolInt(w.ProfileElevation),
 		w.ResumeOwner, waitClaimedAtValue(w.ResumeClaimedAt), strings.TrimSpace(w.ResumePhase), now, now); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE fb_runs SET status=?, updated_at=? WHERE id=?`, string(RunStatusWaitingAction), now, runID); err != nil {
+	if _, err = tx.ExecContext(ctx, setRunWaitingActionSQL.For(tx.Dialect()), string(RunStatusWaitingAction), now, runID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -637,8 +1078,7 @@ func (s *RunStore) SetWaitSessionSnapshot(ctx context.Context, runID, actionID s
 	if runID == "" || actionID == "" {
 		return fmt.Errorf("run id and action id are required")
 	}
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_run_waits SET session_snapshot_json=?, updated_at=? WHERE run_id=? AND action_id=?`,
+	res, err := dbx.Exec(ctx, s.DB, setWaitSessionSnapshotSQL.For(dbx.DialectOf(s.DB)),
 		MarshalWaitSessionSnapshot(snapshot), time.Now().Unix(), runID, actionID)
 	if err != nil {
 		return err
@@ -682,7 +1122,7 @@ func (s *RunStore) SessionHasRunWaitingOnToolApproval(ctx context.Context, sessi
 		return false, nil
 	}
 	var n int
-	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=? AND status=?)`, sid, string(RunStatusWaitingAction)).Scan(&n)
+	err := s.DB.QueryRowContext(ctx, sessionHasRunWaitingOnToolApprovalSQL.For(dbx.DialectOf(s.DB)), sid, string(RunStatusWaitingAction)).Scan(&n)
 	if err != nil {
 		return false, err
 	}
@@ -698,8 +1138,7 @@ func (s *RunStore) FirstWaitingRunIDForSession(ctx context.Context, sessionID st
 		return "", nil
 	}
 	var rid string
-	err := s.DB.QueryRowContext(ctx, `
-SELECT id FROM fb_runs WHERE session_id=? AND status=? ORDER BY updated_at ASC LIMIT 1`,
+	err := s.DB.QueryRowContext(ctx, firstWaitingRunIDForSessionSQL.For(dbx.DialectOf(s.DB)),
 		sid, string(RunStatusWaitingAction)).Scan(&rid)
 	if err == sql.ErrNoRows {
 		return "", nil
@@ -716,7 +1155,7 @@ func (s *RunStore) FindRunByAction(ctx context.Context, actionID string) (string
 	}
 	w, err := scanWait(s.DB.QueryRowContext(ctx, `
 SELECT `+waitColumns+`
-FROM fb_run_waits WHERE action_id=?`, actionID))
+FROM fb_run_waits WHERE action_id=`+dbx.Placeholder(dbx.DialectOf(s.DB), 1), actionID))
 	if err == sql.ErrNoRows {
 		return "", nil, ErrRunNotFound
 	}
@@ -742,16 +1181,21 @@ FROM fb_run_waits WHERE action_id=?`, actionID))
 // agent session that dispatched it, so a nested subagent's run carries its
 // parent's worker session rather than the conversation. Walking parent_run_id
 // down from the conversation's own runs reaches every one of them.
-func waitRecoveryScan(columns, sessionID string, limit int) (string, []any) {
+func waitRecoveryScan(d dbx.Dialect, columns, sessionID string, limit int) (string, []any) {
 	sessionID = strings.TrimSpace(sessionID)
 	if limit > 5000 {
 		limit = 5000
+	}
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
 	}
 	query, args := "", []any{}
 	if sessionID != "" {
 		query = `
 WITH RECURSIVE conversation_runs(id) AS (
-	SELECT id FROM fb_runs WHERE session_id=?
+	SELECT id FROM fb_runs WHERE session_id=` + next() + `
 	UNION
 	SELECT r.id FROM fb_runs r JOIN conversation_runs c ON r.parent_run_id=c.id
 )`
@@ -765,11 +1209,11 @@ JOIN fb_actions a ON a.id=w.action_id`
 JOIN conversation_runs c ON c.id=w.run_id`
 	}
 	query += `
-WHERE a.status<>?
+WHERE a.status<>` + next() + `
 	ORDER BY w.updated_at ASC, w.action_id ASC`
 	args = append(args, string(ActionPending))
 	if limit > 0 {
-		query += ` LIMIT ?`
+		query += ` LIMIT ` + next()
 		args = append(args, limit)
 	}
 	return query, args
@@ -792,7 +1236,7 @@ func (s *RunStore) ListResolvedWaitActionIDs(ctx context.Context, sessionID stri
 	if s == nil || s.DB == nil {
 		return nil, fmt.Errorf("nil db")
 	}
-	query, args := waitRecoveryScan(`DISTINCT w.action_id, w.resume_owner, w.resume_claimed_at_ms, w.resume_phase`, sessionID, limit)
+	query, args := waitRecoveryScan(dbx.DialectOf(s.DB), `DISTINCT w.action_id, w.resume_owner, w.resume_claimed_at_ms, w.resume_phase`, sessionID, limit)
 	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -840,7 +1284,7 @@ func (s *RunStore) ListUncertainResolvedWaits(ctx context.Context, sessionID str
 	if s == nil || s.DB == nil {
 		return nil, fmt.Errorf("nil db")
 	}
-	query, args := waitRecoveryScan(`w.`+strings.Join(strings.Split(waitColumns, ", "), ", w."), sessionID, limit)
+	query, args := waitRecoveryScan(dbx.DialectOf(s.DB), `w.`+strings.Join(strings.Split(waitColumns, ", "), ", w."), sessionID, limit)
 	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -896,8 +1340,7 @@ func (s *RunStore) WaitResumeOwnedBy(ctx context.Context, runID, actionID, owner
 		return false, fmt.Errorf("nil db")
 	}
 	var owned bool
-	err := s.DB.QueryRowContext(ctx,
-		`SELECT resume_owner = ? FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+	err := s.DB.QueryRowContext(ctx, waitResumeOwnedBySQL.For(dbx.DialectOf(s.DB)),
 		strings.TrimSpace(owner), strings.TrimSpace(runID), strings.TrimSpace(actionID)).Scan(&owned)
 	if err == sql.ErrNoRows {
 		return false, nil
@@ -918,10 +1361,7 @@ func (s *RunStore) ReleaseWaitResumeOwner(ctx context.Context, runID, actionID, 
 		return fmt.Errorf("nil db")
 	}
 	owner = strings.TrimSpace(owner)
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_run_waits
-SET resume_owner='', resume_claimed_at_ms=NULL, resume_phase='', updated_at=?
-WHERE run_id=? AND action_id=? AND resume_owner=? AND resume_phase NOT IN (?, ?)`,
+	res, err := dbx.Exec(ctx, s.DB, releaseWaitResumeOwnerUpdateSQL.For(dbx.DialectOf(s.DB)),
 		time.Now().Unix(), strings.TrimSpace(runID), strings.TrimSpace(actionID), owner,
 		WaitResumePhaseExecutionStarted, WaitResumePhaseUncertain)
 	if err != nil {
@@ -931,8 +1371,7 @@ WHERE run_id=? AND action_id=? AND resume_owner=? AND resume_phase NOT IN (?, ?)
 		return nil
 	}
 	var resumeOwner, resumePhase string
-	err = s.DB.QueryRowContext(ctx,
-		`SELECT resume_owner, resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+	err = s.DB.QueryRowContext(ctx, releaseWaitResumeOwnerSelectSQL.For(dbx.DialectOf(s.DB)),
 		strings.TrimSpace(runID), strings.TrimSpace(actionID)).Scan(&resumeOwner, &resumePhase)
 	if err == sql.ErrNoRows {
 		return nil
@@ -957,10 +1396,7 @@ func (s *RunStore) BeginWaitResumeExecution(ctx context.Context, runID, actionID
 	if runID == "" || actionID == "" || owner == "" {
 		return fmt.Errorf("run id, action id, and resume owner are required")
 	}
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_run_waits
-SET resume_phase=?, resume_claimed_at_ms=?, updated_at=?
-WHERE run_id=? AND action_id=? AND resume_owner=? AND resume_phase NOT IN (?, ?)`,
+	res, err := dbx.Exec(ctx, s.DB, beginWaitResumeExecutionUpdateSQL.For(dbx.DialectOf(s.DB)),
 		WaitResumePhaseExecutionStarted, time.Now().UTC().UnixMilli(), time.Now().Unix(),
 		runID, actionID, owner, WaitResumePhaseExecutionStarted, WaitResumePhaseUncertain)
 	if err != nil {
@@ -970,8 +1406,7 @@ WHERE run_id=? AND action_id=? AND resume_owner=? AND resume_phase NOT IN (?, ?)
 		return nil
 	}
 	var resumeOwner, resumePhase string
-	err = s.DB.QueryRowContext(ctx,
-		`SELECT resume_owner, resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+	err = s.DB.QueryRowContext(ctx, beginWaitResumeExecutionSelectSQL.For(dbx.DialectOf(s.DB)),
 		runID, actionID).Scan(&resumeOwner, &resumePhase)
 	if err == sql.ErrNoRows {
 		return ErrRunNotFound
@@ -992,9 +1427,7 @@ func (s *RunStore) MarkWaitResumeUncertain(ctx context.Context, runID, actionID 
 	if s == nil || s.DB == nil {
 		return fmt.Errorf("nil db")
 	}
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_run_waits SET resume_phase=?, updated_at=?
-WHERE run_id=? AND action_id=? AND resume_phase=?`,
+	res, err := dbx.Exec(ctx, s.DB, markWaitResumeUncertainUpdateSQL.For(dbx.DialectOf(s.DB)),
 		WaitResumePhaseUncertain, time.Now().Unix(), strings.TrimSpace(runID), strings.TrimSpace(actionID), WaitResumePhaseExecutionStarted)
 	if err != nil {
 		return err
@@ -1003,8 +1436,7 @@ WHERE run_id=? AND action_id=? AND resume_phase=?`,
 		return nil
 	}
 	var resumePhase string
-	err = s.DB.QueryRowContext(ctx,
-		`SELECT resume_phase FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+	err = s.DB.QueryRowContext(ctx, markWaitResumeUncertainSelectSQL.For(dbx.DialectOf(s.DB)),
 		strings.TrimSpace(runID), strings.TrimSpace(actionID)).Scan(&resumePhase)
 	if err == sql.ErrNoRows || resumePhase == WaitResumePhaseUncertain {
 		return nil
@@ -1034,17 +1466,7 @@ func (s *RunStore) claimWaitResume(ctx context.Context, runID, actionID, owner s
 	}
 	now := time.Now().UTC()
 	staleBefore := now.UnixMilli() - WaitResumeLease.Milliseconds()
-	res, err := s.DB.ExecContext(ctx, `
-UPDATE fb_run_waits
-SET resume_owner = ?, resume_claimed_at_ms = ?,
-    resume_phase = CASE WHEN resume_phase = '' THEN ? ELSE resume_phase END,
-    updated_at = ?
-WHERE run_id = ? AND action_id = ?
-  AND (
-    (? AND resume_owner = ?)
-    OR (resume_phase NOT IN (?, ?)
-        AND (resume_owner = '' OR resume_claimed_at_ms IS NULL OR resume_claimed_at_ms < ?))
-  )`,
+	res, err := dbx.Exec(ctx, s.DB, claimWaitResumeUpdateSQL.For(dbx.DialectOf(s.DB)),
 		owner, now.UnixMilli(), WaitResumePhaseClaimed, now.Unix(),
 		runID, actionID,
 		refreshSame, owner,
@@ -1056,8 +1478,7 @@ WHERE run_id = ? AND action_id = ?
 		return true, true, true, nil
 	}
 	var resumeOwner string
-	err = s.DB.QueryRowContext(ctx,
-		`SELECT resume_owner FROM fb_run_waits WHERE run_id=? AND action_id=?`,
+	err = s.DB.QueryRowContext(ctx, claimWaitResumeSelectSQL.For(dbx.DialectOf(s.DB)),
 		runID, actionID).Scan(&resumeOwner)
 	if err == sql.ErrNoRows {
 		return false, false, false, nil
@@ -1072,7 +1493,7 @@ func (s *RunStore) ClearWait(ctx context.Context, runID string) error {
 	if s == nil || s.DB == nil {
 		return fmt.Errorf("nil db")
 	}
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM fb_run_waits WHERE run_id=?`, runID)
+	_, err := dbx.Exec(ctx, s.DB, clearWaitSQL.For(dbx.DialectOf(s.DB)), runID)
 	return err
 }
 
@@ -1086,7 +1507,7 @@ func (s *RunStore) GetWaitForRun(ctx context.Context, runID string) (*Wait, erro
 	}
 	w, err := scanWait(s.DB.QueryRowContext(ctx, `
 SELECT `+waitColumns+`
-FROM fb_run_waits WHERE run_id=?`, runID))
+FROM fb_run_waits WHERE run_id=`+dbx.Placeholder(dbx.DialectOf(s.DB), 1), runID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1115,19 +1536,16 @@ func (s *RunStore) SetStatus(ctx context.Context, runID string, st RunStatus) er
 	case RunStatusRunning:
 		// Resuming past an approval re-stamps the driver: the lease that
 		// vouches for this run now belongs to whoever continued it.
-		_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_runs SET status=?, owner=?, updated_at=? WHERE id=? AND status IN (?, ?)`,
+		_, err := dbx.Exec(ctx, s.DB, setRunStatusRunningSQL.For(dbx.DialectOf(s.DB)),
 			string(st), strings.TrimSpace(s.Owner), time.Now().Unix(), runID,
 			string(RunStatusWaitingAction), string(RunStatusRunning))
 		return err
 	case RunStatusDone, RunStatusFailed, RunStatusCancelled:
-		_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_runs SET status=?, updated_at=? WHERE id=? AND status IN (?, ?)`,
+		_, err := dbx.Exec(ctx, s.DB, setRunStatusTerminalSQL.For(dbx.DialectOf(s.DB)),
 			string(st), time.Now().Unix(), runID, string(RunStatusRunning), string(RunStatusWaitingAction))
 		return err
 	case RunStatusWaitingAction:
-		_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_runs SET status=?, updated_at=? WHERE id=? AND status=?`,
+		_, err := dbx.Exec(ctx, s.DB, setRunStatusWaitingSQL.For(dbx.DialectOf(s.DB)),
 			string(st), time.Now().Unix(), runID, string(RunStatusRunning))
 		return err
 	default:
@@ -1146,11 +1564,13 @@ func (s *RunStore) SessionHasLiveRun(ctx context.Context, sessionID string) (boo
 		return false, nil
 	}
 	var live int
-	err := s.DB.QueryRowContext(ctx, `
+	d := dbx.DialectOf(s.DB)
+	query := `
 SELECT EXISTS(
   SELECT 1 FROM fb_runs r
-  WHERE r.session_id=? AND r.parent_run_id IS NULL
-    AND `+fmt.Sprintf(livePrimaryRunCondition, "r")+`)`,
+  WHERE r.session_id=` + dbx.Placeholder(d, 1) + ` AND r.parent_run_id IS NULL
+    AND ` + livePrimaryRunConditionFor(d, "r", 2) + `)`
+	err := s.DB.QueryRowContext(ctx, query,
 		append([]any{sid}, liveRunArgs(time.Now())...)...).Scan(&live)
 	if err != nil {
 		return false, err
@@ -1172,8 +1592,7 @@ func (s *RunStore) FirstPrimaryRunID(ctx context.Context, sessionID string) (str
 		return "", nil
 	}
 	var id string
-	err := s.DB.QueryRowContext(ctx, `
-SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1`, sid).Scan(&id)
+	err := s.DB.QueryRowContext(ctx, firstPrimaryRunIDSQL.For(dbx.DialectOf(s.DB)), sid).Scan(&id)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -1197,10 +1616,7 @@ func (s *RunStore) LivePrimaryInput(ctx context.Context, sessionID string) (stri
 		return "", nil
 	}
 	var input string
-	err := s.DB.QueryRowContext(ctx, `
-SELECT input_text FROM fb_runs
-WHERE session_id=? AND parent_run_id IS NULL AND status IN (?, ?)
-ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+	err := s.DB.QueryRowContext(ctx, livePrimaryInputSQL.For(dbx.DialectOf(s.DB)),
 		sid, string(RunStatusRunning), string(RunStatusWaitingAction)).Scan(&input)
 	if err == sql.ErrNoRows {
 		return "", nil
@@ -1231,9 +1647,7 @@ func (s *RunStore) HoldOwnerLease(ctx context.Context) (stop func(), err error) 
 		return nil, fmt.Errorf("a run store without an owner cannot hold a lease")
 	}
 	renew := func(ctx context.Context) error {
-		_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES(?, ?)
-ON CONFLICT(owner) DO UPDATE SET heartbeat_at_ms=excluded.heartbeat_at_ms`,
+		_, err := dbx.Exec(ctx, s.DB, runOwnerLeaseUpsertSQL.For(dbx.DialectOf(s.DB)),
 			owner, time.Now().UnixMilli())
 		return err
 	}
@@ -1262,7 +1676,7 @@ ON CONFLICT(owner) DO UPDATE SET heartbeat_at_ms=excluded.heartbeat_at_ms`,
 		once.Do(func() {
 			cancel()
 			<-done
-			if _, err := s.DB.ExecContext(context.Background(), `DELETE FROM fb_run_owners WHERE owner=?`, owner); err != nil {
+			if _, err := dbx.Exec(context.Background(), s.DB, runOwnerLeaseDeleteSQL.For(dbx.DialectOf(s.DB)), owner); err != nil {
 				slog.Warn("run owner lease deregistration failed", "owner", owner, "err", err)
 			}
 		})
@@ -1299,15 +1713,7 @@ func (s *RunStore) ReapAbandonedRuns(ctx context.Context, now time.Time) ([]Aban
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, session_id, parent_run_id, owner FROM fb_runs
-WHERE status=?
-  AND NOT EXISTS (SELECT 1 FROM fb_run_waits w WHERE w.run_id=fb_runs.id)
-  AND (? = '' OR owner <> ? OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner))
-  AND (owner=''
-       OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner)
-       OR (SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner) < ?)
-ORDER BY created_at ASC, id ASC`,
+	rows, err := tx.QueryContext(ctx, reapAbandonedRunsSelectSQL.For(tx.Dialect()),
 		string(RunStatusRunning), self, self, staleBefore)
 	if err != nil {
 		return nil, err
@@ -1338,31 +1744,39 @@ ORDER BY created_at ASC, id ASC`,
 	// exactly the process dying between the two writes, and it is reaped
 	// like any other dead one. RETURNING yields the stamped end only for
 	// the row this compare-and-swap won.
-	const clockExpr = `MAX(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
 	out := make([]AbandonedRun, 0, len(candidates))
 	for _, r := range candidates {
 		var finished int64
-		err := tx.QueryRowContext(ctx, `
-UPDATE fb_runs
-SET status=?, updated_at=?,
-    started_at_ms=COALESCE(started_at_ms, created_at*1000),
-    finished_at_ms=COALESCE(finished_at_ms, `+clockExpr+`),
-    worked_ms=COALESCE(worked_ms, `+clockExpr+`-created_at*1000)
-WHERE id=? AND status=? AND owner=?
-RETURNING finished_at_ms`,
-			string(RunStatusFailed), now.Unix(), r.ID, string(RunStatusRunning), r.Owner).Scan(&finished)
-		if err == sql.ErrNoRows {
-			continue
-		}
-		if err != nil {
-			return nil, err
+		if tx.Dialect() == dbx.MySQL {
+			// MySQL has no RETURNING: the compare-and-swap moves the row, and
+			// the clock it wrote is read back in the same transaction.
+			res, err := tx.ExecContext(ctx, reapAbandonedRunUpdateMySQLSQL.For(dbx.MySQL),
+				string(RunStatusFailed), now.Unix(), r.ID, string(RunStatusRunning), r.Owner)
+			if err != nil {
+				return nil, err
+			}
+			if changed, _ := res.RowsAffected(); changed == 0 {
+				continue
+			}
+			if err := tx.QueryRowContext(ctx, reapAbandonedRunClockMySQLSQL.For(dbx.MySQL), r.ID).Scan(&finished); err != nil {
+				return nil, err
+			}
+		} else {
+			err := tx.QueryRowContext(ctx, reapAbandonedRunUpdateSQL.For(tx.Dialect()),
+				string(RunStatusFailed), now.Unix(), r.ID, string(RunStatusRunning), r.Owner).Scan(&finished)
+			if err == sql.ErrNoRows {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
 		}
 		r.FinishedAtMs = finished
 		out = append(out, r)
 	}
 	// A lapsed lease reads as dead already; removing its rows keeps the
 	// table from collecting one per process that ever crashed mid-run.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_run_owners WHERE heartbeat_at_ms < ?`, staleBefore); err != nil {
+	if _, err := tx.ExecContext(ctx, reapAbandonedOwnersDeleteSQL.For(tx.Dialect()), staleBefore); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1387,7 +1801,7 @@ func (s *RunStore) ActivePrimaryRun(ctx context.Context, agentID string) (Run, b
 	r, err := scanRun(s.DB.QueryRowContext(ctx, `
 SELECT `+prefixedRunColumns("r")+`
 FROM fb_runs r JOIN fb_sessions s ON s.id = r.session_id
-WHERE s.agent_id = ? AND r.parent_run_id IS NULL AND r.status IN (?, ?)
+WHERE s.agent_id = `+dbx.Placeholder(dbx.DialectOf(s.DB), 1)+` AND r.parent_run_id IS NULL AND r.status IN (`+dbx.Placeholder(dbx.DialectOf(s.DB), 2)+`, `+dbx.Placeholder(dbx.DialectOf(s.DB), 3)+`)
 ORDER BY r.updated_at DESC LIMIT 1`, agentID, string(RunStatusRunning), string(RunStatusWaitingAction)))
 	if err == sql.ErrNoRows {
 		return Run{}, false, nil
@@ -1412,9 +1826,7 @@ func (s *RunStore) ListRunsBySession(ctx context.Context, sessionID string, limi
 	if limit > 5000 {
 		limit = 5000
 	}
-	rows, err := s.DB.QueryContext(ctx, `
-SELECT `+runColumns+`
-FROM fb_runs WHERE session_id=? ORDER BY updated_at DESC, created_at DESC LIMIT ?`, sessionID, limit)
+	rows, err := s.DB.QueryContext(ctx, listRunsBySessionSQL.For(dbx.DialectOf(s.DB)), sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1445,23 +1857,29 @@ func (s *RunStore) ListChildRuns(ctx context.Context, parentRunID string, limit 
 		limit = 500
 	}
 	args := []any{parentRunID}
+	d := dbx.DialectOf(s.DB)
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
 	var b strings.Builder
 	b.WriteString(`
 SELECT ` + runColumns + `
 FROM fb_runs
-WHERE parent_run_id=?`)
+WHERE parent_run_id=` + next())
 	if len(statuses) > 0 {
 		b.WriteString(` AND status IN (`)
 		for i, st := range statuses {
 			if i > 0 {
 				b.WriteString(",")
 			}
-			b.WriteString("?")
+			b.WriteString(next())
 			args = append(args, string(st))
 		}
 		b.WriteString(")")
 	}
-	b.WriteString(` ORDER BY updated_at DESC, created_at DESC LIMIT ?`)
+	b.WriteString(` ORDER BY updated_at DESC, created_at DESC LIMIT ` + next())
 	args = append(args, limit)
 	rows, err := s.DB.QueryContext(ctx, b.String(), args...)
 	if err != nil {
