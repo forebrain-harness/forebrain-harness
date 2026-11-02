@@ -13,6 +13,224 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
+// The memory store's statements. Every row is tenant data, so every statement
+// carries the owning agent; the upsert of a stage-one output conflicts on the
+// thread, which is that table's primary key.
+//
+// The stage-one upsert's DO UPDATE is guarded: a row whose extraction is not
+// newer, or that belongs to another tenant, must not be replaced. MySQL has no
+// WHERE on its upsert, so the guard becomes one IF per assigned column — when
+// it is false every column is assigned its own value, which is what SQLite's
+// skipped update does.
+var (
+	memThreadProjectTypeSQL = dbx.SQL{
+		SQLite:   `SELECT project_type FROM fb_sessions WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT project_type FROM fb_sessions WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT project_type FROM fb_sessions WHERE id=$1 AND agent_id=$2`,
+	}
+	memThreadModeSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET memory_mode=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_sessions SET memory_mode=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_sessions SET memory_mode=$1 WHERE id=$2 AND agent_id=$3`,
+	}
+	memThreadModeUnlessPollutedSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET memory_mode=? WHERE id=? AND agent_id=? AND memory_mode<>?`,
+		MySQL:    `UPDATE fb_sessions SET memory_mode=? WHERE id=? AND agent_id=? AND memory_mode<>?`,
+		Postgres: `UPDATE fb_sessions SET memory_mode=$1 WHERE id=$2 AND agent_id=$3 AND memory_mode<>$4`,
+	}
+	memStage1UpsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_memory_stage1_outputs(
+		thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at,
+		usage_count, last_usage, selected_for_phase2, selected_for_phase2_source_updated_at, last_message_row_id
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+	ON CONFLICT(thread_id) DO UPDATE SET
+		agent_id=excluded.agent_id,
+		project_key=excluded.project_key,
+		source_updated_at=excluded.source_updated_at,
+		raw_memory=excluded.raw_memory,
+		rollout_summary=excluded.rollout_summary,
+		rollout_slug=excluded.rollout_slug,
+		generated_at=excluded.generated_at,
+		last_message_row_id=excluded.last_message_row_id
+	WHERE excluded.source_updated_at>=fb_memory_stage1_outputs.source_updated_at
+	  AND fb_memory_stage1_outputs.agent_id=excluded.agent_id`,
+		MySQL: `INSERT INTO fb_memory_stage1_outputs(
+		thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at,
+		usage_count, last_usage, selected_for_phase2, selected_for_phase2_source_updated_at, last_message_row_id
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+	ON DUPLICATE KEY UPDATE
+		agent_id=IF(VALUES(source_updated_at)>=fb_memory_stage1_outputs.source_updated_at AND fb_memory_stage1_outputs.agent_id=VALUES(agent_id), VALUES(agent_id), fb_memory_stage1_outputs.agent_id),
+		project_key=IF(VALUES(source_updated_at)>=fb_memory_stage1_outputs.source_updated_at AND fb_memory_stage1_outputs.agent_id=VALUES(agent_id), VALUES(project_key), fb_memory_stage1_outputs.project_key),
+		source_updated_at=IF(VALUES(source_updated_at)>=fb_memory_stage1_outputs.source_updated_at AND fb_memory_stage1_outputs.agent_id=VALUES(agent_id), VALUES(source_updated_at), fb_memory_stage1_outputs.source_updated_at),
+		raw_memory=IF(VALUES(source_updated_at)>=fb_memory_stage1_outputs.source_updated_at AND fb_memory_stage1_outputs.agent_id=VALUES(agent_id), VALUES(raw_memory), fb_memory_stage1_outputs.raw_memory),
+		rollout_summary=IF(VALUES(source_updated_at)>=fb_memory_stage1_outputs.source_updated_at AND fb_memory_stage1_outputs.agent_id=VALUES(agent_id), VALUES(rollout_summary), fb_memory_stage1_outputs.rollout_summary),
+		rollout_slug=IF(VALUES(source_updated_at)>=fb_memory_stage1_outputs.source_updated_at AND fb_memory_stage1_outputs.agent_id=VALUES(agent_id), VALUES(rollout_slug), fb_memory_stage1_outputs.rollout_slug),
+		generated_at=IF(VALUES(source_updated_at)>=fb_memory_stage1_outputs.source_updated_at AND fb_memory_stage1_outputs.agent_id=VALUES(agent_id), VALUES(generated_at), fb_memory_stage1_outputs.generated_at),
+		last_message_row_id=IF(VALUES(source_updated_at)>=fb_memory_stage1_outputs.source_updated_at AND fb_memory_stage1_outputs.agent_id=VALUES(agent_id), VALUES(last_message_row_id), fb_memory_stage1_outputs.last_message_row_id)`,
+		Postgres: `INSERT INTO fb_memory_stage1_outputs(
+		thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at,
+		usage_count, last_usage, selected_for_phase2, selected_for_phase2_source_updated_at, last_message_row_id
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	ON CONFLICT(thread_id) DO UPDATE SET
+		agent_id=excluded.agent_id,
+		project_key=excluded.project_key,
+		source_updated_at=excluded.source_updated_at,
+		raw_memory=excluded.raw_memory,
+		rollout_summary=excluded.rollout_summary,
+		rollout_slug=excluded.rollout_slug,
+		generated_at=excluded.generated_at,
+		last_message_row_id=excluded.last_message_row_id
+	WHERE excluded.source_updated_at>=fb_memory_stage1_outputs.source_updated_at
+	  AND fb_memory_stage1_outputs.agent_id=excluded.agent_id`,
+	}
+	memStage1SelectionSQL = dbx.SQL{
+		SQLite:   `SELECT selected_for_phase2, project_key FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`,
+		MySQL:    `SELECT selected_for_phase2, project_key FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`,
+		Postgres: `SELECT selected_for_phase2, project_key FROM fb_memory_stage1_outputs WHERE thread_id=$1 AND agent_id=$2`,
+	}
+	memStage1DeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`,
+		MySQL:    `DELETE FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`,
+		Postgres: `DELETE FROM fb_memory_stage1_outputs WHERE thread_id=$1 AND agent_id=$2`,
+	}
+	memStage1JobDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_memory_jobs WHERE kind=? AND job_key=? AND agent_id=?`,
+		MySQL:    `DELETE FROM fb_memory_jobs WHERE kind=? AND job_key=? AND agent_id=?`,
+		Postgres: `DELETE FROM fb_memory_jobs WHERE kind=$1 AND job_key=$2 AND agent_id=$3`,
+	}
+	memStage1OutputSQL = dbx.SQL{
+		SQLite: `SELECT thread_id, project_key, source_updated_at, raw_memory, rollout_summary,
+		rollout_slug, generated_at, usage_count, last_usage, selected_for_phase2, last_message_row_id
+	FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`,
+		MySQL: `SELECT thread_id, project_key, source_updated_at, raw_memory, rollout_summary,
+		rollout_slug, generated_at, usage_count, last_usage, selected_for_phase2, last_message_row_id
+	FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`,
+		Postgres: `SELECT thread_id, project_key, source_updated_at, raw_memory, rollout_summary,
+		rollout_slug, generated_at, usage_count, last_usage, selected_for_phase2, last_message_row_id
+	FROM fb_memory_stage1_outputs WHERE thread_id=$1 AND agent_id=$2`,
+	}
+	memJobCloseOwnedSQL = dbx.SQL{
+		SQLite: `UPDATE fb_memory_jobs SET status=?,finished_at=?,lease_until=NULL,last_error=NULL,last_success_watermark=input_watermark
+		WHERE kind=? AND job_key=? AND agent_id=? AND status=? AND ownership_token=?`,
+		MySQL: `UPDATE fb_memory_jobs SET status=?,finished_at=?,lease_until=NULL,last_error=NULL,last_success_watermark=input_watermark
+		WHERE kind=? AND job_key=? AND agent_id=? AND status=? AND ownership_token=?`,
+		Postgres: `UPDATE fb_memory_jobs SET status=$1,finished_at=$2,lease_until=NULL,last_error=NULL,last_success_watermark=input_watermark
+		WHERE kind=$3 AND job_key=$4 AND agent_id=$5 AND status=$6 AND ownership_token=$7`,
+	}
+	memStage1WatermarkSQL = dbx.SQL{
+		SQLite: `UPDATE fb_memory_stage1_outputs SET source_updated_at=?, last_message_row_id=?
+			WHERE thread_id=? AND agent_id=?`,
+		MySQL: `UPDATE fb_memory_stage1_outputs SET source_updated_at=?, last_message_row_id=?
+			WHERE thread_id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_memory_stage1_outputs SET source_updated_at=$1, last_message_row_id=$2
+			WHERE thread_id=$3 AND agent_id=$4`,
+	}
+	memStage1Phase2InputSQL = dbx.SQL{
+		SQLite: `SELECT o.thread_id, o.project_key, o.source_updated_at, o.raw_memory, o.rollout_summary,
+		o.rollout_slug, o.generated_at, o.usage_count, o.last_usage, o.selected_for_phase2,
+		o.selected_for_phase2_source_updated_at, s.cwd, s.git_branch
+	FROM fb_memory_stage1_outputs AS o
+	JOIN fb_sessions AS s ON s.id=o.thread_id
+	WHERE o.agent_id=? AND s.agent_id=? AND o.project_key=?
+	  AND s.memory_mode=? AND (TRIM(o.raw_memory)<>'' OR TRIM(o.rollout_summary)<>'')
+	  AND COALESCE(o.last_usage, o.source_updated_at)>=?
+	ORDER BY o.usage_count DESC,
+		COALESCE(o.last_usage,o.source_updated_at) DESC,
+		o.source_updated_at DESC, o.thread_id DESC
+	LIMIT ?`,
+		MySQL: `SELECT o.thread_id, o.project_key, o.source_updated_at, o.raw_memory, o.rollout_summary,
+		o.rollout_slug, o.generated_at, o.usage_count, o.last_usage, o.selected_for_phase2,
+		o.selected_for_phase2_source_updated_at, s.cwd, s.git_branch
+	FROM fb_memory_stage1_outputs AS o
+	JOIN fb_sessions AS s ON s.id=o.thread_id
+	WHERE o.agent_id=? AND s.agent_id=? AND o.project_key=?
+	  AND s.memory_mode=? AND (TRIM(o.raw_memory)<>'' OR TRIM(o.rollout_summary)<>'')
+	  AND COALESCE(o.last_usage, o.source_updated_at)>=?
+	ORDER BY o.usage_count DESC,
+		COALESCE(o.last_usage,o.source_updated_at) DESC,
+		o.source_updated_at DESC, o.thread_id DESC
+	LIMIT ?`,
+		Postgres: `SELECT o.thread_id, o.project_key, o.source_updated_at, o.raw_memory, o.rollout_summary,
+		o.rollout_slug, o.generated_at, o.usage_count, o.last_usage, o.selected_for_phase2,
+		o.selected_for_phase2_source_updated_at, s.cwd, s.git_branch
+	FROM fb_memory_stage1_outputs AS o
+	JOIN fb_sessions AS s ON s.id=o.thread_id
+	WHERE o.agent_id=$1 AND s.agent_id=$2 AND o.project_key=$3
+	  AND s.memory_mode=$4 AND (TRIM(o.raw_memory)<>'' OR TRIM(o.rollout_summary)<>'')
+	  AND COALESCE(o.last_usage, o.source_updated_at)>=$5
+	ORDER BY o.usage_count DESC,
+		COALESCE(o.last_usage,o.source_updated_at) DESC,
+		o.source_updated_at DESC, o.thread_id DESC
+	LIMIT $6`,
+	}
+	memStage1UsageSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_memory_stage1_outputs SET usage_count=usage_count+1, last_usage=? WHERE thread_id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_memory_stage1_outputs SET usage_count=usage_count+1, last_usage=? WHERE thread_id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_memory_stage1_outputs SET usage_count=usage_count+1, last_usage=$1 WHERE thread_id=$2 AND agent_id=$3`,
+	}
+	// MySQL refuses a LIMIT inside an IN (…) subquery, so the pruned set is a
+	// derived table there — the same rows, ordered the same way.
+	memStage1PruneSQL = dbx.SQL{
+		SQLite: `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=? AND thread_id IN (
+		SELECT thread_id FROM fb_memory_stage1_outputs
+		WHERE agent_id=? AND selected_for_phase2=0 AND COALESCE(last_usage,source_updated_at)<?
+		ORDER BY COALESCE(last_usage,source_updated_at) ASC, thread_id ASC LIMIT ?
+	)`,
+		MySQL: `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=? AND thread_id IN (
+		SELECT thread_id FROM (
+			SELECT thread_id FROM fb_memory_stage1_outputs
+			WHERE agent_id=? AND selected_for_phase2=0 AND COALESCE(last_usage,source_updated_at)<?
+			ORDER BY COALESCE(last_usage,source_updated_at) ASC, thread_id ASC LIMIT ?
+		) AS doomed
+	)`,
+		Postgres: `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=$1 AND thread_id IN (
+		SELECT thread_id FROM fb_memory_stage1_outputs
+		WHERE agent_id=$2 AND selected_for_phase2=0 AND COALESCE(last_usage,source_updated_at)<$3
+		ORDER BY COALESCE(last_usage,source_updated_at) ASC, thread_id ASC LIMIT $4
+	)`,
+	}
+	memStage1VersionsSQL = dbx.SQL{
+		SQLite:   `SELECT thread_id, project_key, source_updated_at FROM fb_memory_stage1_outputs WHERE agent_id=?`,
+		MySQL:    `SELECT thread_id, project_key, source_updated_at FROM fb_memory_stage1_outputs WHERE agent_id=?`,
+		Postgres: `SELECT thread_id, project_key, source_updated_at FROM fb_memory_stage1_outputs WHERE agent_id=$1`,
+	}
+	memStage1AgentDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=?`,
+		MySQL:    `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=?`,
+		Postgres: `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=$1`,
+	}
+	memJobKindsDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_memory_jobs WHERE agent_id=? AND kind IN (?,?)`,
+		MySQL:    `DELETE FROM fb_memory_jobs WHERE agent_id=? AND kind IN (?,?)`,
+		Postgres: `DELETE FROM fb_memory_jobs WHERE agent_id=$1 AND kind IN ($2,$3)`,
+	}
+	memScopeThreadsSQL = dbx.SQL{
+		SQLite:   `SELECT thread_id FROM fb_memory_stage1_outputs WHERE agent_id=? AND project_key=?`,
+		MySQL:    `SELECT thread_id FROM fb_memory_stage1_outputs WHERE agent_id=? AND project_key=?`,
+		Postgres: `SELECT thread_id FROM fb_memory_stage1_outputs WHERE agent_id=$1 AND project_key=$2`,
+	}
+	memScopeDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=? AND project_key=?`,
+		MySQL:    `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=? AND project_key=?`,
+		Postgres: `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=$1 AND project_key=$2`,
+	}
+	memStage1CountSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE agent_id=?`,
+		MySQL:    `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE agent_id=?`,
+		Postgres: `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE agent_id=$1`,
+	}
+	memJobCountSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_memory_jobs WHERE agent_id=? AND kind IN (?,?)`,
+		MySQL:    `SELECT COUNT(*) FROM fb_memory_jobs WHERE agent_id=? AND kind IN (?,?)`,
+		Postgres: `SELECT COUNT(*) FROM fb_memory_jobs WHERE agent_id=$1 AND kind IN ($2,$3)`,
+	}
+	memSelectedCountSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE agent_id=? AND selected_for_phase2<>0`,
+		MySQL:    `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE agent_id=? AND selected_for_phase2<>0`,
+		Postgres: `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE agent_id=$1 AND selected_for_phase2<>0`,
+	}
+)
+
 const (
 	ThreadMemoryEnabled  = "enabled"
 	ThreadMemoryDisabled = "disabled"
@@ -153,7 +371,7 @@ func (s *Store) SetThreadMemoryMode(ctx context.Context, threadID, mode string) 
 	}
 	if mode == ThreadMemoryEnabled {
 		var projectType string
-		switch err := s.DB.QueryRowContext(ctx, `SELECT project_type FROM fb_sessions WHERE id=? AND agent_id=?`, threadID, agentID).Scan(&projectType); {
+		switch err := s.DB.QueryRowContext(ctx, memThreadProjectTypeSQL.For(dbx.DialectOf(s.DB)), threadID, agentID).Scan(&projectType); {
 		case errors.Is(err, sql.ErrNoRows):
 		case err != nil:
 			return err
@@ -161,7 +379,7 @@ func (s *Store) SetThreadMemoryMode(ctx context.Context, threadID, mode string) 
 			return ErrBatchProjectUsesNoMemory
 		}
 	}
-	_, err = s.DB.ExecContext(ctx, `UPDATE fb_sessions SET memory_mode=? WHERE id=? AND agent_id=?`, mode, threadID, agentID)
+	_, err = dbx.Exec(ctx, s.DB, memThreadModeSQL.For(dbx.DialectOf(s.DB)), mode, threadID, agentID)
 	return err
 }
 
@@ -173,7 +391,7 @@ func (s *Store) markThreadPolluted(ctx context.Context, threadID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `UPDATE fb_sessions SET memory_mode=? WHERE id=? AND agent_id=? AND memory_mode<>?`, threadMemoryPolluted, strings.TrimSpace(threadID), agentID, threadMemoryPolluted)
+	_, err = dbx.Exec(ctx, s.DB, memThreadModeUnlessPollutedSQL.For(dbx.DialectOf(s.DB)), threadMemoryPolluted, strings.TrimSpace(threadID), agentID, threadMemoryPolluted)
 	return err
 }
 
@@ -197,21 +415,7 @@ func (s *Store) UpsertStage1Output(ctx context.Context, out Stage1Output) error 
 	if generatedAt <= 0 {
 		generatedAt = time.Now().Unix()
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO fb_memory_stage1_outputs(
-		thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at,
-		usage_count, last_usage, selected_for_phase2, selected_for_phase2_source_updated_at, last_message_row_id
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-	ON CONFLICT(thread_id) DO UPDATE SET
-		agent_id=excluded.agent_id,
-		project_key=excluded.project_key,
-		source_updated_at=excluded.source_updated_at,
-		raw_memory=excluded.raw_memory,
-		rollout_summary=excluded.rollout_summary,
-		rollout_slug=excluded.rollout_slug,
-		generated_at=excluded.generated_at,
-		last_message_row_id=excluded.last_message_row_id
-	WHERE excluded.source_updated_at>=fb_memory_stage1_outputs.source_updated_at
-	  AND fb_memory_stage1_outputs.agent_id=excluded.agent_id`,
+	_, err = dbx.Exec(ctx, s.DB, memStage1UpsertSQL.For(dbx.DialectOf(s.DB)),
 		threadID, agentID, projectKey, out.SourceUpdatedAt, out.RawMemory, out.RolloutSummary, nullStringValue(out.RolloutSlug), generatedAt,
 		out.UsageCount.Int64, nullIntValue(out.LastUsage), boolInt(out.SelectedForPhase2), nullIntValue(out.SelectedForPhase2SourceUpdatedAt),
 		nullIntValue(out.LastMessageRowID))
@@ -230,14 +434,14 @@ func (s *Store) DeleteThreadMemory(ctx context.Context, threadID string) error {
 	return s.withImmediate(ctx, func(tx *dbx.Tx) error {
 		var selected int
 		var projectKey string
-		err := tx.QueryRowContext(ctx, `SELECT selected_for_phase2, project_key FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`, threadID, agentID).Scan(&selected, &projectKey)
+		err := tx.QueryRowContext(ctx, memStage1SelectionSQL.For(tx.Dialect()), threadID, agentID).Scan(&selected, &projectKey)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`, threadID, agentID); err != nil {
+		if _, err := tx.ExecContext(ctx, memStage1DeleteSQL.For(tx.Dialect()), threadID, agentID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_jobs WHERE kind=? AND job_key=? AND agent_id=?`, JobKindStage1, threadID, agentID); err != nil {
+		if _, err := tx.ExecContext(ctx, memStage1JobDeleteSQL.For(tx.Dialect()), JobKindStage1, threadID, agentID); err != nil {
 			return err
 		}
 		if selected != 0 {
@@ -264,9 +468,7 @@ func (s *Store) Stage1OutputForThread(ctx context.Context, threadID string) (Sta
 	}
 	var out Stage1Output
 	var selected int
-	err = s.DB.QueryRowContext(ctx, `SELECT thread_id, project_key, source_updated_at, raw_memory, rollout_summary,
-		rollout_slug, generated_at, usage_count, last_usage, selected_for_phase2, last_message_row_id
-	FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`, strings.TrimSpace(threadID), agentID).
+	err = s.DB.QueryRowContext(ctx, memStage1OutputSQL.For(dbx.DialectOf(s.DB)), strings.TrimSpace(threadID), agentID).
 		Scan(&out.ThreadID, &out.ProjectKey, &out.SourceUpdatedAt, &out.RawMemory, &out.RolloutSummary,
 			&out.RolloutSlug, &out.GeneratedAt, &out.UsageCount, &out.LastUsage, &selected, &out.LastMessageRowID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -297,8 +499,7 @@ func (s *Store) AdvanceStage1Watermark(ctx context.Context, threadID, ownershipT
 	threadID = strings.TrimSpace(threadID)
 	owned := false
 	err = s.withImmediate(ctx, func(tx *dbx.Tx) error {
-		result, err := tx.ExecContext(ctx, `UPDATE fb_memory_jobs SET status=?,finished_at=?,lease_until=NULL,last_error=NULL,last_success_watermark=input_watermark
-			WHERE kind=? AND job_key=? AND agent_id=? AND status=? AND ownership_token=?`,
+		result, err := tx.ExecContext(ctx, memJobCloseOwnedSQL.For(tx.Dialect()),
 			jobStatusDone, time.Now().Unix(), JobKindStage1, threadID, agentID, jobStatusRunning, ownershipToken)
 		if err != nil {
 			return err
@@ -312,8 +513,7 @@ func (s *Store) AdvanceStage1Watermark(ctx context.Context, threadID, ownershipT
 		if lastMessageRowID > 0 {
 			cursor = lastMessageRowID
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE fb_memory_stage1_outputs SET source_updated_at=?, last_message_row_id=?
-			WHERE thread_id=? AND agent_id=?`, sourceUpdatedAt, cursor, threadID, agentID)
+		_, err = tx.ExecContext(ctx, memStage1WatermarkSQL.For(tx.Dialect()), sourceUpdatedAt, cursor, threadID, agentID)
 		return err
 	})
 	return owned, err
@@ -335,7 +535,7 @@ func (s *Store) HasSelectedStage1Output(ctx context.Context, threadID string) (S
 	}
 	var selected int
 	var projectKey string
-	err = s.DB.QueryRowContext(ctx, `SELECT selected_for_phase2, project_key FROM fb_memory_stage1_outputs WHERE thread_id=? AND agent_id=?`, strings.TrimSpace(threadID), agentID).Scan(&selected, &projectKey)
+	err = s.DB.QueryRowContext(ctx, memStage1SelectionSQL.For(dbx.DialectOf(s.DB)), strings.TrimSpace(threadID), agentID).Scan(&selected, &projectKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Scope{}, false, nil
 	}
@@ -367,18 +567,8 @@ func (s *Store) SelectStage1ForPhase2(ctx context.Context, projectKey string, li
 		return nil, err
 	}
 	cutoff := time.Now().Add(-time.Duration(maxUnusedDays) * 24 * time.Hour).Unix()
-	rows, err := s.DB.QueryContext(ctx, `SELECT o.thread_id, o.project_key, o.source_updated_at, o.raw_memory, o.rollout_summary,
-		o.rollout_slug, o.generated_at, o.usage_count, o.last_usage, o.selected_for_phase2,
-		o.selected_for_phase2_source_updated_at, s.cwd, s.git_branch
-	FROM fb_memory_stage1_outputs AS o
-	JOIN fb_sessions AS s ON s.id=o.thread_id
-	WHERE o.agent_id=? AND s.agent_id=? AND o.project_key=?
-	  AND s.memory_mode=? AND (TRIM(o.raw_memory)<>'' OR TRIM(o.rollout_summary)<>'')
-	  AND COALESCE(o.last_usage, o.source_updated_at)>=?
-	ORDER BY o.usage_count DESC,
-		COALESCE(o.last_usage,o.source_updated_at) DESC,
-		o.source_updated_at DESC, o.thread_id DESC
-	LIMIT ?`, agentID, agentID, projectKey, ThreadMemoryEnabled, cutoff, limit)
+	rows, err := s.DB.QueryContext(ctx, memStage1Phase2InputSQL.For(dbx.DialectOf(s.DB)),
+		agentID, agentID, projectKey, ThreadMemoryEnabled, cutoff, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +613,7 @@ func (s *Store) UpdateUsage(ctx context.Context, threadIDs []string, at int64) e
 		if threadID == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE fb_memory_stage1_outputs SET usage_count=usage_count+1, last_usage=? WHERE thread_id=? AND agent_id=?`, at, threadID, agentID); err != nil {
+		if _, err := tx.ExecContext(ctx, memStage1UsageSQL.For(tx.Dialect()), at, threadID, agentID); err != nil {
 			return err
 		}
 	}
@@ -439,11 +629,7 @@ func (s *Store) PruneStage1Outputs(ctx context.Context, maxUnusedDays, batchSize
 		return 0, err
 	}
 	cutoff := time.Now().Add(-time.Duration(maxUnusedDays) * 24 * time.Hour).Unix()
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=? AND thread_id IN (
-		SELECT thread_id FROM fb_memory_stage1_outputs
-		WHERE agent_id=? AND selected_for_phase2=0 AND COALESCE(last_usage,source_updated_at)<?
-		ORDER BY COALESCE(last_usage,source_updated_at) ASC, thread_id ASC LIMIT ?
-	)`, agentID, agentID, cutoff, batchSize)
+	result, err := dbx.Exec(ctx, s.DB, memStage1PruneSQL.For(dbx.DialectOf(s.DB)), agentID, agentID, cutoff, batchSize)
 	if err != nil {
 		return 0, err
 	}
@@ -458,7 +644,7 @@ func (s *Store) ListStage1Versions(ctx context.Context) ([]Stage1Version, error)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT thread_id, project_key, source_updated_at FROM fb_memory_stage1_outputs WHERE agent_id=?`, agentID)
+	rows, err := s.DB.QueryContext(ctx, memStage1VersionsSQL.For(dbx.DialectOf(s.DB)), agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -490,10 +676,10 @@ func (s *Store) Reset(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=?`, agentID); err != nil {
+	if _, err := tx.ExecContext(ctx, memStage1AgentDeleteSQL.For(tx.Dialect()), agentID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_jobs WHERE agent_id=? AND kind IN (?,?)`, agentID, JobKindStage1, JobKindConsolidate); err != nil {
+	if _, err := tx.ExecContext(ctx, memJobKindsDeleteSQL.For(tx.Dialect()), agentID, JobKindStage1, JobKindConsolidate); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -518,7 +704,7 @@ func (s *Store) ResetScope(ctx context.Context, scope Scope) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	if scope.Kind == ScopeProject {
-		threadIDs, err := tx.QueryContext(ctx, `SELECT thread_id FROM fb_memory_stage1_outputs WHERE agent_id=? AND project_key=?`, agentID, scope.Key)
+		threadIDs, err := tx.QueryContext(ctx, memScopeThreadsSQL.For(tx.Dialect()), agentID, scope.Key)
 		if err != nil {
 			return err
 		}
@@ -536,16 +722,16 @@ func (s *Store) ResetScope(ctx context.Context, scope Scope) error {
 			return err
 		}
 		threadIDs.Close()
-		if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_stage1_outputs WHERE agent_id=? AND project_key=?`, agentID, scope.Key); err != nil {
+		if _, err := tx.ExecContext(ctx, memScopeDeleteSQL.For(tx.Dialect()), agentID, scope.Key); err != nil {
 			return err
 		}
 		for _, id := range ids {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_jobs WHERE kind=? AND job_key=? AND agent_id=?`, JobKindStage1, id, agentID); err != nil {
+			if _, err := tx.ExecContext(ctx, memStage1JobDeleteSQL.For(tx.Dialect()), JobKindStage1, id, agentID); err != nil {
 				return err
 			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_jobs WHERE kind=? AND job_key=? AND agent_id=?`, JobKindConsolidate, consolidateJobKey(agentID, scope), agentID); err != nil {
+	if _, err := tx.ExecContext(ctx, memStage1JobDeleteSQL.For(tx.Dialect()), JobKindConsolidate, consolidateJobKey(agentID, scope), agentID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -560,13 +746,13 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return status, err
 	}
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE agent_id=?`, agentID).Scan(&status.Stage1Count); err != nil {
+	if err := s.DB.QueryRowContext(ctx, memStage1CountSQL.For(dbx.DialectOf(s.DB)), agentID).Scan(&status.Stage1Count); err != nil {
 		return status, err
 	}
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_memory_jobs WHERE agent_id=? AND kind IN (?,?)`, agentID, JobKindStage1, JobKindConsolidate).Scan(&status.JobCount); err != nil {
+	if err := s.DB.QueryRowContext(ctx, memJobCountSQL.For(dbx.DialectOf(s.DB)), agentID, JobKindStage1, JobKindConsolidate).Scan(&status.JobCount); err != nil {
 		return status, err
 	}
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE agent_id=? AND selected_for_phase2<>0`, agentID).Scan(&status.SelectedCount); err != nil {
+	if err := s.DB.QueryRowContext(ctx, memSelectedCountSQL.For(dbx.DialectOf(s.DB)), agentID).Scan(&status.SelectedCount); err != nil {
 		return status, err
 	}
 	return status, nil
