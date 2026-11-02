@@ -15,6 +15,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // Artifact is one row of fb_artifacts.
@@ -46,6 +48,83 @@ var ErrArtifactNotFound = errors.New("artifact not found")
 const artifactColumns = `id, agent_id, session_id, run_id, tool_call_id, path, rel_path,
   name, title, description, mime, kind, preview, size, mtime_ns, sha256, origin, created_at`
 
+// The artifact statements. Each SQLite arm is the text this file carried
+// before multi-database support. PostgreSQL numbers its parameters, and the
+// other two engines order same-timestamp artifacts by the explicit row_id
+// column where SQLite uses its rowid.
+var (
+	artifactInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_artifacts (id, agent_id, session_id, run_id, tool_call_id, path, rel_path,
+  name, title, description, mime, kind, preview, size, mtime_ns, sha256, origin, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		MySQL: `
+INSERT INTO fb_artifacts (id, agent_id, session_id, run_id, tool_call_id, path, rel_path,
+  name, title, description, mime, kind, preview, size, mtime_ns, sha256, origin, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		Postgres: `
+INSERT INTO fb_artifacts (id, agent_id, session_id, run_id, tool_call_id, path, rel_path,
+  name, title, description, mime, kind, preview, size, mtime_ns, sha256, origin, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+	}
+	artifactSelectSQL = dbx.SQL{
+		SQLite: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE id=? AND session_id=? AND agent_id=?`,
+		MySQL: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE id=? AND session_id=? AND agent_id=?`,
+		Postgres: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE id=$1 AND session_id=$2 AND agent_id=$3`,
+	}
+	artifactCountSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=? AND agent_id=?`,
+		MySQL:    `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=? AND agent_id=?`,
+		Postgres: `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=$1 AND agent_id=$2`,
+	}
+	artifactPageSQL = dbx.SQL{
+		SQLite: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE session_id=? AND agent_id=?
+ ORDER BY created_at ASC, rowid ASC
+ LIMIT ? OFFSET ?`,
+		MySQL: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE session_id=? AND agent_id=?
+ ORDER BY created_at ASC, row_id ASC
+ LIMIT ? OFFSET ?`,
+		Postgres: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE session_id=$1 AND agent_id=$2
+ ORDER BY created_at ASC, row_id ASC
+ LIMIT $3 OFFSET $4`,
+	}
+	artifactRunSQL = dbx.SQL{
+		SQLite: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE run_id=? AND agent_id=?
+ ORDER BY created_at, rowid`,
+		MySQL: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE run_id=? AND agent_id=?
+ ORDER BY created_at, row_id`,
+		Postgres: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE run_id=$1 AND agent_id=$2
+ ORDER BY created_at, row_id`,
+	}
+)
+
 // AddArtifact registers one delivered file under this agent's conversation.
 // The session must be this primary agent's; the id, agent and timestamp the
 // caller does not carry are filled here so every row agrees on who wrote it
@@ -71,10 +150,7 @@ func (s *SessionStore) AddArtifact(ctx context.Context, a Artifact) (Artifact, e
 		a.Origin = ArtifactOriginModel
 	}
 	a.CreatedAt = time.Now().Unix()
-	res, err := s.db.ExecContext(ctx, `
-INSERT INTO fb_artifacts (id, agent_id, session_id, run_id, tool_call_id, path, rel_path,
-  name, title, description, mime, kind, preview, size, mtime_ns, sha256, origin, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	res, err := dbx.Exec(ctx, s.db, artifactInsertSQL.For(dbx.DialectOf(s.db)),
 		a.ID, a.AgentID, a.SessionID, a.RunID, a.ToolCallID, a.Path, a.RelPath,
 		a.Name, a.Title, a.Description, a.MIME, a.Kind, a.Preview, a.Size, a.MTimeNS, a.SHA256, a.Origin, a.CreatedAt)
 	if err != nil {
@@ -98,10 +174,7 @@ func (s *SessionStore) GetArtifact(ctx context.Context, sessionID, id string) (A
 		return Artifact{}, ErrArtifactNotFound
 	}
 	var a Artifact
-	err := s.db.QueryRowContext(ctx, `
-SELECT `+artifactColumns+`
-  FROM fb_artifacts
- WHERE id=? AND session_id=? AND agent_id=?`, id, sessionID, s.AgentID()).Scan(&a.ID, &a.AgentID, &a.SessionID, &a.RunID, &a.ToolCallID,
+	err := s.db.QueryRowContext(ctx, artifactSelectSQL.For(dbx.DialectOf(s.db)), id, sessionID, s.AgentID()).Scan(&a.ID, &a.AgentID, &a.SessionID, &a.RunID, &a.ToolCallID,
 		&a.Path, &a.RelPath, &a.Name, &a.Title, &a.Description, &a.MIME, &a.Kind, &a.Preview,
 		&a.Size, &a.MTimeNS, &a.SHA256, &a.Origin, &a.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -127,19 +200,14 @@ func (s *SessionStore) ListArtifactsPage(ctx context.Context, sessionID string, 
 	}
 	limit, offset = projectPageWindow(limit, offset)
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=? AND agent_id=?`,
+	if err := s.db.QueryRowContext(ctx, artifactCountSQL.For(dbx.DialectOf(s.db)),
 		sessionID, s.AgentID()).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if offset >= total {
 		offset = max(total-1, 0) / limit * limit
 	}
-	rows, err := s.db.QueryContext(ctx, `
-SELECT `+artifactColumns+`
-  FROM fb_artifacts
- WHERE session_id=? AND agent_id=?
- ORDER BY created_at ASC, rowid ASC
- LIMIT ? OFFSET ?`, sessionID, s.AgentID(), limit, offset)
+	rows, err := s.db.QueryContext(ctx, artifactPageSQL.For(dbx.DialectOf(s.db)), sessionID, s.AgentID(), limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -166,11 +234,7 @@ func (s *SessionStore) ListArtifactsForRun(ctx context.Context, runID string) ([
 	if runID == "" {
 		return []Artifact{}, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
-SELECT `+artifactColumns+`
-  FROM fb_artifacts
- WHERE run_id=? AND agent_id=?
- ORDER BY created_at, rowid`, runID, s.AgentID())
+	rows, err := s.db.QueryContext(ctx, artifactRunSQL.For(dbx.DialectOf(s.db)), runID, s.AgentID())
 	if err != nil {
 		return nil, err
 	}
