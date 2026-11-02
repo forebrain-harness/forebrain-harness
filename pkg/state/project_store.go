@@ -413,6 +413,126 @@ const projectColumns = `id, agent_id, name, icon, description, instructions, roo
 
 const projectColumnCount = 17
 
+// The project store's statements. Each SQLite arm is the text this file
+// carried before multi-database support. MySQL turns the two upserts into ON
+// DUPLICATE KEY UPDATE — the root conflict is the unique index over SHA2(root),
+// which is the same uniqueness over the same rows — and PostgreSQL numbers its
+// parameters.
+var (
+	projectInsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_projects(` + projectColumns + `)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `INSERT INTO fb_projects(` + projectColumns + `)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `INSERT INTO fb_projects(` + projectColumns + `)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+	}
+	// projectInsertIgnoreSQL is the create-or-keep insert: a concurrent writer
+	// that registered the same root first wins, and this one reads the stored
+	// row back. MySQL has no DO NOTHING, so it updates the primary key to
+	// itself — the same no-op, reported as zero affected rows.
+	projectInsertIgnoreSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_projects(` + projectColumns + `)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(agent_id, root) DO NOTHING`,
+		MySQL: `INSERT INTO fb_projects(` + projectColumns + `)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON DUPLICATE KEY UPDATE id=id`,
+		Postgres: `INSERT INTO fb_projects(` + projectColumns + `)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+ON CONFLICT(agent_id, root) DO NOTHING`,
+	}
+	projectSelectByIDSQL = dbx.SQL{
+		SQLite:   `SELECT ` + projectColumns + ` FROM fb_projects WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT ` + projectColumns + ` FROM fb_projects WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT ` + projectColumns + ` FROM fb_projects WHERE id=$1 AND agent_id=$2`,
+	}
+	projectSelectByRootSQL = dbx.SQL{
+		SQLite:   `SELECT ` + projectColumns + ` FROM fb_projects WHERE agent_id=? AND root=?`,
+		MySQL:    `SELECT ` + projectColumns + ` FROM fb_projects WHERE agent_id=? AND root=?`,
+		Postgres: `SELECT ` + projectColumns + ` FROM fb_projects WHERE agent_id=$1 AND root=$2`,
+	}
+	projectUpdateSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_projects SET name=?, icon=?, description=?, instructions=?, memory_scope=?, resource_access=?, project_type=?, task_notify_json=?, batch_sandbox=?, updated_at=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_projects SET name=?, icon=?, description=?, instructions=?, memory_scope=?, resource_access=?, project_type=?, task_notify_json=?, batch_sandbox=?, updated_at=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_projects SET name=$1, icon=$2, description=$3, instructions=$4, memory_scope=$5, resource_access=$6, project_type=$7, task_notify_json=$8, batch_sandbox=$9, updated_at=$10 WHERE id=$11 AND agent_id=$12`,
+	}
+	projectSetPinnedSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_projects SET pinned=?, updated_at=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_projects SET pinned=?, updated_at=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_projects SET pinned=$1, updated_at=$2 WHERE id=$3 AND agent_id=$4`,
+	}
+	projectSetLastAttachDirSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_projects SET last_attach_dir=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_projects SET last_attach_dir=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_projects SET last_attach_dir=$1 WHERE id=$2 AND agent_id=$3`,
+	}
+	projectLiveRunCountSQL = dbx.SQL{
+		SQLite: `
+SELECT COUNT(*) FROM fb_runs r
+JOIN fb_sessions s ON s.id = r.session_id
+WHERE s.project_id = ? AND s.agent_id = ? AND r.status IN ('running', 'waiting_action')`,
+		MySQL: `
+SELECT COUNT(*) FROM fb_runs r
+JOIN fb_sessions s ON s.id = r.session_id
+WHERE s.project_id = ? AND s.agent_id = ? AND r.status IN ('running', 'waiting_action')`,
+		Postgres: `
+SELECT COUNT(*) FROM fb_runs r
+JOIN fb_sessions s ON s.id = r.session_id
+WHERE s.project_id = $1 AND s.agent_id = $2 AND r.status IN ('running', 'waiting_action')`,
+	}
+	projectDeleteCronRunsBySessionSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_cron_runs WHERE session_id IN (SELECT id FROM fb_sessions WHERE project_id=? AND agent_id=?)`,
+		MySQL:    `DELETE FROM fb_cron_runs WHERE session_id IN (SELECT id FROM fb_sessions WHERE project_id=? AND agent_id=?)`,
+		Postgres: `DELETE FROM fb_cron_runs WHERE session_id IN (SELECT id FROM fb_sessions WHERE project_id=$1 AND agent_id=$2)`,
+	}
+	projectDeleteMemoryJobsSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_memory_jobs WHERE kind='memory_stage1' AND job_key IN (SELECT id FROM fb_sessions WHERE project_id=? AND agent_id=?)`,
+		MySQL:    `DELETE FROM fb_memory_jobs WHERE kind='memory_stage1' AND job_key IN (SELECT id FROM fb_sessions WHERE project_id=? AND agent_id=?)`,
+		Postgres: `DELETE FROM fb_memory_jobs WHERE kind='memory_stage1' AND job_key IN (SELECT id FROM fb_sessions WHERE project_id=$1 AND agent_id=$2)`,
+	}
+	projectDeleteCronRunsByJobSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_cron_runs WHERE job_id IN (SELECT id FROM fb_cron_jobs WHERE project_id=? AND agent_id=?)`,
+		MySQL:    `DELETE FROM fb_cron_runs WHERE job_id IN (SELECT id FROM fb_cron_jobs WHERE project_id=? AND agent_id=?)`,
+		Postgres: `DELETE FROM fb_cron_runs WHERE job_id IN (SELECT id FROM fb_cron_jobs WHERE project_id=$1 AND agent_id=$2)`,
+	}
+	projectDeleteCronJobsSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`,
+		MySQL:    `DELETE FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`,
+		Postgres: `DELETE FROM fb_cron_jobs WHERE project_id=$1 AND agent_id=$2`,
+	}
+	projectDeleteSessionsSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_sessions WHERE project_id=? AND agent_id=?`,
+		MySQL:    `DELETE FROM fb_sessions WHERE project_id=? AND agent_id=?`,
+		Postgres: `DELETE FROM fb_sessions WHERE project_id=$1 AND agent_id=$2`,
+	}
+	projectDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_projects WHERE id=? AND agent_id=?`,
+		MySQL:    `DELETE FROM fb_projects WHERE id=? AND agent_id=?`,
+		Postgres: `DELETE FROM fb_projects WHERE id=$1 AND agent_id=$2`,
+	}
+	projectCronJobCountSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`,
+		MySQL:    `SELECT COUNT(*) FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`,
+		Postgres: `SELECT COUNT(*) FROM fb_cron_jobs WHERE project_id=$1 AND agent_id=$2`,
+	}
+	projectBindSessionSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET project_id=NULLIF(?,'') WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_sessions SET project_id=NULLIF(?,'') WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_sessions SET project_id=NULLIF($1,'') WHERE id=$2 AND agent_id=$3`,
+	}
+	projectSessionTypeSQL = dbx.SQL{
+		SQLite:   `SELECT project_type FROM fb_sessions WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT project_type FROM fb_sessions WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT project_type FROM fb_sessions WHERE id=$1 AND agent_id=$2`,
+	}
+	projectSessionProjectIDSQL = dbx.SQL{
+		SQLite:   `SELECT project_id FROM fb_sessions WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT project_id FROM fb_sessions WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT project_id FROM fb_sessions WHERE id=$1 AND agent_id=$2`,
+	}
+)
+
 func scanProject(scanner interface{ Scan(...any) error }) (Project, error) {
 	var p Project
 	var resourceAccess int
@@ -492,8 +612,7 @@ func (s *ProjectStore) Create(ctx context.Context, in CreateProjectInput) (Proje
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = dbx.Exec(ctx, s.db, projectInsertSQL.For(dbx.DialectOf(s.db)),
 		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.LastAttachDir, p.ProjectType, p.CreatedAt, p.UpdatedAt, encodeTaskNotify(p.TaskNotify), boolInt(p.BatchSandbox))
 	if err != nil {
 		if dbx.IsUniqueViolation(err) {
@@ -557,9 +676,7 @@ func (s *ProjectStore) FindOrCreateByRoot(ctx context.Context, root string, defa
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(agent_id, root) DO NOTHING`,
+	if _, err := dbx.Exec(ctx, s.db, projectInsertIgnoreSQL.For(dbx.DialectOf(s.db)),
 		fresh.ID, fresh.AgentID, fresh.Name, fresh.Icon, fresh.Description, fresh.Instructions, fresh.Root, fresh.ProjectKey, fresh.MemoryScope, boolInt(fresh.ResourceAccess), boolInt(fresh.Pinned), fresh.LastAttachDir, fresh.ProjectType, fresh.CreatedAt, fresh.UpdatedAt, encodeTaskNotify(fresh.TaskNotify), boolInt(fresh.BatchSandbox)); err != nil {
 		return Project{}, false, err
 	}
@@ -586,7 +703,7 @@ func (s *ProjectStore) Get(ctx context.Context, id string) (Project, error) {
 	if s == nil || s.db == nil {
 		return Project{}, ErrProjectNotFound
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM fb_projects WHERE id=? AND agent_id=?`, strings.TrimSpace(id), s.agentID)
+	row := s.db.QueryRowContext(ctx, projectSelectByIDSQL.For(dbx.DialectOf(s.db)), strings.TrimSpace(id), s.agentID)
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Project{}, ErrProjectNotFound
@@ -600,7 +717,7 @@ func (s *ProjectStore) GetByRoot(ctx context.Context, root string) (Project, boo
 	if s == nil || s.db == nil {
 		return Project{}, false, nil
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM fb_projects WHERE agent_id=? AND root=?`, s.agentID, strings.TrimSpace(root))
+	row := s.db.QueryRowContext(ctx, projectSelectByRootSQL.For(dbx.DialectOf(s.db)), s.agentID, strings.TrimSpace(root))
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Project{}, false, nil
@@ -681,7 +798,7 @@ func (s *ProjectStore) Update(ctx context.Context, id string, in UpdateProjectIn
 		current.BatchSandbox = *in.BatchSandbox
 	}
 	current.UpdatedAt = time.Now().Unix()
-	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET name=?, icon=?, description=?, instructions=?, memory_scope=?, resource_access=?, project_type=?, task_notify_json=?, batch_sandbox=?, updated_at=? WHERE id=? AND agent_id=?`,
+	res, err := dbx.Exec(ctx, s.db, projectUpdateSQL.For(dbx.DialectOf(s.db)),
 		current.Name, current.Icon, current.Description, current.Instructions, current.MemoryScope, boolInt(current.ResourceAccess), current.ProjectType, encodeTaskNotify(current.TaskNotify), boolInt(current.BatchSandbox), current.UpdatedAt, strings.TrimSpace(id), s.agentID)
 	if err != nil {
 		return Project{}, err
@@ -697,7 +814,7 @@ func (s *ProjectStore) SetPinned(ctx context.Context, id string, pinned bool) er
 	if s == nil || s.db == nil {
 		return ErrProjectNotFound
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET pinned=?, updated_at=? WHERE id=? AND agent_id=?`, boolInt(pinned), time.Now().Unix(), strings.TrimSpace(id), s.agentID)
+	res, err := dbx.Exec(ctx, s.db, projectSetPinnedSQL.For(dbx.DialectOf(s.db)), boolInt(pinned), time.Now().Unix(), strings.TrimSpace(id), s.agentID)
 	if err != nil {
 		return err
 	}
@@ -717,7 +834,7 @@ func (s *ProjectStore) SetLastAttachDir(ctx context.Context, id, dir string) err
 		return ErrProjectNotFound
 	}
 	normalized := strings.Trim(strings.ReplaceAll(strings.TrimSpace(dir), "\\", "/"), "/")
-	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET last_attach_dir=? WHERE id=? AND agent_id=?`, normalized, strings.TrimSpace(id), s.agentID)
+	res, err := dbx.Exec(ctx, s.db, projectSetLastAttachDirSQL.For(dbx.DialectOf(s.db)), normalized, strings.TrimSpace(id), s.agentID)
 	if err != nil {
 		return err
 	}
@@ -740,11 +857,9 @@ func (s *ProjectStore) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	d := dbx.DialectOf(tx)
 	var live int
-	if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM fb_runs r
-JOIN fb_sessions s ON s.id = r.session_id
-WHERE s.project_id = ? AND s.agent_id = ? AND r.status IN ('running', 'waiting_action')`,
+	if err := tx.QueryRowContext(ctx, projectLiveRunCountSQL.For(d),
 		id, s.agentID).Scan(&live); err != nil {
 		return err
 	}
@@ -756,22 +871,22 @@ WHERE s.project_id = ? AND s.agent_id = ? AND r.status IN ('running', 'waiting_a
 	// rows they refer to go. Everything else hangs off fb_sessions through a
 	// foreign key and cascades when those rows are deleted (foreign keys are on
 	// at runtime).
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE session_id IN (SELECT id FROM fb_sessions WHERE project_id=? AND agent_id=?)`, id, s.agentID); err != nil {
+	if _, err := tx.ExecContext(ctx, projectDeleteCronRunsBySessionSQL.For(d), id, s.agentID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_jobs WHERE kind='memory_stage1' AND job_key IN (SELECT id FROM fb_sessions WHERE project_id=? AND agent_id=?)`, id, s.agentID); err != nil {
+	if _, err := tx.ExecContext(ctx, projectDeleteMemoryJobsSQL.For(d), id, s.agentID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE job_id IN (SELECT id FROM fb_cron_jobs WHERE project_id=? AND agent_id=?)`, id, s.agentID); err != nil {
+	if _, err := tx.ExecContext(ctx, projectDeleteCronRunsByJobSQL.For(d), id, s.agentID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`, id, s.agentID); err != nil {
+	if _, err := tx.ExecContext(ctx, projectDeleteCronJobsSQL.For(d), id, s.agentID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_sessions WHERE project_id=? AND agent_id=?`, id, s.agentID); err != nil {
+	if _, err := tx.ExecContext(ctx, projectDeleteSessionsSQL.For(d), id, s.agentID); err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM fb_projects WHERE id=? AND agent_id=?`, id, s.agentID)
+	res, err := tx.ExecContext(ctx, projectDeleteSQL.For(d), id, s.agentID)
 	if err != nil {
 		return err
 	}
@@ -794,20 +909,18 @@ func (s *ProjectStore) DeletePreview(ctx context.Context, id string) (sessions i
 	if _, err = s.Get(ctx, id); err != nil {
 		return 0, 0, false, err
 	}
+	d := dbx.DialectOf(s.db)
 	if err = s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM fb_sessions
-		 WHERE project_id=? AND agent_id=? AND source=? AND `+conversationHoldsAMessage,
+		 WHERE project_id=`+dbx.Placeholder(d, 1)+` AND agent_id=`+dbx.Placeholder(d, 2)+` AND source=`+dbx.Placeholder(d, 3)+` AND `+conversationHoldsAMessage,
 		id, s.agentID, SessionSourceConversation).Scan(&sessions); err != nil {
 		return 0, 0, false, err
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`, id, s.agentID).Scan(&cronJobs); err != nil {
+	if err = s.db.QueryRowContext(ctx, projectCronJobCountSQL.For(d), id, s.agentID).Scan(&cronJobs); err != nil {
 		return 0, 0, false, err
 	}
 	var live int
-	if err = s.db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM fb_runs r
-JOIN fb_sessions s ON s.id = r.session_id
-WHERE s.project_id = ? AND s.agent_id = ? AND r.status IN ('running', 'waiting_action')`,
+	if err = s.db.QueryRowContext(ctx, projectLiveRunCountSQL.For(d),
 		id, s.agentID).Scan(&live); err != nil {
 		return 0, 0, false, err
 	}
@@ -828,12 +941,24 @@ type ListProjectsOptions struct {
 
 // projectListWhere is the filter both list reads apply, so the page a table
 // draws and the total it pages through always count the same rows.
-func (s *ProjectStore) projectListWhere(opts ListProjectsOptions) (string, []any) {
-	where := "agent_id=?"
+// projectListWhere is the filter both list reads apply, so the page a table
+// draws and the total it pages through always count the same rows. The search
+// arm follows each engine's own case rule: SQLite's LIKE ignores ASCII case,
+// MySQL's utf8mb4_bin collation does not, so it lowercases both sides, and
+// PostgreSQL spells the same insensitivity ILIKE.
+func (s *ProjectStore) projectListWhere(d dbx.Dialect, opts ListProjectsOptions) (string, []any) {
+	where := "agent_id=" + dbx.Placeholder(d, 1)
 	args := []any{s.agentID}
 	if q := strings.TrimSpace(opts.Search); q != "" {
-		where += " AND (name LIKE ? OR root LIKE ?)"
 		like := "%" + q + "%"
+		switch d {
+		case dbx.Postgres:
+			where += " AND (name ILIKE " + dbx.Placeholder(d, 2) + " OR root ILIKE " + dbx.Placeholder(d, 3) + ")"
+		case dbx.MySQL:
+			where += " AND (LOWER(name) LIKE LOWER(" + dbx.Placeholder(d, 2) + ") OR LOWER(root) LIKE LOWER(" + dbx.Placeholder(d, 3) + "))"
+		default:
+			where += " AND (name LIKE " + dbx.Placeholder(d, 2) + " OR root LIKE " + dbx.Placeholder(d, 3) + ")"
+		}
 		args = append(args, like, like)
 	}
 	return where, args
@@ -841,8 +966,9 @@ func (s *ProjectStore) projectListWhere(opts ListProjectsOptions) (string, []any
 
 // projectListOrder puts the pinned projects first whatever the key and the
 // direction are: the pin is the person's own ordering of the list, not a
-// value of any column.
-func projectListOrder(opts ListProjectsOptions) string {
+// value of any column. A name sorts without regard to case, which SQLite
+// spells COLLATE NOCASE and the other two spell LOWER(name).
+func projectListOrder(d dbx.Dialect, opts ListProjectsOptions) string {
 	byName := strings.EqualFold(strings.TrimSpace(opts.Sort), "name")
 	desc := !byName
 	if opts.Desc != nil {
@@ -853,7 +979,10 @@ func projectListOrder(opts ListProjectsOptions) string {
 		direction = "DESC"
 	}
 	if byName {
-		return "pinned DESC, name COLLATE NOCASE " + direction + ", id"
+		if d == dbx.SQLite {
+			return "pinned DESC, name COLLATE NOCASE " + direction + ", id"
+		}
+		return "pinned DESC, LOWER(name) " + direction + ", id"
 	}
 	return "pinned DESC, updated_at " + direction + ", id"
 }
@@ -888,7 +1017,8 @@ func (s *ProjectStore) ListProjectsPage(ctx context.Context, opts ListProjectsOp
 		return nil, 0, nil
 	}
 	limit, offset = projectPageWindow(limit, offset)
-	where, args := s.projectListWhere(opts)
+	d := dbx.DialectOf(s.db)
+	where, args := s.projectListWhere(d, opts)
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -906,9 +1036,10 @@ func (s *ProjectStore) ListProjectsPage(ctx context.Context, opts ListProjectsOp
 // projectPageRows reads one window of the agent's projects. The window is
 // already clamped by projectPageWindow.
 func (s *ProjectStore) projectPageRows(ctx context.Context, opts ListProjectsOptions, limit, offset int) ([]Project, error) {
-	where, args := s.projectListWhere(opts)
+	d := dbx.DialectOf(s.db)
+	where, args := s.projectListWhere(d, opts)
 	query := `SELECT ` + projectColumns + ` FROM fb_projects WHERE ` + where +
-		` ORDER BY ` + projectListOrder(opts) + ` LIMIT ? OFFSET ?`
+		` ORDER BY ` + projectListOrder(d, opts) + ` LIMIT ` + dbx.Placeholder(d, len(args)+1) + ` OFFSET ` + dbx.Placeholder(d, len(args)+2)
 	rows, err := s.db.QueryContext(ctx, query, append(args, limit, offset)...)
 	if err != nil {
 		return nil, err
@@ -942,7 +1073,7 @@ func (s *ProjectStore) BindSession(ctx context.Context, sessionID, projectID str
 			return err
 		}
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE fb_sessions SET project_id=NULLIF(?,'') WHERE id=? AND agent_id=?`, projectID, sessionID, s.agentID)
+	_, err := dbx.Exec(ctx, s.db, projectBindSessionSQL.For(dbx.DialectOf(s.db)), projectID, sessionID, s.agentID)
 	return err
 }
 
@@ -970,7 +1101,7 @@ func (s *ProjectStore) SessionProjectTypeKnown(ctx context.Context, sessionID st
 		return "", false, nil
 	}
 	var rowType string
-	err = s.db.QueryRowContext(ctx, `SELECT project_type FROM fb_sessions WHERE id=? AND agent_id=?`, strings.TrimSpace(sessionID), s.agentID).Scan(&rowType)
+	err = s.db.QueryRowContext(ctx, projectSessionTypeSQL.For(dbx.DialectOf(s.db)), strings.TrimSpace(sessionID), s.agentID).Scan(&rowType)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -986,7 +1117,7 @@ func (s *ProjectStore) ProjectForSession(ctx context.Context, sessionID string) 
 		return Project{}, false, nil
 	}
 	var projectID sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT project_id FROM fb_sessions WHERE id=? AND agent_id=?`, strings.TrimSpace(sessionID), s.agentID).Scan(&projectID)
+	err := s.db.QueryRowContext(ctx, projectSessionProjectIDSQL.For(dbx.DialectOf(s.db)), strings.TrimSpace(sessionID), s.agentID).Scan(&projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Project{}, false, nil
 	}
