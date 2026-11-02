@@ -474,17 +474,17 @@ func visibleToolCallPredicateFor(d dbx.Dialect) string {
 	return visibleToolCallPredicate
 }
 
-// toolPayloadText reads one payload_json field as text on d. SQLite and
+// jsonFieldText reads one JSON field of column as text on d. SQLite and
 // PostgreSQL both have the unquoting ->> operator; MySQL's JSON functions keep
 // the quotes unless JSON_UNQUOTE is written out.
-func toolPayloadText(d dbx.Dialect, field string) string {
+func jsonFieldText(d dbx.Dialect, column, field string) string {
 	switch d {
 	case dbx.MySQL:
-		return `JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.` + field + `'))`
+		return `JSON_UNQUOTE(JSON_EXTRACT(` + column + `,'$.` + field + `'))`
 	case dbx.Postgres:
-		return `payload_json::jsonb->>'` + field + `'`
+		return column + `::jsonb->>'` + field + `'`
 	}
-	return `payload_json->>'$.` + field + `'`
+	return column + `->>'$.` + field + `'`
 }
 
 // ifNullExpr wraps expr in the dialect's null-coalescing function: IFNULL on
@@ -517,7 +517,7 @@ func (s *RunStore) ListSessionToolCalls(ctx context.Context, sessionID, runID, t
 		return dbx.Placeholder(d, n)
 	}
 	query := `SELECT event_id, ` + ifNullExpr(d, `run_id`, `''`) + `, session_id, ` +
-		ifNullExpr(d, toolPayloadText(d, "tool_name"), `''`) + `, payload_json, occurred_at_ms
+		ifNullExpr(d, jsonFieldText(d, "payload_json", "tool_name"), `''`) + `, payload_json, occurred_at_ms
 FROM fb_session_events
 WHERE session_id=` + next() + ` AND ` + visibleToolCallPredicateFor(d) + ` AND ` + rewindVisibleEventsPredicateFor(d)
 	args := []any{sessionID}
@@ -526,7 +526,7 @@ WHERE session_id=` + next() + ` AND ` + visibleToolCallPredicateFor(d) + ` AND `
 		args = append(args, runID)
 	}
 	if toolName = strings.TrimSpace(toolName); toolName != "" {
-		query += ` AND ` + toolPayloadText(d, "tool_name") + `=` + next()
+		query += ` AND ` + jsonFieldText(d, "payload_json", "tool_name") + `=` + next()
 		args = append(args, toolName)
 	}
 	if limit <= 0 {
@@ -567,7 +567,7 @@ func (s *RunStore) CountSessionToolCalls(ctx context.Context, sessionID string) 
 	}
 	d := dbx.DialectOf(s.DB)
 	rows, err := s.DB.QueryContext(ctx, `
-SELECT `+ifNullExpr(d, toolPayloadText(d, "tool_name"), `''`)+`, COUNT(*)
+SELECT `+ifNullExpr(d, jsonFieldText(d, "payload_json", "tool_name"), `''`)+`, COUNT(*)
 FROM fb_session_events
 WHERE session_id=`+dbx.Placeholder(d, 1)+` AND `+visibleToolCallPredicateFor(d)+` AND `+rewindVisibleEventsPredicateFor(d)+`
 GROUP BY 1`, sessionID)
