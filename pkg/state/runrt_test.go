@@ -12,7 +12,22 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
+
+// insertActionIgnoreSQL seeds an fb_actions row a wait references, leaving an
+// existing row alone.
+var insertActionIgnoreSQL = dbx.SQL{
+	SQLite: `INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO NOTHING`,
+	MySQL: `INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?)
+		ON DUPLICATE KEY UPDATE id=id`,
+	Postgres: `INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT(id) DO NOTHING`,
+}
 
 // --- Wait-resume lease semantics -------------------------------------------
 //
@@ -44,9 +59,8 @@ func newLeaseTestStore(t *testing.T) (*RunStore, string) {
 func seedWait(t *testing.T, rt *RunStore, sessionID, runID string, w Wait) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := rt.DB.ExecContext(ctx, `INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO NOTHING`, w.ActionID, sessionID, "tool_approval", string(ActionPending), "{}", 1, 1); err != nil {
+	if _, err := dbx.Exec(ctx, rt.DB, insertActionIgnoreSQL.For(dbx.DialectOf(rt.DB)),
+		w.ActionID, sessionID, "tool_approval", string(ActionPending), "{}", 1, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.SetWaitingAction(ctx, runID, w); err != nil {
@@ -58,9 +72,8 @@ func seedWait(t *testing.T, rt *RunStore, sessionID, runID string, w Wait) {
 // key enforces that every parked run waits on a real action.
 func mustWaitAction(t *testing.T, db *sql.DB, sessionID, actionID string) {
 	t.Helper()
-	if _, err := db.ExecContext(context.Background(), `INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO NOTHING`, actionID, sessionID, "tool_approval", string(ActionPending), "{}", 1, 1); err != nil {
+	if _, err := dbx.Exec(context.Background(), db, insertActionIgnoreSQL.For(dbx.DialectOf(db)),
+		actionID, sessionID, "tool_approval", string(ActionPending), "{}", 1, 1); err != nil {
 		t.Fatal(err)
 	}
 }
