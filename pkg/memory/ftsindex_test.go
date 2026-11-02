@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -247,8 +250,9 @@ func TestSearchDropsIndexRecallBelowTheRelevanceFloor(t *testing.T) {
 	if len(response.Matches) == 0 {
 		t.Fatal("the line sharing the rare term must survive the floor")
 	}
+	floor := minIndexRelevance(dbx.DialectOf(b.index.db))
 	for _, match := range response.Matches {
-		if match.score > MinIndexRelevance {
+		if match.score > floor {
 			t.Fatalf("a match below the floor was returned: score=%f %q", match.score, match.Content)
 		}
 	}
@@ -629,4 +633,204 @@ func TestConcurrentReindexesOfOneRootLeaveNoOrphanRows(t *testing.T) {
 	if total != claimed {
 		t.Fatalf("FTS holds %d rows but a.md claims %d; a concurrent re-index leaked rows", total, claimed)
 	}
+}
+
+// calibrationCorpora are the stores the relevance floor is calibrated on: the
+// fixtures the tests above already use, so a floor that keeps the right rows
+// for them is a floor that keeps the right rows for the searches this package
+// is tested on.
+var calibrationCorpora = []struct {
+	name  string
+	files func() map[string]string
+	query string
+}{
+	{
+		name: "one rare term among a common one",
+		files: func() map[string]string {
+			body := "审批浮层必须完整展示待批准内容\n"
+			for index := 0; index < 60; index++ {
+				body += "部署 流水线 构建 产物 校验 内容\n"
+			}
+			return map[string]string{"MEMORY.md": body}
+		},
+		query: "审批的内容",
+	},
+	{
+		name: "an identifier",
+		files: func() map[string]string {
+			return map[string]string{
+				"paths.md": padded("cwd: /srv/guangfa/chatibsagent/chatibs_claw_client\n"),
+				"other.md": padded("the AgentEngineCompatClient is the client for this service\n"),
+			}
+		},
+		query: "chatibs_claw_client",
+	},
+	{
+		name: "a hyphenated word",
+		files: func() map[string]string {
+			return map[string]string{
+				"mounts.md": padded("the module cache is mounted read-only\n"),
+				"naming.md": padded("do not invent a filename: read_file does not exist\n"),
+			}
+		},
+		query: "read-only",
+	},
+	{
+		name: "a term every note shares",
+		files: func() map[string]string {
+			files := map[string]string{}
+			for index := 0; index < 20; index++ {
+				files[fmt.Sprintf("note-%02d.md", index)] = padded("note about the release checklist\n")
+			}
+			files["MEMORY.md"] = padded("审批浮层必须完整展示待批准内容\n")
+			return files
+		},
+		query: "审批 release",
+	},
+	{
+		name: "a term most of the store shares",
+		files: func() map[string]string {
+			files := map[string]string{}
+			for index := 0; index < 40; index++ {
+				files[fmt.Sprintf("rollout/entry-%02d.md", index)] = strings.Repeat(filler, 12) +
+					"failover drill: the standby replica took over within four seconds\n" +
+					strings.Repeat(filler, 12)
+			}
+			files["MEMORY.md"] = "the standby replica promotion was rehearsed\n"
+			return files
+		},
+		query: "standby replica promotion",
+	},
+}
+
+// scoredRows is every candidate line the index recalls for query under root,
+// with the score the engine gave it — the floor's input, before the floor.
+func scoredRows(t *testing.T, b Backend, query string) map[string]float64 {
+	t.Helper()
+	ctx := context.Background()
+	var files []indexedFile
+	err := filepath.WalkDir(b.Root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		files = append(files, indexedFile{
+			path: displayPath(b.Root, path), content: string(data),
+			size: info.Size(), modTime: info.ModTime(),
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the corpus: %v", err)
+	}
+	if err := b.index.sync(ctx, b.Root, files); err != nil {
+		t.Fatalf("index the corpus: %v", err)
+	}
+	signals, err := b.index.signals(ctx, b.Root, []string{query})
+	if err != nil {
+		t.Fatalf("query the index: %v", err)
+	}
+	rows := map[string]float64{}
+	for path, lines := range signals {
+		for line, signal := range lines {
+			rows[fmt.Sprintf("%s:%d", path, line)] = signal.score
+		}
+	}
+	return rows
+}
+
+// rowsAtOrBelow is the set the floor keeps, as a sorted list so two dialects'
+// answers compare as one.
+func rowsAtOrBelow(rows map[string]float64, floor float64) []string {
+	var kept []string
+	for row, score := range rows {
+		if score <= floor {
+			kept = append(kept, row)
+		}
+	}
+	sort.Strings(kept)
+	return kept
+}
+
+// The relevance floor is per dialect, because the three scores are not on one
+// scale: SQLite reports bm25, MySQL InnoDB's MATCH relevance and PostgreSQL an
+// IDF sum built on bm25's scale (plan 212 §2.4). What must not differ is the
+// rows they keep. This measures exactly that on the corpora above: the set
+// SQLite's bm25 floor keeps, and the set each server's own floor keeps, on the
+// same store.
+func TestRelevanceFloorKeepsTheSameRowsOnEveryDialect(t *testing.T) {
+	ctx := context.Background()
+	sqliteDB, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.sqlite"), nil)
+	if err != nil {
+		t.Fatalf("open sqlite state: %v", err)
+	}
+	t.Cleanup(func() { _ = sqliteDB.Close() })
+	if dialect := dbx.DialectOf(sqliteDB); dialect != dbx.SQLite {
+		t.Fatalf("the reference floor needs SQLite, got %s", dialect)
+	}
+	// OpenStateForTest hands back a database on FOREBRAIN_TEST_DATABASE_URL
+	// when it is set, and a SQLite file when it is not — which is the dialect
+	// this test then finds nothing new to compare against.
+	serverDB := testSearchIndexDB(t)
+	serverDialect := dbx.DialectOf(serverDB)
+
+	filtered := false
+	for _, corpus := range calibrationCorpora {
+		reference := rowsAtOrBelow(scoredRows(t, indexPathBackend(t, sqliteDB, corpus.files()), corpus.query), MinIndexRelevance)
+		if len(reference) == 0 {
+			t.Fatalf("%s: SQLite's floor keeps nothing, so this corpus proves nothing", corpus.name)
+		}
+		if serverDialect == dbx.SQLite {
+			continue
+		}
+		floor := minIndexRelevance(serverDialect)
+		got := rowsAtOrBelow(scoredRows(t, indexPathBackend(t, serverDB, corpus.files()), corpus.query), floor)
+		if !reflect.DeepEqual(reference, got) {
+			only, extra := diffRows(reference, got)
+			t.Fatalf("%s: %s at floor %.4f keeps a different set than SQLite at %.4f\nmissing: %v\nextra:   %v",
+				corpus.name, serverDialect, floor, MinIndexRelevance, only, extra)
+		}
+		all := scoredRows(t, indexPathBackend(t, sqliteDB, corpus.files()), corpus.query)
+		if len(reference) < len(all) {
+			filtered = true
+		}
+	}
+	if serverDialect == dbx.SQLite {
+		t.Skip("no FOREBRAIN_TEST_DATABASE_URL configured; the servers' floors are unmeasured here")
+	}
+	if !filtered {
+		t.Fatal("no corpus had a row the floor drops, so the floors were never compared on a boundary")
+	}
+}
+
+// diffRows reports the rows in want but not got, and in got but not want.
+func diffRows(want, got []string) (missing, extra []string) {
+	inWant, inGot := map[string]bool{}, map[string]bool{}
+	for _, row := range want {
+		inWant[row] = true
+	}
+	for _, row := range got {
+		inGot[row] = true
+	}
+	for _, row := range want {
+		if !inGot[row] {
+			missing = append(missing, row)
+		}
+	}
+	for _, row := range got {
+		if !inWant[row] {
+			extra = append(extra, row)
+		}
+	}
+	return missing, extra
 }

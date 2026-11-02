@@ -13,6 +13,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 const (
@@ -549,13 +551,16 @@ func (b Backend) search(request SearchRequest) (SearchResponse, error) {
 	if err != nil {
 		return SearchResponse{}, err
 	}
+	// Each engine scores on its own scale, so each engine has its own floor;
+	// the row sets they keep are the same (plan 212 §2.4).
+	floor := minIndexRelevance(dbx.DialectOf(b.index.db))
 	var matches []SearchMatch
 	for _, file := range files {
 		if !withinScope(file.path, scope) {
 			continue
 		}
 		for _, match := range searchFile(file.path, file.content, queries, signals[file.path]) {
-			if match.score > MinIndexRelevance {
+			if match.score > floor {
 				continue
 			}
 			matches = append(matches, match)
@@ -843,6 +848,47 @@ const searchContextLines = 3
 // common word has a low IDF however many documents there are — only genuinely
 // rare terms score further down, which is the signal, not the noise.
 const MinIndexRelevance = -2.5
+
+// The same floor on the servers, where the score is a different formula on a
+// different scale (plan 212 §2.4). SQLite's bm25 is the reference: a value here
+// is calibrated so the rows it keeps are exactly the rows MinIndexRelevance
+// keeps on the same store, which is what
+// TestRelevanceFloorKeepsTheSameRowsOnEveryDialect measures.
+//
+// Measured on the same-store corpora that test seeds (the weakest line that is
+// on the query's subject against the strongest line that only shares a common
+// term):
+//
+//	MySQL      -4.85 … -0.15   InnoDB's MATCH relevance, negated; it grows with
+//	                           the store, so it lands both far below bm25 on a
+//	                           rare term and much closer to zero on a common one
+//	PostgreSQL -5.52 … -0.90   the IDF sum ftsindex.go builds on bm25's scale
+//	                           for the GIN index, negated like bm25
+//
+// Each value sits at the midpoint of its own engine's gap, which is where a
+// row has the most room before the other side of the band reaches it.
+const (
+	// mysqlMinIndexRelevance is the midpoint of MySQL's measured gap
+	// (-4.9029 for the weakest subject line, -0.1550 for the strongest noise
+	// line).
+	mysqlMinIndexRelevance = -2.5
+	// postgresMinIndexRelevance is the midpoint of PostgreSQL's measured gap
+	// (-5.5167 and -0.9015).
+	postgresMinIndexRelevance = -3.2
+)
+
+// minIndexRelevance is the weakest score a match may have on d. The three
+// scores are not on one scale, so neither is the floor.
+func minIndexRelevance(d dbx.Dialect) float64 {
+	switch d {
+	case dbx.MySQL:
+		return mysqlMinIndexRelevance
+	case dbx.Postgres:
+		return postgresMinIndexRelevance
+	default:
+		return MinIndexRelevance
+	}
+}
 
 // rankMatches orders results by relevance: bm25 decides, and path and line
 // break ties so that two runs over an unchanged store return the same page.
