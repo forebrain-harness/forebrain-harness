@@ -186,6 +186,7 @@ func mysqlServerConfigFromURL(u *url.URL) (*mysql.Config, error) {
 		cfg.Passwd, _ = u.User.Password()
 	}
 	cfg.ParseTime = false
+	cfg.InterpolateParams = true
 	cfg.MultiStatements = false
 	if err := cfg.Apply(mysql.Charset(mysqlCharset, mysqlCollation)); err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
