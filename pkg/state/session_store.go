@@ -1968,10 +1968,11 @@ func (s *SessionStore) ConversationCountsByProject(ctx context.Context, projectI
 	for _, id := range projectIDs {
 		args = append(args, id)
 	}
-	placeholders := dbx.Placeholders(dbx.DialectOf(s.db), 3, len(projectIDs))
+	d := dbx.DialectOf(s.db)
+	placeholders := dbx.Placeholders(d, 3, len(projectIDs))
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT project_id, COUNT(*) FROM fb_sessions
-		 WHERE agent_id = ? AND source = ? AND project_id IN (`+placeholders+`)
+		 WHERE agent_id = `+dbx.Placeholder(d, 1)+` AND source = `+dbx.Placeholder(d, 2)+` AND project_id IN (`+placeholders+`)
 		   AND `+conversationHoldsAMessage+`
 		 GROUP BY project_id`, args...)
 	if err != nil {
