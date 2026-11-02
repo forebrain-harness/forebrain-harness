@@ -16,6 +16,742 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
+// The session store's statements. Each SQLite arm is the text this file carried
+// before multi-database support; PostgreSQL numbers its parameters and takes
+// COALESCE where the others take IFNULL. MySQL has no RETURNING, so the one
+// statement that reports the row it wrote (insertMessage) reads the new id back
+// through LastInsertId there, and the upserts become ON DUPLICATE KEY UPDATE.
+var (
+	setSessionSourceSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET source=?, updated_at=updated_at WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_sessions SET source=?, updated_at=updated_at WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_sessions SET source=$1, updated_at=updated_at WHERE id=$2 AND agent_id=$3`,
+	}
+	// ensureSessionUpsertSQL keys on fb_sessions.id, the primary key. The
+	// conflict clause's owner test is what makes touching another agent's
+	// conversation fail; MySQL carries it in the updated value because its
+	// ON DUPLICATE KEY UPDATE has no WHERE.
+	ensureSessionUpsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id, project_type)
+		VALUES(?, ?, ?, ?,
+			CASE WHEN COALESCE(
+				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
+				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
+				'coding') = 'batch' THEN 'disabled' ELSE ? END, ?,
+			COALESCE(NULLIF((SELECT cwd FROM fb_sessions WHERE id=? AND project_id IS NOT NULL), ''), ?),
+			?, ?, ?, NULLIF(?, ''),
+			COALESCE((SELECT project_id FROM fb_sessions WHERE id=?), NULLIF(?, ''), NULLIF(?, '')),
+			COALESCE(
+				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
+				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
+				'coding'))
+		ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
+		WHERE fb_sessions.agent_id=excluded.agent_id`,
+		MySQL: `INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id, project_type)
+		VALUES(?, ?, ?, ?,
+			CASE WHEN COALESCE(
+				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
+				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
+				'coding') = 'batch' THEN 'disabled' ELSE ? END, ?,
+			COALESCE(NULLIF((SELECT cwd FROM fb_sessions WHERE id=? AND project_id IS NOT NULL), ''), ?),
+			?, ?, ?, NULLIF(?, ''),
+			COALESCE((SELECT project_id FROM fb_sessions WHERE id=?), NULLIF(?, ''), NULLIF(?, '')),
+			COALESCE(
+				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
+				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
+				'coding'))
+		ON DUPLICATE KEY UPDATE updated_at=IF(fb_sessions.agent_id=VALUES(agent_id), VALUES(updated_at), updated_at)`,
+		Postgres: `INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id, project_type)
+		VALUES($1, $2, $3, $4,
+			CASE WHEN COALESCE(
+				(SELECT project_type FROM fb_sessions WHERE id=$5 AND project_id IS NOT NULL),
+				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF($6, ''), NULLIF($7, ''))),
+				'coding') = 'batch' THEN 'disabled' ELSE $8 END, $9,
+			COALESCE(NULLIF((SELECT cwd FROM fb_sessions WHERE id=$10 AND project_id IS NOT NULL), ''), $11),
+			$12, $13, $14, NULLIF($15, ''),
+			COALESCE((SELECT project_id FROM fb_sessions WHERE id=$16), NULLIF($17, ''), NULLIF($18, '')),
+			COALESCE(
+				(SELECT project_type FROM fb_sessions WHERE id=$19 AND project_id IS NOT NULL),
+				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF($20, ''), NULLIF($21, ''))),
+				'coding'))
+		ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
+		WHERE fb_sessions.agent_id=excluded.agent_id`,
+	}
+	ensureSessionPresetSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT id, ?, ?, ? FROM fb_sessions
+		WHERE id=? AND agent_id=? AND project_type <> 'batch'
+			AND NOT EXISTS (SELECT 1 FROM fb_session_permission_state p WHERE p.session_id=?)
+		ON CONFLICT(session_id) DO NOTHING`,
+		MySQL: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT id, ?, ?, ? FROM fb_sessions
+		WHERE id=? AND agent_id=? AND project_type <> 'batch'
+			AND NOT EXISTS (SELECT 1 FROM fb_session_permission_state p WHERE p.session_id=?)
+		ON DUPLICATE KEY UPDATE session_id=session_id`,
+		Postgres: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT id, $1, $2, $3 FROM fb_sessions
+		WHERE id=$4 AND agent_id=$5 AND project_type <> 'batch'
+			AND NOT EXISTS (SELECT 1 FROM fb_session_permission_state p WHERE p.session_id=$6)
+		ON CONFLICT(session_id) DO NOTHING`,
+	}
+	sessionOwnerSelectSQL = dbx.SQL{
+		SQLite:   `SELECT agent_id FROM fb_sessions WHERE id=?`,
+		MySQL:    `SELECT agent_id FROM fb_sessions WHERE id=?`,
+		Postgres: `SELECT agent_id FROM fb_sessions WHERE id=$1`,
+	}
+	sessionExistsSQL = dbx.SQL{
+		SQLite: `
+SELECT CASE WHEN EXISTS(
+	SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?
+) THEN 1 ELSE 0 END`,
+		MySQL: `
+SELECT CASE WHEN EXISTS(
+	SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?
+) THEN 1 ELSE 0 END`,
+		Postgres: `
+SELECT CASE WHEN EXISTS(
+	SELECT 1 FROM fb_sessions WHERE id=$1 AND agent_id=$2
+) THEN 1 ELSE 0 END`,
+	}
+	setSessionTitleSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET title=?, updated_at=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_sessions SET title=?, updated_at=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_sessions SET title=$1, updated_at=$2 WHERE id=$3 AND agent_id=$4`,
+	}
+	sessionTitleSelectSQL = dbx.SQL{
+		SQLite:   `SELECT title FROM fb_sessions WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT title FROM fb_sessions WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT title FROM fb_sessions WHERE id=$1 AND agent_id=$2`,
+	}
+	setParentSessionIDSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET parent_session_id=NULLIF(?,''), updated_at=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_sessions SET parent_session_id=NULLIF(?,''), updated_at=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_sessions SET parent_session_id=NULLIF($1,''), updated_at=$2 WHERE id=$3 AND agent_id=$4`,
+	}
+	recentlyActiveSessionsSQL = dbx.SQL{
+		SQLite: `SELECT id, COALESCE(cwd, ''), updated_at
+		 FROM fb_sessions
+		 WHERE agent_id = ? AND updated_at >= ? AND project_type <> 'batch'
+		 ORDER BY updated_at DESC, id ASC
+		 LIMIT ?`,
+		MySQL: `SELECT id, COALESCE(cwd, ''), updated_at
+		 FROM fb_sessions
+		 WHERE agent_id = ? AND updated_at >= ? AND project_type <> 'batch'
+		 ORDER BY updated_at DESC, id ASC
+		 LIMIT ?`,
+		Postgres: `SELECT id, COALESCE(cwd, ''), updated_at
+		 FROM fb_sessions
+		 WHERE agent_id = $1 AND updated_at >= $2 AND project_type <> 'batch'
+		 ORDER BY updated_at DESC, id ASC
+		 LIMIT $3`,
+	}
+	childSessionsRecentSQL = dbx.SQL{
+		SQLite: `SELECT id, title, updated_at, source
+		 FROM fb_sessions
+		 WHERE parent_session_id = ? AND agent_id = ? AND source <> ?
+		 ORDER BY updated_at DESC
+		 LIMIT ?`,
+		MySQL: `SELECT id, title, updated_at, source
+		 FROM fb_sessions
+		 WHERE parent_session_id = ? AND agent_id = ? AND source <> ?
+		 ORDER BY updated_at DESC
+		 LIMIT ?`,
+		Postgres: `SELECT id, title, updated_at, source
+		 FROM fb_sessions
+		 WHERE parent_session_id = $1 AND agent_id = $2 AND source <> $3
+		 ORDER BY updated_at DESC
+		 LIMIT $4`,
+	}
+	listSessionsRecentSQL = dbx.SQL{
+		SQLite: `SELECT id, title, updated_at, source, COALESCE(project_id, '')
+	 FROM fb_sessions
+	 WHERE agent_id = ? AND source NOT IN (?, ?)
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC
+	 LIMIT ?`,
+		MySQL: `SELECT id, title, updated_at, source, COALESCE(project_id, '')
+	 FROM fb_sessions
+	 WHERE agent_id = ? AND source NOT IN (?, ?)
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC
+	 LIMIT ?`,
+		Postgres: `SELECT id, title, updated_at, source, COALESCE(project_id, '')
+	 FROM fb_sessions
+	 WHERE agent_id = $1 AND source NOT IN ($2, $3)
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC
+	 LIMIT $4`,
+	}
+	listSessionsOfSourceSQL = dbx.SQL{
+		SQLite: `SELECT id, title, updated_at, source
+	 FROM fb_sessions
+	 WHERE agent_id = ? AND project_id IS NULL AND source = ?
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id ASC
+	 LIMIT ?`,
+		MySQL: `SELECT id, title, updated_at, source
+	 FROM fb_sessions
+	 WHERE agent_id = ? AND project_id IS NULL AND source = ?
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id ASC
+	 LIMIT ?`,
+		Postgres: `SELECT id, title, updated_at, source
+	 FROM fb_sessions
+	 WHERE agent_id = $1 AND project_id IS NULL AND source = $2
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id ASC
+	 LIMIT $3`,
+	}
+	listSessionsForProjectSQL = dbx.SQL{
+		SQLite: `SELECT id, title, updated_at, project_id
+	 FROM fb_sessions
+	 WHERE agent_id = ? AND project_id = ? AND source = ?
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id
+	 LIMIT ? OFFSET ?`,
+		MySQL: `SELECT id, title, updated_at, project_id
+	 FROM fb_sessions
+	 WHERE agent_id = ? AND project_id = ? AND source = ?
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id
+	 LIMIT ? OFFSET ?`,
+		Postgres: `SELECT id, title, updated_at, project_id
+	 FROM fb_sessions
+	 WHERE agent_id = $1 AND project_id = $2 AND source = $3
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id
+	 LIMIT $4 OFFSET $5`,
+	}
+	listSessionsRecentPagedSQL = dbx.SQL{
+		SQLite: `SELECT id, title, updated_at, source
+	 FROM fb_sessions
+	 WHERE agent_id = ? AND source NOT IN (?, ?)
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id ASC
+	 LIMIT ? OFFSET ?`,
+		MySQL: `SELECT id, title, updated_at, source
+	 FROM fb_sessions
+	 WHERE agent_id = ? AND source NOT IN (?, ?)
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id ASC
+	 LIMIT ? OFFSET ?`,
+		Postgres: `SELECT id, title, updated_at, source
+	 FROM fb_sessions
+	 WHERE agent_id = $1 AND source NOT IN ($2, $3)
+	   AND ` + conversationHoldsAMessage + `
+	 ORDER BY updated_at DESC, id ASC
+	 LIMIT $4 OFFSET $5`,
+	}
+	sessionIDWithLatestMessageSQL = dbx.SQL{
+		SQLite: `SELECT s.id FROM fb_sessions s
+		 WHERE s.agent_id = ?
+		   AND EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.visibility = 'visible')
+		 ORDER BY s.updated_at DESC, s.id DESC
+		 LIMIT 1`,
+		MySQL: `SELECT s.id FROM fb_sessions s
+		 WHERE s.agent_id = ?
+		   AND EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.visibility = 'visible')
+		 ORDER BY s.updated_at DESC, s.id DESC
+		 LIMIT 1`,
+		Postgres: `SELECT s.id FROM fb_sessions s
+		 WHERE s.agent_id = $1
+		   AND EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.visibility = 'visible')
+		 ORDER BY s.updated_at DESC, s.id DESC
+		 LIMIT 1`,
+	}
+	lastAssistantTextSQL = dbx.SQL{
+		SQLite: `SELECT content FROM fb_messages
+		WHERE run_id = ? AND role = 'assistant' AND visibility = 'visible'
+		ORDER BY id DESC LIMIT 1`,
+		MySQL: `SELECT content FROM fb_messages
+		WHERE run_id = ? AND role = 'assistant' AND visibility = 'visible'
+		ORDER BY id DESC LIMIT 1`,
+		Postgres: `SELECT content FROM fb_messages
+		WHERE run_id = $1 AND role = 'assistant' AND visibility = 'visible'
+		ORDER BY id DESC LIMIT 1`,
+	}
+	lastTranscriptRowIDSQL = dbx.SQL{
+		SQLite: `
+		SELECT MAX(id) FROM fb_messages
+		WHERE session_id = ? AND visibility = 'visible'`,
+		MySQL: `
+		SELECT MAX(id) FROM fb_messages
+		WHERE session_id = ? AND visibility = 'visible'`,
+		Postgres: `
+		SELECT MAX(id) FROM fb_messages
+		WHERE session_id = $1 AND visibility = 'visible'`,
+	}
+	messagePartsSelectSQL = dbx.SQL{
+		SQLite:   `SELECT parts FROM fb_messages WHERE id=?`,
+		MySQL:    `SELECT parts FROM fb_messages WHERE id=?`,
+		Postgres: `SELECT parts FROM fb_messages WHERE id=$1`,
+	}
+	initialWindowUpdateSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET initial_window_id=? WHERE id=? AND agent_id=? AND initial_window_id=''`,
+		MySQL:    `UPDATE fb_sessions SET initial_window_id=? WHERE id=? AND agent_id=? AND initial_window_id=''`,
+		Postgres: `UPDATE fb_sessions SET initial_window_id=$1 WHERE id=$2 AND agent_id=$3 AND initial_window_id=''`,
+	}
+	initialWindowSelectSQL = dbx.SQL{
+		SQLite:   `SELECT initial_window_id FROM fb_sessions WHERE id=?`,
+		MySQL:    `SELECT initial_window_id FROM fb_sessions WHERE id=?`,
+		Postgres: `SELECT initial_window_id FROM fb_sessions WHERE id=$1`,
+	}
+	stampRunTimingSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_runs SET started_at_ms=?, finished_at_ms=?, worked_ms=?, updated_at=? WHERE id=? AND finished_at_ms IS NULL`,
+		MySQL:    `UPDATE fb_runs SET started_at_ms=?, finished_at_ms=?, worked_ms=?, updated_at=? WHERE id=? AND finished_at_ms IS NULL`,
+		Postgres: `UPDATE fb_runs SET started_at_ms=$1, finished_at_ms=$2, worked_ms=$3, updated_at=$4 WHERE id=$5 AND finished_at_ms IS NULL`,
+	}
+	stampRunFirstTokenSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_runs SET first_token_ms=?, updated_at=? WHERE id=? AND first_token_ms IS NULL`,
+		MySQL:    `UPDATE fb_runs SET first_token_ms=?, updated_at=? WHERE id=? AND first_token_ms IS NULL`,
+		Postgres: `UPDATE fb_runs SET first_token_ms=$1, updated_at=$2 WHERE id=$3 AND first_token_ms IS NULL`,
+	}
+	bindMessageToRunSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_messages SET run_id=? WHERE id=? AND session_id=? AND run_id IS NULL`,
+		MySQL:    `UPDATE fb_messages SET run_id=? WHERE id=? AND session_id=? AND run_id IS NULL`,
+		Postgres: `UPDATE fb_messages SET run_id=$1 WHERE id=$2 AND session_id=$3 AND run_id IS NULL`,
+	}
+	// insertMessageSQL's PostgreSQL arm returns the new row's id: pgx's
+	// database/sql result carries no LastInsertId.
+	insertMessageSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_messages(session_id, run_id, role, visibility, content, parts, message_id, model, usage_json, tool_step_id, tool_meta_json, exec_started_at_ms, exec_finished_at_ms, exec_duration_ms, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `INSERT INTO fb_messages(session_id, run_id, role, visibility, content, parts, message_id, model, usage_json, tool_step_id, tool_meta_json, exec_started_at_ms, exec_finished_at_ms, exec_duration_ms, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `INSERT INTO fb_messages(session_id, run_id, role, visibility, content, parts, message_id, model, usage_json, tool_step_id, tool_meta_json, exec_started_at_ms, exec_finished_at_ms, exec_duration_ms, created_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+	}
+	nameSessionFromTurnSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET title=?, updated_at=? WHERE id=? AND agent_id=? AND title=id`,
+		MySQL:    `UPDATE fb_sessions SET title=?, updated_at=? WHERE id=? AND agent_id=? AND title=id`,
+		Postgres: `UPDATE fb_sessions SET title=$1, updated_at=$2 WHERE id=$3 AND agent_id=$4 AND title=id`,
+	}
+	withdrawUserTurnSelectSQL = dbx.SQL{
+		SQLite:   `SELECT content FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+		MySQL:    `SELECT content FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+		Postgres: `SELECT content FROM fb_messages WHERE id=$1 AND session_id=$2 AND role='user'`,
+	}
+	sessionTitleForReleaseSQL = dbx.SQL{
+		SQLite:   `SELECT title FROM fb_sessions WHERE id=? AND agent_id=?`,
+		MySQL:    `SELECT title FROM fb_sessions WHERE id=? AND agent_id=?`,
+		Postgres: `SELECT title FROM fb_sessions WHERE id=$1 AND agent_id=$2`,
+	}
+	firstVisibleUserContentSQL = dbx.SQL{
+		SQLite: `SELECT content FROM fb_messages
+		  WHERE session_id=? AND role='user' AND visibility=?
+		  ORDER BY id LIMIT 1`,
+		MySQL: `SELECT content FROM fb_messages
+		  WHERE session_id=? AND role='user' AND visibility=?
+		  ORDER BY id LIMIT 1`,
+		Postgres: `SELECT content FROM fb_messages
+		  WHERE session_id=$1 AND role='user' AND visibility=$2
+		  ORDER BY id LIMIT 1`,
+	}
+	updateMessagePartsSQL = dbx.SQL{
+		SQLite: `UPDATE fb_messages SET parts=?
+		WHERE id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+		MySQL: `UPDATE fb_messages SET parts=?
+		WHERE id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+		Postgres: `UPDATE fb_messages SET parts=$1
+		WHERE id=$2 AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=$3)`,
+	}
+	updateMessageContentAndPartsSQL = dbx.SQL{
+		SQLite: `UPDATE fb_messages SET content=?, parts=?
+		WHERE id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+		MySQL: `UPDATE fb_messages SET content=?, parts=?
+		WHERE id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+		Postgres: `UPDATE fb_messages SET content=$1, parts=$2
+		WHERE id=$3 AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=$4)`,
+	}
+	messageRowOwnerSelectSQL = dbx.SQL{
+		SQLite:   `SELECT session_id FROM fb_messages WHERE id=?`,
+		MySQL:    `SELECT session_id FROM fb_messages WHERE id=?`,
+		Postgres: `SELECT session_id FROM fb_messages WHERE id=$1`,
+	}
+	setCompactBoundarySQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET compact_boundary_message_id=?, updated_at=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_sessions SET compact_boundary_message_id=?, updated_at=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_sessions SET compact_boundary_message_id=$1, updated_at=$2 WHERE id=$3 AND agent_id=$4`,
+	}
+	forkSessionSelectSQL = dbx.SQL{
+		SQLite:   `SELECT compact_boundary_message_id, context_reset_message_id, initial_window_id, memory_mode, memory_source, cwd, git_branch, project_id FROM fb_sessions WHERE id=?`,
+		MySQL:    `SELECT compact_boundary_message_id, context_reset_message_id, initial_window_id, memory_mode, memory_source, cwd, git_branch, project_id FROM fb_sessions WHERE id=?`,
+		Postgres: `SELECT compact_boundary_message_id, context_reset_message_id, initial_window_id, memory_mode, memory_source, cwd, git_branch, project_id FROM fb_sessions WHERE id=$1`,
+	}
+	forkSessionUpdateSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET compact_boundary_message_id=?, context_reset_message_id=?, initial_window_id=?, memory_mode=?, memory_source=?, cwd=?, git_branch=?, project_id=NULLIF(?,''), updated_at=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_sessions SET compact_boundary_message_id=?, context_reset_message_id=?, initial_window_id=?, memory_mode=?, memory_source=?, cwd=?, git_branch=?, project_id=NULLIF(?,''), updated_at=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_sessions SET compact_boundary_message_id=$1, context_reset_message_id=$2, initial_window_id=$3, memory_mode=$4, memory_source=$5, cwd=$6, git_branch=$7, project_id=NULLIF($8,''), updated_at=$9 WHERE id=$10 AND agent_id=$11`,
+	}
+	// forkPromptStateSQL copies the source's frozen prompt rows. SQLite's
+	// INSERT OR REPLACE and MySQL's ON DUPLICATE KEY UPDATE both replace a row
+	// the target already holds; PostgreSQL says so with excluded.
+	forkPromptStateSQL = dbx.SQL{
+		SQLite:   `INSERT OR REPLACE INTO fb_session_prompt_state(session_id, key, value, updated_at) SELECT ?, key, value, updated_at FROM fb_session_prompt_state WHERE session_id=?`,
+		MySQL:    `INSERT INTO fb_session_prompt_state(session_id, ` + "`key`" + `, value, updated_at) SELECT ?, ` + "`key`" + `, value, updated_at FROM fb_session_prompt_state WHERE session_id=? ON DUPLICATE KEY UPDATE ` + "`key`" + `=VALUES(` + "`key`" + `), value=VALUES(value), updated_at=VALUES(updated_at)`,
+		Postgres: `INSERT INTO fb_session_prompt_state(session_id, key, value, updated_at) SELECT $1, key, value, updated_at FROM fb_session_prompt_state WHERE session_id=$2 ON CONFLICT (session_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+	}
+	// forkEventsSQL copies the source's event history, ignoring rows whose
+	// (session_id, event_id) the target already holds.
+	forkEventsSQL = dbx.SQL{
+		SQLite:   `INSERT OR IGNORE INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) SELECT ?, event_id, run_id, event_type, payload_json, occurred_at_ms FROM fb_session_events WHERE session_id=? ORDER BY sequence`,
+		MySQL:    `INSERT INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) SELECT ?, event_id, run_id, event_type, payload_json, occurred_at_ms FROM fb_session_events WHERE session_id=? ORDER BY sequence ON DUPLICATE KEY UPDATE sequence=sequence`,
+		Postgres: `INSERT INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) SELECT $1, event_id, run_id, event_type, payload_json, occurred_at_ms FROM fb_session_events WHERE session_id=$2 ORDER BY sequence ON CONFLICT DO NOTHING`,
+	}
+	deleteSessionMessagesSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_messages WHERE session_id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+		MySQL:    `DELETE FROM fb_messages WHERE session_id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+		Postgres: `DELETE FROM fb_messages WHERE session_id=$1 AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=$2)`,
+	}
+	deleteRunMessageRowSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_messages WHERE id=? AND session_id=? AND run_id=?`,
+		MySQL:    `DELETE FROM fb_messages WHERE id=? AND session_id=? AND run_id=?`,
+		Postgres: `DELETE FROM fb_messages WHERE id=$1 AND session_id=$2 AND run_id=$3`,
+	}
+	setContextResetSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_sessions SET context_reset_message_id=NULLIF(?,0), updated_at=? WHERE id=? AND agent_id=?`,
+		MySQL:    `UPDATE fb_sessions SET context_reset_message_id=NULLIF(?,0), updated_at=? WHERE id=? AND agent_id=?`,
+		Postgres: `UPDATE fb_sessions SET context_reset_message_id=NULLIF($1,0), updated_at=$2 WHERE id=$3 AND agent_id=$4`,
+	}
+	contextResetSelectSQL = dbx.SQL{
+		SQLite:   `SELECT context_reset_message_id FROM fb_sessions WHERE id=?`,
+		MySQL:    `SELECT context_reset_message_id FROM fb_sessions WHERE id=?`,
+		Postgres: `SELECT context_reset_message_id FROM fb_sessions WHERE id=$1`,
+	}
+	compactBoundarySelectSQL = dbx.SQL{
+		SQLite:   `SELECT compact_boundary_message_id FROM fb_sessions WHERE id=?`,
+		MySQL:    `SELECT compact_boundary_message_id FROM fb_sessions WHERE id=?`,
+		Postgres: `SELECT compact_boundary_message_id FROM fb_sessions WHERE id=$1`,
+	}
+	sessionPromptStateSelectSQL = dbx.SQL{
+		SQLite:   `SELECT value FROM fb_session_prompt_state WHERE session_id=? AND key=?`,
+		MySQL:    `SELECT value FROM fb_session_prompt_state WHERE session_id=? AND ` + "`key`" + `=?`,
+		Postgres: `SELECT value FROM fb_session_prompt_state WHERE session_id=$1 AND key=$2`,
+	}
+	freezeSessionPromptStateSQL = dbx.SQL{
+		SQLite: `INSERT OR IGNORE INTO fb_session_prompt_state (session_id, key, value, updated_at)
+		 SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)`,
+		MySQL: `INSERT INTO fb_session_prompt_state (session_id, ` + "`key`" + `, value, updated_at)
+		 SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		 ON DUPLICATE KEY UPDATE session_id=session_id`,
+		Postgres: `INSERT INTO fb_session_prompt_state (session_id, key, value, updated_at)
+		 SELECT $1, $2, $3, $4 WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=$5 AND agent_id=$6)
+		 ON CONFLICT DO NOTHING`,
+	}
+	sessionModelSelectionSelectSQL = dbx.SQL{
+		SQLite: `SELECT m.provider, m.model, m.effort
+		FROM fb_session_model_state m
+		JOIN fb_sessions s ON s.id=m.session_id AND s.agent_id=?
+		WHERE m.session_id=?`,
+		MySQL: `SELECT m.provider, m.model, m.effort
+		FROM fb_session_model_state m
+		JOIN fb_sessions s ON s.id=m.session_id AND s.agent_id=?
+		WHERE m.session_id=?`,
+		Postgres: `SELECT m.provider, m.model, m.effort
+		FROM fb_session_model_state m
+		JOIN fb_sessions s ON s.id=m.session_id AND s.agent_id=$1
+		WHERE m.session_id=$2`,
+	}
+	imageRefusalSelectSQL = dbx.SQL{
+		SQLite: `SELECT r.reason
+		FROM fb_session_image_refusals r
+		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=?
+		WHERE r.session_id=? AND r.provider=? AND r.model=?`,
+		MySQL: `SELECT r.reason
+		FROM fb_session_image_refusals r
+		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=?
+		WHERE r.session_id=? AND r.provider=? AND r.model=?`,
+		Postgres: `SELECT r.reason
+		FROM fb_session_image_refusals r
+		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=$1
+		WHERE r.session_id=$2 AND r.provider=$3 AND r.model=$4`,
+	}
+	sessionExistsForCopySQL = dbx.SQL{
+		SQLite: `SELECT CASE WHEN EXISTS(
+			SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?
+		) THEN 1 ELSE 0 END`,
+		MySQL: `SELECT CASE WHEN EXISTS(
+			SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?
+		) THEN 1 ELSE 0 END`,
+		Postgres: `SELECT CASE WHEN EXISTS(
+			SELECT 1 FROM fb_sessions WHERE id=$1 AND agent_id=$2
+		) THEN 1 ELSE 0 END`,
+	}
+	latestSessionModelSelectionSQL = dbx.SQL{
+		SQLite: `SELECT p.provider, p.model, p.effort
+		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
+		WHERE s.agent_id = ? AND s.source IN (?, ?)
+		ORDER BY p.updated_at DESC, p.session_id DESC LIMIT 1`,
+		MySQL: `SELECT p.provider, p.model, p.effort
+		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
+		WHERE s.agent_id = ? AND s.source IN (?, ?)
+		ORDER BY p.updated_at DESC, p.session_id DESC LIMIT 1`,
+		Postgres: `SELECT p.provider, p.model, p.effort
+		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
+		WHERE s.agent_id = $1 AND s.source IN ($2, $3)
+		ORDER BY p.updated_at DESC, p.session_id DESC LIMIT 1`,
+	}
+	sessionFactsForModelDefaultSQL = dbx.SQL{
+		SQLite: `SELECT s.source,
+			EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.role != 'user')
+		FROM fb_sessions s WHERE s.id = ?`,
+		MySQL: `SELECT s.source,
+			EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.role != 'user')
+		FROM fb_sessions s WHERE s.id = ?`,
+		Postgres: `SELECT s.source,
+			EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.role != 'user')
+		FROM fb_sessions s WHERE s.id = $1`,
+	}
+	sessionPermissionPresetSelectSQL = dbx.SQL{
+		SQLite: `SELECT p.preset, p.source, p.updated_at
+		FROM fb_session_permission_state p
+		JOIN fb_sessions s ON s.id=p.session_id AND s.agent_id=?
+		WHERE p.session_id=?`,
+		MySQL: `SELECT p.preset, p.source, p.updated_at
+		FROM fb_session_permission_state p
+		JOIN fb_sessions s ON s.id=p.session_id AND s.agent_id=?
+		WHERE p.session_id=?`,
+		Postgres: `SELECT p.preset, p.source, p.updated_at
+		FROM fb_session_permission_state p
+		JOIN fb_sessions s ON s.id=p.session_id AND s.agent_id=$1
+		WHERE p.session_id=$2`,
+	}
+	lastToolResultContentSQL = dbx.SQL{
+		SQLite: `SELECT content FROM fb_messages
+		WHERE session_id=? AND role='tool'
+		ORDER BY id DESC LIMIT 1`,
+		MySQL: `SELECT content FROM fb_messages
+		WHERE session_id=? AND role='tool'
+		ORDER BY id DESC LIMIT 1`,
+		Postgres: `SELECT content FROM fb_messages
+		WHERE session_id=$1 AND role='tool'
+		ORDER BY id DESC LIMIT 1`,
+	}
+)
+
+// sessionModelStampFor is sessionModelStampSQL with the dialect's placeholder
+// and its two-argument scalar max: SQLite spells that max(X,Y), the other two
+// engines GREATEST. n is the ordinal of the stamp's parameter.
+func sessionModelStampFor(d dbx.Dialect, n int) string {
+	if d == dbx.SQLite {
+		return sessionModelStampSQL
+	}
+	ph := dbx.Placeholder(d, n)
+	return `GREATEST(` + ph + `, COALESCE((SELECT MAX(updated_at) FROM fb_session_model_state), 0) + 1)`
+}
+
+// saveSessionModelSelectionSQL is the upsert SaveSessionModelSelection runs,
+// with the stamp expression's placeholder numbered as the statement's n-th.
+func saveSessionModelSelectionSQL(d dbx.Dialect) string {
+	switch d {
+	case dbx.Postgres:
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
+		SELECT $1, $2, $3, $4, ` + sessionModelStampFor(dbx.Postgres, 5) + `
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=$6 AND agent_id=$7)
+		ON CONFLICT(session_id) DO UPDATE SET
+			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`
+	case dbx.MySQL:
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
+		SELECT ?, ?, ?, ?, ` + sessionModelStampFor(dbx.MySQL, 5) + `
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		ON DUPLICATE KEY UPDATE
+			provider=VALUES(provider), model=VALUES(model), effort=VALUES(effort), updated_at=VALUES(updated_at)`
+	default:
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
+		SELECT ?, ?, ?, ?, ` + sessionModelStampFor(dbx.SQLite, 5) + `
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`
+	}
+}
+
+// copySessionModelSelectionSQL is the upsert CopySessionModelSelection runs.
+func copySessionModelSelectionSQL(d dbx.Dialect) string {
+	switch d {
+	case dbx.Postgres:
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
+		SELECT $1, src.provider, src.model, src.effort, ` + sessionModelStampFor(dbx.Postgres, 2) + `
+		FROM fb_session_model_state src
+		WHERE src.session_id=$3 AND EXISTS (
+			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=$4
+		)
+		ON CONFLICT(session_id) DO UPDATE SET
+			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`
+	case dbx.MySQL:
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
+		SELECT ?, src.provider, src.model, src.effort, ` + sessionModelStampFor(dbx.MySQL, 2) + `
+		FROM fb_session_model_state src
+		WHERE src.session_id=? AND EXISTS (
+			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
+		)
+		ON DUPLICATE KEY UPDATE
+			provider=VALUES(provider), model=VALUES(model), effort=VALUES(effort), updated_at=VALUES(updated_at)`
+	default:
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
+		SELECT ?, src.provider, src.model, src.effort, ` + sessionModelStampFor(dbx.SQLite, 2) + `
+		FROM fb_session_model_state src
+		WHERE src.session_id=? AND EXISTS (
+			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
+		)
+		ON CONFLICT(session_id) DO UPDATE SET
+			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`
+	}
+}
+
+// recordImageRefusalSQL is the upsert RecordImageRefusal runs.
+var recordImageRefusalSQL = dbx.SQL{
+	SQLite: `INSERT INTO fb_session_image_refusals(session_id, provider, model, reason, observed_at)
+		SELECT ?, ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		ON CONFLICT(session_id, provider, model) DO UPDATE SET
+			reason=excluded.reason, observed_at=excluded.observed_at`,
+	MySQL: `INSERT INTO fb_session_image_refusals(session_id, provider, model, reason, observed_at)
+		SELECT ?, ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		ON DUPLICATE KEY UPDATE
+			reason=VALUES(reason), observed_at=VALUES(observed_at)`,
+	Postgres: `INSERT INTO fb_session_image_refusals(session_id, provider, model, reason, observed_at)
+		SELECT $1, $2, $3, $4, $5
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=$6 AND agent_id=$7)
+		ON CONFLICT(session_id, provider, model) DO UPDATE SET
+			reason=excluded.reason, observed_at=excluded.observed_at`,
+}
+
+// saveSessionPermissionPresetSQL is the upsert SaveSessionPermissionPreset runs.
+var saveSessionPermissionPresetSQL = dbx.SQL{
+	SQLite: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			preset=excluded.preset, source=excluded.source, updated_at=excluded.updated_at`,
+	MySQL: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
+		ON DUPLICATE KEY UPDATE
+			preset=VALUES(preset), source=VALUES(source), updated_at=VALUES(updated_at)`,
+	Postgres: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT $1, $2, $3, $4
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=$5 AND agent_id=$6)
+		ON CONFLICT(session_id) DO UPDATE SET
+			preset=excluded.preset, source=excluded.source, updated_at=excluded.updated_at`,
+}
+
+// copySessionPermissionPresetSQL is the upsert CopySessionPermissionPreset runs.
+var copySessionPermissionPresetSQL = dbx.SQL{
+	SQLite: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT ?, src.preset, src.source, ?
+		FROM fb_session_permission_state src
+		WHERE src.session_id=? AND EXISTS (
+			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
+		)
+		ON CONFLICT(session_id) DO UPDATE SET
+			preset=excluded.preset, source=excluded.source, updated_at=excluded.updated_at`,
+	MySQL: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT ?, src.preset, src.source, ?
+		FROM fb_session_permission_state src
+		WHERE src.session_id=? AND EXISTS (
+			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
+		)
+		ON DUPLICATE KEY UPDATE
+			preset=VALUES(preset), source=VALUES(source), updated_at=VALUES(updated_at)`,
+	Postgres: `INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
+		SELECT $1, src.preset, src.source, $2
+		FROM fb_session_permission_state src
+		WHERE src.session_id=$3 AND EXISTS (
+			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=$4
+		)
+		ON CONFLICT(session_id) DO UPDATE SET
+			preset=excluded.preset, source=excluded.source, updated_at=excluded.updated_at`,
+}
+
+// projectChannelSessionsSQL reads a project channel's stamped session ids. The
+// LIKE is the channel prefix pattern; MySQL lowercases both sides and
+// PostgreSQL writes ILIKE, matching SQLite's ASCII-case-insensitive LIKE.
+var projectChannelSessionsSQL = dbx.SQL{
+	SQLite: `SELECT id, title, updated_at, source, COALESCE(project_id, '')
+		 FROM fb_sessions
+		 WHERE agent_id = ? AND project_id = ? AND id LIKE ?
+		 ORDER BY updated_at DESC, id
+		 LIMIT ?`,
+	MySQL: `SELECT id, title, updated_at, source, COALESCE(project_id, '')
+		 FROM fb_sessions
+		 WHERE agent_id = ? AND project_id = ? AND LOWER(id) LIKE LOWER(?)
+		 ORDER BY updated_at DESC, id
+		 LIMIT ?`,
+	Postgres: `SELECT id, title, updated_at, source, COALESCE(project_id, '')
+		 FROM fb_sessions
+		 WHERE agent_id = $1 AND project_id = $2 AND id ILIKE $3
+		 ORDER BY updated_at DESC, id
+		 LIMIT $4`,
+}
+
+// touchSessionModelSelectionSQL is the refresh TouchSessionModelSelection runs.
+func touchSessionModelSelectionSQL(d dbx.Dialect) string {
+	switch d {
+	case dbx.Postgres:
+		return `UPDATE fb_session_model_state SET updated_at = ` + sessionModelStampFor(dbx.Postgres, 1) + `
+		WHERE session_id = $2
+		  AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = $3 AND source IN ($4, $5))`
+	case dbx.MySQL:
+		return `UPDATE fb_session_model_state SET updated_at = ` + sessionModelStampFor(dbx.MySQL, 1) + `
+		WHERE session_id = ?
+		  AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = ? AND source IN (?, ?))`
+	default:
+		return `UPDATE fb_session_model_state SET updated_at = ` + sessionModelStampFor(dbx.SQLite, 1) + `
+		WHERE session_id = ?
+		  AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = ? AND source IN (?, ?))`
+	}
+}
+
+// deleteSessionsSpillPathsSQL reads the spilled-output paths a session's tool
+// rows point at. SQLite's json_valid has no PostgreSQL 14 built-in; the column
+// holds what the append paths validated with encoding/json or the empty
+// default, so NULLIF(…, '') excludes the one value that is not JSON.
+func deleteSessionsSpillPathsSQL(d dbx.Dialect, placeholders string) string {
+	if d == dbx.Postgres {
+		return `
+SELECT DISTINCT m.tool_meta_json::jsonb->>'full_path'
+FROM fb_messages m
+JOIN fb_sessions s ON s.id = m.session_id AND s.agent_id = $1
+WHERE m.session_id IN (` + placeholders + `)
+  AND NULLIF(m.tool_meta_json, '') IS NOT NULL
+  AND m.tool_meta_json::jsonb->>'full_path' IS NOT NULL
+  AND TRIM(m.tool_meta_json::jsonb->>'full_path') <> ''`
+	}
+	if d == dbx.MySQL {
+		return `
+SELECT DISTINCT JSON_UNQUOTE(JSON_EXTRACT(m.tool_meta_json, '$.full_path'))
+FROM fb_messages m
+JOIN fb_sessions s ON s.id = m.session_id AND s.agent_id = ?
+WHERE m.session_id IN (` + placeholders + `)
+  AND JSON_VALID(m.tool_meta_json)
+  AND JSON_EXTRACT(m.tool_meta_json, '$.full_path') IS NOT NULL
+  AND TRIM(JSON_UNQUOTE(JSON_EXTRACT(m.tool_meta_json, '$.full_path'))) <> ''`
+	}
+	return `
+SELECT DISTINCT json_extract(m.tool_meta_json, '$.full_path')
+FROM fb_messages m
+JOIN fb_sessions s ON s.id = m.session_id AND s.agent_id = ?
+WHERE m.session_id IN (` + placeholders + `)
+  AND json_valid(m.tool_meta_json)
+  AND json_extract(m.tool_meta_json, '$.full_path') IS NOT NULL
+  AND TRIM(json_extract(m.tool_meta_json, '$.full_path')) <> ''`
+}
+
+// titleLikeFor renders the drawer's title search on d: SQLite's LIKE is
+// case-insensitive for ASCII, so MySQL lowercases both sides and PostgreSQL
+// writes ILIKE. The argument is the same "%"+q+"%" on every engine.
+func titleLikeFor(d dbx.Dialect, column, placeholder string) string {
+	switch d {
+	case dbx.MySQL:
+		return `LOWER(` + column + `) LIKE LOWER(` + placeholder + `)`
+	case dbx.Postgres:
+		return column + ` ILIKE ` + placeholder
+	default:
+		return column + ` LIKE ` + placeholder
+	}
+}
+
 type SessionStore struct {
 	db           *sql.DB
 	defaultsMu   sync.RWMutex
@@ -218,7 +954,7 @@ func (s *SessionStore) SetSessionSource(ctx context.Context, sessionID, source s
 	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE fb_sessions SET source=?, updated_at=updated_at WHERE id=? AND agent_id=?`,
+	res, err := dbx.Exec(ctx, s.db, setSessionSourceSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(source), sessionID, s.AgentID())
 	if err != nil {
 		return err
@@ -285,22 +1021,7 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	// parent belongs to a project, else the birth project's), so a later type
 	// edit only reaches sessions born after it. A batch session is born with
 	// memory disabled: it never generates memories (owner 2026-10-26).
-	res, err := q.ExecContext(ctx,
-		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id, project_type)
-		VALUES(?, ?, ?, ?,
-			CASE WHEN COALESCE(
-				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
-				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
-				'coding') = 'batch' THEN 'disabled' ELSE ? END, ?,
-			COALESCE(NULLIF((SELECT cwd FROM fb_sessions WHERE id=? AND project_id IS NOT NULL), ''), ?),
-			?, ?, ?, NULLIF(?, ''),
-			COALESCE((SELECT project_id FROM fb_sessions WHERE id=?), NULLIF(?, ''), NULLIF(?, '')),
-			COALESCE(
-				(SELECT project_type FROM fb_sessions WHERE id=? AND project_id IS NOT NULL),
-				(SELECT project_type FROM fb_projects WHERE id = COALESCE(NULLIF(?, ''), NULLIF(?, ''))),
-				'coding'))
-		ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
-		WHERE fb_sessions.agent_id=excluded.agent_id`,
+	res, err := q.ExecContext(ctx, ensureSessionUpsertSQL.For(dbx.DialectOf(q)),
 		id, title, now, now,
 		parentID, birthProject, defaultProject, mode, source,
 		cwdParent, cwd,
@@ -326,12 +1047,7 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	// choice, a --yolo one, an inferred one) is never overwritten. The SELECT
 	// ends with a WHERE clause so SQLite binds ON CONFLICT to the insert.
 	nowMillis := time.Now().UnixMilli()
-	if _, err := q.ExecContext(ctx,
-		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
-		SELECT id, ?, ?, ? FROM fb_sessions
-		WHERE id=? AND agent_id=? AND project_type <> 'batch'
-			AND NOT EXISTS (SELECT 1 FROM fb_session_permission_state p WHERE p.session_id=?)
-		ON CONFLICT(session_id) DO NOTHING`,
+	if _, err := q.ExecContext(ctx, ensureSessionPresetSQL.For(dbx.DialectOf(q)),
 		bornPreset, SessionPresetSourceDefault, nowMillis, id, s.AgentID(), id,
 	); err != nil {
 		return fmt.Errorf("seed session approval preset: %w", err)
@@ -359,7 +1075,7 @@ func (s *SessionStore) requireOwned(ctx context.Context, q dbtx, sessionID strin
 		return nil
 	}
 	var owner string
-	err := q.QueryRowContext(ctx, `SELECT agent_id FROM fb_sessions WHERE id=?`, sessionID).Scan(&owner)
+	err := q.QueryRowContext(ctx, sessionOwnerSelectSQL.For(dbx.DialectOf(q)), sessionID).Scan(&owner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -383,10 +1099,7 @@ func (s *SessionStore) HasSession(ctx context.Context, id string) (bool, error) 
 	// Only this agent's conversations exist as far as callers are concerned:
 	// answering "yes" for another agent's session is what lets a resume reach it.
 	var exists int
-	err := s.db.QueryRowContext(ctx, `
-SELECT CASE WHEN EXISTS(
-	SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?
-) THEN 1 ELSE 0 END`,
+	err := s.db.QueryRowContext(ctx, sessionExistsSQL.For(dbx.DialectOf(s.db)),
 		id, s.AgentID()).Scan(&exists)
 	if err != nil {
 		return false, err
@@ -418,20 +1131,21 @@ func (s *SessionStore) LastActiveByIDs(ctx context.Context, ids []string) (map[s
 		}
 	}
 	out := make(map[string]int64, len(cleaned))
+	d := dbx.DialectOf(s.db)
 	for start := 0; start < len(cleaned); start += sessionLastActiveChunk {
 		end := start + sessionLastActiveChunk
 		if end > len(cleaned) {
 			end = len(cleaned)
 		}
 		chunk := cleaned[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		placeholders := dbx.Placeholders(d, 1, len(chunk))
 		args := make([]any, 0, len(chunk)+1)
 		for _, id := range chunk {
 			args = append(args, id)
 		}
 		args = append(args, s.AgentID())
 		rows, err := s.db.QueryContext(ctx,
-			`SELECT id, updated_at FROM fb_sessions WHERE id IN (`+placeholders+`) AND agent_id=?`, args...)
+			`SELECT id, updated_at FROM fb_sessions WHERE id IN (`+placeholders+`) AND agent_id=`+dbx.Placeholder(d, len(chunk)+1), args...)
 		if err != nil {
 			return nil, err
 		}
@@ -524,7 +1238,7 @@ func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (Sessio
 			}
 			chunk = deletable
 		}
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		placeholders := dbx.Placeholders(tx.Dialect(), 2, len(chunk))
 		args := make([]any, 0, len(chunk)+1)
 		args = append(args, agentID)
 		for _, id := range chunk {
@@ -543,12 +1257,12 @@ func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (Sessio
 		deleteArgs := make([]any, 0, len(args)+len(liveArgs))
 		deleteArgs = append(deleteArgs, args...)
 		deleteArgs = append(deleteArgs, liveArgs...)
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM fb_sessions WHERE agent_id = ? AND id IN (`+placeholders+`)
+		deleteStmt := `DELETE FROM fb_sessions WHERE agent_id = ` + dbx.Placeholder(tx.Dialect(), 1) + ` AND id IN (` + placeholders + `)
   AND NOT EXISTS (
     SELECT 1 FROM fb_runs rr
     WHERE rr.session_id = fb_sessions.id AND rr.parent_run_id IS NULL
-      AND `+fmt.Sprintf(livePrimaryRunCondition, "rr")+`)`, deleteArgs...); err != nil {
+      AND ` + livePrimaryRunConditionFor(tx.Dialect(), "rr", len(args)+1) + `)`
+		if _, err := tx.ExecContext(ctx, deleteStmt, deleteArgs...); err != nil {
 			return SessionLeftovers{}, err
 		}
 	}
@@ -562,20 +1276,22 @@ func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (Sessio
 // live primary run still holds. DeleteSessions asks it inside the delete's
 // own transaction and with the delete's own clock, so the two never disagree.
 func deleteSessionsSurvivors(ctx context.Context, q dbtx, ids []string, agentID string, liveArgs []any) ([]string, error) {
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	d := dbx.DialectOf(q)
+	placeholders := dbx.Placeholders(d, 2, len(ids))
 	args := make([]any, 0, len(ids)+1+len(liveArgs))
 	args = append(args, agentID)
 	for _, id := range ids {
 		args = append(args, id)
 	}
 	args = append(args, liveArgs...)
-	rows, err := q.QueryContext(ctx, `
+	query := `
 SELECT id FROM fb_sessions
-WHERE agent_id = ? AND id IN (`+placeholders+`)
+WHERE agent_id = ` + dbx.Placeholder(d, 1) + ` AND id IN (` + placeholders + `)
   AND EXISTS (
     SELECT 1 FROM fb_runs rr
     WHERE rr.session_id = fb_sessions.id AND rr.parent_run_id IS NULL
-      AND `+fmt.Sprintf(livePrimaryRunCondition, "rr")+`)`, args...)
+      AND ` + livePrimaryRunConditionFor(d, "rr", len(args)-len(liveArgs)+1) + `)`
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -592,13 +1308,14 @@ WHERE agent_id = ? AND id IN (`+placeholders+`)
 }
 
 func deleteSessionsFiles(ctx context.Context, q dbtx, placeholders string, args []any) ([]File, error) {
-	rows, err := q.QueryContext(ctx, `
+	query := `
 SELECT f.id, f.session_id, f.original_name, f.media_type, f.size_bytes, f.sha256,
        f.storage_backend, f.storage_bucket, f.storage_key,
        f.parse_status, f.parsed_text_path, f.parse_error, f.created_at, f.updated_at
 FROM fb_files f
-JOIN fb_sessions s ON s.id = f.session_id AND s.agent_id = ?
-WHERE f.session_id IN (`+placeholders+`)`, args...)
+JOIN fb_sessions s ON s.id = f.session_id AND s.agent_id = ` + dbx.Placeholder(dbx.DialectOf(q), 1) + `
+WHERE f.session_id IN (` + placeholders + `)`
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -621,14 +1338,7 @@ WHERE f.session_id IN (`+placeholders+`)`, args...)
 // in the tool row's metadata, so the files can be found again from the
 // database alone once the rows are about to go.
 func deleteSessionsSpillPaths(ctx context.Context, q dbtx, placeholders string, args []any) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `
-SELECT DISTINCT json_extract(m.tool_meta_json, '$.full_path')
-FROM fb_messages m
-JOIN fb_sessions s ON s.id = m.session_id AND s.agent_id = ?
-WHERE m.session_id IN (`+placeholders+`)
-  AND json_valid(m.tool_meta_json)
-  AND json_extract(m.tool_meta_json, '$.full_path') IS NOT NULL
-  AND TRIM(json_extract(m.tool_meta_json, '$.full_path')) <> ''`, args...)
+	rows, err := q.QueryContext(ctx, deleteSessionsSpillPathsSQL(dbx.DialectOf(q), placeholders), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -660,7 +1370,7 @@ func (s *SessionStore) SetTitle(ctx context.Context, id string, title string) er
 	if err := s.Ensure(ctx, id, title); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE fb_sessions SET title=?, updated_at=? WHERE id=? AND agent_id=?`, title, now, id, s.AgentID())
+	_, err := dbx.Exec(ctx, s.db, setSessionTitleSQL.For(dbx.DialectOf(s.db)), title, now, id, s.AgentID())
 	return err
 }
 
@@ -676,7 +1386,7 @@ func (s *SessionStore) SessionTitle(ctx context.Context, id string) (string, err
 		return "", nil
 	}
 	var title string
-	err := s.db.QueryRowContext(ctx, `SELECT title FROM fb_sessions WHERE id=? AND agent_id=?`, id, s.AgentID()).Scan(&title)
+	err := s.db.QueryRowContext(ctx, sessionTitleSelectSQL.For(dbx.DialectOf(s.db)), id, s.AgentID()).Scan(&title)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -702,7 +1412,7 @@ func (s *SessionStore) SetParentSessionID(ctx context.Context, id string, parent
 	if err := s.Ensure(ctx, id, id); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE fb_sessions SET parent_session_id=NULLIF(?,''), updated_at=? WHERE id=? AND agent_id=?`, parentSessionID, now, id, s.AgentID())
+	_, err := dbx.Exec(ctx, s.db, setParentSessionIDSQL.For(dbx.DialectOf(s.db)), parentSessionID, now, id, s.AgentID())
 	return err
 }
 
@@ -786,12 +1496,7 @@ func (s *SessionStore) RecentlyActiveSessions(ctx context.Context, since time.Ti
 	if limit <= 0 {
 		limit = 64
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, COALESCE(cwd, ''), updated_at
-		 FROM fb_sessions
-		 WHERE agent_id = ? AND updated_at >= ? AND project_type <> 'batch'
-		 ORDER BY updated_at DESC, id ASC
-		 LIMIT ?`,
+	rows, err := s.db.QueryContext(ctx, recentlyActiveSessionsSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), since.Unix(), limit)
 	if err != nil {
 		return nil, err
@@ -822,12 +1527,7 @@ func (s *SessionStore) ListChildSessionsRecent(ctx context.Context, parentSessio
 	if limit > 500 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at, source
-		 FROM fb_sessions
-		 WHERE parent_session_id = ? AND agent_id = ? AND source <> ?
-		 ORDER BY updated_at DESC
-		 LIMIT ?`,
+	rows, err := s.db.QueryContext(ctx, childSessionsRecentSQL.For(dbx.DialectOf(s.db)),
 		parentSessionID, s.AgentID(), SessionSourceSubagent, limit)
 	if err != nil {
 		return nil, err
@@ -871,13 +1571,7 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 	}
 	// project_id rides along so a surface can tell a project's sessions from
 	// the agent's own conversations without a second lookup per row.
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
-		 FROM fb_sessions
-		 WHERE agent_id = ? AND source NOT IN (?, ?)
-		   AND `+conversationHoldsAMessage+`
-		 ORDER BY updated_at DESC
-		 LIMIT ?`,
+	rows, err := s.db.QueryContext(ctx, listSessionsRecentSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), SessionSourceCron, SessionSourceSubagent, limit)
 	if err != nil {
 		return nil, err
@@ -914,13 +1608,7 @@ func (s *SessionStore) ListSessionsOfSource(ctx context.Context, source string, 
 	if limit > 500 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at, source
-		 FROM fb_sessions
-		 WHERE agent_id = ? AND project_id IS NULL AND source = ?
-		   AND `+conversationHoldsAMessage+`
-		 ORDER BY updated_at DESC, id ASC
-		 LIMIT ?`,
+	rows, err := s.db.QueryContext(ctx, listSessionsOfSourceSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), source, limit)
 	if err != nil {
 		return nil, err
@@ -955,15 +1643,20 @@ const conversationsMaxPageSize = 100
 // execution of a task, reached from that project's task page and its execution
 // history, so the drawer leaves them out even when it asks for one project's
 // rows (plan 153).
-func (s *SessionStore) conversationsWhere(q, projectID string) (string, []any) {
-	where := `agent_id = ? AND source IN (?, ?) AND (project_id IS NOT NULL OR source = ?) AND ` + conversationHoldsAMessage + ` AND project_type <> 'batch'`
+func (s *SessionStore) conversationsWhere(d dbx.Dialect, q, projectID string) (string, []any) {
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
+	where := `agent_id = ` + next() + ` AND source IN (` + next() + `, ` + next() + `) AND (project_id IS NOT NULL OR source = ` + next() + `) AND ` + conversationHoldsAMessage + ` AND project_type <> 'batch'`
 	args := []any{s.AgentID(), SessionSourceConversation, SessionSourceWorkshop, SessionSourceWorkshop}
 	if projectID = strings.TrimSpace(projectID); projectID != "" {
-		where += ` AND project_id = ?`
+		where += ` AND project_id = ` + next()
 		args = append(args, projectID)
 	}
 	if q = strings.TrimSpace(q); q != "" {
-		where += ` AND title LIKE ?`
+		where += ` AND ` + titleLikeFor(d, "title", next())
 		args = append(args, "%"+q+"%")
 	}
 	return where, args
@@ -994,7 +1687,8 @@ func (s *SessionStore) ListConversationsPage(ctx context.Context, q, projectID s
 	if offset < 0 {
 		offset = 0
 	}
-	where, args := s.conversationsWhere(q, projectID)
+	d := dbx.DialectOf(s.db)
+	where, args := s.conversationsWhere(d, q, projectID)
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -1004,13 +1698,12 @@ func (s *SessionStore) ListConversationsPage(ctx context.Context, q, projectID s
 	if offset >= total {
 		offset = max(total-1, 0) / limit * limit
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
-		 FROM fb_sessions
-		 WHERE `+where+`
-		 ORDER BY updated_at DESC, id ASC
-		 LIMIT ? OFFSET ?`,
-		append(args, limit, offset)...)
+	query := `SELECT id, title, updated_at, source, COALESCE(project_id, '')
+	 FROM fb_sessions
+	 WHERE ` + where + `
+	 ORDER BY updated_at DESC, id ASC
+	 LIMIT ` + dbx.Placeholder(d, len(args)+1) + ` OFFSET ` + dbx.Placeholder(d, len(args)+2)
+	rows, err := s.db.QueryContext(ctx, query, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1049,13 +1742,7 @@ func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID str
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at, project_id
-		 FROM fb_sessions
-		 WHERE agent_id = ? AND project_id = ? AND source = ?
-		   AND `+conversationHoldsAMessage+`
-		 ORDER BY updated_at DESC, id
-		 LIMIT ? OFFSET ?`,
+	rows, err := s.db.QueryContext(ctx, listSessionsForProjectSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), projectID, SessionSourceConversation, limit, offset)
 	if err != nil {
 		return nil, err
@@ -1090,12 +1777,7 @@ func (s *SessionStore) ProjectChannelSessions(ctx context.Context, projectID str
 		limit = 500
 	}
 	pattern := "%-" + hex.EncodeToString([]byte(projectID)) + "-%"
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
-		 FROM fb_sessions
-		 WHERE agent_id = ? AND project_id = ? AND id LIKE ?
-		 ORDER BY updated_at DESC, id
-		 LIMIT ?`,
+	rows, err := s.db.QueryContext(ctx, projectChannelSessionsSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), projectID, pattern, limit)
 	if err != nil {
 		return nil, err
@@ -1161,11 +1843,16 @@ const projectSessionMessageCount = `(SELECT COUNT(*) FROM fb_messages m
 // table carries: this agent's conversations, bound to the project, that hold a
 // message (the same rows ListSessionsForProject lists), optionally narrowed to
 // the ones whose title matches the search box.
-func (s *SessionStore) projectSessionsWhere(projectID, search string) (string, []any) {
-	where := `fb_sessions.agent_id = ? AND fb_sessions.project_id = ? AND fb_sessions.source = ? AND ` + conversationHoldsAMessage
+func (s *SessionStore) projectSessionsWhere(d dbx.Dialect, projectID, search string) (string, []any) {
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
+	where := `fb_sessions.agent_id = ` + next() + ` AND fb_sessions.project_id = ` + next() + ` AND fb_sessions.source = ` + next() + ` AND ` + conversationHoldsAMessage
 	args := []any{s.AgentID(), projectID, SessionSourceConversation}
 	if search = strings.TrimSpace(search); search != "" {
-		where += ` AND fb_sessions.title LIKE ?`
+		where += ` AND ` + titleLikeFor(d, "fb_sessions.title", next())
 		args = append(args, "%"+search+"%")
 	}
 	return where, args
@@ -1190,8 +1877,8 @@ func projectSessionsOrder(opts ProjectSessionsQuery) string {
 // function so the test that pins the query plan can run EXPLAIN over the very
 // text the store executes — the plan cannot drift away from the query it
 // describes.
-func (s *SessionStore) projectSessionsPageSQL(projectID string, opts ProjectSessionsQuery, limit, offset int) (string, []any) {
-	where, args := s.projectSessionsWhere(projectID, opts.Search)
+func (s *SessionStore) projectSessionsPageSQL(d dbx.Dialect, projectID string, opts ProjectSessionsQuery, limit, offset int) (string, []any) {
+	where, args := s.projectSessionsWhere(d, projectID, opts.Search)
 	query := `SELECT fb_sessions.id, fb_sessions.title, fb_sessions.created_at, fb_sessions.updated_at,
 	        COALESCE(model_state.model, ''),
 	        ` + projectSessionMessageCount + `,
@@ -1200,7 +1887,7 @@ func (s *SessionStore) projectSessionsPageSQL(projectID string, opts ProjectSess
 	 LEFT JOIN fb_session_model_state model_state ON model_state.session_id = fb_sessions.id
 	 WHERE ` + where + `
 	 ORDER BY ` + projectSessionsOrder(opts) + `
-	 LIMIT ? OFFSET ?`
+	 LIMIT ` + dbx.Placeholder(d, len(args)+1) + ` OFFSET ` + dbx.Placeholder(d, len(args)+2)
 	return query, append(args, limit, offset)
 }
 
@@ -1218,7 +1905,8 @@ func (s *SessionStore) ListSessionsForProjectPage(ctx context.Context, projectID
 		return []ProjectSessionRow{}, 0, nil
 	}
 	limit, offset = projectPageWindow(limit, offset)
-	where, countArgs := s.projectSessionsWhere(projectID, opts.Search)
+	d := dbx.DialectOf(s.db)
+	where, countArgs := s.projectSessionsWhere(d, projectID, opts.Search)
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE `+where, countArgs...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -1228,7 +1916,7 @@ func (s *SessionStore) ListSessionsForProjectPage(ctx context.Context, projectID
 	if offset >= total {
 		offset = max(total-1, 0) / limit * limit
 	}
-	query, args := s.projectSessionsPageSQL(projectID, opts, limit, offset)
+	query, args := s.projectSessionsPageSQL(d, projectID, opts, limit, offset)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
@@ -1262,7 +1950,7 @@ func (s *SessionStore) ConversationCountsByProject(ctx context.Context, projectI
 	for _, id := range projectIDs {
 		args = append(args, id)
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(projectIDs)), ",")
+	placeholders := dbx.Placeholders(dbx.DialectOf(s.db), 3, len(projectIDs))
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT project_id, COUNT(*) FROM fb_sessions
 		 WHERE agent_id = ? AND source = ? AND project_id IN (`+placeholders+`)
@@ -1307,13 +1995,7 @@ func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offse
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at, source
-		 FROM fb_sessions
-		 WHERE agent_id = ? AND source NOT IN (?, ?)
-		   AND `+conversationHoldsAMessage+`
-		 ORDER BY updated_at DESC, id ASC
-		 LIMIT ? OFFSET ?`,
+	rows, err := s.db.QueryContext(ctx, listSessionsRecentPagedSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), SessionSourceCron, SessionSourceSubagent, limit, offset)
 	if err != nil {
 		return nil, err
@@ -1338,12 +2020,7 @@ func (s *SessionStore) SessionIDWithLatestMessage(ctx context.Context) (string, 
 	// has a visible message: an index-range answer to what the message row
 	// scan used to compute over every row the tenant ever wrote.
 	var sid sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT s.id FROM fb_sessions s
-		 WHERE s.agent_id = ?
-		   AND EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.visibility = 'visible')
-		 ORDER BY s.updated_at DESC, s.id DESC
-		 LIMIT 1`, s.AgentID()).Scan(&sid)
+	err := s.db.QueryRowContext(ctx, sessionIDWithLatestMessageSQL.For(dbx.DialectOf(s.db)), s.AgentID()).Scan(&sid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -1392,21 +2069,27 @@ func (s *SessionStore) ListTranscriptRecent(ctx context.Context, sessionID strin
 			return out, nil
 		}
 	}
+	d := dbx.DialectOf(s.db)
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
 	query := `SELECT id, role, content, message_id, parts, tool_step_id, created_at
 		 FROM fb_messages
-		 WHERE session_id = ?
+		 WHERE session_id = ` + next() + `
 		   AND visibility = 'visible'`
 	args := []any{sessionID}
 	if useProjection && boundaryID > 0 {
-		query += ` AND id >= ?`
+		query += ` AND id >= ` + next()
 		args = append(args, boundaryID)
 	} else if floor > 0 {
-		query += ` AND id > ?`
+		query += ` AND id > ` + next()
 		args = append(args, floor)
 	}
 	query += ` ORDER BY id DESC`
 	if limit > 0 {
-		query += ` LIMIT ?`
+		query += ` LIMIT ` + next()
 		args = append(args, limit)
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1457,21 +2140,27 @@ func (s *SessionStore) ListRecentMessages(ctx context.Context, sessionID string,
 			return out, nil
 		}
 	}
+	d := dbx.DialectOf(s.db)
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
 	query := `SELECT ` + messageColumnsJoined + `
 		 FROM fb_messages m LEFT JOIN fb_runs r ON r.id = m.run_id
-		 WHERE m.session_id = ?
+		 WHERE m.session_id = ` + next() + `
 		   AND m.visibility = 'visible'`
 	args := []any{sessionID}
 	if useProjection && boundaryID > 0 {
-		query += ` AND m.id >= ?`
+		query += ` AND m.id >= ` + next()
 		args = append(args, boundaryID)
 	} else if floor > 0 {
-		query += ` AND m.id > ?`
+		query += ` AND m.id > ` + next()
 		args = append(args, floor)
 	}
 	query += ` ORDER BY m.id DESC`
 	if limit > 0 {
-		query += ` LIMIT ?`
+		query += ` LIMIT ` + next()
 		args = append(args, limit)
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1608,9 +2297,7 @@ func (s *SessionStore) LastAssistantTextForRun(ctx context.Context, runID string
 		return "", nil
 	}
 	var content string
-	err := s.db.QueryRowContext(ctx, `SELECT content FROM fb_messages
-		WHERE run_id = ? AND role = 'assistant' AND visibility = 'visible'
-		ORDER BY id DESC LIMIT 1`, runID).Scan(&content)
+	err := s.db.QueryRowContext(ctx, lastAssistantTextSQL.For(dbx.DialectOf(s.db)), runID).Scan(&content)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return "", nil
@@ -1718,9 +2405,7 @@ func (s *SessionStore) LastTranscriptRowID(ctx context.Context, sessionID string
 	}
 	// MAX over a session with no visible rows is NULL: there is no anchor yet.
 	var id sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `
-		SELECT MAX(id) FROM fb_messages
-		WHERE session_id = ? AND visibility = 'visible'`, strings.TrimSpace(sessionID)).Scan(&id)
+	err := s.db.QueryRowContext(ctx, lastTranscriptRowIDSQL.For(dbx.DialectOf(s.db)), strings.TrimSpace(sessionID)).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
@@ -1737,18 +2422,24 @@ func (s *SessionStore) listStoredMessagesSince(ctx context.Context, q dbtx, sess
 	if sessionID == "" {
 		return []storedMessage{}, nil
 	}
+	d := dbx.DialectOf(q)
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
 	query := `SELECT ` + messageColumnsJoined + `
 		FROM fb_messages m LEFT JOIN fb_runs r ON r.id = m.run_id
-		WHERE m.session_id = ?
+		WHERE m.session_id = ` + next() + `
 		  AND m.visibility = 'visible'`
 	args := []any{sessionID}
 	if sinceRowID > 0 {
-		query += ` AND m.id > ?`
+		query += ` AND m.id > ` + next()
 		args = append(args, sinceRowID)
 	}
 	query += ` ORDER BY m.id DESC`
 	if limit > 0 {
-		query += ` LIMIT ?`
+		query += ` LIMIT ` + next()
 		args = append(args, limit)
 	}
 	rows, err := q.QueryContext(ctx, query, args...)
@@ -1826,22 +2517,28 @@ func (s *SessionStore) listStoredMessagesBefore(ctx context.Context, q dbtx, ses
 	if sessionID == "" {
 		return []storedMessage{}, false, nil
 	}
+	d := dbx.DialectOf(q)
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
 	query := `SELECT ` + messageColumnsJoined + `,
 		EXISTS(SELECT 1 FROM fb_messages older
 			WHERE older.session_id = m.session_id
 			  AND older.visibility = 'visible'
 			  AND older.id < m.id)
 		FROM fb_messages m LEFT JOIN fb_runs r ON r.id = m.run_id
-		WHERE m.session_id = ?
+		WHERE m.session_id = ` + next() + `
 		  AND m.visibility = 'visible'`
 	args := []any{sessionID}
 	if beforeRowID > 0 {
-		query += ` AND m.id < ?`
+		query += ` AND m.id < ` + next()
 		args = append(args, beforeRowID)
 	}
 	query += ` ORDER BY m.id DESC`
 	if limit > 0 {
-		query += ` LIMIT ?`
+		query += ` LIMIT ` + next()
 		args = append(args, limit)
 	}
 	rows, err := q.QueryContext(ctx, query, args...)
@@ -1941,7 +2638,7 @@ func (s *SessionStore) loadStoredMessageByRowID(ctx context.Context, rowID int64
 	row, err := scanMessageWithRun(s.db.QueryRowContext(ctx, `
 		SELECT `+messageColumnsJoined+`
 		FROM fb_messages m LEFT JOIN fb_runs r ON r.id = m.run_id
-		WHERE m.id = ?`,
+		WHERE m.id = `+dbx.Placeholder(dbx.DialectOf(s.db), 1),
 		rowID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedMessage{}, false, nil
@@ -1963,9 +2660,9 @@ func (s *SessionStore) listStoredMessagesAfterRowID(ctx context.Context, q dbtx,
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+messageColumnsJoined+`
 		FROM fb_messages m LEFT JOIN fb_runs r ON r.id = m.run_id
-		WHERE m.session_id = ?
+		WHERE m.session_id = `+dbx.Placeholder(dbx.DialectOf(q), 1)+`
 		  AND m.visibility = 'visible'
-		  AND m.id > ?
+		  AND m.id > `+dbx.Placeholder(dbx.DialectOf(q), 2)+`
 		ORDER BY m.id ASC`,
 		sessionID,
 		rowID,
@@ -2001,7 +2698,7 @@ func (s *SessionStore) LatestCompactBoundary(ctx context.Context, sessionID stri
 		return boundaryID, CompactBoundaryPart{}, err
 	}
 	var partsJSON string
-	if err := s.db.QueryRowContext(ctx, `SELECT parts FROM fb_messages WHERE id=?`, boundaryID).Scan(&partsJSON); err != nil {
+	if err := s.db.QueryRowContext(ctx, messagePartsSelectSQL.For(dbx.DialectOf(s.db)), boundaryID).Scan(&partsJSON); err != nil {
 		return 0, CompactBoundaryPart{}, err
 	}
 	part, ok := ParseCompactBoundaryPart(partsJSON)
@@ -2022,11 +2719,11 @@ func (s *SessionStore) EnsureInitialWindowID(ctx context.Context, sessionID, can
 	if sessionID == "" || candidate == "" {
 		return "", errors.New("session id and initial window id are required")
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE fb_sessions SET initial_window_id=? WHERE id=? AND agent_id=? AND initial_window_id=''`, candidate, sessionID, s.AgentID()); err != nil {
+	if _, err := dbx.Exec(ctx, s.db, initialWindowUpdateSQL.For(dbx.DialectOf(s.db)), candidate, sessionID, s.AgentID()); err != nil {
 		return "", err
 	}
 	var windowID string
-	if err := s.db.QueryRowContext(ctx, `SELECT initial_window_id FROM fb_sessions WHERE id=?`, sessionID).Scan(&windowID); err != nil {
+	if err := s.db.QueryRowContext(ctx, initialWindowSelectSQL.For(dbx.DialectOf(s.db)), sessionID).Scan(&windowID); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(windowID), nil
@@ -2068,7 +2765,7 @@ func (s *SessionStore) StampRunTiming(ctx context.Context, runID string, timing 
 	if runID == "" || !timing.valid() {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE fb_runs SET started_at_ms=?, finished_at_ms=?, worked_ms=?, updated_at=? WHERE id=? AND finished_at_ms IS NULL`,
+	_, err := dbx.Exec(ctx, s.db, stampRunTimingSQL.For(dbx.DialectOf(s.db)),
 		timing.StartedAt.UnixMilli(), timing.FinishedAt.UnixMilli(), timing.Worked.Milliseconds(), time.Now().Unix(), runID)
 	return err
 }
@@ -2086,7 +2783,7 @@ func (s *SessionStore) StampRunFirstToken(ctx context.Context, runID string, wai
 	if runID == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE fb_runs SET first_token_ms=?, updated_at=? WHERE id=? AND first_token_ms IS NULL`,
+	_, err := dbx.Exec(ctx, s.db, stampRunFirstTokenSQL.For(dbx.DialectOf(s.db)),
 		wait.Milliseconds(), time.Now().Unix(), runID)
 	return err
 }
@@ -2102,7 +2799,7 @@ func (s *SessionStore) BindMessageToRun(ctx context.Context, sessionID string, r
 	if sessionID == "" || runID == "" || rowID <= 0 {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE fb_messages SET run_id=? WHERE id=? AND session_id=? AND run_id IS NULL`, runID, rowID, sessionID)
+	_, err := dbx.Exec(ctx, s.db, bindMessageToRunSQL.For(dbx.DialectOf(s.db)), runID, rowID, sessionID)
 	return err
 }
 
@@ -2254,11 +2951,18 @@ type messageRow struct {
 // insertMessage is the one INSERT onto fb_messages.
 func insertMessage(ctx context.Context, q dbtx, row messageRow) (int64, error) {
 	execStarted, execFinished, execDuration := row.Exec.columns()
-	res, err := q.ExecContext(ctx,
-		`INSERT INTO fb_messages(session_id, run_id, role, visibility, content, parts, message_id, model, usage_json, tool_step_id, tool_meta_json, exec_started_at_ms, exec_finished_at_ms, exec_duration_ms, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.SessionID, nullIfEmpty(row.RunID), row.Role, row.Visibility, row.Content, row.PartsJSON, row.MessageID, row.Model, row.UsageJSON, row.ToolStepID, row.ToolMetaJSON,
-		execStarted, execFinished, execDuration, row.CreatedAt)
+	args := []any{row.SessionID, nullIfEmpty(row.RunID), row.Role, row.Visibility, row.Content, row.PartsJSON, row.MessageID, row.Model, row.UsageJSON, row.ToolStepID, row.ToolMetaJSON,
+		execStarted, execFinished, execDuration, row.CreatedAt}
+	if dbx.DialectOf(q) == dbx.Postgres {
+		// pgx's database/sql result carries no LastInsertId; the statement
+		// returns the new row's id instead.
+		var id int64
+		if err := q.QueryRowContext(ctx, insertMessageSQL.Postgres, args...).Scan(&id); err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+	res, err := q.ExecContext(ctx, insertMessageSQL.For(dbx.DialectOf(q)), args...)
 	if err != nil {
 		return 0, err
 	}
@@ -2306,14 +3010,12 @@ func (s *SessionStore) appendRowInTx(ctx context.Context, q dbtx, row messageRow
 		// place: once the conversation has moved on, the rewind can no longer
 		// be undone. This is the single write every surface's user turn goes
 		// through, so the rule lives here rather than in each surface.
-		if _, err := q.ExecContext(ctx,
-			`UPDATE fb_rewinds SET state='fixed' WHERE session_id=? AND state='pending'`, row.SessionID); err != nil {
+		if _, err := q.ExecContext(ctx, fixPendingRewindsSQL.For(dbx.DialectOf(q)), row.SessionID); err != nil {
 			return 0, err
 		}
 	}
 	if row.Role == "user" && row.Visibility == messageVisible && strings.TrimSpace(row.Content) != "" {
-		if _, err := q.ExecContext(ctx,
-			`UPDATE fb_sessions SET title=?, updated_at=? WHERE id=? AND agent_id=? AND title=id`,
+		if _, err := q.ExecContext(ctx, nameSessionFromTurnSQL.For(dbx.DialectOf(q)),
 			generateSessionTitle(row.Content), time.Now().Unix(), row.SessionID, s.AgentID()); err != nil {
 			return 0, err
 		}
@@ -2341,8 +3043,7 @@ func (s *SessionStore) WithdrawUserTurn(ctx context.Context, sessionID string, r
 	// Read the display content before hiding the row: it is what named the
 	// session, and the release below compares against it.
 	var content string
-	switch err := s.db.QueryRowContext(ctx,
-		`SELECT content FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+	switch err := s.db.QueryRowContext(ctx, withdrawUserTurnSelectSQL.For(dbx.DialectOf(s.db)),
 		rowID, sessionID).Scan(&content); {
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:
@@ -2371,8 +3072,7 @@ func (s *SessionStore) WithdrawUserTurn(ctx context.Context, sessionID string, r
 // else and is left alone.
 func (s *SessionStore) releaseWithdrawnSessionTitle(ctx context.Context, sessionID string, withdrawnContent string) error {
 	var current string
-	switch err := s.db.QueryRowContext(ctx,
-		`SELECT title FROM fb_sessions WHERE id=? AND agent_id=?`,
+	switch err := s.db.QueryRowContext(ctx, sessionTitleForReleaseSQL.For(dbx.DialectOf(s.db)),
 		sessionID, s.AgentID()).Scan(&current); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
@@ -2383,10 +3083,7 @@ func (s *SessionStore) releaseWithdrawnSessionTitle(ctx context.Context, session
 		return nil
 	}
 	var next string
-	switch err := s.db.QueryRowContext(ctx,
-		`SELECT content FROM fb_messages
-		  WHERE session_id=? AND role='user' AND visibility=?
-		  ORDER BY id LIMIT 1`,
+	switch err := s.db.QueryRowContext(ctx, firstVisibleUserContentSQL.For(dbx.DialectOf(s.db)),
 		sessionID, messageVisible).Scan(&next); {
 	case errors.Is(err, sql.ErrNoRows):
 		// Nothing visible is left to name the session: fall back to the id,
@@ -2416,8 +3113,7 @@ func (s *SessionStore) UpdateMessageParts(ctx context.Context, q dbtx, rowID int
 	// boundary row it read), so ownership is re-derived from the row's own
 	// session rather than trusted: this is the one write in the package that is
 	// not keyed by a session id, and it must still stay inside the boundary.
-	res, err := q.ExecContext(ctx, `UPDATE fb_messages SET parts=?
-		WHERE id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+	res, err := q.ExecContext(ctx, updateMessagePartsSQL.For(dbx.DialectOf(q)),
 		partsJSON, rowID, s.AgentID())
 	if err != nil {
 		return err
@@ -2449,8 +3145,7 @@ func (s *SessionStore) UpdateMessageContentAndParts(ctx context.Context, q dbtx,
 	if !json.Valid([]byte(partsJSON)) {
 		return fmt.Errorf("invalid parts json")
 	}
-	res, err := q.ExecContext(ctx, `UPDATE fb_messages SET content=?, parts=?
-		WHERE id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`,
+	res, err := q.ExecContext(ctx, updateMessageContentAndPartsSQL.For(dbx.DialectOf(q)),
 		strings.TrimSpace(content), partsJSON, rowID, s.AgentID())
 	if err != nil {
 		return err
@@ -2466,7 +3161,7 @@ func (s *SessionStore) UpdateMessageContentAndParts(ctx context.Context, q dbtx,
 // belongs to another primary agent, and nil when there is no such row.
 func (s *SessionStore) messageRowOwnershipError(ctx context.Context, q dbtx, rowID int64) error {
 	var sessionID string
-	err := q.QueryRowContext(ctx, `SELECT session_id FROM fb_messages WHERE id=?`, rowID).Scan(&sessionID)
+	err := q.QueryRowContext(ctx, messageRowOwnerSelectSQL.For(dbx.DialectOf(q)), rowID).Scan(&sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -2498,23 +3193,30 @@ const (
 // actually moved, leaving each caller to turn a false into the specific
 // not-found/not-owned error it owes its own caller.
 func (s *SessionStore) setMessageVisibility(ctx context.Context, q dbtx, rowID int64, to string, from []string, sessionID string, role string) (bool, error) {
-	stmt := `UPDATE fb_messages SET visibility=? WHERE id=?`
+	d := dbx.DialectOf(q)
+	n := 0
+	next := func() string {
+		n++
+		return dbx.Placeholder(d, n)
+	}
+	stmt := `UPDATE fb_messages SET visibility=` + next() + ` WHERE id=` + next()
 	args := []any{to, rowID}
 	if sessionID != "" {
-		stmt += ` AND session_id=?`
+		stmt += ` AND session_id=` + next()
 		args = append(args, sessionID)
 	}
 	if role != "" {
-		stmt += ` AND role=?`
+		stmt += ` AND role=` + next()
 		args = append(args, role)
 	}
 	if len(from) > 0 {
-		stmt += ` AND visibility IN (?` + strings.Repeat(", ?", len(from)-1) + `)`
+		stmt += ` AND visibility IN (` + dbx.Placeholders(d, n+1, len(from)) + `)`
 		for _, src := range from {
+			n++
 			args = append(args, src)
 		}
 	}
-	stmt += ` AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`
+	stmt += ` AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=` + next() + `)`
 	args = append(args, s.AgentID())
 	res, err := q.ExecContext(ctx, stmt, args...)
 	if err != nil {
@@ -2773,8 +3475,7 @@ func (s *SessionStore) AppendCompactCheckpoint(ctx context.Context, sessionID st
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE fb_sessions SET compact_boundary_message_id=?, updated_at=? WHERE id=? AND agent_id=?`,
+	if _, err := tx.ExecContext(ctx, setCompactBoundarySQL.For(tx.Dialect()),
 		rowID, time.Now().Unix(), sessionID, s.AgentID()); err != nil {
 		return err
 	}
@@ -2812,7 +3513,7 @@ func (s *SessionStore) ForkInto(ctx context.Context, sourceID, targetID string) 
 	// The fork copies rows as stored — hidden rows, timing and all — through
 	// the one insert path, then re-points the copied session's row pointers at
 	// the copied rows.
-	rows, err := tx.QueryContext(ctx, `SELECT `+messageColumns+`, visibility FROM fb_messages WHERE session_id=? ORDER BY id`, sourceID)
+	rows, err := tx.QueryContext(ctx, `SELECT `+messageColumns+`, visibility FROM fb_messages WHERE session_id=`+dbx.Placeholder(dbx.DialectOf(tx), 1)+` ORDER BY id`, sourceID)
 	if err != nil {
 		return err
 	}
@@ -2856,8 +3557,7 @@ func (s *SessionStore) ForkInto(ctx context.Context, sourceID, targetID string) 
 		projectID                                        sql.NullString
 		boundary, resetRow                               sql.NullInt64
 	)
-	if err := tx.QueryRowContext(ctx,
-		`SELECT compact_boundary_message_id, context_reset_message_id, initial_window_id, memory_mode, memory_source, cwd, git_branch, project_id FROM fb_sessions WHERE id=?`,
+	if err := tx.QueryRowContext(ctx, forkSessionSelectSQL.For(tx.Dialect()),
 		sourceID).Scan(&boundary, &resetRow, &window, &memoryMode, &memorySource, &cwd, &gitBranch, &projectID); err != nil {
 		return err
 	}
@@ -2867,18 +3567,15 @@ func (s *SessionStore) ForkInto(ctx context.Context, sourceID, targetID string) 
 		}
 		return copyOf[v.Int64]
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE fb_sessions SET compact_boundary_message_id=?, context_reset_message_id=?, initial_window_id=?, memory_mode=?, memory_source=?, cwd=?, git_branch=?, project_id=NULLIF(?,''), updated_at=? WHERE id=? AND agent_id=?`,
+	if _, err := tx.ExecContext(ctx, forkSessionUpdateSQL.For(tx.Dialect()),
 		mapRow(boundary), mapRow(resetRow), window, memoryMode, memorySource, cwd, gitBranch, projectID.String, time.Now().Unix(), targetID, s.AgentID()); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO fb_session_prompt_state(session_id, key, value, updated_at) SELECT ?, key, value, updated_at FROM fb_session_prompt_state WHERE session_id=?`,
+	if _, err := tx.ExecContext(ctx, forkPromptStateSQL.For(tx.Dialect()),
 		targetID, sourceID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) SELECT ?, event_id, run_id, event_type, payload_json, occurred_at_ms FROM fb_session_events WHERE session_id=? ORDER BY sequence`,
+	if _, err := tx.ExecContext(ctx, forkEventsSQL.For(tx.Dialect()),
 		targetID, sourceID); err != nil {
 		return err
 	}
@@ -2899,7 +3596,7 @@ func (s *SessionStore) DeleteSessionMessages(ctx context.Context, sessionID stri
 	if sessionID == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM fb_messages WHERE session_id=? AND EXISTS (SELECT 1 FROM fb_sessions s WHERE s.id=fb_messages.session_id AND s.agent_id=?)`, sessionID, s.AgentID())
+	_, err := dbx.Exec(ctx, s.db, deleteSessionMessagesSQL.For(dbx.DialectOf(s.db)), sessionID, s.AgentID())
 	return err
 }
 
@@ -2919,7 +3616,7 @@ func (s *SessionStore) DeleteRunMessageRow(ctx context.Context, sessionID, runID
 	if sessionID == "" || runID == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM fb_messages WHERE id=? AND session_id=? AND run_id=?`, rowID, sessionID, runID)
+	_, err := dbx.Exec(ctx, s.db, deleteRunMessageRowSQL.For(dbx.DialectOf(s.db)), rowID, sessionID, runID)
 	return err
 }
 
@@ -2948,8 +3645,7 @@ func (s *SessionStore) SetSessionContextResetToLatest(ctx context.Context, sessi
 		return 0, err
 	}
 	now := time.Now().Unix()
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE fb_sessions SET context_reset_message_id=NULLIF(?,0), updated_at=? WHERE id=? AND agent_id=?`,
+	if _, err := dbx.Exec(ctx, s.db, setContextResetSQL.For(dbx.DialectOf(s.db)),
 		latest, now, sessionID, s.AgentID()); err != nil {
 		return 0, err
 	}
@@ -2968,9 +3664,7 @@ func (s *SessionStore) sessionContextResetRowID(ctx context.Context, q dbtx, ses
 		return 0, nil
 	}
 	var rowID sql.NullInt64
-	err := q.QueryRowContext(ctx,
-		`SELECT context_reset_message_id FROM fb_sessions WHERE id=?`,
-		sessionID).Scan(&rowID)
+	err := q.QueryRowContext(ctx, contextResetSelectSQL.For(dbx.DialectOf(q)), sessionID).Scan(&rowID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -3046,7 +3740,7 @@ func (s *SessionStore) compactBoundaryRowID(ctx context.Context, q dbtx, session
 		return 0, nil
 	}
 	var v sql.NullInt64
-	err := q.QueryRowContext(ctx, `SELECT compact_boundary_message_id FROM fb_sessions WHERE id=?`, sessionID).Scan(&v)
+	err := q.QueryRowContext(ctx, compactBoundarySelectSQL.For(dbx.DialectOf(q)), sessionID).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -3072,8 +3766,7 @@ func (s *SessionStore) SessionPromptState(ctx context.Context, sessionID, key st
 		return "", false, nil
 	}
 	var value string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT value FROM fb_session_prompt_state WHERE session_id=? AND key=?`,
+	err := s.db.QueryRowContext(ctx, sessionPromptStateSelectSQL.For(dbx.DialectOf(s.db)),
 		sessionID, key,
 	).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3104,9 +3797,7 @@ func (s *SessionStore) FreezeSessionPromptState(ctx context.Context, sessionID, 
 	if sessionID == "" || key == "" {
 		return candidate, false, nil
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO fb_session_prompt_state (session_id, key, value, updated_at)
-		 SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)`,
+	if _, err := dbx.Exec(ctx, s.db, freezeSessionPromptStateSQL.For(dbx.DialectOf(s.db)),
 		sessionID, key, candidate, time.Now().Unix(), sessionID, s.AgentID(),
 	); err != nil {
 		return "", false, err
@@ -3167,12 +3858,7 @@ func (s *SessionStore) SaveSessionModelSelection(
 	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
 		return false, err
 	}
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT ?, ?, ?, ?, `+sessionModelStampSQL+`
-		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
-		ON CONFLICT(session_id) DO UPDATE SET
-			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
+	res, err := dbx.Exec(ctx, s.db, saveSessionModelSelectionSQL(dbx.DialectOf(s.db)),
 		// Milliseconds for the wall clock, lifted past the table's maximum
 		// when needed: updated_at orders "most recently used", so two writes
 		// inside one millisecond must still order by the later one.
@@ -3205,11 +3891,7 @@ func (s *SessionStore) SessionModelSelection(
 		return SessionModelSelection{}, false, err
 	}
 	var sel SessionModelSelection
-	err := s.db.QueryRowContext(ctx,
-		`SELECT m.provider, m.model, m.effort
-		FROM fb_session_model_state m
-		JOIN fb_sessions s ON s.id=m.session_id AND s.agent_id=?
-		WHERE m.session_id=?`,
+	err := s.db.QueryRowContext(ctx, sessionModelSelectionSelectSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), sessionID,
 	).Scan(&sel.Provider, &sel.Model, &sel.Effort)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3245,12 +3927,7 @@ func (s *SessionStore) RecordImageRefusal(ctx context.Context, sessionID, provid
 	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO fb_session_image_refusals(session_id, provider, model, reason, observed_at)
-		SELECT ?, ?, ?, ?, ?
-		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
-		ON CONFLICT(session_id, provider, model) DO UPDATE SET
-			reason=excluded.reason, observed_at=excluded.observed_at`,
+	_, err := dbx.Exec(ctx, s.db, recordImageRefusalSQL.For(dbx.DialectOf(s.db)),
 		sessionID, provider, model, imageRefusalReason(reason), time.Now().Unix(), sessionID, s.AgentID(),
 	)
 	return err
@@ -3278,11 +3955,7 @@ func (s *SessionStore) ImageRefusal(
 		return "", false, err
 	}
 	var reason string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT r.reason
-		FROM fb_session_image_refusals r
-		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=?
-		WHERE r.session_id=? AND r.provider=? AND r.model=?`,
+	err := s.db.QueryRowContext(ctx, imageRefusalSelectSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), sessionID, provider, model,
 	).Scan(&reason)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3333,10 +4006,7 @@ func (s *SessionStore) CopySessionModelSelection(
 		return false, err
 	}
 	var target int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT CASE WHEN EXISTS(
-			SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?
-		) THEN 1 ELSE 0 END`,
+	if err := s.db.QueryRowContext(ctx, sessionExistsForCopySQL.For(dbx.DialectOf(s.db)),
 		targetSessionID, s.AgentID(),
 	).Scan(&target); err != nil {
 		return false, err
@@ -3347,15 +4017,7 @@ func (s *SessionStore) CopySessionModelSelection(
 	// The SELECT ends with a WHERE clause on purpose: SQLite binds ON
 	// CONFLICT to the upsert only then; without it the statement is a syntax
 	// error.
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT ?, src.provider, src.model, src.effort, `+sessionModelStampSQL+`
-		FROM fb_session_model_state src
-	WHERE src.session_id=? AND EXISTS (
-		SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
-	)
-	ON CONFLICT(session_id) DO UPDATE SET
-		provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
+	res, err := dbx.Exec(ctx, s.db, copySessionModelSelectionSQL(dbx.DialectOf(s.db)),
 		targetSessionID, time.Now().UnixMilli(), sourceSessionID, s.AgentID(),
 	)
 	if err != nil {
@@ -3386,11 +4048,7 @@ func (s *SessionStore) LatestSessionModelSelection(ctx context.Context) (Session
 		return SessionModelSelection{}, false, nil
 	}
 	var sel SessionModelSelection
-	err := s.db.QueryRowContext(ctx,
-		`SELECT p.provider, p.model, p.effort
-		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
-		WHERE s.agent_id = ? AND s.source IN (?, ?)
-		ORDER BY p.updated_at DESC, p.session_id DESC LIMIT 1`,
+	err := s.db.QueryRowContext(ctx, latestSessionModelSelectionSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), SessionSourceConversation, SessionSourceWorkshop,
 	).Scan(&sel.Provider, &sel.Model, &sel.Effort)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3415,10 +4073,7 @@ func (s *SessionStore) TouchSessionModelSelection(ctx context.Context, sessionID
 	if sessionID == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE fb_session_model_state SET updated_at = `+sessionModelStampSQL+`
-		WHERE session_id = ?
-		  AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = ? AND source IN (?, ?))`,
+	_, err := dbx.Exec(ctx, s.db, touchSessionModelSelectionSQL(dbx.DialectOf(s.db)),
 		time.Now().UnixMilli(), sessionID, s.AgentID(), SessionSourceConversation, SessionSourceWorkshop,
 	)
 	return err
@@ -3443,10 +4098,7 @@ func (s *SessionStore) SessionFactsForModelDefault(ctx context.Context, sessionI
 	if sessionID == "" {
 		return "", false, nil
 	}
-	err = s.db.QueryRowContext(ctx,
-		`SELECT s.source,
-			EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = s.id AND m.role != 'user')
-		FROM fb_sessions s WHERE s.id = ?`,
+	err = s.db.QueryRowContext(ctx, sessionFactsForModelDefaultSQL.For(dbx.DialectOf(s.db)),
 		sessionID,
 	).Scan(&source, &hasRunATurn)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3501,12 +4153,7 @@ func (s *SessionStore) SaveSessionPermissionPreset(
 	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
 		return false, err
 	}
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
-		SELECT ?, ?, ?, ?
-		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
-		ON CONFLICT(session_id) DO UPDATE SET
-			preset=excluded.preset, source=excluded.source, updated_at=excluded.updated_at`,
+	res, err := dbx.Exec(ctx, s.db, saveSessionPermissionPresetSQL.For(dbx.DialectOf(s.db)),
 		sessionID, presetID, source, time.Now().UnixMilli(), sessionID, s.AgentID(),
 	)
 	if err != nil {
@@ -3536,11 +4183,7 @@ func (s *SessionStore) SessionPermissionPreset(
 	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
 		return "", "", 0, false, err
 	}
-	err = s.db.QueryRowContext(ctx,
-		`SELECT p.preset, p.source, p.updated_at
-		FROM fb_session_permission_state p
-		JOIN fb_sessions s ON s.id=p.session_id AND s.agent_id=?
-		WHERE p.session_id=?`,
+	err = s.db.QueryRowContext(ctx, sessionPermissionPresetSelectSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), sessionID,
 	).Scan(&presetID, &source, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3570,10 +4213,7 @@ func (s *SessionStore) CopySessionPermissionPreset(
 		return false, err
 	}
 	var target int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT CASE WHEN EXISTS(
-			SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?
-		) THEN 1 ELSE 0 END`,
+	if err := s.db.QueryRowContext(ctx, sessionExistsForCopySQL.For(dbx.DialectOf(s.db)),
 		targetSessionID, s.AgentID(),
 	).Scan(&target); err != nil {
 		return false, err
@@ -3584,15 +4224,7 @@ func (s *SessionStore) CopySessionPermissionPreset(
 	// The SELECT ends with a WHERE clause on purpose: SQLite binds ON
 	// CONFLICT to the upsert only then; without it the statement is a syntax
 	// error.
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO fb_session_permission_state(session_id, preset, source, updated_at)
-		SELECT ?, src.preset, src.source, ?
-		FROM fb_session_permission_state src
-		WHERE src.session_id=? AND EXISTS (
-			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
-		)
-		ON CONFLICT(session_id) DO UPDATE SET
-			preset=excluded.preset, source=excluded.source, updated_at=excluded.updated_at`,
+	res, err := dbx.Exec(ctx, s.db, copySessionPermissionPresetSQL.For(dbx.DialectOf(s.db)),
 		targetSessionID, time.Now().UnixMilli(), sourceSessionID, s.AgentID(),
 	)
 	if err != nil {
@@ -3620,10 +4252,7 @@ func (s *SessionStore) SessionLastToolResultBypassedApprovals(
 		return false, nil
 	}
 	var content string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT content FROM fb_messages
-		WHERE session_id=? AND role='tool'
-		ORDER BY id DESC LIMIT 1`,
+	err := s.db.QueryRowContext(ctx, lastToolResultContentSQL.For(dbx.DialectOf(s.db)),
 		sessionID,
 	).Scan(&content)
 	if errors.Is(err, sql.ErrNoRows) {

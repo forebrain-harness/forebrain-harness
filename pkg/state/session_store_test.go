@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // TestStampRunFirstTokenRecordsOneWaitAndReadsItBack pins the owner's rule
@@ -1092,7 +1093,7 @@ func TestListSessionsForProjectPageSortsCountsAndSearches(t *testing.T) {
 
 	// Counting messages must ride the session's own index, never read the whole
 	// message table: the column is drawn for every row of every page.
-	query, args := sessions.projectSessionsPageSQL(p.ID, ProjectSessionsQuery{Desc: true}, 10, 0)
+	query, args := sessions.projectSessionsPageSQL(dbx.SQLite, p.ID, ProjectSessionsQuery{Desc: true}, 10, 0)
 	planRows, err := db.Query(`EXPLAIN QUERY PLAN `+query, args...)
 	if err != nil {
 		t.Fatal(err)
