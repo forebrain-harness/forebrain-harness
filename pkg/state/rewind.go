@@ -27,6 +27,118 @@ func SHA256Hex(content []byte) string {
 // The orchestration that reads and writes them — what "both", "chat" and
 // "code" mean — lives in pkg/turn, shared by the gateway and the terminal.
 
+// The ledger's statements. Each SQLite arm is the text this file carried before
+// multi-database support; PostgreSQL numbers its parameters and takes COALESCE
+// where the others take IFNULL.
+var (
+	fileChangeInsertSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_file_changes(session_id, run_id, step_id, anchor_message_id, path, existed_before, before_snapshot, after_sha256, deleted, created_at_ms)
+VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_file_changes(session_id, run_id, step_id, anchor_message_id, path, existed_before, before_snapshot, after_sha256, deleted, created_at_ms)
+VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_file_changes(session_id, run_id, step_id, anchor_message_id, path, existed_before, before_snapshot, after_sha256, deleted, created_at_ms)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+	}
+	deleteFileChangePathSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_file_changes WHERE session_id=? AND path=?`,
+		MySQL:    `DELETE FROM fb_file_changes WHERE session_id=? AND path=?`,
+		Postgres: `DELETE FROM fb_file_changes WHERE session_id=$1 AND path=$2`,
+	}
+	latestUserMessageRowSelectSQL = dbx.SQL{
+		SQLite:   `SELECT id, parts FROM fb_messages WHERE session_id=? AND role='user' AND visibility=? ORDER BY id DESC LIMIT 40`,
+		MySQL:    `SELECT id, parts FROM fb_messages WHERE session_id=? AND role='user' AND visibility=? ORDER BY id DESC LIMIT 40`,
+		Postgres: `SELECT id, parts FROM fb_messages WHERE session_id=$1 AND role='user' AND visibility=$2 ORDER BY id DESC LIMIT 40`,
+	}
+	userMessageContentSQL = dbx.SQL{
+		SQLite:   `SELECT content FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+		MySQL:    `SELECT content FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+		Postgres: `SELECT content FROM fb_messages WHERE id=$1 AND session_id=$2 AND role='user'`,
+	}
+	visibleUserMessagesSQL = dbx.SQL{
+		SQLite: `
+SELECT id, content, parts FROM fb_messages
+WHERE session_id=? AND role='user' AND visibility=?
+ORDER BY id DESC LIMIT ?`,
+		MySQL: `
+SELECT id, content, parts FROM fb_messages
+WHERE session_id=? AND role='user' AND visibility=?
+ORDER BY id DESC LIMIT ?`,
+		Postgres: `
+SELECT id, content, parts FROM fb_messages
+WHERE session_id=$1 AND role='user' AND visibility=$2
+ORDER BY id DESC LIMIT $3`,
+	}
+	insertRewindSQL = dbx.SQL{
+		SQLite: `
+INSERT INTO fb_rewinds(id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms)
+VALUES(?,?,?,?,?,?,?,?)`,
+		MySQL: `
+INSERT INTO fb_rewinds(id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms)
+VALUES(?,?,?,?,?,?,?,?)`,
+		Postgres: `
+INSERT INTO fb_rewinds(id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+	}
+	pendingRewindSQL = dbx.SQL{
+		SQLite: `
+SELECT id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms
+FROM fb_rewinds WHERE session_id=? AND state='pending' ORDER BY created_at_ms DESC, id DESC LIMIT 1`,
+		MySQL: `
+SELECT id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms
+FROM fb_rewinds WHERE session_id=? AND state='pending' ORDER BY created_at_ms DESC, id DESC LIMIT 1`,
+		Postgres: `
+SELECT id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms
+FROM fb_rewinds WHERE session_id=$1 AND state='pending' ORDER BY created_at_ms DESC, id DESC LIMIT 1`,
+	}
+	fixPendingRewindsSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_rewinds SET state='fixed' WHERE session_id=? AND state='pending'`,
+		MySQL:    `UPDATE fb_rewinds SET state='fixed' WHERE session_id=? AND state='pending'`,
+		Postgres: `UPDATE fb_rewinds SET state='fixed' WHERE session_id=$1 AND state='pending'`,
+	}
+	deleteRewindSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_rewinds WHERE id=?`,
+		MySQL:    `DELETE FROM fb_rewinds WHERE id=?`,
+		Postgres: `DELETE FROM fb_rewinds WHERE id=$1`,
+	}
+	// One statement serves both directions of a rewind: it moves the anchor and
+	// everything after it between two visibility values.
+	setMessageVisibilitySQL = dbx.SQL{
+		SQLite:   `UPDATE fb_messages SET visibility=? WHERE session_id=? AND id>=? AND visibility=?`,
+		MySQL:    `UPDATE fb_messages SET visibility=? WHERE session_id=? AND id>=? AND visibility=?`,
+		Postgres: `UPDATE fb_messages SET visibility=$1 WHERE session_id=$2 AND id>=$3 AND visibility=$4`,
+	}
+	rewindEventStartSQL = dbx.SQL{
+		SQLite: `
+SELECT IFNULL(MIN(e.sequence), 0)
+FROM fb_session_events e
+WHERE e.session_id=? AND TRIM(IFNULL(e.run_id,'')) <> ''
+  AND e.run_id = (SELECT TRIM(IFNULL(m.run_id,'')) FROM fb_messages m WHERE m.id=? AND m.session_id=?)`,
+		MySQL: `
+SELECT IFNULL(MIN(e.sequence), 0)
+FROM fb_session_events e
+WHERE e.session_id=? AND TRIM(IFNULL(e.run_id,'')) <> ''
+  AND e.run_id = (SELECT TRIM(IFNULL(m.run_id,'')) FROM fb_messages m WHERE m.id=? AND m.session_id=?)`,
+		Postgres: `
+SELECT COALESCE(MIN(e.sequence), 0)
+FROM fb_session_events e
+WHERE e.session_id=$1 AND TRIM(COALESCE(e.run_id,'')) <> ''
+  AND e.run_id = (SELECT TRIM(COALESCE(m.run_id,'')) FROM fb_messages m WHERE m.id=$2 AND m.session_id=$3)`,
+	}
+)
+
+// The two changed-files reads share their column list and their FROM clause;
+// only the tail differs. The FROM clause carries the indentation the statement
+// has always had, spelled with escapes so it survives as that text: MySQL
+// matches SQLite, and PostgreSQL numbers its session parameter.
+const (
+	changedFileColumns      = `SELECT id, run_id, step_id, anchor_message_id, path, existed_before, before_snapshot, after_sha256, deleted, created_at_ms`
+	changedFileFromSQLite   = "\n\t\t FROM fb_file_changes WHERE session_id=?"
+	changedFileFromPostgres = "\n\t\t FROM fb_file_changes WHERE session_id=$1"
+)
+
 // FileChange is one file write a file tool recorded. It is the value the tool
 // layer hands the store's recorder; the store never inspects the file itself.
 type FileChange struct {
@@ -74,9 +186,7 @@ func (s *SessionStore) RecordFileChange(ctx context.Context, c FileChange) error
 	if path == "" {
 		return fmt.Errorf("record file change: empty path")
 	}
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO fb_file_changes(session_id, run_id, step_id, anchor_message_id, path, existed_before, before_snapshot, after_sha256, deleted, created_at_ms)
-VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	_, err := dbx.Exec(ctx, s.db, fileChangeInsertSQL.For(dbx.DialectOf(s.db)),
 		sessionID, strings.TrimSpace(c.RunID), strings.TrimSpace(c.StepID), c.AnchorMessageID, path,
 		boolToInt(c.ExistedBefore), strings.TrimSpace(c.BeforeSnapshot), strings.TrimSpace(c.AfterSHA256),
 		boolToInt(c.Deleted), time.Now().UnixMilli())
@@ -90,26 +200,28 @@ VALUES(?,?,?,?,?,?,?,?,?,?)`,
 // anchorMessageID, oldest first: rewinding to before that message restores
 // everything it returns.
 func (s *SessionStore) FileChangesSince(ctx context.Context, sessionID string, anchorMessageID int64) ([]FileChangeRow, error) {
-	return s.queryFileChanges(ctx,
-		`SELECT id, run_id, step_id, anchor_message_id, path, existed_before, before_snapshot, after_sha256, deleted, created_at_ms
-		 FROM fb_file_changes WHERE session_id=? AND anchor_message_id>=? ORDER BY id ASC`,
-		strings.TrimSpace(sessionID), anchorMessageID)
+	return s.queryFileChanges(ctx, dbx.SQL{
+		SQLite:   changedFileColumns + changedFileFromSQLite + ` AND anchor_message_id>=? ORDER BY id ASC`,
+		MySQL:    changedFileColumns + changedFileFromSQLite + ` AND anchor_message_id>=? ORDER BY id ASC`,
+		Postgres: changedFileColumns + changedFileFromPostgres + ` AND anchor_message_id>=$2 ORDER BY id ASC`,
+	}, strings.TrimSpace(sessionID), anchorMessageID)
 }
 
 // AllFileChanges returns every change recorded for a conversation, oldest
 // first: the source of the workbench's changed-files list.
 func (s *SessionStore) AllFileChanges(ctx context.Context, sessionID string) ([]FileChangeRow, error) {
-	return s.queryFileChanges(ctx,
-		`SELECT id, run_id, step_id, anchor_message_id, path, existed_before, before_snapshot, after_sha256, deleted, created_at_ms
-		 FROM fb_file_changes WHERE session_id=? ORDER BY id ASC`,
-		strings.TrimSpace(sessionID))
+	return s.queryFileChanges(ctx, dbx.SQL{
+		SQLite:   changedFileColumns + changedFileFromSQLite + ` ORDER BY id ASC`,
+		MySQL:    changedFileColumns + changedFileFromSQLite + ` ORDER BY id ASC`,
+		Postgres: changedFileColumns + changedFileFromPostgres + ` ORDER BY id ASC`,
+	}, strings.TrimSpace(sessionID))
 }
 
-func (s *SessionStore) queryFileChanges(ctx context.Context, query string, args ...any) ([]FileChangeRow, error) {
+func (s *SessionStore) queryFileChanges(ctx context.Context, q dbx.SQL, args ...any) ([]FileChangeRow, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("file changes: session store unavailable")
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, q.For(dbx.DialectOf(s.db)), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +246,7 @@ func (s *SessionStore) DeleteFileChangePath(ctx context.Context, sessionID, path
 	if s == nil || s.db == nil {
 		return fmt.Errorf("delete file change: session store unavailable")
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM fb_file_changes WHERE session_id=? AND path=?`,
+	_, err := dbx.Exec(ctx, s.db, deleteFileChangePathSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(sessionID), strings.TrimSpace(path))
 	return err
 }
@@ -147,8 +259,7 @@ func (s *SessionStore) LatestUserMessageRowID(ctx context.Context, sessionID str
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("latest user message: session store unavailable")
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, parts FROM fb_messages WHERE session_id=? AND role='user' AND visibility=? ORDER BY id DESC LIMIT 40`,
+	rows, err := s.db.QueryContext(ctx, latestUserMessageRowSelectSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(sessionID), messageVisible)
 	if err != nil {
 		return 0, err
@@ -174,8 +285,7 @@ func (s *SessionStore) UserMessageContent(ctx context.Context, sessionID string,
 		return "", false, fmt.Errorf("user message content: session store unavailable")
 	}
 	var content string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT content FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
+	err := s.db.QueryRowContext(ctx, userMessageContentSQL.For(dbx.DialectOf(s.db)),
 		rowID, strings.TrimSpace(sessionID)).Scan(&content)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
@@ -201,10 +311,7 @@ func (s *SessionStore) ListVisibleUserMessages(ctx context.Context, sessionID st
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `
-SELECT id, content, parts FROM fb_messages
-WHERE session_id=? AND role='user' AND visibility=?
-ORDER BY id DESC LIMIT ?`, strings.TrimSpace(sessionID), messageVisible, limit)
+	rows, err := s.db.QueryContext(ctx, visibleUserMessagesSQL.For(dbx.DialectOf(s.db)), strings.TrimSpace(sessionID), messageVisible, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -243,9 +350,7 @@ func (s *SessionStore) InsertRewind(ctx context.Context, rec RewindRecord) error
 	if s == nil || s.db == nil {
 		return fmt.Errorf("insert rewind: session store unavailable")
 	}
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO fb_rewinds(id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms)
-VALUES(?,?,?,?,?,?,?,?)`,
+	_, err := dbx.Exec(ctx, s.db, insertRewindSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(rec.ID), strings.TrimSpace(rec.SessionID), rec.AnchorMessageID,
 		strings.TrimSpace(rec.Mode), rec.HiddenEventSeqFrom, rec.FilesJSON, strings.TrimSpace(rec.State), rec.CreatedAtMs)
 	if err != nil {
@@ -261,9 +366,7 @@ func (s *SessionStore) PendingRewind(ctx context.Context, sessionID string) (Rew
 		return RewindRecord{}, false, fmt.Errorf("pending rewind: session store unavailable")
 	}
 	var rec RewindRecord
-	err := s.db.QueryRowContext(ctx, `
-SELECT id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms
-FROM fb_rewinds WHERE session_id=? AND state='pending' ORDER BY created_at_ms DESC, id DESC LIMIT 1`,
+	err := s.db.QueryRowContext(ctx, pendingRewindSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(sessionID)).
 		Scan(&rec.ID, &rec.SessionID, &rec.AnchorMessageID, &rec.Mode, &rec.HiddenEventSeqFrom, &rec.FilesJSON, &rec.State, &rec.CreatedAtMs)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -281,7 +384,7 @@ func (s *SessionStore) FixPendingRewinds(ctx context.Context, sessionID string) 
 	if s == nil || s.db == nil {
 		return fmt.Errorf("fix pending rewinds: session store unavailable")
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE fb_rewinds SET state='fixed' WHERE session_id=? AND state='pending'`,
+	_, err := dbx.Exec(ctx, s.db, fixPendingRewindsSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(sessionID))
 	return err
 }
@@ -292,7 +395,7 @@ func (s *SessionStore) DeleteRewind(ctx context.Context, id string) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("delete rewind: session store unavailable")
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM fb_rewinds WHERE id=?`, strings.TrimSpace(id))
+	_, err := dbx.Exec(ctx, s.db, deleteRewindSQL.For(dbx.DialectOf(s.db)), strings.TrimSpace(id))
 	return err
 }
 
@@ -303,8 +406,7 @@ func (s *SessionStore) RewindMessagesFrom(ctx context.Context, sessionID string,
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("rewind messages: session store unavailable")
 	}
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE fb_messages SET visibility=? WHERE session_id=? AND id>=? AND visibility=?`,
+	res, err := dbx.Exec(ctx, s.db, setMessageVisibilitySQL.For(dbx.DialectOf(s.db)),
 		messageRewound, strings.TrimSpace(sessionID), anchorMessageID, messageVisible)
 	if err != nil {
 		return 0, err
@@ -318,8 +420,7 @@ func (s *SessionStore) RestoreRewoundMessages(ctx context.Context, sessionID str
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("restore rewound messages: session store unavailable")
 	}
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE fb_messages SET visibility=? WHERE session_id=? AND id>=? AND visibility=?`,
+	res, err := dbx.Exec(ctx, s.db, setMessageVisibilitySQL.For(dbx.DialectOf(s.db)),
 		messageVisible, strings.TrimSpace(sessionID), anchorMessageID, messageRewound)
 	if err != nil {
 		return 0, err
@@ -337,11 +438,7 @@ func (s *SessionStore) RewindEventStart(ctx context.Context, sessionID string, a
 		return 0, fmt.Errorf("rewind event start: session store unavailable")
 	}
 	var seq int64
-	err := s.db.QueryRowContext(ctx, `
-SELECT IFNULL(MIN(e.sequence), 0)
-FROM fb_session_events e
-WHERE e.session_id=? AND TRIM(IFNULL(e.run_id,'')) <> ''
-  AND e.run_id = (SELECT TRIM(IFNULL(m.run_id,'')) FROM fb_messages m WHERE m.id=? AND m.session_id=?)`,
+	err := s.db.QueryRowContext(ctx, rewindEventStartSQL.For(dbx.DialectOf(s.db)),
 		strings.TrimSpace(sessionID), anchorMessageID, strings.TrimSpace(sessionID)).Scan(&seq)
 	if err != nil {
 		return 0, err
@@ -406,4 +503,3 @@ func rewindVisibleEventsPredicateFor(d dbx.Dialect) string {
 	}
 	return rewindVisibleEventsPredicate
 }
-
