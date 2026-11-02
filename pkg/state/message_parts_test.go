@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 func TestMessageOriginRoundTrip(t *testing.T) {
@@ -275,7 +276,7 @@ func TestReasoningRowStaysOutOfTheModelTranscript(t *testing.T) {
 	// The row is on disk all the same — the projection drops it, not the store.
 	var reasoningRows int
 	if err := store.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM fb_messages WHERE session_id=? AND role='reasoning'`, sid).Scan(&reasoningRows); err != nil {
+		dbx.Rebind(dbx.DialectOf(store.db), `SELECT count(*) FROM fb_messages WHERE session_id=? AND role='reasoning'`), sid).Scan(&reasoningRows); err != nil {
 		t.Fatal(err)
 	}
 	if reasoningRows != 1 {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // TestSaveHeartbeatKeepsWhenItLastFired pins that replacing a heartbeat's
@@ -368,7 +370,7 @@ func TestExpiredFires(t *testing.T) {
 		if err := st.EnsureAt(ctx, id, id, SessionBirth{Source: source}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`UPDATE fb_sessions SET updated_at=? WHERE id=?`, old, id); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_sessions SET updated_at=? WHERE id=?`), old, id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -382,7 +384,7 @@ func TestExpiredFires(t *testing.T) {
 			if _, err := store.FinishRun(ctx, id, CronStatusOK, "done", "", ""); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Exec(`UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`, old, old, id); err != nil {
+			if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`), old, old, id); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -430,7 +432,7 @@ func TestExpiredFires(t *testing.T) {
 	if _, err := store.FinishRun(ctx, otherID, CronStatusOK, "done", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`, old, old, otherID); err != nil {
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`), old, old, otherID); err != nil {
 		t.Fatal(err)
 	}
 	seed(second, "cron-other", SessionSourceCron)

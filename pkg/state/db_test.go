@@ -243,7 +243,7 @@ func TestSessionUsageSumsTheRunTreeOnceAndLastTurnIsTopLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The child settles last, as a subagent can.
-	if _, err := db.ExecContext(ctx, `UPDATE fb_runs SET updated_at=updated_at+100 WHERE id=?`, child.ID); err != nil {
+	if _, err := db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_runs SET updated_at=updated_at+100 WHERE id=?`), child.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -293,7 +293,7 @@ func TestRunUsageStoresModelCallTime(t *testing.T) {
 	}
 
 	var raw int
-	if err := db.QueryRowContext(ctx, `SELECT usage_llm_ms FROM fb_runs WHERE id=?`, run.ID).Scan(&raw); err != nil {
+	if err := db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(db), `SELECT usage_llm_ms FROM fb_runs WHERE id=?`), run.ID).Scan(&raw); err != nil {
 		t.Fatalf("read usage_llm_ms: %v", err)
 	}
 	if raw != 8_500 {
@@ -356,7 +356,7 @@ func TestSessionOutputRateIgnoresRunsWithoutTime(t *testing.T) {
 
 	// A session whose no run recorded the time answers zero on both sides:
 	// no denominator, no rate.
-	if _, err := db.ExecContext(ctx, `UPDATE fb_runs SET usage_llm_ms=0 WHERE id=?`, timed.ID); err != nil {
+	if _, err := db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_runs SET usage_llm_ms=0 WHERE id=?`), timed.ID); err != nil {
 		t.Fatal(err)
 	}
 	tokens, ms, err = rt.SessionOutputRate(ctx, "s1")
@@ -392,7 +392,7 @@ func TestLatestPrimaryRunTreeAttemptsIncludesSubagentRows(t *testing.T) {
 	seedPrimaryRun := func(sessionID, runID string, updatedAt int64) {
 		t.Helper()
 		if _, err := db.ExecContext(ctx,
-			`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,'',?,?,?)`,
+			dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,'',?,?,?)`),
 			runID, sessionID, string(RunStatusDone), updatedAt, updatedAt); err != nil {
 			t.Fatalf("create run %s: %v", runID, err)
 		}

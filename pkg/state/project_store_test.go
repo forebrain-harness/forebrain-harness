@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 func newProjectStoreForTest(t *testing.T, agent string) (*ProjectStore, *SessionStore) {
@@ -206,8 +208,8 @@ func TestProjectDeletePreviewCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := a.db.ExecContext(ctx,
-		`INSERT INTO fb_cron_jobs(id, agent_id, project_id, schedule, created_at, updated_at)
-		 VALUES('job-1','main',?,'every 1h',1,1)`, p.ID); err != nil {
+		dbx.Rebind(dbx.DialectOf(a.db), `INSERT INTO fb_cron_jobs(id, agent_id, project_id, schedule, created_at, updated_at)
+		 VALUES('job-1','main',?,'every 1h',1,1)`), p.ID); err != nil {
 		t.Fatal(err)
 	}
 	sessionCount, cronJobs, running, err := a.DeletePreview(ctx, p.ID)
@@ -264,7 +266,7 @@ func TestListProjectsPageKeepsPinnedFirstAndCountsTotal(t *testing.T) {
 		id      string
 		updated int64
 	}{{alpha.ID, 300}, {beta.ID, 100}, {gamma.ID, 200}} {
-		if _, err := store.db.ExecContext(ctx, `UPDATE fb_projects SET updated_at=? WHERE id=?`, stamp.updated, stamp.id); err != nil {
+		if _, err := store.db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(store.db), `UPDATE fb_projects SET updated_at=? WHERE id=?`), stamp.updated, stamp.id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -677,7 +679,7 @@ func TestBindSessionNeverChangesFrozenProjectType(t *testing.T) {
 	}
 	// The project binding itself did move.
 	var bound string
-	if err := a.db.QueryRowContext(ctx, `SELECT project_id FROM fb_sessions WHERE id=? AND agent_id=?`, "rebind", "main").Scan(&bound); err != nil {
+	if err := a.db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(a.db), `SELECT project_id FROM fb_sessions WHERE id=? AND agent_id=?`), "rebind", "main").Scan(&bound); err != nil {
 		t.Fatal(err)
 	}
 	if bound != batch.ID {
@@ -737,7 +739,7 @@ func TestProjectTaskNotifyRoundTrip(t *testing.T) {
 	}
 
 	// A column nobody can read as a list is "no targets", not a broken project.
-	if _, err := projects.db.ExecContext(ctx, `UPDATE fb_projects SET task_notify_json='not json' WHERE id=?`, p.ID); err != nil {
+	if _, err := projects.db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(projects.db), `UPDATE fb_projects SET task_notify_json='not json' WHERE id=?`), p.ID); err != nil {
 		t.Fatal(err)
 	}
 	broken, err := projects.Get(ctx, p.ID)
