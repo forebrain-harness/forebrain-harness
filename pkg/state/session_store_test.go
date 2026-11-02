@@ -1092,39 +1092,42 @@ func TestListSessionsForProjectPageSortsCountsAndSearches(t *testing.T) {
 	}
 
 	// Counting messages must ride the session's own index, never read the whole
-	// message table: the column is drawn for every row of every page.
-	query, args := sessions.projectSessionsPageSQL(dbx.SQLite, p.ID, ProjectSessionsQuery{Desc: true}, 10, 0)
-	planRows, err := db.Query(`EXPLAIN QUERY PLAN `+query, args...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer planRows.Close()
-	var plan []string
-	for planRows.Next() {
-		var id, parent, unused int
-		var detail string
-		if err := planRows.Scan(&id, &parent, &unused, &detail); err != nil {
+	// message table: the column is drawn for every row of every page. The plan
+	// is a SQLite form; the other engines have their own EXPLAIN.
+	if dbx.DialectOf(db) == dbx.SQLite {
+		query, args := sessions.projectSessionsPageSQL(dbx.SQLite, p.ID, ProjectSessionsQuery{Desc: true}, 10, 0)
+		planRows, err := db.Query(`EXPLAIN QUERY PLAN `+query, args...)
+		if err != nil {
 			t.Fatal(err)
 		}
-		plan = append(plan, detail)
-	}
-	if err := planRows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	searchedCount := false
-	for _, detail := range plan {
-		parts := strings.Fields(detail)
-		if len(parts) >= 2 && parts[0] == "SCAN" && (parts[1] == "m" || parts[1] == "fb_messages") {
-			t.Fatalf("the message count reads the whole table: %q\nplan: %v", detail, plan)
+		defer planRows.Close()
+		var plan []string
+		for planRows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := planRows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, detail)
 		}
-		// The count is the subquery that also narrows on visibility; the bare
-		// EXISTS beside it only narrows on the session.
-		if strings.Contains(detail, "idx_fb_messages_session_visibility") && strings.Contains(detail, "visibility=?") {
-			searchedCount = true
+		if err := planRows.Err(); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !searchedCount {
-		t.Fatalf("the message count does not narrow on idx_fb_messages_session_visibility: %v", plan)
+		searchedCount := false
+		for _, detail := range plan {
+			parts := strings.Fields(detail)
+			if len(parts) >= 2 && parts[0] == "SCAN" && (parts[1] == "m" || parts[1] == "fb_messages") {
+				t.Fatalf("the message count reads the whole table: %q\nplan: %v", detail, plan)
+			}
+			// The count is the subquery that also narrows on visibility; the bare
+			// EXISTS beside it only narrows on the session.
+			if strings.Contains(detail, "idx_fb_messages_session_visibility") && strings.Contains(detail, "visibility=?") {
+				searchedCount = true
+			}
+		}
+		if !searchedCount {
+			t.Fatalf("the message count does not narrow on idx_fb_messages_session_visibility: %v", plan)
+		}
 	}
 }
 
