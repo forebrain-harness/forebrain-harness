@@ -72,7 +72,7 @@ func TestHandleContextSlashStatsUsesRunnerStateRoot(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	s := &Server{Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root, SessionStore: sessions}}}
+	s := &Server{Sessions: sessions, Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: root, SessionStore: sessions}}}
 	reply, handled := s.HandleContextSlash(context.Background(), "s1", "webchat", nil)
 	require.True(t, handled)
 	require.Contains(t, reply, "Filtered tool output, across this agent's conversations")
