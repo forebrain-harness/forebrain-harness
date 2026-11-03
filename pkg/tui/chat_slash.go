@@ -1165,6 +1165,26 @@ func (s *ChatSession) HandleLSPSlash(sessionID, channel string) (string, bool) {
 	return turn.RenderLSPInventoryMarkdown(ctl.Snapshot()), true
 }
 
+// peerDirectorySource is the optional half of Session that reaches the agents
+// other processes host on this machine, which is what /peers lists. A surface
+// with no engine behind it (tests, replay) simply does not have it.
+type peerDirectorySource interface {
+	// PeerListing is the agents this conversation's own agent can message.
+	PeerListing(ctx context.Context, sessionID string) (run.PeerListing, error)
+}
+
+// PeerListing is who /peers can name: the agents in other processes on this
+// machine, as the caller that is this conversation's own agent reaches them
+// (plan 199 §3.4). No port means the machine has no peer messaging, which is
+// an empty list rather than a failure.
+func (s *ChatSession) PeerListing(ctx context.Context, sessionID string) (run.PeerListing, error) {
+	deps := s.deps()
+	if deps == nil || deps.Peers == nil {
+		return run.PeerListing{}, nil
+	}
+	return deps.Peers.List(ctx, run.PeerCaller{SessionID: strings.TrimSpace(sessionID)})
+}
+
 // startMCPLocalOAuth begins the local OAuth flow for one server: it listens
 // for the browser callback and returns the authorization URL to open. done
 // receives the outcome once the flow ends — the underlying error verbatim when

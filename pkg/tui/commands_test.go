@@ -12,6 +12,8 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -4440,5 +4442,113 @@ func TestReplayReasoningRowShowsItsStoredDuration(t *testing.T) {
 	painted := stripANSI(strings.Join(renderViewport(&renderer.vm, 120, 24, 0, DiffThemeDark).lines, "\n"))
 	if !strings.Contains(painted, "Thought for 12s") {
 		t.Fatalf("replay did not draw the stored thinking duration:\n%s", painted)
+	}
+}
+
+// --- /peers (plan 199 §3.4) ---
+
+// peersTestSession is the slice of Session /peers reads: the agents another
+// session hosts, and the messages waiting for this conversation.
+type peersTestSession struct {
+	Session
+	listing run.PeerListing
+	err     error
+	held    []process.HeldPeerMessage
+}
+
+func (s *peersTestSession) PeerListing(context.Context, string) (run.PeerListing, error) {
+	return s.listing, s.err
+}
+
+func (s *peersTestSession) HeldPeerMessages(string) []process.HeldPeerMessage { return s.held }
+
+func (s *peersTestSession) ReleasePeerMessage(string) error { return nil }
+
+func (s *peersTestSession) DenyPeerMessage(string) error { return nil }
+
+// /peers lists the agents this machine's other sessions host, then the messages
+// waiting for this conversation, and only a waiting message has something to
+// answer: the row that answers opens the held prompt.
+func TestPeersListsAgentsThenHeldMessagesAndAnswersOne(t *testing.T) {
+	session := &peersTestSession{
+		listing: run.PeerListing{Peers: []run.PeerEntry{
+			{Name: "builder", Status: "idle", Task: "waiting for review", Kind: "terminal", SameTree: true},
+			{Name: "reviewer", Ref: "abc123", Status: "running", Kind: "terminal"},
+		}},
+		held: []process.HeldPeerMessage{{
+			MsgID: "held-1", FromName: "planner", Preview: "please look at line 12\nand the rest",
+			Cause: event.PeerHoldCauseModeMismatch,
+		}},
+	}
+	// The held message is the third row: after the two agents.
+	selector := &stubSelector{selectRichIdx: 2, selectRichOK: true}
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	cmds := newCommandController(session, renderer, selector, nil, "")
+	var asked []process.HeldPeerMessage
+	cmds.askHeldPeer = func(held process.HeldPeerMessage) { asked = append(asked, held) }
+
+	if !cmds.handlePeers(context.Background(), "conv-1") {
+		t.Fatal("/peers must be handled by the TUI")
+	}
+	items := selector.selectRichItems
+	if len(items) != 3 {
+		t.Fatalf("rows=%d want 3: %+v", len(items), items)
+	}
+	if items[0].Label != "builder" || !strings.Contains(items[0].Description, "idle") ||
+		!strings.Contains(items[0].Description, "waiting for review") || !strings.Contains(items[0].Description, "same tree") {
+		t.Fatalf("agent row=%+v want its status, task and tree", items[0])
+	}
+	if items[1].Label != "reviewer [abc123]" {
+		t.Fatalf("ambiguous agent row=%q want the name with its ref", items[1].Label)
+	}
+	if items[0].Category == items[2].Category {
+		t.Fatalf("agents and held messages share the heading %q: the list is two halves", items[0].Category)
+	}
+	if items[2].Label != "Message from planner" || !strings.Contains(items[2].Description, "permission modes differ") {
+		t.Fatalf("held row=%+v want the sender and why it waits", items[2])
+	}
+	if len(asked) != 1 || asked[0].MsgID != "held-1" {
+		t.Fatalf("chosen held message=%+v want held-1 put to the person", asked)
+	}
+}
+
+// A peer row is read-only: choosing one opens nothing, because messaging is the
+// agent's job and this list is not a compose box.
+func TestPeersPeerRowAnswersNothing(t *testing.T) {
+	session := &peersTestSession{listing: run.PeerListing{Peers: []run.PeerEntry{{Name: "builder"}}}}
+	selector := &stubSelector{selectRichIdx: 0, selectRichOK: true}
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	cmds := newCommandController(session, renderer, selector, nil, "")
+	asked := 0
+	cmds.askHeldPeer = func(process.HeldPeerMessage) { asked++ }
+
+	if !cmds.handlePeers(context.Background(), "conv-1") {
+		t.Fatal("/peers must be handled by the TUI")
+	}
+	if asked != 0 {
+		t.Fatalf("choosing a peer opened %d questions: the list is read-only", asked)
+	}
+}
+
+// With nobody to message and nothing waiting, /peers says so instead of opening
+// an empty picker.
+func TestPeersSaysWhenThereIsNothingToList(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	cmds := newCommandController(&peersTestSession{}, renderer, &stubSelector{}, nil, "")
+
+	if !cmds.handlePeers(context.Background(), "conv-1") {
+		t.Fatal("/peers must be handled by the TUI")
+	}
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want one line saying there is nothing to list", len(renderer.vm.blocks))
+	}
+	if card := renderer.vm.blocks[0].frame; card.Title != "peers" || !strings.Contains(card.Content, "no peer message is waiting") {
+		t.Fatalf("empty /peers card=%+v want the honest empty answer", card)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/migrate"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -30,6 +31,10 @@ type commandController struct {
 	// openPanel, when wired by the main loop, opens an interactive slash
 	// panel (composer state, §3.1) and reports whether it opened.
 	openPanel func(kind string) bool
+	// askHeldPeer, when wired by the main loop, puts one held peer message's
+	// question to the person. /peers picks the message; the question itself is
+	// the same one the idle loop asks (plan 199 §3.3).
+	askHeldPeer func(held process.HeldPeerMessage)
 	// resetScreen, when wired by the main loop, replaces everything the terminal
 	// is showing with the chrome a fresh screen opens with. A replay appends
 	// otherwise: /resume looked right only because switchStreamSession had just
@@ -2461,6 +2466,121 @@ func (c *commandController) handleLSP(sessionID string) bool {
 	}
 	c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "lsp", Content: strings.TrimSpace(reply), Final: true})
 	return true
+}
+
+// peerPanelItem is one row of /peers: the row the picker shows, and the held
+// message behind it — nil for a peer, whose row is only there to be read.
+type peerPanelItem struct {
+	item SelectItem
+	held *process.HeldPeerMessage
+}
+
+// handlePeers lists the agents other sessions on this machine host, then the
+// peer messages waiting for this conversation (plan 199 §3.4). It is a
+// read-only list in the picker the other slash commands use: messaging is the
+// agent's job, so the only row that acts is a held message, and what it opens
+// is the same question the idle loop asks.
+func (c *commandController) handlePeers(ctx context.Context, sessionID string) bool {
+	if c == nil || c.session == nil || c.renderer == nil {
+		return false
+	}
+	rows := c.peerPanelItems(ctx, sessionID)
+	if len(rows) == 0 {
+		c.renderer.RenderFrame(Frame{
+			Kind: FrameSystem, Title: "peers",
+			Content: "No agent on this machine can be messaged, and no peer message is waiting.",
+			Final:   true,
+		})
+		return true
+	}
+	items := make([]SelectItem, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, row.item)
+	}
+	idx, ok, err := c.selector.SelectRich("Peers\nAgents on this machine you can message, then the messages waiting for you", items, -1)
+	if err != nil {
+		c.renderer.PrintError(err)
+		return true
+	}
+	if !ok || idx < 0 || idx >= len(rows) || rows[idx].held == nil {
+		return true
+	}
+	if c.askHeldPeer != nil {
+		c.askHeldPeer(*rows[idx].held)
+	}
+	return true
+}
+
+// peerPanelItems is /peers' content: the agents the peer port lists, then the
+// messages the engine is holding for this conversation. A row is added only
+// when its half of the session can answer, so a surface without peers simply
+// has an empty list.
+func (c *commandController) peerPanelItems(ctx context.Context, sessionID string) []peerPanelItem {
+	var rows []peerPanelItem
+	if src, ok := c.session.(peerDirectorySource); ok {
+		if listing, err := src.PeerListing(ctx, sessionID); err == nil {
+			for _, peer := range listing.Peers {
+				rows = append(rows, peerPanelItem{item: SelectItem{
+					Label:       peerRowLabel(peer),
+					Description: peerRowDescription(peer),
+					Category:    "Agents you can message",
+				}})
+			}
+		}
+	}
+	if holds, ok := c.session.(peerHoldDecider); ok {
+		for _, waiting := range holds.HeldPeerMessages(sessionID) {
+			held := waiting
+			rows = append(rows, peerPanelItem{
+				item: SelectItem{
+					Label:       "Message from " + heldPeerName(held),
+					Description: heldPeerRowDescription(held),
+					Category:    "Waiting for you",
+				},
+				held: &held,
+			})
+		}
+	}
+	return rows
+}
+
+// peerRowLabel is one agent's name as peer_send takes it, with its ref when two
+// reachable agents share the name.
+func peerRowLabel(peer run.PeerEntry) string {
+	if ref := strings.TrimSpace(peer.Ref); ref != "" {
+		return strings.TrimSpace(peer.Name) + " [" + ref + "]"
+	}
+	return strings.TrimSpace(peer.Name)
+}
+
+// peerRowDescription is the rest of a peer_list row: what the agent is doing,
+// what it is, and whether it works in this tree.
+func peerRowDescription(peer run.PeerEntry) string {
+	parts := make([]string, 0, 4)
+	for _, field := range []string{peer.Status, peer.Task, peer.Kind} {
+		if text := strings.TrimSpace(field); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if peer.SameTree {
+		parts = append(parts, "same tree")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// heldPeerRowDescription is why a held message waits, and the opening of what
+// it carries.
+func heldPeerRowDescription(held process.HeldPeerMessage) string {
+	parts := make([]string, 0, 2)
+	if cause := heldPeerCauseLabel(held.Cause); cause != "" {
+		parts = append(parts, cause)
+	}
+	if lines := heldPeerPreviewLines(held.Preview, 1); len(lines) > 0 {
+		if preview := strings.TrimSpace(lines[0]); preview != "" {
+			parts = append(parts, preview)
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 // migrateSession is the slice of ChatSession the /migrate flow drives: the

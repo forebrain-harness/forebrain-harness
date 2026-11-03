@@ -230,6 +230,14 @@ func Run(ctx context.Context, opts Options) error {
 	cmds.resetScreen = func() {
 		resetStreamTranscript(renderer, &state)
 	}
+	// /peers picks a held message; its question is the idle loop's own, asked
+	// here with the message the person chose. The message joins the state's
+	// list first, so its settlement is reported and named the same way as one
+	// the loop asked about itself.
+	cmds.askHeldPeer = func(held process.HeldPeerMessage) {
+		state.addHeldPeer(held)
+		askHeldPeerMessage(ctx, out, rawSel, opts.Session, &state, renderer, held)
+	}
 	opts.Session.SetToolApprovalSink(approvalSink)
 
 	tracker := NewTracker()
@@ -1299,6 +1307,9 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		return true, false, ComposerSubmission{}, false
 	case "lsp":
 		_ = cmds.handleLSP(state.sessionID)
+		return true, false, ComposerSubmission{}, false
+	case "peers":
+		_ = cmds.handlePeers(ctx, state.sessionID)
 		return true, false, ComposerSubmission{}, false
 	case "migrate":
 		_ = cmds.handleMigrate(ctx, state.sessionID)
