@@ -61,6 +61,10 @@ type OpenOptions struct {
 	EnableChannels    bool
 	EnableTelemetry   bool
 	EnableApprovalTTL bool
+	// ReplicaKind is what this process records about itself in fb_run_owners
+	// (plan 213 §3.1): state.RunOwnerKindGateway or
+	// state.RunOwnerKindTerminal. Empty derives it from SessionSource.
+	ReplicaKind string
 }
 
 // Environment owns process-wide runtime dependencies.
@@ -654,6 +658,17 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		return nil, fmt.Errorf("register run owner lease: %w", err)
 	}
 	env.ownerLeaseStop = ownerStop
+	// The replica registration is what tells the other replicas of a shared
+	// database whether a running conversation belongs here and, when it does
+	// not, where to forward to (plan 213 §3.1). It rides on the lease row
+	// HoldOwnerLease just created, so it cannot outlive the process either.
+	kind, internalAddr := replicaRegistration(opts.ReplicaKind, source, loaded)
+	if err := runSvc.RegisterReplica(ctx, kind, internalAddr, replicaHost()); err != nil {
+		ownerStop()
+		_ = env.LSP.Close()
+		_ = env.Runner.Close()
+		return nil, fmt.Errorf("register replica: %w", err)
+	}
 	return env, nil
 }
 

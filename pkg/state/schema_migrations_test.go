@@ -3952,3 +3952,62 @@ func TestOutputRecordsMigrationReachesAnOlderDatabase(t *testing.T) {
 		t.Fatalf("migrated row = id %d kind %q", id, kind)
 	}
 }
+
+// TestReplicaColumnsMigrationReachesAnOlderDatabase pins the v31 migration on
+// every engine, the way TestOutputRecordsMigrationReachesAnOlderDatabase pins
+// v30: a fresh database gets the replica columns from its schema script and
+// never runs a migration, so without this the three arms would be proven only
+// by never having been asked for — which is exactly what a database 209
+// created before the columns joined the schema is.
+func TestReplicaColumnsMigrationReachesAnOlderDatabase(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	dialect := dbx.DialectOf(db)
+
+	// Take the columns and the version row away, whatever the engine keeps
+	// them in: the database now looks like one from before v31.
+	for _, column := range []string{"kind", "host", "internal_addr"} {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE fb_run_owners DROP COLUMN `+column); err != nil {
+			t.Fatalf("drop fb_run_owners.%s: %v", column, err)
+		}
+	}
+	if dialect == dbx.SQLite {
+		if _, err := db.ExecContext(ctx, `PRAGMA user_version = 30`); err != nil {
+			t.Fatalf("lower user_version: %v", err)
+		}
+	} else if err := writeDialectSchemaVersion(ctx, db, dialect, 30); err != nil {
+		t.Fatalf("lower the version row: %v", err)
+	}
+
+	if err := migrateStateSchema(ctx, db, ""); err != nil {
+		t.Fatalf("%s migrate to v%d: %v", dialect, stateSchemaVersion, err)
+	}
+	if dialect == dbx.SQLite {
+		requireSchemaVersion(ctx, t, db, stateSchemaVersion)
+	} else {
+		version, err := readDialectSchemaVersion(ctx, db, dialect)
+		if err != nil {
+			t.Fatalf("read %s schema version: %v", dialect, err)
+		}
+		if version != stateSchemaVersion {
+			t.Fatalf("%s schema version = %d, want %d", dialect, version, stateSchemaVersion)
+		}
+	}
+
+	// The columns the migration added are the ones the store writes: a
+	// registration goes in and reads back, on every engine alike.
+	insert := dbx.Rebind(dialect, `INSERT INTO fb_run_owners
+		(owner, heartbeat_at_ms, internal_addr, host, kind)
+		VALUES (?,?,?,?,?)`)
+	if _, err := db.ExecContext(ctx, insert, "owner-replica", 1, "http://10.0.3.17:8787", "node-a", "gateway"); err != nil {
+		t.Fatalf("insert on the migrated table: %v", err)
+	}
+	var addr, host, kind string
+	read := dbx.Rebind(dialect, `SELECT internal_addr, host, kind FROM fb_run_owners WHERE owner = ?`)
+	if err := db.QueryRowContext(ctx, read, "owner-replica").Scan(&addr, &host, &kind); err != nil {
+		t.Fatalf("read the migrated table: %v", err)
+	}
+	if addr != "http://10.0.3.17:8787" || host != "node-a" || kind != "gateway" {
+		t.Fatalf("migrated row = %q/%q/%q, want the registration that was written", addr, host, kind)
+	}
+}

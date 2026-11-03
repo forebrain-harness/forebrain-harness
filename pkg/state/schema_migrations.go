@@ -20,7 +20,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 30
+const stateSchemaVersion = 31
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -83,6 +83,12 @@ var stateSchemaMigrations = []schemaMigration{
 		apply:         migrateStateV29ToV30,
 		applyMySQL:    migrateStateV29ToV30MySQL,
 		applyPostgres: migrateStateV29ToV30Postgres,
+	},
+	{
+		version:       31,
+		apply:         migrateStateV30ToV31,
+		applyMySQL:    migrateStateV30ToV31MySQL,
+		applyPostgres: migrateStateV30ToV31Postgres,
 	},
 }
 
@@ -1394,7 +1400,75 @@ CREATE TABLE IF NOT EXISTS output_records (
 	return nil
 }
 
-// rewriteStoredConfigV28 removes the paths from one stored section and writes
+// migrateStateV30ToV31 gives every owner row the replica registration a
+// multi-replica deployment reads (plan 213 §3.1, design §2.7.1): the address
+// the other replicas reach this one at, the machine it runs on, and whether it
+// is a gateway or a terminal. All three default to the empty string, which is
+// what a database written before replicas existed should read as — nothing to
+// forward to, no host to compare, no kind to act on.
+//
+// A fixture built from the current schema.sql with a lowered user_version
+// already carries the columns, so the ALTERs are skipped rather than failing on
+// a duplicate.
+func migrateStateV30ToV31(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_run_owners') WHERE name='internal_addr'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_run_owners ADD COLUMN internal_addr TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_run_owners.internal_addr: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_run_owners ADD COLUMN host TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_run_owners.host: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_run_owners ADD COLUMN kind TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_run_owners.kind: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV30ToV31MySQL is the same three columns in MySQL's types. Only a
+// database 209 created before this migration reaches it: a new one is built
+// from schema_mysql.sql whole, at the current version.
+func migrateStateV30ToV31MySQL(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_run_owners' AND column_name = 'internal_addr'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `
+ALTER TABLE fb_run_owners
+  ADD COLUMN internal_addr VARCHAR(1024) NOT NULL DEFAULT (''),
+  ADD COLUMN host VARCHAR(255) NOT NULL DEFAULT (''),
+  ADD COLUMN kind VARCHAR(32) NOT NULL DEFAULT ('')`); err != nil {
+		return fmt.Errorf("add fb_run_owners replica columns: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV30ToV31Postgres is the same three columns in PostgreSQL's types.
+func migrateStateV30ToV31Postgres(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+ALTER TABLE fb_run_owners
+  ADD COLUMN IF NOT EXISTS internal_addr TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS host TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_run_owners replica columns: %w", err)
+	}
+	return nil
+}
+
+
 // the explicit representation over an empty string, in one read-modify-write of
 // that row. A section the database does not hold is nothing to rewrite.
 func rewriteStoredConfigV28(ctx context.Context, conn *sql.Conn, section string, remove []string, represent map[string]string) error {

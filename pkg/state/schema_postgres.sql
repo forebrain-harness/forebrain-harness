@@ -301,10 +301,14 @@ CREATE TABLE fb_actions (
 CREATE INDEX idx_fb_actions_session_status ON fb_actions (session_id, status, updated_at DESC);
 CREATE INDEX idx_fb_actions_pending_created ON fb_actions (created_at) WHERE status = 'pending';
 
--- One row per living forebrain process, renewed on a lease interval.
+-- One row per living forebrain process, renewed on a lease interval. The last
+-- three columns are the replica registration (plan 213 §3.1).
 CREATE TABLE fb_run_owners (
   owner TEXT NOT NULL PRIMARY KEY,
   heartbeat_at_ms BIGINT NOT NULL,
+  internal_addr TEXT NOT NULL DEFAULT '',
+  host TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT '',
   CHECK (TRIM(owner) <> '')
 );
 

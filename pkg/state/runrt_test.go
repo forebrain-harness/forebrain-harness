@@ -992,6 +992,51 @@ func TestOwnerLeaseRegistersAndLeaves(t *testing.T) {
 	}
 }
 
+// TestRegisterReplicaRecordsTheReplicaColumns pins the registration a
+// multi-replica deployment reads (plan 213 §3.1): what this process is, which
+// machine it runs on, and — for a gateway — where the other replicas reach it.
+// The heartbeat renewal writes only the clock, so the registration has to
+// survive it, and a store without an owner refuses.
+func TestRegisterReplicaRecordsTheReplicaColumns(t *testing.T) {
+	ctx := context.Background()
+	a, _, db := newTwoOwnerStores(t)
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if err := a.RegisterReplica(ctx, RunOwnerKindGateway, "http://10.0.3.17:8787", "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (string, string, string) {
+		t.Helper()
+		var kind, host, addr string
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db),
+			`SELECT kind, host, internal_addr FROM fb_run_owners WHERE owner=?`), "owner-a").Scan(&kind, &host, &addr); err != nil {
+			t.Fatal(err)
+		}
+		return kind, host, addr
+	}
+	if kind, host, addr := read(); kind != RunOwnerKindGateway || host != "node-a" || addr != "http://10.0.3.17:8787" {
+		t.Fatalf("registered replica = %q/%q/%q, want gateway/node-a/http://10.0.3.17:8787", kind, host, addr)
+	}
+	// Renewing the lease is what a live replica does every few seconds; it must
+	// not disturb what the replica said about itself.
+	ageOwnerLease(t, db, "owner-a")
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_run_owners SET heartbeat_at_ms=? WHERE owner=?`),
+		time.Now().UnixMilli(), "owner-a"); err != nil {
+		t.Fatal(err)
+	}
+	if kind, host, addr := read(); kind != RunOwnerKindGateway || host != "node-a" || addr != "http://10.0.3.17:8787" {
+		t.Fatalf("replica after a renewal = %q/%q/%q, want the registration unchanged", kind, host, addr)
+	}
+
+	bare := &RunStore{DB: db}
+	if err := bare.RegisterReplica(ctx, RunOwnerKindGateway, "", ""); err == nil {
+		t.Fatal("a store without an owner must refuse to register a replica")
+	}
+}
+
 // TestFirstPrimaryRunIDReturnsTheEarliestPrimaryRun pins the read settling a
 // fire rests on: the first primary run of a fire's session is the fire's run,
 // however many runs the conversation later holds and however many subagent

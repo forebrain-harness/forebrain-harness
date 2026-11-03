@@ -209,6 +209,15 @@ type RunStore struct {
 	Owner string
 }
 
+// The replica kinds recorded in fb_run_owners.kind (plan 213 §3.1). A gateway
+// serves the internal endpoints the other replicas forward to, so it is the
+// only kind that carries an internal_addr. A terminal serves none: nothing is
+// ever forwarded to it, and its row says so by leaving the address empty.
+const (
+	RunOwnerKindGateway  = "gateway"
+	RunOwnerKindTerminal = "tui"
+)
+
 // livePrimaryRunCondition is the one definition of "this session has a live
 // primary run": one parked on an approval, or one running under an owner
 // whose lease is still fresh. CreateRun's atomic INSERT and
@@ -624,6 +633,15 @@ ON CONFLICT(owner) DO UPDATE SET heartbeat_at_ms=excluded.heartbeat_at_ms`,
 		SQLite:   `DELETE FROM fb_run_owners WHERE owner=?`,
 		MySQL:    `DELETE FROM fb_run_owners WHERE owner=?`,
 		Postgres: `DELETE FROM fb_run_owners WHERE owner=$1`,
+	}
+	// runOwnerLeaseProfileSQL records what this replica is and where the other
+	// replicas reach it, once, right after the lease row is first written. The
+	// heartbeat upsert stays the statement it was, so renewing a lease never
+	// has to know about the registration.
+	runOwnerLeaseProfileSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_run_owners SET internal_addr=?, host=?, kind=? WHERE owner=?`,
+		MySQL:    `UPDATE fb_run_owners SET internal_addr=?, host=?, kind=? WHERE owner=?`,
+		Postgres: `UPDATE fb_run_owners SET internal_addr=$1, host=$2, kind=$3 WHERE owner=$4`,
 	}
 	reapAbandonedRunsSelectSQL = dbx.SQL{
 		SQLite: `
@@ -1695,7 +1713,32 @@ func (s *RunStore) HoldOwnerLease(ctx context.Context) (stop func(), err error) 
 	}, nil
 }
 
-// AbandonedRun is a run reaped because the process driving it stopped
+// RegisterReplica records this process's replica registration in the owner row
+// HoldOwnerLease created: what it is (RunOwnerKindGateway or
+// RunOwnerKindTerminal), which machine it runs on, and — for a gateway — the
+// address the other replicas reach it at. A terminal passes an empty
+// internalAddr: it serves no internal endpoint, so no other replica ever
+// forwards to it, and an empty address is how the row says so.
+//
+// It is called once, after HoldOwnerLease, and a failure is fatal to the
+// process that makes it: a replica the database cannot describe is one the
+// others would forward to blindly, or refuse to forward to at all.
+func (s *RunStore) RegisterReplica(ctx context.Context, kind, internalAddr, host string) error {
+	if s == nil || s.DB == nil {
+		return fmt.Errorf("nil db")
+	}
+	owner := strings.TrimSpace(s.Owner)
+	if owner == "" {
+		return fmt.Errorf("a run store without an owner cannot register a replica")
+	}
+	_, err := dbx.Exec(ctx, s.DB, runOwnerLeaseProfileSQL.For(dbx.DialectOf(s.DB)),
+		strings.TrimSpace(internalAddr), strings.TrimSpace(host), strings.TrimSpace(kind), owner)
+	if err != nil {
+		return fmt.Errorf("register replica %s: %w", owner, err)
+	}
+	return nil
+}
+
 // renewing its lease. FinishedAtMs is the clock the reap stamped on it — the
 // moment its owner was last seen — which is what a surface computes the
 // run's final duration from.

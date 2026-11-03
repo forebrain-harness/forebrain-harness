@@ -315,10 +315,16 @@ CREATE INDEX idx_fb_runs_session_live ON fb_runs(session_id)
 
 -- One row per living forebrain process, renewed on a lease interval. Its
 -- absence (or a stale heartbeat) is what marks that process's running runs
--- as abandoned.
+-- as abandoned. The last three columns are the replica registration a
+-- multi-replica deployment reads: where the other replicas reach this one,
+-- which machine it runs on, and whether it is a gateway (which serves the
+-- internal endpoints) or a terminal (which nothing forwards to).
 CREATE TABLE fb_run_owners (
   owner TEXT PRIMARY KEY CHECK (TRIM(owner) <> ''),
-  heartbeat_at_ms INTEGER NOT NULL
+  heartbeat_at_ms INTEGER NOT NULL,
+  internal_addr TEXT NOT NULL DEFAULT '',
+  host TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 -- The single, ordered record of everything a conversation and its runs did.
