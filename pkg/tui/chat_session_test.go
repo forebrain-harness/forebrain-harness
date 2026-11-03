@@ -37,6 +37,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
+	"github.com/forebrain-harness/forebrain-harness/pkg/peer"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -9866,6 +9867,71 @@ func TestRenderDeliveredSteerMessagesRendersDisplayTextNotModelText(t *testing.T
 	}
 }
 
+// A peer message delivered into a running turn carries no composer submission —
+// nobody typed it — so draining the delivered list must skip it rather than
+// assert a Payload that is not there, and the reader must still see the letter:
+// the same `↘ <sender>` card a resume draws, never a "you" row. Plan 201 hit the
+// assert on a real machine and the TUI died.
+func TestDeliveredPeerInputDrawsItsCardWithoutPanicking(t *testing.T) {
+	session := &fakeSession{}
+	st := &streamState{sessionID: "s1", session: session}
+	queue := session.SurfaceInputQueue("s1")
+	// Built by the protocol, not hand-typed: the receiver parses an envelope
+	// and re-renders it, so a hand-written one that does not round-trip reads
+	// as plain text and the card has no sender to name.
+	envelope := peer.Build(peer.Envelope{From: "uds:/tmp/a.sock", FromName: "builder", Body: "please review a.go"})
+	// The queue folds whitespace in Text, so the envelope is carried by its
+	// Parts and the surface's text is rebuilt from them — exactly what
+	// process.peerInput does.
+	queue.Steer(run.Input{
+		Parts:  []llm.ContentPart{llm.Text(envelope)},
+		Origin: state.MessageOriginPeer,
+	})
+	queue.Steer(run.Input{
+		Parts:  []llm.ContentPart{llm.Text("<system-reminder>\nPeer message delivery update:\n- to builder: delivered.\n</system-reminder>")},
+		Origin: state.MessageOriginPeerStatus,
+	})
+	// The run hands both to the model at a tool boundary.
+	if drained := queue.Runtime().DrainSteers(); len(drained) != 2 {
+		t.Fatalf("expected the two steers delivered, got %#v", drained)
+	}
+
+	// One drain hands back both halves: neither entry is a composer
+	// submission, and the drain must not panic on either.
+	deliveries, peer := st.takeDeliveredSteersForDisplay()
+	if len(peer) != 2 {
+		t.Fatalf("expected both peer deliveries back, got %#v", peer)
+	}
+	if len(deliveries) != 0 {
+		t.Fatalf("peer deliveries are not composer submissions, got %#v", deliveries)
+	}
+	// The queue folds whitespace into the text it keeps, so the envelope —
+	// whose parse re-renders the original — travels in the parts.
+	for i := range peer {
+		peer[i].Text = llm.TextContent(peer[i].Parts...)
+	}
+	if peer[0].Origin != state.MessageOriginPeer || peer[1].Origin != state.MessageOriginPeerStatus {
+		t.Fatalf("peer deliveries lost their origin: %#v", peer)
+	}
+
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	renderDeliveredInputCards(renderer, peer)
+	if got := deliveredSteerTranscript(t, renderer); len(got) != 0 {
+		t.Fatalf("a peer delivery must not render as a user message, got %#v", got)
+	}
+	var titles []string
+	for _, block := range renderer.vm.blocks {
+		titles = append(titles, block.frame.Title)
+	}
+	if !slices.Contains(titles, "↘ builder") {
+		t.Fatalf("peer message must render as its ↘ sender card, got %#v", titles)
+	}
+	if !slices.Contains(titles, "Delivery") {
+		t.Fatalf("delivery note must render as its Delivery card, got %#v", titles)
+	}
+}
+
 // The queue's delivered list is what carries the display form, so taking it
 // must hand the delivered submissions back rather than dropping them on the
 // floor.
@@ -12518,7 +12584,9 @@ func TestEditDeliveredPendingSteerLeavesSteerUntouched(t *testing.T) {
 	// The queue hook mirrors production: the surface renders the delivered
 	// steers as soon as the delivery notification lands.
 	session.SurfaceInputQueue("s1").SetChangeHook(func() {
-		renderDeliveredSteerMessages(renderer, state.takeDeliveredSteers())
+		deliveries, peers := state.takeDeliveredSteersForDisplay()
+		renderDeliveredInputCards(renderer, peers)
+		renderDeliveredSteerMessages(renderer, deliveries)
 	})
 	session.rt.DrainSteers()
 

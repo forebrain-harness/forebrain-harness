@@ -438,7 +438,9 @@ func Run(ctx context.Context, opts Options) error {
 					// preview into the transcript: take them off the queue's
 					// delivered list and render them as user-history messages
 					// so they don't silently disappear.
-					renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
+					deliveries, peers := state.takeDeliveredSteersForDisplay()
+					renderDeliveredInputCards(renderer, peers)
+					renderDeliveredSteerMessages(renderer, deliveries)
 					renderComposerWithState(renderer, &state)
 				}
 			}
@@ -2970,13 +2972,36 @@ func rejectedQueueInput(submission ComposerSubmission) run.Input {
 }
 
 // queuedSubmissions pulls the surface's submissions back out of the queue's
-// inputs, in the order the queue listed them.
+// inputs, in the order the queue listed them. An input the person did not type
+// carries no submission — a peer message and a delivery note are steered into a
+// running turn with no Payload at all — so those are skipped rather than
+// asserted: every caller here is a steer path, and a steer that is not a
+// composer submission has nothing for it to recall, release or render.
 func queuedSubmissions(inputs []run.Input) []ComposerSubmission {
 	out := make([]ComposerSubmission, 0, len(inputs))
 	for _, in := range inputs {
-		out = append(out, in.Payload.(ComposerSubmission))
+		if submission, ok := in.Payload.(ComposerSubmission); ok {
+			out = append(out, submission)
+		}
 	}
 	return out
+}
+
+// takeDeliveredSteers drains the steers the model has received and hands back
+// the composer submissions among them, in delivery order. It is the queue's
+// delivered list drained for the submission half only; takeDeliveredSteersForDisplay
+// is the same drain for a caller that also renders, and drains the peer half.
+func (s *streamState) takeDeliveredSteers() []ComposerSubmission {
+	if s == nil {
+		return nil
+	}
+	var submissions []ComposerSubmission
+	for _, in := range s.sessionQueue().TakeDelivered() {
+		if submission, ok := in.Payload.(ComposerSubmission); ok {
+			submissions = append(submissions, submission)
+		}
+	}
+	return submissions
 }
 
 // hasQueuedSteers reports whether the queue still holds steers the model has
@@ -2986,29 +3011,52 @@ func (s *streamState) hasQueuedSteers() bool {
 	return q != nil && len(q.Preview().Steers) > 0
 }
 
-// takeDeliveredSteers drains the steers the model has received — in delivery
-// order, whole — so the surface can render them into the transcript. The
-// queue's delivered list is consumed destructively, so whichever observer
-// drains it first owns rendering those messages.
-func (s *streamState) takeDeliveredSteers() []ComposerSubmission {
-	return queuedSubmissions(s.sessionQueue().TakeDelivered())
+// takeDeliveredSteersForDisplay drains the queue's delivered list once and
+// hands back both halves: the composer submissions the person typed, and the
+// peer messages and delivery notes nobody typed here. The caller renders each
+// half as what it is — a submission is a "you" row, a peer delivery is its own
+// card — so the surface that takes them off the queue owns drawing them into
+// the transcript. The submissions are also filed in the conversation's log, so
+// a reload draws the same message.
+func (s *streamState) takeDeliveredSteersForDisplay() ([]ComposerSubmission, []run.Input) {
+	if s == nil {
+		return nil, nil
+	}
+	var submissions []ComposerSubmission
+	var peer []run.Input
+	for _, in := range s.sessionQueue().TakeDelivered() {
+		if submission, ok := in.Payload.(ComposerSubmission); ok {
+			submissions = append(submissions, submission)
+			continue
+		}
+		if statepkg.IsPeerOrigin(in.Origin) {
+			peer = append(peer, in)
+		}
+	}
+	if len(submissions) > 0 {
+		if recorder, ok := s.session.(interface {
+			recordDeliveredSteers(sessionID string, delivered []ComposerSubmission)
+		}); ok {
+			recorder.recordDeliveredSteers(s.sessionID, submissions)
+		}
+	}
+	return submissions, peer
 }
 
-// takeDeliveredSteersForDisplay drains the delivered steers and files each one
-// in the conversation's log before the caller renders it: the surface that
-// takes them off the queue owns both drawing them into the transcript and
-// recording where the model received them, so a reload draws the same message.
-func (s *streamState) takeDeliveredSteersForDisplay() []ComposerSubmission {
-	delivered := s.takeDeliveredSteers()
-	if len(delivered) == 0 {
-		return delivered
+// renderDeliveredInputCards draws the messages the model just received that
+// nobody typed at this terminal: a peer message as its `↘ <sender>` letter and a
+// delivery note as its `Delivery` card — the same cards a resume of the
+// conversation draws for the rows those inputs become, so a letter the model
+// answered is never on screen in one form live and another form after a reload.
+func renderDeliveredInputCards(renderer *Renderer, inputs []run.Input) {
+	if renderer == nil {
+		return
 	}
-	if recorder, ok := s.session.(interface {
-		recordDeliveredSteers(sessionID string, delivered []ComposerSubmission)
-	}); ok {
-		recorder.recordDeliveredSteers(s.sessionID, delivered)
+	for _, in := range inputs {
+		if card, ok := peerOriginCard(in.Origin, in.Text); ok {
+			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: card.Title, Content: card.Content, Final: true})
+		}
 	}
-	return delivered
 }
 
 // discardQueuedInput empties every queue and returns how many messages were
@@ -4016,7 +4064,9 @@ func runTurnWithDispatch(ctx context.Context, sigCh <-chan os.Signal, events <-c
 			// yet; leaving it there makes the turn-boundary handler treat an
 			// answered message as undelivered and resubmit it, so the model sees
 			// it twice.
-			renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
+			deliveries, peers := state.takeDeliveredSteersForDisplay()
+			renderDeliveredInputCards(renderer, peers)
+			renderDeliveredSteerMessages(renderer, deliveries)
 			if state != nil {
 				renderComposerWithState(renderer, state)
 			}
@@ -4688,7 +4738,9 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	// the queue, so editing/resubmitting operates on what is genuinely pending.
 	// This can observe a delivery before its notification reaches the loop, so
 	// it owns moving those steers into the transcript too.
-	renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
+	deliveries, peers := state.takeDeliveredSteersForDisplay()
+	renderDeliveredInputCards(renderer, peers)
+	renderDeliveredSteerMessages(renderer, deliveries)
 	// Shift+Left is decoded by the raw reader; bare Up remains history
 	// navigation.
 	switch ev.kind {
