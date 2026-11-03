@@ -1185,6 +1185,91 @@ func TestReplayDrawsACronPromptAsItsOriginCard(t *testing.T) {
 	}
 }
 
+// A peer message is another session talking, not the person typing: replay
+// draws the envelope as the sender's card, and the live line draws the same one
+// (plan 199 §3.1).
+func TestReplayDrawsAPeerMessageAsTheSendersCard(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	// The wire form exactly as another process writes it: the surfaces never
+	// import pkg/peer, so the shape is spelled out here.
+	envelope := "<cross-session-message from=\"uds:/tmp/a.sock\" from-session=\"conv-peer-a\" from-name=\"builder\">\n" +
+		"please review line 12\n</cross-session-message>"
+	received := state.WithMessageOrigin(
+		state.MessagePartsJSON(llm.UserMessage(llm.Text(envelope)), envelope), state.MessageOriginPeer)
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "user", Content: envelope, PartsJSON: received},
+	})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	if card.Kind != FrameSystem {
+		t.Fatalf("peer frame kind=%s want system", card.Kind)
+	}
+	if card.Title != "↘ builder" {
+		t.Fatalf("peer frame title=%q want ↘ builder", card.Title)
+	}
+	if card.Content != "please review line 12" {
+		t.Fatalf("peer frame content=%q want the envelope body", card.Content)
+	}
+}
+
+// A row that is not exactly one envelope is still somebody else's message: the
+// reader sees the text as it arrived, under a card that names no sender rather
+// than under the person's own user card.
+func TestReplayPeerRowWithoutAnEnvelopeKeepsItsText(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	text := "plain words, no envelope"
+	row := state.WithMessageOrigin(state.MessagePartsJSON(llm.UserMessage(llm.Text(text)), text), state.MessageOriginPeer)
+	replayTurnsToRenderer(renderer, []state.Message{{Role: "user", Content: text, PartsJSON: row}})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	if card.Kind != FrameSystem || card.Title != "↘ peer" {
+		t.Fatalf("unparsed peer row kind=%s title=%q want a system card titled ↘ peer", card.Kind, card.Title)
+	}
+	if card.Content != text {
+		t.Fatalf("unparsed peer row content=%q want the row text", card.Content)
+	}
+}
+
+// A delivery note is the sending conversation's receipt summary: its card says
+// Delivery and carries the list, not the system-reminder wrapper the model
+// reads.
+func TestReplayDrawsAPeerDeliveryNoteAsItsCard(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	note := "<system-reminder>\nPeer message delivery update:\n- to builder: released after approval and delivered.\n</system-reminder>"
+	row := state.WithMessageOrigin(state.MessagePartsJSON(llm.UserMessage(llm.Text(note)), note), state.MessageOriginPeerStatus)
+	replayTurnsToRenderer(renderer, []state.Message{{Role: "user", Content: note, PartsJSON: row}})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	if card.Kind != FrameSystem || card.Title != "Delivery" {
+		t.Fatalf("delivery card kind=%s title=%q want a system card titled Delivery", card.Kind, card.Title)
+	}
+	if card.Content != "- to builder: released after approval and delivered." {
+		t.Fatalf("delivery card content=%q want the receipt list alone", card.Content)
+	}
+	if strings.Contains(card.Content, "system-reminder") || strings.Contains(card.Content, "delivery update") {
+		t.Fatalf("delivery card kept the model-facing wrapper: %q", card.Content)
+	}
+}
+
 // A subagent's read_file card is rebuilt from the durable event stream, so
 // the engine's paging facts must ride the canonical ToolMeta. The call below
 // passed no offset/limit — without the facts there is nothing to derive a

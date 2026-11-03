@@ -15,6 +15,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/migrate"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -294,7 +295,12 @@ func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Mess
 	// what it is rather than as a card that says they sent it.
 	if kind == MsgKindUser {
 		if origin := state.MessageOrigin(turn.PartsJSON); origin != "" {
-			renderReplayFrames(renderer, reducer, Message{Kind: MsgKindSystem, Title: origin, Content: content, Timestamp: timestamp}, "", meta, timing)
+			msg := Message{Kind: MsgKindSystem, Title: origin, Content: content, Timestamp: timestamp}
+			if card, ok := peerOriginCard(origin, content); ok {
+				msg = card
+				msg.Timestamp = timestamp
+			}
+			renderReplayFrames(renderer, reducer, msg, "", meta, timing)
 			return
 		}
 	}
@@ -313,6 +319,57 @@ func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Mess
 		}
 	}
 	renderReplayFrames(renderer, reducer, msg, "", meta, timing)
+}
+
+// peerOriginCard turns a user row another session wrote into the card the
+// reader sees: who wrote it and the words they sent (plan 199 §3.1). It is the
+// one place a replay and the live line both draw from, so a peer message reads
+// the same whether it was just delivered or is being read back later.
+//
+// The second return is false for every other origin, and the caller keeps that
+// origin's plain card.
+func peerOriginCard(origin, content string) (Message, bool) {
+	switch strings.TrimSpace(origin) {
+	case state.MessageOriginPeer:
+		// ↘ points at the transcript the message arrived in: the reader is
+		// being spoken to by another session, not by the person at this
+		// terminal.
+		title := "↘ peer"
+		body := content
+		if name, parsedBody, ok := process.ParsePeerEnvelope(content); ok {
+			if name != "" {
+				title = "↘ " + name
+			}
+			body = parsedBody
+		}
+		return Message{Kind: MsgKindSystem, Title: title, Content: body}, true
+	case state.MessageOriginPeerStatus:
+		return Message{Kind: MsgKindSystem, Title: "Delivery", Content: peerDeliveryBody(content)}, true
+	}
+	return Message{}, false
+}
+
+// peerDeliveryBody is the list a delivery note carries, without its
+// system-reminder wrapper and the sentence that heads it: the card's own title
+// says "Delivery", so keeping the sentence would say it twice. Content in an
+// unexpected shape is returned whole rather than dropped.
+func peerDeliveryBody(content string) string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch trimmed := strings.TrimSpace(line); {
+		case trimmed == "",
+			trimmed == "<system-reminder>", trimmed == "</system-reminder>",
+			strings.EqualFold(trimmed, "Peer message delivery update:"):
+		default:
+			kept = append(kept, line)
+		}
+	}
+	body := strings.TrimSpace(strings.Join(kept, "\n"))
+	if body == "" {
+		return strings.TrimSpace(content)
+	}
+	return body
 }
 
 // replayTimelineWithReducer merges the compact-independent primary transcript

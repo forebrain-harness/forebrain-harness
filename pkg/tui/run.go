@@ -4081,12 +4081,16 @@ func executePeerTurn(ctx context.Context, events <-chan inputEvent, notifyCh <-c
 	defer func() { state.activeForeground = nil }()
 	// The line names the sender: the reader is looking at a conversation that
 	// started talking to someone else's session, and the row must not read as
-	// something they typed.
-	title := "peer"
-	if name := strings.TrimSpace(prompt.FromName); name != "" {
-		title = "peer · " + name
+	// something they typed. A peer message and its delivery note draw the card
+	// they replay as (peerOriginCard), so the live transcript and a resume of
+	// it never show the same message two different ways.
+	frame := Frame{Kind: FrameUser, Title: "peer", Content: prompt.Text, Final: true, turn: foreground}
+	if card, ok := peerOriginCard(prompt.Origin, prompt.Text); ok {
+		frame = Frame{Kind: FrameSystem, Title: card.Title, Content: card.Content, Final: true}
+	} else if name := strings.TrimSpace(prompt.FromName); name != "" {
+		frame.Title = "peer · " + name
 	}
-	renderer.RenderFrame(Frame{Kind: FrameUser, Title: title, Content: prompt.Text, Final: true, turn: foreground})
+	renderer.RenderFrame(frame)
 	sessionID, envelope := strings.TrimSpace(prompt.SessionID), prompt.Text
 	dispatch := func(ctx context.Context, session Session) error {
 		return dispatcher.DispatchPeerTurn(ctx, sessionID, envelope)
