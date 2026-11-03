@@ -1249,3 +1249,52 @@ func TestLivePrimaryInputTruncatesAndTracksLiveness(t *testing.T) {
 		t.Fatalf("ended run: LivePrimaryInput = %q, %v; want empty", got, err)
 	}
 }
+
+// TestRecoveryScanRunsOnEveryDialect pins the recovery scans against the three
+// engines. It goes through OpenStateForTest so PostgreSQL and MySQL run it too:
+// the scan orders by a column the wait row does not select, and PostgreSQL
+// refuses that under SELECT DISTINCT (SQLSTATE 42P10) — a shape only the matrix
+// can catch, because every other caller of this scan opens SQLite directly.
+func TestRecoveryScanRunsOnEveryDialect(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ensureSessionsForRuns(t, db, "conversation")
+	runs := &RunStore{DB: db}
+	actions := &ActionService{DB: db}
+
+	run, err := runs.CreateRun(ctx, "conversation", "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, err := actions.CreatePending(ctx, "conversation", "shell", map[string]any{"session_id": "conversation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.SetWaitingAction(ctx, run.ID, Wait{
+		RunID: run.ID, ActionID: action.ID, ToolName: "shell", ToolInputJSON: "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := actions.Approve(ctx, action.ID, "approved"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both scans must answer on every engine: the session-scoped one (the CTE
+	// form) and the whole-server one (no CTE).
+	for _, sessionID := range []string{"", "conversation"} {
+		resolved, err := runs.ListResolvedWaitActionIDs(ctx, sessionID, 0)
+		if err != nil {
+			t.Fatalf("ListResolvedWaitActionIDs(%q): %v", sessionID, err)
+		}
+		if len(resolved) != 1 || resolved[0] != action.ID {
+			t.Fatalf("ListResolvedWaitActionIDs(%q) = %v, want [%s]", sessionID, resolved, action.ID)
+		}
+		if _, err := runs.ListUncertainResolvedWaits(ctx, sessionID, 0); err != nil {
+			t.Fatalf("ListUncertainResolvedWaits(%q): %v", sessionID, err)
+		}
+	}
+}

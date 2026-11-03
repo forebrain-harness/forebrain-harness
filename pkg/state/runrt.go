@@ -1207,6 +1207,18 @@ FROM fb_run_waits WHERE action_id=`+dbx.Placeholder(dbx.DialectOf(s.DB), 1), act
 // down from the conversation's own runs reaches every one of them.
 func waitRecoveryScan(d dbx.Dialect, columns, sessionID string, limit int) (string, []any) {
 	sessionID = strings.TrimSpace(sessionID)
+	// PostgreSQL refuses a SELECT DISTINCT whose ORDER BY names an expression
+	// the select list does not carry ("for SELECT DISTINCT, ORDER BY
+	// expressions must appear in select list", SQLSTATE 42P10), and this scan
+	// orders by w.updated_at, which the wait row's own columns do not include.
+	// DISTINCT buys nothing here: fb_run_waits.action_id is UNIQUE and the
+	// conversation_runs join is on that table's primary key, so one wait row
+	// can appear at most once. Dropping it for PostgreSQL is therefore the same
+	// result set — and the SQLite statement, which must stay byte-identical,
+	// is untouched.
+	if d == dbx.Postgres {
+		columns = strings.TrimPrefix(columns, "DISTINCT ")
+	}
 	if limit > 5000 {
 		limit = 5000
 	}
