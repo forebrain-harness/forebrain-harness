@@ -636,7 +636,12 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		if cmd := approvalShellCommand(o.req); cmd != "" {
 			writeLine("Command: %s", cmd)
 		}
-		if reason := strings.TrimSpace(o.req.Reason); reason != "" {
+		if peers, sameTree := approvalPeerWorkTreeNames(o.req); sameTree {
+			// The question is not "may I run this git command" but "may I run
+			// it while these agents have work in flight", so the names are the
+			// reason line (plan 199 §3.5).
+			writeLine("Other agents in this tree: %s", strings.Join(peers, ", "))
+		} else if reason := strings.TrimSpace(o.req.Reason); reason != "" {
 			writeLine("Reason: %s", reason)
 		}
 		if desc := strings.TrimSpace(o.req.Description); desc != "" {
@@ -1987,6 +1992,40 @@ func approvalJustification(req turn.ToolApprovalRequest) string {
 func approvalHasFileDiff(req turn.ToolApprovalRequest) bool {
 	tool := strings.ToLower(strings.TrimSpace(approvalToolName(req)))
 	return tool == "edit_file" || tool == "edit" || tool == "write_file" || tool == "write" || tool == "apply_patch"
+}
+
+// approvalPeerWorkTreeNames names the agents a same-tree git guard is asking
+// about: the gate the engine raises when a command would sweep the work of
+// agents still working in this directory tree, which no preset, allow rule or
+// full access answers (plan 198 §3.5). The names travel in the tool input
+// because a surface cannot derive them from the command.
+func approvalPeerWorkTreeNames(req turn.ToolApprovalRequest) ([]string, bool) {
+	raw := strings.TrimSpace(req.ToolInputJSON)
+	if raw == "" || raw == "{}" {
+		return nil, false
+	}
+	var in struct {
+		ApprovalReason string   `json:"approval_reason"`
+		PeerNames      []string `json:"peer_names"`
+	}
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(in.ApprovalReason) != "peer_work_tree" {
+		return nil, false
+	}
+	names := make([]string, 0, len(in.PeerNames))
+	for _, name := range in.PeerNames {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			names = append(names, trimmed)
+		}
+	}
+	if len(names) == 0 {
+		// The gate is the same-tree one but carries nobody: the ordinary
+		// reason line is the honest answer rather than an empty list.
+		return nil, false
+	}
+	return names, true
 }
 
 func approvalFileDiff(req turn.ToolApprovalRequest) (filePath, diffText string) {

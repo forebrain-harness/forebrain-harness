@@ -3236,3 +3236,68 @@ func (s *heldPeerTestSession) DenyPeerMessage(msgID string) error {
 	s.denied = append(s.denied, msgID)
 	return nil
 }
+
+// A git command that would sweep another agent's work is asked about by name:
+// the reason line says who else is in this tree, which is the question no
+// preset, allow rule or full access can answer (plan 198 §3.5, 199 §3.5).
+func TestApprovalOverlayNamesTheAgentsSharingTheTree(t *testing.T) {
+	req := withServiceDecisions(turn.ToolApprovalRequest{
+		ToolName: "Bash",
+		ToolInputJSON: `{"command":"git stash","force_tool_approval":true,"ask_even_in_yolo":true,` +
+			`"approval_reason":"peer_work_tree","peer_names":["builder","reviewer"],"dangerous_rule":"git:stash"}`,
+	})
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	lines, _ := overlay.buildApprovalContent(100)
+	plain := stripANSI(strings.Join(lines, "\n"))
+
+	if !strings.Contains(plain, "Other agents in this tree: builder, reviewer") {
+		t.Fatalf("same-tree approval must name the agents:\n%s", plain)
+	}
+	if !strings.Contains(plain, "Command: git stash") {
+		t.Fatalf("same-tree approval lost its command:\n%s", plain)
+	}
+}
+
+// Every other gate keeps the reason line it always had: only the same-tree
+// gate has peers to name.
+func TestApprovalPeerWorkTreeNamesReadsOnlyItsOwnGate(t *testing.T) {
+	cases := []struct {
+		name string
+		req  turn.ToolApprovalRequest
+		want []string
+		ok   bool
+	}{
+		{
+			name: "same-tree gate",
+			req:  turn.ToolApprovalRequest{ToolInputJSON: `{"approval_reason":"peer_work_tree","peer_names":["builder"," reviewer "]}`},
+			want: []string{"builder", "reviewer"},
+			ok:   true,
+		},
+		{
+			name: "another reason",
+			req:  turn.ToolApprovalRequest{ToolInputJSON: `{"approval_reason":"plan_mode_unproven_command","peer_names":["builder"],"justification":"Plan mode is active."}`},
+			ok:   false,
+		},
+		{
+			name: "same-tree gate without names",
+			req:  turn.ToolApprovalRequest{ToolInputJSON: `{"approval_reason":"peer_work_tree"}`},
+			ok:   false,
+		},
+		{
+			name: "no payload",
+			req:  turn.ToolApprovalRequest{ToolInputJSON: "{}"},
+			ok:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := approvalPeerWorkTreeNames(tc.req)
+			if ok != tc.ok {
+				t.Fatalf("ok=%v want %v", ok, tc.ok)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("names=%v want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -262,6 +262,11 @@ func Run(ctx context.Context, opts Options) error {
 	// the reducer — eliminating the data races and the selector deadlock.
 	notifyQ := event.New[any]()
 	notifyCh := notifyQ.Start(ctx)
+	// The footer's ⇄ count is polled, not told: another process starting or
+	// stopping work in this tree is not something this one is notified of
+	// (plan 199 §3.5). The walk happens off the main loop and only its result
+	// is applied there.
+	go watchPeerTreeCount(ctx, opts.Session, notifyQ)
 	// The MCP startup line, which is driven by status messages but has to keep
 	// its own clock: the snapshot only changes when a server does, and a line
 	// that says "0s" for the thirty seconds a server takes to answer is worse
@@ -320,6 +325,9 @@ func Run(ctx context.Context, opts Options) error {
 			return
 		}
 		if handlePeerHoldNotification(renderer, &state, m) {
+			return
+		}
+		if handlePeerTreeCountNotification(renderer, &state, m) {
 			return
 		}
 		if handleAutoContinueNotification(renderer, &state, m) {

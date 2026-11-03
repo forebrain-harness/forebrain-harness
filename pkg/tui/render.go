@@ -238,6 +238,11 @@ type Renderer struct {
 	// execution, which the terminal shows read-only (plan 152): the footer
 	// says so, and Plan mode never applies there.
 	batchReadOnly bool
+	// peerCount is how many other live agents share this conversation's
+	// directory tree. The footer says so with a ⇄ segment, and says nothing at
+	// all when it is zero: nobody else working here is the ordinary case, not
+	// a fact worth a line (plan 199 §3.5).
+	peerCount int
 	// composerTokens is the footer's token budget, keyed by the view it
 	// belongs to: "" is the conversation's own, a roster key is that
 	// subagent's (each subagent's view answers "how much context is left for
@@ -3516,6 +3521,20 @@ func (r *Renderer) SetFullAccess(on bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.fullAccess = on
+}
+
+// SetPeerCount says how many other agents are working in the conversation's
+// directory tree, for the footer's ⇄ segment; zero removes it.
+func (r *Renderer) SetPeerCount(n int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	r.peerCount = n
 }
 
 // batchReadOnlyFooterLabel is the footer's segment in a batch project: nothing

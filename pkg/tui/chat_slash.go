@@ -1173,6 +1173,29 @@ type peerDirectorySource interface {
 	PeerListing(ctx context.Context, sessionID string) (run.PeerListing, error)
 }
 
+// peerWorkTreeSource is the optional half of Session that counts the other
+// agents working in this conversation's directory tree, for the footer's ⇄
+// segment (plan 199 §3.5). Same-tree work is what the guard asks about, so the
+// count comes from the same port.
+type peerWorkTreeSource interface {
+	PeerWorkTreeCount(ctx context.Context) int
+}
+
+// PeerWorkTreeCount is how many other live agents' directories overlap this
+// conversation's project root. A machine with no peer port has nobody to
+// count, which is zero rather than an error.
+func (s *ChatSession) PeerWorkTreeCount(ctx context.Context) int {
+	deps := s.deps()
+	if deps == nil || deps.Peers == nil || s == nil {
+		return 0
+	}
+	root := strings.TrimSpace(s.WorkingDir)
+	if root == "" {
+		return 0
+	}
+	return len(deps.Peers.WorkTreePeers(ctx, root))
+}
+
 // PeerListing is who /peers can name: the agents in other processes on this
 // machine, as the caller that is this conversation's own agent reaches them
 // (plan 199 §3.4). No port means the machine has no peer messaging, which is

@@ -2777,6 +2777,51 @@ func (s *streamState) idleWake() bool {
 	return s.autoContinueWake() || s.heldPeersHeld()
 }
 
+// handlePeerTreeCountNotification applies the footer's ⇄ count to the
+// renderer, reporting false for any other message. The count is read off the
+// loop because the directory walk is a directory read, not a render.
+func handlePeerTreeCountNotification(renderer *Renderer, state *streamState, m any) bool {
+	msg, ok := m.(PeerTreeCountMsg)
+	if !ok {
+		return false
+	}
+	if renderer == nil {
+		return true
+	}
+	renderer.SetPeerCount(msg.Count)
+	if state != nil && state.panel != nil {
+		drawUIPanel(renderer, state)
+		return true
+	}
+	renderComposerWithState(renderer, state)
+	return true
+}
+
+// peerTreePollInterval is how often the footer's ⇄ count is re-read: the number
+// changes when another agent starts or stops working in this tree, and nothing
+// in this process is told about that.
+const peerTreePollInterval = 5 * time.Second
+
+// watchPeerTreeCount publishes the conversation's same-tree peer count until
+// ctx ends. A surface with no peer port reports zero, which the footer shows by
+// saying nothing.
+func watchPeerTreeCount(ctx context.Context, session Session, queue *event.Queue[any]) {
+	src, ok := session.(peerWorkTreeSource)
+	if !ok || queue == nil {
+		return
+	}
+	ticker := time.NewTicker(peerTreePollInterval)
+	defer ticker.Stop()
+	for {
+		queue.Push(PeerTreeCountMsg{Count: src.PeerWorkTreeCount(ctx)})
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 // handlePeerHoldNotification applies one held or settled peer message to the
 // event loop's state, reporting false for any other message. It never asks
 // anything: the question belongs to the idle loop, which is the one place a
