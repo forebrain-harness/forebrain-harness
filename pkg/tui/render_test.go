@@ -965,6 +965,95 @@ func TestSummaryToolBodyKeepsFirstLineIndent(t *testing.T) {
 	}
 }
 
+// TestSummaryToolBodyPeerSend pins the peer_send card's body (plan 199 §3.2):
+// the sent message's first three lines, and the engine's delivery answer as a
+// one-line footnote — never the raw JSON. The content is built the way the
+// live step hook builds it, so the test covers the envelope the card carries.
+func TestSummaryToolBodyPeerSend(t *testing.T) {
+	frameWithAnswer := func(answer, message string) Frame {
+		evt := tool.StepEvent{
+			Kind:     tool.StepKindToolCompleted,
+			ToolName: "peer_send",
+			Input:    map[string]any{"to": "proj-ff", "message": message},
+			Output:   map[string]any{"output": answer},
+		}
+		body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+		return Frame{Kind: FrameTool, Title: "peer_send", Final: true, Content: body, ToolMeta: tool.BuildToolMeta(evt)}
+	}
+	const message = "first line\nsecond line\nthird line\nfourth line"
+
+	t.Run("message and cross-process result", func(t *testing.T) {
+		got := summaryToolBody(frameWithAnswer(`{"status":"delivered","to":"proj-ff","peer_status":"idle"}`, message), "peer_send")
+		for _, want := range []string{"first line", "second line", "third line", "Sent to proj-ff (idle)."} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("body missing %q:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, "fourth line") {
+			t.Fatalf("body showed the message's fourth line:\n%s", got)
+		}
+		if strings.Contains(got, `"status"`) || strings.Contains(got, `"output"`) {
+			t.Fatalf("body exposed the raw answer JSON:\n%s", got)
+		}
+	})
+
+	t.Run("status-only answer", func(t *testing.T) {
+		got := summaryToolBody(frameWithAnswer(`{"status":"delivered"}`, "hello"), "peer_send")
+		if !strings.Contains(got, "hello") || !strings.Contains(got, "Delivered.") {
+			t.Fatalf("status-only body wrong:\n%s", got)
+		}
+	})
+
+	t.Run("unparseable answer", func(t *testing.T) {
+		got := summaryToolBody(frameWithAnswer("not json", "hello"), "peer_send")
+		if !strings.Contains(got, "hello") {
+			t.Fatalf("unparseable body dropped the message:\n%s", got)
+		}
+		if strings.Contains(got, "not json") {
+			t.Fatalf("unparseable body exposed the raw answer:\n%s", got)
+		}
+	})
+
+	t.Run("raw answer row", func(t *testing.T) {
+		f := Frame{Kind: FrameTool, Title: "peer_send", Final: true, Content: `{"status":"queued"}`,
+			ToolMeta: tool.ToolMeta{ToolName: "peer_send", Status: "completed", Input: map[string]any{"message": "hello"}}}
+		got := summaryToolBody(f, "peer_send")
+		if !strings.Contains(got, "hello") || !strings.Contains(got, "Queued.") {
+			t.Fatalf("raw-answer body wrong:\n%s", got)
+		}
+	})
+}
+
+// TestPeerSendCardBodyRendersMessageAndResult pins the card a reader sees: the
+// viewport renders in full-body mode, where the compact summary pipeline is
+// skipped, so the peer_send body has to be shaped there too.
+func TestPeerSendCardBodyRendersMessageAndResult(t *testing.T) {
+	evt := tool.StepEvent{
+		Kind:     tool.StepKindToolCompleted,
+		ToolName: "peer_send",
+		Input:    map[string]any{"to": "proj-ff", "message": "first line\nsecond line\nthird line\nfourth line"},
+		Output:   map[string]any{"output": `{"status":"delivered","to":"proj-ff","peer_status":"idle"}`},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	f := Frame{Kind: FrameTool, Title: "peer_send", Final: true, Content: body, ToolMeta: tool.BuildToolMeta(evt)}
+	painted := make([]string, 0)
+	for _, line := range renderFrameLines(f, 120, DiffThemeDark, 0) {
+		painted = append(painted, stripANSI(line))
+	}
+	joined := strings.Join(painted, "\n")
+	for _, want := range []string{"first line", "second line", "third line", "Sent to proj-ff (idle)."} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("rendered card missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "fourth line") {
+		t.Fatalf("rendered card showed the message's fourth line:\n%s", joined)
+	}
+	if strings.Contains(joined, `"status"`) || strings.Contains(joined, `"output"`) {
+		t.Fatalf("rendered card exposed the raw answer JSON:\n%s", joined)
+	}
+}
+
 // ---- migrated from migration_card_test.go (tests for this file's production code) ----
 
 // migration_card_test.go pins the /migrate progress card: the compact card's
