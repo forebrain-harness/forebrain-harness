@@ -1226,6 +1226,48 @@ func TestPeerHeldNotificationOnlyRecordsTheQuestion(t *testing.T) {
 	}
 }
 
+// A peer message that needs a turn of its own must wake the idle loop, which is
+// the only place a turn may start: the wake was the missing link between the
+// engine's peer wake and the loop that consumes it (plan 201 found the omission
+// on a real machine — an idle terminal never opened the turn).
+func TestPeerWakeWakesTheIdleLoopForTheConversationOnScreen(t *testing.T) {
+	state := &streamState{sessionID: "conv-1"}
+	if state.idleWake() {
+		t.Fatal("an idle conversation must not wake the loop")
+	}
+	if !handlePeerWakeNotification(state, PeerWakeMsg{
+		SessionID: "conv-1",
+		Prompt:    process.PeerPrompt{SessionID: "conv-1", Text: "please review a.go"},
+	}) {
+		t.Fatal("a peer wake must be handled by the peer wake notification")
+	}
+	if !state.idleWake() {
+		t.Fatal("a peer message waiting for a turn must wake the idle loop, which is what runs it")
+	}
+	prompt, due := state.takePeerDue()
+	if !due || prompt.SessionID != "conv-1" || prompt.Text != "please review a.go" {
+		t.Fatalf("takePeerDue = %+v, %v: want the message that was waiting", prompt, due)
+	}
+	if state.idleWake() {
+		t.Fatal("a message already handed to the loop must not wake it again")
+	}
+
+	// Another conversation's message has nowhere to land here: it is dropped by
+	// the same guard that keeps it off this screen's transcript.
+	if !handlePeerWakeNotification(state, PeerWakeMsg{
+		SessionID: "conv-2",
+		Prompt:    process.PeerPrompt{SessionID: "conv-2", Text: "not for this terminal"},
+	}) {
+		t.Fatal("a peer wake for another conversation is still handled, just not kept")
+	}
+	if state.idleWake() {
+		t.Fatal("another conversation's message must not wake this loop")
+	}
+	if _, due := state.takePeerDue(); due {
+		t.Fatal("another conversation's message must not be handed to this loop")
+	}
+}
+
 // A message the person answered, or left on screen, ends with a line saying how
 // it ended; one they were never asked about ends silently.
 func TestPeerSettledNotificationSaysHowAnAskedMessageEnded(t *testing.T) {

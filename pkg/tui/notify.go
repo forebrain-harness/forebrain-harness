@@ -2771,10 +2771,10 @@ func (s *streamState) heldPeersHeld() bool {
 }
 
 // idleWake tells the idle loop's wait to return so it can do what a
-// notification asked for: run a due continuation, or put a held peer message's
-// question to the person.
+// notification asked for: run a due continuation, run a peer message waiting
+// for a turn of its own, or put a held peer message's question to the person.
 func (s *streamState) idleWake() bool {
-	return s.autoContinueWake() || s.heldPeersHeld()
+	return s.autoContinueWake() || s.heldPeersHeld() || s.peerDue != nil
 }
 
 // handlePeerTreeCountNotification applies the footer's ⇄ count to the
