@@ -261,6 +261,78 @@ func writeControlPlaneAuthError(w http.ResponseWriter, r *http.Request, err erro
 	}
 }
 
+// The two endpoints a replica exposes to the other replicas (plan 213 §3.2):
+// the WebSocket a relayed browser connection speaks through, and the one-shot
+// operation a run-bound HTTP request is forwarded as. Both carry the shared
+// gateway token and are checked against the replicas registered in the database,
+// so a browser that merely owns the sign-in cookie cannot reach them.
+const (
+	internalWSPath    = "/internal/v1/ws"
+	internalRunOpPath = "/internal/v1/run-op"
+)
+
+// internalRequestAuthorized is the whole of the peer authentication, and both
+// halves must hold: the shared gateway token — the same forebrain.yaml every
+// replica reads — and a TCP peer that is the host of a replica whose heartbeat
+// is fresh. The token alone would let anyone who reaches the port drive every
+// run; the source check alone would authenticate nobody.
+func (s *Server) internalRequestAuthorized(r *http.Request) bool {
+	if s == nil || r == nil {
+		return false
+	}
+	cfg := s.liveCfg()
+	if cfg == nil {
+		return false
+	}
+	// The bearer header only: a browser's session cookie is exactly the
+	// credential that must never open a replica-to-replica endpoint.
+	token := strings.TrimSpace(cfg.Gateway.Auth.Token)
+	if token == "" || !ControlPlaneAuthorized(r, token) {
+		return false
+	}
+	return s.internalSourceRegistered(r.Context(), r.RemoteAddr)
+}
+
+// internalSourceRegistered reports whether the request's TCP peer is the host of
+// a replica that is heartbeating right now. X-Forwarded-For is deliberately not
+// consulted: it is a header the caller writes, and this check exists to be the
+// half the caller cannot talk its way out of.
+func (s *Server) internalSourceRegistered(ctx context.Context, remoteAddr string) bool {
+	if s == nil || s.RunRT == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	addrs, err := s.RunRT.LiveReplicaAddrs(ctx)
+	if err != nil {
+		slog.Warn("gateway internal auth: read registered replicas", "err", err)
+		return false
+	}
+	for _, addr := range addrs {
+		u, parseErr := url.Parse(strings.TrimSpace(addr))
+		if parseErr != nil || u.Host == "" {
+			continue
+		}
+		if peer := net.ParseIP(strings.Trim(u.Hostname(), "[]")); peer != nil && peer.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseInternalRequest answers a peer request that failed authentication the
+// way the control plane answers any other: 401 and nothing else.
+func refuseInternalRequest(w http.ResponseWriter, r *http.Request) {
+	slog.Warn("gateway internal endpoint refused a request", "path", r.URL.Path, "remote", r.RemoteAddr)
+	writeControlPlaneUnauthorized(w, `{"error":"unauthorized"}`)
+}
+
 func ControlPlaneHTTPMiddleware(env *process.Environment, gw *Server, inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if env == nil || env.Deps.AppCfg == nil {
@@ -346,6 +418,26 @@ func ServeHTTPChain(env *process.Environment, gw *Server, inner http.Handler) ht
 				gw.HandleChatWS(w, r)
 			} else {
 				http.NotFound(w, r)
+			}
+			return
+		}
+		// Replica-to-replica traffic is mounted ahead of the control plane,
+		// because it authenticates on its own terms (plan 213 §3.2): the shared
+		// token plus a registered source address, never a browser cookie.
+		switch r.URL.Path {
+		case internalWSPath, internalRunOpPath:
+			if gw == nil {
+				http.NotFound(w, r)
+				return
+			}
+			if !gw.internalRequestAuthorized(r) {
+				refuseInternalRequest(w, r)
+				return
+			}
+			if r.URL.Path == internalWSPath {
+				gw.handleInternalChatWS(w, r)
+			} else {
+				gw.handleInternalRunOp(w, r)
 			}
 			return
 		}

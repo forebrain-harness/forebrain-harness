@@ -2,13 +2,16 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -368,6 +371,143 @@ func writeRunInputJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// --- Replica-to-replica forwarding of run-bound operations (plan 213 §3.2) ---
+//
+// The operations below act on live state that exists in exactly one place: the
+// run.Controller, the input queue and the approval wait of the process actually
+// running the conversation. A request that arrives at any other replica is
+// forwarded, by name, to the one that owns the run, and its answer — status and
+// body — is returned unchanged.
+
+// internalRunOpRequest is how a replica asks the replica that owns a
+// conversation to perform one operation on it. Op names the operation, and the
+// fields carry exactly what that operation's public route and body carry.
+type internalRunOpRequest struct {
+	Op         string          `json:"op"`
+	RunID      string          `json:"run_id,omitempty"`
+	ActionID   string          `json:"action_id,omitempty"`
+	AgentID    string          `json:"agent_id,omitempty"`
+	SubagentID string          `json:"subagent_id,omitempty"`
+	Body       json.RawMessage `json:"body,omitempty"`
+}
+
+// internalRunOps is the table of operations a replica will perform for a peer.
+// Every endpoint that reads or writes this process's run.Controller, its
+// InputQueue or an approval wait belongs here (plan 213 §7): a new one that does
+// must be added to this table and wrapped on its route, or the browser calling
+// it would reach a replica that answers "nothing is running".
+var internalRunOps = map[string]struct {
+	// param is the path parameter the public route takes; field names the
+	// request field that supplies its value.
+	param   string
+	field   string
+	handler func(*Server) http.HandlerFunc
+}{
+	"run_cancel":         {param: "id", field: "run", handler: func(s *Server) http.HandlerFunc { return s.handleRunCancel }},
+	"run_input":          {param: "id", field: "run", handler: func(s *Server) http.HandlerFunc { return s.handleRunInput }},
+	"run_queued_input":   {param: "id", field: "run", handler: func(s *Server) http.HandlerFunc { return s.handleRunQueuedInput }},
+	"action_approve":     {param: "id", field: "action", handler: func(s *Server) http.HandlerFunc { return s.handleActionsApprove }},
+	"action_deny":        {param: "id", field: "action", handler: func(s *Server) http.HandlerFunc { return s.handleActionsDeny }},
+	"action_answer":      {param: "id", field: "action", handler: func(s *Server) http.HandlerFunc { return s.handleActionsAnswer }},
+	"action_plan_review": {param: "id", field: "action", handler: func(s *Server) http.HandlerFunc { return s.handleActionPlanReview }},
+	"agent_cancel":       {param: "agentId", field: "agent", handler: func(s *Server) http.HandlerFunc { return s.handlePrimaryAgentCancel }},
+	"agent_cancel_all":   {handler: func(s *Server) http.HandlerFunc { return s.handleAgentCancelAll }},
+	"subagent_cancel":    {param: "id", field: "subagent", handler: func(s *Server) http.HandlerFunc { return s.handleSubagentCancel }},
+}
+
+// paramValue is the route parameter this operation is performed with.
+func (req internalRunOpRequest) paramValue(field string) string {
+	switch field {
+	case "run":
+		return strings.TrimSpace(req.RunID)
+	case "action":
+		return strings.TrimSpace(req.ActionID)
+	case "agent":
+		return strings.TrimSpace(req.AgentID)
+	case "subagent":
+		return strings.TrimSpace(req.SubagentID)
+	}
+	return ""
+}
+
+// handleInternalRunOp performs one forwarded operation as if the caller had
+// reached the public route itself: the same handler runs, with the same
+// parameters and the same request body, and its answer is what the caller gets.
+func (s *Server) handleInternalRunOp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var req internalRunOpRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "internal run-op body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	op, ok := internalRunOps[strings.TrimSpace(req.Op)]
+	if !ok {
+		http.Error(w, "unsupported internal operation: "+strings.TrimSpace(req.Op), http.StatusBadRequest)
+		return
+	}
+	inner := r.Clone(r.Context())
+	inner.Method = http.MethodPost
+	inner.URL = &url.URL{Path: internalRunOpPath}
+	inner.RequestURI = internalRunOpPath
+	if len(req.Body) > 0 {
+		inner.Body = io.NopCloser(bytes.NewReader(req.Body))
+		inner.ContentLength = int64(len(req.Body))
+	} else {
+		inner.Body = http.NoBody
+		inner.ContentLength = 0
+	}
+	var params Params
+	if op.param != "" {
+		params = Params{{Key: op.param, Value: req.paramValue(op.field)}}
+	}
+	inner = inner.WithContext(context.WithValue(inner.Context(), ParamsKey, params))
+	rec := &captureResponseWriter{header: http.Header{}}
+	op.handler(s)(rec, inner)
+	rec.writeTo(w)
+}
+
+// captureResponseWriter records an operation's answer so it can be handed back
+// to the caller unchanged: status, headers and body.
+type captureResponseWriter struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (c *captureResponseWriter) Header() http.Header { return c.header }
+
+func (c *captureResponseWriter) WriteHeader(status int) {
+	if c.status == 0 {
+		c.status = status
+	}
+}
+
+func (c *captureResponseWriter) Write(p []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	return c.body.Write(p)
+}
+
+func (c *captureResponseWriter) writeTo(w http.ResponseWriter) {
+	for k, vs := range c.header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	status := c.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(c.body.Bytes())
+}
+
 
 func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

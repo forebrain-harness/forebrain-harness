@@ -1766,6 +1766,125 @@ func (s *RunStore) CheckSQLiteSingleHost(ctx context.Context, selfHost string) e
 	return fmt.Errorf("%w: 另一台主机 %s 上已有一个存活的网关副本", ErrSQLiteMultiHost, host)
 }
 
+// liveReplicaPeerSQL reads the replicas whose heartbeat is still fresh and that
+// registered an address. A replica that registered none — a terminal, or a
+// gateway that could not work out where its peers reach it — contributes
+// nothing, because nothing can be sent to it.
+var liveReplicaPeerSQL = dbx.SQL{
+	SQLite: `
+SELECT owner, internal_addr, kind FROM fb_run_owners
+WHERE heartbeat_at_ms >= ? AND internal_addr <> ''
+ORDER BY owner`,
+	MySQL: `
+SELECT owner, internal_addr, kind FROM fb_run_owners
+WHERE heartbeat_at_ms >= ? AND internal_addr <> ''
+ORDER BY owner`,
+	Postgres: `
+SELECT owner, internal_addr, kind FROM fb_run_owners
+WHERE heartbeat_at_ms >= $1 AND internal_addr <> ''
+ORDER BY owner`,
+}
+
+// LiveReplicaPeers returns every replica that is heartbeating right now and can
+// be reached, this process included: the set a replica-wide operation is
+// broadcast to (plan 213 §3.2), and the set a peer request may have come from.
+func (s *RunStore) LiveReplicaPeers(ctx context.Context) ([]ReplicaPeer, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	rows, err := s.DB.QueryContext(ctx, liveReplicaPeerSQL.For(dbx.DialectOf(s.DB)),
+		time.Now().UnixMilli()-RunOwnerLease.Milliseconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReplicaPeer
+	for rows.Next() {
+		var owner, addr, kind string
+		if err := rows.Scan(&owner, &addr, &kind); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(addr) == "" {
+			continue
+		}
+		out = append(out, ReplicaPeer{
+			Owner:        strings.TrimSpace(owner),
+			InternalAddr: strings.TrimSpace(addr),
+			Kind:         strings.TrimSpace(kind),
+		})
+	}
+	return out, rows.Err()
+}
+
+// LiveReplicaAddrs returns the internal addresses of the live replicas, which is
+// what a peer request's source address is checked against.
+func (s *RunStore) LiveReplicaAddrs(ctx context.Context) ([]string, error) {
+	peers, err := s.LiveReplicaPeers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		out = append(out, peer.InternalAddr)
+	}
+	return out, nil
+}
+
+// ReplicaPeer is the registered replica that owns a conversation's live run: who
+// it is, where the other replicas reach it, and what kind of process it is.
+type ReplicaPeer struct {
+	Owner        string
+	InternalAddr string
+	Kind         string
+}
+
+// liveRunPeerSQL is LiveRunPeer's shape with the dialect's placeholders left
+// open: the join's cutoff and the session take the first two, and the live-run
+// predicate that follows is numbered from there by
+// livePrimaryRunConditionFor, exactly as liveRunRefusal numbers it.
+const liveRunPeerSQL = `
+SELECT r.owner, o.internal_addr, o.kind
+FROM fb_runs r
+JOIN fb_run_owners o ON o.owner = r.owner AND o.heartbeat_at_ms >= %s
+WHERE r.session_id = %s AND r.parent_run_id IS NULL AND %s
+ORDER BY r.updated_at DESC LIMIT 1`
+
+// LiveRunPeer returns the replica that owns the session's live primary run and
+// can be reached over the internal network, or nil when the conversation is
+// not running elsewhere: no live run, a run this process owns, a run whose
+// owner is a terminal (which serves no internal endpoint), or one whose owner
+// registered no address. The gateway relays a browser connection to exactly
+// this replica (plan 213 §3.2).
+func (s *RunStore) LiveRunPeer(ctx context.Context, sessionID string) (*ReplicaPeer, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	d := dbx.DialectOf(s.DB)
+	cutoff := time.Now().UnixMilli() - RunOwnerLease.Milliseconds()
+	query := fmt.Sprintf(liveRunPeerSQL,
+		dbx.Placeholder(d, 1), dbx.Placeholder(d, 2), livePrimaryRunConditionFor(d, "r", 3))
+	args := append([]any{cutoff, strings.TrimSpace(sessionID)}, liveRunArgs(time.Now())...)
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	var owner, addr, kind string
+	if err := rows.Scan(&owner, &addr, &kind); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(owner) == strings.TrimSpace(s.Owner) {
+		return nil, nil
+	}
+	if kind != RunOwnerKindGateway || strings.TrimSpace(addr) == "" {
+		return nil, nil
+	}
+	return &ReplicaPeer{Owner: owner, InternalAddr: strings.TrimSpace(addr), Kind: kind}, nil
+}
+
 
 // HoldOwnerLease created: what it is (RunOwnerKindGateway or
 // RunOwnerKindTerminal), which machine it runs on, and — for a gateway — the

@@ -880,8 +880,58 @@ func runEventToWSMessage(requestID, traceID string, evt event.RunEvent) wsServer
 	}
 }
 
+// wsConnOptions is how one chat socket differs by who opened it (plan 213 §3.2).
+// A browser socket authenticates here and may start runs; an internal socket
+// came from another replica's relay, already authenticated by the internal
+// endpoint, and may only drive the one conversation it names.
+type wsConnOptions struct {
+	internal bool
+	// session is the conversation an internal socket is confined to.
+	session string
+}
+
 func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
-	if s != nil && s.Env != nil && s.Env.Deps.AppCfg != nil {
+	s.handleChatWS(w, r, wsConnOptions{})
+}
+
+// handleInternalChatWS serves the socket a relayed browser connection speaks
+// through. It is the same protocol as /ws/chat, opened by a peer rather than by
+// a browser, so the control-plane handshake has already happened.
+func (s *Server) handleInternalChatWS(w http.ResponseWriter, r *http.Request) {
+	s.handleChatWS(w, r, wsConnOptions{
+		internal: true,
+		session:  strings.TrimSpace(r.URL.Query().Get("session")),
+	})
+}
+
+// applyWSScope confines a peer's socket to the conversation it was opened for.
+// An internal socket is a relay's mouthpiece, so every operation must name that
+// conversation and none may start a run: start_run is what the replica the
+// browser is talking to does, not something a peer does on its behalf.
+func applyWSScope(m *wsClientMsg, session string) error {
+	if m.Op == "start_run" {
+		return errors.New("start_run 不是会话内操作：运行在浏览器所连的副本上启动")
+	}
+	sid := strings.TrimSpace(session)
+	if sid == "" {
+		return errors.New("内部端点必须指定会话")
+	}
+	if _, ok := wsSessionOps[m.Op]; !ok {
+		return fmt.Errorf("内部端点不支持该操作: %s", m.Op)
+	}
+	// resume_connection names one run rather than a session; the run's own
+	// session is checked against the confinement before it is replayed.
+	if m.Op != "resume_connection" {
+		if own := strings.TrimSpace(m.SessionID); own != "" && own != sid {
+			return fmt.Errorf("内部端点只服务会话 %s", sid)
+		}
+		m.SessionID = sid
+	}
+	return nil
+}
+
+func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request, opts wsConnOptions) {
+	if !opts.internal && s != nil && s.Env != nil && s.Env.Deps.AppCfg != nil {
 		if origin, err := authorizeControlPlane(r, s.Env.Deps.AppCfg); err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -1167,6 +1217,12 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if err != nil || rn == nil {
 			return false, false
 		}
+		// An internal socket speaks for one conversation. A resume that named a
+		// run of another one would re-point the socket outside the confinement
+		// it was opened with, so it is refused rather than served.
+		if opts.internal && strings.TrimSpace(rn.SessionID) != strings.TrimSpace(opts.session) {
+			return false, false
+		}
 		if runEventCancel != nil {
 			runEventCancel()
 			runEventCancel = nil
@@ -1178,7 +1234,12 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		}
 		return true, false
 	}
-	writeConnected()
+	if !opts.internal {
+		// A peer's socket has nobody to announce itself to: the relay that
+		// opened it is already past its handshake, and the browser it speaks
+		// for has one connected event of its own.
+		writeConnected()
+	}
 
 	go func() {
 		tk := time.NewTicker(20 * time.Second)
@@ -1291,6 +1352,15 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			message = normalizeWSClientMessage(message)
+			if opts.internal {
+				if scopeErr := applyWSScope(&message, opts.session); scopeErr != nil {
+					writeMsg(wsServerMsg{
+						Op: "run_error", RequestID: message.RequestID, SessionID: message.SessionID,
+						Message: "internal_scope", Error: scopeErr.Error(),
+					})
+					continue
+				}
+			}
 			if message.Op == "cancel_command" {
 				// Answered here rather than by the loop, which is the one
 				// busy with the message and cannot take another until it ends.
