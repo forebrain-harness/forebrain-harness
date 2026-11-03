@@ -13,14 +13,14 @@
   >
     <div class="peer-hold-in">
       <div class="top-row">
-        <PeerMark :mark="held.mark" :tone="held.tone" :name="held.from_name" />
+        <PeerMark :mark="held.mark" :tone="held.tone" :name="held.fromName" />
         <span class="lead">
-          <b>{{ held.from_name || t('chat.peerUnknownAgent') }}</b>
+          <b>{{ held.fromName || t('chat.peerUnknownAgent') }}</b>
           {{ t('chat.peerHoldLead') }}
         </span>
         <span v-if="reason" class="reason">{{ reason }}</span>
       </div>
-      <div ref="textEl" class="text">{{ held.preview }}</div>
+      <div ref="textEl" class="text">{{ text }}</div>
       <div class="gate">
         <button
           type="button"
@@ -76,6 +76,13 @@ const gone = ref(false)
 const textEl = ref<HTMLElement | null>(null)
 let settling = false
 
+/**
+ * The words the person is being asked about: the message itself, which the
+ * engine has already taken out of its envelope. A server that did not send the
+ * body falls back to the envelope's opening, which still says what arrived.
+ */
+const text = computed(() => String(props.held?.peerBody ?? '').trim() || String(props.held?.preview ?? '').trim())
+
 /** Why the message was held, in the reader's own words. The cause is the
  *  engine's; each one says what the person is being asked to settle. */
 const reason = computed(() => {
@@ -126,7 +133,7 @@ async function decide(release: boolean) {
 function fly(from: DOMRect, to: DOMRect | null | undefined) {
   const ghost = document.createElement('div')
   ghost.className = 'peer-hold-flyer'
-  ghost.textContent = String(props.held?.preview ?? '')
+  ghost.textContent = text.value
   ghost.style.left = `${from.left}px`
   ghost.style.top = `${from.top}px`
   ghost.style.width = `${from.width}px`

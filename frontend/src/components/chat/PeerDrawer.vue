@@ -26,10 +26,10 @@
       <!-- 1. What is waiting for the person. The only section that acts. -->
       <section v-if="held.length" class="peer-sec" data-testid="peer-drawer-held">
         <h4>{{ t('chat.peerHeldSection') }} <span class="count">{{ held.length }}</span></h4>
-        <div v-for="row in held" :key="row.msg_id" class="peer-waiting" :style="peerToneVar(row.tone)">
+        <div v-for="row in held" :key="row.msgId" class="peer-waiting" :style="peerToneVar(row.tone)">
           <div class="peer-waiting-top">
-            <PeerMark :mark="row.mark" :tone="row.tone" :name="row.from_name" />
-            <b>{{ row.from_name || t('chat.peerUnknownAgent') }}</b>
+            <PeerMark :mark="row.mark" :tone="row.tone" :name="row.fromName" />
+            <b>{{ row.fromName || t('chat.peerUnknownAgent') }}</b>
             <span class="why">{{ heldReason(row.cause) }}</span>
           </div>
           <div class="peer-waiting-text">{{ row.preview }}</div>
@@ -37,13 +37,13 @@
             <button
               type="button"
               class="forebrain-btn forebrain-btn-primary"
-              :data-testid="'peer-drawer-release-' + row.msg_id"
+              :data-testid="'peer-drawer-release-' + row.msgId"
               @click="emit('release', row)"
             >{{ t('chat.peerHoldRelease') }}</button>
             <button
               type="button"
               class="forebrain-btn forebrain-btn-ghost"
-              :data-testid="'peer-drawer-deny-' + row.msg_id"
+              :data-testid="'peer-drawer-deny-' + row.msgId"
               @click="emit('deny', row)"
             >{{ t('chat.peerHoldDeny') }}</button>
           </div>
@@ -75,7 +75,7 @@
                   :kind="agent.self ? 'me' : 'agent'"
                 />
               </span>
-              <span class="ago">{{ file.clash ? t('chat.peerClash') : ago(file.last_ms) }}</span>
+              <span class="ago">{{ file.clash ? t('chat.peerClash') : ago(file.lastMs) }}</span>
             </div>
           </template>
         </div>

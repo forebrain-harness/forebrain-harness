@@ -3493,12 +3493,13 @@ export function useChatStream() {
   function applyBoundPeerHeld(bound: { peerHeld?: ForebrainPeerHeldEntry[] }) {
     const held = Array.isArray(bound.peerHeld) ? bound.peerHeld : []
     heldPeers.value = held.map((row) => ({
-      msg_id: row.msgId,
+      msgId: row.msgId,
       from: row.from,
-      from_name: row.fromName,
+      fromName: row.fromName,
       preview: row.preview,
+      peerBody: row.peerBody || undefined,
       cause: row.cause,
-      held_at_ms: row.heldAtMs,
+      heldAtMs: row.heldAtMs,
       mark: row.mark,
       tone: row.tone,
     }))
@@ -3521,24 +3522,26 @@ export function useChatStream() {
     switch (evt.type) {
       case 'peer_message_held': {
        	const fromName = String(payload.fromName ?? payload.from_name ?? '').trim()
+       	const body = String(payload.peerBody ?? payload.peer_body ?? '').trim()
        	const row: PeerHeldRow = {
-          msg_id: msgID,
+          msgId: msgID,
           from: String(payload.from ?? '').trim() || undefined,
-          from_name: fromName || undefined,
+          fromName: fromName || undefined,
           preview: String(payload.preview ?? ''),
+          peerBody: body || undefined,
           cause: String(payload.cause ?? ''),
-          held_at_ms: Number(payload.heldAtMs ?? payload.held_at_ms ?? 0) || 0,
+          heldAtMs: Number(payload.heldAtMs ?? payload.held_at_ms ?? 0) || 0,
           // The identity block is the engine's derivation; a page that did not
           // get one (an older server) still draws the block, in the default tone.
           mark: String(payload.peerMark ?? payload.peer_mark ?? ''),
           tone: Number(payload.peerTone ?? payload.peer_tone ?? 0) || 0,
         }
-        heldPeers.value = [...heldPeers.value.filter((held) => held.msg_id !== msgID), row]
+        heldPeers.value = [...heldPeers.value.filter((held) => held.msgId !== msgID), row]
         void refreshPeerDirectory()
         return
       }
       case 'peer_message_settled':
-        heldPeers.value = heldPeers.value.filter((held) => held.msg_id !== msgID)
+        heldPeers.value = heldPeers.value.filter((held) => held.msgId !== msgID)
         return
     }
   }
@@ -3561,9 +3564,9 @@ export function useChatStream() {
       peerDirectoryPage.value = page
       peerDirectory.value = {
         files: Array.isArray(data.files) ? data.files : [],
-        sameTree: Array.isArray(data.same_tree) ? data.same_tree : [],
+        sameTree: Array.isArray(data.sameTree) ? data.sameTree : [],
         other: Array.isArray(data.other) ? data.other : [],
-        otherTotal: Number(data.other_total ?? 0) || 0,
+        otherTotal: Number(data.otherTotal ?? 0) || 0,
       }
       // The payload's held list is the same fact the events carry; taking it
       // here keeps the banner and the drawer from disagreeing on a cold read.

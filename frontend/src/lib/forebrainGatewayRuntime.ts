@@ -115,6 +115,7 @@ export type ForebrainPeerHeldEntry = {
   from?: string
   fromName?: string
   preview?: string
+  peerBody?: string
   cause: string
   heldAtMs: number
   mark: string
@@ -501,6 +502,7 @@ function parsePeerHeldEntries(raw: unknown): ForebrainPeerHeldEntry[] {
       from: asTrimmedString(record?.from),
       fromName: asTrimmedString(record?.from_name),
       preview: asTrimmedString(record?.preview) ?? '',
+      peerBody: asTrimmedString(record?.peer_body) ?? '',
       cause: asTrimmedString(record?.cause) ?? '',
       heldAtMs: asNumber(record?.held_at_ms) ?? 0,
       mark: asTrimmedString(record?.peer_mark) ?? '',

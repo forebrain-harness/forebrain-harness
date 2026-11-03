@@ -1538,14 +1538,17 @@ export interface SlashCommandsResponse {
 }
 
 /** One peer message waiting for the person's decision (plan 200 §3). The mark
- *  and tone are the identity block's, derived by the gateway. */
+ *  and tone are the identity block's, derived by the gateway. The keys are the
+ *  camelCase ones every API response arrives in. */
 export interface PeerHeldRow {
-  msg_id: string
+  msgId: string
   from?: string
-  from_name?: string
+  fromName?: string
   preview?: string
+  /** The message itself, the envelope's markup taken off it. */
+  peerBody?: string
   cause: string
-  held_at_ms: number
+  heldAtMs: number
   mark: string
   tone: number
 }
@@ -1575,17 +1578,17 @@ export interface PeerFileRow {
   dir: string
   name: string
   agents: PeerFileAgent[]
-  last_ms: number
+  lastMs: number
   clash: boolean
 }
 
-/** The peer drawer's payload. Only `other` is paged; `same_tree` is short. */
+/** The peer drawer's payload. Only `other` is paged; `sameTree` is short. */
 export interface PeerDirectoryResponse {
   held: PeerHeldRow[]
   files: PeerFileRow[]
-  same_tree: PeerAgentRow[]
+  sameTree: PeerAgentRow[]
   other: PeerAgentRow[]
-  other_total: number
+  otherTotal: number
 }
 
 export interface MentionCandidate {

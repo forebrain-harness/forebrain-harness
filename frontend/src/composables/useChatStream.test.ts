@@ -6685,7 +6685,7 @@ describe('held peer messages', () => {
       } as never),
       vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
       vi.spyOn(forebrainApi, 'peersDirectory').mockResolvedValue({
-        held: [], files: [], same_tree: [], other: [], other_total: 0,
+        held: [], files: [], sameTree: [], other: [], otherTotal: 0,
       }),
     ]
     try {
@@ -6705,18 +6705,18 @@ describe('held peer messages', () => {
         },
       })
       expect(stream.heldPeers.value).toHaveLength(1)
-      expect(stream.heldPeers.value[0]).toMatchObject({ msg_id: 'm0', from_name: 'forebrain-harness-a3', mark: 'a3', tone: 0 })
+      expect(stream.heldPeers.value[0]).toMatchObject({ msgId: 'm0', fromName: 'forebrain-harness-a3', mark: 'a3', tone: 0 })
 
       // The replay up to the binding's high water is already accounted for.
       observerEvent(observer, 'evt-replayed', 4, 'peer_message_held', heldPayload({ msg_id: 'm-replayed' }))
-      expect(stream.heldPeers.value.map((row) => row.msg_id)).toEqual(['m0'])
+      expect(stream.heldPeers.value.map((row) => row.msgId)).toEqual(['m0'])
 
       // A new hold joins the list; the settlement of one leaves the other.
       observerEvent(observer, 'evt-held', 6, 'peer_message_held', heldPayload())
-      expect(stream.heldPeers.value.map((row) => row.msg_id)).toEqual(['m0', 'm1'])
+      expect(stream.heldPeers.value.map((row) => row.msgId)).toEqual(['m0', 'm1'])
       observerEvent(observer, 'evt-settled', 7, 'peer_message_settled', { msg_id: 'm0', outcome: 'denied' })
-      expect(stream.heldPeers.value.map((row) => row.msg_id)).toEqual(['m1'])
-      expect(stream.heldPeers.value[0]).toMatchObject({ from_name: 'forebrain-harness-28', mark: '28', tone: 1 })
+      expect(stream.heldPeers.value.map((row) => row.msgId)).toEqual(['m1'])
+      expect(stream.heldPeers.value[0]).toMatchObject({ fromName: 'forebrain-harness-28', mark: '28', tone: 1 })
 
       // A repeated event changes nothing.
       observerEvent(observer, 'evt-held', 6, 'peer_message_held', heldPayload())
@@ -6740,7 +6740,7 @@ describe('held peer messages', () => {
       } as never),
       vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
       vi.spyOn(forebrainApi, 'peersDirectory').mockResolvedValue({
-        held: [], files: [], same_tree: [], other: [], other_total: 0,
+        held: [], files: [], sameTree: [], other: [], otherTotal: 0,
       }),
     ]
     try {

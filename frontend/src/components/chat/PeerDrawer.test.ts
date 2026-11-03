@@ -26,7 +26,7 @@ function file(overrides: Partial<PeerFileRow> = {}): PeerFileRow {
     dir: 'pkg/process',
     name: 'open.go',
     agents: [{ name: 'forebrain-harness-28', mark: '28', tone: 1, self: false }],
-    last_ms: NOW - 6 * 60_000,
+    lastMs: NOW - 6 * 60_000,
     clash: false,
     ...overrides,
   }
@@ -34,11 +34,11 @@ function file(overrides: Partial<PeerFileRow> = {}): PeerFileRow {
 
 function held(overrides: Partial<PeerHeldRow> = {}): PeerHeldRow {
   return {
-    msg_id: 'm1',
-    from_name: 'forebrain-harness-28',
+    msgId: 'm1',
+    fromName: 'forebrain-harness-28',
     preview: 'are you still editing open.go?',
     cause: 'mode-mismatch',
-    held_at_ms: NOW,
+    heldAtMs: NOW,
     mark: '28',
     tone: 1,
     ...overrides,

@@ -111,6 +111,11 @@ type HeldPeerMessage struct {
 	From     string
 	FromName string
 	Preview  string
+	// Body is the message itself, with the envelope's own markup taken off it.
+	// Preview is the envelope's opening — what the terminal's picker row shows
+	// — and a banner that quotes the message needs the words, not the wrapper
+	// (plan 200 §3).
+	Body string
 	// Cause is why it was held: event.PeerHoldCause*.
 	Cause    string
 	HeldAtMs int64
@@ -565,6 +570,7 @@ func (in *peerInbox) publishHeld(ctx context.Context, held *heldPeerMessage) {
 		From:     held.from,
 		FromName: held.fromName,
 		Preview:  peerPreview(held.envelope),
+		PeerBody: peerEnvelopeBody(held.envelope),
 		Cause:    held.cause,
 		HeldAtMs: held.heldAt.UnixMilli(),
 	})
@@ -588,6 +594,16 @@ func (in *peerInbox) publish(ctx context.Context, sessionID, typ string, payload
 	if err := in.surface.Publish(ctx, sessionID, "", typ, payload); err != nil {
 		slog.Debug("peer run event could not be published", "type", typ, "session_id", sessionID, "err", err)
 	}
+}
+
+// peerEnvelopeBody is the message inside an envelope, or "" when the content
+// was not one. A banner quotes the words the person is being asked about, and
+// the envelope's own markup is not those words (plan 200 §3).
+func peerEnvelopeBody(envelope string) string {
+	if _, body, ok := ParsePeerEnvelope(envelope); ok {
+		return body
+	}
+	return ""
 }
 
 // peerPreview is a message's opening, for a card that says what arrived.
@@ -1084,6 +1100,7 @@ func (in *peerInbox) heldMessages(sessionID string) []HeldPeerMessage {
 			From:     held.from,
 			FromName: held.fromName,
 			Preview:  peerPreview(held.envelope),
+			Body:     peerEnvelopeBody(held.envelope),
 			Cause:    held.cause,
 			HeldAtMs: held.heldAt.UnixMilli(),
 		})

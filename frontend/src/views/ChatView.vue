@@ -200,7 +200,9 @@
                            and unframed, never a bubble of the reader's own. A
                            delivery note is the same row with the opposite
                            meaning — what became of the messages this
-                           conversation sent. -->
+                           conversation sent. Both are the first links of the
+                           chain below, so a peer row never falls through to the
+                           reader's bubble or the prose fallback. -->
                       <PeerMessageCard
                         v-if="msg.role === 'user' && msg.origin === 'peer'"
                         :data-peer-landing="String(msg.id ?? '').startsWith('peer-landing-') ? msg.id : undefined"
@@ -226,7 +228,7 @@
                            subagent, a call's state for a call. Anything else
                            (a compaction, a goal line, an error) breaks the
                            line. -->
-                      <div v-if="hasVisibleBlocks(msg.blocks) && drawnBlocks(msg.blocks).length" class="msg-blocks">
+                      <div v-else-if="hasVisibleBlocks(msg.blocks) && drawnBlocks(msg.blocks).length" class="msg-blocks">
                         <template v-for="(run, runIdx) in activityRunsOf(msg)" :key="`${msg.id ?? idx}-run-${runIdx}`">
                           <ActivityLine v-if="run.line">
                             <!-- One checklist card per turn, holding what the
@@ -2810,38 +2812,39 @@ function peerLandingRect(): DOMRect | null {
  * own settled event is what removes the row everywhere.
  */
 async function releasePeerMessage(held: PeerHeldRow) {
-  const id = `peer-landing-${held.msg_id}`
+  const id = `peer-landing-${held.msgId}`
   peerLandingId.value = id
+  const body = String(held.peerBody ?? '').trim() || String(held.preview ?? '').trim()
   messages.value = [...messages.value, {
     id,
     role: 'user',
-    content: held.preview ?? '',
+    content: body,
     origin: 'peer',
-    peerFromName: held.from_name ?? '',
-    peerBody: held.preview ?? '',
+    peerFromName: held.fromName ?? '',
+    peerBody: body,
     peerMark: held.mark,
     peerTone: held.tone,
-    createdAt: held.held_at_ms || Date.now(),
+    createdAt: held.heldAtMs || Date.now(),
   }]
-  void answerPeerHeld(held.msg_id, true)
+  void answerPeerHeld(held.msgId, true)
   await nextTick()
 }
 
 /** Denying leaves the thread's own line saying what happened, so the refusal is
  *  as visible as the message would have been. */
 async function denyPeerMessage(held: PeerHeldRow) {
-  void answerPeerHeld(held.msg_id, false)
+  void answerPeerHeld(held.msgId, false)
   messages.value = [...messages.value, {
-    id: `peer-denied-${held.msg_id}`,
+    id: `peer-denied-${held.msgId}`,
     role: 'notice',
-    content: t('chat.peerDeniedLine', { name: held.from_name || t('chat.peerUnknownAgent') }),
+    content: t('chat.peerDeniedLine', { name: held.fromName || t('chat.peerUnknownAgent') }),
   }]
 }
 
 /** The banner has collapsed; its held row is no longer the one to show. */
 function settlePeerMessage(held: PeerHeldRow) {
-  heldPeers.value = heldPeers.value.filter((row) => row.msg_id !== held.msg_id)
-  if (peerLandingId.value === `peer-landing-${held.msg_id}`) peerLandingId.value = ''
+  heldPeers.value = heldPeers.value.filter((row) => row.msgId !== held.msgId)
+  if (peerLandingId.value === `peer-landing-${held.msgId}`) peerLandingId.value = ''
 }
 
 /** The drawer's agent list is read when the conversation changes, so the top

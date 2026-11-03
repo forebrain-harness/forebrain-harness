@@ -2445,6 +2445,9 @@ type peerHeldRow struct {
 	From     string `json:"from,omitempty"`
 	FromName string `json:"from_name,omitempty"`
 	Preview  string `json:"preview,omitempty"`
+	// Body is the message itself; Preview is the envelope's opening, which is
+	// what the terminal's picker row shows.
+	Body     string `json:"peer_body,omitempty"`
 	Cause    string `json:"cause"`
 	HeldAtMs int64  `json:"held_at_ms"`
 	Mark     string `json:"mark"`
@@ -2560,6 +2563,7 @@ func (s *Server) peerHeldRows(sessionID string) []peerHeldRow {
 			From:     message.From,
 			FromName: message.FromName,
 			Preview:  message.Preview,
+			Body:     message.Body,
 			Cause:    message.Cause,
 			HeldAtMs: message.HeldAtMs,
 			Mark:     mark,

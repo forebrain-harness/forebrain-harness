@@ -7,12 +7,12 @@ import PeerHeldBanner from './PeerHeldBanner.vue'
 
 function held(overrides: Partial<PeerHeldRow> = {}): PeerHeldRow {
   return {
-    msg_id: 'm1',
+    msgId: 'm1',
     from: 'uds:/tmp/a.sock',
-    from_name: 'forebrain-harness-28',
+    fromName: 'forebrain-harness-28',
     preview: 'are you still editing open.go?',
     cause: 'mode-mismatch',
-    held_at_ms: 0,
+    heldAtMs: 0,
     mark: '28',
     tone: 1,
     ...overrides,

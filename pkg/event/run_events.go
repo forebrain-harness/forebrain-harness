@@ -376,6 +376,9 @@ type PeerMessageHeldPayload struct {
 	From     string `json:"from,omitempty"`
 	FromName string `json:"from_name,omitempty"`
 	Preview  string `json:"preview,omitempty"`
+	// PeerBody is the message itself, the envelope's markup taken off it, for
+	// a surface that quotes the words rather than the wrapper (plan 200 §3).
+	PeerBody string `json:"peer_body,omitempty"`
 	Cause    string `json:"cause"`
 	HeldAtMs int64  `json:"held_at_ms"`
 }
