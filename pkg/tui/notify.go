@@ -954,6 +954,20 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		if json.Unmarshal(evt.Payload, &p) == nil && (p.InputTokens != 0 || p.OutputTokens != 0) {
 			s.notifyUIForSession(evt.SessionID, TokenUsageDeltaMsg{RunID: evt.RunID, AgentID: p.AgentID, InputTokens: p.InputTokens, OutputTokens: p.OutputTokens})
 		}
+	case event.RunEventPeerMessageHeld:
+		// A held peer message is a question for the person, and the loop is
+		// the only place that may ask it (plan 199 §3.3).
+		var p event.PeerMessageHeldPayload
+		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.MsgID) != "" {
+			s.notifyUIForSession(evt.SessionID, PeerHeldMsg{SessionID: evt.SessionID, Held: p})
+		}
+	case event.RunEventPeerMessageSettled:
+		// The same event settles the prompt that is still on screen — an
+		// expiry nobody answered, or a release answered through /peers.
+		var p event.PeerMessageSettledPayload
+		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.MsgID) != "" {
+			s.notifyUIForSession(evt.SessionID, PeerSettledMsg{SessionID: evt.SessionID, MsgID: p.MsgID, Outcome: p.Outcome})
+		}
 	case event.RunEventToolStarted:
 		var p event.ToolCallStartedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
@@ -2207,6 +2221,29 @@ type PeerWakeMsg struct {
 	Prompt    process.PeerPrompt
 }
 
+// PeerHeldMsg carries one peer message the engine is holding for the person's
+// decision into the event loop (plan 199 §3.3). Nothing is drawn from it until
+// the loop is idle and nothing else owns the keys, so a tool approval inside a
+// turn is always answered first.
+type PeerHeldMsg struct {
+	SessionID string
+	Held      event.PeerMessageHeldPayload
+}
+
+// PeerSettledMsg carries what became of a held peer message: released,
+// denied, or expired without an answer.
+type PeerSettledMsg struct {
+	SessionID string
+	MsgID     string
+	Outcome   string
+}
+
+// PeerTreeCountMsg tells the event loop how many other agents are working in
+// this conversation's directory tree, for the footer's ⇄ count.
+type PeerTreeCountMsg struct {
+	Count int
+}
+
 // wakeForPeer is the engine's port into this surface for a peer message that
 // needs a turn of its own. The turn is not run here: it is handed to the event
 // loop, exactly as a continuation after a usage limit is. A terminal with no
@@ -2223,6 +2260,79 @@ func (s *ChatSession) wakeForPeer(_ context.Context, p process.PeerPrompt) error
 	}
 	s.notifyUI(PeerWakeMsg{SessionID: strings.TrimSpace(p.SessionID), Prompt: p})
 	return nil
+}
+
+// peerHoldDecider is the optional half of Session that answers a held peer
+// message on the person's behalf, and lists what is still waiting. A surface
+// with no engine behind it (tests, replay) simply does not have it.
+type peerHoldDecider interface {
+	HeldPeerMessages(sessionID string) []process.HeldPeerMessage
+	ReleasePeerMessage(msgID string) error
+	DenyPeerMessage(msgID string) error
+}
+
+// HeldPeerMessages lists the peer messages waiting for this conversation's
+// person, oldest first: what /peers shows, and the set the engine accepts an
+// answer for.
+func (s *ChatSession) HeldPeerMessages(sessionID string) []process.HeldPeerMessage {
+	if s == nil || s.Env == nil {
+		return nil
+	}
+	return s.Env.HeldPeerMessages(sessionID)
+}
+
+// ReleasePeerMessage delivers one held peer message: the person allowed it.
+func (s *ChatSession) ReleasePeerMessage(msgID string) error {
+	if s == nil || s.Env == nil {
+		return errors.New("peer: no peer service is running")
+	}
+	return s.Env.ReleasePeerMessage(msgID)
+}
+
+// DenyPeerMessage refuses one held peer message: the person declined it.
+func (s *ChatSession) DenyPeerMessage(msgID string) error {
+	if s == nil || s.Env == nil {
+		return errors.New("peer: no peer service is running")
+	}
+	return s.Env.DenyPeerMessage(msgID)
+}
+
+// askHeldPeerMessage puts one held message's question to the person and hands
+// the answer to the engine. It runs on the idle loop, which is what makes a
+// tool approval come first: no turn is in flight when the question is asked.
+func askHeldPeerMessage(ctx context.Context, out io.Writer, rs *rawSelector, session Session, state *streamState, renderer *Renderer, held process.HeldPeerMessage) {
+	if state == nil {
+		return
+	}
+	choice, err := newHeldPeerOverlay(ctx, out, rs, held).Run()
+	if err != nil && renderer != nil {
+		renderer.PrintError(err)
+	}
+	// The question is not put again on its own, whatever came back: an answer
+	// is on its way out of the list, and Esc leaves the message held for
+	// /peers to answer whenever the person wants to.
+	state.noteHeldPeerAsked(held.MsgID)
+	if choice == heldPeerLeft {
+		return
+	}
+	decider, ok := session.(peerHoldDecider)
+	if !ok {
+		if renderer != nil {
+			renderer.RenderFrame(Frame{
+				Kind: FrameSystem, Title: "peer",
+				Content: "this surface cannot answer held peer messages", Final: true,
+			})
+		}
+		return
+	}
+	if choice == heldPeerRelease {
+		err = decider.ReleasePeerMessage(held.MsgID)
+	} else {
+		err = decider.DenyPeerMessage(held.MsgID)
+	}
+	if err != nil && renderer != nil {
+		renderer.PrintError(err)
+	}
 }
 
 // publishPeerRunEvent records a peer message's fate on the conversation's log.
@@ -2578,6 +2688,135 @@ func (s *streamState) takePeerDue() (process.PeerPrompt, bool) {
 // continuation.
 func (s *streamState) autoContinueWake() bool {
 	return s != nil && s.autoContinueDue != nil
+}
+
+// heldPeerMark is what the loop remembers about one held peer message beyond
+// the message itself.
+type heldPeerMark struct {
+	// asked is set once the question was put to the person: only then is the
+	// message's outcome worth a line, because only then did they see it.
+	asked bool
+	// left is set when the prompt ended without an answer — Esc, or an answer
+	// that never reached the engine. The message stays held and the question
+	// does not reopen on its own: /peers is where it is answered later.
+	left bool
+}
+
+// addHeldPeer records one message the engine is holding for this conversation,
+// oldest first. A message announced twice is kept once.
+func (s *streamState) addHeldPeer(held process.HeldPeerMessage) {
+	if s == nil || strings.TrimSpace(held.MsgID) == "" {
+		return
+	}
+	for _, waiting := range s.heldPeers {
+		if waiting.MsgID == held.MsgID {
+			return
+		}
+	}
+	s.heldPeers = append(s.heldPeers, held)
+}
+
+// nextHeldPeer is the oldest held message the person has not left for later,
+// which is the one the idle loop asks about.
+func (s *streamState) nextHeldPeer() (process.HeldPeerMessage, bool) {
+	if s == nil {
+		return process.HeldPeerMessage{}, false
+	}
+	for _, waiting := range s.heldPeers {
+		if !s.heldMarks[waiting.MsgID].left {
+			return waiting, true
+		}
+	}
+	return process.HeldPeerMessage{}, false
+}
+
+// noteHeldPeerAsked records that the question was put to the person, and that
+// it is not to be put again on its own.
+func (s *streamState) noteHeldPeerAsked(msgID string) {
+	msgID = strings.TrimSpace(msgID)
+	if s == nil || msgID == "" {
+		return
+	}
+	if s.heldMarks == nil {
+		s.heldMarks = map[string]heldPeerMark{}
+	}
+	s.heldMarks[msgID] = heldPeerMark{asked: true, left: true}
+}
+
+// takeSettledHeldPeer drops one settled message from the list, reporting it and
+// whether the person had been asked about it — the one case its outcome is
+// worth a line of its own.
+func (s *streamState) takeSettledHeldPeer(msgID string) (process.HeldPeerMessage, bool) {
+	msgID = strings.TrimSpace(msgID)
+	if s == nil || msgID == "" {
+		return process.HeldPeerMessage{}, false
+	}
+	asked := s.heldMarks[msgID].asked
+	delete(s.heldMarks, msgID)
+	for i, waiting := range s.heldPeers {
+		if waiting.MsgID != msgID {
+			continue
+		}
+		s.heldPeers = append(s.heldPeers[:i], s.heldPeers[i+1:]...)
+		return waiting, asked
+	}
+	return process.HeldPeerMessage{}, asked
+}
+
+// heldPeersHeld reports whether any held message still needs the person's
+// answer, which is one reason the idle loop's wait returns.
+func (s *streamState) heldPeersHeld() bool {
+	_, waiting := s.nextHeldPeer()
+	return waiting
+}
+
+// idleWake tells the idle loop's wait to return so it can do what a
+// notification asked for: run a due continuation, or put a held peer message's
+// question to the person.
+func (s *streamState) idleWake() bool {
+	return s.autoContinueWake() || s.heldPeersHeld()
+}
+
+// handlePeerHoldNotification applies one held or settled peer message to the
+// event loop's state, reporting false for any other message. It never asks
+// anything: the question belongs to the idle loop, which is the one place a
+// tool approval cannot be waiting for the input (plan 199 §3.3).
+func handlePeerHoldNotification(renderer *Renderer, state *streamState, m any) bool {
+	switch msg := m.(type) {
+	case PeerHeldMsg:
+		if state == nil || !sameSessionID(msg.SessionID, state.sessionID) {
+			return true
+		}
+		state.addHeldPeer(process.HeldPeerMessage{
+			MsgID:    strings.TrimSpace(msg.Held.MsgID),
+			From:     msg.Held.From,
+			FromName: msg.Held.FromName,
+			Preview:  msg.Held.Preview,
+			Cause:    msg.Held.Cause,
+			HeldAtMs: msg.Held.HeldAtMs,
+		})
+		return true
+	case PeerSettledMsg:
+		if state == nil || !sameSessionID(msg.SessionID, state.sessionID) {
+			return true
+		}
+		held, asked := state.takeSettledHeldPeer(msg.MsgID)
+		// A message that was never put to the person needs no account of
+		// itself here; one they answered, or left, does.
+		if asked && renderer != nil {
+			outcome := strings.TrimSpace(msg.Outcome)
+			if outcome == "" {
+				outcome = "settled"
+			}
+			renderer.RenderFrame(Frame{
+				Kind:  FrameSystem,
+				Title: "Held message from " + heldPeerName(held) + " " + outcome,
+				Final: true,
+			})
+		}
+		return true
+	}
+	return false
 }
 
 func sameSessionID(a, b string) bool {

@@ -22,6 +22,7 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -3257,6 +3258,232 @@ func (o *questionOverlay) termSize() (width, height int) {
 // adapt to terminal resizes.
 func (c *qlineCollector) questionSeparatorLine() string {
 	return "\x00QSEP\x00"
+}
+
+// --- held peer messages (plan 199 §3.3) ---
+
+// heldPeerChoice is what the person answered about one held peer message.
+type heldPeerChoice int
+
+const (
+	// heldPeerLeft is Esc: the prompt closes and the message stays held, to be
+	// answered from /peers whenever the person wants to.
+	heldPeerLeft heldPeerChoice = iota
+	heldPeerRelease
+	heldPeerDeny
+)
+
+// heldPeerAnswers are the question's two answers in the order the row shows
+// them. Release comes first because that is what the sender is waiting for.
+var heldPeerAnswers = []string{"Release", "Deny"}
+
+// heldPeerPreviewMaxLines is how much of a held message the question shows: its
+// opening is enough to know what it is about.
+const heldPeerPreviewMaxLines = 3
+
+// heldPeerOverlay asks whether one peer message the engine is holding for this
+// conversation may be delivered. It is the approval overlay's shape with the
+// approval logic left out: the same raw selector, the same bottom-pinned
+// composer block above the transcript, two answers and Esc.
+//
+// It is opened from the idle loop and nowhere else, so a tool approval inside a
+// turn is always answered first; while another modal owns the input it queues
+// behind it, exactly as an approval queues behind a selector.
+type heldPeerOverlay struct {
+	ctx    context.Context
+	out    io.Writer
+	rs     *rawSelector
+	held   process.HeldPeerMessage
+	cursor int
+}
+
+func newHeldPeerOverlay(ctx context.Context, out io.Writer, rs *rawSelector, held process.HeldPeerMessage) *heldPeerOverlay {
+	return &heldPeerOverlay{ctx: ctx, out: out, rs: rs, held: held}
+}
+
+// Run paints the question and blocks until the person answers it or leaves it.
+func (o *heldPeerOverlay) Run() (heldPeerChoice, error) {
+	if o.rs == nil {
+		return heldPeerLeft, fmt.Errorf("tui peer prompts require an interactive raw terminal")
+	}
+	release, acquired := waitForComposerInput(o.ctx, o.rs)
+	if !acquired {
+		// The context was cancelled while this question waited for the input:
+		// the message stays held, which is where it was.
+		return heldPeerLeft, nil
+	}
+	defer release()
+	// Ignore keys queued before this prompt owned stdin, the way every other
+	// modal does.
+	o.rs.discardPreOpenInput()
+	// In non-viewport mode serialise writes against the renderer; in viewport
+	// mode the renderer locks per render, so the mutex is not held across a
+	// key read.
+	mutexHeld := false
+	if !o.rs.inViewportOverlay() && o.rs.mu != nil {
+		o.rs.mu.Lock()
+		mutexHeld = true
+	}
+	defer func() {
+		if mutexHeld {
+			o.rs.mu.Unlock()
+		}
+	}()
+	o.cursor = 0
+	o.rs.resetOverlayViewportState()
+	o.render()
+	for {
+		key, err := o.rs.readKey()
+		if err != nil {
+			return heldPeerLeft, err
+		}
+		switch key.kind {
+		case rawKeyNone:
+			continue
+		case rawKeyMouse:
+			o.rs.dispatchMouse(key.mouse)
+			continue
+		}
+		o.rs.clearViewportSelection()
+		choice, done := o.handleKey(key)
+		if done {
+			return choice, nil
+		}
+		o.render()
+	}
+}
+
+func (o *heldPeerOverlay) handleKey(key parsedKey) (heldPeerChoice, bool) {
+	switch key.kind {
+	case rawKeyUp, rawKeyLeft, rawKeyShiftTab:
+		if o.cursor > 0 {
+			o.cursor--
+		}
+	case rawKeyDown, rawKeyRight, rawKeyTab:
+		if o.cursor < len(heldPeerAnswers)-1 {
+			o.cursor++
+		}
+	case rawKeyEnter:
+		if o.cursor == 0 {
+			return heldPeerRelease, true
+		}
+		return heldPeerDeny, true
+	case rawKeyEscape, rawKeyCtrlC:
+		return heldPeerLeft, true
+	case rawKeyRune:
+		switch key.r {
+		case 'r', 'R':
+			return heldPeerRelease, true
+		case 'd', 'D':
+			return heldPeerDeny, true
+		}
+	}
+	return heldPeerLeft, false
+}
+
+func (o *heldPeerOverlay) render() {
+	lines := o.lines(o.width())
+	if o.rs != nil && o.rs.inViewportOverlay() {
+		o.rs.setOverlayComposer(lines, -1, 0)
+		return
+	}
+	for _, line := range lines {
+		_, _ = fmt.Fprintln(o.out, line)
+	}
+}
+
+func (o *heldPeerOverlay) width() int {
+	if o != nil && o.rs != nil {
+		w, _ := o.rs.termSize()
+		return w
+	}
+	w, h, err := termSizeWithFallback()
+	if err == nil && w > 0 && h > 0 {
+		return w
+	}
+	return 80
+}
+
+// lines is the question's content: who is waiting, the opening of what they
+// sent, why it was held, and the two answers, folded to width the way the
+// approval overlay folds its own content.
+func (o *heldPeerOverlay) lines(width int) []string {
+	var lines []string
+	write := func(style, text string) {
+		for _, visual := range approvalOverlayVisualLines(text, width) {
+			lines = append(lines, style+visual+"\x1b[0m")
+		}
+	}
+	write("\x1b[1m", "Message from "+heldPeerName(o.held)+" is held")
+	for _, line := range heldPeerPreviewLines(o.held.Preview, heldPeerPreviewMaxLines) {
+		write("  ", line)
+	}
+	if cause := heldPeerCauseLabel(o.held.Cause); cause != "" {
+		write("\x1b[2m", cause)
+	}
+	lines = append(lines, o.answersLine())
+	write("\x1b[2m", "←/→ to choose · enter to answer · esc to leave it held")
+	return lines
+}
+
+// answersLine is the two answers on one row, the focused one marked: the
+// question is a choice between two words, not a list to page through.
+func (o *heldPeerOverlay) answersLine() string {
+	parts := make([]string, 0, len(heldPeerAnswers))
+	for i, label := range heldPeerAnswers {
+		if i == o.cursor {
+			parts = append(parts, "\x1b[36m❯\x1b[0m "+label)
+			continue
+		}
+		parts = append(parts, "  "+label)
+	}
+	return strings.Join(parts, "   ")
+}
+
+// heldPeerPreviewLines is the opening of the held message cut to the few lines
+// the question shows; the last line says there is more rather than the prompt
+// pretending this is all of it.
+func heldPeerPreviewLines(preview string, max int) []string {
+	raw := strings.Split(strings.ReplaceAll(preview, "\r\n", "\n"), "\n")
+	kept := make([]string, 0, max+1)
+	for _, line := range raw {
+		if len(kept) == max {
+			kept = append(kept, "…")
+			break
+		}
+		kept = append(kept, line)
+	}
+	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
+		kept = kept[:len(kept)-1]
+	}
+	return kept
+}
+
+// heldPeerCauseLabel says why the message was held, in the words the reader
+// needs: the modes differ, the sender asserted none, or this conversation holds
+// everything it receives. A cause this build does not know is not explained.
+func heldPeerCauseLabel(cause string) string {
+	switch strings.TrimSpace(cause) {
+	case event.PeerHoldCauseModeMismatch:
+		return "permission modes differ"
+	case event.PeerHoldCauseNoModeAsserted:
+		return "sender mode unknown"
+	case event.PeerHoldCauseHoldAll:
+		return "holding all peer messages"
+	}
+	return ""
+}
+
+// heldPeerName is what the question and the settle line call the sender: the
+// name they went by, their address when they gave none, and a plain word when
+// both are missing.
+func heldPeerName(held process.HeldPeerMessage) string {
+	for _, candidate := range []string{held.FromName, held.From} {
+		if name := strings.TrimSpace(candidate); name != "" {
+			return name
+		}
+	}
+	return "a peer"
 }
 
 // errStdinBusy is returned by acquireComposerInput when another modal

@@ -193,6 +193,9 @@ func Run(ctx context.Context, opts Options) error {
 	if f, ok := in.(*os.File); ok {
 		selector = NewInteractiveSelector(out, readLine, f, renderer)
 	}
+	// rawSel is the same selector when it owns the terminal: the held peer
+	// prompt, like every other overlay, exists only where keys can be read.
+	rawSel, _ := selector.(*rawSelector)
 	cmds := newCommandController(opts.Session, renderer, selector, readLine, strings.TrimSpace(opts.Home))
 	approvalSink := NewInteractiveApprovalSinkWithTTY(out, selector).WithRenderer(renderer).WithRecorder(opts.Session)
 	if spt, ok := opts.Session.(interface{ SessionProjectType(string) string }); ok {
@@ -306,6 +309,9 @@ func Run(ctx context.Context, opts Options) error {
 			return
 		}
 		if handlePeerWakeNotification(&state, m) {
+			return
+		}
+		if handlePeerHoldNotification(renderer, &state, m) {
 			return
 		}
 		if handleAutoContinueNotification(renderer, &state, m) {
@@ -742,6 +748,17 @@ func Run(ctx context.Context, opts Options) error {
 				continue
 			}
 		}
+		// A peer message the engine is holding is a question for the person,
+		// and the idle loop is the only place that asks it: a turn — and so a
+		// tool approval inside one — is never in flight here (plan 199 §3.3).
+		// One message per pass, so a settlement or a key that arrived in
+		// between is applied before the next question is put.
+		if state.panel == nil && rawSel != nil {
+			if held, waiting := state.nextHeldPeer(); waiting {
+				askHeldPeerMessage(ctx, out, rawSel, opts.Session, &state, renderer, held)
+				continue
+			}
+		}
 		line := state.composer.Text
 		if state.holdComposer {
 			line = ""
@@ -758,7 +775,7 @@ func Run(ctx context.Context, opts Options) error {
 				ok = true
 			} else {
 				var err error
-				ev, ok, err = awaitInputOrSignal(ctx, sigCh, events, notifyCh, processUINotification, state.autoContinueWake)
+				ev, ok, err = awaitInputOrSignal(ctx, sigCh, events, notifyCh, processUINotification, state.idleWake)
 				if err != nil {
 					return err
 				}
@@ -1678,6 +1695,14 @@ type streamState struct {
 	// event stream, notifications keep flowing, and the transcript keeps
 	// streaming above it.
 	panel *uiPanel
+	// heldPeers are the peer messages the engine is holding for this
+	// conversation's person, oldest first. The idle loop asks about them one
+	// at a time (askHeldPeerMessage) — never while a turn, and so never while
+	// a tool approval, owns the keys.
+	heldPeers []process.HeldPeerMessage
+	// heldMarks is what the loop remembers about a held message beyond the
+	// message itself, by message id.
+	heldMarks map[string]heldPeerMark
 	// terminalFocused follows CSI I / CSI O focus reports. It starts true so
 	// terminals without focus-reporting support do not produce noisy bells.
 	terminalFocused bool
