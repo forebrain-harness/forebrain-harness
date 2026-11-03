@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -98,6 +99,98 @@ func ParsePeerEnvelope(content string) (fromName, body string, ok bool) {
 		return "", "", false
 	}
 	return strings.TrimSpace(envelope.FromName), envelope.Body, true
+}
+
+// PeerMark is the identity block a surface draws for one agent: the two
+// characters it carries and the tone it is drawn in (plan 200 §3). Both are
+// derived here, once, so the same agent reads the same everywhere — the top
+// bar, a letter, the drawer, an approval card — and no surface has to hash a
+// name itself.
+//
+// name is the agent's own name; parent is the hosting primary agent's name
+// when the agent is a subagent, empty otherwise. A primary agent's mark is the
+// first two characters of the last dash-separated segment of its name
+// (forebrain-harness-a3 → a3, forebrain-gw-3c1a → 3c). A subagent's is the
+// initials of the dash-separated segments of the part after its last dot
+// (forebrain-gw-3c1a.review-auth → ra), padded from the first segment when
+// there is only one initial to read.
+//
+// The tone is a stable hash of the *process* agent's name — the parent's for a
+// subagent, so a subagent wears its parent's colour — taken modulo the four
+// identity tones. FNV-1a is used because it is stable across processes and
+// platforms, which is the whole requirement: nothing about the mapping is a
+// secret, it only has to agree everywhere.
+func PeerMark(name, parent string) (mark string, tone int) {
+	name = strings.TrimSpace(name)
+	parent = strings.TrimSpace(parent)
+	toneName := name
+	if parent != "" {
+		toneName = parent
+	}
+	if toneName == "" {
+		toneName = name
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(toneName))
+	tone = int(h.Sum32() % peerToneCount)
+	if parent != "" {
+		return peerSubagentMark(name), tone
+	}
+	return peerNameMark(name), tone
+}
+
+// peerToneCount is how many identity tones there are; the palette itself is
+// the surface's, indexed by the tone a mark carries.
+const peerToneCount = 4
+
+// peerNameMark is a primary agent's two characters: the first two of the last
+// dash-separated segment of its name.
+func peerNameMark(name string) string {
+	segments := strings.Split(name, "-")
+	for i := len(segments) - 1; i >= 0; i-- {
+		if segment := strings.TrimSpace(segments[i]); segment != "" {
+			return firstRunes(segment, 2)
+		}
+	}
+	return firstRunes(name, 2)
+}
+
+// peerSubagentMark is a subagent's two characters: the initial of each
+// dash-separated segment of the name after its last dot, padded from the first
+// segment when that yields a single character.
+func peerSubagentMark(name string) string {
+	base := name
+	if dot := strings.LastIndex(name, "."); dot >= 0 {
+		base = name[dot+1:]
+	}
+	segments := strings.Split(base, "-")
+	out := make([]rune, 0, 2)
+	for _, segment := range segments {
+		for _, r := range segment {
+			out = append(out, r)
+			break
+		}
+		if len(out) == 2 {
+			return string(out)
+		}
+	}
+	if len(out) == 1 {
+		// One initial to read: the block still carries two characters, so the
+		// second comes after it in the same segment.
+		if runes := []rune(segments[0]); len(runes) > 1 {
+			out = append(out, runes[1])
+		}
+	}
+	return string(out)
+}
+
+// firstRunes is the first n runes of s, or all of them when s is shorter.
+func firstRunes(s string, n int) string {
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) > n {
+		runes = runes[:n]
+	}
+	return string(runes)
 }
 
 // peerService is the running registration: one mode, one socket, one record.

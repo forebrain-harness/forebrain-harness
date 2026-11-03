@@ -553,3 +553,36 @@ func TestPeerOutboundFollowsTheInteropSwitch(t *testing.T) {
 		t.Fatalf("frame from = %q, want this process's interop address", frame.From)
 	}
 }
+
+// TestParsePeerReceiptSummary pins the reading the web's delivery card makes of
+// the note this process writes (plan 200 §3): one row per recipient, with the
+// state the protocol reported and the reason in plain words. The round trip is
+// the contract — a summary this package wrote must read back as the rows it was
+// built from — and content in any other shape must yield nothing rather than a
+// guess.
+func TestParsePeerReceiptSummary(t *testing.T) {
+	summary := peerReceiptSummary([]string{
+		peerReceiptLine("forebrain-harness-28", peer.PeerMessageStatus{Status: peer.StatusHeld, Reason: "held"}),
+		peerReceiptLine("forebrain-gw-3c1a", peer.PeerMessageStatus{Status: peer.StatusDelivered}),
+		peerReceiptLine("forebrain-harness-a3", peer.PeerMessageStatus{Status: peer.StatusDenied}),
+		peerReceiptLine("docs-site-7f", peer.PeerMessageStatus{Status: peer.StatusDropped, DropReason: "rate-limited"}),
+	})
+	rows := ParsePeerReceiptSummary(summary)
+	if len(rows) != 4 {
+		t.Fatalf("ParsePeerReceiptSummary returned %d rows, want 4: %+v", len(rows), rows)
+	}
+	want := []PeerReceiptRow{
+		{Name: "forebrain-harness-28", Status: PeerReceiptHeld},
+		{Name: "forebrain-gw-3c1a", Status: PeerReceiptDelivered},
+		{Name: "forebrain-harness-a3", Status: PeerReceiptDenied},
+		{Name: "docs-site-7f", Status: PeerReceiptDropped, Reason: "rate-limited"},
+	}
+	for i, row := range rows {
+		if row.Name != want[i].Name || row.Status != want[i].Status || row.Reason != want[i].Reason {
+			t.Fatalf("row %d = %+v, want %+v", i, row, want[i])
+		}
+	}
+	if rows := ParsePeerReceiptSummary("not a delivery note"); len(rows) != 0 {
+		t.Fatalf("ParsePeerReceiptSummary read rows out of unrelated content: %+v", rows)
+	}
+}

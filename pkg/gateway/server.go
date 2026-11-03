@@ -1103,8 +1103,8 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if s.RunRT == nil {
 			runEvtSub.Bind(sid)
 			bound := wsServerMsg{Op: "session_bound", RequestID: requestID, SessionID: sid, Message: "subscribed"}
-			if plans := s.autoContinuePlans(sid); len(plans) > 0 {
-				bound.Data = sessionBoundData(0, 0, plans)
+			if plans := s.autoContinuePlans(sid); len(plans) > 0 || len(s.peerHeldRows(sid)) > 0 {
+				bound.Data = s.sessionBoundData(sid, 0, 0, plans)
 			}
 			writeMsg(bound)
 			return true, false
@@ -1128,7 +1128,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			RequestID: requestID,
 			SessionID: sid,
 			Message:   "subscribed",
-			Data:      sessionBoundData(cursor, highWater, autoContinuePlans),
+			Data:      s.sessionBoundData(sid, cursor, highWater, autoContinuePlans),
 		})
 		next := cursor
 		for next < highWater {

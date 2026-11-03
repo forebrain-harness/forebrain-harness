@@ -126,17 +126,32 @@ func (s *Server) withDetachedGatewayApprovalHooks(ctx context.Context, sessionID
 	return ctx
 }
 
+// runLessPeerEvent reports whether eventType is one of the peer facts that
+// belong to a conversation rather than to a run: a message is being held for
+// the person, or the person's answer to one settled it (plan 200 §3). These are
+// the only events the peer funnel publishes, and the only ones allowed through
+// without a run id — everything else still needs one to be routed at all.
+func runLessPeerEvent(eventType string) bool {
+	return eventType == event.RunEventPeerMessageHeld || eventType == event.RunEventPeerMessageSettled
+}
+
 // publishGatewayRunEvent records one lifecycle transition of a background
 // continuation on the conversation's event log. The ordinary request path
 // publishes through writeMsg; a detached approval resume has no such writer, so
 // without this the transition would be absent from the canonical session cursor
 // entirely.
+//
+// A fact that belongs to no run — a peer message being held for the person, or
+// the answer to one (plan 200 §3) — arrives with an empty run id, exactly as the
+// terminal's own peer funnel writes it. The event bus routes by session, so the
+// fact still lands on the conversation's log; refusing it here would leave the
+// web's held banner and delivery card with nothing to draw from but a reload.
 func (s *Server) publishGatewayRunEvent(ctx context.Context, sessionID, runID, eventType string, payload any) error {
 	if s == nil || s.RunEvents() == nil {
 		return nil
 	}
 	runID = strings.TrimSpace(runID)
-	if runID == "" {
+	if runID == "" && !runLessPeerEvent(eventType) {
 		return fmt.Errorf("publish gateway run event: run id is required")
 	}
 	// Every way a run ends carries its checklist facts and its delivered

@@ -395,6 +395,50 @@ func (o *peerOutbound) TouchesBetween(ctx context.Context, root string, from, to
 	return out
 }
 
+// PeerFileTouch is one file-tool write under a root, as the web's "who is
+// editing this directory" panel reads it (plan 200 §3): the path relative to
+// the root, which agent wrote it, and when. AgentID is the forebrain agent id
+// the ledger recorded, so a surface can tell its own conversation's writes from
+// another process's; the surface decides what "its own" means, because the
+// ledger only knows processes.
+type PeerFileTouch struct {
+	Path      string
+	AgentName string
+	AgentID   string
+	At        time.Time
+}
+
+// RecentPeerFileTouches lists every file-tool write under root inside the
+// ledger's retention window, newest first — this process's own agents included,
+// which is what distinguishes it from TouchesBetween (plan 200 §3: the panel
+// shows who is editing a file, and "who" includes the reader). A process that
+// is not registered as a peer has nothing to attribute its own writes to, so a
+// write of its own reads as another agent's; the panel is a view, never a guard.
+func (env *Environment) RecentPeerFileTouches(root string) []PeerFileTouch {
+	if env == nil {
+		return nil
+	}
+	resolvedRoot := resolvePath(root)
+	if resolvedRoot == "" {
+		return nil
+	}
+	now := time.Now()
+	touches := agentTouchesBetween(now.Add(-agentTouchRetention), now)
+	list := make([]PeerFileTouch, 0, len(touches))
+	for _, touch := range touches {
+		if !pathUnderRoot(resolvedRoot, touch.path) {
+			continue
+		}
+		list = append(list, PeerFileTouch{
+			Path:      relativeToRoot(resolvedRoot, touch.path),
+			AgentName: touch.name,
+			AgentID:   touch.agentID,
+			At:        touch.at,
+		})
+	}
+	return list
+}
+
 // WorkTreePeers lists the other live agents whose directory overlaps root, with
 // the files each wrote recently. A peer this process can reach but the ledger
 // never saw — a Claude Code session, or one that has not written a file yet —

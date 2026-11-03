@@ -659,3 +659,45 @@ func TestParsePeerEnvelope(t *testing.T) {
 		t.Fatalf("envelope without from-name = %q, %v; want empty name and true", name, ok)
 	}
 }
+
+// TestPeerMark pins the identity block's derivation (plan 200 §3): the two
+// characters a surface draws, and the tone that stays with one agent wherever
+// it is drawn. The marks are the design's own examples; the tones are only
+// pinned as "stable and in range" — the palette's index is an implementation
+// choice, the stability is the contract.
+func TestPeerMark(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		parent string
+		mark   string
+	}{
+		{name: "forebrain-harness-a3", mark: "a3"},
+		{name: "forebrain-harness-28", mark: "28"},
+		{name: "forebrain-gw-3c1a", mark: "3c"},
+		{name: "docs-site-7f", mark: "7f"},
+		{name: "forebrain-gw-3c1a.review-auth", parent: "forebrain-gw-3c1a", mark: "ra"},
+		{name: "solo", mark: "so"},
+		{name: "forebrain-harness-a3.review", parent: "forebrain-harness-a3", mark: "re"},
+	} {
+		mark, tone := PeerMark(tc.name, tc.parent)
+		if mark != tc.mark {
+			t.Fatalf("PeerMark(%q, %q) mark = %q, want %q", tc.name, tc.parent, mark, tc.mark)
+		}
+		if tone < 0 || tone >= peerToneCount {
+			t.Fatalf("PeerMark(%q, %q) tone = %d, want 0..%d", tc.name, tc.parent, tone, peerToneCount-1)
+		}
+	}
+	// The same agent reads the same everywhere: the derivation is a pure
+	// function of the name.
+	first, firstTone := PeerMark("forebrain-harness-a3", "")
+	again, againTone := PeerMark("forebrain-harness-a3", "")
+	if first != again || firstTone != againTone {
+		t.Fatalf("PeerMark is not stable: %q/%d then %q/%d", first, firstTone, again, againTone)
+	}
+	// A subagent wears its parent's tone, not its own name's.
+	_, subTone := PeerMark("forebrain-harness-a3.review-auth", "forebrain-harness-a3")
+	_, parentTone := PeerMark("forebrain-harness-a3", "")
+	if subTone != parentTone {
+		t.Fatalf("subagent tone = %d, parent tone = %d; want them equal", subTone, parentTone)
+	}
+}
