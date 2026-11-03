@@ -110,6 +110,7 @@ Design and task plans: `docs/plan/LSP_CODE_INTELLIGENCE_PLAN.md` and `docs/plan/
 - **LLM-facing prompt text must be provider-neutral and byte-stable**: system-prompt constants (see `pkg/agent/scope_discipline.go`) contain no model/tool/vendor names and are compile-time constants so the cached prompt prefix never shifts.
 - Every package carries a `doc.go`; keep it accurate when you change a package's role.
 - Keep package boundaries intact: entrypoints in `cmd/forebrain`, serving in `pkg/gateway`, run lifecycle in `pkg/run`, turn execution in `pkg/turn`, agent loop in `pkg/agent`, context assembly in `pkg/assembly`, tools in `pkg/tool`.
+- **Run `scripts/peer-protocol-check.sh` after upgrading the local Claude Code, and before changing `pkg/peer`.** forebrain's cross-process interop clones Claude Code's private peer-messaging protocol, which moves between releases; the script greps the installed binary for the protocol's stable literals and checks the rendezvous records, so a protocol change is caught at upgrade time instead of as an interop failure. It is read-only, and it exits 0 when at least one Claude Code on the machine carries the protocol — an install that does not is reported as a WARNING, because a machine can hold more than one.
 
 ## Development workflow (branch, commit, pull request)
 
