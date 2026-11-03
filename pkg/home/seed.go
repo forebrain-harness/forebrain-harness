@@ -57,10 +57,7 @@ func seedWorkspace(root string) error {
 	ws := filepath.Join(root, WorkspaceDirName)
 	lock := filepath.Join(ws, ".forebrainhub", "lock.json")
 	if _, err := os.Stat(lock); os.IsNotExist(err) {
-		if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(lock, []byte("{}\n"), 0o644); err != nil {
+		if err := writeSeedFile(lock, []byte("{}\n"), 0o644); err != nil {
 			return err
 		}
 	}
@@ -76,11 +73,41 @@ func seedWorkspace(root string) error {
 		if err := UpsertEnvVar(root, GatewayTokenEnvVar, tok); err != nil {
 			return err
 		}
-		if err := os.WriteFile(cfgPath, []byte(defaultForebrainYAML), 0o600); err != nil {
+		if err := writeSeedFile(cfgPath, []byte(defaultForebrainYAML), 0o600); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// writeSeedFile writes a seed file whole and atomically (plan 213 §3.6): the
+// content appears only once it is complete, so a replica starting against a
+// shared home never reads a half-written config, and two replicas seeding one
+// home leave the same bytes behind instead of interleaving writes over a file
+// one of them is already reading.
+func writeSeedFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".seed-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 const defaultForebrainYAML = `gateway:
