@@ -2479,3 +2479,180 @@ func TestEditingAnOrdinarySessionIsUnaffected(t *testing.T) {
 		t.Fatalf("renaming an ordinary conversation = %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestRunBoundRoutesForwardToTheOwningReplica pins plan 213 §3.2 for the HTTP
+// surface: a request that reaches a replica which is not running the
+// conversation is forwarded to the one that is, and the answer — status and body
+// — comes back unchanged. The route comes from AttachExtraRoutes, so the
+// registration is under test, not just a hand-called wrapper.
+func TestRunBoundRoutesForwardToTheOwningReplica(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+
+	// The owning replica serves the internal endpoint over the same chain the
+	// gateway installs, so the peer authentication is exercised too.
+	owner := newReplicaTestServer(t, db, home, "gateway-owner", "gw-secret", "http://127.0.0.1:1")
+	ownerServer := httptest.NewServer(ServeHTTPChain(owner.Env, owner, http.HandlerFunc(http.NotFound)))
+	defer ownerServer.Close()
+	require.NoError(t, owner.RunRT.RegisterReplica(ctx, state.RunOwnerKindGateway, ownerServer.URL, "host-owner"))
+	rn, err := owner.RunRT.CreateRun(ctx, "sid", "hello")
+	require.NoError(t, err)
+
+	// The entry replica: it serves the browser and does not own the run.
+	entry := newReplicaTestServer(t, db, home, "gateway-entry", "gw-secret", "http://127.0.0.1:2")
+	routes := NewRestServer("")
+	entry.AttachExtraRoutes(routes)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+rn.ID+"/cancel", nil)
+	req.Header.Set("Authorization", "Bearer gw-secret")
+	rec := httptest.NewRecorder()
+	routes.Server.Handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var answer struct {
+		OK        bool `json:"ok"`
+		Cancelled bool `json:"cancelled"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &answer), rec.Body.String())
+	require.True(t, answer.OK)
+
+	// The owner is the one that ended the run: the cancel reached the replica
+	// holding it, not the one the request arrived at.
+	got, err := owner.RunRT.GetRun(ctx, rn.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusCancelled, got.Status)
+}
+
+// TestRunBoundRoutesServeLocallyWithoutAnOwner pins the other half: with no live
+// run anywhere else, the request is served here, exactly as before replicas
+// existed.
+func TestRunBoundRoutesServeLocallyWithoutAnOwner(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+
+	s := newReplicaTestServer(t, db, home, "gateway-only", "gw-secret", "http://127.0.0.1:1")
+	rn, err := s.RunRT.CreateRun(ctx, "sid", "hello")
+	require.NoError(t, err)
+	routes := NewRestServer("")
+	s.AttachExtraRoutes(routes)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+rn.ID+"/cancel", nil)
+	rec := httptest.NewRecorder()
+	routes.Server.Handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	got, err := s.RunRT.GetRun(ctx, rn.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusCancelled, got.Status)
+}
+
+// TestForwardedRunOpReportsAnUnreachableOwner pins that a forward that cannot be
+// delivered says so: the caller gets a 502 it can show, not a success that
+// changed nothing.
+func TestForwardedRunOpReportsAnUnreachableOwner(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+
+	s := newReplicaTestServer(t, db, home, "gateway-entry", "gw-secret", "http://127.0.0.1:2")
+	// An owner that is heartbeating but whose address nobody answers, holding
+	// the run this replica is asked to cancel.
+	gone := &state.RunStore{DB: db, Owner: "gateway-gone"}
+	stop, err := gone.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	require.NoError(t, gone.RegisterReplica(ctx, state.RunOwnerKindGateway, "http://127.0.0.1:1", "host-gone"))
+	rn, err := gone.CreateRun(ctx, "sid", "hello")
+	require.NoError(t, err)
+
+	routes := NewRestServer("")
+	s.AttachExtraRoutes(routes)
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+rn.ID+"/cancel", nil)
+	rec := httptest.NewRecorder()
+	routes.Server.Handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "replica_unreachable")
+}
+
+// TestRunOwnerOfActionFindsTheOwningReplica pins the lookup the approval routes
+// use: the action row names the conversation, and the conversation's live run
+// names the replica that will resume it.
+func TestRunOwnerOfActionFindsTheOwningReplica(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+
+	owner := &state.RunStore{DB: db, Owner: "gateway-owner"}
+	stop, err := owner.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	require.NoError(t, owner.RegisterReplica(ctx, state.RunOwnerKindGateway, "http://10.4.4.4:8787", "host-owner"))
+	_, err = owner.CreateRun(ctx, "sid", "hello")
+	require.NoError(t, err)
+
+	entry := newReplicaTestServer(t, db, home, "gateway-entry", "gw-secret", "http://10.4.4.5:8787")
+	action, err := entry.Actions.CreatePending(ctx, "sid", "tool_approval", map[string]any{"tool": "shell"})
+	require.NoError(t, err)
+
+	peer := entry.runOwnerOfAction(ctx, action.ID)
+	require.NotNil(t, peer)
+	require.Equal(t, "gateway-owner", peer.Owner)
+	require.Equal(t, "http://10.4.4.4:8787", peer.InternalAddr)
+
+	// Nothing parked, nothing forwarded.
+	require.Nil(t, entry.runOwnerOfAction(ctx, "no-such-action"))
+}
+
+// TestCancelAllFoldsInWhatEveryReplicaCancelled pins the replica-wide operations:
+// an operation that belongs to no single conversation is asked of every live
+// replica, and the answers are folded into one — this replica's and the peers'.
+func TestCancelAllFoldsInWhatEveryReplicaCancelled(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"main":1,"subagents":2}`))
+	}))
+	defer peer.Close()
+
+	s := newReplicaTestServer(t, db, home, "gateway-entry", "gw-secret", "http://127.0.0.1:2")
+	other := &state.RunStore{DB: db, Owner: "gateway-other"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	require.NoError(t, other.RegisterReplica(ctx, state.RunOwnerKindGateway, peer.URL, "host-other"))
+
+	routes := NewRestServer("")
+	s.AttachExtraRoutes(routes)
+	rec := httptest.NewRecorder()
+	routes.Server.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents/cancel-all", nil))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var answer struct {
+		OK        bool `json:"ok"`
+		Main      int  `json:"main"`
+		Subagents int  `json:"subagents"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &answer), rec.Body.String())
+	require.True(t, answer.OK)
+	require.Equal(t, 1, answer.Main, "the peer's cancels must be in the answer")
+	require.Equal(t, 2, answer.Subagents)
+}

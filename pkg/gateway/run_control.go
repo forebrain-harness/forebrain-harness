@@ -508,6 +508,260 @@ func (c *captureResponseWriter) writeTo(w http.ResponseWriter) {
 	_, _ = w.Write(c.body.Bytes())
 }
 
+// routeParam reads one route parameter, however this router delivered it.
+func routeParam(r *http.Request, name string) string {
+	if r == nil || name == "" {
+		return ""
+	}
+	if v := strings.TrimSpace(ParamsFromContext(r.Context()).ByName(name)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(r.PathValue(name))
+}
+
+// runOwnerOfRun is the replica that owns the run's live state, or nil when the
+// run is not live anywhere else.
+func (s *Server) runOwnerOfRun(ctx context.Context, runID string) *state.ReplicaPeer {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || s == nil || s.RunRT == nil {
+		return nil
+	}
+	rn, err := s.RunRT.GetRun(ctx, runID)
+	if err != nil || rn == nil {
+		return nil
+	}
+	return s.relayPeerForSession(ctx, rn.SessionID)
+}
+
+// runOwnerOfAction is the replica parked on the action's approval, or nil when
+// the conversation it belongs to is not being driven elsewhere.
+func (s *Server) runOwnerOfAction(ctx context.Context, actionID string) *state.ReplicaPeer {
+	actionID = strings.TrimSpace(actionID)
+	if actionID == "" || s == nil || s.Actions == nil {
+		return nil
+	}
+	pending, err := s.Actions.Get(ctx, actionID)
+	if err != nil {
+		return nil
+	}
+	return s.relayPeerForSession(ctx, pending.SessionID)
+}
+
+// runOwnerOfPrimaryAgent is the replica running the active primary agent's
+// conversation, when that is another one.
+func (s *Server) runOwnerOfPrimaryAgent(ctx context.Context) *state.ReplicaPeer {
+	if s == nil {
+		return nil
+	}
+	run, err := s.findCancellablePrimaryRun(ctx)
+	if err != nil || strings.TrimSpace(run.ID) == "" {
+		return nil
+	}
+	return s.relayPeerForSession(ctx, run.SessionID)
+}
+
+// forwardRunOpToRunOwner wraps an operation keyed by the run in its route: when
+// another replica owns the run, the operation is forwarded there and its answer
+// returned unchanged. A run that is not live elsewhere is served here, so the
+// request behaves exactly as it did before replicas existed.
+func (s *Server) forwardRunOpToRunOwner(op string, inner http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		runID := routeParam(r, "id")
+		if peer := s.runOwnerOfRun(r.Context(), runID); peer != nil {
+			if s.forwardRunOp(w, r, *peer, internalRunOpRequest{Op: op, RunID: runID}) {
+				return
+			}
+		}
+		inner(w, r)
+	}
+}
+
+// forwardRunOpToActionOwner is forwardRunOpToRunOwner for the approval family,
+// whose route names an action rather than a run.
+func (s *Server) forwardRunOpToActionOwner(op string, inner http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actionID := routeParam(r, "id")
+		if peer := s.runOwnerOfAction(r.Context(), actionID); peer != nil {
+			if s.forwardRunOp(w, r, *peer, internalRunOpRequest{Op: op, ActionID: actionID}) {
+				return
+			}
+		}
+		inner(w, r)
+	}
+}
+
+// forwardRunOpToPrimaryAgentOwner is forwardRunOpToRunOwner for the agent-wide
+// cancel, whose route names an agent.
+func (s *Server) forwardRunOpToPrimaryAgentOwner(op string, inner http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		agentID := routeParam(r, "agentId")
+		if peer := s.runOwnerOfPrimaryAgent(r.Context()); peer != nil {
+			if s.forwardRunOp(w, r, *peer, internalRunOpRequest{Op: op, AgentID: agentID}) {
+				return
+			}
+		}
+		inner(w, r)
+	}
+}
+
+// otherReplicas is every reachable replica except this process: one registered a
+// heartbeat ago, of the gateway kind, with an address to send to.
+func (s *Server) otherReplicas(ctx context.Context) []state.ReplicaPeer {
+	if s == nil || s.RunRT == nil {
+		return nil
+	}
+	peers, err := s.RunRT.LiveReplicaPeers(ctx)
+	if err != nil {
+		slog.Warn("gateway forward: read live replicas", "err", err)
+		return nil
+	}
+	out := make([]state.ReplicaPeer, 0, len(peers))
+	for _, peer := range peers {
+		if peer.Owner == s.RunRT.Owner || peer.Kind != state.RunOwnerKindGateway || peer.InternalAddr == "" {
+			continue
+		}
+		out = append(out, peer)
+	}
+	return out
+}
+
+// forwardRunOpToEveryReplica wraps an operation that belongs to no single
+// conversation: cancelling every agent, or cancelling a subagent by the id its
+// own replica knows it by. This replica acts first and then asks the others, and
+// the answers are folded into one — a boolean says whether anything anywhere was
+// cancelled, a count how many.
+func (s *Server) forwardRunOpToEveryReplica(op string, inner http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rec := &captureResponseWriter{header: http.Header{}}
+		inner(rec, r)
+		if rec.status >= http.StatusBadRequest {
+			rec.writeTo(w)
+			return
+		}
+		merged := map[string]any{"ok": true}
+		mergeReplicaAnswer(merged, rec.body.Bytes())
+		for _, peer := range s.otherReplicas(r.Context()) {
+			answer, status, err := s.postRunOp(r, peer, internalRunOpRequest{Op: op})
+			if err != nil || status != http.StatusOK {
+				// A replica that cannot be reached must not turn a cancel into a
+				// failure for the others: what it holds is reported and the rest
+				// still happened.
+				slog.Warn("gateway forward: broadcast", "op", op, "owner", peer.Owner, "addr", peer.InternalAddr, "status", status, "err", err)
+				continue
+			}
+			mergeReplicaAnswer(merged, answer.body.Bytes())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(merged)
+	}
+}
+
+// mergeReplicaAnswer folds one answer into the merged one.
+func mergeReplicaAnswer(dst map[string]any, answer []byte) {
+	var m map[string]any
+	if json.Unmarshal(answer, &m) != nil {
+		return
+	}
+	for k, v := range m {
+		if k == "ok" {
+			continue
+		}
+		switch got := v.(type) {
+		case bool:
+			prev, _ := dst[k].(bool)
+			dst[k] = prev || got
+		case float64:
+			prev, _ := dst[k].(float64)
+			dst[k] = prev + got
+		}
+	}
+}
+
+// forwardRunOp sends one operation to the replica that owns it and copies the
+// answer back unchanged, reporting whether it did. It reads the request body
+// itself and puts it back, so a request it does not forward still arrives whole
+// at the handler.
+func (s *Server) forwardRunOp(w http.ResponseWriter, r *http.Request, peer state.ReplicaPeer, req internalRunOpRequest) bool {
+	answer, status, err := s.postRunOp(r, peer, req)
+	if err != nil {
+		writeGatewayRelayError(w, "正在运行该对话的副本不可达（"+peer.InternalAddr+"），本次操作没有执行。")
+		return true
+	}
+	for k, vs := range answer.header {
+		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(answer.body.Bytes())
+	return true
+}
+
+// postRunOp is the request itself: it carries the body the caller sent, if any,
+// and the shared gateway token the peer authenticates with.
+func (s *Server) postRunOp(r *http.Request, peer state.ReplicaPeer, req internalRunOpRequest) (captureResponseWriter, int, error) {
+	out := captureResponseWriter{header: http.Header{}}
+	if s == nil || peer.InternalAddr == "" || r == nil {
+		return out, 0, errors.New("no peer to forward to")
+	}
+	cfg := s.liveCfg()
+	if cfg == nil {
+		return out, 0, errors.New("gateway has no live configuration")
+	}
+	token := strings.TrimSpace(cfg.Gateway.Auth.Token)
+	if token == "" {
+		return out, 0, errors.New("gateway has no token to authenticate a peer with")
+	}
+	if req.Body == nil && r.Body != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			return out, 0, err
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if len(body) > 0 {
+			req.Body = json.RawMessage(body)
+		}
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return out, 0, err
+	}
+	target := strings.TrimSuffix(strings.TrimSpace(peer.InternalAddr), "/") + internalRunOpPath
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return out, 0, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(httpReq)
+	if err != nil {
+		slog.Warn("gateway forward: the owning replica is unreachable", "owner", peer.Owner, "addr", peer.InternalAddr, "op", req.Op, "err", err)
+		return out, 0, err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if readErr != nil {
+		return out, 0, readErr
+	}
+	for k, vs := range resp.Header {
+		out.header[k] = vs
+	}
+	out.status = resp.StatusCode
+	_, _ = out.body.Write(body)
+	return out, resp.StatusCode, nil
+}
+
+// writeGatewayRelayError is what a caller gets when the replica running the
+// conversation cannot be reached: a 502 it can show, in words it can read,
+// rather than a silent success that changed nothing.
+func writeGatewayRelayError(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusBadGateway)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": "replica_unreachable", "message": text})
+}
 
 func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
