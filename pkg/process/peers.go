@@ -86,6 +86,20 @@ type PeerPrompt struct {
 	FromName string
 }
 
+// ParsePeerEnvelope reads one peer message the way a card needs it: the
+// sender's display name and the body the envelope carried. It is the thin
+// wrapper a surface uses instead of importing pkg/peer itself, so the live line
+// and a replay draw the same card from the same parse. Content that is not
+// exactly one envelope reports false, and the caller shows it as plain text —
+// which is what the receiving model reads in the same case.
+func ParsePeerEnvelope(content string) (fromName, body string, ok bool) {
+	envelope, ok := peer.Parse(strings.TrimSpace(content))
+	if !ok {
+		return "", "", false
+	}
+	return strings.TrimSpace(envelope.FromName), envelope.Body, true
+}
+
 // peerService is the running registration: one mode, one socket, one record.
 type peerService struct {
 	env     *Environment

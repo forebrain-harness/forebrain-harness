@@ -635,3 +635,27 @@ func TestReadGitBranchInProcess(t *testing.T) {
 		t.Fatalf("detached branch = %q, want 0123456", got)
 	}
 }
+
+// TestParsePeerEnvelope pins the thin wrapper the terminal reads a peer message
+// through (plan 199): the sender's name and the body, and plain text for
+// anything that is not exactly one envelope.
+func TestParsePeerEnvelope(t *testing.T) {
+	envelope := peer.Build(peer.Envelope{From: "uds:/tmp/a.sock", FromName: "builder", Body: "please review line 12"})
+	name, body, ok := ParsePeerEnvelope(envelope)
+	if !ok {
+		t.Fatalf("ParsePeerEnvelope(%q) reported false", envelope)
+	}
+	if name != "builder" || body != "please review line 12" {
+		t.Fatalf("ParsePeerEnvelope = %q, %q; want builder, please review line 12", name, body)
+	}
+	// The row is stored trimmed: surrounding space must not defeat the parse.
+	if _, _, ok := ParsePeerEnvelope("\n  " + envelope + "  \n"); !ok {
+		t.Fatal("ParsePeerEnvelope rejected an envelope the row had padded")
+	}
+	if _, _, ok := ParsePeerEnvelope("just a message"); ok {
+		t.Fatal("ParsePeerEnvelope accepted plain text")
+	}
+	if name, _, ok := ParsePeerEnvelope(peer.Build(peer.Envelope{Body: "no name"})); !ok || name != "" {
+		t.Fatalf("envelope without from-name = %q, %v; want empty name and true", name, ok)
+	}
+}

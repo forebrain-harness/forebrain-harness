@@ -359,6 +359,30 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		}
 		target = presentFilesHeaderTarget(meta.Input)
 
+	// --- Peers ---
+	case lower == "peer_send":
+		// A message card names who it went to, the way a read card names the
+		// file: the recipient is the one thing a reader wants from the head.
+		// The message itself is the card's body.
+		if isFailed {
+			action = "Failed to message"
+		} else if isRunning || isPending {
+			action = "Messaging"
+		} else {
+			action = "Messaged"
+		}
+		target = InputString(meta, "to")
+
+	case lower == "peer_list":
+		// No target: the call has no arguments, so the head is the verb alone.
+		if isFailed {
+			action = "Failed to list agents"
+		} else if isRunning || isPending {
+			action = "Listing agents"
+		} else {
+			action = "Listed agents"
+		}
+
 	// --- MCP ---
 	case strings.HasPrefix(lower, "mcp__"):
 		action = "MCP"
@@ -460,6 +484,9 @@ func HeaderActions() []string {
 		// Notes and questions
 		"Notes", "Saving notes", "Failed to save notes",
 		"Asked user", "Asking user", "Failed to ask user",
+		// Peers
+		"Messaged", "Messaging", "Failed to message",
+		"Listed agents", "Listing agents", "Failed to list agents",
 		// Skill and MCP cards
 		"Loading skill", "Skill",
 		"MCP",
