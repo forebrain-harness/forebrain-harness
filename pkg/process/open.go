@@ -86,6 +86,11 @@ type Environment struct {
 	// its base runner.
 	noLaunchProject bool
 	SQL             *sql.DB
+	// Leases holds the fb_leases rows this process takes: one per long-
+	// connection chat account, so that only one replica of a shared database
+	// is connected to it (plan 213 §3.4). A single-replica install wins every
+	// lease it asks for, so the machinery is inert there.
+	Leases *Leases
 	// Deps is the single owner of the path/config/store dependencies this
 	// process shares with its primary Runner. Runner.Deps points at this very
 	// field, so there is exactly one place that state lives (R6). It is a value
@@ -450,6 +455,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// and resumes are stamped with it, and the lease it holds below is what
 	// tells every other process on this machine that those runs are alive.
 	runSvc := &state.RunStore{DB: sqlDB, Owner: source + "-" + uuid.NewString()}
+	env.Leases = &Leases{DB: sqlDB, Holder: runSvc.Owner}
 	fileSvc := &state.FileStore{DB: sqlDB, Home: root, Cfg: state.LoadConfigFromEnv()}
 	if v := strings.TrimSpace(os.Getenv("FOREBRAIN_WORK_ITEM_LEASE_SEC")); v != "" {
 		if _, err := strconv.Atoi(v); err == nil {

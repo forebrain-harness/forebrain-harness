@@ -4011,3 +4011,58 @@ func TestReplicaColumnsMigrationReachesAnOlderDatabase(t *testing.T) {
 		t.Fatalf("migrated row = %q/%q/%q, want the registration that was written", addr, host, kind)
 	}
 }
+
+// TestLeasesMigrationReachesAnOlderDatabase pins the v32 migration on every
+// engine: a fresh database gets fb_leases from its schema script and never runs
+// a migration, so without this the three arms would be proven only by never
+// having been asked for.
+func TestLeasesMigrationReachesAnOlderDatabase(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	dialect := dbx.DialectOf(db)
+
+	if _, err := db.ExecContext(ctx, `DROP TABLE fb_leases`); err != nil {
+		t.Fatalf("drop fb_leases: %v", err)
+	}
+	if dialect == dbx.SQLite {
+		if _, err := db.ExecContext(ctx, `PRAGMA user_version = 31`); err != nil {
+			t.Fatalf("lower user_version: %v", err)
+		}
+	} else if err := writeDialectSchemaVersion(ctx, db, dialect, 31); err != nil {
+		t.Fatalf("lower the version row: %v", err)
+	}
+
+	if err := migrateStateSchema(ctx, db, ""); err != nil {
+		t.Fatalf("%s migrate to v%d: %v", dialect, stateSchemaVersion, err)
+	}
+	if dialect == dbx.SQLite {
+		requireSchemaVersion(ctx, t, db, stateSchemaVersion)
+	} else {
+		version, err := readDialectSchemaVersion(ctx, db, dialect)
+		if err != nil {
+			t.Fatalf("read %s schema version: %v", dialect, err)
+		}
+		if version != stateSchemaVersion {
+			t.Fatalf("%s schema version = %d, want %d", dialect, version, stateSchemaVersion)
+		}
+	}
+
+	// The table the migration created is the one the lease store writes: a
+	// holder goes in, and a second holder over an expired lease takes over.
+	insert := dbx.Rebind(dialect, `INSERT INTO fb_leases(name, holder, expires_at_ms) VALUES(?,?,?)`)
+	if _, err := db.ExecContext(ctx, insert, "channel:acct", "webchat-a", 1); err != nil {
+		t.Fatalf("insert on the migrated table: %v", err)
+	}
+	update := dbx.Rebind(dialect, `UPDATE fb_leases SET holder=? WHERE name=? AND expires_at_ms < ?`)
+	if _, err := db.ExecContext(ctx, update, "webchat-b", "channel:acct", time.Now().UnixMilli()); err != nil {
+		t.Fatalf("take over the migrated lease: %v", err)
+	}
+	var holder string
+	read := dbx.Rebind(dialect, `SELECT holder FROM fb_leases WHERE name = ?`)
+	if err := db.QueryRowContext(ctx, read, "channel:acct").Scan(&holder); err != nil {
+		t.Fatalf("read the migrated table: %v", err)
+	}
+	if holder != "webchat-b" {
+		t.Fatalf("migrated lease holder = %q, want the replica that took it over", holder)
+	}
+}

@@ -563,7 +563,7 @@ func TestConcurrentBindAndStopLeaveNothingRunning(t *testing.T) {
 
 func bindProjectChannels(t *testing.T, reg *Registry, bus Bus, stateRoot string, configs ...ProjectChannelConfig) {
 	t.Helper()
-	if err := reg.BindProjects(context.Background(), "main", BuildProjectChannels(configs, stateRoot), bus); err != nil {
+	if err := reg.BindProjects(context.Background(), "main", BuildProjectChannels(configs, stateRoot, nil), bus); err != nil {
 		t.Fatalf("BindProjects: %v", err)
 	}
 }

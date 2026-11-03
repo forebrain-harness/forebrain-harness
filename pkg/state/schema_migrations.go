@@ -20,7 +20,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 31
+const stateSchemaVersion = 32
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -89,6 +89,12 @@ var stateSchemaMigrations = []schemaMigration{
 		apply:         migrateStateV30ToV31,
 		applyMySQL:    migrateStateV30ToV31MySQL,
 		applyPostgres: migrateStateV30ToV31Postgres,
+	},
+	{
+		version:       32,
+		apply:         migrateStateV31ToV32,
+		applyMySQL:    migrateStateV31ToV32MySQL,
+		applyPostgres: migrateStateV31ToV32Postgres,
 	},
 }
 
@@ -1468,7 +1474,60 @@ ALTER TABLE fb_run_owners
 	return nil
 }
 
+// migrateStateV31ToV32 creates fb_leases, the compare-and-swap row that keeps a
+// background singleton on one replica of a shared database (plan 213 §3.4,
+// design §2.7.5). A fresh database gets the table from schema.sql, and a
+// fixture built from it with a lowered user_version already has it: the create
+// is skipped rather than failing on a duplicate.
+func migrateStateV31ToV32(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fb_leases'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE fb_leases (
+  name TEXT PRIMARY KEY CHECK (TRIM(name) <> ''),
+  holder TEXT NOT NULL,
+  expires_at_ms INTEGER NOT NULL
+) STRICT`); err != nil {
+		return fmt.Errorf("create fb_leases: %w", err)
+	}
+	return nil
+}
 
+// migrateStateV31ToV32MySQL is the same table in MySQL's types. Only a database
+// 209 created before this migration reaches it: a new one is built from
+// schema_mysql.sql whole, at the current version.
+func migrateStateV31ToV32MySQL(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_leases (
+  name VARCHAR(191) NOT NULL PRIMARY KEY,
+  holder VARCHAR(191) NOT NULL,
+  expires_at_ms BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`); err != nil {
+		return fmt.Errorf("create fb_leases: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV31ToV32Postgres is the same table in PostgreSQL's types.
+func migrateStateV31ToV32Postgres(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_leases (
+  name TEXT NOT NULL PRIMARY KEY,
+  holder TEXT NOT NULL,
+  expires_at_ms BIGINT NOT NULL
+)`); err != nil {
+		return fmt.Errorf("create fb_leases: %w", err)
+	}
+	return nil
+}
+
+// rewriteStoredConfigV28 removes the paths from one stored section and writes
 // the explicit representation over an empty string, in one read-modify-write of
 // that row. A section the database does not hold is nothing to rewrite.
 func rewriteStoredConfigV28(ctx context.Context, conn *sql.Conn, section string, remove []string, represent map[string]string) error {

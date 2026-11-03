@@ -81,3 +81,61 @@ func wecomIdentity(corpID, corpSecret string, agentID int64) string {
 	}
 	return corp + "|" + strconv.FormatInt(agentID, 10)
 }
+
+// LeaseName is the fb_leases row one account's long connection is held behind:
+// the "channel:" prefix over the same account identity AccountKey computes, so
+// two projects sharing one bot share one lease too — an account can only be
+// connected once. It returns "" for a kind that keeps no connection, and for a
+// channel whose credential is blank (AccountKey's ""), because a channel that
+// cannot connect has no lease to hold.
+func LeaseName(kind string, ch appcfg.ChannelsSection) string {
+	if !NeedsLease(kind) {
+		return ""
+	}
+	account := AccountKey(kind, ch)
+	if account == "" {
+		return ""
+	}
+	return "channel:" + account
+}
+
+// NeedsLease reports whether a kind's adapter keeps a long connection or a
+// polling loop of its own, which is what makes it a second receiver when every
+// replica of a shared database starts one. A webhook or HTTP-bridge adapter is
+// the opposite: the load balancer delivers each message to exactly one replica,
+// so it needs no lease.
+//
+// The classification, adapter by adapter:
+//
+//	kind             takes a lease   why
+//	telegram         yes             long-polling loop against the Bot API
+//	discord          yes             gateway websocket loop
+//	mattermost       yes             loop over the bot's connection
+//	matrix           yes             sync loop
+//	homeassistant    yes             polling loop
+//	signal           yes             event loop over the signal-cli REST socket
+//	weixin           yes             runMonitor loop
+//	dingtalk         yes             websocket bridge
+//	feishu           yes             websocket bridge, in its default websocket mode
+//	qq               yes             websocket bridge
+//	whatsapp         yes             poll loop, beside the webhook route it also mounts
+//	slack            no              Events API over HTTP; the adapter only mounts routes
+//	webhook          no              HTTP bridge; the adapter only mounts routes
+//	http_bridge      no              HTTP bridge; the adapter only mounts routes
+//	bluebubbles      no              inbound path only
+//	email            no              inbound path only
+//	sms              no              inbound path only
+//	wecom            no              callback routes only
+//
+// A kind that is neither — a half-configured one, or a new adapter — takes no
+// lease, which is the safe default: it mounts routes the way a webhook does
+// rather than silently connecting twice.
+func NeedsLease(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case "telegram", "discord", "mattermost", "matrix", "homeassistant",
+		"signal", "weixin", "dingtalk", "feishu", "qq", "whatsapp":
+		return true
+	default:
+		return false
+	}
+}

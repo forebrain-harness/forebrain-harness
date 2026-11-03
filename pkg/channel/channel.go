@@ -408,12 +408,21 @@ func BuildProjectChannel(kind string, ch appcfg.ChannelsSection, stateRoot strin
 // BuildProjectChannels builds one handler per configured (project, kind).
 // stateRoot is the agent's workspace, where a channel that keeps local state
 // writes it.
-func BuildProjectChannels(configs []ProjectChannelConfig, stateRoot string) []BoundChannel {
+//
+// wrap, when it is not nil, sees each handler together with the configuration
+// it was built from and may return another handler in its place — which is how
+// a multi-replica deployment puts a long-connection channel behind the lease
+// that keeps it on one replica (plan 213 §3.4). A nil wrap builds every handler
+// as it is, which is what a single-replica install and the tests want.
+func BuildProjectChannels(configs []ProjectChannelConfig, stateRoot string, wrap func(ProjectChannelConfig, Handler) Handler) []BoundChannel {
 	out := make([]BoundChannel, 0, len(configs))
 	for _, cfg := range configs {
 		h := BuildProjectChannel(cfg.Kind, cfg.Section, stateRoot)
 		if h == nil {
 			continue
+		}
+		if wrap != nil {
+			h = wrap(cfg, h)
 		}
 		out = append(out, BoundChannel{ProjectID: strings.TrimSpace(cfg.ProjectID), Handler: h})
 	}

@@ -297,6 +297,14 @@ CREATE TABLE fb_run_owners (
   kind VARCHAR(32) NOT NULL DEFAULT ('')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+-- One lease per background singleton that only one replica of a shared
+-- database may run at a time (plan 213 §3.4).
+CREATE TABLE fb_leases (
+  name VARCHAR(191) NOT NULL PRIMARY KEY,
+  holder VARCHAR(191) NOT NULL,
+  expires_at_ms BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 -- The single, ordered record of everything a conversation and its runs did.
 CREATE TABLE fb_session_events (
   sequence BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,

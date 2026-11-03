@@ -327,6 +327,17 @@ CREATE TABLE fb_run_owners (
   kind TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
+-- One lease per background singleton that only one replica of a shared
+-- database may run at a time — a long-connection or polling chat channel today.
+-- The holder renews expires_at_ms; a replica that finds it in the past takes
+-- over. A row is never updated in place by a loser: the acquire is a
+-- compare-and-swap on that column.
+CREATE TABLE fb_leases (
+  name TEXT PRIMARY KEY CHECK (TRIM(name) <> ''),
+  holder TEXT NOT NULL,
+  expires_at_ms INTEGER NOT NULL
+) STRICT;
+
 -- The single, ordered record of everything a conversation and its runs did.
 -- sequence is the conversation cursor surfaces page by; run_id scopes a row to
 -- the run that produced it, which is how run-level readers (goal state, the
