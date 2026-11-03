@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -995,4 +996,139 @@ func bindGatewayEnv(t *testing.T, home string) *process.Environment {
 	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: &cfg}, Root: home, SQL: db}
 	env.ConfigPath = cfgPath
 	return env
+}
+
+// relayStub is one owning replica's internal socket, written by hand: it answers
+// the bind a relay forwards, reports what it was sent afterwards, and can end the
+// run when the test says so.
+type relayStub struct {
+	url     string
+	got     chan wsClientMsg
+	ended   chan struct{}
+	connMu  sync.Mutex
+	conn    *websocket.Conn
+}
+
+func newRelayStub(t *testing.T) *relayStub {
+	t.Helper()
+	stub := &relayStub{got: make(chan wsClientMsg, 16), ended: make(chan struct{})}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		stub.connMu.Lock()
+		stub.conn = conn
+		stub.connMu.Unlock()
+		for {
+			var m wsClientMsg
+			if err := conn.ReadJSON(&m); err != nil {
+				return
+			}
+			stub.got <- m
+			if m.Op != "bind_session" {
+				continue
+			}
+			// The owning replica answers the bind it was asked, and then the
+			// conversation it was running ends.
+			_ = conn.WriteJSON(wsServerMsg{Op: "session_bound", RequestID: m.RequestID, SessionID: m.SessionID})
+		}
+	}))
+	t.Cleanup(server.Close)
+	stub.url = server.URL
+	return stub
+}
+
+// endRun reports the conversation's run ending, the way the owning replica's own
+// run event bus would.
+func (s *relayStub) endRun(t *testing.T, sessionID, runID string) {
+	t.Helper()
+	s.connMu.Lock()
+	conn := s.conn
+	s.connMu.Unlock()
+	require.NotNil(t, conn)
+	require.NoError(t, conn.WriteJSON(wsServerMsg{Op: "run_completed", RunID: runID, SessionID: sessionID}))
+}
+
+// TestHandleChatWSRelaysToTheOwningReplica pins plan 213 §3.2 end to end: a
+// browser that binds a conversation running on another replica is served by that
+// replica through a transparent relay, and the relay ends when the run does, so
+// the socket goes back to being served here.
+func TestHandleChatWSRelaysToTheOwningReplica(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	stub := newRelayStub(t)
+
+	// The other replica: it owns the conversation's run and registered where its
+	// peers reach it.
+	owner := &state.RunStore{DB: db, Owner: "gateway-owner"}
+	stopOwner, err := owner.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stopOwner()
+	require.NoError(t, owner.RegisterReplica(ctx, state.RunOwnerKindGateway, stub.url, "host-owner"))
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "sid-remote", "sid-remote"))
+	rn, err := owner.CreateRun(ctx, "sid-remote", "hello")
+	require.NoError(t, err)
+
+	// This replica: it serves the browser, and does not own the run.
+	s := newReplicaTestServer(t, db, home, "gateway-entry", "gw-secret", "http://127.0.0.1:1")
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer gw-secret")
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), header)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	require.Equal(t, "connected", connected.Op)
+
+	// The bind is the owning replica's to answer, not this one's.
+	require.NoError(t, conn.WriteJSON(wsClientMsg{Op: "bind_session", RequestID: "b1", SessionID: "sid-remote"}))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var bound wsServerMsg
+	require.NoError(t, conn.ReadJSON(&bound))
+	require.Equal(t, "session_bound", bound.Op)
+	require.Equal(t, "b1", bound.RequestID)
+	require.Equal(t, "sid-remote", bound.SessionID)
+
+	relayed := <-stub.got
+	require.Equal(t, "bind_session", relayed.Op, "the browser's bind must reach the owning replica unchanged")
+	require.Equal(t, "sid-remote", relayed.SessionID)
+
+	// A session operation while the run is live goes to the owner.
+	require.NoError(t, conn.WriteJSON(wsClientMsg{Op: "ping", RequestID: "p1"}))
+	relayed = <-stub.got
+	require.Equal(t, "ping", relayed.Op)
+
+	// The run ends: the relay is torn down, and this replica serves the socket
+	// again — the next operation is answered here, not forwarded.
+	stub.endRun(t, "sid-remote", rn.ID)
+	var ended wsServerMsg
+	require.NoError(t, conn.ReadJSON(&ended))
+	require.Equal(t, "run_completed", ended.Op)
+	require.Equal(t, rn.ID, ended.RunID)
+
+	require.NoError(t, conn.WriteJSON(wsClientMsg{Op: "ping", RequestID: "p2"}))
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg))
+		if msg.Op != "pong" {
+			continue
+		}
+		require.Equal(t, "p2", msg.RequestID)
+		break
+	}
+	select {
+	case extra := <-stub.got:
+		t.Fatalf("the relay kept forwarding after the run ended: %#v", extra)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
