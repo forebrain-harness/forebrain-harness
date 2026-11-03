@@ -4179,11 +4179,99 @@ type actionListRow struct {
 
 func (s *Server) actionListRow(ctx context.Context, a state.Action) actionListRow {
 	row := actionListRow{Action: a}
+	row.PayloadJSON = withPeerIdentity(row.PayloadJSON)
 	if sugg := s.actionPermissionSuggestion(ctx, a); len(sugg) > 0 {
 		row.PermissionSuggestion = sugg
 	}
 	row.AgentID, row.SubagentType = turn.ActionSubagent(&a)
 	return row
+}
+
+// withPeerIdentity adds the identity block's two characters and tone to a
+// same-tree git guard's payload, so the approval card can draw each affected
+// agent's block without deriving one itself (plan 200 §3). The guard names the
+// agents and the files they are editing; the block is the one thing a name
+// alone cannot give a reader.
+//
+// Any other payload is returned exactly as it was stored — including one that
+// merely mentions the reason in a command string, which the substring test
+// above is what keeps apart from a payload the guard actually raised.
+func withPeerIdentity(payloadJSON string) string {
+	trimmed := strings.TrimSpace(payloadJSON)
+	if !strings.Contains(trimmed, peerWorkTreeApprovalReason) {
+		return payloadJSON
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(trimmed), &payload) != nil {
+		return payloadJSON
+	}
+	if peerPayloadString(payload["approval_reason"]) != peerWorkTreeApprovalReason {
+		return payloadJSON
+	}
+	names := peerPayloadStringList(payload["peer_names"])
+	filesByAgent := map[string][]string{}
+	for _, raw := range peerPayloadRecords(payload["peer_files"]) {
+		name := strings.TrimSpace(peerPayloadString(raw["name"]))
+		if name == "" {
+			continue
+		}
+		filesByAgent[name] = peerPayloadStringList(raw["files"])
+	}
+	agents := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		mark, tone := process.PeerMark(name, "")
+		agents = append(agents, map[string]any{
+			"name":  name,
+			"mark":  mark,
+			"tone":  tone,
+			"files": filesByAgent[name],
+		})
+	}
+	payload["peer_agents"] = agents
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return payloadJSON
+	}
+	return string(out)
+}
+
+// The reason the same-tree git guard tags its approvals with (pkg/tool's
+// peerWorkTreeApprovalReason, which this package cannot read).
+const peerWorkTreeApprovalReason = "peer_work_tree"
+
+func peerPayloadString(v any) string {
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func peerPayloadStringList(v any) []string {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		if text := peerPayloadString(item); text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func peerPayloadRecords(v any) []map[string]any {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		if record, ok := item.(map[string]any); ok {
+			out = append(out, record)
+		}
+	}
+	return out
 }
 
 func (s *Server) actionPermissionSuggestion(ctx context.Context, a state.Action) map[string]any {

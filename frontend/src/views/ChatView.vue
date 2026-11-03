@@ -195,7 +195,28 @@
                   </template>
                   </template>
                   <Message v-if="msg.role !== 'notice' && messageHasBubble(msg)" :from="messageBubbleRole(msg.role)" class="max-w-full overflow-visible">
-                    <MessageContent :class="messageContentClass(msg.role)">
+                      <MessageContent :class="messageContentClass(msg.role)">
+                      <!-- A letter from another agent (plan 200 §3): left-aligned
+                           and unframed, never a bubble of the reader's own. A
+                           delivery note is the same row with the opposite
+                           meaning — what became of the messages this
+                           conversation sent. -->
+                      <PeerMessageCard
+                        v-if="msg.role === 'user' && msg.origin === 'peer'"
+                        :data-peer-landing="String(msg.id ?? '').startsWith('peer-landing-') ? msg.id : undefined"
+                        :from-name="msg.peerFromName"
+                        :mark="msg.peerMark"
+                        :tone="msg.peerTone"
+                        :body="msg.peerBody"
+                        :content="msg.content"
+                        :kind="peerKindOf(msg.peerFromName)"
+                        :same-tree="peerSameTreeOf(msg.peerFromName)"
+                        :created-at="msg.createdAt"
+                      />
+                      <PeerDeliveryCard
+                        v-else-if="msg.role === 'user' && msg.origin === 'peer_status'"
+                        :receipts="msg.peerReceipts ?? []"
+                      />
                       <!-- What the turn said and did, in the order it happened,
                            on one activity line (owner 2026-10-25): a turn's
                            action cards hang on one vertical line, each on a
@@ -483,6 +504,17 @@
               <AlertDescription class="whitespace-pre-line">{{ composerNoticeDetail }}</AlertDescription>
             </Alert>
             <AutoContinueBanner :state="autoContinueForView('')" @cancel="cancelAutoContinue('')" />
+            <!-- A peer message waiting for the person (plan 200 §3): the one
+                 thing above the composer that is a question rather than a
+                 notice, so it is framed like an approval. -->
+            <PeerHeldBanner
+              v-if="heldPeer"
+              :held="heldPeer"
+              :landing-rect="peerLandingRect"
+              @release="releasePeerMessage"
+              @deny="denyPeerMessage"
+              @settled="settlePeerMessage"
+            />
             <!-- The recommendation card owns its own goodbye: the answer's
                  result line stays up briefly, then the card closes itself. -->
             <LspRecommendationCard
@@ -690,6 +722,25 @@
           @dismiss-notice="subagentNotices[record.agentId] = null"
         />
       </SubagentDrawer>
+      <!-- The agents on this machine (plan 200 §3): the same drawer the
+           subagents use, opened from the top bar's identity blocks or /peers. -->
+      <PeerDrawer
+        v-if="peerDrawerOpen"
+        :held="heldPeers"
+        :files="peerDirectory.files"
+        :same-tree="peerDirectory.sameTree"
+        :other="peerDirectory.other"
+        :other-total="peerDirectory.otherTotal"
+        :page="peerDirectoryPage"
+        :page-size="PEER_DIRECTORY_PAGE_SIZE"
+        :now="peerNow"
+        :overlay="workbenchOverlay"
+        data-testid="peer-drawer"
+        @close="peerDrawerOpen = false"
+        @release="releasePeerMessage"
+        @deny="denyPeerMessage"
+        @page-change="changePeerPage"
+      />
       <ChatWorkbench
         v-if="workbench.open.value && !isFreshChat && !drawerVisible"
         :records="runningRoster"
@@ -775,6 +826,11 @@ import RunStatusLine from '@/components/chat/RunStatusLine.vue'
 import SlashPickerCard from '@/components/chat/SlashPickerCard.vue'
 import ActivityLine from '@/components/chat/ActivityLine.vue'
 import ActivityStep from '@/components/chat/ActivityStep.vue'
+import PeerMessageCard from '@/components/chat/PeerMessageCard.vue'
+import PeerDeliveryCard from '@/components/chat/PeerDeliveryCard.vue'
+import PeerHeldBanner from '@/components/chat/PeerHeldBanner.vue'
+import PeerDrawer from '@/components/chat/PeerDrawer.vue'
+import PeerMark from '@/components/chat/PeerMark.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
 import ToolCallCard, { statusOf } from '@/components/chat/ToolCallCard.vue'
 import ToolDocCommand from '@/components/chat/ToolDocCommand.vue'
@@ -860,7 +916,7 @@ import { useWorkspaceTree, migrateWorkspaceTree } from '@/composables/useWorkspa
 import { useChatSessions } from '@/composables/useChatSessions'
 import { useSessionInfo, sessionHeaderTitle } from '@/composables/useSessionInfo'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
-import { getErrorMessage, forebrainApi, type AgentRosterRow, type ProjectRecord, type ProjectServerPendingRow, type RewindPreview, type SessionContextDebug, type SessionModelResponse, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
+import { getErrorMessage, forebrainApi, type AgentRosterRow, type PeerHeldRow, type ProjectRecord, type ProjectServerPendingRow, type RewindPreview, type SessionContextDebug, type SessionModelResponse, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
 import { targetFromFolder, targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
 import { formatProviderError } from '@/lib/providerError'
 import type { ComposerSubmission, PickedFile, SubmittedAttachment } from '@/lib/composerSubmission'
@@ -1019,6 +1075,25 @@ setTopbar({
     })()] : []),
     ])),
   trailing: () => [
+    // The agents working in this directory (plan 200 §3): their identity blocks
+    // stacked, with the count beside them. It is the one control that says the
+    // machine has other people on it, and it opens the drawer that names them.
+    ...(sessionId.value && !isFreshChat.value && peerCrowd.value.length ? [h('button', {
+      type: 'button',
+      class: 'forebrain-chip-btn peer-crowd',
+      'aria-expanded': String(peerDrawerOpen.value),
+      'aria-label': t('chat.peerCrowdAria', { count: peerCrowd.value.length }),
+      'data-testid': 'peer-drawer-toggle',
+      onClick: togglePeerDrawer,
+    }, [
+      h('span', { class: 'peer-crowd-stack' }, peerCrowd.value.slice(0, 3).map((agent) => h(PeerMark, {
+        mark: agent.mark,
+        tone: agent.tone,
+        name: agent.name,
+        kind: agent.name.includes('.') ? 'sub' : 'agent',
+      }))),
+      h('span', { class: 'peer-crowd-count' }, String(peerCrowd.value.length)),
+    ])] : []),
     // The heartbeat is this conversation's, so its control sits in the
     // conversation's row; without a conversation there is nothing for it to
     // ask again — and a batch execution is nobody's to schedule.
@@ -1576,6 +1651,11 @@ const {
   mcpStatus,
   autoContinueForView,
   cancelAutoContinue,
+  heldPeers,
+  peerDirectory,
+  peerDirectoryPage,
+  refreshPeerDirectory,
+  answerPeerHeld,
   lspRecommendation,
   pendingActionsVersion,
   pendingInputPreview,
@@ -2658,6 +2738,119 @@ function messageContentClass(role: string): string | undefined {
   return 'w-full min-w-0 max-w-full overflow-visible break-words gap-[10px] text-[13px] leading-[1.55] [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto'
 }
 
+// ---- peers on this machine (plan 200 §3) ----
+
+/** The drawer's page size, matching the gateway's own default. */
+const PEER_DIRECTORY_PAGE_SIZE = 20
+
+const peerDrawerOpen = ref(false)
+/** The clock the drawer's relative times are read against; it only has to move
+ *  while the drawer is open, which is when anyone is reading them. */
+const peerNow = ref(Date.now())
+let peerNowTimer: ReturnType<typeof setInterval> | null = null
+
+/** The agents working in this directory tree — the top bar's crowd. */
+const peerCrowd = computed(() => peerDirectory.value.sameTree)
+
+function togglePeerDrawer() {
+  peerDrawerOpen.value = !peerDrawerOpen.value
+  if (peerDrawerOpen.value) {
+    void refreshPeerDirectory()
+    peerNow.value = Date.now()
+    if (!peerNowTimer) peerNowTimer = setInterval(() => { peerNow.value = Date.now() }, 30_000)
+  } else if (peerNowTimer) {
+    clearInterval(peerNowTimer)
+    peerNowTimer = null
+  }
+}
+
+function closePeerDrawer() {
+  peerDrawerOpen.value = false
+  if (peerNowTimer) {
+    clearInterval(peerNowTimer)
+    peerNowTimer = null
+  }
+}
+
+function changePeerPage(page: number) {
+  void refreshPeerDirectory(page)
+}
+
+/** What the drawer knows about a letter's sender, for the header's own labels.
+ *  A sender the directory has not listed yet simply carries no label. */
+function peerKindOf(name?: string): string {
+  const agent = String(name ?? '').trim()
+  if (!agent) return ''
+  return peerDirectory.value.sameTree.find((row) => row.name === agent)?.kind
+    ?? peerDirectory.value.other.find((row) => row.name === agent)?.kind
+    ?? ''
+}
+
+function peerSameTreeOf(name?: string): boolean {
+  const agent = String(name ?? '').trim()
+  return Boolean(agent) && peerDirectory.value.sameTree.some((row) => row.name === agent)
+}
+
+/** The held message the banner is showing: the oldest one waiting. */
+const heldPeer = computed(() => heldPeers.value[0] ?? null)
+
+/** Where the released letter will land, so the banner's flight ends where the
+ *  reader will read it. The letter carries its own id as a hook. */
+const peerLandingId = ref('')
+function peerLandingRect(): DOMRect | null {
+  const id = peerLandingId.value
+  if (!id) return null
+  const el = document.querySelector(`[data-peer-landing="${CSS.escape(id)}"]`)
+  return el ? el.getBoundingClientRect() : null
+}
+
+/**
+ * Releasing a held message lands it in the thread as the letter it always was,
+ * then tells the engine. The banner collapses around the flight; the engine's
+ * own settled event is what removes the row everywhere.
+ */
+async function releasePeerMessage(held: PeerHeldRow) {
+  const id = `peer-landing-${held.msg_id}`
+  peerLandingId.value = id
+  messages.value = [...messages.value, {
+    id,
+    role: 'user',
+    content: held.preview ?? '',
+    origin: 'peer',
+    peerFromName: held.from_name ?? '',
+    peerBody: held.preview ?? '',
+    peerMark: held.mark,
+    peerTone: held.tone,
+    createdAt: held.held_at_ms || Date.now(),
+  }]
+  void answerPeerHeld(held.msg_id, true)
+  await nextTick()
+}
+
+/** Denying leaves the thread's own line saying what happened, so the refusal is
+ *  as visible as the message would have been. */
+async function denyPeerMessage(held: PeerHeldRow) {
+  void answerPeerHeld(held.msg_id, false)
+  messages.value = [...messages.value, {
+    id: `peer-denied-${held.msg_id}`,
+    role: 'notice',
+    content: t('chat.peerDeniedLine', { name: held.from_name || t('chat.peerUnknownAgent') }),
+  }]
+}
+
+/** The banner has collapsed; its held row is no longer the one to show. */
+function settlePeerMessage(held: PeerHeldRow) {
+  heldPeers.value = heldPeers.value.filter((row) => row.msg_id !== held.msg_id)
+  if (peerLandingId.value === `peer-landing-${held.msg_id}`) peerLandingId.value = ''
+}
+
+/** The drawer's agent list is read when the conversation changes, so the top
+ *  bar's crowd and a letter's header both have it before anyone opens it. */
+watch(sessionId, (sid) => {
+  closePeerDrawer()
+  if (sid) void refreshPeerDirectory()
+}, { immediate: true })
+
 function isAllowedAttachmentType(mediaType: string, filename: string): boolean {
   const t = (mediaType ?? '').toLowerCase()
   const name = (filename ?? '').toLowerCase()
@@ -2747,6 +2940,14 @@ async function handleSubmit(message: { text: string; files?: { url?: string; fil
   busyNotice.value = ''
   if (text === '/memories' && files.length === 0 && !attachedByComposer && !isStreaming.value) {
     await router.push({ name: 'memories' })
+    return
+  }
+  // /peers opens this surface's own panel — the drawer of agents on this
+  // machine — the way /memories opens the memories page (plan 200 §3). The
+  // command is the terminal's too, where it opens the picker; a surface owns
+  // its own panel, so the line is answered here rather than sent.
+  if (text === '/peers' && files.length === 0 && !attachedByComposer) {
+    togglePeerDrawer()
     return
   }
   // Everything the composer attached leaves it with this message at once, so
@@ -3048,6 +3249,33 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* The top bar's crowd of agents (plan 200 §3): their identity blocks stacked,
+   the first on top, with the count beside them. It is the one control that
+   says the machine has other people on it. */
+.peer-crowd {
+  position: relative;
+}
+
+.peer-crowd-stack {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Each block overlaps the one behind it, so three agents read as a pile
+   rather than a row of chips. */
+.peer-crowd-stack > .peer-mark {
+  position: relative;
+  box-shadow: 0 0 0 2px var(--forebrain-surface);
+}
+
+.peer-crowd-stack > .peer-mark + .peer-mark {
+  margin-left: -2px;
+}
+
+.peer-crowd-count {
+  font-variant-numeric: tabular-nums;
+}
+
 /* The prototype's .col (chat column) and .thread padding: the scroll container
    spans the pane so the scrollbar sits at its right edge, while the column —
    width and breathers — is what the reader reads. */

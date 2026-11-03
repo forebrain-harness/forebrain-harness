@@ -108,6 +108,19 @@ export interface ChatMessage {
   attachments?: ChatAttachmentRecord[]
   /** Who wrote a user message on the person's behalf: 'heartbeat'. */
   origin?: string
+  /**
+   * A peer message's own facts (plan 200 §3), derived by the engine so the page
+   * never parses an envelope or hashes a name: who wrote it, the body the
+   * envelope carried, and the identity block's two characters and tone. A
+   * delivery note carries `peerReceipts` instead — one row per recipient.
+   */
+  peerFromName?: string
+  peerBody?: string
+  peerMark?: string
+  peerTone?: number
+  peerReceipts?: PeerReceipt[]
+  /** The row's own creation time, in milliseconds, for a letter's header. */
+  createdAt?: number
   turnDiffs?: TurnDiffData[]
   memoryCitation?: import('@/lib/api').MemoryCitation
   tokenBudget?: TokenBudgetData
@@ -133,6 +146,19 @@ export interface ChatMessage {
    * conversation already paid for that refusal on this model and the turn was
    * withheld (`remembered`). All three end at /model. */
   imageRefusal?: { provider: string; model: string; kind?: 'unsupported' | 'rejected' | 'remembered' }
+}
+
+/**
+ * One recipient's answer to a message this conversation sent (plan 200 §3), as
+ * the engine read it back out of its own receipt summary.
+ */
+export interface PeerReceipt {
+  name: string
+  /** held, delivered, denied, expired, refused or dropped. */
+  status: string
+  reason?: string
+  mark: string
+  tone: number
 }
 
 /**
@@ -1013,6 +1039,12 @@ export function conversationFromTranscript(
         ...(attachments.length ? { attachments } : {}),
         ...(row.memoryCitation ? { memoryCitation: row.memoryCitation } : {}),
         ...(row.origin ? { origin: row.origin } : {}),
+        ...(row.createdAt ? { createdAt: row.createdAt } : {}),
+        ...(row.peerFromName ? { peerFromName: row.peerFromName } : {}),
+        ...(row.peerBody ? { peerBody: row.peerBody } : {}),
+        ...(row.peerMark ? { peerMark: row.peerMark } : {}),
+        ...(row.peerTone !== undefined ? { peerTone: row.peerTone } : {}),
+        ...(row.peerReceipts?.length ? { peerReceipts: row.peerReceipts } : {}),
       })
       return
     }
@@ -1823,7 +1855,20 @@ export function emptyContextRuntimeSignals(): ContextRuntimeSignals {
   return { compactVersion: 0, budgetVersion: 0, activeRunId: undefined }
 }
 
-import { getErrorMessage, forebrainApi, GatewayHttpError, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse, type SessionContextDebug } from '@/lib/api'
+import { getErrorMessage, forebrainApi, GatewayHttpError, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse, type SessionContextDebug, type PeerAgentRow, type PeerFileRow, type PeerHeldRow } from '@/lib/api'
+
+/**
+ * The drawer's own view of the machine (plan 200 §3): the files being edited
+ * under this conversation's directory, and the agents other processes host.
+ * `held` is kept beside it because the same payload carries both, and the
+ * banner and the drawer must never disagree about what is waiting.
+ */
+export interface PeerDirectoryView {
+  files: PeerFileRow[]
+  sameTree: PeerAgentRow[]
+  other: PeerAgentRow[]
+  otherTotal: number
+}
 import { persistLastSessionId } from '@/composables/useLastSession'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { currentLocale, t as translate, type I18nKey } from '@/locales'
@@ -1855,6 +1900,7 @@ import {
   type ForebrainGoalLine,
   type ForebrainRunEvent,
   type ForebrainMcpStatus,
+  type ForebrainPeerHeldEntry,
 } from '@/lib/forebrainGatewayRuntime'
 
 type TranslateFn = (key: I18nKey, params?: Record<string, string | number>) => string
@@ -2678,6 +2724,16 @@ export function useChatStream() {
   // shows in the subagent's view rather than the conversation's.
   const autoContinue = ref<AutoContinueState | null>(null)
   const subagentAutoContinue = ref<Record<string, AutoContinueState>>({})
+  // The peer facts (plan 200 §3): the messages waiting for this conversation's
+  // person, and the drawer's view of the machine — the files being edited under
+  // this directory and the agents other processes host. Both are live state,
+  // not history, so a page that binds after they changed is told them the same
+  // way it is told a pending continuation.
+  const heldPeers = ref<PeerHeldRow[]>([])
+  const peerDirectory = ref<PeerDirectoryView>({ files: [], sameTree: [], other: [], otherTotal: 0 })
+  const peerDirectoryPage = ref(1)
+  const peerDirectoryLoading = ref(false)
+  const PEER_DIRECTORY_PAGE_SIZE = 20
   // The language-server recommendation waiting for the user's answer. Like
   // autoContinue it belongs to the conversation, not to any run's timeline,
   // and only a live event sets it: history replays the answer's transcript
@@ -3302,6 +3358,10 @@ export function useChatStream() {
     'transport_retry',
   ])
 
+  // The two run-less peer facts (plan 200 §3): a message is being held for the
+  // person, and the person's answer — or an expiry — settled it.
+  const PEER_EVENT_TYPES = new Set(['peer_message_held', 'peer_message_settled'])
+
   function legacyAlreadyProjected(evt: ForebrainRunEvent): boolean {
     if (isSubagentHistoryEvent(evt)) return false
     if (!legacyMirroredRunIDs.has(String(evt.runId ?? ''))) return false
@@ -3423,6 +3483,116 @@ export function useChatStream() {
     }]
   }
 
+  /**
+   * applyBoundPeerHeld restores what a freshly bound page should be showing
+   * above its composer: the peer messages waiting for the person. They are not
+   * in the transcript — a held message only becomes a row once the person
+   * releases it — so the binding's snapshot is the only place a reload can
+   * learn them, exactly as it is for a pending continuation.
+   */
+  function applyBoundPeerHeld(bound: { peerHeld?: ForebrainPeerHeldEntry[] }) {
+    const held = Array.isArray(bound.peerHeld) ? bound.peerHeld : []
+    heldPeers.value = held.map((row) => ({
+      msg_id: row.msgId,
+      from: row.from,
+      from_name: row.fromName,
+      preview: row.preview,
+      cause: row.cause,
+      held_at_ms: row.heldAtMs,
+      mark: row.mark,
+      tone: row.tone,
+    }))
+    if (held.length) void refreshPeerDirectory()
+  }
+
+  /**
+   * applyPeerHeldEvent tracks one held message's life: the engine announces it
+   * when it is held and tells every page when the person's answer — or an
+   * expiry — settled it. A held message is live state, so the same high-water
+   * rule as the other run-less facts applies: the binding's snapshot already
+   * accounts for everything up to it.
+   */
+  function applyPeerHeldEvent(evt: ForebrainRunEvent, historical: boolean) {
+    const sequence = Number(evt.sequence ?? 0)
+    if (historical || (sequence > 0 && sequence <= observerHighWater)) return
+    const payload = (evt.payload ?? {}) as Record<string, unknown>
+    const msgID = String(payload.msgId ?? payload.msg_id ?? '').trim()
+    if (!msgID) return
+    switch (evt.type) {
+      case 'peer_message_held': {
+       	const fromName = String(payload.fromName ?? payload.from_name ?? '').trim()
+       	const row: PeerHeldRow = {
+          msg_id: msgID,
+          from: String(payload.from ?? '').trim() || undefined,
+          from_name: fromName || undefined,
+          preview: String(payload.preview ?? ''),
+          cause: String(payload.cause ?? ''),
+          held_at_ms: Number(payload.heldAtMs ?? payload.held_at_ms ?? 0) || 0,
+          // The identity block is the engine's derivation; a page that did not
+          // get one (an older server) still draws the block, in the default tone.
+          mark: String(payload.peerMark ?? payload.peer_mark ?? ''),
+          tone: Number(payload.peerTone ?? payload.peer_tone ?? 0) || 0,
+        }
+        heldPeers.value = [...heldPeers.value.filter((held) => held.msg_id !== msgID), row]
+        void refreshPeerDirectory()
+        return
+      }
+      case 'peer_message_settled':
+        heldPeers.value = heldPeers.value.filter((held) => held.msg_id !== msgID)
+        return
+    }
+  }
+
+  /**
+   * refreshPeerDirectory reads the drawer's payload: the files this directory is
+   * having edited and the agents other processes host. It is read when the
+   * drawer opens, when a held message arrives, and when the reader pages the
+   * "other directories" list — the same payload carries all three.
+   */
+  async function refreshPeerDirectory(page = peerDirectoryPage.value) {
+    const sid = String(sessionId.value ?? '').trim()
+    if (!sid) {
+      peerDirectory.value = { files: [], sameTree: [], other: [], otherTotal: 0 }
+      return
+    }
+    peerDirectoryLoading.value = true
+    try {
+      const data = await forebrainApi.peersDirectory(sid, page, PEER_DIRECTORY_PAGE_SIZE)
+      peerDirectoryPage.value = page
+      peerDirectory.value = {
+        files: Array.isArray(data.files) ? data.files : [],
+        sameTree: Array.isArray(data.same_tree) ? data.same_tree : [],
+        other: Array.isArray(data.other) ? data.other : [],
+        otherTotal: Number(data.other_total ?? 0) || 0,
+      }
+      // The payload's held list is the same fact the events carry; taking it
+      // here keeps the banner and the drawer from disagreeing on a cold read.
+      if (Array.isArray(data.held)) {
+        heldPeers.value = data.held
+      }
+    } catch {
+      // A drawer that cannot be read opens empty rather than not at all: the
+      // page's own conversation is unaffected.
+    } finally {
+      peerDirectoryLoading.value = false
+    }
+  }
+
+  /** The reader's answer to one held message (plan 200 §3). The engine owns the
+   *  delivery and the receipt; this only reports the choice, and the settled
+   *  event that follows is what removes the banner everywhere. */
+  async function answerPeerHeld(msgID: string, release: boolean): Promise<boolean> {
+    const sid = String(sessionId.value ?? '').trim()
+    if (!sid) return false
+    try {
+      if (release) await forebrainApi.releasePeerMessage(msgID)
+      else await forebrainApi.denyPeerMessage(msgID)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   // While a send owns a run, its request socket is the sole deliverer that
   // applies that run's fragments: the gateway fans every event out to every
   // subscriber, and the observer's copy of a fragment has no id to dedup by —
@@ -3443,6 +3613,13 @@ export function useChatStream() {
     }
     if (String(evt.type) === 'heartbeat_fired') {
       if (rememberObservedEvent(evt)) applyHeartbeatFiredEvent(evt, historical)
+      return
+    }
+    // A peer message's hold and settlement are the conversation's own facts,
+    // not a run's: they are filed with no run id and read here, the same way
+    // the terminal's idle loop reads them (plan 200 §3).
+    if (PEER_EVENT_TYPES.has(String(evt.type))) {
+      if (rememberObservedEvent(evt)) applyPeerHeldEvent(evt, historical)
       return
     }
     // A task execution's state is the engine's own fact, published as it
@@ -3618,6 +3795,9 @@ export function useChatStream() {
           if (bound) {
             observerHighWater = bound.highWater ?? 0
             if (autoContinueSequence <= observerHighWater) applyBoundAutoContinues(bound)
+            // The held peer messages are live state too, and a page that binds
+            // after one arrived has no other way to learn it (plan 200 §3).
+            applyBoundPeerHeld(bound)
             // One bind of this conversation's observation socket: the first
             // attach, or a reconnect. A page driving itself from the frames
             // this socket carries counts them to tell the two apart — the
@@ -3715,6 +3895,9 @@ export function useChatStream() {
 	  autoContinueSequence = 0
 	  autoContinue.value = null
 	  subagentAutoContinue.value = {}
+	  heldPeers.value = []
+	  peerDirectory.value = { files: [], sameTree: [], other: [], otherTotal: 0 }
+	  peerDirectoryPage.value = 1
 	  lspRecommendation.value = null
     const generation = historyGeneration
     if (!options.keepLastSession) persistLastSessionId(sid || null)
@@ -5142,8 +5325,25 @@ export function useChatStream() {
         const userId = `user-delivered-${seed}`
         const nextAnswerId = `assistant-delivered-${seed}`
         const runId = String(evt.runId ?? '').trim() || undefined
+        // A peer message handed to the running turn is that session's letter,
+        // not the person's own words: the delivery carries the sender and the
+        // identity block so the card reads the same as a reloaded one
+        // (plan 200 §3).
+        const origin = String(payload.origin ?? '').trim()
+        const peerFromName = String(payload.fromName ?? payload.from_name ?? '').trim()
+        const peerMark = String(payload.peerMark ?? payload.peer_mark ?? '').trim()
+        const peerTone = Number(payload.peerTone ?? payload.peer_tone ?? 0) || 0
         const inserted: ChatMessage[] = [
-          { id: userId, role: 'user', content: delivered.text, runId },
+          {
+            id: userId,
+            role: 'user',
+            content: delivered.text,
+            runId,
+            ...(origin ? { origin } : {}),
+            ...(peerFromName ? { peerFromName } : {}),
+            ...(peerMark ? { peerMark } : {}),
+            ...(peerFromName ? { peerTone } : {}),
+          },
           { id: nextAnswerId, role: 'assistant', content: NOTHING_SAID_YET, runId },
         ]
         const index = messages.value.findIndex((message) => message.id === assistantMessageId)
@@ -5906,6 +6106,10 @@ export function useChatStream() {
                 if (rememberObservedEvent(runEvent)) applyHeartbeatFiredEvent(runEvent, false)
                 return
               }
+              if (PEER_EVENT_TYPES.has(String(runEvent.type))) {
+                if (rememberObservedEvent(runEvent)) applyPeerHeldEvent(runEvent, false)
+                return
+              }
               if (String(runEvent.type) === LSP_RECOMMENDATION_EVENT_TYPE) {
                 if (rememberObservedEvent(runEvent)) {
                   const sequence = Number(runEvent.sequence ?? 0)
@@ -6458,6 +6662,12 @@ export function useChatStream() {
     subagentAutoContinue,
     autoContinueForView,
     cancelAutoContinue,
+    heldPeers,
+    peerDirectory,
+    peerDirectoryPage,
+    peerDirectoryLoading,
+    refreshPeerDirectory,
+    answerPeerHeld,
     lspRecommendation,
     contextSignals,
     pendingActionsVersion,

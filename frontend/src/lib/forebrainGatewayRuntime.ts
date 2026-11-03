@@ -100,6 +100,25 @@ export type ForebrainSessionBoundMessage = {
    * of its subagents', so a page opened mid-wait shows each in its own view.
    */
   autoContinues?: AutoContinueEntry[]
+  /**
+   * The peer messages held for the person right now (plan 200 §3). They are not
+   * in the transcript — a held message only becomes a row once it is released —
+   * so a page that binds after one arrived learns it here, the same way it
+   * learns a pending continuation.
+   */
+  peerHeld?: ForebrainPeerHeldEntry[]
+}
+
+/** One held peer message, as the binding's snapshot carries it. */
+export type ForebrainPeerHeldEntry = {
+  msgId: string
+  from?: string
+  fromName?: string
+  preview?: string
+  cause: string
+  heldAtMs: number
+  mark: string
+  tone: number
 }
 
 export type ForebrainTaskNotificationTask = {
@@ -452,6 +471,7 @@ export function parseForebrainSessionBoundMessage(raw: unknown): ForebrainSessio
   const highWater = asNumber(data?.high_water)
   const autoContinue = parseAutoContinue(data?.auto_continue)
   const autoContinues = parseAutoContinueEntries(data?.auto_continues)
+  const peerHeld = parsePeerHeldEntries(data?.peer_held)
   return {
     requestId: asTrimmedString(msg.request_id),
     sessionId: asTrimmedString(msg.session_id),
@@ -460,7 +480,34 @@ export function parseForebrainSessionBoundMessage(raw: unknown): ForebrainSessio
     ...(highWater !== undefined ? { highWater } : {}),
     ...(autoContinue ? { autoContinue } : {}),
     ...(autoContinues.length ? { autoContinues } : {}),
+    ...(peerHeld.length ? { peerHeld } : {}),
   }
+}
+
+/**
+ * parsePeerHeldEntries reads the binding's held-message list. The keys are the
+ * gateway's own snake_case, like every other field of the bound data. A row
+ * with no message id is not one this page could act on, so it is dropped.
+ */
+function parsePeerHeldEntries(raw: unknown): ForebrainPeerHeldEntry[] {
+  if (!Array.isArray(raw)) return []
+  const out: ForebrainPeerHeldEntry[] = []
+  for (const entry of raw) {
+    const record = asRecord(entry)
+    const msgId = asTrimmedString(record?.msg_id)
+    if (!msgId) continue
+    out.push({
+      msgId,
+      from: asTrimmedString(record?.from),
+      fromName: asTrimmedString(record?.from_name),
+      preview: asTrimmedString(record?.preview) ?? '',
+      cause: asTrimmedString(record?.cause) ?? '',
+      heldAtMs: asNumber(record?.held_at_ms) ?? 0,
+      mark: asTrimmedString(record?.peer_mark) ?? '',
+      tone: asNumber(record?.peer_tone) ?? 0,
+    })
+  }
+  return out
 }
 
 /**

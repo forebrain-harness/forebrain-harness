@@ -325,11 +325,22 @@ func (s *Server) watchRunQueue(q *run.InputQueue, runID, sessionID string) {
 		defer publishing.Unlock()
 		ctx := context.Background()
 		for _, in := range q.TakeDelivered() {
-			_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventInputDelivered, event.InputDeliveredPayload{
+			payload := event.InputDeliveredPayload{
 				Text:          in.Text,
 				Attachments:   in.Attachments,
 				MentionImages: in.MentionImages,
-			})
+			}
+			// A peer message delivered into a running turn is that session's
+			// letter, and the page draws it as one — which needs the sender and
+			// the identity block, not just the envelope (plan 200 §3).
+			if state.IsPeerOrigin(in.Origin) {
+				payload.Origin = in.Origin
+				if fromName, _, ok := process.ParsePeerEnvelope(in.Text); ok {
+					payload.FromName = fromName
+					payload.PeerMark, payload.PeerTone = process.PeerMark(fromName, "")
+				}
+			}
+			_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventInputDelivered, payload)
 		}
 		s.appendPendingInputUpdated(ctx, runID, sessionID, toPendingInputPreview(q.Preview()))
 	})

@@ -103,6 +103,13 @@ export interface ChatMessageRecord {
   attachments?: ChatAttachmentRecord[] | null
   /** Who wrote a user message on the person's behalf ('heartbeat'). */
   origin?: string
+  /** A peer message's sender, body and identity block (plan 200 §3), derived
+   *  by the gateway; a delivery note carries `peerReceipts` instead. */
+  peerFromName?: string
+  peerBody?: string
+  peerMark?: string
+  peerTone?: number
+  peerReceipts?: import('@/composables/useChatStream').PeerReceipt[]
   /**
    * A tool row's or a `!cmd` row's own execution window; on a "worked" row —
    * the line that closes a run, after the last row it wrote — the run's clock.
@@ -1528,6 +1535,57 @@ export interface SlashCommandsResponse {
   query: string
   options: { duringRun: boolean; sideConversation: boolean }
   records: SlashCommandRecord[]
+}
+
+/** One peer message waiting for the person's decision (plan 200 §3). The mark
+ *  and tone are the identity block's, derived by the gateway. */
+export interface PeerHeldRow {
+  msg_id: string
+  from?: string
+  from_name?: string
+  preview?: string
+  cause: string
+  held_at_ms: number
+  mark: string
+  tone: number
+}
+
+/** One agent another process hosts, as the drawer lists it. */
+export interface PeerAgentRow {
+  name: string
+  kind?: string
+  status?: string
+  task?: string
+  cwd?: string
+  mark: string
+  tone: number
+  self: boolean
+}
+
+/** One agent writing one of the directory's files. */
+export interface PeerFileAgent {
+  name: string
+  mark: string
+  tone: number
+  self: boolean
+}
+
+/** One file being edited under the conversation's directory. */
+export interface PeerFileRow {
+  dir: string
+  name: string
+  agents: PeerFileAgent[]
+  last_ms: number
+  clash: boolean
+}
+
+/** The peer drawer's payload. Only `other` is paged; `same_tree` is short. */
+export interface PeerDirectoryResponse {
+  held: PeerHeldRow[]
+  files: PeerFileRow[]
+  same_tree: PeerAgentRow[]
+  other: PeerAgentRow[]
+  other_total: number
 }
 
 export interface MentionCandidate {
@@ -4419,6 +4477,40 @@ export const forebrainApi = {
     const params: Record<string, string> = { session_id: sessionId }
     if (id) params.agent_id = id
     return api.delete<{ cancelled: boolean }>('/auto-continue', { params }).then((res) => res.data)
+  },
+
+  /** The peer drawer's payload (plan 200 §3): the messages waiting for this
+   *  conversation's person, the files being edited under its directory, and
+   *  the agents other processes host — this directory tree first, then the
+   *  rest, paged. */
+  peersDirectory(sessionId: string, page = 1, pageSize = 20) {
+    return api
+      .get<PeerDirectoryResponse>('/peers', { params: { session_id: sessionId, page, page_size: pageSize } })
+      .then((res) => res.data)
+  },
+
+  /** The held messages a freshly bound page should already be showing, the
+   *  same read the binding's snapshot carries. */
+  sessionPeersHeld(sessionId: string) {
+    return api
+      .get<{ session_id: string; held: PeerHeldRow[] }>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/peers/held`,
+      )
+      .then((res) => res.data)
+  },
+
+  /** The person's answer to one held peer message. The engine delivers the
+   *  message or sends the refusal, and publishes the outcome to every page. */
+  releasePeerMessage(msgId: string) {
+    return api
+      .post<{ msg_id: string; released: boolean }>(`/peers/held/${encodeURIComponent(msgId)}/release`)
+      .then((res) => res.data)
+  },
+
+  denyPeerMessage(msgId: string) {
+    return api
+      .post<{ msg_id: string; released: boolean }>(`/peers/held/${encodeURIComponent(msgId)}/deny`)
+      .then((res) => res.data)
   },
 
   permissionsExplain(params: { toolName: string; input?: string; sessionId?: string }) {

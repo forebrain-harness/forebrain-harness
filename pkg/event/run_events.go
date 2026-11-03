@@ -523,6 +523,17 @@ type InputDeliveredPayload struct {
 	Text          string   `json:"text"`
 	Attachments   []string `json:"attachments,omitempty"`
 	MentionImages []string `json:"mention_images,omitempty"`
+	// Origin is the delivered message's own origin, when it had one: a peer
+	// message handed to a running turn is another session's letter, and the
+	// surface has to draw it as such rather than as the person's own words
+	// (plan 200 §3). Empty for everything the person typed or attached.
+	Origin string `json:"origin,omitempty"`
+	// FromName, PeerMark and PeerTone identify the peer who wrote it, derived
+	// by the engine so no surface hashes a name itself. They travel only for a
+	// peer origin, and only when the message was one envelope.
+	FromName string `json:"from_name,omitempty"`
+	PeerMark string `json:"peer_mark,omitempty"`
+	PeerTone int    `json:"peer_tone,omitempty"`
 }
 
 // FirstTokenPayload reports how long one run waited for the model's first
