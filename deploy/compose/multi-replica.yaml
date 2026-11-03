@@ -1,0 +1,123 @@
+# Two gateway replicas over one database and one shared FOREBRAIN_HOME (plan
+# 213): the deployment the replica machinery exists for.
+#
+#   database.url in the shared forebrain.yaml is the database service below; the
+#   replicas register themselves in fb_run_owners with their own internal
+#   address, relay a browser's socket to the replica running its conversation,
+#   forward run-bound HTTP calls the same way, claim scheduled work by
+#   compare-and-swap, and hold each long-connection channel account on one
+#   replica through fb_leases.
+#
+#   FOREBRAIN_INTERNAL_ADDR names the pod/service address a peer reaches this
+#   replica at (plan 213 §3.1): in Kubernetes the downward API supplies
+#   http://$(POD_IP):6060 instead. Both replicas serve it on the same port the
+#   browser uses — the internal endpoints are paths on the one listener.
+#
+#   The seed service writes the shared home's config once, before either replica
+#   starts: two replicas seeding a brand-new home at once would each generate a
+#   gateway token (plan 213 §3.6). FOREBRAIN_GATEWAY_TOKEN must be set in the
+#   environment for the compose run.
+#
+#   docker compose -f deploy/compose/multi-replica.yaml up --build -d
+#   docker compose -f deploy/compose/multi-replica.yaml down -v
+
+name: forebrain-multi-replica
+
+services:
+  db:
+    image: postgres:14
+    environment:
+      POSTGRES_PASSWORD: fb
+      POSTGRES_DB: forebrain
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - forebrain-db:/var/lib/postgresql/data
+
+  seed:
+    image: ${FOREBRAIN_IMAGE:-forebrain:213}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      FOREBRAIN_GATEWAY_TOKEN: ${FOREBRAIN_GATEWAY_TOKEN:?set FOREBRAIN_GATEWAY_TOKEN}
+      FOREBRAIN_HOME: /home/forebrain
+    volumes:
+      - forebrain-home:/home/forebrain
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        home=/home/forebrain
+        mkdir -p "$$home/workspace"
+        test -f "$$home/forebrain.yaml" && exit 0
+        printf 'FOREBRAIN_GATEWAY_TOKEN=%s\n' "$$FOREBRAIN_GATEWAY_TOKEN" > "$$home/.env"
+        chmod 600 "$$home/.env"
+        cat > "$$home/forebrain.yaml.tmp" <<'YAML'
+        gateway:
+          http_addr: "0.0.0.0:6060"
+          auth:
+            mode: token
+            token: $${FOREBRAIN_GATEWAY_TOKEN}
+        database:
+          url: "postgres://postgres:fb@db:5432/forebrain?sslmode=disable"
+        approval_policy: "on-request"
+        approvals_reviewer: "user"
+        agents:
+          definitions:
+            main:
+              primary: true
+              llm_providers:
+                - provider: deepseek
+                  model: deepseek-v4-flash
+                  api_key: ${FAKE_LLM_KEY}
+                  base_url: http://llm:8741
+        YAML
+        # The config arrives whole: a replica that started first must never read
+        # a half-written file (plan 213 §3.6).
+        mv "$$home/forebrain.yaml.tmp" "$$home/forebrain.yaml"
+        chmod 600 "$$home/forebrain.yaml"
+
+  llm:
+    # The repository's own provider stub: a turn that parks on an approval.
+    image: python:3.12-slim
+    working_dir: /app
+    command: ["python3", "scripts/acceptance/fake_provider.py", "toolcall", "8741", "FAKE_ANSWER"]
+    volumes:
+      - ../..:/app:ro
+
+  gateway-a:
+    image: ${FOREBRAIN_IMAGE:-forebrain:213}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      FOREBRAIN_HOME: /home/forebrain
+      FOREBRAIN_INTERNAL_ADDR: http://gateway-a:6060
+    ports:
+      - "6061:6060"
+    volumes:
+      - forebrain-home:/home/forebrain
+    command: ["gateway", "start"]
+
+  gateway-b:
+    image: ${FOREBRAIN_IMAGE:-forebrain:213}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      FOREBRAIN_HOME: /home/forebrain
+      FOREBRAIN_INTERNAL_ADDR: http://gateway-b:6060
+    ports:
+      - "6062:6060"
+    volumes:
+      - forebrain-home:/home/forebrain
+    command: ["gateway", "start"]
+
+volumes:
+  forebrain-home:
+  forebrain-db:
