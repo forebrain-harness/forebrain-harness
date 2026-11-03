@@ -29,6 +29,16 @@ case "$engine" in
   *) echo "usage: $0 postgres|mysql" >&2; exit 2 ;;
 esac
 
+# PostgreSQL's URL names the server's own postgres database, which always
+# exists; MySQL's names `fbt`, which a fresh container does not have — the Go
+# dialect tests create a scratch database per test and never need it, while the
+# gateway opens its configured database directly. Create it once, through the
+# container the URL points at.
+if [ "$engine" = mysql ]; then
+  docker exec fb-mysql mysql -uroot -pfb -e 'CREATE DATABASE IF NOT EXISTS fbt' 2>/dev/null ||
+    { echo "cannot create the fbt database: is the fb-mysql container running? (scripts/test-db.sh up)" >&2; exit 1; }
+fi
+
 export PKG_CONFIG_PATH="$root/third_party/pdfium/darwin_arm64"
 export CGO_CFLAGS="-I$root/third_party/pdfium/darwin_arm64/include"
 export CGO_LDFLAGS="-L$root/third_party/pdfium/darwin_arm64/lib -lpdfium -Wl,-rpath,$root/third_party/pdfium/darwin_arm64/lib"
@@ -95,7 +105,14 @@ write_home "$home_b" "$port_b"
 echo "== provider stub on 127.0.0.1:$llm_port (a turn that parks on an approval)"
 # exit_plan_mode is the one tool a gateway turn always gates on: it is the
 # approval a person answers from the web page.
-FAKE_TOOL_NAME=exit_plan_mode FAKE_TOOL_ARGS='{}' \
+#
+# The script goes through FAKE_TOOL_SCRIPT rather than FAKE_TOOL_NAME: only the
+# multi-shot form streams its tool call, and a gateway turn always asks for a
+# stream. With the single-shot form the provider answers with a JSON body where
+# the client expects an event stream, the turn ends on "Streaming response ended
+# before any complete data was received", and the gate is never reached.
+printf '[["exit_plan_mode","{}"]]\n' > "$work/tools.json"
+FAKE_TOOL_SCRIPT="$work/tools.json" \
   python3 "$root/scripts/acceptance/fake_provider.py" toolcall "$llm_port" FAKE_ANSWER \
   > "$work/llm.log" 2>&1 &
 pids+=("$!")

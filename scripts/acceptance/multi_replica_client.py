@@ -168,6 +168,30 @@ def run_id_of(msg):
     return str(msg.get("run_id") or "")
 
 
+def run_end_of(msg):
+    """How a run ended, or "" while it has not.
+
+    A run ends two ways on the wire, and the page handles both: the replica that
+    started the turn answers its own socket with a `run_completed` /
+    `run_cancelled` / `run_error` op, while every other socket watching the
+    conversation — a second tab, or a browser relayed to the owning replica —
+    sees the canonical run event `turn_completed` / `turn_cancelled` /
+    `turn_error`. A relay only ever delivers the second form, so a wait that
+    accepted just the first timed out on a run that had already finished.
+    """
+    op = str(msg.get("op") or "")
+    if op in ("run_completed", "run_cancelled", "run_error"):
+        return op
+    if op == "run_event":
+        data = msg.get("data") or {}
+        return {
+            "turn_completed": "run_completed",
+            "turn_cancelled": "run_cancelled",
+            "turn_error": "run_error",
+        }.get(str(data.get("type") or ""), "")
+    return ""
+
+
 def http_json(method, addr, path, body=None):
     """One control-plane request, the way the web page makes it."""
     data = None if body is None else json.dumps(body).encode()
@@ -211,7 +235,11 @@ def start_conversation(session):
     # exit_plan_mode is only offered in plan mode, and this is the gate the
     # plan's approval is raised on.
     ws.send({"op": "switch_mode", "request_id": "mode-1", "session_id": session, "mode": "plan"})
-    ws.wait_for(lambda m: m.get("op") == "mode_changed" or m.get("op") == "session_bound", "plan mode")
+    # Only mode_changed acknowledges the switch. session_bound is sent for the
+    # connection's own bind and arrives first, so accepting it let start_run
+    # race the switch: the run started in default mode, exit_plan_mode was not
+    # in the tool table, and the turn completed without ever reaching the gate.
+    ws.wait_for(lambda m: m.get("op") == "mode_changed", "plan mode")
     ws.send({"op": "start_run", "request_id": "start-1", "session_id": session,
              "message": {"content": "drive the approval"}})
     started, seen = ws.wait_for(
@@ -254,11 +282,11 @@ def main():
     # --- B: approving on B resumes the run A is parked on -------------------
     ws_b.send({"op": "approve_action", "request_id": "approve-1", "action_id": action_id})
     done, seen = ws_b.wait_for(
-        lambda m: m.get("op") in ("run_completed", "run_error", "run_cancelled"),
+        lambda m: run_end_of(m) != "",
         "the run to finish after the approval on B",
         timeout=MAX_WAIT * 2,
     )
-    if done.get("op") != "run_completed":
+    if run_end_of(done) != "run_completed":
         fail("B approval", f"run ended {done.get('op')}: {json.dumps(done)[:400]}")
     print(f"PASS B: approving on B resumed the run on A, which completed ({time.time() - started_at:.1f}s)")
 
@@ -266,22 +294,18 @@ def main():
     ws_a.send({"op": "start_run", "request_id": "start-2", "session_id": session,
                "message": {"content": "drive the approval again"}})
     second, _ = ws_a.wait_for(
-        lambda m: m.get("op") in ("run_started", "run_error") or action_id_of(m) != "",
+        lambda m: m.get("op") == "run_started" and run_id_of(m) not in ("", run_id),
         "the second run to start on A",
     )
-    if second.get("op") == "run_error":
-        fail("second start on A", json.dumps(second)[:400])
     second_run = run_id_of(second)
-    if not second_run:
-        second_run = run_id
     ws_b.send({"op": "control_request", "request_id": "int-1", "run_id": second_run,
                "type": "control_request", "request": {"subtype": "interrupt"}})
     stopped, seen = ws_b.wait_for(
-        lambda m: m.get("op") in ("run_cancelled", "run_completed", "run_error") and run_id_of(m) == second_run,
+        lambda m: run_end_of(m) != "" and run_id_of(m) == second_run,
         "the interrupted run to end",
         timeout=MAX_WAIT * 2,
     )
-    if stopped.get("op") != "run_cancelled":
+    if run_end_of(stopped) != "run_cancelled":
         fail("C interrupt", f"run ended {stopped.get('op')}: {json.dumps(stopped)[:400]}")
     print("PASS C: interrupting on B cancelled the run A was executing")
 
