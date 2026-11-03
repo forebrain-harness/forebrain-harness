@@ -663,7 +663,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// not, where to forward to (plan 213 §3.1). It rides on the lease row
 	// HoldOwnerLease just created, so it cannot outlive the process either.
 	kind, internalAddr := replicaRegistration(opts.ReplicaKind, source, loaded)
-	if err := runSvc.RegisterReplica(ctx, kind, internalAddr, replicaHost()); err != nil {
+	if err := registerReplica(ctx, runSvc, kind, internalAddr, replicaHost()); err != nil {
 		ownerStop()
 		_ = env.LSP.Close()
 		_ = env.Runner.Close()

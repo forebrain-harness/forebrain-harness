@@ -5,6 +5,7 @@
 package process
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"os"
@@ -90,4 +91,18 @@ func replicaHost() string {
 		return ""
 	}
 	return strings.TrimSpace(name)
+}
+
+// registerReplica records this process in fb_run_owners and then, for a
+// gateway, refuses a SQLite database another host's gateway is already using
+// (plan 213 §3.5). The check runs after the lease is held, so the row it is
+// compared against is this process's own as well as any other's.
+func registerReplica(ctx context.Context, runSvc *state.RunStore, kind, internalAddr, host string) error {
+	if err := runSvc.RegisterReplica(ctx, kind, internalAddr, host); err != nil {
+		return err
+	}
+	if kind != state.RunOwnerKindGateway {
+		return nil
+	}
+	return runSvc.CheckSQLiteSingleHost(ctx, host)
 }

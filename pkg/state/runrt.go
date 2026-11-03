@@ -1713,7 +1713,60 @@ func (s *RunStore) HoldOwnerLease(ctx context.Context) (stop func(), err error) 
 	}, nil
 }
 
-// RegisterReplica records this process's replica registration in the owner row
+// ErrSQLiteMultiHost is the refusal a gateway makes when its state database is
+// SQLite and a live gateway replica is already registered on another host
+// (plan 213 §3.5, design §2.7.9). SQLite on shared storage is not safe for two
+// writers, so the second host stops instead of corrupting the first one's data;
+// the message names the configuration that fixes it.
+var ErrSQLiteMultiHost = errors.New("多副本部署需要 MySQL 或 PostgreSQL（forebrain.yaml 的 database.url）")
+
+// liveGatewayOwnerHostSQL finds a live gateway replica registered on a host
+// other than selfHost. A row that names no host is not evidence of another
+// machine — only a replica that could resolve its own hostname writes one — so
+// it is left out rather than read as a mismatch.
+var liveGatewayOwnerHostSQL = dbx.SQL{
+	SQLite: `
+SELECT host FROM fb_run_owners
+WHERE kind=? AND heartbeat_at_ms >= ? AND host <> ? AND host <> ''
+LIMIT 1`,
+	MySQL: `
+SELECT host FROM fb_run_owners
+WHERE kind=? AND heartbeat_at_ms >= ? AND host <> ? AND host <> ''
+LIMIT 1`,
+	Postgres: `
+SELECT host FROM fb_run_owners
+WHERE kind=$1 AND heartbeat_at_ms >= $2 AND host <> $3 AND host <> ''
+LIMIT 1`,
+}
+
+// CheckSQLiteSingleHost refuses a SQLite state database that a gateway on
+// another host is already using. Only a gateway asks: a terminal shares
+// SQLite with the gateway on its own machine as it always has, and a
+// non-SQLite database is the supported multi-replica engine, where the check
+// is a no-op.
+//
+// selfHost is the name this machine is known by; the caller passes the same
+// value it registered, so a replica never refuses against its own row.
+func (s *RunStore) CheckSQLiteSingleHost(ctx context.Context, selfHost string) error {
+	if s == nil || s.DB == nil {
+		return fmt.Errorf("nil db")
+	}
+	if dbx.DialectOf(s.DB) != dbx.SQLite {
+		return nil
+	}
+	var host string
+	err := s.DB.QueryRowContext(ctx, liveGatewayOwnerHostSQL.For(dbx.SQLite),
+		RunOwnerKindGateway, time.Now().UnixMilli()-RunOwnerLease.Milliseconds(), strings.TrimSpace(selfHost)).Scan(&host)
+	switch {
+	case err == sql.ErrNoRows:
+		return nil
+	case err != nil:
+		return err
+	}
+	return fmt.Errorf("%w: 另一台主机 %s 上已有一个存活的网关副本", ErrSQLiteMultiHost, host)
+}
+
+
 // HoldOwnerLease created: what it is (RunOwnerKindGateway or
 // RunOwnerKindTerminal), which machine it runs on, and — for a gateway — the
 // address the other replicas reach it at. A terminal passes an empty

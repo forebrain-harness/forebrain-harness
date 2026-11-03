@@ -1037,6 +1037,65 @@ func TestRegisterReplicaRecordsTheReplicaColumns(t *testing.T) {
 	}
 }
 
+// TestCheckSQLiteSingleHost pins the refusal behind owner ruling 2026-11-03
+// (plan 213 §3.5): a gateway does not share a SQLite state database with a
+// gateway on another host, because SQLite on shared storage is not safe for
+// two writers. A gateway on the same host — the ordinary single-machine
+// terminal-plus-gateway setup — is allowed, a terminal on another host is
+// allowed, and a replica whose heartbeat has lapsed is allowed because it is
+// no longer driving anything.
+func TestCheckSQLiteSingleHost(t *testing.T) {
+	ctx := context.Background()
+	a, _, db := newTwoOwnerStores(t)
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if err := a.RegisterReplica(ctx, RunOwnerKindGateway, "http://10.0.3.17:8787", "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(owner, host, kind string, heartbeatAgo time.Duration) {
+		t.Helper()
+		_, err := db.Exec(dbx.Rebind(dbx.DialectOf(db),
+			`INSERT INTO fb_run_owners(owner, heartbeat_at_ms, internal_addr, host, kind) VALUES(?,?,?,?,?)`),
+			owner, time.Now().UnixMilli()-heartbeatAgo.Milliseconds(), "http://10.0.3.99:8787", host, kind)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// This process's own row, and a replica that names no host, are not
+	// another machine.
+	if err := a.CheckSQLiteSingleHost(ctx, "node-a"); err != nil {
+		t.Fatalf("the same host must be allowed: %v", err)
+	}
+	seed("webchat-anonymous", "", RunOwnerKindGateway, 0)
+	if err := a.CheckSQLiteSingleHost(ctx, "node-a"); err != nil {
+		t.Fatalf("a replica that names no host must be allowed: %v", err)
+	}
+	// A terminal on another host shares SQLite with its own machine's gateway
+	// and drives no runs of its own here, so it is not a second writer.
+	seed("tui-elsewhere", "node-b", RunOwnerKindTerminal, 0)
+	if err := a.CheckSQLiteSingleHost(ctx, "node-a"); err != nil {
+		t.Fatalf("a terminal on another host must be allowed: %v", err)
+	}
+	// A lapsed gateway is already being reaped, not a live second writer.
+	seed("webchat-stale", "node-b", RunOwnerKindGateway, RunOwnerLease+time.Minute)
+	if err := a.CheckSQLiteSingleHost(ctx, "node-a"); err != nil {
+		t.Fatalf("a lapsed gateway must be allowed: %v", err)
+	}
+
+	if dbx.DialectOf(db) != dbx.SQLite {
+		t.Skip("the servers are the supported multi-replica engines; the refusal is SQLite's alone")
+	}
+	seed("webchat-live", "node-b", RunOwnerKindGateway, 0)
+	err = a.CheckSQLiteSingleHost(ctx, "node-a")
+	if !errors.Is(err, ErrSQLiteMultiHost) {
+		t.Fatalf("a live gateway on another host = %v, want ErrSQLiteMultiHost", err)
+	}
+}
+
 // TestFirstPrimaryRunIDReturnsTheEarliestPrimaryRun pins the read settling a
 // fire rests on: the first primary run of a fire's session is the fire's run,
 // however many runs the conversation later holds and however many subagent
