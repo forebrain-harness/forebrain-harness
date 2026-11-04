@@ -25,6 +25,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
@@ -1335,10 +1336,10 @@ func (g *autoContinueGateway) ageIntoAbandonment(t *testing.T, runID, owner stri
 	t.Helper()
 	now := time.Now().Unix()
 	_, err := g.server.RunRT.DB.ExecContext(context.Background(),
-		`UPDATE fb_runs SET created_at=?, updated_at=? WHERE id=?`, now-120, now-70, runID)
+		dbx.Rebind(dbx.DialectOf(g.server.RunRT.DB), `UPDATE fb_runs SET created_at=?, updated_at=? WHERE id=?`), now-120, now-70, runID)
 	require.NoError(t, err)
 	_, err = g.server.RunRT.DB.ExecContext(context.Background(),
-		`UPDATE fb_run_owners SET heartbeat_at_ms=? WHERE owner=?`, (now-70)*1000, owner)
+		dbx.Rebind(dbx.DialectOf(g.server.RunRT.DB), `UPDATE fb_run_owners SET heartbeat_at_ms=? WHERE owner=?`), (now-70)*1000, owner)
 	require.NoError(t, err)
 }
 
@@ -1426,7 +1427,7 @@ func TestTheReaperLeavesAnUncertainContinuationToItsRecovery(t *testing.T) {
 	require.True(t, won)
 	require.NoError(t, other.BeginWaitResumeExecution(ctx, rr.ID, act.ID, "dead-process"))
 	// Both leases lapse: the continuation's and the owner's.
-	_, err = g.server.RunRT.DB.ExecContext(ctx, `UPDATE fb_run_waits SET resume_claimed_at_ms=?`, (time.Now().Unix()-30)*1000)
+	_, err = g.server.RunRT.DB.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(g.server.RunRT.DB), `UPDATE fb_run_waits SET resume_claimed_at_ms=?`), (time.Now().Unix()-30)*1000)
 	require.NoError(t, err)
 	g.ageIntoAbandonment(t, rr.ID, "dead-process")
 
@@ -1830,7 +1831,7 @@ func TestCronFireRunsAsItsOwnConversation(t *testing.T) {
 	// The session is born a cron session, named for the job.
 	var source, title string
 	require.NoError(t, g.server.Env.SQL.QueryRowContext(ctx,
-		`SELECT source, title FROM fb_sessions WHERE id=?`, fire.SessionID).Scan(&source, &title))
+		dbx.Rebind(dbx.DialectOf(g.server.Env.SQL), `SELECT source, title FROM fb_sessions WHERE id=?`), fire.SessionID).Scan(&source, &title))
 	require.Equal(t, state.SessionSourceCron, source)
 	require.True(t, strings.HasPrefix(title, "nightly brief"), "fire session title %q", title)
 
@@ -1877,7 +1878,7 @@ func TestProjectCronFireRunsInItsProject(t *testing.T) {
 
 	var projectID, cwd string
 	require.NoError(t, g.server.Env.SQL.QueryRowContext(ctx,
-		`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, fire.SessionID).Scan(&projectID, &cwd))
+		dbx.Rebind(dbx.DialectOf(g.server.Env.SQL), `SELECT project_id, cwd FROM fb_sessions WHERE id=?`), fire.SessionID).Scan(&projectID, &cwd))
 	require.Equal(t, p.ID, projectID)
 	require.Equal(t, root, cwd)
 }

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -417,7 +418,7 @@ func userRowWithAttachments(t *testing.T, s *Server, sid string, paths ...string
 	}
 	parts += `]`
 	res, err := s.Sessions.DB().ExecContext(context.Background(),
-		`INSERT INTO fb_messages (session_id, role, visibility, content, parts, created_at) VALUES (?, 'user', 'visible', 'look', ?, 1)`,
+		dbx.Rebind(dbx.DialectOf(s.Sessions.DB()), `INSERT INTO fb_messages (session_id, role, visibility, content, parts, created_at) VALUES (?, 'user', 'visible', 'look', ?, 1)`),
 		sid, parts)
 	require.NoError(t, err)
 	id, err := res.LastInsertId()

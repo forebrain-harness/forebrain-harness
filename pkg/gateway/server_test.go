@@ -24,6 +24,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/gorilla/websocket"
@@ -918,7 +919,7 @@ func TestHandleChatWSRefusesATurnWithoutARunnableProject(t *testing.T) {
 	countRuns := func(t *testing.T, sid string) int {
 		t.Helper()
 		var n int
-		require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_runs WHERE session_id=?`, sid).Scan(&n))
+		require.NoError(t, db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM fb_runs WHERE session_id=?`), sid).Scan(&n))
 		return n
 	}
 
