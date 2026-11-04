@@ -199,6 +199,19 @@ func TestParseSlashCommandWebchatGoalWithoutObjectiveIsUsageHint(t *testing.T) {
 	require.True(t, res.Handled)
 }
 
+// seedConfigUpsertSQL is the seeding upsert in each engine's syntax — the
+// store's configSectionUpsertSQL with the timestamp pinned at 0, as a row
+// planted at install time reads. MySQL has no ON CONFLICT: the same upsert
+// keys on the section primary key with ON DUPLICATE KEY UPDATE.
+var seedConfigUpsertSQL = dbx.SQL{
+	SQLite: `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
+ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`,
+	MySQL: `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
+ON DUPLICATE KEY UPDATE value_json = VALUES(value_json)`,
+	Postgres: `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES($1,$2,0)
+ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`,
+}
+
 // seedConfigRoot stores every runtime section of a configuration the way the
 // write paths store them now (plan 188): one fb_config row per section. The
 // rows are planted directly, so a fixture may seed a shape the validator
@@ -211,8 +224,7 @@ func seedConfigRoot(t *testing.T, db *sql.DB, root appcfg.Root) {
 		if raw == nil {
 			continue
 		}
-		_, err = db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`), name, string(raw))
+		_, err = db.Exec(seedConfigUpsertSQL.For(dbx.DialectOf(db)), name, string(raw))
 		require.NoError(t, err)
 	}
 }
