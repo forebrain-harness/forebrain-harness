@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,6 +130,59 @@ func TestNetworkRetryExhaustionMessage(t *testing.T) {
 	if inner.calls != 4 {
 		t.Fatalf("provider calls = %d, want 1 + 2 streaming retries + 1 non-streaming", inner.calls)
 	}
+}
+
+// A give-up before the cap names the retries the lines announced, not the
+// cap: two announced network retries, then a failure the loop cannot
+// classify and its one silent non-streaming resend — after 2 retries, never
+// "10", and the silent resend is not counted.
+func TestNetworkRetryEarlyGiveUpNamesTheAnnouncedRetries(t *testing.T) {
+	reset := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
+	inner := &scriptedErrLLM{errs: []error{reset, reset, errors.New("unclassified failure"), errors.New("unclassified failure")}}
+	_, err := wrapNetworkRetryLLM(inner, 10, 0).Execute(context.Background(), nil, nil)
+	if err == nil || !strings.HasPrefix(err.Error(), "network error, gave up after 2 retries: ") {
+		t.Fatalf("error = %v, want the gave-up sentence counting the 2 announced retries", err)
+	}
+	if inner.calls != 4 {
+		t.Fatalf("provider calls = %d, want 4", inner.calls)
+	}
+
+	// One retry reads in the singular.
+	inner = &scriptedErrLLM{errs: []error{reset, errors.New("unclassified failure"), errors.New("unclassified failure")}}
+	_, err = wrapNetworkRetryLLM(inner, 10, 0).Execute(context.Background(), nil, nil)
+	if err == nil || !strings.HasPrefix(err.Error(), "network error, gave up after 1 retry: ") {
+		t.Fatalf("error = %v, want the gave-up sentence counting 1 retry", err)
+	}
+
+	// Only a silent resend: no retry line was shown, so no gave-up sentence.
+	inner = &scriptedErrLLM{errs: []error{errors.New("unclassified failure"), errors.New("unclassified failure")}}
+	_, err = wrapNetworkRetryLLM(inner, 10, 0).Execute(context.Background(), nil, nil)
+	if err == nil || strings.HasPrefix(err.Error(), "network error") {
+		t.Fatalf("error = %v, want the failure as it is", err)
+	}
+}
+
+// An inner layer's exhaustion passing through the network loop untouched is
+// not a network give-up: the sentence belongs to the loop's own exhaustion.
+func TestNetworkRetryLeavesAnInnerExhaustionAlone(t *testing.T) {
+	blank := &llm.MaxAttemptsExceededError{Attempts: 4, Err: &llm.APIError{StatusCode: http.StatusBadRequest, Message: "completed without output"}}
+	inner := &scriptedErrLLM{errs: []error{blank}}
+	_, err := wrapNetworkRetryLLM(inner, 10, 0).Execute(context.Background(), nil, nil)
+	if err == nil || strings.HasPrefix(err.Error(), "network error") {
+		t.Fatalf("error = %v, want the inner exhaustion as it was, not a network give-up", err)
+	}
+}
+
+// scriptedErrLLM fails each call with the next scripted error.
+type scriptedErrLLM struct {
+	errs  []error
+	calls int
+}
+
+func (m *scriptedErrLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	err := m.errs[min(m.calls, len(m.errs)-1)]
+	m.calls++
+	return nil, err
 }
 
 // alwaysNetFailLLM dies on the network every call: the loop's exhaustion path

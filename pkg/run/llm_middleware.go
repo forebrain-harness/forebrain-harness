@@ -376,14 +376,24 @@ func (n networkRetryLLM) Execute(ctx context.Context, messages []llm.Message, to
 	}
 	// Only a mounted retry loop can exhaust: with maxRetries 0 the inner
 	// chain is the raw LLM, and an exhaustion error bubbling out of it is
-	// another layer's business, not a network give-up.
+	// another layer's business, not a network give-up. The loop's own
+	// exhaustion is its direct return — an inner layer's (the blank-output
+	// retry's) passing through unwrapped is not a network give-up either.
 	if n.maxRetries > 0 {
-		var exhausted *llm.MaxAttemptsExceededError
-		if err != nil && errors.As(err, &exhausted) {
-			return nil, fmt.Errorf("network error, gave up after %d retries: %w", n.maxRetries, exhausted.Err)
+		if exhausted, ok := err.(*llm.MaxAttemptsExceededError); ok {
+			return nil, fmt.Errorf("network error, gave up after %s: %w", retriesPhrase(exhausted.Attempts-1), exhausted.Err)
 		}
 	}
 	return res, err
+}
+
+// retriesPhrase counts the retries a give-up made, numbered as the retry lines
+// number them — never the configured cap.
+func retriesPhrase(n int) string {
+	if n == 1 {
+		return "1 retry"
+	}
+	return fmt.Sprintf("%d retries", n)
 }
 
 func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {

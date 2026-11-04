@@ -1510,6 +1510,18 @@ func TestApplyPermissionPresetRejectsUnknownID(t *testing.T) {
 	require.ErrorContains(t, err, "unknown preset")
 }
 
+// --yolo outranks every session's row, so a pick would be reported as made
+// while nothing changed: it is refused, and nothing reaches the permission
+// store.
+func TestApplyPermissionPresetRefusedUnderYOLO(t *testing.T) {
+	t.Setenv(safety.EnvYOLO, "1")
+	home := t.TempDir()
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	_, err := s.ApplyPermissionPreset("s1", safety.PresetWorkspaceWrite)
+	require.ErrorIs(t, err, errYOLOPresetFixed)
+	require.Empty(t, s.runner().PermissionSnapshotForSession("s1").SandboxMode)
+}
+
 // A preset is never written to forebrain.yaml, so a reload of that file must not
 // be able to hand the session's sandbox back to whatever the file still says —
 // nor may the preset leak into the config the file is reloaded as.

@@ -549,6 +549,16 @@ func TestConfigEndpointEditsTheFileOnDisk(t *testing.T) {
 	if flag.PresetsVisible == nil || *flag.PresetsVisible != safety.SandboxAvailable() {
 		t.Fatalf("approval_presets_visible = %v, want this machine's sandbox answer", flag.PresetsVisible)
 	}
+	// And whether --yolo fixes the composer's switch: not in this process.
+	var fixed struct {
+		PresetFixed *bool `json:"approval_preset_fixed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fixed); err != nil {
+		t.Fatalf("decode fixed flag: %v", err)
+	}
+	if fixed.PresetFixed == nil || *fixed.PresetFixed {
+		t.Fatalf("approval_preset_fixed = %v, want false without --yolo", fixed.PresetFixed)
+	}
 
 	// A key the file does not support is saved as written and stores nothing:
 	// the file is not the runtime configuration's source any more.
@@ -3771,6 +3781,28 @@ func TestPresetWriteRoutesAreMissingWithoutASandbox(t *testing.T) {
 	persisted, err := s.persistedConfig(context.Background())
 	require.NoError(t, err)
 	require.NotEqual(t, appcfg.ApprovalPresetFullAccess, persisted.ApprovalPreset)
+}
+
+// A --yolo gateway runs every conversation with full access, so a session's
+// pick is refused rather than stored and answered as made; the config read
+// tells the composer to fix its switch.
+func TestSessionPresetRefusedUnderYOLO(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	t.Setenv(safety.EnvYOLO, "1")
+
+	rr := httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"workspace_write"}`)))
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "yolo_preset_fixed")
+
+	rr = httptest.NewRecorder()
+	s.handleConfigFile(rr, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var flag struct {
+		PresetFixed bool `json:"approval_preset_fixed"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &flag))
+	require.True(t, flag.PresetFixed)
 }
 
 // A preset picked in the web dropdown is durable: a server (and runner)

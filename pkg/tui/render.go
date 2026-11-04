@@ -234,6 +234,9 @@ type Renderer struct {
 	// it, because a posture that asks nothing is worth saying out loud (plan
 	// 215 §3.6).
 	fullAccess bool
+	// modeCycleFixed is whether shift+tab is inert in this process (--yolo):
+	// the footer then drops the key's hint from both segments above.
+	modeCycleFixed bool
 	// batchReadOnly is whether the conversation on screen is a batch
 	// execution, which the terminal shows read-only (plan 152): the footer
 	// says so, and Plan mode never applies there.
@@ -3642,6 +3645,25 @@ const planModeFooterLabel = "plan mode (shift+tab to cycle)"
 // /permissions, forced by the environment, or the only posture a machine with
 // no sandbox can run (plan 215 §3.6).
 const fullAccessFooterLabel = "full access (shift+tab to cycle)"
+
+// The two segments without their shift+tab hint, for a process where the key
+// cycles nothing: --yolo fixes full access for every conversation, and the
+// footer must not offer a key that does nothing.
+const (
+	planModeFixedFooterLabel   = "plan mode"
+	fullAccessFixedFooterLabel = "full access"
+)
+
+// SetModeCycleFixed says whether shift+tab is inert in this process, so the
+// footer names the mode and posture without offering the key.
+func (r *Renderer) SetModeCycleFixed(fixed bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.modeCycleFixed = fixed
+}
 
 // SetFullAccess says whether the conversation on screen runs with full access.
 // Plan mode outranks it in the footer when both hold: plan mode is the state

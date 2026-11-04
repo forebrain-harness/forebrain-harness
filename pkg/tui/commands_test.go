@@ -827,6 +827,32 @@ func TestCommandControllerHandlePermissionsShowsEveryPreset(t *testing.T) {
 	}
 }
 
+// --yolo leaves no preset to pick, so /permissions says so and opens nothing.
+func TestCommandControllerHandlePermissionsUnderYOLORefusesWithoutAPicker(t *testing.T) {
+	t.Setenv(safety.EnvYOLO, "1")
+	session := &fakeSession{activePreset: safety.PresetFullAccess}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	selector := &stubSelector{selectRichIdx: 0, selectRichOK: true}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+
+	if !ctrl.handlePermissions("s1") {
+		t.Fatalf("expected permissions command handled")
+	}
+	if selector.selectRichItems != nil {
+		t.Fatalf("a picker opened under --yolo: %#v", selector.selectRichItems)
+	}
+	if len(session.appliedPresets) != 0 {
+		t.Fatalf("a preset was applied under --yolo: %#v", session.appliedPresets)
+	}
+	for _, block := range renderer.vm.blocks {
+		if block.frame.Kind == FrameSystem && block.frame.Content == yoloPresetFixedNote {
+			return
+		}
+	}
+	t.Fatalf("no --yolo note on screen: %#v", renderer.vm.blocks)
+}
+
 func TestCommandControllerHandlePermissionsCancelAppliesNothing(t *testing.T) {
 	session := &fakeSession{}
 	var out bytes.Buffer

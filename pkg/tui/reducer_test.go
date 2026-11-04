@@ -5241,9 +5241,6 @@ func TestTransportRetryMsgSetsTrackerAndEmitsNoFrames(t *testing.T) {
 	if !snap.Retry.Active() {
 		t.Fatal("the recorded retry must read as active")
 	}
-	if want := "read tcp 10.0.0.1:1->10.0.0.2:2: read: operation timed out"; snap.Retry.Err != want {
-		t.Fatalf("tracker retry err = %q, want the transport's own sentence", snap.Retry.Err)
-	}
 	if remaining := time.Until(snap.Retry.Deadline); remaining <= 0 || remaining > 8*time.Second {
 		t.Fatalf("tracker retry deadline = %v away, want about 8s", remaining)
 	}
@@ -5341,7 +5338,7 @@ func TestTransportRetryClearedClearsTheStatus(t *testing.T) {
 // A new run does not inherit the previous run's retry status.
 func TestStartRunClearsAStaleRetry(t *testing.T) {
 	tracker := NewTracker()
-	tracker.ObserveTransportRetry("", 1, 10, time.Second, "x", 0)
+	tracker.ObserveTransportRetry("", 1, 10, time.Second, 0)
 	if !tracker.SnapshotActiveRun().Retry.Active() {
 		t.Fatal("sanity: the retry must be pending before the new run")
 	}

@@ -380,22 +380,22 @@ describe('useChatStream helpers', () => {
     }
   })
 
-  it('names a retry by its error only from the third attempt on', () => {
-    const retry = (attempt: number, total: number, error = '', status = 0) =>
-      ({ attempt, total, deadline: 0, error, status })
-    // The generic reason while the failure is still anonymous.
+  it('names a retry generically on every attempt', () => {
+    const retry = (attempt: number, total: number, status = 0) =>
+      ({ attempt, total, deadline: 0, status })
     expect(formatTransportRetryLine(retry(2, 10), t, 0).reason).toBe('Network error')
     expect(formatTransportRetryLine(retry(2, 10), t, 0).label).toBe('Retrying in 0s · attempt 2/10')
+    // Later attempts, the last included, never show the transport's own
+    // sentence (method, URL, socket address).
+    expect(formatTransportRetryLine(retry(3, 10), t, 0).reason).toBe('Network error')
+    expect(formatTransportRetryLine(retry(10, 10), t, 0).reason).toBe('Network error')
+    expect(formatTransportRetryLine(retry(2, 2), t, 0).reason).toBe('Network error')
     // A failure the provider answered with an HTTP status is an API error,
-    // not a network one.
-    expect(formatTransportRetryLine(retry(2, 10, '503 unavailable', 503), t, 0).reason).toBe('API error')
-    // From the third attempt (or a cap below it) the transport's own
-    // sentence stands in, whole.
-    expect(formatTransportRetryLine(retry(3, 10, 'read tcp 10.0.0.2:59383->…: operation timed out'), t, 0).reason)
-      .toBe('read tcp 10.0.0.2:59383->…: operation timed out')
-    expect(formatTransportRetryLine(retry(2, 2, 'read tcp: reset'), t, 0).reason).toBe('read tcp: reset')
+    // not a network one — on every attempt.
+    expect(formatTransportRetryLine(retry(2, 10, 503), t, 0).reason).toBe('API error')
+    expect(formatTransportRetryLine(retry(3, 10, 503), t, 0).reason).toBe('API error')
     // The countdown is read against the moment passed in.
-    expect(formatTransportRetryLine({ attempt: 1, total: 3, deadline: 8000, error: '', status: 0 }, t, 0).label)
+    expect(formatTransportRetryLine({ attempt: 1, total: 3, deadline: 8000, status: 0 }, t, 0).label)
       .toBe('Retrying in 8s · attempt 1/3')
   })
 
@@ -6050,13 +6050,18 @@ describe('useChatStream stream_partial', () => {
       expect(blocks.some((b) => b.kind === 'error')).toBe(false)
       expect(stream.runtimeStatus.value.retry).toMatchObject({ attempt: 1, total: 3 })
       expect(typeof stream.runtimeStatus.value.retry?.deadline).toBe('number')
-      expect(stream.runtimeStatus.value.retry?.error).toBe('read tcp 10.0.0.1:1->10.0.0.2:2: i/o timeout')
+      // The transport's own sentence never reaches the status line.
+      expect(stream.runtimeStatus.value.retry).not.toHaveProperty('error')
+      expect(formatTransportRetryLine(stream.runtimeStatus.value.retry!, t).reason).toBe('Network error')
       // The composer-level answer buffer went with the dead attempt.
       expect(stream.answer.value).toBe('')
 
       // The next failure walks the same status, never stacks anything.
       runEvent('transport_retry', { retry: 2, total: 3, wait_ms: 1000, error: 'read tcp: connection reset' })
       expect(stream.runtimeStatus.value.retry?.attempt).toBe(2)
+      runEvent('transport_retry', { retry: 3, total: 3, wait_ms: 2000, error: 'Post "https://opencode.ai/inference/go/openai/v1/chat/completions": dial tcp 172.65.90.21:443: i/o timeout' })
+      expect(stream.runtimeStatus.value.retry?.attempt).toBe(3)
+      expect(formatTransportRetryLine(stream.runtimeStatus.value.retry!, t).reason).toBe('Network error')
 
       // Recovery: the cleared notice hands the status line back before the
       // re-sent request's first words, which open a NEW block — the dead

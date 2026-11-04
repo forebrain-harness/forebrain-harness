@@ -2687,6 +2687,10 @@ func (s *ChatSession) PermissionPresets(sessionID string) ([]safety.ApprovalPres
 	return presets, s.runner().SessionPresetFor(context.Background(), sessionID).Current
 }
 
+// errYOLOPresetFixed refuses a preset change in a --yolo process, where every
+// conversation runs with full access whatever its own row says.
+var errYOLOPresetFixed = errors.New("permissions: yolo_preset_fixed — --yolo runs every conversation with full access")
+
 // ApplyPermissionPreset switches the session to one of the built-in approval
 // presets and reports the resulting state.
 //
@@ -2711,6 +2715,11 @@ func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string,
 	// written here would describe a session that never runs that way.
 	if r := s.runner(); r != nil && r.ProjectType() == state.ProjectTypeBatch {
 		return "", fmt.Errorf("permissions: batch_preset_fixed — a batch project's tasks always run in the task sandbox with no approvals")
+	}
+	// --yolo outranks every session's row for the life of the process, so a
+	// row written here would be reported as switched while nothing changed.
+	if safety.RuntimeYOLOEnabled() {
+		return "", errYOLOPresetFixed
 	}
 	// Persist first, apply second — a choice that failed to persist never
 	// ran only in memory either.

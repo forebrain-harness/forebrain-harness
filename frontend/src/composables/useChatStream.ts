@@ -1716,16 +1716,14 @@ function appendStreamedText(
 /**
  * transportRetryStatusOf reads the status line's retry facts off one
  * transport_retry payload: the n/total progress straight from the event, the
- * countdown deadline from its wait, the transport's own sentence (shown from
- * the third attempt on) and the HTTP status behind it (0 for transport
- * failures).
+ * countdown deadline from its wait and the HTTP status behind it (0 for
+ * transport failures).
  */
 function transportRetryStatusOf(payload: Record<string, unknown>): TransportRetryStatus {
   return {
     attempt: Number(payload.retry ?? 0),
     total: Number(payload.total ?? 0),
     deadline: Date.now() + Math.max(0, Number(payload.waitMs ?? 0)),
-    error: String(payload.error ?? '').trim(),
     status: Number(payload.status ?? 0),
   }
 }
@@ -1833,8 +1831,6 @@ export interface TransportRetryStatus {
   total: number
   /** When the next attempt fires, epoch ms. */
   deadline: number
-  /** The transport's own sentence; shown from the third attempt on. */
-  error: string
   /** The failure's HTTP status, 0 for transport errors; picks the generic reason. */
   status: number
 }
@@ -2687,11 +2683,11 @@ export function formatRuntimeStatusLabel(status: RuntimeStatus, tr: TranslateFn 
 
 /**
  * The status line while a network retry is pending: the reason (the only
- * part that may be cut) and the countdown with the attempt. The generic
- * reason — "API error" when the provider answered with an HTTP status,
- * "network error" when the transport itself died — stands in until the third
- * attempt, from which the transport's own sentence is shown — the terminal's
- * same rule.
+ * part that may be cut) and the countdown with the attempt. The reason is
+ * generic on every attempt — "API error" when the provider answered with an
+ * HTTP status, "network error" when the transport itself died — and never the
+ * transport's own sentence (method, URL, socket address): the terminal's same
+ * rule.
  */
 export interface TransportRetryLine {
   reason: string
@@ -2703,9 +2699,7 @@ export function formatTransportRetryLine(
   tr: TranslateFn = translate,
   now = Date.now(),
 ): TransportRetryLine {
-  const reason = retry.attempt >= Math.min(3, retry.total) && retry.error
-    ? retry.error
-    : tr(retry.status > 0 ? 'chat.transportRetry.apiError' : 'chat.transportRetry.networkError')
+  const reason = tr(retry.status > 0 ? 'chat.transportRetry.apiError' : 'chat.transportRetry.networkError')
   return {
     reason,
     label: tr('chat.transportRetry.retryIn', {

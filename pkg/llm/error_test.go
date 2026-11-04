@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -198,5 +200,60 @@ func TestIsRetryableNetworkErrorClassification(t *testing.T) {
 				t.Fatalf("IsRetryableNetworkError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// realDialTimeout is the error Go's own dialer returns for a dial that ran
+// out of its timeout, made by the real dialer: an already-expired timeout
+// fails before any packet leaves, with the error a 30s timeout gives — net's
+// errTimeout, which deliberately matches context.DeadlineExceeded.
+func realDialTimeout(t *testing.T) error {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: time.Nanosecond}).DialContext}}
+	resp, err := client.Post("https://192.0.2.1/v1/chat/completions", "application/json", strings.NewReader("{}"))
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "dial tcp 192.0.2.1:443: i/o timeout") {
+		t.Fatalf("sanity: dial error = %v, want net's errTimeout behind \"dial tcp …: i/o timeout\"", err)
+	}
+	return err
+}
+
+// A dial that times out is the network's failure whichever error net's
+// connect race hands back — errTimeout (matches context.DeadlineExceeded) or
+// os.ErrDeadlineExceeded; both read "dial tcp …: i/o timeout". Reading only
+// the second as transport made one outage retry on some attempts and give up
+// on others. The caller's own deadline, with no socket operation behind it,
+// still is not a transport failure.
+func TestDialTimeoutIsATransportFailureWhicheverWayItSurfaces(t *testing.T) {
+	t.Parallel()
+
+	transport := map[string]error{
+		"dial context timeout": realDialTimeout(t),
+		"dial socket deadline": &url.Error{Op: "Post", URL: "https://api.example/v1/chat/completions",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}},
+		"dns lookup timeout": &url.Error{Op: "Post", URL: "https://api.example/v1/chat/completions",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "i/o timeout", Name: "api.example", IsTimeout: true, UnwrapErr: context.DeadlineExceeded}}},
+	}
+	for name, err := range transport {
+		if !IsRetryableNetworkError(err) {
+			t.Errorf("%s: IsRetryableNetworkError(%v) = false, want true", name, err)
+		}
+		if got := ClassifyStreamFailure(err, StreamProgressSnapshot{}); got != CauseConnectionLost {
+			t.Errorf("%s: ClassifyStreamFailure(%v) = %q, want %q", name, err, got, CauseConnectionLost)
+		}
+	}
+
+	callerDeadline := map[string]error{
+		"bare":           context.DeadlineExceeded,
+		"wrapped":        fmt.Errorf("turn: %w", context.DeadlineExceeded),
+		"on a request":   &url.Error{Op: "Post", URL: "https://api.example/v1/chat/completions", Err: context.DeadlineExceeded},
+		"cancelled dial": &url.Error{Op: "Post", URL: "https://api.example/v1/chat/completions", Err: &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}},
+	}
+	for name, err := range callerDeadline {
+		if IsRetryableNetworkError(err) {
+			t.Errorf("%s: IsRetryableNetworkError(%v) = true, want false", name, err)
+		}
 	}
 }

@@ -771,6 +771,10 @@ type SessionStore struct {
 	// session's picker owns the row, which is why changing this value reaches
 	// only sessions created after it.
 	approvalPreset string
+	// birthPresets holds presets chosen for sessions that had no row yet,
+	// keyed by session id, until ensureSession births them with it.
+	birthPresetsMu sync.Mutex
+	birthPresets   map[string]bornSessionPreset
 
 	agentMu sync.RWMutex
 	agentID string
@@ -1065,10 +1069,20 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	// fixed posture and gets no row at all, and an existing row (a picker's
 	// choice, a --yolo one, an inferred one) is never overwritten. The SELECT
 	// ends with a WHERE clause so SQLite binds ON CONFLICT to the insert.
+	// A preset chosen before the session existed is the one it is born with:
+	// the choice was made for this conversation, the default was not.
+	bornSource := SessionPresetSourceDefault
+	held, holding := s.takeBirthPreset(id)
+	if holding {
+		bornPreset, bornSource = held.preset, held.source
+	}
 	nowMillis := time.Now().UnixMilli()
 	if _, err := q.ExecContext(ctx, ensureSessionPresetSQL.For(dbx.DialectOf(q)),
-		bornPreset, SessionPresetSourceDefault, nowMillis, id, s.AgentID(), id,
+		bornPreset, bornSource, nowMillis, id, s.AgentID(), id,
 	); err != nil {
+		if holding {
+			s.holdBirthPreset(id, held)
+		}
 		return fmt.Errorf("seed session approval preset: %w", err)
 	}
 	return nil
@@ -4176,6 +4190,11 @@ const SessionPresetWorkspaceWrite = "workspace_write"
 // SaveSessionPermissionPreset stores the approval preset one session runs
 // under, last-write-wins, the persistence twin of the in-process session
 // update. source is one of the SessionPresetSource* constants.
+//
+// A session with no row yet — a terminal conversation before its first
+// message — has nowhere to store the choice, so it is held until the session
+// is born and becomes the row it is born with, in place of the global default
+// (ensureSession). stored stays false: nothing is in the table yet.
 func (s *SessionStore) SaveSessionPermissionPreset(
 	ctx context.Context, sessionID, presetID, source string,
 ) (stored bool, err error) {
@@ -4200,7 +4219,38 @@ func (s *SessionStore) SaveSessionPermissionPreset(
 	if err != nil {
 		return false, err
 	}
-	return affected > 0, nil
+	if affected == 0 {
+		s.holdBirthPreset(sessionID, bornSessionPreset{preset: presetID, source: source})
+		return false, nil
+	}
+	s.takeBirthPreset(sessionID)
+	return true, nil
+}
+
+// bornSessionPreset is a preset chosen for a session that has no row yet.
+type bornSessionPreset struct {
+	preset string
+	source string
+}
+
+func (s *SessionStore) holdBirthPreset(sessionID string, p bornSessionPreset) {
+	s.birthPresetsMu.Lock()
+	defer s.birthPresetsMu.Unlock()
+	if s.birthPresets == nil {
+		s.birthPresets = map[string]bornSessionPreset{}
+	}
+	s.birthPresets[sessionID] = p
+}
+
+// takeBirthPreset removes and returns the preset held for a session.
+func (s *SessionStore) takeBirthPreset(sessionID string) (bornSessionPreset, bool) {
+	s.birthPresetsMu.Lock()
+	defer s.birthPresetsMu.Unlock()
+	p, ok := s.birthPresets[sessionID]
+	if ok {
+		delete(s.birthPresets, sessionID)
+	}
+	return p, ok
 }
 
 // SessionPermissionPreset returns the session's stored approval preset, its

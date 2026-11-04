@@ -4161,13 +4161,22 @@ export const forebrainApi = {
    * settings page reads for the sandbox's own switches (plan 215 §3.4).
    */
   approvalPresetsVisible() {
-    // Raw for the same reason settings() is: the field's own name is the
-    // gateway's snake_case, and the interceptor would rename it into one this
-    // read never finds — making every machine look like it has a sandbox.
+    return forebrainApi.approvalPresetSwitch().then((state) => state.visible)
+  },
+
+  /**
+   * The composer's preset switch in one read: whether this machine has a
+   * sandbox to choose about (`visible`), and whether a --yolo gateway fixes
+   * every conversation at full access anyway (`fixed`).
+   */
+  approvalPresetSwitch() {
+    // Raw for the same reason settings() is: the fields' own names are the
+    // gateway's snake_case, and the interceptor would rename them into ones
+    // this read never finds — making every machine look like it has a sandbox.
     return gatewayFetch(`${API_BASE}/config`).then(async (res) => {
       if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
-      const raw = (await res.json()) as { approval_presets_visible?: boolean }
-      return raw.approval_presets_visible !== false
+      const raw = (await res.json()) as { approval_presets_visible?: boolean; approval_preset_fixed?: boolean }
+      return { visible: raw.approval_presets_visible !== false, fixed: raw.approval_preset_fixed === true }
     })
   },
 

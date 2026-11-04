@@ -5889,6 +5889,11 @@ func (s *Server) handleConfigFile(w http.ResponseWriter, r *http.Request) {
 			// the composer already reads; the settings page gets the same answer
 			// from GET /api/settings, from the same function.
 			"approval_presets_visible": safety.SandboxAvailable(),
+			// A --yolo gateway runs every conversation with full access
+			// whatever its own row says, so the composer's switch is fixed
+			// there too; the settings page keeps its stored default, which
+			// is a real save for the processes started without the flag.
+			"approval_preset_fixed": safety.RuntimeYOLOEnabled(),
 		})
 	case http.MethodPut:
 		var req struct {
@@ -8707,6 +8712,12 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 	// longer offers it expects.
 	if !safety.SandboxAvailable() {
 		http.NotFound(w, r)
+		return
+	}
+	// --yolo outranks every conversation's row for the life of the process: a
+	// row stored here would be answered as picked while nothing changed.
+	if safety.RuntimeYOLOEnabled() {
+		http.Error(w, "yolo_preset_fixed", http.StatusConflict)
 		return
 	}
 	var req struct {

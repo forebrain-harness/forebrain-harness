@@ -2,10 +2,13 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -170,9 +173,10 @@ func TestStreamFailureWithOnlyTextIsResent(t *testing.T) {
 	}
 }
 
-// Only thinking finished, three times: two resends withdraw the finished
-// thinking, the third finishes the turn from nothing.
-func TestThinkingOnlyFailureRetriesTwiceWithdrawingThinkingThenEnds(t *testing.T) {
+// Only thinking finished, every time: two silent resends withdraw the
+// finished thinking; past them the budget pays for announced retries, 1/2 and
+// 2/2, each withdrawing it too; only then does the turn finish from nothing.
+func TestThinkingOnlyFailureRetriesSilentlyThenAnnouncedUntilTheCapThenEnds(t *testing.T) {
 	attempt := func(ctx context.Context) (*Result, error) {
 		streamFire(ctx, func(sink *StreamSink) {
 			sink.OnReasoningDelta("thinking")
@@ -180,7 +184,7 @@ func TestThinkingOnlyFailureRetriesTwiceWithdrawingThinkingThenEnds(t *testing.T
 		})
 		return nil, connDropped()
 	}
-	result, err, inner, rec := runStreamRetry(t, 10, attempt, attempt, attempt)
+	err, inner, rec := runFastStreamRetry(t, 2, attempt, attempt, attempt, attempt, attempt)
 	var partial *PartialResponseError
 	if !errors.As(err, &partial) {
 		t.Fatalf("error = %v, want a PartialResponseError", err)
@@ -188,21 +192,17 @@ func TestThinkingOnlyFailureRetriesTwiceWithdrawingThinkingThenEnds(t *testing.T
 	if partial.Complete || partial.Failed {
 		t.Fatalf("partial = complete:%v failed:%v, want keep-partial", partial.Complete, partial.Failed)
 	}
-	if inner.calls != 3 {
-		t.Fatalf("inner calls = %d, want 3", inner.calls)
+	if inner.calls != 5 {
+		t.Fatalf("inner calls = %d, want 1 + 2 silent resends + 2 announced retries", inner.calls)
 	}
-	if len(rec.live()) != 0 {
-		t.Fatalf("non-Cleared notices = %+v, want none (no status line for thinking-only resends)", rec.live())
+	live := rec.live()
+	if len(live) != 2 || live[0].Retry != 1 || live[1].Retry != 2 || live[1].Total != 2 {
+		t.Fatalf("announced retries = %+v, want 1/2 then 2/2 after the silent resends", live)
 	}
-	if rec.droppedThinking() != 2 {
-		t.Fatalf("DropFinishedThinking notices = %d, want 2", rec.droppedThinking())
-	}
-	// Two withdraw announcements plus the finish's catch-up Cleared.
-	if rec.cleared() != 3 {
-		t.Fatalf("Cleared notices = %d, want 3", rec.cleared())
-	}
-	if result != nil {
-		t.Fatalf("result = %#v, want nil", result)
+	// Every resend withdraws the finished thinking: the two silent ones'
+	// Cleared notices and the two announcements.
+	if rec.droppedThinking() != 4 {
+		t.Fatalf("DropFinishedThinking notices = %d, want 4", rec.droppedThinking())
 	}
 }
 
@@ -405,6 +405,214 @@ func TestStreamRetryCancellationIsReturnedAsIs(t *testing.T) {
 	var exhausted *MaxAttemptsExceededError
 	if errors.As(err, &exhausted) {
 		t.Fatal("cancellation must not be wrapped as exhaustion")
+	}
+}
+
+// runFastStreamRetry is runStreamRetry with a 1ms back-off, for scripts long
+// enough that the real back-off would dominate the test.
+func runFastStreamRetry(t *testing.T, maxRetries int, attempts ...func(ctx context.Context) (*Result, error)) (error, *scriptedStreamLLM, *streamRetryRecorder) {
+	t.Helper()
+	rec := &streamRetryRecorder{}
+	sink := &StreamSink{
+		OnDelta:          func(string) {},
+		OnReasoningDelta: func(string) {},
+		OnReasoningDone:  func() {},
+		OnTextBlockDone:  func() {},
+		OnToolCallReady:  func(ToolCall) {},
+		OnMessageStop:    func() {},
+		OnTransportRetry: func(tr TransportRetry) { rec.retries = append(rec.retries, tr) },
+		OnResponseNotice: func(n ResponseNotice) { rec.notices = append(rec.notices, n) },
+	}
+	ctx, _ := WithStreamProgress(WithStreamSink(context.Background(), sink))
+	inner := &scriptedStreamLLM{attempts: attempts}
+	mw := NewStreamRetry(maxRetries, WithInitialBackoff(time.Millisecond), WithMaxBackoff(time.Millisecond),
+		WithRetryNotify(func(ctx context.Context, tr TransportRetry) {
+			if s := StreamSinkFrom(ctx); s != nil && s.OnTransportRetry != nil {
+				s.OnTransportRetry(tr)
+			}
+		}))
+	_, err := Use(inner, mw).Execute(ctx, []Message{UserMessage(Text("hi"))}, nil)
+	return err, inner, rec
+}
+
+// The outage from the field: every dial times out, the two errors net's
+// connect race hands back interleaved. Each is a dropped connection, so the
+// retries are announced 1..N with nothing silent in between, the budget runs
+// out at N/N, the one non-streaming attempt follows, and the give-up counts
+// the N retries the last retry line showed.
+func TestDialTimeoutsRetryAsAnnouncedStreamsUntilTheCap(t *testing.T) {
+	const maxRetries = 10
+	shapes := []error{
+		realDialTimeout(t),
+		&url.Error{Op: "Post", URL: "https://api.example/v1/chat/completions",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}},
+	}
+	var attempts []func(ctx context.Context) (*Result, error)
+	for i := range maxRetries + 2 {
+		err := shapes[i%2]
+		attempts = append(attempts, func(context.Context) (*Result, error) { return nil, err })
+	}
+	err, inner, rec := runFastStreamRetry(t, maxRetries, attempts...)
+
+	live := rec.live()
+	if len(live) != maxRetries {
+		t.Fatalf("announced retries = %+v, want %d", live, maxRetries)
+	}
+	for i, tr := range live {
+		if tr.Retry != i+1 || tr.Total != maxRetries {
+			t.Fatalf("announcement %d = %d/%d, want %d/%d", i, tr.Retry, tr.Total, i+1, maxRetries)
+		}
+	}
+	if inner.calls != maxRetries+2 {
+		t.Fatalf("inner calls = %d, want %d (first + %d streaming retries + 1 non-streaming)", inner.calls, maxRetries+2, maxRetries)
+	}
+	for i, ns := range inner.nonStreaming {
+		if ns != (i == maxRetries+1) {
+			t.Fatalf("nonStreaming per call = %v, want only the last call without streaming", inner.nonStreaming)
+		}
+	}
+	var exhausted *MaxAttemptsExceededError
+	if !errors.As(err, &exhausted) || exhausted.Attempts-1 != maxRetries {
+		t.Fatalf("error = %v, want exhaustion after %d retries", err, maxRetries)
+	}
+}
+
+// A give-up before the cap counts the retries the lines announced — the
+// number the last one showed — never the cap it did not reach, and never the
+// silent non-streaming resend that followed.
+func TestEarlyGiveUpCountsTheAnnouncedRetriesNotTheCap(t *testing.T) {
+	drop := func(context.Context) (*Result, error) { return nil, connDropped() }
+	odd := func(context.Context) (*Result, error) { return nil, errors.New("unclassified failure") }
+	err, inner, rec := runFastStreamRetry(t, 10, drop, odd, odd)
+
+	if live := rec.live(); len(live) != 1 || live[0].Retry != 1 || live[0].Total != 10 {
+		t.Fatalf("announced retries = %+v, want retry 1/10 alone", live)
+	}
+	if inner.calls != 3 || !inner.nonStreaming[2] {
+		t.Fatalf("calls = %d nonStreaming = %v, want 3 with the last one non-streaming", inner.calls, inner.nonStreaming)
+	}
+	var exhausted *MaxAttemptsExceededError
+	if !errors.As(err, &exhausted) || exhausted.Attempts != 2 {
+		t.Fatalf("error = %v, want a give-up after the 1 announced retry", err)
+	}
+}
+
+// Silent resends are not charged to the budget: a stalled first attempt is
+// re-sent with no line, and the retries that follow are still announced 1/2,
+// 2/2 with no gap; only then does the one non-streaming attempt go out.
+func TestSilentResendsLeaveTheBudgetToTheAnnouncedRetries(t *testing.T) {
+	stall := func(context.Context) (*Result, error) {
+		return nil, &StreamStallError{Headers: true, After: time.Second}
+	}
+	drop := func(context.Context) (*Result, error) { return nil, connDropped() }
+	err, inner, rec := runFastStreamRetry(t, 2, stall, drop, drop, drop, drop)
+
+	live := rec.live()
+	if len(live) != 2 || live[0].Retry != 1 || live[1].Retry != 2 || live[1].Total != 2 {
+		t.Fatalf("announced retries = %+v, want 1/2 then 2/2", live)
+	}
+	if inner.calls != 5 || !inner.nonStreaming[4] {
+		t.Fatalf("calls = %d nonStreaming = %v, want stall + silent resend + 2 announced retries + 1 non-streaming", inner.calls, inner.nonStreaming)
+	}
+	var exhausted *MaxAttemptsExceededError
+	if !errors.As(err, &exhausted) || exhausted.Attempts != 3 {
+		t.Fatalf("error = %v, want a give-up after the 2 announced retries", err)
+	}
+}
+
+// The field case behind the rule: a stall is re-sent silently, the second
+// stall goes out once without streaming, and that attempt times out. The
+// table's silent fallbacks are spent, but the budget is not — every later
+// stall is an announced retry, 1/3 through 3/3, and only then does the loop
+// give up, after 3.
+func TestStallsPastTheSilentFallbacksRetryAnnouncedUntilTheCap(t *testing.T) {
+	stall := func(context.Context) (*Result, error) {
+		return nil, &StreamStallError{Headers: true, After: time.Second}
+	}
+	nonStreamingTimeout := func(context.Context) (*Result, error) { return nil, fmt.Errorf("deepseek: %w", ErrNonStreamingTimeout) }
+	err, inner, rec := runFastStreamRetry(t, 3, stall, stall, nonStreamingTimeout, stall, stall, stall)
+
+	live := rec.live()
+	if len(live) != 3 {
+		t.Fatalf("announced retries = %+v, want 1/3, 2/3, 3/3", live)
+	}
+	for i, tr := range live {
+		if tr.Retry != i+1 || tr.Total != 3 {
+			t.Fatalf("announcement %d = %d/%d, want %d/3", i, tr.Retry, tr.Total, i+1)
+		}
+	}
+	want := []bool{false, false, true, false, false, false}
+	if inner.calls != len(want) || !reflect.DeepEqual(inner.nonStreaming, want) {
+		t.Fatalf("calls = %d nonStreaming = %v, want %v", inner.calls, inner.nonStreaming, want)
+	}
+	var exhausted *MaxAttemptsExceededError
+	if !errors.As(err, &exhausted) || exhausted.Attempts != 4 {
+		t.Fatalf("error = %v, want a give-up after the 3 announced retries", err)
+	}
+}
+
+// After thinking finished, a server error is re-sent silently twice; past
+// that the budget still pays for announced retries, each withdrawing the
+// dead attempt's finished thinking, until N/N.
+func TestThinkingOnlyServerErrorPastTheSilentResendsRetriesAnnounced(t *testing.T) {
+	attempt := func(ctx context.Context) (*Result, error) {
+		streamFire(ctx, func(sink *StreamSink) {
+			sink.OnReasoningDelta("thinking")
+			sink.OnReasoningDone()
+		})
+		return nil, &APIError{Type: "server_error", Message: "upstream failed"}
+	}
+	err, inner, rec := runFastStreamRetry(t, 2, attempt, attempt, attempt, attempt, attempt)
+
+	live := rec.live()
+	if len(live) != 2 || live[0].Retry != 1 || live[1].Retry != 2 {
+		t.Fatalf("announced retries = %+v, want 1/2 then 2/2", live)
+	}
+	for _, tr := range live {
+		if !tr.DropFinishedThinking {
+			t.Fatalf("announcement %+v must withdraw the finished thinking", tr)
+		}
+	}
+	if inner.calls != 5 {
+		t.Fatalf("calls = %d, want 1 + 2 silent resends + 2 announced retries", inner.calls)
+	}
+	var exhausted *MaxAttemptsExceededError
+	if !errors.As(err, &exhausted) || exhausted.Attempts != 3 {
+		t.Fatalf("error = %v, want a give-up after the 2 announced retries", err)
+	}
+}
+
+// An error that is not the network's is never retried past the table, budget
+// or not: the one non-streaming resend, then the error as it is.
+func TestNonNetworkFailureIsNotRetriedPastTheFallbacks(t *testing.T) {
+	malformed := func(context.Context) (*Result, error) {
+		return nil, fmt.Errorf("decode: %w", &json.SyntaxError{})
+	}
+	err, inner, rec := runFastStreamRetry(t, 10, malformed, malformed)
+	if len(rec.live()) != 0 || inner.calls != 2 || !inner.nonStreaming[1] {
+		t.Fatalf("live = %+v calls = %d nonStreaming = %v, want the attempt and its one silent non-streaming resend", rec.live(), inner.calls, inner.nonStreaming)
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("error = %v, want the malformed failure as it is", err)
+	}
+}
+
+// When only silent resends happened no retry line was ever shown, so the
+// failure is returned as it is — not as a give-up after some count.
+func TestOnlySilentResendsReturnTheErrorAsItIs(t *testing.T) {
+	odd := func(context.Context) (*Result, error) { return nil, errors.New("unclassified failure") }
+	err, inner, rec := runFastStreamRetry(t, 10, odd, odd)
+
+	if live := rec.live(); len(live) != 0 {
+		t.Fatalf("announced retries = %+v, want none", live)
+	}
+	if inner.calls != 2 || !inner.nonStreaming[1] {
+		t.Fatalf("calls = %d nonStreaming = %v, want the attempt and its one non-streaming resend", inner.calls, inner.nonStreaming)
+	}
+	var exhausted *MaxAttemptsExceededError
+	if errors.As(err, &exhausted) || err == nil || err.Error() != "unclassified failure" {
+		t.Fatalf("error = %v, want the failure as it is", err)
 	}
 }
 

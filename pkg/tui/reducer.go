@@ -147,7 +147,6 @@ type TransportRetryStatus struct {
 	Retry    int
 	Total    int
 	Deadline time.Time
-	Err      string
 	// Status is the HTTP status of the failure, 0 for transport errors; it
 	// picks the line's generic reason (API error vs Network error).
 	Status int
@@ -1431,11 +1430,7 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			return EventResult{}
 		}
 		if r.tracker != nil {
-			errText := ""
-			if m.Err != nil {
-				errText = m.Err.Error()
-			}
-			r.tracker.ObserveTransportRetry(agentID, m.Retry, m.Total, m.Wait, errText, m.Status)
+			r.tracker.ObserveTransportRetry(agentID, m.Retry, m.Total, m.Wait, m.Status)
 		}
 		return EventResult{}
 	case ResponseNoticeMsg:
@@ -3730,8 +3725,14 @@ func (r *Renderer) composerFooterSidesLocked() (string, string) {
 		// being prepared in plan mode, and the posture it would run under is
 		// the second thing to know, not the first (plan 215 §3.6).
 		lead = planModeFooterLabel
+		if r.modeCycleFixed {
+			lead = planModeFixedFooterLabel
+		}
 	} else if r.fullAccess {
 		lead = fullAccessFooterLabel
+		if r.modeCycleFixed {
+			lead = fullAccessFixedFooterLabel
+		}
 	}
 	return joinFooterSegments(lead, r.footer.Model, r.footer.ReasoningEffort, peerTreeFooterSegment(r.peerCount)),
 		formatComposerTokenStats(r.composerTokens.get(""))
@@ -8256,7 +8257,7 @@ func (t *Tracker) ObserveAgentFirstToken(agentID string, wait time.Duration) {
 // countdown is derived from the deadline it stores, so the Working line walks
 // it at paint time with no timer of its own. status is the failure's HTTP
 // status, 0 for transport errors.
-func (t *Tracker) ObserveTransportRetry(agentID string, retry, total int, wait time.Duration, errText string, status int) {
+func (t *Tracker) ObserveTransportRetry(agentID string, retry, total int, wait time.Duration, status int) {
 	if t == nil {
 		return
 	}
@@ -8269,7 +8270,6 @@ func (t *Tracker) ObserveTransportRetry(agentID string, retry, total int, wait t
 		Retry:    retry,
 		Total:    total,
 		Deadline: time.Now().Add(wait),
-		Err:      errText,
 		Status:   status,
 	}
 	t.mu.Unlock()

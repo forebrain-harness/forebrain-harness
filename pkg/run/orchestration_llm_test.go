@@ -10644,7 +10644,11 @@ func TestStreamFailureAfterCompletedToolCallRunsItAndContinues(t *testing.T) {
 // Only thinking finished, three times in a row: the first two resends
 // withdraw their finished thinking rows, the third finishes the turn with the
 // no-response sentence — and only the last attempt's block is left on disk.
-func TestThinkingOnlyFailureRetriesTwiceWithdrawingThinkingThenEnds(t *testing.T) {
+// Only thinking finished, every time: two silent resends, then the budget's
+// three announced retries, each withdrawing the dead attempt's thinking rows;
+// only after 3/3 does the turn end with the no-response sentence, keeping the
+// final attempt's thinking alone.
+func TestThinkingOnlyFailureRetriesUntilTheCapWithdrawingThinkingThenEnds(t *testing.T) {
 	attempt := func(n int) func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
 		return func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
 			sink.OnReasoningDelta(fmt.Sprintf("thinking #%d", n))
@@ -10652,12 +10656,13 @@ func TestThinkingOnlyFailureRetriesTwiceWithdrawingThinkingThenEnds(t *testing.T
 			return nil, connDropErr()
 		}
 	}
-	res, err, inner, _, store := runStreamFailure(t, "streamfail-thinking-only", attempt(1), attempt(2), attempt(3))
+	res, err, inner, _, store := runStreamFailure(t, "streamfail-thinking-only",
+		attempt(1), attempt(2), attempt(3), attempt(4), attempt(5), attempt(6))
 	if err == nil || err.Error() != "Connection lost before a response was produced. Try again." {
 		t.Fatalf("turn error = %v, want the no-response sentence", err)
 	}
-	if inner.calls != 3 {
-		t.Fatalf("model calls = %d, want 3", inner.calls)
+	if inner.calls != 6 {
+		t.Fatalf("model calls = %d, want 1 + 2 silent resends + 3 announced retries", inner.calls)
 	}
 	if res != nil {
 		t.Fatalf("result = %+v, want nil", res)
@@ -10672,7 +10677,7 @@ func TestThinkingOnlyFailureRetriesTwiceWithdrawingThinkingThenEnds(t *testing.T
 			reasoning = append(reasoning, row.Content)
 		}
 	}
-	if len(reasoning) != 1 || !strings.Contains(reasoning[0], "thinking #3") {
+	if len(reasoning) != 1 || !strings.Contains(reasoning[0], "thinking #6") {
 		t.Fatalf("reasoning rows = %v, want only the final attempt's", reasoning)
 	}
 }

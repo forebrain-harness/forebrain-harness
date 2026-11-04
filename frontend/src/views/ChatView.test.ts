@@ -656,7 +656,7 @@ describe('ChatView run status line', () => {
       planCompleted: 3,
       planTotal: 5,
       planActive: 'fix the middleware',
-      retry: { attempt: 2, total: 10, deadline: Date.now() + 8000, error: '', status: 0 },
+      retry: { attempt: 2, total: 10, deadline: Date.now() + 8000, status: 0 },
     }
     const wrapper = await mountView()
     await flushPromises()

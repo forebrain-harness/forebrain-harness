@@ -66,6 +66,10 @@ import { useI18n } from '@/locales'
  * switch says so and stops being a switch: one option, disabled, and no menu.
  * Saying nothing would leave the one thing a person must know — that nothing is
  * being asked — to be discovered (owner 2026-10-31, plan 215 §3.4).
+ *
+ * A --yolo gateway is pinned the same way: every conversation runs with full
+ * access whatever was picked, so a switch that still moved would claim a
+ * choice the server never applies (owner 2026-11-04).
  */
 const props = defineProps<{ sessionId: string | null }>()
 
@@ -84,7 +88,7 @@ const presets = computed<Preset[]>(() => {
     { id: 'workspace_write', label: t('approval.default'), description: t('approval.defaultDescription') },
     { id: 'full_access', label: t('approval.fullAccess'), description: t('approval.fullAccessDescription') },
   ]
-  return presetsVisible.value ? all : all.filter((preset) => preset.id === 'full_access')
+  return frozen.value ? all.filter((preset) => preset.id === 'full_access') : all
 })
 
 const open = ref(false)
@@ -95,8 +99,10 @@ const menuRef = ref<HTMLElement | null>(null)
 
 /** Whether this machine has a sandbox, so a preset is a choice at all. */
 const presetsVisible = ref(true)
-/** The one posture a machine without a sandbox runs, pinned: no menu, no pick. */
-const frozen = computed(() => !presetsVisible.value)
+/** Whether --yolo fixes every conversation of this gateway at full access. */
+const presetFixed = ref(false)
+/** Full access pinned — no sandbox, or --yolo: no menu, no pick. */
+const frozen = computed(() => !presetsVisible.value || presetFixed.value)
 
 /** The preset picked before any conversation existed, until it is handed over. */
 const draft = ref<string | null>(null)
@@ -129,11 +135,14 @@ async function load(sessionId: string | null) {
 // gateway runs, and every composer on the page shows the same one.
 async function loadVisibility() {
   try {
-    presetsVisible.value = await forebrainApi.approvalPresetsVisible()
+    const state = await forebrainApi.approvalPresetSwitch()
+    presetsVisible.value = state.visible
+    presetFixed.value = state.fixed
   } catch {
     // A read that failed leaves the switch as it always was: the presets are
     // the default, and the server refuses a write it will not take anyway.
     presetsVisible.value = true
+    presetFixed.value = false
   }
   if (frozen.value) current.value = 'full_access'
 }

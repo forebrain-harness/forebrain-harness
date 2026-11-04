@@ -28,7 +28,6 @@ import (
 	statepkg "github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
-	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/require"
 )
 
@@ -4480,6 +4479,58 @@ func TestHotkeyCyclesOnlyFullAccessAndPlanWithoutASandbox(t *testing.T) {
 	}
 }
 
+// --yolo fixes full access for the whole process, so shift+tab does nothing at
+// all — not the preset, and not plan mode either — and the footer stops
+// offering it (owner 2026-11-04).
+func TestHotkeyCycleDoesNothingUnderYOLOAndFooterDropsTheHint(t *testing.T) {
+	t.Setenv(safety.EnvYOLO, "1")
+	home := t.TempDir()
+	session := &fakeSession{activePreset: safety.PresetFullAccess}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	renderer.SetComposerFooter(ComposerFooter{Model: "openai/gpt-5"})
+	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
+	footer := func() string {
+		renderer.mu.Lock()
+		defer renderer.mu.Unlock()
+		return renderer.composerFooterText(120)
+	}
+
+	syncPlanModeIndicator(renderer, state)
+	if got := footer(); !strings.HasPrefix(got, fullAccessFixedFooterLabel+" · ") || strings.Contains(got, "shift+tab") {
+		t.Fatalf("full access footer under --yolo = %q, want the segment without the hint", got)
+	}
+	for i := 0; i < 3; i++ {
+		if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyCycleMode) {
+			t.Fatal("expected the cycle hotkey to be handled")
+		}
+		st, err := statepkg.Get(home, "s1")
+		if err != nil {
+			t.Fatalf("state.Get: %v", err)
+		}
+		if st.Mode == statepkg.ModePlan {
+			t.Fatalf("press %d entered plan mode under --yolo", i+1)
+		}
+	}
+	if len(session.appliedPresets) != 0 {
+		t.Fatalf("presets applied under --yolo: %v", session.appliedPresets)
+	}
+
+	// Plan mode reached another way (/plan) is named without the hint too.
+	if _, err := statepkg.Switch(home, "s1", statepkg.ModePlan); err != nil {
+		t.Fatal(err)
+	}
+	syncPlanModeIndicator(renderer, state)
+	if got := footer(); !strings.HasPrefix(got, planModeFixedFooterLabel+" · ") || strings.Contains(got, "shift+tab") {
+		t.Fatalf("plan mode footer under --yolo = %q, want the segment without the hint", got)
+	}
+	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyCycleMode) {
+		t.Fatal("expected the cycle hotkey to be handled")
+	}
+	if st, _ := statepkg.Get(home, "s1"); st.Mode != statepkg.ModePlan {
+		t.Fatalf("shift+tab left plan mode under --yolo: mode = %q", st.Mode)
+	}
+}
+
 // The footer names full access wherever it is in force, and plan mode outranks
 // it when both hold (plan 215 §3.6).
 func TestFooterNamesFullAccessAndPlanModeOutranksIt(t *testing.T) {
@@ -7323,16 +7374,15 @@ func TestClearedTransportRetryWithdrawsTheFinalDeadAttempt(t *testing.T) {
 }
 
 // While a retry is pending the Working line is the retry status alone: the
-// reason (generic for the first attempts, the transport's own sentence from
-// the third on, cut to 60 columns), the countdown, and the attempt counter —
-// never the ordinary "Working" segments.
+// generic reason, the countdown, and the attempt counter — never the ordinary
+// "Working" segments.
 func TestWorkingLineShowsRetryStatus(t *testing.T) {
 	formatterFor := func(s TransportRetryStatus) transientStatusFormatter {
 		return workingStatusFormatter(func() Counters { return Counters{Retry: s} }, nil)
 	}
 
 	// Attempt 2 of 10 names the failure generically.
-	got := formatterFor(TransportRetryStatus{Retry: 2, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	got := formatterFor(TransportRetryStatus{Retry: 2, Total: 10, Deadline: time.Now().Add(8 * time.Second)})(20*time.Second, 0, "")
 	if !strings.Contains(got, "Network error · Retrying in 8s · attempt 2/10") {
 		t.Fatalf("retry line = %q, want the generic reason with the countdown and progress", got)
 	}
@@ -7340,48 +7390,33 @@ func TestWorkingLineShowsRetryStatus(t *testing.T) {
 		t.Fatalf("retry line = %q, must not carry the ordinary Working segments", got)
 	}
 
-	// From the third attempt the transport's own sentence is the reason.
-	long := strings.Repeat("a", 80)
-	got = formatterFor(TransportRetryStatus{Retry: 3, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: long})(20*time.Second, 0, "")
-	if !strings.Contains(got, "attempt 3/10") {
-		t.Fatalf("retry line = %q, want attempt 3/10", got)
-	}
-	reason := got
-	if i := strings.Index(reason, " · Retrying in"); i >= 0 {
-		reason = reason[:i]
-	}
-	reason = strings.TrimPrefix(reason, transientSpinnerFrame(0)+" ")
-	if reason != long[:59]+"…" {
-		t.Fatalf("reason = %q, want the error cut to 60 columns ending in …", reason)
-	}
-	if runewidth.StringWidth(reason) != 60 {
-		t.Fatalf("reason width = %d, want 60", runewidth.StringWidth(reason))
-	}
-
-	// A total under three keeps the generic reason one attempt longer:
-	// min(3, 2) = 2, so attempt 1 is generic and attempt 2 is verbatim.
-	got = formatterFor(TransportRetryStatus{Retry: 1, Total: 2, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
-	if !strings.Contains(got, "Network error · Retrying in 8s · attempt 1/2") {
-		t.Fatalf("1/2 retry line = %q, want the generic reason", got)
-	}
-	got = formatterFor(TransportRetryStatus{Retry: 2, Total: 2, Deadline: time.Now().Add(8 * time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
-	if !strings.Contains(got, "read tcp x · Retrying in 8s · attempt 2/2") {
-		t.Fatalf("2/2 retry line = %q, want the verbatim reason", got)
+	// Every later attempt — the last one included — keeps the generic reason.
+	for _, s := range []TransportRetryStatus{
+		{Retry: 3, Total: 10, Deadline: time.Now().Add(8 * time.Second)},
+		{Retry: 10, Total: 10, Deadline: time.Now().Add(8 * time.Second)},
+		{Retry: 2, Total: 2, Deadline: time.Now().Add(8 * time.Second)},
+	} {
+		got = formatterFor(s)(20*time.Second, 0, "")
+		want := fmt.Sprintf("Network error · Retrying in 8s · attempt %d/%d", s.Retry, s.Total)
+		if !strings.Contains(got, want) {
+			t.Fatalf("retry line = %q, want %q", got, want)
+		}
 	}
 
 	// A failure the provider answered with an HTTP status is named an API
-	// error, not a network one — the same rule on every attempt that would
-	// have been generic.
-	got = formatterFor(TransportRetryStatus{Retry: 1, Total: 10, Deadline: time.Now().Add(8 * time.Second), Err: "503 unavailable", Status: 503})(20*time.Second, 0, "")
-	if !strings.Contains(got, "API error · Retrying in 8s · attempt 1/10") {
-		t.Fatalf("503 retry line = %q, want the API error generic reason", got)
-	}
-	if strings.Contains(got, "Network error") {
-		t.Fatalf("503 retry line = %q, must not read as a network error", got)
+	// error, not a network one — on every attempt.
+	for _, retry := range []int{1, 3} {
+		got = formatterFor(TransportRetryStatus{Retry: retry, Total: 10, Deadline: time.Now().Add(8 * time.Second), Status: 503})(20*time.Second, 0, "")
+		if want := fmt.Sprintf("API error · Retrying in 8s · attempt %d/10", retry); !strings.Contains(got, want) {
+			t.Fatalf("503 retry line = %q, want %q", got, want)
+		}
+		if strings.Contains(got, "Network error") {
+			t.Fatalf("503 retry line = %q, must not read as a network error", got)
+		}
 	}
 
 	// A deadline that has passed reads 0s until the request produces or fails.
-	got = formatterFor(TransportRetryStatus{Retry: 3, Total: 10, Deadline: time.Now().Add(-time.Second), Err: "read tcp x"})(20*time.Second, 0, "")
+	got = formatterFor(TransportRetryStatus{Retry: 3, Total: 10, Deadline: time.Now().Add(-time.Second)})(20*time.Second, 0, "")
 	if !strings.Contains(got, "Retrying in 0s") {
 		t.Fatalf("past-deadline retry line = %q, want Retrying in 0s", got)
 	}
@@ -7416,7 +7451,7 @@ func TestFormatRetryCountdownTiers(t *testing.T) {
 func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
 	tracker := NewTracker()
 	tracker.ObserveAgent("task-1", "exec-1", time.Now())
-	tracker.ObserveTransportRetry("task-1", 1, 10, 8*time.Second, "x", 0)
+	tracker.ObserveTransportRetry("task-1", 1, 10, 8*time.Second, 0)
 
 	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
 	sub := formatter(time.Second, 0, "task-1")

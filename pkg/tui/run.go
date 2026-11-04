@@ -1856,6 +1856,7 @@ func syncPlanModeIndicator(renderer *Renderer, state *streamState) {
 		fullAccess = current == safety.PresetFullAccess
 	}
 	renderer.SetFullAccess(fullAccess)
+	renderer.SetModeCycleFixed(safety.RuntimeYOLOEnabled())
 	state.recordModeChange(st)
 }
 
@@ -4674,17 +4675,14 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 
 // transportRetryStatusLine renders the Working line while a network retry is
 // pending: the reason, the countdown to the next attempt and the attempt
-// counter. The first attempts name the failure generically — API error when
-// the provider answered with an HTTP status, Network error when the transport
-// itself died; from the third on the transport's own sentence is shown, cut
-// to fit.
+// counter. The reason is generic on every attempt — API error when the
+// provider answered with an HTTP status, Network error when the transport
+// itself died. The transport's own sentence (method, URL, socket address) is
+// never shown here; the error the turn ends with keeps it.
 func transportRetryStatusLine(tick int, s TransportRetryStatus, now time.Time) string {
 	reason := "Network error"
 	if s.Status > 0 {
 		reason = "API error"
-	}
-	if s.Retry >= min(3, s.Total) && strings.TrimSpace(s.Err) != "" {
-		reason = truncateForDisplay(strings.TrimSpace(s.Err), 60)
 	}
 	return transientSpinnerFrame(tick) + " " + reason + " · Retrying in " + formatRetryCountdown(s.Deadline.Sub(now)) +
 		" · attempt " + strconv.Itoa(s.Retry) + "/" + strconv.Itoa(s.Total)
@@ -5431,6 +5429,12 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		// moving a mode that would change nothing.
 		if state.batchReadOnlySession() {
 			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "mode", Content: "The mode is fixed in batch projects."})
+			return true
+		}
+		// --yolo fixes full access for every conversation of this process, so
+		// the key has nothing to cycle: it does nothing at all, and the footer
+		// does not offer it (owner 2026-11-04). Plan mode is still /plan's.
+		if safety.RuntimeYOLOEnabled() {
 			return true
 		}
 		st, _ := statepkg.Get(state.stateRoot(), state.sessionID)

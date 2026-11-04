@@ -42,15 +42,62 @@ type streamRetryLLM struct {
 var streamingFallbackWarned atomic.Bool
 
 // retryAnnounceNumber is the number a retry announcement carries: the retry's
-// own 1-based ordinal, every announced retry counted. It is not the shared
-// budget's spend, because the decision table also retries without spending it —
-// a machine that slept through the request gets up to maxSleptThrough retries of
-// its own — and an announcement numbered 0 is read downstream as no retry at
-// all: the pending notice would never be armed, so its Cleared would never fire
-// and the status line would outlive the recovery until the turn ended. Clamped
-// to the cap the line divides by, which the slept-through retries sit past.
+// own 1-based ordinal among the announced retries. Silent resends are never
+// charged to the shared budget (silentResend), so its spend counts announced
+// retries only; a machine that slept through the request gets up to
+// maxSleptThrough announced retries on an allowance of its own, hence the sum.
+// An announcement numbered 0 is read downstream as no retry at all: the
+// pending notice would never be armed, so its Cleared would never fire and the
+// status line would outlive the recovery until the turn ended. Clamped to the
+// cap the line divides by, which the slept-through retries sit past. A give-up
+// counts its retries with the same number, so its sentence agrees with the
+// last retry line.
 func retryAnnounceNumber(c streamRetryCounts, maxRetries int) int {
 	return min(c.retries+c.sleptThrough, maxRetries)
+}
+
+// silentResend reports a resend that withdraws the dead attempt without a
+// retry line: the non-streaming fallback, a resend after only thinking had
+// finished, and the resend after the watchdog's stall abort. None of them is
+// one of the N retries the line counts, so none is charged to the shared
+// budget; each kind stays bounded by its own counter (one stall, two resends
+// after thinking, three overloads, one non-streaming attempt).
+func silentResend(d StreamDecision, snap StreamProgressSnapshot, cause StreamFailureCause) bool {
+	switch d {
+	case DecideRetryWithoutStreaming:
+		return true
+	case DecideRetry:
+		return snap.Kind == ProgressThinkingOnly || cause == CauseStalled
+	}
+	return false
+}
+
+// resendableAfterFallbacks reports an end the table reaches once its silent
+// fallbacks are spent — a give-up, or a turn finished from nothing but
+// thinking, which leaves the user no answer — that the loop instead retries,
+// now with a retry line, while the budget lasts. Only for transport and
+// server trouble a resend can still fix, at a point where the resend
+// duplicates nothing the user keeps (no answer text, no dispatched tool). An
+// overloaded server keeps its own cap of three, and an error that is not the
+// network's (malformed, bad request, unknown) is not retried past the table.
+func resendableAfterFallbacks(d StreamDecision, cause StreamFailureCause, snap StreamProgressSnapshot) bool {
+	if snap.Kind == ProgressOutput || snap.ToolDispatched {
+		return false
+	}
+	switch d {
+	case DecideFail:
+	case DecideKeepPartial:
+		if snap.Kind != ProgressThinkingOnly {
+			return false
+		}
+	default:
+		return false
+	}
+	switch cause {
+	case CauseConnectionLost, CauseSuspended, CauseTruncated, CauseStalled, CauseServerError, CauseTimedOut:
+		return true
+	}
+	return false
 }
 
 func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools []*Tool) (*Result, error) {
@@ -205,6 +252,22 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 			}
 			dec = decideStreamFailure(cause, snap, snap.Elapsed >= NonStreamingTimeout, counts, policy)
 		}
+		if silentResend(dec.d, snap, cause) {
+			// Not one of the retries the line counts: the budget gets back
+			// what the table charged, so the announced retries run 1..N with
+			// no gaps and the loop gives up only after N/N.
+			dec.c.retries = counts.retries
+		}
+		// The table ends the request once its silent fallbacks are spent —
+		// giving up, or finishing from nothing but thinking — but the budget
+		// may not be: a failure a resend can still fix goes on as an
+		// announced retry, and the table's end stands only after N/N.
+		announce := false
+		if resendableAfterFallbacks(dec.d, cause, snap) && dec.c.retries < policy.maxRetries {
+			dec.c.retries++
+			dec.d = DecideRetry
+			announce = true
+		}
 		counts = dec.c
 
 		switch dec.d {
@@ -213,10 +276,15 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 				// The completed part stays; the notice is the error itself.
 				return finish(&PartialResponseError{Err: err, Progress: snap, Cause: cause, Failed: true})
 			}
-			if counts.retries > 0 {
+			if announced := retryAnnounceNumber(counts, maxRetries); announced > 0 {
 				clearPending()
-				return nil, &MaxAttemptsExceededError{Attempts: 1 + counts.retries, Err: acct.fail(err)}
+				// The give-up names the retries the lines announced — the
+				// number the last one showed, never the cap an early
+				// give-up did not reach. Silent resends are not counted.
+				return nil, &MaxAttemptsExceededError{Attempts: 1 + announced, Err: acct.fail(err)}
 			}
+			// Only silent resends happened: no retry line was ever shown,
+			// so there is no count to give up after.
 			return nil, acct.fail(err)
 		case DecideKeepPartial:
 			return finish(&PartialResponseError{Err: err, Progress: snap, Cause: cause})
@@ -230,7 +298,7 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 			continue
 		case DecideRetry:
 			switch {
-			case snap.Kind == ProgressThinkingOnly:
+			case !announce && snap.Kind == ProgressThinkingOnly:
 				// Only thinking finished: the resend withdraws it, and the
 				// wait stays out of the status line.
 				withdraw(snap)
@@ -258,7 +326,7 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 				}
 				ResetStreamProgress(ctx)
 				continue
-			case cause == CauseStalled:
+			case !announce && cause == CauseStalled:
 				// The watchdog's abort re-sends at any progress, with no
 				// wait and no status line.
 				withdraw(snap)
@@ -278,6 +346,10 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 						Err:          err,
 						Status:       statusOf(err),
 						NonStreaming: attemptNonStreaming,
+						// Only an announced retry past the silent fallbacks
+						// can follow an attempt that finished thinking; the
+						// resend withdraws that thinking too.
+						DropFinishedThinking: snap.Kind == ProgressThinkingOnly,
 					})
 					pendingRetry.Store(int64(retryNo))
 				}

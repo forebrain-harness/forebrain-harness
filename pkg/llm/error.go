@@ -85,7 +85,10 @@ func isTransportFailure(err error) bool {
 	if errors.Is(err, ErrNonStreamingTimeout) {
 		return true
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) && !isSocketTimeout(err) {
 		return false
 	}
 	if isNXDOMAIN(err) {
@@ -115,6 +118,19 @@ func isTransportFailure(err error) bool {
 		return isTransportFailure(aerr.Err) // unwrap provider normalizeError wrappers
 	}
 	return false
+}
+
+// isSocketTimeout reports a socket operation — a dial, read or write — that
+// ran out of its own deadline. Go's dialer reports its timeout as net's
+// errTimeout, which deliberately matches context.DeadlineExceeded, and whether
+// a dial timeout surfaces as that or as os.ErrDeadlineExceeded is a race inside
+// net's connect (the socket's write deadline and the dial context's timer
+// expire together). Both read "dial tcp …: i/o timeout" and both are the
+// network's failure, not the caller's deadline; reading only one of them as
+// transport made the same outage retry on some attempts and give up on others.
+func isSocketTimeout(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Timeout()
 }
 
 // isNXDOMAIN reports whether err is a DNS name-resolution miss: a misspelled

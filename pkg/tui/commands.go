@@ -17,6 +17,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/migrate"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -2454,6 +2455,9 @@ func (c *commandController) handlePermissionsReport(sessionID string, args []str
 	return true
 }
 
+// yoloPresetFixedNote is /permissions' whole answer in a --yolo process.
+const yoloPresetFixedNote = "Full Access · fixed by --yolo"
+
 // handlePermissions opens the approval preset picker.
 //
 // The picker is the whole of the interactive permission surface: it selects a
@@ -2462,6 +2466,12 @@ func (c *commandController) handlePermissionsReport(sessionID string, args []str
 // session belong in a settings file that can be reviewed, not in a prompt whose
 // result nobody can see afterwards.
 func (c *commandController) handlePermissions(sessionID string) bool {
+	// --yolo leaves nothing to pick: say so instead of opening a picker whose
+	// every other answer would be refused.
+	if safety.RuntimeYOLOEnabled() {
+		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "permissions", Content: yoloPresetFixedNote, Final: true})
+		return true
+	}
 	presets, current := c.session.PermissionPresets(sessionID)
 	// The picker opens on the preset in force.
 	items := make([]SelectItem, 0, len(presets))

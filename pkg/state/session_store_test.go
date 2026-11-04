@@ -2767,6 +2767,53 @@ func TestEnsureSeedsTheSessionApprovalPreset(t *testing.T) {
 	}
 }
 
+// A preset chosen before the session has a row — a terminal conversation
+// before its first message — is the one the session is born with, not the
+// global default: nothing is stored until then, and the first append births
+// the row with the choice and its source.
+func TestPresetChosenBeforeBirthIsTheBornPreset(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+
+	stored, err := store.SaveSessionPermissionPreset(ctx, "early", "full_access", SessionPresetSourcePicker)
+	if err != nil || stored {
+		t.Fatalf("save before birth: stored=%v err=%v, want nothing stored yet", stored, err)
+	}
+	if _, _, _, ok, err := store.SessionPermissionPreset(ctx, "early"); err != nil || ok {
+		t.Fatalf("row before birth: ok=%v err=%v", ok, err)
+	}
+	// The last choice before birth wins.
+	if _, err := store.SaveSessionPermissionPreset(ctx, "early", "workspace_write", SessionPresetSourcePicker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionPermissionPreset(ctx, "early", "full_access", SessionPresetSourcePicker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, "early", "user", "hello"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	preset, source, _, ok, err := store.SessionPermissionPreset(ctx, "early")
+	if err != nil || !ok || preset != "full_access" || source != SessionPresetSourcePicker {
+		t.Fatalf("born row = %q/%q ok=%v err=%v, want full_access/picker", preset, source, ok, err)
+	}
+
+	// The held choice is spent: a later session is born with the default.
+	if _, err := store.Append(ctx, "plain", "user", "hello"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if preset, source, _, _, _ := store.SessionPermissionPreset(ctx, "plain"); preset != SessionPresetWorkspaceWrite || source != SessionPresetSourceDefault {
+		t.Fatalf("plain row = %q/%q, want workspace_write/default", preset, source)
+	}
+	// And a choice made after birth is an ordinary overwrite.
+	if stored, err := store.SaveSessionPermissionPreset(ctx, "early", "workspace_write", SessionPresetSourcePicker); err != nil || !stored {
+		t.Fatalf("save after birth: stored=%v err=%v", stored, err)
+	}
+	if preset, _, _, _, _ := store.SessionPermissionPreset(ctx, "early"); preset != "workspace_write" {
+		t.Fatalf("row after a later choice = %q, want workspace_write", preset)
+	}
+}
+
 // The seeded row is exactly one row per session, not one per append: the
 // store's write paths run the session upsert repeatedly, and a duplicate would
 // be a second, silently-different answer.

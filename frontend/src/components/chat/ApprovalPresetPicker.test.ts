@@ -33,7 +33,7 @@ describe('ApprovalPresetPicker', () => {
   // being asked — fixed at full access and disabled (owner 2026-10-31, plan 215
   // §3.4).
   it('is fixed at full access and disabled when there is no sandbox', async () => {
-    vi.spyOn(forebrainApi, 'approvalPresetsVisible').mockResolvedValue(false)
+    vi.spyOn(forebrainApi, 'approvalPresetSwitch').mockResolvedValue({ visible: false, fixed: false })
     vi.spyOn(forebrainApi, 'sessionPresetCurrent').mockResolvedValue({ current: 'full_access' })
     const session = vi.spyOn(forebrainApi, 'sessionPreset').mockResolvedValue({ ok: true })
     const wrapper = mount(ApprovalPresetPicker, { props: { sessionId: 's1' } })
@@ -50,8 +50,32 @@ describe('ApprovalPresetPicker', () => {
     expect(wrapper.text()).not.toContain('Sandbox unavailable')
   })
 
+  // A --yolo gateway runs every conversation with full access whatever was
+  // picked, so the switch is pinned exactly as it is without a sandbox — on an
+  // open conversation and on a new chat alike, where a pick would otherwise be
+  // held and handed to a conversation that never runs under it (owner
+  // 2026-11-04).
+  it('is fixed at full access and disabled on a --yolo gateway', async () => {
+    vi.spyOn(forebrainApi, 'approvalPresetSwitch').mockResolvedValue({ visible: true, fixed: true })
+    vi.spyOn(forebrainApi, 'sessionPresetCurrent').mockResolvedValue({ current: 'full_access' })
+    vi.spyOn(forebrainApi, 'approvalDefault').mockResolvedValue({ current: 'full_access' })
+    const session = vi.spyOn(forebrainApi, 'sessionPreset').mockResolvedValue({ ok: true })
+
+    for (const sessionId of ['s1', null]) {
+      const wrapper = mount(ApprovalPresetPicker, { props: { sessionId } })
+      const button = wrapper.get('[data-testid="approval-picker"]')
+      await vi.waitFor(() => expect(button.attributes('disabled')).toBeDefined())
+      expect(button.text()).toBe('Full Access')
+      await button.trigger('click')
+      expect(wrapper.findAll('[role="option"]')).toHaveLength(0)
+      expect((wrapper.vm as unknown as { takeDraft: () => string | null }).takeDraft()).toBeNull()
+      wrapper.unmount()
+    }
+    expect(session).not.toHaveBeenCalled()
+  })
+
   it('keeps both presets when the machine has a sandbox', async () => {
-    vi.spyOn(forebrainApi, 'approvalPresetsVisible').mockResolvedValue(true)
+    vi.spyOn(forebrainApi, 'approvalPresetSwitch').mockResolvedValue({ visible: true, fixed: false })
     const wrapper = mountPicker('workspace_write')
     const button = wrapper.get('[data-testid="approval-picker"]')
     await vi.waitFor(() => expect(button.text()).toBe('Default'))
