@@ -3532,7 +3532,11 @@ func rulesServer(t *testing.T) (*Server, string, string) {
 	seedConfigRoot(t, db, *cfg)
 	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
 	env.ConfigPath = cfgPath
-	return &Server{Home: home, Env: env}, home, workspace
+	s := &Server{Home: home, Env: env}
+	// Registered after db.Close, and t.Cleanup is LIFO, so the accepted inbound
+	// messages finish before the database they read goes away (plan 220).
+	t.Cleanup(s.QuiesceInbound)
+	return s, home, workspace
 }
 
 func TestAgentRuleFilesListAndWhitelist(t *testing.T) {

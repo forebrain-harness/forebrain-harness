@@ -68,6 +68,14 @@ type Server struct {
 	runStartedAt     sync.Map
 	approvalRecovery sync.Once
 
+	// inboundWG counts the inbound channel messages PublishInbound has accepted
+	// but not finished processing. That work runs in a goroutine on purpose —
+	// nothing on an inbound path may block on a turn — so this counter is the
+	// only thing that makes the acceptance waitable. Whatever takes away what
+	// the work reads (the state database, a session directory) has to wait on
+	// it first, through QuiesceInbound, or it races the goroutine (plan 220).
+	inboundWG sync.WaitGroup
+
 	mcpOAuthPKCEMu sync.Mutex
 	mcpOAuthPKCE   map[string]gatewayMcpPKCE
 
@@ -612,7 +620,13 @@ func (b channelBus) deliverOutbound(ctx context.Context, channelID string, sessi
 }
 
 func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error {
+	if b.s != nil {
+		b.s.inboundWG.Add(1)
+	}
 	go func() {
+		if b.s != nil {
+			defer b.s.inboundWG.Done()
+		}
 		ch := strings.TrimSpace(m.ChannelID)
 		if ch == "" {
 			ch = "wecom"
@@ -765,6 +779,20 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 		}
 	}()
 	return nil
+}
+
+// QuiesceInbound waits until every inbound channel message this server has
+// accepted has finished processing. PublishInbound promises the message will be
+// handled and returns before that work even starts, so whatever tears down what
+// the work reads — closing the state database, removing a session directory —
+// must call this first: without the wait the teardown races the goroutine and
+// the pipeline reports a closed database or writes into a directory that is
+// already gone (plan 220).
+func (s *Server) QuiesceInbound() {
+	if s == nil {
+		return
+	}
+	s.inboundWG.Wait()
 }
 
 func (s *Server) AttachREST(srv *RestServer) {

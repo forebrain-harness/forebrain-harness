@@ -22,6 +22,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -1301,6 +1302,9 @@ func batchChannelGateway(t *testing.T) (*Server, state.Project, *batchNotifyChan
 	require.NoError(t, err)
 	rec := &batchNotifyChannel{id: "wecom"}
 	require.NoError(t, s.Channels.BindProjects(ctx, "main", []channel.BoundChannel{{ProjectID: project.ID, Handler: rec}}, channelBus{s: s}))
+	// Registered after db.Close, and t.Cleanup is LIFO, so the accepted inbound
+	// messages finish before the database they read goes away (plan 220).
+	t.Cleanup(s.QuiesceInbound)
 	t.Cleanup(func() { _ = s.Channels.Stop(ctx) })
 	return s, project, rec
 }
@@ -1431,6 +1435,35 @@ func TestChannelMessageOnACodingProjectOpensNoTask(t *testing.T) {
 	rows, _, err = s.Projects.ListTasksPage(ctx, project.ID, state.ListTasksOptions{}, 10, 0)
 	require.NoError(t, err)
 	require.Empty(t, rows, "the batch project opened nothing for another project's message")
+}
+
+// PublishInbound accepts a message and returns before the work starts, so a
+// test — or a shutting-down server — cannot tear down what that work reads
+// until the work is done. QuiesceInbound is that wait, and it waits for the
+// whole pipeline: the message below leaves a hook transcript behind, and the
+// transcript is already on disk when the wait returns, with nothing polling
+// for it in between (plan 220).
+func TestQuiesceInboundWaitsForAcceptedMessages(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := batchChannelGateway(t)
+	codingRoot := filepath.Join(t.TempDir(), "coding")
+	require.NoError(t, os.MkdirAll(codingRoot, 0o755))
+	coding, err := s.Projects.Create(ctx, state.CreateProjectInput{
+		Name: "coding", Root: codingRoot, ProjectKey: state.ProjectKeyForRoot(codingRoot), ProjectType: state.ProjectTypeCoding,
+	})
+	require.NoError(t, err)
+
+	// Only the accepted message's pipeline writes this, and it writes it after
+	// the project lookup and the slash parse — not on the publisher's side.
+	transcript := hook.SessionTranscriptPath(s.stateRoot(), state.WrapProjectChannelSession("wecom", coding.ID, "u1"))
+	_, statErr := os.Stat(transcript)
+	require.True(t, os.IsNotExist(statErr), "nothing wrote the transcript before the message was published: %v", statErr)
+
+	inboundBatch(t, s, coding.ID, "u1", "帮我看一下这个仓库")
+	s.QuiesceInbound()
+
+	_, statErr = os.Stat(transcript)
+	require.NoError(t, statErr, "quiesce returned while the accepted message was still being processed")
 }
 
 // A built-in slash command steers a conversation, and a batch project has no
