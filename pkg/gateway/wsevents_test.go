@@ -1396,7 +1396,12 @@ func TestHandleChatWSTurnThatCannotRecordItsRunIsWithdrawn(t *testing.T) {
 		require.NotContains(t, []string{"run_started", "run_error", "run_completed"}, msg.Op, "a turn without a run started: %+v", msg)
 		if msg.Op == "turn_withdrawn" {
 			require.Equal(t, "req-turn", msg.RequestID)
-			require.Contains(t, msg.Error, "FOREIGN KEY")
+			// Every engine spells the refusal with the same two words —
+			// SQLite "FOREIGN KEY constraint failed", PostgreSQL "violates
+			// foreign key constraint …", MySQL "a foreign key constraint
+			// fails" — so the words, case aside, still prove the failure
+			// is the foreign key and not any other refusal.
+			require.Contains(t, strings.ToLower(msg.Error), "foreign key")
 			break
 		}
 	}
