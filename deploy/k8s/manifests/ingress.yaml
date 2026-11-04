@@ -1,0 +1,37 @@
+# nginx-ingress exposure (plan 214 §3.4). The annotations are load-bearing:
+#
+#   proxy-read-timeout / proxy-send-timeout 3600 — the web UI holds a
+#   WebSocket to the replica running the conversation and a run can park on
+#   an approval for hours; nginx's 60s default closes idle sockets and the
+#   browser reconnects forever.
+#   proxy-body-size — agent uploads (logs, documents, spreadsheets) are
+#   larger than nginx's 1m default.
+#
+# The cluster's ingress controller must be reachable at this host; on an
+# intranet that usually means an internal DNS entry pointing at the
+# controller's Service, and a certificate the browser trusts (see
+# docs/deploy/kubernetes.md, 反向代理与 HTTPS).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forebrain
+  namespace: forebrain
+  labels:
+    app.kubernetes.io/name: forebrain
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: forebrain.example.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: forebrain
+                port:
+                  number: 6060

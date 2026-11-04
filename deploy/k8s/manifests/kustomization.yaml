@@ -1,9 +1,15 @@
+# Renders the whole bundle (plan 214 §3.4):
+#   kubectl kustomize deploy/k8s/manifests
+# Applies it:
+#   kubectl apply -k deploy/k8s/manifests
+#
+# Edit secret.yaml's placeholders BEFORE applying (see the file's header).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - namespace.yaml
-  - pvc.yaml
-  - configmap.yaml
   - secret.yaml
+  - pvc.yaml
   - deployment.yaml
   - service.yaml
+  - ingress.yaml

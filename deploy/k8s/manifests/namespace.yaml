@@ -1,4 +1,9 @@
+# The namespace everything below lands in (plan 214 §3.4). All manifests
+# hard-code it; kustomize namespace transforms are not used so a rendered
+# bundle reads as exactly what will be applied.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: forebrain
+  labels:
+    app.kubernetes.io/name: forebrain

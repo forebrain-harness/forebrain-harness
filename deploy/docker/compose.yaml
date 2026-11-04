@@ -9,7 +9,7 @@
 # State is one named volume, forebrain-home: config, .env, SQLite state,
 # workspace, logs. Everything survives `docker compose down`; only
 # `down -v` deletes it. The gateway serves only once the main agent's LLM is
-# configured (cmd/forebrain/serve.go refuses to serve otherwise), so the
+# configured (the gateway start command refuses to run otherwise), so the
 # seed service below writes forebrain.yaml and .env on the FIRST up only — a
 # home that already has forebrain.yaml is left exactly as it is, and after
 # that the file belongs to the web's configuration editor. The LLM variables
@@ -63,7 +63,7 @@ services:
         fi
         if [ -z "$${FOREBRAIN_LLM_PROVIDER:-}" ] || [ -z "$${FOREBRAIN_LLM_MODEL:-}" ] \
            || [ -z "$${FOREBRAIN_LLM_API_KEY:-}" ] || [ -z "$${FOREBRAIN_LLM_BASE_URL:-}" ]; then
-          # The gateway refuses to serve until the main agent's LLM is
+          # The gateway refuses to start until the main agent's LLM is
           # configured; fail the first 'up' with the variables it needs
           # rather than write a config that cannot boot.
           echo "seed: FOREBRAIN_LLM_PROVIDER / FOREBRAIN_LLM_MODEL / FOREBRAIN_LLM_API_KEY / FOREBRAIN_LLM_BASE_URL must all be set on the first 'up' (afterwards the web's configuration editor owns forebrain.yaml)" >&2

@@ -162,7 +162,7 @@ COPY --from=frontend /usr/local/lib/node_modules/npm /usr/local/lib/node_modules
 COPY --from=frontend /usr/local/lib/node_modules/corepack /usr/local/lib/node_modules/corepack
 
 # The Go toolchain, unpacked where the official tarball expects to live.
-# GO_DIST_URL lets an offline build serve the tarball from an internal mirror.
+# GO_DIST_URL lets an offline build fetch the tarball from an internal mirror.
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \

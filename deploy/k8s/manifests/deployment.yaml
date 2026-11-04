@@ -1,43 +1,92 @@
+# The gateway Deployment (plan 214 §3.4): two replicas over one RWX home
+# and one external MySQL/PostgreSQL.
+#
+# Replica mechanics (plan 213) the fields below exist for:
+#   - FOREBRAIN_INTERNAL_ADDR is the POD'S OWN literal IP (downward API).
+#     Peer auth is the shared gateway token AND the source IP being one of
+#     the registered replicas' internal_addr values — X-Forwarded-For is
+#     never consulted — so a Service name or hostname cannot substitute.
+#   - The internal endpoints are paths on the SAME listener the browser
+#     uses (port 6060); there is no second port to expose.
+#   - The init container copies the Secret's forebrain.yaml/.env only when
+#     the shared home has none: two replicas booting a brand-new home would
+#     otherwise race, and the gateway token on a brand-new home is
+#     last-writer-wins.
+#   - RollingUpdate with maxUnavailable 0: one replica keeps serving while
+#     the other re-registers itself.
+#
+# Sandbox: seccompProfile Localhost + AppArmor Unconfined are the plan 214
+# §3.2 pair. The Localhost profile must exist on EVERY node BEFORE a pod is
+# scheduled there — copy deploy/seccomp/forebrain-bubblewrap.json to
+# /var/lib/kubelet/seccomp/profiles/forebrain-bubblewrap.json (see
+# docs/deploy/kubernetes.md, 沙箱); a node without it leaves the pod in
+# ContainerCreating. To run deliberately WITHOUT the sandbox instead, set
+# seccompProfile.type: RuntimeDefault and drop the appArmorProfile — the
+# gateway then runs with every command full access and no approval presets.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: forebrain
+  name: forebrain-gateway
   namespace: forebrain
   labels:
-    app: forebrain
+    app.kubernetes.io/name: forebrain
+    app.kubernetes.io/component: gateway
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
-      app: forebrain
+      app.kubernetes.io/name: forebrain
+      app.kubernetes.io/component: gateway
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
-        app: forebrain
+        app.kubernetes.io/name: forebrain
+        app.kubernetes.io/component: gateway
     spec:
       automountServiceAccountToken: false
       securityContext:
-        fsGroup: 65532
+        # The image's fixed unprivileged identity: its numeric UID is what
+        # an RWX volume's file ownership has to match.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
         seccompProfile:
-          type: RuntimeDefault
+          type: Localhost
+          localhostProfile: forebrain-bubblewrap.json
+        # 1.30+; on older clusters use the annotation instead:
+        #   container.apparmor.security.beta.kubernetes.io/gateway: unconfined
+        appArmorProfile:
+          type: Unconfined
       initContainers:
-        - name: init-config
-          image: busybox:1.37
+        - name: seed-home
+          # The gateway image itself, not busybox: an offline cluster never
+          # has to pull a second image for two `cp` calls.
+          image: forebrain:dev
           imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
+          command: ["/bin/sh", "-c"]
+          args:
             - |
               set -e
-              mkdir -p /data/forebrain
-              cp /config/forebrain.yaml /data/forebrain/forebrain.yaml
-              mkdir -p /data/forebrain/workspace /data/forebrain/agents /data/forebrain/state
-              cp /config/default.yaml /data/forebrain/agents/default.yaml
-          securityContext:
-            runAsUser: 65532
-            runAsGroup: 65532
+              home=/data/forebrain
+              mkdir -p "$home"
+              if [ -f "$home/forebrain.yaml" ]; then
+                echo "seed-home: keeping the existing $home/forebrain.yaml"
+                exit 0
+              fi
+              # Each file arrives whole: a replica that started first must
+              # never read a half-written file (plan 213 §3.6).
+              cp /seed/forebrain.yaml "$home/forebrain.yaml.tmp"
+              mv "$home/forebrain.yaml.tmp" "$home/forebrain.yaml"
+              cp /seed/env "$home/.env.tmp"
+              mv "$home/.env.tmp" "$home/.env"
+              chmod 600 "$home/forebrain.yaml" "$home/.env"
+              echo "seed-home: wrote first-boot $home/forebrain.yaml and .env"
           resources:
             requests:
               memory: 32Mi
@@ -46,37 +95,52 @@ spec:
               memory: 64Mi
               cpu: 100m
           volumeMounts:
-            - name: forebrain-home
+            - name: home
               mountPath: /data/forebrain
-            - name: config
-              mountPath: /config
+            - name: seed
+              mountPath: /seed
+              readOnly: true
       containers:
         - name: gateway
-          image: forebrain:latest
+          image: forebrain:dev
           imagePullPolicy: IfNotPresent
-          args: ["serve", "--static-dist=/app/static"]
+          # No args: the image's CMD is `gateway start` and its entrypoint
+          # hands everything to the binary. forebrain.yaml already exists
+          # (init container), so the entrypoint seeds nothing.
           ports:
             - name: http
               containerPort: 6060
               protocol: TCP
           env:
-            - name: HOME
-              value: /data
-            - name: FOREBRAIN_HOME
-              value: /data/forebrain
-            - name: OPENAI_API_KEY
+            - name: POD_IP
               valueFrom:
-                secretKeyRef:
-                  name: forebrain-secrets
-                  key: OPENAI_API_KEY
-                  optional: true
+                fieldRef:
+                  fieldPath: status.podIP
+            # The address peers reach THIS replica at: a literal IP, on the
+            # same listener as the browser. Kubernetes expands $(POD_IP) in
+            # the value.
+            - name: FOREBRAIN_INTERNAL_ADDR
+              value: "http://$(POD_IP):6060"
+            # Intranet mirror + certificate variables an offline network
+            # needs (plan 208 §3.1; the whitelist in pkg/home/envguard.go is
+            # what reaches the agent's subprocesses). Examples:
+            #   - name: GOPROXY
+            #     value: http://goproxy.corp.example:3000
+            #   - name: PIP_INDEX_URL
+            #     value: http://pypi.corp.example:8081/simple
+            #   - name: NPM_CONFIG_REGISTRY
+            #     value: http://npm.corp.example:4873
+            #   - name: SSL_CERT_FILE
+            #     value: /data/forebrain/certs/corp-root-ca.pem
+          # Sizing for a gateway whose agent toolchain (Node.js, Go, Python)
+          # runs inside the pod: builds and test runs happen here.
           resources:
             requests:
-              memory: 256Mi
-              cpu: 100m
+              memory: 512Mi
+              cpu: 250m
             limits:
-              memory: 2Gi
-              cpu: "1"
+              memory: 4Gi
+              cpu: "2"
           livenessProbe:
             httpGet:
               path: /healthz
@@ -84,6 +148,7 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 30
             timeoutSeconds: 5
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /readyz
@@ -91,22 +156,27 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
+            failureThreshold: 3
           volumeMounts:
-            - name: forebrain-home
+            - name: home
               mountPath: /data/forebrain
           securityContext:
             runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
+            runAsUser: 10001
+            runAsGroup: 10001
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            # No capabilities: the sandbox runs on unprivileged user
+            # namespaces, whose powers come from inside the namespace.
             capabilities:
-              drop:
-                - ALL
+              drop: ["ALL"]
+            # The root filesystem stays writable: the toolchain the agent
+            # drives writes caches and GOPATH under /home/forebrain in the
+            # image. Everything durable is on the home volume.
+            readOnlyRootFilesystem: false
       volumes:
-        - name: forebrain-home
+        - name: home
           persistentVolumeClaim:
-            claimName: forebrain-home-pvc
-        - name: config
-          configMap:
-            name: forebrain-config
+            claimName: forebrain-home
+        - name: seed
+          secret:
+            secretName: forebrain-config
