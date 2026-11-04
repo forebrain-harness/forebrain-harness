@@ -106,6 +106,11 @@ FOREBRAIN_GATEWAY_TOKEN=<openssl rand -hex 32 的输出>
 FOREBRAIN_LLM_API_KEY=<模型 API key>
 ```
 
+**项目根目录放在 FOREBRAIN_HOME 之外**（网关拒绝 `$FOREBRAIN_HOME` 内部路径作为项目
+根，例如 `/var/lib/forebrain/workspace/...` 会报 `root must not be inside the forebrain
+home directory`）：建议单独建 `/srv/forebrain-projects/` 一类目录，属主设为 forebrain
+用户，网页里新建项目时填那里的路径。
+
 运维在网关进程里设的环境变量只有「镜像源 / 企业证书」一类会传给代理的子进程
 （`GOPROXY`、`PIP_INDEX_URL`、`NPM_CONFIG_REGISTRY`、`SSL_CERT_FILE`、
 `NODE_EXTRA_CA_CERTS` 等，完整白名单见源码 `pkg/home/envguard.go`）；其余变量

@@ -63,6 +63,11 @@ Deployment 的 init 容器只在共享卷里**没有** `forebrain.yaml` 时把�
 （两个副本同时首启不会各写一份 token——全新共享 home 上 token 是后写覆盖）；
 之后文件归网页配置编辑器管，改 Secret 不会重新播种，要重来就清掉 PVC 内容。
 
+**项目根目录不在共享 home 里**：网关拒绝把 FOREBRAIN_HOME 内部路径用作项目根。为项目
+存储再挂一个卷（PVC 或 hostPath），例如在 Deployment 的 volumes 加一个
+`projects` 卷挂到 `/workspace`，网页里新建项目时填 `/workspace/...` 路径；多副本共享
+项目时这个卷同样需要 RWX。
+
 内网镜像源与企业证书变量加在 Deployment 的 `env`（示例已注释在清单里）：
 `GOPROXY`、`PIP_INDEX_URL`、`NPM_CONFIG_REGISTRY`、`SSL_CERT_FILE` 等，白名单见
 源码 `pkg/home/envguard.go`；证书文件挂进共享卷（如 `/data/forebrain/certs/`）。

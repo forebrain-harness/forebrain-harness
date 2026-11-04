@@ -67,6 +67,16 @@ export FOREBRAIN_LLM_BASE_URL=https://api.deepseek.com   # 内网部署换成内
 改配置在网页里做（配置页写回 `forebrain.yaml`），或直接编辑卷里的文件后
 `docker compose restart gateway`。
 
+**项目根目录放在 FOREBRAIN_HOME 之外**：网关拒绝把 `forebrain-home` 内部路径用作项目根
+（`root must not be inside the forebrain home directory`）。给项目存储另挂一个卷或绑定
+目录，例如在 compose 的 gateway 下加：
+
+```yaml
+    volumes:
+      - forebrain-home:/data/forebrain
+      - ./projects:/workspace        # 项目根目录放这里
+```
+
 内网镜像源与企业证书变量加在 compose 的 `gateway.environment`（示例已在文件里）：
 `GOPROXY`、`PIP_INDEX_URL`、`NPM_CONFIG_REGISTRY`、`SSL_CERT_FILE`、
 `NODE_EXTRA_CA_CERTS` 等，白名单见源码 `pkg/home/envguard.go`；证书文件要一并挂进
