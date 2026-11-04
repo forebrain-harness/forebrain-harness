@@ -1824,9 +1824,18 @@ func TestCronFireRunsAsItsOwnConversation(t *testing.T) {
 	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusOK)
 	require.Equal(t, "picked up where it left off", rec.Output)
 	require.Equal(t, state.CronStatusOK, rec.Status)
-	saved, err := g.server.Env.Cron().Job(ctx, "main", job.ID)
-	require.NoError(t, err)
-	require.Equal(t, state.CronStatusOK, saved.LastStatus)
+	// The run record closes first and the job's own summary is written after
+	// it (settle's recordOutcome runs at settle's end), so the job row settles
+	// a moment after the record fireWaitsForStatus saw.
+	var saved state.CronJob
+	require.Eventually(t, func() bool {
+		j, err := g.server.Env.Cron().Job(ctx, "main", job.ID)
+		if err != nil {
+			return false
+		}
+		saved = j
+		return saved.LastStatus == state.CronStatusOK
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// The session is born a cron session, named for the job.
 	var source, title string
@@ -1949,9 +1958,18 @@ func TestCronFireFailureIsRecordedExplained(t *testing.T) {
 	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusFailed)
 	require.Contains(t, rec.Error, "required-docs")
 	require.Equal(t, "run_failed", rec.ErrorCode)
-	saved, err := g.server.Env.Cron().Job(context.Background(), "main", job.ID)
-	require.NoError(t, err)
-	require.Equal(t, state.CronStatusFailed, saved.LastStatus)
+	// The run record closes first and the job's own summary is written after
+	// it (settle's recordOutcome runs at settle's end), so the job row settles
+	// a moment after the record fireWaitsForStatus saw.
+	var saved state.CronJob
+	require.Eventually(t, func() bool {
+		j, err := g.server.Env.Cron().Job(context.Background(), "main", job.ID)
+		if err != nil {
+			return false
+		}
+		saved = j
+		return saved.LastStatus == state.CronStatusFailed
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 // A crash mid-fire leaves an open record and a run nobody vouches for. The
