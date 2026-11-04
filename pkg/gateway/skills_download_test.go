@@ -329,10 +329,11 @@ func TestProjectSkillListScopesRowsToTheProjectLayer(t *testing.T) {
 func workshopServer(t *testing.T) (*Server, string, string) {
 	t.Helper()
 	s, home, workspace := rulesServer(t)
-	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	s.RunRT = &state.RunStore{DB: db}
+	// rulesServer already opened home's state database (s.Env.SQL holds the
+	// pool); opening the same path again would drop and recreate the scratch
+	// database under the live pool — on PostgreSQL that DROP is refused with
+	// SQLSTATE 55006. One pool is also what the server itself runs on.
+	s.RunRT = &state.RunStore{DB: s.Env.SQL}
 	agentSkill := writeGatewaySkill(t, filepath.Join(workspace, "skills"), "workshop-skill")
 	require.NoError(t, os.MkdirAll(filepath.Join(agentSkill, "evals"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(agentSkill, "evals", "evals.json"), []byte(`{"cases":[]}`), 0o644))

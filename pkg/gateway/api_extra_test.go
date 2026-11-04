@@ -1582,7 +1582,7 @@ func TestProjectDeletePreviewReturnsCounts(t *testing.T) {
 // TestProjectDeleteBusyReturnsConflict pins that deleting a project whose
 // conversation has a run in flight is a 409 the dialog can name.
 func TestProjectDeleteBusyReturnsConflict(t *testing.T) {
-	s, store, home := newProjectsTestServer(t)
+	s, store, _ := newProjectsTestServer(t)
 	ctx := context.Background()
 	root := t.TempDir()
 	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "busy", "root": root})
@@ -1600,12 +1600,10 @@ func TestProjectDeleteBusyReturnsConflict(t *testing.T) {
 	if err := store.BindSession(ctx, "sess-busy", id); err != nil {
 		t.Fatal(err)
 	}
-	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := (&state.RunStore{DB: db}).CreateRun(ctx, "sess-busy", "hello"); err != nil {
+	// The server's own pool is the state database the run must be visible in;
+	// opening home's state.sqlite again would drop and recreate the scratch
+	// database under the live pool (SQLSTATE 55006 on PostgreSQL).
+	if _, err := (&state.RunStore{DB: s.Sessions.DB()}).CreateRun(ctx, "sess-busy", "hello"); err != nil {
 		t.Fatal(err)
 	}
 	rec = doJSON(t, s, http.MethodDelete, "/api/v1/projects/"+id, nil)
