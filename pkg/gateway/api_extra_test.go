@@ -199,10 +199,14 @@ func TestParseSlashCommandWebchatGoalWithoutObjectiveIsUsageHint(t *testing.T) {
 	require.True(t, res.Handled)
 }
 
-// seedConfigUpsertSQL is the seeding upsert in each engine's syntax — the
-// store's configSectionUpsertSQL with the timestamp pinned at 0, as a row
-// planted at install time reads. MySQL has no ON CONFLICT: the same upsert
-// keys on the section primary key with ON DUPLICATE KEY UPDATE.
+// seedConfigUpsertSQL is the fb_config upsert seedConfigRoot plants rows
+// through — the store's configSectionUpsertSQL with the timestamp pinned at 0,
+// as a row planted at install time reads, and with the arms mirroring that
+// statement. fb_config is keyed by its primary key (section), which is the same
+// key MySQL's ON DUPLICATE KEY UPDATE conflicts on, so all three arms land the
+// same row. MySQL has no ON CONFLICT clause at all: handing it the SQLite text
+// is a syntax error, not a dialect nuance, which is why the fixture cannot rely
+// on Rebind alone.
 var seedConfigUpsertSQL = dbx.SQL{
 	SQLite: `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
 ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`,
@@ -216,21 +220,6 @@ ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`,
 // write paths store them now (plan 188): one fb_config row per section. The
 // rows are planted directly, so a fixture may seed a shape the validator
 // would refuse, exactly like a row an earlier state of the install left.
-// seedConfigUpsertSQL is the fb_config upsert seedConfigRoot plants rows
-// through. fb_config is keyed by its primary key (section), which is the same
-// key MySQL's ON DUPLICATE KEY UPDATE conflicts on, so all three arms land the
-// same row — the arms mirror state.ConfigStore's own upsert. MySQL has no
-// ON CONFLICT clause at all: handing it the SQLite text is a syntax error, not
-// a dialect nuance, which is why the fixture cannot rely on Rebind alone.
-var seedConfigUpsertSQL = dbx.SQL{
-	SQLite: `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`,
-	MySQL: `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
-ON DUPLICATE KEY UPDATE value_json = VALUES(value_json)`,
-	Postgres: `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES($1,$2,0)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`,
-}
-
 func seedConfigRoot(t *testing.T, db *sql.DB, root appcfg.Root) {
 	t.Helper()
 	for _, name := range process.RootConfigSections() {
