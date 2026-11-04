@@ -1364,6 +1364,13 @@ func TestBatchChannelMessageStartsATask(t *testing.T) {
 	s, project, rec := batchChannelGateway(t)
 	text := "把上个月的 CSV 汇总成 xlsx"
 	inboundBatch(t, s, project.ID, "u1", text)
+	// Wait for the accepted message itself before looking at what it wrote:
+	// the task's row lands before its execution workspace is built (the row is
+	// what the execution is added to, and the directories are created after
+	// that), so polling the row and then statting the directories read state
+	// the pipeline had not reached yet. Slower engines made it lose that race
+	// every so often (plan 220).
+	s.QuiesceInbound()
 
 	var row state.TaskRow
 	require.Eventually(t, func() bool {
