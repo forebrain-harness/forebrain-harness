@@ -1,13 +1,28 @@
+# One shared FOREBRAIN_HOME for every replica (plan 214 §3.4/§0.5): config,
+# .env, workspace, logs. State lives in the shared database; the database
+# itself is NOT deployed here (docs/deploy/kubernetes.md has the CREATE
+# DATABASE statements).
+#
+# ReadWriteMany is a requirement, not a preference: every replica mounts the
+# SAME home. That means NFS, CephFS, or another RWX provisioner — the default
+# storage class on most clusters gives RWO and will make the second replica
+# unschedulable. NFS additionally must allow atomic renames (forebrain.yaml
+# and the state files are written whole-then-renamed, plan 213 §3.6): a
+# server or mount option that breaks rename over NFS breaks the gateway, not
+# just a file. logs/debug.log is shared by every replica (opt-in, plan 213).
+#
+# storageClassName is left unset so the cluster's default applies; set it to
+# your RWX class explicitly if the default is not one.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: forebrain-home-pvc
+  name: forebrain-home
   namespace: forebrain
   labels:
-    app: forebrain
+    app.kubernetes.io/name: forebrain
 spec:
   accessModes:
-    - ReadWriteOnce
+    - ReadWriteMany
   resources:
     requests:
-      storage: 5Gi
+      storage: 50Gi

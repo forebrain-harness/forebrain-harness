@@ -1,16 +1,22 @@
+# ClusterIP with NO session affinity (plan 214 §3.4): replicas are
+# interchangeable. A browser's socket is relayed to whichever replica runs
+# its conversation, run-bound HTTP calls are forwarded the same way, and
+# each long-connection channel account sits on exactly one replica through
+# fb_leases (plan 213) — the Service must not pin a client to the replica
+# it first hit.
 apiVersion: v1
 kind: Service
 metadata:
   name: forebrain
   namespace: forebrain
   labels:
-    app: forebrain
+    app.kubernetes.io/name: forebrain
 spec:
   type: ClusterIP
   selector:
-    app: forebrain
+    app.kubernetes.io/name: forebrain
   ports:
     - name: http
       port: 6060
-      targetPort: 6060
+      targetPort: http
       protocol: TCP

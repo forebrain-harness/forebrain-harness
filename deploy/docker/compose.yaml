@@ -1,0 +1,177 @@
+# One gateway on one Docker host (plan 214 §3.3): the plain form of the
+# deployment the Dockerfile exists for.
+#
+#   FOREBRAIN_GATEWAY_TOKEN=$(openssl rand -hex 32) \
+#   FOREBRAIN_LLM_PROVIDER=deepseek FOREBRAIN_LLM_MODEL=… \
+#   FOREBRAIN_LLM_API_KEY=… FOREBRAIN_LLM_BASE_URL=https://… \
+#   docker compose -f deploy/docker/compose.yaml up -d
+#
+# State is one named volume, forebrain-home: config, .env, SQLite state,
+# workspace, logs. Everything survives `docker compose down`; only
+# `down -v` deletes it. The gateway serves only once the main agent's LLM is
+# configured (the gateway start command refuses to run otherwise), so the
+# seed service below writes forebrain.yaml and .env on the FIRST up only — a
+# home that already has forebrain.yaml is left exactly as it is, and after
+# that the file belongs to the web's configuration editor. The LLM variables
+# exist for that one write; nothing reads them afterwards (the api_key lands
+# in .env as FOREBRAIN_LLM_API_KEY and forebrain.yaml references it).
+#
+# The security_opt block on the gateway is the sandbox (plan 214 §3.2):
+# seccomp lets the uid-10001 process create a user namespace,
+# systempaths=unconfined stops Docker's masked/readonly /proc from blocking
+# the sandbox's fresh proc mount, apparmor=unconfined is for Ubuntu hosts.
+# Remove the whole block and the gateway runs exactly the same with every
+# command full access (no approval presets in the UI) — read
+# deploy/seccomp/README.md before doing that on purpose.
+#
+# Mirror/CA variables for an offline network (plan 208 §3.1) go on the
+# gateway's environment; the examples are in the gateway service below.
+#
+# Multi-instance is a different deployment (shared home, MySQL/PostgreSQL
+# only, one literal-IP FOREBRAIN_INTERNAL_ADDR per instance) — the comment
+# at the bottom of this file, and deploy/compose/multi-replica.yaml, which
+# is the tested two-replica form.
+
+name: forebrain
+
+services:
+  seed:
+    # Runs before the gateway on every `up` and does nothing once
+    # forebrain.yaml exists. Two gateways seeding a brand-new shared home at
+    # once would each write their own token (plan 213 §3.6); one seed service
+    # is also what makes a brand-new single-host home deterministic.
+    image: ${FOREBRAIN_IMAGE:-forebrain:dev}
+    restart: "no"
+    environment:
+      FOREBRAIN_GATEWAY_TOKEN: ${FOREBRAIN_GATEWAY_TOKEN:?set FOREBRAIN_GATEWAY_TOKEN, e.g. `openssl rand -hex 32`}
+      FOREBRAIN_DATABASE_URL: ${FOREBRAIN_DATABASE_URL:-}
+      FOREBRAIN_LLM_PROVIDER: ${FOREBRAIN_LLM_PROVIDER:-}
+      FOREBRAIN_LLM_MODEL: ${FOREBRAIN_LLM_MODEL:-}
+      FOREBRAIN_LLM_API_KEY: ${FOREBRAIN_LLM_API_KEY:-}
+      FOREBRAIN_LLM_BASE_URL: ${FOREBRAIN_LLM_BASE_URL:-}
+    volumes:
+      - forebrain-home:/data/forebrain
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        home=$${FOREBRAIN_HOME:-/data/forebrain}
+        mkdir -p "$$home"
+        if [ -f "$$home/forebrain.yaml" ]; then
+          echo "seed: keeping the existing $$home/forebrain.yaml"
+          exit 0
+        fi
+        if [ -z "$${FOREBRAIN_LLM_PROVIDER:-}" ] || [ -z "$${FOREBRAIN_LLM_MODEL:-}" ] \
+           || [ -z "$${FOREBRAIN_LLM_API_KEY:-}" ] || [ -z "$${FOREBRAIN_LLM_BASE_URL:-}" ]; then
+          # The gateway refuses to start until the main agent's LLM is
+          # configured; fail the first 'up' with the variables it needs
+          # rather than write a config that cannot boot.
+          echo "seed: FOREBRAIN_LLM_PROVIDER / FOREBRAIN_LLM_MODEL / FOREBRAIN_LLM_API_KEY / FOREBRAIN_LLM_BASE_URL must all be set on the first 'up' (afterwards the web's configuration editor owns forebrain.yaml)" >&2
+          exit 1
+        fi
+        printf 'FOREBRAIN_GATEWAY_TOKEN=%s\nFOREBRAIN_LLM_API_KEY=%s\n' \
+          "$$FOREBRAIN_GATEWAY_TOKEN" "$$FOREBRAIN_LLM_API_KEY" > "$$home/.env"
+        chmod 600 "$$home/.env"
+        {
+          printf 'gateway:\n'
+          printf '  http_addr: "0.0.0.0:6060"\n'
+          printf '  auth:\n'
+          printf '    mode: token\n'
+          printf '    token: "$${FOREBRAIN_GATEWAY_TOKEN}"\n'
+          if [ -n "$${FOREBRAIN_DATABASE_URL:-}" ]; then
+            printf 'database:\n'
+            printf '  url: "%s"\n' "$$FOREBRAIN_DATABASE_URL"
+          fi
+          printf 'agents:\n'
+          printf '  definitions:\n'
+          printf '    main:\n'
+          printf '      primary: true\n'
+          printf '      llm_providers:\n'
+          printf '        - provider: %s\n' "$$FOREBRAIN_LLM_PROVIDER"
+          printf '          model: %s\n' "$$FOREBRAIN_LLM_MODEL"
+          printf '          api_key: "$${FOREBRAIN_LLM_API_KEY}"\n'
+          printf '          base_url: %s\n' "$$FOREBRAIN_LLM_BASE_URL"
+        } > "$$home/forebrain.yaml.tmp"
+        # The config arrives whole: the gateway must never read a
+        # half-written file (plan 213 §3.6).
+        mv "$$home/forebrain.yaml.tmp" "$$home/forebrain.yaml"
+        chmod 600 "$$home/forebrain.yaml"
+        echo "seed: wrote $$home/forebrain.yaml"
+
+  gateway:
+    image: ${FOREBRAIN_IMAGE:-forebrain:dev}
+    restart: unless-stopped
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    ports:
+      - "6060:6060"
+    environment:
+      # The shared secret every request carries (web sign-in and peer
+      # replicas alike); it is also what seed wrote into the home's .env.
+      FOREBRAIN_GATEWAY_TOKEN: ${FOREBRAIN_GATEWAY_TOKEN:?set FOREBRAIN_GATEWAY_TOKEN, e.g. `openssl rand -hex 32`}
+      # mysql://… or postgres://…; empty (the default) is the SQLite file in
+      # the forebrain-home volume. Set it only together with --profile pg
+      # below or your own database.
+      FOREBRAIN_DATABASE_URL: ${FOREBRAIN_DATABASE_URL:-}
+      # Intranet mirror + certificate variables an offline network needs
+      # (plan 208 §3.1 — this exact whitelist is what reaches the agent's
+      # subprocesses, pkg/home/envguard.go). Examples:
+      #   GOPROXY: http://goproxy.corp.example:3000
+      #   PIP_INDEX_URL: http://pypi.corp.example:8081/simple
+      #   NPM_CONFIG_REGISTRY: http://npm.corp.example:4873
+      #   SSL_CERT_FILE: /data/forebrain/certs/corp-root-ca.pem   # mount the certs too
+      #   NODE_EXTRA_CA_CERTS: /data/forebrain/certs/corp-root-ca.pem
+    volumes:
+      - forebrain-home:/data/forebrain
+    security_opt:
+      - seccomp=../seccomp/forebrain-bubblewrap.json
+      - systempaths=unconfined
+      - apparmor=unconfined
+
+  # Optional PostgreSQL (plan 214 §3.3), started with --profile pg:
+  #
+  #   FOREBRAIN_GATEWAY_TOKEN=… FOREBRAIN_LLM_*=… \
+  #   FOREBRAIN_DATABASE_URL='postgres://forebrain:forebrain@postgres:5432/forebrain?sslmode=disable' \
+  #   docker compose -f deploy/docker/compose.yaml --profile pg up -d
+  #
+  # The gateway has no depends_on on it (a profiled dependency would break
+  # the plain `up`), so with the pg profile it may restart a few times until
+  # the database answers — restart: unless-stopped lands it on its feet.
+  postgres:
+    image: postgres:14
+    profiles: ["pg"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: forebrain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forebrain}
+      POSTGRES_DB: forebrain
+    volumes:
+      - forebrain-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forebrain"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  forebrain-home:
+  forebrain-pgdata:
+
+# --- two instances on this host (only with MySQL/PostgreSQL) ---------------
+#
+# SQLite does not survive two writers; a second `docker compose up --scale
+# gateway=2` against it is not a supported deployment. With
+# FOREBRAIN_DATABASE_URL pointing at MySQL/PostgreSQL, scale instead of
+# editing, and give each instance the address its peers reach it at - a
+# literal IP (peer auth checks the source IP against the registered
+# internal_addr; X-Forwarded-For is never consulted), on the same listener
+# as the browser's port 6060:
+#
+#   deploy:
+#     replicas: 2
+#   environment:
+#     FOREBRAIN_INTERNAL_ADDR: http://192.0.2.10:6060   # literal IP, per instance
+#
+# The tested two-replica compose, with the same once-only seeding this file
+# does, is deploy/compose/multi-replica.yaml.

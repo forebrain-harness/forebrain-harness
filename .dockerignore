@@ -5,3 +5,20 @@ frontend/dist
 *.log
 frontend/.vite
 .codegraph
+
+# Fetched build artifacts, not sources (gitignored). The image fetches the ones
+# it needs for its own target platform during the build, so copying a local
+# checkout's copies in is at best 140 MB of dead context and at worst fatal: a
+# checkout whose third_party/libtokenizers is a symlink (a worktree linked to a
+# shared cache) lands an unusable entry in /src and the fetch script's mkdir
+# fails with "File exists".
+third_party/libtokenizers
+third_party/pdfium
+
+# Local state and per-machine files that must never reach an image.
+.worktrees
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm
+.env
+.env.*

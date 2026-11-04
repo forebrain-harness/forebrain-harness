@@ -10,7 +10,7 @@
 #
 #   FOREBRAIN_INTERNAL_ADDR names the pod/service address a peer reaches this
 #   replica at (plan 213 §3.1): in Kubernetes the downward API supplies
-#   http://$(POD_IP):6060 instead. Both replicas serve it on the same port the
+#   http://$(POD_IP):6060 instead. Both replicas expose it on the same port the
 #   browser uses — the internal endpoints are paths on the one listener.
 #
 #   The seed service writes the shared home's config once, before either replica

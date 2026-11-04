@@ -56,13 +56,19 @@ fetch_font() {
 
   local tgz_name
   tgz_name="${pkg##*/}-$version.tgz"
-  local url="https://registry.npmjs.org/$pkg/-/$tgz_name"
+  # FOREBRAIN_NPM_REGISTRY points this at a mirror (an internal one, or
+  # registry.npmmirror.com where the public registry is slow). The pinned
+  # sha256 below is what decides whether the bytes are the ones expected, so a
+  # mirror can serve them but cannot change them.
+  local url="${FOREBRAIN_NPM_REGISTRY:-https://registry.npmjs.org}/$pkg/-/$tgz_name"
 
   local tmp
   tmp="$(mktemp -d)"
   trap "rm -rf '$tmp'" RETURN
   log "downloading $pkg@$version"
-  curl -fsSL --retry 3 --retry-all-errors -o "$tmp/pkg.tgz" "$url" \
+  curl -fsSL --retry 3 --retry-all-errors \
+    --connect-timeout 15 --max-time 600 \
+    -o "$tmp/pkg.tgz" "$url" \
     || die "download failed: $url"
   tar -xzf "$tmp/pkg.tgz" -C "$tmp" "$inner" \
     || die "$pkg@$version does not contain $inner"

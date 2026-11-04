@@ -276,6 +276,73 @@ npm i -g forebrain-harness-forebrain-<version>.tgz
 
 </details>
 
+### Building the container image
+
+```bash
+docker build -t forebrain:dev .          # or: make docker
+```
+
+The build pulls its pieces from the public origins by default. On a network
+where those are slow or unreachable — docker.io for the base images and the
+BuildKit frontend, GitHub for the tokenizers/PDFium release archives (whose
+download host, objects.githubusercontent.com, some networks block outright),
+registry.npmjs.org for the CJK font packages, go.dev for the Go toolchain —
+point each piece at a mirror through a build argument. Every mirror is
+overridable and none is mandatory; the downloads are verified against the
+sha256 values pinned in the repository either way.
+
+With the mirrors available in mainland China (DaoCloud for images, Aliyun for
+apt and the Go toolchain, npmmirror for npm, goproxy.cn for Go modules,
+ghfast.top for GitHub release archives), the complete command is:
+
+```bash
+# Base images and the BuildKit frontend, through the DaoCloud mirror. Pull them
+# once and retag, so the build resolves everything locally (--pull=false):
+docker pull docker.m.daocloud.io/docker/dockerfile:1.7
+for img in node:22-bookworm golang:1.27-bookworm debian:bookworm-slim; do
+  docker pull "docker.m.daocloud.io/library/$img" \
+    && docker tag "docker.m.daocloud.io/library/$img" "$img"
+done
+
+docker build --pull=false \
+  --build-arg BUILDKIT_SYNTAX=docker.m.daocloud.io/docker/dockerfile:1.7 \
+  --build-arg NODE_IMAGE=docker.m.daocloud.io/library/node:22-bookworm \
+  --build-arg GO_BUILD_IMAGE=docker.m.daocloud.io/library/golang:1.27-bookworm \
+  --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/debian:bookworm-slim \
+  --build-arg APT_MIRROR=mirrors.aliyun.com \
+  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  --build-arg GO_DIST_URL=https://mirrors.aliyun.com/golang \
+  --build-arg GITHUB_MIRROR=https://ghfast.top/ \
+  -t forebrain:dev .
+```
+
+| Build argument      | What it serves                     | Public default                        | Used for                                          |
+| ------------------- | ---------------------------------- | ------------------------------------- | ------------------------------------------------- |
+| `BUILDKIT_SYNTAX`  | BuildKit frontend image            | `docker/dockerfile:1.7` on docker.io | parsing the Dockerfile                            |
+| `NODE_IMAGE` / `GO_BUILD_IMAGE` / `RUNTIME_IMAGE` | the three stage bases | docker.io | frontend build / Go build / runtime             |
+| `APT_MIRROR`       | Debian package mirror              | `deb.debian.org`                      | apt in both build stages and the runtime stage    |
+| `NPM_REGISTRY`     | npm registry                       | `registry.npmjs.org`                  | pnpm install; the CJK font packages               |
+| `GOPROXY`          | Go module proxy                    | `proxy.golang.org`                    | `go mod download` and the Go build                |
+| `GO_DIST_URL`      | Go toolchain tarball               | `go.dev/dl`                           | the Go the runtime image carries                  |
+| `GITHUB_MIRROR`    | GitHub release-archive prefix      | (none)                                | `scripts/fetch-libtokenizers.sh`, `scripts/fetch-pdfium.sh` |
+
+`GITHUB_MIRROR` is a URL prefix prepended to the full `https://github.com/...`
+download URL, and it changes *which host serves* the archive, not *what* is
+served: both fetch scripts verify the sha256 pinned in the repository, so any
+mirror works or fails loudly. It also skips the GitHub asset-API lookup
+(`api.github.com` allows 60 anonymous requests per hour per IP — a few local
+retries exhaust it), which is why it is worth setting even where github.com
+itself is reachable.
+
+Verify the image:
+
+```bash
+docker run --rm forebrain:dev --version
+docker run --rm --entrypoint sh forebrain:dev \
+  -c 'bwrap --version && git --version && node --version && npm --version && python3 --version && pip3 --version && go version'
+```
+
 ## Roadmap
 
 Forebrain Harness is built in the open, and the roadmap is shaped by the people who use it.
