@@ -1209,14 +1209,16 @@ func waitRecoveryScan(d dbx.Dialect, columns, sessionID string, limit int) (stri
 	sessionID = strings.TrimSpace(sessionID)
 	// PostgreSQL refuses a SELECT DISTINCT whose ORDER BY names an expression
 	// the select list does not carry ("for SELECT DISTINCT, ORDER BY
-	// expressions must appear in select list", SQLSTATE 42P10), and this scan
+	// expressions must appear in select list", SQLSTATE 42P10), and MySQL
+	// rejects the same shape ("Expression #1 of ORDER BY clause is not in
+	// SELECT list ... incompatible with DISTINCT", Error 3065). This scan
 	// orders by w.updated_at, which the wait row's own columns do not include.
 	// DISTINCT buys nothing here: fb_run_waits.action_id is UNIQUE and the
 	// conversation_runs join is on that table's primary key, so one wait row
-	// can appear at most once. Dropping it for PostgreSQL is therefore the same
+	// can appear at most once. Dropping it for both is therefore the same
 	// result set — and the SQLite statement, which must stay byte-identical,
 	// is untouched.
-	if d == dbx.Postgres {
+	if d == dbx.Postgres || d == dbx.MySQL {
 		columns = strings.TrimPrefix(columns, "DISTINCT ")
 	}
 	if limit > 5000 {
