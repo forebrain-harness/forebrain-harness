@@ -9,6 +9,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
 )
@@ -282,7 +283,7 @@ func TestAbandonedRunReaperReportsEachEndingOnce(t *testing.T) {
 	// The finish is the dead owner's last heartbeat window, recorded on the
 	// run the reap stamped — not the moment this process noticed.
 	var finishedAt int64
-	require.NoError(t, db.QueryRow(`SELECT finished_at_ms FROM fb_runs WHERE id=?`, child.ID).Scan(&finishedAt))
+	require.NoError(t, db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT finished_at_ms FROM fb_runs WHERE id=?`), child.ID).Scan(&finishedAt))
 	require.NotZero(t, finishedAt)
 	require.Equal(t, finishedAt, ended.FinishedAtMs)
 

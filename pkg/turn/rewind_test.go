@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
 )
@@ -205,7 +206,7 @@ func TestRewindBusyWhileRunAlive(t *testing.T) {
 	h := newRewindHarness(t)
 	u1 := h.userMessage(t, "hello")
 	_, err := h.runs.DB.ExecContext(h.ctx,
-		`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES('r-live', ?, 'x', 'waiting_action', 1, 1)`, h.sid)
+		dbx.Rebind(dbx.DialectOf(h.runs.DB), `INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES('r-live', ?, 'x', 'waiting_action', 1, 1)`), h.sid)
 	require.NoError(t, err)
 	_, err = Rewind(h.ctx, h.eng, h.sid, u1, RewindModeBoth, nil)
 	require.ErrorIs(t, err, ErrRewindBusy)

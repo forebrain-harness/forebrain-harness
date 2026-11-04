@@ -17,6 +17,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
 )
@@ -508,7 +509,7 @@ func expireLease(ctx context.Context, t *testing.T, db *sql.DB, runID, actionID 
 	t.Helper()
 	stale := time.Now().Add(-2 * state.WaitResumeLease).UnixMilli()
 	_, err := db.ExecContext(ctx,
-		`UPDATE fb_run_waits SET resume_claimed_at_ms=? WHERE run_id=? AND action_id=?`,
+		dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_run_waits SET resume_claimed_at_ms=? WHERE run_id=? AND action_id=?`),
 		stale, runID, actionID)
 	require.NoError(t, err)
 }
