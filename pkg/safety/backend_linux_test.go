@@ -315,3 +315,64 @@ func TestDeniedDirWithoutNestedRuleRemountsImmediately(t *testing.T) {
 		t.Fatalf("a denied directory with no nested rule must be read-only immediately: %v", args)
 	}
 }
+
+// A directory marker must stay traversable by the user that created it. The
+// deny list that produces one names several paths beneath the same missing
+// directory — the git execution surfaces .git/hooks, .git/config, … — and the
+// next entry's Lstat walks through the marker as that same user. A 0000 marker
+// denied the walk (EACCES, which is not IsNotExist), so the prepare pass
+// failed and every sandboxed shell in a workspace without a .git died at its
+// first command — but only for a non-root gateway (a container's fixed uid,
+// no CAP_DAC_OVERRIDE); root ignores the mode bits, and macOS has no markers.
+func TestMissingDenyMarkerDirectoryStaysTraversableForTheNextEntry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory mode bits; the defect is unprivileged-only")
+	}
+	root := t.TempDir()
+
+	// The same shape protectedWritePaths emits for a workspace without a .git:
+	// siblings beneath one missing directory, in the order they are appended.
+	req := CommandRequest{
+		Profile:                 ProfileWorkspaceWrite,
+		WorkDir:                 root,
+		AdditionalWritablePaths: []string{root},
+		DeniedWritablePaths: []string{
+			filepath.Join(root, ".git", "hooks"),
+			filepath.Join(root, ".git", "config"),
+			filepath.Join(root, ".git", "config.worktree"),
+			filepath.Join(root, ".git", "modules"),
+		},
+	}
+	markers, err := prepareLinuxMissingDenyMarkers(req)
+	if err != nil {
+		t.Fatalf("prepare over sibling deny paths under one missing directory: %v", err)
+	}
+
+	// The marker directory itself is what the next entry had to walk through.
+	marker := filepath.Join(root, ".git")
+	info, err := os.Lstat(marker)
+	if err != nil {
+		t.Fatalf("marker directory: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("marker %s is not a directory", marker)
+	}
+	// 0700: the creator may traverse it. The boundary is the mount table —
+	// bwrap covers the marker with a tmpfs or read-only bind — never the
+	// host-side mode of a directory that exists for one command.
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("marker mode = %o, want 700 (traversable by its creator)", perm)
+	}
+	// The walk that used to die: .git/config is itself a denied missing path,
+	// so prepare created a file marker for it — reaching it at all is the
+	// proof, because that Lstat is the one the 0000 directory used to turn
+	// into EACCES.
+	if _, err := os.Lstat(filepath.Join(marker, "config")); err != nil {
+		t.Fatalf("lstat through the marker = %v, want the sibling file marker (the old failure was EACCES here)", err)
+	}
+
+	cleanupLinuxMissingDenyMarkers(markers)
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker survived cleanup: %v", err)
+	}
+}

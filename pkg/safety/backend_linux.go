@@ -342,13 +342,29 @@ func firstMissingLinuxPathComponent(target string) (string, bool, error) {
 
 func createLinuxMissingDenyMarker(path string, directory bool) (linuxMissingDenyMarker, bool, error) {
 	if directory {
-		if err := os.Mkdir(path, 0o000); err != nil {
+		// Traversable by its creator (0700, not 0000): the deny list that
+		// produced this marker names several paths beneath it — .git/hooks,
+		// .git/config, … — and the next one's Lstat has to walk through this
+		// directory as the same unprivileged user that just created it. A 0000
+		// directory denies that walk (EACCES, not IsNotExist), and the prepare
+		// pass fails outright: on a non-root gateway (a container's fixed uid,
+		// no CAP_DAC_OVERRIDE) every sandboxed shell in a workspace without a
+		// .git died at its first command. Root and macOS never saw it — root
+		// ignores the mode bits and the darwin backend has no markers. The
+		// mode is not part of the sandbox boundary either: inside bwrap the
+		// marker is covered by a tmpfs or a read-only bind, so the boundary is
+		// the mount table, not the host-side bits on a directory that exists
+		// for the duration of one command and is removed afterwards.
+		if err := os.Mkdir(path, 0o700); err != nil {
 			if os.IsExist(err) {
 				return linuxMissingDenyMarker{}, false, nil
 			}
 			return linuxMissingDenyMarker{}, false, err
 		}
 	} else {
+		// A file marker blocks nothing but itself: stat does not need the
+		// file's own permission bits, so 0000 stays — an inert empty file is
+		// exactly what the deny mount covers.
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o000)
 		if err != nil {
 			if os.IsExist(err) {
