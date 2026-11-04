@@ -36,6 +36,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
@@ -210,8 +211,8 @@ func seedConfigRoot(t *testing.T, db *sql.DB, root appcfg.Root) {
 		if raw == nil {
 			continue
 		}
-		_, err = db.Exec(`INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`, name, string(raw))
+		_, err = db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
+ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`), name, string(raw))
 		require.NoError(t, err)
 	}
 }
@@ -231,7 +232,7 @@ func seedConfigDocument(t *testing.T, db *sql.DB, doc string) {
 func configSectionRow(t *testing.T, db *sql.DB, section string) string {
 	t.Helper()
 	var raw string
-	err := db.QueryRow(`SELECT value_json FROM fb_config WHERE section = ?`, section).Scan(&raw)
+	err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT value_json FROM fb_config WHERE section = ?`), section).Scan(&raw)
 	require.NoError(t, err)
 	return raw
 }
@@ -240,7 +241,7 @@ func configSectionRow(t *testing.T, db *sql.DB, section string) string {
 func configSectionAbsent(t *testing.T, db *sql.DB, section string) bool {
 	t.Helper()
 	var raw string
-	err := db.QueryRow(`SELECT value_json FROM fb_config WHERE section = ?`, section).Scan(&raw)
+	err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT value_json FROM fb_config WHERE section = ?`), section).Scan(&raw)
 	require.ErrorIs(t, err, sql.ErrNoRows)
 	return true
 }
@@ -295,7 +296,7 @@ func seedRun(t *testing.T, runs *state.RunStore, sessionID, runID string) {
 		t.Fatalf("ensure session %s: %v", sessionID, err)
 	}
 	if _, err := runs.DB.ExecContext(context.Background(),
-		`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,'',?,0,0)`,
+		dbx.Rebind(dbx.DialectOf(runs.DB), `INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,'',?,0,0)`),
 		runID, sessionID, string(state.RunStatusRunning)); err != nil {
 		t.Fatalf("create run %s: %v", runID, err)
 	}
@@ -1722,7 +1723,7 @@ func TestChatSessionsAreFilteredByPurpose(t *testing.T) {
 		if err := s.Sessions.SetSessionSource(ctx, id, state.SessionSourceCron); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Sessions.DB().Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(10_000+i), id); err != nil {
+		if _, err := s.Sessions.DB().Exec(dbx.Rebind(dbx.DialectOf(s.Sessions.DB()), "UPDATE fb_sessions SET updated_at = ? WHERE id = ?"), int64(10_000+i), id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1775,14 +1776,14 @@ func TestChatSessionsPagesTheDrawerList(t *testing.T) {
 		if err := projects.BindSession(ctx, id, p.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Sessions.DB().Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(30-i), id); err != nil {
+		if _, err := s.Sessions.DB().Exec(dbx.Rebind(dbx.DialectOf(s.Sessions.DB()), "UPDATE fb_sessions SET updated_at = ? WHERE id = ?"), int64(30-i), id); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if _, err := s.Sessions.Append(ctx, "legacy", "user", "hello"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Sessions.DB().Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(99), "legacy"); err != nil {
+	if _, err := s.Sessions.DB().Exec(dbx.Rebind(dbx.DialectOf(s.Sessions.DB()), "UPDATE fb_sessions SET updated_at = ? WHERE id = ?"), int64(99), "legacy"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2604,7 +2605,7 @@ func TestChatMessagesPagesBackwards(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Env.SQL.ExecContext(ctx, `UPDATE fb_messages SET created_at = ? WHERE id = ?`, base.Add(at).Unix(), id); err != nil {
+		if _, err := s.Env.SQL.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(s.Env.SQL), `UPDATE fb_messages SET created_at = ? WHERE id = ?`), base.Add(at).Unix(), id); err != nil {
 			t.Fatal(err)
 		}
 		return id
@@ -2625,7 +2626,7 @@ func TestChatMessagesPagesBackwards(t *testing.T) {
 		start, end time.Duration
 	}{{"r1", 2 * time.Second, 3*time.Second + 500*time.Millisecond}, {"r2", 4 * time.Second, 6 * time.Second}} {
 		if _, err := s.Env.SQL.ExecContext(ctx,
-			`UPDATE fb_runs SET started_at_ms = ?, finished_at_ms = ?, worked_ms = ? WHERE id = ?`,
+			dbx.Rebind(dbx.DialectOf(s.Env.SQL), `UPDATE fb_runs SET started_at_ms = ?, finished_at_ms = ?, worked_ms = ? WHERE id = ?`),
 			base.Add(r.start).UnixMilli(), base.Add(r.end).UnixMilli(), (r.end - r.start).Milliseconds(), r.id); err != nil {
 			t.Fatal(err)
 		}
@@ -2738,7 +2739,7 @@ func TestChatMessagesPlacesAGoalsLinesWhereTheTerminalDrawsThem(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Env.SQL.ExecContext(ctx, `UPDATE fb_messages SET created_at = ? WHERE id = ?`, base.Add(at).Unix(), id); err != nil {
+		if _, err := s.Env.SQL.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(s.Env.SQL), `UPDATE fb_messages SET created_at = ? WHERE id = ?`), base.Add(at).Unix(), id); err != nil {
 			t.Fatal(err)
 		}
 		return id
@@ -3339,7 +3340,7 @@ func TestProjectSessionIsBornInTheProjectAndLeavesOthersAlone(t *testing.T) {
 	cwdOf := func(id string) string {
 		t.Helper()
 		var cwd string
-		if err := s.Sessions.DB().QueryRow("SELECT cwd FROM fb_sessions WHERE id=?", id).Scan(&cwd); err != nil {
+		if err := s.Sessions.DB().QueryRow(dbx.Rebind(dbx.DialectOf(s.Sessions.DB()), "SELECT cwd FROM fb_sessions WHERE id=?"), id).Scan(&cwd); err != nil {
 			t.Fatal(err)
 		}
 		return cwd
@@ -3419,7 +3420,7 @@ func TestChatSessionCreateRequiresProjectOrFolder(t *testing.T) {
 	}
 	cwdOf := func(id string) string {
 		var cwd string
-		require.NoError(t, s.Sessions.DB().QueryRow("SELECT cwd FROM fb_sessions WHERE id=?", id).Scan(&cwd))
+		require.NoError(t, s.Sessions.DB().QueryRow(dbx.Rebind(dbx.DialectOf(s.Sessions.DB()), "SELECT cwd FROM fb_sessions WHERE id=?"), id).Scan(&cwd))
 		return cwd
 	}
 
@@ -8425,11 +8426,11 @@ func seedProjectConversation(t *testing.T, s *Server, p state.Project, id, title
 	require.NoError(t, s.Projects.BindSession(ctx, id, p.ID))
 	for _, message := range messages {
 		_, err := s.Env.SQL.Exec(
-			`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`,
+			dbx.Rebind(dbx.DialectOf(s.Env.SQL), `INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`),
 			id, message[0], message[1], "text", 1)
 		require.NoError(t, err)
 	}
-	_, err := s.Env.SQL.Exec(`UPDATE fb_sessions SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, updatedAt, id)
+	_, err := s.Env.SQL.Exec(dbx.Rebind(dbx.DialectOf(s.Env.SQL), `UPDATE fb_sessions SET created_at = ?, updated_at = ? WHERE id = ?`), createdAt, updatedAt, id)
 	require.NoError(t, err)
 }
 
@@ -10238,7 +10239,7 @@ func TestProjectChannelTargetsListsSeenChats(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Env.SQL.ExecContext(ctx, `UPDATE fb_sessions SET updated_at=? WHERE id=?`, base+60, chat); err != nil {
+	if _, err := s.Env.SQL.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(s.Env.SQL), `UPDATE fb_sessions SET updated_at=? WHERE id=?`), base+60, chat); err != nil {
 		t.Fatal(err)
 	}
 
