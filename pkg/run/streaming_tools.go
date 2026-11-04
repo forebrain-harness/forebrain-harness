@@ -152,6 +152,15 @@ func (e *streamingToolExecutor) pump() {
 			e.mu.Unlock()
 			return
 		}
+		if e.ctx != nil && e.ctx.Err() != nil {
+			// The turn is over — cancelled, or a subagent's execution
+			// interrupted to send its steers — while the call ahead of this
+			// one settled: nothing starts on a dead turn. abort answers the
+			// calls still queued.
+			e.halted = true
+			e.mu.Unlock()
+			return
+		}
 		if e.steerWaitingLocked() {
 			// A queued steer takes the turn at this call boundary: it and
 			// every call behind it are answered "not run".
@@ -193,6 +202,10 @@ func (e *streamingToolExecutor) pump() {
 			e.wg.Done()
 			return
 		}
+		// Esc's "interrupt and send immediately" reaches the call through the
+		// turn's input runtime: the model call streaming beside it is not the
+		// only thing the user stopped waiting for.
+		baseCtx, releaseInterrupt := TurnInputRuntimeFromContext(baseCtx).interruptibleTools(baseCtx)
 		// The call's own cancellation, so a refusal without words elsewhere in
 		// the batch can interrupt this call without touching the turn.
 		callCtx, cancelCall := context.WithCancelCause(baseCtx)
@@ -202,6 +215,7 @@ func (e *streamingToolExecutor) pump() {
 		index := first
 		go func() {
 			defer e.wg.Done()
+			defer releaseInterrupt()
 			defer cancelCall(nil)
 			// The crash-recovery snapshot of this call's in-place gates: the
 			// provisional session the call started under, plus every result
@@ -392,8 +406,11 @@ func (e *streamingToolExecutor) finish(ctx context.Context, finalCalls []llm.Too
 
 // abort settles a cancelled request: every readied call gets a result — the
 // ones that finished their real one, the rest an interruption — so they are
-// written with the assistant message before the cancellation returns.
-func (e *streamingToolExecutor) abort(ctx context.Context) []orchestratedToolResult {
+// written with the assistant message before the cancellation returns. With
+// preempted the request was stopped by Esc's "interrupt and send immediately":
+// the calls that never ran read "not run", the answer a steer gives a call it
+// preempts, because the user's message took the turn before they started.
+func (e *streamingToolExecutor) abort(ctx context.Context, preempted bool) []orchestratedToolResult {
 	e.hold()
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -405,11 +422,18 @@ func (e *streamingToolExecutor) abort(ctx context.Context) []orchestratedToolRes
 			out = append(out, c.result)
 			continue
 		}
-		out = append(out, orchestratedToolResult{
-			index: len(out),
-			call:  c.call,
-			err:   context.Canceled,
-		})
+		if preempted {
+			out = append(out, steerPreemptedResult(len(out), c.call))
+			continue
+		}
+		if c.state == streamedCallDeferred {
+			// A call deferred to the stream's end for its approval already
+			// drew its card: it reads as interrupted, the way that card is
+			// stamped canceled, not as a call nobody saw.
+			out = append(out, orchestratedToolResult{index: len(out), call: c.call, err: context.Canceled})
+			continue
+		}
+		out = append(out, notStartedResult(len(out), c.call))
 	}
 	return out
 }

@@ -10295,8 +10295,11 @@ func TestQueuedSteerLetsTheRunningParallelGroupFinish(t *testing.T) {
 	}
 }
 
-// A cancelled run keeps its own behaviour: the calls it started are settled as
-// they were, and no call is answered "not run".
+// A cancelled run keeps its own behaviour: the call it started settles as it
+// was, no call is answered "not run" — the steer queued meanwhile did not take
+// the turn, the cancellation ended it — and nothing behind that call starts on
+// the dead turn. A tool that never reads its context, like this one, would
+// otherwise still act after the user pressed Esc.
 func TestCancelledRunDoesNotPreempt(t *testing.T) {
 	st := toolpkg.NewState(t.TempDir())
 	st.RegisterToolMeta(event.ToolMeta{Name: "write_note"})
@@ -10327,14 +10330,29 @@ func TestCancelledRunDoesNotPreempt(t *testing.T) {
 	); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if got := atomic.LoadInt32(calls); got != 3 {
-		t.Fatalf("tool executions = %d, want 3 (a cancelled run does not preempt)", got)
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("tool executions = %d, want 1 (a cancelled run starts nothing more)", got)
 	}
 	for i, request := range inner.requests {
 		for _, msg := range request {
 			if msg.Role == llm.RoleTool && msg.TextContent() == steerPreemptedResultText {
 				t.Fatalf("request %d carries a not-run result: %#v", i+1, request)
 			}
+		}
+	}
+	results := toolResultMessages(inner.request(t, 2))
+	if len(results) != 3 {
+		t.Fatalf("tool results = %d, want 3: %#v", len(results), results)
+	}
+	if got := results[0].TextContent(); got != "wrote" {
+		t.Fatalf("first tool result = %q, want the call that ran", got)
+	}
+	for i, result := range results[1:] {
+		if got := result.TextContent(); got != cancelledBeforeStartResultText {
+			t.Fatalf("tool result %d = %q, want the not-started answer", i+2, got)
+		}
+		if result.ToolDisplay == nil || result.ToolDisplay.Body != toolpkg.CancelledBeforeStartDisplayKey {
+			t.Fatalf("tool result %d display = %#v, want the drop key no surface draws", i+2, result.ToolDisplay)
 		}
 	}
 }

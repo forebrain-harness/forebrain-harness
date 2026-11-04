@@ -495,6 +495,14 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			foreground.acknowledgeResponse()
 			accum.ResponseCompleted()
 		},
+		// A tool call is model output as much as a word is — the non-streaming
+		// replay already counts it as such — but the providers' streams
+		// acknowledge only text and reasoning, and a call that starts inside
+		// the stream holds the response open until it ends. A response made
+		// of nothing but tool calls therefore never left the withdraw window:
+		// Esc during its running command took the message back, and with a
+		// steer waiting withdrew the turn instead of sending the steer.
+		OnToolCallReady: func(llm.ToolCall) { foreground.acknowledgeResponse() },
 		// A transport failure killed the whole attempt: drop the cancelled-
 		// turn buffer's streamed text (the retry re-streams from the first
 		// token) and let the reducer move the retry onto the Working line.

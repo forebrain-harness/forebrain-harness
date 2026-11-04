@@ -420,14 +420,23 @@ function isPlanReviewDeliveredRow(row: { partsJson?: string | null }): boolean {
 export const REJECTION_STOPPED_KEY = 'Not run — the user refused a call in this response and stopped the turn.'
 
 /**
+ * The body a tool row carries when the run never started that call because
+ * the turn was cancelled first — Esc while an earlier call of the same reply
+ * was running. Like a preempted call, it never ran: every replay projection
+ * that meets the key drops the row whole. Must stay byte-identical with the
+ * runtime's tool.CancelledBeforeStartDisplayKey.
+ */
+export const CANCELLED_BEFORE_START_KEY = 'Not run — the turn was cancelled before this call started.'
+
+/**
  * isHiddenRunRow reports whether a stored tool row is the drop key of a call
- * the run never started — a queued user message took the turn from it, or a
- * refusal without words stopped the turn before it. The call never ran, so
- * the timeline draws nothing for it.
+ * the run never started — a queued user message took the turn from it, a
+ * refusal without words stopped the turn before it, or the turn was cancelled
+ * first. The call never ran, so the timeline draws nothing for it.
  */
 export function isHiddenRunRow(row: { partsJson?: string | null }): boolean {
   const body = String(parseToolDisplayPart(row.partsJson).body ?? '').trim()
-  return body === STEER_PREEMPTED_KEY || body === REJECTION_STOPPED_KEY
+  return body === STEER_PREEMPTED_KEY || body === REJECTION_STOPPED_KEY || body === CANCELLED_BEFORE_START_KEY
 }
 
 /**

@@ -48,6 +48,13 @@ type TurnInputRuntime struct {
 	// a steer, which is what lets Esc stop a call that is already streaming an
 	// answer nobody asked to continue.
 	callAbort func()
+	// toolAborts abandon the tool calls the turn is executing, one per open
+	// scope (see interruptibleTools): a streamed call, or the batch the turn
+	// runs after its response. Esc reaches them the way it reaches the call,
+	// because a command still running is exactly what the user chose not to
+	// wait for.
+	toolAborts map[int]func()
+	toolSeq    int
 	// sendNow records that the user pressed Esc to send what is queued (see
 	// InterruptToSend). The next steer delivery this turn takes carries it, and
 	// the loop then reports those entries as delivered at the handoff instead
@@ -332,6 +339,7 @@ func (r *TurnInputRuntime) RetractSteer(seq int) bool {
 	for i, entry := range r.pending {
 		if entry.Mode == TurnInputModeSteer && entry.Seq == seq {
 			r.pending = append(r.pending[:i], r.pending[i+1:]...)
+			r.forgetSendNowLocked()
 			r.mu.Unlock()
 			return true
 		}
@@ -343,6 +351,7 @@ func (r *TurnInputRuntime) RetractSteer(seq int) bool {
 			}
 			d.entries = append(d.entries[:i], d.entries[i+1:]...)
 			d.retracted = true
+			r.forgetSendNowLocked()
 			abort := d.abort
 			r.mu.Unlock()
 			if abort != nil {
@@ -352,6 +361,33 @@ func (r *TurnInputRuntime) RetractSteer(seq int) bool {
 		}
 	}
 	r.mu.Unlock()
+	return false
+}
+
+// forgetSendNowLocked drops an Esc's "send it now" once nothing it was meant
+// to send is left: a steer queued later is the user's ordinary message, not
+// the one they pressed Esc for, and must neither cut a tool short nor skip its
+// own delivery boundary.
+func (r *TurnInputRuntime) forgetSendNowLocked() {
+	if !r.steerWaitingLocked() {
+		r.sendNow = false
+	}
+}
+
+// steerWaitingLocked reports whether a steer is still waiting to be read:
+// queued, or carried by a call that has not begun answering it (Commit retires
+// the delivery). Every delivery carries steers only: the take filters them.
+func (r *TurnInputRuntime) steerWaitingLocked() bool {
+	for _, entry := range r.pending {
+		if entry.Mode == TurnInputModeSteer {
+			return true
+		}
+	}
+	for _, d := range r.inflight {
+		if !d.settled && len(d.entries) > 0 {
+			return true
+		}
+	}
 	return false
 }
 
@@ -381,55 +417,79 @@ func (r *TurnInputRuntime) endCall() {
 // InterruptToSend is Esc's "interrupt and send immediately" for the
 // conversation's own turn: when a steer is waiting — queued, or carried by a
 // call that has not settled — the call in flight is abandoned so the loop asks
-// again carrying it, and the turn keeps running. It reports false when nothing
-// is waiting, so the surface can keep Esc's other meaning for that state: stop
-// the run. Nothing waiting is the whole of that rule — a call streaming, a tool
-// executing and an approval gate all read false on an empty queue, and Esc then
-// cancels exactly as it does without this method.
+// again carrying it, every tool call still executing is interrupted so the
+// steer does not wait for it to end, and the turn keeps running. It reports
+// false when nothing is waiting, so the surface can keep Esc's other meaning
+// for that state: stop the run. Nothing waiting is the whole of that rule — a
+// call streaming, a tool executing and an approval gate all read false on an
+// empty queue, and Esc then cancels exactly as it does without this method.
 //
-// A waiting steer with no call in flight still reports true: the message goes
-// out with the next call the turn makes, which is what the user asked for, and
-// the surface must not fall back to cancelling around it.
+// A waiting steer with nothing in flight still reports true: the message goes
+// out at the turn's next boundary, which is what the user asked for, and the
+// surface must not fall back to cancelling around it.
 func (r *TurnInputRuntime) InterruptToSend() bool {
 	if r == nil {
 		return false
 	}
 	r.mu.Lock()
-	waiting := false
-	for _, entry := range r.pending {
-		if entry.Mode == TurnInputModeSteer {
-			waiting = true
-			break
-		}
-	}
-	// A delivery's entries have left pending but the model has not begun
-	// answering them (Commit retires the delivery), so they are still waiting
-	// to be read. Every delivery carries steers only: the take filters them.
+	waiting := r.steerWaitingLocked()
 	if !waiting {
-		for _, d := range r.inflight {
-			if !d.settled && len(d.entries) > 0 {
-				waiting = true
-				break
-			}
-		}
+		r.mu.Unlock()
+		return false
 	}
 	// The next delivery this turn takes carries the user's intent: Esc is the
 	// send, so the loop reports those entries as delivered where the turn
 	// takes them instead of waiting for the next call to open its mouth.
-	if waiting {
-		r.sendNow = true
+	r.sendNow = true
+	aborts := make([]func(), 0, len(r.toolAborts)+1)
+	if r.callAbort != nil {
+		aborts = append(aborts, r.callAbort)
 	}
-	abort := r.callAbort
+	for _, abort := range r.toolAborts {
+		aborts = append(aborts, abort)
+	}
 	r.mu.Unlock()
-	if !waiting {
-		return false
-	}
 	// Outside the lock: abandoning a call runs the caller's teardown, which
 	// must not hold the runtime between the take above and this abort.
-	if abort != nil {
+	for _, abort := range aborts {
 		abort()
 	}
 	return true
+}
+
+// interruptibleTools opens a scope the turn's tool calls execute under: Esc's
+// "interrupt and send immediately" cancels it with errInterruptToSend, so a
+// command still running stops there and the steer goes out now rather than
+// when the command would have ended. The release retires the scope once its
+// calls have settled; every scope opened must be released.
+//
+// A scope opened after Esc already asked to send — its steer still waiting —
+// is cancelled at once: the call would only be preempted at its boundary, and
+// it must not slip into the gap between the press and that boundary.
+func (r *TurnInputRuntime) interruptibleTools(ctx context.Context) (context.Context, func()) {
+	toolCtx, cancel := context.WithCancelCause(ctx)
+	if r == nil {
+		return toolCtx, func() { cancel(nil) }
+	}
+	abort := func() { cancel(errInterruptToSend) }
+	r.mu.Lock()
+	if r.toolAborts == nil {
+		r.toolAborts = make(map[int]func())
+	}
+	r.toolSeq++
+	id := r.toolSeq
+	r.toolAborts[id] = abort
+	now := r.sendNow && r.steerWaitingLocked()
+	r.mu.Unlock()
+	if now {
+		abort()
+	}
+	return toolCtx, func() {
+		r.mu.Lock()
+		delete(r.toolAborts, id)
+		r.mu.Unlock()
+		cancel(nil)
+	}
 }
 
 func (r *TurnInputRuntime) DrainAll() []TurnInputEntry {

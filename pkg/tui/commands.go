@@ -1006,11 +1006,13 @@ func isPlanReviewDeliveredDisplay(body string) bool {
 }
 
 // isHiddenToolDisplay reports whether a stored tool display is one no surface
-// draws: a delivered review's handoff, or a call a queued message took the
-// turn from before it started.
+// draws: a delivered review's handoff, or a call the run never started — a
+// queued message took the turn from it, a refusal stopped the turn before it,
+// or the turn was cancelled first.
 func isHiddenToolDisplay(body string) bool {
 	body = strings.TrimSpace(body)
-	return body == tool.PlanReviewDeliveredDisplayKey || body == tool.SteerPreemptedDisplayKey || body == tool.RejectionStoppedDisplayKey
+	return body == tool.PlanReviewDeliveredDisplayKey || body == tool.SteerPreemptedDisplayKey ||
+		body == tool.RejectionStoppedDisplayKey || body == tool.CancelledBeforeStartDisplayKey
 }
 
 // replayApprovalEventFrames rebuilds the frames an approval record carries that

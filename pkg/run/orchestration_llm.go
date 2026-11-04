@@ -47,9 +47,10 @@ type orchestratedToolResult struct {
 	timing  llm.ExecutionTiming
 	display *llm.ToolDisplayState
 	err     error
-	// notRun marks a call the turn never started because a queued user
-	// message took the turn at the call boundary. Its result is the model-facing
-	// "not run" answer, and no surface draws a card for it.
+	// notRun marks a call the turn never started — a queued user message took
+	// the turn at the call boundary, or the turn was cancelled first. Its
+	// result is the model-facing "not run" answer, and no surface draws a card
+	// for it.
 	notRun bool
 	// deferred marks a call that started while its response was still
 	// streaming and reached an approval or a question: nothing was created,
@@ -622,8 +623,11 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				// Calls the stream already started settle here: the ones that
 				// finished keep their results, the rest read as interrupted. The
 				// run's own ctx is alive, so this is a settlement, not a
-				// cancellation, and the turn goes on after it.
-				settled := exec.abort(ctx)
+				// cancellation, and the turn goes on after it. The Esc that
+				// abandoned the call interrupted the calls still executing
+				// too, so this does not wait them out, and the calls that never
+				// started read "not run": the steer took the turn first.
+				settled := exec.abort(ctx, true)
 				if answer != nil && (len(answer.ToolCalls) > 0 || strings.TrimSpace(answer.TextContent()) != "") {
 					session = append(session, *answer)
 					noteResponseCompleted()
@@ -666,7 +670,10 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			if err == nil {
 				err = ctx.Err()
 			}
-			results := exec.abort(ctx)
+			// A subagent's execution interrupted to send its steers ends here,
+			// cancelled as a whole: its never-started calls read "not run" the
+			// way the conversation's own interrupt answers them.
+			results := exec.abort(ctx, cancelledToSend(ctx))
 			// abort joined every call that was still in flight, so a refusal
 			// that landed while it waited is recorded now — and this is the
 			// only place left that can report it. Read it again: the value
@@ -879,6 +886,10 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		// write it now, so the words survive a process that stops mid-turn.
 		transcript.flush(ctx, session, modelForTranscript(), latestUsage)
 		toolCtx := withForkRuntimeSnapshot(w.state.ContextWithRuntimeSessionMode(ctx), session)
+		// The batch runs after the response, when no model call is in flight
+		// for Esc to abandon: its own interruptible scope is what lets "send
+		// it now" stop a command still running instead of waiting it out.
+		toolCtx, releaseTools := TurnInputRuntimeFromContext(ctx).interruptibleTools(toolCtx)
 		var results []orchestratedToolResult
 		stopped := false
 		if exec != nil && exec.dispatched() {
@@ -888,6 +899,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		} else {
 			results, stopped = w.executeToolCalls(toolCtx, res.Message.ToolCalls, toolMap)
 		}
+		releaseTools()
 		if stopped {
 			// The user refused a call without words, answered where it asked:
 			// the refusal is on that call, the calls behind it read the same
@@ -962,6 +974,20 @@ var errSteerRetracted = errors.New("queued steer retracted before the model answ
 // asks again carrying them. It is not a cancellation — nothing the turn
 // produced is thrown away and no turn boundary is reached.
 var errInterruptToSend = errors.New("interrupt to send the queued steers")
+
+// cancelledToSend reports whether ctx was cancelled by Esc's "interrupt and
+// send immediately" — the conversation's own turn (errInterruptToSend) or a
+// subagent's execution (errSubagentInterruptedToSend). A tool call that had
+// not started by then never starts: the user's message takes the turn, so the
+// call reads "not run" exactly like one a steer preempts at its boundary, in
+// either view, instead of being run on a dead context and drawn as a failure.
+func cancelledToSend(ctx context.Context) bool {
+	if ctx == nil || ctx.Err() == nil {
+		return false
+	}
+	cause := context.Cause(ctx)
+	return errors.Is(cause, errInterruptToSend) || errors.Is(cause, errSubagentInterruptedToSend)
+}
 
 // withSteerDeliveryResponseStart binds a provisional delivery to the provider's
 // response boundary. The provider fires OnResponseStarted before forwarding its
@@ -1465,10 +1491,12 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 	assigned := make([]bool, len(calls))
 	// A queued steer takes the turn at the next call boundary: whatever has
 	// not started yet is answered "not run" so the steer goes out now instead
-	// of after the whole batch.
+	// of after the whole batch. Esc's "interrupt and send immediately" is the
+	// same boundary reached early: it cancelled this batch's context to stop
+	// the call that was running, and nothing behind that call may start.
 	preempted := false
 	steerWaiting := func() bool {
-		if !preempted && ctx.Err() == nil && TurnInputRuntimeFromContext(ctx).HasSteers() {
+		if !preempted && (cancelledToSend(ctx) || (ctx.Err() == nil && TurnInputRuntimeFromContext(ctx).HasSteers())) {
 			preempted = true
 		}
 		return preempted
@@ -1496,6 +1524,13 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 					}
 					continue
 				}
+				if ctx.Err() != nil {
+					for i, call := range seg.calls {
+						batch.set(seg.offset+i, notStartedResult(seg.offset+i, call))
+						assigned[seg.offset+i] = true
+					}
+					continue
+				}
 				segResults := results[seg.offset : seg.offset+len(seg.calls)]
 				groups := parallelToolCallSummaryGroups(seg.calls, toolMap)
 				w.emitParallelBatchSummary(ctx, groups, tool.StepKindToolParallelStarted, nil)
@@ -1517,6 +1552,15 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 				}
 				if steerWaiting() {
 					batch.set(seg.offset+i, steerPreemptedResult(seg.offset+i, call))
+					assigned[seg.offset+i] = true
+					continue
+				}
+				if ctx.Err() != nil {
+					// The turn was cancelled while the call ahead of this one
+					// ran: nothing starts on a dead turn. A tool that never
+					// consults its context — a file write — would otherwise
+					// still act after the user pressed Esc.
+					batch.set(seg.offset+i, notStartedResult(seg.offset+i, call))
 					assigned[seg.offset+i] = true
 					continue
 				}
@@ -2213,6 +2257,27 @@ func steerPreemptedResult(index int, call llm.ToolCall) orchestratedToolResult {
 		call:    call,
 		parts:   []llm.ContentPart{llm.Text(steerPreemptedResultText)},
 		display: &llm.ToolDisplayState{Body: tool.SteerPreemptedDisplayKey, ToolMetaJSON: string(metaJSON)},
+		notRun:  true,
+	}
+}
+
+// cancelledBeforeStartResultText is what the model reads for a call the turn
+// never started because it was cancelled first.
+const cancelledBeforeStartResultText = "Not run: the turn was cancelled before this tool call started."
+
+// notStartedResult is the result of a call a cancelled turn never started. No
+// step announces it and its display carries the drop key, so no surface draws
+// it live or on replay: the call never ran, and the user never saw it start.
+// It is the answer a streamed call still queued gets when its request is
+// cancelled (streamingToolExecutor.abort) as well, so a call reads the same
+// whether it waited inside the stream or after it.
+func notStartedResult(index int, call llm.ToolCall) orchestratedToolResult {
+	metaJSON, _ := json.Marshal(map[string]string{"tool_name": strings.TrimSpace(call.Function.Name), "status": "not_run"})
+	return orchestratedToolResult{
+		index:   index,
+		call:    call,
+		parts:   []llm.ContentPart{llm.Text(cancelledBeforeStartResultText)},
+		display: &llm.ToolDisplayState{Body: tool.CancelledBeforeStartDisplayKey, ToolMetaJSON: string(metaJSON)},
 		notRun:  true,
 	}
 }

@@ -3113,6 +3113,40 @@ func TestReplayDropsTheCallAQueuedMessageTookTheTurnFrom(t *testing.T) {
 	}
 }
 
+// A call the turn was cancelled before it started — Esc while an earlier call
+// of the same reply ran — never ran either: live it never drew a card, so the
+// replay draws none, instead of "Ran" over the model-facing answer.
+func TestReplayDropsTheCallACancelledTurnNeverStarted(t *testing.T) {
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "run the commands", CreatedAt: 99},
+		assistantToolCallsRow("",
+			llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"sleep 30"}`}},
+			llm.ToolCall{ID: "call-2", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"echo two"}`}},
+		),
+		toolRowWithDisplay(3, "call-1", "tool shell: context canceled", `{"tool_name":"shell","status":"failed"}`),
+		toolRowWithDisplay(4, "call-2", tool.CancelledBeforeStartDisplayKey, `{"tool_name":"shell","status":"not_run"}`),
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, turns, nil, &Reducer{}, nil)
+
+	var cards []string
+	for i := range renderer.vm.blocks {
+		f := renderer.vm.blocks[i].frame
+		if strings.Contains(f.Content, tool.CancelledBeforeStartDisplayKey) {
+			t.Fatalf("the never-started call's drop key reached the screen: %#v", f)
+		}
+		if f.Kind == FrameTool {
+			cards = append(cards, f.StepID)
+		}
+	}
+	if len(cards) != 1 || cards[0] != "call-1" {
+		t.Fatalf("tool cards = %v, want only the call that ran", cards)
+	}
+}
+
 // The same rule for a call the exit-plan gate made: it never ran either, so
 // it leaves no card and no gate behind — the gate's wait never opened.
 func TestReplayDropsTheSkippedExitPlanGateCall(t *testing.T) {

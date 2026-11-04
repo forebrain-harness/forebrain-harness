@@ -41,6 +41,13 @@ const SteerPreemptedDisplayKey = "Not run — a queued user message took the tur
 // the refusal's own card already says what happened.
 const RejectionStoppedDisplayKey = "Not run — the user refused a call in this response and stopped the turn."
 
+// CancelledBeforeStartDisplayKey is the display body persisted for a tool call
+// the run never started because the turn was cancelled first — Esc while an
+// earlier call of the same response was running. No surface renders it, like
+// SteerPreemptedDisplayKey: the call never ran, and the user never saw it
+// start, so a replay must not draw it as a call that ran.
+const CancelledBeforeStartDisplayKey = "Not run — the turn was cancelled before this call started."
+
 const (
 	// RejectedStopText is what a primary agent's call refused without words
 	// receives: the turn stops here and waits for the user (Claude Code's text).

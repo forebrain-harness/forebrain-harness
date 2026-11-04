@@ -10,6 +10,7 @@ import { liveBatchExecution, sessionBindCount } from '@/lib/batchExecution'
 import {
   REJECTION_STOPPED_KEY,
   STEER_PREEMPTED_KEY,
+  CANCELLED_BEFORE_START_KEY,
   applyAssistantRunEventMetadata,
   applyCompactionUpdate,
   appendGoalLine,
@@ -6538,6 +6539,10 @@ describe('isHiddenRunRow', () => {
     expect(isHiddenRunRow(rowWithBody(REJECTION_STOPPED_KEY))).toBe(true)
   })
 
+  it('drops the row of a call a cancelled turn never started', () => {
+    expect(isHiddenRunRow(rowWithBody(CANCELLED_BEFORE_START_KEY))).toBe(true)
+  })
+
   it('keeps every other row visible', () => {
     expect(isHiddenRunRow(rowWithBody('Denied'))).toBe(false)
     expect(isHiddenRunRow({})).toBe(false)
@@ -6546,6 +6551,7 @@ describe('isHiddenRunRow', () => {
   it('keeps the runtime keys byte-identical', () => {
     expect(STEER_PREEMPTED_KEY).toBe('Not run — a queued user message took the turn first.')
     expect(REJECTION_STOPPED_KEY).toBe('Not run — the user refused a call in this response and stopped the turn.')
+    expect(CANCELLED_BEFORE_START_KEY).toBe('Not run — the turn was cancelled before this call started.')
   })
 })
 

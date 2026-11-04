@@ -1494,3 +1494,272 @@ func TestOnlyOneInPlaceQuestionPerRun(t *testing.T) {
 		t.Fatalf("result = %+v, want the turn to continue", res)
 	}
 }
+
+// ---- Esc's "interrupt and send immediately" reaches the tools executing ----
+
+// escDuringTool is a serial tool whose first execution is where the user
+// queues a steer and presses Esc; it then waits on its context the way a
+// running command does. Whatever it waited for is recorded: Esc must reach it,
+// not leave the steer queued behind a command running to its end.
+type escDuringTool struct {
+	tool    *llm.Tool
+	runs    *int32
+	causes  chan error
+	started chan struct{}
+}
+
+func newEscDuringTool(t *testing.T, st *toolpkg.State, q *InputQueue, rt *TurnInputRuntime, beforeEsc func()) escDuringTool {
+	t.Helper()
+	st.RegisterToolMeta(event.ToolMeta{Name: "long_command"})
+	e := escDuringTool{causes: make(chan error, 1), started: make(chan struct{})}
+	var once sync.Once
+	e.tool, e.runs = preemptSerialTool(t, "long_command", func(ctx context.Context, _ int) (string, error) {
+		once.Do(func() { close(e.started) })
+		if beforeEsc != nil {
+			beforeEsc()
+		}
+		if !q.Steer(Input{Text: "stop that", Parts: []llm.ContentPart{llm.Text("stop that")}}) {
+			return "", errors.New("steer refused while the tool ran")
+		}
+		if !rt.InterruptToSend() {
+			return "", errors.New("InterruptToSend refused a queued steer")
+		}
+		select {
+		case <-ctx.Done():
+			e.causes <- context.Cause(ctx)
+			return "", ctx.Err()
+		case <-time.After(5 * time.Second):
+			e.causes <- nil
+			return "ran to the end", nil
+		}
+	})
+	return e
+}
+
+// assertSteerTookTheTurn checks the request after the interrupt: the
+// interrupted call answers with its cancellation, every call behind it reads
+// "not run", and the steer is the last message.
+func assertSteerTookTheTurn(t *testing.T, e escDuringTool, q *InputQueue, request []llm.Message, wantResults int) {
+	t.Helper()
+	if got := atomic.LoadInt32(e.runs); got != 1 {
+		t.Fatalf("tool runs = %d, want 1 (nothing starts behind the interrupted call)", got)
+	}
+	select {
+	case cause := <-e.causes:
+		if !errors.Is(cause, errInterruptToSend) {
+			t.Fatalf("the running tool ended with cause %v, want the interrupt to send", cause)
+		}
+	default:
+		t.Fatal("the running tool never observed Esc")
+	}
+	results := toolResultMessages(request)
+	if len(results) != wantResults {
+		t.Fatalf("tool results = %d, want %d: %+v", len(results), wantResults, request)
+	}
+	if got := results[0].TextContent(); !strings.Contains(got, context.Canceled.Error()) {
+		t.Fatalf("interrupted call result = %q, want its cancellation", got)
+	}
+	for i, result := range results[1:] {
+		if result.TextContent() != steerPreemptedResultText {
+			t.Fatalf("result %d = %q, want the not-run answer", i+2, result.TextContent())
+		}
+	}
+	last := request[len(request)-1]
+	if last.Role != llm.RoleUser || last.TextContent() != "stop that" {
+		t.Fatalf("last message = role %q content %q, want the steer", last.Role, last.TextContent())
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 1 || delivered[0].Text != "stop that" {
+		t.Fatalf("delivered = %#v, want the steer Esc sent", delivered)
+	}
+}
+
+func escTurnContext(rt *TurnInputRuntime) context.Context {
+	return llm.WithStreamSink(WithTurnInputRuntime(context.Background(), rt), streamTestSink())
+}
+
+// The batch a response asked for runs after the response, when no model call
+// is in flight: Esc with a steer waiting interrupts the command running there,
+// the calls behind it never start, and the same turn asks again carrying the
+// steer — it did not wait for the command to end.
+func TestInterruptToSendStopsTheToolRunningAfterTheResponse(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	e := newEscDuringTool(t, st, q, rt, nil)
+	inner := &preemptScriptedLLM{
+		calls: []llm.ToolCall{
+			preemptToolCall("call-1", "long_command"),
+			preemptToolCall("call-2", "long_command"),
+			preemptToolCall("call-3", "long_command"),
+		},
+		answer: "steer received",
+	}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(escTurnContext(rt),
+		[]llm.Message{llm.UserMessage(llm.Text("run it"))}, []*llm.Tool{e.tool})
+	if err != nil {
+		t.Fatalf("the interrupt ended the turn: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "steer received" {
+		t.Fatalf("result = %+v, want the answer to the steer", res)
+	}
+	assertSteerTookTheTurn(t, e, q, inner.request(t, 2), 3)
+}
+
+// A call started inside the stream runs beside the model call: Esc abandons
+// the stream and interrupts the command too, instead of waiting it out before
+// the steer can go.
+func TestInterruptToSendStopsAStreamedToolWithItsStream(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	e := newEscDuringTool(t, st, q, rt, nil)
+	callA, callB := streamCall("call-a", "long_command"), streamCall("call-b", "long_command")
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnToolCallReady(callA)
+			sink.OnToolCallReady(callB)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("steer received")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(escTurnContext(rt),
+		[]llm.Message{llm.UserMessage(llm.Text("run it"))}, []*llm.Tool{e.tool})
+	if err != nil {
+		t.Fatalf("the interrupt ended the turn: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "steer received" {
+		t.Fatalf("result = %+v, want the answer to the steer", res)
+	}
+	assertSteerTookTheTurn(t, e, q, inner.received[1], 2)
+}
+
+// The user's case: the response streamed a command and ended while the
+// command kept running, so the turn is holding for it and has no model call
+// to abandon. Esc still stops the command and sends the steer now.
+func TestInterruptToSendStopsAStreamedToolThatOutlivedItsStream(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	streamEnded := make(chan struct{})
+	e := newEscDuringTool(t, st, q, rt, func() {
+		<-streamEnded
+		// The loop has moved on to holding for the call.
+		time.Sleep(50 * time.Millisecond)
+	})
+	callA, callB := streamCall("call-a", "long_command"), streamCall("call-b", "long_command")
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			defer close(streamEnded)
+			sink.OnToolCallReady(callA)
+			<-e.started
+			sink.OnToolCallReady(callB)
+			msg := llm.AssistantMessage(nil, callA, callB)
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("steer received")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(escTurnContext(rt),
+		[]llm.Message{llm.UserMessage(llm.Text("run it"))}, []*llm.Tool{e.tool})
+	if err != nil {
+		t.Fatalf("the interrupt ended the turn: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "steer received" {
+		t.Fatalf("result = %+v, want the answer to the steer", res)
+	}
+	assertSteerTookTheTurn(t, e, q, inner.received[1], 2)
+}
+
+// A subagent's Esc stops its execution as a whole and resumes it carrying the
+// steers. The calls that never started read "not run" there exactly as they do
+// in the conversation's own view — they are not run on the dead context and
+// drawn as failures.
+func TestSubagentInterruptToSendLeavesTheBatchBehindNotRun(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "write_note"})
+	rt := NewTurnInputRuntime()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	tool, runs := preemptSerialTool(t, "write_note", func(context.Context, int) (string, error) {
+		rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop that")})
+		cancel(errSubagentInterruptedToSend)
+		return "wrote", nil
+	})
+	inner := &preemptScriptedLLM{
+		calls: []llm.ToolCall{
+			preemptToolCall("call-1", "write_note"),
+			preemptToolCall("call-2", "write_note"),
+			preemptToolCall("call-3", "write_note"),
+		},
+		answer: "resumed",
+	}
+	_, _ = wrapToolOrchestrationLLM(inner, st).Execute(WithTurnInputRuntime(ctx, rt),
+		[]llm.Message{llm.UserMessage(llm.Text("run the notes"))}, []*llm.Tool{tool})
+	if got := atomic.LoadInt32(runs); got != 1 {
+		t.Fatalf("tool runs = %d, want 1", got)
+	}
+	results := toolResultMessages(inner.request(t, 2))
+	if len(results) != 3 || results[0].TextContent() != "wrote" {
+		t.Fatalf("tool results = %+v, want the call that ran first", results)
+	}
+	for i, result := range results[1:] {
+		if result.TextContent() != steerPreemptedResultText {
+			t.Fatalf("result %d = %q, want the not-run answer", i+2, result.TextContent())
+		}
+	}
+}
+
+// The same for calls queued inside a subagent's stream: the execution is
+// cancelled mid-stream, the queued call never starts once the running one
+// settles, and it reads "not run".
+func TestSubagentInterruptToSendLeavesTheStreamedCallsNotRun(t *testing.T) {
+	const sid = "streamtools-subagent-interrupt"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "write_note"})
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	tool, runs := preemptSerialTool(t, "write_note", func(context.Context, int) (string, error) {
+		cancel(errSubagentInterruptedToSend)
+		return "wrote", nil
+	})
+	callA, callB := streamCall("call-a", "write_note"), streamCall("call-b", "write_note")
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnToolCallReady(callA)
+			sink.OnToolCallReady(callB)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid), streamTestSink())
+	if _, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{tool}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("turn error = %v, want the cancellation", err)
+	}
+	if got := atomic.LoadInt32(runs); got != 1 {
+		t.Fatalf("tool runs = %d, want 1 (the queued call never starts)", got)
+	}
+	rows, err := store.ListTranscriptMessages(context.Background(), sid, 100)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	var results []string
+	for _, msg := range rows {
+		if msg.Role == llm.RoleTool {
+			results = append(results, msg.TextContent())
+		}
+	}
+	if len(results) != 2 || results[0] != "wrote" || results[1] != steerPreemptedResultText {
+		t.Fatalf("tool rows = %q, want the call that ran and the not-run answer", results)
+	}
+}

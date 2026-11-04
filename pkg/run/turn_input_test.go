@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -624,9 +625,9 @@ func TestInterruptToSendAbortsTheCallInFlight(t *testing.T) {
 func TestInterruptToSendWithoutACallStillReportsTrue(t *testing.T) {
 	rt := NewTurnInputRuntime()
 	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("keep going")})
-	// Between calls — a tool executing, an approval gate waiting — there is no
-	// handle to fire, but the message still goes out with the next call, so the
-	// surface must not fall back to cancelling.
+	// With no call and no tool in flight — an approval gate waiting — there is
+	// no handle to fire, but the message still goes out at the next boundary,
+	// so the surface must not fall back to cancelling.
 	if !rt.InterruptToSend() {
 		t.Fatal("a waiting steer between calls reported nothing to send")
 	}
@@ -646,6 +647,98 @@ func TestInterruptToSendSeesASteerItsCallIsCarrying(t *testing.T) {
 	delivery.Commit()
 	if rt.InterruptToSend() {
 		t.Fatal("a committed steer still reported something to send")
+	}
+}
+
+// Esc with a steer waiting reaches the tool calls the turn is executing, not
+// only its model call: a command still running is what the steer would
+// otherwise wait out.
+func TestInterruptToSendInterruptsTheToolsExecuting(t *testing.T) {
+	rt := NewTurnInputRuntime()
+	first, releaseFirst := rt.interruptibleTools(context.Background())
+	second, releaseSecond := rt.interruptibleTools(context.Background())
+	defer releaseSecond()
+	done, releaseDone := rt.interruptibleTools(context.Background())
+	releaseDone()
+
+	if rt.InterruptToSend() {
+		t.Fatal("an empty runtime reported something to send")
+	}
+	if first.Err() != nil || second.Err() != nil {
+		t.Fatal("Esc with nothing waiting interrupted a tool; it must cancel the run instead")
+	}
+
+	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop that")})
+	if !rt.InterruptToSend() {
+		t.Fatal("a queued steer reported nothing to send")
+	}
+	for name, ctx := range map[string]context.Context{"first": first, "second": second} {
+		if !errors.Is(context.Cause(ctx), errInterruptToSend) {
+			t.Fatalf("%s tool scope cause = %v, want the interrupt to send", name, context.Cause(ctx))
+		}
+	}
+	if errors.Is(context.Cause(done), errInterruptToSend) {
+		t.Fatal("a released scope was interrupted again")
+	}
+	releaseFirst()
+	releaseFirst() // releasing twice is harmless
+}
+
+// A tool scope opened after Esc asked to send, while its steer still waits,
+// is cancelled at once: the call would be preempted at its boundary anyway and
+// must not slip into the gap. Taking the steer ends that state.
+func TestToolScopeOpenedAfterEscIsInterruptedAtOnce(t *testing.T) {
+	rt := NewTurnInputRuntime()
+	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("stop that")})
+	if !rt.InterruptToSend() {
+		t.Fatal("a queued steer reported nothing to send")
+	}
+	late, releaseLate := rt.interruptibleTools(context.Background())
+	defer releaseLate()
+	if !errors.Is(context.Cause(late), errInterruptToSend) {
+		t.Fatalf("late scope cause = %v, want the interrupt to send", context.Cause(late))
+	}
+	delivery := rt.BeginSteerDelivery(context.Background())
+	if delivery == nil || !delivery.CommitNow() {
+		t.Fatal("the steer Esc sent was not committed at the handoff")
+	}
+	after, releaseAfter := rt.interruptibleTools(context.Background())
+	defer releaseAfter()
+	if after.Err() != nil {
+		t.Fatalf("a scope opened after the steer went out was cancelled: %v", context.Cause(after))
+	}
+}
+
+// Taking back the steer Esc was pressed for also takes back the "send it
+// now": a steer queued later is an ordinary one — it neither cuts a tool
+// short nor skips its own delivery boundary.
+func TestRetractingTheSteerForgetsEscsSendNow(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	if !q.Steer(Input{Text: "never mind", Parts: []llm.ContentPart{llm.Text("never mind")}}) {
+		t.Fatal("the running turn refused the steer")
+	}
+	if !rt.InterruptToSend() {
+		t.Fatal("a queued steer reported nothing to send")
+	}
+	if _, ok := q.Recall(); !ok {
+		t.Fatal("the steer could not be recalled")
+	}
+	if !q.Steer(Input{Text: "later", Parts: []llm.ContentPart{llm.Text("later")}}) {
+		t.Fatal("the running turn refused the later steer")
+	}
+	scope, release := rt.interruptibleTools(context.Background())
+	defer release()
+	if scope.Err() != nil {
+		t.Fatalf("an ordinary steer cut a tool short: %v", context.Cause(scope))
+	}
+	delivery := rt.BeginSteerDelivery(context.Background())
+	if delivery == nil {
+		t.Fatal("the later steer was not taken")
+	}
+	if delivery.CommitNow() {
+		t.Fatal("an ordinary steer was committed at the handoff as if Esc had sent it")
 	}
 }
 

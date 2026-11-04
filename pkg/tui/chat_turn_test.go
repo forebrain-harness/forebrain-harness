@@ -35,6 +35,14 @@ func TestPrepareTUIAgentBaseClosesWithdrawalWindowOnFirstOutput(t *testing.T) {
 		"reasoning delta":                 func(sink *llm.StreamSink) { sink.OnReasoningDelta("thinking") },
 		"provider web search":             func(sink *llm.StreamSink) { sink.OnWebSearch("ws-1", "query", false) },
 		"non-streamed response completed": func(sink *llm.StreamSink) { sink.OnResponseCompleted() },
+		// A response made of nothing but tool calls: the providers' streams
+		// acknowledge only text and reasoning, and a call started in the
+		// stream holds the response open until it ends — Esc during its
+		// command must cancel (or, with a steer waiting, send it), not take
+		// the message back.
+		"tool call ready": func(sink *llm.StreamSink) {
+			sink.OnToolCallReady(llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"sleep 30"}`}})
+		},
 	}
 	for name, closeWindow := range closers {
 		t.Run(name, func(t *testing.T) {
@@ -108,6 +116,7 @@ func TestMutedForegroundStreamCannotCloseTheWithdrawalWindow(t *testing.T) {
 	require.NotNil(t, muted)
 	require.Nil(t, muted.OnResponseStarted)
 	require.Nil(t, muted.OnDelta)
+	require.Nil(t, muted.OnToolCallReady)
 	require.True(t, foreground.withdraw(), "a nested call must not commit the foreground submission")
 }
 
