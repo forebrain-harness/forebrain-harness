@@ -256,3 +256,45 @@ func TestStartReusedKeyNotClobberedByStaleRemove(t *testing.T) {
 		t.Fatal("stale finish removed the live handle that reused the key")
 	}
 }
+
+// One subagent can have two executions in flight — a continuation waiting
+// behind the one running — and both are filed under its task and run ids. A
+// stop by either id must reach both: stopping only the newest left the running
+// one going while the roster answered that the subagent was stopped.
+func TestCancelStopsEveryExecutionFiledUnderTheID(t *testing.T) {
+	r := newTestRegistry()
+	entry := HistoryEntry{TaskID: "task-a", RunID: "run-a", SessionID: "sess-1", Status: StatusRunning}
+	running, runningCancelled := startCancelable(r, entry)
+	waiting, waitingCancelled := startCancelable(r, entry)
+
+	if got, ok := r.Get(Query{TaskID: "task-a"}); !ok || got != waiting {
+		t.Fatal("Get must resolve the newest execution")
+	}
+	if got := r.List(Query{Limit: 500}); len(got) != 1 {
+		t.Fatalf("List = %d entries, want the subagent once", len(got))
+	}
+
+	if !r.Cancel(Query{RunID: "run-a", SessionID: "sess-1"}) {
+		t.Fatal("cancel by the run id found nothing to stop")
+	}
+	if !runningCancelled() || !waitingCancelled() {
+		t.Fatalf("cancel stopped running=%v waiting=%v, want both", runningCancelled(), waitingCancelled())
+	}
+
+	// The newest finishing first leaves the other one resolvable, and the last
+	// to finish empties the index.
+	waiting.Finish(HistoryEntry{TaskID: "task-a", RunID: "run-a", SessionID: "sess-1", Status: StatusCancelled})
+	if got, ok := r.Get(Query{TaskID: "task-a"}); !ok || got != running {
+		t.Fatal("finishing one execution removed the other from the live index")
+	}
+	running.Finish(HistoryEntry{TaskID: "task-a", RunID: "run-a", SessionID: "sess-1", Status: StatusCancelled})
+	if r.Cancel(Query{TaskID: "task-a"}) {
+		t.Fatal("cancel reported success with every execution finished")
+	}
+	r.mu.RLock()
+	n := len(r.byKey)
+	r.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("registry retained %d keys after both finished, want 0", n)
+	}
+}

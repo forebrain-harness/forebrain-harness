@@ -84,12 +84,17 @@ func (h *Handle) IsDone() bool {
 }
 
 type Registry struct {
-	mu    sync.RWMutex
-	byKey map[string]*Handle
+	mu sync.RWMutex
+	// byKey files every live handle under each key it answers to, oldest
+	// first. One subagent can have more than one execution in flight — a
+	// subagent_continue waiting behind the execution it continues — and they
+	// share its task and run ids, so a key holds them all: a cancel by that id
+	// stops the subagent, not only the execution started last.
+	byKey map[string][]*Handle
 }
 
 func NewRegistry() *Registry {
-	return &Registry{byKey: make(map[string]*Handle)}
+	return &Registry{byKey: make(map[string][]*Handle)}
 }
 
 // registries holds one live index per agent workspace root. The in-memory index
@@ -164,13 +169,13 @@ func (r *Registry) Start(entry HistoryEntry, cancel context.CancelFunc) *Handle 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, k := range keys {
-		r.byKey[k] = h
+		r.byKey[k] = append(r.byKey[k], h)
 	}
 	return h
 }
 
-// remove deletes the given keys from the live index, but only when they still
-// point at this handle (so a later Start that reused a key is not clobbered).
+// remove takes this handle out from under the given keys, leaving every other
+// handle filed there (so a later Start that reused a key is not clobbered).
 func (r *Registry) remove(keys []string, h *Handle) {
 	if r == nil {
 		return
@@ -178,40 +183,62 @@ func (r *Registry) remove(keys []string, h *Handle) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, k := range keys {
-		if r.byKey[k] == h {
-			delete(r.byKey, k)
+		kept := make([]*Handle, 0, len(r.byKey[k]))
+		for _, other := range r.byKey[k] {
+			if other != h {
+				kept = append(kept, other)
+			}
 		}
+		if len(kept) == 0 {
+			delete(r.byKey, k)
+			continue
+		}
+		r.byKey[k] = kept
 	}
 }
 
-func (r *Registry) Get(q Query) (*Handle, bool) {
+// matching returns the live handles the query's explicit id names, oldest
+// first, within the session / parent-run scope the query carries — so an id
+// from one session cannot resolve a handle owned by another.
+func (r *Registry) matching(q Query) []*Handle {
 	if r == nil {
-		return nil, false
+		return nil
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	var h *Handle
+	var key string
 	switch {
 	case strings.TrimSpace(q.TaskID) != "":
-		h = r.byKey["task:"+strings.TrimSpace(q.TaskID)]
+		key = "task:" + strings.TrimSpace(q.TaskID)
 	case strings.TrimSpace(q.RunID) != "":
-		h = r.byKey["run:"+strings.TrimSpace(q.RunID)]
+		key = "run:" + strings.TrimSpace(q.RunID)
 	default:
 		// Require an explicit task_id or run_id; the live index is not scanned
 		// for a "latest" match here.
-		return nil, false
+		return nil
 	}
-	if h == nil {
-		return nil, false
+	r.mu.RLock()
+	handles := append([]*Handle(nil), r.byKey[key]...)
+	r.mu.RUnlock()
+	out := handles[:0]
+	for _, h := range handles {
+		if h != nil && matchesQuery(h.Snapshot(), q) {
+			out = append(out, h)
+		}
 	}
-	// Enforce the session / parent-run scope carried by the query so an id from
-	// one session cannot resolve a handle owned by another.
-	if !matchesQuery(h.Snapshot(), q) {
-		return nil, false
-	}
-	return h, true
+	return out
 }
 
+// Get returns the newest live handle the query names.
+func (r *Registry) Get(q Query) (*Handle, bool) {
+	handles := r.matching(q)
+	if len(handles) == 0 {
+		return nil, false
+	}
+	return handles[len(handles)-1], true
+}
+
+// List returns one entry per subagent execution identity: the newest live
+// handle filed under each handle's own primary key, so an execution waiting
+// behind another of the same subagent does not list the subagent twice.
 func (r *Registry) List(q Query) []HistoryEntry {
 	if r == nil {
 		return nil
@@ -224,15 +251,19 @@ func (r *Registry) List(q Query) []HistoryEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]HistoryEntry, 0, len(r.byKey))
-	seen := make(map[*Handle]struct{}, len(r.byKey))
-	for _, handle := range r.byKey {
+	for key, handles := range r.byKey {
+		// A handle is filed under its run key too; it is listed once, under
+		// the key that names it first.
+		var handle *Handle
+		for i := len(handles) - 1; i >= 0; i-- {
+			if h := handles[i]; h != nil && h.keys[0] == key {
+				handle = h
+				break
+			}
+		}
 		if handle == nil {
 			continue
 		}
-		if _, ok := seen[handle]; ok {
-			continue
-		}
-		seen[handle] = struct{}{}
 		entry := handle.Snapshot()
 		if !matchesQuery(entry, q) {
 			continue
@@ -246,16 +277,21 @@ func (r *Registry) List(q Query) []HistoryEntry {
 	return out
 }
 
+// Cancel stops every live execution the query names: a subagent's id answers
+// for all of its executions in flight, so stopping it leaves none of them
+// running. It reports false when none was left to stop.
 func (r *Registry) Cancel(q Query) bool {
-	handle, ok := r.Get(q)
-	if !ok || handle == nil {
-		return false
+	cancelled := false
+	for _, handle := range r.matching(q) {
+		// A subagent that has already finished is not reported as cancelled.
+		if handle.IsDone() {
+			continue
+		}
+		if handle.Cancel() {
+			cancelled = true
+		}
 	}
-	// Do not report a successful cancel for a subagent that has already finished.
-	if handle.IsDone() {
-		return false
-	}
-	return handle.Cancel()
+	return cancelled
 }
 
 func sortHistory(out []HistoryEntry) {

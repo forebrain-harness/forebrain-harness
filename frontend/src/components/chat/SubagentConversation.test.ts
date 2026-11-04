@@ -58,6 +58,15 @@ describe('SubagentConversation', () => {
     expect(worked.text()).toContain('Worked for 1m 00s')
   })
 
+  // A subagent the user stopped ends with its reason as its error, and the
+  // account of it said "failed" — a stop is not a failure.
+  it('titles a stopped run as cancelled, a failed one as failed', () => {
+    const titleOf = (status: SubagentTranscript['status'], error: string) =>
+      mount(SubagentConversation, { props: { record: record({ status, error }) } }).find('[data-slot="alert-title"]').text()
+    expect(titleOf('cancelled', 'cancelled')).toBe('Cancelled')
+    expect(titleOf('failed', 'provider refused')).toBe('failed')
+  })
+
   it('opens the task it was handed as a collapsed card and reports the fold', async () => {
     const long = 'review the plan '.repeat(40)
     const wrapper = mount(SubagentConversation, {

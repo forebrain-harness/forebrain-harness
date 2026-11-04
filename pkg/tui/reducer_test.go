@@ -1520,6 +1520,31 @@ func TestReducerFanoutTaskToolRingBufferCap(t *testing.T) {
 	}
 }
 
+// A reload rebuilds a subagent's call from its result row, so the card sees
+// only the call's completion. It counts all the same — the card names the
+// subagent's last call as the live card did — and once only.
+func TestReducerFanoutTaskCountsACallSeenOnlyByItsCompletion(t *testing.T) {
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fanout-done-only", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run",
+		Input: map[string]any{"task": "investigate", "title": "Investigation"},
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "agent-done-only", AgentType: "explore", TaskID: "agent-done-only",
+		ParentToolCallID: "fanout-done-only", TaskIndex: 0,
+	})
+	completed := Message{
+		Kind: MsgKindTool, StepID: "call-1", ToolName: "shell",
+		ToolMeta: tool.ToolMeta{Invocation: "sleep 600"}, AgentID: "agent-done-only", ToolPhase: "tool_call_completed",
+	}
+	_ = r.Reduce(NewMessageMsg{Msg: completed})
+	_ = r.Reduce(NewMessageMsg{Msg: completed})
+	task := r.findFanoutByStepID("fanout-done-only").Tasks[0]
+	if task.ToolTotal != 1 || len(task.RecentTools) != 1 || task.RecentTools[0].Label != "sleep 600" {
+		t.Fatalf("task tools = %d %+v, want the one call, named", task.ToolTotal, task.RecentTools)
+	}
+}
+
 func TestReducerFanoutTaskTokenUsageFolding(t *testing.T) {
 	tracker := NewTracker()
 	var r Reducer

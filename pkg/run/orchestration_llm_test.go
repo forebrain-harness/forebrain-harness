@@ -11444,3 +11444,49 @@ func TestInPlaceSnapshotCarriesCompletedResults(t *testing.T) {
 	close(answer)
 	<-execDone
 }
+
+// A call the run's cancellation stopped mid-flight still completes, and the
+// step hook sees that completion on a context the cancellation does not reach:
+// a hook that records the step before it draws it — a subagent's — dropped it
+// on the canceled one, and the stopped call's card ran on for good.
+func TestStoppedToolCallCompletesOnAnUncancelledContext(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type readInput struct {
+		FilePath string `json:"file_path"`
+	}
+	readTool, err := llm.NewTool("read_file", "read", func(_ context.Context, _ *readInput) (string, error) {
+		cancel()
+		return "", context.Canceled
+	})
+	if err != nil {
+		t.Fatalf("read_file tool: %v", err)
+	}
+	var (
+		mu        sync.Mutex
+		completed []error
+	)
+	hook := func(stepCtx context.Context, evt toolpkg.StepEvent) {
+		if evt.Kind != toolpkg.StepKindToolCompleted {
+			return
+		}
+		mu.Lock()
+		completed = append(completed, stepCtx.Err())
+		mu.Unlock()
+	}
+	_, _ = wrapToolOrchestrationLLM(&cancelDuringToolLLM{}, st).Execute(
+		toolpkg.WithStepHook(ctx, hook),
+		[]llm.Message{llm.UserMessage(llm.Text("read it"))},
+		[]*llm.Tool{readTool},
+	)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(completed) != 1 {
+		t.Fatalf("completed steps = %d, want the stopped call's one", len(completed))
+	}
+	if completed[0] != nil {
+		t.Fatalf("the stopped call completed on a canceled context (%v): a recording hook drops it", completed[0])
+	}
+}

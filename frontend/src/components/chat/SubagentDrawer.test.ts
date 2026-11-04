@@ -67,6 +67,21 @@ describe('SubagentDrawer', () => {
     expect(wrapper.get('[data-testid="subagent-tab-task-1"]').find('[aria-label="New activity"]').exists()).toBe(false)
   })
 
+  // A subagent someone stopped did not fail: its tab and its "+" row draw the
+  // muted ban its card row draws, never the failure's red cross.
+  it('draws a stopped subagent with its own icon, apart from a failed one', async () => {
+    const stopped = record('task-stop', { status: 'cancelled' })
+    const failed = record('task-fail', { status: 'failed' })
+    const wrapper = mountDrawer({ tabs: [stopped, failed], active: 'task-stop', records: [stopped, failed] })
+    const iconOf = (selector: string) => wrapper.get(selector).find('svg').classes()
+    expect(iconOf('[data-testid="subagent-tab-task-stop"]')).toContain('is-off')
+    expect(iconOf('[data-testid="subagent-tab-task-fail"]')).toContain('is-bad')
+
+    await wrapper.get('[data-testid="subagent-drawer-add"]').trigger('click')
+    expect(iconOf('[data-testid="subagent-menu-task-stop"]')).toContain('is-off')
+    expect(iconOf('[data-testid="subagent-menu-task-fail"]')).toContain('is-bad')
+  })
+
   it('closes a tab and collapses the drawer when asked', async () => {
     const wrapper = mountDrawer()
     await wrapper.get('[data-testid="subagent-tab-close-task-2"]').trigger('click')

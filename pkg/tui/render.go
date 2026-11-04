@@ -858,6 +858,24 @@ func (r *Renderer) FinalizePendingTools() {
 	}
 }
 
+// FinalizeAgentPendingTools is FinalizePendingTools for one subagent's view,
+// called when an execution of it ends: nothing it started is still running or
+// still waiting for an approval. A call the stop interrupted publishes its own
+// completion first; a card that never gets one — a call stopped while it waited
+// for an approval — would otherwise stay pending in the subagent's view for
+// good, as a stopped run's would without FinalizePendingTools.
+func (r *Renderer) FinalizeAgentPendingTools(agentID string) {
+	agentID = strings.TrimSpace(agentID)
+	if r == nil || agentID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if vm := r.perAgentVM[agentID]; vm != nil && r.finalizePendingToolsVM(vm) {
+		r.paintViewportLocked()
+	}
+}
+
 func (r *Renderer) finalizePendingToolsVM(vm *viewModel) bool {
 	changed := false
 	for _, b := range vm.blocks {
@@ -4655,20 +4673,13 @@ func (r *Renderer) renderFanout(f Frame) {
 	if summary == "" && content == "" && f.FanoutCallError == "" {
 		return
 	}
-	// Header: bullet + summary
-	markerGlyph := "○"
-	if f.Final {
-		markerGlyph = "●"
-	}
-	bullet := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render(markerGlyph)
 	if summary != "" {
 		if f.Final {
 			if ds := formatDuration(f.Duration); ds != "" {
 				summary += " · " + ds
 			}
 		}
-		header := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render(summary)
-		headerLine := wrapToolDisplayLine(bullet+" "+header, "   ")
+		headerLine := wrapToolDisplayLine(fanoutHeaderLine(f, summary, r.spinnerPhase, r.diffTheme), "   ")
 		_, _ = fmt.Fprintln(r.out, headerLine)
 		owner(-1, strings.Count(headerLine, "\n")+1)
 	}
@@ -4732,6 +4743,53 @@ func (r *Renderer) renderFanout(f Frame) {
 	_, _ = fmt.Fprintln(r.out)
 	owner(-1, 1)
 }
+
+// fanoutHeaderLine is a subagent card's header row: its marker and summary. A
+// settled card wears the amber every finished tool card wears. A card whose
+// agents are still at work has its summary in a steady orchid nothing else in
+// the transcript uses, and its dot breathes, so a background agent reads as
+// alive at a glance rather than as one more finished call. Without colour the
+// running card keeps its hollow marker: the breath is all colour, and the
+// glyph is what is left to tell the two apart.
+func fanoutHeaderLine(f Frame, summary string, phase int, theme DiffTheme) string {
+	if f.Final || noColorActive() {
+		marker := "○"
+		if f.Final {
+			marker = "●"
+		}
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ordinaryToolHeaderColor)).Bold(true)
+		return style.Render(marker) + " " + style.Render(summary)
+	}
+	header, breath := fanoutRunningDarkHeader, fanoutRunningDarkBreath
+	if theme == DiffThemeLight {
+		header, breath = fanoutRunningLightHeader, fanoutRunningLightBreath
+	}
+	if phase < 0 {
+		phase = 0
+	}
+	dot := lipgloss.NewStyle().Foreground(lipgloss.Color(breath[phase%len(breath)])).Bold(true).Render("●")
+	return dot + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(header)).Bold(true).Render(summary)
+}
+
+// The running subagent card's colours. The header is one static colour; only
+// the dot moves, one breath entry per spinner tick — it rests dim, rises
+// slowly, holds and falls slowly, so it breathes rather than blinks.
+var (
+	// On a dark background the dot rises from a dim mauve to a soft pink just
+	// past the header's orchid.
+	fanoutRunningDarkHeader = "170"
+	fanoutRunningDarkBreath = []string{
+		"96", "96", "96", "96", "133", "133", "133", "170", "170", "170", "213", "213",
+		"213", "213", "170", "170", "170", "133", "133", "133", "96", "96", "96", "96",
+	}
+	// On a light background the header is a deeper magenta that holds its
+	// contrast against white, and the dot darkens into it from a pale pink.
+	fanoutRunningLightHeader = "127"
+	fanoutRunningLightBreath = []string{
+		"182", "182", "182", "182", "176", "176", "176", "170", "170", "170", "127", "127",
+		"127", "127", "170", "170", "170", "176", "176", "176", "182", "182", "182", "182",
+	}
+)
 
 // fanoutClockSuffix is the elapsed time a task row's title carries: the final
 // elapsed of an ended execution, or a running clock read at paint time. Rows

@@ -126,6 +126,28 @@ describe('useChatStream helpers', () => {
     expect(conversation[4].blocks?.[1]).toMatchObject({ kind: 'assistant', text: 'second answer' })
   })
 
+  // A response that issued calls is written before its thinking: the calls are
+  // flushed as they are dispatched, the thinking when its block closes. Live
+  // drew the thinking first, and a reload drew it under the card.
+  it('draws a call response’s thinking ahead of its cards, as live did', () => {
+    const call = (id: string) => JSON.stringify([{ type: 'tool_calls', tool_calls: [{ id, type: 'function', function: { name: 'read_file', arguments: '{}' } }] }])
+    const rows = [
+      { role: 'user', content: 'look' },
+      { role: 'assistant', content: '', partsJson: call('read-1') },
+      { role: 'reasoning', content: 'which file' },
+      { role: 'tool', content: 'body', toolStepId: 'read-1' },
+      { role: 'reasoning', content: 'it is fine' },
+      { role: 'assistant', content: 'all good' },
+    ]
+    const blocks = conversationFromTranscript(rows)[1].blocks ?? []
+    expect(blocks.map((block) => (block.kind === 'tool' ? `tool:${block.step.stepId}` : `${block.kind}:${'text' in block ? block.text : ''}`))).toEqual([
+      'thinking:which file',
+      'tool:read-1',
+      'thinking:it is fine',
+      'assistant:all good',
+    ])
+  })
+
   it('closes each run with its worked row, a run that said nothing included', () => {
     const rows = [
       { role: 'user', content: 'first', runId: 'r1' },
@@ -2586,6 +2608,113 @@ describe('useChatStream helpers', () => {
         legacySpy.mockRestore()
       }
     })
+
+    const replayFrom = async (log: typeof events, rows: Record<string, unknown>[]) => {
+      const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({ sessionId: 'session-1', nextCursor: log.length, highWater: log.length, hasMore: false, schemaVersion: 1, events: log } as never)
+      const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'session-1', records: [] })
+      const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockImplementation(async (sessionId: string) => (sessionId === 'worker-1' ? rows : primaryRows) as never)
+      try {
+        return blocksOf(await reload())
+      } finally {
+        chatMessagesSpy.mockRestore()
+        sessionEventsSpy.mockRestore()
+        legacySpy.mockRestore()
+      }
+    }
+
+    // The durable log keeps no text deltas — they are pushed, never stored —
+    // so a reload has the call and the end to walk the rows by. One block per
+    // event left the thinking before the call and the answer after it out of
+    // the reloaded view.
+    it('draws every block when the log holds no text deltas', async () => {
+      const durable = events.filter((evt) => !['reasoning_delta', 'reasoning_done', 'assistant_delta'].includes(evt.type))
+      expect(await replayFrom(durable, workerRows)).toEqual([
+        'prompt:inspect history',
+        'thinking:checking',
+        'tool:read-1',
+        'assistant:all checks passed',
+        'worked',
+      ])
+    })
+
+    // A reload draws the call's card from the worker rows, and the call still
+    // lands on its card task: the reloaded card names the subagent's last call
+    // the way the live card did.
+    it('keeps the card naming the subagent’s last call after a reload', async () => {
+      const durable = events.filter((evt) => !['reasoning_delta', 'reasoning_done', 'assistant_delta'].includes(evt.type))
+      const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({ sessionId: 'session-1', nextCursor: durable.length, highWater: durable.length, hasMore: false, schemaVersion: 1, events: durable } as never)
+      const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'session-1', records: [] })
+      const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockImplementation(async (sessionId: string) => (sessionId === 'worker-1' ? workerRows : primaryRows) as never)
+      try {
+        const stream = await reload()
+        const task = stream.subagentCallTasks.get('subagent-exec:exec-1')?.get(0)
+        expect(task?.latestTool).toBe('read_file')
+        expect(task?.toolCount).toBe(1)
+      } finally {
+        chatMessagesSpy.mockRestore()
+        sessionEventsSpy.mockRestore()
+        legacySpy.mockRestore()
+      }
+    })
+
+    // Every execution of a subagent shares its run id and its worker session.
+    // Kept as one body per run, a subagent_continue's words were drawn into
+    // the execution before it, ahead of the message that asked for them.
+    it('keeps each execution of a continued subagent in its own place', async () => {
+      const at = (s: number) => `2026-09-06T00:00:${String(s).padStart(2, '0')}Z`
+      const durable = [
+        events[0],
+        events[3],
+        { ...events[5], payload: { ...events[5].payload, executionId: 'exec-1' } },
+        { id: 'spawn-2', sequence: 7, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_spawned', createdAt: at(7), payload: { agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', task: 'keep going', parentRunId: 'parent-1', executionId: 'exec-2', workerSessionId: 'worker-1' } },
+        { id: 'tool-2', sequence: 8, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'tool_call_started', createdAt: at(8), payload: { stepId: 'read-2', toolName: 'read_file', toolMeta: { agentId: 'agent-1', status: 'running' } } },
+        { id: 'ended-2', sequence: 9, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_ended', createdAt: at(9), payload: { agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', parentRunId: 'parent-1', executionId: 'exec-2', status: 'cancelled', error: 'cancelled' } },
+      ]
+      const rows = [
+        ...workerRows.filter((row) => row.role !== 'worked'),
+        { id: 'w2-user', role: 'user', content: 'keep going', runId: 'child-1' },
+        { id: 'w2-reason', role: 'reasoning', content: 'looking again', runId: 'child-1' },
+        { id: 'w2-call', role: 'assistant', content: '', runId: 'child-1', partsJson: JSON.stringify([{ type: 'tool_calls', tool_calls: [{ id: 'read-2', type: 'function', function: { name: 'read_file', arguments: '{}' } }] }]) },
+        { id: 'w2-tool', role: 'tool', content: "Error executing tool 'read_file': context canceled", runId: 'child-1', toolStepId: 'read-2', partsJson: JSON.stringify([{ type: 'tool_display', body: 'context canceled', tool_meta_json: JSON.stringify({ tool_name: 'read_file', status: 'failed' }) }]) },
+      ]
+      expect(await replayFrom(durable as typeof events, rows)).toEqual([
+        'prompt:inspect history',
+        'thinking:checking',
+        'tool:read-1',
+        'assistant:all checks passed',
+        'worked',
+        'prompt:keep going',
+        'thinking:looking again',
+        'tool:read-2',
+        'error:cancelled',
+        'worked',
+      ])
+    })
+  })
+
+  // A call stopped while it waited for an approval never gets a completion of
+  // its own; the end of its subagent's execution settles its card the way a
+  // stopped turn's are, instead of leaving it pending for good.
+  it('settles a subagent card left pending when its execution ends', async () => {
+    const log = [
+      { id: 'spawn', sequence: 1, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_spawned', createdAt: '2026-09-06T00:00:01Z', payload: { agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', task: 'inspect', parentRunId: 'parent-1', executionId: 'exec-1' } },
+      { id: 'gate', sequence: 2, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'tool_call_completed', createdAt: '2026-09-06T00:00:02Z', payload: { stepId: 'shell-1', toolName: 'shell', toolMeta: { agentId: 'agent-1', toolName: 'shell', status: 'awaiting approval' } } },
+      { id: 'ended', sequence: 3, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_ended', createdAt: '2026-09-06T00:00:03Z', payload: { agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', parentRunId: 'parent-1', executionId: 'exec-1', status: 'cancelled', error: 'cancelled' } },
+    ]
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({ sessionId: 'session-1', nextCursor: log.length, highWater: log.length, hasMore: false, schemaVersion: 1, events: log } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'session-1', records: [] })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([] as never)
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 'session-1'
+      await stream.loadMessages('session-1')
+      const card = stream.subagents.value.find((record) => record.agentId === 'agent-1')?.blocks.find((block) => block.kind === 'tool')
+      expect(card?.kind === 'tool' ? card.step.status : '').toBe('canceled')
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
   })
 
   it('replays primary run metadata through the same event projection as live updates', async () => {

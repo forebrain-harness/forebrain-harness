@@ -3088,6 +3088,8 @@ func subagentCallApplyResult(call *event.SubagentCall, tool string, result map[s
 			}
 			if boolFromAny(m["ok"]) {
 				call.Tasks[i].Status = "done"
+			} else if subagentTaskStatus(stringFromAny(m["status"])) == "cancelled" {
+				call.Tasks[i].Status = "cancelled"
 			} else if errText := strings.TrimSpace(stringFromAny(m["error"])); strings.HasPrefix(errText, "skipped") {
 				call.Tasks[i].Status = "skipped"
 			} else {

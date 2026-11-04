@@ -376,6 +376,11 @@ func Run(ctx context.Context, opts Options) error {
 		if reset, ok := m.(StreamResetMsg); ok && !reset.turn.isWithdrawn() && renderer != nil {
 			renderer.FinalizePendingTools()
 		}
+		// A subagent's execution ending is its own run ending: the tool cards
+		// it left in flight in its view are stale the same way.
+		if ended, ok := m.(SubagentEndedMsg); ok && renderer != nil {
+			renderer.FinalizeAgentPendingTools(firstNonEmpty(strings.TrimSpace(ended.AgentID), strings.TrimSpace(ended.TaskID)))
+		}
 		if ev.WorkedStatus != "" {
 			turnWorkedStatus = ev.WorkedStatus
 			// Clear the live "Working" transient line before appending the
@@ -966,10 +971,10 @@ func Run(ctx context.Context, opts Options) error {
 			if cmd == "compact" {
 				handled, continueRun, slashSubmission, exitRequested = dispatchCancelableStreamSlashCommand(
 					ctx, sigCh, events, notifyCh, processUINotification,
-					cmds, renderer, tracker, &state, line, submission.Attachments,
+					cmds, renderer, tracker, &state, line, submission,
 				)
 			} else {
-				handled, continueRun, slashSubmission, exitRequested = dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, &state, line, submission.Attachments)
+				handled, continueRun, slashSubmission, exitRequested = dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, &state, line, submission)
 			}
 			if handled {
 				if exitRequested {
@@ -1196,18 +1201,20 @@ func batchViewerSlashGate(renderer *Renderer, state *streamState, cmd string) (h
 	return true, false
 }
 
-// attachments is the draft the command was submitted from: the turn the
-// command expands into is that draft's turn, so its images ride along.
-func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, line string, attachments []InputAttachment) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
+// draft is the composer submission the command was submitted from: the turn
+// the command expands into is that draft's turn, so its images ride along, and
+// the line's folded pastes are expanded before the command reads its arguments.
+func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, line string, draft ComposerSubmission) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
 	if cmds == nil || state == nil {
 		return false, false, ComposerSubmission{}, false
 	}
 	// /plan and a session change can move the conversation's mode.
 	defer syncPlanModeIndicator(renderer, state)
-	line = strings.TrimSpace(line)
-	if line == "" || !strings.HasPrefix(line, "/") {
+	display := strings.TrimSpace(line)
+	if display == "" || !strings.HasPrefix(display, "/") {
 		return false, false, ComposerSubmission{}, false
 	}
+	line = slashCommandLine(display, draft.PendingPastes)
 	toks := strings.Fields(line)
 	cmd := ""
 	if len(toks) > 0 {
@@ -1328,7 +1335,16 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		}
 		return false, false, ComposerSubmission{}, false
 	}
-	return applySlashOutcome(ctx, cmds, renderer, tracker, state, cmd, line, attachments, outcome)
+	return applySlashOutcome(ctx, cmds, renderer, tracker, state, cmd, display, draft, outcome)
+}
+
+// slashCommandLine is the line a slash command runs on: the composer's line
+// with every folded paste expanded to the text it stands for, as a plain
+// message's turn expands it (composerSubmission). The placeholder is only the
+// composer's chip, so a command that read its arguments from it — a skill's
+// request, a /goal objective — handed the model "[Pasted Content N chars]".
+func slashCommandLine(line string, pastes []PendingPaste) string {
+	return strings.TrimSpace(expandComposerText(strings.TrimSpace(line), pastes))
 }
 
 // dispatchCancelableStreamSlashCommand keeps the TUI event loop alive while a
@@ -1351,12 +1367,14 @@ func dispatchCancelableStreamSlashCommand(
 	tracker *Tracker,
 	state *streamState,
 	line string,
-	attachments []InputAttachment,
+	draft ComposerSubmission,
 ) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
 	if cmds == nil || cmds.session == nil || state == nil {
 		return false, false, ComposerSubmission{}, false
 	}
-	fields := strings.Fields(strings.TrimSpace(line))
+	display := strings.TrimSpace(line)
+	line = slashCommandLine(display, draft.PendingPastes)
+	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return false, false, ComposerSubmission{}, false
 	}
@@ -1406,7 +1424,7 @@ func dispatchCancelableStreamSlashCommand(
 			if !result.ok || (!result.outcome.Handled && !result.outcome.ShouldContinueRun) {
 				return false, false, ComposerSubmission{}, false
 			}
-			return applySlashOutcome(ctx, cmds, renderer, tracker, state, cmd, line, attachments, result.outcome)
+			return applySlashOutcome(ctx, cmds, renderer, tracker, state, cmd, display, draft, result.outcome)
 		case <-ctxDone:
 			// Keep waiting for the handler's synchronous cleanup/persistence
 			// barrier, but do not spin on an already-closed context channel.
@@ -2529,12 +2547,16 @@ func subagentViewLine(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 
 	switch {
 	case strings.HasPrefix(line, "/"):
-		subagentViewSlash(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, cmds, view, line, submission.Attachments)
+		subagentViewSlash(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, cmds, view, line, submission)
 	case strings.HasPrefix(line, "!"):
-		// A shell command is the conversation's, never the subagent's.
+		// A shell command is the conversation's, never the subagent's. The
+		// line goes back with what its chips stand for, or a placeholder
+		// would return to the composer with no paste or image behind it.
 		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "shell", Content: subagentViewMainOnlyReply, AgentID: view, Final: true})
 		state.composer.DraftText = line
 		state.composer.Cursor = len([]rune(line))
+		state.composer.PendingPastes = append([]PendingPaste(nil), submission.PendingPastes...)
+		state.composer.Attachments = append([]InputAttachment(nil), submission.Attachments...)
 		state.seedReader(line, seedCursorEnd)
 		renderComposerWithState(renderer, state)
 	default:
@@ -2546,7 +2568,7 @@ func subagentViewLine(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 
 // subagentViewSlash dispatches a slash command typed in a subagent's view by
 // its D4 class.
-func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, view, line string, attachments []InputAttachment) {
+func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, view, line string, draft ComposerSubmission) {
 	fields := strings.Fields(strings.TrimSpace(line))
 	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
 	// The registry lists skill commands beside the built-ins, so a name it
@@ -2556,7 +2578,7 @@ func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-cha
 		// A skill command acts on the subagent: it is expanded through the
 		// shared slash path and sent to the subagent with the skill explicitly
 		// activated.
-		submission, ok := expandSubagentSkillCommand(ctx, session, state, line, attachments)
+		submission, ok := expandSubagentSkillCommand(ctx, session, state, line, draft)
 		if !ok {
 			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.UnknownCommandReply(turn.SurfaceTUI, name, turn.DiscoveryOptions{SubagentView: true, FastAvailable: sessionFastAvailable(session)}), AgentID: view, Final: true})
 			return
@@ -2568,7 +2590,7 @@ func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-cha
 	switch builtin.SubagentView {
 	case turn.SubagentViewGlobal:
 		// Runs exactly as it does in the conversation's view.
-		dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line, attachments)
+		dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line, draft)
 	case turn.SubagentViewActs:
 		switch name {
 		case "context":
@@ -2587,8 +2609,11 @@ func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-cha
 
 // expandSubagentSkillCommand expands a skill command into the submission the
 // subagent runs: the shared slash path builds the prompt, and the trusted skill
-// selection rides along so the execution activates that skill.
-func expandSubagentSkillCommand(ctx context.Context, session Session, state *streamState, line string, attachments []InputAttachment) (ComposerSubmission, bool) {
+// selection rides along so the execution activates that skill. draft is the
+// composer submission the line came from, as dispatchStreamSlashCommand takes it.
+func expandSubagentSkillCommand(ctx context.Context, session Session, state *streamState, line string, draft ComposerSubmission) (ComposerSubmission, bool) {
+	display := strings.TrimSpace(line)
+	line = slashCommandLine(display, draft.PendingPastes)
 	outcome, ok := session.ExecuteSurfaceSlash(ctx, state.sessionID, line)
 	if !ok || !outcome.ShouldContinueRun {
 		return ComposerSubmission{}, false
@@ -2597,11 +2622,12 @@ func expandSubagentSkillCommand(ctx context.Context, session Session, state *str
 	if next == "" {
 		return ComposerSubmission{}, false
 	}
-	sub, ok := buildComposerSubmission(stripComposerAttachmentPlaceholders(next, attachments), strings.TrimSpace(line), attachments)
+	sub, ok := buildComposerSubmission(stripComposerAttachmentPlaceholders(next, draft.Attachments), display, draft.Attachments)
 	if !ok {
 		return ComposerSubmission{}, false
 	}
-	sub.RawInput = strings.TrimSpace(line)
+	sub.RawInput = line
+	sub.PendingPastes = append([]PendingPaste(nil), draft.PendingPastes...)
 	sub.SkillName = strings.TrimSpace(outcome.SkillName)
 	sub.SkillPath = strings.TrimSpace(outcome.SkillPath)
 	return sub, true
@@ -4690,13 +4716,20 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			// Same rule as the idle loop: the submitted line has left the
 			// composer, so clear and repaint it before the handler runs
 			// rather than leaving the command on screen underneath whatever
-			// the handler puts up.
+			// the handler puts up. The draft is taken first: the line only
+			// names its folded pastes and images, and the composer is what
+			// holds them.
+			state.composer.Text = text
+			draft, _ := state.submissionFromCurrentDraft()
 			state.resetComposerForActiveRunDraft()
 			renderComposerWithState(renderer, state)
-			handleActiveRunSlash(ctx, session, renderer, tracker, state, cmds, commandText)
+			handleActiveRunSlash(ctx, session, renderer, tracker, state, cmds, commandText, draft)
 			return
 		}
 		if strings.HasPrefix(commandText, "!") {
+			// The command runs on what the folded pastes stand for, as an
+			// idle "!" line does; the transcript shows the line as typed.
+			command := expandComposerText(text, state.composer.PendingPastes)
 			state.composer.Text = text
 			state.composer.DraftText = text
 			state.composer.SlashOverlay = nil
@@ -4705,7 +4738,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				if err := session.RunSurfaceShellCommand(ctx, state.sessionID, "tui", line); err != nil && !errors.Is(err, context.Canceled) {
 					renderer.PrintError(err)
 				}
-			}(text)
+			}(command)
 			state.resetComposerForActiveRunDraft()
 			return
 		}
@@ -4957,7 +4990,11 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	}
 }
 
-func handleActiveRunSlash(ctx context.Context, session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, line string) {
+// handleActiveRunSlash runs a slash line submitted while a turn is running.
+// draft is the composer submission the line was taken from, before the
+// composer was cleared: its images and folded pastes belong to the command,
+// and it is the message itself when the line turns out not to be a command.
+func handleActiveRunSlash(ctx context.Context, session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, line string, draft ComposerSubmission) {
 	if state == nil {
 		return
 	}
@@ -4966,10 +5003,7 @@ func handleActiveRunSlash(ctx context.Context, session Session, renderer *Render
 		return
 	}
 	if cmds != nil {
-		// The active-run door clears the draft before dispatching (the submitted
-		// line has left the composer), so this call has no attachments to carry:
-		// a slash command typed mid-run still drops the images drafted with it.
-		handled, continueRun, submission, _ := dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line, nil)
+		handled, continueRun, submission, _ := dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line, draft)
 		if handled {
 			if continueRun {
 				// A steer joins an already-built agent session and cannot safely add
@@ -4989,16 +5023,11 @@ func handleActiveRunSlash(ctx context.Context, session Session, renderer *Render
 			return
 		}
 	}
-	state.composer.Text = line
-	state.composer.DraftText = line
-	state.composer.Cursor = len([]rune(line))
-	submission, ok := state.submissionFromCurrentDraft()
-	if !ok {
+	if len(draft.Parts) == 0 {
 		return
 	}
-	state.sessionQueue().FollowUp(rejectedQueueInput(submission))
+	state.sessionQueue().FollowUp(rejectedQueueInput(draft))
 	state.resetComposerForActiveRunDraft()
-	_ = ctx
 }
 
 // runSlashPicker shows the picker a slash command offered and applies what
@@ -5031,7 +5060,7 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 	refreshSessionFooter(renderer, cmds.session, state.sessionID)
 	// A picker choice authors a turn of its own: it has no draft, so nothing
 	// is attached to it.
-	return applySlashOutcome(ctx, cmds, renderer, tracker, state, strings.TrimSuffix(picker.Command, "-effort"), "", nil, outcome)
+	return applySlashOutcome(ctx, cmds, renderer, tracker, state, strings.TrimSuffix(picker.Command, "-effort"), "", ComposerSubmission{}, outcome)
 }
 
 // refreshSessionFooter redraws what the footer says about the session: its
@@ -5064,7 +5093,10 @@ func refreshSessionFooter(renderer *Renderer, session Session, sessionID string)
 	}
 }
 
-func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, title string, rawLine string, attachments []InputAttachment, outcome SlashOutcome) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
+// applySlashOutcome acts on what a slash command answered. rawLine is the
+// command as the composer showed it, folded pastes still placeholders, and draft
+// is the composer submission it came from (see dispatchStreamSlashCommand).
+func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, title string, rawLine string, draft ComposerSubmission, outcome SlashOutcome) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
 	if state == nil {
 		return false, false, ComposerSubmission{}, false
 	}
@@ -5150,16 +5182,23 @@ func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *R
 		// because turn.SurfaceTurnContentParts appends one clean [Image #N]
 		// marker per attachment that actually goes out (see
 		// composerSubmission, same file).
-		sub, ok := buildComposerSubmission(stripComposerAttachmentPlaceholders(next, attachments), displayText, attachments)
+		sub, ok := buildComposerSubmission(stripComposerAttachmentPlaceholders(next, draft.Attachments), displayText, draft.Attachments)
 		if !ok {
 			return true, false, ComposerSubmission{}, outcome.ExitRequested
 		}
 		// Carry the raw command (e.g. "/init") so it is persisted as the
 		// display-only turn content and resume replay shows what the user
-		// typed, while Parts keeps the expanded prompt for the model.
-		if raw := strings.TrimSpace(rawLine); raw != "" {
+		// typed, while Parts keeps the expanded prompt for the model. The row
+		// keeps what a folded paste stands for, as a plain message's row does:
+		// its placeholder has no paste behind it once the composer lets go, so
+		// a replay — or a /rewind back into the composer — would get the chip
+		// and not the text.
+		if raw := slashCommandLine(rawLine, draft.PendingPastes); raw != "" {
 			sub.RawInput = raw
 		}
+		// The pastes travel with the submission, so a queued or recalled
+		// command comes back to the composer as chips with their text.
+		sub.PendingPastes = append([]PendingPaste(nil), draft.PendingPastes...)
 		sub.SkillName = strings.TrimSpace(outcome.SkillName)
 		sub.SkillPath = strings.TrimSpace(outcome.SkillPath)
 		sub.GoalObjective = strings.TrimSpace(outcome.GoalObjective)

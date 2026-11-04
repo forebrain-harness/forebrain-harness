@@ -978,6 +978,11 @@ export function conversationFromTranscript(
   const out: ChatMessage[] = []
   let turn: ChatMessage | null = null
   const drawn = new Set<string>()
+  // Where the blocks of the last assistant row that issued calls begin: the
+  // reasoning of that response is written after the row (the calls are flushed
+  // as they are dispatched, the thinking as its block closes), yet it came
+  // first, and live drew it first.
+  let callResponse: { row: number; at: number; turn: ChatMessage } | null = null
   const openTurn = (row: ChatMessageRecord, index: number) => {
     if (turn) return turn
     turn = {
@@ -1076,10 +1081,23 @@ export function conversationFromTranscript(
         // The row carries how long the model spent on the block, so a reload
         // draws the same "Thought for Ns" the live view showed.
         const durationMs = parseReasoningTimingMs(row.partsJson)
-        current.blocks = [...(current.blocks ?? []), { kind: 'thinking', text, open: false, startedAt: 0, durationMs }]
+        const thinking: TimelineBlock = { kind: 'thinking', text, open: false, startedAt: 0, durationMs }
+        const blocks = [...(current.blocks ?? [])]
+        if (callResponse && callResponse.row === index - 1 && callResponse.turn === current) {
+          // The thinking of the response whose row came just before: ahead of
+          // that response's text and cards, where live drew it.
+          blocks.splice(callResponse.at, 0, thinking)
+          callResponse = { ...callResponse, row: index, at: callResponse.at + 1 }
+        } else {
+          blocks.push(thinking)
+        }
+        current.blocks = blocks
       }
       return
     }
+    callResponse = parseStoredToolCalls(row.partsJson).length
+      ? { row: index, at: current.blocks?.length ?? 0, turn: current }
+      : null
     if (text.trim()) {
       spoken.push(text)
       current.blocks = [...(current.blocks ?? []), { kind: 'assistant', text, open: false }]
@@ -1155,20 +1173,26 @@ export function subagentBlocksFromTranscript(rows: ChatMessageRecord[]): Timelin
 }
 
 /**
- * WorkerBody walks one execution's rebuilt blocks as its delta events replay.
- * The run's events describe the same blocks in the same order, grouped the way
- * a block is written (a thinking block is its run of reasoning deltas, a tool
- * card is one call's start/completion, an answer is its run of text deltas), so
- * a reload spends one block at each group boundary and skips the rest of the
- * deltas. `cursor` is the next block; `group`/`stepId` name the group the last
- * delta belonged to.
+ * WorkerBody walks one execution's rebuilt blocks as its events replay. The
+ * durable log keeps no text deltas (they are pushed, never stored), so a tool
+ * event says how far to walk: every block up to and including that call's card
+ * — the thinking and answers before it with it — and the execution's end draws
+ * whatever is left. A log that still holds deltas spends one block at each
+ * group boundary, as before. `cursor` is the next block; `group` names the
+ * group the last delta belonged to; `drawn` the calls whose card is already on
+ * screen, so their other event is swallowed instead of drawing a second card.
  */
 interface WorkerBody {
   agentId: string
   blocks: TimelineBlock[]
   cursor: number
-  group: 'thinking' | 'assistant' | 'tool' | ''
-  stepId: string
+  group: 'thinking' | 'assistant' | ''
+  drawn: Set<string>
+}
+
+/** replayEventKey names one event of a replayed log: its id, else its place in the log. */
+function replayEventKey(evt: ForebrainRunEvent): string {
+  return String(evt.id ?? '').trim() || `seq:${Number(evt.sequence ?? 0)}`
 }
 
 /**
@@ -2824,9 +2848,10 @@ export function useChatStream() {
   // One subagent execution's words, rebuilt from its own worker session's
   // transcript (plan 017): the assistant/thinking/tool blocks the runtime wrote
   // there, in the order it wrote them. A reload feeds them into that subagent's
-  // view as its own delta events replay - the lifecycle, approvals and plan
-  // cards still come from the events - so the text has one home. Keyed by the
-  // execution's run id, the id every one of its events carries.
+  // view as its own events replay - the lifecycle, approvals and plan cards
+  // still come from the events - so the text has one home. Keyed by the event
+  // that draws from it (replayEventKey): every execution of a subagent shares
+  // its run id, so the run alone does not say which execution an event is of.
   const replayWorkerBodies = new Map<string, WorkerBody>()
 
   function syncSubagentClock() {
@@ -3044,12 +3069,20 @@ export function useChatStream() {
     syncSubagentClock()
   }
 
+  /** countSubagentToolEvent folds one of a subagent's tool events into its card task. */
+  function countSubagentToolEvent(agentId: string, evt: ForebrainRunEvent, payload: Record<string, unknown>) {
+    const completed = evt.type === 'tool_call_completed'
+    const step = toolStepFromPayload(payload, completed, `${payload.toolName ?? 'tool'}-${evt.id ?? ''}`)
+    countSubagentTool(agentId, step.stepId, String(subagentStepMeta(payload).invocation ?? '').trim() || step.toolName)
+  }
+
   /**
    * countSubagentTool folds one tool event of a subagent into its card task:
-   * the count rises only on a start, a completion only refines the label —
-   * the terminal's appendFanoutTaskTool rule.
+   * a call counts once, on whichever of its events comes first — live, its
+   * start — and a later event only refines the label: the terminal's
+   * appendFanoutTaskTool rule, where a reload sees only a call's completion.
    */
-  function countSubagentTool(agentId: string, stepId: string, label: string, started: boolean) {
+  function countSubagentTool(agentId: string, stepId: string, label: string) {
     const bound = currentCallTaskOfAgent.get(agentId)
     if (!bound) return
     const tasks = subagentCallTasks.get(bound.stepId)
@@ -3058,11 +3091,9 @@ export function useChatStream() {
     const seen = task.toolStepIds ?? []
     const known = seen.includes(stepId)
     let toolCount = task.toolCount ?? 0
-    if (!known && started) {
+    if (!known) {
       seen.push(stepId)
       toolCount += 1
-    } else if (!known && !started) {
-      return
     }
     tasks.set(bound.index, { ...task, toolCount, latestTool: label || task.latestTool, toolStepIds: seen })
     subagentCallTasks.set(bound.stepId, tasks)
@@ -3783,37 +3814,45 @@ export function useChatStream() {
   }
 
   /**
-   * applyWorkerBackedDelta consumes one delta event of an execution whose words
-   * live in its worker transcript. A block is written when it ends, so the
-   * deltas only mark where one begins: the first delta of a group spends the
-   * next rebuilt block, every later delta of that group is dropped. Events that
-   * are not part of a block - an approval, a plan card, the lifecycle - fall
-   * through to the ordinary routing, so they keep the place among the blocks
-   * that live drew them at.
+   * applyWorkerBackedDelta consumes one event of an execution whose words live
+   * in its worker transcript. A tool event draws every block up to and
+   * including that call's card — the durable log keeps no text deltas, so the
+   * thinking and answers before the call ride with it — and swallows the call's
+   * other event; a call the rows hold no card for (stopped before its row was
+   * written) stays on the event path. A text delta, in a log that still holds
+   * them, starts its group's block. Events that are not part of a block - an
+   * approval, a plan card, the lifecycle - fall through to the ordinary
+   * routing, so they keep the place among the blocks that live drew them at.
    *
-   * It reports whether the event was consumed as a block delta.
+   * It reports whether the event was consumed.
    */
   function applyWorkerBackedDelta(agentId: string, evt: ForebrainRunEvent, payload: Record<string, unknown>, body: WorkerBody): boolean {
-    const startGroup = (group: WorkerBody['group'], stepId: string) => {
+    const startGroup = (group: WorkerBody['group']) => {
       body.group = group
-      body.stepId = stepId
       const block = body.blocks[body.cursor++]
       if (block) appendWorkerBlock(agentId, block)
     }
     switch (evt.type) {
       case 'reasoning_delta':
-        if (body.group !== 'thinking') startGroup('thinking', '')
+        if (body.group !== 'thinking') startGroup('thinking')
         return true
       case 'reasoning_done':
         body.group = ''
         return true
       case 'assistant_delta':
-        if (body.group !== 'assistant') startGroup('assistant', '')
+        if (body.group !== 'assistant') startGroup('assistant')
         return true
       case 'tool_call_started':
       case 'tool_call_completed': {
         const stepId = String(payload.stepId ?? '').trim()
-        if (body.group !== 'tool' || body.stepId !== stepId) startGroup('tool', stepId)
+        if (!stepId) return false
+        body.group = ''
+        if (body.drawn.has(stepId)) return true
+        const at = body.blocks.findIndex((block, i) => i >= body.cursor && block.kind === 'tool' && block.step.stepId === stepId)
+        if (at < 0) return false
+        for (const block of body.blocks.slice(body.cursor, at + 1)) appendWorkerBlock(agentId, block)
+        body.cursor = at + 1
+        body.drawn.add(stepId)
         return true
       }
       case 'tool_output_delta':
@@ -3824,28 +3863,53 @@ export function useChatStream() {
   }
 
   /**
+   * drawWorkerRest draws what an execution's rows still hold — a text-only
+   * execution, or the thinking and answer after its last call — when the
+   * execution ends, ahead of the end's own blocks.
+   */
+  function drawWorkerRest(agentId: string, body: WorkerBody) {
+    for (const block of body.blocks.slice(body.cursor)) appendWorkerBlock(agentId, block)
+    body.cursor = body.blocks.length
+    body.group = ''
+  }
+
+  /**
    * loadReplayWorkerBodies reads, once, the worker sessions a reloaded
    * conversation's subagent spawns name, and rebuilds each execution's words
-   * from the rows of its own run. A spawn with no worker session id, a worker
-   * session the reader can no longer see, and an execution with no rows in its
-   * worker session all leave that execution on the event path - the fallback
-   * until the rows recorded before the transcript contract are migrated.
+   * from its rows. Every execution of a subagent — its dispatch, each
+   * subagent_continue, an automatic continuation — shares its run id and its
+   * worker session, so the run's rows are cut at each later execution's prompt:
+   * the user row its spawn's task names (a prompt the rows do not hold cuts
+   * nothing, and its rows stay with the execution before it). An event draws
+   * from the execution it belongs to: a spawn or an end from its own, anything
+   * else from the run's latest spawn. Kept as one body per run, a continuation's
+   * words were drawn into the execution before it.
+   *
+   * A spawn with no worker session id, a worker session the reader can no
+   * longer see, and an execution with no rows in its worker session all leave
+   * that execution on the event path - the fallback until the rows recorded
+   * before the transcript contract are migrated.
    */
   async function loadReplayWorkerBodies(events: ForebrainRunEvent[]): Promise<void> {
-    const spawns: { runId: string; agentId: string; workerSessionId: string }[] = []
-    const sessionIds = new Set<string>()
+    const executionKey = (evt: ForebrainRunEvent, executionId: unknown) =>
+      String(executionId ?? '').trim() || `spawn#${replayEventKey(evt)}`
+    const runs = new Map<string, { agentId: string; workerSessionId: string; executions: { key: string; task: string }[] }>()
     for (const evt of events) {
       if (evt.type !== 'subagent_spawned') continue
       const payload = evt.payload ?? {}
       const workerSessionId = String(payload.workerSessionId ?? '').trim()
       const runId = String(evt.runId ?? '').trim()
       if (!workerSessionId || !runId) continue
-      spawns.push({ runId, agentId: String(payload.agentId ?? '').trim(), workerSessionId })
-      sessionIds.add(workerSessionId)
+      let run = runs.get(runId)
+      if (!run) {
+        run = { agentId: String(payload.agentId ?? '').trim(), workerSessionId, executions: [] }
+        runs.set(runId, run)
+      }
+      run.executions.push({ key: executionKey(evt, payload.executionId), task: String(payload.task ?? '').trim() })
     }
-    if (!spawns.length) return
+    if (!runs.size) return
     const rowsBySession = new Map<string, ChatMessageRecord[]>()
-    await Promise.all([...sessionIds].map(async (workerSessionId) => {
+    await Promise.all([...new Set([...runs.values()].map((run) => run.workerSessionId))].map(async (workerSessionId) => {
       try {
         const rows = await forebrainApi.chatMessages(workerSessionId, 0)
         if (Array.isArray(rows)) rowsBySession.set(workerSessionId, rows)
@@ -3853,16 +3917,36 @@ export function useChatStream() {
         // A worker session the reader cannot see stays on the event path.
       }
     }))
-    for (const spawn of spawns) {
-      const rows = rowsBySession.get(spawn.workerSessionId)
-      if (!rows?.length) continue
-      // Execution id and run id are the same child run, so the rows of this
-      // execution are the ones carrying it.
-      const execRows = rows.filter((row) => String(row.runId ?? '').trim() === spawn.runId)
-      if (!execRows.length) continue
-      const blocks = subagentBlocksFromTranscript(execRows)
-      if (!blocks.length) continue
-      replayWorkerBodies.set(spawn.runId, { agentId: spawn.agentId, blocks, cursor: 0, group: '', stepId: '' })
+    const bodies = new Map<string, WorkerBody>()
+    for (const [runId, run] of runs) {
+      const segments: ChatMessageRecord[][] = run.executions.map(() => [])
+      let current = 0
+      for (const row of rowsBySession.get(run.workerSessionId) ?? []) {
+        if (String(row.runId ?? '').trim() !== runId) continue
+        const next = run.executions[current + 1]?.task
+        if (next && row.role === 'user' && String(row.content ?? '').trim() === next) current++
+        segments[current].push(row)
+      }
+      segments.forEach((rows, i) => {
+        const blocks = rows.length ? subagentBlocksFromTranscript(rows) : []
+        if (blocks.length) {
+          bodies.set(`${runId}\u0000${run.executions[i].key}`, { agentId: run.agentId, blocks, cursor: 0, group: '', drawn: new Set() })
+        }
+      })
+    }
+    const latest = new Map<string, string>()
+    for (const evt of events) {
+      const runId = String(evt.runId ?? '').trim()
+      if (!runId) continue
+      let key = latest.get(runId) ?? ''
+      if (evt.type === 'subagent_spawned') {
+        key = executionKey(evt, evt.payload?.executionId)
+        latest.set(runId, key)
+      } else if (evt.type === 'subagent_ended' && String(evt.payload?.executionId ?? '').trim()) {
+        key = String(evt.payload?.executionId).trim()
+      }
+      const body = bodies.get(`${runId}\u0000${key}`)
+      if (body) replayWorkerBodies.set(replayEventKey(evt), body)
     }
   }
 
@@ -3874,8 +3958,14 @@ export function useChatStream() {
    * said.
    */
   function routeSubagentEvent(agentId: string, evt: ForebrainRunEvent, payload: Record<string, unknown>): boolean {
-    const workerBody = replayWorkerBodies.get(String(evt.runId ?? '').trim())
-    if (workerBody && applyWorkerBackedDelta(agentId, evt, payload, workerBody)) return true
+    const workerBody = replayWorkerBodies.get(replayEventKey(evt))
+    if (workerBody && applyWorkerBackedDelta(agentId, evt, payload, workerBody)) {
+      // The rows draw the call's card, but the call still lands on the card
+      // task its execution is bound to: a reloaded card names the subagent's
+      // last call the way the live one did.
+      if (evt.type === 'tool_call_started' || evt.type === 'tool_call_completed') countSubagentToolEvent(agentId, evt, payload)
+      return true
+    }
     switch (evt.type) {
       case 'context_compacting':
       case 'context_compact_progress':
@@ -3975,12 +4065,7 @@ export function useChatStream() {
         // A subagent's own call is one of these cards when it says so, and
         // every tool event it runs lands on the card task it was bound to.
         rememberSubagentCallStep(step)
-        countSubagentTool(
-          agentId,
-          step.stepId,
-          String(subagentStepMeta(payload).invocation ?? '').trim() || step.toolName,
-          !completed,
-        )
+        countSubagentToolEvent(agentId, evt, payload)
         updateSubagent(agentId, (entry) => {
           entry = { ...entry, blocks: closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt) }
           const index = entry.blocks.findIndex((b) => b.kind === 'tool' && b.step.stepId === step.stepId)
@@ -4876,6 +4961,10 @@ export function useChatStream() {
 	  const finishedAtMs = Number.isFinite(finishedAtMsRaw) && finishedAtMsRaw > 0
 		? finishedAtMsRaw
 		: eventTimestamp(evt.createdAt)
+      // On a reload, what this execution's rows still hold is drawn here,
+      // ahead of the end's own blocks.
+      const restBody = replayWorkerBodies.get(replayEventKey(evt))
+      if (restBody) drawWorkerRest(agentId, restBody)
       updateSubagent(agentId, (entry) => ({
         ...entry,
         agentType: agentType || entry.agentType,
@@ -4888,7 +4977,11 @@ export function useChatStream() {
         // The run is over, so nothing more will be appended to the text it was
         // streaming.
 	    blocks: (() => {
-		  let blocks = closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt)
+		  // Nothing the execution started is still running or waiting on an
+		  // approval: a card that never got its completion — a call stopped
+		  // while it waited for one — settles the way a stopped turn's do
+		  // (cancelPendingToolBlocks), not left pending for good.
+		  let blocks = cancelPendingToolBlocks(closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt))
 		  let promptIndex = -1
 		  if (promptId) {
 			for (let i = blocks.length - 1; i >= 0; i--) {
@@ -6281,9 +6374,15 @@ export function useChatStream() {
 	  // A subagent's words are rebuilt from its own worker session's transcript
 	  // (plan 017), so the workers are read before their events replay. An
 	  // execution whose worker session is gone keeps the event path below.
-	  await loadReplayWorkerBodies(events)
-	  for (const evt of events.sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0))) {
+	  const ordered = events.sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0))
+	  await loadReplayWorkerBodies(ordered)
+	  for (const evt of ordered) {
 		applyObservedEvent(evt, true)
+	  }
+	  // An execution with no end in the log — still running when the page
+	  // loaded — has the tail of its rows drawn after its last event.
+	  for (const body of new Set(replayWorkerBodies.values())) {
+		if (body.cursor < body.blocks.length) drawWorkerRest(body.agentId, body)
 	  }
 	  sessionEventCursor = Math.max(sessionEventCursor, Number(highWater ?? 0))
 	  // Read after the replay, and never awaited by it: a turn whose end frame

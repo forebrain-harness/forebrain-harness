@@ -4357,3 +4357,163 @@ func TestReplayReasoningRowShowsItsStoredDuration(t *testing.T) {
 		t.Fatalf("replay did not draw the stored thinking duration:\n%s", painted)
 	}
 }
+
+// subagentContinueReplay is one subagent's two executions as a session records
+// them: dispatched with subagent_send, then continued with subagent_continue.
+// Both executions share the subagent's run id and its worker session; only the
+// second's execution id differs from that run id.
+func subagentContinueReplay() ([]state.Message, []event.RunEvent, map[string][]state.Message, string) {
+	const (
+		agentID  = "task-cont"
+		runID    = "run-cont"
+		workerID = "worker-cont"
+	)
+	call := func(id, name, args string) string {
+		return state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+			ID: id, Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: name, Arguments: args},
+		}), "")
+	}
+	result := func(id, body string) string {
+		return state.MessagePartsJSON(llm.ToolResultMessage(id, llm.Text(body)), body)
+	}
+	sendBody := `{"task_id":"` + agentID + `","agent_type":"explore","run_id":"` + runID + `","status":"running","started_at":100}`
+	contBody := `{"record":{"task_id":"` + agentID + `","agent_type":"explore","title":"look around","status":"ok","execution_id":"exec-2","started_at":100,"finished_at":130}}`
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "look around, then keep going", CreatedAt: 99},
+		{RowID: 2, Role: "assistant", PartsJSON: call("send-1", "subagent_send", `{"title":"look around","task":"first task","subagent_type":"explore"}`), CreatedAt: 140},
+		{RowID: 3, Role: "tool", Content: sendBody, ToolStepID: "send-1", PartsJSON: result("send-1", sendBody), CreatedAt: 140},
+		{RowID: 4, Role: "assistant", PartsJSON: call("cont-1", "subagent_continue", `{"task_id":"`+agentID+`","message":"keep going"}`), CreatedAt: 140},
+		{RowID: 5, Role: "tool", Content: contBody, ToolStepID: "cont-1", PartsJSON: result("cont-1", contBody), CreatedAt: 140},
+		{RowID: 6, Role: "assistant", Content: "all done", CreatedAt: 140},
+	}
+	at := func(sec int64) time.Time { return time.Unix(sec, 0) }
+	spawned := func(id, execution, toolCall, task string, sec int64) event.RunEvent {
+		return event.NewRunEvent(id, runID, "session-1", event.RunEventSubagentSpawned, event.SubagentSpawnedPayload{
+			AgentID: agentID, AgentType: "explore", TaskID: agentID, Title: "look around", Task: task,
+			ParentRunID: "parent-1", ParentToolCallID: toolCall, ExecutionID: execution, WorkerSessionID: workerID,
+		}, at(sec))
+	}
+	ended := func(id, execution, toolCall string, sec int64) event.RunEvent {
+		return event.NewRunEvent(id, runID, "session-1", event.RunEventSubagentEnded, event.SubagentEndedPayload{
+			AgentID: agentID, AgentType: "explore", TaskID: agentID, Status: "ok",
+			ParentRunID: "parent-1", ParentToolCallID: toolCall, ExecutionID: execution,
+		}, at(sec))
+	}
+	answer := func(id, text string, sec int64) event.RunEvent {
+		return event.NewRunEvent(id, runID, "session-1", event.RunEventAssistantDelta, event.AssistantDeltaPayload{AgentID: agentID, Text: text}, at(sec))
+	}
+	events := []event.RunEvent{
+		spawned("spawn-1", runID, "send-1", "first task", 100),
+		answer("answer-1", "first answer", 105),
+		ended("ended-1", runID, "send-1", 110),
+		spawned("spawn-2", "exec-2", "cont-1", "keep going", 120),
+		answer("answer-2", "second answer", 125),
+		ended("ended-2", "exec-2", "cont-1", 130),
+	}
+	for i := range events {
+		events[i].Sequence = int64(i + 1)
+	}
+	workers := map[string][]state.Message{workerID: {
+		{RunID: runID, Role: "user", Content: "first task"},
+		{RunID: runID, Role: "assistant", Content: "first answer"},
+		{RunID: runID, Role: "user", Content: "keep going"},
+		{RunID: runID, Role: "assistant", Content: "second answer"},
+	}}
+	return turns, events, workers, agentID
+}
+
+// A continuation's events share the subagent's run id with its dispatch, so
+// anchored by the run they replayed after the dispatching call — ahead of the
+// subagent_continue card, which they then could not bind to: the replay drew a
+// card of their own for them, and the continue card timed itself from the
+// subagent's first start. They belong after the continue call.
+func TestReplayBindsAContinuationToItsContinueCard(t *testing.T) {
+	turns, events, _, _ := subagentContinueReplay()
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	reducer := &Reducer{}
+	replayTimelineWithReducer(renderer, turns, events, reducer, nil)
+	flushReplayReducer(renderer, reducer)
+	var cards []string
+	for _, block := range renderer.vm.blocks {
+		if block.frame.Kind == FrameFanout {
+			cards = append(cards, strings.TrimSpace(stripANSI(block.frame.Summary)))
+		}
+	}
+	if len(cards) != 2 || !strings.HasPrefix(cards[0], "Ran 1 explore task in background") || !strings.HasPrefix(cards[1], "Continued 1 explore task") {
+		t.Fatalf("cards = %q, want the send's and the continue's, nothing else", cards)
+	}
+}
+
+// Every execution of a subagent shares its run id and its worker session, so
+// one body per run gave the first execution's end every later execution's rows:
+// the continuation's answer was drawn ahead of the message that asked for it.
+// Each execution draws its own rows, cut at the next execution's prompt.
+func TestReplaySubagentViewKeepsEachExecutionsRowsInItsOwnPlace(t *testing.T) {
+	turns, events, workers, agentID := subagentContinueReplay()
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithWorkers(renderer, turns, events, &Reducer{}, nil, workers)
+	vm := renderer.perAgentVM[agentID]
+	if vm == nil {
+		t.Fatal("replayed subagent view is empty")
+	}
+	index := func(text string) int {
+		for i, block := range vm.blocks {
+			if strings.Contains(stripANSI(block.frame.Content), text) {
+				return i
+			}
+		}
+		t.Fatalf("subagent view lacks %q", text)
+		return -1
+	}
+	first, prompt, second := index("first answer"), index("keep going"), index("second answer")
+	if !(first < prompt && prompt < second) {
+		t.Fatalf("subagent view order: first answer %d, continue prompt %d, second answer %d", first, prompt, second)
+	}
+}
+
+// A continue card is settled by its own result row before its execution's
+// events replay. Its execution's calls still belong to it: the reloaded card
+// names the subagent's last call, as the live card did.
+func TestReplayContinueCardNamesTheSubagentsLastCall(t *testing.T) {
+	turns, events, workers, agentID := subagentContinueReplay()
+	const stepID = "shell-2"
+	started := event.NewRunEvent("tool-2", "run-cont", "session-1", event.RunEventToolStarted, event.ToolCallStartedPayload{
+		Kind: event.RunEventToolStarted, StepID: stepID, ToolName: "shell",
+		ToolMeta: event.ToolCallMeta{ToolName: "shell", Status: "running", AgentID: agentID},
+	}, time.Unix(122, 0))
+	// After spawn-2, ahead of the second answer.
+	events = append(events[:4], append([]event.RunEvent{started}, events[4:]...)...)
+	for i := range events {
+		events[i].Sequence = int64(i + 1)
+	}
+	call := state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+		ID: stepID, Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"sleep 600"}`},
+	}), "")
+	result := `[{"type":"tool_result_meta","tool_call_id":"shell-2"},{"type":"tool_display","body":"tool shell: context canceled","summary":"failed","tool_meta_json":"{\"tool_name\":\"shell\",\"status\":\"failed\",\"invocation\":\"sleep 600\"}"}]`
+	rows := workers["worker-cont"]
+	workers["worker-cont"] = append(append(append([]state.Message(nil), rows[:3]...),
+		state.Message{RunID: "run-cont", Role: "assistant", PartsJSON: call},
+		state.Message{RunID: "run-cont", Role: "tool", ToolStepID: stepID, Content: "Error executing tool 'shell': tool shell: context canceled", PartsJSON: result},
+	), rows[3:]...)
+
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	reducer := &Reducer{}
+	replayTimelineWithWorkers(renderer, turns, events, reducer, nil, workers)
+	flushReplayReducer(renderer, reducer)
+	for _, block := range renderer.vm.blocks {
+		f := block.frame
+		if f.Kind == FrameFanout && strings.HasPrefix(stripANSI(f.Summary), "Continued") {
+			if !strings.Contains(stripANSI(f.Content), "└ sleep 600") {
+				t.Fatalf("continue card = %q, want it to name the subagent's last call", stripANSI(f.Content))
+			}
+			return
+		}
+	}
+	t.Fatal("no continue card was replayed")
+}

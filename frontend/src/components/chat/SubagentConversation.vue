@@ -138,7 +138,7 @@
 
     <Alert v-if="record.error" variant="destructive">
       <CircleAlert class="size-4" />
-      <AlertTitle>{{ t('chat.subagentFailed') }}</AlertTitle>
+      <AlertTitle>{{ endedTitle }}</AlertTitle>
       <AlertDescription class="whitespace-pre-wrap">{{ record.error }}</AlertDescription>
     </Alert>
   </section>
@@ -178,7 +178,7 @@ import { injectPendingActions } from '@/composables/providePendingActions'
 import type { ActionRow } from '@/composables/usePendingActions'
 import type { DocTab } from '@/composables/useDocTabs'
 import { groupActivityRuns, blockOnActivityLine } from '@/lib/activityRuns'
-import { subagentPhase } from '@/lib/subagentStatus'
+import { subagentPhase, subagentStatusLabel } from '@/lib/subagentStatus'
 import { blockVisibleIn } from '@/lib/viewMode'
 import type { ViewMode } from '@/composables/useViewMode'
 import type { WorkspaceScope } from '@/lib/api'
@@ -233,6 +233,15 @@ const runs = computed(() => {
 })
 
 const isRunning = computed(() => subagentPhase(props.record.status) === 'active')
+
+/** How the ended execution's account is titled: a stopped subagent was
+ *  cancelled or interrupted, never "failed" — the end carries its reason as
+ *  its error all the same. */
+const endedTitle = computed(() => (
+  props.record.status === 'cancelled' || props.record.status === 'interrupted'
+    ? subagentStatusLabel(props.record.status)
+    : t('chat.subagentFailed')
+))
 
 /** The conversation's own pending-actions store: a gate this subagent raised
  *  hangs on its own call's card here, the same way the conversation's do. */

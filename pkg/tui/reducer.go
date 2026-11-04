@@ -292,6 +292,9 @@ type FanoutTaskState struct {
 	StopRequested bool
 	ToolTotal     int               // total subagent tool calls (deduped by StepID)
 	RecentTools   []fanoutToolEntry // recent tool labels (ring buffer, cap maxFanoutRecentTools)
+	// toolSteps is every call ToolTotal counted, so a call already pushed out
+	// of RecentTools is not counted — or shown as the latest — a second time.
+	toolSteps map[string]struct{}
 }
 
 // fanoutState is one subagent card: the subagent_* call (or the review
@@ -455,8 +458,13 @@ func (r *Reducer) fanoutTaskForLifecycle(parentToolCallID string, taskIndex int)
 	return fs, &fs.Tasks[taskIndex]
 }
 
-// appendFanoutTaskTool folds a subagent tool event into a task ring buffer.
-func appendFanoutTaskTool(t *FanoutTaskState, stepID, label, phase string) {
+// appendFanoutTaskTool folds a subagent tool event into a task ring buffer. A
+// call counts once, on whichever of its events comes first: live that is its
+// start, and its completion only refines the label. A reload rebuilds the call
+// from its result row and sees only the completion — ignoring that left the
+// reloaded card without the line naming the subagent's last call, which the
+// live card showed.
+func appendFanoutTaskTool(t *FanoutTaskState, stepID, label string) {
 	if t == nil {
 		return
 	}
@@ -470,8 +478,14 @@ func appendFanoutTaskTool(t *FanoutTaskState, stepID, label, phase string) {
 			return
 		}
 	}
-	if phase == "tool_call_completed" {
-		return
+	if stepID != "" {
+		if _, counted := t.toolSteps[stepID]; counted {
+			return
+		}
+		if t.toolSteps == nil {
+			t.toolSteps = make(map[string]struct{})
+		}
+		t.toolSteps[stepID] = struct{}{}
 	}
 	t.ToolTotal++
 	t.RecentTools = append(t.RecentTools, fanoutToolEntry{StepID: stepID, Label: label})
@@ -585,7 +599,11 @@ func (r *Reducer) bindFanoutTaskToSpawn(fs *fanoutState, index int, m SubagentSp
 	if fanoutTaskTerminal(t.Status) {
 		// The task's outcome already arrived — a re-delivered spawn after its
 		// end, or a replay whose completed row settled it before the events.
-		// The identity is still the fact this message carries.
+		// The identity is still the fact this message carries, and the
+		// execution's calls still belong to this row: a replayed continue card
+		// is settled by its row first, and unbound its calls found no row, so
+		// it lost the line naming the subagent's last call. The outcome stays.
+		r.setCardTaskOfAgent(m.AgentID, cardTaskRef{stepID: fs.StepID, index: index})
 		return
 	}
 	t.Status = "running"
@@ -2102,7 +2120,7 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		// bound to. Emit AgentID-tagged FrameTool for the per-agent view, then
 		// re-emit the card for the surface that shows it.
 		if fs, task := r.cardTaskOf(agentID); task != nil {
-			appendFanoutTaskTool(task, stepID, fanoutToolLabel(msg), strings.TrimSpace(msg.ToolPhase))
+			appendFanoutTaskTool(task, stepID, fanoutToolLabel(msg))
 			frames := r.withFlushedBuffers(r.agentBuf(agentID), r.buildFrame(FrameTool, toolName, msg), msg.Timestamp)
 			return append(frames, r.emitFanoutFrame(fs))
 		}
@@ -3125,26 +3143,22 @@ func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int,
 	animated := (toolStatusRunning(b.frame) && !toolStatusAwaitingApproval(b.frame)) ||
 		(b.frame.Kind == FrameMemoryCompact && !b.frame.Final) ||
 		(b.frame.Kind == FrameSkillInstall && !b.frame.Final) ||
-		(b.frame.Kind == FrameMigration && !b.frame.Final)
-	// A subagent card with a running task clock depends on the second, not the
-	// spinner phase: the clock walks once a second, so keying it on the tick
-	// would re-render the whole card ten times for one visible change.
+		(b.frame.Kind == FrameMigration && !b.frame.Final) ||
+		(b.frame.Kind == FrameFanout && !b.frame.Final)
+	// A subagent card's task clock depends on the second, not the spinner
+	// phase. A settled card can still hold one — a query card's snapshot of
+	// executions still running — and keying it on the tick would re-render
+	// the whole card ten times for one visible change.
 	clockSec := 0
-	clocked := b.frame.Kind == FrameFanout && fanoutHasLiveClock(b.frame)
-	if clocked {
+	if b.frame.Kind == FrameFanout && fanoutHasLiveClock(b.frame) {
 		clockSec = int(time.Now().Unix())
 	}
-	if c.valid && c.width == width && c.cwd == cwd {
-		if clocked {
-			if c.clockSec == clockSec {
-				return c.lines
-			}
-		} else if !animated || c.spinnerPhase == spinnerPhase {
-			// Running tools and compact blocks depend on the animation phase;
-			// all other blocks are phase-independent and reuse their cached
-			// lines.
-			return c.lines
-		}
+	// Running tools, compact blocks and running subagent cards depend on the
+	// animation phase; all other blocks are phase-independent and reuse their
+	// cached lines.
+	if c.valid && c.width == width && c.cwd == cwd && c.clockSec == clockSec &&
+		(!animated || c.spinnerPhase == spinnerPhase) {
+		return c.lines
 	}
 	lines, lineAgents := renderFrameLinesWithAgents(b.displayFrame(), width, theme, spinnerPhase, cwd)
 	c.valid = true
@@ -4117,8 +4131,8 @@ func (r *Renderer) stopCompactAnimationLocked() {
 
 // hasLiveBlockLocked reports whether the view on screen holds a block that
 // changes with time on its own: a running compaction — the conversation's, or
-// the subagent's whose view is open — or a subagent card with a task clock
-// still walking.
+// the subagent's whose view is open — a subagent card still at work, which
+// animates, or one with a task clock still walking.
 func (r *Renderer) hasLiveBlockLocked() bool {
 	vm := &r.vm
 	if r.activeView != "" {
@@ -4133,7 +4147,7 @@ func (r *Renderer) hasLiveBlockLocked() bool {
 			return true
 		case block.frame.Kind == FrameMigration && !block.frame.Final:
 			return true
-		case block.frame.Kind == FrameFanout && fanoutHasLiveClock(block.frame):
+		case block.frame.Kind == FrameFanout && (!block.frame.Final || fanoutHasLiveClock(block.frame)):
 			return true
 		}
 	}

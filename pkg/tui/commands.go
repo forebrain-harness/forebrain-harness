@@ -462,7 +462,7 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 			pos = placed
 		}
 		if pos < 0 {
-			if anchored, ok := anchors[strings.TrimSpace(evt.RunID)]; ok {
+			if anchored, ok := anchors[i]; ok {
 				pos = anchored
 			}
 		}
@@ -482,12 +482,10 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 		// them. The durable log holds no block deltas to walk it by, so the body
 		// draws its own rows in order and an event only says where a card falls;
 		// everything that is not a block boundary - an approval, a plan card,
-		// the lifecycle - keeps the place the events drew it at. One worker
-		// session's executions share its run id, so the bodies are left in place
-		// across a `subagent_ended`; a later execution of the same subagent
-		// keeps drawing the same body.
+		// the lifecycle - keeps the place the events drew it at. Each event
+		// draws from its own execution's body (buildReplayWorkerBodies).
 		runID := strings.TrimSpace(evt.RunID)
-		if body := workerBodies[runID]; body != nil {
+		if body := workerBodies[i]; body != nil {
 			// A run's blocks end at its last event: whatever the rows still
 			// hold - a text-only execution's thinking and answer, or the
 			// thinking and answer that follow the final call - belongs there,
@@ -522,7 +520,7 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 		// and drops the copy; the field stays the only record of an execution
 		// whose rows are gone.
 		if ended, isEnded := msg.(SubagentEndedMsg); isEnded {
-			if body := workerBodies[runID]; body != nil && body.endsOnAnswer() {
+			if body := workerBodies[i]; body != nil && body.endsOnAnswer() {
 				ended.Output = ""
 				msg = ended
 			}
@@ -1136,42 +1134,68 @@ func replayHeldGateStepMessage(call heldGateCall, at time.Time) Message {
 	}
 }
 
-// subagentEventAnchors resolves, per subagent run, the transcript position its
-// events replay at: the index of the first row that must follow them. A spawn
-// records the parent tool call it was dispatched from, and that call is a tool
-// row of this transcript, so the child's whole stream replays immediately after
-// the row for the call that created it - which is where the live surface showed
-// it. A nested subagent's dispatching call belongs to its parent's transcript
-// rather than this one, so it inherits its parent run's anchor.
-func subagentEventAnchors(turns []state.Message, events []event.RunEvent) map[string]int {
+// subagentEventAnchors resolves, per event index, the transcript position a
+// subagent's event replays at: the index of the first row that must follow it.
+// A spawn records the parent tool call it was dispatched from, and that call is
+// a tool row of this transcript, so an execution's stream replays immediately
+// after the row for the call that started it - which is where the live surface
+// showed it.
+//
+// Every execution of a subagent shares its run id, so a run's events follow
+// the anchor of its latest spawn: a continuation replays after the
+// subagent_continue call that started it. Anchored by the run alone, it
+// replayed after the call that first dispatched the subagent, ahead of the
+// continue call's card - so its lifecycle bound to no card, drew a second one
+// of its own, and left the continue card to time itself from the subagent's
+// first start. An end is anchored with its own execution's spawn, so an
+// execution that ends after the next one was announced still closes where it
+// opened. An execution no call started (an automatic continuation) has no
+// anchor and replays by its clock. A nested subagent's dispatching call belongs
+// to its parent's transcript rather than this one, so it inherits its parent
+// run's anchor.
+func subagentEventAnchors(turns []state.Message, events []event.RunEvent) map[int]int {
 	rowByToolCallID := make(map[string]int, len(turns))
 	for i := range turns {
 		if id := strings.TrimSpace(turns[i].ToolStepID); id != "" {
 			rowByToolCallID[id] = i
 		}
 	}
-	anchors := make(map[string]int)
+	// current is each run's latest spawn's anchor; byExecution each
+	// execution's own.
+	current := make(map[string]int)
+	byExecution := make(map[string]int)
+	anchors := make(map[int]int)
 	for i := range events {
-		if events[i].Type != event.RunEventSubagentSpawned {
-			continue
-		}
-		var p event.SubagentSpawnedPayload
-		if json.Unmarshal(events[i].Payload, &p) != nil {
-			continue
-		}
-		runID := strings.TrimSpace(p.ExecutionID)
-		if runID == "" {
-			runID = strings.TrimSpace(events[i].RunID)
-		}
+		runID := strings.TrimSpace(events[i].RunID)
 		if runID == "" {
 			continue
 		}
-		if row, ok := rowByToolCallID[strings.TrimSpace(p.ParentToolCallID)]; ok {
-			anchors[runID] = row + 1
-			continue
+		switch events[i].Type {
+		case event.RunEventSubagentSpawned:
+			var p event.SubagentSpawnedPayload
+			if json.Unmarshal(events[i].Payload, &p) != nil {
+				break
+			}
+			delete(current, runID)
+			if row, ok := rowByToolCallID[strings.TrimSpace(p.ParentToolCallID)]; ok {
+				current[runID] = row + 1
+			} else if parent, ok := current[strings.TrimSpace(p.ParentRunID)]; ok {
+				current[runID] = parent
+			}
+			if pos, ok := current[runID]; ok && strings.TrimSpace(p.ExecutionID) != "" {
+				byExecution[strings.TrimSpace(p.ExecutionID)] = pos
+			}
+		case event.RunEventSubagentEnded:
+			var p event.SubagentEndedPayload
+			if json.Unmarshal(events[i].Payload, &p) == nil {
+				if pos, ok := byExecution[strings.TrimSpace(p.ExecutionID)]; ok {
+					anchors[i] = pos
+					continue
+				}
+			}
 		}
-		if parent, ok := anchors[strings.TrimSpace(p.ParentRunID)]; ok {
-			anchors[runID] = parent
+		if pos, ok := current[runID]; ok {
+			anchors[i] = pos
 		}
 	}
 	return anchors
@@ -1557,14 +1581,41 @@ func lastEventIndexes(events []event.RunEvent) map[string]int {
 }
 
 // buildReplayWorkerBodies rebuilds, per execution, the messages a subagent's
-// view draws from its own worker transcript. A spawn with no worker session id,
-// a worker session whose rows are absent, and an execution with no rows of its
-// own all leave that execution on the event path.
-func buildReplayWorkerBodies(events []event.RunEvent, workerTranscripts map[string][]state.Message) map[string]*replayWorkerBody {
+// view draws from its own worker transcript, and hands them out by the index of
+// the events that draw them.
+//
+// Every execution of a subagent — its dispatch, each subagent_continue, an
+// automatic continuation — shares its run id and its worker session, so the
+// run's rows are cut at each later execution's prompt: the user row its spawn's
+// task names. An event draws from the execution it belongs to: a spawn or an
+// end from its own, anything else from the run's latest spawn. Kept as one body
+// per run, the first execution's end took every later execution's rows with it
+// and drew them ahead of the prompt that started them, and a later execution's
+// calls, finding the rows spent, drew from their events — a call stopped
+// mid-flight as running for good. A prompt the rows do not hold (a legacy
+// stitched one) cuts nothing, and its rows stay with the execution before it.
+//
+// A spawn with no worker session id, a worker session whose rows are absent,
+// and an execution with no rows of its own all leave that execution on the
+// event path.
+func buildReplayWorkerBodies(events []event.RunEvent, workerTranscripts map[string][]state.Message) map[int]*replayWorkerBody {
 	if len(workerTranscripts) == 0 {
 		return nil
 	}
-	out := make(map[string]*replayWorkerBody)
+	// executionKey names one spawn's execution; a spawn recorded before
+	// executions had ids is named by its place in the log.
+	executionKey := func(i int, executionID string) string {
+		if id := strings.TrimSpace(executionID); id != "" {
+			return id
+		}
+		return fmt.Sprintf("spawn#%d", i)
+	}
+	type execution struct{ key, task string }
+	type subagentRun struct {
+		agentID, workerSessionID string
+		executions               []execution
+	}
+	runs := make(map[string]*subagentRun)
 	for i := range events {
 		if events[i].Type != event.RunEventSubagentSpawned {
 			continue
@@ -1578,29 +1629,61 @@ func buildReplayWorkerBodies(events []event.RunEvent, workerTranscripts map[stri
 		if workerSessionID == "" || runID == "" {
 			continue
 		}
-		if _, done := out[runID]; done {
-			continue
+		run := runs[runID]
+		if run == nil {
+			run = &subagentRun{agentID: strings.TrimSpace(p.AgentID), workerSessionID: workerSessionID}
+			runs[runID] = run
 		}
-		rows := workerTranscripts[workerSessionID]
-		if len(rows) == 0 {
-			continue
+		run.executions = append(run.executions, execution{key: executionKey(i, p.ExecutionID), task: strings.TrimSpace(p.Task)})
+	}
+	bodies := make(map[string]*replayWorkerBody)
+	for runID, run := range runs {
+		segments := make([][]state.Message, len(run.executions))
+		current := 0
+		for _, row := range workerTranscripts[run.workerSessionID] {
+			if strings.TrimSpace(row.RunID) != runID {
+				continue
+			}
+			if current+1 < len(run.executions) && strings.EqualFold(strings.TrimSpace(row.Role), "user") {
+				if next := run.executions[current+1].task; next != "" && strings.TrimSpace(row.Content) == next {
+					current++
+				}
+			}
+			segments[current] = append(segments[current], row)
 		}
-		// Execution id and run id are the same child run, so the rows of this
-		// execution are the ones carrying it.
-		execRows := make([]state.Message, 0, len(rows))
-		for _, row := range rows {
-			if strings.TrimSpace(row.RunID) == runID {
-				execRows = append(execRows, row)
+		for j, rows := range segments {
+			if messages := replayWorkerMessages(rows, run.agentID); len(messages) > 0 {
+				bodies[runID+"\x00"+run.executions[j].key] = &replayWorkerBody{messages: messages}
 			}
 		}
-		if len(execRows) == 0 {
+	}
+	if len(bodies) == 0 {
+		return nil
+	}
+	out := make(map[int]*replayWorkerBody)
+	latest := make(map[string]string)
+	for i := range events {
+		runID := strings.TrimSpace(events[i].RunID)
+		if runID == "" {
 			continue
 		}
-		messages := replayWorkerMessages(execRows, strings.TrimSpace(p.AgentID))
-		if len(messages) == 0 {
-			continue
+		key := latest[runID]
+		switch events[i].Type {
+		case event.RunEventSubagentSpawned:
+			var p event.SubagentSpawnedPayload
+			if json.Unmarshal(events[i].Payload, &p) == nil {
+				key = executionKey(i, p.ExecutionID)
+				latest[runID] = key
+			}
+		case event.RunEventSubagentEnded:
+			var p event.SubagentEndedPayload
+			if json.Unmarshal(events[i].Payload, &p) == nil && strings.TrimSpace(p.ExecutionID) != "" {
+				key = strings.TrimSpace(p.ExecutionID)
+			}
 		}
-		out[runID] = &replayWorkerBody{messages: messages}
+		if body := bodies[runID+"\x00"+key]; body != nil {
+			out[i] = body
+		}
 	}
 	return out
 }

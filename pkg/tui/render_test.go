@@ -896,6 +896,91 @@ func TestSubagentCardBodyIsFullBrightness(t *testing.T) {
 	}
 }
 
+// A subagent card still at work must not look like a finished tool card: its
+// header is a steady orchid rather than the settled amber, and only its dot
+// moves, breathing with the spinner phase. Once settled it is amber again.
+func TestRunningSubagentCardBreathesWithASteadyHeader(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+	header := func(final bool, phase int, theme DiffTheme) string {
+		var buf bytes.Buffer
+		r := NewRenderer(&buf, &buf)
+		r.spinnerPhase = phase
+		r.diffTheme = theme
+		r.renderFanout(Frame{
+			Kind:    FrameFanout,
+			StepID:  "fanout-breath",
+			Final:   final,
+			Summary: "Running 1 plan task in background…",
+			Content: "复核待办分栏抽屉方案",
+		})
+		return strings.SplitN(buf.String(), "\n", 2)[0]
+	}
+	dotColor := func(line string) string {
+		return strings.SplitN(strings.TrimPrefix(line, "\x1b["), "m", 2)[0]
+	}
+	const summary = "Running 1 plan task in background…"
+
+	dim, peak := header(false, 0, DiffThemeDark), header(false, 12, DiffThemeDark)
+	for _, line := range []string{dim, peak} {
+		if !strings.HasSuffix(line, " \x1b[1;38;5;170m"+summary+"\x1b[0m") {
+			t.Fatalf("running header is not one steady orchid run:\n%q", line)
+		}
+	}
+	if got := dotColor(dim); got != "1;38;5;96" {
+		t.Fatalf("resting dot = %q, want the dim mauve", got)
+	}
+	if got := dotColor(peak); got != "1;38;5;213" {
+		t.Fatalf("peak dot = %q, want the soft pink", got)
+	}
+	if got := header(false, 24, DiffThemeDark); got != dim {
+		t.Fatalf("breath does not loop after one cycle:\n%q\n%q", got, dim)
+	}
+	if light := header(false, 0, DiffThemeLight); !strings.HasSuffix(light, " \x1b[1;38;5;127m"+summary+"\x1b[0m") {
+		t.Fatalf("light running header is not the deep magenta:\n%q", light)
+	}
+
+	settled := header(true, 12, DiffThemeDark)
+	if want := "\x1b[1;38;5;214m●\x1b[0m \x1b[1;38;5;214m" + summary + "\x1b[0m"; settled != want {
+		t.Fatalf("settled header = %q, want %q", settled, want)
+	}
+}
+
+// The breath only shows if the running card is repainted as the phase moves:
+// the block cache must not serve a running card's old dot, and the view must
+// count the card as live so the animation ticker keeps painting it — even
+// before any task has a clock to walk.
+func TestRunningSubagentCardRepaintsWithThePhase(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+	running := Frame{Kind: FrameFanout, StepID: "fanout-live", Summary: "Starting 1 task in background…", Content: "复核方案"}
+	b := &viewBlock{frame: running}
+	first := strings.Join(renderBlockFull(b, 80, DiffThemeDark, 0), "\n")
+	second := strings.Join(renderBlockFull(b, 80, DiffThemeDark, 12), "\n")
+	if first == second {
+		t.Fatalf("running card was served from cache across phases:\n%q", first)
+	}
+
+	r := NewRenderer(io.Discard, io.Discard)
+	r.vm.blocks = []*viewBlock{{frame: running}}
+	if !r.hasLiveBlockLocked() {
+		t.Fatal("a running subagent card with no task clock is not counted as live")
+	}
+	settled := running
+	settled.Final = true
+	r.vm.blocks = []*viewBlock{{frame: settled}}
+	if r.hasLiveBlockLocked() {
+		t.Fatal("a settled subagent card is still counted as live")
+	}
+
+	settledBlock := &viewBlock{frame: settled}
+	a := strings.Join(renderBlockFull(settledBlock, 80, DiffThemeDark, 0), "\n")
+	settledBlock.cache.lines = []string{"cached"}
+	if got := strings.Join(renderBlockFull(settledBlock, 80, DiffThemeDark, 12), "\n"); got != "cached" {
+		t.Fatalf("settled card was re-rendered on a phase change: %q (first %q)", got, a)
+	}
+}
+
 // The reported bug, end to end: the engine formatter dropped the first line's
 // leading spaces, so the shell card's first output row sat two columns left of
 // every later row. This walks the real engine formatter and the real card

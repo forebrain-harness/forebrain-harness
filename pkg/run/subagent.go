@@ -279,6 +279,9 @@ type FanoutResult struct {
 	Output       string `json:"output,omitempty"`
 	Error        string `json:"error,omitempty"`
 	OK           bool   `json:"ok"`
+	// Status is "cancelled" for a task whose subagent the user stopped; empty
+	// otherwise, when OK and Error tell the outcome.
+	Status string `json:"status,omitempty"`
 	// TaskID, RanFor, ResetsAt and Next are set when the task's subagent
 	// started and then failed: the account subagent_run gives, so the
 	// dispatching agent continues that subagent instead of starting over.
@@ -297,8 +300,11 @@ type subagentExecResult struct {
 }
 
 type preparedSubagent struct {
-	ctx             context.Context
-	cancel          context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
+	// stop cancels ctx as a stop of the subagent (errSubagentStopped): what
+	// its live registry handle runs.
+	stop            func()
 	detach          func()
 	entry           agent.HistoryEntry
 	superviseRunID  string
@@ -375,6 +381,10 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 				var failed *subagentFailure
 				if errors.As(err, &failed) {
 					return "", errors.New(subagentFailureForModel(failed))
+				}
+				var stopped *subagentStopped
+				if errors.As(err, &stopped) {
+					return subagentStoppedRunResult(stopped.record), nil
 				}
 				return "", err
 			}
@@ -937,6 +947,11 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+	// The slot can free up in the same instant the execution is stopped, and
+	// select picks either: a stopped execution does not start.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	executionID := strings.TrimSpace(record.ExecutionID)
 	if executionID == "" {
 		executionID = uuid.NewString()
@@ -965,7 +980,10 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 		ex.boundary = BoundaryCompleted
 		surface := ch.surface
 		ch.mu.Unlock()
-		if boundary == BoundaryInterruptToSend && ch.store != nil {
+		// An execution stopped while it was being interrupted to send stays
+		// stopped: its steers go back to the user below instead of being
+		// shown delivered to an attempt that cannot run.
+		if boundary == BoundaryInterruptToSend && ch.store != nil && ctx.Err() == nil {
 			if steers, _ := ch.queue.Next(BoundaryInterruptToSend); len(steers) > 0 {
 				ch.publishInputDelivered(fac, ex, steerEntries(steers))
 				in, skills := mergeSteers(steers)
@@ -1534,7 +1552,8 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	}
 	// The child's own input runtime is attached by runSubagentExecution when it
 	// runs; nothing here inherits the dispatching agent's.
-	cctx, cancel := context.WithCancel(runCtx)
+	cctx, cancelCause := context.WithCancelCause(runCtx)
+	cancel := func() { cancelCause(nil) }
 	cctx = tool.WithConversationSessionID(cctx, sid)
 	cacheKey := strings.TrimSpace(llm.PromptCacheKeyFromContext(baseCtx))
 	if cacheKey == "" {
@@ -1697,6 +1716,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	return preparedSubagent{
 		ctx:             cctx,
 		cancel:          cancel,
+		stop:            func() { cancelCause(errSubagentStopped) },
 		detach:          detach,
 		entry:           entry,
 		superviseRunID:  childRunID,
@@ -2419,25 +2439,6 @@ func LiveSubagents(r *Runner, conversationSessionID string) []LiveSubagent {
 	return out
 }
 
-// cancelRunning stops the running execution, restoring everything it never
-// took. It is what a registry-handle cancel (the surface's cancel-by-row)
-// resolves to for a subagent.
-func (ch *subagentChannel) cancelRunning(cause error) bool {
-	ch.mu.Lock()
-	ex := ch.running
-	if ex == nil {
-		ch.mu.Unlock()
-		return false
-	}
-	ex.boundary = BoundaryInterrupted
-	cancel := ex.cancel
-	ch.mu.Unlock()
-	if cancel != nil {
-		cancel(cause)
-	}
-	return true
-}
-
 // startSubagentContinuation runs one auto-continue prompt as the subagent's
 // next execution: on the surface's own context, through the channel, with the
 // lifecycle of any other execution. It publishes the spawn so the roster and
@@ -2485,12 +2486,18 @@ func startSubagentContinuation(ctx context.Context, fac Factory, ch *subagentCha
 	if scopeRoot != "" {
 		_ = agent.AppendHistory(scopeRoot, lifecycle)
 	}
-	handle := agent.RegistryFor(scopeRoot).Start(lifecycle, func() { ch.cancelRunning(context.Canceled) })
+	// The handle cancels the execution's own context rather than the attempt
+	// running now: until the execution takes the channel, and between two of
+	// its attempts, there is no attempt to stop, and a stop that reached
+	// nothing still answered that it had.
+	runCtx, cancelRun := context.WithCancelCause(hostCtx)
+	defer cancelRun(nil)
+	handle := agent.RegistryFor(scopeRoot).Start(lifecycle, func() { cancelRun(errSubagentStopped) })
 	notifySubagentSpawnedDirect(fac, lifecycle, "user")
 	if own.RunRT != nil && strings.TrimSpace(record.RunID) != "" {
 		_ = own.RunRT.SetStatus(ctx, record.RunID, state.RunStatusRunning)
 	}
-	outText, runErr := runSubagentExecution(hostCtx, fac, lifecycle, subagentResumeAttempt(fac, record, in, skills))
+	outText, runErr := runSubagentExecution(runCtx, fac, lifecycle, subagentResumeAttempt(fac, record, in, skills))
 	now = time.Now().Unix()
 	// The ended event must carry the identity the spawn announced, not the
 	// original record's: this execution has no dispatching tool call, so its
@@ -2507,6 +2514,9 @@ func startSubagentContinuation(ctx context.Context, fac Factory, ch *subagentCha
 		final.Status = agent.StatusOK
 		final.Output = mergeContinuationOutput(record.Output, outText)
 		final.Error = ""
+	case errors.Is(runErr, context.Canceled) || errors.Is(context.Cause(runCtx), context.Canceled):
+		final.Status = agent.StatusCancelled
+		final.Error = "cancelled"
 	default:
 		final.Status = agent.StatusFailed
 		final.Error = llm.ExplainError(runErr)
@@ -2698,6 +2708,15 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	lifecycle.Task = msg
 	lifecycle.Status = agent.StatusRunning
 	lifecycle.Error = ""
+	lifecycle.UpdatedAt = time.Now().Unix()
+	// The continuation is in the live registry like every other execution:
+	// its handle is what the roster's stop, subagent_close and cancel-all
+	// reach, and without one they found nothing running. The handle cancels
+	// the execution's own context, so it stops it while it waits for the
+	// channel as surely as in any attempt.
+	runCtx, cancelRun := context.WithCancelCause(hostCtx)
+	defer cancelRun(nil)
+	handle := agent.RegistryFor(fac.subagentScopeRoot()).Start(lifecycle, func() { cancelRun(errSubagentStopped) })
 	// The continuation's clock starts where its card row's does: at the
 	// spawned notification below.
 	started := time.Now()
@@ -2721,7 +2740,7 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 			return continueForkSubagent(attemptCtx, fac, record, input)
 		}
 	}
-	outText, runErr := runSubagentExecution(withSubagentAwaited(hostCtx), fac, lifecycle, func(execCtx context.Context) (string, error) {
+	outText, runErr := runSubagentExecution(withSubagentAwaited(runCtx), fac, lifecycle, func(execCtx context.Context) (string, error) {
 		return runAcrossApprovals(execCtx, approve, record.RunID, "subagent continuation",
 			func(attemptCtx context.Context, superviseRunID string) (string, error) {
 				if runFork != nil {
@@ -2742,15 +2761,18 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 		final.Status = agent.StatusOK
 		final.Output = mergeContinuationOutput(record.Output, outText)
 		final.Error = ""
+	case errors.Is(runErr, context.Canceled) || errors.Is(context.Cause(runCtx), context.Canceled):
+		// Stopped on purpose, as finishSubagent records it — not a failure
+		// for the dispatcher to pick up.
+		final.Status = agent.StatusCancelled
+		final.Error = "cancelled"
 	default:
 		final.Status = agent.StatusFailed
 		// Described rather than dumped, for the same reason finishSubagent
 		// explains its own failure text.
 		final.Error = llm.ExplainError(runErr)
 	}
-	if root := fac.subagentScopeRoot(); root != "" {
-		_ = agent.AppendHistory(root, final)
-	}
+	finishSubagentExecution(fac, handle, final)
 	syncGeneralSubagentRunState(fac, hostCtx, final)
 	ended := final
 	ended.Task = msg
@@ -2760,8 +2782,11 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	if runErr != nil {
 		// A gate is a suspension and a cancellation was asked for; only an
 		// execution that ran and failed is the dispatcher's to pick up.
-		if !isRequiresActionError(runErr) && !errors.Is(runErr, context.Canceled) {
+		if final.Status == agent.StatusFailed && !isRequiresActionError(runErr) {
 			return final, &subagentFailure{record: final, elapsed: time.Since(started), err: runErr}
+		}
+		if final.Status == agent.StatusCancelled && subagentStoppedBy(runCtx) {
+			return final, &subagentStopped{record: final, err: runErr}
 		}
 		return final, runErr
 	}
@@ -2979,6 +3004,19 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 					defer func() { <-sem }()
 
 					execRes, err := execGeneralSubagent(withSubagentTaskIndex(fanoutCtx, i), fac, taskID, title, task, subType)
+					// A task the user stopped is not a failure: fail_fast does
+					// not take the other tasks down with it.
+					var stopped *subagentStopped
+					if errors.As(err, &stopped) {
+						results[i] = FanoutResult{
+							Index: i, Task: task, SubagentType: subType, OK: false,
+							Status: string(agent.StatusCancelled),
+							Error:  stopped.record.Error,
+							TaskID: stopped.record.TaskID,
+							Next:   subagentStoppedAdvice,
+						}
+						return
+					}
 					if err != nil {
 						mu.Lock()
 						if firstErr == nil {
@@ -3221,6 +3259,11 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 				if errors.As(err, &failed) {
 					return "", errors.New(subagentFailureForModel(failed))
 				}
+				var stopped *subagentStopped
+				if errors.As(err, &stopped) {
+					b, _ := json.Marshal(map[string]any{"record": stopped.record, "next": subagentStoppedAdvice})
+					return string(b), nil
+				}
 				return "", err
 			}
 			b, _ := json.Marshal(map[string]any{"record": record})
@@ -3316,21 +3359,28 @@ func lookupSubagentRecord(workspaceRoot string, ctx context.Context, in *Subagen
 }
 
 func buildFanoutSummary(results []FanoutResult) string {
-	ok, failed := 0, 0
+	ok, failed, cancelled := 0, 0, 0
 	for _, r := range results {
-		if r.OK {
+		switch {
+		case r.OK:
 			ok++
-		} else {
+		case r.Status == string(agent.StatusCancelled):
+			cancelled++
+		default:
 			failed++
 		}
 	}
+	summary := map[string]any{
+		"total":    len(results),
+		"succeed":  ok,
+		"failed":   failed,
+		"finished": time.Now().Unix(),
+	}
+	if cancelled > 0 {
+		summary["cancelled"] = cancelled
+	}
 	resp := map[string]any{
-		"summary": map[string]any{
-			"total":    len(results),
-			"succeed":  ok,
-			"failed":   failed,
-			"finished": time.Now().Unix(),
-		},
+		"summary": summary,
 		"results": results,
 	}
 	b, _ := json.Marshal(resp)
@@ -3384,7 +3434,7 @@ func startSubagent(ctx context.Context, fac Factory, d subagentDispatch) (prepar
 	if root := fac.subagentScopeRoot(); root != "" {
 		_ = agent.AppendHistory(root, prep.entry)
 	}
-	handle := agent.RegistryFor(fac.subagentScopeRoot()).Start(prep.entry, prep.cancel)
+	handle := agent.RegistryFor(fac.subagentScopeRoot()).Start(prep.entry, prep.stop)
 	notifySubagentSpawnedDirect(fac, prep.entry, "")
 	return prep, handle, nil
 }
@@ -3418,6 +3468,55 @@ func withSubagentAwaited(ctx context.Context) context.Context {
 func subagentAwaitedFromContext(ctx context.Context) bool {
 	awaited, _ := ctx.Value(subagentAwaitedKey{}).(bool)
 	return awaited
+}
+
+// errSubagentStopped is the cause a subagent's live registry handle cancels its
+// execution with: someone stopped the subagent — the user from the agent
+// roster, cancel-all, subagent_close — rather than the dispatching turn ending.
+// It wraps context.Canceled, so every check for a cancellation still sees one.
+var errSubagentStopped = fmt.Errorf("subagent stopped: %w", context.Canceled)
+
+// subagentStoppedBy reports whether ctx was cancelled by a stop of its
+// subagent (errSubagentStopped) rather than by anything above it.
+func subagentStoppedBy(ctx context.Context) bool {
+	return ctx != nil && errors.Is(context.Cause(ctx), errSubagentStopped)
+}
+
+// subagentStopped is an awaited subagent execution that was stopped before it
+// finished, as the call that awaited it receives it. It unwraps to the
+// execution's error, so a caller that only passes it on — plan review, the
+// goal check — reads a cancellation as before; the dispatching tools answer
+// the model with the stop and subagentStoppedAdvice instead of a bare "context canceled",
+// which a model read as a transient error and retried, restarting the
+// subagent the user had just stopped.
+type subagentStopped struct {
+	record agent.HistoryEntry
+	err    error
+}
+
+func (s *subagentStopped) Error() string { return s.err.Error() }
+
+func (s *subagentStopped) Unwrap() error { return s.err }
+
+// subagentStoppedAdvice is what a dispatching agent reads when a subagent it
+// awaited was stopped. It is runtime text that reaches the model, so it is
+// constant and byte-stable.
+const subagentStoppedAdvice = "The user stopped this subagent before it finished. Do not continue it or redo its task unless the user asks you to."
+
+// subagentStoppedRunResult is subagent_run's answer for a subagent the user
+// stopped: its outcome in the shape of the call's result, which the card
+// settles the task from, and what to do about it.
+func subagentStoppedRunResult(record agent.HistoryEntry) string {
+	b, _ := json.Marshal(map[string]any{
+		"task_id":     record.TaskID,
+		"run_id":      record.RunID,
+		"agent_type":  record.AgentType,
+		"status":      agent.StatusCancelled,
+		"error":       record.Error,
+		"finished_at": record.FinishedAt,
+		"next":        subagentStoppedAdvice,
+	})
+	return string(b)
 }
 
 // subagentFailure is a subagent execution that started and then failed, as
@@ -3583,6 +3682,9 @@ func dispatchSubagent(
 		// stopped on purpose: both travel on as they are.
 		if final.Status == agent.StatusFailed && !isRequiresActionError(runErr) {
 			return prep, "", &subagentFailure{record: final, elapsed: time.Since(started), err: runErr}
+		}
+		if final.Status == agent.StatusCancelled && subagentStoppedBy(prep.ctx) {
+			return prep, "", &subagentStopped{record: final, err: runErr}
 		}
 		return prep, "", runErr
 	}

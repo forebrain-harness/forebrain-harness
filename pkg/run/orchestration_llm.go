@@ -2090,6 +2090,12 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 		llm.NotifyExternalContext(ctx)
 	}
 	if step := tool.StepHookFromContext(ctx, w.state); step != nil {
+		// A call the cancellation stopped mid-flight still ends here, and its
+		// completion must survive that cancellation the way the transcript's
+		// write does: a hook that records the step before it draws it — a
+		// subagent's — dropped it on the canceled context, and the call's card
+		// ran on for good in the subagent's view.
+		ctx := context.WithoutCancel(ctx)
 		for i, attempt := range tool.ToolAttemptsFromContext(toolCtx) {
 			attemptEvent := completedEvent
 			attemptEvent.Output = attempt.Output

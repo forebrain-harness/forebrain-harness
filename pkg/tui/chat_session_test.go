@@ -19382,6 +19382,48 @@ func TestRendererFinalizePendingToolsLeavesCompletedToolsUnchanged(t *testing.T)
 	}
 }
 
+// A subagent's card that never gets a completion — a call stopped while it
+// waited for an approval — is settled when that subagent's execution ends, the
+// way a stopped run's are; another agent's running card and the
+// conversation's are left alone.
+func TestSubagentEndSettlesOnlyThatSubagentsRunningToolCards(t *testing.T) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+	running := func(agentID, stepID string) Frame {
+		return Frame{
+			Kind: FrameTool, Title: "shell", StepID: stepID, AgentID: agentID,
+			ToolMeta: tool.ToolMeta{ToolName: "shell", Status: "running", Input: map[string]any{"command": "sleep 600"}},
+		}
+	}
+	r.RenderFrame(running("", "main-call"))
+	r.RenderFrame(running("agent-a", "a-call"))
+	r.RenderFrame(running("agent-b", "b-call"))
+	status := func(vm *viewModel, stepID string) string {
+		t.Helper()
+		for _, b := range vm.blocks {
+			if b.frame.StepID == stepID {
+				return b.frame.ToolMeta.Status
+			}
+		}
+		t.Fatalf("no block for %s", stepID)
+		return ""
+	}
+
+	r.FinalizeAgentPendingTools("agent-a")
+
+	if got := status(r.perAgentVM["agent-a"], "a-call"); got != "canceled" {
+		t.Fatalf("the ended subagent's running card = %q, want canceled", got)
+	}
+	if got := status(r.perAgentVM["agent-b"], "b-call"); got != "running" {
+		t.Fatalf("another subagent's running card = %q, want running", got)
+	}
+	if got := status(&r.vm, "main-call"); got != "running" {
+		t.Fatalf("the conversation's running card = %q, want running", got)
+	}
+}
+
 func TestRendererCompletedToolHeaderUsesOneForegroundColor(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	useANSI256ColorProfile(t)
@@ -21461,7 +21503,7 @@ func TestApplySlashOutcomeCarriesExplicitSkillSelection(t *testing.T) {
 		SkillPath:         "/skills/review/SKILL.md",
 	}
 
-	handled, continueRun, submission, _ := applySlashOutcome(context.Background(), nil, nil, nil, state, "review", "/review review this diff", nil, outcome)
+	handled, continueRun, submission, _ := applySlashOutcome(context.Background(), nil, nil, nil, state, "review", "/review review this diff", ComposerSubmission{}, outcome)
 	if !handled || !continueRun {
 		t.Fatalf("handled=%v continue=%v", handled, continueRun)
 	}
@@ -21488,7 +21530,7 @@ func TestActiveRunQueuesExplicitSkillSlashInsteadOfSteering(t *testing.T) {
 	}
 	state := &streamState{sessionID: "s1", session: session}
 
-	handleActiveRunSlash(context.Background(), session, nil, nil, state, newCommandController(session, nil, &stubSelector{}, nil, ""), "/review change")
+	handleActiveRunSlash(context.Background(), session, nil, nil, state, newCommandController(session, nil, &stubSelector{}, nil, ""), "/review change", ComposerSubmission{})
 
 	q := session.SurfaceInputQueue("s1")
 	preview := q.Preview()
@@ -30485,7 +30527,7 @@ func TestNewSessionAsksForProjectServersBeforeSwitching(t *testing.T) {
 	cmds := newCommandController(session, renderer, selector, nil, t.TempDir())
 	state := &streamState{sessionID: "sess-a", session: session}
 
-	handled, _, _, _ := applySlashOutcome(context.Background(), cmds, renderer, nil, state, "/new", "/new", nil, SlashOutcome{
+	handled, _, _, _ := applySlashOutcome(context.Background(), cmds, renderer, nil, state, "/new", "/new", ComposerSubmission{}, SlashOutcome{
 		Handled:         true,
 		Reply:           "Started a new conversation.",
 		SessionChanged:  true,

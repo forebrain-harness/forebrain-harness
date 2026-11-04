@@ -116,6 +116,7 @@
           >
             <Loader2 v-if="entry.agent && phaseOf(entry.agent) === 'active'" class="is-run" aria-hidden="true" />
             <CheckCircle2 v-else-if="entry.agent && phaseOf(entry.agent) === 'done'" class="is-ok" aria-hidden="true" />
+            <Ban v-else-if="entry.agent?.status === 'cancelled'" class="is-off" aria-hidden="true" />
             <XCircle v-else class="is-bad" aria-hidden="true" />
             <span class="subagent-drawer-tab-label" v-tip:bottom.trunc="entry.agent ? tabLabel(entry.agent) : ''">{{ entry.agent ? tabLabel(entry.agent) : '' }}</span>
             <span
@@ -176,6 +177,7 @@
         >
           <Loader2 v-if="phaseOf(row) === 'active'" class="is-run" aria-hidden="true" />
           <CheckCircle2 v-else-if="phaseOf(row) === 'done'" class="is-ok" aria-hidden="true" />
+          <Ban v-else-if="row.status === 'cancelled'" class="is-off" aria-hidden="true" />
           <XCircle v-else class="is-bad" aria-hidden="true" />
           <span class="subagent-drawer-menu-label">{{ tabLabel(row) }}</span>
           <span class="subagent-drawer-menu-side">{{ sideOf(row) }}</span>
@@ -199,7 +201,7 @@
  * same way: a column on a wide screen, an overlay on a narrow one.
  */
 import { computed, onUnmounted, ref, watch, type Component } from 'vue'
-import { CheckCircle2, Download, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
+import { Ban, CheckCircle2, Download, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
 import { usePanelWidth } from '@/composables/usePanelWidth'
 import { formatRuntimeDuration, type SubagentTranscript } from '@/composables/useChatStream'
 import type { DocTab } from '@/composables/useDocTabs'
@@ -481,6 +483,12 @@ onUnmounted(() => {
   color: var(--forebrain-danger);
 }
 
+/* A subagent someone stopped reads the way its card row does: a muted ban,
+   not the failure's red cross. */
+.subagent-drawer-tab-main svg.is-off {
+  color: var(--forebrain-muted-text);
+}
+
 .subagent-drawer-tab-main svg.is-plan {
   color: var(--forebrain-brand-1);
 }
@@ -610,6 +618,10 @@ a.subagent-drawer-tab-close {
 
 .subagent-drawer-menu-row svg.is-bad {
   color: var(--forebrain-danger);
+}
+
+.subagent-drawer-menu-row svg.is-off {
+  color: var(--forebrain-muted-text);
 }
 
 .subagent-drawer-menu-label {

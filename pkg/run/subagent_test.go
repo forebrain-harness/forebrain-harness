@@ -1772,6 +1772,16 @@ func (f *failingSubagentExecutor) failNext(errs ...error) {
 
 func newFailingSubagentTools(t *testing.T) (*agent.Agent, *failingSubagentExecutor, context.Context) {
 	t.Helper()
+	exec := &failingSubagentExecutor{fixedSubagentExecutor: &fixedSubagentExecutor{output: "probe answered"}}
+	a, _, ctx := newSubagentToolsFor(t, exec)
+	return a, exec, ctx
+}
+
+// newSubagentToolsFor registers the subagent tools on a main agent whose
+// subagents run on exec, and returns the factory they were registered with
+// and the context a call of one of them runs under.
+func newSubagentToolsFor(t *testing.T, exec SubagentExecutor) (*agent.Agent, Factory, context.Context) {
+	t.Helper()
 	ctx := context.Background()
 	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
@@ -1785,16 +1795,169 @@ func newFailingSubagentTools(t *testing.T) (*agent.Agent, *failingSubagentExecut
 		t.Fatalf("CreateRun: %v", err)
 	}
 	home := t.TempDir()
-	exec := &failingSubagentExecutor{fixedSubagentExecutor: &fixedSubagentExecutor{output: "probe answered"}}
 	owner := &Runner{Deps: &Deps{Home: home, RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: exec, Control: NewController(), Events: &collectingUINotify{}}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
 	}
-	if err := RegisterSubagentTool(a, Factory{Home: home, Owner: owner}); err != nil {
+	fac := Factory{Home: home, Owner: owner}
+	if err := RegisterSubagentTool(a, fac); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
 	}
-	return a, exec, toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID)
+	return a, fac, toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID)
+}
+
+// stoppingSubagentExecutor is the fixed executor whose next run is stopped
+// while it works, the way the agent roster's "x" stops it: through the live
+// registry, by the subagent's key. The run then holds until the stop reaches
+// it; once no stop is queued its runs succeed.
+type stoppingSubagentExecutor struct {
+	*fixedSubagentExecutor
+	root string
+	// endTurn, when set, ends the dispatching turn instead: every run calls it
+	// and holds until that reaches it.
+	endTurn func()
+	mu      sync.Mutex
+	stop    int
+}
+
+func (s *stoppingSubagentExecutor) RunSubagentExec(ctx context.Context, req SubagentExecRequest) (string, error) {
+	if s.endTurn != nil {
+		s.endTurn()
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	s.mu.Lock()
+	stop := s.stop > 0
+	if stop {
+		s.stop--
+	}
+	s.mu.Unlock()
+	if !stop {
+		return s.fixedSubagentExecutor.RunSubagentExec(ctx, req)
+	}
+	reg := agent.RegistryFor(s.root)
+	for _, entry := range reg.List(agent.Query{Limit: -1}) {
+		reg.Cancel(agent.Query{TaskID: entry.TaskID})
+	}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (s *stoppingSubagentExecutor) stopNext(n int) {
+	s.mu.Lock()
+	s.stop += n
+	s.mu.Unlock()
+}
+
+// newStoppingSubagentTools is newFailingSubagentTools with an executor whose
+// runs the test can have stopped.
+func newStoppingSubagentTools(t *testing.T) (*agent.Agent, *stoppingSubagentExecutor, context.Context) {
+	t.Helper()
+	exec := &stoppingSubagentExecutor{fixedSubagentExecutor: &fixedSubagentExecutor{output: "probe answered"}}
+	a, fac, ctx := newSubagentToolsFor(t, exec)
+	exec.root = fac.subagentScopeRoot()
+	return a, exec, ctx
+}
+
+// A subagent the user stopped while its dispatcher awaited it is answered as
+// stopped — not as a bare "context canceled", which the model read as a
+// transient error and retried, restarting at once the subagent the user had
+// just stopped — on each of the three calls that await one, and the card
+// settles each task as cancelled.
+func TestAwaitedSubagentStoppedByTheUserIsAnsweredAsStopped(t *testing.T) {
+	a, exec, callCtx := newStoppingSubagentTools(t)
+	cardTasks := func(name, args, out string) []event.SubagentCallTask {
+		t.Helper()
+		var input map[string]any
+		if err := json.Unmarshal([]byte(args), &input); err != nil {
+			t.Fatal(err)
+		}
+		call, ok := toolpkg.SubagentCallFromStep(toolpkg.StepEvent{
+			Kind: toolpkg.StepKindToolCompleted, ToolName: name, Input: input,
+			Output: map[string]any{"output": out},
+		})
+		if !ok {
+			t.Fatalf("%s: no card facts", name)
+		}
+		return call.Tasks
+	}
+
+	runTool, _ := aToolByName(a, "subagent_run")
+	runArgs := `{"title":"Probe","task":"answer briefly","subagent_type":"general-purpose"}`
+	exec.stopNext(1)
+	out, err := runTool.Handle(callCtx, runArgs)
+	if err != nil {
+		t.Fatalf("subagent_run = %v, want the stop answered as a result", err)
+	}
+	var run map[string]any
+	if err := json.Unmarshal([]byte(out.(string)), &run); err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := run["task_id"].(string)
+	if run["status"] != string(agent.StatusCancelled) || run["next"] != subagentStoppedAdvice || !strings.HasPrefix(taskID, "subagent-") {
+		t.Fatalf("subagent_run result = %v", run)
+	}
+	if tasks := cardTasks("subagent_run", runArgs, out.(string)); len(tasks) != 1 || tasks[0].Status != "cancelled" {
+		t.Fatalf("subagent_run card tasks = %+v, want one cancelled", tasks)
+	}
+
+	contTool, _ := aToolByName(a, "subagent_continue")
+	contArgs := `{"task_id":"` + taskID + `","message":"keep going"}`
+	exec.stopNext(1)
+	out, err = contTool.Handle(callCtx, contArgs)
+	if err != nil {
+		t.Fatalf("subagent_continue = %v, want the stop answered as a result", err)
+	}
+	if !strings.Contains(out.(string), subagentStoppedAdvice) {
+		t.Fatalf("subagent_continue result = %s, want the stop advice", out)
+	}
+	if tasks := cardTasks("subagent_continue", contArgs, out.(string)); len(tasks) != 1 || tasks[0].Status != "cancelled" {
+		t.Fatalf("subagent_continue card tasks = %+v, want one cancelled", tasks)
+	}
+
+	// fail_fast does not stop the other task: a stop is not a failure.
+	fanTool, _ := aToolByName(a, "subagent_fanout")
+	fanArgs := `{"tasks":[{"title":"Stopped","prompt":"a","subagent_type":"general-purpose"},{"title":"Kept","prompt":"b","subagent_type":"general-purpose"}],"max_parallel":1,"fail_fast":true}`
+	exec.stopNext(1)
+	out, err = fanTool.Handle(callCtx, fanArgs)
+	if err != nil {
+		t.Fatalf("subagent_fanout = %v", err)
+	}
+	var summary struct {
+		Summary map[string]any `json:"summary"`
+		Results []FanoutResult `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(out.(string)), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Results) != 2 || summary.Results[0].Status != string(agent.StatusCancelled) ||
+		summary.Results[0].Next != subagentStoppedAdvice || !summary.Results[1].OK {
+		t.Fatalf("fanout results = %+v, want the first stopped and the second done", summary.Results)
+	}
+	if summary.Summary["failed"] != float64(0) || summary.Summary["cancelled"] != float64(1) {
+		t.Fatalf("fanout summary = %v, want 0 failed and 1 cancelled", summary.Summary)
+	}
+	if tasks := cardTasks("subagent_fanout", fanArgs, out.(string)); len(tasks) != 2 || tasks[0].Status != "cancelled" || tasks[1].Status != "done" {
+		t.Fatalf("fanout card tasks = %+v, want cancelled then done", tasks)
+	}
+}
+
+// The dispatching turn ending is not a stop of its subagent: the awaited call
+// still ends in the plain cancellation the turn's own abort expects.
+func TestAwaitedSubagentCancelledWithItsTurnIsNotAStop(t *testing.T) {
+	a, exec, callCtx := newStoppingSubagentTools(t)
+	turnCtx, endTurn := context.WithCancel(callCtx)
+	exec.endTurn = endTurn
+	runTool, _ := aToolByName(a, "subagent_run")
+	_, err := runTool.Handle(turnCtx, `{"title":"Probe","task":"answer briefly","subagent_type":"general-purpose"}`)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("subagent_run = %v, want the turn's cancellation", err)
+	}
+	var stopped *subagentStopped
+	if errors.As(err, &stopped) {
+		t.Fatal("a subagent cancelled with its turn was reported as stopped by the user")
+	}
 }
 
 // usageLimitError is a provider's spent-allowance refusal with a known reset.
@@ -5468,6 +5631,199 @@ func TestModelContinuationWaitsForTheRunningExecutionOfTheSameSubagent(t *testin
 	waitSubagentIdle(t, owner, conv, "task-serial")
 	if got := ex.maxConcurrent(); got != 1 {
 		t.Fatalf("executions overlapped: concurrent=%d", got)
+	}
+}
+
+// seedStoppableSubagent seeds a finished, continuable subagent of conv for the
+// roster-stop tests and returns its roster key.
+func seedStoppableSubagent(t *testing.T, fix *persistenceFixture, conv, worker string) string {
+	t.Helper()
+	const key = "task-stop"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: key, RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "first pass", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed",
+		RuntimeKind: "typed_subagent", Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	return key
+}
+
+// lastSubagentEndedStatus is the status the last subagent_ended event carried.
+func lastSubagentEndedStatus(t *testing.T, p *channelEventProbe) string {
+	t.Helper()
+	ended := p.ofType(event.RunEventSubagentEnded)
+	if len(ended) == 0 {
+		t.Fatal("no subagent_ended event was published")
+	}
+	var payload event.SubagentEndedPayload
+	if err := json.Unmarshal(ended[len(ended)-1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Status
+}
+
+// TestSubagentContinueCanBeStoppedFromTheRoster pins the roster's stop for a
+// subagent its dispatcher continued with subagent_continue: the continuation
+// is filed in the live registry like every other execution, so the cancel the
+// roster's "x" issues by the row's key reaches it — it used to answer "no
+// cancellable run" — and the subagent ends cancelled, not failed.
+func TestSubagentContinueCanBeStoppedFromTheRoster(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	probe := &channelEventProbe{}
+	owner.Events = probe
+	conv := "conv-stop-continue"
+	key := seedStoppableSubagent(t, fix, conv, "main:conv-stop-continue:worker:00000000-0000-0000-0000-0000000000b1")
+	ex := &channelTestExecutor{store: fix.store, hold: true, release: make(chan struct{})}
+	owner.SubagentExecutor = ex
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := continueSubagentExecution(context.Background(), fix.fac, &SubagentContinueInput{TaskID: key, Message: "keep going"})
+		done <- err
+	}()
+	waitSubagentBusy(t, owner, conv, key)
+
+	// What ChatSession.CancelSubagent resolves the roster row's key to.
+	reg := agent.RegistryFor(fix.fac.subagentScopeRoot())
+	if !reg.Cancel(agent.Query{TaskID: key}) {
+		t.Fatal("the continued subagent has no live handle: the roster cannot stop it")
+	}
+	select {
+	case err := <-done:
+		var stopped *subagentStopped
+		if !errors.Is(err, context.Canceled) || !errors.As(err, &stopped) {
+			t.Fatalf("continueSubagentExecution = %v, want the subagent's stop", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the continuation kept running after the roster stopped it")
+	}
+	if record := waitSubagentRecordSettled(t, fix.fac, conv, key); record.Status != agent.StatusCancelled {
+		t.Fatalf("record status = %q, want cancelled", record.Status)
+	}
+	if got := lastSubagentEndedStatus(t, probe); got != string(agent.StatusCancelled) {
+		t.Fatalf("ended status = %q, want cancelled", got)
+	}
+	if _, ok := reg.Get(agent.Query{TaskID: key}); ok {
+		t.Fatal("the stopped continuation is still in the live registry")
+	}
+}
+
+// TestAutoContinueStoppedBeforeItTakesTheChannelNeverRuns pins the stop of an
+// auto-continuation still waiting for the subagent's channel: it has no attempt
+// to cancel yet, so a stop that only reached the attempt running now answered
+// "cancelled" and the continuation ran anyway once the channel freed up.
+func TestAutoContinueStoppedBeforeItTakesTheChannelNeverRuns(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	probe := &channelEventProbe{}
+	owner.Events = probe
+	conv := "conv-stop-waiting"
+	key := seedStoppableSubagent(t, fix, conv, "main:conv-stop-waiting:worker:00000000-0000-0000-0000-0000000000b2")
+	ex := &channelTestExecutor{store: fix.store, answer: "ran anyway"}
+	owner.SubagentExecutor = ex
+
+	ch, _, err := subagentChannelForConversation(owner, conv, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another execution holds the channel.
+	ch.exec <- struct{}{}
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, key, Input{Text: "resume"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
+	reg := agent.RegistryFor(fix.fac.subagentScopeRoot())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := reg.Get(agent.Query{TaskID: key}); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the auto-continuation never filed a live handle")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !reg.Cancel(agent.Query{TaskID: key}) {
+		t.Fatal("the roster could not stop the waiting auto-continuation")
+	}
+	<-ch.exec
+
+	if record := waitSubagentRecordSettled(t, fix.fac, conv, key); record.Status != agent.StatusCancelled {
+		t.Fatalf("record status = %q, want cancelled", record.Status)
+	}
+	if got := ex.taskCount(); got != 0 {
+		t.Fatalf("the stopped auto-continuation still ran %d attempt(s)", got)
+	}
+	if got := lastSubagentEndedStatus(t, probe); got != string(agent.StatusCancelled) {
+		t.Fatalf("ended status = %q, want cancelled", got)
+	}
+}
+
+// TestRosterStopReachesEveryExecutionOfTheSubagent pins the stop of a subagent
+// with two executions in flight — an auto-continuation running and the
+// dispatcher's subagent_continue waiting behind it. Both are filed under the
+// subagent's key, so the row's "x" stops the subagent: neither the running one
+// nor the one that would run next is left going.
+func TestRosterStopReachesEveryExecutionOfTheSubagent(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	conv := "conv-stop-both"
+	key := seedStoppableSubagent(t, fix, conv, "main:conv-stop-both:worker:00000000-0000-0000-0000-0000000000b3")
+	ex := &channelTestExecutor{store: fix.store, hold: true, release: make(chan struct{})}
+	owner.SubagentExecutor = ex
+
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, key, Input{Text: "resume"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
+	waitSubagentBusy(t, owner, conv, key)
+	done := make(chan error, 1)
+	go func() {
+		_, err := continueSubagentExecution(context.Background(), fix.fac, &SubagentContinueInput{TaskID: key, Message: "then this"})
+		done <- err
+	}()
+	reg := agent.RegistryFor(fix.fac.subagentScopeRoot())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if h, ok := reg.Get(agent.Query{TaskID: key}); ok && h.Snapshot().Task == "then this" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the waiting continuation never filed a live handle")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if !reg.Cancel(agent.Query{TaskID: key}) {
+		t.Fatal("the roster could not stop the subagent")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("continueSubagentExecution = %v, want the cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting continuation ran on after the subagent was stopped")
+	}
+	waitSubagentIdle(t, owner, conv, key)
+	if got := ex.taskCount(); got != 1 {
+		t.Fatalf("executor attempts = %d, want only the auto-continuation's", got)
+	}
+	if ctx := ex.contextSeen(); ctx == nil || ctx.Err() == nil {
+		t.Fatal("the running auto-continuation was not stopped")
+	}
+	if record := waitSubagentRecordSettled(t, fix.fac, conv, key); record.Status != agent.StatusCancelled {
+		t.Fatalf("record status = %q, want cancelled", record.Status)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(2 * time.Millisecond) {
+		if _, ok := reg.Get(agent.Query{TaskID: key}); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a stopped execution is still in the live registry")
+		}
 	}
 }
 

@@ -2567,7 +2567,7 @@ func TestDispatchStreamSlashInitSubmitsBuiltPrompt(t *testing.T) {
 	tracker := NewTracker()
 	cmds := newCommandController(session, renderer, &stubSelector{}, nil, "")
 
-	handled, continueRun, sub, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, tracker, state, "/init", nil)
+	handled, continueRun, sub, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, tracker, state, "/init", ComposerSubmission{})
 
 	if !handled {
 		t.Fatalf("expected /init to be handled, got handled=false")
@@ -2580,6 +2580,282 @@ func TestDispatchStreamSlashInitSubmitsBuiltPrompt(t *testing.T) {
 	}
 	if sub.DisplayText != "/init" {
 		t.Fatalf("expected raw /init preserved as display text, got %q", sub.DisplayText)
+	}
+}
+
+// foldedPasteText is a paste long enough to fold behind a placeholder, with
+// line breaks a request must keep.
+func foldedPasteText() string {
+	return strings.Repeat("第一行 pasted body\n", largePasteCharThreshold/10) + "最后一行"
+}
+
+// typeAndFoldPaste types prefix into the composer and pastes pasted after it,
+// the way the raw reader delivers them, and returns the line Enter submits.
+func typeAndFoldPaste(t *testing.T, state *streamState, prefix, pasted string) string {
+	t.Helper()
+	state.composer.DraftText = prefix
+	state.composer.Cursor = len([]rune(prefix))
+	state.appendPaste(pasted)
+	if len(state.composer.PendingPastes) != 1 {
+		t.Fatalf("the paste did not fold: %+v", state.composer.PendingPastes)
+	}
+	return state.composer.DraftText
+}
+
+// registerRequestSkill registers name as an installed skill's command is
+// registered (turn.skillCommand): it takes a request after its name.
+func registerRequestSkill(t *testing.T, name string) {
+	t.Helper()
+	turn.ResetDynamic()
+	t.Cleanup(turn.ResetDynamic)
+	if err := turn.ReplaceDynamicSource("tui-test", []turn.DynamicCommand{{
+		Command: turn.Command{
+			Name: name, Description: name, Category: turn.SkillCategory,
+			AllowedSurfaces:    []turn.Surface{turn.SurfaceTUI, turn.SurfaceWebChat},
+			SupportsInlineArgs: true, ArgumentHint: "[request]", Visibility: turn.VisibilityPublic,
+		},
+		SkillPath: "/skills/" + name + "/SKILL.md",
+		Handler: func(turn.Context, string, []string) turn.Result {
+			return turn.Result{}
+		},
+	}}); err != nil {
+		t.Fatalf("ReplaceDynamicSource: %v", err)
+	}
+}
+
+// skillSlashFn answers a skill command the way the engine's skill handler does
+// (turn.skillCommand): the request is everything after the command token. It
+// records the line the command ran on.
+func skillSlashFn(name string, ran *string) func(context.Context, string, string) (SlashOutcome, bool) {
+	var mu sync.Mutex
+	return func(_ context.Context, _ string, line string) (SlashOutcome, bool) {
+		mu.Lock()
+		*ran = line
+		mu.Unlock()
+		toks := strings.Fields(line)
+		request := strings.TrimSpace(strings.TrimPrefix(line, toks[0]))
+		return SlashOutcome{
+			Handled: true, ShouldContinueRun: true,
+			ContinueInput: turn.SkillCommandInput(name, request),
+			SkillName:     name, SkillPath: "/skills/" + name + "/SKILL.md",
+		}, true
+	}
+}
+
+// requirePasteExpanded fails unless sub hands the model the pasted text, not
+// the placeholder that stood for it in the composer.
+func requirePasteExpanded(t *testing.T, sub ComposerSubmission, placeholder, pasted string) {
+	t.Helper()
+	model := llm.TextContent(sub.Parts...)
+	if !strings.Contains(model, pasted) || strings.Contains(model, placeholder) {
+		t.Fatalf("model text = %q, want the pasted text in place of %q", model, placeholder)
+	}
+	if !strings.Contains(sub.Text, pasted) {
+		t.Fatalf("submission text = %q, want the pasted text", sub.Text)
+	}
+}
+
+// A skill command typed in front of a folded paste runs on the pasted text. The
+// placeholder is only the composer's chip: a request built from it handed the
+// model "[Pasted Content N chars]" instead of what was pasted. The row on screen
+// keeps the chip; the stored row keeps the text, as a plain message's does.
+func TestSkillCommandRunsOnTheTextOfAFoldedPaste(t *testing.T) {
+	registerRequestSkill(t, "probe-skill")
+	var ran string
+	session := &fakeSession{streamSlashFn: skillSlashFn("probe-skill", &ran)}
+	state := &streamState{sessionID: "s1", session: session}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	cmds := newCommandController(session, renderer, &stubSelector{}, nil, "")
+
+	pasted := foldedPasteText()
+	line := typeAndFoldPaste(t, state, "/probe-skill 按这个改 ", pasted)
+	placeholder := state.composer.PendingPastes[0].Placeholder
+	// The idle loop's own order: take the draft, then clear the composer.
+	state.composer.Text = line
+	draft, _ := state.submissionFromCurrentDraft()
+	state.resetComposerForActiveRunDraft()
+
+	handled, continueRun, sub, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, line, draft)
+
+	if !handled || !continueRun {
+		t.Fatalf("handled=%v continueRun=%v, want the skill turn", handled, continueRun)
+	}
+	if want := "/probe-skill 按这个改 " + pasted; ran != want {
+		t.Fatalf("the command ran on %q, want %q", ran, want)
+	}
+	requirePasteExpanded(t, sub, placeholder, pasted)
+	if sub.SkillName != "probe-skill" {
+		t.Fatalf("skill = %q, want probe-skill", sub.SkillName)
+	}
+	if sub.DisplayText != line {
+		t.Fatalf("display text = %q, want the line with its chip %q", sub.DisplayText, line)
+	}
+	if !strings.Contains(sub.RawInput, pasted) || strings.Contains(sub.RawInput, placeholder) {
+		t.Fatalf("stored row = %q, want the command with the pasted text", sub.RawInput)
+	}
+	if len(sub.PendingPastes) != 1 || sub.PendingPastes[0].Content != pasted {
+		t.Fatalf("pastes = %+v, want the folded paste carried for a recall", sub.PendingPastes)
+	}
+}
+
+// Mid-run, the composer is cleared before the command runs, which took the
+// folded paste with it: the skill turn queued behind the run carried the bare
+// placeholder.
+func TestActiveRunSkillCommandRunsOnTheTextOfAFoldedPaste(t *testing.T) {
+	registerRequestSkill(t, "probe-skill")
+	var ran string
+	session := &fakeSession{streamSlashFn: skillSlashFn("probe-skill", &ran)}
+	state := &streamState{sessionID: "s1", session: session}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	cmds := newCommandController(session, renderer, &stubSelector{}, nil, "")
+	dispatch := func(ev inputEvent) {
+		handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, ev, cmds)
+	}
+
+	prefix := "/probe-skill "
+	dispatch(inputEvent{kind: inputEventDraft, draft: prefix, cursor: len([]rune(prefix))})
+	pasted := foldedPasteText()
+	dispatch(inputEvent{kind: inputEventPaste, paste: pasted})
+	placeholder := state.composer.PendingPastes[0].Placeholder
+	line := state.composer.DraftText
+	dispatch(inputEvent{kind: inputEventDraft, draft: line, cursor: len([]rune(line))})
+	dispatch(inputEvent{kind: inputEventLine, line: line})
+
+	if !strings.Contains(ran, pasted) {
+		t.Fatalf("the command ran on %q, want the pasted text", ran)
+	}
+	in, ok := session.SurfaceInputQueue("s1").Recall()
+	if !ok {
+		t.Fatal("the skill turn was not queued behind the run")
+	}
+	sub := in.Payload.(ComposerSubmission)
+	requirePasteExpanded(t, sub, placeholder, pasted)
+	if len(sub.PendingPastes) != 1 || sub.PendingPastes[0].Content != pasted {
+		t.Fatalf("pastes = %+v, want the folded paste carried for a recall", sub.PendingPastes)
+	}
+}
+
+// A line that starts with "/" but is no command is the message itself, and the
+// message keeps what its chips stand for.
+func TestActiveRunSlashLineThatIsNoCommandKeepsItsFoldedPaste(t *testing.T) {
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	pasted := foldedPasteText()
+	line := typeAndFoldPaste(t, state, "/tmp/notes.md ", pasted)
+	placeholder := state.composer.PendingPastes[0].Placeholder
+	state.composer.Text = line
+	draft, _ := state.submissionFromCurrentDraft()
+	state.resetComposerForActiveRunDraft()
+
+	handleActiveRunSlash(context.Background(), session, nil, nil, state, nil, line, draft)
+
+	in, ok := session.SurfaceInputQueue("s1").Recall()
+	if !ok {
+		t.Fatal("the message was not queued")
+	}
+	requirePasteExpanded(t, in.Payload.(ComposerSubmission), placeholder, pasted)
+}
+
+// A skill command typed in a subagent's view goes to that subagent with the
+// pasted text, not its placeholder.
+func TestSubagentViewSkillCommandRunsOnTheTextOfAFoldedPaste(t *testing.T) {
+	registerRequestSkill(t, "probe-skill")
+	var ran string
+	session := &fakeSession{streamSlashFn: skillSlashFn("probe-skill", &ran)}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	pasted := foldedPasteText()
+	line := typeAndFoldPaste(t, state, "/probe-skill ", pasted)
+	placeholder := state.composer.PendingPastes[0].Placeholder
+
+	subagentViewLine(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", line)
+
+	if len(session.subagentSent) != 1 {
+		t.Fatalf("sent to the subagent %d times, want once", len(session.subagentSent))
+	}
+	sub := session.subagentSent[0].Submission
+	requirePasteExpanded(t, sub, placeholder, pasted)
+	if sub.SkillName != "probe-skill" || sub.DisplayText != line {
+		t.Fatalf("sent %+v, want the skill selected and the line shown with its chip", sub)
+	}
+}
+
+// A "!" line in a subagent's view is sent back to the composer; its folded paste
+// goes back with it, or the chip would return with nothing behind it.
+func TestSubagentViewShellLineKeepsItsFoldedPaste(t *testing.T) {
+	session := &fakeSession{}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	pasted := foldedPasteText()
+	line := typeAndFoldPaste(t, state, "!cat ", pasted)
+
+	subagentViewLine(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", line)
+
+	if state.composer.DraftText != line {
+		t.Fatalf("draft = %q, want the line back", state.composer.DraftText)
+	}
+	if len(state.composer.PendingPastes) != 1 || state.composer.PendingPastes[0].Content != pasted {
+		t.Fatalf("pastes = %+v, want the folded paste back behind its chip", state.composer.PendingPastes)
+	}
+}
+
+// /compact runs on its own dispatcher; its instructions are read from the
+// pasted text as well.
+func TestCompactInstructionsRunOnTheTextOfAFoldedPaste(t *testing.T) {
+	var ran string
+	session := &fakeSession{streamSlashFn: func(_ context.Context, _ string, line string) (SlashOutcome, bool) {
+		ran = line
+		return SlashOutcome{Handled: true}, true
+	}}
+	state := &streamState{sessionID: "s1", session: session}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	cmds := newCommandController(session, renderer, &stubSelector{}, nil, "")
+	pasted := foldedPasteText()
+	line := typeAndFoldPaste(t, state, "/compact ", pasted)
+	state.composer.Text = line
+	draft, _ := state.submissionFromCurrentDraft()
+	state.resetComposerForActiveRunDraft()
+
+	dispatchCancelableStreamSlashCommand(context.Background(), nil, nil, nil, nil, cmds, renderer, NewTracker(), state, line, draft)
+
+	if want := "/compact " + pasted; ran != want {
+		t.Fatalf("/compact ran on %q, want %q", ran, want)
+	}
+}
+
+// A "!" line typed mid-run runs on the pasted text, as an idle one does.
+func TestActiveRunShellLineRunsOnTheTextOfAFoldedPaste(t *testing.T) {
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	pasted := foldedPasteText()
+	line := typeAndFoldPaste(t, state, "!cat <<'EOF'\n", pasted)
+
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventLine, line: line}, nil)
+
+	want := "!cat <<'EOF'\n" + pasted
+	deadline := time.Now().Add(time.Second)
+	for {
+		session.mu.Lock()
+		got := append([]string(nil), session.shellCommands...)
+		session.mu.Unlock()
+		if len(got) == 1 && got[0] == want {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shell ran %q, want %q", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -4366,7 +4642,7 @@ func TestCancelableCompactKeepsNotificationsResponsiveAndCancelsHandler(t *testi
 					}
 				}
 			},
-			cmds, renderer, nil, state, "/compact", nil,
+			cmds, renderer, nil, state, "/compact", ComposerSubmission{},
 		)
 		done <- result{handled: handled}
 	}()
@@ -6255,21 +6531,21 @@ func TestSubagentViewSlashCommandClasses(t *testing.T) {
 	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
 
 	// A hidden command points back to the conversation and changes nothing.
-	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/new", nil)
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/new", ComposerSubmission{})
 	if renderer.ActiveView() != "task-b" {
 		t.Fatal("a hidden command must not change the view")
 	}
 
 	// /context reports this subagent (no error, and the report is rendered in
 	// this view).
-	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/context", nil)
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/context", ComposerSubmission{})
 	if vm := renderer.ensurePerAgentVM("task-b"); vm == nil || len(vm.blocks) == 0 {
 		t.Fatal("/context must render its report in the subagent's view")
 	}
 
 	// /compact is hidden there now: it answers with the one sentence that points
 	// back to the conversation instead of running.
-	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/compact", nil)
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/compact", ComposerSubmission{})
 	if vm := renderer.ensurePerAgentVM("task-b"); vm == nil || !blockSays(vm.blocks, subagentViewMainOnlyReply) {
 		t.Fatal("/compact must answer as a conversation command in a subagent's view")
 	}
@@ -6297,7 +6573,7 @@ func TestSubagentViewSendsARegisteredSkillCommandToTheSubagent(t *testing.T) {
 	renderer.SetActiveView("task-b")
 	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
 
-	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/probe-skill tighten it", nil)
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/probe-skill tighten it", ComposerSubmission{})
 
 	if len(session.subagentSent) != 1 {
 		t.Fatalf("sent to the subagent %d times, want once", len(session.subagentSent))
@@ -7308,7 +7584,7 @@ func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
 	cmds := newCommandController(session, renderer, nil, nil, home)
 
 	for _, refused := range []string{"/plan write it", "/model", "/permissions", "/new", "/some-skill"} {
-		handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, refused, nil)
+		handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, refused, ComposerSubmission{})
 		if !handled {
 			t.Fatalf("%s was not handled", refused)
 		}
@@ -7320,7 +7596,7 @@ func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
 
 	// /compact has a dispatcher of its own — the one that keeps the event loop
 	// alive while it runs — so it is asked the same question there.
-	handled, _, _, _ := dispatchCancelableStreamSlashCommand(context.Background(), nil, nil, nil, nil, cmds, renderer, NewTracker(), state, "/compact", nil)
+	handled, _, _, _ := dispatchCancelableStreamSlashCommand(context.Background(), nil, nil, nil, nil, cmds, renderer, NewTracker(), state, "/compact", ComposerSubmission{})
 	if !handled {
 		t.Fatal("/compact was not handled")
 	}
@@ -7330,7 +7606,7 @@ func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
 
 	// /continue is a turn: the dispatcher declines it so the submission reaches
 	// the surface, which admits it against the execution.
-	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/continue", nil); handled {
+	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/continue", ComposerSubmission{}); handled {
 		t.Fatal("/continue must fall through to the submission path")
 	}
 }
@@ -7347,7 +7623,7 @@ func TestPermissionsLineAnswersAsAnUnknownCommandWithoutASandbox(t *testing.T) {
 	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
 	cmds := newCommandController(session, renderer, nil, nil, home)
 
-	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/permissions", nil); !handled {
+	if handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/permissions", ComposerSubmission{}); !handled {
 		t.Fatal("/permissions must be answered, not sent to the model")
 	}
 	if len(session.permissionCalls) != 0 {
@@ -7369,7 +7645,7 @@ func TestApplySlashOutcomeCarriesDraftImageAttachments(t *testing.T) {
 	handled, continueRun, sub, _ := applySlashOutcome(
 		context.Background(), nil, nil, nil, state, "improve",
 		"/improve 如截图所示[Image #1] 定位根因",
-		[]InputAttachment{{Path: img, Label: "shot.png"}},
+		ComposerSubmission{Attachments: []InputAttachment{{Path: img, Label: "shot.png"}}},
 		outcome,
 	)
 	if !handled || !continueRun {
@@ -7400,7 +7676,7 @@ func TestApplySlashOutcomeWithoutAttachmentsUnchanged(t *testing.T) {
 	outcome := SlashOutcome{Handled: true, ShouldContinueRun: true, ContinueInput: "review this diff"}
 	handled, continueRun, sub, _ := applySlashOutcome(
 		context.Background(), nil, nil, nil, state, "review",
-		"/review review this diff", nil, outcome,
+		"/review review this diff", ComposerSubmission{}, outcome,
 	)
 	if !handled || !continueRun {
 		t.Fatalf("handled=%v continueRun=%v, want true/true", handled, continueRun)
