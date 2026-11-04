@@ -20,7 +20,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 30
+const stateSchemaVersion = 32
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -83,6 +83,18 @@ var stateSchemaMigrations = []schemaMigration{
 		apply:         migrateStateV29ToV30,
 		applyMySQL:    migrateStateV29ToV30MySQL,
 		applyPostgres: migrateStateV29ToV30Postgres,
+	},
+	{
+		version:       31,
+		apply:         migrateStateV30ToV31,
+		applyMySQL:    migrateStateV30ToV31MySQL,
+		applyPostgres: migrateStateV30ToV31Postgres,
+	},
+	{
+		version:       32,
+		apply:         migrateStateV31ToV32,
+		applyMySQL:    migrateStateV31ToV32MySQL,
+		applyPostgres: migrateStateV31ToV32Postgres,
 	},
 }
 
@@ -1390,6 +1402,127 @@ CREATE TABLE IF NOT EXISTS output_records (
   CHECK (kind IN ('shell', 'mcp'))
 )`); err != nil {
 		return fmt.Errorf("create output_records: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV30ToV31 gives every owner row the replica registration a
+// multi-replica deployment reads (plan 213 §3.1, design §2.7.1): the address
+// the other replicas reach this one at, the machine it runs on, and whether it
+// is a gateway or a terminal. All three default to the empty string, which is
+// what a database written before replicas existed should read as — nothing to
+// forward to, no host to compare, no kind to act on.
+//
+// A fixture built from the current schema.sql with a lowered user_version
+// already carries the columns, so the ALTERs are skipped rather than failing on
+// a duplicate.
+func migrateStateV30ToV31(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_run_owners') WHERE name='internal_addr'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_run_owners ADD COLUMN internal_addr TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_run_owners.internal_addr: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_run_owners ADD COLUMN host TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_run_owners.host: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_run_owners ADD COLUMN kind TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_run_owners.kind: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV30ToV31MySQL is the same three columns in MySQL's types. Only a
+// database 209 created before this migration reaches it: a new one is built
+// from schema_mysql.sql whole, at the current version.
+func migrateStateV30ToV31MySQL(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_run_owners' AND column_name = 'internal_addr'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `
+ALTER TABLE fb_run_owners
+  ADD COLUMN internal_addr VARCHAR(1024) NOT NULL DEFAULT (''),
+  ADD COLUMN host VARCHAR(255) NOT NULL DEFAULT (''),
+  ADD COLUMN kind VARCHAR(32) NOT NULL DEFAULT ('')`); err != nil {
+		return fmt.Errorf("add fb_run_owners replica columns: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV30ToV31Postgres is the same three columns in PostgreSQL's types.
+func migrateStateV30ToV31Postgres(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+ALTER TABLE fb_run_owners
+  ADD COLUMN IF NOT EXISTS internal_addr TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS host TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_run_owners replica columns: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV31ToV32 creates fb_leases, the compare-and-swap row that keeps a
+// background singleton on one replica of a shared database (plan 213 §3.4,
+// design §2.7.5). A fresh database gets the table from schema.sql, and a
+// fixture built from it with a lowered user_version already has it: the create
+// is skipped rather than failing on a duplicate.
+func migrateStateV31ToV32(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fb_leases'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE fb_leases (
+  name TEXT PRIMARY KEY CHECK (TRIM(name) <> ''),
+  holder TEXT NOT NULL,
+  expires_at_ms INTEGER NOT NULL
+) STRICT`); err != nil {
+		return fmt.Errorf("create fb_leases: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV31ToV32MySQL is the same table in MySQL's types. Only a database
+// 209 created before this migration reaches it: a new one is built from
+// schema_mysql.sql whole, at the current version.
+func migrateStateV31ToV32MySQL(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_leases (
+  name VARCHAR(191) NOT NULL PRIMARY KEY,
+  holder VARCHAR(191) NOT NULL,
+  expires_at_ms BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`); err != nil {
+		return fmt.Errorf("create fb_leases: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV31ToV32Postgres is the same table in PostgreSQL's types.
+func migrateStateV31ToV32Postgres(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_leases (
+  name TEXT NOT NULL PRIMARY KEY,
+  holder TEXT NOT NULL,
+  expires_at_ms BIGINT NOT NULL
+)`); err != nil {
+		return fmt.Errorf("create fb_leases: %w", err)
 	}
 	return nil
 }

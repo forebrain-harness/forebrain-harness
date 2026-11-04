@@ -143,9 +143,9 @@ func TestInstallGatewayConsoleLogMirrorsConsoleFormat(t *testing.T) {
 	if !strings.Contains(terminal, "\x1b[36mINF\x1b[0m gateway started") {
 		t.Fatalf("terminal output = %q", terminal)
 	}
-	data, err := os.ReadFile(filepath.Join(root, "logs", gatewayLogFile))
+	data, err := os.ReadFile(gatewayLogPath(root))
 	if err != nil {
-		t.Fatalf("read %s: %v", gatewayLogFile, err)
+		t.Fatalf("read %s: %v", gatewayLogPath(root), err)
 	}
 	if strings.ContainsRune(string(data), 0x1b) {
 		t.Fatalf("log file must carry no escape sequence: %q", string(data))
@@ -154,12 +154,12 @@ func TestInstallGatewayConsoleLogMirrorsConsoleFormat(t *testing.T) {
 	if string(data) != want {
 		t.Fatalf("log file must mirror the console:\n--- file ---\n%q\n--- console ---\n%q", string(data), want)
 	}
-	info, err := os.Stat(filepath.Join(root, "logs", gatewayLogFile))
+	info, err := os.Stat(gatewayLogPath(root))
 	if err != nil {
-		t.Fatalf("stat %s: %v", gatewayLogFile, err)
+		t.Fatalf("stat %s: %v", gatewayLogPath(root), err)
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("gateway.log mode = %o, want 0600", got)
+		t.Fatalf("gateway log mode = %o, want 0600", got)
 	}
 	if slog.Default() != prev {
 		t.Fatal("restore must put the previous logger back")
@@ -181,9 +181,9 @@ func TestInstallGatewayConsoleLogKeepsLogfmtOffATerminal(t *testing.T) {
 	slog.Info("gateway started", "port", 6060)
 	restore()
 
-	data, err := os.ReadFile(filepath.Join(root, "logs", gatewayLogFile))
+	data, err := os.ReadFile(gatewayLogPath(root))
 	if err != nil {
-		t.Fatalf("read %s: %v", gatewayLogFile, err)
+		t.Fatalf("read %s: %v", gatewayLogPath(root), err)
 	}
 	if !strings.Contains(string(data), "level=INFO") || !strings.Contains(string(data), "msg=\"gateway started\"") {
 		t.Fatalf("log file = %q, want logfmt", string(data))
@@ -213,7 +213,36 @@ func TestInstallGatewayConsoleLogSurvivesMissingLogsDir(t *testing.T) {
 	if got := read(t); !strings.Contains(got, "still logging") {
 		t.Fatalf("terminal output = %q", got)
 	}
-	if _, err := os.Stat(filepath.Join(root, "logs", gatewayLogFile)); err == nil {
+	if _, err := os.Stat(gatewayLogPath(root)); err == nil {
 		t.Fatal("no log file should exist when the logs directory is absent")
+	}
+}
+
+// TestGatewayLogPathIsPerReplica pins plan 213 §3.6 for the one always-on log a
+// gateway replica writes: the file is its own, named for the machine it runs on
+// (a pod's name is its hostname), because the log rotates by copy-and-truncate —
+// two replicas truncating one file lose whichever records the other copied, and
+// no line of a shared file says which replica wrote it.
+func TestGatewayLogPathIsPerReplica(t *testing.T) {
+	root := t.TempDir()
+	path := gatewayLogPath(root)
+	if got := filepath.Dir(path); got != filepath.Join(root, "logs") {
+		t.Fatalf("log dir = %q, want the home's logs directory", got)
+	}
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "gateway-") || !strings.HasSuffix(base, ".log") {
+		t.Fatalf("log file = %q, want gateway-<replica>.log", base)
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(base, "gateway-"), ".log")
+	if name == "" {
+		t.Fatal("the replica name must never be empty")
+	}
+	for _, bad := range []string{"/", "\\", ":", " "} {
+		if strings.Contains(name, bad) {
+			t.Fatalf("replica name %q keeps %q, which is not a portable file name", name, bad)
+		}
+	}
+	if other := replicaLogName(); !strings.HasSuffix(strings.TrimSuffix(base, ".log"), other) && other != "local" {
+		t.Fatalf("log file %q does not name this replica %q", base, other)
 	}
 }

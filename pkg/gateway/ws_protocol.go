@@ -74,6 +74,47 @@ var wsOpsRequireRequestID = map[string]struct{}{
 	"control_request": {},
 }
 
+// wsSessionOps are the operations that act on a conversation rather than open a
+// socket or start work in it. An internal socket — the far end of a relay — is
+// the mouthpiece of a browser whose run is already going somewhere else, so it
+// accepts exactly these (plan 213 §3.2): the two that name a conversation, and
+// everything a person can do inside one.
+//
+// Every entry of wsInboundOps belongs either to this set or to wsUnrelayedOps;
+// TestEveryInboundOpIsClassifiedForRelay keeps a new operation from silently
+// becoming one the relay drops.
+var wsSessionOps = map[string]struct{}{
+	"bind_session":      {},
+	"resume_connection": {},
+	"cancel_run":        {},
+	// cancel_command stops what the connection is doing with a message before
+	// any run exists, which is state of the replica that took the message.
+	"cancel_command":       {},
+	"switch_mode":          {},
+	"query_mode":           {},
+	"approve_action":       {},
+	"deny_action":          {},
+	"submit_answer":        {},
+	"sync_context":         {},
+	"control_request":      {},
+	"ping":                 {},
+	"mcp_status":           {},
+	"mcp_resources":        {},
+	"mcp_tool_search":      {},
+	"task_status":          {},
+	wsOpCancelAutoContinue: {},
+}
+
+// wsUnrelayedOps are the inbound operations a relay never forwards: connect
+// opens the socket, and start_run starts work on the replica the browser is
+// connected to — the run it starts never belongs to a peer. bind_session and
+// resume_connection are forwarded, but only as the message that opens a relay,
+// which is why they are session operations rather than unrelayed ones.
+var wsUnrelayedOps = map[string]struct{}{
+	"connect":   {},
+	"start_run": {},
+}
+
 type wsRequestCacheEntry struct {
 	Response wsServerMsg
 	ExpireAt time.Time

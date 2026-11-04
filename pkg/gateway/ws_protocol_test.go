@@ -110,3 +110,30 @@ func TestWSRequestCache(t *testing.T) {
 		t.Fatal("expired request should miss")
 	}
 }
+
+// TestEveryInboundOpIsClassifiedForRelay pins the plan 213 §7 maintenance rule at
+// the protocol level: a relay forwards the session operations and answers the
+// rest here, so every inbound operation must have been classified as one of the
+// two. A new operation that is in neither set would be silently dropped by a
+// relayed socket.
+func TestEveryInboundOpIsClassifiedForRelay(t *testing.T) {
+	for op := range wsInboundOps {
+		_, isSessionOp := wsSessionOps[op]
+		_, isUnrelayed := wsUnrelayedOps[op]
+		if !isSessionOp && !isUnrelayed {
+			t.Errorf("inbound op %q is neither a session operation a relay forwards nor one it handles here", op)
+		}
+		if isSessionOp && isUnrelayed {
+			t.Errorf("inbound op %q is classified as both forwarded and unrelayed", op)
+		}
+	}
+	// start_run is the operation the relay must never forward: the run it would
+	// start belongs to the replica the browser is connected to, and it is also
+	// what ends a relay.
+	if _, ok := wsSessionOps["start_run"]; ok {
+		t.Fatal("start_run must not be a relayed session operation")
+	}
+	if _, ok := wsUnrelayedOps["start_run"]; !ok {
+		t.Fatal("start_run must be one of the operations a relay handles here")
+	}
+}

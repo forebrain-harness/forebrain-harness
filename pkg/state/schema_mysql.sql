@@ -287,10 +287,22 @@ CREATE TABLE fb_actions (
   KEY idx_fb_actions_pending_created (created_at, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
--- One row per living forebrain process, renewed on a lease interval.
+-- One row per living forebrain process, renewed on a lease interval. The last
+-- three columns are the replica registration (plan 213 §3.1).
 CREATE TABLE fb_run_owners (
   owner VARCHAR(191) NOT NULL PRIMARY KEY CHECK (TRIM(owner) <> ''),
-  heartbeat_at_ms BIGINT NOT NULL
+  heartbeat_at_ms BIGINT NOT NULL,
+  internal_addr VARCHAR(1024) NOT NULL DEFAULT (''),
+  host VARCHAR(255) NOT NULL DEFAULT (''),
+  kind VARCHAR(32) NOT NULL DEFAULT ('')
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- One lease per background singleton that only one replica of a shared
+-- database may run at a time (plan 213 §3.4).
+CREATE TABLE fb_leases (
+  name VARCHAR(191) NOT NULL PRIMARY KEY,
+  holder VARCHAR(191) NOT NULL,
+  expires_at_ms BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 -- The single, ordered record of everything a conversation and its runs did.

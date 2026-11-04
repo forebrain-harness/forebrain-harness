@@ -518,24 +518,33 @@ func extractDictionaries(archive *tar.Reader, dir string, files []DictionaryFile
 }
 
 // writeVerifiedEntry copies one bundle entry into path, hashing as it goes,
-// and refuses it when the bytes do not match the declared checksum.
+// and refuses it when the bytes do not match the declared checksum. The entry is
+// written beside its destination and renamed in once it has verified, so a
+// replica reading a dictionary never sees a half-copied or unverified file, and
+// two replicas installing the same bundle leave the same verified bytes behind
+// instead of truncating each other's (plan 213 §3.6).
 func writeVerifiedEntry(archive *tar.Reader, path string, file DictionaryFile) error {
-	unpacked, err := os.Create(path)
+	staged, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".verify-*")
 	if err != nil {
 		return err
 	}
+	stagedName := staged.Name()
+	defer func() { _ = os.Remove(stagedName) }()
 	checksum := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(unpacked, checksum), archive); err != nil {
-		unpacked.Close()
+	if _, err := io.Copy(io.MultiWriter(staged, checksum), archive); err != nil {
+		_ = staged.Close()
 		return err
 	}
-	if err := unpacked.Close(); err != nil {
+	if err := staged.Close(); err != nil {
 		return err
 	}
 	if got := hex.EncodeToString(checksum.Sum(nil)); got != file.SHA256 {
 		return fmt.Errorf("%s does not match its published checksum", file.Name)
 	}
-	return nil
+	if err := os.Chmod(stagedName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(stagedName, path)
 }
 
 // InstallDictionary copies every dictionary file into DictionaryDir under

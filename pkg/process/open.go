@@ -61,6 +61,10 @@ type OpenOptions struct {
 	EnableChannels    bool
 	EnableTelemetry   bool
 	EnableApprovalTTL bool
+	// ReplicaKind is what this process records about itself in fb_run_owners
+	// (plan 213 §3.1): state.RunOwnerKindGateway or
+	// state.RunOwnerKindTerminal. Empty derives it from SessionSource.
+	ReplicaKind string
 }
 
 // Environment owns process-wide runtime dependencies.
@@ -82,6 +86,11 @@ type Environment struct {
 	// its base runner.
 	noLaunchProject bool
 	SQL             *sql.DB
+	// Leases holds the fb_leases rows this process takes: one per long-
+	// connection chat account, so that only one replica of a shared database
+	// is connected to it (plan 213 §3.4). A single-replica install wins every
+	// lease it asks for, so the machinery is inert there.
+	Leases *Leases
 	// Deps is the single owner of the path/config/store dependencies this
 	// process shares with its primary Runner. Runner.Deps points at this very
 	// field, so there is exactly one place that state lives (R6). It is a value
@@ -446,6 +455,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// and resumes are stamped with it, and the lease it holds below is what
 	// tells every other process on this machine that those runs are alive.
 	runSvc := &state.RunStore{DB: sqlDB, Owner: source + "-" + uuid.NewString()}
+	env.Leases = &Leases{DB: sqlDB, Holder: runSvc.Owner}
 	fileSvc := &state.FileStore{DB: sqlDB, Home: root, Cfg: state.LoadConfigFromEnv()}
 	if v := strings.TrimSpace(os.Getenv("FOREBRAIN_WORK_ITEM_LEASE_SEC")); v != "" {
 		if _, err := strconv.Atoi(v); err == nil {
@@ -654,6 +664,17 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		return nil, fmt.Errorf("register run owner lease: %w", err)
 	}
 	env.ownerLeaseStop = ownerStop
+	// The replica registration is what tells the other replicas of a shared
+	// database whether a running conversation belongs here and, when it does
+	// not, where to forward to (plan 213 §3.1). It rides on the lease row
+	// HoldOwnerLease just created, so it cannot outlive the process either.
+	kind, internalAddr := replicaRegistration(opts.ReplicaKind, source, loaded)
+	if err := registerReplica(ctx, runSvc, kind, internalAddr, replicaHost()); err != nil {
+		ownerStop()
+		_ = env.LSP.Close()
+		_ = env.Runner.Close()
+		return nil, fmt.Errorf("register replica: %w", err)
+	}
 	return env, nil
 }
 

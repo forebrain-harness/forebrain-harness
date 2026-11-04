@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -880,8 +881,353 @@ func runEventToWSMessage(requestID, traceID string, evt event.RunEvent) wsServer
 	}
 }
 
+// wsConnOptions is how one chat socket differs by who opened it (plan 213 §3.2).
+// A browser socket authenticates here and may start runs; an internal socket
+// came from another replica's relay, already authenticated by the internal
+// endpoint, and may only drive the one conversation it names.
+type wsConnOptions struct {
+	internal bool
+	// session is the conversation an internal socket is confined to.
+	session string
+}
+
+// relayPeerForSession returns the other replica that owns the conversation's
+// live run, or nil when the conversation is not being driven elsewhere: no live
+// run, a run this process owns, a terminal's run (a terminal serves no internal
+// endpoint), or a replica that registered no address.
+func (s *Server) relayPeerForSession(ctx context.Context, sessionID string) *state.ReplicaPeer {
+	if s == nil || s.RunRT == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	peer, err := s.RunRT.LiveRunPeer(ctx, sessionID)
+	if err != nil {
+		slog.Warn("gateway relay: read the run owner", "session", sessionID, "err", err)
+		return nil
+	}
+	return peer
+}
+
+// relaySessionID names the conversation an operation points at: bind_session
+// names the session itself, resume_connection the run it resumes.
+func (s *Server) relaySessionID(ctx context.Context, m wsClientMsg) (string, bool) {
+	if m.Op == "resume_connection" {
+		rid := strings.TrimSpace(m.RunID)
+		if rid == "" || s == nil || s.RunRT == nil {
+			return "", false
+		}
+		rn, err := s.RunRT.GetRun(ctx, rid)
+		if err != nil || rn == nil {
+			return "", false
+		}
+		return strings.TrimSpace(rn.SessionID), true
+	}
+	sid := strings.TrimSpace(m.SessionID)
+	if sid == "" {
+		sid = "default"
+	}
+	return sid, true
+}
+
+// internalWSURL is the address a peer's internal socket answers at: the
+// registered internal address with the scheme that speaks WebSocket.
+func internalWSURL(addr, session string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(addr))
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("replica internal address %q is not a URL", addr)
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		u.Scheme = "wss"
+	} else {
+		u.Scheme = "ws"
+	}
+	u.Path = internalWSPath
+	u.RawQuery = url.Values{"session": {session}}.Encode()
+	return u.String(), nil
+}
+
+// wsRelay is a browser socket's transparent pipe to the replica that owns the
+// conversation's live run (plan 213 §3.2). The entry replica forwards the
+// operations the browser sends exactly as they came and writes the owner's
+// messages back exactly as they arrived: nothing is stored on the way, because
+// the streamed text and tool output are pushed and never stored, and the owner
+// is the one that commits the conversation's events.
+//
+// A socket relays one conversation at a time, which is also how the protocol
+// behaves — a bind_session names one session — so a browser that switches
+// conversations simply re-points or ends the relay.
+type wsRelay struct {
+	s       *Server
+	browser *websocket.Conn
+	writeMu *sync.Mutex
+
+	mu      sync.Mutex
+	sendMu  sync.Mutex
+	peer    *websocket.Conn
+	session string
+	addr    string
+}
+
+func newWSRelay(s *Server, browser *websocket.Conn, writeMu *sync.Mutex) *wsRelay {
+	return &wsRelay{s: s, browser: browser, writeMu: writeMu}
+}
+
+// handoff attempts to serve one inbound operation through a relay, reporting
+// whether it did. The operations a relay never takes — connect, bind_session,
+// resume_connection, start_run — are the ones that open or re-point a socket or
+// start work here; everything else in wsSessionOps is forwarded whenever a relay
+// is live.
+func (r *wsRelay) handoff(ctx context.Context, raw []byte, m wsClientMsg) bool {
+	if r == nil {
+		return false
+	}
+	switch m.Op {
+	case "bind_session", "resume_connection":
+		return r.bind(ctx, raw, m)
+	case "start_run":
+		// The next turn belongs to the replica the browser is connected to, so
+		// the relay ends before the local path starts it.
+		r.stop()
+		return false
+	}
+	if _, ok := wsSessionOps[m.Op]; !ok {
+		// connect and anything else that is not a session operation is
+		// answered by this socket's own loop.
+		return false
+	}
+	if !r.active() {
+		return false
+	}
+	if err := r.forward(raw); err != nil {
+		slog.Warn("gateway relay: forward an operation", "err", err)
+		r.stop()
+		r.warn("正在运行该对话的副本已不可达，后续操作不再转发。")
+		return true
+	}
+	return true
+}
+
+// bind points the relay at a conversation, forwarding the browser's own bind to
+// the owning replica so that replica answers it. It reports whether the bind was
+// forwarded; false means this replica serves the socket.
+func (r *wsRelay) bind(ctx context.Context, raw []byte, m wsClientMsg) bool {
+	sid, ok := r.s.relaySessionID(ctx, m)
+	if !ok {
+		r.stop()
+		return false
+	}
+	peer := r.s.relayPeerForSession(ctx, sid)
+	if peer == nil {
+		r.stop()
+		return false
+	}
+	if r.active() && r.session == sid && r.addr == peer.InternalAddr {
+		return r.forward(raw) == nil
+	}
+	r.stop()
+	if err := r.dial(ctx, peer, sid); err != nil {
+		slog.Warn("gateway relay: dial the owning replica", "owner", peer.Owner, "addr", peer.InternalAddr, "err", err)
+		// The conversation's events are durable, so the socket still shows the
+		// history; only the live deltas are lost, and the person is told so
+		// rather than left with a conversation that quietly stopped moving.
+		r.warn("无法连接正在运行该对话的副本（" + peer.InternalAddr + "），本连接只显示已保存的内容。")
+		return false
+	}
+	if err := r.forward(raw); err != nil {
+		slog.Warn("gateway relay: forward the bind", "err", err)
+		r.stop()
+		r.warn("正在运行该对话的副本已不可达，后续操作不再转发。")
+		return false
+	}
+	return true
+}
+
+// dial opens the peer's internal socket and starts the pump that writes its
+// messages to the browser.
+func (r *wsRelay) dial(ctx context.Context, peer *state.ReplicaPeer, session string) error {
+	cfg := r.s.liveCfg()
+	if cfg == nil {
+		return errors.New("gateway has no live configuration")
+	}
+	token := strings.TrimSpace(cfg.Gateway.Auth.Token)
+	if token == "" {
+		return errors.New("gateway has no token to authenticate a peer with")
+	}
+	target, err := internalWSURL(peer.InternalAddr, session)
+	if err != nil {
+		return err
+	}
+	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
+	conn, resp, err := dialer.DialContext(ctx, target, header)
+	if err != nil {
+		if resp != nil {
+			return fmt.Errorf("%w (status %d)", err, resp.StatusCode)
+		}
+		return err
+	}
+	conn.SetReadLimit(4 << 20)
+	r.mu.Lock()
+	r.peer = conn
+	r.session = session
+	r.addr = peer.InternalAddr
+	r.mu.Unlock()
+	go r.pump(conn)
+	return nil
+}
+
+// pump writes the owning replica's messages to the browser and ends the relay
+// when the run it exists for ends.
+func (r *wsRelay) pump(peer *websocket.Conn) {
+	for {
+		_, data, err := peer.ReadMessage()
+		if err != nil {
+			if r.stopIf(peer) {
+				r.warn("与正在运行该对话的副本的连接已断开，后续内容将只来自已保存的记录。")
+			}
+			return
+		}
+		var msg struct {
+			Op    string `json:"op"`
+			RunID string `json:"run_id"`
+		}
+		if json.Unmarshal(data, &msg) == nil && wsRunEndOps[msg.Op] && strings.TrimSpace(msg.RunID) != "" {
+			// The run this relay was opened for has ended. Forwarding stops
+			// before the ending is handed to the browser, so the socket is
+			// already served here by the time the page can answer it; the next
+			// turn then starts on this replica.
+			r.stopIf(peer)
+			r.writeRaw(data)
+			return
+		}
+		r.writeRaw(data)
+	}
+}
+
+// writeRaw writes one message from the owning replica to the browser unchanged.
+func (r *wsRelay) writeRaw(data []byte) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	_ = r.browser.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	_ = r.browser.WriteMessage(websocket.TextMessage, data)
+}
+
+// warn tells the browser, in words it can show, that the relay is gone.
+func (r *wsRelay) warn(text string) {
+	if r == nil || r.browser == nil {
+		return
+	}
+	payload, err := json.Marshal(wsServerMsg{
+		Op:      "run_warning",
+		Message: "replica_relay_unavailable",
+		Text:    text,
+		Error:   text,
+	})
+	if err != nil {
+		return
+	}
+	r.writeRaw(payload)
+}
+
+// forward writes one operation to the owning replica as the browser sent it.
+func (r *wsRelay) forward(raw []byte) error {
+	r.mu.Lock()
+	peer := r.peer
+	r.mu.Unlock()
+	if peer == nil {
+		return errors.New("no peer relay")
+	}
+	r.sendMu.Lock()
+	defer r.sendMu.Unlock()
+	_ = peer.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return peer.WriteMessage(websocket.TextMessage, raw)
+}
+
+func (r *wsRelay) active() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.peer != nil
+}
+
+// stopIf ends the relay if peer is still the socket it relays to.
+func (r *wsRelay) stopIf(peer *websocket.Conn) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	current := r.peer
+	if current != peer {
+		r.mu.Unlock()
+		return false
+	}
+	r.peer = nil
+	r.session = ""
+	r.addr = ""
+	r.mu.Unlock()
+	_ = peer.Close()
+	return true
+}
+
+func (r *wsRelay) stop() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	peer := r.peer
+	r.peer = nil
+	r.session = ""
+	r.addr = ""
+	r.mu.Unlock()
+	if peer != nil {
+		_ = peer.Close()
+	}
+}
+
 func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
-	if s != nil && s.Env != nil && s.Env.Deps.AppCfg != nil {
+	s.handleChatWS(w, r, wsConnOptions{})
+}
+
+// handleInternalChatWS serves the socket a relayed browser connection speaks
+// through. It is the same protocol as /ws/chat, opened by a peer rather than by
+// a browser, so the control-plane handshake has already happened.
+func (s *Server) handleInternalChatWS(w http.ResponseWriter, r *http.Request) {
+	s.handleChatWS(w, r, wsConnOptions{
+		internal: true,
+		session:  strings.TrimSpace(r.URL.Query().Get("session")),
+	})
+}
+
+// applyWSScope confines a peer's socket to the conversation it was opened for.
+// An internal socket is a relay's mouthpiece, so every operation must name that
+// conversation and none may start a run: start_run is what the replica the
+// browser is talking to does, not something a peer does on its behalf.
+func applyWSScope(m *wsClientMsg, session string) error {
+	if m.Op == "start_run" {
+		return errors.New("start_run 不是会话内操作：运行在浏览器所连的副本上启动")
+	}
+	sid := strings.TrimSpace(session)
+	if sid == "" {
+		return errors.New("内部端点必须指定会话")
+	}
+	if _, ok := wsSessionOps[m.Op]; !ok {
+		return fmt.Errorf("内部端点不支持该操作: %s", m.Op)
+	}
+	// resume_connection names one run rather than a session; the run's own
+	// session is checked against the confinement before it is replayed.
+	if m.Op != "resume_connection" {
+		if own := strings.TrimSpace(m.SessionID); own != "" && own != sid {
+			return fmt.Errorf("内部端点只服务会话 %s", sid)
+		}
+		m.SessionID = sid
+	}
+	return nil
+}
+
+func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request, opts wsConnOptions) {
+	if !opts.internal && s != nil && s.Env != nil && s.Env.Deps.AppCfg != nil {
 		if origin, err := authorizeControlPlane(r, s.Env.Deps.AppCfg); err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -1167,6 +1513,12 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if err != nil || rn == nil {
 			return false, false
 		}
+		// An internal socket speaks for one conversation. A resume that named a
+		// run of another one would re-point the socket outside the confinement
+		// it was opened with, so it is refused rather than served.
+		if opts.internal && strings.TrimSpace(rn.SessionID) != strings.TrimSpace(opts.session) {
+			return false, false
+		}
 		if runEventCancel != nil {
 			runEventCancel()
 			runEventCancel = nil
@@ -1178,7 +1530,14 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		}
 		return true, false
 	}
-	writeConnected()
+	if !opts.internal {
+		// A peer's socket has nobody to announce itself to: the relay that
+		// opened it is already past its handshake, and the browser it speaks
+		// for has one connected event of its own.
+		writeConnected()
+	}
+	relay := newWSRelay(s, c, &writeMu)
+	defer relay.stop()
 
 	go func() {
 		tk := time.NewTicker(20 * time.Second)
@@ -1291,6 +1650,20 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			message = normalizeWSClientMessage(message)
+			if opts.internal {
+				if scopeErr := applyWSScope(&message, opts.session); scopeErr != nil {
+					writeMsg(wsServerMsg{
+						Op: "run_error", RequestID: message.RequestID, SessionID: message.SessionID,
+						Message: "internal_scope", Error: scopeErr.Error(),
+					})
+					continue
+				}
+			} else if relay.handoff(r.Context(), data, message) {
+				// A conversation whose live run belongs to another replica is
+				// driven through a relay: only that replica holds the streaming
+				// deltas, which are pushed and never stored.
+				continue
+			}
 			if message.Op == "cancel_command" {
 				// Answered here rather than by the loop, which is the one
 				// busy with the message and cannot take another until it ends.

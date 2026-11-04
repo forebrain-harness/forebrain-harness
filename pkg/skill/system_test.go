@@ -144,7 +144,8 @@ func TestInstall_RemoveAllError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Make parent read-only so RemoveAll fails
+	// Make parent read-only so the install cannot write its staging tree beside
+	// the live one.
 	parent := filepath.Join(tmp, "skills")
 	if err := os.Chmod(parent, 0o555); err != nil {
 		t.Fatal(err)
@@ -153,9 +154,9 @@ func TestInstall_RemoveAllError(t *testing.T) {
 
 	err := Install(tmp)
 	if err == nil {
-		t.Fatal("expected error when RemoveAll fails")
+		t.Fatal("expected error when the skill tree cannot be rebuilt")
 	}
-	if !strings.Contains(err.Error(), "remove old .system") {
+	if !strings.Contains(err.Error(), "stage") && !strings.Contains(err.Error(), "remove old .system") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -207,9 +208,9 @@ func TestInstall_WriteMarkerError(t *testing.T) {
 
 	err := Install(tmp)
 	if err == nil {
-		t.Fatal("expected error when extraction fails")
+		t.Fatal("expected error when the skill tree cannot be rebuilt")
 	}
-	if !strings.Contains(err.Error(), "extract") && !strings.Contains(err.Error(), "remove") {
+	if !strings.Contains(err.Error(), "stage") && !strings.Contains(err.Error(), "extract") && !strings.Contains(err.Error(), "remove") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

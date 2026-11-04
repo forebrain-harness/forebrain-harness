@@ -129,9 +129,13 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	agents.Delete("/primary/:id/subagents/:name", s.handleAgentSubagentDelete)
 	agents.Put("/primary/:id/subagents/:name/enabled", s.handleAgentSubagentEnabled)
 	agents.Get("/roster", s.handleAgentRoster)
-	agents.Post("/cancel-all", s.handleAgentCancelAll)
-	agents.Post("/:agentId/cancel", s.handlePrimaryAgentCancel)
-	api.Post("/subagents/:id/cancel", s.handleSubagentCancel)
+	// The cancels act on live state (the run controller, the input queue, a
+	// parked approval), so each one is registered with the table an
+	// operation is forwarded by (plan 213 §3.2): a request that reaches a
+	// replica which is not running the conversation is sent to the one that is.
+	agents.Post("/cancel-all", s.forwardRunOpToEveryReplica("agent_cancel_all", s.handleAgentCancelAll))
+	agents.Post("/:agentId/cancel", s.forwardRunOpToPrimaryAgentOwner("agent_cancel", s.handlePrimaryAgentCancel))
+	api.Post("/subagents/:id/cancel", s.forwardRunOpToEveryReplica("subagent_cancel", s.handleSubagentCancel))
 
 	skills := api.Group("/skills")
 	skills.Get("/", s.handleSkillsList)
@@ -255,10 +259,12 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	actions := api.Group("/actions")
 	actions.Get("/", s.handleActions)
 	actions.Post("/ask", s.handleActionsAsk)
-	actions.Post("/:id/answer", s.handleActionsAnswer)
-	actions.Post("/:id/approve", s.handleActionsApprove)
-	actions.Post("/:id/deny", s.handleActionsDeny)
-	actions.Post("/:id/plan-review", s.handleActionPlanReview)
+	// Answering an action resumes the conversation's run in this process, so
+	// these four are forwarded to the replica that owns it (plan 213 §3.2).
+	actions.Post("/:id/answer", s.forwardRunOpToActionOwner("action_answer", s.handleActionsAnswer))
+	actions.Post("/:id/approve", s.forwardRunOpToActionOwner("action_approve", s.handleActionsApprove))
+	actions.Post("/:id/deny", s.forwardRunOpToActionOwner("action_deny", s.handleActionsDeny))
+	actions.Post("/:id/plan-review", s.forwardRunOpToActionOwner("action_plan_review", s.handleActionPlanReview))
 
 	projects := api.Group("/v1/projects")
 	projects.Get("/", s.handleProjectsList)
@@ -409,9 +415,11 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	api.Put("/cron-settings", s.handleCronSettings)
 
 	runs := api.Group("/runs")
-	runs.Post("/:id/cancel", s.handleRunCancel)
-	runs.Post("/:id/input", s.handleRunInput)
-	runs.Post("/:id/queued-input", s.handleRunQueuedInput)
+	// Cancelling and steering act on the run's live controller and input queue,
+	// which exist only in the replica running it (plan 213 §3.2).
+	runs.Post("/:id/cancel", s.forwardRunOpToRunOwner("run_cancel", s.handleRunCancel))
+	runs.Post("/:id/input", s.forwardRunOpToRunOwner("run_input", s.handleRunInput))
+	runs.Post("/:id/queued-input", s.forwardRunOpToRunOwner("run_queued_input", s.handleRunQueuedInput))
 	runs.Get("/:id/events", s.handleRunEvents)
 	runs.Get("/:id/subagents", s.handleRunSubagents)
 }

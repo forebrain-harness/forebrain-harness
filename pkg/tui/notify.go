@@ -1630,6 +1630,10 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 		LaunchDir:       cwd,
 		ExactLaunchRoot: true,
 		SessionSource:   memory.SessionSourceTUI,
+		// A terminal serves no internal endpoint, so no other replica ever
+		// forwards to it; the kind says so and its address stays empty
+		// (plan 213 §3.1).
+		ReplicaKind: state.RunOwnerKindTerminal,
 	})
 	if err != nil {
 		return nil, err

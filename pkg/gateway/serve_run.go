@@ -40,6 +40,10 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		// so expiration can be observed live instead of only changing SQLite.
 		EnableApprovalTTL: false,
 		SessionSource:     "webchat",
+		// The gateway is the only process that serves the internal endpoints
+		// the other replicas forward to (plan 213 §3.1), so it is the only one
+		// whose registration carries an address.
+		ReplicaKind: state.RunOwnerKindGateway,
 		// The gateway serves sessions in many projects with one process: the
 		// directory it was started in is not a project, so neither its trust
 		// nor its default cwd applies to any session here (R4). Every session

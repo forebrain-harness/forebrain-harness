@@ -35,15 +35,31 @@ func Install(forebrainHome string) error {
 		}
 	}
 
-	// Wipe and re-extract
+	// Wipe and re-extract, into a staging directory that is swapped in: a replica
+	// that is running a turn reads either the old complete skill tree or the new
+	// one, and two replicas starting against a shared home leave one complete
+	// tree behind instead of deleting each other's files mid-extract (plan 213
+	// §3.6).
+	parent := filepath.Dir(dest)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("systemskills: create %s: %w", parent, err)
+	}
+	staging, err := os.MkdirTemp(parent, "."+systemSkillsDirName+".seed-*")
+	if err != nil {
+		return fmt.Errorf("systemskills: stage: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+	if err := extractEmbedFS(assetsFS, "system_assets", staging); err != nil {
+		return fmt.Errorf("systemskills: extract: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, filepath.Base(markerPath)), []byte(expected+"\n"), 0o644); err != nil {
+		return fmt.Errorf("systemskills: write marker: %w", err)
+	}
 	if err := os.RemoveAll(dest); err != nil {
 		return fmt.Errorf("systemskills: remove old .system: %w", err)
 	}
-	if err := extractEmbedFS(assetsFS, "system_assets", dest); err != nil {
-		return fmt.Errorf("systemskills: extract: %w", err)
-	}
-	if err := os.WriteFile(markerPath, []byte(expected+"\n"), 0o644); err != nil {
-		return fmt.Errorf("systemskills: write marker: %w", err)
+	if err := os.Rename(staging, dest); err != nil {
+		return fmt.Errorf("systemskills: install: %w", err)
 	}
 	return nil
 }

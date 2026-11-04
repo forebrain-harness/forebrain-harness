@@ -2,12 +2,14 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -531,4 +533,146 @@ func TestServeHTTPChainLogsEveryRequest(t *testing.T) {
 			t.Errorf("logged status for %s = %q, want %q", path, got, want)
 		}
 	}
+}
+
+// newReplicaTestServer builds one gateway replica over a state database: its own
+// owner identity and lease, the shared stores, the token its peers authenticate
+// with, and the address they reach it at. Two of them over one database are what
+// plan 213's forwarding is about.
+func newReplicaTestServer(t *testing.T, db *sql.DB, home, owner, token, internalAddr string) *Server {
+	t.Helper()
+	ctx := context.Background()
+	sessions := state.NewSessionStore(db, "main")
+	store := &state.RunStore{DB: db, Owner: owner}
+	stop, err := store.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	require.NoError(t, store.RegisterReplica(ctx, state.RunOwnerKindGateway, internalAddr, "host-"+owner))
+	cfg := &appcfg.Root{}
+	cfg.Gateway.Auth.Token = token
+	env := &process.Environment{
+		Root: home,
+		SQL:  db,
+		Deps: run.Deps{Home: home, AppCfg: cfg, SessionStore: sessions, RunRT: store},
+	}
+	return &Server{
+		Home: home, Sessions: sessions, RunRT: store,
+		Actions: &state.ActionService{DB: db}, Env: env,
+	}
+}
+
+// TestInternalEndpointsRequireTheTokenAndARegisteredReplica pins both halves of
+// the peer authentication (plan 213 §3.2): the shared gateway token, and a source
+// address that is a registered replica's. Neither alone opens the endpoint, and a
+// browser's session cookie — the credential the web pages have — is not a peer
+// credential at all.
+func TestInternalEndpointsRequireTheTokenAndARegisteredReplica(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newReplicaTestServer(t, db, home, "gateway-self", "gw-secret", "http://10.9.9.9:8787")
+	chain := ServeHTTPChain(s.Env, s, http.HandlerFunc(http.NotFound))
+
+	send := func(auth, remote, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, internalRunOpPath, strings.NewReader(body))
+		req.RemoteAddr = remote
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		rec := httptest.NewRecorder()
+		chain.ServeHTTP(rec, req)
+		return rec
+	}
+	const op = `{"op":"run_cancel","run_id":"run-1"}`
+
+	require.Equal(t, http.StatusUnauthorized, send("", "10.9.9.9:5000", op).Code,
+		"no credentials must not open a peer endpoint")
+	require.Equal(t, http.StatusUnauthorized, send("Bearer gw-secret", "10.9.9.8:5000", op).Code,
+		"the token from a host that registered nothing must not open it")
+	require.NotEqual(t, http.StatusUnauthorized, send("Bearer gw-secret", "10.9.9.9:5000", op).Code,
+		"the token from a registered replica must reach the operation")
+
+	// The browser's own credential: valid, and still not a peer's.
+	cookieReq := httptest.NewRequest(http.MethodPost, internalRunOpPath, strings.NewReader(op))
+	cookieReq.RemoteAddr = "10.9.9.9:5000"
+	cookieReq.AddCookie(&http.Cookie{Name: webSessionCookieName("gw-secret"), Value: webSessionValue("gw-secret")})
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, cookieReq)
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "a session cookie must never open a peer endpoint")
+}
+
+// TestInternalRunOpRefusesAnUnknownOperation pins that the forwarded operation
+// is a name from the table, not an arbitrary call: the peer runs the handler the
+// table names and nothing else.
+func TestInternalRunOpRefusesAnUnknownOperation(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newReplicaTestServer(t, db, home, "gateway-self", "gw-secret", "http://10.9.9.9:8787")
+	req := httptest.NewRequest(http.MethodPost, internalRunOpPath, strings.NewReader(`{"op":"delete_everything"}`))
+	rec := httptest.NewRecorder()
+	s.handleInternalRunOp(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// The endpoint serves POST only, like every operation it carries.
+	getRec := httptest.NewRecorder()
+	s.handleInternalRunOp(getRec, httptest.NewRequest(http.MethodGet, internalRunOpPath, nil))
+	require.Equal(t, http.StatusMethodNotAllowed, getRec.Code)
+}
+
+// newInternalWSTestServer serves the peer socket for the confinement tests.
+func newInternalWSTestServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s := newReplicaTestServer(t, db, home, "gateway-self", "gw-secret", "http://10.9.9.9:8787")
+	require.NoError(t, s.Sessions.Ensure(ctx, "sid", "sid"))
+	require.NoError(t, s.Sessions.Ensure(ctx, "other", "other"))
+	server := httptest.NewServer(http.HandlerFunc(s.handleInternalChatWS))
+	t.Cleanup(server.Close)
+	return s, "ws" + strings.TrimPrefix(server.URL, "http") + internalWSPath + "?session=sid"
+}
+
+// TestInternalChatWSServesOnlyItsOwnSession pins what a relayed socket may do
+// (plan 213 §3.2): it binds the conversation it was opened for, and neither
+// starts a run of its own nor reaches a second conversation.
+func TestInternalChatWSServesOnlyItsOwnSession(t *testing.T) {
+	_, wsURL := newInternalWSTestServer(t)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	send := func(m wsClientMsg) wsServerMsg {
+		t.Helper()
+		require.NoError(t, conn.WriteJSON(m))
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		for {
+			var got wsServerMsg
+			require.NoError(t, conn.ReadJSON(&got))
+			if got.Op == "session_bound" || got.Op == "run_error" {
+				return got
+			}
+		}
+	}
+
+	refused := send(wsClientMsg{Op: "start_run", RequestID: "r1", SessionID: "sid", Message: wsClientMessage{Content: "hello"}})
+	require.Equal(t, "run_error", refused.Op)
+	require.Equal(t, "internal_scope", refused.Message)
+
+	foreign := send(wsClientMsg{Op: "bind_session", RequestID: "r2", SessionID: "other"})
+	require.Equal(t, "run_error", foreign.Op)
+	require.Equal(t, "internal_scope", foreign.Message)
+
+	bound := send(wsClientMsg{Op: "bind_session", RequestID: "r3"})
+	require.Equal(t, "session_bound", bound.Op)
+	require.Equal(t, "sid", bound.SessionID)
 }

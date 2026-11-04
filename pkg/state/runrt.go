@@ -209,6 +209,15 @@ type RunStore struct {
 	Owner string
 }
 
+// The replica kinds recorded in fb_run_owners.kind (plan 213 §3.1). A gateway
+// serves the internal endpoints the other replicas forward to, so it is the
+// only kind that carries an internal_addr. A terminal serves none: nothing is
+// ever forwarded to it, and its row says so by leaving the address empty.
+const (
+	RunOwnerKindGateway  = "gateway"
+	RunOwnerKindTerminal = "tui"
+)
+
 // livePrimaryRunCondition is the one definition of "this session has a live
 // primary run": one parked on an approval, or one running under an owner
 // whose lease is still fresh. CreateRun's atomic INSERT and
@@ -624,6 +633,15 @@ ON CONFLICT(owner) DO UPDATE SET heartbeat_at_ms=excluded.heartbeat_at_ms`,
 		SQLite:   `DELETE FROM fb_run_owners WHERE owner=?`,
 		MySQL:    `DELETE FROM fb_run_owners WHERE owner=?`,
 		Postgres: `DELETE FROM fb_run_owners WHERE owner=$1`,
+	}
+	// runOwnerLeaseProfileSQL records what this replica is and where the other
+	// replicas reach it, once, right after the lease row is first written. The
+	// heartbeat upsert stays the statement it was, so renewing a lease never
+	// has to know about the registration.
+	runOwnerLeaseProfileSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_run_owners SET internal_addr=?, host=?, kind=? WHERE owner=?`,
+		MySQL:    `UPDATE fb_run_owners SET internal_addr=?, host=?, kind=? WHERE owner=?`,
+		Postgres: `UPDATE fb_run_owners SET internal_addr=$1, host=$2, kind=$3 WHERE owner=$4`,
 	}
 	reapAbandonedRunsSelectSQL = dbx.SQL{
 		SQLite: `
@@ -1189,6 +1207,18 @@ FROM fb_run_waits WHERE action_id=`+dbx.Placeholder(dbx.DialectOf(s.DB), 1), act
 // down from the conversation's own runs reaches every one of them.
 func waitRecoveryScan(d dbx.Dialect, columns, sessionID string, limit int) (string, []any) {
 	sessionID = strings.TrimSpace(sessionID)
+	// PostgreSQL refuses a SELECT DISTINCT whose ORDER BY names an expression
+	// the select list does not carry ("for SELECT DISTINCT, ORDER BY
+	// expressions must appear in select list", SQLSTATE 42P10), and this scan
+	// orders by w.updated_at, which the wait row's own columns do not include.
+	// DISTINCT buys nothing here: fb_run_waits.action_id is UNIQUE and the
+	// conversation_runs join is on that table's primary key, so one wait row
+	// can appear at most once. Dropping it for PostgreSQL is therefore the same
+	// result set — and the SQLite statement, which must stay byte-identical,
+	// is untouched.
+	if d == dbx.Postgres {
+		columns = strings.TrimPrefix(columns, "DISTINCT ")
+	}
 	if limit > 5000 {
 		limit = 5000
 	}
@@ -1695,7 +1725,204 @@ func (s *RunStore) HoldOwnerLease(ctx context.Context) (stop func(), err error) 
 	}, nil
 }
 
-// AbandonedRun is a run reaped because the process driving it stopped
+// ErrSQLiteMultiHost is the refusal a gateway makes when its state database is
+// SQLite and a live gateway replica is already registered on another host
+// (plan 213 §3.5, design §2.7.9). SQLite on shared storage is not safe for two
+// writers, so the second host stops instead of corrupting the first one's data;
+// the message names the configuration that fixes it.
+var ErrSQLiteMultiHost = errors.New("多副本部署需要 MySQL 或 PostgreSQL（forebrain.yaml 的 database.url）")
+
+// liveGatewayOwnerHostSQL finds a live gateway replica registered on a host
+// other than selfHost. A row that names no host is not evidence of another
+// machine — only a replica that could resolve its own hostname writes one — so
+// it is left out rather than read as a mismatch.
+var liveGatewayOwnerHostSQL = dbx.SQL{
+	SQLite: `
+SELECT host FROM fb_run_owners
+WHERE kind=? AND heartbeat_at_ms >= ? AND host <> ? AND host <> ''
+LIMIT 1`,
+	MySQL: `
+SELECT host FROM fb_run_owners
+WHERE kind=? AND heartbeat_at_ms >= ? AND host <> ? AND host <> ''
+LIMIT 1`,
+	Postgres: `
+SELECT host FROM fb_run_owners
+WHERE kind=$1 AND heartbeat_at_ms >= $2 AND host <> $3 AND host <> ''
+LIMIT 1`,
+}
+
+// CheckSQLiteSingleHost refuses a SQLite state database that a gateway on
+// another host is already using. Only a gateway asks: a terminal shares
+// SQLite with the gateway on its own machine as it always has, and a
+// non-SQLite database is the supported multi-replica engine, where the check
+// is a no-op.
+//
+// selfHost is the name this machine is known by; the caller passes the same
+// value it registered, so a replica never refuses against its own row.
+func (s *RunStore) CheckSQLiteSingleHost(ctx context.Context, selfHost string) error {
+	if s == nil || s.DB == nil {
+		return fmt.Errorf("nil db")
+	}
+	if dbx.DialectOf(s.DB) != dbx.SQLite {
+		return nil
+	}
+	var host string
+	err := s.DB.QueryRowContext(ctx, liveGatewayOwnerHostSQL.For(dbx.SQLite),
+		RunOwnerKindGateway, time.Now().UnixMilli()-RunOwnerLease.Milliseconds(), strings.TrimSpace(selfHost)).Scan(&host)
+	switch {
+	case err == sql.ErrNoRows:
+		return nil
+	case err != nil:
+		return err
+	}
+	return fmt.Errorf("%w: 另一台主机 %s 上已有一个存活的网关副本", ErrSQLiteMultiHost, host)
+}
+
+// liveReplicaPeerSQL reads the replicas whose heartbeat is still fresh and that
+// registered an address. A replica that registered none — a terminal, or a
+// gateway that could not work out where its peers reach it — contributes
+// nothing, because nothing can be sent to it.
+var liveReplicaPeerSQL = dbx.SQL{
+	SQLite: `
+SELECT owner, internal_addr, kind FROM fb_run_owners
+WHERE heartbeat_at_ms >= ? AND internal_addr <> ''
+ORDER BY owner`,
+	MySQL: `
+SELECT owner, internal_addr, kind FROM fb_run_owners
+WHERE heartbeat_at_ms >= ? AND internal_addr <> ''
+ORDER BY owner`,
+	Postgres: `
+SELECT owner, internal_addr, kind FROM fb_run_owners
+WHERE heartbeat_at_ms >= $1 AND internal_addr <> ''
+ORDER BY owner`,
+}
+
+// LiveReplicaPeers returns every replica that is heartbeating right now and can
+// be reached, this process included: the set a replica-wide operation is
+// broadcast to (plan 213 §3.2), and the set a peer request may have come from.
+func (s *RunStore) LiveReplicaPeers(ctx context.Context) ([]ReplicaPeer, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	rows, err := s.DB.QueryContext(ctx, liveReplicaPeerSQL.For(dbx.DialectOf(s.DB)),
+		time.Now().UnixMilli()-RunOwnerLease.Milliseconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReplicaPeer
+	for rows.Next() {
+		var owner, addr, kind string
+		if err := rows.Scan(&owner, &addr, &kind); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(addr) == "" {
+			continue
+		}
+		out = append(out, ReplicaPeer{
+			Owner:        strings.TrimSpace(owner),
+			InternalAddr: strings.TrimSpace(addr),
+			Kind:         strings.TrimSpace(kind),
+		})
+	}
+	return out, rows.Err()
+}
+
+// LiveReplicaAddrs returns the internal addresses of the live replicas, which is
+// what a peer request's source address is checked against.
+func (s *RunStore) LiveReplicaAddrs(ctx context.Context) ([]string, error) {
+	peers, err := s.LiveReplicaPeers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		out = append(out, peer.InternalAddr)
+	}
+	return out, nil
+}
+
+// ReplicaPeer is the registered replica that owns a conversation's live run: who
+// it is, where the other replicas reach it, and what kind of process it is.
+type ReplicaPeer struct {
+	Owner        string
+	InternalAddr string
+	Kind         string
+}
+
+// liveRunPeerSQL is LiveRunPeer's shape with the dialect's placeholders left
+// open: the join's cutoff and the session take the first two, and the live-run
+// predicate that follows is numbered from there by
+// livePrimaryRunConditionFor, exactly as liveRunRefusal numbers it.
+const liveRunPeerSQL = `
+SELECT r.owner, o.internal_addr, o.kind
+FROM fb_runs r
+JOIN fb_run_owners o ON o.owner = r.owner AND o.heartbeat_at_ms >= %s
+WHERE r.session_id = %s AND r.parent_run_id IS NULL AND %s
+ORDER BY r.updated_at DESC LIMIT 1`
+
+// LiveRunPeer returns the replica that owns the session's live primary run and
+// can be reached over the internal network, or nil when the conversation is
+// not running elsewhere: no live run, a run this process owns, a run whose
+// owner is a terminal (which serves no internal endpoint), or one whose owner
+// registered no address. The gateway relays a browser connection to exactly
+// this replica (plan 213 §3.2).
+func (s *RunStore) LiveRunPeer(ctx context.Context, sessionID string) (*ReplicaPeer, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	d := dbx.DialectOf(s.DB)
+	cutoff := time.Now().UnixMilli() - RunOwnerLease.Milliseconds()
+	query := fmt.Sprintf(liveRunPeerSQL,
+		dbx.Placeholder(d, 1), dbx.Placeholder(d, 2), livePrimaryRunConditionFor(d, "r", 3))
+	args := append([]any{cutoff, strings.TrimSpace(sessionID)}, liveRunArgs(time.Now())...)
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	var owner, addr, kind string
+	if err := rows.Scan(&owner, &addr, &kind); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(owner) == strings.TrimSpace(s.Owner) {
+		return nil, nil
+	}
+	if kind != RunOwnerKindGateway || strings.TrimSpace(addr) == "" {
+		return nil, nil
+	}
+	return &ReplicaPeer{Owner: owner, InternalAddr: strings.TrimSpace(addr), Kind: kind}, nil
+}
+
+
+// HoldOwnerLease created: what it is (RunOwnerKindGateway or
+// RunOwnerKindTerminal), which machine it runs on, and — for a gateway — the
+// address the other replicas reach it at. A terminal passes an empty
+// internalAddr: it serves no internal endpoint, so no other replica ever
+// forwards to it, and an empty address is how the row says so.
+//
+// It is called once, after HoldOwnerLease, and a failure is fatal to the
+// process that makes it: a replica the database cannot describe is one the
+// others would forward to blindly, or refuse to forward to at all.
+func (s *RunStore) RegisterReplica(ctx context.Context, kind, internalAddr, host string) error {
+	if s == nil || s.DB == nil {
+		return fmt.Errorf("nil db")
+	}
+	owner := strings.TrimSpace(s.Owner)
+	if owner == "" {
+		return fmt.Errorf("a run store without an owner cannot register a replica")
+	}
+	_, err := dbx.Exec(ctx, s.DB, runOwnerLeaseProfileSQL.For(dbx.DialectOf(s.DB)),
+		strings.TrimSpace(internalAddr), strings.TrimSpace(host), strings.TrimSpace(kind), owner)
+	if err != nil {
+		return fmt.Errorf("register replica %s: %w", owner, err)
+	}
+	return nil
+}
+
 // renewing its lease. FinishedAtMs is the clock the reap stamped on it — the
 // moment its owner was last seen — which is what a surface computes the
 // run's final duration from.

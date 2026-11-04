@@ -578,6 +578,51 @@ func TestClaimDueJobLetsOnlyOneProcessWin(t *testing.T) {
 	}
 }
 
+// A due beat is claimed exactly as a due job is: two replicas reading the same
+// beat both try to move its next_run_at, and only the UPDATE that matched the
+// value it read fires the turn. Without that claim, every replica of a
+// multi-replica deployment would start a turn for the same beat.
+func TestTwoSchedulersFireOneHeartbeatOnce(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
+	if err := state.NewSessionStore(store.DB, "main").Ensure(ctx, "s-beat", "s-beat"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	hb := state.Heartbeat{SessionID: "s-beat", IntervalSec: 300, Prompt: "anything new?"}
+	if err := ApplyHeartbeatInterval(&hb, now.Add(-10*time.Minute), false); err != nil {
+		t.Fatalf("ApplyHeartbeatInterval: %v", err)
+	}
+	if err := store.SaveHeartbeat(ctx, hb); err != nil {
+		t.Fatalf("SaveHeartbeat: %v", err)
+	}
+
+	deps := func(rec *recorder) SchedulerDeps {
+		return SchedulerDeps{StartHeartbeat: rec.startHeartbeat, Now: func() time.Time { return now }}
+	}
+	first, second := &recorder{}, &recorder{}
+	s1 := &Scheduler{Store: store, AgentID: "main", Deps: deps(first)}
+	s2 := &Scheduler{Store: store, AgentID: "main", Deps: deps(second)}
+	s1.RunDue(ctx)
+	waitIdle(t, s1)
+	s2.RunDue(ctx)
+	waitIdle(t, s2)
+
+	if prompts, _, _ := first.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the first scheduler fired %d beats, want the one it claimed", len(prompts))
+	}
+	if prompts, _, _ := second.snapshot(); len(prompts) != 0 {
+		t.Fatalf("the second scheduler fired %d beats, want none", len(prompts))
+	}
+	fired, _ := store.GetHeartbeat(ctx, "s-beat")
+	if fired.LastFiredAt == nil || *fired.LastFiredAt != now.Unix() {
+		t.Fatalf("the single beat must record when it fired: %#v", fired.LastFiredAt)
+	}
+	if fired.NextRunAt == nil || *fired.NextRunAt != now.Add(5*time.Minute).Unix() {
+		t.Fatalf("the beat must be re-anchored past the fire: %v", fired.NextRunAt)
+	}
+}
+
 // A heartbeat cleared while its turn runs is not resurrected by the re-anchor.
 func TestHeartbeatClearedWhileItRunsIsNotResurrected(t *testing.T) {
 	ctx := context.Background()

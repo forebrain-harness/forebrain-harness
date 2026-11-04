@@ -68,7 +68,20 @@ func (s *Server) projectChannelBindings(ctx context.Context, active config.Summa
 		}
 		configs = append(configs, channel.ProjectChannelConfig{ProjectID: row.ProjectID, Kind: row.Kind, Section: section})
 	}
-	return channel.BuildProjectChannels(configs, active.WorkspaceRoot)
+	return channel.BuildProjectChannels(configs, active.WorkspaceRoot, s.wrapChannelLease)
+}
+
+// wrapChannelLease puts a long-connection or polling channel behind the lease
+// that keeps its account connected on one replica only (plan 213 §3.4). A
+// webhook-style adapter needs nothing: the load balancer delivers each message
+// to exactly one replica. The lease name is the account identity, so two
+// projects sharing one bot are still one connection.
+func (s *Server) wrapChannelLease(cfg channel.ProjectChannelConfig, h channel.Handler) channel.Handler {
+	name := channel.LeaseName(cfg.Kind, cfg.Section)
+	if name == "" {
+		return h
+	}
+	return s.Env.Leases.Guard(name, h)
 }
 
 // channelTaskCommandRefusal is what a batch project's channel answers a built-in

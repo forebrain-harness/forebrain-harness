@@ -992,6 +992,110 @@ func TestOwnerLeaseRegistersAndLeaves(t *testing.T) {
 	}
 }
 
+// TestRegisterReplicaRecordsTheReplicaColumns pins the registration a
+// multi-replica deployment reads (plan 213 §3.1): what this process is, which
+// machine it runs on, and — for a gateway — where the other replicas reach it.
+// The heartbeat renewal writes only the clock, so the registration has to
+// survive it, and a store without an owner refuses.
+func TestRegisterReplicaRecordsTheReplicaColumns(t *testing.T) {
+	ctx := context.Background()
+	a, _, db := newTwoOwnerStores(t)
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if err := a.RegisterReplica(ctx, RunOwnerKindGateway, "http://10.0.3.17:8787", "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (string, string, string) {
+		t.Helper()
+		var kind, host, addr string
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db),
+			`SELECT kind, host, internal_addr FROM fb_run_owners WHERE owner=?`), "owner-a").Scan(&kind, &host, &addr); err != nil {
+			t.Fatal(err)
+		}
+		return kind, host, addr
+	}
+	if kind, host, addr := read(); kind != RunOwnerKindGateway || host != "node-a" || addr != "http://10.0.3.17:8787" {
+		t.Fatalf("registered replica = %q/%q/%q, want gateway/node-a/http://10.0.3.17:8787", kind, host, addr)
+	}
+	// Renewing the lease is what a live replica does every few seconds; it must
+	// not disturb what the replica said about itself.
+	ageOwnerLease(t, db, "owner-a")
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_run_owners SET heartbeat_at_ms=? WHERE owner=?`),
+		time.Now().UnixMilli(), "owner-a"); err != nil {
+		t.Fatal(err)
+	}
+	if kind, host, addr := read(); kind != RunOwnerKindGateway || host != "node-a" || addr != "http://10.0.3.17:8787" {
+		t.Fatalf("replica after a renewal = %q/%q/%q, want the registration unchanged", kind, host, addr)
+	}
+
+	bare := &RunStore{DB: db}
+	if err := bare.RegisterReplica(ctx, RunOwnerKindGateway, "", ""); err == nil {
+		t.Fatal("a store without an owner must refuse to register a replica")
+	}
+}
+
+// TestCheckSQLiteSingleHost pins the refusal behind owner ruling 2026-11-03
+// (plan 213 §3.5): a gateway does not share a SQLite state database with a
+// gateway on another host, because SQLite on shared storage is not safe for
+// two writers. A gateway on the same host — the ordinary single-machine
+// terminal-plus-gateway setup — is allowed, a terminal on another host is
+// allowed, and a replica whose heartbeat has lapsed is allowed because it is
+// no longer driving anything.
+func TestCheckSQLiteSingleHost(t *testing.T) {
+	ctx := context.Background()
+	a, _, db := newTwoOwnerStores(t)
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if err := a.RegisterReplica(ctx, RunOwnerKindGateway, "http://10.0.3.17:8787", "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(owner, host, kind string, heartbeatAgo time.Duration) {
+		t.Helper()
+		_, err := db.Exec(dbx.Rebind(dbx.DialectOf(db),
+			`INSERT INTO fb_run_owners(owner, heartbeat_at_ms, internal_addr, host, kind) VALUES(?,?,?,?,?)`),
+			owner, time.Now().UnixMilli()-heartbeatAgo.Milliseconds(), "http://10.0.3.99:8787", host, kind)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// This process's own row, and a replica that names no host, are not
+	// another machine.
+	if err := a.CheckSQLiteSingleHost(ctx, "node-a"); err != nil {
+		t.Fatalf("the same host must be allowed: %v", err)
+	}
+	seed("webchat-anonymous", "", RunOwnerKindGateway, 0)
+	if err := a.CheckSQLiteSingleHost(ctx, "node-a"); err != nil {
+		t.Fatalf("a replica that names no host must be allowed: %v", err)
+	}
+	// A terminal on another host shares SQLite with its own machine's gateway
+	// and drives no runs of its own here, so it is not a second writer.
+	seed("tui-elsewhere", "node-b", RunOwnerKindTerminal, 0)
+	if err := a.CheckSQLiteSingleHost(ctx, "node-a"); err != nil {
+		t.Fatalf("a terminal on another host must be allowed: %v", err)
+	}
+	// A lapsed gateway is already being reaped, not a live second writer.
+	seed("webchat-stale", "node-b", RunOwnerKindGateway, RunOwnerLease+time.Minute)
+	if err := a.CheckSQLiteSingleHost(ctx, "node-a"); err != nil {
+		t.Fatalf("a lapsed gateway must be allowed: %v", err)
+	}
+
+	if dbx.DialectOf(db) != dbx.SQLite {
+		t.Skip("the servers are the supported multi-replica engines; the refusal is SQLite's alone")
+	}
+	seed("webchat-live", "node-b", RunOwnerKindGateway, 0)
+	err = a.CheckSQLiteSingleHost(ctx, "node-a")
+	if !errors.Is(err, ErrSQLiteMultiHost) {
+		t.Fatalf("a live gateway on another host = %v, want ErrSQLiteMultiHost", err)
+	}
+}
+
 // TestFirstPrimaryRunIDReturnsTheEarliestPrimaryRun pins the read settling a
 // fire rests on: the first primary run of a fire's session is the fire's run,
 // however many runs the conversation later holds and however many subagent
@@ -1143,5 +1247,54 @@ func TestLivePrimaryInputTruncatesAndTracksLiveness(t *testing.T) {
 	}
 	if got, err := rt.LivePrimaryInput(ctx, "s"); err != nil || got != "" {
 		t.Fatalf("ended run: LivePrimaryInput = %q, %v; want empty", got, err)
+	}
+}
+
+// TestRecoveryScanRunsOnEveryDialect pins the recovery scans against the three
+// engines. It goes through OpenStateForTest so PostgreSQL and MySQL run it too:
+// the scan orders by a column the wait row does not select, and PostgreSQL
+// refuses that under SELECT DISTINCT (SQLSTATE 42P10) — a shape only the matrix
+// can catch, because every other caller of this scan opens SQLite directly.
+func TestRecoveryScanRunsOnEveryDialect(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ensureSessionsForRuns(t, db, "conversation")
+	runs := &RunStore{DB: db}
+	actions := &ActionService{DB: db}
+
+	run, err := runs.CreateRun(ctx, "conversation", "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, err := actions.CreatePending(ctx, "conversation", "shell", map[string]any{"session_id": "conversation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.SetWaitingAction(ctx, run.ID, Wait{
+		RunID: run.ID, ActionID: action.ID, ToolName: "shell", ToolInputJSON: "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := actions.Approve(ctx, action.ID, "approved"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both scans must answer on every engine: the session-scoped one (the CTE
+	// form) and the whole-server one (no CTE).
+	for _, sessionID := range []string{"", "conversation"} {
+		resolved, err := runs.ListResolvedWaitActionIDs(ctx, sessionID, 0)
+		if err != nil {
+			t.Fatalf("ListResolvedWaitActionIDs(%q): %v", sessionID, err)
+		}
+		if len(resolved) != 1 || resolved[0] != action.ID {
+			t.Fatalf("ListResolvedWaitActionIDs(%q) = %v, want [%s]", sessionID, resolved, action.ID)
+		}
+		if _, err := runs.ListUncertainResolvedWaits(ctx, sessionID, 0); err != nil {
+			t.Fatalf("ListUncertainResolvedWaits(%q): %v", sessionID, err)
+		}
 	}
 }
