@@ -238,6 +238,11 @@ type Renderer struct {
 	// execution, which the terminal shows read-only (plan 152): the footer
 	// says so, and Plan mode never applies there.
 	batchReadOnly bool
+	// peerCount is how many other live agents share this conversation's
+	// directory tree. The footer says so with a ⇄ segment, and says nothing at
+	// all when it is zero: nobody else working here is the ordinary case, not
+	// a fact worth a line (plan 199 §3.5).
+	peerCount int
 	// composerTokens is the footer's token budget, keyed by the view it
 	// belongs to: "" is the conversation's own, a roster key is that
 	// subagent's (each subagent's view answers "how much context is left for
@@ -2201,7 +2206,11 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			_, _ = fmt.Fprintln(r.out)
 			return
 		}
-		if !r.fullBodyMode && !toolStatusFailed(f) {
+		// peer_send's body is the message it sent and the delivery result, not
+		// the engine's JSON answer. The viewport's full-body render has to shape
+		// it too: this is the card a reader actually sees, while the compact
+		// branch is the same body in the non-viewport stream.
+		if !toolStatusFailed(f) && (!r.fullBodyMode || strings.EqualFold(title, "peer_send")) {
 			content = summaryToolBody(f, title)
 			if content == "" {
 				_, _ = fmt.Fprintln(r.out)
@@ -2627,6 +2636,12 @@ func formatToolContentWithInput(title, content, cwd string, input map[string]any
 	if lower == "retrieve_output" {
 		return retrieveOutputMarkdownBody(content)
 	}
+	// peer_send's body is the message and the delivery result, already shaped by
+	// the card pipeline. The generic metadata cleaner would drop its blank
+	// lines and read the result line as a label.
+	if lower == "peer_send" {
+		return content
+	}
 	if lower == "web_search" || lower == "websearch" {
 		if formatted, recognized := tool.FormatWebSearchResult(content); recognized {
 			return formatted
@@ -2982,6 +2997,11 @@ func summaryToolBody(f Frame, title string) string {
 	if isMCPToolTitle(title) {
 		return mcpToolOutputBody(content)
 	}
+	// peer_send's answer is JSON and its message is the call's input: the card
+	// shows the message and the delivery result, never the raw answer.
+	if strings.EqualFold(strings.TrimSpace(title), "peer_send") {
+		return peerSendCardBody(f.ToolMeta.Input, content)
+	}
 	if isReadLikeTool(title) {
 		if n := readFileContentLineCount(content); n > 0 {
 			return fmt.Sprintf("Read %d lines", n)
@@ -3000,6 +3020,105 @@ func isMCPToolTitle(title string) bool {
 
 func retrieveOutputMarkdownBody(content string) string {
 	return normalizeRetrievedOutputMarkdown(content)
+}
+
+// peerSendBodyLines is how many lines of the sent message a peer_send card
+// shows. Anything longer folds behind the card's own disclosure, the way every
+// other tool body does.
+const peerSendBodyLines = 3
+
+// peerSendAnswer is the engine's answer to peer_send, as the model received it
+// (pkg/run/peer_tools.go). The card turns it into one footnote line instead of
+// showing the JSON.
+type peerSendAnswer struct {
+	Status     string `json:"status"`
+	To         string `json:"to"`
+	PeerStatus string `json:"peer_status"`
+}
+
+// peerSendCardBody is the peer_send card's body (plan 199 §3.2): the message
+// the agent sent — at most its first three lines — and the delivery result as a
+// footnote on its own line. The engine's answer is JSON, which a reader should
+// never see; when it cannot be read the message stands alone.
+func peerSendCardBody(input map[string]any, content string) string {
+	lines := peerSendMessageLines(input["message"])
+	footnote := peerSendFootnote(content)
+	switch {
+	case len(lines) == 0:
+		return footnote
+	case footnote == "":
+		return strings.Join(lines, "\n")
+	default:
+		return strings.Join(lines, "\n") + "\n" + footnote
+	}
+}
+
+// peerSendMessageLines is the sent message's first lines. The engine trims the
+// message before sending it, so the card trims it the same way.
+func peerSendMessageLines(message any) []string {
+	text, _ := message.(string)
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) > peerSendBodyLines {
+		lines = lines[:peerSendBodyLines]
+	}
+	return lines
+}
+
+// peerSendFootnote is the delivery result as one sentence, or empty when the
+// answer cannot be read.
+func peerSendFootnote(content string) string {
+	answer, ok := parsePeerSendAnswer(content)
+	if !ok {
+		return ""
+	}
+	if to := strings.TrimSpace(answer.To); to != "" {
+		if status := strings.TrimSpace(answer.PeerStatus); status != "" {
+			return "Sent to " + to + " (" + status + ")."
+		}
+		return "Sent to " + to + "."
+	}
+	if status := strings.TrimSpace(answer.Status); status != "" {
+		runes := []rune(status)
+		runes[0] = unicode.ToUpper(runes[0])
+		return string(runes) + "."
+	}
+	return ""
+}
+
+// parsePeerSendAnswer reads the engine's answer from a card's content. The
+// model received the answer as JSON, and a replayed row keeps it verbatim; the
+// live card carries the generic formatter envelope around it. Both are
+// accepted, and anything else is not an answer.
+func parsePeerSendAnswer(content string) (peerSendAnswer, bool) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return peerSendAnswer{}, false
+	}
+	var answer peerSendAnswer
+	if err := json.Unmarshal([]byte(trimmed), &answer); err == nil && answer.namesADelivery() {
+		return answer, true
+	}
+	if body := extractAnyFencedBody(trimmed); body != "" {
+		var envelope struct {
+			Output string `json:"output"`
+		}
+		if err := json.Unmarshal([]byte(body), &envelope); err == nil {
+			if err := json.Unmarshal([]byte(strings.TrimSpace(envelope.Output)), &answer); err == nil && answer.namesADelivery() {
+				return answer, true
+			}
+		}
+	}
+	return peerSendAnswer{}, false
+}
+
+// namesADelivery reports whether the answer carries the one fact a footnote
+// needs: where the message went, or at least what happened to it.
+func (a peerSendAnswer) namesADelivery() bool {
+	return strings.TrimSpace(a.Status) != "" || strings.TrimSpace(a.To) != ""
 }
 
 // Query and line-range recovery responses start with a Markdown heading and
@@ -3534,6 +3653,20 @@ func (r *Renderer) SetFullAccess(on bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.fullAccess = on
+}
+
+// SetPeerCount says how many other agents are working in the conversation's
+// directory tree, for the footer's ⇄ segment; zero removes it.
+func (r *Renderer) SetPeerCount(n int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	r.peerCount = n
 }
 
 // batchReadOnlyFooterLabel is the footer's segment in a batch project: nothing

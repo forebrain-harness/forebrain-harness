@@ -20,6 +20,10 @@ export type ApprovalFamily =
   | 'apply_patch'
   | 'shell'
   | 'shell_outside_sandbox'
+  /** A git command that would sweep up another agent's uncommitted work
+   *  (plan 200 §3): the same-tree guard's own reason, and the one approval
+   *  that names who it would affect. */
+  | 'peer_work_tree'
   | 'request_permissions'
   | 'enter_plan_mode'
   | 'mcp_tool'
@@ -50,6 +54,9 @@ export interface ApprovalFacts {
   rationale?: string
   /** The memory note's own body, shown scrollable and never truncated. */
   bodyMarkdown?: string
+  /** The agents a same-tree git guard would sweep up (plan 200 §3), each with
+   *  the identity block the gateway derived and the files it is editing. */
+  peerAgents?: { name: string; mark: string; tone: number; files: string[] }[]
 }
 
 /** A pending action's payload as the engine wrote it: snake_case keys, raw. */
@@ -77,6 +84,10 @@ export function approvalFamily(kind: string, payload: Record<string, unknown>): 
   // this function with one has miscalled it, and fallback is the two-choice
   // card that says only what it truly knows.
   if (k === 'user_interaction') return 'fallback'
+  // The same-tree git guard's own reason, read before the kind's shell branch:
+  // it is a shell command, and the question it asks is about the other agents
+  // in the directory rather than about the command (plan 200 §3).
+  if (payload.approval_reason === 'peer_work_tree') return 'peer_work_tree'
   if (payload.approval_reason === 'sandbox_denied' || payload.sandbox_permissions === 'require_escalated' || payload.profile_elevation === true) {
     return 'shell_outside_sandbox'
   }
@@ -316,12 +327,43 @@ function permissionEntries(permissions: unknown): { access: 'read' | 'write'; pa
   return entries
 }
 
+/**
+ * The agents a same-tree git guard named, each with the identity block the
+ * gateway derived and the files it is editing. A payload from a server that did
+ * not add `peer_agents` still lists names and files, so the rows are built from
+ * those and simply carry no block — better a row than a missing agent.
+ */
+function peerAgentsOf(payload: Record<string, unknown>): { name: string; mark: string; tone: number; files: string[] }[] {
+  const enriched = Array.isArray(payload.peer_agents) ? payload.peer_agents : []
+  if (enriched.length) {
+    return enriched.map((raw) => {
+      const row = (raw ?? {}) as Record<string, unknown>
+      return {
+        name: String(row.name ?? '').trim(),
+        mark: String(row.mark ?? '').trim(),
+        tone: Number(row.tone ?? 0) || 0,
+        files: Array.isArray(row.files) ? row.files.map((file) => String(file)) : [],
+      }
+    }).filter((row) => row.name !== '')
+  }
+  const filesByName = new Map<string, string[]>()
+  for (const raw of Array.isArray(payload.peer_files) ? payload.peer_files : []) {
+    const row = (raw ?? {}) as Record<string, unknown>
+    const name = String(row.name ?? '').trim()
+    if (!name) continue
+    filesByName.set(name, Array.isArray(row.files) ? row.files.map((file) => String(file)) : [])
+  }
+  return (Array.isArray(payload.peer_names) ? payload.peer_names : [])
+    .map((name) => String(name).trim())
+    .filter((name) => name !== '')
+    .map((name) => ({ name, mark: '', tone: 0, files: filesByName.get(name) ?? [] }))
+}
+
 /** Whether a permissions profile asks for network access at all. The engine's
  * profile has no host list (pkg/safety/permission_types.go
  * NetworkPermissionProfile is `enabled` alone), so a "reach <host>" line could
  * only ever be invented here; the fact is that the grant opens the network. */
-function permissionNetworkEnabled(permissions: unknown): boolean {
-  const profile = permissions && typeof permissions === 'object' ? permissions as Record<string, unknown> : null
+function permissionNetworkEnabled(permissions: unknown): boolean {  const profile = permissions && typeof permissions === 'object' ? permissions as Record<string, unknown> : null
   const network = profile?.network && typeof profile.network === 'object' ? profile.network as Record<string, unknown> : null
   return network?.enabled === true
 }
@@ -422,6 +464,18 @@ function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>): 
       // command it found nothing dangerous in has no line here.
       const sentence = dangerousRuleFact(String(payload.dangerous_rule ?? '').trim().toLowerCase())
       return { family, facts: sentence ? [sentence] : [] }
+    }
+    case 'peer_work_tree': {
+      // Who the command would sweep up, and what each of them is editing. The
+      // block and the tone are the gateway's derivation; the surface only lays
+      // the row out (plan 200 §3).
+      const agents = peerAgentsOf(payload)
+      const command = String(payload.command ?? '').trim() || String(payload.tool_name ?? '').trim()
+      return {
+        family,
+        peerAgents: agents,
+        facts: [t('chat.approvalPeerWorkTreeFact', { count: agents.length, command })],
+      }
     }
     case 'shell_outside_sandbox': {
       // A scoped retry is about the scope it would gain, not the sandbox it
@@ -531,6 +585,10 @@ export function approvalQuestion(family: ApprovalFamily, kind: string, payload: 
     case 'apply_patch':
       return t('chat.approvalPatchQuestion')
     case 'shell':
+      return t('chat.approvalShellQuestion')
+    case 'peer_work_tree':
+      // The footer and the question are the shell command's own: what makes
+      // this approval different is who it would affect, which the facts name.
       return t('chat.approvalShellQuestion')
     case 'shell_outside_sandbox':
       return t('chat.approvalShellOutsideQuestion')

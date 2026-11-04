@@ -5444,3 +5444,54 @@ func TestBatchFooterLabel(t *testing.T) {
 		t.Fatalf("footer after the batch conversation = %q", got)
 	}
 }
+
+// The footer names how many other agents are working in this tree, and says
+// nothing at all when nobody else is: the ordinary case is not a fact worth a
+// line (plan 199 §3.5).
+func TestFooterSaysHowManyAgentsShareTheTree(t *testing.T) {
+	renderer := NewRenderer(io.Discard, io.Discard)
+	renderer.SetComposerFooter(ComposerFooter{Model: "opencode-go/deepseek-v4.1-flash"})
+
+	footer := func() string {
+		renderer.mu.Lock()
+		defer renderer.mu.Unlock()
+		return stripANSI(renderer.composerFooterText(120))
+	}
+	if got := footer(); strings.Contains(got, "⇄") {
+		t.Fatalf("footer with nobody else in the tree = %q, want no count", got)
+	}
+
+	renderer.SetPeerCount(2)
+	if got := footer(); !strings.Contains(got, "⇄ 2") {
+		t.Fatalf("footer = %q, want the same-tree count", got)
+	}
+	// The count is a segment like the model: it does not replace one.
+	if got := footer(); !strings.Contains(got, "opencode-go/deepseek-v4.1-flash") {
+		t.Fatalf("footer = %q, want the model kept beside the count", got)
+	}
+
+	renderer.SetPeerCount(0)
+	if got := footer(); strings.Contains(got, "⇄") {
+		t.Fatalf("footer after the other agents left = %q, want the count gone", got)
+	}
+}
+
+// A count read off the loop paints the composer without disturbing anything
+// else, and any other message stays with the reducer.
+func TestPeerTreeCountNotificationPaintsTheFooter(t *testing.T) {
+	renderer := NewRenderer(io.Discard, io.Discard)
+	state := &streamState{}
+
+	if handlePeerTreeCountNotification(renderer, state, TokenUsageDeltaMsg{}) {
+		t.Fatal("an unrelated message must fall through to the reducer")
+	}
+	if !handlePeerTreeCountNotification(renderer, state, PeerTreeCountMsg{Count: 3}) {
+		t.Fatal("a tree count is handled here")
+	}
+	renderer.mu.Lock()
+	count := renderer.peerCount
+	renderer.mu.Unlock()
+	if count != 3 {
+		t.Fatalf("renderer peer count = %d, want 3", count)
+	}
+}

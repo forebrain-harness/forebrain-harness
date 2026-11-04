@@ -325,11 +325,22 @@ func (s *Server) watchRunQueue(q *run.InputQueue, runID, sessionID string) {
 		defer publishing.Unlock()
 		ctx := context.Background()
 		for _, in := range q.TakeDelivered() {
-			_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventInputDelivered, event.InputDeliveredPayload{
+			payload := event.InputDeliveredPayload{
 				Text:          in.Text,
 				Attachments:   in.Attachments,
 				MentionImages: in.MentionImages,
-			})
+			}
+			// A peer message delivered into a running turn is that session's
+			// letter, and the page draws it as one — which needs the sender and
+			// the identity block, not just the envelope (plan 200 §3).
+			if state.IsPeerOrigin(in.Origin) {
+				payload.Origin = in.Origin
+				if fromName, _, ok := process.ParsePeerEnvelope(in.Text); ok {
+					payload.FromName = fromName
+					payload.PeerMark, payload.PeerTone = process.PeerMark(fromName, "")
+				}
+			}
+			_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventInputDelivered, payload)
 		}
 		s.appendPendingInputUpdated(ctx, runID, sessionID, toPendingInputPreview(q.Preview()))
 	})
@@ -1270,14 +1281,22 @@ func (s *Server) autoContinuePlans(sid string) []event.AutoContinueScheduledPayl
 }
 
 // sessionBoundData is the session_bound reply's data: where the replay starts
-// and ends, and the continuations pending right now, when there are any. The
-// conversation's own is also sent as the single auto_continue every client
-// already reads; the whole list, subagents included, travels as auto_continues.
-func sessionBoundData(cursor, highWater int64, plans []event.AutoContinueScheduledPayload) map[string]any {
+// and ends, the continuations pending right now, when there are any, and the
+// peer messages waiting for the person's decision. The conversation's own
+// continuation is also sent as the single auto_continue every client already
+// reads; the whole list, subagents included, travels as auto_continues.
+//
+// A held peer message is live state of the same kind as a continuation: it is
+// not in the transcript yet, and a page that binds after it arrived has to be
+// told, or the banner only appears when the next message comes in (plan 200 §3).
+func (s *Server) sessionBoundData(sessionID string, cursor, highWater int64, plans []event.AutoContinueScheduledPayload) map[string]any {
 	data := map[string]any{
 		"cursor":         cursor,
 		"high_water":     highWater,
 		"schema_version": event.RunEventSchemaVersion,
+	}
+	if held := s.peerHeldRows(sessionID); len(held) > 0 {
+		data["peer_held"] = held
 	}
 	if len(plans) == 0 {
 		return data

@@ -120,6 +120,14 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       switchToSession: vi.fn(),
       resetForNewChat: f.resetForNewChat,
       rebindSessionObserver: f.rebindSessionObserver,
+      // The peer facts the page draws (plan 200 §3): the messages waiting for
+      // the person and the drawer's view of the machine. A case drives them by
+      // writing these refs, the way it writes messages.
+      heldPeers: ref([]),
+      peerDirectory: ref({ files: [], sameTree: [], other: [], otherTotal: 0 }),
+      peerDirectoryPage: ref(1),
+      refreshPeerDirectory: vi.fn(async () => {}),
+      answerPeerHeld: vi.fn(async () => true),
       formatRuntimeStatusLabel: actual.formatRuntimeStatusLabel,
     }),
   }

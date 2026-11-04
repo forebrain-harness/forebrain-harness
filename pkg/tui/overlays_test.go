@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/mattn/go-runewidth"
@@ -2990,5 +2992,312 @@ func TestCodingExitPlanChoicesUnchanged(t *testing.T) {
 		if choices[i].planOnly {
 			t.Fatalf("coding rows must never set planOnly: %+v", choices[i])
 		}
+	}
+}
+
+// --- held peer messages (plan 199 §3.3) ---
+
+// heldPeerExample is one message the engine is holding for the person.
+func heldPeerExample() process.HeldPeerMessage {
+	return process.HeldPeerMessage{
+		MsgID:    "held-1",
+		From:     "uds:/tmp/b.sock",
+		FromName: "builder",
+		Preview:  "please review line 12\nand the rest of the diff\nthird line\nfourth line",
+		Cause:    event.PeerHoldCauseModeMismatch,
+	}
+}
+
+// The question says who is waiting, what they sent, why it was held and what
+// can be answered — and never the whole message.
+func TestHeldPeerOverlayShowsSenderPreviewAndCause(t *testing.T) {
+	overlay := newHeldPeerOverlay(context.Background(), io.Discard, nil, heldPeerExample())
+
+	lines := overlay.lines(80)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"Message from builder is held",
+		"please review line 12",
+		"and the rest of the diff",
+		"third line",
+		"permission modes differ",
+		"Release",
+		"Deny",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("held prompt %q missing %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, "fourth line") {
+		t.Fatalf("held prompt shows beyond the preview's first %d lines: %q", heldPeerPreviewMaxLines, joined)
+	}
+	if !strings.Contains(joined, "…") {
+		t.Fatalf("held prompt must say the message continues: %q", joined)
+	}
+	// The focused answer is the first one: releasing is what the sender waits
+	// for, so Enter is the answer that delivers.
+	if !strings.HasPrefix(overlay.answersLine(), "\x1b[36m❯\x1b[0m Release") {
+		t.Fatalf("focused answer row=%q want the pointer on Release", overlay.answersLine())
+	}
+}
+
+// Every hold cause is said in the person's words; a cause this build does not
+// know is not explained at all.
+func TestHeldPeerCauseLabels(t *testing.T) {
+	cases := map[string]string{
+		event.PeerHoldCauseModeMismatch:   "permission modes differ",
+		event.PeerHoldCauseNoModeAsserted: "sender mode unknown",
+		event.PeerHoldCauseHoldAll:        "holding all peer messages",
+		"":                                "",
+		"future-cause":                    "",
+	}
+	for cause, want := range cases {
+		if got := heldPeerCauseLabel(cause); got != want {
+			t.Fatalf("cause %q label=%q want %q", cause, got, want)
+		}
+	}
+}
+
+// A prompt with no preview says who is waiting and nothing else rather than
+// leaving a blank body behind.
+func TestHeldPeerOverlayWithoutPreviewOrName(t *testing.T) {
+	overlay := newHeldPeerOverlay(context.Background(), io.Discard, nil, process.HeldPeerMessage{
+		MsgID: "held-2", From: "uds:/tmp/b.sock", Cause: event.PeerHoldCauseHoldAll,
+	})
+	joined := strings.Join(overlay.lines(80), "\n")
+	if !strings.Contains(joined, "Message from uds:/tmp/b.sock is held") {
+		t.Fatalf("held prompt without a name must use the address: %q", joined)
+	}
+	if !strings.Contains(joined, "holding all peer messages") {
+		t.Fatalf("held prompt lost its cause: %q", joined)
+	}
+}
+
+// The keys answer the question the way they answer an approval's: Enter takes
+// the focused answer, the arrows move it, and Esc leaves the message held.
+func TestHeldPeerOverlayAnswersWithTheKeyPressed(t *testing.T) {
+	cases := []struct {
+		name string
+		keys []byte
+		want heldPeerChoice
+	}{
+		{"enter releases", []byte("\r"), heldPeerRelease},
+		{"right then enter denies", []byte{0x1b, '[', 'C', '\r'}, heldPeerDeny},
+		{"d denies", []byte("d"), heldPeerDeny},
+		{"escape leaves it held", []byte{0x1b}, heldPeerLeft},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			readEnd, writeEnd, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("os.Pipe: %v", err)
+			}
+			t.Cleanup(func() {
+				readEnd.Close()
+				writeEnd.Close()
+			})
+			rs := newRawSelector(readEnd, nil)
+			overlay := newHeldPeerOverlay(context.Background(), io.Discard, rs, heldPeerExample())
+			go func() {
+				_, _ = writeEnd.Write(tc.keys)
+			}()
+			got, err := overlay.Run()
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("answer=%v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The question is an approval the person answers, not a modal that can take the
+// input from the approval already on screen: it queues behind it, and the note
+// under that approval says it is waiting.
+func TestHeldPeerPromptQueuesBehindAnApproval(t *testing.T) {
+	forcedTermWidth = 80
+	forcedTermHeight = 24
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+	rs := newRawSelector(nil, r)
+
+	// Hold stdin the way an approval does; the hold is process-wide state, so
+	// every exit path releases it.
+	release := heldInput(t, rs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	overlay := newHeldPeerOverlay(ctx, &out, rs, heldPeerExample())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = overlay.Run()
+	}()
+	waitFor(t, 2*time.Second, func() bool {
+		return approvalQueueDepth.Load() == 1
+	})
+	r.mu.Lock()
+	note := r.overlayNote
+	r.mu.Unlock()
+	if !strings.Contains(note, "1 approval waiting") {
+		t.Fatalf("overlay note %q must report the held question waiting behind the approval", note)
+	}
+
+	release()
+	waitFor(t, 5*time.Second, func() bool {
+		return approvalQueueDepth.Load() == 0
+	})
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("held prompt did not return once its context was cancelled")
+	}
+}
+
+// askHeldPeerMessage is what the idle loop calls: the answer reaches the
+// session's own ports, and a question left with Esc reaches neither.
+func TestAskHeldPeerMessageAppliesTheAnswer(t *testing.T) {
+	cases := []struct {
+		name        string
+		keys        []byte
+		wantRelease bool
+		wantDeny    bool
+	}{
+		{"enter releases", []byte("\r"), true, false},
+		{"right then enter denies", []byte{0x1b, '[', 'C', '\r'}, false, true},
+		{"escape answers nothing", []byte{0x1b}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			readEnd, writeEnd, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("os.Pipe: %v", err)
+			}
+			t.Cleanup(func() {
+				readEnd.Close()
+				writeEnd.Close()
+			})
+			rs := newRawSelector(readEnd, nil)
+			session := &heldPeerTestSession{}
+			state := &streamState{sessionID: "conv-1"}
+			held := heldPeerExample()
+			state.addHeldPeer(held)
+			go func() {
+				_, _ = writeEnd.Write(tc.keys)
+			}()
+			askHeldPeerMessage(context.Background(), io.Discard, rs, session, state, NewRenderer(io.Discard, io.Discard), held)
+
+			if got := len(session.released) > 0; got != tc.wantRelease {
+				t.Fatalf("released=%v want %v", session.released, tc.wantRelease)
+			}
+			if got := len(session.denied) > 0; got != tc.wantDeny {
+				t.Fatalf("denied=%v want %v", session.denied, tc.wantDeny)
+			}
+			if tc.wantRelease && session.released[0] != held.MsgID {
+				t.Fatalf("released %q want %q", session.released[0], held.MsgID)
+			}
+			if tc.wantDeny && session.denied[0] != held.MsgID {
+				t.Fatalf("denied %q want %q", session.denied[0], held.MsgID)
+			}
+			// Asked once is asked: the question never reopens on its own, so
+			// the person is not interrupted again by a message they chose not
+			// to answer now.
+			if _, waiting := state.nextHeldPeer(); waiting {
+				t.Fatal("a message whose question was asked must not be asked again on its own")
+			}
+		})
+	}
+}
+
+// heldPeerTestSession is the slice of Session askHeldPeerMessage talks to: the
+// peer hold ports. Every other method belongs to a real session and is never
+// reached here.
+type heldPeerTestSession struct {
+	Session
+	released []string
+	denied   []string
+}
+
+func (s *heldPeerTestSession) HeldPeerMessages(string) []process.HeldPeerMessage { return nil }
+
+func (s *heldPeerTestSession) ReleasePeerMessage(msgID string) error {
+	s.released = append(s.released, msgID)
+	return nil
+}
+
+func (s *heldPeerTestSession) DenyPeerMessage(msgID string) error {
+	s.denied = append(s.denied, msgID)
+	return nil
+}
+
+// A git command that would sweep another agent's work is asked about by name:
+// the reason line says who else is in this tree, which is the question no
+// preset, allow rule or full access can answer (plan 198 §3.5, 199 §3.5).
+func TestApprovalOverlayNamesTheAgentsSharingTheTree(t *testing.T) {
+	req := withServiceDecisions(turn.ToolApprovalRequest{
+		ToolName: "Bash",
+		ToolInputJSON: `{"command":"git stash","force_tool_approval":true,"ask_even_in_yolo":true,` +
+			`"approval_reason":"peer_work_tree","peer_names":["builder","reviewer"],"dangerous_rule":"git:stash"}`,
+	})
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	lines, _ := overlay.buildApprovalContent(100)
+	plain := stripANSI(strings.Join(lines, "\n"))
+
+	if !strings.Contains(plain, "Other agents in this tree: builder, reviewer") {
+		t.Fatalf("same-tree approval must name the agents:\n%s", plain)
+	}
+	if !strings.Contains(plain, "Command: git stash") {
+		t.Fatalf("same-tree approval lost its command:\n%s", plain)
+	}
+}
+
+// Every other gate keeps the reason line it always had: only the same-tree
+// gate has peers to name.
+func TestApprovalPeerWorkTreeNamesReadsOnlyItsOwnGate(t *testing.T) {
+	cases := []struct {
+		name string
+		req  turn.ToolApprovalRequest
+		want []string
+		ok   bool
+	}{
+		{
+			name: "same-tree gate",
+			req:  turn.ToolApprovalRequest{ToolInputJSON: `{"approval_reason":"peer_work_tree","peer_names":["builder"," reviewer "]}`},
+			want: []string{"builder", "reviewer"},
+			ok:   true,
+		},
+		{
+			name: "another reason",
+			req:  turn.ToolApprovalRequest{ToolInputJSON: `{"approval_reason":"plan_mode_unproven_command","peer_names":["builder"],"justification":"Plan mode is active."}`},
+			ok:   false,
+		},
+		{
+			name: "same-tree gate without names",
+			req:  turn.ToolApprovalRequest{ToolInputJSON: `{"approval_reason":"peer_work_tree"}`},
+			ok:   false,
+		},
+		{
+			name: "no payload",
+			req:  turn.ToolApprovalRequest{ToolInputJSON: "{}"},
+			ok:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := approvalPeerWorkTreeNames(tc.req)
+			if ok != tc.ok {
+				t.Fatalf("ok=%v want %v", ok, tc.ok)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("names=%v want %v", got, tc.want)
+			}
+		})
 	}
 }

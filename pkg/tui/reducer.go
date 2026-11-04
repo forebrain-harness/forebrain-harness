@@ -3733,8 +3733,19 @@ func (r *Renderer) composerFooterSidesLocked() (string, string) {
 	} else if r.fullAccess {
 		lead = fullAccessFooterLabel
 	}
-	return joinFooterSegments(lead, r.footer.Model, r.footer.ReasoningEffort),
+	return joinFooterSegments(lead, r.footer.Model, r.footer.ReasoningEffort, peerTreeFooterSegment(r.peerCount)),
 		formatComposerTokenStats(r.composerTokens.get(""))
+}
+
+// peerTreeFooterSegment is the footer's ⇄ count: how many other agents are
+// working in this conversation's directory tree. Nothing when there are none —
+// working alone is the ordinary case rather than a fact — and the count alone
+// when there are, since there is no room to name them (plan 199 §3.5).
+func peerTreeFooterSegment(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	return "⇄ " + strconv.Itoa(count)
 }
 
 // subagentFooterLeftLocked names the subagent whose view is open, how to leave

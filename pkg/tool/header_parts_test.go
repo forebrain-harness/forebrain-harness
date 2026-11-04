@@ -75,6 +75,34 @@ func TestDisplayHeaderPartsKeepTheDurationApart(t *testing.T) {
 	}
 }
 
+// TestDisplayHeaderPartsPeerTools pins the two peer cards' heads (plan 199
+// §3.2): a send names its recipient, a listing has nobody to name, and each of
+// the three states says its own verb.
+func TestDisplayHeaderPartsPeerTools(t *testing.T) {
+	cwd := "/work/proj"
+	send := func(status string) DisplayFrame {
+		return DisplayFrame{
+			Title: "peer_send", Final: true,
+			Meta: ToolMeta{ToolName: "peer_send", Status: status,
+				Input: map[string]any{"to": "builder", "message": "hello"}},
+		}
+	}
+	require.Equal(t, HeaderParts{Action: "Messaged", Target: "builder"}, DisplayHeaderParts(send("completed"), cwd))
+	require.Equal(t, HeaderParts{Action: "Messaging", Target: "builder"}, DisplayHeaderParts(send("running"), cwd))
+	require.Equal(t, HeaderParts{Action: "Failed to message", Target: "builder"}, DisplayHeaderParts(send("failed"), cwd))
+	require.Equal(t, "Canceled", DisplayHeaderParts(send("canceled"), cwd).Action)
+
+	list := func(status string) DisplayFrame {
+		return DisplayFrame{
+			Title: "peer_list", Final: true,
+			Meta: ToolMeta{ToolName: "peer_list", Status: status},
+		}
+	}
+	require.Equal(t, HeaderParts{Action: "Listed agents"}, DisplayHeaderParts(list("completed"), cwd))
+	require.Equal(t, HeaderParts{Action: "Listing agents"}, DisplayHeaderParts(list("running"), cwd))
+	require.Equal(t, HeaderParts{Action: "Failed to list agents"}, DisplayHeaderParts(list("failed"), cwd))
+}
+
 // TestHeaderActionsCoverEveryKnownTool walks every known tool through every
 // status a card can carry and asserts the action is one the web's wording
 // table knows: a tool that starts wording itself outside the list leaves the
@@ -100,6 +128,8 @@ func TestHeaderActionsCoverEveryKnownTool(t *testing.T) {
 		"memories_search":           {"queries": []string{"go"}},
 		"intermediate_tool":         {"action": "append"},
 		"user_interaction":          {"questions": []any{}},
+		"peer_send":                 {"to": "builder", "message": "hello"},
+		"peer_list":                 {},
 		"mcp__github__create_issue": {"owner": "octocat", "repo": "hello", "title": "bug"},
 	}
 	retrieveWithQuery := map[string]any{"id": 7, "query": "go test"}

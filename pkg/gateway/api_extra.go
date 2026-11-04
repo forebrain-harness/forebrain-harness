@@ -194,6 +194,9 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	// path-recorded attachment (the terminal's pasted screenshot) is opened by.
 	chatSessions.Get("/:id/messages/:row/attachments/:n", s.handleChatMessageAttachment)
 	chatSessions.Get("/:id/events", s.handleChatSessionEvents)
+	// The peer messages waiting for this conversation's person, read when a
+	// page binds so a reload shows what a live arrival would have (plan 200 §3).
+	chatSessions.Get("/:id/peers/held", s.handleSessionPeersHeld)
 	chatSessions.Get("/:id/context", s.handleChatSessionContext)
 	chatSessions.Get("/:id/tool-audit", s.handleSessionToolAudit)
 	chatSessions.Get("/:id/cost-summary", s.handleSessionCostSummary)
@@ -375,6 +378,13 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 
 	api.Get("/auto-continue", s.handleAutoContinue)
 	api.Delete("/auto-continue", s.handleAutoContinue)
+
+	// The agents other processes on this machine host, and the answers to a
+	// held peer message (plan 200 §3). The drawer reads the first; the banner's
+	// two buttons post to the others.
+	api.Get("/peers", s.handlePeersDirectory)
+	api.Post("/peers/held/:msgID/release", s.handlePeerHeldRelease)
+	api.Post("/peers/held/:msgID/deny", s.handlePeerHeldDeny)
 
 	api.Get("/config", s.handleConfigFile)
 	api.Put("/config", s.handleConfigFile)
@@ -2166,6 +2176,17 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		// card says what the live one said. Transport only; the derivation
 		// lives in pkg/turn.
 		SubagentCall *event.SubagentCall `json:"subagent_call,omitempty"`
+		// The peer half of a message row (plan 200 §3). A row another session
+		// sent carries the sender's name and the body the envelope held, plus
+		// the identity block's two characters and tone, all derived here so a
+		// surface never parses an envelope or hashes a name itself. A delivery
+		// note carries the receipt rows instead, read back from the note this
+		// process wrote. Both are absent for every other origin.
+		PeerFromName string           `json:"peer_from_name,omitempty"`
+		PeerBody     string           `json:"peer_body,omitempty"`
+		PeerMark     string           `json:"peer_mark,omitempty"`
+		PeerTone     int              `json:"peer_tone,omitempty"`
+		PeerReceipts []peerReceiptRow `json:"peer_receipts,omitempty"`
 	}
 	// The card facts of every subagent_* call the transcript answered, keyed
 	// by tool call id, from the same derivation the live path applied.
@@ -2183,8 +2204,16 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		// IsMeta is a structural part, never inferred from text, because a user
 		// may legitimately type the same tags. The marker is role-blind: it
 		// means "no surface drew this row", whichever role carries it.
+		//
+		// A peer message is the one exception: it is meta for the model - it is
+		// context, not the person typing - and drawn for the person, because the
+		// terminal replays it as its own card (plan 199) and the web draws the
+		// same letter (plan 200). Hiding it here left the web with nothing to
+		// draw but the envelope the model was handed.
 		if _, _, _, isMeta := state.ParseMessageParts(turn.PartsJSON, ""); isMeta {
-			continue
+			if !state.IsPeerOrigin(state.MessageOrigin(turn.PartsJSON)) {
+				continue
+			}
 		}
 		visibleIndexes = append(visibleIndexes, i)
 	}
@@ -2330,6 +2359,33 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 				m.Content = t.Content
 			}
 			m.Origin = state.MessageOrigin(t.PartsJSON)
+			// A peer message's sender and body, and a delivery note's rows, are
+			// read here rather than by the page (plan 200 §1): the envelope and
+			// the receipt summary are both this process's own formats, and the
+			// identity block's mark and tone are one derivation every surface
+			// shares.
+			switch m.Origin {
+			case state.MessageOriginPeer:
+				if fromName, body, ok := process.ParsePeerEnvelope(m.Content); ok {
+					m.PeerFromName = fromName
+					m.PeerBody = body
+					m.PeerMark, m.PeerTone = process.PeerMark(fromName, "")
+				}
+			case state.MessageOriginPeerStatus:
+				if rows := process.ParsePeerReceiptSummary(m.Content); len(rows) > 0 {
+					m.PeerReceipts = make([]peerReceiptRow, 0, len(rows))
+					for _, row := range rows {
+						mark, tone := process.PeerMark(row.Name, "")
+						m.PeerReceipts = append(m.PeerReceipts, peerReceiptRow{
+							Name:   row.Name,
+							Status: row.Status,
+							Reason: row.Reason,
+							Mark:   mark,
+							Tone:   tone,
+						})
+					}
+				}
+			}
 			if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
 				m.MemoryCitation = citation
 			}
@@ -2369,6 +2425,344 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// ---- peers on this machine (plan 200 §3) ----
+
+// peerReceiptRow is one recipient's answer to a message this process sent, as
+// the delivery card reads it.
+type peerReceiptRow struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+	Mark   string `json:"mark"`
+	Tone   int    `json:"tone"`
+}
+
+// peerHeldRow is one peer message waiting for the person's decision.
+type peerHeldRow struct {
+	MsgID    string `json:"msg_id"`
+	From     string `json:"from,omitempty"`
+	FromName string `json:"from_name,omitempty"`
+	Preview  string `json:"preview,omitempty"`
+	// Body is the message itself; Preview is the envelope's opening, which is
+	// what the terminal's picker row shows.
+	Body     string `json:"peer_body,omitempty"`
+	Cause    string `json:"cause"`
+	HeldAtMs int64  `json:"held_at_ms"`
+	Mark     string `json:"mark"`
+	Tone     int    `json:"tone"`
+}
+
+// peerAgentRow is one agent another process hosts, as the drawer lists it.
+type peerAgentRow struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind,omitempty"`
+	Status string `json:"status,omitempty"`
+	Task   string `json:"task,omitempty"`
+	Cwd    string `json:"cwd,omitempty"`
+	Mark   string `json:"mark"`
+	Tone   int    `json:"tone"`
+	Self   bool   `json:"self"`
+}
+
+// peerFileAgent is one agent writing one of the directory's files.
+type peerFileAgent struct {
+	Name string `json:"name"`
+	Mark string `json:"mark"`
+	Tone int    `json:"tone"`
+	Self bool   `json:"self"`
+}
+
+// peerFileRow is one file being edited under the conversation's directory: who
+// is editing it, and when the newest of those writes landed.
+type peerFileRow struct {
+	Dir    string          `json:"dir"`
+	Name   string          `json:"name"`
+	Agents []peerFileAgent `json:"agents"`
+	LastMs int64           `json:"last_ms"`
+	Clash  bool            `json:"clash"`
+}
+
+// peerDirectoryPayload is GET /api/peers: everything the peer drawer draws.
+// same_tree and other are the agents in this directory tree and everywhere
+// else; only other is paged, because it is the one that can be long.
+type peerDirectoryPayload struct {
+	Held       []peerHeldRow  `json:"held"`
+	Files      []peerFileRow  `json:"files"`
+	SameTree   []peerAgentRow `json:"same_tree"`
+	Other      []peerAgentRow `json:"other"`
+	OtherTotal int            `json:"other_total"`
+}
+
+// peerPageSize bounds the drawer's "other directories" page.
+const (
+	peerPageSizeDefault = 20
+	peerPageSizeMax     = 100
+)
+
+// handlePeersDirectory serves GET /api/peers?session_id=&page=&page_size=. The
+// session is the reader's own: it names the directory the file list is read
+// under and the conversation the held messages belong to.
+func (s *Server) handlePeersDirectory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sid == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	page := positiveQueryInt(r, "page", 1)
+	pageSize := positiveQueryInt(r, "page_size", peerPageSizeDefault)
+	if pageSize > peerPageSizeMax {
+		pageSize = peerPageSizeMax
+	}
+	sameTree, other, total := s.peerAgentRows(r.Context(), sid, page, pageSize)
+	writeAgentsJSON(w, peerDirectoryPayload{
+		Held:       s.peerHeldRows(sid),
+		Files:      s.peerFileRows(r.Context(), sid),
+		SameTree:   sameTree,
+		Other:      other,
+		OtherTotal: total,
+	})
+}
+
+// positiveQueryInt reads a 1-based count from the query, falling back to def.
+func positiveQueryInt(r *http.Request, key string, def int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get(key)))
+	if err != nil || value < 1 {
+		return def
+	}
+	return value
+}
+
+// peerHeldRows is the conversation's held messages as the banner and the drawer
+// draw them. The identity block's mark and tone come from the sender's name, so
+// a held message and the letter it becomes carry the same block.
+func (s *Server) peerHeldRows(sessionID string) []peerHeldRow {
+	if s == nil || s.Env == nil {
+		return nil
+	}
+	held := s.Env.HeldPeerMessages(sessionID)
+	rows := make([]peerHeldRow, 0, len(held))
+	for _, message := range held {
+		mark, tone := process.PeerMark(message.FromName, "")
+		rows = append(rows, peerHeldRow{
+			MsgID:    message.MsgID,
+			From:     message.From,
+			FromName: message.FromName,
+			Preview:  message.Preview,
+			Body:     message.Body,
+			Cause:    message.Cause,
+			HeldAtMs: message.HeldAtMs,
+			Mark:     mark,
+			Tone:     tone,
+		})
+	}
+	return rows
+}
+
+// peerFileRows groups the ledger's writes under the conversation's directory
+// into one row per file, newest write first inside each directory.
+func (s *Server) peerFileRows(ctx context.Context, sessionID string) []peerFileRow {
+	if s == nil || s.Env == nil {
+		return nil
+	}
+	root := s.sessionDisplayRoot(ctx, sessionID)
+	type agentWrite struct {
+		agent peerFileAgent
+		at    int64
+	}
+	type fileWrites struct {
+		dir    string
+		name   string
+		agents map[string]agentWrite
+		lastMs int64
+	}
+	files := map[string]*fileWrites{}
+	for _, touch := range s.Env.RecentPeerFileTouches(root) {
+		dir, name := "", touch.Path
+		if index := strings.LastIndex(touch.Path, "/"); index >= 0 {
+			dir, name = touch.Path[:index], touch.Path[index+1:]
+		}
+		if name == "" {
+			continue
+		}
+		key := dir + "\x00" + name
+		entry := files[key]
+		if entry == nil {
+			entry = &fileWrites{dir: dir, name: name, agents: map[string]agentWrite{}}
+			files[key] = entry
+		}
+		at := touch.At.UnixMilli()
+		mark, tone := process.PeerMark(touch.AgentName, "")
+		// A write of this conversation's own — its primary agent or one of its
+		// subagents — is the reader's, and the row says so.
+		id := strings.TrimSpace(touch.AgentID)
+		self := id == sessionID || strings.HasPrefix(id, sessionID+"/")
+		agentKey := id
+		if agentKey == "" {
+			agentKey = strings.TrimSpace(touch.AgentName)
+		}
+		if seen, ok := entry.agents[agentKey]; !ok || seen.at < at {
+			entry.agents[agentKey] = agentWrite{agent: peerFileAgent{
+				Name: strings.TrimSpace(touch.AgentName),
+				Mark: mark,
+				Tone: tone,
+				Self: self,
+			}, at: at}
+		}
+		if at > entry.lastMs {
+			entry.lastMs = at
+		}
+	}
+	rows := make([]peerFileRow, 0, len(files))
+	for _, entry := range files {
+		row := peerFileRow{Dir: entry.dir, Name: entry.name, LastMs: entry.lastMs}
+		for _, write := range entry.agents {
+			row.Agents = append(row.Agents, write.agent)
+			if write.agent.Self {
+				row.Clash = true
+			}
+		}
+		// "Both of us" needs somebody else too: a file only this conversation
+		// writes is not a clash, however many of its agents wrote it.
+		others := false
+		for _, agent := range row.Agents {
+			if !agent.Self {
+				others = true
+			}
+		}
+		row.Clash = row.Clash && others
+		slices.SortFunc(row.Agents, func(a, b peerFileAgent) int { return strings.Compare(a.Name, b.Name) })
+		rows = append(rows, row)
+	}
+	slices.SortFunc(rows, func(a, b peerFileRow) int {
+		if c := strings.Compare(a.Dir, b.Dir); c != 0 {
+			return c
+		}
+		if a.LastMs != b.LastMs {
+			if b.LastMs > a.LastMs {
+				return 1
+			}
+			return -1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return rows
+}
+
+// peerAgentRows lists the agents other processes host, split by whether they
+// work in this conversation's directory tree. The second half is paged; the
+// first is not, because a directory tree holds few agents and the drawer shows
+// them all.
+func (s *Server) peerAgentRows(ctx context.Context, sessionID string, page, pageSize int) (sameTree, other []peerAgentRow, otherTotal int) {
+	if s == nil || s.Env == nil || s.Env.Deps.Peers == nil {
+		return nil, nil, 0
+	}
+	listing, err := s.Env.Deps.Peers.List(ctx, run.PeerCaller{SessionID: sessionID})
+	if err != nil {
+		return nil, nil, 0
+	}
+	for _, peer := range listing.Peers {
+		mark, tone := process.PeerMark(peer.Name, "")
+		row := peerAgentRow{
+			Name:   peer.Name,
+			Kind:   peer.Kind,
+			Status: peer.Status,
+			Task:   peer.Task,
+			Cwd:    peer.Cwd,
+			Mark:   mark,
+			Tone:   tone,
+		}
+		if peer.SameTree {
+			sameTree = append(sameTree, row)
+			continue
+		}
+		otherTotal++
+		if len(other) >= pageSize {
+			continue
+		}
+		if otherTotal <= (page-1)*pageSize {
+			continue
+		}
+		other = append(other, row)
+	}
+	return sameTree, other, otherTotal
+}
+
+// handleSessionPeersHeld serves GET /api/chat/sessions/{id}/peers/held: the
+// held messages a freshly bound page should already be showing, the same way
+// the binding's snapshot carries the pending continuations.
+func (s *Server) handleSessionPeersHeld(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if sid == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	writeAgentsJSON(w, map[string]any{"session_id": sid, "held": s.peerHeldRows(sid)})
+}
+
+// handlePeerHeldRelease and handlePeerHeldDeny are the person's answer to one
+// held message. The engine owns the answer — it delivers the message or sends
+// the refusal, and publishes the outcome to every page watching.
+func (s *Server) handlePeerHeldRelease(w http.ResponseWriter, r *http.Request) {
+	s.settlePeerHeld(w, r, true)
+}
+
+func (s *Server) handlePeerHeldDeny(w http.ResponseWriter, r *http.Request) {
+	s.settlePeerHeld(w, r, false)
+}
+
+func (s *Server) settlePeerHeld(w http.ResponseWriter, r *http.Request, release bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	msgID := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("msgID"))
+	if msgID == "" {
+		http.Error(w, "msg_id is required", http.StatusBadRequest)
+		return
+	}
+	if s == nil || s.Env == nil {
+		http.Error(w, "peer messaging is not available", http.StatusServiceUnavailable)
+		return
+	}
+	var err error
+	if release {
+		err = s.Env.ReleasePeerMessage(msgID)
+	} else {
+		err = s.Env.DenyPeerMessage(msgID)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeAgentsJSON(w, map[string]any{"msg_id": msgID, "released": release})
 }
 
 func (s *Server) handleChatSessionEvents(w http.ResponseWriter, r *http.Request) {
@@ -3789,11 +4183,99 @@ type actionListRow struct {
 
 func (s *Server) actionListRow(ctx context.Context, a state.Action) actionListRow {
 	row := actionListRow{Action: a}
+	row.PayloadJSON = withPeerIdentity(row.PayloadJSON)
 	if sugg := s.actionPermissionSuggestion(ctx, a); len(sugg) > 0 {
 		row.PermissionSuggestion = sugg
 	}
 	row.AgentID, row.SubagentType = turn.ActionSubagent(&a)
 	return row
+}
+
+// withPeerIdentity adds the identity block's two characters and tone to a
+// same-tree git guard's payload, so the approval card can draw each affected
+// agent's block without deriving one itself (plan 200 §3). The guard names the
+// agents and the files they are editing; the block is the one thing a name
+// alone cannot give a reader.
+//
+// Any other payload is returned exactly as it was stored — including one that
+// merely mentions the reason in a command string, which the substring test
+// above is what keeps apart from a payload the guard actually raised.
+func withPeerIdentity(payloadJSON string) string {
+	trimmed := strings.TrimSpace(payloadJSON)
+	if !strings.Contains(trimmed, peerWorkTreeApprovalReason) {
+		return payloadJSON
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(trimmed), &payload) != nil {
+		return payloadJSON
+	}
+	if peerPayloadString(payload["approval_reason"]) != peerWorkTreeApprovalReason {
+		return payloadJSON
+	}
+	names := peerPayloadStringList(payload["peer_names"])
+	filesByAgent := map[string][]string{}
+	for _, raw := range peerPayloadRecords(payload["peer_files"]) {
+		name := strings.TrimSpace(peerPayloadString(raw["name"]))
+		if name == "" {
+			continue
+		}
+		filesByAgent[name] = peerPayloadStringList(raw["files"])
+	}
+	agents := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		mark, tone := process.PeerMark(name, "")
+		agents = append(agents, map[string]any{
+			"name":  name,
+			"mark":  mark,
+			"tone":  tone,
+			"files": filesByAgent[name],
+		})
+	}
+	payload["peer_agents"] = agents
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return payloadJSON
+	}
+	return string(out)
+}
+
+// The reason the same-tree git guard tags its approvals with (pkg/tool's
+// peerWorkTreeApprovalReason, which this package cannot read).
+const peerWorkTreeApprovalReason = "peer_work_tree"
+
+func peerPayloadString(v any) string {
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func peerPayloadStringList(v any) []string {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		if text := peerPayloadString(item); text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func peerPayloadRecords(v any) []map[string]any {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		if record, ok := item.(map[string]any); ok {
+			out = append(out, record)
+		}
+	}
+	return out
 }
 
 func (s *Server) actionPermissionSuggestion(ctx context.Context, a state.Action) map[string]any {

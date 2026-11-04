@@ -12,6 +12,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -1177,5 +1178,119 @@ func TestSubagentToolStepMsgKeepsPlanOnly(t *testing.T) {
 	msg := subagentToolStepMsg(canonical, completed.StepID, completed.ToolName, completed.Summary, completed.ToolMeta, canonical.Type)
 	if !msg.Msg.ToolMeta.PlanOnly {
 		t.Fatalf("the mirror dropped plan_only: %+v", msg.Msg.ToolMeta)
+	}
+}
+
+// A held peer message is recorded for the idle loop to ask about, and is not
+// asked about from the notification path: a turn may be in flight, and its tool
+// approval owns the keys first (plan 199 §3.3).
+func TestPeerHeldNotificationOnlyRecordsTheQuestion(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	state := &streamState{sessionID: "conv-1"}
+	held := event.PeerMessageHeldPayload{
+		MsgID: "held-1", From: "uds:/tmp/a.sock", FromName: "builder",
+		Preview: "please review line 12", Cause: event.PeerHoldCauseModeMismatch,
+	}
+	if !handlePeerHoldNotification(renderer, state, PeerHeldMsg{SessionID: "conv-1", Held: held}) {
+		t.Fatal("a held peer message must be handled by the peer hold notification")
+	}
+	// The engine publishes the same hold again when a surface attaches; the
+	// message is one message, asked about once.
+	handlePeerHoldNotification(renderer, state, PeerHeldMsg{SessionID: "conv-1", Held: held})
+	// Another conversation's message has nowhere to land in this terminal.
+	handlePeerHoldNotification(renderer, state, PeerHeldMsg{SessionID: "conv-2", Held: event.PeerMessageHeldPayload{MsgID: "held-other"}})
+
+	if len(state.heldPeers) != 1 {
+		t.Fatalf("held messages=%d want 1: %+v", len(state.heldPeers), state.heldPeers)
+	}
+	if got := state.heldPeers[0]; got.MsgID != "held-1" || got.FromName != "builder" || got.Cause != event.PeerHoldCauseModeMismatch {
+		t.Fatalf("held message=%+v want the event's own fields", got)
+	}
+	if len(renderer.vm.blocks) != 0 {
+		t.Fatalf("recording a held message painted %d blocks: nothing is asked from here", len(renderer.vm.blocks))
+	}
+	if !state.idleWake() {
+		t.Fatal("a held message must wake the idle loop, which is what asks about it")
+	}
+	// Esc leaves the message held and the question closed: the wait has
+	// nothing to return for, and /peers answers it later.
+	state.noteHeldPeerAsked("held-1")
+	if state.idleWake() {
+		t.Fatal("a message left for /peers must not wake the loop to ask again")
+	}
+	if len(state.heldPeers) != 1 {
+		t.Fatal("leaving a question must not drop the message: it is still held")
+	}
+}
+
+// A peer message that needs a turn of its own must wake the idle loop, which is
+// the only place a turn may start: the wake was the missing link between the
+// engine's peer wake and the loop that consumes it (plan 201 found the omission
+// on a real machine — an idle terminal never opened the turn).
+func TestPeerWakeWakesTheIdleLoopForTheConversationOnScreen(t *testing.T) {
+	state := &streamState{sessionID: "conv-1"}
+	if state.idleWake() {
+		t.Fatal("an idle conversation must not wake the loop")
+	}
+	if !handlePeerWakeNotification(state, PeerWakeMsg{
+		SessionID: "conv-1",
+		Prompt:    process.PeerPrompt{SessionID: "conv-1", Text: "please review a.go"},
+	}) {
+		t.Fatal("a peer wake must be handled by the peer wake notification")
+	}
+	if !state.idleWake() {
+		t.Fatal("a peer message waiting for a turn must wake the idle loop, which is what runs it")
+	}
+	prompt, due := state.takePeerDue()
+	if !due || prompt.SessionID != "conv-1" || prompt.Text != "please review a.go" {
+		t.Fatalf("takePeerDue = %+v, %v: want the message that was waiting", prompt, due)
+	}
+	if state.idleWake() {
+		t.Fatal("a message already handed to the loop must not wake it again")
+	}
+
+	// Another conversation's message has nowhere to land here: it is dropped by
+	// the same guard that keeps it off this screen's transcript.
+	if !handlePeerWakeNotification(state, PeerWakeMsg{
+		SessionID: "conv-2",
+		Prompt:    process.PeerPrompt{SessionID: "conv-2", Text: "not for this terminal"},
+	}) {
+		t.Fatal("a peer wake for another conversation is still handled, just not kept")
+	}
+	if state.idleWake() {
+		t.Fatal("another conversation's message must not wake this loop")
+	}
+	if _, due := state.takePeerDue(); due {
+		t.Fatal("another conversation's message must not be handed to this loop")
+	}
+}
+
+// A message the person answered, or left on screen, ends with a line saying how
+// it ended; one they were never asked about ends silently.
+func TestPeerSettledNotificationSaysHowAnAskedMessageEnded(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	state := &streamState{sessionID: "conv-1"}
+	state.addHeldPeer(process.HeldPeerMessage{MsgID: "asked", FromName: "builder"})
+	state.addHeldPeer(process.HeldPeerMessage{MsgID: "unasked", FromName: "reviewer"})
+	state.noteHeldPeerAsked("asked")
+
+	handlePeerHoldNotification(renderer, state, PeerSettledMsg{SessionID: "conv-1", MsgID: "asked", Outcome: event.PeerOutcomeReleased})
+	handlePeerHoldNotification(renderer, state, PeerSettledMsg{SessionID: "conv-1", MsgID: "unasked", Outcome: event.PeerOutcomeExpired})
+
+	if len(state.heldPeers) != 0 {
+		t.Fatalf("settled messages must leave the list: %+v", state.heldPeers)
+	}
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want one line for the message the person was asked about", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	if card.Title != "Held message from builder released" {
+		t.Fatalf("settle line=%q want the sender and the outcome", card.Title)
 	}
 }

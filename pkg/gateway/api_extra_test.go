@@ -31,6 +31,7 @@ import (
 	llmopenai "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
+	"github.com/forebrain-harness/forebrain-harness/pkg/peer"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -10534,4 +10535,208 @@ func TestWriteRootSectionsIsAllOrNothing(t *testing.T) {
 	require.Equal(t, 70, stored.Compact.AutoCompactPercent,
 		"the section written before the refusal must have been rolled back")
 	require.Zero(t, stored.LSP.IdleTimeout)
+}
+
+// peerDirectoryDouble is the least a drawer test needs of run.PeerDirectory: a
+// fixed listing, and the same-tree guards answered empty.
+type peerDirectoryDouble struct {
+	peers []run.PeerEntry
+}
+
+func (d *peerDirectoryDouble) List(context.Context, run.PeerCaller) (run.PeerListing, error) {
+	return run.PeerListing{Peers: d.peers}, nil
+}
+
+func (d *peerDirectoryDouble) Send(context.Context, run.PeerCaller, string, string) (run.PeerSendResult, error) {
+	return run.PeerSendResult{}, errors.New("not implemented")
+}
+
+func (d *peerDirectoryDouble) WorkTreePeers(context.Context, string) []tool.WorkTreePeer {
+	return nil
+}
+
+func (d *peerDirectoryDouble) NoteWrite(context.Context, string, time.Time) {}
+
+func (d *peerDirectoryDouble) TouchesBetween(context.Context, string, time.Time, time.Time) []tool.PeerTouch {
+	return nil
+}
+
+// TestChatMessagesPeerRowCarriesSenderBodyAndIdentity pins the history half of
+// a peer message (plan 200 §3): the page is handed the sender's name, the body
+// the envelope carried, and the identity block's two characters and tone, so it
+// never parses an envelope or hashes a name itself.
+func TestChatMessagesPeerRowCarriesSenderBodyAndIdentity(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	envelope := peer.Build(peer.Envelope{
+		From:     "uds:/tmp/a.sock",
+		FromName: "forebrain-harness-28",
+		Body:     "are you still editing open.go?",
+	})
+	turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{
+		SessionID: "s1", ModelInput: envelope, Origin: state.MessageOriginPeer, EnsureSession: true,
+	})
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("rows = %s", rec.Body.String())
+	}
+	if raw[0]["origin"] != "peer" {
+		t.Fatalf("origin = %#v", raw[0]["origin"])
+	}
+	if raw[0]["peer_from_name"] != "forebrain-harness-28" || raw[0]["peer_body"] != "are you still editing open.go?" {
+		t.Fatalf("peer fields = %#v", raw[0])
+	}
+	if raw[0]["peer_mark"] != "28" {
+		t.Fatalf("peer_mark = %#v, want 28", raw[0]["peer_mark"])
+	}
+	tone, ok := raw[0]["peer_tone"].(float64)
+	if !ok || tone < 0 || tone > 3 {
+		t.Fatalf("peer_tone = %#v, want 0..3", raw[0]["peer_tone"])
+	}
+}
+
+// TestChatMessagesPeerStatusRowCarriesReceipts pins the delivery note's history
+// half: the receipt summary is read back into one row per recipient, with the
+// state and the identity block, rather than handed to the page as prose.
+func TestChatMessagesPeerStatusRowCarriesReceipts(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	summary := "<system-reminder>\nPeer message delivery update:\n" +
+		"- to forebrain-harness-28: released after approval and delivered.\n" +
+		"- to forebrain-harness-a3: held by the receiving session; it has not seen your message yet.\n" +
+		"</system-reminder>"
+	turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{
+		SessionID: "s1", ModelInput: summary, Origin: state.MessageOriginPeerStatus, EnsureSession: true,
+	})
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var raw []struct {
+		Origin   string `json:"origin"`
+		Receipts []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Mark   string `json:"mark"`
+			Tone   int    `json:"tone"`
+		} `json:"peer_receipts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1 || raw[0].Origin != "peer_status" {
+		t.Fatalf("rows = %s", rec.Body.String())
+	}
+	if len(raw[0].Receipts) != 2 {
+		t.Fatalf("receipts = %+v", raw[0].Receipts)
+	}
+	if raw[0].Receipts[0].Name != "forebrain-harness-28" || raw[0].Receipts[0].Status != "delivered" || raw[0].Receipts[0].Mark != "28" {
+		t.Fatalf("first receipt = %+v", raw[0].Receipts[0])
+	}
+	if raw[0].Receipts[1].Status != "held" {
+		t.Fatalf("second receipt = %+v", raw[0].Receipts[1])
+	}
+}
+
+// TestHandlePeersDirectoryPagesOtherDirectories pins the drawer's payload: the
+// agents in this directory tree are all listed, the rest are paged, and the
+// total says how many the pages hold.
+func TestHandlePeersDirectoryPagesOtherDirectories(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	require.NoError(t, s.Sessions.Ensure(ctx, "s1", "s1"))
+	s.Projects = state.NewProjectStore(s.Env.SQL, "main")
+	s.Env.Deps.Peers = &peerDirectoryDouble{peers: []run.PeerEntry{
+		{Name: "forebrain-harness-a3", Kind: "terminal", Status: "busy", SameTree: true},
+		{Name: "forebrain-gw-3c1a", Kind: "gateway conversation"},
+		{Name: "docs-site-7f", Kind: "terminal"},
+	}}
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/peers?session_id=s1&page=1&page_size=1", nil, s.handlePeersDirectory)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("peers = %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		SameTree   []peerAgentRow `json:"same_tree"`
+		Other      []peerAgentRow `json:"other"`
+		OtherTotal int            `json:"other_total"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	if len(out.SameTree) != 1 || out.SameTree[0].Name != "forebrain-harness-a3" || out.SameTree[0].Mark != "a3" {
+		t.Fatalf("same_tree = %+v", out.SameTree)
+	}
+	if len(out.Other) != 1 || out.Other[0].Name != "forebrain-gw-3c1a" {
+		t.Fatalf("other = %+v", out.Other)
+	}
+	if out.OtherTotal != 2 {
+		t.Fatalf("other_total = %d, want 2", out.OtherTotal)
+	}
+
+	// The second page holds the remaining agent, and the total does not move.
+	rec = cronRequest(t, s, http.MethodGet, "/api/peers?session_id=s1&page=2&page_size=1", nil, s.handlePeersDirectory)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	if len(out.Other) != 1 || out.Other[0].Name != "docs-site-7f" || out.OtherTotal != 2 {
+		t.Fatalf("page 2 = %+v (total %d)", out.Other, out.OtherTotal)
+	}
+}
+
+// TestHandlePeersDirectoryRequiresASession pins the one argument the drawer's
+// payload cannot be read without.
+func TestHandlePeersDirectoryRequiresASession(t *testing.T) {
+	s := cronTestServer(t)
+	rec := cronRequest(t, s, http.MethodGet, "/api/peers", nil, s.handlePeersDirectory)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestSettlePeerHeldRefusesWithoutAPeerService pins the answer's failure path:
+// a process with no peer service has no held message to answer, and says so
+// rather than reporting a decision nobody made.
+func TestSettlePeerHeldRefusesWithoutAPeerService(t *testing.T) {
+	s := cronTestServer(t)
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{name: "release", handler: s.handlePeerHeldRelease},
+		{name: "deny", handler: s.handlePeerHeldDeny},
+	} {
+		rec := cronRequest(t, s, http.MethodPost, "/api/peers/held/m1/"+tc.name, nil, tc.handler, "msgID", "m1")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s = %d %s", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestHandleSessionPeersHeldIsEmptyWithoutAPeerService pins the bind-time read:
+// a conversation with nothing waiting answers an empty list, which is what a
+// freshly bound page draws its banner from.
+func TestHandleSessionPeersHeldIsEmptyWithoutAPeerService(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	require.NoError(t, s.Sessions.Ensure(ctx, "s1", "s1"))
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/peers/held", nil, s.handleSessionPeersHeld, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out struct {
+		SessionID string        `json:"session_id"`
+		Held      []peerHeldRow `json:"held"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	if out.SessionID != "s1" || len(out.Held) != 0 {
+		t.Fatalf("held = %+v", out)
+	}
 }

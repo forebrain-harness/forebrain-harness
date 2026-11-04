@@ -193,6 +193,9 @@ func Run(ctx context.Context, opts Options) error {
 	if f, ok := in.(*os.File); ok {
 		selector = NewInteractiveSelector(out, readLine, f, renderer)
 	}
+	// rawSel is the same selector when it owns the terminal: the held peer
+	// prompt, like every other overlay, exists only where keys can be read.
+	rawSel, _ := selector.(*rawSelector)
 	cmds := newCommandController(opts.Session, renderer, selector, readLine, strings.TrimSpace(opts.Home))
 	approvalSink := NewInteractiveApprovalSinkWithTTY(out, selector).WithRenderer(renderer).WithRecorder(opts.Session)
 	if spt, ok := opts.Session.(interface{ SessionProjectType(string) string }); ok {
@@ -227,6 +230,14 @@ func Run(ctx context.Context, opts Options) error {
 	cmds.resetScreen = func() {
 		resetStreamTranscript(renderer, &state)
 	}
+	// /peers picks a held message; its question is the idle loop's own, asked
+	// here with the message the person chose. The message joins the state's
+	// list first, so its settlement is reported and named the same way as one
+	// the loop asked about itself.
+	cmds.askHeldPeer = func(held process.HeldPeerMessage) {
+		state.addHeldPeer(held)
+		askHeldPeerMessage(ctx, out, rawSel, opts.Session, &state, renderer, held)
+	}
 	opts.Session.SetToolApprovalSink(approvalSink)
 
 	tracker := NewTracker()
@@ -251,6 +262,11 @@ func Run(ctx context.Context, opts Options) error {
 	// the reducer — eliminating the data races and the selector deadlock.
 	notifyQ := event.New[any]()
 	notifyCh := notifyQ.Start(ctx)
+	// The footer's ⇄ count is polled, not told: another process starting or
+	// stopping work in this tree is not something this one is notified of
+	// (plan 199 §3.5). The walk happens off the main loop and only its result
+	// is applied there.
+	go watchPeerTreeCount(ctx, opts.Session, notifyQ)
 	// The MCP startup line, which is driven by status messages but has to keep
 	// its own clock: the snapshot only changes when a server does, and a line
 	// that says "0s" for the thirty seconds a server takes to answer is worse
@@ -306,6 +322,12 @@ func Run(ctx context.Context, opts Options) error {
 			return
 		}
 		if handlePeerWakeNotification(&state, m) {
+			return
+		}
+		if handlePeerHoldNotification(renderer, &state, m) {
+			return
+		}
+		if handlePeerTreeCountNotification(renderer, &state, m) {
 			return
 		}
 		if handleAutoContinueNotification(renderer, &state, m) {
@@ -421,7 +443,9 @@ func Run(ctx context.Context, opts Options) error {
 					// preview into the transcript: take them off the queue's
 					// delivered list and render them as user-history messages
 					// so they don't silently disappear.
-					renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
+					deliveries, peers := state.takeDeliveredSteersForDisplay()
+					renderDeliveredInputCards(renderer, peers)
+					renderDeliveredSteerMessages(renderer, deliveries)
 					renderComposerWithState(renderer, &state)
 				}
 			}
@@ -747,6 +771,17 @@ func Run(ctx context.Context, opts Options) error {
 				continue
 			}
 		}
+		// A peer message the engine is holding is a question for the person,
+		// and the idle loop is the only place that asks it: a turn — and so a
+		// tool approval inside one — is never in flight here (plan 199 §3.3).
+		// One message per pass, so a settlement or a key that arrived in
+		// between is applied before the next question is put.
+		if state.panel == nil && rawSel != nil {
+			if held, waiting := state.nextHeldPeer(); waiting {
+				askHeldPeerMessage(ctx, out, rawSel, opts.Session, &state, renderer, held)
+				continue
+			}
+		}
 		line := state.composer.Text
 		if state.holdComposer {
 			line = ""
@@ -763,7 +798,7 @@ func Run(ctx context.Context, opts Options) error {
 				ok = true
 			} else {
 				var err error
-				ev, ok, err = awaitInputOrSignal(ctx, sigCh, events, notifyCh, processUINotification, state.autoContinueWake)
+				ev, ok, err = awaitInputOrSignal(ctx, sigCh, events, notifyCh, processUINotification, state.idleWake)
 				if err != nil {
 					return err
 				}
@@ -1290,6 +1325,9 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 	case "lsp":
 		_ = cmds.handleLSP(state.sessionID)
 		return true, false, ComposerSubmission{}, false
+	case "peers":
+		_ = cmds.handlePeers(ctx, state.sessionID)
+		return true, false, ComposerSubmission{}, false
 	case "migrate":
 		_ = cmds.handleMigrate(ctx, state.sessionID)
 		return true, false, ComposerSubmission{}, false
@@ -1696,6 +1734,14 @@ type streamState struct {
 	// event stream, notifications keep flowing, and the transcript keeps
 	// streaming above it.
 	panel *uiPanel
+	// heldPeers are the peer messages the engine is holding for this
+	// conversation's person, oldest first. The idle loop asks about them one
+	// at a time (askHeldPeerMessage) — never while a turn, and so never while
+	// a tool approval, owns the keys.
+	heldPeers []process.HeldPeerMessage
+	// heldMarks is what the loop remembers about a held message beyond the
+	// message itself, by message id.
+	heldMarks map[string]heldPeerMark
 	// terminalFocused follows CSI I / CSI O focus reports. It starts true so
 	// terminals without focus-reporting support do not produce noisy bells.
 	terminalFocused bool
@@ -2952,13 +2998,36 @@ func rejectedQueueInput(submission ComposerSubmission) run.Input {
 }
 
 // queuedSubmissions pulls the surface's submissions back out of the queue's
-// inputs, in the order the queue listed them.
+// inputs, in the order the queue listed them. An input the person did not type
+// carries no submission — a peer message and a delivery note are steered into a
+// running turn with no Payload at all — so those are skipped rather than
+// asserted: every caller here is a steer path, and a steer that is not a
+// composer submission has nothing for it to recall, release or render.
 func queuedSubmissions(inputs []run.Input) []ComposerSubmission {
 	out := make([]ComposerSubmission, 0, len(inputs))
 	for _, in := range inputs {
-		out = append(out, in.Payload.(ComposerSubmission))
+		if submission, ok := in.Payload.(ComposerSubmission); ok {
+			out = append(out, submission)
+		}
 	}
 	return out
+}
+
+// takeDeliveredSteers drains the steers the model has received and hands back
+// the composer submissions among them, in delivery order. It is the queue's
+// delivered list drained for the submission half only; takeDeliveredSteersForDisplay
+// is the same drain for a caller that also renders, and drains the peer half.
+func (s *streamState) takeDeliveredSteers() []ComposerSubmission {
+	if s == nil {
+		return nil
+	}
+	var submissions []ComposerSubmission
+	for _, in := range s.sessionQueue().TakeDelivered() {
+		if submission, ok := in.Payload.(ComposerSubmission); ok {
+			submissions = append(submissions, submission)
+		}
+	}
+	return submissions
 }
 
 // hasQueuedSteers reports whether the queue still holds steers the model has
@@ -2968,29 +3037,52 @@ func (s *streamState) hasQueuedSteers() bool {
 	return q != nil && len(q.Preview().Steers) > 0
 }
 
-// takeDeliveredSteers drains the steers the model has received — in delivery
-// order, whole — so the surface can render them into the transcript. The
-// queue's delivered list is consumed destructively, so whichever observer
-// drains it first owns rendering those messages.
-func (s *streamState) takeDeliveredSteers() []ComposerSubmission {
-	return queuedSubmissions(s.sessionQueue().TakeDelivered())
+// takeDeliveredSteersForDisplay drains the queue's delivered list once and
+// hands back both halves: the composer submissions the person typed, and the
+// peer messages and delivery notes nobody typed here. The caller renders each
+// half as what it is — a submission is a "you" row, a peer delivery is its own
+// card — so the surface that takes them off the queue owns drawing them into
+// the transcript. The submissions are also filed in the conversation's log, so
+// a reload draws the same message.
+func (s *streamState) takeDeliveredSteersForDisplay() ([]ComposerSubmission, []run.Input) {
+	if s == nil {
+		return nil, nil
+	}
+	var submissions []ComposerSubmission
+	var peer []run.Input
+	for _, in := range s.sessionQueue().TakeDelivered() {
+		if submission, ok := in.Payload.(ComposerSubmission); ok {
+			submissions = append(submissions, submission)
+			continue
+		}
+		if statepkg.IsPeerOrigin(in.Origin) {
+			peer = append(peer, in)
+		}
+	}
+	if len(submissions) > 0 {
+		if recorder, ok := s.session.(interface {
+			recordDeliveredSteers(sessionID string, delivered []ComposerSubmission)
+		}); ok {
+			recorder.recordDeliveredSteers(s.sessionID, submissions)
+		}
+	}
+	return submissions, peer
 }
 
-// takeDeliveredSteersForDisplay drains the delivered steers and files each one
-// in the conversation's log before the caller renders it: the surface that
-// takes them off the queue owns both drawing them into the transcript and
-// recording where the model received them, so a reload draws the same message.
-func (s *streamState) takeDeliveredSteersForDisplay() []ComposerSubmission {
-	delivered := s.takeDeliveredSteers()
-	if len(delivered) == 0 {
-		return delivered
+// renderDeliveredInputCards draws the messages the model just received that
+// nobody typed at this terminal: a peer message as its `↘ <sender>` letter and a
+// delivery note as its `Delivery` card — the same cards a resume of the
+// conversation draws for the rows those inputs become, so a letter the model
+// answered is never on screen in one form live and another form after a reload.
+func renderDeliveredInputCards(renderer *Renderer, inputs []run.Input) {
+	if renderer == nil {
+		return
 	}
-	if recorder, ok := s.session.(interface {
-		recordDeliveredSteers(sessionID string, delivered []ComposerSubmission)
-	}); ok {
-		recorder.recordDeliveredSteers(s.sessionID, delivered)
+	for _, in := range inputs {
+		if card, ok := peerOriginCard(in.Origin, in.Text); ok {
+			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: card.Title, Content: card.Content, Final: true})
+		}
 	}
-	return delivered
 }
 
 // discardQueuedInput empties every queue and returns how many messages were
@@ -3998,7 +4090,9 @@ func runTurnWithDispatch(ctx context.Context, sigCh <-chan os.Signal, events <-c
 			// yet; leaving it there makes the turn-boundary handler treat an
 			// answered message as undelivered and resubmit it, so the model sees
 			// it twice.
-			renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
+			deliveries, peers := state.takeDeliveredSteersForDisplay()
+			renderDeliveredInputCards(renderer, peers)
+			renderDeliveredSteerMessages(renderer, deliveries)
 			if state != nil {
 				renderComposerWithState(renderer, state)
 			}
@@ -4107,12 +4201,16 @@ func executePeerTurn(ctx context.Context, events <-chan inputEvent, notifyCh <-c
 	defer func() { state.activeForeground = nil }()
 	// The line names the sender: the reader is looking at a conversation that
 	// started talking to someone else's session, and the row must not read as
-	// something they typed.
-	title := "peer"
-	if name := strings.TrimSpace(prompt.FromName); name != "" {
-		title = "peer · " + name
+	// something they typed. A peer message and its delivery note draw the card
+	// they replay as (peerOriginCard), so the live transcript and a resume of
+	// it never show the same message two different ways.
+	frame := Frame{Kind: FrameUser, Title: "peer", Content: prompt.Text, Final: true, turn: foreground}
+	if card, ok := peerOriginCard(prompt.Origin, prompt.Text); ok {
+		frame = Frame{Kind: FrameSystem, Title: card.Title, Content: card.Content, Final: true}
+	} else if name := strings.TrimSpace(prompt.FromName); name != "" {
+		frame.Title = "peer · " + name
 	}
-	renderer.RenderFrame(Frame{Kind: FrameUser, Title: title, Content: prompt.Text, Final: true, turn: foreground})
+	renderer.RenderFrame(frame)
 	sessionID, envelope := strings.TrimSpace(prompt.SessionID), prompt.Text
 	dispatch := func(ctx context.Context, session Session) error {
 		return dispatcher.DispatchPeerTurn(ctx, sessionID, envelope)
@@ -4666,7 +4764,9 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	// the queue, so editing/resubmitting operates on what is genuinely pending.
 	// This can observe a delivery before its notification reaches the loop, so
 	// it owns moving those steers into the transcript too.
-	renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
+	deliveries, peers := state.takeDeliveredSteersForDisplay()
+	renderDeliveredInputCards(renderer, peers)
+	renderDeliveredSteerMessages(renderer, deliveries)
 	// Shift+Left is decoded by the raw reader; bare Up remains history
 	// navigation.
 	switch ev.kind {

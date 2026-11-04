@@ -645,3 +645,85 @@ func peerReceiptReason(reason, fallback string) string {
 func peerReceiptSummary(lines []string) string {
 	return fmt.Sprintf(peerSummaryTemplate, strings.Join(lines, "\n"))
 }
+
+// PeerReceiptRow is one recipient's answer to a message this process sent, as
+// the delivery card reads it (plan 200 §3). Status is the state the protocol
+// reported — held, delivered, denied, expired, refused or dropped — and Reason
+// is the plain words that came with it, empty for the states that carry none.
+type PeerReceiptRow struct {
+	Name   string
+	Status string
+	Reason string
+}
+
+// The states a receipt row reports, named as the protocol names them.
+const (
+	PeerReceiptHeld      = "held"
+	PeerReceiptDelivered = "delivered"
+	PeerReceiptDenied    = "denied"
+	PeerReceiptExpired   = "expired"
+	PeerReceiptRefused   = "refused"
+	PeerReceiptDropped   = "dropped"
+)
+
+// ParsePeerReceiptSummary reads a delivery note back into the rows a surface
+// draws, so the card does not have to read English prose to know which recipient
+// got which state. It is the inverse of peerReceiptSummary for everything this
+// process writes; content in any other shape yields no rows, and the caller
+// shows it whole rather than guessing (the terminal already does).
+func ParsePeerReceiptSummary(content string) []PeerReceiptRow {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]PeerReceiptRow, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "- to ") {
+			continue
+		}
+		rest := strings.TrimPrefix(trimmed, "- to ")
+		name, state, found := strings.Cut(rest, ":")
+		if !found {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		rows = append(rows, parsePeerReceiptRow(name, strings.TrimSpace(state)))
+	}
+	return rows
+}
+
+// parsePeerReceiptRow classifies one receipt line's state sentence. The
+// sentences are this package's own (peerReceiptLine), so the match is on their
+// leading words; anything unrecognised reads as the state the protocol would
+// have reported for it, with the sentence kept as the reason.
+func parsePeerReceiptRow(name, state string) PeerReceiptRow {
+	switch {
+	case strings.HasPrefix(state, "held by the receiving session"):
+		return PeerReceiptRow{Name: name, Status: PeerReceiptHeld}
+	case strings.HasPrefix(state, "released after approval and delivered"):
+		return PeerReceiptRow{Name: name, Status: PeerReceiptDelivered}
+	case strings.HasPrefix(state, "declined by the recipient's user"):
+		return PeerReceiptRow{Name: name, Status: PeerReceiptDenied}
+	case strings.HasPrefix(state, "expired without approval"):
+		return PeerReceiptRow{Name: name, Status: PeerReceiptExpired}
+	case strings.HasPrefix(state, "refused ("):
+		return PeerReceiptRow{Name: name, Status: PeerReceiptRefused, Reason: parenthesised(state)}
+	case strings.HasPrefix(state, "dropped ("):
+		return PeerReceiptRow{Name: name, Status: PeerReceiptDropped, Reason: parenthesised(state)}
+	default:
+		// A sentence this package did not write. It still names a recipient,
+		// and the card's grey bucket is where an unrecognised outcome belongs.
+		return PeerReceiptRow{Name: name, Status: PeerReceiptExpired, Reason: state}
+	}
+}
+
+// parenthesised is the text inside a receipt line's trailing parentheses.
+func parenthesised(state string) string {
+	open := strings.Index(state, "(")
+	close := strings.LastIndex(state, ")")
+	if open < 0 || close <= open {
+		return state
+	}
+	return strings.TrimSpace(state[open+1 : close])
+}

@@ -426,6 +426,10 @@ func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
 		"memories":    SubagentViewGlobal,
 		"migrate":     SubagentViewGlobal,
 		"config":      SubagentViewGlobal,
+		// The agents in this conversation's tree are the same ones from any
+		// view of it, and a held message waits on the conversation rather than
+		// on the subagent whose view happens to be open.
+		"peers": SubagentViewGlobal,
 		// Hidden, and answered with one sentence pointing back to the conversation.
 		"new":    SubagentViewHidden,
 		"resume": SubagentViewHidden,

@@ -6771,3 +6771,139 @@ describe('a conversation whose observation socket dropped', () => {
     }
   })
 })
+
+/**
+ * A peer message held for the person is live state of the same kind as a
+ * pending continuation (plan 200 §3): the binding's snapshot says what is
+ * waiting, the two run-less events change it, and the replay that overlaps the
+ * binding changes nothing. The banner and the drawer read the same list.
+ */
+describe('held peer messages', () => {
+  beforeAll(() => setLocale('en'))
+  afterAll(() => setLocale('en'))
+
+  function observerEvent(socket: FakeChatWebSocket, id: string, sequence: number, type: string, payload: Record<string, unknown>) {
+    socket.message({
+      op: 'run_event',
+      data: { id, sequence, type, run_id: '', session_id: 's1', created_at: '2026-09-30T23:00:00Z', payload },
+    })
+  }
+
+  function heldPayload(overrides: Record<string, unknown> = {}) {
+    return {
+      msg_id: 'm1',
+      from_name: 'forebrain-harness-28',
+      preview: 'are you still editing open.go?',
+      cause: 'mode-mismatch',
+      held_at_ms: 1_793_000_000_000,
+      peer_mark: '28',
+      peer_tone: 1,
+      ...overrides,
+    }
+  }
+
+  it('shows what the binding reports, follows the hold and the settlement, and ignores the replay', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId: 's1', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
+      vi.spyOn(forebrainApi, 'peersDirectory').mockResolvedValue({
+        held: [], files: [], sameTree: [], other: [], otherTotal: 0,
+      }),
+    ]
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      const observer = FakeChatWebSocket.instances[0]!
+      observer.open()
+
+      observer.message({
+        op: 'session_bound',
+        session_id: 's1',
+        data: {
+          cursor: 0,
+          high_water: 5,
+          peer_held: [{ msg_id: 'm0', from_name: 'forebrain-harness-a3', preview: 'earlier', cause: 'hold-all', held_at_ms: 1, peer_mark: 'a3', peer_tone: 0 }],
+        },
+      })
+      expect(stream.heldPeers.value).toHaveLength(1)
+      expect(stream.heldPeers.value[0]).toMatchObject({ msgId: 'm0', fromName: 'forebrain-harness-a3', mark: 'a3', tone: 0 })
+
+      // The replay up to the binding's high water is already accounted for.
+      observerEvent(observer, 'evt-replayed', 4, 'peer_message_held', heldPayload({ msg_id: 'm-replayed' }))
+      expect(stream.heldPeers.value.map((row) => row.msgId)).toEqual(['m0'])
+
+      // A new hold joins the list; the settlement of one leaves the other.
+      observerEvent(observer, 'evt-held', 6, 'peer_message_held', heldPayload())
+      expect(stream.heldPeers.value.map((row) => row.msgId)).toEqual(['m0', 'm1'])
+      observerEvent(observer, 'evt-settled', 7, 'peer_message_settled', { msg_id: 'm0', outcome: 'denied' })
+      expect(stream.heldPeers.value.map((row) => row.msgId)).toEqual(['m1'])
+      expect(stream.heldPeers.value[0]).toMatchObject({ fromName: 'forebrain-harness-28', mark: '28', tone: 1 })
+
+      // A repeated event changes nothing.
+      observerEvent(observer, 'evt-held', 6, 'peer_message_held', heldPayload())
+      expect(stream.heldPeers.value).toHaveLength(1)
+      stream.dispose()
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('draws a delivered peer letter with the sender the engine named', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId: 's1', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
+      vi.spyOn(forebrainApi, 'peersDirectory').mockResolvedValue({
+        held: [], files: [], sameTree: [], other: [], otherTotal: 0,
+      }),
+    ]
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      const observer = FakeChatWebSocket.instances[0]!
+      observer.open()
+      observer.message({ op: 'session_bound', session_id: 's1', data: { cursor: 0, high_water: 0 } })
+
+      observerEvent(observer, 'evt-delivered', 3, 'input_delivered', {
+        text: '<cross-session-message from-name="forebrain-harness-28">are you still editing open.go?</cross-session-message>',
+        origin: 'peer',
+        from_name: 'forebrain-harness-28',
+        peer_mark: '28',
+        peer_tone: 1,
+      })
+      const letter = stream.messages.value.find((message) => message.origin === 'peer')
+      expect(letter).toMatchObject({
+        role: 'user',
+        peerFromName: 'forebrain-harness-28',
+        peerMark: '28',
+        peerTone: 1,
+      })
+
+      // A delivery the engine did not mark as a peer stays the reader's own.
+      observerEvent(observer, 'evt-steer', 4, 'input_delivered', { text: 'actually, do this instead' })
+      const steer = stream.messages.value.find((message) => message.content === 'actually, do this instead')
+      expect(steer?.origin).toBeUndefined()
+      expect(steer?.peerFromName).toBeUndefined()
+      stream.dispose()
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+})

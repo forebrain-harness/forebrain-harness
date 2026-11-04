@@ -110,6 +110,15 @@ mkdir -p "$HOME_DIR" "$PROJ" "$WEBUI" "$SHOTS"
 : > "$WORK/gateway.out"
 : > "$WORK/gateway.err"
 
+# 1b. The peer protocol's rendezvous directories, pointed into this run's own
+#     scratch tree. A real gateway registers itself as a peer on this machine
+#     (plan 195), and the design is explicit that a test must neither read nor
+#     write the user's own entries (design §9) — so the whole run, the peer
+#     e2e included, keeps its records and sockets here.
+export FOREBRAIN_PEERS_DIR="$WORK/peers"
+export FOREBRAIN_PEER_SOCKET_DIR="$WORK/socks"
+mkdir -p "$FOREBRAIN_PEERS_DIR" "$FOREBRAIN_PEER_SOCKET_DIR"
+
 # 2. Build the binary and the UI in parallel (independent toolchains). The UI
 #    is served from FOREBRAIN_STATIC_DIST so pkg/gateway/dist (managed by the
 #    release flow) is never touched. A failed branch aborts the run with its
