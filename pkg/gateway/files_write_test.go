@@ -408,6 +408,18 @@ func attachmentRequest(sid, row, n, query string) *http.Request {
 	}))
 }
 
+// userRowInsertSQL plants one user message row. PostgreSQL's arm returns the
+// new row's id — pgx's database/sql result carries no LastInsertId — the same
+// split the store's insertMessage makes.
+var userRowInsertSQL = dbx.SQL{
+	SQLite: `INSERT INTO fb_messages (session_id, role, visibility, content, parts, created_at)
+		VALUES (?, 'user', 'visible', 'look', ?, 1)`,
+	MySQL: `INSERT INTO fb_messages (session_id, role, visibility, content, parts, created_at)
+		VALUES (?, 'user', 'visible', 'look', ?, 1)`,
+	Postgres: `INSERT INTO fb_messages (session_id, role, visibility, content, parts, created_at)
+		VALUES ($1, 'user', 'visible', 'look', $2, 1) RETURNING id`,
+}
+
 // userRowWithAttachments stores one user message that attached the given
 // recorded paths (the terminal's file_reference parts) and returns its row id.
 func userRowWithAttachments(t *testing.T, s *Server, sid string, paths ...string) int64 {
@@ -417,9 +429,14 @@ func userRowWithAttachments(t *testing.T, s *Server, sid string, paths ...string
 		parts += `,{"file_id":"` + p + `","label":"` + filepath.Base(p) + `","mime_type":"image/png","type":"file_reference"}`
 	}
 	parts += `]`
-	res, err := s.Sessions.DB().ExecContext(context.Background(),
-		dbx.Rebind(dbx.DialectOf(s.Sessions.DB()), `INSERT INTO fb_messages (session_id, role, visibility, content, parts, created_at) VALUES (?, 'user', 'visible', 'look', ?, 1)`),
-		sid, parts)
+	db := s.Sessions.DB()
+	if dbx.DialectOf(db) == dbx.Postgres {
+		// The statement returns the new row's id; the Exec result would not.
+		var id int64
+		require.NoError(t, db.QueryRowContext(context.Background(), userRowInsertSQL.Postgres, sid, parts).Scan(&id))
+		return id
+	}
+	res, err := db.ExecContext(context.Background(), userRowInsertSQL.For(dbx.DialectOf(db)), sid, parts)
 	require.NoError(t, err)
 	id, err := res.LastInsertId()
 	require.NoError(t, err)
