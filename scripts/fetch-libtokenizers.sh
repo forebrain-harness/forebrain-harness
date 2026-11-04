@@ -26,6 +26,14 @@
 # x86_64-pc-windows-gnu target, added automatically with rustup when present).
 # The other targets download the pinned release asset and verify its sha256.
 #
+# `FOREBRAIN_GITHUB_MIRROR` prefixes the release URL, for a network where
+# github.com's asset host is unreachable: e.g.
+#
+#   FOREBRAIN_GITHUB_MIRROR=https://ghfast.top/ scripts/fetch-libtokenizers.sh linux/arm64
+#
+# Any mirror is fine — the pinned sha256 is what decides whether the bytes are
+# the ones this version expects.
+#
 # Idempotent: a target whose archive already matches the version in go.mod is
 # left alone, so a CI cache hit costs nothing.
 set -euo pipefail
@@ -98,12 +106,21 @@ fetch_download() { # fetch_download <target> <dest>
   if ! read -r asset sha < <(asset_and_sha "$target"); then
     die "no known prebuilt archive for $target at $version; update the asset table in this script"
   fi
-  local url="https://github.com/daulet/tokenizers/releases/download/$version/$asset"
+  local url="${FOREBRAIN_GITHUB_MIRROR:-}https://github.com/daulet/tokenizers/releases/download/$version/$asset"
   local tmp
   tmp="$(mktemp -d)"
   trap "rm -rf '$tmp'" RETURN
   echo "==> downloading $asset ($version)" >&2
-  curl -fsSL --retry 3 --retry-all-errors -o "$tmp/$asset" "$url" \
+  # The release download redirects to objects.githubusercontent.com, which some
+  # networks block outright. Without a bound every attempt hangs on that
+  # redirect until the OS gives up (minutes), and --retry multiplies it — which
+  # is what made this step look like a hung build rather than a failed download.
+  # A mirror prefix (FOREBRAIN_GITHUB_MIRROR, e.g. https://ghfast.top/) serves
+  # the same asset from a reachable host; the sha256 check below is what says
+  # the bytes are still the pinned ones, whoever served them.
+  curl -fsSL --retry 3 --retry-all-errors \
+    --connect-timeout 15 --max-time 600 \
+    -o "$tmp/$asset" "$url" \
     || die "download failed: $url"
   local got
   got="$(sha256 "$tmp/$asset")"

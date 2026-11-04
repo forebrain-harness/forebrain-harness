@@ -41,11 +41,12 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DEST_ROOT="$ROOT_DIR/third_party/pdfium"
 
 # The bblanchon/pdfium-binaries release this repository links against.
+REPO_SLUG="bblanchon/pdfium-binaries"
 RELEASE_TAG="chromium/8100"
 RELEASE_TAG_ENCODED="chromium%2F8100"
 PDFIUM_VERSION="157.0.8100.0"
 
-RELEASES_API="https://api.github.com/repos/bblanchon/pdfium-binaries"
+RELEASES_API="https://api.github.com/repos/$REPO_SLUG"
 ASSETS_API="$RELEASES_API/releases/assets"
 
 # api.github.com is rate-limited hard for anonymous callers (60/h per IP); CI
@@ -138,18 +139,46 @@ fetch_one() { # fetch_one <goos>/<goarch> <release-json>
   if ! read -r asset sha < <(asset_and_sha "$target"); then
     die "no PDFium build for $target; the supported triples are darwin/{arm64,amd64}, linux/{amd64,arm64}, windows/amd64"
   fi
-  local id
-  id="$(resolve_asset_id "$asset" "$json")"
 
   local tmp
   tmp="$(mktemp -d)"
   trap "rm -rf '$tmp'" RETURN
   log "downloading $asset ($RELEASE_TAG)"
-  curl -fsSL --retry 3 --retry-all-errors \
-    ${gh_curl_opts[@]+"${gh_curl_opts[@]}"} \
-    -H 'Accept: application/octet-stream' \
-    -o "$tmp/$asset" "$ASSETS_API/$id" \
+  # Two ways to the same bytes.
+  #
+  # Through the asset API (the default): the id is looked up in the pinned
+  # release's asset list, then downloaded with an octet-stream Accept. That path
+  # is rate-limited to 60 anonymous requests an hour per IP, so a few local
+  # retries exhaust it and the build fails with 403 rather than anything about
+  # this repository.
+  #
+  # Through FOREBRAIN_GITHUB_MIRROR: the release URL is deterministic, so no API
+  # call is made at all — the mirror serves
+  # <mirror>https://github.com/<repo>/releases/download/<url-encoded tag>/<asset>.
+  # This is the path for a network where github.com's asset host is unreachable
+  # or the anonymous API quota is gone.
+  #
+  # Either way the pinned sha256 below decides whether the bytes are the ones
+  # this version expects.
+  local url
+  if [ -n "${FOREBRAIN_GITHUB_MIRROR:-}" ]; then
+    url="${FOREBRAIN_GITHUB_MIRROR}https://github.com/${REPO_SLUG}/releases/download/${RELEASE_TAG_ENCODED}/${asset}"
+    # --connect-timeout / --max-time bound the transfer: a blocked or half-open
+    # route otherwise leaves this hanging and --retry turns that into minutes.
+    curl -fsSL --retry 3 --retry-all-errors \
+      --connect-timeout 15 --max-time 900 \
+      -o "$tmp/$asset" "$url" \
+      || die "download failed: $url"
+  else
+    local id
+    id="$(resolve_asset_id "$asset" "$json")"
+    curl -fsSL --retry 3 --retry-all-errors \
+      --connect-timeout 15 --max-time 900 \
+      ${gh_curl_opts[@]+"${gh_curl_opts[@]}"} \
+      -H 'Accept: application/octet-stream' \
+      -o "$tmp/$asset" "$ASSETS_API/$id" \
     || die "download failed: $ASSETS_API/$id"
+  fi
   local got
   got="$(sha256 "$tmp/$asset")"
   [ "$got" = "$sha" ] || die "$asset sha256 mismatch: got $got, want $sha"
@@ -195,7 +224,11 @@ fetch_one() { # fetch_one <goos>/<goarch> <release-json>
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v tar >/dev/null 2>&1 || die "tar is required"
-command -v jq >/dev/null 2>&1 || die "jq is required to resolve asset ids"
+# jq resolves asset ids through the API; the mirror path downloads the
+# deterministic release URL instead and never needs it.
+if [ -z "${FOREBRAIN_GITHUB_MIRROR:-}" ] && ! command -v jq >/dev/null 2>&1; then
+  die "jq is required to resolve asset ids"
+fi
 command -v pkg-config >/dev/null 2>&1 || die "pkg-config is required: go-pdfium links through 'cgo pkg-config: pdfium'"
 
 targets=("$@")
@@ -207,12 +240,17 @@ if [ "${#targets[@]}" -eq 0 ]; then
 fi
 
 # Fetch the pinned release's asset list once; every target resolves its id here.
+# The mirror path (FOREBRAIN_GITHUB_MIRROR) never reads the API — the release URL
+# is deterministic — so skip the call entirely there: it costs one request of a
+# 60/hour anonymous quota and is the first thing to fail once that quota is gone.
 release_json="$(mktemp)"
 trap 'rm -f "$release_json"' EXIT
-curl -fsSL --retry 3 --retry-all-errors \
-  ${gh_curl_opts[@]+"${gh_curl_opts[@]}"} \
-  "$RELEASES_API/releases/tags/$RELEASE_TAG_ENCODED" -o "$release_json" \
-  || die "could not read release $RELEASE_TAG"
+if [ -z "${FOREBRAIN_GITHUB_MIRROR:-}" ]; then
+  curl -fsSL --retry 3 --retry-all-errors \
+    ${gh_curl_opts[@]+"${gh_curl_opts[@]}"} \
+    "$RELEASES_API/releases/tags/$RELEASE_TAG_ENCODED" -o "$release_json" \
+    || die "could not read release $RELEASE_TAG"
+fi
 
 for target in "${targets[@]}"; do
   case "$target" in
