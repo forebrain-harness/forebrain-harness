@@ -1791,9 +1791,16 @@ func fireSessionEventOfType(t *testing.T, g *autoContinueGateway, sessionID, eve
 	return evts[0]
 }
 
-// fireWaitsForStatus waits until the job's record reaches the status and
-// returns it.
-func fireWaitsForStatus(t *testing.T, g *autoContinueGateway, jobID, status string) state.CronRun {
+// fireWaitsFor waits until the job's single fire satisfies done, and returns it.
+//
+// A fire settles in three writes, and a caller that wants a later one has to
+// wait for that one rather than for the status: settle closes the run record
+// first (FinishRun, one CAS that also writes the answer — the claim that keeps
+// two closers from delivering twice), then hands the answer to the channel and
+// records where it went (MarkFireDelivered), then writes the job's own summary
+// (recordOutcome). The delivery has to come after the claim, and its record has
+// to come after the delivery, so the three cannot be one statement (plan 221).
+func fireWaitsFor(t *testing.T, g *autoContinueGateway, jobID string, done func(state.CronRun) bool) state.CronRun {
 	t.Helper()
 	var rec state.CronRun
 	require.Eventually(t, func() bool {
@@ -1802,9 +1809,18 @@ func fireWaitsForStatus(t *testing.T, g *autoContinueGateway, jobID, status stri
 			return false
 		}
 		rec = runs[0]
-		return rec.Status == status
+		return done(rec)
 	}, 5*time.Second, 10*time.Millisecond)
 	return rec
+}
+
+// fireWaitsForStatus waits until the job's record reaches the status and
+// returns it. That is the first of the three writes above: the delivery and the
+// job row's own summary land after it, so a caller asserting either has to wait
+// for it through fireWaitsFor.
+func fireWaitsForStatus(t *testing.T, g *autoContinueGateway, jobID, status string) state.CronRun {
+	t.Helper()
+	return fireWaitsFor(t, g, jobID, func(rec state.CronRun) bool { return rec.Status == status })
 }
 
 // TestCronFireRunsAsItsOwnConversation pins the shape the whole change is
@@ -1936,7 +1952,11 @@ func TestCronFireParkedOnApprovalSettlesWhenItsRunEnds(t *testing.T) {
 	require.NoError(t, g.server.RunRT.SetStatus(ctx, runID, state.RunStatusDone))
 	_ = g.server.publishGatewayRunEvent(ctx, fire.SessionID, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{})
 
-	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusOK)
+	// The answer is delivered and its target recorded after the status the
+	// record closes with, so this waits for the delivery itself.
+	rec := fireWaitsFor(t, g, job.ID, func(rec state.CronRun) bool {
+		return rec.Status == state.CronStatusOK && rec.DeliveredTo == "firetest"
+	})
 	require.Equal(t, "done", rec.Output)
 	require.Equal(t, "firetest", rec.DeliveredTo)
 	require.Equal(t, []string{out.delivered()[0], "done"}, out.delivered())
