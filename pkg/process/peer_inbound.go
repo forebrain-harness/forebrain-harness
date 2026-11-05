@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -281,10 +282,19 @@ func (in *peerInbox) handleUserFrame(ctx context.Context, a peerArrival) {
 }
 
 // envelopeFor is the text the model reads: the envelope as it arrived, or, when
-// the content was not one, a fresh envelope wrapping it so the model can tell a
-// peer wrote it.
+// the content was not one — or named a sender other than the one that arrived —
+// a fresh envelope wrapping it so the model can tell a peer wrote it. A forged
+// from is re-wrapped like any other text, so the attributes a model reads are
+// the ones the transport vouched for, not the ones the sender typed — and the
+// hop chain the forgery claims goes with them.
+//
+// The sender is vouched for in FB mode only: the source gate there matches the
+// connecting pid's record against the address the frame carries (gateRecord). In
+// CC mode the record is looked up by pid for its features alone, so the frame's
+// from is unproven and this re-wrap is a consistency rule rather than a check
+// the transport keeps (peer.ParseFrom).
 func (in *peerInbox) envelopeFor(content, from string) string {
-	if _, ok := peer.Parse(content); ok {
+	if _, ok := peer.ParseFrom(content, from); ok {
 		return content
 	}
 	envelope := peer.Envelope{Body: peer.EscapeBody(content)}
@@ -606,13 +616,30 @@ func peerEnvelopeBody(envelope string) string {
 	return ""
 }
 
-// peerPreview is a message's opening, for a card that says what arrived.
+// peerPreview is a message's opening, for a card that says what arrived. A peer
+// message is not this process's text, so its control characters are dropped on
+// the way out: an ESC in a body would let a sender move the cursor or redraw the
+// question a person is answering about it.
 func peerPreview(envelope string) string {
-	runes := []rune(strings.TrimSpace(envelope))
+	runes := []rune(strings.TrimSpace(stripControlForDisplay(envelope)))
 	if len(runes) <= peerHeldPreviewRunes {
 		return string(runes)
 	}
 	return string(runes[:peerHeldPreviewRunes]) + "…"
+}
+
+// stripControlForDisplay removes the C0 and C1 control characters from text a
+// surface will draw, keeping the newline and tab that give it its shape.
+func stripControlForDisplay(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // settle answers a held message's sender with what became of it, and tells the
