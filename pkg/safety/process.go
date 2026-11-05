@@ -629,6 +629,9 @@ func lookBubblewrap() (string, error) {
 // the process runs.
 const sandboxProbeTimeout = 5 * time.Second
 
+// sandboxProbeRetryDelay is how long a failed probe waits before its one retry.
+const sandboxProbeRetryDelay = 100 * time.Millisecond
+
 // sandboxProbe caches the probe for the life of the process: the answer is a
 // property of this machine, and running it per command would cost a process
 // launch each time. forced is what a test pinned it to — nil in the product.
@@ -641,6 +644,15 @@ var sandboxProbe struct {
 
 // probeSandboxReason is the cached probe answer, or "" when the sandbox really
 // runs here.
+//
+// A success is cached at once; a failure is retried once before it is cached.
+// The answer is a capability of the machine, but one failure is not always the
+// machine: sandboxProbeTimeout under load, a host busy for a moment, or a probe
+// that starts before the session's temp directories exist all fail once and
+// then pass. Since plan 215 an unusable sandbox is not a degraded answer but a
+// permanent one — every command then runs uncontained with full access and the
+// approval picker never appears — so a transient failure must not be cached as
+// this machine's verdict for the life of the process.
 func probeSandboxReason(platform Platform) string {
 	sandboxProbe.mu.Lock()
 	defer sandboxProbe.mu.Unlock()
@@ -648,7 +660,12 @@ func probeSandboxReason(platform Platform) string {
 		return *sandboxProbe.forced
 	}
 	if !sandboxProbe.done {
-		sandboxProbe.reason = probeSandbox(platform)
+		reason := probeSandbox(platform)
+		if reason != "" {
+			time.Sleep(sandboxProbeRetryDelay)
+			reason = probeSandbox(platform)
+		}
+		sandboxProbe.reason = reason
 		sandboxProbe.done = true
 	}
 	return sandboxProbe.reason
