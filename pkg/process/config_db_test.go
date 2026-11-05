@@ -478,6 +478,129 @@ func TestComposedStartupConfigTransitionCases(t *testing.T) {
 	}
 }
 
+// startupHomeForTest builds the home the startup gates judge when the database
+// is somewhere else: a forebrain.yaml naming that database, which is close to
+// all a MySQL or PostgreSQL install keeps in the file (plan 187 moved the rest
+// into the database).
+func startupHomeForTest(t *testing.T, databaseURL string) string {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "gateway:\n  http_addr: 127.0.0.1:6060\n"
+	if databaseURL != "" {
+		cfg += "database:\n  url: " + databaseURL + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
+// TestComposedStartupConfigReportsAnUnreachableServer pins plan 236 step 1: a
+// configured server that cannot be reached is a failure an operator has to see,
+// never an empty configuration. Before the change every open failure read as
+// "no database yet", so the first-run gate sent a configured install back
+// through setup and the real error was discarded.
+func TestComposedStartupConfigReportsAnUnreachableServer(t *testing.T) {
+	home := startupHomeForTest(t, "mysql://fb:s3cret-pw@127.0.0.1:1/forebrain")
+	if _, ok, err := ComposedStartupConfig(context.Background(), home); err == nil {
+		t.Fatalf("unreachable server = (ok=%v, err=nil), want an error", ok)
+	}
+}
+
+// TestComposedStartupConfigErrorNamesTheFileNotTheCredentials pins plan 236
+// step 3: the message names the configuration file and the engine that failed,
+// and never the URL — it may carry the password.
+func TestComposedStartupConfigErrorNamesTheFileNotTheCredentials(t *testing.T) {
+	const password = "s3cret-pw-236"
+	home := startupHomeForTest(t, "mysql://fb:"+password+"@127.0.0.1:1/forebrain")
+	_, _, err := ComposedStartupConfig(context.Background(), home)
+	if err == nil {
+		t.Fatal("unreachable server: want an error")
+	}
+	msg := err.Error()
+	if cfgPath := filepath.Join(home, "forebrain.yaml"); !strings.Contains(msg, cfgPath) {
+		t.Fatalf("message %q does not name the config file %s", msg, cfgPath)
+	}
+	if !strings.Contains(msg, "mysql") {
+		t.Fatalf("message %q does not name the engine", msg)
+	}
+	if strings.Contains(msg, password) {
+		t.Fatalf("message %q echoes the password", msg)
+	}
+}
+
+// TestComposedStartupConfigKeepsAFreshSQLiteHomeQuiet pins the one fallback that
+// is correct (plan 236): a SQLite home with no state file yet is "not
+// configured yet", not a failure. The state directory existing is the shape a
+// fresh home reaches this gate in — home.Ensure creates it before the first
+// setup check.
+func TestComposedStartupConfigKeepsAFreshSQLiteHomeQuiet(t *testing.T) {
+	ctx := context.Background()
+	home := startupHomeForTest(t, "")
+	if _, ok, err := ComposedStartupConfig(ctx, home); err != nil || ok {
+		t.Fatalf("fresh SQLite home = (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+
+	// A home nothing has created yet: there is no state directory to hold a
+	// database, so it is the same "not configured yet".
+	bare := startupHomeForTest(t, "")
+	if err := os.RemoveAll(filepath.Join(bare, "state")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := ComposedStartupConfig(ctx, bare); err != nil || ok {
+		t.Fatalf("home with no state directory = (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+}
+
+// TestComposedStartupConfigReportsAnUnreadableSQLiteFile pins the other side of
+// that stat: a state file that is there but is not a database is a failure to
+// report, not a fresh install. This is the case the missing-file fallback must
+// not swallow, and why the fallback is a stat rather than the open's error —
+// mattn/go-sqlite3 reports both as one opaque value.
+func TestComposedStartupConfigReportsAnUnreadableSQLiteFile(t *testing.T) {
+	home := startupHomeForTest(t, "")
+	path := state.StateDBPath(home)
+	if err := os.WriteFile(path, []byte("these bytes are not a state database\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := ComposedStartupConfig(context.Background(), home)
+	if err == nil {
+		t.Fatal("unreadable state file: want an error")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("message %q does not name the state file %s", err, path)
+	}
+}
+
+// TestComposedStartupConfigFallsBackOnAnOutdatedSchema pins the transition rule
+// plan 236 keeps: a read-only open of a database this binary has not migrated is
+// nothing to report — the file is still the answer until the binary is upgraded
+// or migration runs.
+func TestComposedStartupConfigFallsBackOnAnOutdatedSchema(t *testing.T) {
+	home := startupHomeForTest(t, "")
+	ctx := context.Background()
+	db, err := state.Open(ctx, state.StateDBPath(home), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The gate that makes it the transition case rather than a silent misread.
+	if _, err := state.Open(ctx, state.StateDBPath(home), &state.OpenOptions{ReadOnly: true}); !errors.Is(err, state.ErrStateSchemaOutdated) {
+		t.Fatalf("read-only open = %v, want ErrStateSchemaOutdated", err)
+	}
+	if _, ok, err := ComposedStartupConfig(ctx, home); err != nil || ok {
+		t.Fatalf("outdated schema = (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+}
+
 // TestSyncConfigFromDBComposesFromDatabase pins plan 187 §3.2 from the
 // applying side: a turn-boundary sync on a composing environment re-composes —
 // the file's startup sections plus the database's runtime sections — so a
