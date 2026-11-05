@@ -172,8 +172,8 @@ func (s *Store) Save(e Entry) (int64, error) {
 	if strings.TrimSpace(e.Kind) == "" {
 		e.Kind = KindShell
 	}
-	e.OriginalOutput = ValidText(e.OriginalOutput)
-	e.FilteredOutput = ValidText(e.FilteredOutput)
+	e.OriginalOutput = dbx.ValidText(e.OriginalOutput)
+	e.FilteredOutput = dbx.ValidText(e.FilteredOutput)
 	args := []any{
 		e.Kind, e.Command, e.OriginalOutput, e.FilteredOutput,
 		e.OriginalBytes, e.FilteredBytes, e.SavedTokens, e.SessionID,

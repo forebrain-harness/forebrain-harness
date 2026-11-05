@@ -204,7 +204,7 @@ func (s *RunStore) AppendSessionEventOnce(ctx context.Context, in SessionEvent) 
 	// PostgreSQL refuses to parse when it reads a column as jsonb — and the
 	// audit readers cast this one. The event is stored without it rather than
 	// rejected: the row is the record of something that did happen.
-	payload = json.RawMessage(ValidJSONText(payload))
+	payload = json.RawMessage(dbx.ValidJSONText(payload))
 	args := []any{in.SessionID, nullIfEmpty(in.RunID), in.ID, strings.TrimSpace(in.Type), string(payload), in.CreatedAt.UnixMilli(), in.SessionID}
 	d := dbx.DialectOf(s.DB)
 	if d == dbx.MySQL {

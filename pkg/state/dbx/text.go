@@ -7,7 +7,7 @@
 // `git ls-files -z`, a program writing its output as binary — and the store is
 // the one place every writer passes through, so the repair lives here rather
 // than in each tool.
-package state
+package dbx
 
 import (
 	"bytes"

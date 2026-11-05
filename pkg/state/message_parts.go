@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 const (
@@ -334,7 +335,7 @@ func MessagePartsJSON(msg llm.Message, fallbackText string) string {
 	// One call covers the parts and the tool_meta_json a display part carries
 	// inside them: both are this document's bytes, and a NUL in either arrives
 	// as the `\u0000` escape PostgreSQL refuses to parse out of a jsonb cast.
-	return string(ValidJSONText(b))
+	return string(dbx.ValidJSONText(b))
 }
 
 func ParseMessage(role string, content string, partsJSON string) (llm.Message, bool) {
