@@ -511,6 +511,75 @@ func TestOpenAICompatLLMStreamCountsCumulativeUsageOnce(t *testing.T) {
 	}
 }
 
+// A length-continue round re-sends the whole prompt: each round is its own
+// billed request, but only the last one is the request the conversation is
+// now standing at. Result.Usage states that occupancy, so it must carry the
+// settled round's prompt, not the sum — the sum read back as a window twice
+// the real size and fired the compaction threshold at half of it
+// (opencode-go/deepseek-v4.1-flash, 1M window, compacted at 916k of a real
+// 458k prompt).
+func TestLengthContinueReportsSettledRequestPrompt(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		round := requests
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		var body bytes.Buffer
+		if round == 1 {
+			body.WriteString(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"thinking"},"finish_reason":null}]}` + "\n\n")
+			body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":400000,"completion_tokens":100,"total_tokens":400100,"prompt_tokens_details":{"cached_tokens":350000}}}` + "\n\n")
+		} else {
+			body.WriteString(`data: {"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}` + "\n\n")
+			body.WriteString(`data: {"id":"4","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":450000,"completion_tokens":200,"total_tokens":450200,"prompt_tokens_details":{"cached_tokens":400000}}}` + "\n\n")
+		}
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = w.Write(body.Bytes())
+	}))
+	t.Cleanup(server.Close)
+
+	// The production constructor, not a hand-built client: it installs
+	// llm.CacheUsageTransport, whose per-response figures land on the Result
+	// too — a test with its own transport cannot see that path.
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "fake-length-continue", 0, 16, "", []byte(`{"stream":true}`))
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("physical requests = %d, want 2 (the fixture must exercise a real length-continue)", requests)
+	}
+	if res == nil || res.Usage == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if got := promptOf(res.Usage); got != 450000 {
+		t.Fatalf("settled prompt = %d, want 450000 (the last round's request, not the two summed)", got)
+	}
+	if got := res.Usage.OutputTokens; got != 300 {
+		t.Fatalf("output = %d, want 300 (both rounds produced it)", got)
+	}
+	if got := promptOf(res.Billed()); got != 850000 {
+		t.Fatalf("billed prompt = %d, want 850000 (both rounds were billed)", got)
+	}
+	if got := res.Billed().OutputTokens; got != 300 {
+		t.Fatalf("billed output = %d, want 300", got)
+	}
+}
+
+// promptOf is the figure every occupancy reader sums to: a request's whole
+// prompt, cached and uncached together.
+func promptOf(u *llm.Usage) int {
+	if u == nil {
+		return 0
+	}
+	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+}
+
 func TestOpenAICompatLLMStreamsThroughTelemetryBeforeServerCompletes(t *testing.T) {
 	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
 

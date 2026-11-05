@@ -32,28 +32,6 @@ func compactModelLimit(snapshotRaw json.RawMessage, provider, model string, conf
 	return llm.EffectiveWindow(provider, model, window)
 }
 
-// estimateToolsTokens estimates the tool-schema block sent with every request.
-// This is part of the model's input on each call and is often the largest fixed
-// cost in the request, so occupancy that omits it systematically reads low. It
-// counts with the same estimator as the message block it is added to.
-func estimateToolsTokens(e llm.Estimator, tools []*llm.Tool) int {
-	total := 0
-	for _, tool := range tools {
-		if tool == nil {
-			continue
-		}
-		total += llm.EstimateTextWith(e, tool.Name())
-		total += llm.EstimateTextWith(e, tool.Description())
-		if schema := tool.InputSchema(); len(schema) > 0 {
-			if raw, err := json.Marshal(schema); err == nil {
-				total += llm.EstimateTextWith(e, string(raw))
-			}
-		}
-		total += 8
-	}
-	return total
-}
-
 // modelContextLimitFromSnapshot extracts the effective input window size used
 // for compaction decisions. Older snapshots only carry the total context
 // window, so keep that as a compatibility fallback.
@@ -77,8 +55,11 @@ func modelContextLimitFromSnapshot(raw json.RawMessage) int {
 type CompactChainDeps struct {
 	// TryCompact checkpoints the live history — messages and tools are the
 	// request the agent is about to make. Reactive marks a compaction forced by
-	// the provider rejecting that request as too large.
-	TryCompact func(ctx context.Context, messages []llm.Message, tools []*llm.Tool, reactive bool) ([]llm.Message, bool, error)
+	// the provider rejecting that request as too large. Occupancy is that
+	// request's projected size, the number the decision was made on: the card
+	// reports it as what the compaction fired at, so it reads the same as the
+	// gauge and the threshold instead of a second, local estimate.
+	TryCompact func(ctx context.Context, messages []llm.Message, tools []*llm.Tool, reactive bool, occupancy int) ([]llm.Message, bool, error)
 	// AutoCompactPercent is the share of the effective input window at which
 	// this checkpoint fires, and ConfigContextTokens the configured context
 	// window used when the catalog knows none — the same two the pre-turn
@@ -99,13 +80,13 @@ func (d *CompactChainDeps) activeModel(ctx context.Context) (string, string) {
 	return d.ActiveModel(ctx)
 }
 
-func (d *CompactChainDeps) tryCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, reactive bool) ([]llm.Message, bool) {
+func (d *CompactChainDeps) tryCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, reactive bool, occupancy int) ([]llm.Message, bool) {
 	if d == nil || d.TryCompact == nil {
 		return nil, false
 	}
 	// A failed compaction has already reported itself through its lifecycle
 	// events; the call it was made for goes ahead with the history unchanged.
-	compacted, ok, err := d.TryCompact(llm.WithMutedForegroundStream(ctx), messages, tools, reactive)
+	compacted, ok, err := d.TryCompact(llm.WithMutedForegroundStream(ctx), messages, tools, reactive, occupancy)
 	return compacted, ok && err == nil
 }
 
@@ -121,10 +102,14 @@ func compactIfNeeded(
 ) ([]llm.Message, bool) {
 	provider, model := deps.activeModel(ctx)
 	modelLimit := compactModelLimit(snapshotRaw, provider, model, deps.ConfigContextTokens)
-	if modelLimit <= 0 || deps == nil || deps.TryCompact == nil || !shouldCompactMessages(messages, modelLimit, deps, tools, provider, model) {
+	if deps == nil || modelLimit <= 0 || deps.TryCompact == nil {
 		return messages, false
 	}
-	compacted, ok := deps.tryCompact(ctx, messages, tools, false)
+	occupancy := requestOccupancy(provider, model, tools, messages)
+	if !compactThresholdReached(occupancy, modelLimit, deps) {
+		return messages, false
+	}
+	compacted, ok := deps.tryCompact(ctx, messages, tools, false, occupancy)
 	if !ok {
 		return messages, false
 	}
@@ -135,25 +120,36 @@ func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *Compact
 	if modelLimit <= 0 {
 		return false
 	}
-	// This mid-turn checkpoint must count with the session's own model's
-	// estimator, the same one the pre-turn checkpoint
-	// (assembly.autoCompactDecision) and the observed overhead
-	// (RecordSuccessFor/RecordOverflow) use. The overhead is server-real minus
-	// local-estimate; if the decision counted with a different tokenizer than
-	// the observation measured against, the learned overhead would be added to
-	// the wrong base and the two checkpoints would fire at different real sizes.
-	est := llm.EstimatorFor(provider, model)
-	// Tool schemas are part of every request's input and can run to tens of
-	// thousands of tokens, so occupancy that ignores them reads far below the
-	// truth and the threshold never fires. The rest of what this layer cannot
-	// see -- the prefix the inner wrappers prepend, the provider's own framing
-	// -- is added back as the token overhead those same providers have reported.
-	total := llm.ProjectFor(provider, model, est.Name(), llm.EstimateMessagesWith(est, messages)+estimateToolsTokens(est, tools))
-	if total >= modelLimit {
+	return compactThresholdReached(requestOccupancy(provider, model, tools, messages), modelLimit, deps)
+}
+
+// requestOccupancy is this request's projected size: the history plus the tool
+// schemas every call carries, corrected by the overhead the provider has
+// reported. The compaction threshold, the card and the gauge all read it, so
+// they cannot state different sizes for the same request.
+//
+// This mid-turn checkpoint must count with the session's own model's estimator,
+// the same one the pre-turn checkpoint (assembly.autoCompactDecision) and the
+// observed overhead (RecordSuccessFor/RecordOverflow) use. The overhead is
+// server-real minus local-estimate; if the decision counted with a different
+// tokenizer than the observation measured against, the learned overhead would
+// be added to the wrong base and the two checkpoints would fire at different
+// real sizes.
+func requestOccupancy(provider, model string, tools []*llm.Tool, messages []llm.Message) int {
+	return llm.ProjectRequestTokens(provider, model, llm.EstimatorFor(provider, model), messages, tools)
+}
+
+// compactThresholdReached reports whether occupancy has crossed this
+// checkpoint's firing point: the window itself, or the configured share of it.
+func compactThresholdReached(occupancy, modelLimit int, deps *CompactChainDeps) bool {
+	if modelLimit <= 0 {
+		return false
+	}
+	if occupancy >= modelLimit {
 		return true
 	}
 	threshold := modelLimit * autoCompactPercent(deps) / 100
-	return total >= threshold
+	return occupancy >= threshold
 }
 
 // autoCompactPercent is the configured share of the window this checkpoint

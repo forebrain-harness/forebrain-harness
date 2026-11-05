@@ -495,6 +495,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if MODE == "netdrop" and self.serve_netdrop(body):
             return
 
+        # REQUESTS counts from 0; the mode documents request 1, 2, 3.
+        if MODE == "lengthcontinue" and self.serve_lengthcontinue(next(REQUESTS) + 1):
+            return
+
         if MODE == "hang":
             # Never answer. The socket stays open, so forebrain keeps the turn in
             # flight and the withdrawal window stays open until Esc closes it.
@@ -543,6 +547,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_event(final)
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")  # terminating zero-length chunk
+
+    def serve_lengthcontinue(self, n):
+        """Answer one turn with a length-continue, the way a reasoning model that
+        ran into max_tokens does: the first request comes back with
+        finish_reason "length" after some thinking, so the client re-sends the
+        whole prompt with that thinking appended and takes a second answer.
+
+        Both rounds report their own usage, and the two are far apart on
+        purpose: the billing view of the call is round1+round2, while the
+        request the conversation ends up standing at is round2 alone. A client
+        that reports the sum as its usage puts a prompt onto the record that
+        never happened — on a 1M-window session that read back as a window at
+        92% and compacted it at half its real size, and the footer gauge echoed
+        it. FAKE_LC_PROMPT_1 / FAKE_LC_PROMPT_2 and their _CACHED pairs pick the
+        numbers, so a run can place the sum and the settled round on opposite
+        sides of the configured compaction threshold.
+
+        Requests past the pair answer in plain text: the turn that FOLLOWS the
+        length-continue is the one whose compaction check already runs with the
+        overhead this call taught.
+        """
+        p1 = int(os.environ.get("FAKE_LC_PROMPT_1") or 8000)
+        p2 = int(os.environ.get("FAKE_LC_PROMPT_2") or 9000)
+        c1 = int(os.environ.get("FAKE_LC_PROMPT_1_CACHED") or p1 - 1000)
+        c2 = int(os.environ.get("FAKE_LC_PROMPT_2_CACHED") or p2 - 1000)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if n == 1:
+            self.write_event(chunk(delta={"role": "assistant", "reasoning_content": "thinking about it"}))
+            final = chunk(finish="length")
+            final["usage"] = {
+                "prompt_tokens": p1,
+                "completion_tokens": 100,
+                "total_tokens": p1 + 100,
+                "prompt_tokens_details": {"cached_tokens": c1},
+            }
+            self.write_event(final)
+        elif n == 2:
+            self.write_event(chunk(delta={"role": "assistant", "content": TEXT}))
+            final = chunk(finish="stop")
+            final["usage"] = {
+                "prompt_tokens": p2,
+                "completion_tokens": 200,
+                "total_tokens": p2 + 200,
+                "prompt_tokens_details": {"cached_tokens": c2},
+            }
+            self.write_event(final)
+        else:
+            self.write_event(chunk(delta={"role": "assistant", "content": "second turn"}))
+            self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+        return True
 
     def serve_gemini(self, body):
         """Answer generateContent: the turn's script streamed over SSE, the

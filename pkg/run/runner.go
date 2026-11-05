@@ -1080,7 +1080,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		ActiveModel: func(ctx context.Context) (string, string) {
 			return r.agentModelFor(ctx)
 		},
-		TryCompact: func(ctx context.Context, msgs []llm.Message, tools []*llm.Tool, reactive bool) ([]llm.Message, bool, error) {
+		TryCompact: func(ctx context.Context, msgs []llm.Message, tools []*llm.Tool, reactive bool, occupancy int) ([]llm.Message, bool, error) {
 			// Compaction owns model history, so it remains scoped to the worker
 			// session. Only permission decisions use ConversationSessionID.
 			sessionID := llm.AgentSessionIDFromContext(ctx)
@@ -1092,7 +1092,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 			conversation := func(ctx context.Context, instruction llm.Message) (*llm.Result, error) {
 				return summaryChain.Execute(ctx, append(append([]llm.Message(nil), msgs...), instruction), tools)
 			}
-			return compactSvc.TryCompactOnMessages(ctx, msgs, sessionID, reactive, conversation)
+			return compactSvc.TryCompactOnMessages(ctx, msgs, tools, sessionID, reactive, conversation, occupancy)
 		},
 	}
 	// Re-wrap the LLM client with compactDeps wired in.

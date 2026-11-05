@@ -73,7 +73,7 @@ func TestOrchestrationAutoCompactsDuringTurnWithoutSnapshot(t *testing.T) {
 			inner := &growingCompactTestLLM{t: t, compactions: &compactions}
 			recoverable := WrapRecoverableLLM(inner, snapshot.read, &CompactChainDeps{
 				ConfigContextTokens: 500,
-				TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+				TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool, occupancy int) ([]llm.Message, bool, error) {
 					compactions++
 					if messages[len(messages)-1].Role != llm.RoleTool {
 						t.Fatal("compact must see the completed tool result")
@@ -557,7 +557,7 @@ func TestCompactionKeepsInFlightSteersOutOfTheCheckpoint(t *testing.T) {
 	inner := &steerCompactLLM{}
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
 		ConfigContextTokens: 500,
-		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool, occupancy int) ([]llm.Message, bool, error) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},
@@ -595,7 +595,7 @@ func TestRetractionDuringCompactionKeepsTheCheckpoint(t *testing.T) {
 	inner := &steerCompactLLM{}
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
 		ConfigContextTokens: 500,
-		TryCompact: func(ctx context.Context, _ []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+		TryCompact: func(ctx context.Context, _ []llm.Message, _ []*llm.Tool, _ bool, occupancy int) ([]llm.Message, bool, error) {
 			compactions++
 			if _, ok := q.Recall(); !ok {
 				t.Error("recall refused a steer that is still in the queue")
@@ -701,7 +701,7 @@ func TestObservedEstimateMatchesDecisionEstimator(t *testing.T) {
 		t.Fatal("no observation recorded for the active model")
 	}
 	est := scaledEstimator{}
-	sent := llm.EstimateMessagesWith(est, msgs) + estimateToolsTokens(est, tools)
+	sent := llm.EstimateRequestTokens(est, msgs, tools)
 	want := real - sent
 	// The overhead is learned under the decision estimator's name; read it
 	// back the way the decision projects with it.
@@ -712,7 +712,7 @@ func TestObservedEstimateMatchesDecisionEstimator(t *testing.T) {
 	}
 	// Guard the test itself: the global estimator must size the same request
 	// differently, or the assertion above proves nothing.
-	if global := llm.EstimateMessages(msgs) + estimateToolsTokens(llm.DefaultEstimator(), tools); global == sent {
+	if global := llm.EstimateRequestTokens(llm.DefaultEstimator(), msgs, tools); global == sent {
 		t.Fatal("fixture: the model estimator must differ from the global one")
 	} else if overhead == real-global {
 		t.Fatal("Overhead was measured against the global estimator, not the decision estimator")
@@ -770,7 +770,7 @@ func TestCompactionGuardKeepsAHistorysCheckpointToItself(t *testing.T) {
 	compactions := 0
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
 		ConfigContextTokens: 500,
-		TryCompact: func(_ context.Context, _ []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+		TryCompact: func(_ context.Context, _ []llm.Message, _ []*llm.Tool, _ bool, occupancy int) ([]llm.Message, bool, error) {
 			compactions++
 			return []llm.Message{llm.UserMessage(llm.Text(fmt.Sprintf("checkpoint-%d", compactions)))}, true, nil
 		},
@@ -805,7 +805,7 @@ func TestCompactionGuardCachesNothingWithoutARunID(t *testing.T) {
 	var compacted [][]llm.Message
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
 		ConfigContextTokens: 500,
-		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool, occupancy int) ([]llm.Message, bool, error) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},
@@ -849,7 +849,7 @@ func TestCompactionSkipsACallWhoseProvisionalTailCannotBeHonored(t *testing.T) {
 	inner := &steerCompactLLM{}
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
 		ConfigContextTokens: 500,
-		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool, occupancy int) ([]llm.Message, bool, error) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},
@@ -890,7 +890,7 @@ func TestCompactionOfAHistoryThatCarriesAnotherHistorysTail(t *testing.T) {
 	var compacted [][]llm.Message
 	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
 		ConfigContextTokens: 500,
-		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool, occupancy int) ([]llm.Message, bool, error) {
 			compacted = append(compacted, append([]llm.Message(nil), messages...))
 			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
 		},

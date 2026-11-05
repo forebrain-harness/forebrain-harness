@@ -302,12 +302,20 @@ type Usage struct {
 // Result represents the output of an LLM execution, including the assistant message and any tool calls.
 type Result struct {
 	Message *Message
-	// Usage holds token counts for the settled attempt of this call. May be
-	// nil when the provider does not return usage information. The billing
-	// view that includes every retried attempt lives on the
-	// UsageAccumulator (and, for a failed request, on the merged total the
-	// error carries) — not here.
+	// Usage holds token counts for the settled attempt of this call: the
+	// request the conversation is now standing at. May be nil when the
+	// provider does not return usage information. The billing view that
+	// includes every retried attempt lives on the UsageAccumulator (and, for
+	// a failed request, on the merged total the error carries) — not here.
 	Usage *Usage
+	// BilledUsage is every physical request this call made, which a
+	// length-continue makes several of by re-sending the whole prompt per
+	// round: the billing view of this call. Nil when it equals Usage (the
+	// ordinary one-request case). Occupancy readers (the footer gauge, the
+	// compaction threshold, the overhead calibration, the window bound) use
+	// Usage; billing readers (the attempt ledger, run totals, the prefix
+	// hit-rate) use Billed().
+	BilledUsage *Usage
 	// Attempts is the number of physical model requests this call took:
 	// every retry of the same logical request counts as its own attempt.
 	// 0 means unknown; callers that count requests treat it as 1.
@@ -319,6 +327,19 @@ type Result struct {
 	// Result.Session and persisted to the session store. When nil, callers fall
 	// back to appending just Message to their session (the legacy behavior).
 	Session []Message
+}
+
+// Billed returns the usage every physical request of this call was billed for:
+// BilledUsage when the call made more than one, Usage otherwise. Nil-safe, and
+// nil only when the call reported no usage at all.
+func (r *Result) Billed() *Usage {
+	if r == nil {
+		return nil
+	}
+	if r.BilledUsage != nil {
+		return r.BilledUsage
+	}
+	return r.Usage
 }
 
 // LLM is the minimal interface implemented by chat-model backends.

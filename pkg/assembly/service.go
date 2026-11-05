@@ -135,12 +135,21 @@ func (s Service) ManualCompactSession(ctx context.Context, sessionID, trigger st
 	if err != nil {
 		return Result{}, err
 	}
-	ctx, run := s.beginCompaction(ctx, sid, trigger, llm.EstimateMessagesWith(s.estimator(ctx), messages))
+	// The card reports the occupancy the user was looking at: the same count
+	// the gauge shows and the pre-turn checkpoint decides on. A local estimate
+	// taken here would be a second measure of the same history and read lower
+	// by whatever the estimator cannot see.
+	before := s.gaugeUsage(ctx, sid)
+	if before <= 0 {
+		before = llm.EstimateMessagesWith(s.estimator(ctx), messages)
+	}
+	ctx, run := s.beginCompaction(ctx, sid, trigger, before)
 	res, err := s.compactSession(ctx, sid, messages, trigger, "", "", false)
 	if err != nil {
 		run.fail(err)
 		return Result{}, err
 	}
+	res.TokensBefore = before
 	return run.finish(res), nil
 }
 
@@ -244,10 +253,7 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 	// reports and the threshold both come from this session's own model's
 	// tokenizer, not a process-wide default. The mid-turn checkpoint
 	// (shouldCompactMessages) resolves the same way, so the two agree.
-	provider, model := "", ""
-	if s.PrimaryModel != nil {
-		provider, model = s.PrimaryModel(ctx)
-	}
+	provider, model := s.projectionModel(ctx)
 	est := llm.EstimatorFor(provider, model)
 	usage := state.TokenCountWithEstimationFor(turns, est)
 	limits, _ := llm.Lookup(provider, model)
@@ -326,16 +332,26 @@ func modelChangeCompactReason(usage int, currentAutoLimit int, previous, current
 // the history the next request carries. Reactive marks a compaction forced by
 // the provider rejecting the request as too large. Conversation, when set,
 // sends the summary request as the request the agent was about to make.
-func (s Service) TryCompactOnMessages(ctx context.Context, messages []llm.Message, sessionID string, reactive bool, conversation ConversationSummarizer) ([]llm.Message, bool, error) {
+// Occupancy is the projected size of the request the checkpoint fired on — the
+// number the decision was made on, which the card reports; 0 falls back to a
+// local estimate of the history.
+func (s Service) TryCompactOnMessages(ctx context.Context, messages []llm.Message, tools []*llm.Tool, sessionID string, reactive bool, conversation ConversationSummarizer, occupancy int) ([]llm.Message, bool, error) {
 	if s.Sessions == nil || s.CompactLLM == nil || strings.TrimSpace(sessionID) == "" || len(messages) == 0 {
 		return nil, false, nil
 	}
-	ctx, run := s.beginCompaction(ctx, sessionID, "auto", llm.EstimateMessagesWith(s.estimator(ctx), messages))
+	before := occupancy
+	if before <= 0 {
+		before = llm.EstimateMessagesWith(s.estimator(ctx), messages)
+	}
+	ctx, run := s.beginCompaction(ctx, sessionID, "auto", before)
 	replacement, result, err := s.compactLiveMessages(ctx, messages, sessionID, reactive, conversation)
 	if err != nil {
 		run.fail(err)
 		return nil, false, err
 	}
+	result.TokensBefore = before
+	provider, model := s.projectionModel(ctx)
+	result.TokensAfter = llm.ProjectRequestTokens(provider, model, s.estimator(ctx), replacement, tools)
 	run.finish(result)
 	// The checkpoint excludes initial instructions. Reinject current initial
 	// context for the request that immediately follows a mid-turn compaction.
@@ -379,6 +395,7 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 	}
 	// One estimator for every size this compaction states or budgets with:
 	// the card's numbers, the summary request's fit and its trimming.
+	provider, model := s.projectionModel(ctx)
 	est := s.estimator(ctx)
 	before := llm.EstimateMessagesWith(est, messages)
 	var replacement []llm.Message
@@ -445,7 +462,12 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 		Summary:       summary,
 		ReplacedTurns: max(0, len(stripInitialContext(messages))-len(replacement)),
 		TokensBefore:  before,
-		TokensAfter:   llm.EstimateMessagesWith(est, replacement),
+		// After is what the NEXT request will project to, not the bare text of
+		// the replacement: the same basis Before is stated in, so the card's
+		// two numbers can be read against each other. No tool schemas here —
+		// the summary path does not carry them, which understates the next
+		// request by that block (~2% of a window) and never overstates it.
+		TokensAfter: llm.ProjectFor(provider, model, est.Name(), llm.EstimateMessagesWith(est, replacement)),
 	}
 	return replacement, result, nil
 }
@@ -597,6 +619,33 @@ func (s Service) estimator(ctx context.Context) llm.Estimator {
 		return llm.DefaultEstimator()
 	}
 	return llm.EstimatorFor(s.PrimaryModel(ctx))
+}
+
+// projectionModel names the provider/model this service's occupancy numbers
+// are projected with — the session's own model, the one estimator counts with.
+// Empty when no model is named; ProjectFor then states the local estimate
+// unchanged.
+func (s Service) projectionModel(ctx context.Context) (string, string) {
+	if s.PrimaryModel == nil {
+		return "", ""
+	}
+	return s.PrimaryModel(ctx)
+}
+
+// gaugeUsage is the occupancy a surface's gauge shows for this session: the
+// count the pre-turn checkpoint decides on. A compaction card states the number
+// the user was looking at, so it reads this instead of a local estimate that
+// would disagree with the gauge it sits next to. 0 when the history cannot be
+// read.
+func (s Service) gaugeUsage(ctx context.Context, sessionID string) int {
+	if s.Sessions == nil {
+		return 0
+	}
+	turns, err := s.Sessions.ListRecentMessages(ctx, normalizedSessionID(sessionID), 5000)
+	if err != nil {
+		return 0
+	}
+	return state.TokenCountWithEstimationFor(turns, s.estimator(ctx))
 }
 
 // summaryInputBudget returns the token budget for a summarization request,

@@ -835,6 +835,36 @@ func BenchmarkEstimateMessagesRepeated(b *testing.B) {
 	b.ReportMetric(float64(bytesPerPass)/(1<<20), "history-MB")
 }
 
+// A reasoning model's earlier thinking rides on the next request through
+// Message.Name, so the estimate has to count it. On the history that triggered
+// this it was ~135k tokens skipped per request — the gap the overhead
+// calibration then learned as a constant instead of the constant it should be.
+func TestEstimateMessageCountsCarriedReasoning(t *testing.T) {
+	t.Parallel()
+
+	est := DefaultEstimator()
+	reasoning := strings.Repeat("step through the options ", 40)
+
+	carried := AssistantMessage(nil)
+	carried.Name = Prefix + reasoning
+	inParts := AssistantMessage([]ContentPart{Text(reasoning)})
+	extra := EstimateMessageWith(est, carried) - EstimateMessageWith(est, inParts)
+	if extra < 0 {
+		t.Fatalf("carried reasoning counts %d tokens less than the same text in Parts; the carrier must be counted", -extra)
+	}
+	// The carrier's own prefix never reaches the wire (it is stripped before
+	// the request), so it may only add its few tokens — rounding included.
+	if limit := EstimateTextWith(est, Prefix) + 1; extra > limit {
+		t.Fatalf("carried reasoning adds %d tokens over the same text in Parts, want at most %d", extra, limit)
+	}
+	if got, want := EstimateMessageWith(est, AssistantMessage(nil)), 4; got != want {
+		t.Fatalf("empty message = %d tokens, want the %d-token frame", got, want)
+	}
+	if got, want := EstimateMessageWith(est, AssistantMessage([]ContentPart{Text("hi")})), EstimateTextWith(est, "hi")+4; got != want {
+		t.Fatalf("message without a name = %d tokens, want %d (a name adds nothing when it carries nothing)", got, want)
+	}
+}
+
 func TestEmptyHubsMeansDefaultHubs(t *testing.T) {
 	ResetTokenizersForTest()
 	t.Cleanup(ResetTokenizersForTest)

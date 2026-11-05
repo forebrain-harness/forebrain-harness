@@ -88,7 +88,7 @@ type streamOverflowLLM struct {
 
 func (m *streamOverflowLLM) Execute(_ context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	m.calls++
-	size := llm.EstimateMessages(messages) + estimateToolsTokens(llm.DefaultEstimator(), tools)
+	size := llm.EstimateRequestTokens(llm.DefaultEstimator(), messages, tools)
 	if size > m.limit {
 		return nil, fmt.Errorf(
 			`received error while streaming: {"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again.","param":"input"}`,
@@ -126,7 +126,7 @@ func TestStreamingOverflowRecoversAndContinues(t *testing.T) {
 	var reactive []bool
 	deps := &CompactChainDeps{
 		ActiveModel: func(context.Context) (string, string) { return "openai", "gpt-5.1-codex" },
-		TryCompact: func(_ context.Context, msgs []llm.Message, _ []*llm.Tool, isReactive bool) ([]llm.Message, bool, error) {
+		TryCompact: func(_ context.Context, msgs []llm.Message, _ []*llm.Tool, isReactive bool, occupancy int) ([]llm.Message, bool, error) {
 			compacted++
 			reactive = append(reactive, isReactive)
 			// Stand in for the real replacement checkpoint: system prefix, the
@@ -165,7 +165,7 @@ func TestOverflowCompactionKeepsProvisionalSteersOutOfTheCheckpoint(t *testing.T
 	var compactedInput []llm.Message
 	deps := &CompactChainDeps{
 		ActiveModel: func(context.Context) (string, string) { return "openai", "gpt-5.1-codex" },
-		TryCompact: func(_ context.Context, msgs []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+		TryCompact: func(_ context.Context, msgs []llm.Message, _ []*llm.Tool, _ bool, occupancy int) ([]llm.Message, bool, error) {
 			compactedInput = append([]llm.Message(nil), msgs...)
 			return []llm.Message{
 				llm.SystemMessage("system prompt"),
@@ -203,7 +203,7 @@ func TestOverflowTeachesWindowSoNextRunCompactsProactively(t *testing.T) {
 	compactCalls := 0
 	deps := &CompactChainDeps{
 		ActiveModel: func(context.Context) (string, string) { return "openai", "wrong-catalog-model" },
-		TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool) ([]llm.Message, bool, error) {
+		TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool, int) ([]llm.Message, bool, error) {
 			compactCalls++
 			return []llm.Message{
 				llm.SystemMessage("system prompt"),
@@ -253,7 +253,7 @@ func TestOverflowWithoutRecoveryStillReportsProviderError(t *testing.T) {
 		nil,
 		&CompactChainDeps{
 			ActiveModel: func(context.Context) (string, string) { return "openai", "m" },
-			TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool) ([]llm.Message, bool, error) {
+			TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool, int) ([]llm.Message, bool, error) {
 				attempted++
 				return nil, false, errors.New("compact backend down")
 			},
@@ -277,10 +277,10 @@ func TestToolSchemasCountTowardOccupancy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := estimateToolsTokens(llm.DefaultEstimator(), []*llm.Tool{tool}); got < 300 {
+	if got := llm.EstimateToolsWith(llm.DefaultEstimator(), []*llm.Tool{tool}); got < 300 {
 		t.Fatalf("tool schema tokens=%d; schemas must count toward occupancy", got)
 	}
-	schemaTokens := estimateToolsTokens(llm.DefaultEstimator(), []*llm.Tool{tool})
+	schemaTokens := llm.EstimateToolsWith(llm.DefaultEstimator(), []*llm.Tool{tool})
 	// modelLimit is chosen so the schema alone exceeds 90% of the window,
 	// but the tiny message alone does not.
 	modelLimit := int(float64(schemaTokens) * 1.05)
@@ -2011,6 +2011,93 @@ func TestUsageAccountingLLMAttachesErrorUsageToAccumulator(t *testing.T) {
 	}
 }
 
+// scriptedRoundLLM answers a scripted sequence of results, one per model call.
+type scriptedRoundLLM struct {
+	mu      sync.Mutex
+	results []*llm.Result
+}
+
+func (m *scriptedRoundLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.results) == 0 {
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+		return &llm.Result{Message: &msg}, nil
+	}
+	res := m.results[0]
+	m.results = m.results[1:]
+	return res, nil
+}
+
+// One tool loop makes one model call per batch, and a call can itself take
+// several physical requests. Result.Usage must still state one request — the
+// one the conversation is now standing at — because that is the only figure a
+// window reader may measure; the run's billing is the sum, and it belongs on
+// Billed().
+//
+// Writing the running total onto Usage (which this loop did) put a 2x/3x
+// prompt in front of the compaction threshold and the gauge, exactly the way a
+// length-continue round sum did one layer down.
+func TestOrchestrationReportsTheSettledRequestAndBillsEveryCall(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "echo", ReadOnly: true, ConcurrencySafe: true})
+	echo, err := llm.NewTool("echo", "echoes its input", func(context.Context, *struct{}) (string, error) {
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("echo tool: %v", err)
+	}
+
+	// Call 1: a tool batch, one request (40k prompt).
+	batch := llm.AssistantMessage(nil, llm.ToolCall{
+		ID: "call-1", Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "echo", Arguments: `{}`},
+	})
+	// Call 2: the answer, and a length-continue: two rounds of 50k, billed 60k.
+	answer := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")})
+	inner := &scriptedRoundLLM{results: []*llm.Result{
+		{Message: &batch, Usage: &llm.Usage{InputTokens: 40000, OutputTokens: 100}},
+		{
+			Message:     &answer,
+			Usage:       &llm.Usage{InputTokens: 50000, OutputTokens: 200},
+			BilledUsage: &llm.Usage{InputTokens: 60000, OutputTokens: 200},
+		},
+	}}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		context.Background(), []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{echo},
+	)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Usage == nil {
+		t.Fatal("expected usage on the orchestrated result")
+	}
+	if got := res.Usage.InputTokens; got != 50000 {
+		t.Fatalf("result usage = %d, want the settled request of the last call (50000), not the loop's total", got)
+	}
+	if got := res.Usage.OutputTokens; got != 200 {
+		t.Fatalf("result output = %d, want the last call's own output (200)", got)
+	}
+	if got := res.Billed(); got == nil || got.InputTokens != 100000 || got.OutputTokens != 300 {
+		t.Fatalf("billed = %+v, want every request of the loop: 40000+60000 prompt, 100+200 output", got)
+	}
+
+	// A single-call loop reports one request, so the billing view stays nil:
+	// that path must not start carrying a duplicate of Usage.
+	res, err = wrapToolOrchestrationLLM(&scriptedRoundLLM{results: []*llm.Result{
+		{Message: &answer, Usage: &llm.Usage{InputTokens: 7000, OutputTokens: 80}},
+	}}, st).Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("go"))}, nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.BilledUsage != nil {
+		t.Fatalf("billed usage = %+v, want nil for a single request", res.BilledUsage)
+	}
+	if res.Usage == nil || res.Usage.InputTokens != 7000 {
+		t.Fatalf("result usage = %+v, want the one request", res.Usage)
+	}
+}
+
 func TestNestedUsageAccumulatorPropagatesToOuterAccumulator(t *testing.T) {
 	outer := llm.NewUsageAccumulator()
 	ctx := llm.WithUsageAccumulator(context.Background(), outer)
@@ -3618,7 +3705,7 @@ func TestCompactIfNeededUsesSingleCheckpointPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	callTools := []*llm.Tool{readFile}
-	deps := &CompactChainDeps{TryCompact: func(ctx context.Context, _ []llm.Message, tools []*llm.Tool, reactive bool) ([]llm.Message, bool, error) {
+	deps := &CompactChainDeps{TryCompact: func(ctx context.Context, _ []llm.Message, tools []*llm.Tool, reactive bool, occupancy int) ([]llm.Message, bool, error) {
 		called++
 		if reactive {
 			t.Fatal("a threshold compaction is not reactive")
@@ -3643,7 +3730,7 @@ func TestCompactIfNeededUsesSingleCheckpointPath(t *testing.T) {
 // compaction ended is reported by its own lifecycle, not here.
 func TestCompactIfNeededKeepsTheHistoryWhenCompactionFails(t *testing.T) {
 	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("x", 4000)))}
-	deps := &CompactChainDeps{TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool) ([]llm.Message, bool, error) {
+	deps := &CompactChainDeps{TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool, int) ([]llm.Message, bool, error) {
 		return nil, false, errors.New("provider compact failed")
 	}}
 	out, did := compactIfNeeded(context.Background(), msgs, json.RawMessage(`{"model_context_tokens":100}`), deps, nil)
@@ -3736,7 +3823,7 @@ func TestRecoverableLLMCompactsAndRetriesAfterContextOverflow(t *testing.T) {
 	wrapped := WrapRecoverableLLM(
 		inner,
 		nil,
-		&CompactChainDeps{TryCompact: func(ctx context.Context, messages []llm.Message, _ []*llm.Tool, isReactive bool) ([]llm.Message, bool, error) {
+		&CompactChainDeps{TryCompact: func(ctx context.Context, messages []llm.Message, _ []*llm.Tool, isReactive bool, occupancy int) ([]llm.Message, bool, error) {
 			assertAndExerciseMutedCompactionSink(t, ctx)
 			if len(messages) != 1 || messages[0].TextContent() != "oversized history" {
 				t.Fatalf("unexpected compact input=%+v", messages)
@@ -5237,8 +5324,17 @@ func TestToolOrchestrationAggregatesUsageAcrossInternalLLMCalls(t *testing.T) {
 	if res == nil || res.Usage == nil {
 		t.Fatalf("expected non-nil usage")
 	}
-	if res.Usage.InputTokens != 300 || res.Usage.OutputTokens != 50 {
-		t.Fatalf("usage=%+v want input=300 output=50", *res.Usage)
+	// Two calls of the tool loop: 100/20 then 200/30.
+	//
+	// Usage states the request the conversation is standing at — the last
+	// call's own — because that is the only figure a window reader may
+	// measure. The loop's total is what the run was billed for, so it lives
+	// on Billed(); a reader that wants the cost asks for it.
+	if res.Usage.InputTokens != 200 || res.Usage.OutputTokens != 30 {
+		t.Fatalf("usage=%+v want the settled request input=200 output=30", *res.Usage)
+	}
+	if billed := res.Billed(); billed == nil || billed.InputTokens != 300 || billed.OutputTokens != 50 {
+		t.Fatalf("billed=%+v want input=300 output=50 across both internal calls", billed)
 	}
 }
 

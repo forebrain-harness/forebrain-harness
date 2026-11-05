@@ -243,6 +243,19 @@ func NewExecuteError(err error, usage *Usage) error {
 	return &ExecuteError{err: err, usage: usage, attempts: AttemptsFromError(err), lastAttempt: LastAttemptUsageFromError(err)}
 }
 
+// NewExecuteErrorWithLastAttempt is an adapter's failure wrapper when the one
+// request it died on is not the only one it made: a length-continue re-sends
+// the whole prompt, so usage is the merged total of every round (that billing
+// must not be lost) and lastAttempt is the round the provider refused. Marks
+// the failing attempt for the overflow calibration, which otherwise has only
+// the total to bound the window with.
+func NewExecuteErrorWithLastAttempt(err error, usage, lastAttempt *Usage) error {
+	if err == nil {
+		return nil
+	}
+	return newRetriedExecuteError(err, usage, lastAttempt, AttemptsFromError(err))
+}
+
 // newRetriedExecuteError is the retry loops' failure wrapper. It carries the
 // merged usage of every attempt the logical request burned (usage, nil when
 // none reported any), the physical attempt count, and the failing attempt's

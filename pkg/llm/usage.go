@@ -13,6 +13,10 @@ import (
 	"time"
 )
 
+// UsageAccumulator rolls one scope's model calls into a run total. Its two
+// figures answer two different questions, and a call that re-sent its prompt
+// makes them differ: sum is what the run was billed for, last is the request
+// the conversation is standing at.
 type UsageAccumulator struct {
 	mu      sync.Mutex
 	sum     Usage
@@ -29,38 +33,56 @@ func (a *UsageAccumulator) Observe(inputTokens int, outputTokens int) {
 	a.ObserveUsage(Usage{InputTokens: inputTokens, OutputTokens: outputTokens})
 }
 
+// ObserveUsage records one model call whose settled request and billed total
+// are the same — the ordinary case.
 func (a *UsageAccumulator) ObserveUsage(usage Usage) {
+	a.ObserveUsageWithBilling(usage, usage)
+}
+
+// ObserveUsageWithBilling records one model call whose billed total is larger
+// than the request it settled on: a length-continue re-sends the whole prompt
+// per round, so every round is billed while only the last one is the context
+// the conversation continues from.
+//
+// billed goes into the totals — a run's usage is what its calls cost — and
+// settled becomes LastResponse, which states how big a request was. That is a
+// window question: a sum over rounds answers it with a number no request ever
+// sent, which is how a 1M-window session came to compact at half its size.
+func (a *UsageAccumulator) ObserveUsageWithBilling(billed, settled Usage) {
 	if a == nil {
 		return
 	}
-	if usage.InputTokens < 0 {
-		usage.InputTokens = 0
-	}
-	if usage.OutputTokens < 0 {
-		usage.OutputTokens = 0
-	}
-	if usage.CacheCreationInputTokens < 0 {
-		usage.CacheCreationInputTokens = 0
-	}
-	if usage.CacheReadInputTokens < 0 {
-		usage.CacheReadInputTokens = 0
-	}
-	if usage.InputTokens == 0 && usage.OutputTokens == 0 &&
-		usage.CacheCreationInputTokens == 0 && usage.CacheReadInputTokens == 0 {
+	billed, settled = nonNegativeUsage(billed), nonNegativeUsage(settled)
+	if emptyUsage(billed) && emptyUsage(settled) {
 		return
 	}
 	a.mu.Lock()
-	a.sum.InputTokens += usage.InputTokens
-	a.sum.OutputTokens += usage.OutputTokens
-	a.sum.CacheCreationInputTokens += usage.CacheCreationInputTokens
-	a.sum.CacheReadInputTokens += usage.CacheReadInputTokens
-	a.last = usage
-	a.hasLast = true
+	a.sum.InputTokens += billed.InputTokens
+	a.sum.OutputTokens += billed.OutputTokens
+	a.sum.CacheCreationInputTokens += billed.CacheCreationInputTokens
+	a.sum.CacheReadInputTokens += billed.CacheReadInputTokens
+	if !emptyUsage(settled) {
+		a.last = settled
+		a.hasLast = true
+	}
 	parent := a.parent
 	a.mu.Unlock()
 	if parent != nil {
-		parent.ObserveUsage(usage)
+		parent.ObserveUsageWithBilling(billed, settled)
 	}
+}
+
+func nonNegativeUsage(usage Usage) Usage {
+	usage.InputTokens = max(0, usage.InputTokens)
+	usage.OutputTokens = max(0, usage.OutputTokens)
+	usage.CacheCreationInputTokens = max(0, usage.CacheCreationInputTokens)
+	usage.CacheReadInputTokens = max(0, usage.CacheReadInputTokens)
+	return usage
+}
+
+func emptyUsage(usage Usage) bool {
+	return usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		usage.CacheCreationInputTokens == 0 && usage.CacheReadInputTokens == 0
 }
 
 func (a *UsageAccumulator) Snapshot() Usage {

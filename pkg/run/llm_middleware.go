@@ -419,7 +419,7 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 		recordCompactionAdoption(ctx, messages)
 	}
 
-	sent := llm.EstimateMessagesWith(est, messages) + estimateToolsTokens(est, tools)
+	sent := llm.EstimateRequestTokens(est, messages, tools)
 	res, err := r.inner.Execute(ctx, messages, tools)
 	if err == nil {
 		r.observeSuccess(ctx, res, est, sent)
@@ -452,7 +452,7 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 			}
 			llm.ResetStreamProgress(ctx)
 			if res2, err2 := r.inner.Execute(ctx, compacted, tools); err2 == nil {
-				r.observeSuccess(ctx, res2, est, llm.EstimateMessagesWith(est, compacted)+estimateToolsTokens(est, tools))
+				r.observeSuccess(ctx, res2, est, llm.EstimateRequestTokens(est, compacted, tools))
 				return res2, nil
 			} else {
 				lastErr = err2
@@ -587,8 +587,12 @@ func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message
 		return messages, false
 	}
 	head, provisional := messages[:len(messages)-tail], messages[len(messages)-tail:]
+	provider, model := r.compactDeps.activeModel(ctx)
+	// The rejected request is this one: its projected size is what the
+	// compaction card reports as the occupancy it fired at.
+	occupancy := requestOccupancy(provider, model, tools, head)
 	compactCtx, release := compactionContext(ctx)
-	compacted, ok := r.compactDeps.tryCompact(compactCtx, head, tools, true)
+	compacted, ok := r.compactDeps.tryCompact(compactCtx, head, tools, true, occupancy)
 	release()
 	if !ok {
 		return messages, false
@@ -842,19 +846,39 @@ func (w *usageAccountingLLM) executeWithAccounting(ctx context.Context, execute 
 		ctx = llm.WithStreamSink(ctx, &muted)
 	}
 	res, err := execute(ctx)
-	usage := usageCopy(res)
-	if usage == nil {
-		usage = llm.UsageFromError(err)
+	// Billing observes every physical request the call made: a
+	// length-continue re-sends the prompt per round, and the run's totals
+	// (Summary.Usage, the cache hit-rate behind /status, a gateway's session
+	// totals) are what those rounds cost. Occupancy readers — the compaction
+	// threshold, the gauge, the overhead calibration — stay on res.Usage,
+	// which states only the settled request; the accumulator keeps both apart
+	// so LastResponse is still that request rather than a bill.
+	billed := billedUsageCopy(res)
+	if billed == nil {
+		billed = llm.UsageFromError(err)
 	}
-	if usage != nil {
+	settled := usageCopy(res)
+	if settled == nil {
+		settled = billed
+	}
+	if billed != nil {
 		if acc := internalLLMUsageAccumulatorFrom(ctx); acc != nil {
-			acc.ObserveUsage(*usage)
+			acc.ObserveUsageWithBilling(*billed, *settled)
 		}
 	}
 	if observer != nil {
-		observer.reportFinalIfNeeded(usage)
+		observer.reportFinalIfNeeded(billed)
 	}
 	return res, err
+}
+
+// billedUsageCopy is what a call was billed for — every physical request it
+// made — as a copy the caller may keep.
+func billedUsageCopy(res *llm.Result) *llm.Usage {
+	if res == nil {
+		return nil
+	}
+	return cloneUsage(res.Billed())
 }
 
 // usageAccountingCompactor is returned only when the wrapped client really

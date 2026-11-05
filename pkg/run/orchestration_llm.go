@@ -227,7 +227,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		}
 		return w.transcriptModel(ctx)
 	}
-	var totalUsage llm.Usage
+	// billedUsage is every physical request this Execute made — each call of
+	// the tool loop, and every round of a call that re-sent its prompt. It is
+	// what the loop cost, so it goes out as Result.BilledUsage; Result.Usage
+	// stays the settled request of the last call, which is the only thing a
+	// window reader may measure.
+	var billedUsage llm.Usage
 	toolMap := make(map[string]*llm.Tool, len(tools))
 	for _, tool := range tools {
 		if tool == nil {
@@ -446,9 +451,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			return nil, stopErr
 		}
 		if !sameUsage(latestUsage, resolved) {
-			accumulateUsage(&totalUsage, usageCopy(resolved))
+			// The end-of-turn hooks re-asked the model: that request is billed
+			// too, and it is the only request of a call `latestUsage` did not
+			// already count.
+			accumulateUsage(&billedUsage, billedUsageCopy(resolved))
 		}
-		attachTotalUsage(&totalUsage, resolved)
+		attachBilledUsage(&billedUsage, resolved)
 		// Propagate the full orchestration session (including intermediate
 		// tool calls and results) plus the final assistant message so the
 		// agent's Result.Session is the complete conversation tail and the
@@ -592,7 +600,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			if sink := llm.StreamSinkFrom(callCtx); sink != nil && sink.OnTextBlockDone != nil {
 				sink.OnTextBlockDone()
 			}
-			accumulateUsage(&totalUsage, usageCopy(res))
+			accumulateUsage(&billedUsage, billedUsageCopy(res))
 			// Unwind the abandoned call's steers before appending anything: the
 			// tail this truncation drops is exactly those user messages, and the
 			// partial answer belongs after it.
@@ -707,7 +715,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				// view — is discarded; only the tokens it spent are counted. The
 				// steers still riding on it go back to the queue and are taken
 				// again for a fresh call, together with any queued since.
-				accumulateUsage(&totalUsage, usageCopy(res))
+				accumulateUsage(&billedUsage, billedUsageCopy(res))
 				steerCount := len(session) - sessionBeforeSteers
 				inFlightSteers.Rollback()
 				inFlightSteers = nil
@@ -796,7 +804,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			partialCapture.Set(session)
 		}
 		latestUsage := usageCopy(res)
-		accumulateUsage(&totalUsage, latestUsage)
+		accumulateUsage(&billedUsage, billedUsageCopy(res))
 		// A response can report fewer calls than its stream announced — a compat
 		// adapter synthesizes them from its final frame. The calls that already
 		// ran are still this response's own: append the ones it left out so each
@@ -939,7 +947,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		if shouldStopAfterToolResult(ctx, results) {
 			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 			resolved := &llm.Result{Message: &msg}
-			attachTotalUsage(&totalUsage, resolved)
+			attachBilledUsage(&billedUsage, resolved)
 			resolved.Session = append([]llm.Message(nil), session...)
 			resolved.Session = append(resolved.Session, msg)
 			return resolved, nil
@@ -1069,6 +1077,7 @@ func shouldStopAfterToolResult(ctx context.Context, results []orchestratedToolRe
 	return false
 }
 
+// accumulateUsage adds one call's usage to a running total.
 func accumulateUsage(total *llm.Usage, usage *llm.Usage) {
 	if total == nil || usage == nil {
 		return
@@ -1079,19 +1088,30 @@ func accumulateUsage(total *llm.Usage, usage *llm.Usage) {
 	total.CacheReadInputTokens += usage.CacheReadInputTokens
 }
 
-func attachTotalUsage(total *llm.Usage, res *llm.Result) {
-	if total == nil || res == nil {
+// attachBilledUsage states what this orchestration was billed for: every
+// physical request of every call it made. It goes on BilledUsage, never on
+// Usage.
+//
+// Usage is the settled request of the last call, and that is the only figure a
+// window reader may have: this loop makes one call per tool batch, so writing
+// the running total there multiplied one conversation by the length of the
+// loop. That is the same defect as the length-continue sum, one layer up — a
+// compaction threshold or a gauge reading it sees a prompt no request ever
+// sent. Callers that want the cost ask Billed().
+func attachBilledUsage(billed *llm.Usage, res *llm.Result) {
+	if billed == nil || res == nil {
 		return
 	}
-	if total.InputTokens <= 0 && total.OutputTokens <= 0 {
+	if billed.InputTokens <= 0 && billed.OutputTokens <= 0 {
 		return
 	}
-	res.Usage = &llm.Usage{
-		InputTokens:              total.InputTokens,
-		OutputTokens:             total.OutputTokens,
-		CacheCreationInputTokens: total.CacheCreationInputTokens,
-		CacheReadInputTokens:     total.CacheReadInputTokens,
+	if res.Usage != nil && *res.Usage == *billed {
+		// One request: Usage already is the billing view, and the field stays
+		// nil so the ordinary single-call path is unchanged.
+		return
 	}
+	total := *billed
+	res.BilledUsage = &total
 }
 
 func usageCopy(res *llm.Result) *llm.Usage {

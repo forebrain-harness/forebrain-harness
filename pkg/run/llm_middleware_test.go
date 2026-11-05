@@ -459,7 +459,7 @@ func TestRecoverableLayerPassesPartialResponsesThrough(t *testing.T) {
 		Cause: llm.CauseBadRequest,
 	}
 	inner := &failingLLM{err: partialErr}
-	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool) ([]llm.Message, bool, error) {
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool, int) ([]llm.Message, bool, error) {
 		return []llm.Message{llm.UserMessage(llm.Text("compacted"))}, true, nil
 	}}, 3, 0)
 
@@ -497,7 +497,7 @@ func TestStatus529AfterStartedOutputIsReturnedAsIs(t *testing.T) {
 func TestCompactionResendHonoursTheResendGuard(t *testing.T) {
 	inner := &failingLLM{err: &llm.APIError{StatusCode: 400, Message: "maximum context length exceeded"}}
 	deps := &CompactChainDeps{
-		TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool) ([]llm.Message, bool, error) {
+		TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool, int) ([]llm.Message, bool, error) {
 			return []llm.Message{llm.UserMessage(llm.Text("compacted"))}, true, nil
 		},
 	}

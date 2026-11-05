@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -400,6 +401,16 @@ func EstimateTextWith(e Estimator, s string) int {
 // rule as EstimateMessage.
 func EstimateMessageWith(e Estimator, msg Message) int {
 	total := EstimateTextWith(e, msg.TextContent())
+	// Name carries content on the wire, not just a label: the compatible
+	// clients hand a reasoning model its own earlier thinking back through it
+	// (openAIReasoningCarryPrefix, restored to reasoning_content per message),
+	// and the Responses client puts a reasoning item there. That block rides
+	// on every request of the turn and is routinely the largest single piece
+	// of it, so an estimate that skipped it read ~30% low on a reasoning-heavy
+	// history — the gap the overhead calibration then learned as a constant.
+	// Other adapters only put a participant name here; a few tokens never move
+	// a decision.
+	total += EstimateTextWith(e, msg.Name)
 	for _, tc := range msg.ToolCalls {
 		total += EstimateTextWith(e, tc.Function.Name+tc.Function.Arguments)
 	}
@@ -422,6 +433,43 @@ func EstimateMessagesWith(e Estimator, msgs []Message) int {
 		total += EstimateMessageWith(e, msg)
 	}
 	return total
+}
+
+// EstimateToolsWith estimates the tool-schema block sent with every request.
+// This is part of the model's input on each request and is often its largest
+// fixed cost, so occupancy that omits it reads low by that much on every call.
+// It counts with the same estimator as the message block it is added to.
+func EstimateToolsWith(e Estimator, tools []*Tool) int {
+	total := 0
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		total += EstimateTextWith(e, tool.Name())
+		total += EstimateTextWith(e, tool.Description())
+		if schema := tool.InputSchema(); len(schema) > 0 {
+			if raw, err := json.Marshal(schema); err == nil {
+				total += EstimateTextWith(e, string(raw))
+			}
+		}
+		total += 8
+	}
+	return total
+}
+
+// EstimateRequestTokens is the local size of one request: the history plus the
+// tool-schema block every call carries. It is the one number occupancy
+// statements are made in — the compaction threshold, the compaction card and
+// the live gauge all measure this same shape, so they cannot disagree.
+func EstimateRequestTokens(e Estimator, msgs []Message, tools []*Tool) int {
+	return EstimateMessagesWith(e, msgs) + EstimateToolsWith(e, tools)
+}
+
+// ProjectRequestTokens is EstimateRequestTokens corrected by what this
+// provider/model has actually reported: the learned constant this estimator
+// cannot see (the provider's own framing), see ProjectFor.
+func ProjectRequestTokens(provider, model string, e Estimator, msgs []Message, tools []*Tool) int {
+	return ProjectFor(provider, model, e.Name(), EstimateRequestTokens(e, msgs, tools))
 }
 
 // SetEstimatorForTest pins the estimator for a provider/model pair and returns

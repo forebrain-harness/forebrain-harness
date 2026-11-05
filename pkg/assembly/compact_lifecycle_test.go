@@ -201,7 +201,7 @@ func TestSubagentCompactionIsAddressedToItsView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := svc.TryCompactOnMessages(ctx, history, "worker", false, nil); err != nil || !ok {
+	if _, ok, err := svc.TryCompactOnMessages(ctx, history, nil, "worker", false, nil, 0); err != nil || !ok {
 		t.Fatalf("compact: ok=%v err=%v", ok, err)
 	}
 	for _, evt := range sink.all() {
@@ -231,7 +231,7 @@ func TestPostCompactHookCannotUndoACommittedCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replaced, ok, err := svc.TryCompactOnMessages(context.Background(), history, "s1", true, nil)
+	replaced, ok, err := svc.TryCompactOnMessages(context.Background(), history, nil, "s1", true, nil, 0)
 	if err != nil || !ok || len(replaced) == 0 {
 		t.Fatalf("compact: ok=%v err=%v", ok, err)
 	}
@@ -414,7 +414,7 @@ func TestSummaryIsAskedOfTheConversationFirst(t *testing.T) {
 			t.Fatal("the request the provider refused as too large cannot carry the summary")
 			return nil, nil
 		}
-		if _, ok, err := svc.TryCompactOnMessages(context.Background(), history, "s1", true, conversation); err != nil || !ok {
+		if _, ok, err := svc.TryCompactOnMessages(context.Background(), history, nil, "s1", true, conversation, 0); err != nil || !ok {
 			t.Fatalf("reactive compaction: ok=%v err=%v", ok, err)
 		}
 	})

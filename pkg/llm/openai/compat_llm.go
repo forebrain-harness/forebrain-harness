@@ -849,6 +849,17 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	readyCount := 0
 	textDone := false
 	var tokIn, tokOut, tokCached int
+	// settledIn/Out/Cached are the last round's own usage: the request this
+	// conversation is now standing at. tokIn/tokOut/tokCached are every round
+	// summed — the billing view, since a length-continue re-sends the whole
+	// prompt and each round is its own billed request.
+	var settledIn, settledOut, settledCached int
+	// lastAttemptUsage is the settled round's own usage: nil until a round
+	// completed, and never a sum. Overflow calibration reads it to bound the
+	// window by the size of the request that was refused.
+	lastAttemptUsage := func() *llm.Usage {
+		return openAIUsage(int64(settledIn), int64(settledOut), int64(settledCached))
+	}
 	var reportedIn, reportedOut int
 	responseStarted := false
 
@@ -868,7 +879,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 			}
 			// Earlier length-continue rounds were already billed; that
 			// billing rides the error into the retry loop's accounting.
-			return nil, llm.NewExecuteError(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
+			return nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
 		}
 		if sink != nil && sink.Streamed != nil && round == 0 {
 			*sink.Streamed = true
@@ -896,7 +907,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				// The usage chunks that arrived before the cut were billed;
 				// that billing rides the error into the retry loop's
 				// accounting.
-				return nil, llm.NewExecuteError(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
+				return nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
 			}
 			if len(resp.Choices) > 0 {
 				delta := resp.Choices[0].Delta
@@ -993,8 +1004,12 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		_ = stream.Close()
 
 		// The round is over: fold its own total into the cross-round sum.
-		// Length-continue re-sends the request, so each round is its own billed
-		// request with its own usage and the sum across rounds is the truth.
+		// Length-continue re-sends the request, so each round is its own
+		// billed request with its own usage and the sum across rounds is what
+		// this call is billed for. Only the settled round is the request the
+		// conversation now stands at, and that — not the sum — is the
+		// occupancy every window reader measures.
+		settledIn, settledOut, settledCached = roundIn, roundOut, roundCached
 		tokIn += roundIn
 		tokOut += roundOut
 		tokCached += roundCached
@@ -1020,13 +1035,13 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 			if sink != nil && sink.OnEnd != nil {
 				sink.OnEnd()
 			}
-			return nil, llm.NewExecuteError(fmt.Errorf("%s: %w", c.model, llm.ErrStreamTruncated), openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
+			return nil, llm.NewExecuteErrorWithLastAttempt(fmt.Errorf("%s: %w", c.model, llm.ErrStreamTruncated), openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
 		}
 		if lastFinish == "" {
 			if sink != nil && sink.OnEnd != nil {
 				sink.OnEnd()
 			}
-			return nil, llm.NewExecuteError(fmt.Errorf("%s: %w", c.model, llm.ErrStreamNoEvents), openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
+			return nil, llm.NewExecuteErrorWithLastAttempt(fmt.Errorf("%s: %w", c.model, llm.ErrStreamNoEvents), openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
 		}
 		// Clean exit without truncation: any call the finish frame did not
 		// cover (a provider that ends [DONE] with zero output) is ready now.
@@ -1072,7 +1087,13 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	}
 	msg := compatMessageFromOpenAI(openMsg)
 	out := &llm.Result{Message: &msg}
-	out.Usage = openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached))
+	// Occupancy is the settled round's prompt; the output is every round's,
+	// because the model really did produce it and this Result's answer carries
+	// it.
+	out.Usage = openAIUsage(int64(settledIn), int64(tokOut), int64(settledCached))
+	if settledIn != tokIn || settledOut != tokOut || settledCached != tokCached {
+		out.BilledUsage = openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached))
+	}
 	return out, nil
 }
 
@@ -1106,7 +1127,7 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 		if sink != nil && sink.OnEnd != nil {
 			defer sink.OnEnd()
 		}
-		openMsg, finishReason, usage, err := c.executeChatCompletionUnaryParts(ctx, req)
+		openMsg, finishReason, usage, billed, err := c.executeChatCompletionUnaryParts(ctx, req)
 		if err != nil {
 			err = llm.NonStreamingError(ctx, err)
 			result := finish(nil)
@@ -1114,9 +1135,9 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 			return result, err
 		}
 		msg := compatMessageFromOpenAI(openMsg)
-		result := &llm.Result{Message: &msg, Usage: usage}
-		result = finish(result)
-		prefix.Finish(resultUsage(result))
+		result := &llm.Result{Message: &msg, Usage: usage, BilledUsage: billed}
+		result = finishUsage(result, finish)
+		prefix.Finish(resultBilledUsage(result))
 		if sink != nil && result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
 			if sink.OnUsage != nil {
 				sink.OnUsage(result.Usage.InputTokens, result.Usage.OutputTokens)
@@ -1135,22 +1156,53 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 	}
 	if req.Stream {
 		result, err := c.executeChatCompletionStream(ctx, req)
-		result = finish(result)
-		prefix.Finish(resultUsage(result))
+		result = finishUsage(result, finish)
+		prefix.Finish(resultBilledUsage(result))
 		return result, err
 	}
 	result, err := c.executeChatCompletionUnary(ctx, req)
-	result = finish(result)
-	prefix.Finish(resultUsage(result))
+	result = finishUsage(result, finish)
+	prefix.Finish(resultBilledUsage(result))
 	return result, err
 }
 
-// resultUsage returns the usage attached to result, tolerating a nil result.
-func resultUsage(result *llm.Result) *llm.Usage {
+// finishUsage folds the raw transport's reading into result without letting it
+// overwrite the request the conversation is standing at.
+//
+// The transport reports the total of every response this call read — the
+// billing view, and on a single-request call the same number the client
+// computed. A length-continue makes several responses, and there the total is
+// not the settled round: assigning it to Result.Usage put a 2x prompt in front
+// of every occupancy reader (the compaction threshold fired at half the window
+// and the footer gauge echoed it). The client's own split wins, and the raw
+// total stays what it is: the billing view.
+func finishUsage(result *llm.Result, finish func(*llm.Result) *llm.Result) *llm.Result {
+	if result == nil {
+		return finish(nil)
+	}
+	settled, billed := result.Usage, result.BilledUsage
+	result = finish(result)
+	if result == nil || billed == nil {
+		// One request: the raw figure is the client's own, and the single
+		// request path stays exactly as it was.
+		return result
+	}
+	raw := result.Usage
+	result.Usage = settled
+	if raw != nil && *raw != *settled {
+		result.BilledUsage = raw
+	}
+	return result
+}
+
+// resultBilledUsage returns what this call was billed for — every physical
+// request it made — tolerating a nil result. Cache hit-rate is a billing
+// figure: each length-continue round re-reads the same prefix.
+func resultBilledUsage(result *llm.Result) *llm.Usage {
 	if result == nil {
 		return nil
 	}
-	return result.Usage
+	return result.Billed()
 }
 
 func (c *openAICompatLLM) ExecuteStructured(ctx context.Context, messages []llm.Message, spec llm.StructuredOutputSpec) (outResult *llm.Result, outErr error) {
@@ -1186,8 +1238,8 @@ func (c *openAICompatLLM) ExecuteStructured(ctx context.Context, messages []llm.
 		},
 	}
 	result, err := c.executeChatCompletionUnary(ctx, req)
-	result = finish(result)
-	prefix.Finish(resultUsage(result))
+	result = finishUsage(result, finish)
+	prefix.Finish(resultBilledUsage(result))
 	return result, err
 }
 
@@ -1198,25 +1250,35 @@ func (s rawJSONSchema) MarshalJSON() ([]byte, error) {
 }
 
 func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req openaiclient.ChatCompletionRequest) (*llm.Result, error) {
-	openMsg, _, usage, err := c.executeChatCompletionUnaryParts(ctx, req)
+	openMsg, _, usage, billed, err := c.executeChatCompletionUnaryParts(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	msg := compatMessageFromOpenAI(openMsg)
-	return &llm.Result{Message: &msg, Usage: usage}, nil
+	return &llm.Result{Message: &msg, Usage: usage, BilledUsage: billed}, nil
 }
 
 // executeChatCompletionUnaryParts runs the length-continue loop of one
 // non-streaming chat completion and returns the assembled OpenAI message, the
-// last finish reason and the summed usage — the pieces a sink replay of the
-// whole answer needs on top of the Result.
-func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, req openaiclient.ChatCompletionRequest) (openaiclient.ChatCompletionMessage, openaiclient.FinishReason, *llm.Usage, error) {
+// last finish reason and the usage — the pieces a sink replay of the whole
+// answer needs on top of the Result. usage is the settled round (what
+// occupancy reads), billed every round (what the call was billed for) and nil
+// when there was only one round.
+func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, req openaiclient.ChatCompletionRequest) (openaiclient.ChatCompletionMessage, openaiclient.FinishReason, *llm.Usage, *llm.Usage, error) {
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
 	var reasoningAcc, contentAcc strings.Builder
 	var toolBuf []openaiclient.ToolCall
 	var role string
 	var lastFinish openaiclient.FinishReason
 	var tokIn, tokOut, tokCached int
+	// settledIn/Out/Cached are the last round's own usage; tokIn/tokOut/
+	// tokCached are every round summed (each round is its own billed request).
+	var settledIn, settledOut, settledCached int
+	// lastAttemptUsage is the settled round's own usage: nil until a round
+	// completed, and never a sum.
+	lastAttemptUsage := func() *llm.Usage {
+		return openAIUsage(int64(settledIn), int64(settledOut), int64(settledCached))
+	}
 
 	for round := 0; round < openAILengthContinueMax; round++ {
 		req.Messages = baseMsgs
@@ -1224,7 +1286,7 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		if err != nil {
 			// Earlier length-continue rounds were already billed; that
 			// billing rides the error into the retry loop's accounting.
-			return openaiclient.ChatCompletionMessage{}, "", nil, llm.NewExecuteError(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)))
+			return openaiclient.ChatCompletionMessage{}, "", nil, nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
 		}
 		if len(resp.Choices) == 0 {
 			// A 200 with usage but no choice was still billed for its
@@ -1233,7 +1295,10 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 			if resp.Usage.PromptTokensDetails != nil {
 				cached = resp.Usage.PromptTokensDetails.CachedTokens
 			}
-			return openaiclient.ChatCompletionMessage{}, "", nil, llm.NewExecuteError(errOpenAINoChoices, openAIUsage(int64(tokIn+resp.Usage.PromptTokens), int64(tokOut+resp.Usage.CompletionTokens), int64(tokCached+cached)))
+			settledIn, settledOut, settledCached = resp.Usage.PromptTokens, resp.Usage.CompletionTokens, cached
+			return openaiclient.ChatCompletionMessage{}, "", nil, nil, llm.NewExecuteErrorWithLastAttempt(errOpenAINoChoices,
+				openAIUsage(int64(tokIn+resp.Usage.PromptTokens), int64(tokOut+resp.Usage.CompletionTokens), int64(tokCached+cached)),
+				lastAttemptUsage())
 		}
 		ch := resp.Choices[0]
 		lastFinish = ch.FinishReason
@@ -1246,11 +1311,13 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		if len(m.ToolCalls) > 0 {
 			toolBuf = append([]openaiclient.ToolCall(nil), m.ToolCalls...)
 		}
+		settledIn, settledOut, settledCached = resp.Usage.PromptTokens, resp.Usage.CompletionTokens, 0
+		if resp.Usage.PromptTokensDetails != nil {
+			settledCached = resp.Usage.PromptTokensDetails.CachedTokens
+		}
 		tokIn += resp.Usage.PromptTokens
 		tokOut += resp.Usage.CompletionTokens
-		if resp.Usage.PromptTokensDetails != nil {
-			tokCached += resp.Usage.PromptTokensDetails.CachedTokens
-		}
+		tokCached += settledCached
 
 		if !openAIReasoningLengthShouldContinue(lastFinish, reasoningAcc.Len(), contentAcc.Len(), len(toolBuf)) {
 			break
@@ -1277,7 +1344,12 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 	if len(toolBuf) > 0 {
 		openMsg.ToolCalls = toolBuf
 	}
-	return openMsg, lastFinish, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), nil
+	settled := openAIUsage(int64(settledIn), int64(tokOut), int64(settledCached))
+	var billed *llm.Usage
+	if settledIn != tokIn || settledOut != tokOut || settledCached != tokCached {
+		billed = openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached))
+	}
+	return openMsg, lastFinish, settled, billed, nil
 }
 
 // compatMessagesToOpenAI projects the conversation for the wire.

@@ -177,9 +177,12 @@ func (l *llmAttemptLedger) settle(ctx context.Context, res *llm.Result, err erro
 		}
 	} else {
 		rec.Outcome = state.LLMAttemptSuccess
-		if res != nil && res.Usage != nil {
-			input := int64(res.Usage.InputTokens)
-			output := int64(res.Usage.OutputTokens)
+		// The row states what this attempt was billed for, so a
+		// length-continue round (which re-sends the prompt) reports every
+		// round it made, not just the settled one.
+		if billed := res.Billed(); billed != nil {
+			input := int64(billed.InputTokens)
+			output := int64(billed.OutputTokens)
 			if input > 0 {
 				rec.InputTokens = &input
 			}

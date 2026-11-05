@@ -79,6 +79,108 @@ func newCompactTestStore(t *testing.T) *state.SessionStore {
 	return sess
 }
 
+// TestTryCompactOnMessagesReportsTheTriggeringOccupancy pins one basis for the
+// mid-turn card: Before is the request occupancy the checkpoint fired on — the
+// same number the compaction threshold and the live gauge read — and After is
+// what the next request projects to. A local estimate taken at compaction time
+// is a second measure of the same history and reads lower by everything the
+// estimator cannot see (the tool schemas, the provider's framing, a reasoning
+// block carried back), which is how a card came to claim 313.2k for a request
+// that was really 458k.
+func TestTryCompactOnMessagesReportsTheTriggeringOccupancy(t *testing.T) {
+	ctx := context.Background()
+	sink, svc := seedCompactSession(t, "s1")
+	seedCompactHistory(t, svc.Sessions)
+	history, err := svc.Sessions.ListTranscriptMessages(ctx, "s1", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const occupancy = 916_456
+	// A learned overhead is the whole difference between a projection and a
+	// bare estimate: state one for a model nothing else uses, and the card's
+	// after must carry it.
+	const overhead = 39_000
+	svc.PrimaryModel = func(context.Context) (string, string) { return "cardbasis", "card-model" }
+	llm.RecordSuccessFor("cardbasis", "card-model", llm.DefaultEstimator().Name(), overhead+1_000, 1_000)
+	if _, ok, err := svc.TryCompactOnMessages(ctx, history, nil, "s1", false, nil, occupancy); err != nil || !ok {
+		t.Fatalf("compact: ok=%v err=%v", ok, err)
+	}
+	events := sink.all()
+	var started event.ContextCompactingPayload
+	if events[0].Type != event.RunEventContextCompacting || json.Unmarshal(events[0].Payload, &started) != nil {
+		t.Fatalf("first event = %s", events[0].Type)
+	}
+	if started.TokensBefore != occupancy {
+		t.Fatalf("running card before = %d, want the triggering occupancy %d", started.TokensBefore, occupancy)
+	}
+	last := events[len(events)-1]
+	var done event.ContextCompactedPayload
+	if last.Type != event.RunEventContextCompacted || json.Unmarshal(last.Payload, &done) != nil {
+		t.Fatalf("last event = %s", last.Type)
+	}
+	if done.TokensBefore != occupancy {
+		t.Fatalf("compacted card before = %d, want %d (the number the gauge showed)", done.TokensBefore, occupancy)
+	}
+	if done.TokensAfter < overhead {
+		t.Fatalf("compacted card after = %d, want the projection of the replacement (it must carry the %d learned overhead a bare estimate cannot see)", done.TokensAfter, overhead)
+	}
+	if done.TokensAfter >= occupancy {
+		t.Fatalf("compacted card after = %d, want it below the %d it replaced", done.TokensAfter, occupancy)
+	}
+}
+
+// seedCompactHistory grows a seeded session into a history large enough that a
+// summary really is the smaller side, so "after" can be told apart from the
+// history it replaced.
+func seedCompactHistory(t *testing.T, sess *state.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		_, _ = sess.Append(ctx, "s1", "user", strings.Repeat("requirement detail. ", 40))
+		_, _ = sess.Append(ctx, "s1", "assistant", "answer")
+	}
+}
+
+// TestManualCompactionCardReportsTheGauge pins the manual card's before to the
+// occupancy the gauge showed: the two sit next to each other, so a second,
+// local measure of the same history would state two different sizes for one
+// conversation.
+func TestManualCompactionCardReportsTheGauge(t *testing.T) {
+	ctx := context.Background()
+	sink := &recordingSink{}
+	sess := newCompactTestStore(t)
+	seedCompactHistory(t, sess)
+	const overhead = 39_000
+	svc := Service{Sessions: sess, Events: sink, CompactLLM: func(context.Context) llm.LLM { return checkpointTestLLM{summary: "handoff"} },
+		PrimaryModel: func(context.Context) (string, string) { return "cardgauge", "card-model" }}
+	llm.RecordSuccessFor("cardgauge", "card-model", llm.DefaultEstimator().Name(), overhead+1_000, 1_000)
+	// Stated independently of the service: the recent turns counted with the
+	// active model's estimator, which is what the gauge counts.
+	turns, err := sess.ListRecentMessages(ctx, "s1", 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gauge := state.TokenCountWithEstimationFor(turns, llm.DefaultEstimator())
+	if gauge <= 0 {
+		t.Fatalf("gauge = %d, want a positive occupancy for a seeded session", gauge)
+	}
+	res, err := svc.ManualCompactSession(ctx, "s1", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TokensBefore != gauge {
+		t.Fatalf("card before = %d, want the gauge's %d", res.TokensBefore, gauge)
+	}
+	if res.TokensAfter < overhead {
+		t.Fatalf("card after = %d, want the projection of the replacement (it must carry the %d learned overhead a bare estimate cannot see)", res.TokensAfter, overhead)
+	}
+	var done event.ContextCompactedPayload
+	events := sink.all()
+	if end := events[len(events)-1]; json.Unmarshal(end.Payload, &done) != nil || done.TokensBefore != gauge {
+		t.Fatalf("published before = %d, want the gauge's %d", done.TokensBefore, gauge)
+	}
+}
+
 func TestManualCompactPersistsReplacementCheckpoint(t *testing.T) {
 	ctx, sess := context.Background(), newCompactTestStore(t)
 	_, _ = sess.Append(ctx, "s1", "user", "first request")
