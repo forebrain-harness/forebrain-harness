@@ -319,11 +319,41 @@ func (s *Server) internalSourceRegistered(ctx context.Context, remoteAddr string
 		if parseErr != nil || u.Host == "" {
 			continue
 		}
-		if peer := net.ParseIP(strings.Trim(u.Hostname(), "[]")); peer != nil && peer.Equal(ip) {
-			return true
+		for _, peer := range replicaHostIPs(ctx, u.Hostname()) {
+			if peer.Equal(ip) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// replicaHostIPs is the set of addresses one registered internal address stands
+// for. A literal is itself; a name is whatever the resolver answers — the
+// compose form registers a service name (`http://gateway-a:6060`), which is not
+// an IP literal and never was, so the row it wrote has to be resolved before it
+// can be compared. The direction is row → IP and never caller → IP: only the
+// replicas' own rows are looked up, so a caller still cannot name its way in.
+// A row that cannot be resolved is a row that does not match; it is logged and
+// skipped, never allowed to fail the check for the others. The request's
+// context bounds the lookup, so a hung resolver cannot outlive the request.
+func replicaHostIPs(ctx context.Context, host string) []net.IP {
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return []net.IP{ip}
+	}
+	answers, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		slog.Warn("gateway internal auth: resolve registered replica", "host", host, "err", err)
+		return nil
+	}
+	out := make([]net.IP, 0, len(answers))
+	for _, answer := range answers {
+		if ip := net.ParseIP(strings.Trim(answer, "[]")); ip != nil {
+			out = append(out, ip)
+		}
+	}
+	return out
 }
 
 // refuseInternalRequest answers a peer request that failed authentication the

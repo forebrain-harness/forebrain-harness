@@ -28,9 +28,9 @@
 # gateway's environment; the examples are in the gateway service below.
 #
 # Multi-instance is a different deployment (shared home, MySQL/PostgreSQL
-# only, one literal-IP FOREBRAIN_INTERNAL_ADDR per instance) — the comment
-# at the bottom of this file, and deploy/compose/multi-replica.yaml, which
-# is the tested two-replica form.
+# only, one FOREBRAIN_INTERNAL_ADDR — a hostname or a literal IP — per
+# instance) — the comment at the bottom of this file, and
+# deploy/compose/multi-replica.yaml, which is the tested two-replica form.
 
 name: forebrain
 
@@ -164,14 +164,14 @@ volumes:
 # gateway=2` against it is not a supported deployment. With
 # FOREBRAIN_DATABASE_URL pointing at MySQL/PostgreSQL, scale instead of
 # editing, and give each instance the address its peers reach it at - a
-# literal IP (peer auth checks the source IP against the registered
-# internal_addr; X-Forwarded-For is never consulted), on the same listener
-# as the browser's port 6060:
+# hostname or a literal IP (peer auth resolves the registered internal_addr
+# and compares the request's source IP against the result; X-Forwarded-For
+# is never consulted), on the same listener as the browser's port 6060:
 #
 #   deploy:
 #     replicas: 2
 #   environment:
-#     FOREBRAIN_INTERNAL_ADDR: http://192.0.2.10:6060   # literal IP, per instance
+#     FOREBRAIN_INTERNAL_ADDR: http://192.0.2.10:6060   # or http://gateway-a:6060
 #
 # The tested two-replica compose, with the same once-only seeding this file
 # does, is deploy/compose/multi-replica.yaml.

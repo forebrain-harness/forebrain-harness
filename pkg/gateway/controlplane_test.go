@@ -604,6 +604,35 @@ func TestInternalEndpointsRequireTheTokenAndARegisteredReplica(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code, "a session cookie must never open a peer endpoint")
 }
 
+// TestInternalSourceAcceptsARegisteredHostname pins the form the tested
+// multi-replica deployment registers (plan 226): a compose service name, not an
+// IP literal. The address compared is still the one a live replica wrote down —
+// its row is resolved, never the caller's name — so the check keeps its promise
+// that the caller cannot talk its way in.
+func TestInternalSourceAcceptsARegisteredHostname(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newReplicaTestServer(t, db, home, "gateway-self", "gw-secret", "http://localhost:6060")
+	require.True(t, s.internalSourceRegistered(ctx, "127.0.0.1:6060"),
+		"a registered hostname that resolves to the caller is a registered replica")
+	require.False(t, s.internalSourceRegistered(ctx, "10.10.10.10:6060"),
+		"an address no replica registered is still refused")
+
+	// A row that does not resolve is a row that does not match: it must not fail
+	// the check for the rows that do.
+	broken := &state.RunStore{DB: db, Owner: "gateway-broken"}
+	stop, err := broken.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	require.NoError(t, broken.RegisterReplica(ctx, state.RunOwnerKindGateway, "http://replica-does-not-resolve.invalid:6060", "host-broken"))
+	require.True(t, s.internalSourceRegistered(ctx, "127.0.0.1:6060"),
+		"one unresolvable registered row must not fail the whole check")
+}
+
 // TestInternalRunOpRefusesAnUnknownOperation pins that the forwarded operation
 // is a name from the table, not an arbitrary call: the peer runs the handler the
 // table names and nothing else.
