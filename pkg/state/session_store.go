@@ -933,7 +933,7 @@ func (s *SessionStore) Ensure(ctx context.Context, id string, title string) erro
 	if id == "" {
 		return nil
 	}
-	return s.ensureSession(ctx, s.db, id, title, SessionBirth{})
+	return s.ensureSessionLocked(ctx, id, title, SessionBirth{})
 }
 
 // EnsureAt opens a session born with the identity its creator chose: the row's
@@ -947,7 +947,23 @@ func (s *SessionStore) EnsureAt(ctx context.Context, id, title string, birth Ses
 	if id == "" {
 		return nil
 	}
-	return s.ensureSession(ctx, s.db, id, title, birth)
+	return s.ensureSessionLocked(ctx, id, title, birth)
+}
+
+// ensureSessionLocked writes the session row and the approval posture it is
+// born with in the one transaction that holds the write lock: the upsert is a
+// write, and on PostgreSQL a standalone one takes no lock — two creations
+// could then interleave with the appends that run after them.
+func (s *SessionStore) ensureSessionLocked(ctx context.Context, id string, title string, birth SessionBirth) error {
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.ensureSession(ctx, tx, id, title, birth); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetSessionSource marks what a session is for. The value set is a gateway
@@ -3083,9 +3099,19 @@ func (s *SessionStore) WithdrawUserTurn(ctx context.Context, sessionID string, r
 	case err != nil:
 		return err
 	}
-	moved, err := s.setMessageVisibility(ctx, s.db, rowID, messageWithdrawn,
+	// The visibility move is a write: it runs in the transaction that holds the
+	// write lock, so it cannot slip between two writers the lock orders.
+	tx, err := dbx.BeginTx(ctx, s.db, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	moved, err := s.setMessageVisibility(ctx, tx, rowID, messageWithdrawn,
 		[]string{messageVisible, messageWithdrawn}, sessionID, "user")
 	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	if !moved {

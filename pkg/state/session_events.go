@@ -214,20 +214,38 @@ func (s *RunStore) AppendSessionEventOnce(ctx context.Context, in SessionEvent) 
 		}
 		return stored, storedNow, nil
 	}
-	stored, err := scanSessionEvent(s.DB.QueryRowContext(ctx, sessionEventInsertSQL.For(d), args...))
+	// The insert is what allocates the event's sequence, and a paging reader
+	// advances its cursor to the highest sequence it has seen: a write that
+	// took no lock could commit ahead of an earlier one, and the reader would
+	// then step over an event it never saw. So the insert runs inside the
+	// transaction that holds the write lock — and the read-back of a duplicate
+	// runs in it too, so no other writer can change what it reports.
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
+	if err != nil {
+		return SessionEvent{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stored, err := scanSessionEvent(tx.QueryRowContext(ctx, sessionEventInsertSQL.For(tx.Dialect()), args...))
 	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return SessionEvent{}, false, err
+		}
 		return stored, true, nil
 	}
 	if err != sql.ErrNoRows {
 		return SessionEvent{}, false, err
 	}
 	// Nothing was stored: the row already existed, so read it back — or there
-	// is no conversation to record it in yet.
-	stored, err = scanSessionEvent(s.DB.QueryRowContext(ctx, sessionEventReadSQL.For(d), in.SessionID, in.ID))
+	// is no conversation to record it in yet. The deferred rollback releases
+	// the write lock in that case.
+	stored, err = scanSessionEvent(tx.QueryRowContext(ctx, sessionEventReadSQL.For(tx.Dialect()), in.SessionID, in.ID))
 	if err == sql.ErrNoRows {
 		return SessionEvent{}, false, ErrSessionNotStarted
 	}
 	if err != nil {
+		return SessionEvent{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
 		return SessionEvent{}, false, err
 	}
 	return stored, false, nil

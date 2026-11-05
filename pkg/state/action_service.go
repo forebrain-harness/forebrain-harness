@@ -504,21 +504,36 @@ func (s *ActionService) ExpirePending(ctx context.Context, ttl time.Duration, re
 		}
 		return expired, nil
 	}
-	rows, err := s.DB.QueryContext(ctx, expirePendingActionsSQL.For(d),
+	// The batch is a write: the statement runs in the transaction that holds
+	// the write lock, so it cannot slip between two writers the lock orders.
+	tx, err := dbx.BeginTx(ctx, s.DB, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, expirePendingActionsSQL.For(tx.Dialect()),
 		string(ActionExpired), reason, time.Now().Unix(), string(ActionPending), cutoff)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var expired []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		expired = append(expired, id)
 	}
-	return expired, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return expired, nil
 }
 
 func (s *ActionService) ExpireIfPending(ctx context.Context, id, reason string) (bool, error) {

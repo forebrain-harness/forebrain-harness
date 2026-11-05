@@ -148,3 +148,37 @@ func TestDialectAllowanceStillApplies(t *testing.T) {
 		}
 	}
 }
+
+// TestNoBareHandleWrites is the guard behind plan 232: every write takes the
+// global lock the design promises, so a reader never observes a gap and a writer
+// never commits ahead of an earlier one. A standalone write on the bare handle
+// takes no lock at all on PostgreSQL, which is the failure this catches — and it
+// cannot be caught by the statement scans above, because the statement text is
+// a dbx.SQL constant the call never spells out.
+//
+// The allowlist is the whole exception list, and every entry says why.
+func TestNoBareHandleWrites(t *testing.T) {
+	root := findRepoRoot(t)
+	found, err := architecture.BareHandleWrites(root)
+	if err != nil {
+		t.Fatalf("scan bare handles: %v", err)
+	}
+	for _, site := range found {
+		t.Errorf("write on a bare database handle: %s", site)
+	}
+	if len(found) > 0 {
+		t.Fatalf("%d writes bypass dbx.BeginTx; run them in the transaction that holds the write lock", len(found))
+	}
+	allowances := architecture.BareHandleAllowances()
+	if len(allowances) == 0 {
+		t.Fatal("the allowance is empty; the scan would have to report the guard's own vocabulary")
+	}
+	for _, entry := range allowances {
+		if entry.Reason == "" {
+			t.Errorf("%s is allowed without a reason", entry.File)
+		}
+		if _, err := os.Stat(filepath.Join(root, entry.File)); err != nil {
+			t.Errorf("%s is allowed but does not exist: %v", entry.File, err)
+		}
+	}
+}

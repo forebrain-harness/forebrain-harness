@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -602,4 +604,159 @@ func TestEventOfAConversationThatHasNotStartedIsNotRecorded(t *testing.T) {
 	if _, inserted, err := runs.AppendSessionEventOnce(ctx, SessionEvent{ID: "evt-early", SessionID: "not-yet", Type: "context_compaction_started"}); err != nil || inserted {
 		t.Fatalf("repeat append = inserted %v, %v; want the existing row", inserted, err)
 	}
+}
+
+// TestPostgresEventSequenceNeverCommitsOutOfOrder pins the fact the write lock
+// exists for on the engines that have one: the insert that allocates an event's
+// sequence runs inside the locked write, so a reader paging by MAX(sequence)
+// can never step over an event. Without the lock two appends interleave freely,
+// the lower sequence commits last, and the reader advances its cursor to the
+// higher one — the event it never saw is then invisible for ever.
+//
+// SQLite's immediate transactions already serialise this, so the test runs only
+// where FOREBRAIN_TEST_DATABASE_URL names a server (openDialectStateForTest
+// skips otherwise), and the explicit command in plan 232 step 3 is what runs it:
+// ./scripts/test-db.sh postgres filters by test name and does not match.
+func TestPostgresEventSequenceNeverCommitsOutOfOrder(t *testing.T) {
+	dialect, db := openDialectStateForTest(t)
+	ctx := context.Background()
+	store := &RunStore{DB: db}
+	const sessionID = "evt-ordering"
+	if err := NewSessionStore(db, "main").Ensure(ctx, sessionID, sessionID); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	const writers = 2
+	deadline := time.Now().Add(2 * time.Second)
+
+	var writtenMu sync.Mutex
+	written := map[int64]bool{}
+	var writeErrMu sync.Mutex
+	var writeErr error
+
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; time.Now().Before(deadline); i++ {
+				evt, err := store.AppendSessionEvent(ctx, SessionEvent{
+					SessionID: sessionID,
+					ID:        fmt.Sprintf("evt-%d-%d", w, i),
+					Type:      "ordering-probe",
+					CreatedAt: time.Now().UTC(),
+				})
+				if err != nil {
+					writeErrMu.Lock()
+					if writeErr == nil {
+						writeErr = fmt.Errorf("appender %d: %w", w, err)
+					}
+					writeErrMu.Unlock()
+					return
+				}
+				writtenMu.Lock()
+				written[evt.Sequence] = true
+				writtenMu.Unlock()
+			}
+		}(w)
+	}
+
+	// The reader pages exactly as the surfaces do: cursor plus the current
+	// high water, advancing NextCursor to the last event the page returned.
+	stop := make(chan struct{})
+	readerDone := make(chan error, 1)
+	go func() {
+		seen := map[int64]bool{}
+		var cursor int64
+		draining := false
+		for {
+			page, err := store.ListSessionEvents(ctx, sessionID, cursor, 0, 500)
+			if err != nil {
+				readerDone <- fmt.Errorf("page events: %w", err)
+				return
+			}
+			for _, evt := range page.Events {
+				seen[evt.Sequence] = true
+			}
+			cursor = page.NextCursor
+			if draining && len(page.Events) == 0 {
+				break
+			}
+			if !draining {
+				select {
+				case <-stop:
+					draining = true
+				default:
+				}
+			}
+		}
+		writtenMu.Lock()
+		defer writtenMu.Unlock()
+		var skipped []int64
+		for seq := range written {
+			if !seen[seq] {
+				skipped = append(skipped, seq)
+			}
+		}
+		if len(skipped) > 0 {
+			sort.Slice(skipped, func(i, j int) bool { return skipped[i] < skipped[j] })
+			readerDone <- fmt.Errorf("the reader stepped over %d of %d written events (%v): "+
+				"it advanced its cursor to %d without observing them, so an append committed out of order",
+				len(skipped), len(written), skipped, cursor)
+			return
+		}
+		readerDone <- nil
+	}()
+
+	wg.Wait()
+	close(stop)
+	readErr := <-readerDone
+
+	writeErrMu.Lock()
+	defer writeErrMu.Unlock()
+	if writeErr != nil {
+		t.Fatalf("%s appender: %v", dialect, writeErr)
+	}
+	if readErr != nil {
+		t.Fatalf("%s reader: %v", dialect, readErr)
+	}
+	writtenMu.Lock()
+	defer writtenMu.Unlock()
+	if len(written) < 2 {
+		t.Fatalf("%s: only %d events were written; the test proved nothing", dialect, len(written))
+	}
+	t.Logf("%s: %d events written, none skipped by a paging reader", dialect, len(written))
+}
+
+// TestPostgresEventAppendSurfacesBusyLock pins the other half of the promise: a
+// writer that cannot have the write lock is told so within dbx.LockTimeout
+// rather than queueing for ever. The append runs in a transaction now, so this
+// is the error shape a caller can newly see — it is asserted here rather than
+// left to the first busy production day.
+func TestPostgresEventAppendSurfacesBusyLock(t *testing.T) {
+	dialect, db := openDialectStateForTest(t)
+	ctx := context.Background()
+	store := &RunStore{DB: db}
+	const sessionID = "evt-busy"
+	if err := NewSessionStore(db, "main").Ensure(ctx, sessionID, sessionID); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	// Another writer holds the global lock for the whole test.
+	holder, err := dbx.BeginTx(ctx, db, nil)
+	if err != nil {
+		t.Fatalf("%s: take the write lock: %v", dialect, err)
+	}
+	defer func() { _ = holder.Rollback() }()
+
+	started := time.Now()
+	_, err = store.AppendSessionEvent(ctx, SessionEvent{SessionID: sessionID, ID: "evt-blocked", Type: "ordering-probe"})
+	elapsed := time.Since(started)
+	if !errors.Is(err, dbx.ErrBusy) {
+		t.Fatalf("%s: append under a held write lock reported %v, want a busy error", dialect, err)
+	}
+	// LockTimeout is 5s; anything near a deadline would be a hang, not a bound.
+	if elapsed > 10*time.Second {
+		t.Fatalf("%s: the busy error took %s, want about %ss", dialect, elapsed, dbx.LockTimeout)
+	}
+	t.Logf("%s: append reported busy after %s", dialect, elapsed)
 }

@@ -1,4 +1,5 @@
-// The "every statement has a dialect arm" contract (plans 210–212).
+// The "every statement has a dialect arm" contract (plans 210–212) and the
+// "every write takes the write lock" contract (plan 232).
 package architecture
 
 import (
@@ -597,4 +598,125 @@ func EmptyDialectArms(root string) ([]string, error) {
 		unique = append(unique, finding)
 	}
 	return unique, nil
+}
+
+// BareHandleWriteShape is one write a source scan can recognise without type
+// information. The statement text is never at the call — it comes from a dbx.SQL
+// constant — so the constant a query method is handed, or the handle argument a
+// shared writer is given, is what identifies a write.
+type BareHandleWriteShape struct {
+	// Name is the shape as a reader sees it in a failure message.
+	Name string
+	// Pattern is what the scan looks for in a source line.
+	Pattern *regexp.Regexp
+	// Reason says what the shape writes, for the guard's failure message.
+	Reason string
+}
+
+// bareHandleWriteShapes are the standalone writes plan 232 found running on the
+// bare *sql.DB handle. A bare statement takes no write lock on PostgreSQL, so a
+// later write can commit ahead of an earlier one: event sequences are what a
+// paging reader advances its cursor past, which is why the shapes are worth
+// pinning one by one. The list is deliberately this narrow — "any write" needs
+// type information a source scan does not have, and a bare handle is also what
+// every read is handed.
+var bareHandleWriteShapes = []BareHandleWriteShape{
+	{
+		Name:    `.DB.QueryRowContext(ctx, sessionEventInsertSQL`,
+		Pattern: regexp.MustCompile(`\.DB\.QueryRowContext\(ctx, sessionEventInsertSQL\b`),
+		Reason:  "the event insert is what allocates the sequence a paging reader follows",
+	},
+	{
+		Name:    `.DB.QueryContext(ctx, expirePendingActionsSQL`,
+		Pattern: regexp.MustCompile(`\.DB\.QueryContext\(ctx, expirePendingActionsSQL\b`),
+		Reason:  "the expiry sweep moves approval rows",
+	},
+	{
+		Name:    `ensureSession(ctx, s.db`,
+		Pattern: regexp.MustCompile(`ensureSession\(ctx, s\.db\b`),
+		Reason:  "the session upsert writes the row and the approval posture it is born with",
+	},
+	{
+		Name:    `setMessageVisibility(ctx, s.db`,
+		Pattern: regexp.MustCompile(`setMessageVisibility\(ctx, s\.db\b`),
+		Reason:  "the visibility move writes the message row",
+	},
+}
+
+// BareHandleAllowance is one file that may spell a bare-handle write shape
+// without it being a write, and why.
+type BareHandleAllowance struct {
+	File   string
+	Reason string
+}
+
+// bareHandleAllowlist names the files the scan above must not report. Every
+// shape it knows is a write by construction — a read has no business naming
+// those statements or those writers — so the one entry is the guard's own
+// vocabulary, and a product file added here needs a reason as specific.
+var bareHandleAllowlist = []BareHandleAllowance{
+	{
+		File: "pkg/architecture/dialect_coverage.go",
+		Reason: "the guard's own vocabulary: the shapes are written out here as patterns and " +
+			"report text, never handed to a database handle",
+	},
+}
+
+// BareHandleAllowances exposes the allowlist to the test, which checks that
+// every entry still names a file that exists and carries a reason.
+func BareHandleAllowances() []BareHandleAllowance {
+	out := make([]BareHandleAllowance, len(bareHandleAllowlist))
+	copy(out, bareHandleAllowlist)
+	return out
+}
+
+// BareHandleWrites reports every write a product file hands to a bare *sql.DB
+// handle, as "file:line: shape (what it writes)". The rule is that a write goes
+// through dbx.BeginTx, or dbx.Exec, which takes a transaction of its own: on
+// MySQL and PostgreSQL that transaction is what holds the global write lock.
+func BareHandleWrites(root string) ([]string, error) {
+	var out []string
+	pkgRoot := filepath.Join(root, "pkg")
+	err := filepath.WalkDir(pkgRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		file := filepath.ToSlash(rel)
+		if bareHandleAllowed(file) {
+			return nil
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for index, line := range strings.Split(string(body), "\n") {
+			for _, shape := range bareHandleWriteShapes {
+				if !shape.Pattern.MatchString(line) {
+					continue
+				}
+				out = append(out, fmt.Sprintf("%s:%d: %s (%s)", file, index+1, shape.Name, shape.Reason))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func bareHandleAllowed(file string) bool {
+	for _, entry := range bareHandleAllowlist {
+		if entry.File == file {
+			return true
+		}
+	}
+	return false
 }
