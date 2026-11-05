@@ -748,6 +748,103 @@ func TestListConversationsPagePinsTheDrawerList(t *testing.T) {
 	}
 }
 
+// TestSearchBackslashMatchesLiterally pins the title search as a literal
+// match. The term travels into a LIKE pattern, where % and _ are wildcards on
+// every engine and — before plan 233 — a backslash was an escape character of
+// its own on MySQL and PostgreSQL, so a search for C:\Users matched CUsersx on
+// two of the three engines and not on the third. One helper escapes the term
+// and every engine is told which character escapes it, so the same search
+// means the same thing everywhere: only the row whose title holds the term
+// literally comes back.
+func TestSearchBackslashMatchesLiterally(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	projects := NewProjectStore(db, "main")
+	store := NewSessionStore(db, "main")
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "search", Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := func(id, title string, at int64) {
+		t.Helper()
+		if err := store.Ensure(ctx, id, title); err != nil {
+			t.Fatal(err)
+		}
+		// A project's own conversation: the one kind of row both searches
+		// read — the drawer's list and the project's conversation table.
+		if err := projects.BindSession(ctx, id, p.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, id, "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_sessions SET updated_at=? WHERE id=?`), at, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each pair is a title that holds the term literally next to the decoy a
+	// raw pattern would reach instead: a backslash (an escape character by
+	// default on MySQL and PostgreSQL), % (any run of characters), _ (any one
+	// character), ! (the escape character the pattern now names), and a term
+	// with no metacharacter in it at all.
+	seed("win-path", `C:\Users\x`, 40)
+	seed("no-slash", "CUsersx", 30)
+	seed("full-disk", "disk 100% full", 20)
+	seed("disk-grew", "disk 1000x full", 10)
+	seed("snake", "under_score notes", 80)
+	seed("camel", "underXscore notes", 70)
+	seed("bang", "a!b", 60)
+	seed("no-bang", "ab", 50)
+
+	// The drawer's list and the project's table are the two readers of the
+	// shared title predicate: the same term must return the same one row
+	// through both.
+	ids := func(rows []SessionSummary) []string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return out
+	}
+	for _, reader := range []struct {
+		name  string
+		title func(term string) ([]string, int, error)
+	}{
+		{"drawer", func(term string) ([]string, int, error) {
+			rows, total, err := store.ListConversationsPage(ctx, term, "", 100, 0)
+			return ids(rows), total, err
+		}},
+		{"project table", func(term string) ([]string, int, error) {
+			rows, total, err := store.ListSessionsForProjectPage(ctx, p.ID, ProjectSessionsQuery{Search: term}, 100, 0)
+			got := make([]string, 0, len(rows))
+			for _, row := range rows {
+				got = append(got, row.ID)
+			}
+			return got, total, err
+		}},
+	} {
+		for _, tc := range []struct {
+			name, term, want string
+		}{
+			{"backslash", `C:\Users`, "win-path"},
+			{"percent", "100%", "full-disk"},
+			{"underscore", "under_score", "snake"},
+			{"escape character", "a!b", "bang"},
+			{"no metacharacter", "1000x", "disk-grew"},
+		} {
+			t.Run(tc.name+"/"+reader.name, func(t *testing.T) {
+				got, total, err := reader.title(tc.term)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if total != 1 || len(got) != 1 || got[0] != tc.want {
+					t.Fatalf("search %q = %v (total %d), want only %q: the term must match literally", tc.term, got, total, tc.want)
+				}
+			})
+		}
+	}
+}
+
 // TestListConversationsPageLeavesOutBatchExecutions pins the drawer's other
 // exclusion (plan 153): a batch project's conversations are executions of its
 // tasks, reached from that project's task page and its execution history, so
