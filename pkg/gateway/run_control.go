@@ -698,6 +698,16 @@ func (s *Server) forwardRunOp(w http.ResponseWriter, r *http.Request, peer state
 		writeGatewayRelayError(w, "正在运行该对话的副本不可达（"+peer.InternalAddr+"），本次操作没有执行。")
 		return true
 	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		// A peer's refusal is about the replicas' own handshake, not about the
+		// browser that asked: replaying the status would sign the user out of a
+		// page whose credentials were never in question, and replaying the body
+		// would hand out the peer's answer. The caller is told the operation did
+		// not happen, and what refused it stays in this replica's log.
+		slog.Warn("gateway forward: the owning replica refused the operation", "owner", peer.Owner, "addr", peer.InternalAddr, "op", req.Op, "status", status)
+		writeGatewayRelayError(w, gatewayPeerRefusedText)
+		return true
+	}
 	for k, vs := range answer.header {
 		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
 			continue
@@ -764,6 +774,12 @@ func (s *Server) postRunOp(r *http.Request, peer state.ReplicaPeer, req internal
 	_, _ = out.body.Write(body)
 	return out, resp.StatusCode, nil
 }
+
+// gatewayPeerRefusedText is what a caller gets when the replica that owns the
+// conversation refused the forwarded operation. It is the whole of what the
+// browser learns: no peer address, no token, no status detail — which replica
+// refused and why is the operator's log, not the page's.
+const gatewayPeerRefusedText = "正在运行该对话的副本拒绝了本次操作，本次操作没有执行。"
 
 // writeGatewayRelayError is what a caller gets when the replica running the
 // conversation cannot be reached: a 502 it can show, in words it can read,

@@ -2624,6 +2624,53 @@ func TestForwardedRunOpReportsAnUnreachableOwner(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "replica_unreachable")
 }
 
+// TestForwardedPeerUnauthorizedIsNotForwarded pins the auth-failure path of
+// forwarding (plan 226): a peer answering 401 refused the replicas' own
+// handshake, so its answer belongs in this replica's log and not in the browser.
+// The caller is told the operation did not happen — 502 and a neutral sentence —
+// never the peer's status or body: replaying those signs the user out of a page
+// whose credentials were never in question.
+func TestForwardedPeerUnauthorizedIsNotForwarded(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized","message":"peer-only-body"}`))
+	}))
+	defer peer.Close()
+
+	// A heartbeating owner holding the run, whose endpoint refuses the forward.
+	owner := &state.RunStore{DB: db, Owner: "gateway-owner"}
+	stop, err := owner.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	require.NoError(t, owner.RegisterReplica(ctx, state.RunOwnerKindGateway, peer.URL, "host-owner"))
+	rn, err := owner.CreateRun(ctx, "sid", "hello")
+	require.NoError(t, err)
+
+	s := newReplicaTestServer(t, db, home, "gateway-entry", "gw-secret", "http://127.0.0.1:2")
+	routes := NewRestServer("")
+	s.AttachExtraRoutes(routes)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+rn.ID+"/cancel", nil)
+	req.Header.Set("Authorization", "Bearer gw-secret")
+	rec := httptest.NewRecorder()
+	routes.Server.Handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "peer-only-body",
+		"the peer's body must not be replayed to the browser")
+	require.NotContains(t, rec.Body.String(), "unauthorized",
+		"the peer's refusal must not be replayed as the browser's own status")
+	require.Contains(t, rec.Body.String(), gatewayPeerRefusedText)
+}
+
 // TestRunOwnerOfActionFindsTheOwningReplica pins the lookup the approval routes
 // use: the action row names the conversation, and the conversation's live run
 // names the replica that will resume it.
