@@ -570,6 +570,45 @@ func TestPeerServiceCleansOnlyItsOwnDeadRecords(t *testing.T) {
 	}
 }
 
+// A failed start is not the end of the registration. The loop is running
+// before the first attempt is made, so the next tick tries again: a socket
+// directory that is unusable once — a transient failure, or one the person
+// fixes — must not cost this process its entire life (plan 237 §3).
+func TestPeerServiceRetriesAFailedStart(t *testing.T) {
+	env := peerTestEnvFor(t, "tui", func() string { return "cli-retry" })
+	// A regular file where the socket directory belongs: the first attempt
+	// cannot create the directory under it. Removing the file is the person
+	// clearing whatever it was.
+	blocker := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocker, []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREBRAIN_PEER_SOCKET_DIR", filepath.Join(blocker, "sock"))
+
+	stop := env.StartPeers(context.Background(), PeerSurface{Kind: "tui", CurrentSession: func() string { return "cli-retry" }})
+	defer stop()
+
+	// The first attempt failed before anything was written, and no attempt can
+	// succeed while the file is there.
+	if rec := ownRecord(t, env.dirs.fbDir); rec != nil {
+		t.Fatalf("record = %+v, want the first attempt to have failed", rec)
+	}
+	time.Sleep(3 * peerTickInterval)
+	if rec := ownRecord(t, env.dirs.fbDir); rec != nil {
+		t.Fatalf("record = %+v, want nothing registered while the directory is unusable", rec)
+	}
+
+	// Without a restart, the loop's next attempt registers the process.
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the retried registration", func() bool { return ownRecord(t, env.dirs.fbDir) != nil })
+	rec := ownRecord(t, env.dirs.fbDir)
+	if rec.SessionID != "cli-retry" {
+		t.Fatalf("sessionId = %q, want the retried registration to be the real one", rec.SessionID)
+	}
+}
+
 // TestClaudeCodeDetectedOnlyStats pins the display condition helper: an
 // existing directory answers true, a missing one false — and the missing one
 // stays missing.
