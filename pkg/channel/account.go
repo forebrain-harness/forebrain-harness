@@ -130,6 +130,13 @@ func LeaseName(kind string, ch appcfg.ChannelsSection) string {
 // A kind that is neither — a half-configured one, or a new adapter — takes no
 // lease, which is the safe default: it mounts routes the way a webhook does
 // rather than silently connecting twice.
+//
+// Of the kinds above, whatsapp is the only one that does both: it implements
+// RouteMounter, so its inbound route is mounted on every replica and only its
+// poll loop sits behind the lease. The rest of the "yes" rows mount nothing.
+// An adapter that later does both must implement RouteMounter too — a route
+// mounted inside Start alone would answer only on the replica holding the
+// lease.
 func NeedsLease(kind string) bool {
 	switch strings.TrimSpace(kind) {
 	case "telegram", "discord", "mattermost", "matrix", "homeassistant",
