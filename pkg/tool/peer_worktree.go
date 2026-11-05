@@ -21,6 +21,14 @@ type PeerWorkTree interface {
 	// WorkTreePeers lists the other live agents whose directory overlaps root
 	// (equal, ancestor or descendant), with the files they edited recently.
 	WorkTreePeers(ctx context.Context, root string) []WorkTreePeer
+	// SweepPeers lists the other live agents whose uncommitted work a git sweep
+	// run in root could discard: the ones in the same git working tree as root,
+	// plus the ones the ledger shows writing under root recently even though
+	// their registered root is elsewhere. Path containment alone cannot tell a
+	// linked worktree nested in another tree apart from the outer tree, and the
+	// two trees have separate indexes: a checkout in the nested one cannot
+	// touch the outer one's files.
+	SweepPeers(ctx context.Context, root string) []WorkTreePeer
 	// NoteWrite records that the calling agent's file tool wrote absPath at at.
 	NoteWrite(ctx context.Context, absPath string, at time.Time)
 	// TouchesBetween returns other agents' file-tool writes under root in

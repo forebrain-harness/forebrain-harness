@@ -444,6 +444,27 @@ func (env *Environment) RecentPeerFileTouches(root string) []PeerFileTouch {
 // never saw — a Claude Code session, or one that has not written a file yet —
 // still appears, because it is in the tree; it just has nothing to report.
 func (o *peerOutbound) WorkTreePeers(ctx context.Context, root string) []tool.WorkTreePeer {
+	return o.peersUnder(ctx, root, false)
+}
+
+// SweepPeers lists the other live agents whose uncommitted work a git sweep run
+// in root could discard. It asks a narrower question than WorkTreePeers does,
+// and deliberately so: path containment (design §2.2) is right for saying who is
+// in the same directory tree — the agents of a linked work tree nested in
+// another tree do want to know about each other — but it is wrong for a sweep,
+// because the nested tree has its own working tree and index. A checkout in
+// `repo/.worktrees/232` cannot touch what an agent has in `repo`.
+//
+// So the answer here is git working tree identity, plus the ledger: a subagent
+// registered under the main tree that is actually writing files inside the work
+// tree has its work there, and only the ledger can say so.
+func (o *peerOutbound) SweepPeers(ctx context.Context, root string) []tool.WorkTreePeer {
+	return o.peersUnder(ctx, root, true)
+}
+
+// peersUnder answers both same-tree questions from one enumeration: sweep picks
+// the git identity rule, everything else the containment rule.
+func (o *peerOutbound) peersUnder(ctx context.Context, root string, sweep bool) []tool.WorkTreePeer {
 	if o == nil {
 		return nil
 	}
@@ -466,10 +487,17 @@ func (o *peerOutbound) WorkTreePeers(ctx context.Context, root string) []tool.Wo
 		if candidate.agentID != "" && candidate.agentID == self {
 			continue
 		}
-		if !sameWorkTree(candidate.cwd, resolvedRoot) {
+		files, wrote := recent[agentAddress(peer.EncodeUDS(candidate.socket), candidate.agentID)]
+		if sweep {
+			// Recent writes under root are evidence of work in root wherever
+			// the agent registered; without them, only the same git working
+			// tree counts.
+			if !wrote && !sameGitWorkTree(candidate.cwd, resolvedRoot) {
+				continue
+			}
+		} else if !sameWorkTree(candidate.cwd, resolvedRoot) {
 			continue
 		}
-		files := recent[agentAddress(peer.EncodeUDS(candidate.socket), candidate.agentID)]
 		out = append(out, tool.WorkTreePeer{
 			Name:        candidate.name,
 			Kind:        candidate.kind,
@@ -480,6 +508,44 @@ func (o *peerOutbound) WorkTreePeers(ctx context.Context, root string) []tool.Wo
 		})
 	}
 	return out
+}
+
+// sameGitWorkTree reports whether two directories are one git working tree:
+// both sit under the same nearest `.git` entry. That is what tells
+// `repo/.worktrees/232` apart from `repo`, which path containment cannot. A path
+// outside any repository falls back to containment, so a plain directory still
+// behaves as it did — and a sweep is asked about rather than missed.
+func sameGitWorkTree(a, b string) bool {
+	left, right := resolvePath(a), resolvePath(b)
+	if left == "" || right == "" {
+		return false
+	}
+	leftRoot, leftOK := workTreeRoot(left)
+	rightRoot, rightOK := workTreeRoot(right)
+	if !leftOK || !rightOK {
+		return sameWorkTree(left, right)
+	}
+	return leftRoot == rightRoot
+}
+
+// workTreeRoot is the nearest directory at or above dir that holds a `.git`
+// entry: the root of the working tree dir belongs to. A linked work tree and a
+// submodule spell that entry as a file rather than a directory, which is why
+// only its existence counts. Nothing here opens a repository or runs a command,
+// per the design's §7.1: the filesystem's names are the whole evidence.
+func workTreeRoot(dir string) (string, bool) {
+	dir = resolvePath(dir)
+	for dir != "" {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+	return "", false
 }
 
 // peerTasksByAddress maps each reachable peer agent's ledger address to the task

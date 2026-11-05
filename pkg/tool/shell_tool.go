@@ -216,7 +216,18 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			if peers := peersOf(rt); peers != nil {
 				sweepRule, sweepsTree = safety.GitSweepsWorkTree(cmd)
 				if sweepsTree {
-					treePeers = peers.WorkTreePeers(ctx, wdAbs)
+					// The question is about the directory the command changes
+					// to, not the session's root: a linked work tree nested in
+					// this one has its own index, so a sweep inside it cannot
+					// touch the agents working here. The port answers that
+					// narrower question; when the directory cannot be followed
+					// statically it falls back to this one, asking too much
+					// rather than too little.
+					root := wdAbs
+					if resolved, ok := safety.GitSweepWorkingDir(cmd, wdAbs); ok {
+						root = resolved
+					}
+					treePeers = peers.SweepPeers(ctx, root)
 				}
 			}
 			if sweepsTree && len(treePeers) > 0 {

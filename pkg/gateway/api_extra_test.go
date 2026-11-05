@@ -10627,6 +10627,10 @@ func (d *peerDirectoryDouble) WorkTreePeers(context.Context, string) []tool.Work
 	return nil
 }
 
+func (d *peerDirectoryDouble) SweepPeers(context.Context, string) []tool.WorkTreePeer {
+	return nil
+}
+
 func (d *peerDirectoryDouble) NoteWrite(context.Context, string, time.Time) {}
 
 func (d *peerDirectoryDouble) TouchesBetween(context.Context, string, time.Time, time.Time) []tool.PeerTouch {

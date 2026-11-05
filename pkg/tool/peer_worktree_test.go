@@ -23,11 +23,22 @@ type peerWorkTreeFake struct {
 	touches []PeerTouch
 	noted   []string
 	roots   []string
+
+	// The git sweep guard asks a narrower question than the same-tree guards
+	// do, so the two answers are set apart: sweep is what SweepPeers says, and
+	// sweepRoots records the directory it was asked about.
+	sweep      []WorkTreePeer
+	sweepRoots []string
 }
 
 func (f *peerWorkTreeFake) WorkTreePeers(_ context.Context, root string) []WorkTreePeer {
 	f.roots = append(f.roots, root)
 	return f.peers
+}
+
+func (f *peerWorkTreeFake) SweepPeers(_ context.Context, root string) []WorkTreePeer {
+	f.sweepRoots = append(f.sweepRoots, root)
+	return f.sweep
 }
 
 func (f *peerWorkTreeFake) NoteWrite(_ context.Context, absPath string, _ time.Time) {
@@ -219,10 +230,16 @@ func peerShellCtx(root string) context.Context {
 // §3.5): the command string alone cannot say whether it is safe to run.
 func TestShellToolAsksBeforeAGitSweepWhileAnotherAgentWorks(t *testing.T) {
 	rec := &shellApprovalRecorder{}
-	shellTool, root := peerShellTool(t, rec, &peerWorkTreeFake{peers: []WorkTreePeer{{
-		Name: "b", Kind: "terminal", Status: "busy", Task: "the parser",
-		RecentFiles: []string{"b.go", "pkg/c.go"},
-	}}})
+	shellTool, root := peerShellTool(t, rec, &peerWorkTreeFake{
+		peers: []WorkTreePeer{{
+			Name: "b", Kind: "terminal", Status: "busy", Task: "the parser",
+			RecentFiles: []string{"b.go", "pkg/c.go"},
+		}},
+		sweep: []WorkTreePeer{{
+			Name: "b", Kind: "terminal", Status: "busy", Task: "the parser",
+			RecentFiles: []string{"b.go", "pkg/c.go"},
+		}},
+	})
 
 	_, err := shellTool.Handle(peerShellCtx(root), `{"command":"git stash"}`)
 	var pending *RequiresActionError
@@ -253,6 +270,44 @@ func TestShellToolAsksBeforeAGitSweepWhileAnotherAgentWorks(t *testing.T) {
 	}
 	if files, _ := peers[0]["files"].([]string); len(files) != 2 || files[0] != "b.go" {
 		t.Fatalf("peer_files[0].files = %#v, want the files it edited", peers[0]["files"])
+	}
+}
+
+// A sweep is judged in the directory the command runs in, not in the session's
+// project root. A linked work tree nested in the main tree has its own working
+// tree and index: `git stash` inside it cannot touch the agent working in the
+// main tree, so listing that agent would put a false claim on the card — and
+// this approval is asked even under full access.
+func TestShellToolJudgesAGitSweepInTheDirectoryItChanges(t *testing.T) {
+	rec := &shellApprovalRecorder{}
+	fake := &peerWorkTreeFake{peers: []WorkTreePeer{{
+		Name: "forebrain-harness-65", Kind: "terminal", Status: "busy",
+	}}}
+	shellTool, root := peerShellTool(t, rec, fake)
+	worktree := filepath.Join(root, ".worktrees", "232")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(map[string]string{"command": "cd " + worktree + " && git stash"})
+	if err != nil {
+		t.Fatalf("encode args: %v", err)
+	}
+	if _, err := shellTool.Handle(peerShellCtx(root), string(encoded)); err != nil {
+		var pending *RequiresActionError
+		if !errors.As(err, &pending) {
+			t.Fatalf("cd ... && git stash: %v", err)
+		}
+	}
+	if len(fake.sweepRoots) != 1 {
+		t.Fatalf("sweep roots = %#v, want the one directory the command changes in (%s)", fake.sweepRoots, worktree)
+	}
+	if fake.sweepRoots[0] != worktree {
+		t.Fatalf("sweep root = %q, want the command's own directory %q", fake.sweepRoots[0], worktree)
+	}
+	for _, asked := range rec.inputs {
+		if asked["approval_reason"] == "peer_work_tree" {
+			t.Fatalf("asked %#v, want no peer question for a sweep in a work tree nobody else works in", asked)
+		}
 	}
 }
 

@@ -1,0 +1,1 @@
+import{t as r}from"./index-D7wl5gwo.js";function f(t){return t==="low"?r("chat.effortLow"):t==="medium"?r("chat.effortMedium"):t==="high"?r("chat.effortHigh"):t==="xhigh"?r("chat.effortXhigh"):t===""?r("chat.effortDefault"):t}export{f as e};

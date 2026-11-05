@@ -13,11 +13,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/peer"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 // touchLedger installs the ledger override for one case and returns its
@@ -235,4 +237,83 @@ func TestPeerWorkTreePeersListOnlyTheAgentsInThisTree(t *testing.T) {
 			t.Fatalf("%s reports %v/%d, want nothing: the ledger never saw it", p.Name, p.RecentFiles, p.MoreFiles)
 		}
 	}
+}
+
+// Which agents a git sweep can reach is a narrower question than who is in the
+// directory tree: a linked work tree nested inside another tree is a working
+// tree of its own, with its own index and files, so a sweep inside it cannot
+// touch the agent working in the outer tree. The ledger keeps the agent whose
+// registered root is the outer tree but who is writing inside the work tree.
+func TestPeerSweepPeersSeparateANestedWorkTree(t *testing.T) {
+	ledger := touchLedger(t)
+	f := startPeerOutbound(t, "cli-sweep-tree", nil)
+	ctx := touchContext("cli-sweep-tree")
+
+	main := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(main, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(main, ".worktrees", "232")
+	if err := os.MkdirAll(filepath.Join(worktree, "pkg", "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A linked work tree spells its .git as a file pointing at the main
+	// repository's metadata; only its existence matters to the guard.
+	if err := os.WriteFile(filepath.Join(worktree, ".git"),
+		[]byte("gitdir: "+filepath.Join(main, ".git", "worktrees", "232")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := startPeerRemote(t, f.env.dirs.fbSock, "900420")
+	writePeerRecord(t, f.env, f.dir, terminalPeer(remote.socket, main, "sweep-tree",
+		peer.ExtAgent{ID: "peer-main", Name: "forebrain-harness-65", Kind: "primary",
+			Root: main, Status: peer.StatusBusy},
+		peer.ExtAgent{ID: "peer-wt", Name: "forebrain-harness-wt", Kind: "primary",
+			Root: worktree, Status: peer.StatusBusy},
+		peer.ExtAgent{ID: "peer-editor", Name: "forebrain-harness-editor", Kind: "primary",
+			Root: main, Status: peer.StatusBusy},
+	))
+	// The editor is registered under the main tree but writing inside the work
+	// tree: only the ledger sees that its work is there.
+	appendAgentTouch(ledger, agentTouch{
+		path:    resolveTouchPath(filepath.Join(worktree, "pkg", "state", "x.go")),
+		addr:    peer.EncodeUDS(remote.socket),
+		agentID: "peer-editor",
+		name:    "forebrain-harness-editor",
+	}, time.Now())
+
+	// Coordination is unchanged: one directory tree, everybody in it.
+	coordination := peerTreeNames(f.port.WorkTreePeers(ctx, worktree))
+	if got := strings.Join(coordination, ","); got != "forebrain-harness-65,forebrain-harness-wt,forebrain-harness-editor" {
+		t.Fatalf("WorkTreePeers(%s) = %s, want the whole directory tree", worktree, got)
+	}
+
+	inWorkTree := f.port.SweepPeers(ctx, worktree)
+	if got := strings.Join(peerTreeNames(inWorkTree), ","); got != "forebrain-harness-wt,forebrain-harness-editor" {
+		t.Fatalf("SweepPeers(%s) = %s, want the work tree's own agent and the one writing in it, not the outer tree's", worktree, got)
+	}
+	if files := inWorkTree[1].RecentFiles; len(files) != 1 || files[0] != "pkg/state/x.go" {
+		t.Fatalf("editor's recent files = %v, want the one write inside the work tree", files)
+	}
+
+	// A subdirectory of the work tree still belongs to it, and to nobody in the
+	// outer tree.
+	if got := strings.Join(peerTreeNames(f.port.SweepPeers(ctx, filepath.Join(worktree, "pkg"))), ","); got != "forebrain-harness-wt,forebrain-harness-editor" {
+		t.Fatalf("SweepPeers(%s/pkg) = %s, want the work tree's agents", worktree, got)
+	}
+
+	// The outer tree is the mirror image: its own agents, and the one writing
+	// inside it through the ledger, never the nested tree's.
+	if got := strings.Join(peerTreeNames(f.port.SweepPeers(ctx, main)), ","); got != "forebrain-harness-65,forebrain-harness-editor" {
+		t.Fatalf("SweepPeers(%s) = %s, want the main tree's agents only", main, got)
+	}
+}
+
+// peerTreeNames lists one same-tree answer's agents, for assertions.
+func peerTreeNames(peers []tool.WorkTreePeer) []string {
+	out := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		out = append(out, peer.Name)
+	}
+	return out
 }

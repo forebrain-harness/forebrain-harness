@@ -135,3 +135,46 @@ func TestGitSweepWrapperNearMisses(t *testing.T) {
 		}
 	}
 }
+
+// The sibling question of the classifier: which tree a sweep is about. The
+// command's own `cd` and git's -C/--work-tree move it; anything that cannot be
+// read as a literal directory refuses rather than guessing, because the caller
+// falls back to the session's root and asking too much is the safe way to be
+// wrong.
+func TestGitSweepWorkingDir(t *testing.T) {
+	const cwd = "/repo"
+	cases := []struct {
+		name    string
+		command string
+		want    string
+		ok      bool
+	}{
+		{"cd then stash", "cd /wt && git stash", "/wt", true},
+		{"a relative cd", "cd ../wt && git checkout -- f", "/wt", true},
+		{"nothing moves the directory", "git stash", cwd, true},
+		{"a read before the cd", "git status && cd sub && git restore .", "/repo/sub", true},
+		{"git -C", "git -C /wt checkout -- f", "/wt", true},
+		{"git -C attached", "git -C/wt checkout -- f", "/wt", true},
+		{"a global option before -C", "git --no-pager -C /wt checkout -- f", "/wt", true},
+		{"a global option alone", "git --no-pager checkout -- f", cwd, true},
+		{"--work-tree attached", "git --work-tree=/wt reset --hard", "/wt", true},
+		{"--work-tree apart", "git --work-tree /wt reset --hard", "/wt", true},
+		{"sudo", "sudo git -C /wt stash", "/wt", true},
+		{"env", "env GIT_PAGER=cat git -C /wt stash", "/wt", true},
+		{"sh -c", "sh -c 'cd /wt && git stash'", "/wt", true},
+		{"a read-only git form moves nothing", "cd /wt && git stash list", "", false},
+		{"a variable", `cd "$WT" && git stash`, "", false},
+		{"the previous directory", "cd - && git stash", "", false},
+		{"a cd that may fail", "cd /wt || git stash", "", false},
+		{"a separator that does not carry the cd", "cd /wt; git stash", "", false},
+		{"pushd", "pushd /wt && git stash", "", false},
+		{"two directories", "cd /a && git stash && cd /b && git clean -fd", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := GitSweepWorkingDir(tc.command, cwd)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("%s: GitSweepWorkingDir(%q, %q) = %q, %v; want %q, %v",
+				tc.name, tc.command, cwd, got, ok, tc.want, tc.ok)
+		}
+	}
+}

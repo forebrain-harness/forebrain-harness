@@ -255,6 +255,207 @@ func gitSweepFromSubcommand(sub string, args []string) (string, bool) {
 	return "", false
 }
 
+// GitSweepWorkingDir reports the one directory every sweeping git call in the
+// command runs in: it follows the literal `cd <dir>` clauses that carry into the
+// next command, and git's own -C / --work-tree options. cwd is the shell's
+// starting directory.
+//
+// ok is false when the sweeps run in different directories, and when a
+// directory cannot be followed without running a shell: a variable or glob
+// target, `cd -`, pushd/popd, or a cd whose separator does not carry into the
+// next command (a failing `cd` there leaves git in the old directory). The
+// caller then falls back to the directory it already knows, which asks too much
+// rather than too little.
+//
+// This is the companion of GitSweepsWorkTree: that one decides whether a sweep
+// is worth a question, this one decides which tree the question is about. A
+// linked work tree nested in another tree has its own working tree and index,
+// so the two answers have to be asked separately.
+func GitSweepWorkingDir(command, cwd string) (string, bool) {
+	command, cwd = strings.TrimSpace(command), strings.TrimSpace(cwd)
+	if command == "" || cwd == "" {
+		return "", false
+	}
+	dirs, ok := gitSweepWorkingDirs(command, cwd, 0)
+	if !ok || len(dirs) == 0 {
+		return "", false
+	}
+	for _, dir := range dirs[1:] {
+		if dir != dirs[0] {
+			return "", false
+		}
+	}
+	return dirs[0], true
+}
+
+// gitSweepWorkingDirs walks one command line — or the script an `sh -c` carries
+// — and reports the directory of every sweeping git call in it. Every sweeping
+// call is recorded, not just the first: a command that sweeps two directories
+// cannot be answered with either of them.
+func gitSweepWorkingDirs(source, cwd string, depth int) ([]string, bool) {
+	if depth > gitSweepMaxWrapperDeep {
+		return nil, false
+	}
+	var dirs []string
+	dir := cwd
+	for _, segment := range SplitTopLevelWithSeparators(source) {
+		words, ok := gitSweepSegmentWords(segment.Text)
+		if !ok {
+			return nil, false
+		}
+		if len(words) == 0 {
+			continue
+		}
+		switch strings.ToLower(filepath.Base(words[0])) {
+		case "pushd", "popd":
+			return nil, false
+		case "cd":
+			// Only `&&` carries a change of directory into the next clause: on
+			// `;`, a pipe or a newline a failed cd still lets git run where the
+			// shell started, and following the literal target would then hide
+			// a sweep from whoever it can reach.
+			if segment.Sep != SepAnd {
+				return nil, false
+			}
+			next, ok := gitSweepCDTarget(words[1:], dir)
+			if !ok {
+				return nil, false
+			}
+			dir = next
+			continue
+		}
+		if !gitSweepDirFromWords(words, dir, depth, &dirs) {
+			return nil, false
+		}
+	}
+	return dirs, true
+}
+
+// gitSweepSegmentWords reads one top-level clause as its words. A clause the
+// reader cannot reduce to exactly one command is one this walk does not follow:
+// it may be a subshell, or two commands the split did not separate.
+func gitSweepSegmentWords(text string) ([]string, bool) {
+	commands := gitSweepWords(text)
+	if len(commands) != 1 {
+		return nil, false
+	}
+	return commands[0], true
+}
+
+// gitSweepDirFromWords records the directory a sweeping git call in one clause
+// runs in, unwrapping the same wrappers the classifier unwraps. A clause with
+// no sweep records nothing and is still followed.
+func gitSweepDirFromWords(command []string, dir string, depth int, dirs *[]string) bool {
+	if depth > gitSweepMaxWrapperDeep {
+		return false
+	}
+	if len(command) == 0 {
+		return true
+	}
+	switch strings.ToLower(filepath.Base(command[0])) {
+	case "git":
+		return gitSweepDirFromGitArgs(command[1:], dir, dirs)
+	case "sudo":
+		return gitSweepDirFromWords(command[1:], dir, depth+1, dirs)
+	case "env":
+		i := 1
+		for i < len(command) {
+			arg := command[i]
+			if arg == "--" {
+				i++
+				break
+			}
+			_, isAssignment := parseEnvAssignment(arg)
+			if arg == "-i" || arg == "--ignore-environment" || isAssignment {
+				i++
+				continue
+			}
+			break
+		}
+		return gitSweepDirFromWords(command[i:], dir, depth+1, dirs)
+	case "sh", "bash", "zsh", "dash", "ksh":
+		script, ok := shellDashCScript(command)
+		if !ok {
+			return true
+		}
+		nested, ok := gitSweepWorkingDirs(script, dir, depth+1)
+		if !ok {
+			return false
+		}
+		*dirs = append(*dirs, nested...)
+	}
+	return true
+}
+
+// gitSweepDirFromGitArgs follows one git invocation's global options to its
+// subcommand, recording the directory the call runs in when the subcommand
+// sweeps. -C and --work-tree move the call; every other global option — the
+// `--no-pager` the rewriter inserts included — is skipped without changing
+// anything, which is what makes the classifier and this walk agree.
+func gitSweepDirFromGitArgs(args []string, dir string, dirs *[]string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if !strings.HasPrefix(arg, "-") {
+			if _, hit := gitSweepFromSubcommand(strings.ToLower(arg), args[i+1:]); hit {
+				*dirs = append(*dirs, dir)
+			}
+			return true
+		}
+		name, value, hasValue := arg, "", false
+		if eq := strings.IndexByte(arg, '='); eq >= 0 {
+			name, value, hasValue = arg[:eq], arg[eq+1:], true
+		}
+		// The attached short form git reads as a value: `-C/wt`.
+		if !hasValue && len(name) > 2 && strings.HasPrefix(name, "-C") {
+			name, value, hasValue = "-C", name[2:], true
+		}
+		if name == "-C" || name == "--work-tree" {
+			if !hasValue {
+				if i+1 >= len(args) {
+					return false
+				}
+				i++
+				value = strings.TrimSpace(args[i])
+			}
+			resolved, ok := gitSweepDirTarget(value, dir)
+			if !ok {
+				return false
+			}
+			dir = resolved
+			continue
+		}
+		if _, takesValue := gitGlobalOptionTakesValue[name]; takesValue && !hasValue {
+			i++
+		}
+	}
+	return true
+}
+
+// gitSweepCDTarget is the directory one `cd` clause changes to. A bare `cd`,
+// two operands (a cd that fails), and the shell's own -P/-L flags are not
+// literals this walk can follow.
+func gitSweepCDTarget(args []string, dir string) (string, bool) {
+	if len(args) != 1 {
+		return "", false
+	}
+	return gitSweepDirTarget(args[0], dir)
+}
+
+// gitSweepDirTarget is a directory operand read as a literal: anything the
+// shell would expand — a variable, a tilde, a glob, a command substitution — is
+// not a directory this walk can follow, and neither is `-`, the shell's
+// previous directory.
+func gitSweepDirTarget(target, dir string) (string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" || target == "-" || strings.ContainsAny(target, "$~`*?[]{}") {
+		return "", false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(dir, target)
+	}
+	return filepath.Clean(target), true
+}
+
 // argIs reports whether one of the arguments is exactly want.
 func argIs(args []string, want string) bool {
 	for _, arg := range args {
