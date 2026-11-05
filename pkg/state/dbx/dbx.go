@@ -130,12 +130,8 @@ func Rebind(d Dialect, query string) string {
 	return b.String()
 }
 
-// handles maps a registered *sql.DB, and a *sql.Conn taken from one through
-// Conn, to the dialect it speaks.
-var (
-	dbDialects   sync.Map
-	connDialects sync.Map
-)
+// dbDialects maps a *sql.DB registered by Open to the dialect it speaks.
+var dbDialects sync.Map
 
 // Register records the dialect db speaks. Open calls it once per database; a
 // handle nobody registered reads as SQLite, which is the only engine a caller
@@ -147,21 +143,18 @@ func Register(db *sql.DB, d Dialect) {
 	dbDialects.Store(db, d)
 }
 
-// Conn is db.Conn with the dialect recorded, so DialectOf answers for the
-// connection a caller drives by hand — the migration executor does. A
-// *sql.Conn taken straight from *sql.DB is indistinguishable from a SQLite
-// one, which is why the store goes through here.
+// Conn is db.Conn: it returns the connection as-is and records nothing. Its
+// callers — the migration executor pinning a lock, and beginMySQL taking the
+// write lock before it begins the transaction — already hold the dialect.
 func Conn(ctx context.Context, db *sql.DB) (*sql.Conn, error) {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	connDialects.Store(conn, DialectOf(db))
-	return conn, nil
+	return db.Conn(ctx)
 }
 
-// DialectOf answers for a *sql.DB registered by Open, a *Tx from BeginTx, or
-// a *sql.Conn obtained through Conn. Anything else is SQLite.
+// DialectOf answers only for a *sql.DB registered by Open and a *Tx from
+// BeginTx, so what it remembers is bounded by the databases the process opens,
+// not by the connections it hands out. A hand-driven *sql.Conn deliberately
+// reads as the default: no caller asks one for its dialect, and every caller
+// that needs one holds the *sql.DB or the *Tx.
 func DialectOf(q any) Dialect {
 	switch v := q.(type) {
 	case *Tx:
@@ -170,10 +163,6 @@ func DialectOf(q any) Dialect {
 		}
 	case *sql.DB:
 		if d, ok := dbDialects.Load(v); ok {
-			return d.(Dialect)
-		}
-	case *sql.Conn:
-		if d, ok := connDialects.Load(v); ok {
 			return d.(Dialect)
 		}
 	}
