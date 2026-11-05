@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1266,6 +1268,179 @@ func TestPeerWakeWakesTheIdleLoopForTheConversationOnScreen(t *testing.T) {
 	if _, due := state.takePeerDue(); due {
 		t.Fatal("another conversation's message must not be handed to this loop")
 	}
+}
+
+// Two peer messages that arrive before the first has run are two turns, in the
+// order they arrived. The engine wakes the surface once per message and told one
+// sender after another that its message was delivered; a second wake must not
+// overwrite the first, or the sender of the lost message keeps believing in a
+// turn nobody will ever run — the message that says "stop, do not push" is
+// exactly the one a single slot loses.
+func TestTwoPeerWakesBothRun(t *testing.T) {
+	state := &streamState{sessionID: "conv-1"}
+	arrived := []process.PeerPrompt{
+		{SessionID: "conv-1", Text: "stop, do not push", MsgID: "msg-stop"},
+		{SessionID: "conv-1", Text: "and rebase onto dev first", MsgID: "msg-rebase"},
+	}
+	for _, prompt := range arrived {
+		if !handlePeerWakeNotification(state, PeerWakeMsg{SessionID: "conv-1", Prompt: prompt}) {
+			t.Fatalf("peer wake %q must be handled by the peer wake notification", prompt.MsgID)
+		}
+		if !state.idleWake() {
+			t.Fatalf("peer message %q waiting for a turn must wake the idle loop", prompt.MsgID)
+		}
+	}
+
+	var got []process.PeerPrompt
+	for {
+		prompt, due := state.takePeerDue()
+		if !due {
+			break
+		}
+		got = append(got, prompt)
+	}
+	require.Len(t, got, len(arrived), "two accepted peer messages are two turns, not one")
+	require.Equal(t, "msg-stop", got[0].MsgID, "the turns must run in arrival order")
+	require.Equal(t, "msg-rebase", got[1].MsgID, "the turns must run in arrival order")
+	require.False(t, state.idleWake(), "an emptied queue must not wake the loop")
+}
+
+// captureTUISlog records what the code under test logs through the default
+// logger, restoring the previous one when the test ends. Tests that assert a drop
+// is visible read the buffer: a message whose sender was answered cannot also
+// vanish from the record.
+func captureTUISlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// A peer message for a conversation this terminal is not showing is dropped with
+// a record naming it, and it neither evicts nor consumes what is parked for the
+// conversation on screen. The engine has no refusal hook reachable from here
+// (`peerInbox.refuse` is unexported), so the log line is the only account of the
+// message: its sender was answered as delivered.
+func TestPeerWakeForAnotherConversationIsRecordedAndNotQueued(t *testing.T) {
+	logs := captureTUISlog(t)
+
+	state := &streamState{sessionID: "conv-1"}
+	if !handlePeerWakeNotification(state, PeerWakeMsg{
+		SessionID: "conv-1",
+		Prompt:    process.PeerPrompt{SessionID: "conv-1", Text: "keep me", MsgID: "msg-keep"},
+	}) {
+		t.Fatal("a peer wake must be handled by the peer wake notification")
+	}
+	if !handlePeerWakeNotification(state, PeerWakeMsg{
+		SessionID: "conv-2",
+		Prompt:    process.PeerPrompt{SessionID: "conv-2", Text: "elsewhere", MsgID: "msg-elsewhere"},
+	}) {
+		t.Fatal("a peer wake for another conversation is still handled, just not kept")
+	}
+
+	require.Len(t, state.peerDue, 1, "another conversation's message must not be parked here")
+	prompt, due := state.takePeerDue()
+	require.True(t, due, "the message for this conversation must still be waiting")
+	require.Equal(t, "msg-keep", prompt.MsgID)
+	require.Empty(t, state.peerDue)
+
+	recorded := logs.String()
+	require.Contains(t, recorded, "msg_id=msg-elsewhere", "the drop must name the message: %s", recorded)
+	require.Contains(t, recorded, "session_id=conv-2", "the drop must name the conversation: %s", recorded)
+	require.NotContains(t, recorded, "msg-keep", "the message kept for this conversation was reported as dropped")
+}
+
+// The queue is bounded at the engine's own limit, and a message that cannot be
+// parked is dropped from the newest end — never one an earlier sender was already
+// answered for — with a line naming it.
+func TestPeerWakeQueueDropsTheNewestWhenFull(t *testing.T) {
+	logs := captureTUISlog(t)
+
+	state := &streamState{sessionID: "conv-1"}
+	for i := 0; i < maxPeerWakeQueue; i++ {
+		handlePeerWakeNotification(state, PeerWakeMsg{
+			SessionID: "conv-1",
+			Prompt: process.PeerPrompt{
+				SessionID: "conv-1", Text: fmt.Sprintf("message %d", i), MsgID: fmt.Sprintf("msg-%d", i),
+			},
+		})
+	}
+	require.Len(t, state.peerDue, maxPeerWakeQueue)
+
+	handlePeerWakeNotification(state, PeerWakeMsg{
+		SessionID: "conv-1",
+		Prompt:    process.PeerPrompt{SessionID: "conv-1", Text: "one too many", MsgID: "msg-overflow"},
+	})
+
+	require.Len(t, state.peerDue, maxPeerWakeQueue, "a full queue must not grow")
+	require.Equal(t, "msg-0", state.peerDue[0].MsgID, "the drop must take the newest, not the message already waiting")
+	require.Equal(t, fmt.Sprintf("msg-%d", maxPeerWakeQueue-1), state.peerDue[len(state.peerDue)-1].MsgID)
+	require.Contains(t, logs.String(), "msg_id=msg-overflow", "a message that cannot run must be visible")
+}
+
+// A slash panel delays the peer queue instead of stranding it: no turn may start
+// while the panel owns the screen, so what arrived meanwhile is still queued, in
+// arrival order, and is what the first idle pass after the panel closes runs.
+func TestPeerWakeWhileAPanelIsOpenWaitsForThePanelToClose(t *testing.T) {
+	state := &streamState{sessionID: "conv-1", panel: &uiPanel{kind: "status"}}
+	for _, prompt := range []process.PeerPrompt{
+		{SessionID: "conv-1", Text: "first", MsgID: "msg-first"},
+		{SessionID: "conv-1", Text: "second", MsgID: "msg-second"},
+	} {
+		handlePeerWakeNotification(state, PeerWakeMsg{SessionID: "conv-1", Prompt: prompt})
+	}
+	require.Len(t, state.peerDue, 2, "an open panel must not drop what arrived behind it")
+	require.True(t, state.idleWake(), "a queued peer message keeps the loop's wake armed while the panel is open")
+
+	// The idle loop takes a peer message only when no panel is open (the
+	// `state.panel == nil` gate in run.go); closing it is what lets the next
+	// pass run what the panel deferred.
+	state.panel = nil
+	first, due := state.takePeerDue()
+	require.True(t, due, "the message parked behind the panel must still be there once it closes")
+	require.Equal(t, "msg-first", first.MsgID)
+	second, due := state.takePeerDue()
+	require.True(t, due)
+	require.Equal(t, "msg-second", second.MsgID)
+	require.False(t, state.idleWake())
+}
+
+// Switching conversations drops the peer turn parked for the conversation being
+// left, with a line naming it: running it would dispatch to the old session,
+// which the person is no longer looking at, and carrying it to the new one would
+// run a turn there that its sender never wrote to.
+func TestSwitchingConversationDropsTheOldConversationsPeerTurn(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	runs := &state.RunStore{DB: db}
+	session := sessionEnv{Home: home, SQL: db, SessStore: sessions, RunSvc: runs}.session()
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	require.NoError(t, sessions.Ensure(ctx, "s2", "s2"))
+
+	logs := captureTUISlog(t)
+	stream := &streamState{sessionID: "s1", session: session}
+	handlePeerWakeNotification(stream, PeerWakeMsg{
+		SessionID: "s1",
+		Prompt:    process.PeerPrompt{SessionID: "s1", Text: "run this in s1", MsgID: "msg-parked"},
+	})
+	require.Len(t, stream.peerDue, 1)
+
+	switched, _, err := switchStreamSession(ctx, stream, nil, nil, "s2")
+	require.NoError(t, err)
+	require.True(t, switched)
+	require.Equal(t, "s2", stream.sessionID)
+
+	if _, due := stream.takePeerDue(); due {
+		t.Fatal("a peer turn parked for s1 was left for the next idle pass after switching to s2")
+	}
+	require.Empty(t, stream.peerDue)
+	require.Contains(t, logs.String(), "msg_id=msg-parked", "the dropped peer turn must be named in the record")
 }
 
 // A message the person answered, or left on screen, ends with a line saying how

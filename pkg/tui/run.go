@@ -1726,9 +1726,11 @@ type streamState struct {
 	// delivered when its notice arrives, so it has no separate due slot.
 	autoContinue    map[string]*autoContinueView
 	autoContinueDue *ComposerSubmission
-	// peerDue is a peer message waiting for a turn of this conversation: the
-	// idle loop runs it, the way it runs a due continuation.
-	peerDue *process.PeerPrompt
+	// peerDue are the peer messages waiting for a turn of this conversation,
+	// oldest first: the engine wakes the surface once per accepted message, and
+	// each is a turn of its own, so the idle loop runs them the way it runs a
+	// due continuation — one per pass, in the order the senders were answered.
+	peerDue []process.PeerPrompt
 	// panel is the interactive slash panel (/status, /mcp) owned by this
 	// loop. It is composer state, not a modal: keys arrive through the same
 	// event stream, notifications keep flowing, and the transcript keeps
@@ -1962,6 +1964,12 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 	// same rule, so it is discarded here too rather than lingering in a queue
 	// whose subagent the user is no longer looking at.
 	dropped += state.discardSubagentQueues(state.session)
+	// A peer message parked for a turn belongs to the conversation being left
+	// — its sender wrote to that session, and the engine already answered it as
+	// delivered — so it is dropped here rather than carried along or left for
+	// the next idle pass: either would run a turn in a conversation nobody is
+	// looking at. Each drop is logged with its message id in discardPeerDue.
+	dropped += state.discardPeerDue()
 	// A continuation waiting on a usage limit belongs to the conversation
 	// being left. It is cancelled rather than carried along: it would resume a
 	// conversation the reader is no longer looking at.
