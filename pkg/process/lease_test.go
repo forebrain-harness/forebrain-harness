@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -335,6 +337,32 @@ func TestLeasedChannelMountsRoutesOnEveryReplica(t *testing.T) {
 	// routes for one callback URL.
 	if got := holderAdapter.mountCount(); got != 1 {
 		t.Fatalf("the lease holder mounted the route %d times, want once", got)
+	}
+
+	// A callback the load balancer delivers to the standby's replica lands on
+	// that replica's own route table, not on a 404, and reaches the bus the
+	// route was mounted with.
+	answer := func(t *testing.T, replica string, reg *channel.Registry, bus *recordingBus) {
+		t.Helper()
+		hf, ok := reg.Route(http.MethodPost, routeMountInboundPath)
+		if !ok {
+			t.Fatalf("%s serves no route at %s: its callbacks would 404", replica, routeMountInboundPath)
+		}
+		rec := httptest.NewRecorder()
+		hf(rec, httptest.NewRequest(http.MethodPost, routeMountInboundPath,
+			strings.NewReader(`{"chatId":"chat:1","text":"hello"}`)))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("%s answered the callback with %d, want %d", replica, rec.Code, http.StatusNoContent)
+		}
+		if got := len(bus.published()); got != 1 {
+			t.Fatalf("%s published %d inbound messages for the callback, want one", replica, got)
+		}
+	}
+	answer(t, "the replica without the lease", standbyRegistry, standbyBus)
+	answer(t, "the lease holder", holderRegistry, holderBus)
+	// One poll loop across both replicas, which is the whole point of the lease.
+	if got := holderAdapter.startCount() + standbyAdapter.startCount(); got != 1 {
+		t.Fatalf("the poll loop started %d times across both replicas, want once", got)
 	}
 
 	cancel()
