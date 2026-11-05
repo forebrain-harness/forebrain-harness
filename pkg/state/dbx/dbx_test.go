@@ -77,12 +77,16 @@ func TestDialectOf(t *testing.T) {
 		if got := dbx.DialectOf(db); got != d {
 			t.Fatalf("DialectOf(registered %s db) = %s", d, got)
 		}
+		// A connection driven by hand reads as the default even when the
+		// database it came from is registered: the connection carries no
+		// dialect of its own, and nothing in the product asks one for it. A
+		// caller that needs the dialect holds the *sql.DB or the *dbx.Tx.
 		conn, err := dbx.Conn(context.Background(), db)
 		if err != nil {
 			t.Fatalf("conn: %v", err)
 		}
-		if got := dbx.DialectOf(conn); got != d {
-			t.Fatalf("DialectOf(conn of registered %s db) = %s", d, got)
+		if got := dbx.DialectOf(conn); got != dbx.SQLite {
+			t.Fatalf("DialectOf(conn of registered %s db) = %s, want sqlite (the documented default)", d, got)
 		}
 		_ = conn.Close()
 	}
