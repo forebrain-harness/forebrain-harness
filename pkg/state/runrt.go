@@ -693,13 +693,25 @@ SET status=$1, updated_at=$2,
 WHERE id=$3 AND status=$4 AND owner=$5
 RETURNING finished_at_ms`,
 	}
+	// reapAbandonedRunUpdateMySQLSQL is reapAbandonedRunUpdateSQL's MySQL arm.
+	// MySQL runs a SET list left to right, each assignment reading what the
+	// ones before it already wrote, so the two clock expressions must come
+	// before the updated_at they fall back to: with updated_at assigned first
+	// they would read the reap's own clock, and a run left behind by a process
+	// that exited cleanly would be stamped as ending at reap time — days late,
+	// with worked_ms inflated by the same time. The order is load-bearing, not
+	// tidiness: pkg/memory/jobs.go's memJobClaimUpdateMySQL is ordered for the
+	// same reason. The placeholders are position-bound to it —
+	// (status, id, status, owner, updated_at) — so moving a SET item means
+	// moving its argument.
 	reapAbandonedRunUpdateMySQLSQL = dbx.SQL{
 		MySQL: `
 UPDATE fb_runs
-SET status=?, updated_at=?,
+SET status=?,
     started_at_ms=COALESCE(started_at_ms, created_at*1000),
     finished_at_ms=COALESCE(finished_at_ms, ` + reapClockExprMySQL + `),
-    worked_ms=COALESCE(worked_ms, ` + reapClockExprMySQL + `-created_at*1000)
+    worked_ms=COALESCE(worked_ms, ` + reapClockExprMySQL + `-created_at*1000),
+    updated_at=?
 WHERE id=? AND status=? AND owner=?`,
 	}
 	reapAbandonedRunClockMySQLSQL = dbx.SQL{
@@ -1978,7 +1990,11 @@ func (s *RunStore) ReapAbandonedRuns(ctx context.Context, now time.Time) ([]Aban
 	// The clock's end is the owner's last heartbeat — when its process was
 	// last seen — falling back to the row's own last write when no owner row
 	// exists at all. Every expression below reads the pre-update row, so the
-	// updated_at this reap writes cannot feed its own arithmetic; COALESCE
+	// updated_at this reap writes cannot feed its own arithmetic: SQLite and
+	// PostgreSQL read the old row by definition, and the MySQL arm orders its
+	// SET list so the clock expressions come before the updated_at it
+	// assigns (see reapAbandonedRunUpdateMySQLSQL — the order is load-bearing
+	// there). COALESCE
 	// keeps a clock a surface already stamped, because a stamp is written
 	// only once a run has ended, which makes it a better end than the lease
 	// fallback. A row like that — clock stamped, status still running — is
@@ -1990,7 +2006,12 @@ func (s *RunStore) ReapAbandonedRuns(ctx context.Context, now time.Time) ([]Aban
 		var finished int64
 		if tx.Dialect() == dbx.MySQL {
 			// MySQL has no RETURNING: the compare-and-swap moves the row, and
-			// the clock it wrote is read back in the same transaction.
+			// the clock it wrote is read back in the same transaction. A
+			// placeholder is numbered by its position in the statement text,
+			// not by the SET item it belongs to, and none of the clock
+			// expressions takes one — so updated_at stays the second
+			// placeholder even though it is now the last assignment:
+			// (status, updated_at, id, status, owner).
 			res, err := tx.ExecContext(ctx, reapAbandonedRunUpdateMySQLSQL.For(dbx.MySQL),
 				string(RunStatusFailed), now.Unix(), r.ID, string(RunStatusRunning), r.Owner)
 			if err != nil {

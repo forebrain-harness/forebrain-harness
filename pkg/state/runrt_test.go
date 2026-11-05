@@ -855,6 +855,75 @@ func TestReapAbandonedRunsTakesARunWhoseClockWasStampedBeforeTheStatus(t *testin
 	}
 }
 
+// TestReapedRunEndsWhenItStoppedNotWhenItWasReaped pins which clock a reap
+// stamps on a run nobody is watching any more: the row's own last write — the
+// last moment its process was known to be alive — never the moment the reap
+// happened to notice. A run left behind by a process that exited cleanly has
+// no lease row left to fall back to, so its updated_at is the only clock there
+// is, and the run's worked time is measured from it. The statement is the same
+// on every engine and must mean the same thing on every engine (plan 233).
+func TestReapedRunEndsWhenItStoppedNotWhenItWasReaped(t *testing.T) {
+	ctx := context.Background()
+	a, b, db := newTwoOwnerStores(t, "s-exited")
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := a.CreateRun(ctx, "s-exited", "the process exited cleanly, leaving the row behind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A clean exit deregisters its lease on the way out, and the run it was
+	// driving is left behind still reading running. Its last write is an hour
+	// ago; the reap runs now.
+	stop()
+	var leases int
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`), "owner-a").Scan(&leases); err != nil {
+		t.Fatal(err)
+	}
+	if leases != 0 {
+		t.Fatalf("the exited process left %d lease rows behind; the clock this test pins is the fallback one", leases)
+	}
+	stopped := time.Now().Add(-time.Hour).Truncate(time.Second)
+	started := stopped.Add(-2 * time.Minute)
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_runs SET created_at=?, updated_at=? WHERE id=?`),
+		started.Unix(), stopped.Unix(), run.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	reaped, err := b.ReapAbandonedRuns(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A reap whose compare-and-swap matches no row skips it silently
+	// (RowsAffected()==0), so an empty result is a no-op passing as a reap.
+	if len(reaped) != 1 || reaped[0].ID != run.ID {
+		t.Fatalf("reaped = %+v, want exactly the abandoned run: the update matched no row", reaped)
+	}
+	var status string
+	var startedMs, finishedMs, workedMs int64
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`), run.ID).
+		Scan(&status, &startedMs, &finishedMs, &workedMs); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(RunStatusFailed) {
+		t.Fatalf("reaped run status = %q, want failed", status)
+	}
+	if finishedMs != reaped[0].FinishedAtMs {
+		t.Fatalf("reaper reported the run ending at %d, the row says %d", reaped[0].FinishedAtMs, finishedMs)
+	}
+	if want := stopped.UnixMilli(); finishedMs < want-5000 || finishedMs > want+5000 {
+		t.Fatalf("reaped run ended at %d, want its last write %d: %d ms of reap latency stamped as the run's own end",
+			finishedMs, want, finishedMs-want)
+	}
+	if startedMs != started.UnixMilli() {
+		t.Fatalf("reaped run started at %d, want its created_at %d", startedMs, started.UnixMilli())
+	}
+	if want := stopped.Sub(started).Milliseconds(); workedMs < want-5000 || workedMs > want+5000 {
+		t.Fatalf("reaped run worked %d ms, want the %d ms it ran: the reap's own clock inflated it", workedMs, want)
+	}
+}
+
 // TestReapAbandonedRunsCleansLapsedLeaseRows pins the reap's second duty:
 // a lease that reads as dead is removed for real, so the table collects no
 // one row per process that ever crashed mid-run. A fresh lease — the

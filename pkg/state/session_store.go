@@ -743,17 +743,46 @@ WHERE m.session_id IN (` + placeholders + `)
   AND TRIM(json_extract(m.tool_meta_json, '$.full_path')) <> ''`
 }
 
+// escapeLikeArg makes a search term match literally. LIKE reads % as "any run
+// of characters" and _ as "any one character" on every engine, so a search for
+// "100%" or "under_score" has to escape them; the clause rendered by
+// titleLikeFor names ! as the escape character, so ! itself is escaped too.
+//
+// The backslash is deliberately left alone: with the escape character named
+// explicitly it is an ordinary character, and that is what makes a search for
+// C:\Users match only the row that holds it — on MySQL and PostgreSQL a bare
+// backslash would otherwise escape the character after it, and the same term
+// would mean three different things on three engines.
+func escapeLikeArg(s string) string {
+	if !strings.ContainsAny(s, `%_!`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for _, ch := range s {
+		if ch == '%' || ch == '_' || ch == '!' {
+			b.WriteByte('!')
+		}
+		b.WriteRune(ch)
+	}
+	return b.String()
+}
+
 // titleLikeFor renders the drawer's title search on d: SQLite's LIKE is
 // case-insensitive for ASCII, so MySQL lowercases both sides and PostgreSQL
-// writes ILIKE. The argument is the same "%"+q+"%" on every engine.
+// writes ILIKE. The argument is the same "%"+escapeLikeArg(q)+"%" on every
+// engine, and the ESCAPE clause is written out rather than left to each
+// engine's default: MySQL and PostgreSQL default to a backslash escape and
+// SQLite has none, so only an explicit character makes one pattern mean one
+// thing everywhere.
 func titleLikeFor(d dbx.Dialect, column, placeholder string) string {
 	switch d {
 	case dbx.MySQL:
-		return `LOWER(` + column + `) LIKE LOWER(` + placeholder + `)`
+		return `LOWER(` + column + `) LIKE LOWER(` + placeholder + `) ESCAPE '!'`
 	case dbx.Postgres:
-		return column + ` ILIKE ` + placeholder
+		return column + ` ILIKE ` + placeholder + ` ESCAPE '!'`
 	default:
-		return column + ` LIKE ` + placeholder
+		return column + ` LIKE ` + placeholder + ` ESCAPE '!'`
 	}
 }
 
@@ -1690,7 +1719,7 @@ func (s *SessionStore) conversationsWhere(d dbx.Dialect, q, projectID string) (s
 	}
 	if q = strings.TrimSpace(q); q != "" {
 		where += ` AND ` + titleLikeFor(d, "title", next())
-		args = append(args, "%"+q+"%")
+		args = append(args, "%"+escapeLikeArg(q)+"%")
 	}
 	return where, args
 }
@@ -1886,7 +1915,7 @@ func (s *SessionStore) projectSessionsWhere(d dbx.Dialect, projectID, search str
 	args := []any{s.AgentID(), projectID, SessionSourceConversation}
 	if search = strings.TrimSpace(search); search != "" {
 		where += ` AND ` + titleLikeFor(d, "fb_sessions.title", next())
-		args = append(args, "%"+search+"%")
+		args = append(args, "%"+escapeLikeArg(search)+"%")
 	}
 	return where, args
 }
