@@ -45,9 +45,27 @@ func NewWhatsApp(cfg WhatsAppConfig) *WhatsApp {
 }
 
 func (w *WhatsApp) ID() string { return "whatsapp" }
-func (w *WhatsApp) Start(ctx context.Context, add RouteAdder, bus Bus) error {
+
+// MountRoutes mounts the inbound route on this replica and keeps the bus the
+// route publishes on. It is deliberately not part of Start: mounting is
+// replica-local, so a replica that does not hold the account's lease must still
+// serve its webhook, while the poll loop Start runs is the part the lease gates.
+// The bus has to be handed over here for the same reason — handleInbound
+// publishes on it, and it is not assigned anywhere else.
+func (w *WhatsApp) MountRoutes(add RouteAdder, bus Bus) {
 	w.inboundAdd = add
 	w.bus = bus
+	if !w.cfg.Enabled {
+		return
+	}
+	if path := strings.TrimSpace(w.cfg.InboundPath); path != "" {
+		add(http.MethodPost, path, w.handleInbound)
+	}
+}
+
+// Start runs the poll loop, which is the adapter's connection: the half that
+// belongs to one replica and is therefore what a lease gates.
+func (w *WhatsApp) Start(ctx context.Context, add RouteAdder, bus Bus) error {
 	if !w.cfg.Enabled {
 		return nil
 	}
@@ -56,10 +74,6 @@ func (w *WhatsApp) Start(ctx context.Context, add RouteAdder, bus Bus) error {
 		base = "http://127.0.0.1:3000"
 	}
 	w.cfg.OutboundURL = base
-	path := strings.TrimSpace(w.cfg.InboundPath)
-	if path != "" {
-		add(http.MethodPost, path, w.handleInbound)
-	}
 	runCtx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
 	// done is created here, with the loop it belongs to, so a non-nil done

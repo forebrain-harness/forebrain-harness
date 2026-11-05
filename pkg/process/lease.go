@@ -142,7 +142,8 @@ func (l *Leases) release(ctx context.Context, name string) error {
 // leasedHandler is the channel.Handler a long-connection adapter is replaced
 // by. It starts the delegate when — and only when — this process holds the
 // lease, renews while it does, and disconnects the moment a renewal says it
-// does not.
+// does not. Mounting the delegate's routes is the one thing it does not gate:
+// every replica serves the route (see MountRoutes).
 type leasedHandler struct {
 	leases  *Leases
 	name    string
@@ -157,6 +158,15 @@ type leasedHandler struct {
 }
 
 func (s *leasedHandler) ID() string { return s.handler.ID() }
+
+// MountRoutes forwards the capability to the delegate. The registry sees this
+// wrapper rather than the adapter, so without the delegation a lease-gated kind
+// that mounts routes would mount none on any replica, holder included.
+func (s *leasedHandler) MountRoutes(add channel.RouteAdder, bus channel.Bus) {
+	if m, ok := s.handler.(channel.RouteMounter); ok {
+		m.MountRoutes(add, bus)
+	}
+}
 
 func (s *leasedHandler) Start(ctx context.Context, add channel.RouteAdder, bus channel.Bus) error {
 	runCtx, cancel := context.WithCancel(ctx)

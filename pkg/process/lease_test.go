@@ -3,7 +3,10 @@ package process
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -269,6 +272,168 @@ func TestGuardedChannelConnectsOnOneReplicaOnly(t *testing.T) {
 	}
 	if err := second.Stop(context.Background()); err != nil {
 		t.Fatalf("stop the second replica's handler: %v", err)
+	}
+}
+
+// routeMountInboundPath is the callback URL the route-mounting double serves.
+const routeMountInboundPath = "/channels/route-mount/inbound"
+
+// routeMountChannel is the shape whatsapp has: an adapter that keeps a
+// connection of its own *and* mounts an inbound HTTP route. Start only records
+// that the connection came up; mounting the route — and with it the bus the
+// route publishes on — is MountRoutes' business.
+type routeMountChannel struct {
+	mu         sync.Mutex
+	starts     int
+	mounts     int
+	mountedBus channel.Bus
+}
+
+func (c *routeMountChannel) ID() string { return "route-mount" }
+
+func (c *routeMountChannel) Start(context.Context, channel.RouteAdder, channel.Bus) error {
+	c.mu.Lock()
+	c.starts++
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *routeMountChannel) Stop(context.Context) error { return nil }
+
+// MountRoutes records one mount and publishes on the bus it was handed when
+// the mounted route is called.
+func (c *routeMountChannel) MountRoutes(add channel.RouteAdder, bus channel.Bus) {
+	c.mu.Lock()
+	c.mounts++
+	c.mountedBus = bus
+	c.mu.Unlock()
+	add(http.MethodPost, routeMountInboundPath, func(rw http.ResponseWriter, r *http.Request) {
+		if bus != nil {
+			_ = bus.PublishInbound(r.Context(), channel.Inbound{
+				ChannelID: "route-mount",
+				SessionID: "chat:1",
+				Text:      "hello",
+			})
+		}
+		rw.WriteHeader(http.StatusNoContent)
+	})
+}
+
+func (c *routeMountChannel) startCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.starts
+}
+
+func (c *routeMountChannel) mountCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mounts
+}
+
+func (c *routeMountChannel) mounted() channel.Bus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mountedBus
+}
+
+// recordingBus keeps what a channel published, so the test can tell a route
+// that really delivered from one that only returned a status code.
+type recordingBus struct {
+	mu  sync.Mutex
+	got []channel.Inbound
+}
+
+func (b *recordingBus) PublishInbound(_ context.Context, m channel.Inbound) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.got = append(b.got, m)
+	return nil
+}
+
+func (b *recordingBus) published() []channel.Inbound {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]channel.Inbound(nil), b.got...)
+}
+
+// TestLeasedChannelMountsRoutesOnEveryReplica pins the split between mounting
+// and connecting for a kind that does both (whatsapp): mounting is replica-
+// local, so every replica — the lease holder and the standby — serves the
+// inbound route, and only the holder runs the connection. Both replicas bind
+// through the registry, because that is the one path every kind takes.
+func TestLeasedChannelMountsRoutesOnEveryReplica(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	holderAdapter, standbyAdapter := &routeMountChannel{}, &routeMountChannel{}
+	holderRegistry, standbyRegistry := channel.NewRegistry(), channel.NewRegistry()
+	holderBus, standbyBus := &recordingBus{}, &recordingBus{}
+	holder := (&Leases{DB: db, Holder: "webchat-a"}).Guard("channel:acct", holderAdapter)
+	standby := (&Leases{DB: db, Holder: "webchat-b"}).Guard("channel:acct", standbyAdapter)
+	if err := holderRegistry.BindProjects(ctx, "agent",
+		[]channel.BoundChannel{{Handler: holder}}, holderBus); err != nil {
+		t.Fatalf("bind the lease holder's channels: %v", err)
+	}
+	if err := standbyRegistry.BindProjects(ctx, "agent",
+		[]channel.BoundChannel{{Handler: standby}}, standbyBus); err != nil {
+		t.Fatalf("bind the standby's channels: %v", err)
+	}
+
+	// The standby's route must be up even though its connection is not: a
+	// callback the load balancer delivers here would otherwise hit no route.
+	if got := standbyAdapter.mountCount(); got != 1 {
+		t.Fatalf("the replica without the lease mounted the route %d times, want once", got)
+	}
+	if got := standbyAdapter.mounted(); got == nil {
+		t.Fatal("the replica without the lease mounted the route with a nil bus: its first callback would panic")
+	}
+	if got := standbyAdapter.startCount(); got != 0 {
+		t.Fatalf("the replica without the lease started its connection %d times, want none", got)
+	}
+	// The holder mounts once too — a second mount point would give it two
+	// routes for one callback URL.
+	if got := holderAdapter.mountCount(); got != 1 {
+		t.Fatalf("the lease holder mounted the route %d times, want once", got)
+	}
+
+	// A callback the load balancer delivers to the standby's replica lands on
+	// that replica's own route table, not on a 404, and reaches the bus the
+	// route was mounted with.
+	answer := func(t *testing.T, replica string, reg *channel.Registry, bus *recordingBus) {
+		t.Helper()
+		hf, ok := reg.Route(http.MethodPost, routeMountInboundPath)
+		if !ok {
+			t.Fatalf("%s serves no route at %s: its callbacks would 404", replica, routeMountInboundPath)
+		}
+		rec := httptest.NewRecorder()
+		hf(rec, httptest.NewRequest(http.MethodPost, routeMountInboundPath,
+			strings.NewReader(`{"chatId":"chat:1","text":"hello"}`)))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("%s answered the callback with %d, want %d", replica, rec.Code, http.StatusNoContent)
+		}
+		if got := len(bus.published()); got != 1 {
+			t.Fatalf("%s published %d inbound messages for the callback, want one", replica, got)
+		}
+	}
+	answer(t, "the replica without the lease", standbyRegistry, standbyBus)
+	answer(t, "the lease holder", holderRegistry, holderBus)
+	// One poll loop across both replicas, which is the whole point of the lease.
+	if got := holderAdapter.startCount() + standbyAdapter.startCount(); got != 1 {
+		t.Fatalf("the poll loop started %d times across both replicas, want once", got)
+	}
+
+	cancel()
+	if err := holder.Stop(context.Background()); err != nil {
+		t.Fatalf("stop the lease holder's handler: %v", err)
+	}
+	if err := standby.Stop(context.Background()); err != nil {
+		t.Fatalf("stop the standby's handler: %v", err)
 	}
 }
 

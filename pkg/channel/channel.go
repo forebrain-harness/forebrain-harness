@@ -43,6 +43,15 @@ type Handler interface {
 
 type Channel = Handler
 
+// RouteMounter is implemented by an adapter that mounts inbound HTTP routes and
+// keeps a connection of its own. Mounting is replica-local — every replica must
+// serve the route — while the connection is singleton and belongs to the lease
+// holder. An adapter that only mounts routes needs no lease at all (see
+// NeedsLease); this interface exists for the kinds that do both.
+type RouteMounter interface {
+	MountRoutes(add RouteAdder, bus Bus)
+}
+
 type Bus interface {
 	PublishInbound(ctx context.Context, m Inbound) error
 }
@@ -100,6 +109,11 @@ func (r *Registry) Bind(ctx context.Context, agentID string, handlers []Handler,
 // still come up, because one misconfigured bot token must not take the whole
 // gateway down with it.
 //
+// A handler that also mounts routes of its own (RouteMounter) is mounted here,
+// on every replica, before it is started. Mounting is replica-local, so it must
+// not sit behind a lease: behind one, the replicas that do not hold the account
+// would answer their webhooks with nothing at all.
+//
 // The whole operation is serialized. Bind detaches the old handlers, starts the
 // new ones without holding the data lock, and only then swaps them in, so two
 // concurrent binds could otherwise interleave as detach/detach/swap/swap and
@@ -135,6 +149,13 @@ func (r *Registry) BindProjects(ctx context.Context, agentID string, channels []
 		hb := bus
 		if pid := strings.TrimSpace(bc.ProjectID); pid != "" && bus != nil {
 			hb = projectBus{projectID: pid, inner: bus}
+		}
+		// Mounting is replica-local: every replica serves the inbound route,
+		// including the one whose lease lives on another replica. Start stays
+		// what it was — connect and return — so the lease still decides who
+		// connects.
+		if m, ok := bc.Handler.(RouteMounter); ok {
+			m.MountRoutes(add, hb)
 		}
 		if err := bc.Handler.Start(ctx, add, hb); err != nil {
 			errs = append(errs, fmt.Errorf("channel %s: %w", bc.Handler.ID(), err))
