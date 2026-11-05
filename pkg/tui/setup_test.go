@@ -169,6 +169,36 @@ func TestNeedsFirstSetupTrueAfterHomeEnsureSeedsSkeleton(t *testing.T) {
 	}
 }
 
+// TestNeedsFirstSetupReportsAnUnreachableDatabase pins plan 236 step 2 at the
+// surface an operator actually sees: a home whose forebrain.yaml names a MySQL
+// server this process cannot reach must report that failure, not read the file
+// — which holds little more than the URL — and conclude that a configured
+// install still has to be set up. The gateway reaches this same predicate
+// through cmd/forebrain's gatewayNeedsFirstSetup, which is this function.
+func TestNeedsFirstSetupReportsAnUnreachableDatabase(t *testing.T) {
+	process.ResetResolve()
+	t.Cleanup(process.ResetResolve)
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	cfg := "gateway:\n  http_addr: 127.0.0.1:6060\ndatabase:\n  url: mysql://fb:s3cret-pw@127.0.0.1:1/forebrain\n"
+	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	needs, err := NeedsFirstSetup()
+	if err == nil {
+		t.Fatalf("NeedsFirstSetup = (%v, nil) for an unreachable database, want the error", needs)
+	}
+	if needs {
+		t.Fatalf("NeedsFirstSetup = (true, %v), want (false, err)", err)
+	}
+	if cfgPath := filepath.Join(home, "forebrain.yaml"); !strings.Contains(err.Error(), cfgPath) {
+		t.Fatalf("NeedsFirstSetup error %q does not name the config file %s", err, cfgPath)
+	}
+	if strings.Contains(err.Error(), "s3cret-pw") {
+		t.Fatalf("NeedsFirstSetup error %q echoes the password", err)
+	}
+}
+
 // useSetupTestCatalog pins the shared catalog to a small deterministic set so
 // provider-option assertions do not depend on the embedded asset's ordering.
 // The reasoning_options mirror each model's real shipped row: the levels a

@@ -419,10 +419,16 @@ func readStartupConfig(ctx context.Context, home string) (appcfg.Root, bool, err
 // has not opened its environment yet — the startup gates (first-setup,
 // startup-config) and anything else that must judge the configuration before
 // Open runs. It reports false in the transition cases where the file is still
-// the answer: no database yet, one this binary cannot read read-only (an
-// older binary has not migrated it), or one that holds no sections (the
+// the answer: no SQLite state file yet, one this binary cannot read read-only
+// (an older binary has not migrated it), or one that holds no sections (the
 // legacy import has not run). A database that holds sections but cannot be
 // composed is an error — fail-closed, the same verdict Open gives later.
+//
+// A configured server that cannot be reached is a failure to report, never an
+// empty configuration; an outdated schema is not a failure to reach. The two
+// are told apart by engine and by error, so an install whose database is down,
+// whose password is wrong or whose host is unreachable says so instead of
+// reading as a fresh home that still has to be set up (plan 236).
 //
 // The database opens read-only: this path runs in commands that must not
 // migrate anything, and a database needing migration is exactly the case
@@ -440,9 +446,40 @@ func ComposedStartupConfig(ctx context.Context, home string) (appcfg.Root, bool,
 	if err != nil {
 		return appcfg.Root{}, false, fmt.Errorf("read database.url from %s: %w", cfgPath, err)
 	}
+	// Decide by engine, not by failure (plan 236): a configured server that
+	// cannot be reached is a failure to report, never an empty configuration,
+	// so the only silent fallback left is the home's own SQLite file not
+	// existing yet. The missing file is found by stat, not by the open's error:
+	// state.Open returns the driver's sqlite3.Error, which has no Unwrap, so
+	// errors.Is(err, fs.ErrNotExist) is always false against it.
+	if strings.TrimSpace(databaseURL) == "" {
+		statePath := state.StateDBPath(home)
+		if _, err := os.Stat(statePath); err != nil {
+			if os.IsNotExist(err) {
+				return appcfg.Root{}, false, nil
+			}
+			return appcfg.Root{}, false, fmt.Errorf("look for the state database at %s: %w", statePath, err)
+		}
+	}
 	db, err := state.OpenFromConfig(ctx, home, databaseURL, &state.OpenOptions{ReadOnly: true})
 	if err != nil {
-		return appcfg.Root{}, false, nil
+		// An outdated schema is not a failure to reach the database: this
+		// binary cannot read it read-only until it is upgraded or migration
+		// runs, and the file is still the answer until then.
+		if errors.Is(err, state.ErrStateSchemaOutdated) || errors.Is(err, state.ErrStateSchemaNewer) {
+			return appcfg.Root{}, false, nil
+		}
+		// Name the file and the engine that failed, never the URL: it may
+		// carry the password. A SQLite database is the home's own file, which
+		// the configuration does not name — say where it is instead.
+		if strings.TrimSpace(databaseURL) == "" {
+			return appcfg.Root{}, false, fmt.Errorf("open the SQLite state database at %s: %w", state.StateDBPath(home), err)
+		}
+		engine := "configured"
+		if scheme, _, found := strings.Cut(strings.TrimSpace(databaseURL), "://"); found {
+			engine = scheme
+		}
+		return appcfg.Root{}, false, fmt.Errorf("open the %s state database named by %s: %w", engine, cfgPath, err)
 	}
 	defer db.Close()
 	store := &state.ConfigStore{DB: db}
