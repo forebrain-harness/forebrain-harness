@@ -708,6 +708,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         and the steer: it gets one delta, which commits the steer's delivery,
         and then hangs, so the subagent stays running. The conversation's
         first request dispatches the probe; the rest answer with a fixed line.
+        FAKE_SUBAGENT_STEER_FINISH=1 finishes that later request instead of
+        hanging, so the subagent's answer goes back to the conversation.
         """
         system, _ = _system_and_last_user(body)
         self.send_response(200)
@@ -718,6 +720,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if _has_tool_result(body):
                 sys.stderr.write("SUBAGENT-STEER took the steer, holding the subagent\n")
                 sys.stderr.flush()
+                if os.environ.get("FAKE_SUBAGENT_STEER_FINISH") == "1":
+                    self.write_event(chunk(delta={"role": "assistant", "content": "steer received, subagent finished"}))
+                    self.write_event(chunk(finish="stop"))
+                    self.write_raw(b"data: [DONE]\n\n")
+                    self.write_raw(b"")
+                    return
                 self.write_event(chunk(delta={"role": "assistant", "content": "steer received, still working"}))
                 while True:
                     time.sleep(3600)

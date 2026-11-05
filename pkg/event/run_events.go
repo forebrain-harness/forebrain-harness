@@ -50,6 +50,12 @@ const (
 	// as a user message in that subagent's own view; it persists, so a replay
 	// draws it too.
 	RunEventSubagentInputDelivered = "subagent_input_delivered"
+	// RunEventSubagentPaused reports a subagent the user interrupted from its
+	// own view: the attempt in flight stopped, and the execution waits for the
+	// user's next message instead of ending. The message that resumes it is the
+	// subagent_input_delivered that follows; it persists, so a replay draws the
+	// interruption where it happened.
+	RunEventSubagentPaused = "subagent_paused"
 	// RunEventPlanReviewStarted is a second opinion being asked for an
 	// exit-plan approval. ReviewID is the dispatch id of the review run: the
 	// reviewer's subagent_spawned names it as its ParentToolCallID, the way a
@@ -518,6 +524,13 @@ type SubagentInputDeliveredPayload struct {
 	AgentID     string `json:"agent_id,omitempty"`
 	ExecutionID string `json:"execution_id,omitempty"`
 	Text        string `json:"text,omitempty"`
+}
+
+// SubagentPausedPayload names the subagent whose execution the user
+// interrupted from its view and that now waits for their next message.
+type SubagentPausedPayload struct {
+	AgentID     string `json:"agent_id,omitempty"`
+	ExecutionID string `json:"execution_id,omitempty"`
 }
 
 // InputDeliveredPayload is a steer the run handed its model: the message as

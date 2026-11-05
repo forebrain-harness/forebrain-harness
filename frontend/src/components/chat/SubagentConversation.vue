@@ -110,6 +110,10 @@
             :line="formatWorkedDurationLabel(run.item.durationMs, t, run.item.finishedAt, run.item.plan, run.item.firstTokenMs)"
           />
 
+          <RunPausedLine v-else-if="run.item.kind === 'paused'" />
+
+          <RunStoppedLine v-else-if="run.item.kind === 'stopped'" />
+
           <RunErrorBlock
             v-else-if="run.item.kind === 'error'"
             :text="run.item.text"
@@ -135,12 +139,6 @@
         @open-agent="(agentId) => emit('open-agent', agentId)"
       />
     </div>
-
-    <Alert v-if="record.error" variant="destructive">
-      <CircleAlert class="size-4" />
-      <AlertTitle>{{ endedTitle }}</AlertTitle>
-      <AlertDescription class="whitespace-pre-wrap">{{ record.error }}</AlertDescription>
-    </Alert>
   </section>
 </template>
 
@@ -158,13 +156,14 @@
  * holds it (SubagentTab).
  */
 import { computed } from 'vue'
-import { ChevronDown, ChevronUp, CircleAlert, User } from 'lucide-vue-next'
+import { ChevronDown, ChevronUp, User } from 'lucide-vue-next'
 import { Message, MessageContent, MessageResponse } from '@repo/elements/message'
-import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import ActivityLine from '@/components/chat/ActivityLine.vue'
 import ActivityStep from '@/components/chat/ActivityStep.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
+import RunPausedLine from '@/components/chat/RunPausedLine.vue'
+import RunStoppedLine from '@/components/chat/RunStoppedLine.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
@@ -178,7 +177,7 @@ import { injectPendingActions } from '@/composables/providePendingActions'
 import type { ActionRow } from '@/composables/usePendingActions'
 import type { DocTab } from '@/composables/useDocTabs'
 import { groupActivityRuns, blockOnActivityLine } from '@/lib/activityRuns'
-import { subagentPhase, subagentStatusLabel } from '@/lib/subagentStatus'
+import { subagentPhase } from '@/lib/subagentStatus'
 import { blockVisibleIn } from '@/lib/viewMode'
 import type { ViewMode } from '@/composables/useViewMode'
 import type { WorkspaceScope } from '@/lib/api'
@@ -233,15 +232,6 @@ const runs = computed(() => {
 })
 
 const isRunning = computed(() => subagentPhase(props.record.status) === 'active')
-
-/** How the ended execution's account is titled: a stopped subagent was
- *  cancelled or interrupted, never "failed" — the end carries its reason as
- *  its error all the same. */
-const endedTitle = computed(() => (
-  props.record.status === 'cancelled' || props.record.status === 'interrupted'
-    ? subagentStatusLabel(props.record.status)
-    : t('chat.subagentFailed')
-))
 
 /** The conversation's own pending-actions store: a gate this subagent raised
  *  hangs on its own call's card here, the same way the conversation's do. */

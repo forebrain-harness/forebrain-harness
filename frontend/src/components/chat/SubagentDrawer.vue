@@ -114,7 +114,8 @@
             :aria-selected="!activePlan && !activeDoc && entry.key === active"
             @click="emit('select', entry.key)"
           >
-            <Loader2 v-if="entry.agent && phaseOf(entry.agent) === 'active'" class="is-run" aria-hidden="true" />
+            <CirclePause v-if="entry.agent?.status === 'waiting_input'" class="is-wait" aria-hidden="true" />
+            <Loader2 v-else-if="entry.agent && phaseOf(entry.agent) === 'active'" class="is-run" aria-hidden="true" />
             <CheckCircle2 v-else-if="entry.agent && phaseOf(entry.agent) === 'done'" class="is-ok" aria-hidden="true" />
             <Ban v-else-if="entry.agent?.status === 'cancelled'" class="is-off" aria-hidden="true" />
             <XCircle v-else class="is-bad" aria-hidden="true" />
@@ -175,7 +176,8 @@
           :data-testid="`subagent-menu-${row.agentId}`"
           @click="openFromMenu(row.agentId)"
         >
-          <Loader2 v-if="phaseOf(row) === 'active'" class="is-run" aria-hidden="true" />
+          <CirclePause v-if="row.status === 'waiting_input'" class="is-wait" aria-hidden="true" />
+          <Loader2 v-else-if="phaseOf(row) === 'active'" class="is-run" aria-hidden="true" />
           <CheckCircle2 v-else-if="phaseOf(row) === 'done'" class="is-ok" aria-hidden="true" />
           <Ban v-else-if="row.status === 'cancelled'" class="is-off" aria-hidden="true" />
           <XCircle v-else class="is-bad" aria-hidden="true" />
@@ -201,7 +203,7 @@
  * same way: a column on a wide screen, an overlay on a narrow one.
  */
 import { computed, onUnmounted, ref, watch, type Component } from 'vue'
-import { Ban, CheckCircle2, Download, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
+import { Ban, CheckCircle2, CirclePause, Download, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
 import { usePanelWidth } from '@/composables/usePanelWidth'
 import { formatRuntimeDuration, type SubagentTranscript } from '@/composables/useChatStream'
 import type { DocTab } from '@/composables/useDocTabs'
@@ -325,7 +327,9 @@ function unseen(tab: SubagentTranscript): boolean {
 function sideOf(record: SubagentTranscript): string {
   if (openIds.value.includes(record.agentId)) return t('chat.subagentOpened')
   const phase = phaseOf(record)
-  if (phase === 'active') {
+  // One the user interrupted says it waits for them, the word its card row
+  // and its tab use, rather than a clock that reads as work in progress.
+  if (phase === 'active' && record.status !== 'waiting_input') {
     const started = record.startedAt ? Date.parse(record.startedAt) : NaN
     if (Number.isFinite(started)) return formatRuntimeDuration(Math.max(0, (props.now ?? Date.now()) - started))
     return ''
@@ -489,6 +493,11 @@ onUnmounted(() => {
   color: var(--forebrain-muted-text);
 }
 
+/* One the user interrupted waits for them: the brand's pause, still. */
+.subagent-drawer-tab-main svg.is-wait {
+  color: var(--forebrain-brand-1);
+}
+
 .subagent-drawer-tab-main svg.is-plan {
   color: var(--forebrain-brand-1);
 }
@@ -622,6 +631,10 @@ a.subagent-drawer-tab-close {
 
 .subagent-drawer-menu-row svg.is-off {
   color: var(--forebrain-muted-text);
+}
+
+.subagent-drawer-menu-row svg.is-wait {
+  color: var(--forebrain-brand-1);
 }
 
 .subagent-drawer-menu-label {

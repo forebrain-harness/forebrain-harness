@@ -34,7 +34,7 @@ describe('subagentStatus', () => {
     const labels: Record<Status, string> = {
       running: 'running',
       waiting_approval: 'Waiting for approval',
-      waiting_input: 'Waiting for input',
+      waiting_input: 'Waiting for your message',
       done: 'done',
       failed: 'failed',
       cancelled: 'Cancelled',

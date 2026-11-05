@@ -58,13 +58,43 @@ describe('SubagentConversation', () => {
     expect(worked.text()).toContain('Worked for 1m 00s')
   })
 
-  // A subagent the user stopped ends with its reason as its error, and the
-  // account of it said "failed" — a stop is not a failure.
-  it('titles a stopped run as cancelled, a failed one as failed', () => {
-    const titleOf = (status: SubagentTranscript['status'], error: string) =>
-      mount(SubagentConversation, { props: { record: record({ status, error }) } }).find('[data-slot="alert-title"]').text()
-    expect(titleOf('cancelled', 'cancelled')).toBe('Cancelled')
-    expect(titleOf('failed', 'provider refused')).toBe('failed')
+  // How an execution ended is said once, in its place — never again at the
+  // foot of the tab. A stop is not a failure: it is the quiet line the card row
+  // and the drawer's tab already use for it, not the red account a failure gets.
+  it('says a stopped run once, quietly, and a failed one once, in red', () => {
+    const stopped = mount(SubagentConversation, {
+      props: {
+        record: record({
+          status: 'cancelled',
+          blocks: [
+            { kind: 'prompt', text: 'review the plan' },
+            { kind: 'stopped', id: 'stopped:exec-1' },
+            { kind: 'worked', id: 'worked:exec-1', durationMs: 4000, finishedAt: new Date().toISOString() },
+          ],
+        }),
+      },
+    })
+    const line = stopped.get('[data-testid="run-stopped-line"]')
+    expect(line.text()).toBe('Cancelled')
+    // The red account is not drawn a second time, nowhere at all.
+    expect(stopped.find('[data-testid="run-error"]').exists()).toBe(false)
+    expect(stopped.find('[data-slot="alert-title"]').exists()).toBe(false)
+    expect(stopped.text().match(/Cancelled/g)).toHaveLength(1)
+
+    const failed = mount(SubagentConversation, {
+      props: {
+        record: record({
+          status: 'failed',
+          blocks: [
+            { kind: 'prompt', text: 'review the plan' },
+            { kind: 'error', id: 'error:exec-1', text: 'provider refused' },
+          ],
+        }),
+      },
+    })
+    expect(failed.find('[data-testid="run-stopped-line"]').exists()).toBe(false)
+    expect(failed.find('[data-slot="alert-title"]').exists()).toBe(false)
+    expect(failed.text()).toContain('provider refused')
   })
 
   it('opens the task it was handed as a collapsed card and reports the fold', async () => {

@@ -361,7 +361,9 @@ usage: driver.sh <command>
                         general-purpose probe (needs ENABLE_SUBAGENT=1) that
                         runs a shell call (the answer text, default sleep 8);
                         its next request takes a steer queued meanwhile, sends
-                        one delta and hangs, so the subagent keeps running
+                        one delta and hangs, so the subagent keeps running;
+                        FAKE_SUBAGENT_STEER_FINISH=1 finishes it instead, so
+                        its answer goes back to the main agent
                          RESUME_ID=<session> resumes that session instead of
                          starting a new one (does not reset the home)
                          ENABLE_SUBAGENT=1 enables the subagent tools

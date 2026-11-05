@@ -158,6 +158,85 @@ test('a steer the subagent takes at its tool boundary leaves its queue at once',
   await shot(page, 'subagent-steer-delivered')
 })
 
+/**
+ * The terminal's Ctrl+C in a subagent's view, on the page (owner 2026-11-05):
+ * the first press interrupts the subagent where it is and holds it for the
+ * user — its tab keeps the composer, its card row says it waits — while the
+ * conversation's own turn keeps running; the user's message continues the same
+ * dispatch, and the second press stops the subagent, after which the main agent
+ * finishes its turn. Nothing here cancels the conversation's run.
+ */
+test('a subagent is interrupted first and stopped second, never with its dispatcher', async ({ page }) => {
+  test.skip(realLLM, 'the subagent-steer probe drives the fake provider')
+  test.info().setTimeout(240_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
+  await signIn(page)
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-subagent')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('textarea')
+  await page.fill('textarea', 'delegate the slow probe [[e2e:subagent-steer]]')
+  await page.press('textarea', 'Enter')
+
+  await page.waitForSelector('[data-testid="subagent-call-card"]', { timeout: 90_000 })
+  await page.locator('[data-testid="subagent-task-row"]').first().click()
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+
+  // Running: the tab offers the interrupt, not the stop.
+  const interrupt = drawer.locator('[data-testid="subagent-interrupt"]')
+  await expect(interrupt).toBeVisible({ timeout: 30_000 })
+  await interrupt.click()
+
+  // Interrupted: the tab keeps its composer and says where it stopped; the
+  // button becomes the stop, and the conversation's run is untouched.
+  await expect(drawer.locator('[data-testid="run-paused-line"]')).toBeVisible({ timeout: 30_000 })
+  await expect(drawer.locator('textarea')).toBeVisible()
+  await expect(drawer.locator('[data-testid="subagent-stop"]')).toBeVisible()
+  await expect(drawer.locator('[data-testid="subagent-interrupt"]')).toHaveCount(0)
+  await expect(drawer.locator('[data-testid="subagent-working"]')).toHaveCount(0)
+  // Its card row says what it waits for in place of the call the pause stopped.
+  const row = page.locator('[data-testid="subagent-task-row"]').first()
+  await expect(row.locator('[data-testid="subagent-row-paused"]')).toBeVisible()
+  // The conversation's own turn still runs: no cancellation reached it.
+  await expect(page.locator('body')).not.toContainText('cancelling run')
+  await shot(page, 'subagent-paused')
+
+  // The user's message continues that same dispatch: it is drawn as their own
+  // message in the tab, the tab is running again, and its card row names its
+  // calls once more.
+  const resumed = 'only the first five packets'
+  const tabInput = drawer.locator('textarea')
+  await tabInput.fill(resumed)
+  await tabInput.press('Enter')
+  await expect(drawer.locator('[data-testid="subagent-user-message"]').last()).toContainText(resumed, { timeout: 30_000 })
+  await expect(drawer.locator('[data-testid="subagent-interrupt"]')).toBeVisible({ timeout: 30_000 })
+  await expect(drawer.locator('[data-testid="run-paused-line"]')).toHaveCount(1)
+  await expect(row.locator('[data-testid="subagent-row-paused"]')).toHaveCount(0)
+  await shot(page, 'subagent-resumed')
+
+  // Answering the pause put the subagent back to work, so the next press is
+  // another interrupt — the terminal's own sequence — and only then the stop.
+  await drawer.locator('[data-testid="subagent-interrupt"]').click()
+  const stop = drawer.locator('[data-testid="subagent-stop"]')
+  await expect(stop).toBeVisible({ timeout: 30_000 })
+  await expect(drawer.locator('[data-testid="run-paused-line"]')).toHaveCount(2)
+
+  // The second press stops it. The main agent receives the stop and finishes
+  // its own turn — the proof that the subagent's button never cancelled it.
+  await stop.click()
+  await expect(drawer.locator('textarea')).toHaveCount(0, { timeout: 60_000 })
+  await expect(drawer.locator('[data-testid="run-stopped-line"]').last()).toHaveText('Cancelled', { timeout: 60_000 })
+
+  // The stop is said once, in its place: the quiet line above, and no second
+  // account at the foot of the tab beside it.
+  const cancelled = drawer.getByText('Cancelled', { exact: true })
+  await expect(cancelled).toHaveCount(1)
+  await expect(drawer.locator('[data-testid="run-error"]')).toHaveCount(0)
+  await expect(page.locator('body')).toContainText('primary done', { timeout: 60_000 })
+  await expect(page.locator('body')).not.toContainText('cancelling run')
+  await shot(page, 'subagent-stopped')
+})
+
 test('a plan-reviewer tab opens with its own review model and budget', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))

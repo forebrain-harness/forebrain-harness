@@ -2474,6 +2474,7 @@ func TestBatchSessionIsReadOnlyOverTheAPI(t *testing.T) {
 		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/interrupt-send", map[string]any{"message": "hi"}},
 		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/subagents/worker/input", map[string]any{"message": "hi"}},
 		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/subagents/worker/queued-input", map[string]any{"message": "hi"}},
+		{http.MethodPost, "/api/chat/sessions/" + sessionID + "/subagents/worker/pause", map[string]any{}},
 	} {
 		rec := doJSON(t, s, tc.method, tc.path, tc.body)
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "batch_session_read_only") {

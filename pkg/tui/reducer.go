@@ -289,8 +289,12 @@ type FanoutTaskState struct {
 	// while the task was still running, and the close asked it to stop.
 	TimedOut      bool
 	StopRequested bool
-	ToolTotal     int               // total subagent tool calls (deduped by StepID)
-	RecentTools   []fanoutToolEntry // recent tool labels (ring buffer, cap maxFanoutRecentTools)
+	// Paused is a running task the user interrupted from its view: it waits
+	// for their next message, so its row says so instead of naming the last
+	// call it made.
+	Paused      bool
+	ToolTotal   int               // total subagent tool calls (deduped by StepID)
+	RecentTools []fanoutToolEntry // recent tool labels (ring buffer, cap maxFanoutRecentTools)
 	// toolSteps is every call ToolTotal counted, so a call already pushed out
 	// of RecentTools is not counted — or shown as the latest — a second time.
 	toolSteps map[string]struct{}
@@ -607,6 +611,7 @@ func (r *Reducer) bindFanoutTaskToSpawn(fs *fanoutState, index int, m SubagentSp
 	}
 	t.Status = "running"
 	t.EndedAt = time.Time{}
+	t.Paused = false
 	if t.Title == "" {
 		t.Title = firstNonEmpty(strings.TrimSpace(m.Title), tool.SubagentTaskTitle("", strings.TrimSpace(m.Task)))
 	}
@@ -621,6 +626,7 @@ func (r *Reducer) bindFanoutTaskToSpawn(fs *fanoutState, index int, m SubagentSp
 // execution was already dead when the reaper said so.
 func settleFanoutTaskOnEnd(t *FanoutTaskState, m SubagentEndedMsg, status string) {
 	t.Status = status
+	t.Paused = false
 	t.Error = strings.TrimSpace(m.Error)
 	ended := m.FinishedAt
 	if ended.IsZero() {
@@ -1547,14 +1553,34 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		if text == "" || agentID == "" {
 			return EventResult{}
 		}
-		return EventResult{Frames: []Frame{{
+		// A message reaching the model is what resumes a paused execution.
+		if r.tracker != nil {
+			r.tracker.ObserveAgentPaused(agentID, false)
+		}
+		frames := []Frame{{
 			Kind:    FrameUser,
 			Title:   "you",
 			Content: text,
 			RunID:   strings.TrimSpace(m.RunID),
 			AgentID: agentID,
 			Final:   true,
-		}}}
+		}}
+		return EventResult{Frames: append(frames, r.setCardTaskPaused(agentID, false)...)}
+	case SubagentPausedMsg:
+		// The user interrupted this subagent from its view and it now waits
+		// for them: what it was saying is sealed where it stopped, and its
+		// view says so, the way the conversation's view does when its own run
+		// is interrupted.
+		agentID := strings.TrimSpace(m.AgentID)
+		if agentID == "" {
+			return EventResult{}
+		}
+		if r.tracker != nil {
+			r.tracker.ObserveAgentPaused(agentID, true)
+		}
+		frame := Frame{Kind: FrameStatus, Title: subagentPausedLine, RunID: firstNonEmpty(strings.TrimSpace(m.RunID), r.activeRunID), AgentID: agentID, Final: true}
+		frames := r.withFlushedBuffers(r.agentBuf(agentID), frame)
+		return EventResult{Frames: append(frames, r.setCardTaskPaused(agentID, true)...)}
 	case SubagentSpawnedMsg:
 		if r.tracker != nil {
 			r.tracker.ObserveAgent(strings.TrimSpace(m.AgentID), strings.TrimSpace(m.ExecutionID), m.Timestamp)
@@ -2133,6 +2159,25 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 	}
 }
 
+// subagentPausedLine is what a subagent's view says where the user
+// interrupted it: it stopped, and the next move is the user's.
+const subagentPausedLine = "Interrupted · waiting for your message"
+
+// subagentPausedCardLine is the same pause on the task row of the card that
+// dispatched the subagent.
+const subagentPausedCardLine = "waiting for your message"
+
+// setCardTaskPaused marks the card task bound to agentID paused or resumed and
+// returns the card redrawn, or nothing when no running task follows it.
+func (r *Reducer) setCardTaskPaused(agentID string, paused bool) []Frame {
+	fs, task := r.cardTaskOf(agentID)
+	if task == nil || task.Paused == paused || fanoutTaskTerminal(task.Status) {
+		return nil
+	}
+	task.Paused = paused
+	return []Frame{r.emitFanoutFrame(fs)}
+}
+
 // subagentClosingFrames renders how a subagent's run ended, tagged with its
 // roster key so it lands in that subagent's own view.
 //
@@ -2374,6 +2419,12 @@ func renderFanoutContent(fs *fanoutState) (string, []string, []fanoutLineClock) 
 		// reason reads as one continuation of the task above it.
 		if t.Error != "" && fanoutTaskTerminal(t.Status) {
 			add("  ", t.Error)
+		}
+		// A paused task's third layer is the pause: the last call it made was
+		// stopped, and what it does next is the user's message.
+		if t.Paused && !fanoutTaskTerminal(t.Status) {
+			add("  └ ", subagentPausedCardLine)
+			continue
 		}
 		// Live tool progress (third layer): the most recent tool label.
 		overflow := t.ToolTotal - len(t.RecentTools)
@@ -7797,6 +7848,8 @@ type agentRun struct {
 	executionID string
 	startedAt   time.Time
 	endedAt     time.Time
+	// paused is set while the user has the execution waiting for them.
+	paused bool
 }
 
 // AgentRunSnapshot is one subagent's own working figures: how long it has been
@@ -7809,6 +7862,10 @@ type AgentRunSnapshot struct {
 	// Any face that paints a finished run's completion time from now (a
 	// replay draws runs that ended long before) reads it from here.
 	EndedAt time.Time
+	// Paused is an execution the user interrupted from its view that waits
+	// for their next message: it is not working, so its view shows no
+	// Working line.
+	Paused bool
 }
 
 // NewTracker constructs a Tracker.
@@ -7954,6 +8011,7 @@ func (t *Tracker) ObserveAgent(agentID, executionID string, at time.Time) {
 		run.executionID = executionID
 		run.startedAt = at
 		run.endedAt = time.Time{}
+		run.paused = false
 	} else if run.startedAt.IsZero() {
 		run.startedAt = at
 	}
@@ -7992,7 +8050,24 @@ func (t *Tracker) ObserveAgentEnded(agentID string, at time.Time) {
 		at = time.Now()
 	}
 	t.mu.Lock()
-	t.agentRunLocked(agentID).endedAt = at
+	run := t.agentRunLocked(agentID)
+	run.endedAt = at
+	run.paused = false
+	t.mu.Unlock()
+}
+
+// ObserveAgentPaused records that the user's interrupt holds a subagent's
+// execution waiting for them (paused), or that a message has resumed it.
+func (t *Tracker) ObserveAgentPaused(agentID string, paused bool) {
+	if t == nil {
+		return
+	}
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return
+	}
+	t.mu.Lock()
+	t.agentRunLocked(agentID).paused = paused
 	t.mu.Unlock()
 }
 
@@ -8048,7 +8123,7 @@ func (t *Tracker) SnapshotAgentRun(agentID string) (AgentRunSnapshot, bool) {
 	}
 	c := run.counters
 	c.Retry = t.retries[agentID]
-	return AgentRunSnapshot{Counters: c, Elapsed: until.Sub(run.startedAt), Ended: ended, EndedAt: run.endedAt}, true
+	return AgentRunSnapshot{Counters: c, Elapsed: until.Sub(run.startedAt), Ended: ended, EndedAt: run.endedAt, Paused: run.paused && !ended}, true
 }
 
 // ObserveRunEnd folds provider-reported token usage into the session.

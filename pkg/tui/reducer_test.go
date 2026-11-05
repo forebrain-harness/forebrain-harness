@@ -1459,6 +1459,42 @@ func TestReducerFanoutTaskToolFolding(t *testing.T) {
 	}
 }
 
+// A paused subagent's card row says it waits for the user instead of naming
+// the call the pause stopped, and names its calls again once a message has
+// resumed it.
+func TestReducerFanoutTaskRowShowsThePause(t *testing.T) {
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fanout-step-p", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run",
+		Input: map[string]any{"task": "probe the network", "title": "Network Probe"},
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{AgentID: "task-p", AgentType: "explore", TaskID: "task-p", ParentToolCallID: "fanout-step-p", TaskIndex: 0})
+	_ = r.Reduce(NewMessageMsg{Msg: Message{
+		Kind: MsgKindTool, StepID: "tool-step-p", ToolName: "shell",
+		ToolMeta: tool.ToolMeta{Invocation: "sleep 60"}, AgentID: "task-p", ToolPhase: "tool_call_started",
+	}})
+	card := func(frames []Frame) Frame {
+		t.Helper()
+		for _, f := range frames {
+			if f.Kind == FrameFanout {
+				return f
+			}
+		}
+		t.Fatalf("no card redrawn in %#v", frames)
+		return Frame{}
+	}
+
+	paused := card(r.Reduce(SubagentPausedMsg{AgentID: "task-p", RunID: "run-p"}).Frames)
+	if !strings.Contains(paused.Content, subagentPausedCardLine) || strings.Contains(paused.Content, "sleep 60") {
+		t.Fatalf("paused card = %q, want the pause in place of the stopped call", paused.Content)
+	}
+
+	resumed := card(r.Reduce(SubagentInputDeliveredMsg{AgentID: "task-p", RunID: "run-p", Text: "go on"}).Frames)
+	if strings.Contains(resumed.Content, subagentPausedCardLine) || !strings.Contains(resumed.Content, "sleep 60") {
+		t.Fatalf("resumed card = %q, want its calls named again", resumed.Content)
+	}
+}
+
 func TestReducerFanoutTaskToolRingBufferCap(t *testing.T) {
 	var r Reducer
 	// Start a fanout.

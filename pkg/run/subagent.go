@@ -553,6 +553,11 @@ func executeSubagent(ctx context.Context, fac Factory, record agent.HistoryEntry
 // decision and the same execution resumes with them.
 var errSubagentInterruptedToSend = errors.New("subagent interrupted to send")
 
+// errSubagentPausedForUser marks an attempt the user stopped from the
+// subagent's own view: the execution does not end, it waits for the user's
+// next message and resumes with it.
+var errSubagentPausedForUser = errors.New("subagent paused for the user")
+
 // SubagentSurface is how the surface the user is talking to a subagent from
 // takes part in that conversation.
 type SubagentSurface struct {
@@ -595,6 +600,11 @@ type subagentChannel struct {
 	// user's message, or two messages the user sent — waits here rather than
 	// writing the same worker session concurrently.
 	exec chan struct{}
+	// wake is signalled whenever a message is steered into the queue, so an
+	// execution the user paused takes it the moment it arrives. One slot: a
+	// paused execution re-reads the queue on every wake, so a signal that
+	// finds the slot full has nothing to add.
+	wake chan struct{}
 
 	mu      sync.Mutex
 	running *subagentExecution
@@ -633,6 +643,12 @@ type subagentExecution struct {
 	// boundary is how the current attempt is being stopped, when it is; the
 	// zero value means it ran to its end.
 	boundary Boundary
+	// attemptLive is set while an attempt runs, so a pause is only asked of an
+	// attempt its cancel can still stop.
+	attemptLive bool
+	// paused is set from the moment the user stops the attempt to wait for
+	// them until their next message resumes the execution.
+	paused bool
 }
 
 var (
@@ -668,6 +684,7 @@ func subagentChannelFor(fac Factory, record agent.HistoryEntry) *subagentChannel
 			runID:           strings.TrimSpace(record.RunID),
 			sessionID:       strings.TrimSpace(record.SessionID),
 			exec:            make(chan struct{}, 1),
+			wake:            make(chan struct{}, 1),
 		}
 		if fac.Owner != nil {
 			ch.store = fac.Owner.SessionStore
@@ -788,6 +805,7 @@ func (ch *subagentChannel) beginAttempt(ctx context.Context, fac Factory, ex *su
 	execCtx = WithTurnInputRuntime(execCtx, rt)
 	ch.mu.Lock()
 	ex.cancel = cancel
+	ex.attemptLive = true
 	ch.mu.Unlock()
 	return execCtx, cancel
 }
@@ -833,6 +851,78 @@ func (ch *subagentChannel) interruptToSend() bool {
 		cancel(errSubagentInterruptedToSend)
 	}
 	return true
+}
+
+// pauseForUser stops the attempt running now and holds the execution open for
+// the user's next message — Ctrl+C in the subagent's own view. Nothing above
+// the subagent is touched: whoever awaits the execution keeps waiting, and the
+// answer it gets is the one the subagent gives after the user has spoken. It
+// does nothing unless an attempt is running and the execution is not already
+// paused, so a second press can mean stop instead.
+func (ch *subagentChannel) pauseForUser() bool {
+	ch.mu.Lock()
+	ex := ch.running
+	if ex == nil || ex.paused || !ex.attemptLive || ex.cancel == nil {
+		ch.mu.Unlock()
+		return false
+	}
+	ex.paused = true
+	cancel := ex.cancel
+	ch.mu.Unlock()
+	cancel(errSubagentPausedForUser)
+	return true
+}
+
+// paused reports whether the execution in flight waits for the user.
+func (ch *subagentChannel) paused() bool {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	return ch.running != nil && ch.running.paused
+}
+
+// signalWake tells a paused execution that a message has been queued for it.
+func (ch *subagentChannel) signalWake() {
+	select {
+	case ch.wake <- struct{}{}:
+	default:
+	}
+}
+
+// awaitUserMessage holds a paused execution until a message reaches the
+// subagent's queue, and returns everything queued merged the way an
+// interrupt-to-send resumes with its steers. A message sent while no attempt
+// was attached waits in the queue's rejected lane rather than among the
+// steers, so the whole queue is taken, in the order it was written. ok is
+// false when the execution is stopped while it waits.
+func (ch *subagentChannel) awaitUserMessage(ctx context.Context, fac Factory, ex *subagentExecution) (Input, []SkillSelection, bool) {
+	for {
+		if steers := ch.queue.TakeAll(); len(steers) > 0 {
+			ch.mu.Lock()
+			ex.paused = false
+			ch.mu.Unlock()
+			ch.publishInputDelivered(fac, ex, steerEntries(steers))
+			in, skills := mergeSteers(steers)
+			return in, skills, true
+		}
+		select {
+		case <-ch.wake:
+		case <-ctx.Done():
+			return Input{}, nil, false
+		}
+	}
+}
+
+// publishPaused tells the surfaces that the execution stopped where it was and
+// now waits for the user.
+func (ch *subagentChannel) publishPaused(fac Factory, ex *subagentExecution) {
+	own := fac.Owner
+	if own == nil || own.Events == nil {
+		return
+	}
+	publishEvent(context.Background(), own.Events, ch.runID, ch.sessionID, event.RunEventSubagentPaused, event.SubagentPausedPayload{
+		AgentID:     ch.agentKey,
+		ExecutionID: ex.executionID,
+	})
 }
 
 // steerEntries is how steers released by an interrupt are reported delivered:
@@ -934,7 +1024,10 @@ func subagentResumeAttempt(fac Factory, record agent.HistoryEntry, in Input, ski
 // running attempt, and the steers queued behind it start the next one on the
 // subagent's own conversation inside this same execution, so whoever awaits it —
 // the dispatching tool call above all — still gets its answer (owner,
-// 2026-10-26). When the execution ends, every message the user sent that the
+// 2026-10-26). The user's pause (Ctrl+C in the subagent's view) stops the
+// running attempt the same way and waits for their next message to start the
+// next one; stopping the subagent while it waits ends the execution as stopped
+// (owner, 2026-11-05). When the execution ends, every message the user sent that the
 // subagent never took goes back to the user: the subagent is idle then, and an
 // idle subagent takes no messages.
 func runSubagentExecution(ctx context.Context, fac Factory, record agent.HistoryEntry,
@@ -978,6 +1071,8 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 		ch.mu.Lock()
 		boundary := ex.boundary
 		ex.boundary = BoundaryCompleted
+		ex.attemptLive = false
+		paused := ex.paused
 		surface := ch.surface
 		ch.mu.Unlock()
 		// An execution stopped while it was being interrupted to send stays
@@ -985,11 +1080,32 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 		// shown delivered to an attempt that cannot run.
 		if boundary == BoundaryInterruptToSend && ch.store != nil && ctx.Err() == nil {
 			if steers, _ := ch.queue.Next(BoundaryInterruptToSend); len(steers) > 0 {
+				ch.mu.Lock()
+				ex.paused = false
+				ch.mu.Unlock()
 				ch.publishInputDelivered(fac, ex, steerEntries(steers))
 				in, skills := mergeSteers(steers)
 				attempt = subagentResumeAttempt(fac, record, in, skills)
 				continue
 			}
+		}
+		// A pause that reached an attempt still running waits here for the
+		// user's next message. One that came too late — the attempt had
+		// already answered — lets the execution end with that answer.
+		if paused && err != nil && ch.store != nil && ctx.Err() == nil {
+			ch.publishPaused(fac, ex)
+			if in, skills, ok := ch.awaitUserMessage(ctx, fac, ex); ok {
+				attempt = subagentResumeAttempt(fac, record, in, skills)
+				continue
+			}
+			// Stopped while it waited: the execution ends as the stop says,
+			// not with the pause's own cancellation.
+			out, err = "", ctx.Err()
+		}
+		if paused {
+			ch.mu.Lock()
+			ex.paused = false
+			ch.mu.Unlock()
 		}
 		ch.mu.Lock()
 		if ch.running == ex {
@@ -2285,6 +2401,8 @@ func steerRunningSubagent(ch *subagentChannel, in Input) (SubagentDelivery, erro
 	if ch.queue.Steer(in) {
 		return SubagentDeliverySteered, nil
 	}
+	// The message is queued; an execution the user paused is waiting for it.
+	ch.signalWake()
 	// No runtime is attached between two attempts of an execution: the queue
 	// keeps the message, and the execution's end hands it back if no attempt
 	// took it.
@@ -2365,6 +2483,33 @@ func InterruptSubagentToSend(r *Runner, conversationSessionID, agentKey string) 
 		return false
 	}
 	return ch.interruptToSend()
+}
+
+// PauseSubagent stops the subagent's running attempt and holds its execution
+// open for the user's next message — Ctrl+C's first meaning in its view. The
+// agent that dispatched it is not touched and keeps waiting for its answer. It
+// returns false when nothing is running or the execution already waits, so the
+// surface can give the key its next meaning: stop the subagent. A batch task
+// takes no input, so a pause there could never be resumed and is refused.
+func PauseSubagent(r *Runner, conversationSessionID, agentKey string) bool {
+	if r != nil && r.ProjectType() == state.ProjectTypeBatch {
+		return false
+	}
+	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
+	if ch == nil {
+		return false
+	}
+	return ch.pauseForUser()
+}
+
+// SubagentPaused reports whether the subagent's execution is paused, waiting
+// for the user's next message.
+func SubagentPaused(r *Runner, conversationSessionID, agentKey string) bool {
+	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
+	if ch == nil {
+		return false
+	}
+	return ch.paused()
 }
 
 // DiscardSubagentInput empties the subagent's queue and returns how many

@@ -405,11 +405,11 @@ describe('ChatView subagent drawer', () => {
       expect((textarea.element as HTMLTextAreaElement).placeholder)
         .toBe('Message this subagent — / for commands, @ to reference files')
       // Running: the terminal's working line sits above that composer, and the
-      // tab offers its own stop.
+      // tab offers to interrupt it — the first of the terminal's two Ctrl+C.
       const working = drawer.find('[data-testid="subagent-working"]')
       expect(working.exists()).toBe(true)
       expect(working.text()).toContain('Working (')
-      expect(drawer.find('[data-testid="subagent-stop"]').exists()).toBe(true)
+      expect(drawer.find('[data-testid="subagent-interrupt"]').exists()).toBe(true)
       // The conversation's composer is still there, outside the drawer.
       expect(wrapper.findAll('textarea').length).toBe(2)
     } finally {

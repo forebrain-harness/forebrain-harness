@@ -740,15 +740,21 @@ type fakeSession struct {
 	savedBrowseSession   string
 	savedBrowseState     RendererBrowseState
 	// Subagent conversation seams (plan 007).
-	subagentSent         []subagentSendCall
-	subagentSendErr      error
-	subagentDelivery     runpkg.SubagentDelivery
-	subagentPreview      ComposerPendingInputPreview
-	recalledSubagent     ComposerSubmission
-	recallSubagentOK     bool
-	recallSubagentCalls  int
-	interruptToSend      bool
-	interruptSentCalls   int
+	subagentSent        []subagentSendCall
+	subagentSendErr     error
+	subagentDelivery    runpkg.SubagentDelivery
+	subagentPreview     ComposerPendingInputPreview
+	recalledSubagent    ComposerSubmission
+	recallSubagentOK    bool
+	recallSubagentCalls int
+	interruptToSend     bool
+	interruptSentCalls  int
+	// pauseSubagent answers PauseSubagent; subagentPaused answers
+	// SubagentPaused per agent key, and a pause that lands sets it.
+	pauseSubagent        bool
+	pauseSubagentCalls   []string
+	subagentPaused       map[string]bool
+	cancelSubagentCalls  int
 	discardSubagentCalls int
 	discardSubagentCount int
 	// subagentRunning answers SubagentRunning per agent key; an absent key
@@ -1279,7 +1285,28 @@ func (f *fakeSession) CancelSubagent(query SubagentControlQuery) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cancelSubagentQuery = query
+	f.cancelSubagentCalls++
 	return true
+}
+
+func (f *fakeSession) PauseSubagent(_ string, agentKey string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pauseSubagentCalls = append(f.pauseSubagentCalls, agentKey)
+	if !f.pauseSubagent {
+		return false
+	}
+	if f.subagentPaused == nil {
+		f.subagentPaused = make(map[string]bool)
+	}
+	f.subagentPaused[agentKey] = true
+	return true
+}
+
+func (f *fakeSession) SubagentPaused(_ string, agentKey string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subagentPaused[agentKey]
 }
 
 func (f *fakeSession) CancelAllAgents() AgentCancelSummary {
@@ -6685,6 +6712,133 @@ func TestPlanReviewerFooterShowsItsOwnContextBudget(t *testing.T) {
 	}
 	if strings.Contains(got, "90%/1M") {
 		t.Fatalf("the conversation's budget leaked into the reviewer's view: %q", got)
+	}
+}
+
+// Ctrl+C in a subagent's view acts on that subagent and never on the
+// conversation's run (owner, 2026-11-05): cancelling the run stopped the
+// dispatching agent and, with it, the subagent the user was talking to. The
+// first press pauses the subagent for the user's next message, the second stops
+// it; neither cancels the run or asks to quit.
+func TestCtrlCInASubagentViewPausesThenStopsTheSubagentNotTheRun(t *testing.T) {
+	session := &fakeSession{cancelActive: true, pauseSubagent: true}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	press := func() {
+		handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventHotkey, hotkey: hotkeyInterrupt}, nil)
+	}
+
+	press()
+	if len(session.pauseSubagentCalls) != 1 || session.pauseSubagentCalls[0] != "task-b" {
+		t.Fatalf("pause calls = %v, want one for task-b", session.pauseSubagentCalls)
+	}
+	if session.cancelSubagentCalls != 0 {
+		t.Fatalf("first press stopped the subagent (%d calls), want a pause", session.cancelSubagentCalls)
+	}
+
+	press()
+	if session.cancelSubagentCalls != 1 || session.cancelSubagentQuery.TaskID != "task-b" {
+		t.Fatalf("second press: stop calls = %d query %+v, want one stop of task-b", session.cancelSubagentCalls, session.cancelSubagentQuery)
+	}
+	if session.cancelCalls != 0 {
+		t.Fatalf("CancelActiveRun called %d times from a subagent's view, want 0", session.cancelCalls)
+	}
+	if state.quitRequested {
+		t.Fatal("Ctrl+C on a subagent asked to quit")
+	}
+	if renderer.ActiveView() != "task-b" {
+		t.Fatal("Ctrl+C left the subagent's view")
+	}
+}
+
+// The same key between two turns of the conversation: a background subagent's
+// view pauses and stops that subagent instead of quitting.
+func TestIdleCtrlCInASubagentViewPausesTheSubagentInsteadOfQuitting(t *testing.T) {
+	session := &fakeSession{cancelActive: true, pauseSubagent: true}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	for i := 0; i < 2; i++ {
+		if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyInterrupt) {
+			t.Fatal("Ctrl+C not handled")
+		}
+	}
+	if len(session.pauseSubagentCalls) != 1 || session.cancelSubagentCalls != 1 {
+		t.Fatalf("pause calls = %v, stop calls = %d; want one of each", session.pauseSubagentCalls, session.cancelSubagentCalls)
+	}
+	if session.cancelCalls != 0 {
+		t.Fatalf("CancelActiveRun called %d times from a subagent's view, want 0", session.cancelCalls)
+	}
+	if state.quitRequested {
+		t.Fatal("Ctrl+C on a running subagent asked to quit")
+	}
+}
+
+// With nothing of the subagent's in flight there is nothing in its view to act
+// on: Ctrl+C still leaves the conversation's run alone, and only moves the exit
+// sequence on — the second press quits, as it does after a cancel in the
+// conversation's view.
+func TestCtrlCInAnIdleSubagentViewNeverCancelsTheRun(t *testing.T) {
+	session := &fakeSession{cancelActive: true, subagentRunning: map[string]bool{"task-b": false}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	press := func() {
+		handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventHotkey, hotkey: hotkeyInterrupt}, nil)
+	}
+
+	press()
+	if session.cancelCalls != 0 || len(session.pauseSubagentCalls) != 0 || session.cancelSubagentCalls != 0 {
+		t.Fatalf("cancel=%d pause=%v stop=%d, want nothing acted on", session.cancelCalls, session.pauseSubagentCalls, session.cancelSubagentCalls)
+	}
+	if state.quitRequested {
+		t.Fatal("the first press quit")
+	}
+	press()
+	if !state.quitRequested {
+		t.Fatal("the second press did not quit")
+	}
+	if session.cancelCalls != 0 {
+		t.Fatalf("CancelActiveRun called %d times from a subagent's view, want 0", session.cancelCalls)
+	}
+}
+
+// A pause closes what the subagent was saying, marks the pause in its own view,
+// and takes its Working line away until a message resumes it.
+func TestSubagentPauseIsDrawnInItsViewAndHidesItsWorkingLine(t *testing.T) {
+	tracker := NewTracker()
+	tracker.ObserveAgent("task-b", "exec-1", time.Now())
+	reducer := &Reducer{tracker: tracker}
+	format := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
+	if line := format(time.Second, 0, "task-b"); !strings.Contains(line, "Working") {
+		t.Fatalf("working line before the pause = %q, want Working", line)
+	}
+
+	result := reducer.Reduce(SubagentPausedMsg{AgentID: "task-b", RunID: "run-1"})
+	var paused *Frame
+	for i := range result.Frames {
+		if result.Frames[i].Kind == FrameStatus {
+			paused = &result.Frames[i]
+		}
+	}
+	if paused == nil || paused.AgentID != "task-b" || paused.Title != subagentPausedLine {
+		t.Fatalf("frames = %#v, want the pause line in task-b's view", result.Frames)
+	}
+	if line := format(time.Second, 0, "task-b"); line != "" {
+		t.Fatalf("working line while paused = %q, want none", line)
+	}
+
+	reducer.Reduce(SubagentInputDeliveredMsg{AgentID: "task-b", RunID: "run-1", Text: "go on"})
+	if line := format(time.Second, 0, "task-b"); !strings.Contains(line, "Working") {
+		t.Fatalf("working line after the message = %q, want Working again", line)
 	}
 }
 

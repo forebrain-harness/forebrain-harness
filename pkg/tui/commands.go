@@ -1470,6 +1470,14 @@ func replaySubagentRunEventMessage(evt event.RunEvent) (any, bool) {
 			return nil, false
 		}
 		return SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text)}, true
+	case event.RunEventSubagentPaused:
+		// The user interrupted this subagent from its view, replayed where it
+		// happened.
+		var p event.SubagentPausedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" {
+			return nil, false
+		}
+		return SubagentPausedMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID}, true
 	case event.CompactEventBudgetUpdated:
 		var p event.TokenBudgetUpdatedPayload
 		if json.Unmarshal(evt.Payload, &p) != nil {

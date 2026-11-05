@@ -35,6 +35,7 @@
         <XCircle v-else-if="row.status === 'failed'" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-danger)]" aria-hidden="true" />
         <Ban v-else-if="row.status === 'cancelled'" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-muted-text)]" aria-hidden="true" />
         <AlertTriangle v-else-if="row.status === 'skipped'" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-warning)]" aria-hidden="true" />
+        <CirclePause v-else-if="row.status === 'running' && row.paused" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-brand-1)]" aria-hidden="true" />
         <Loader2 v-else-if="row.status === 'running'" class="mt-0.5 size-4 shrink-0 animate-spin text-[var(--forebrain-brand-1)]" aria-hidden="true" />
         <CircleDashed v-else class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-muted-text)]" aria-hidden="true" />
         <span class="min-w-0 flex-1">
@@ -42,7 +43,12 @@
             <span class="min-w-0 truncate text-[13px] text-[var(--forebrain-text)]" v-tip:top.trunc="row.title || t('subagentCard.emptyTask')">{{ row.title || t('subagentCard.emptyTask') }}</span>
             <span v-if="row.clock" data-testid="subagent-row-clock" class="shrink-0 text-xs tabular-nums text-[var(--forebrain-muted-text)]"> · {{ row.clock.label }}</span>
           </span>
-          <span v-if="detailOf(row)" class="mt-0.5 block truncate text-xs text-[var(--forebrain-muted-text)]">{{ detailOf(row) }}</span>
+          <span
+            v-if="detailOf(row)"
+            class="mt-0.5 block truncate text-xs"
+            :class="row.paused ? 'text-[var(--forebrain-text-2)]' : 'text-[var(--forebrain-muted-text)]'"
+            :data-testid="row.paused ? 'subagent-row-paused' : undefined"
+          >{{ detailOf(row) }}</span>
           <span v-if="row.error" class="mt-0.5 block whitespace-pre-wrap text-xs leading-relaxed" :class="row.status === 'skipped' ? 'text-[var(--forebrain-warning)]' : 'text-[var(--forebrain-danger)]'">{{ row.error }}</span>
         </span>
         <span v-if="row.agentId" class="shrink-0 self-center whitespace-nowrap text-xs text-[var(--forebrain-brand-1)]">{{ t('subagentCard.open') }}</span>
@@ -61,7 +67,7 @@
  * call's prompt, its result JSON, or a raw task id.
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { AlertTriangle, Ban, Bot, CheckCircle2, CircleDashed, Loader2, XCircle } from 'lucide-vue-next'
+import { AlertTriangle, Ban, Bot, CheckCircle2, CircleDashed, CirclePause, Loader2, XCircle } from 'lucide-vue-next'
 import { t, type I18nKey } from '@/locales'
 import { subagentCallView, type SubagentCallRowView, type SubagentCallTaskLive, type SubagentToolStep } from '@/composables/useChatStream'
 
@@ -141,8 +147,11 @@ const header = computed(() => {
   return parts.join(' · ')
 })
 
-/** A row's one gray line: what its dispatch last did, or what its query saw. */
+/** A row's one gray line: what its dispatch last did, or what its query saw.
+ *  A task the user interrupted says it waits for them instead of naming the
+ *  call the pause stopped. */
 function detailOf(row: SubagentCallRowView): string {
+  if (row.paused) return t('chat.subagentPaused')
   if (row.latestTool) {
     const more = row.moreToolUses
       ? ` · ${t(row.moreToolUses === 1 ? 'subagentCard.moreToolUsesOne' : 'subagentCard.moreToolUsesOther', { count: row.moreToolUses })}`

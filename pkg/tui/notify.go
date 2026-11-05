@@ -480,6 +480,15 @@ type SubagentInputDeliveredMsg struct {
 	Text    string
 }
 
+// SubagentPausedMsg is a subagent the user interrupted from its own view (the
+// engine's subagent_paused event): its attempt stopped and the execution waits
+// for the user's next message. The reducer closes what the attempt was saying
+// and marks the pause in that subagent's view.
+type SubagentPausedMsg struct {
+	AgentID string
+	RunID   string
+}
+
 // SubagentInputReturnedMsg carries what an execution of a subagent ended
 // without taking: every message the user sent it that it never read, in the
 // order they were written. The subagent is idle then and takes no messages, so
@@ -1012,6 +1021,11 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		var p event.SubagentInputDeliveredPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.AgentID) != "" && strings.TrimSpace(p.Text) != "" {
 			s.notifyUIForSession(evt.SessionID, SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text)})
+		}
+	case event.RunEventSubagentPaused:
+		var p event.SubagentPausedPayload
+		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.AgentID) != "" {
+			s.notifyUIForSession(evt.SessionID, SubagentPausedMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID})
 		}
 	case event.RunEventFirstToken:
 		// One subagent execution's wait for its model's first output, measured
@@ -1947,6 +1961,14 @@ type Session interface {
 	// steers queued behind it (Esc's second meaning in its view); false when
 	// there is nothing to flush.
 	InterruptSubagentToSend(sessionID, agentKey string) bool
+	// PauseSubagent stops the subagent's running attempt and holds its
+	// execution open for the user's next message (Ctrl+C in its view); the
+	// agent that dispatched it keeps waiting. False when nothing is running or
+	// the execution already waits.
+	PauseSubagent(sessionID, agentKey string) bool
+	// SubagentPaused reports whether the subagent's execution waits for the
+	// user after a pause.
+	SubagentPaused(sessionID, agentKey string) bool
 	// DiscardSubagentInput empties the subagent's queued input and returns how
 	// many messages were dropped, the way the conversation's own queue is
 	// discarded when its conversation is left.

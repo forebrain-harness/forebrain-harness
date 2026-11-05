@@ -2851,6 +2851,16 @@ export const forebrainApi = {
     )
   },
 
+  /** Ctrl+C in a subagent's view: stop the step it is on and hold it for the
+   *  user's next message. `paused` is false when nothing is running or it
+   *  already waits — the next press then stops it instead. */
+  subagentPause(sessionId: string, agentId: string) {
+    return postJson<{ paused: boolean }, Record<string, never>>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/pause`,
+      {},
+    )
+  },
+
   subagentInterruptSend(sessionId: string, agentId: string) {
     return postJson<{ interrupted: boolean }, Record<string, never>>(
       `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/interrupt-send`,

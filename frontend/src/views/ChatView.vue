@@ -714,6 +714,7 @@
           @open-agent="openSubagentTab"
           @open-doc="openDocTab"
           @stop="stopSubagent(record.agentId)"
+          @pause="pauseSubagent(record.agentId)"
           @edit-last-queued="recallIntoTab(record.agentId)"
           @interrupt-run="interruptSubagentToSend(record.agentId)"
           @typed="cancelAutoContinue(record.agentId)"
@@ -1667,6 +1668,7 @@ const {
   takeSubagentReturnedDraft,
   sendToSubagent,
   recallSubagentInput,
+  pauseSubagent,
   interruptSubagentToSend,
   loadSubagentContext,
   loadSubagentBudget,

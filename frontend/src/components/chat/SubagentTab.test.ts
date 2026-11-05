@@ -100,13 +100,35 @@ describe('SubagentTab', () => {
     expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('/plan-writing')
   })
 
-  it('offers to stop the subagent only while it runs', async () => {
+  // The terminal's Ctrl+C in two presses (owner 2026-11-05): a running
+  // subagent offers to interrupt it, one that waits for the user offers to stop
+  // it, and an ended one offers neither.
+  it('interrupts a running subagent first and stops it only once it waits', async () => {
     const { wrapper } = mountTab()
-    await wrapper.get('[data-testid="subagent-stop"]').trigger('click')
+    expect(wrapper.find('[data-testid="subagent-stop"]').exists()).toBe(false)
+    const interrupt = wrapper.get('[data-testid="subagent-interrupt"]')
+    expect(interrupt.attributes('aria-label')).toBe('Interrupt this subagent')
+    await interrupt.trigger('click')
+    expect(wrapper.emitted('pause')).toHaveLength(1)
+    expect(wrapper.emitted('stop')).toBeUndefined()
+
+    await wrapper.setProps({ record: record({ status: 'waiting_input' }) })
+    expect(wrapper.find('[data-testid="subagent-interrupt"]').exists()).toBe(false)
+    const stop = wrapper.get('[data-testid="subagent-stop"]')
+    expect(stop.attributes('aria-label')).toBe('Stop this subagent')
+    await stop.trigger('click')
     expect(wrapper.emitted('stop')).toHaveLength(1)
 
     await wrapper.setProps({ record: record({ status: 'done' }) })
     expect(wrapper.find('[data-testid="subagent-stop"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="subagent-interrupt"]').exists()).toBe(false)
+  })
+
+  it('keeps the composer of a subagent that waits for the user, without its working line', async () => {
+    const { wrapper } = mountTab({ record: record({ status: 'waiting_input', blocks: [{ kind: 'paused', id: 'paused:1' }] }) })
+    expect(wrapper.find('textarea').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="subagent-working"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="run-paused-line"]').text()).toBe('Interrupted · waiting for your message')
   })
 
   it('draws the working line between the transcript and the composer', async () => {

@@ -2687,7 +2687,7 @@ describe('useChatStream helpers', () => {
         'prompt:keep going',
         'thinking:looking again',
         'tool:read-2',
-        'error:cancelled',
+        'stopped',
         'worked',
       ])
     })
@@ -5726,6 +5726,112 @@ describe('a subagent talked to from its own view', () => {
       const promptEntry = stream.subagents.value.find((row) => row.agentId === 'task-2')
       expect((promptEntry?.blocks ?? []).some((block) => block.kind === 'prompt')).toBe(true)
       expect((promptEntry?.blocks ?? []).some((block) => block.kind === 'user')).toBe(false)
+
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+
+  // The terminal's first Ctrl+C in a subagent's view, on the web (owner
+  // 2026-11-05): the engine's subagent_paused holds the subagent for the user —
+  // its tab keeps the composer and draws where it stopped, its card row says it
+  // waits instead of naming the call the pause stopped — and the message that
+  // resumes it puts both back to running.
+  it('holds a paused subagent for the user and resumes it on their message', async () => {
+    const restore = installFakeSocket()
+    try {
+      const stream = useChatStream()
+      const pending = stream.send('kick off')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      let seq = 0
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { id: `evt-${++seq}`, type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+      runEvent('subagent_spawned', {
+        agent_id: 'task-1', agent_type: 'general-purpose', task_id: 'task-1',
+        task: 'probe the network', title: 'network probe', execution_id: 'exec-1',
+      })
+      runEvent('tool_call_started', {
+        agent_id: 'task-1', step_id: 'shell-1', tool_name: 'shell', tool_meta: { invocation: 'sleep 60' },
+      })
+      const card = () => stream.subagentCallTasks.get('subagent-exec:exec-1')?.get(0)
+      const row = () => {
+        const tasks = stream.subagentCallTasks.get('subagent-exec:exec-1')
+        const step = { stepId: 'subagent-exec:exec-1', toolName: '', status: 'running', subagentCall: { verb: 'run', tasks: [{ index: 0, title: 'network probe', status: 'waiting' }] } }
+        return subagentCallView(step as never, tasks).rows[0]
+      }
+      expect(row()?.latestTool).toBe('sleep 60')
+
+      runEvent('subagent_paused', { agent_id: 'task-1', execution_id: 'exec-1' })
+      const paused = stream.subagents.value.find((entry) => entry.agentId === 'task-1')
+      expect(paused?.status).toBe('waiting_input')
+      expect(paused?.blocks[paused.blocks.length - 1]?.kind).toBe('paused')
+      expect(card()?.paused).toBe(true)
+      expect(row()?.paused).toBe(true)
+      expect(row()?.status).toBe('running')
+      // A redelivered pause draws no second line.
+      socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { id: `evt-${seq}`, type: 'subagent_paused', run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload: { agent_id: 'task-1', execution_id: 'exec-1' } },
+      })
+      expect(stream.subagents.value.find((entry) => entry.agentId === 'task-1')?.blocks.filter((block) => block.kind === 'paused')).toHaveLength(1)
+
+      runEvent('subagent_input_delivered', { agent_id: 'task-1', execution_id: 'exec-1', text: 'only five packets' })
+      const resumed = stream.subagents.value.find((entry) => entry.agentId === 'task-1')
+      expect(resumed?.status).toBe('running')
+      expect(resumed?.blocks[(resumed?.blocks.length ?? 0) - 1]).toMatchObject({ kind: 'user', text: 'only five packets' })
+      expect(card()?.paused).toBe(false)
+      expect(row()?.paused).toBeUndefined()
+
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+
+  // How a subagent's execution ended is drawn once, where it ended: a stop as
+  // the quiet line the card row uses, a failure as its reason. The tab used to
+  // say it a second time at its foot, and that copy outlived the message that
+  // resumed the subagent — one fact, two accounts, one of them stale.
+  it('says a subagent’s ending once, in its transcript', async () => {
+    const restore = installFakeSocket()
+    try {
+      const stream = useChatStream()
+      const pending = stream.send('kick off')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      let seq = 0
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { id: `evt-${++seq}`, type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+      const blocksOf = (agentId: string) =>
+        (stream.subagents.value.find((entry) => entry.agentId === agentId)?.blocks ?? []).map((block) => block.kind)
+
+      runEvent('subagent_spawned', { agent_id: 'task-stopped', agent_type: 'explore', task_id: 'task-stopped', task: 'probe', execution_id: 'exec-s' })
+      runEvent('subagent_ended', { agent_id: 'task-stopped', agent_type: 'explore', task_id: 'task-stopped', execution_id: 'exec-s', status: 'cancelled', error: 'cancelled' })
+      expect(blocksOf('task-stopped')).toEqual(['prompt', 'stopped', 'worked'])
+      // A redelivered end adds no second line.
+      socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { id: `evt-${seq}`, type: 'subagent_ended', run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload: { agent_id: 'task-stopped', agent_type: 'explore', task_id: 'task-stopped', execution_id: 'exec-s', status: 'cancelled', error: 'cancelled' } },
+      })
+      expect(blocksOf('task-stopped')).toEqual(['prompt', 'stopped', 'worked'])
+
+      runEvent('subagent_spawned', { agent_id: 'task-failed', agent_type: 'explore', task_id: 'task-failed', task: 'probe', execution_id: 'exec-f' })
+      runEvent('subagent_ended', { agent_id: 'task-failed', agent_type: 'explore', task_id: 'task-failed', execution_id: 'exec-f', status: 'failed', error: 'provider refused' })
+      expect(blocksOf('task-failed')).toEqual(['prompt', 'error', 'worked'])
 
       socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
       await pending

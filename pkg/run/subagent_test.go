@@ -6130,6 +6130,125 @@ func TestInterruptToSendContinuesInTheSameExecution(t *testing.T) {
 	}
 }
 
+// TestPauseWaitsForTheUserAndContinuesTheSameExecution pins Ctrl+C in a
+// subagent's view (owner, 2026-11-05): the pause stops the step that is running
+// and the execution waits — still running, so its view keeps its composer —
+// until the user's next message continues it inside the same execution. Whoever
+// awaits that execution gets the answer the subagent gives after the user has
+// spoken.
+func TestPauseWaitsForTheUserAndContinuesTheSameExecution(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	probe := &channelEventProbe{}
+	owner.Events = probe
+	release := make(chan struct{})
+	ex := &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "continued"}
+	owner.SubagentExecutor = ex
+	conv := "conv-pause"
+	worker := "main:conv-pause:worker:00000000-0000-0000-0000-0000000004ee"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-pause", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	if PauseSubagent(owner, conv, "task-pause") {
+		t.Fatal("PauseSubagent = true with nothing running")
+	}
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-pause", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
+	waitSubagentBusy(t, owner, conv, "task-pause")
+	if !PauseSubagent(owner, conv, "task-pause") {
+		t.Fatal("PauseSubagent = false on a running subagent")
+	}
+	waitProbeEvent(t, probe, event.RunEventSubagentPaused, 1)
+	if PauseSubagent(owner, conv, "task-pause") {
+		t.Fatal("PauseSubagent = true on a paused subagent: a second press must be free to mean stop")
+	}
+	if !SubagentPaused(owner, conv, "task-pause") {
+		t.Fatal("SubagentPaused = false after the pause landed")
+	}
+	if !SubagentRunning(owner, conv, "task-pause") {
+		t.Fatal("SubagentRunning = false while paused: the view must keep its composer")
+	}
+	if n := probe.count(event.RunEventSubagentEnded); n != 0 {
+		t.Fatalf("subagent_ended published %d times while paused, want 0", n)
+	}
+	// The resumed attempt answers at once.
+	close(release)
+	if got, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-pause", Input{Text: "go on"}); err != nil || got != SubagentDeliveryQueued {
+		t.Fatalf("message to the paused subagent = %q, %v; want queued for the waiting execution", got, err)
+	}
+	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
+	waitSubagentIdle(t, owner, conv, "task-pause")
+
+	if n := probe.count(event.RunEventSubagentSpawned); n != 1 {
+		t.Fatalf("subagent_spawned published %d times, want 1: the message continued the same execution", n)
+	}
+	if ex.taskCount() != 2 || ex.taskAt(1) != "go on" {
+		t.Fatalf("executor tasks = %d, second %q; want the user's message as the second attempt", ex.taskCount(), ex.taskAt(1))
+	}
+	if n := probe.count(event.RunEventSubagentInputDelivered); n != 1 {
+		t.Fatalf("subagent_input_delivered published %d times, want 1", n)
+	}
+	var ended event.SubagentEndedPayload
+	if err := json.Unmarshal(probe.ofType(event.RunEventSubagentEnded)[0].Payload, &ended); err != nil {
+		t.Fatal(err)
+	}
+	if ended.Status == string(agent.StatusCancelled) || ended.Status == string(agent.StatusFailed) || strings.TrimSpace(ended.Error) != "" {
+		t.Fatalf("ended = %+v, want the resumed answer, not the pause", ended)
+	}
+	if SubagentPaused(owner, conv, "task-pause") {
+		t.Fatal("SubagentPaused = true after the execution ended")
+	}
+}
+
+// TestStopWhilePausedEndsTheExecutionAsStopped pins Ctrl+C's second press in a
+// subagent's view: a paused subagent stopped the way the roster's x stops one
+// ends its execution as cancelled, without running again.
+func TestStopWhilePausedEndsTheExecutionAsStopped(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	probe := &channelEventProbe{}
+	owner.Events = probe
+	ex := &channelTestExecutor{store: fix.store, hold: true, release: make(chan struct{}), answer: "never"}
+	owner.SubagentExecutor = ex
+	conv := "conv-pause-stop"
+	worker := "main:conv-pause-stop:worker:00000000-0000-0000-0000-0000000004ef"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-pause-stop", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-pause-stop", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
+	waitSubagentBusy(t, owner, conv, "task-pause-stop")
+	if !PauseSubagent(owner, conv, "task-pause-stop") {
+		t.Fatal("PauseSubagent = false on a running subagent")
+	}
+	waitProbeEvent(t, probe, event.RunEventSubagentPaused, 1)
+	if !agent.RegistryFor(fix.fac.subagentScopeRoot()).Cancel(agent.Query{TaskID: "task-pause-stop"}) {
+		t.Fatal("registry Cancel = false on a paused subagent")
+	}
+	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
+	waitSubagentIdle(t, owner, conv, "task-pause-stop")
+	var ended event.SubagentEndedPayload
+	if err := json.Unmarshal(probe.ofType(event.RunEventSubagentEnded)[0].Payload, &ended); err != nil {
+		t.Fatal(err)
+	}
+	if ended.Status != string(agent.StatusCancelled) {
+		t.Fatalf("ended status = %q, want cancelled", ended.Status)
+	}
+	if ex.taskCount() != 1 {
+		t.Fatalf("executor ran %d times, want 1: a stopped subagent does not run again", ex.taskCount())
+	}
+}
+
 // TestExecutionEndHandsUnsentMessagesBack pins what happens to a message the
 // user sent that the subagent never took: the execution's end hands it back to
 // the surface, in the order it was written, and no new execution is started for

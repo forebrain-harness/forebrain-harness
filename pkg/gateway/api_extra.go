@@ -241,6 +241,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Post("/:id/subagents/:agent/input", s.batchReadOnly(s.handleSubagentInput))
 	chatSessions.Post("/:id/subagents/:agent/queued-input", s.batchReadOnly(s.handleSubagentQueuedInput))
 	chatSessions.Post("/:id/subagents/:agent/interrupt-send", s.batchReadOnly(s.handleSubagentInterruptSend))
+	chatSessions.Post("/:id/subagents/:agent/pause", s.batchReadOnly(s.handleSubagentPause))
 	chatSessions.Get("/:id/subagents/:agent/context", s.handleSubagentContext)
 	chatSessions.Get("/:id/subagents/:agent/budget", s.handleSubagentBudget)
 
@@ -3533,6 +3534,33 @@ func (s *Server) handleSubagentInterruptSend(w http.ResponseWriter, r *http.Requ
 	}
 	interrupted := run.InterruptSubagentToSend(runner, sid, agentKey)
 	writeJSON(w, map[string]any{"interrupted": interrupted})
+}
+
+// handleSubagentPause serves POST .../subagents/:agent/pause: the terminal's
+// Ctrl+C in a subagent's view. The running attempt stops and the execution
+// waits for the user's next message, which continues the same dispatch; the
+// agent that dispatched it keeps waiting. paused is the engine's answer: false
+// when nothing is running or the subagent already waits, which is the surface's
+// cue that the next press stops it instead.
+func (s *Server) handleSubagentPause(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.subagentNamed(sid, agentKey) {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, map[string]any{"paused": run.PauseSubagent(runner, sid, agentKey)})
 }
 
 func (s *Server) handleSubagentContext(w http.ResponseWriter, r *http.Request) {

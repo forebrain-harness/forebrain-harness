@@ -82,6 +82,19 @@ describe('SubagentDrawer', () => {
     expect(iconOf('[data-testid="subagent-menu-task-fail"]')).toContain('is-bad')
   })
 
+  // One the user interrupted waits for them: its tab and its "+" row draw the
+  // still pause, and the row says what it waits for instead of a clock.
+  it('draws a subagent that waits for the user with the pause', async () => {
+    const waiting = record('task-wait', { status: 'waiting_input', startedAt: new Date(60_000).toISOString() })
+    const other = record('task-other', { status: 'done' })
+    const wrapper = mountDrawer({ tabs: [waiting], active: 'task-wait', records: [waiting, other], now: 120_000 })
+    const iconOf = (selector: string) => wrapper.get(selector).find('svg').classes()
+    expect(iconOf('[data-testid="subagent-tab-task-wait"]')).toContain('is-wait')
+
+    await wrapper.get('[data-testid="subagent-drawer-add"]').trigger('click')
+    expect(iconOf('[data-testid="subagent-menu-task-wait"]')).toContain('is-wait')
+  })
+
   it('closes a tab and collapses the drawer when asked', async () => {
     const wrapper = mountDrawer()
     await wrapper.get('[data-testid="subagent-tab-close-task-2"]').trigger('click')

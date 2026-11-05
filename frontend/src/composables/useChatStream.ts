@@ -1552,6 +1552,19 @@ export type TimelineBlock =
    * execution's model took to start answering, measured once by the engine.
    */
   | { kind: 'worked'; id: string; durationMs: number; finishedAt: string; plan?: WorkedPlanProgress; firstTokenMs?: number }
+  /**
+   * Where the user interrupted a subagent from its own tab: the step it was
+   * on stopped, and the execution waits for the user's next message — the
+   * terminal's "Interrupted · waiting for your message" line.
+   */
+  | { kind: 'paused'; id: string }
+  /**
+   * How one execution the user stopped ended: cancelled or interrupted, in
+   * the place it stopped. A stop is not a failure, so it is drawn as the quiet
+   * line the card row and the drawer's own icon already use — never the red
+   * account a failure gets, and never a second time anywhere else.
+   */
+  | { kind: 'stopped'; id: string }
   | {
       kind: 'approval'
       id: string
@@ -1606,7 +1619,6 @@ export interface SubagentTranscript {
   title?: string
   task: string
   status: 'running' | 'waiting_approval' | 'waiting_input' | 'done' | 'failed' | 'cancelled' | 'interrupted'
-  error?: string
   /** The transcript itself, in the order the subagent produced it. */
   blocks: TimelineBlock[]
   inputTokens: number
@@ -2454,6 +2466,8 @@ export interface SubagentCallTaskLive {
   latestTool?: string
   /** Step ids already counted, so a completion never counts twice. */
   toolStepIds?: string[]
+  /** The user interrupted the bound execution, and it waits for their message. */
+  paused?: boolean
 }
 
 /** One row of a subagent card, ready for the locale and the icons. */
@@ -2468,6 +2482,8 @@ export interface SubagentCallRowView {
   timedOut?: boolean
   stopRequested?: boolean
   error?: string
+  /** A running task the user interrupted: it waits for their next message. */
+  paused?: boolean
 }
 
 /** One subagent_* card's view model: header, rows, and the clock it still owes. */
@@ -2553,6 +2569,7 @@ export function subagentCallView(
         : {
           latestTool: String(bound?.latestTool ?? '').trim() || undefined,
           moreToolUses: (bound?.toolCount ?? 0) > 1 ? (bound?.toolCount ?? 0) - 1 : undefined,
+          ...(status === 'running' && bound?.paused ? { paused: true } : {}),
         }),
       ...(status !== 'waiting' && subagentTaskTerminal(status) && String(bound?.error ?? facts.error ?? '').trim()
         ? { error: String(bound?.error ?? facts.error ?? '').trim() }
@@ -3155,6 +3172,21 @@ export function useChatStream() {
       toolCount += 1
     }
     tasks.set(bound.index, { ...task, toolCount, latestTool: label || task.latestTool, toolStepIds: seen })
+    subagentCallTasks.set(bound.stepId, tasks)
+  }
+
+  /**
+   * setSubagentCallTaskPaused marks the card task this agent's execution is
+   * bound to as waiting for the user (paused) or running again, so its row
+   * says so in place of the call the pause stopped.
+   */
+  function setSubagentCallTaskPaused(agentId: string, paused: boolean) {
+    const bound = currentCallTaskOfAgent.get(agentId)
+    if (!bound) return
+    const tasks = subagentCallTasks.get(bound.stepId)
+    const task = tasks?.get(bound.index)
+    if (!tasks || !task || Boolean(task.paused) === paused) return
+    tasks.set(bound.index, { ...task, paused })
     subagentCallTasks.set(bound.stepId, tasks)
   }
 
@@ -4382,14 +4414,36 @@ export function useChatStream() {
       }
       case 'subagent_input_delivered': {
         // A steer the runtime handed this subagent is the user's own message in
-        // its transcript, the way the terminal draws it.
+        // its transcript, the way the terminal draws it. It is also what
+        // resumes an execution the user paused.
         const text = String(payload.text ?? '').trim()
         if (text) {
           updateSubagent(agentId, (entry) => ({
             ...entry,
+            status: entry.status === 'waiting_input' ? 'running' : entry.status,
             blocks: [...closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt), { kind: 'user' as const, id: evt.id, text }],
           }))
+          setSubagentCallTaskPaused(agentId, false)
         }
+        return true
+      }
+      case 'subagent_paused': {
+        // The user interrupted this subagent from its tab: the step it was on
+        // stopped and the execution waits for their next message, which
+        // continues the same dispatch. Its tab keeps its composer, and its
+        // working line gives way to the line that says so.
+        const id = `paused:${evt.id ?? payload.executionId ?? ''}`
+        updateSubagent(agentId, (entry) => ({
+          ...entry,
+          // An execution that already ended keeps its outcome: a pause that
+          // arrives after the end (a replay out of order) changes nothing.
+          status: entry.status === 'running' || entry.status === 'waiting_approval' ? 'waiting_input' : entry.status,
+          retry: undefined,
+          blocks: entry.blocks.some((block) => block.kind === 'paused' && block.id === id)
+            ? entry.blocks
+            : [...closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt), { kind: 'paused' as const, id }],
+        }))
+        setSubagentCallTaskPaused(agentId, true)
         return true
       }
       case 'queued_input_released': {
@@ -4787,6 +4841,24 @@ export function useChatStream() {
     }
   }
 
+  /**
+   * The stop button's first meaning in a subagent's tab — the terminal's
+   * Ctrl+C: stop the step it is on and hold it for the user's next message.
+   * The agent that dispatched it keeps waiting; the tab draws the pause when
+   * the engine's subagent_paused event arrives.
+   */
+  async function pauseSubagent(agentId: string): Promise<boolean> {
+    const id = String(agentId ?? '').trim()
+    const sid = String(sessionId.value ?? '').trim()
+    if (!id || !sid) return false
+    try {
+      const resp = await forebrainApi.subagentPause(sid, id)
+      return Boolean(resp.paused)
+    } catch {
+      return false
+    }
+  }
+
   /** Esc's second meaning in a subagent's view: interrupt it to send now. */
   async function interruptSubagentToSend(agentId: string): Promise<boolean> {
     const id = String(agentId ?? '').trim()
@@ -5096,7 +5168,6 @@ export function useChatStream() {
         title: title || entry.title,
         task: entry.task || task,
         status: 'running',
-		error: undefined,
         startedAt: evt.createdAt ?? entry.startedAt,
         // A new execution has not waited for its model yet; the wait that
         // closed the previous one belongs to that one's worked row.
@@ -5158,7 +5229,6 @@ export function useChatStream() {
         ...entry,
         agentType: agentType || entry.agentType,
 	    status: transcriptStatus,
-		error: errText || undefined,
         finishedAt: evt.createdAt ?? entry.finishedAt,
         // The run is over, so its status line's retry — if the network was
         // still down when it ended — leaves with it.
@@ -5185,7 +5255,16 @@ export function useChatStream() {
 		  if (output && !currentBlocks.some((block) => block.kind === 'assistant')) {
 			blocks = [...blocks, { kind: 'assistant' as const, id: executionId ? `final:${executionId}` : undefined, text: output, open: false }]
 		  }
-		  if (errText && !blocks.some((block) => block.kind === 'error' && block.id === `error:${executionId}`)) {
+		  // How this execution ended is said here, where it ended, and only
+		  // here: the stop's own quiet line, or the failure's red account. A
+		  // second copy at the end of the tab said the same thing twice — and
+		  // outlived the message that resumed the subagent, because nothing
+		  // cleared it on a continuation.
+		  const stopped = transcriptStatus === 'cancelled' || transcriptStatus === 'interrupted'
+		  if (stopped && !blocks.some((block) => block.kind === 'stopped' && block.id === `stopped:${executionId}`)) {
+			blocks = [...blocks, { kind: 'stopped' as const, id: `stopped:${executionId}` }]
+		  }
+		  if (!stopped && errText && !blocks.some((block) => block.kind === 'error' && block.id === `error:${executionId}`)) {
 			blocks = [...blocks, { kind: 'error' as const, id: executionId ? `error:${executionId}` : undefined, text: errText }]
 		  }
 		  // Every execution closes with its own worked line — how long this
@@ -6616,10 +6695,16 @@ export function useChatStream() {
 			agentType: 'subagent',
 			task: String(record.task ?? ''),
 			status: status === 'cancelled' ? 'cancelled' : status === 'failed' ? 'failed' : status === 'running' ? 'running' : 'done',
-			error: String(record.error ?? '').trim() || undefined,
 			blocks: [
 			  ...(record.task ? [{ kind: 'prompt' as const, text: String(record.task) }] : []),
 			  ...(record.output ? [{ kind: 'assistant' as const, text: String(record.output), open: false }] : []),
+			  // The record's own ending, drawn where the terminal draws it — a
+			  // stop as its quiet line, a failure as its reason.
+			  ...(status === 'cancelled' || status === 'interrupted'
+				? [{ kind: 'stopped' as const, id: `stopped:${executionId}` }]
+				: String(record.error ?? '').trim()
+				  ? [{ kind: 'error' as const, id: `error:${executionId}`, text: String(record.error).trim() }]
+				  : []),
 			],
 		  }))
 		  // The ledger record is an execution with no dispatching call: one
@@ -6752,6 +6837,7 @@ export function useChatStream() {
     takeSubagentReturnedDraft,
     sendToSubagent,
     recallSubagentInput,
+    pauseSubagent,
     interruptSubagentToSend,
     loadSubagentContext,
     loadSubagentBudget,

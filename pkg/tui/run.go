@@ -2746,6 +2746,41 @@ func handleSubagentViewEsc(session Session, renderer *Renderer, state *streamSta
 	renderComposerWithState(renderer, state)
 }
 
+// subagentViewOnScreen is the roster key of the subagent whose view is on
+// screen, or "" in the conversation's own view.
+func subagentViewOnScreen(renderer *Renderer) string {
+	if renderer == nil {
+		return ""
+	}
+	return strings.TrimSpace(renderer.ActiveView())
+}
+
+// handleSubagentViewCtrlC is Ctrl+C in a subagent's view once the composer has
+// nothing left to clear (owner, 2026-11-05). It acts on that subagent alone —
+// the agent that dispatched it is left running — the way Ctrl+C acts on the
+// conversation's turn in its own view: the first press interrupts the
+// subagent's current turn and keeps its execution waiting for the user's next
+// message, which continues the same dispatch; the second stops the subagent, as
+// x on its roster row does. It reports whether the key was spent; false means
+// the subagent has nothing in flight for the key to act on.
+func handleSubagentViewCtrlC(session Session, state *streamState, view string) bool {
+	if session == nil || state == nil || view == "" {
+		return false
+	}
+	if session.SubagentPaused(state.sessionID, view) {
+		session.CancelSubagent(SubagentControlQuery{TaskID: view})
+		return true
+	}
+	if !session.SubagentRunning(state.sessionID, view) {
+		return false
+	}
+	// A running subagent spends the key even when the pause does not land —
+	// between two attempts, or in a batch task that takes no input — so a
+	// second press is never an exit the user did not ask for.
+	session.PauseSubagent(state.sessionID, view)
+	return true
+}
+
 // subagentUnsentReply is the line a subagent's view keeps when an execution
 // ended before it took what the user had sent it: the text is not lost, and the
 // sentence says where it went.
@@ -4620,7 +4655,8 @@ func mcpStartupStatusText(progress run.MCPStartupProgress, snapshot run.MCPSnaps
 //
 // A finished subagent shows no line at all: the "Worked for" status that closed
 // its own transcript is the last word on it, and a line that kept counting
-// would contradict it.
+// would contradict it. Neither does one the user paused: it is waiting for
+// them, not working, and its view already says so.
 func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(string) (AgentRunSnapshot, bool)) transientStatusFormatter {
 	return func(elapsed time.Duration, tick int, view string) string {
 		if view = strings.TrimSpace(view); view != "" {
@@ -4628,7 +4664,7 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 				return ""
 			}
 			snap, ok := agentSnapshot(view)
-			if !ok || snap.Ended {
+			if !ok || snap.Ended || snap.Paused {
 				return ""
 			}
 			if snap.Counters.Retry.Active() {
@@ -4999,6 +5035,25 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 		if ev.hotkey == hotkeyInterrupt {
 			if state.clearComposer() {
 				state.armActiveRunCtrlC()
+				return
+			}
+			// In a subagent's view Ctrl+C is that subagent's and never the
+			// conversation's: cancelling the run here stopped the dispatching
+			// agent and, with it, the subagent the user was talking to. With
+			// nothing in the view to act on the key only moves the exit
+			// sequence on, as a second press after a cancel does in the
+			// conversation's view.
+			if view := subagentViewOnScreen(renderer); view != "" {
+				if handleSubagentViewCtrlC(session, state, view) {
+					state.resetActiveRunCtrlCSequence()
+					return
+				}
+				if state.isActiveRunCtrlCExitArmed() {
+					state.resetActiveRunCtrlCSequence()
+					state.quitRequested = true
+					return
+				}
+				state.armActiveRunCtrlCExit()
 				return
 			}
 			if state.isActiveRunCtrlCArmed() {
@@ -5397,6 +5452,16 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		return true
 	case hotkeyInterrupt:
 		state.agentControlPrefixArmed = false
+		// A subagent's view acts on that subagent (see handleSubagentViewCtrlC),
+		// never on the conversation's run; with nothing there to act on, the key
+		// is the conversation's idle Ctrl+C.
+		if view := subagentViewOnScreen(renderer); view != "" {
+			if state.clearComposer() || handleSubagentViewCtrlC(session, state, view) {
+				return true
+			}
+			state.quitRequested = true
+			return true
+		}
 		if session.CancelActiveRun() {
 			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
 			return true

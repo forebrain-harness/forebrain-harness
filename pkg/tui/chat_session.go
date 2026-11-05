@@ -1641,6 +1641,17 @@ func (s *ChatSession) InterruptSubagentToSend(sessionID, agentKey string) bool {
 	return run.InterruptSubagentToSend(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
 }
 
+// PauseSubagent stops the subagent's running attempt and holds its execution
+// for the user's next message (Ctrl+C in its view).
+func (s *ChatSession) PauseSubagent(sessionID, agentKey string) bool {
+	return run.PauseSubagent(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+}
+
+// SubagentPaused reports whether the subagent's execution waits for the user.
+func (s *ChatSession) SubagentPaused(sessionID, agentKey string) bool {
+	return run.SubagentPaused(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+}
+
 // InterruptToSend is Esc's "interrupt and send immediately" in the
 // conversation's own view: the engine stops the model call in flight and the
 // turn goes on carrying the steers, exactly as a subagent's does. It reads the

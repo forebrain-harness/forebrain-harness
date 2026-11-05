@@ -176,4 +176,25 @@ describe('SubagentCallCard', () => {
     expect(wrapper.text()).toContain('latest: edit pkg/turn/submit.go · +17 tool uses')
     wrapper.unmount()
   })
+
+  // A task the user interrupted from its tab waits for them: its row trades
+  // the spinner for the pause and the call the pause stopped for the words
+  // that say so, while its clock keeps walking — the dispatch has not ended.
+  it('draws a paused task as waiting for the user', () => {
+    const runningStep = stepOf({
+      status: 'running',
+      subagentCall: { verb: 'run', tasks: [{ index: 0, key: 'subagent-8c5c', title: 'network probe', agentType: 'general-purpose', status: 'running' }] },
+    })
+    const live = new Map([[0, {
+      agentId: 'subagent-8c5c', status: 'running', toolCount: 1, latestTool: 'sleep 60', paused: true,
+      startedAtMs: Date.now() - 25_000,
+    }]])
+    const wrapper = mount(SubagentCallCard, { props: { step: runningStep, live, now: Date.now() } })
+    const row = wrapper.get('[data-testid="subagent-task-row"]')
+    expect(row.get('[data-testid="subagent-row-paused"]').text()).toBe('Interrupted · waiting for your message')
+    expect(row.text()).not.toContain('sleep 60')
+    expect(row.find('.animate-spin').exists()).toBe(false)
+    expect(row.find('[data-testid="subagent-row-clock"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
 })

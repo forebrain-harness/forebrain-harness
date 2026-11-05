@@ -35,9 +35,10 @@
     <!-- The terminal's working line sits above the composer, never in the
          record: the state, then the checklist it is working through. A network
          retry replaces it whole — the reason, then the countdown with the
-         attempt — exactly as the conversation's own line does. -->
+         attempt — exactly as the conversation's own line does. A subagent the
+         user interrupted is not working: its transcript says it waits. -->
     <RunStatusLine
-      v-if="active"
+      v-if="active && !paused"
       class="px-[18px] pb-1.5"
       data-testid="subagent-working"
       :label="workingLabel"
@@ -91,16 +92,30 @@
               <ViewModeChip v-model="viewMode" />
               <div class="flex items-center gap-1">
                 <SubagentRunPill :record="record" />
+                <!-- The terminal's Ctrl+C in two presses: a running subagent
+                     is interrupted and waits for the user's message; one that
+                     waits is stopped. -->
                 <button
-                  v-if="active"
+                  v-if="paused"
                   type="button"
-                  class="subagent-stop"
+                  class="subagent-run-btn is-stop"
                   v-tip:top="t('chat.subagentStop')"
                   :aria-label="t('chat.subagentStop')"
                   data-testid="subagent-stop"
                   @click="emit('stop')"
                 >
                   <Square aria-hidden="true" />
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  class="subagent-run-btn is-interrupt"
+                  v-tip:top="t('chat.subagentInterrupt')"
+                  :aria-label="t('chat.subagentInterrupt')"
+                  data-testid="subagent-interrupt"
+                  @click="emit('pause')"
+                >
+                  <Pause aria-hidden="true" />
                 </button>
                 <PromptInputSubmit status="ready" :label="t('chat.sendAria')" />
               </div>
@@ -137,7 +152,7 @@
  * moves a draft: ChatView mounts each open tab and shows one at a time.
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { CircleAlert, Square } from 'lucide-vue-next'
+import { CircleAlert, Pause, Square } from 'lucide-vue-next'
 import {
   Conversation,
   ConversationContent,
@@ -215,6 +230,7 @@ const emit = defineEmits<{
   (e: 'open-agent', agentId: string): void
   (e: 'open-doc', tab: import('@/composables/useDocTabs').DocTab): void
   (e: 'stop'): void
+  (e: 'pause'): void
   (e: 'edit-last-queued'): void
   (e: 'interrupt-run'): void
   (e: 'typed'): void
@@ -231,6 +247,10 @@ const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
 // Still in progress — running, or waiting on the operator. Only then does this
 // tab take a message; when it goes idle its composer is gone (plan 143).
 const active = computed(() => subagentPhase(props.record.status) === 'active')
+
+// Interrupted by the user and waiting for their next message (the terminal's
+// first Ctrl+C): still active — its composer stays — but not working.
+const paused = computed(() => props.record.status === 'waiting_input')
 
 /**
  * How much of this subagent's run its tab draws — its own reading mode, kept
@@ -340,7 +360,7 @@ defineExpose({
   padding: 0 0.75rem 0.75rem;
 }
 
-.subagent-stop {
+.subagent-run-btn {
   width: 28px;
   height: 28px;
   flex: none;
@@ -349,15 +369,24 @@ defineExpose({
   border: 1px solid var(--forebrain-divider);
   border-radius: 7px;
   background: var(--forebrain-surface);
-  color: var(--forebrain-danger);
   cursor: pointer;
 }
 
-.subagent-stop:hover {
+/* Interrupting loses nothing, so it is the quiet button; stopping is the red
+   square the tab has always used. */
+.subagent-run-btn.is-interrupt {
+  color: var(--forebrain-text-2);
+}
+
+.subagent-run-btn.is-stop {
+  color: var(--forebrain-danger);
+}
+
+.subagent-run-btn:hover {
   background: var(--forebrain-button-alt-bg);
 }
 
-.subagent-stop svg {
+.subagent-run-btn svg {
   width: 13px;
   height: 13px;
 }

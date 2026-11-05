@@ -2060,6 +2060,7 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	chatSessions.Post("/:id/interrupt-send", s.batchReadOnly(s.handleSessionInterruptSend))
 	chatSessions.Post("/:id/subagents/:agent/input", s.batchReadOnly(s.handleSubagentInput))
 	chatSessions.Post("/:id/subagents/:agent/queued-input", s.batchReadOnly(s.handleSubagentQueuedInput))
+	chatSessions.Post("/:id/subagents/:agent/pause", s.batchReadOnly(s.handleSubagentPause))
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
 	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
@@ -6208,6 +6209,7 @@ func subagentViewRequests(sid, agentKey string) map[string]*http.Request {
 		"input":        subagentViewRequest(http.MethodPost, sid, agentKey, `{"message":"continue"}`),
 		"queued-input": subagentViewRequest(http.MethodPost, sid, agentKey, `{"action":"edit_last"}`),
 		"interrupt":    subagentViewRequest(http.MethodPost, sid, agentKey, ""),
+		"pause":        subagentViewRequest(http.MethodPost, sid, agentKey, ""),
 		"context":      subagentViewRequest(http.MethodGet, sid, agentKey, ""),
 		"budget":       subagentViewRequest(http.MethodGet, sid, agentKey, ""),
 	}
@@ -6221,6 +6223,8 @@ func (s *Server) dispatchSubagentViewRoute(name string, w http.ResponseWriter, r
 		s.handleSubagentQueuedInput(w, r)
 	case "interrupt":
 		s.handleSubagentInterruptSend(w, r)
+	case "pause":
+		s.handleSubagentPause(w, r)
 	case "context":
 		s.handleSubagentContext(w, r)
 	case "budget":
@@ -6244,6 +6248,23 @@ func TestSubagentViewEndpointsRefuseAnUnknownAgent(t *testing.T) {
 		s.dispatchSubagentViewRoute(name, w, req)
 		require.Equal(t, http.StatusNotFound, w.Code, "%s: %s", name, w.Body.String())
 	}
+}
+
+// TestSubagentPauseReportsTheEngineAnswer pins the pause route on the
+// production route table and its answer: the engine's own. A subagent with
+// nothing running is not paused — the web's cue that the stop button means stop.
+func TestSubagentPauseReportsTheEngineAnswer(t *testing.T) {
+	s, workspaceRoot := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, workspaceRoot, "sid", "agent-1")
+	routes := NewRestServer("")
+	s.AttachExtraRoutes(routes)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/sid/subagents/agent-1/pause", nil)
+	rec := httptest.NewRecorder()
+	routes.Server.Handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, false, body["paused"], "an idle subagent has nothing to pause")
 }
 
 // TestSessionInterruptSendReportsTheEngineAnswer pins two things at once: the
