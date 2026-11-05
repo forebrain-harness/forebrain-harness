@@ -155,6 +155,11 @@ func OpenOutputHistory(ctx context.Context, db *sql.DB, stateRoot string) (*Stor
 }
 
 // Save inserts a record and returns its retrieval id.
+//
+// The two text columns carry raw tool output, which is exactly where an engine
+// meets bytes it refuses (a program printing binary, `find -print0`), so both
+// are repaired on the way in: a record whose text cannot be stored is a record
+// nobody can retrieve.
 func (s *Store) Save(e Entry) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("store not open")
@@ -167,6 +172,8 @@ func (s *Store) Save(e Entry) (int64, error) {
 	if strings.TrimSpace(e.Kind) == "" {
 		e.Kind = KindShell
 	}
+	e.OriginalOutput = ValidText(e.OriginalOutput)
+	e.FilteredOutput = ValidText(e.FilteredOutput)
 	args := []any{
 		e.Kind, e.Command, e.OriginalOutput, e.FilteredOutput,
 		e.OriginalBytes, e.FilteredBytes, e.SavedTokens, e.SessionID,

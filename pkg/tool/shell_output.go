@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -606,6 +607,14 @@ func (c *Compressor) CompressShellOutput(command, stdout, sessionID string) (str
 			CapabilityVer:  res.FilterVersion,
 			SessionID:      sessionID,
 		})
+		if err != nil {
+			// The model still gets the compressed output; what it loses is the
+			// retrieval id, so the full original is unreachable for this command.
+			// A history nobody can retrieve is worth less than a start-up that
+			// never happens, but it is never worth nothing: say so.
+			slog.Error("shell output history not saved; the output has no retrieval id",
+				"session_id", sessionID, "command", command, "err", err)
+		}
 		if err == nil && id > 0 {
 			meta.RetrieveID = id
 			res.Output = res.Output + "\n" + MarkerText(res.CompressedPct, res.SavedTokens, id)

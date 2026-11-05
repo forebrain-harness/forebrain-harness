@@ -2124,14 +2124,18 @@ func (s *ChatSession) persistRequiresActionSnapshot(sessionID, runID string, sna
 	if s == nil || s.sessStore() == nil || len(snapshot) == 0 {
 		return
 	}
-	_ = s.sessStore().AppendMessageSequenceForRun(
+	// Non-fatal on purpose — the gate has already opened — but never silent: a
+	// store that refuses this write is a conversation no longer being saved.
+	if err := s.sessStore().AppendMessageSequenceForRun(
 		context.Background(),
 		sessionID,
 		runID,
 		snapshot,
 		cliResultModel(s, sessionID),
 		"",
-	)
+	); err != nil {
+		slog.Error("persist the approval gate's message snapshot", "session_id", sessionID, "run_id", runID, "err", err)
+	}
 }
 
 // persistReplayResults writes the tool-result messages captured during a
@@ -2171,14 +2175,19 @@ func (s *ChatSession) persistReplayResults(sessionID, runID string, capture *too
 		}
 		msgs = append(msgs, msg)
 	}
-	_ = s.sessStore().AppendMessageSequenceForRun(
+	// The replayed results are already on screen, so a refused write must not
+	// abort the resume; it must be visible, because it also means the transcript
+	// this resume reconciled against is not the one the next turn will read.
+	if err := s.sessStore().AppendMessageSequenceForRun(
 		context.Background(),
 		sessionID,
 		runID,
 		msgs,
 		cliResultModel(s, sessionID),
 		"",
-	)
+	); err != nil {
+		slog.Error("persist the replayed tool results", "session_id", sessionID, "run_id", runID, "err", err)
+	}
 }
 
 // persistCancelledTurnOutcome writes the partial content a cancelled run

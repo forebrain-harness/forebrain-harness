@@ -2775,14 +2775,20 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request, opts wsCon
 				})
 				if s.RunRT != nil {
 					if s.Sessions != nil && len(rae.SessionSnapshot) > 0 {
-						_ = s.Sessions.AppendMessageSequenceForRun(
+						// The gate below still opens: the approval is recorded
+						// whether or not this snapshot could be stored. What
+						// silence would hide is that the conversation stopped
+						// persisting, and every later save fails the same way.
+						if err := s.Sessions.AppendMessageSequenceForRun(
 							agCtx,
 							sid,
 							runID,
 							rae.SessionSnapshot,
 							"",
 							"",
-						)
+						); err != nil {
+							slog.Error("persist the approval gate's message snapshot", "session_id", sid, "run_id", runID, "err", err)
+						}
 					}
 					inb, _ := json.Marshal(rae.ToolInput)
 					_ = s.RunRT.SetWaitingAction(agCtx, runID, state.Wait{
