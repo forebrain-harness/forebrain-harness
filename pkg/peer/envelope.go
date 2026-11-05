@@ -186,8 +186,11 @@ func closingTagAt(runes []rune, j int) bool {
 }
 
 // Parse reads an envelope, and reports false for anything that is not exactly
-// one: the body must re-render to the input byte for byte, so a forged or
-// malformed element is treated as plain text by the receiver.
+// one as this protocol's own writer produces it: the body must already be
+// escaped, and the whole thing must re-render to the input byte for byte. An
+// envelope that was assembled by hand — a body carrying its own closing tag, a
+// malformed or forged element — is treated as plain text by the receiver, so
+// nothing a sender wrote can become text outside the element it travels in.
 func Parse(content string) (Envelope, bool) {
 	match := envelopePattern.FindStringSubmatch(content)
 	if match == nil {
@@ -204,7 +207,34 @@ func Parse(content string) (Envelope, bool) {
 	if match[3] != "" {
 		envelope.HopChain = strings.Split(match[3], ",")
 	}
+	// An escaped body is what Build writes, so requiring it costs an honest
+	// sender nothing and refuses one that would close the element from inside.
+	bodyIsEscaped := EscapeBody(envelope.Body) == envelope.Body
+	if !bodyIsEscaped {
+		return Envelope{}, false
+	}
 	if renderEnvelope(envelope, envelope.Body) != content {
+		return Envelope{}, false
+	}
+	return envelope, true
+}
+
+// ParseFrom reads an envelope and holds it to the sender the socket layer
+// authenticated for the frame it arrived in: an envelope whose from attribute
+// names someone else is not one, and the receiver treats it as plain text.
+//
+// Only the FB-mode source gate proves a frame's sender, by matching the
+// connecting pid's record against the address the frame carries (the FB-mode
+// source gate in pkg/process, gateRecord). In CC mode the sender's record is
+// looked up by pid for its features alone, so a frame's from is unproven there:
+// ParseFrom strengthens the FB path and is not a claim the transport covers CC
+// mode.
+func ParseFrom(content, from string) (Envelope, bool) {
+	envelope, ok := Parse(content)
+	if !ok {
+		return Envelope{}, false
+	}
+	if envelope.From != "" && envelope.From != from {
 		return Envelope{}, false
 	}
 	return envelope, true

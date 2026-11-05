@@ -3479,11 +3479,36 @@ func (o *heldPeerOverlay) answersLine() string {
 	return strings.Join(parts, "   ")
 }
 
+// stripControlForDisplay removes the C0 and C1 control characters from text a
+// terminal will be asked to draw, keeping the newline and tab that give it its
+// shape. Peer text is not this program's text: a body carrying ESC can move the
+// cursor, redraw the question that asks a person to release it, or open an OSC
+// sequence, so it is flattened before it is measured, folded or written.
+//
+// Escape sequences this program wrote itself must not pass through here: the
+// overlay composer's lines carry the SGR sequences its styles are made of, and
+// they are cleaned of bells alone (stripTerminalBells). The same flattening
+// guards the value's way out of the engine (process.stripControlForDisplay), so
+// a surface other than this one is handed clean text as well.
+func stripControlForDisplay(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // heldPeerPreviewLines is the opening of the held message cut to the few lines
 // the question shows; the last line says there is more rather than the prompt
 // pretending this is all of it.
 func heldPeerPreviewLines(preview string, max int) []string {
-	raw := strings.Split(strings.ReplaceAll(preview, "\r\n", "\n"), "\n")
+	// Cleaned before splitting: a control character is removed rather than
+	// becoming a line of its own, and a lone CR cannot overwrite the row above.
+	raw := strings.Split(stripControlForDisplay(preview), "\n")
 	kept := make([]string, 0, max+1)
 	for _, line := range raw {
 		if len(kept) == max {

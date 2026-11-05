@@ -3041,6 +3041,23 @@ func TestHeldPeerOverlayShowsSenderPreviewAndCause(t *testing.T) {
 	}
 }
 
+// The preview is peer text, so the escape sequences in it are not the ones this
+// program wrote: a body carrying ESC or BEL must reach the question as plain
+// characters, or its sender could redraw the question being answered about it.
+func TestHeldPeerPreviewStripsControlCharacters(t *testing.T) {
+	lines := heldPeerPreviewLines("first\x1b[2J line\x07\nsecond\tline", heldPeerPreviewMaxLines)
+	joined := strings.Join(lines, "\n")
+	if strings.ContainsAny(joined, "\x1b\x07") {
+		t.Fatalf("the preview kept control characters: %q", joined)
+	}
+	if !strings.Contains(joined, "second\tline") {
+		t.Fatalf("the preview lost its newline or its tab: %q", joined)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("the preview split into %d lines, want the message's own two: %q", len(lines), joined)
+	}
+}
+
 // Every hold cause is said in the person's words; a cause this build does not
 // know is not explained at all.
 func TestHeldPeerCauseLabels(t *testing.T) {
