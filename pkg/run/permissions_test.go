@@ -1357,65 +1357,19 @@ func TestNoSandboxForcesFullAccessWithoutWritingTheRow(t *testing.T) {
 	}
 }
 
-// peerWorkTreePayload is the shell payload the same-tree guard raises: a git
-// command that would sweep the work tree while another agent has work in it
-// (plan 198 §3.5).
-func peerWorkTreePayload() map[string]any {
-	return map[string]any{
-		"command":             "git stash",
-		"force_tool_approval": true,
-		"ask_even_in_yolo":    true,
-		"approval_reason":     "peer_work_tree",
-		"dangerous_rule":      "git_stash",
-		"peer_names":          []string{"b"},
-	}
-}
-
-// Full access answers every ordinary gate for the user, and it may not answer
-// this one: the changes the command would discard belong to somebody else.
-func TestPeerWorkTreeApprovalIsAskedUnderFullAccess(t *testing.T) {
+// Full access answers every ordinary shell gate, including one whose tool
+// raised force_tool_approval: no payload marker may outrank it any more (the
+// same-tree git guard that used to raise one is gone).
+func TestFullAccessBypassesForcedShellApproval(t *testing.T) {
 	t.Setenv(safety.EnvYOLO, "1")
 	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
 	runner.permRuntimeGet().Store(runner.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
 
-	_, pending, err := runner.actionHook(context.Background(), "shell", peerWorkTreePayload())
-	if err == nil || pending {
-		t.Fatalf("pending=%v err=%v, want the approval prompt to be attempted", pending, err)
-	}
-	if !strings.Contains(err.Error(), "actions service is unavailable") {
-		t.Fatalf("err=%v, want the attempted-prompt error under full access", err)
-	}
-}
-
-// The never policy is the same answer as full access: nothing is asked — except
-// the questions no policy can answer, which is why this one is asked rather
-// than refused.
-func TestPeerWorkTreeApprovalIsAskedUnderNeverPolicy(t *testing.T) {
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
-	runner.permRuntimeGet().Store(runner.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
-
-	_, _, err := runner.actionHook(context.Background(), "shell", peerWorkTreePayload())
-	if err == nil || strings.Contains(err.Error(), "approval policy is never") {
-		t.Fatalf("err=%v, want the question put rather than refused by policy", err)
-	}
-	if !strings.Contains(err.Error(), "actions service is unavailable") {
-		t.Fatalf("err=%v, want the attempted-prompt error", err)
-	}
-}
-
-// An allow rule the user wrote before anybody else was working here cannot
-// stand in for them now: the rule knew nothing about the other agent.
-func TestPeerWorkTreeApprovalIsNotAnsweredByAnAllowRule(t *testing.T) {
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
-	store := runner.permRuntimeGet().Store(runner.AppCfg)
-	store.SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
-	store.AddRule(safety.SourceSession, safety.BehaviorAllow, safety.PermissionRuleValue{
-		ToolName: "Bash", RuleContent: "git stash", SessionID: "session-1",
+	_, pending, err := runner.actionHook(context.Background(), "shell", map[string]any{
+		"command":             "git add -A",
+		"force_tool_approval": true,
 	})
-
-	ctx := llm.WithAgentSessionID(context.Background(), "session-1")
-	_, _, err := runner.actionHook(ctx, "shell", peerWorkTreePayload())
-	if err == nil || !strings.Contains(err.Error(), "actions service is unavailable") {
-		t.Fatalf("err=%v, want the question put despite the allow rule", err)
+	if err != nil || pending {
+		t.Fatalf("pending=%v err=%v, want the call to run unasked under full access", pending, err)
 	}
 }

@@ -441,23 +441,14 @@ type fakePeerDirectory struct {
 	// The same-tree guards (plan 198) ask the same fake. A case that does not
 	// set these gets the quiet answers: nobody in the tree, nothing touched.
 	workTree []toolpkg.WorkTreePeer
-	// sweep is what the git sweep guard's narrower question answers, and
-	// sweepRoots the directories it was asked about.
-	sweep      []toolpkg.WorkTreePeer
-	sweepRoots []string
-	touches    []toolpkg.PeerTouch
-	noted      []string
-	roots      []string
+	touches  []toolpkg.PeerTouch
+	noted    []string
+	roots    []string
 }
 
 func (d *fakePeerDirectory) WorkTreePeers(_ context.Context, root string) []toolpkg.WorkTreePeer {
 	d.roots = append(d.roots, root)
 	return d.workTree
-}
-
-func (d *fakePeerDirectory) SweepPeers(_ context.Context, root string) []toolpkg.WorkTreePeer {
-	d.sweepRoots = append(d.sweepRoots, root)
-	return d.sweep
 }
 
 func (d *fakePeerDirectory) NoteWrite(_ context.Context, absPath string, _ time.Time) {

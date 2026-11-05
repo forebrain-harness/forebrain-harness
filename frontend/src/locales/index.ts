@@ -1657,10 +1657,6 @@ const zh = {
   'chat.peerStatusWaiting': '等批准',
   'chat.peerStatusShell': '跑命令',
   'chat.peerStatusIdle': '空闲',
-  'chat.approvalPeerWorkTreeFact': '这个目录还有 {count} 个代理没提交改动，{command} 会把它们一起收走',
-  'chat.peerAgentNoFiles': '没有正在改的文件',
-  'chat.peerAgentFilesOne': '在改 {file}',
-  'chat.peerAgentFilesMany': '在改 {file} 等 {count} 个文件',
   // 模型服务失败的语义化文案：后端只发结构化事实（错误类别、套餐、重置时刻），
   // 由这里按当前语言拼成句子，切换语言时会重新渲染。
   'providerError.sentence': '{subject}，{reset}。',
@@ -3874,10 +3870,6 @@ const en: Record<keyof typeof zh, string> = {
   'chat.peerStatusWaiting': 'Waiting for approval',
   'chat.peerStatusShell': 'Running a command',
   'chat.peerStatusIdle': 'Idle',
-  'chat.approvalPeerWorkTreeFact': '{count} agents in this directory have uncommitted changes, and {command} would sweep them up with yours',
-  'chat.peerAgentNoFiles': 'No files being edited',
-  'chat.peerAgentFilesOne': 'Editing {file}',
-  'chat.peerAgentFilesMany': 'Editing {file} and {count} more',
   'providerError.sentence': '{subject} — {reset}.',
   'providerError.quotaWithPlan': 'Usage limit reached on your {plan} plan',
   'providerError.quota': 'Usage limit reached for this account',

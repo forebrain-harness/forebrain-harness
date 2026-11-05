@@ -383,43 +383,4 @@ describe('approvalGates', () => {
     expect(parseApprovalPayload('not json')).toEqual({})
     expect(parseApprovalPayload('[1,2]')).toEqual({})
   })
-
-  it('names the agents a same-tree git command would sweep up (plan 200 §3)', () => {
-    const payload = {
-      command: 'git stash',
-      approval_reason: 'peer_work_tree',
-      peer_names: ['forebrain-harness-a3', 'forebrain-harness-28'],
-      peer_files: [
-        { name: 'forebrain-harness-a3', files: ['pkg/peer/liveness.go', 'pkg/peer/record.go'] },
-        { name: 'forebrain-harness-28', files: ['pkg/process/open.go'] },
-      ],
-      peer_agents: [
-        { name: 'forebrain-harness-a3', mark: 'a3', tone: 0, files: ['pkg/peer/liveness.go', 'pkg/peer/record.go'] },
-        { name: 'forebrain-harness-28', mark: '28', tone: 1, files: ['pkg/process/open.go'] },
-      ],
-    }
-    // The guard's reason outranks the shell command's own family: the question
-    // this approval asks is about the other agents, not about the command.
-    expect(approvalFamily('shell', payload)).toBe('peer_work_tree')
-    const facts = approvalFacts('peer_work_tree', payload)
-    expect(facts.peerAgents?.map((agent) => [agent.name, agent.mark, agent.tone])).toEqual([
-      ['forebrain-harness-a3', 'a3', 0],
-      ['forebrain-harness-28', '28', 1],
-    ])
-    expect(facts.facts).toEqual(['这个目录还有 2 个代理没提交改动，git stash 会把它们一起收走'])
-    // The footer and the question stay the shell command's own.
-    expect(approvalQuestion('peer_work_tree', 'shell', payload)).toBe('要运行这条命令吗？')
-  })
-
-  it('still lists the agents a server without the identity block named', () => {
-    const facts = approvalFacts('peer_work_tree', {
-      command: 'git checkout -- .',
-      approval_reason: 'peer_work_tree',
-      peer_names: ['forebrain-harness-a3'],
-      peer_files: [{ name: 'forebrain-harness-a3', files: ['pkg/peer/liveness.go'] }],
-    })
-    // An unenriched payload does not invent a block; the row still names the
-    // agent and the file it is editing.
-    expect(facts.peerAgents).toEqual([{ name: 'forebrain-harness-a3', mark: '', tone: 0, files: ['pkg/peer/liveness.go'] }])
-  })
 })

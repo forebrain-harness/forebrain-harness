@@ -207,40 +207,11 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				}
 			}
 			approvalRequired := skillAccess != "" || planGate == PlanModeShellAsk || shellAssessmentRequiresApproval(ctx, st, rt, cmd, assessment, readOnlyCommand, requestedBypass, sandboxBypassApproved)
-			// A git command that would sweep this tree is a question for the
-			// user whenever another agent is working in it (plan 198 §3.5): a
-			// preset, an allow rule or full access cannot answer for somebody
-			// else's uncommitted work.
-			sweepRule, sweepsTree := "", false
-			var treePeers []WorkTreePeer
-			if peers := peersOf(rt); peers != nil {
-				sweepRule, sweepsTree = safety.GitSweepsWorkTree(cmd)
-				if sweepsTree {
-					// The question is about the directory the command changes
-					// to, not the session's root: a linked work tree nested in
-					// this one has its own index, so a sweep inside it cannot
-					// touch the agents working here. The port answers that
-					// narrower question; when the directory cannot be followed
-					// statically it falls back to this one, asking too much
-					// rather than too little.
-					root := wdAbs
-					if resolved, ok := safety.GitSweepWorkingDir(cmd, wdAbs); ok {
-						root = resolved
-					}
-					treePeers = peers.SweepPeers(ctx, root)
-				}
-			}
-			if sweepsTree && len(treePeers) > 0 {
-				approvalRequired = true
-			}
 			if approvalRequired && ApprovedActionIDFromContext(ctx) == "" {
 				payload := rewriteResult.applyTo(shellAssessmentApprovalPayload(cmd, in, assessment))
 				markProtectedApproval(payload, skillAccess)
 				if planGate == PlanModeShellAsk {
 					markPlanModeApproval(payload)
-				}
-				if sweepsTree && len(treePeers) > 0 {
-					markPeerWorkTreeApproval(payload, sweepRule, treePeers)
 				}
 				payload["sandbox_profile"] = string(profile)
 				if profileElevation {

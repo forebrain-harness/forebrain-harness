@@ -10610,7 +10610,7 @@ func TestWriteRootSectionsIsAllOrNothing(t *testing.T) {
 }
 
 // peerDirectoryDouble is the least a drawer test needs of run.PeerDirectory: a
-// fixed listing, and the same-tree guards answered empty.
+// fixed listing, and the same-tree questions answered empty.
 type peerDirectoryDouble struct {
 	peers []run.PeerEntry
 }
@@ -10624,10 +10624,6 @@ func (d *peerDirectoryDouble) Send(context.Context, run.PeerCaller, string, stri
 }
 
 func (d *peerDirectoryDouble) WorkTreePeers(context.Context, string) []tool.WorkTreePeer {
-	return nil
-}
-
-func (d *peerDirectoryDouble) SweepPeers(context.Context, string) []tool.WorkTreePeer {
 	return nil
 }
 

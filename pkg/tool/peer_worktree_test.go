@@ -3,7 +3,6 @@ package tool
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,30 +14,19 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
-// peerWorkTreeFake answers the three same-tree questions the way another
-// process would: a fixed list of other agents' writes, and a record of what the
-// tools announced to it.
+// peerWorkTreeFake answers the same-tree questions the way another process
+// would: a fixed list of other agents' writes, and a record of what the tools
+// announced to it.
 type peerWorkTreeFake struct {
 	peers   []WorkTreePeer
 	touches []PeerTouch
 	noted   []string
 	roots   []string
-
-	// The git sweep guard asks a narrower question than the same-tree guards
-	// do, so the two answers are set apart: sweep is what SweepPeers says, and
-	// sweepRoots records the directory it was asked about.
-	sweep      []WorkTreePeer
-	sweepRoots []string
 }
 
 func (f *peerWorkTreeFake) WorkTreePeers(_ context.Context, root string) []WorkTreePeer {
 	f.roots = append(f.roots, root)
 	return f.peers
-}
-
-func (f *peerWorkTreeFake) SweepPeers(_ context.Context, root string) []WorkTreePeer {
-	f.sweepRoots = append(f.sweepRoots, root)
-	return f.sweep
 }
 
 func (f *peerWorkTreeFake) NoteWrite(_ context.Context, absPath string, _ time.Time) {
@@ -225,125 +213,19 @@ func peerShellCtx(root string) context.Context {
 	return WithToolCompletionCapture(WithProjectRoot(llm.WithAgentSessionID(context.Background(), "sess-peer-git"), root))
 }
 
-// A git command that would sweep this tree is a question whenever another agent
-// is working in it, and the payload names who and what they touched (plan 198
-// §3.5): the command string alone cannot say whether it is safe to run.
-func TestShellToolAsksBeforeAGitSweepWhileAnotherAgentWorks(t *testing.T) {
+// A git command that would sweep this tree is nobody else's question any more:
+// same-tree coordination is the agents' own business (owner 2026-11-05), so
+// the shell tool asks nothing even while another agent has work in the tree.
+func TestShellToolDoesNotAskBeforeAGitSweepWhileAnotherAgentWorks(t *testing.T) {
 	rec := &shellApprovalRecorder{}
 	shellTool, root := peerShellTool(t, rec, &peerWorkTreeFake{
-		peers: []WorkTreePeer{{
-			Name: "b", Kind: "terminal", Status: "busy", Task: "the parser",
-			RecentFiles: []string{"b.go", "pkg/c.go"},
-		}},
-		sweep: []WorkTreePeer{{
-			Name: "b", Kind: "terminal", Status: "busy", Task: "the parser",
-			RecentFiles: []string{"b.go", "pkg/c.go"},
-		}},
+		peers: []WorkTreePeer{{Name: "b", Kind: "terminal", Status: "busy", RecentFiles: []string{"b.go"}}},
 	})
-
-	_, err := shellTool.Handle(peerShellCtx(root), `{"command":"git stash"}`)
-	var pending *RequiresActionError
-	if !errors.As(err, &pending) || pending.ActionKind != "shell" {
-		t.Fatalf("err=%v, want a pending shell approval", err)
-	}
-	if rec.asked != 1 {
-		t.Fatalf("asked=%d, want the one question", rec.asked)
-	}
-	asked := rec.inputs[0]
-	for _, key := range []string{"force_tool_approval", "ask_even_in_yolo"} {
-		if asked[key] != true {
-			t.Fatalf("%s = %#v, want true", key, asked[key])
-		}
-	}
-	if asked["approval_reason"] != "peer_work_tree" {
-		t.Fatalf("approval_reason = %#v, want peer_work_tree", asked["approval_reason"])
-	}
-	if asked["dangerous_rule"] != "git_stash" {
-		t.Fatalf("dangerous_rule = %#v, want git_stash", asked["dangerous_rule"])
-	}
-	if names, _ := asked["peer_names"].([]string); len(names) != 1 || names[0] != "b" {
-		t.Fatalf("peer_names = %#v, want the one peer", asked["peer_names"])
-	}
-	peers, _ := asked["peer_files"].([]map[string]any)
-	if len(peers) != 1 || peers[0]["name"] != "b" {
-		t.Fatalf("peer_files = %#v, want the one peer with its files", asked["peer_files"])
-	}
-	if files, _ := peers[0]["files"].([]string); len(files) != 2 || files[0] != "b.go" {
-		t.Fatalf("peer_files[0].files = %#v, want the files it edited", peers[0]["files"])
-	}
-}
-
-// A sweep is judged in the directory the command runs in, not in the session's
-// project root. A linked work tree nested in the main tree has its own working
-// tree and index: `git stash` inside it cannot touch the agent working in the
-// main tree, so listing that agent would put a false claim on the card — and
-// this approval is asked even under full access.
-func TestShellToolJudgesAGitSweepInTheDirectoryItChanges(t *testing.T) {
-	rec := &shellApprovalRecorder{}
-	fake := &peerWorkTreeFake{peers: []WorkTreePeer{{
-		Name: "forebrain-harness-65", Kind: "terminal", Status: "busy",
-	}}}
-	shellTool, root := peerShellTool(t, rec, fake)
-	worktree := filepath.Join(root, ".worktrees", "232")
-	if err := os.MkdirAll(worktree, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(map[string]string{"command": "cd " + worktree + " && git stash"})
-	if err != nil {
-		t.Fatalf("encode args: %v", err)
-	}
-	if _, err := shellTool.Handle(peerShellCtx(root), string(encoded)); err != nil {
-		var pending *RequiresActionError
-		if !errors.As(err, &pending) {
-			t.Fatalf("cd ... && git stash: %v", err)
-		}
-	}
-	if len(fake.sweepRoots) != 1 {
-		t.Fatalf("sweep roots = %#v, want the one directory the command changes in (%s)", fake.sweepRoots, worktree)
-	}
-	if fake.sweepRoots[0] != worktree {
-		t.Fatalf("sweep root = %q, want the command's own directory %q", fake.sweepRoots[0], worktree)
-	}
-	for _, asked := range rec.inputs {
-		if asked["approval_reason"] == "peer_work_tree" {
-			t.Fatalf("asked %#v, want no peer question for a sweep in a work tree nobody else works in", asked)
-		}
-	}
-}
-
-// The same command with nobody else in the tree is nobody else's business: the
-// guard asks nothing and the command runs its ordinary path.
-func TestShellToolLeavesAGitSweepAloneWithoutOtherAgents(t *testing.T) {
-	empty := &shellApprovalRecorder{}
-	shellTool, root := peerShellTool(t, empty, &peerWorkTreeFake{})
-	if _, err := shellTool.Handle(peerShellCtx(root), `{"command":"git stash list"}`); err != nil {
-		t.Fatalf("git stash list: %v", err)
-	}
-	if empty.asked != 0 {
-		t.Fatalf("asked=%d, want no question", empty.asked)
-	}
-
-	readOnly := &shellApprovalRecorder{}
-	shellTool, root = peerShellTool(t, readOnly, &peerWorkTreeFake{peers: []WorkTreePeer{{Name: "b"}}})
-	if _, err := shellTool.Handle(peerShellCtx(root), `{"command":"git stash list"}`); err != nil {
-		t.Fatalf("git stash list with a peer present: %v", err)
-	}
-	if readOnly.asked != 0 {
-		t.Fatalf("asked=%d, want no question for a read-only stash form", readOnly.asked)
-	}
-}
-
-// A batch task has nobody to ask: the task sandbox is the enforcement, so the
-// guard stays out of its way exactly as every other approval does (plan 198
-// §3.5).
-func TestBatchShellGitSweepIsNotPutToAnyone(t *testing.T) {
-	rec := &shellApprovalRecorder{}
-	shellTool, root := peerShellTool(t, rec, &peerWorkTreeFake{peers: []WorkTreePeer{{Name: "b"}}})
-	if _, err := shellTool.Handle(WithBatchBoundary(peerShellCtx(root), BatchBoundary{Workspace: root}), `{"command":"git stash"}`); err != nil {
-		t.Fatalf("batch git stash: %v", err)
+	if _, err := shellTool.Handle(peerShellCtx(root), `{"command":"git stash"}`); err != nil {
+		t.Fatalf("git stash: %v", err)
 	}
 	if rec.asked != 0 {
-		t.Fatalf("asked=%d, want nobody asked in a batch task", rec.asked)
+		t.Fatalf("asked=%d, want no approval for a same-tree git sweep", rec.asked)
 	}
 }
 
