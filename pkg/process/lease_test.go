@@ -39,6 +39,9 @@ func TestLeaseIsHeldByOneReplicaAndTakenOverWhenItExpires(t *testing.T) {
 	if err != nil || !won {
 		t.Fatalf("the first replica = %v (%v), want the lease", won, err)
 	}
+	// A real gap between the two attempts: the second replica must be refused
+	// for what the row says, not because both calls landed in one millisecond.
+	time.Sleep(5 * time.Millisecond)
 	won, err = second.acquire(ctx, "channel:acct")
 	if err != nil {
 		t.Fatalf("the second replica: %v", err)
@@ -162,6 +165,66 @@ func (s *stubChannel) connections() int {
 	return s.connects
 }
 
+// TestLeaseStandbyTakesOverWhenTheHolderStopsRenewing pins the half of the
+// lease that makes a standby worth having: a replica whose first acquire lost
+// keeps trying, so it takes the account over once the holder's row ages out —
+// and a replica that loses the account must rejoin the retry loop and take it
+// back rather than exit for good.
+func TestLeaseStandbyTakesOverWhenTheHolderStopsRenewing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	firstLeases := testLeases(t, "webchat-a")
+	secondLeases := testLeases(t, "webchat-b")
+	secondLeases.DB = firstLeases.DB
+	db := firstLeases.DB
+
+	firstChannel, secondChannel := &stubChannel{}, &stubChannel{}
+	first := firstLeases.Guard("channel:acct", firstChannel)
+	second := secondLeases.Guard("channel:acct", secondChannel)
+	if first == nil || second == nil {
+		t.Fatal("a leased handler must be returned")
+	}
+	if err := first.Start(ctx, nil, nil); err != nil {
+		t.Fatalf("the first replica's Start: %v", err)
+	}
+	if err := second.Start(ctx, nil, nil); err != nil {
+		t.Fatalf("the second replica's Start: %v", err)
+	}
+	waitForLease(t, "the holder to connect", func() bool { return firstChannel.connected() == 1 })
+	if got := secondChannel.connected(); got != 0 {
+		t.Fatalf("the replica without the lease connected %d times, want none", got)
+	}
+
+	// The holder dies without renewing. A renewal only matches the row while it
+	// still names this process, so a row left behind by a replica that is gone
+	// has to be both moved to that replica and aged: ageing alone leaves it with
+	// the live holder, whose next renewal pushes the expiry forward again and
+	// keeps the standby out for as long as the holder runs.
+	dieLease(t, db, "channel:acct")
+	waitForLease(t, "the standby to take the account over", func() bool { return secondChannel.connected() == 1 })
+
+	// Symmetric half: the replica that has just lost the account must rejoin the
+	// retry loop and take it back, instead of exiting for good.
+	dieLease(t, db, "channel:acct")
+	waitForLease(t, "the first replica to take the account back", func() bool { return firstChannel.connected() == 1 })
+
+	if err := first.Stop(context.Background()); err != nil {
+		t.Fatalf("stop the first replica's handler: %v", err)
+	}
+	if err := second.Stop(context.Background()); err != nil {
+		t.Fatalf("stop the second replica's handler: %v", err)
+	}
+	// A stopped replica must not reconnect: the loops end with the handler.
+	firstConnections, secondConnections := firstChannel.connections(), secondChannel.connections()
+	time.Sleep(50 * time.Millisecond)
+	if got := firstChannel.connections(); got != firstConnections {
+		t.Fatalf("the stopped first replica reconnected %d times, want none", got-firstConnections)
+	}
+	if got := secondChannel.connections(); got != secondConnections {
+		t.Fatalf("the stopped second replica reconnected %d times, want none", got-secondConnections)
+	}
+}
+
 // TestGuardedChannelConnectsOnOneReplicaOnly pins what the lease is for: of
 // two replicas holding the same account, exactly one has its channel connected,
 // and the one that loses the lease disconnects at once instead of holding a
@@ -272,6 +335,15 @@ func takeLease(t *testing.T, db *sql.DB, name, holder string) {
 		holder, time.Now().UnixMilli()+LeaseTTL.Milliseconds(), name); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// dieLease leaves the account with a replica that is no longer running and
+// whose lease has run out, which is what a holder that stopped renewing looks
+// like to the replicas that are still up.
+func dieLease(t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+	takeLease(t, db, name, "webchat-gone")
+	ageLease(t, db, name)
 }
 
 func waitForLease(t *testing.T, what string, ok func() bool) {
