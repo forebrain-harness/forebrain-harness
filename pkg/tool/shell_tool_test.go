@@ -1704,6 +1704,73 @@ func TestBatchCacheEnv(t *testing.T) {
 	}
 }
 
+// TestBatchRealHomeConfigEnv pins which user-level configuration a batch task
+// keeps sight of, and the two reasons a pointer is withheld: the file is not
+// there, and the task's boundary cannot read it (plans/235).
+func TestBatchRealHomeConfigEnv(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "project", "tasks", "T", "1")
+	project := filepath.Join(base, "project")
+	forebrainHome := filepath.Join(base, "forebrain-home")
+	userHome := filepath.Join(base, "user-home")
+	configDir := filepath.Join(base, "user-config")
+	gitconfig := filepath.Join(userHome, ".gitconfig")
+	npmrc := filepath.Join(userHome, ".npmrc")
+	goenv := filepath.Join(configDir, "go", "env")
+	for _, dir := range []string{workspace, userHome, filepath.Join(configDir, "go")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, body := range map[string]string{
+		gitconfig: "[user]\n\tname = Batch\n",
+		npmrc:     "registry=https://registry.example\n",
+		goenv:     "GOPRIVATE=corp.example\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	boundary := NewBatchBoundary(workspace, project, forebrainHome, nil)
+	want := map[string]string{
+		"GIT_CONFIG_GLOBAL":     gitconfig,
+		"NPM_CONFIG_USERCONFIG": npmrc,
+		"GOENV":                 goenv,
+	}
+	env := batchRealHomeConfigEnv(userHome, configDir, boundary)
+	if len(env) != len(want) {
+		t.Fatalf("env = %#v, want %d pointers (pip.conf does not exist here)", env, len(want))
+	}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("malformed entry %q", entry)
+		}
+		if want[key] != value {
+			t.Fatalf("%s = %q, want %q", key, value, want[key])
+		}
+		if _, statErr := os.Stat(value); statErr != nil {
+			t.Fatalf("%s names %q, which does not exist: %v", key, value, statErr)
+		}
+	}
+	// A user home the boundary denies is not named: the task would only fail
+	// on the read, one confusing step later.
+	deniedHome := filepath.Join(forebrainHome, "user-home")
+	if err := os.MkdirAll(deniedHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deniedHome, ".gitconfig"), []byte("[user]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := batchRealHomeConfigEnv(deniedHome, "", boundary); len(got) != 0 {
+		t.Fatalf("a denied home produced pointers: %#v", got)
+	}
+	// No home to point at, no pointer.
+	if got := batchRealHomeConfigEnv("", "", boundary); len(got) != 0 {
+		t.Fatalf("an empty home produced pointers: %#v", got)
+	}
+}
+
 // TestBatchShellRejectsEscalationRequests pins that a batch task cannot ask for
 // more than its sandbox: the refusal happens before any command runs, so a
 // model that reaches for the escalation fields learns they do not work
@@ -2071,5 +2138,103 @@ func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 
 	if calls := hookCalls.Load(); calls != 0 {
 		t.Fatalf("a batch turn asked the action hook %d time(s); it must ask nobody anything", calls)
+	}
+}
+
+// TestBatchShellKeepsTheUsersConfigurationReachable pins the environment a
+// batch command receives (plans/235): HOME is the task's own — the sandbox only
+// lets it write there — and the tools whose configuration lives in the user's
+// real home are pointed at the real files, which the boundary lets them read.
+func TestBatchShellKeepsTheUsersConfigurationReachable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs real sandboxed commands")
+	}
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	workspace := filepath.Join(project, "tasks", "T", "1")
+	forebrainHome := filepath.Join(base, "forebrain-home")
+	userHome := filepath.Join(base, "user-home")
+	for _, dir := range []string{workspace, forebrainHome, userHome} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitconfig := filepath.Join(userHome, ".gitconfig")
+	npmrc := filepath.Join(userHome, ".npmrc")
+	for path, body := range map[string]string{
+		gitconfig: "[user]\n\tname = Batch\n",
+		npmrc:     "registry=https://registry.example\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The task's HOME is the test's own: os.UserHomeDir and os.UserConfigDir
+	// resolve the pointers from it, exactly as the gateway process resolves
+	// them from the operator's home.
+	t.Setenv("HOME", userHome)
+	// Empty, so the config directory is deterministic off macOS too.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "user-config"))
+
+	st := NewState(project)
+	shellTool, err := NewShellTool(st, &AgentToolRuntime{
+		Home: forebrainHome, WorkspaceRoot: project, Cfg: &appcfg.Root{}, BatchSandbox: true,
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithProjectRoot(context.Background(), project)
+	ctx = WithTaskWorkspace(ctx, workspace)
+	ctx = WithBatchBoundary(ctx, NewBatchBoundary(workspace, project, forebrainHome, nil))
+
+	run := func(command string) (string, string, int, error) {
+		raw, marshalErr := json.Marshal(map[string]any{"command": command})
+		if marshalErr != nil {
+			t.Fatalf("marshal %q: %v", command, marshalErr)
+		}
+		out, handleErr := shellTool.Handle(ctx, string(raw))
+		body, _ := out.(string)
+		var parsed struct {
+			Stdout   string `json:"stdout"`
+			Stderr   string `json:"stderr"`
+			ExitCode int    `json:"exit_code"`
+		}
+		if body != "" {
+			_ = json.Unmarshal([]byte(body), &parsed)
+		}
+		return parsed.Stdout, parsed.Stderr, parsed.ExitCode, handleErr
+	}
+
+	stdout, stderr, exit, handleErr := run(`printf '%s\n' "$HOME" "$GIT_CONFIG_GLOBAL" "$NPM_CONFIG_USERCONFIG" "${PIP_CONFIG_FILE:-unset}" "${GOENV:-unset}"`)
+	if handleErr != nil || exit != 0 {
+		t.Fatalf("reading the task environment must succeed: exit=%d err=%v stderr=%s", exit, handleErr, stderr)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("environment lines = %#v, want 5", lines)
+	}
+	if resolvedWorkingDir(t, lines[0]) != resolvedWorkingDir(t, filepath.Join(workspace, ".work", "home")) {
+		t.Fatalf("HOME = %q, want the task's own home", lines[0])
+	}
+	if lines[1] != gitconfig || lines[2] != npmrc {
+		t.Fatalf("git/npm configuration = %q/%q, want %q/%q", lines[1], lines[2], gitconfig, npmrc)
+	}
+	// Neither file exists under this test's home, so neither pointer is set:
+	// a pointer at a missing file only moves the failure into the tool.
+	if lines[3] != "unset" || lines[4] != "unset" {
+		t.Fatalf("pip/go configuration pointers = %q/%q, want none: neither file exists", lines[3], lines[4])
+	}
+	for _, entry := range []struct{ key, path string }{
+		{"GIT_CONFIG_GLOBAL", lines[1]}, {"NPM_CONFIG_USERCONFIG", lines[2]},
+	} {
+		if _, statErr := os.Stat(entry.path); statErr != nil {
+			t.Fatalf("%s names %q, which does not exist: %v", entry.key, entry.path, statErr)
+		}
+	}
+	// Named is not enough: the read has to succeed inside the sandbox too, or
+	// the pointer would be a promise the boundary breaks.
+	stdout, stderr, exit, handleErr = run(`cat "$GIT_CONFIG_GLOBAL"`)
+	if handleErr != nil || exit != 0 || !strings.Contains(stdout, "name = Batch") {
+		t.Fatalf("reading through GIT_CONFIG_GLOBAL failed: exit=%d err=%v stderr=%s stdout=%q", exit, handleErr, stderr, stdout)
 	}
 }
