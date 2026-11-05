@@ -1,6 +1,102 @@
 package home
 
-import "testing"
+import (
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// envValues collapses a slice into a map and fails on a duplicated name: one
+// entry per variable is the invariant the merge owes every caller, because
+// os/exec keeps only the last of a duplicated key and that choice was
+// previously made by the sort order of the two values.
+func envValues(t *testing.T, env []string) map[string]string {
+	t.Helper()
+	values := make(map[string]string, len(env))
+	for _, item := range env {
+		key, val, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		if _, dup := values[key]; dup {
+			t.Fatalf("%s appears twice in the environment: %#v", key, env)
+		}
+		values[key] = val
+	}
+	return values
+}
+
+// An explicit value wins wherever the two paths happen to sort, which is the
+// case the merge used to lose: the parent's temp directory sorts after the
+// task's own, so the sort made the parent's value the last entry and os/exec
+// kept it.
+func TestSafeSubprocessEnvExplicitTMPDIRBeatsTheParent(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"TMPDIR=/var/folders/zz/T/",
+		"TMP=/var/folders/zz/T/",
+		"TEMP=/var/folders/zz/T/",
+	}
+	got := SafeSubprocessEnv(parent, Options{ExplicitEnv: map[string]string{
+		"TMPDIR": "/Users/u/work/tasks/1/.work/tmp",
+	}})
+	values := envValues(t, got)
+	if values["TMPDIR"] != "/Users/u/work/tasks/1/.work/tmp" {
+		t.Fatalf("TMPDIR = %q, want the explicit value: %#v", values["TMPDIR"], got)
+	}
+	// The names the explicit env did not mention keep the parent's value.
+	if values["TMP"] != "/var/folders/zz/T/" || values["TEMP"] != "/var/folders/zz/T/" {
+		t.Fatalf("untouched temp variables = %q/%q: %#v", values["TMP"], values["TEMP"], got)
+	}
+}
+
+func TestSafeSubprocessEnvExplicitHOMEBeatsTheParent(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"HOME=/Users/u",
+		"LANG=en_US.UTF-8",
+	}
+	got := SafeSubprocessEnv(parent, Options{ExplicitEnv: map[string]string{
+		"HOME": "/Users/u/work/tasks/1/.work/home",
+	}})
+	values := envValues(t, got)
+	if values["HOME"] != "/Users/u/work/tasks/1/.work/home" {
+		t.Fatalf("HOME = %q, want the explicit value: %#v", values["HOME"], got)
+	}
+	// A parent-only variable survives the merge.
+	if values["LANG"] != "en_US.UTF-8" || values["PATH"] != "/usr/bin" {
+		t.Fatalf("inherited variables were dropped: %#v", got)
+	}
+}
+
+// Windows has one PATH, however it is spelled, so the explicit value replaces
+// the inherited `Path` instead of shipping both: os/exec would otherwise hand
+// the child two entries and the toolchain would see whichever came last.
+func TestSafeSubprocessEnvFoldsCaseOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("environment names are case-insensitive only on Windows")
+	}
+	parent := []string{
+		"Path=C:\\Windows\\system32",
+		"HOME=C:\\Users\\u",
+	}
+	got := SafeSubprocessEnv(parent, Options{ExplicitEnv: map[string]string{
+		"PATH": "C:\\tools;C:\\Windows\\system32",
+	}})
+	values := map[string]string{}
+	spellings := map[string]int{}
+	for _, item := range got {
+		key, val, _ := strings.Cut(item, "=")
+		values[strings.ToUpper(key)] = val
+		spellings[strings.ToUpper(key)]++
+	}
+	if spellings["PATH"] != 1 {
+		t.Fatalf("PATH reached the child %d time(s), want one entry: %#v", spellings["PATH"], got)
+	}
+	if values["PATH"] != `C:\tools;C:\Windows\system32` {
+		t.Fatalf("PATH = %q, want the explicit value: %#v", values["PATH"], got)
+	}
+}
 
 func TestSafeSubprocessEnvStripsSecretsAndKeepsBaseRuntime(t *testing.T) {
 	parent := []string{

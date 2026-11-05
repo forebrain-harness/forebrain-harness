@@ -532,17 +532,33 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
 			shellEnv = append(shellEnv, key+"="+tmpDir)
 		}
-		// The task's home lives in its workspace too, because the real one is
-		// unreadable across the task's boundary: a login shell still reads
-		// $HOME/.profile, so leaving HOME at the real home puts
-		// "sh: /Users/<user>/.profile: Operation not permitted" on stderr of
-		// every command the task runs. Appended last so no earlier entry
+		// The task's home lives in its workspace too, because a batch command
+		// may write there and nowhere else: a HOME outside it is read-only, so
+		// every cache, scratch file and config a tool writes under $HOME would
+		// fail. It also keeps a login shell from reading a profile out of a home
+		// the boundary does deny — the Forebrain home, or a project root that
+		// contains the user's home — which is the
+		// "sh: /Users/<user>/.profile: Operation not permitted" line a batch
+		// command used to carry on stderr. Appended last so no earlier entry
 		// overrides it.
 		homeDir := filepath.Join(filepath.Clean(boundary.Workspace), ".work", "home")
 		if mkErr := os.MkdirAll(homeDir, 0o755); mkErr != nil {
 			return "", mkErr
 		}
 		shellEnv = append(shellEnv, "HOME="+homeDir)
+		// The rewrite above is deliberate and stays (plans/216 :187, whose
+		// acceptance walkthrough points TMPDIR and HOME at the task's own
+		// workspace; :99's "HOME 不改" predates the write boundary and would
+		// make every cache write under the real home fail). What it costs is the
+		// user-level configuration the tools read out of the real home, which
+		// the boundary does let the task read — it denies the Forebrain home and
+		// the project root, not the user's home. Hand the tools whose
+		// configuration file has an explicit override the real path, so an
+		// intranet operator's mirror in ~/.npmrc still reaches a batch task's
+		// installs.
+		userHome, _ := os.UserHomeDir()
+		userConfigDir, _ := os.UserConfigDir()
+		shellEnv = append(shellEnv, batchRealHomeConfigEnv(userHome, userConfigDir, boundary)...)
 		// A contained task's package managers write their caches into its own
 		// workspace as well: the real home is denied, so npm, pip, uv, go and
 		// yarn would otherwise fail on the cache write before the install
@@ -784,6 +800,50 @@ func batchCacheEnv(workspace string) []string {
 		"GOPATH=" + filepath.Join(cache, "go"),
 		"YARN_CACHE_FOLDER=" + filepath.Join(cache, "yarn"),
 	}
+}
+
+// batchRealHomeConfigEnv keeps the user-level configuration of the package
+// managers reachable from a batch task, whose HOME lives in its own workspace
+// (batchCacheEnv redirects the caches for the same reason).
+//
+// Each of these variables names one file outright, so a task whose HOME was
+// moved still reads the operator's settings — the mirror in ~/.npmrc is what
+// plans/208 exists for. Only a file that exists *and* is readable across the
+// task's boundary is named: a pointer at a missing file makes the tool fail on
+// it instead of falling back, and one at a denied path only moves the refusal
+// to a place with no explanation. Paths, never credentials: the values here
+// are where a tool should look, and the mirror configuration they lead to is
+// already on mirrorEnvAllow.
+func batchRealHomeConfigEnv(userHome, userConfigDir string, boundary BatchBoundary) []string {
+	paths := map[string]string{}
+	if home := strings.TrimSpace(userHome); home != "" {
+		paths["GIT_CONFIG_GLOBAL"] = filepath.Join(home, ".gitconfig")
+		paths["NPM_CONFIG_USERCONFIG"] = filepath.Join(home, ".npmrc")
+		// pip's user config is the dotfile on every platform; macOS's
+		// Application Support location is pip's own default, and naming it
+		// unconditionally would make the pointer depend on how pip was built.
+		paths["PIP_CONFIG_FILE"] = filepath.Join(home, ".config", "pip", "pip.conf")
+	}
+	if configDir := strings.TrimSpace(userConfigDir); configDir != "" {
+		// Go's own default for $GOENV is <user config dir>/go/env.
+		paths["GOENV"] = filepath.Join(configDir, "go", "env")
+	}
+	keys := []string{"GIT_CONFIG_GLOBAL", "NPM_CONFIG_USERCONFIG", "PIP_CONFIG_FILE", "GOENV"}
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
+		path, ok := paths[key]
+		if !ok {
+			continue
+		}
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
+			continue
+		}
+		if boundary.DeniesRead(path) {
+			continue
+		}
+		env = append(env, key+"="+path)
+	}
+	return env
 }
 
 func filesystemAllowsWriteAt(roots []string, target string) bool {

@@ -2,6 +2,7 @@ package home
 
 import (
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -62,7 +63,13 @@ func SafeSubprocessEnv(parent []string, opts Options) []string {
 	for _, k := range mirrorEnvAllow {
 		allowSet[k] = struct{}{}
 	}
-	out := make([]string, 0, len(parent)+len(opts.ExplicitEnv))
+	// One entry per variable, and the explicit value replaces the inherited one
+	// outright. Appending both and sorting the merged slice — what this used to
+	// do — left the winner to os/exec's "last entry for a duplicate key" rule,
+	// which a plain sort decides by the spelling of the two values: the task's
+	// own TMPDIR lost to the parent's whenever the parent's path happened to
+	// sort after it, and the same held for HOME and every mirror variable.
+	merged := make(map[string]envValue, len(parent)+len(opts.ExplicitEnv))
 	for _, item := range parent {
 		key, val, ok := strings.Cut(item, "=")
 		if !ok {
@@ -81,7 +88,7 @@ func SafeSubprocessEnv(parent []string, opts Options) []string {
 		if strings.TrimSpace(val) == "" {
 			continue
 		}
-		out = append(out, key+"="+val)
+		merged[envVariableKey(key)] = envValue{name: key, value: val}
 	}
 	for key, val := range opts.ExplicitEnv {
 		k := strings.TrimSpace(key)
@@ -96,10 +103,36 @@ func SafeSubprocessEnv(parent []string, opts Options) []string {
 				continue
 			}
 		}
-		out = append(out, k+"="+val)
+		merged[envVariableKey(k)] = envValue{name: k, value: val}
+	}
+	// Sorting is still worth doing — it keeps the output deterministic, and
+	// tests and diffs read by variable — but it no longer decides anything: the
+	// duplicates the sort used to order are gone by now.
+	out := make([]string, 0, len(merged))
+	for _, entry := range merged {
+		out = append(out, entry.name+"="+entry.value)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// envValue is one environment entry, keeping the spelling of the side that
+// won: the parent's for an inherited variable, the explicit one's for an
+// overridden one.
+type envValue struct {
+	name  string
+	value string
+}
+
+// envVariableKey is the identity a variable is merged by. Windows treats
+// environment names case-insensitively — `Path` and `PATH` are one variable —
+// while everywhere else the spelling is part of the name. The uppercase key is
+// never what gets emitted; it only decides which entries are the same entry.
+func envVariableKey(key string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(key)
+	}
+	return key
 }
 
 func looksSecretKey(key string) bool {
