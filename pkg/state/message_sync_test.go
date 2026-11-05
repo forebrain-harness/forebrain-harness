@@ -2,11 +2,16 @@ package state
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 func TestAppendMessageSequenceAppendsOnlyNewSuffix(t *testing.T) {
@@ -349,5 +354,107 @@ func TestClearingAnEmptySessionHasNoAnchor(t *testing.T) {
 	cursor, err := s.SetSessionContextResetToLatest(ctx, "empty")
 	if err != nil || cursor != 0 {
 		t.Fatalf("SetSessionContextResetToLatest(empty) = %d, %v; want 0, nil", cursor, err)
+	}
+}
+
+// TestStoreRepairsTextAnEngineWouldReject pins the promise the store boundary
+// makes: the text it writes is text every engine accepts.
+//
+// On SQLite both bad bytes round-trip, which is why this has never been seen on
+// the default engine; MySQL and PostgreSQL reject the row server-side instead.
+// The assertion is therefore "the stored value is what an engine accepts", not
+// "the value is unchanged" — a normalisation that only ran on the two servers
+// would make a conversation's stored bytes depend on which one it ran on.
+func TestStoreRepairsTextAnEngineWouldReject(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open the state database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	t.Logf("engine under test: %s", dbx.DialectOf(db))
+	ensureSessionsForRuns(t, db, "bytes-session")
+	store := NewSessionStore(db, "main")
+
+	const bad = "before\xffafter\x00end"
+	message := llm.UserMessage(llm.Text(bad))
+	if err := store.AppendMessageSequenceForRun(ctx, "bytes-session", "", []llm.Message{message}, "model", ""); err != nil {
+		t.Fatalf("a message carrying an invalid byte and a NUL was refused instead of repaired: %v", err)
+	}
+
+	content, parts := storedRowText(t, db, "bytes-session")
+	if !utf8.ValidString(content) {
+		t.Errorf("stored content is not valid UTF-8: %q", content)
+	}
+	if strings.ContainsRune(content, 0) {
+		t.Errorf("stored content carries a NUL: %q", content)
+	}
+	if !utf8.ValidString(parts) || strings.ContainsRune(parts, 0) {
+		t.Errorf("stored parts carry a byte an engine refuses: %q", parts)
+	}
+	if strings.Contains(parts, `\u0000`) {
+		t.Errorf("stored parts carry a NUL escape, which PostgreSQL refuses to parse out of a jsonb cast: %q", parts)
+	}
+	if !strings.HasPrefix(content, "before") || !strings.HasSuffix(content, "end") {
+		t.Errorf("stored content lost the prose around the bad bytes: %q", content)
+	}
+}
+
+// storedRowText reads the content and parts columns of a conversation's first
+// message row back as the engine stored them.
+func storedRowText(t *testing.T, db *sql.DB, sessionID string) (content, parts string) {
+	t.Helper()
+	query := `SELECT content, parts FROM fb_messages WHERE session_id=` +
+		dbx.Placeholder(dbx.DialectOf(db), 1) + ` ORDER BY id ASC`
+	if err := db.QueryRowContext(context.Background(), query, sessionID).Scan(&content, &parts); err != nil {
+		t.Fatalf("read the stored row back: %v", err)
+	}
+	return content, parts
+}
+
+// TestPostgresToolPayloadWithANULStillListsTheToolCall is the engine leg for the
+// JSON repair, named for the engine whose jsonb cast is what refused the row: a
+// tool completion whose output held a NUL is stored, and the audit reader that
+// parses the payload to find the tool's name still returns it.
+func TestPostgresToolPayloadWithANULStillListsTheToolCall(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open the state database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	t.Logf("engine under test: %s", dbx.DialectOf(db))
+	ensureSessionsForRuns(t, db, "tool-payload-session")
+	store := &RunStore{DB: db}
+
+	payload := event.EncodePayload(event.ToolCallCompletedPayload{
+		ToolName:    "read_file",
+		Description: "read a GBK file",
+		Data:        "binary\x00output\xffand prose",
+	})
+	if !strings.Contains(string(payload), `\u0000`) {
+		t.Fatalf("the payload under test carries no NUL escape: %s", payload)
+	}
+	if _, err := store.AppendSessionEvent(ctx, SessionEvent{
+		ID:        "evt-nul-payload",
+		SessionID: "tool-payload-session",
+		Type:      event.RunEventToolCompleted,
+		Payload:   payload,
+	}); err != nil {
+		t.Fatalf("a tool completion whose output held a NUL was refused instead of repaired: %v", err)
+	}
+
+	rows, err := store.ListSessionToolCalls(ctx, "tool-payload-session", "", "", 10)
+	if err != nil {
+		t.Fatalf("list the conversation's tool calls: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ToolName != "read_file" {
+		t.Fatalf("tool calls = %+v, want the one read_file completion", rows)
+	}
+	if strings.Contains(rows[0].DetailJSON, `\u0000`) {
+		t.Errorf("stored payload still carries the NUL escape: %s", rows[0].DetailJSON)
+	}
+	if !strings.Contains(rows[0].DetailJSON, dbx.ReplacementText) {
+		t.Errorf("stored payload does not carry the replacement where the NUL was: %s", rows[0].DetailJSON)
 	}
 }

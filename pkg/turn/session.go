@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -188,11 +189,17 @@ func PersistCancelledTurn(ctx context.Context, store CancelledTurnStore, in Canc
 		toPersist = append(toPersist, llm.AssistantMessage([]llm.ContentPart{llm.Text(partialText)}))
 	}
 	if len(toPersist) > 0 {
-		_ = store.AppendMessageSequenceForRun(
+		// A store that refuses the write is not a reason to abort the turn the
+		// user is watching, but it is the reason this conversation stops being
+		// persisted: the next turn writes on top of a transcript missing a whole
+		// turn, and says nothing about it. Silence is the one thing that hides it.
+		if err := store.AppendMessageSequenceForRun(
 			ctx, in.SessionID, in.RunID, toPersist,
 			in.Model,
 			"", // usage is unknown at cancel time; the store tolerates it
-		)
+		); err != nil {
+			slog.Error("persist the cancelled turn's messages", "session_id", in.SessionID, "run_id", in.RunID, "err", err)
+		}
 	}
 	if reasoning := strings.TrimSpace(in.PartialReasoning); reasoning != "" {
 		_, _ = store.AppendMessageForRun(ctx, in.SessionID, in.RunID, "reasoning", reasoning, "", "", state.MessageExecTiming{})

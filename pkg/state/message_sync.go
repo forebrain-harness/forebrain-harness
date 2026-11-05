@@ -55,7 +55,7 @@ func (s *SessionStore) AppendMessageSequenceForRun(ctx context.Context, sessionI
 	}
 	plan := planTranscriptAppend(storedTranscriptMessages(rows), canonical)
 	for _, completion := range plan.completions {
-		text := strings.TrimSpace(completion.message.TextContent())
+		text := storedContent(completion.message)
 		if err := s.UpdateMessageContentAndParts(ctx, tx, completion.rowID, text, MessagePartsJSON(completion.message, text)); err != nil {
 			return err
 		}
@@ -95,6 +95,15 @@ func (s *SessionStore) AppendNewMessages(ctx context.Context, sessionID, runID s
 	return tx.Commit()
 }
 
+// storedContent is what a message row's content column gets: the message's own
+// text, trimmed, and repaired of the bytes MySQL and PostgreSQL refuse
+// (ValidText). It is the one place a transcript row's text is decided, so the
+// append and the in-place completion of a row cannot disagree about it. The
+// parts JSON built from the same text is repaired by MessagePartsJSON.
+func storedContent(msg llm.Message) string {
+	return dbx.ValidText(strings.TrimSpace(msg.TextContent()))
+}
+
 func (s *SessionStore) appendMessage(ctx context.Context, q dbtx, sessionID, runID string, msg llm.Message, model string, usageJSON string) error {
 	role := strings.TrimSpace(msg.Role)
 	if role == "" || role == llm.RoleSystem {
@@ -113,7 +122,7 @@ func (s *SessionStore) appendMessage(ctx context.Context, q dbtx, sessionID, run
 	if IsCompactSummaryMessage(msg) {
 		return nil
 	}
-	content := strings.TrimSpace(msg.TextContent())
+	content := storedContent(msg)
 	switch role {
 	case llm.RoleUser, llm.RoleAssistant, llm.RoleTool, "reasoning":
 	default:
