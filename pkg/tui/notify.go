@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -2494,7 +2495,12 @@ func handlePeerWakeNotification(state *streamState, m any) bool {
 	// A message for a conversation this terminal is not showing has nowhere to
 	// land here: the engine asked the surface that owns the conversation, and
 	// this is not it any more (the person switched conversations in between).
+	// The engine has no way to take the message back — Wake returning nil
+	// already counted it as delivered — so the drop is recorded here instead of
+	// being kept, carried to another conversation, or answered.
 	if !sameSessionID(msg.SessionID, state.sessionID) {
+		slog.Warn("peer message dropped: it belongs to another conversation",
+			"msg_id", msg.Prompt.MsgID, "session_id", msg.SessionID, "showing_session_id", state.sessionID)
 		return true
 	}
 	state.setPeerDue(msg.Prompt)
@@ -2692,22 +2698,63 @@ func (s *streamState) takeAutoContinueDue() (ComposerSubmission, bool) {
 	return sub, true
 }
 
-// setPeerDue records a peer message waiting for the loop to run it.
+// maxPeerWakeQueue bounds the peer messages parked for this conversation's idle
+// loop. The engine accepts at most peer.DefaultLimits.MaxQueuedPeerMessages (50)
+// per conversation, so a surface is never legitimately asked to hold more; the
+// number is repeated here because pkg/tui does not import pkg/peer — the process
+// layer exposes the peer package to the surfaces instead (see
+// process.ClaudeCodeDetected) — and the limit is a field of a struct rather than
+// a package constant anyway.
+const maxPeerWakeQueue = 50
+
+// setPeerDue records a peer message waiting for the loop to run it. Each wake is
+// a message of its own, so the parked messages are a queue drained oldest-first.
+// A message that cannot be parked is dropped rather than allowed to displace one
+// already promised a turn — the newest goes, so the order the senders were
+// answered in is kept — and the drop is logged: the engine answered the sender
+// as if the message were delivered, so the log line is the only account of it.
 func (s *streamState) setPeerDue(prompt process.PeerPrompt) {
 	if s == nil {
 		return
 	}
-	s.peerDue = &prompt
+	if len(s.peerDue) >= maxPeerWakeQueue {
+		slog.Warn("peer message dropped: the wake queue is full",
+			"msg_id", prompt.MsgID, "session_id", prompt.SessionID, "queue_limit", maxPeerWakeQueue)
+		return
+	}
+	s.peerDue = append(s.peerDue, prompt)
 }
 
-// takePeerDue hands the loop a peer message waiting for a turn, once.
+// takePeerDue hands the loop the oldest peer message waiting for a turn, once.
 func (s *streamState) takePeerDue() (process.PeerPrompt, bool) {
-	if s == nil || s.peerDue == nil {
+	if s == nil || len(s.peerDue) == 0 {
 		return process.PeerPrompt{}, false
 	}
-	prompt := *s.peerDue
-	s.peerDue = nil
+	prompt := s.peerDue[0]
+	s.peerDue = s.peerDue[1:]
+	if len(s.peerDue) == 0 {
+		s.peerDue = nil
+	}
 	return prompt, true
+}
+
+// discardPeerDue drops every peer message parked for this conversation, returning
+// how many went, each logged with the id its sender was answered under. It is
+// what a conversation switch does to the queue: the messages are turns for the
+// conversation being left, so carrying them along would run them in a
+// conversation their senders never wrote to, and leaving them for the next idle
+// pass would run them there anyway.
+func (s *streamState) discardPeerDue() int {
+	if s == nil || len(s.peerDue) == 0 {
+		return 0
+	}
+	dropped := s.peerDue
+	s.peerDue = nil
+	for _, prompt := range dropped {
+		slog.Warn("peer message dropped: the conversation changed",
+			"msg_id", prompt.MsgID, "session_id", prompt.SessionID)
+	}
+	return len(dropped)
 }
 
 // autoContinueWake tells the idle loop's wait to return so it can run a due
@@ -2800,7 +2847,7 @@ func (s *streamState) heldPeersHeld() bool {
 // notification asked for: run a due continuation, run a peer message waiting
 // for a turn of its own, or put a held peer message's question to the person.
 func (s *streamState) idleWake() bool {
-	return s.autoContinueWake() || s.heldPeersHeld() || s.peerDue != nil
+	return s.autoContinueWake() || s.heldPeersHeld() || len(s.peerDue) > 0
 }
 
 // handlePeerTreeCountNotification applies the footer's ⇄ count to the
