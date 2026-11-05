@@ -73,6 +73,25 @@ type peerOutbound struct {
 	env     *Environment
 	pacer   *peer.Pacer
 	tracker *peerTracker
+
+	// mu guards warnedUnavailable: the same-tree guard asks on every command,
+	// and a directory that stays unusable must cost one warning, not one per
+	// command (plan 237 §4).
+	mu                sync.Mutex
+	warnedUnavailable bool
+}
+
+// warnUnavailableOnce names the reason the guard had to answer from the
+// rendezvous directory, once per process.
+func (o *peerOutbound) warnUnavailableOnce(err error) {
+	o.mu.Lock()
+	warned := o.warnedUnavailable
+	o.warnedUnavailable = true
+	o.mu.Unlock()
+	if warned {
+		return
+	}
+	slog.Warn("peer service unavailable; the same-tree guard answers from the rendezvous directory", "err", err)
 }
 
 // peerDirectory builds this process's port, once. It is nil when the protocol

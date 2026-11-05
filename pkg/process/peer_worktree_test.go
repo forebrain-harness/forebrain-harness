@@ -11,8 +11,11 @@ package process
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,6 +168,202 @@ func TestPeerNoteWriteNeedsARegistration(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("ledger holds %d entries, want none", len(entries))
 	}
+}
+
+// The peer view may not depend on this process's own registration. When the
+// peer service never started — the socket directory is somebody else's, a
+// transient failure, a full disk — every caller of WorkTreePeers still has to
+// see a neighbour working in this tree (plan 237 §1).
+func TestPeerWorkTreeAnswersWhenTheServiceNeverStarted(t *testing.T) {
+	env := peerTestEnvFor(t, "tui", func() string { return "cli-guard-down" })
+	// StartPeers is exactly what did not happen in this case: the port is
+	// installed by hand and nothing is registered.
+	env.Deps.Peers = env.peerDirectory()
+	port, ok := env.Deps.Peers.(*peerOutbound)
+	if !ok || port == nil {
+		t.Fatal("this process has no port onto the other processes")
+	}
+	if env.peers != nil {
+		t.Fatal("this case needs a process whose peer service never started")
+	}
+	dir := peer.NewLayout(false).Dir
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A live process of this user in the same tree. Nothing listens on the
+	// socket it names, so an answer that dials cannot reach it.
+	rec := terminalPeer(filepath.Join(env.dirs.fbSock, "900271.sock"), env.LaunchDir, "editing",
+		peer.ExtAgent{ID: "cli-editing", Name: "editing", Kind: "primary", Root: env.LaunchDir,
+			Status: peer.StatusBusy, Task: "Rewriting the importer"})
+	rec.PID = os.Getppid()
+	rec.ProcStart, _ = peer.ProcStart(rec.PID)
+	if err := peer.WriteRecord(dir, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	peers := env.Deps.Peers.WorkTreePeers(context.Background(), env.LaunchDir)
+	if len(peers) != 1 || peers[0].Name != "editing" {
+		t.Fatalf("peers = %#v, want the peer editing this tree", peers)
+	}
+	if peers[0].Status != peer.StatusBusy || peers[0].Task != "Rewriting the importer" {
+		t.Fatalf("peer = %#v, want its status and task", peers[0])
+	}
+}
+
+// The fallback reads the rendezvous directory and nothing else, so what it
+// reports is what the directory says: a live neighbour in the tree is a peer,
+// a record whose writer is gone is not, a peer in another tree is not, and this
+// process's own record is not somebody else (plan 237 §2).
+func TestPeerWorkTreeDirectoryFallbackNeedsNoRegistration(t *testing.T) {
+	env := peerTestEnvFor(t, "tui", func() string { return "cli-guard-fallback" })
+	port := env.outbound()
+	if port == nil {
+		t.Fatal("this process has no port onto the other processes")
+	}
+	if env.peers != nil {
+		t.Fatal("this case needs a process whose peer service never started")
+	}
+	root := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := peer.NewLayout(false).Dir
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plant := func(rec peer.Record) {
+		t.Helper()
+		if err := peer.WriteRecord(dir, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent := func(name, agentRoot string) peer.ExtAgent {
+		return peer.ExtAgent{ID: "cli-" + name, Name: name, Kind: "primary", Root: agentRoot,
+			Status: peer.StatusBusy, Task: "Editing " + name}
+	}
+	socket := filepath.Join(env.dirs.fbSock, "900272.sock")
+
+	// A live process of this user in the same tree — and the files it wrote,
+	// keyed the same way the registered path keys them.
+	ledger := touchLedger(t)
+	appendAgentTouch(ledger, agentTouch{
+		path:    resolveTouchPath(filepath.Join(root, "a.go")),
+		addr:    peer.EncodeUDS(socket),
+		agentID: "cli-editing",
+		name:    "editing",
+	}, time.Now())
+	live := terminalPeer(socket, root, "editing", agent("editing", root))
+	live.PID = os.Getppid()
+	live.ProcStart, _ = peer.ProcStart(live.PID)
+	plant(live)
+	peers := port.WorkTreePeers(context.Background(), root)
+	if len(peers) != 1 || peers[0].Name != "editing" || peers[0].Kind != peerKindTerminal {
+		t.Fatalf("peers = %#v, want the live neighbour", peers)
+	}
+	if len(peers[0].RecentFiles) != 1 || peers[0].RecentFiles[0] != "a.go" {
+		t.Fatalf("recent = %#v, want the file the ledger recorded", peers[0].RecentFiles)
+	}
+
+	// A record left behind by a process that is gone: its pid belongs to a
+	// different process now, whose start time is not the recorded one.
+	dead := terminalPeer(socket, root, "gone", agent("gone", root))
+	dead.PID = os.Getppid()
+	dead.ProcStart = "Thu Jan  1 00:00:00 1970"
+	plant(dead)
+	if peers := port.WorkTreePeers(context.Background(), root); len(peers) != 0 {
+		t.Fatalf("peers = %#v, want the dead record left out", peers)
+	}
+
+	// The same live process, working in another tree, is nobody's business here.
+	elsewhere := terminalPeer(socket, t.TempDir(), "elsewhere", agent("elsewhere", t.TempDir()))
+	elsewhere.PID = os.Getppid()
+	elsewhere.ProcStart, _ = peer.ProcStart(elsewhere.PID)
+	plant(elsewhere)
+	if peers := port.WorkTreePeers(context.Background(), root); len(peers) != 0 {
+		t.Fatalf("peers = %#v, want the peer in another tree left out", peers)
+	}
+
+	// This process's own record is not somebody else.
+	own := terminalPeer(socket, root, "self", agent("self", root))
+	own.PID = os.Getpid()
+	own.ProcStart, _ = peer.ProcStart(own.PID)
+	plant(own)
+	if peers := port.WorkTreePeers(context.Background(), root); len(peers) != 0 {
+		t.Fatalf("peers = %#v, want this process's own record left out", peers)
+	}
+
+	// A directory that cannot be read answers "nobody" rather than a panic.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if peers := port.WorkTreePeers(context.Background(), root); len(peers) != 0 {
+		t.Fatalf("peers = %#v, want nobody from an unreadable directory", peers)
+	}
+}
+
+// A service that stays unusable costs one warning, not one per command: the
+// fallback answers every command, and the log says why once (plan 237 §4).
+func TestPeerWorkTreeFallbackWarnsOnce(t *testing.T) {
+	env := peerTestEnvFor(t, "tui", func() string { return "cli-guard-warn" })
+	port := env.outbound()
+	if port == nil {
+		t.Fatal("this process has no port onto the other processes")
+	}
+	capture := &peerWarnCapture{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	root := t.TempDir()
+	for i := 0; i < 3; i++ {
+		if peers := port.WorkTreePeers(context.Background(), root); len(peers) != 0 {
+			t.Fatalf("call %d: peers = %#v, want nobody", i, peers)
+		}
+	}
+	warnings := capture.warnings()
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one", warnings)
+	}
+	if !strings.Contains(warnings[0], "err") {
+		t.Fatalf("warning = %q, want the reason it fell back", warnings[0])
+	}
+}
+
+// peerWarnCapture keeps the warnings this binary logged, as message plus the
+// attribute keys, so a test can see both what was said and that the reason rode
+// along with it.
+type peerWarnCapture struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *peerWarnCapture) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *peerWarnCapture) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Level < slog.LevelWarn {
+		return nil
+	}
+	keys := make([]string, 0, 4)
+	rec.Attrs(func(attr slog.Attr) bool {
+		keys = append(keys, attr.Key)
+		return true
+	})
+	c.mu.Lock()
+	c.lines = append(c.lines, rec.Message+" "+strings.Join(keys, ","))
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *peerWarnCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *peerWarnCapture) WithGroup(string) slog.Handler      { return c }
+
+func (c *peerWarnCapture) warnings() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.lines...)
 }
 
 // Being in the same directory tree is what makes a peer somebody to coordinate

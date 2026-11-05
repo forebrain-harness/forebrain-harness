@@ -462,7 +462,11 @@ func (o *peerOutbound) peersUnder(ctx context.Context, root string) []tool.WorkT
 	}
 	view, err := o.view(caller.SessionID)
 	if err != nil {
-		return nil
+		// This process's registration is not what makes the tree shared: the
+		// rendezvous directory is readable without it, so a service that never
+		// started still answers (plan 237 §2).
+		o.warnUnavailableOnce(err)
+		return o.workTreePeersFromDirectory(resolvedRoot)
 	}
 	self := view.selfID(caller)
 	recent := o.recentFilesByAddress(resolvedRoot, time.Now())
@@ -485,6 +489,80 @@ func (o *peerOutbound) peersUnder(ctx context.Context, root string) []tool.WorkT
 		})
 	}
 	return out
+}
+
+// workTreePeersFromDirectory answers "who else is in this tree" from the
+// rendezvous directory alone, for a process whose peer service is not running.
+// Any process of this user can read that directory — it is how the candidate
+// list is built — so the guard sees the truth even when this process never
+// registered. Only the filesystem is read: a guard may not dial another
+// process's socket to decide whether to ask the person (plan 237 §2).
+func (o *peerOutbound) workTreePeersFromDirectory(resolvedRoot string) []tool.WorkTreePeer {
+	cc := false
+	if o.env != nil {
+		// The same decision targetMode makes: the interop switch on and Claude
+		// Code detected. The other mode's directory is not read — two toggles
+		// that disagree cannot see each other.
+		cc = o.env.peersConfigSnapshot().enabled() && detectClaudeCode()
+	}
+	selfPID := os.Getpid()
+	selfStart, _ := peer.ProcStart(selfPID)
+	recent := o.recentFilesByAddress(resolvedRoot, time.Now())
+	out := make([]tool.WorkTreePeer, 0, 4)
+	for _, rec := range peer.ReadRecords(peer.NewLayout(cc).Dir) {
+		if rec.PID == selfPID && rec.ProcStart == selfStart {
+			continue // this process's own record
+		}
+		if !recordLiveWithoutSocket(rec) || !sameWorkTree(rec.Cwd, resolvedRoot) {
+			continue
+		}
+		if rec.Forebrain == nil {
+			// A record without the extension block is not a forebrain
+			// process, and only the Claude Code directory holds those.
+			if !cc {
+				continue
+			}
+			name := strings.TrimSpace(rec.Name)
+			if name == "" {
+				name = peerSlug(filepath.Base(strings.TrimSpace(rec.Cwd)))
+			}
+			out = append(out, tool.WorkTreePeer{Name: name, Kind: peerKindAgentSess, Status: rec.Status})
+			continue
+		}
+		surface := strings.TrimSpace(rec.Forebrain.Surface)
+		for _, agent := range rec.Forebrain.Agents {
+			cwd := strings.TrimSpace(agent.Root)
+			if cwd == "" {
+				cwd = rec.Cwd
+			}
+			if !sameWorkTree(cwd, resolvedRoot) {
+				continue
+			}
+			files := recent[agentAddress(peer.EncodeUDS(rec.MessagingSocketPath), strings.TrimSpace(agent.ID))]
+			out = append(out, tool.WorkTreePeer{
+				Name:        strings.TrimSpace(agent.Name),
+				Kind:        peerKindOf(surface, agent),
+				Status:      strings.TrimSpace(agent.Status),
+				Task:        strings.TrimSpace(agent.Task),
+				RecentFiles: files.paths,
+				MoreFiles:   files.more,
+			})
+		}
+	}
+	return out
+}
+
+// recordLiveWithoutSocket answers the only question the fallback needs —
+// does the process still exist — without dialling anything.
+func recordLiveWithoutSocket(r peer.Record) bool {
+	if r.PIDDomain != "" && r.PIDDomain != peer.PIDDomain() {
+		return true // another pid domain: take its pid at its word
+	}
+	if r.ProcStart == "" {
+		return true
+	}
+	current, ok := peer.ProcStart(r.PID)
+	return ok && current == r.ProcStart
 }
 
 // peerTasksByAddress maps each reachable peer agent's ledger address to the task

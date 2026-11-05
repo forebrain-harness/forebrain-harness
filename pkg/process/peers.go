@@ -217,9 +217,16 @@ type peerService struct {
 
 	// mu guards everything below; the tick loop is the only writer, and the
 	// frame handler plus stop read under it.
-	mu         sync.Mutex
-	running    bool
-	ccMode     bool
+	mu      sync.Mutex
+	running bool
+	// modeEntered says the initial registration was entered. The loop runs
+	// before it is, so a first attempt that fails is retried instead of
+	// leaving this process invisible for its whole life (plan 237 §3).
+	modeEntered bool
+	// enterWarned makes the retry cost one warning: after the first failure the
+	// cadence is a debug line.
+	enterWarned bool
+	ccMode      bool
 	layout     peer.Layout
 	server     *peer.Server
 	token      string
@@ -340,7 +347,10 @@ type peerConfigView struct {
 
 func (v peerConfigView) enabled() bool { return v.set && v.on }
 
-// start enters the initial mode and starts the tick loop.
+// start enters the initial mode and starts the tick loop. The loop starts
+// before the first attempt, so an attempt that fails is retried on the tick
+// cadence rather than leaving this process unregistered until it exits (plan
+// 237 §3); the error is still reported, because being invisible is news.
 func (svc *peerService) start(ctx context.Context) error {
 	svc.ctx, svc.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	svc.interval = peerTickInterval
@@ -356,11 +366,12 @@ func (svc *peerService) start(ctx context.Context) error {
 	}
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
+	svc.running = true
+	go svc.tickLoop()
 	if err := svc.enterModeLocked(target, false); err != nil {
 		return err
 	}
-	svc.running = true
-	go svc.tickLoop()
+	svc.modeEntered = true
 	return nil
 }
 
@@ -393,6 +404,10 @@ func (svc *peerService) tick() {
 	if !svc.running {
 		return
 	}
+	if !svc.modeEntered {
+		svc.enterPendingModeLocked(target)
+		return
+	}
 	svc.ticks++
 	if target != svc.ccMode {
 		if err := svc.switchModeLocked(target); err != nil {
@@ -408,6 +423,24 @@ func (svc *peerService) tick() {
 	if svc.ticks%peerCleanTicks == 0 {
 		svc.cleanDeadRecordsLocked()
 	}
+}
+
+// enterPendingModeLocked retries the registration the first attempt could not
+// enter. Until it succeeds the loop has no other job: there is no socket, no
+// record and no mode to refresh (plan 237 §3).
+func (svc *peerService) enterPendingModeLocked(target bool) {
+	if err := svc.enterModeLocked(target, false); err != nil {
+		// One warning names the reason; the retries after it are debug lines, so
+		// a directory that stays unusable does not fill the log.
+		if !svc.enterWarned {
+			svc.enterWarned = true
+			slog.Warn("peer registration could not be entered; retrying every tick", "err", err, "target_cc", target)
+		} else {
+			slog.Debug("peer registration retry failed", "err", err, "target_cc", target)
+		}
+		return
+	}
+	svc.modeEntered = true
 }
 
 // targetMode computes the registration mode the switch and the machine
@@ -647,7 +680,9 @@ func (svc *peerService) cleanDeadRecordsLocked() {
 
 // stop tears the registration down: tick loop first, then the mode-switch
 // hook, the server and socket, and this pid's files in the current
-// directory. Safe to call from the surface and from Close.
+// directory. Safe to call from the surface and from Close. A process whose
+// first mode attempt failed still has a loop to cancel, because running is set
+// before the attempt (plan 237 §3).
 func (svc *peerService) stop() {
 	svc.stopOnce.Do(func() {
 		svc.mu.Lock()
