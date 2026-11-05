@@ -1052,6 +1052,107 @@ fbMode:
 	}
 }
 
+// sendFrameAs posts one user frame claiming a given sender identity. A pid has
+// one record file, so a second identity on this machine is that record naming
+// the frame's own address — which is exactly what the FB-mode source gate
+// checks, and how a second peer would look to the service.
+func (s *peerTestService) sendFrameAs(t *testing.T, from, content string) string {
+	t.Helper()
+	previous := s.sendFrom
+	s.sendFrom = from
+	s.refreshSender(t)
+	s.sendFrom = previous
+	frame := peer.NewUserFrame(peer.UserFrameOptions{From: peer.EncodeUDS(from), Content: content})
+	if err := peer.Send(context.Background(), s.socket, frame, peer.SendOptions{Timeout: 2 * time.Second}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	return frame.MsgID
+}
+
+// sendPeerQueueBound delivers the protocol's whole queue bound to the
+// conversation, one message at a time, and ticks after each one.
+//
+// Two sender identities carry it: admission allows thirty messages per sender
+// and checks its bucket before the queue, so a single sender would be refused
+// rate-limited at the thirty-first. Twenty-nine from the first leaves its
+// thirtieth — the message after this bound — inside its own budget. The second
+// identity is an address in the same socket namespace that nothing listens on:
+// an admitted message is not answered, and the source gate only asks that the
+// record names the address the frame claims.
+func sendPeerQueueBound(t *testing.T, svc *peerTestService, bodies string) {
+	t.Helper()
+	in := svc.env.peers.inbox
+	first := svc.sendFrom
+	second := filepath.Join(svc.env.dirs.fbSock, "424343.sock")
+	bound := peer.DefaultLimits.MaxQueuedPeerMessages
+	const fromFirst = 29
+	for i := 0; i < bound; i++ {
+		from := first
+		if i >= fromFirst {
+			from = second
+		}
+		queued := in.queued()
+		svc.sendFrameAs(t, from, envelopeOf(from, fmt.Sprintf("%s %d", bodies, i)))
+		waitFor(t, "the message to be handed to the conversation", func() bool { return in.queued() > queued })
+		// Whatever was handed has been run by the time the next message arrives:
+		// the tick is what decides whether the count is still owed.
+		in.tick(context.Background())
+	}
+}
+
+// A conversation's peer queue is what this process still owes a model, not what
+// it has ever handed one (plan 224): once the turn a message was handed to has
+// ended, the message is no longer queued, so fifty messages spread over idle
+// gaps do not spend the protocol's bound for the life of the process.
+func TestPeerInboxQueueCounterDrainsWhenTheRunEnds(t *testing.T) {
+	view := &peerTestView{}
+	svc := startPeerTestService(t, "tui", "cli-queue-drain", view, nil)
+	bound := peer.DefaultLimits.MaxQueuedPeerMessages
+
+	sendPeerQueueBound(t, svc, "queued")
+
+	// The conversation is between turns, so the message after the bound is owed
+	// to nobody and must be taken.
+	svc.sendFrameAs(t, svc.sendFrom, envelopeOf(svc.sendFrom, "the fifty-first message"))
+	select {
+	case frame := <-svc.sender.frames:
+		t.Fatalf("peer message %d was answered %s/%q; want it admitted", bound+1, frame.Status, frame.Reason)
+	case <-time.After(400 * time.Millisecond):
+	}
+	waitFor(t, "the fifty-first wake", func() bool { return view.wakeCount() == bound+1 })
+}
+
+// The bound the counter feeds is what keeps one busy agent from drowning
+// another: a conversation with a run in flight is still owed everything it was
+// handed, so the fifty-first message is refused (plan 224).
+func TestPeerInboxQueueCounterHoldsWhileTheRunIsLive(t *testing.T) {
+	view := &peerTestView{}
+	svc := startPeerTestService(t, "tui", "cli-queue-live", view, nil)
+	in := svc.env.peers.inbox
+	bound := peer.DefaultLimits.MaxQueuedPeerMessages
+	// The conversation runs here for the whole case: messages go into the live
+	// turn, and a tick may not forget them.
+	queue := svc.env.Control.SessionQueue("cli-queue-live")
+	queue.Attach(run.NewTurnInputRuntime())
+	if !svc.env.Control.TrackRuntime("run-live", "cli-queue-live", func() {}, queue.Runtime()) {
+		t.Fatal("the test run was not tracked")
+	}
+
+	sendPeerQueueBound(t, svc, "live")
+	if got := in.queued(); got != bound {
+		t.Fatalf("the live conversation is owed %d messages, want %d", got, bound)
+	}
+
+	svc.sendFrameAs(t, svc.sendFrom, envelopeOf(svc.sendFrom, "the fifty-first message"))
+	receipt := svc.receipt(t, "the queue-full refusal")
+	if receipt.Status != peer.StatusDropped || receipt.DropReason != peer.ReasonQueueFull {
+		t.Fatalf("receipt = %s/%q, want %s/%q", receipt.Status, receipt.DropReason, peer.StatusDropped, peer.ReasonQueueFull)
+	}
+	if view.wakeCount() != 0 {
+		t.Fatalf("the live conversation was woken %d times; want every message steered into its run", view.wakeCount())
+	}
+}
+
 // TestPeerForwardedToDispatcherNoteIsProviderNeutralAndActionable pins the one
 // constant in the pipeline the model reads (plan 196 §3.4). It is a
 // system-reminder naming the subagent, and it must survive an edit to its prose:
