@@ -1,11 +1,14 @@
 package safety
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A sandbox the presence check can see but cannot run is the case a bare
@@ -27,8 +30,8 @@ func TestProbeSandboxTellsInstalledFromUsable(t *testing.T) {
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatalf("write fake bubblewrap: %v", err)
 	}
-	if got := probeSandbox(PlatformLinux); got != "bubblewrap_unusable" {
-		t.Fatalf("probeSandbox with a bwrap that fails = %q, want bubblewrap_unusable", got)
+	if got := probeSandbox(PlatformLinux); got != "bubblewrap_unusable: exit 1" {
+		t.Fatalf("probeSandbox with a bwrap that fails = %q, want bubblewrap_unusable: exit 1", got)
 	}
 
 	// Installed and it really runs.
@@ -132,6 +135,51 @@ func TestProbeRetriesOnceThenCaches(t *testing.T) {
 	}
 	if n := launches(); n != 2 {
 		t.Fatalf("probe launches after reading the cached failure = %d, want 2", n)
+	}
+}
+
+// A probe's failure now says which failure it was: "unusable" alone sent a
+// maintainer looking for a missing binary when the probe had timed out on a
+// busy host.
+func TestProbeFailureReasonNamesTheCause(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake bubblewrap is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+":/usr/bin:/bin")
+
+	installFakeBubblewrap(t, dir, "exit 3\n")
+	if got := probeSandbox(PlatformLinux); got != "bubblewrap_unusable: exit 3" {
+		t.Fatalf("probeSandbox for a backend that exits 3 = %q, want bubblewrap_unusable: exit 3", got)
+	}
+
+	// A process killed at the deadline reports a signal, not an exit status:
+	// what the probe names is the deadline it hit, and never the command's own
+	// output (it can contain paths, and this string is shown).
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "/bin/sh", "-c", "exec sleep 30").Run(); err == nil {
+		t.Fatal("a command that outlives its deadline returned no error")
+	} else if got := sandboxProbeFailureDetail(ctx, err); got != "timeout" {
+		t.Fatalf("detail for a probe that ran out of time = %q, want timeout", got)
+	}
+}
+
+// A suffixed code is still shown as a sentence: /status and /sandbox print
+// whatever SandboxReasonInWords returns, so the discriminator has to be worded
+// too or those surfaces would show the raw code.
+func TestSandboxReasonInWordsTranslatesProbeDetail(t *testing.T) {
+	timeout := SandboxReasonInWords("bubblewrap_unusable: timeout")
+	if strings.Contains(timeout, "bubblewrap_unusable") || !strings.Contains(timeout, "timed out after 5s") {
+		t.Fatalf(`SandboxReasonInWords("bubblewrap_unusable: timeout") = %q, want a sentence naming the timeout`, timeout)
+	}
+	exited := SandboxReasonInWords("seatbelt_unusable: exit 64")
+	if strings.Contains(exited, "seatbelt_unusable") || !strings.Contains(exited, "exited with code 64") {
+		t.Fatalf(`SandboxReasonInWords("seatbelt_unusable: exit 64") = %q, want a sentence naming the exit code`, exited)
+	}
+	// A code the table does not know is still shown as it is, suffix and all.
+	if got := SandboxReasonInWords("some_future_code: exit 2"); got != "some_future_code: exit 2" {
+		t.Fatalf("SandboxReasonInWords for an unknown code = %q, want it verbatim", got)
 	}
 }
 
