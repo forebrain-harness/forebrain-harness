@@ -473,30 +473,52 @@ func FormatSandboxReport(cfg *appcfg.Root, manager *Manager) string {
 
 // SandboxReasonInWords says what a sandbox diagnostic code means; a code it
 // does not know is shown as it is.
+//
+// A probe's failure arrives as the code plus a discriminator
+// ("bubblewrap_unusable: exit 1"), so the known codes are matched by prefix and
+// the discriminator is worded too — otherwise /status and /sandbox would print
+// the raw code, which is what made "unusable" indistinguishable from a probe
+// that merely ran out of time.
 func SandboxReasonInWords(code string) string {
-	switch strings.TrimSpace(code) {
+	code = strings.TrimSpace(code)
+	base, detail, hasDetail := strings.Cut(code, ": ")
+	var words string
+	switch base {
 	case "seatbelt_not_found":
-		return "sandbox-exec is not on PATH"
+		words = "sandbox-exec is not on PATH"
 	case "bubblewrap_not_found":
-		return "bubblewrap (bwrap) is not installed"
+		words = "bubblewrap (bwrap) is not installed"
 	case "bubblewrap_unusable":
-		return "bubblewrap is installed but cannot start a sandbox here (the kernel or a security profile refuses its namespaces)"
+		words = "bubblewrap is installed but cannot start a sandbox here (the kernel or a security profile refuses its namespaces)"
 	case "seatbelt_unusable":
-		return "sandbox-exec is installed but cannot start a sandbox here"
+		words = "sandbox-exec is installed but cannot start a sandbox here"
 	case "wsl1_unsupported":
-		return "WSL 1 cannot run the sandbox; WSL 2 can"
+		words = "WSL 1 cannot run the sandbox; WSL 2 can"
 	case "platform_unsupported":
-		return "this platform has no sandbox Forebrain Harness can use"
+		words = "this platform has no sandbox Forebrain Harness can use"
 	case "missing_config":
-		return "there is no sandbox configuration"
+		words = "there is no sandbox configuration"
+	case "sandbox configuration unavailable":
+		words = "no sandbox settings are available here, so nothing can be enforced"
 	case "linux_glob_limits_apply":
-		return "on Linux, path patterns in the rules match only what exists when a command starts"
+		words = "on Linux, path patterns in the rules match only what exists when a command starts"
 	case "windows_sandbox_wrong_platform":
-		return "the Windows sandbox runs only on Windows"
+		words = "the Windows sandbox runs only on Windows"
 	case "windows_sandbox_api_unavailable":
-		return "the Windows sandbox API is not available on this system"
+		words = "the Windows sandbox API is not available on this system"
 	case "windows_batch_reads_not_isolated":
-		return "on Windows a batch task's writes stay inside its own directory, but its reads are not isolated: a restricted token cannot hold an exclusive read set"
+		words = "on Windows a batch task's writes stay inside its own directory, but its reads are not isolated: a restricted token cannot hold an exclusive read set"
+	default:
+		return code
+	}
+	if !hasDetail {
+		return words
+	}
+	switch {
+	case detail == "timeout":
+		return words + " — it timed out after " + sandboxProbeTimeout.String()
+	case strings.HasPrefix(detail, "exit "):
+		return words + " — it exited with code " + strings.TrimPrefix(detail, "exit ")
 	}
 	return code
 }
@@ -629,6 +651,9 @@ func lookBubblewrap() (string, error) {
 // the process runs.
 const sandboxProbeTimeout = 5 * time.Second
 
+// sandboxProbeRetryDelay is how long a failed probe waits before its one retry.
+const sandboxProbeRetryDelay = 100 * time.Millisecond
+
 // sandboxProbe caches the probe for the life of the process: the answer is a
 // property of this machine, and running it per command would cost a process
 // launch each time. forced is what a test pinned it to — nil in the product.
@@ -641,6 +666,15 @@ var sandboxProbe struct {
 
 // probeSandboxReason is the cached probe answer, or "" when the sandbox really
 // runs here.
+//
+// A success is cached at once; a failure is retried once before it is cached.
+// The answer is a capability of the machine, but one failure is not always the
+// machine: sandboxProbeTimeout under load, a host busy for a moment, or a probe
+// that starts before the session's temp directories exist all fail once and
+// then pass. Since plan 215 an unusable sandbox is not a degraded answer but a
+// permanent one — every command then runs uncontained with full access and the
+// approval picker never appears — so a transient failure must not be cached as
+// this machine's verdict for the life of the process.
 func probeSandboxReason(platform Platform) string {
 	sandboxProbe.mu.Lock()
 	defer sandboxProbe.mu.Unlock()
@@ -648,7 +682,12 @@ func probeSandboxReason(platform Platform) string {
 		return *sandboxProbe.forced
 	}
 	if !sandboxProbe.done {
-		sandboxProbe.reason = probeSandbox(platform)
+		reason := probeSandbox(platform)
+		if reason != "" {
+			time.Sleep(sandboxProbeRetryDelay)
+			reason = probeSandbox(platform)
+		}
+		sandboxProbe.reason = reason
 		sandboxProbe.done = true
 	}
 	return sandboxProbe.reason
@@ -681,14 +720,37 @@ func probeSandbox(platform Platform) string {
 // the backend being unusable. No output is kept: the exit status is the whole
 // answer, and a probe must not leave a process behind — the deadline kills
 // one that hangs, and bubblewrap's own --die-with-parent covers its children.
+//
+// The failure carries a short discriminator after the code ("timeout", "exit
+// N"): "unusable" alone cannot tell a missing kernel capability from a probe
+// that ran out of time, and the two want different fixes. The command's own
+// output is never quoted — it can contain paths, and this string is shown.
 func runSandboxProbe(name string, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
 	defer cancel()
 	if err := exec.CommandContext(ctx, name, args...).Run(); err != nil {
+		reason := "bubblewrap_unusable"
 		if strings.Contains(name, "sandbox-exec") {
-			return "seatbelt_unusable"
+			reason = "seatbelt_unusable"
 		}
-		return "bubblewrap_unusable"
+		if detail := sandboxProbeFailureDetail(ctx, err); detail != "" {
+			return reason + ": " + detail
+		}
+		return reason
+	}
+	return ""
+}
+
+// sandboxProbeFailureDetail names a failed probe's cause in one word and a
+// number: the deadline it hit, or the status the command exited with. A command
+// that was killed by a signal, or never started at all, has no exit status to
+// report — the bare reason code still says the backend is unusable.
+func sandboxProbeFailureDetail(ctx context.Context, err error) string {
+	if ctx.Err() == context.DeadlineExceeded {
+		return "timeout"
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() >= 0 {
+		return fmt.Sprintf("exit %d", exitErr.ExitCode())
 	}
 	return ""
 }
