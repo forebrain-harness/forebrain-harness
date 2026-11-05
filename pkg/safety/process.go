@@ -498,6 +498,8 @@ func SandboxReasonInWords(code string) string {
 		words = "this platform has no sandbox Forebrain Harness can use"
 	case "missing_config":
 		words = "there is no sandbox configuration"
+	case "sandbox configuration unavailable":
+		words = "no sandbox settings are available here, so nothing can be enforced"
 	case "linux_glob_limits_apply":
 		words = "on Linux, path patterns in the rules match only what exists when a command starts"
 	case "windows_sandbox_wrong_platform":

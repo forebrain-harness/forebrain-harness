@@ -183,6 +183,23 @@ func TestSandboxReasonInWordsTranslatesProbeDetail(t *testing.T) {
 	}
 }
 
+// The one unavailable answer the probe does not produce. With no configuration
+// at all, a sandboxed decision fails closed and says why in words; the fallback
+// is deliberate (plan 225), not an accident of a missing config, so it is
+// pinned here rather than left to the code string reaching a surface raw.
+func TestDecideWithoutConfigFailsClosedAndSaysWhy(t *testing.T) {
+	decision := NewManager().Decide(nil, ToolKindShell)
+	if decision.UseSandbox || decision.Reason != "sandbox_unavailable" {
+		t.Fatalf("Decide with no config must not fall back to the host: %+v", decision)
+	}
+	if decision.UnavailableReason == "" {
+		t.Fatalf("Decide with no config must say why: %+v", decision)
+	}
+	if words := SandboxReasonInWords(decision.UnavailableReason); words == decision.UnavailableReason {
+		t.Fatalf("reason %q is shown as a code, with no words for a surface", decision.UnavailableReason)
+	}
+}
+
 // The cached answer is what the rest of the process reads, and the reason it
 // carries is the one the sandbox report words for the user.
 func TestSandboxAvailableReadsTheProbe(t *testing.T) {
