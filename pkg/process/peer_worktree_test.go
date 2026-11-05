@@ -170,12 +170,11 @@ func TestPeerNoteWriteNeedsARegistration(t *testing.T) {
 	}
 }
 
-// The guard's answer may not depend on this process's own registration. When
-// the peer service never started — the socket directory is somebody else's, a
-// transient failure, a full disk — the port the shell gate asks still has to
-// report a peer editing this tree, or a git sweep runs through another agent's
-// uncommitted work (plan 237 §1).
-func TestGitSweepAsksWhenThePeerServiceIsDown(t *testing.T) {
+// The peer view may not depend on this process's own registration. When the
+// peer service never started — the socket directory is somebody else's, a
+// transient failure, a full disk — every caller of WorkTreePeers still has to
+// see a neighbour working in this tree (plan 237 §1).
+func TestPeerWorkTreeAnswersWhenTheServiceNeverStarted(t *testing.T) {
 	env := peerTestEnvFor(t, "tui", func() string { return "cli-guard-down" })
 	// StartPeers is exactly what did not happen in this case: the port is
 	// installed by hand and nothing is registered.
