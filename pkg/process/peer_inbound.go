@@ -905,9 +905,10 @@ func (in *peerInbox) sendIdleNotice(ctx context.Context, a peerArrival, replyTo 
 	}
 }
 
-// tick is the slow duty: notice a conversation that went idle, and let go of
-// subscriptions nobody can answer for any more. It takes only its own lock, so
-// the service's tick loop can call it before it takes its own.
+// tick is the slow duty: notice a conversation that went idle, let go of
+// subscriptions nobody can answer for any more, and forget the messages a
+// conversation with no run has already run. It takes only its own lock, so the
+// service's tick loop can call it before it takes its own.
 func (in *peerInbox) tick(ctx context.Context) {
 	now := time.Now()
 	type notice struct {
@@ -943,6 +944,18 @@ func (in *peerInbox) tick(ctx context.Context) {
 	}
 	for sessionID := range idleNow {
 		in.idleSince[sessionID] = now.UnixMilli()
+	}
+	in.mu.Unlock()
+
+	// What a conversation was handed is owed to the run it was handed to, so a
+	// conversation with no run here has run it and is queued for nobody. This
+	// walks `handed` itself: `idleSince` only holds conversations a subscription
+	// made idle, and one that was merely handed messages has no key there.
+	in.mu.Lock()
+	for sessionID := range in.handed {
+		if !in.runningHere(sessionID) {
+			delete(in.handed, sessionID)
+		}
 	}
 	in.mu.Unlock()
 
