@@ -22,6 +22,7 @@ func TestWhatsAppNewIDStartStopAndRegister(t *testing.T) {
 	add := func(method, path string, hf http.HandlerFunc) {
 		routes[method+" "+path] = hf
 	}
+	w.MountRoutes(add, &whatsAppBus{})
 	if err := w.Start(context.Background(), add, &whatsAppBus{}); err != nil {
 		t.Fatalf("disabled Start error: %v", err)
 	}
@@ -37,11 +38,24 @@ func TestWhatsAppNewIDStartStopAndRegister(t *testing.T) {
 	})
 	whatsappNewTicker = func(time.Duration) *time.Ticker { return time.NewTicker(time.Hour) }
 	enabled := NewWhatsApp(WhatsAppConfig{Enabled: true, InboundPath: " /wa "})
+	enabled.MountRoutes(add, &whatsAppBus{})
 	if err := enabled.Start(context.Background(), add, &whatsAppBus{}); err != nil {
 		t.Fatalf("enabled Start error: %v", err)
 	}
 	if enabled.cfg.OutboundURL != "http://127.0.0.1:3000" || routes["POST /wa"] == nil {
 		t.Fatalf("outbound=%q routes=%v", enabled.cfg.OutboundURL, routes)
+	}
+	// Start runs the poll loop only: a Start that mounted too would give the
+	// lease holder two routes for one callback URL.
+	startOnly := NewWhatsApp(WhatsAppConfig{Enabled: true, InboundPath: "/start-only"})
+	if err := startOnly.Start(context.Background(), add, &whatsAppBus{}); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	if startOnly.cfg.OutboundURL != "http://127.0.0.1:3000" || routes["POST /start-only"] != nil {
+		t.Fatalf("outbound=%q routes=%v", startOnly.cfg.OutboundURL, routes)
+	}
+	if err := startOnly.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop error: %v", err)
 	}
 	if err := enabled.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop error: %v", err)
