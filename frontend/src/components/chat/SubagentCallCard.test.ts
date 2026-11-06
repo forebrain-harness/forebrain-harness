@@ -138,6 +138,26 @@ describe('SubagentCallCard', () => {
     expect(wrapper.text()).toContain('1 个完成、1 个跳过')
   })
 
+  // A stop is its own outcome — neither done nor failed — and the header's
+  // tally names it in the viewer's language (plans/257).
+  it('counts an interrupted task in the header tally, in both languages', async () => {
+    const interruptedStep = stepOf({
+      subagentCall: {
+        verb: 'run',
+        tasks: [
+          { index: 0, key: 'subagent-8c5c', title: '任务16 migrate 导入', agentType: 'general-purpose', status: 'done' },
+          { index: 1, key: 'subagent-9d7e', title: '任务19 结果核对', agentType: 'general-purpose', status: 'interrupted', error: 'approval continuation was interrupted after execution began' },
+        ],
+      },
+    })
+    const wrapper = mount(SubagentCallCard, { props: { step: interruptedStep } })
+    expect(wrapper.text()).toContain('1 done, 1 interrupted')
+    setLocale('zh')
+    await nextTick()
+    await nextTick()
+    expect(wrapper.text()).toContain('1 个完成、1 个中断')
+  })
+
   it('shows the shared empty line for a card with no rows', () => {
     const wrapper = mount(SubagentCallCard, {
       props: { step: stepOf({ subagentCall: { verb: 'list', tasks: [] } }) },

@@ -617,7 +617,8 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 			// is logged as one, below.
 			denialReason := sandboxDenialReason(decision, res, runErr)
 			slog.Warn("sandbox denied shell command; asking whether it may run outside the sandbox",
-				"command", req.command, "reason", denialReason, "err", runErr)
+				"command", redactForLog(req.command), "command_bytes", len(req.command),
+				"reason", redactForLog(denialReason), "err", runErr)
 			authorized, approvalErr := requestSandboxRetryApproval(ctx, st, rt, req, res, decision, runErr, denialReason)
 			if approvalErr != nil {
 				return "", approvalErr
@@ -740,7 +741,9 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		// attempt this denial may have come from; asking again here would show
 		// the same prompt twice for one command.
 		denialReason := sandboxDenialReason(decision, res, runErr)
-		slog.Error("sandbox denied shell command", "command", req.command, "reason", denialReason, "err", runErr)
+		slog.Error("sandbox denied shell command",
+			"command", redactForLog(req.command), "command_bytes", len(req.command),
+			"reason", redactForLog(denialReason), "err", runErr)
 		captureCompletion()
 		return "", sandboxDeniedCommandError(res, denialReason)
 	}

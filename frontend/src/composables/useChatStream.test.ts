@@ -5104,10 +5104,64 @@ describe('subagent_* call cards', () => {
     expect(view.headerCount).toMatchObject({ count: 2, type: 'general-purpose', one: false })
     // A multi-task batch carries the wall clock on its header.
     expect(view.headerDuration).toBe('6m41s')
-    expect(view.breakdown).toEqual({ done: 1, failed: 0, cancelled: 0, skipped: 1 })
+    expect(view.breakdown).toEqual({ done: 1, failed: 0, cancelled: 0, interrupted: 0, skipped: 1 })
     expect(view.rows[1]).toMatchObject({ status: 'skipped', error: 'skipped: empty prompt' })
     // The skipped row never started, so it carries no clock.
     expect(view.rows[1].clock).toBeUndefined()
+  })
+
+  it('counts an interrupted task as its own outcome', () => {
+    const view = subagentCallView({
+      stepId: 'call-fanout-2', toolName: 'subagent_fanout', summary: 'run 2 tasks', status: 'completed',
+      durationSeconds: 300,
+      subagentCall: {
+        verb: 'run',
+        tasks: [
+          { index: 0, title: '任务18 灰度脚本', agentType: 'general-purpose', status: 'done', executionId: 'e1', startedAt: 1_799_223_000, finishedAt: 1_799_223_200 },
+          { index: 1, title: '任务19 结果核对', agentType: 'general-purpose', status: 'interrupted', error: 'approval continuation was interrupted after execution began', executionId: 'e2', startedAt: 1_799_223_000, finishedAt: 1_799_223_300 },
+        ],
+      },
+    })
+    expect(view.breakdown).toEqual({ done: 1, failed: 0, cancelled: 0, interrupted: 1, skipped: 0 })
+    // A stop is not a failure: its row marks that it stopped, and the reason
+    // is said once, in the agent's own view.
+    expect(view.rows[1]).toMatchObject({ status: 'interrupted' })
+    expect(view.rows[1].error).toBeUndefined()
+  })
+
+  it('keeps an interrupted row settled when a late bind arrives', async () => {
+    const { stream, runEvent, finish } = liveStream()
+    runEvent('tool_call_started', {
+      step_id: 'call-send-2',
+      tool_name: 'subagent_send',
+      summary: 'send 结果核对',
+      tool_meta: {
+        tool_name: 'subagent_send', status: 'running', invocation: 'send 结果核对',
+        subagent_call: { verb: 'send', tasks: [{ index: 0, title: '结果核对', agent_type: 'general-purpose', status: 'waiting' }] },
+      },
+    })
+    const spawnPayload = {
+      agent_id: 'subagent-late', agent_type: 'general-purpose', task_id: 'subagent-late',
+      title: '结果核对', execution_id: 'exec-late',
+      parent_run_id: 'run-1', parent_tool_call_id: 'call-send-2', task_index: 0,
+    }
+    runEvent('subagent_spawned', spawnPayload, '2026-10-07T08:00:02.000Z')
+    runEvent('subagent_ended', {
+      agent_id: 'subagent-late', agent_type: 'general-purpose', task_id: 'subagent-late',
+      status: 'interrupted', error: 'approval continuation was interrupted after execution began',
+      execution_id: 'exec-late', parent_run_id: 'run-1',
+      parent_tool_call_id: 'call-send-2', task_index: 0, finished_at_ms: Date.parse('2026-10-07T08:00:12.000Z'),
+    }, '2026-10-07T08:00:12.000Z')
+    // The spawn is re-delivered after the end — a replayed transcript hands a
+    // run its rows after its subagent events — so the bind lands on a task
+    // that already ended.
+    runEvent('subagent_spawned', spawnPayload, '2026-10-07T08:00:02.000Z')
+    const primaryOf = () => stream.messages.value[stream.messages.value.length - 1]
+    const toolBlockOf = () => (primaryOf()?.blocks ?? []).find((b) => b.kind === 'tool' && b.step.stepId === 'call-send-2')
+    const live = stream.subagentCallTasks.get('call-send-2')
+    const view = subagentCallView((toolBlockOf() as Extract<TimelineBlock, { kind: 'tool' }>).step, live, Date.parse('2026-10-07T08:00:12.000Z'))
+    expect(view.rows[0]).toMatchObject({ status: 'interrupted' })
+    await finish()
   })
 
   it('says why a dispatched subagent failed once, on its row', () => {

@@ -3,8 +3,12 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -601,5 +605,90 @@ func TestBatchFileToolRefusesTheHomeWithoutAsking(t *testing.T) {
 		if _, readErr := readTool.Handle(ctx, string(body)); readErr != nil {
 			t.Fatalf("reading %s must succeed: %v", name, readErr)
 		}
+	}
+}
+
+func TestRedactForLogFollowsTheRedactionSwitch(t *testing.T) {
+	const input = `curl -H "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123" https://x`
+
+	t.Setenv(RedactionDisabledEnv, "")
+	if got := redactForLog(input); strings.Contains(got, "abcdefghijklmnopqrstuvwxyz0123") {
+		t.Fatalf("default switch state must mask the bearer token, got %q", got)
+	} else if !strings.Contains(got, RedactedMarker) {
+		t.Fatalf("default switch state must leave %s in the log text, got %q", RedactedMarker, got)
+	}
+
+	t.Setenv(RedactionDisabledEnv, "1")
+	if got := redactForLog(input); got != input {
+		t.Fatalf("with redaction off the log text must match the input byte for byte, got %q", got)
+	}
+}
+
+// TestToolLogLinesRedactCommandText keeps every slog attribute in this package
+// whose value may carry command text (the command itself, its output, its
+// denial reason) behind redactForLog, so a future log line cannot reintroduce
+// raw secrets into gateway logs.
+func TestToolLogLinesRedactCommandText(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob package files: %v", err)
+	}
+	fset := token.NewFileSet()
+	checked := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || pkg.Name != "slog" {
+				return true
+			}
+			switch sel.Sel.Name {
+			case "Debug", "Info", "Warn", "Error":
+			default:
+				return true
+			}
+			args := call.Args[1:] // Args[0] is the message; the rest are key/value pairs.
+			for i := 0; i+1 < len(args); i += 2 {
+				lit, ok := args[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				key, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					continue
+				}
+				if key != "command" && key != "reason" {
+					continue
+				}
+				checked++
+				val, ok := args[i+1].(*ast.CallExpr)
+				if !ok {
+					t.Errorf("%s: slog attribute %q carries command text without redactForLog", fset.Position(lit.Pos()), key)
+					continue
+				}
+				fn, ok := val.Fun.(*ast.Ident)
+				if !ok || fn.Name != "redactForLog" {
+					t.Errorf("%s: slog attribute %q carries command text without redactForLog", fset.Position(lit.Pos()), key)
+				}
+			}
+			return true
+		})
+	}
+	if checked < 3 {
+		t.Fatalf("expected at least 3 slog attributes carrying command text, found %d: the scan itself is broken", checked)
 	}
 }

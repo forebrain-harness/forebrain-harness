@@ -1680,3 +1680,28 @@ func (b *webhookBus) PublishInbound(ctx context.Context, m Inbound) error {
 	b.messages = append(b.messages, m)
 	return nil
 }
+
+// A replica that never ran Start — a lease standby, a cron fire, a batch
+// notification — still sends replies, so the base URL must be fixed by the
+// constructor alone.
+func TestHomeAssistantDeliversWithoutStart(t *testing.T) {
+	var mu sync.Mutex
+	paths := []string{}
+	srv := testutil.NewLocalServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := NewHomeAssistant(HomeAssistantConfig{OutboundURL: srv.URL + "/"})
+	if err := h.DeliverOutbound(context.Background(), Outbound{SessionID: "user:u", Text: "hi"}); err != nil {
+		t.Fatalf("DeliverOutbound error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 || paths[0] != "/api/services/persistent_notification/create" {
+		t.Fatalf("server paths=%v", paths)
+	}
+}

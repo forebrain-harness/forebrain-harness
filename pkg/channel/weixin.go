@@ -39,8 +39,14 @@ type WeixinConfig struct {
 }
 
 type Weixin struct {
-	cfg            WeixinConfig
-	api            *ilink.Client
+	cfg WeixinConfig
+	// apiMu guards api and sendOnly: Start builds api when this replica takes
+	// the account's lease, while a reply may be going out on another goroutine.
+	apiMu sync.Mutex
+	api   *ilink.Client
+	// sendOnly is the client a replica that never started this adapter sends
+	// on — see outboundClient.
+	sendOnly       *ilink.Client
 	bus            Bus
 	cancel         context.CancelFunc
 	done           chan struct{}
@@ -52,11 +58,21 @@ type Weixin struct {
 }
 
 func NewWeixin(cfg WeixinConfig) *Weixin {
+	cfg.BaseURL = weixinBaseURL(cfg.BaseURL)
 	return &Weixin{
 		cfg:           cfg,
 		done:          make(chan struct{}),
 		contextTokens: map[string]string{},
 	}
+}
+
+// weixinBaseURL is the iLink base URL every client of this adapter uses.
+func weixinBaseURL(v string) string {
+	base := strings.TrimSpace(v)
+	if base == "" {
+		base = ilink.DefaultBaseURL
+	}
+	return strings.TrimRight(base, "/")
 }
 
 func (w *Weixin) ID() string { return "weixin" }
@@ -105,21 +121,19 @@ func (w *Weixin) Start(ctx context.Context, add RouteAdder, bus Bus) error {
 	w.bufMu.Lock()
 	w.getUpdatesBuf = syncBuf
 	w.bufMu.Unlock()
-	baseURL := strings.TrimSpace(w.cfg.BaseURL)
-	if baseURL == "" {
-		baseURL = ilink.DefaultBaseURL
-	}
-	w.cfg.BaseURL = strings.TrimRight(baseURL, "/")
 	token := strings.TrimSpace(w.cfg.Token)
 	if token == "" {
 		return fmt.Errorf("weixin: enabled but missing token; configure it during first-run setup or set weixin.token / WEIXIN_TOKEN")
 	}
-	w.api = ilink.NewClient(token, buildILinkOptions(w.cfg)...)
+	api := ilink.NewClient(token, buildILinkOptions(w.cfg)...)
 	for k, v := range users {
 		if strings.TrimSpace(k) != "" && strings.TrimSpace(v) != "" {
-			w.api.SetContextToken(k, v)
+			api.SetContextToken(k, v)
 		}
 	}
+	w.apiMu.Lock()
+	w.api = api
+	w.apiMu.Unlock()
 	runCtx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
 	go w.runMonitor(runCtx)
@@ -139,8 +153,9 @@ func (w *Weixin) Stop(ctx context.Context) error {
 }
 
 func (w *Weixin) DeliverOutbound(ctx context.Context, o Outbound) error {
-	if w.api == nil {
-		return fmt.Errorf("weixin client not started")
+	api, started, err := w.outboundClient()
+	if err != nil {
+		return err
 	}
 	toUser := parseWeixinSession(o.SessionID)
 	if toUser == "" {
@@ -150,7 +165,7 @@ func (w *Weixin) DeliverOutbound(ctx context.Context, o Outbound) error {
 	if text == "" {
 		return fmt.Errorf("weixin: empty outbound text")
 	}
-	_, err := w.api.Push(ctx, toUser, text)
+	_, err = api.Push(ctx, toUser, text)
 	if err == nil {
 		return nil
 	}
@@ -158,11 +173,50 @@ func (w *Weixin) DeliverOutbound(ctx context.Context, o Outbound) error {
 		return err
 	}
 	ctxTok := w.getContextToken(toUser)
+	if ctxTok == "" && !started {
+		ctxTok = w.diskContextToken(toUser)
+	}
 	if ctxTok == "" {
 		return fmt.Errorf("weixin: missing context_token for user %s", toUser)
 	}
-	_, err = w.api.SendText(ctx, toUser, text, ctxTok)
+	_, err = api.SendText(ctx, toUser, text, ctxTok)
 	return err
+}
+
+// outboundClient is the client a reply goes out on. The replica holding the
+// account's lease sends on the client Start built, with the context tokens its
+// monitor collected. Every other replica — a lease standby that runs a
+// conversation, a cron fire or a batch notification — never started this
+// adapter, yet the lease wrapper forwards its sends here (pkg/process
+// leasedHandler), so it gets a send-only client of its own: the same token and
+// base URL, no monitor, and nothing it ever writes to the account's sync file.
+func (w *Weixin) outboundClient() (*ilink.Client, bool, error) {
+	w.apiMu.Lock()
+	defer w.apiMu.Unlock()
+	if w.api != nil {
+		return w.api, true, nil
+	}
+	if w.sendOnly == nil {
+		token := strings.TrimSpace(w.cfg.Token)
+		if !w.cfg.Enabled || token == "" {
+			return nil, false, fmt.Errorf("weixin client not started")
+		}
+		w.sendOnly = ilink.NewClient(token, buildILinkOptions(w.cfg)...)
+	}
+	return w.sendOnly, false, nil
+}
+
+// diskContextToken reads one user's context token from the sync file the lease
+// holder keeps under the shared home. Read-only by design: the file also holds
+// the holder's update cursor, and a replica that wrote it would move that
+// cursor back.
+func (w *Weixin) diskContextToken(toUser string) string {
+	root := strings.TrimSpace(w.cfg.StateRoot)
+	if root == "" {
+		return ""
+	}
+	users, _ := loadWeixinSyncState(root)
+	return strings.TrimSpace(users[toUser])
 }
 
 func (w *Weixin) runMonitor(ctx context.Context) {
@@ -248,6 +302,14 @@ func (w *Weixin) updateBuf(v string) {
 	w.bufMu.Unlock()
 }
 
+// startedClient is the client Start built, or nil on a replica that never
+// started this adapter.
+func (w *Weixin) startedClient() *ilink.Client {
+	w.apiMu.Lock()
+	defer w.apiMu.Unlock()
+	return w.api
+}
+
 func (w *Weixin) storeContextToken(toUser, token string) {
 	w.contextTokenMu.Lock()
 	w.contextTokens[toUser] = token
@@ -256,8 +318,8 @@ func (w *Weixin) storeContextToken(toUser, token string) {
 		cp[k] = v
 	}
 	w.contextTokenMu.Unlock()
-	if w.api != nil {
-		w.api.SetContextToken(toUser, token)
+	if api := w.startedClient(); api != nil {
+		api.SetContextToken(toUser, token)
 	}
 	if w.disk != nil {
 		w.disk.persistFull(cp, w.currentBuf())
@@ -275,8 +337,8 @@ func (w *Weixin) getContextToken(toUser string) string {
 	if v != "" {
 		return v
 	}
-	if w.api != nil {
-		if t, ok := w.api.GetContextToken(toUser); ok {
+	if api := w.startedClient(); api != nil {
+		if t, ok := api.GetContextToken(toUser); ok {
 			return strings.TrimSpace(t)
 		}
 	}
@@ -643,5 +705,24 @@ func (d *contextDisk) persistFull(users map[string]string, getUpdatesBuf string)
 		}
 	}
 	b, _ := json.MarshalIndent(f, "", "  ")
-	_ = os.WriteFile(weixinSyncPath(d.root), b, 0o600)
+	// Another replica reads this file to send (diskContextToken): write a
+	// sibling and rename it into place, so a reader sees the old file or the
+	// new one, never a truncated one.
+	path := weixinSyncPath(d.root)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".weixin_context_tokens-*.json")
+	if err != nil {
+		return
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
+	}
 }

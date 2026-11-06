@@ -12,6 +12,7 @@ package process
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -620,6 +621,39 @@ func TestPeerServiceRetriesAFailedStart(t *testing.T) {
 	rec := ownRecord(t, env.dirs.fbDir)
 	if rec.SessionID != "cli-retry" {
 		t.Fatalf("sessionId = %q, want the retried registration to be the real one", rec.SessionID)
+	}
+}
+
+// One warning names the reason a first registration could not start
+// (plan 237 §4): StartPeers already says it, so the retries the loop makes
+// while the socket directory stays unusable are debug lines only.
+func TestPeerServiceWarnsOnceForAFailedFirstRegistration(t *testing.T) {
+	env := peerTestEnvFor(t, "tui", func() string { return "cli-warn-once" })
+	capture := &peerWarnCapture{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	blocker := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocker, []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREBRAIN_PEER_SOCKET_DIR", filepath.Join(blocker, "sock"))
+
+	stop := env.StartPeers(context.Background(), PeerSurface{Kind: "tui", CurrentSession: func() string { return "cli-warn-once" }})
+	defer stop()
+	// The loop retries at least twice in this window; only the first failure
+	// may be a warning.
+	time.Sleep(3 * peerTickInterval)
+
+	warned := 0
+	for _, line := range capture.warnings() {
+		if strings.HasPrefix(line, "peer registration") {
+			warned++
+		}
+	}
+	if warned != 1 {
+		t.Fatalf("peer registration warnings = %d, want exactly one: %v", warned, capture.warnings())
 	}
 }
 

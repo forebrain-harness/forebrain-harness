@@ -50,6 +50,9 @@ func (w *wsID) Next() int {
 }
 
 func NewHomeAssistant(cfg HomeAssistantConfig) *HomeAssistant {
+	// The outbound base is fixed at construction for the same reason as
+	// NewWhatsApp: a replica that never runs Start still sends on it.
+	cfg.OutboundURL = normalizeHAURL(cfg.OutboundURL)
 	return &HomeAssistant{
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
@@ -63,11 +66,9 @@ func (h *HomeAssistant) Start(ctx context.Context, add RouteAdder, bus Bus) erro
 	if !h.cfg.Enabled {
 		return nil
 	}
-	base := normalizeHAURL(h.cfg.OutboundURL)
-	if base == "" {
+	if h.cfg.OutboundURL == "" {
 		return fmt.Errorf("homeassistant outbound_url required")
 	}
-	h.cfg.OutboundURL = base
 	runCtx, cancel := context.WithCancel(ctx)
 	h.cancel = cancel
 	// done is created with the loop it belongs to; see WhatsApp.Start.

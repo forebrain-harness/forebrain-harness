@@ -41,11 +41,24 @@ var (
 )
 
 func NewWhatsApp(cfg WhatsAppConfig) *WhatsApp {
+	// The outbound base is fixed at construction: a replica that does not hold
+	// the account's lease never runs Start, yet it sends every reply it produces
+	// (pkg/process leasedHandler forwards the send to this adapter).
+	cfg.OutboundURL = whatsappOutboundBase(cfg.OutboundURL)
 	return &WhatsApp{
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		seen:       map[string]time.Time{},
 	}
+}
+
+// whatsappOutboundBase is the bridge's base URL as every request uses it.
+func whatsappOutboundBase(v string) string {
+	base := strings.TrimRight(strings.TrimSpace(v), "/")
+	if base == "" {
+		base = "http://127.0.0.1:3000"
+	}
+	return base
 }
 
 func (w *WhatsApp) ID() string { return "whatsapp" }
@@ -83,11 +96,6 @@ func (w *WhatsApp) Start(ctx context.Context, add RouteAdder, bus Bus) error {
 	if !w.cfg.Enabled {
 		return nil
 	}
-	base := strings.TrimRight(strings.TrimSpace(w.cfg.OutboundURL), "/")
-	if base == "" {
-		base = "http://127.0.0.1:3000"
-	}
-	w.cfg.OutboundURL = base
 	runCtx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
 	// done is created here, with the loop it belongs to, so a non-nil done

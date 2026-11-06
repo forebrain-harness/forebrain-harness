@@ -1,10 +1,12 @@
 package state
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // fixedEstimator counts one token per byte, so a test can hand-compute the
@@ -180,5 +182,31 @@ func TestUncataloguedModelUsesTheConfiguredWindow(t *testing.T) {
 	}
 	if got.AutoCompactThreshold != 64000 {
 		t.Fatalf("threshold = %d, want 64000", got.AutoCompactThreshold)
+	}
+}
+
+// TestContentPartsFallbackIsRepairedLikeContent pins plan 258: a row whose parts
+// come from the fallback text (a compaction or an imported boundary) carries
+// the same repaired text the content column does — one U+FFFD per run of
+// invalid bytes, not one per byte.
+func TestContentPartsFallbackIsRepairedLikeContent(t *testing.T) {
+	raw := "a\xff\xfeb"
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(ContentPartsJSON(nil, raw)), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %#v, want the one fallback text block", blocks)
+	}
+	got, _ := blocks[0]["text"].(string)
+	if want := dbx.ValidText(raw); got != want {
+		t.Fatalf("fallback text = %q, want %q (the content column's repair)", got, want)
+	}
+	clean := "plain text 中文"
+	if err := json.Unmarshal([]byte(ContentPartsJSON(nil, clean)), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := blocks[0]["text"].(string); got != clean {
+		t.Fatalf("clean fallback = %q, want it unchanged", got)
 	}
 }

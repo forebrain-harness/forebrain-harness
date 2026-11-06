@@ -1156,12 +1156,6 @@ func (s *ChatSession) interruptUncertainTUIApproval(sessionID string, wait state
 	}
 	s.tuiController().Cancel(wait.RunID, errors.New(reason))
 	s.tuiController().Finish(wait.RunID)
-	// Publishing the turn error drew it in the conversation already. A
-	// subagent's own view is a separate screen the event does not reach, so
-	// that view is told here; the conversation is not told twice.
-	if strings.TrimSpace(wait.AgentID) != "" {
-		s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: reason, AgentID: wait.AgentID, RunID: wait.RunID, Timestamp: time.Now()}})
-	}
 }
 
 func (s *ChatSession) failRecoveredApproval(sessionID, actionID, reason string) {

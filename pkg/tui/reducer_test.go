@@ -1959,6 +1959,92 @@ func TestFanoutCardTakesSkippedOutcomesFromTheCallFacts(t *testing.T) {
 	}
 }
 
+func TestFanoutCardCountsInterruptedAsItsOwnOutcome(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	const reason = "approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried"
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "迁移导入", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "扩展目录", "subagent_type": "general-purpose"},
+	}}
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-257", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-ok", AgentType: "general-purpose", TaskID: "subagent-ok",
+		ParentToolCallID: "fan-257", TaskIndex: 0, ExecutionID: "exec-ok", Timestamp: t0,
+	})
+	_ = r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-ok", TaskID: "subagent-ok", Status: "ok",
+		ParentToolCallID: "fan-257", TaskIndex: 0, ExecutionID: "exec-ok", Timestamp: t0.Add(time.Minute),
+	})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-int", AgentType: "general-purpose", TaskID: "subagent-int",
+		ParentToolCallID: "fan-257", TaskIndex: 1, ExecutionID: "exec-int", Timestamp: t0,
+	})
+	_ = r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-int", TaskID: "subagent-int", Status: "interrupted", Error: reason,
+		ParentToolCallID: "fan-257", TaskIndex: 1, ExecutionID: "exec-int", Timestamp: t0.Add(time.Minute),
+	})
+	card := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-257", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
+		Output: map[string]any{"output": `{"results":[{"index":0,"ok":true}]}`},
+	})}))
+	if !strings.HasSuffix(card.Summary, " · 1 done, 1 interrupted") {
+		t.Fatalf("summary = %q, want it to end with · 1 done, 1 interrupted", card.Summary)
+	}
+	sawStop := false
+	for _, line := range fanoutContentLines(card.Content) {
+		if strings.HasPrefix(strings.TrimSpace(line), "×") {
+			sawStop = true
+		}
+	}
+	if !sawStop {
+		t.Fatalf("card lacks the interrupted row:\n%s", card.Content)
+	}
+	if !strings.Contains(card.Content, "\x1b[90m×") {
+		t.Fatalf("the interrupted row must carry the muted grey ×:\n%s", card.Content)
+	}
+	if strings.Contains(card.Content, reason) {
+		t.Fatalf("a stop's reason belongs to the agent's own view, not the card:\n%s", card.Content)
+	}
+}
+
+func TestStoppedSubagentClosesItsViewQuietly(t *testing.T) {
+	const reason = "approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried"
+	for _, tc := range []struct {
+		name   string
+		status string
+		err    string
+		title  string
+		want   string
+	}{
+		{name: "cancelled without a reason", status: "cancelled", title: "Cancelled"},
+		{name: "interrupted with its reason", status: "interrupted", err: reason, title: "Interrupted ·", want: reason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r Reducer
+			agentID := "subagent-stop-" + tc.status
+			res := r.Reduce(SubagentEndedMsg{AgentID: agentID, TaskID: agentID, Status: tc.status, Error: tc.err})
+			var closing Frame
+			for _, f := range res.Frames {
+				if f.Kind == FrameError {
+					t.Fatalf("a stop must not close on an error frame: %#v", f)
+				}
+				if f.AgentID == agentID && f.Final {
+					closing = f
+				}
+			}
+			if closing.Kind != FrameStatus {
+				t.Fatalf("closing frame kind = %v, want FrameStatus", closing.Kind)
+			}
+			if closing.Title != tc.title || closing.Content != tc.want {
+				t.Fatalf("closing frame = %q / %q, want %q / %q", closing.Title, closing.Content, tc.title, tc.want)
+			}
+		})
+	}
+}
+
 func TestFanoutCardShowsWhyTheCallFailed(t *testing.T) {
 	input := map[string]any{"tasks": []any{
 		map[string]any{"prompt": "迁移导入", "subagent_type": "general-purpose"},
@@ -2437,6 +2523,9 @@ func TestQueryRowFollowsItsExecutionToTheEnd(t *testing.T) {
 	lines = fanoutContentLines(settledCard.Content)
 	if got := strings.TrimSpace(lines[0]); !strings.HasPrefix(got, "×") {
 		t.Fatalf("settled query row = %q, want the cancelled icon", got)
+	}
+	if !strings.Contains(settledCard.Content, "\x1b[90m×") {
+		t.Fatalf("the cancelled row must carry the muted grey ×:\n%s", settledCard.Content)
 	}
 	if !strings.Contains(settledCard.Content, "stop requested") {
 		t.Fatalf("settled query row lost its phrase:\n%s", settledCard.Content)

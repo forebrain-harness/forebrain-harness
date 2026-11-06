@@ -29279,6 +29279,52 @@ func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
 	}
 }
 
+// plans/257: an approval-interrupted subagent's own view closes on the quiet
+// stop line carrying its reason, and the turn error the interruption published
+// — the same sentence, mirrored in as global news — is not said there twice.
+func TestInterruptedSubagentViewSaysItsReasonOnce(t *testing.T) {
+	forcedTermWidth = 80
+	forcedTermHeight = 24
+	t.Cleanup(func() {
+		forcedTermWidth = 0
+		forcedTermHeight = 0
+	})
+	r := NewRenderer(nil, nil)
+	r.viewportMode = true
+	r.composerSuppressed = true
+	red := &Reducer{tracker: NewTracker()}
+	render := func(res EventResult) {
+		for _, f := range res.Frames {
+			r.RenderFrame(f)
+		}
+	}
+
+	const rosterKey = "subagent-int257"
+	const reason = "approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried"
+	render(red.Reduce(RunStartedMsg{RunID: "run-parent"}))
+	render(red.Reduce(SubagentSpawnedMsg{AgentID: rosterKey, AgentType: "general-purpose", TaskID: rosterKey, Timestamp: time.Now()}))
+	r.SetActiveView(rosterKey)
+	render(red.Reduce(SubagentEndedMsg{AgentID: rosterKey, AgentType: "general-purpose", TaskID: rosterKey, Status: "interrupted", Error: reason, Timestamp: time.Now()}))
+	render(red.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: reason, Timestamp: time.Now()}}))
+
+	paint := func(vm *viewModel) string {
+		return stripANSI(strings.Join(renderViewport(vm, 80, 40, 1<<30, DiffThemeDark).lines, "\n"))
+	}
+	view := paint(r.perAgentVM[rosterKey])
+	if !strings.Contains(view, "Interrupted") {
+		t.Fatalf("the subagent's view must close on the interrupted stop line:\n%s", view)
+	}
+	if strings.Contains(view, "subagent failed") {
+		t.Fatalf("a stop is not a failure; the view must not say it failed:\n%s", view)
+	}
+	if got := strings.Count(view, "approval continuation was interrupted"); got != 1 {
+		t.Fatalf("the subagent's view must say the reason once, said it %d times:\n%s", got, view)
+	}
+	if primary := paint(&r.vm); !strings.Contains(primary, "approval continuation was interrupted") {
+		t.Fatalf("the turn's error must stay on the primary transcript:\n%s", primary)
+	}
+}
+
 // The helpers below were production functions that only the tests ever
 // called: each is a thin composition of live code. They live here so the
 // production files carry no unused code while the tests keep exercising

@@ -386,3 +386,66 @@ func (b *whatsAppBus) PublishInbound(_ context.Context, in Inbound) error {
 	}
 	return b.err
 }
+
+// A replica that never ran Start — a lease standby, a cron fire, a batch
+// notification — still sends replies, so the outbound base must be fixed by
+// the constructor alone.
+func TestWhatsAppDeliversWithoutStart(t *testing.T) {
+	if got := NewWhatsApp(WhatsAppConfig{}).cfg.OutboundURL; got != "http://127.0.0.1:3000" {
+		t.Fatalf("default outbound=%q", got)
+	}
+	var mu sync.Mutex
+	paths := []string{}
+	srv := testutil.NewLocalServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	w := NewWhatsApp(WhatsAppConfig{Enabled: true, OutboundURL: srv.URL + "/"})
+	if err := w.DeliverOutbound(context.Background(), Outbound{SessionID: "chat:1", Text: "hi"}); err != nil {
+		t.Fatalf("DeliverOutbound error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 || paths[0] != "/send" {
+		t.Fatalf("server paths=%v", paths)
+	}
+}
+
+// The lease holder runs Start while other goroutines on the same replica send
+// replies. Before the outbound base moved into the constructor, Start wrote
+// cfg.OutboundURL while DeliverOutbound read it — a data race.
+func TestWhatsAppStartAndDeliverDoNotRace(t *testing.T) {
+	oldTicker := whatsappNewTicker
+	t.Cleanup(func() { whatsappNewTicker = oldTicker })
+	whatsappNewTicker = func(time.Duration) *time.Ticker { return time.NewTicker(time.Hour) }
+
+	srv := testutil.NewLocalServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/messages" {
+			_, _ = rw.Write([]byte(`[]`))
+			return
+		}
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	bus := &whatsAppBus{}
+	w := NewWhatsApp(WhatsAppConfig{Enabled: true, OutboundURL: srv.URL + "/", Token: "tok"})
+	startErr := make(chan error, 1)
+	go func() { startErr <- w.Start(context.Background(), nil, bus) }()
+	for i := 0; i < 20; i++ {
+		if err := w.DeliverOutbound(context.Background(), Outbound{SessionID: "chat:1", Text: "hi"}); err != nil {
+			_ = w.Stop(context.Background())
+			t.Fatalf("DeliverOutbound %d error: %v", i, err)
+		}
+	}
+	if err := <-startErr; err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	if err := w.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop error: %v", err)
+	}
+}

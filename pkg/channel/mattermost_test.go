@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -544,3 +545,28 @@ func (b *mattermostBus) PublishInbound(_ context.Context, in Inbound) error {
 
 var _ = io.EOF
 var _ = url.URL{}
+
+// A replica that never ran Start — a lease standby, a cron fire, a batch
+// notification — still sends replies, so the base URL (with its /api/v4
+// suffix stripped) must be fixed by the constructor alone.
+func TestMattermostDeliversWithoutStart(t *testing.T) {
+	var mu sync.Mutex
+	paths := []string{}
+	srv := testutil.NewLocalServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	m := NewMattermost(MattermostConfig{OutboundURL: srv.URL + "/api/v4/", Token: "tok"})
+	if err := m.DeliverOutbound(context.Background(), Outbound{SessionID: "channel:C1", Text: "hi"}); err != nil {
+		t.Fatalf("DeliverOutbound error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 || paths[0] != "/api/v4/posts" {
+		t.Fatalf("server paths=%v", paths)
+	}
+}

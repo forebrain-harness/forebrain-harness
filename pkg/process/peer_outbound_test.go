@@ -14,6 +14,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -584,5 +585,39 @@ func TestParsePeerReceiptSummary(t *testing.T) {
 	}
 	if rows := ParsePeerReceiptSummary("not a delivery note"); len(rows) != 0 {
 		t.Fatalf("ParsePeerReceiptSummary read rows out of unrelated content: %+v", rows)
+	}
+}
+
+// peer_list and peer_send speak with this process's own registration, and a
+// process whose first registration is still being retried has none: the tools
+// answer "not available right now" (plan 240 wired the service early, plan 253
+// makes an unlistening service answer like no service).
+func TestPeerToolsAnswerUnavailableWhileTheFirstRegistrationIsRetried(t *testing.T) {
+	env := peerTestEnvFor(t, "tui", func() string { return "cli-tools-retry" })
+	blocker := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocker, []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREBRAIN_PEER_SOCKET_DIR", filepath.Join(blocker, "sock"))
+
+	stop := env.StartPeers(context.Background(), PeerSurface{Kind: "tui", CurrentSession: func() string { return "cli-tools-retry" }})
+	defer stop()
+	if env.peers == nil {
+		t.Fatal("this case needs the service wired while its registration is retried")
+	}
+	if rec := ownRecord(t, env.dirs.fbDir); rec != nil {
+		t.Fatalf("record = %+v, want the first attempt to have failed", rec)
+	}
+
+	port := env.outbound()
+	if port == nil {
+		t.Fatal("this process has no port onto the other processes")
+	}
+	caller := run.PeerCaller{SessionID: "cli-tools-retry"}
+	if _, err := port.List(context.Background(), caller); !errors.Is(err, errPeerMessagingUnavailable) {
+		t.Fatalf("List while unregistered = %v, want %v", err, errPeerMessagingUnavailable)
+	}
+	if _, err := port.Send(context.Background(), caller, "editing", "hello"); !errors.Is(err, errPeerMessagingUnavailable) {
+		t.Fatalf("Send while unregistered = %v, want %v", err, errPeerMessagingUnavailable)
 	}
 }

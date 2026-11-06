@@ -42,6 +42,9 @@ var (
 )
 
 func NewMattermost(cfg MattermostConfig) *Mattermost {
+	// The outbound base is fixed at construction for the same reason as
+	// NewWhatsApp: a replica that never runs Start still sends on it.
+	cfg.OutboundURL = normalizeMattermostBase(cfg.OutboundURL)
 	return &Mattermost{
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: 20 * time.Second},
@@ -56,11 +59,9 @@ func (m *Mattermost) Start(ctx context.Context, add RouteAdder, bus Bus) error {
 	if !m.cfg.Enabled {
 		return nil
 	}
-	base := normalizeMattermostBase(m.cfg.OutboundURL)
-	if base == "" {
+	if m.cfg.OutboundURL == "" {
 		return fmt.Errorf("mattermost outbound_url required")
 	}
-	m.cfg.OutboundURL = base
 	botID, err := m.fetchBotUserID(ctx)
 	if err != nil {
 		return err

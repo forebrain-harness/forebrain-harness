@@ -2498,7 +2498,7 @@ export interface SubagentCallView {
   canceledLabel?: string
   /** The call's own failure, shown once under the header. */
   callError?: string
-  breakdown?: { done: number; failed: number; cancelled: number; skipped: number }
+  breakdown?: { done: number; failed: number; cancelled: number; interrupted: number; skipped: number }
   rows: SubagentCallRowView[]
   /** True when the card has no rows at all — the shared empty line. */
   empty: boolean
@@ -2507,8 +2507,9 @@ export interface SubagentCallView {
 
 const SUBAGENT_QUERY_VERBS = new Set(['status', 'wait', 'close', 'list'])
 
+/** Five endings settle a task: done, failed, cancelled, interrupted, skipped. */
 function subagentTaskTerminal(status: string): boolean {
-  return status === 'done' || status === 'failed' || status === 'cancelled' || status === 'skipped'
+  return status === 'done' || status === 'failed' || status === 'cancelled' || status === 'interrupted' || status === 'skipped'
 }
 
 /** The status a subagent's end settles its task with, mirroring the terminal's reducer. */
@@ -2549,14 +2550,11 @@ export function subagentCallView(
     const startedAtMs = bound?.startedAtMs ?? (Number(facts.startedAt) > 0 ? Number(facts.startedAt) * 1000 : undefined)
     const finishedAtMs = bound?.finishedAtMs ?? (Number(facts.finishedAt) > 0 ? Number(facts.finishedAt) * 1000 : undefined)
     let clock: SubagentCallRowView['clock']
-    // The clock settles on any ending, including the one that is not a tally
-    // outcome: an interrupted execution ran for a real duration (plans/244).
-    const settledEnding = subagentTaskTerminal(status) || status === 'interrupted'
     if (startedAtMs != null && finishedAtMs == null && status === 'running') {
       // The walking clock every surface reads at `now`, in the terminal's
       // working-elapsed form.
       clock = { kind: 'running', startedAtMs, label: formatRuntimeDuration(Math.max(0, now - startedAtMs)) }
-    } else if (startedAtMs != null && finishedAtMs != null && finishedAtMs > startedAtMs && settledEnding) {
+    } else if (startedAtMs != null && finishedAtMs != null && finishedAtMs > startedAtMs && subagentTaskTerminal(status)) {
       clock = { kind: 'final', label: formatToolDuration(finishedAtMs - startedAtMs) }
     }
     rows.push({
@@ -2633,13 +2631,13 @@ export function subagentCallView(
 
   let breakdown: SubagentCallView['breakdown']
   if (phase === 'done' && !query) {
-    const tally = { done: 0, failed: 0, cancelled: 0, skipped: 0 }
+    const tally = { done: 0, failed: 0, cancelled: 0, interrupted: 0, skipped: 0 }
     for (const row of rows) {
-      if (row.status === 'done' || row.status === 'failed' || row.status === 'cancelled' || row.status === 'skipped') {
+      if (row.status === 'done' || row.status === 'failed' || row.status === 'cancelled' || row.status === 'interrupted' || row.status === 'skipped') {
         tally[row.status] += 1
       }
     }
-    if (tally.failed + tally.cancelled + tally.skipped > 0) breakdown = tally
+    if (tally.failed + tally.cancelled + tally.interrupted + tally.skipped > 0) breakdown = tally
   }
 
   // A dispatch card whose row already says why its task failed draws no call

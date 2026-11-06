@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -715,4 +716,55 @@ func SaveClawbotSession(root string, s *ClawbotSession) error {
 	}
 	b, _ := json.MarshalIndent(s, "", "  ")
 	return os.WriteFile(clawbotSessionPath(root), b, 0o600)
+}
+
+// A replica that never ran Start — a lease standby, a cron fire, a batch
+// notification — still sends replies. It must do so without touching the sync
+// file the lease holder owns, and its send-only client must not pose as the
+// one Start would have built.
+func TestWeixinDeliversWithoutStart(t *testing.T) {
+	root := t.TempDir()
+	(&contextDisk{root: root}).persistFull(map[string]string{"u": "ctx"}, "holder-cursor")
+	before, err := os.ReadFile(weixinSyncPath(root))
+	if err != nil {
+		t.Fatalf("read sync file: %v", err)
+	}
+	var mu sync.Mutex
+	paths := []string{}
+	srv := testutil.NewLocalServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/sendmessage" {
+			http.NotFound(rw, r)
+			return
+		}
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		_ = json.NewEncoder(rw).Encode(map[string]any{"ret": 0})
+	}))
+	defer srv.Close()
+
+	w := NewWeixin(WeixinConfig{Enabled: true, Token: "tok", BaseURL: srv.URL + "/", StateRoot: root})
+	if err := w.DeliverOutbound(context.Background(), Outbound{SessionID: "user:u", Text: "hi"}); err != nil {
+		t.Fatalf("DeliverOutbound error: %v", err)
+	}
+	mu.Lock()
+	got := append([]string{}, paths...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "/ilink/bot/sendmessage" {
+		t.Fatalf("server paths=%v", got)
+	}
+	if w.startedClient() != nil {
+		t.Fatal("send-only client must not pose as the started one")
+	}
+	after, err := os.ReadFile(weixinSyncPath(root))
+	if err != nil {
+		t.Fatalf("re-read sync file: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("non-holder rewrote the sync file: before=%q after=%q", before, after)
+	}
+	err = w.DeliverOutbound(context.Background(), Outbound{SessionID: "user:nobody", Text: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "missing context_token") {
+		t.Fatalf("unknown user err=%v", err)
+	}
 }

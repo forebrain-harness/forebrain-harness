@@ -141,6 +141,7 @@ const header = computed(() => {
     const tally: string[] = [t('subagentCard.breakdownDone', { count: v.breakdown.done })]
     if (v.breakdown.failed > 0) tally.push(t('subagentCard.breakdownFailed', { count: v.breakdown.failed }))
     if (v.breakdown.cancelled > 0) tally.push(t('subagentCard.breakdownCancelled', { count: v.breakdown.cancelled }))
+    if (v.breakdown.interrupted > 0) tally.push(t('subagentCard.breakdownInterrupted', { count: v.breakdown.interrupted }))
     if (v.breakdown.skipped > 0) tally.push(t('subagentCard.breakdownSkipped', { count: v.breakdown.skipped }))
     parts.push(tally.join(join))
   }

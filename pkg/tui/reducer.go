@@ -290,7 +290,7 @@ type FanoutTaskState struct {
 	Title        string // display title (SubagentTaskTitle's answer, one line by construction)
 	SubagentType string // e.g. "explore"; "fork" when the dispatch named none
 	AgentID      string // roster key of the execution this row follows, "" while unbound
-	Status       string // "waiting" | "running" | "done" | "failed" | "cancelled" | "skipped" | ""
+	Status       string // "waiting" | "running" | "done" | "failed" | "cancelled" | "interrupted" | "skipped" | ""
 	Error        string // error or skip reason, shown below the task title
 	ExecutionID  string // the execution this row's clock follows
 	StartedAt    time.Time
@@ -647,10 +647,11 @@ func settleFanoutTaskOnEnd(t *FanoutTaskState, m SubagentEndedMsg, status string
 	}
 }
 
-// fanoutTaskTerminal reports whether a task's outcome is final.
+// fanoutTaskTerminal reports whether a task's outcome is final: one of the
+// five endings — done, failed, cancelled, interrupted, skipped.
 func fanoutTaskTerminal(status string) bool {
 	switch status {
-	case "done", "failed", "cancelled", "skipped":
+	case "done", "failed", "cancelled", "interrupted", "skipped":
 		return true
 	default:
 		return false
@@ -1140,7 +1141,7 @@ func fanoutCardHeader(fs *fanoutState) string {
 // on its header. All-done needs no arithmetic; anything else lists every
 // non-zero count, done included.
 func fanoutOutcomeBreakdown(fs *fanoutState) string {
-	var done, failed, cancelled, skipped int
+	var done, failed, cancelled, interrupted, skipped int
 	for _, t := range fs.Tasks {
 		switch t.Status {
 		case "done":
@@ -1149,20 +1150,25 @@ func fanoutOutcomeBreakdown(fs *fanoutState) string {
 			failed++
 		case "cancelled":
 			cancelled++
+		case "interrupted":
+			interrupted++
 		case "skipped":
 			skipped++
 		}
 	}
-	if failed+cancelled+skipped == 0 {
+	if failed+cancelled+interrupted+skipped == 0 {
 		return ""
 	}
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 5)
 	parts = append(parts, fmt.Sprintf("%d done", done))
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", failed))
 	}
 	if cancelled > 0 {
 		parts = append(parts, fmt.Sprintf("%d cancelled", cancelled))
+	}
+	if interrupted > 0 {
+		parts = append(parts, fmt.Sprintf("%d interrupted", interrupted))
 	}
 	if skipped > 0 {
 		parts = append(parts, fmt.Sprintf("%d skipped", skipped))
@@ -1644,7 +1650,11 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			status = "done"
 		}
 		endStatus := status
-		if endStatus != "cancelled" {
+		switch endStatus {
+		case "cancelled", "interrupted":
+			// The two stops keep their own names: neither is a failure, and the
+			// card, the tally and the agent's own view all say which it was.
+		default:
 			if endStatus == "failed" || strings.TrimSpace(m.Error) != "" {
 				endStatus = "failed"
 			} else {
@@ -2200,12 +2210,31 @@ func (r *Reducer) subagentClosingFrames(agentID string, m SubagentEndedMsg) []Fr
 	agentID = strings.TrimSpace(agentID)
 	errText := strings.TrimSpace(m.Error)
 	status := strings.ToLower(strings.TrimSpace(m.Status))
-	if agentID == "" || (errText == "" && status != "failed" && status != "cancelled") {
+	if agentID == "" {
 		return nil
 	}
-	title := "subagent failed"
-	if status == "cancelled" {
-		title = "subagent cancelled"
+	// A stop closes the view with the quiet line the web drawer draws
+	// (RunStoppedLine): its word, and the reason beside it when there is one.
+	// It is a status, not an error — nothing went wrong that the user must fix.
+	if status == "cancelled" || status == "interrupted" {
+		title := "Cancelled"
+		if status == "interrupted" {
+			title = "Interrupted"
+		}
+		if errText != "" {
+			title += " ·"
+		}
+		return []Frame{{
+			Kind:    FrameStatus,
+			Title:   title,
+			Content: errText,
+			RunID:   r.activeRunID,
+			AgentID: agentID,
+			Final:   true,
+		}}
+	}
+	if errText == "" && status != "failed" {
+		return nil
 	}
 	content := errText
 	if content == "" {
@@ -2213,7 +2242,7 @@ func (r *Reducer) subagentClosingFrames(agentID string, m SubagentEndedMsg) []Fr
 	}
 	return []Frame{{
 		Kind:    FrameError,
-		Title:   title,
+		Title:   "subagent failed",
 		Content: content,
 		RunID:   r.activeRunID,
 		AgentID: agentID,
@@ -2410,8 +2439,10 @@ func renderFanoutContent(fs *fanoutState) (string, []string, []fanoutLineClock) 
 			head.WriteString("\x1b[32m✓\x1b[0m ")
 		case "failed":
 			head.WriteString("\x1b[31m✗\x1b[0m ")
-		case "cancelled":
-			head.WriteString("\x1b[31m×\x1b[0m ")
+		case "cancelled", "interrupted":
+			// A stop is the quiet ending, never the red one a failure gets — the
+			// same muted mark the web card draws for both.
+			head.WriteString("\x1b[90m×\x1b[0m ")
 		case "skipped":
 			head.WriteString("\x1b[33m!\x1b[0m ")
 		}
@@ -2429,7 +2460,9 @@ func renderFanoutContent(fs *fanoutState) (string, []string, []fanoutLineClock) 
 		}
 		// Reason line. The indent is repeated on every sentence so the whole
 		// reason reads as one continuation of the task above it.
-		if t.Error != "" && fanoutTaskTerminal(t.Status) {
+		// A stop's reason is said once, in the agent's own view (its closing
+		// line); the card row only marks that it stopped, as the web card does.
+		if t.Error != "" && fanoutTaskTerminal(t.Status) && t.Status != "cancelled" && t.Status != "interrupted" {
 			add("  ", t.Error)
 		}
 		// A paused task's third layer is the pause: the last call it made was

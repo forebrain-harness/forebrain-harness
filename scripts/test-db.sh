@@ -78,7 +78,7 @@ engine_arms=(
 
 run_dialect() {
   local url=$1
-  local row pkgs pattern log ran
+  local row pkgs pattern log ran skipped
   for row in "${engine_arms[@]}"; do
     pkgs=${row%%|*}
     pattern=${row#*|}
@@ -94,15 +94,18 @@ run_dialect() {
       rm -f "$log"
       return 1
     fi
-    ran=$(grep -c '^=== RUN' "$log" || true)
+    # A row counts as run only if a test in it passed. `=== RUN` is printed for
+    # a test that then calls t.Skip, so a row whose every match skips on this
+    # engine would read as covered while it ran nothing. Top-level results only
+    # (subtests are indented).
+    ran=$(grep -cE '^--- PASS: ' "$log" || true)
+    skipped=$(grep -cE '^--- SKIP: ' "$log" || true)
     rm -f "$log"
-    # A -run that matches nothing is not a pass: it is the silent skip this
-    # whole change exists to remove.
     if [ "${ran:-0}" -eq 0 ]; then
-      echo "no test matched '$pattern' in $pkgs — the row is stale" >&2
+      echo "no test passed for '$pattern' in $pkgs (${skipped:-0} skipped) — the row is stale" >&2
       return 1
     fi
-    echo "   $ran tests matched"
+    echo "   $ran tests passed, ${skipped:-0} skipped"
   done
 }
 
@@ -110,15 +113,48 @@ run_sqlite() {
   FOREBRAIN_HOME="$(scratch_home)" "${go_test[@]}" ./... -p 2
 }
 
+# row_covers <pkg> <row>: does this row's package field name pkg? The field is
+# what `go test` is handed: "./pkg/x" or "./pkg/x/" names that package alone,
+# "./pkg/x/..." names it and everything under it. A substring test is not
+# enough — "pkg/state" is inside "./pkg/state/dbx/..." — so the comparison is
+# on whole package paths.
+row_covers() {
+  local pkg=$1 row=$2 field base
+  for field in ${row%%|*}; do
+    field=${field#./}
+    case $field in
+      */...)
+        base=${field%/...}
+        if [ "$pkg" = "$base" ] || [ "${pkg#"$base"/}" != "$pkg" ]; then
+          return 0
+        fi
+        ;;
+      *)
+        if [ "$pkg" = "${field%/}" ]; then
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
 # The anti-rot guard: every package whose tests reach the engine must have a row
 # above, or its arms run on SQLite while the matrix reports success.
 check() {
-  local missing=0 pkg
+  local missing=0 pkg row covered
   local have
   have=$(grep -rlE 'FOREBRAIN_TEST_DATABASE_URL|OpenStateForTest\(' --include='*_test.go' pkg 2>/dev/null \
     | xargs -n1 dirname 2>/dev/null | sort -u)
   for pkg in $have; do
-    if ! printf '%s\n' "${engine_arms[@]}" | grep -q "$pkg"; then
+    covered=0
+    for row in "${engine_arms[@]}"; do
+      if row_covers "$pkg" "$row"; then
+        covered=1
+        break
+      fi
+    done
+    if [ "$covered" -eq 0 ]; then
       echo "engine arms in ./$pkg but no row in engine_arms" >&2
       missing=1
     fi

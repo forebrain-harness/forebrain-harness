@@ -227,19 +227,19 @@ type peerService struct {
 	// cadence is a debug line.
 	enterWarned bool
 	ccMode      bool
-	layout     peer.Layout
-	server     *peer.Server
-	token      string
-	socketPath string
-	addr       string
-	name       string
-	nameSource string
-	nameSince  int64
-	switchOn   bool
-	detected   bool
-	sinceCheck int
-	ticks      int
-	branch     map[string]peerBranchEntry
+	layout      peer.Layout
+	server      *peer.Server
+	token       string
+	socketPath  string
+	addr        string
+	name        string
+	nameSource  string
+	nameSince   int64
+	switchOn    bool
+	detected    bool
+	sinceCheck  int
+	ticks       int
+	branch      map[string]peerBranchEntry
 
 	// dirMu guards the directory listing cache: the frame handler reads it
 	// off the tick loop's lock, which the tick loop itself holds.
@@ -375,6 +375,9 @@ func (svc *peerService) start(ctx context.Context) error {
 	svc.running = true
 	go svc.tickLoop()
 	if err := svc.enterModeLocked(target, false); err != nil {
+		// StartPeers reports this failure; the retries the loop makes after it
+		// are debug lines (plan 237 §4: one warning per cause).
+		svc.enterWarned = true
 		return err
 	}
 	svc.modeEntered = true

@@ -145,17 +145,22 @@ type peerOutboundView struct {
 	mode      string
 }
 
-// view snapshots the running service. A process that is not registered as a
-// peer right now answers errPeerMessagingUnavailable. The session is the
-// conversation that is speaking: its approval mode is what the recipient reads
-// in from-mode, and a session this process does not run reads as prompting.
+// view snapshots the registration this process is answering on. A process
+// that is not listening on a socket right now — no service, a service whose
+// first registration is still being retried (plan 237 §3, wired early by plan
+// 240), or one whose mode switch failed — answers errPeerMessagingUnavailable:
+// it has no directory to list, no address to send from and no name to sign
+// with, and the error is what sends WorkTreePeers to the rendezvous directory.
+// The session is the conversation that is speaking: its approval mode is what
+// the recipient reads in from-mode, and a session this process does not run
+// reads as prompting.
 func (o *peerOutbound) view(sessionID string) (*peerOutboundView, error) {
 	svc := o.service()
 	if svc == nil {
 		return nil, errPeerMessagingUnavailable
 	}
 	svc.mu.Lock()
-	if !svc.running {
+	if !svc.running || svc.addr == "" {
 		svc.mu.Unlock()
 		return nil, errPeerMessagingUnavailable
 	}

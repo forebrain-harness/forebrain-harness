@@ -164,7 +164,10 @@ func contentBlocksJSON(parts []llm.ContentPart, fallbackText string) []map[strin
 		if text := strings.TrimSpace(fallbackText); text != "" {
 			blocks = append(blocks, map[string]any{
 				"type": "text",
-				"text": fallbackText,
+				// Repaired the way the content column is (plan 242): left to
+				// json.Marshal, every invalid byte would become its own U+FFFD
+				// while the content row folds each run into one.
+				"text": dbx.ValidText(fallbackText),
 			})
 		}
 	}

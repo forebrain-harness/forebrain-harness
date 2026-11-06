@@ -210,6 +210,45 @@ func TestPeerWorkTreeAnswersWhenTheServiceNeverStarted(t *testing.T) {
 	}
 }
 
+// The service is wired before its first registration (plan 240), so while a
+// failed first attempt is being retried env.peers is set but nothing listens.
+// That service must answer like no service: the tree's neighbours still come
+// from the rendezvous directory (plan 237 §2), never from an empty listing.
+func TestPeerWorkTreeAnswersWhileTheFirstRegistrationIsRetried(t *testing.T) {
+	env := peerTestEnvFor(t, "tui", func() string { return "cli-guard-retry" })
+	blocker := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocker, []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREBRAIN_PEER_SOCKET_DIR", filepath.Join(blocker, "sock"))
+
+	dir := peer.NewLayout(false).Dir
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := terminalPeer(filepath.Join(env.dirs.fbSock, "900272.sock"), env.LaunchDir, "editing",
+		peer.ExtAgent{ID: "cli-editing", Name: "editing", Kind: "primary", Root: env.LaunchDir,
+			Status: peer.StatusBusy, Task: "Rewriting the importer"})
+	rec.PID = os.Getppid()
+	rec.ProcStart, _ = peer.ProcStart(rec.PID)
+	if err := peer.WriteRecord(dir, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := env.StartPeers(context.Background(), PeerSurface{Kind: "tui", CurrentSession: func() string { return "cli-guard-retry" }})
+	defer stop()
+	if env.peers == nil {
+		t.Fatal("this case needs the service wired while its registration is retried")
+	}
+	if rec := ownRecord(t, env.dirs.fbDir); rec != nil {
+		t.Fatalf("record = %+v, want the first attempt to have failed", rec)
+	}
+	peers := env.Deps.Peers.WorkTreePeers(context.Background(), env.LaunchDir)
+	if len(peers) != 1 || peers[0].Name != "editing" {
+		t.Fatalf("peers = %#v, want the neighbour from the rendezvous directory", peers)
+	}
+}
+
 // The fallback reads the rendezvous directory and nothing else, so what it
 // reports is what the directory says: a live neighbour in the tree is a peer,
 // a record whose writer is gone is not, a peer in another tree is not, and this
@@ -435,4 +474,3 @@ func TestPeerWorkTreePeersListOnlyTheAgentsInThisTree(t *testing.T) {
 		}
 	}
 }
-

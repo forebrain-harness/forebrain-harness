@@ -3055,6 +3055,17 @@ func RedactEnabled() bool {
 	return !envTruthy(RedactionDisabledEnv)
 }
 
+// redactForLog is what a log line may carry of text a command, its output or
+// its denial produced: the same masking the model-facing output gets, unless
+// the operator turned redaction off. Every slog attribute in this package that
+// carries such text goes through it (TestToolLogLinesRedactCommandText).
+func redactForLog(s string) string {
+	if !RedactEnabled() {
+		return s
+	}
+	return Redact(s)
+}
+
 func envTruthy(name string) bool {
 	v := strings.ToLower(strings.TrimSpace(getenv(name)))
 	switch v {
