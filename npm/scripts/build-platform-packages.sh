@@ -68,7 +68,7 @@ else
     echo "web UI build failed; fix the frontend build, or set FOREBRAIN_SKIP_UI_BUILD=1 to embed the existing pkg/gateway/dist" >&2
     exit 1
   }
-  echo "==> web UI rebuilt into pkg/gateway/dist (release-managed: do not commit local rebuilds; scripts/check-webui-dist.sh rejects PR changes)"
+  echo "==> web UI rebuilt into pkg/gateway/dist (gitignored; nothing to commit)"
 fi
 
 DIST_DIR="$NPM_DIR/dist"

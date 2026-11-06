@@ -26,10 +26,14 @@ assets/fonts/*.otf
 .DS_Store
 node_modules
 dist
-# pkg/gateway/dist is committed: it is the built web UI that go:embed serves,
-# and `go install` builds from the tagged source, which must contain it. Only
-# the release workflow rewrites it (scripts/check-webui-dist.sh).
+# pkg/gateway/dist holds the built web UI that go:embed serves; it is not
+# committed. Only the .gitkeep placeholder is tracked: `//go:embed all:dist`
+# matches it, so a clean checkout still compiles and FS() reports "not built".
+# Build the UI with `make ui` (`make build` does that first); the release
+# packaging script builds it into each binary.
 !pkg/gateway/dist/
+pkg/gateway/dist/*
+!pkg/gateway/dist/.gitkeep
 *.exe
 *.test
 /forebrain
