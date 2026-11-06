@@ -276,7 +276,7 @@ func (in *peerInbox) handleUserFrame(ctx context.Context, a peerArrival) {
 		in.hold(ctx, a, envelope, parsed, target, cause)
 		return
 	}
-	if refusal := in.deliverTo(ctx, a, target, envelope, a.Frame.MsgID, parsed.FromName); refusal != "" {
+	if refusal := in.deliverTo(ctx, a, target, envelope, a.Frame.MsgID, peerDisplayName(envelope)); refusal != "" {
 		in.refuse(ctx, a, refusal)
 	}
 }
@@ -537,7 +537,7 @@ func (in *peerInbox) hold(ctx context.Context, a peerArrival, envelope string, p
 		arrival:  a,
 		envelope: envelope,
 		from:     strings.TrimSpace(parsed.From),
-		fromName: strings.TrimSpace(parsed.FromName),
+		fromName: peerDisplayName(envelope),
 		target:   target,
 		cause:    cause,
 		heldAt:   time.Now(),
@@ -604,6 +604,18 @@ func (in *peerInbox) publish(ctx context.Context, sessionID, typ string, payload
 	if err := in.surface.Publish(ctx, sessionID, "", typ, payload); err != nil {
 		slog.Debug("peer run event could not be published", "type", typ, "session_id", sessionID, "err", err)
 	}
+}
+
+// peerDisplayName is the one sender name every surface shows for envelope —
+// the held banner, the letter card, the web history and the queue row — read
+// by the same display reader that gives them the words, so no two surfaces
+// can disagree about who sent the same letter. The strict parse names only
+// the outermost element; the display reader also adopts the same sender's own
+// name from inside a wrapper this process added, and refuses a name a
+// different sender forged inside one.
+func peerDisplayName(envelope string) string {
+	name, _, _ := PeerEnvelopeDisplay(envelope)
+	return name
 }
 
 // peerEnvelopeBody is the message inside an envelope, or "" when the content

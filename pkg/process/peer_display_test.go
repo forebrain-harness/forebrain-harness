@@ -44,13 +44,24 @@ func TestPeerEnvelopeDisplay(t *testing.T) {
 	// The shape this process actually stores for that message: envelopeFor
 	// wraps what it could not authenticate in an envelope of its own, escaping
 	// the closing tags inside. Both elements are transport; the words are
-	// inside both.
+	// inside both. The inner element names a sender other than the one the
+	// wrapper vouched for, so its from-name is not adopted and no surface
+	// shows a name for this letter (plan 249's single-name rule).
 	wrapped := peer.Build(peer.Envelope{
 		From: "uds:/tmp/sender.sock",
 		Body: peer.EscapeBody(unknown),
 	})
-	if name, body, ok := PeerEnvelopeDisplay(wrapped); !ok || name != "builder" || body != "please review line 12" {
+	if name, body, ok := PeerEnvelopeDisplay(wrapped); !ok || name != "" || body != "please review line 12" {
 		t.Fatalf("PeerEnvelopeDisplay of the receiver's own wrapper = (%q, %q, %v)", name, body, ok)
+	}
+	// The same wrapper carrying the wrapper's own sender inside: the one
+	// inner from-name the single-name rule adopts, so the card gets a name.
+	sameSender := peer.Build(peer.Envelope{
+		From: "uds:/tmp/a.sock",
+		Body: peer.EscapeBody(unknown),
+	})
+	if name, body, ok := PeerEnvelopeDisplay(sameSender); !ok || name != "builder" || body != "please review line 12" {
+		t.Fatalf("PeerEnvelopeDisplay of the same-sender wrapper = (%q, %q, %v)", name, body, ok)
 	}
 	if got := peerPreview(wrapped); strings.Contains(got, "cross-session-message") {
 		t.Fatalf("peerPreview of the receiver's own wrapper kept the markup: %q", got)
