@@ -115,7 +115,7 @@ docker:
 release:
 	FOREBRAIN_VERSION=$(VERSION) npm/scripts/build-platform-packages.sh
 
-## clean: drop build outputs. pkg/gateway/dist is committed source now; `make
-## ui` rebuilds it, so clean must not delete it.
+## clean: drop build outputs. pkg/gateway/dist is gitignored, not a build
+## artifact `make build` regenerates, so clean leaves it alone.
 clean:
 	rm -rf build/bin
