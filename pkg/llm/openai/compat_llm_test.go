@@ -677,6 +677,174 @@ func TestLengthContinueCarriesOneAnswerPerRound(t *testing.T) {
 	}
 }
 
+// When a length-continue's round N is refused, the usage that bounds the
+// window must be the request that round sent — the previous round's prompt
+// plus the answer it carried — not the previous round's own usage, which the
+// provider accepted. The bill riding the error is still every completed round.
+func TestLengthContinueRefusedRoundReportsTheRequestItSent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		params []byte
+		stream bool
+	}{
+		{name: "stream", params: []byte(`{"stream":true}`), stream: true},
+		// The merged request defaults to stream:true, so the unary loop is
+		// only reached by overriding it, the way every other unary test in
+		// this file does.
+		{name: "unary", params: []byte(`{"stream":false}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var mu sync.Mutex
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				requests++
+				round := requests
+				mu.Unlock()
+				if round > 1 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":{"message":"This model's maximum context length is exceeded","type":"invalid_request_error","code":"context_length_exceeded"}}`))
+					return
+				}
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					var body bytes.Buffer
+					body.WriteString(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"R1 "},"finish_reason":null}]}` + "\n\n")
+					body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":1000,"completion_tokens":200,"total_tokens":1200}}` + "\n\n")
+					body.WriteString("data: [DONE]\n\n")
+					_, _ = w.Write(body.Bytes())
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, `{"id":"x","object":"chat.completion","created":1,"model":"test","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"R1 "},"finish_reason":"length"}],"usage":{"prompt_tokens":1000,"completion_tokens":200,"total_tokens":1200}}`)
+			}))
+			t.Cleanup(server.Close)
+
+			client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "fake-refused-round", 0, 16, "", tc.params)
+			_, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+			if err == nil {
+				t.Fatal("Execute returned nil error, want the refused round's error")
+			}
+			if lu := llm.LastAttemptUsageFromError(err); promptOf(lu) != 1200 {
+				t.Fatalf("last attempt prompt = %d, want 1200 (round 1's prompt plus the answer round 2 carried)", promptOf(lu))
+			}
+			u := llm.UsageFromError(err)
+			if promptOf(u) != 1000 {
+				t.Fatalf("billed prompt = %d, want 1000 (only round 1 completed)", promptOf(u))
+			}
+			if u.OutputTokens != 200 {
+				t.Fatalf("billed output = %d, want 200", u.OutputTokens)
+			}
+		})
+	}
+}
+
+// A length-continue whose last round reported no usage settles on a nil
+// figure while the raw-usage transport still read the earlier rounds'. That
+// combination is rare — every round's completion had to count zero too — but
+// the settled/billed fold must not dereference the nil when it happens.
+func TestLengthContinueWithoutASettledFigureDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		round := requests
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		var body bytes.Buffer
+		if round == 1 {
+			body.WriteString(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"x"},"finish_reason":null}]}` + "\n\n")
+			body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":500,"completion_tokens":0,"total_tokens":500}}` + "\n\n")
+		} else {
+			body.WriteString(`data: {"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":null}]}` + "\n\n")
+			body.WriteString(`data: {"id":"4","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n")
+		}
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = w.Write(body.Bytes())
+	}))
+	t.Cleanup(server.Close)
+
+	// The production constructor: it installs llm.CacheUsageTransport, whose
+	// raw reading is the non-nil side of the nil-settled combination.
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "fake-nil-settled", 0, 16, "", []byte(`{"stream":true}`))
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("physical requests = %d, want 2 (a length round then a stop)", requests)
+	}
+	if got := promptOf(res.Billed()); got != 500 {
+		t.Fatalf("billed prompt = %d, want 500 (round 1's request was read)", got)
+	}
+}
+
+// The non-streaming branch reports usage to the sink once, at the end. Its
+// OnUsage figure is a bill — every round the length-continue made — while the
+// snapshot stays the settled request the conversation stands at. Reporting the
+// settled figure to OnUsage left the live counters short of the final bill
+// whenever a call continued.
+func TestNonStreamingLengthContinueReportsTheBillToTheCounters(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		round := requests
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		finish := "length"
+		usage := `{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}`
+		if round == 2 {
+			finish = "stop"
+			usage = `{"prompt_tokens":150,"completion_tokens":20,"total_tokens":170}`
+		}
+		_, _ = fmt.Fprintf(w, `{"id":"x","object":"chat.completion","created":1,"model":"test","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"R1 ","content":"done"},"finish_reason":%q}],"usage":%s}`, finish, usage)
+	}))
+	t.Cleanup(server.Close)
+
+	var onUsageIn, onUsageOut int
+	var lastSnapshot [2]int
+	ctx := llm.WithStreamSink(llm.WithNonStreamingRequest(context.Background()), &llm.StreamSink{
+		OnUsage:         func(in, out int) { onUsageIn += in; onUsageOut += out },
+		OnUsageSnapshot: func(in, out int) { lastSnapshot = [2]int{in, out} },
+	})
+	// The merged request defaults to stream:true, so the unary path is only
+	// reached by overriding it, the way every other unary test in this file
+	// does.
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "fake-billed-counters", 0, 16, "", []byte(`{"stream":false}`))
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("physical requests = %d, want 2 (a length round then a stop)", requests)
+	}
+	if res == nil {
+		t.Fatal("expected a result")
+	}
+	if onUsageIn != 250 || onUsageOut != 30 {
+		t.Fatalf("OnUsage accumulated = %d/%d, want 250/30 (both rounds were billed)", onUsageIn, onUsageOut)
+	}
+	if lastSnapshot != [2]int{150, 30} {
+		t.Fatalf("last snapshot = %v, want [150 30] (the settled request)", lastSnapshot)
+	}
+}
+
 func TestOpenAICompatLLMStreamsThroughTelemetryBeforeServerCompletes(t *testing.T) {
 	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
 

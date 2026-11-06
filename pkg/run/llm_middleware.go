@@ -565,6 +565,15 @@ func (r recoverableLLM) observeSuccess(ctx context.Context, res *llm.Result, est
 	}
 	provider, model := r.compactDeps.activeModel(ctx)
 	realInput := res.Usage.InputTokens + res.Usage.CacheReadInputTokens + res.Usage.CacheCreationInputTokens
+	if res.BilledUsage != nil {
+		// A length-continue made several requests and the usage it settled on
+		// is the last one, which carries the answer the earlier rounds produced
+		// on top of messages. estimated sized messages alone, so the gap between
+		// the two is that answer, not the provider's framing — and the overhead
+		// is a ratchet that would keep it for every later request of this model.
+		// The settled size was still accepted, which is all the window needs.
+		estimated = 0
+	}
 	llm.RecordSuccessFor(provider, model, est.Name(), realInput, estimated)
 }
 

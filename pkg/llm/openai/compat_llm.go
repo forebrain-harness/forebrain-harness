@@ -862,10 +862,24 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	// prompt and each round is its own billed request.
 	var settledIn, settledOut, settledCached int
 	// lastAttemptUsage is the settled round's own usage: nil until a round
-	// completed, and never a sum. Overflow calibration reads it to bound the
-	// window by the size of the request that was refused.
+	// completed, and never a sum. It covers the failures raised after a round
+	// settled (ErrStreamTruncated, ErrStreamNoEvents), where the round the
+	// conversation stands at is also the request that failed.
 	lastAttemptUsage := func() *llm.Usage {
 		return openAIUsage(int64(settledIn), int64(settledOut), int64(settledCached))
+	}
+	// refusedRoundUsage is the size of the request the current round sent, for a
+	// round that failed: its own reported usage when the provider sent some, or
+	// else what it re-sent — the previous round's prompt plus the answer that
+	// round produced, which this round carries. Nil on a first round that reported
+	// nothing, so overflow calibration falls back to its estimate. It is never the
+	// previous round's own usage: that request was accepted, and recording it as
+	// refused would cap the window below a size that fit.
+	refusedRoundUsage := func(roundIn, roundOut, roundCached int) *llm.Usage {
+		if roundIn > 0 {
+			return openAIUsage(int64(roundIn), int64(roundOut), int64(roundCached))
+		}
+		return openAIUsage(int64(settledIn+settledOut), 0, int64(settledCached))
 	}
 	var reportedIn, reportedOut int
 	responseStarted := false
@@ -886,7 +900,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 			}
 			// Earlier length-continue rounds were already billed; that
 			// billing rides the error into the retry loop's accounting.
-			return nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
+			return nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), refusedRoundUsage(roundIn, roundOut, roundCached))
 		}
 		if sink != nil && sink.Streamed != nil && round == 0 {
 			*sink.Streamed = true
@@ -914,7 +928,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				// The usage chunks that arrived before the cut were billed;
 				// that billing rides the error into the retry loop's
 				// accounting.
-				return nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
+				return nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn+roundIn), int64(tokOut+roundOut), int64(tokCached+roundCached)), refusedRoundUsage(roundIn, roundOut, roundCached))
 			}
 			if len(resp.Choices) > 0 {
 				delta := resp.Choices[0].Delta
@@ -1147,7 +1161,11 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 		prefix.Finish(resultBilledUsage(result))
 		if sink != nil && result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
 			if sink.OnUsage != nil {
-				sink.OnUsage(result.Usage.InputTokens, result.Usage.OutputTokens)
+				// OnUsage feeds the run's additive counters, which are a bill: a
+				// length-continue's every round. The snapshot below is the request the
+				// conversation stands at.
+				billed := result.Billed()
+				sink.OnUsage(billed.InputTokens, billed.OutputTokens)
 			}
 			if sink.OnUsageSnapshot != nil {
 				sink.OnUsageSnapshot(result.Usage.InputTokens, result.Usage.OutputTokens)
@@ -1196,7 +1214,7 @@ func finishUsage(result *llm.Result, finish func(*llm.Result) *llm.Result) *llm.
 	}
 	raw := result.Usage
 	result.Usage = settled
-	if raw != nil && *raw != *settled {
+	if raw != nil && (settled == nil || *raw != *settled) {
 		result.BilledUsage = raw
 	}
 	return result
@@ -1288,6 +1306,11 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 	lastAttemptUsage := func() *llm.Usage {
 		return openAIUsage(int64(settledIn), int64(settledOut), int64(settledCached))
 	}
+	// refusedRoundUsage is the size of the request the current round sent, for
+	// a round that failed. See executeChatCompletionStream.
+	refusedRoundUsage := func() *llm.Usage {
+		return openAIUsage(int64(settledIn+settledOut), 0, int64(settledCached))
+	}
 
 	for round := 0; round < openAILengthContinueMax; round++ {
 		req.Messages = roundMsgs
@@ -1295,7 +1318,7 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		if err != nil {
 			// Earlier length-continue rounds were already billed; that
 			// billing rides the error into the retry loop's accounting.
-			return openaiclient.ChatCompletionMessage{}, "", nil, nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
+			return openaiclient.ChatCompletionMessage{}, "", nil, nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), refusedRoundUsage())
 		}
 		if len(resp.Choices) == 0 {
 			// A 200 with usage but no choice was still billed for its

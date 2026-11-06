@@ -760,6 +760,53 @@ func TestObservationRecordedUnderActiveEstimator(t *testing.T) {
 	}
 }
 
+// lengthContinueUsageLLM stands in for a compat client whose length-continue
+// settled on its last round's prompt while the whole call was billed for every
+// round: Usage is the settled figure occupancy reads, BilledUsage the sum.
+type lengthContinueUsageLLM struct{ settled, billed int }
+
+func (m *lengthContinueUsageLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("ok")})
+	return &llm.Result{
+		Message:     &msg,
+		Usage:       &llm.Usage{InputTokens: m.settled},
+		BilledUsage: &llm.Usage{InputTokens: m.billed},
+	}, nil
+}
+
+// A length-continue's settled prompt carries the answer the earlier rounds
+// produced, which the local estimate of the caller's messages never sized.
+// Learning that gap as overhead would ratchet tens of thousands of tokens onto
+// every later request of this model; only the window lower bound is recorded.
+func TestLengthContinueTeachesTheWindowButNoOverhead(t *testing.T) {
+	llm.ResetObservedForTest()
+	t.Cleanup(llm.ResetObservedForTest)
+
+	const provider, model = "lc-provider", "lc-model"
+	const real = 90000
+	t.Cleanup(llm.SetEstimatorForTest(provider, model, fakeNamedEstimator{}))
+
+	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("z", 2000)))}
+	recoverable := WrapRecoverableLLM(&lengthContinueUsageLLM{settled: real, billed: 2 * real}, nil, &CompactChainDeps{
+		ActiveModel: func(context.Context) (string, string) { return provider, model },
+	}, 0, 0)
+	if _, err := recoverable.Execute(context.Background(), msgs, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	const x = 1000
+	if got := llm.ProjectFor(provider, model, "fake", x) - x; got != 0 {
+		t.Fatalf("overhead under \"fake\" = %d, want 0 (a length-continue teaches no overhead)", got)
+	}
+	obs, ok := llm.Get(provider, model)
+	if !ok {
+		t.Fatal("no observation recorded for the active model")
+	}
+	if obs.ProvenInput != real {
+		t.Fatalf("ProvenInput = %d, want %d (the settled request was accepted, so it still proves the window)", obs.ProvenInput, real)
+	}
+}
+
 // One run identity does not name one history: a fork dispatched while its
 // dispatcher has no run row of its own runs under the dispatching run's id
 // (pkg/run/subagent.go:1326-1341), and its history is its own worker session's.
