@@ -19,6 +19,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -185,7 +186,7 @@ func TestOpenFilesSessionsUnderTheLaunchProjectScope(t *testing.T) {
 			t.Fatalf("Ensure %s: %v", id, err)
 		}
 		var cwd string
-		if err := env.SQL.QueryRowContext(ctx, `SELECT cwd FROM fb_sessions WHERE id=?`, id).Scan(&cwd); err != nil {
+		if err := env.SQL.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT cwd FROM fb_sessions WHERE id=?`), id).Scan(&cwd); err != nil {
 			t.Fatalf("read cwd for %s: %v", id, err)
 		}
 		return cwd
@@ -394,7 +395,7 @@ func TestOpenRegistersTheRunOwner(t *testing.T) {
 	}
 	ownerRows := func() int {
 		var n int
-		if err := env.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, owner).Scan(&n); err != nil {
+		if err := env.SQL.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`), owner).Scan(&n); err != nil {
 			t.Fatalf("read owner lease row: %v", err)
 		}
 		return n
@@ -411,7 +412,7 @@ func TestOpenRegistersTheRunOwner(t *testing.T) {
 	}
 	defer after.Close()
 	var left int
-	if err := after.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, owner).Scan(&left); err != nil {
+	if err := after.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(after), `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`), owner).Scan(&left); err != nil {
 		t.Fatalf("read owner lease row after Close: %v", err)
 	}
 	if left != 0 {

@@ -127,7 +127,7 @@ func TestStateMigrationMatchesFreshSchema(t *testing.T) {
 
 	for _, residual := range []string{"fb_jobs", "fb_work_items", "fb_todos", "fb_intel_audit"} {
 		var count int
-		if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name=?`, residual).Scan(&count); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM sqlite_master WHERE name=?`), residual).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 0 {
@@ -154,7 +154,7 @@ func TestStateMigrationMatchesFreshSchema(t *testing.T) {
 		t.Fatalf("eta run id = %q, want the created legacy run", etaRunID)
 	}
 	var bound, execTool, execCmd int
-	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_messages WHERE session_id='eta' AND run_id=?`, etaRunID).Scan(&bound); err != nil {
+	if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM fb_messages WHERE session_id='eta' AND run_id=?`), etaRunID).Scan(&bound); err != nil {
 		t.Fatal(err)
 	}
 	// The assistant rows bracket the turn; the tool row between them is part
@@ -234,7 +234,7 @@ func TestStateMigrationMatchesFreshSchema(t *testing.T) {
 		{"a-z1", "zeta"}, {"a-z2", "zeta"}, {"a-z3", "zeta"},
 	} {
 		var session string
-		if err := migrated.QueryRowContext(ctx, `SELECT session_id FROM fb_actions WHERE id=?`, action.id).Scan(&session); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT session_id FROM fb_actions WHERE id=?`), action.id).Scan(&session); err != nil {
 			t.Fatalf("action %s: %v", action.id, err)
 		}
 		if session != action.session {
@@ -243,7 +243,7 @@ func TestStateMigrationMatchesFreshSchema(t *testing.T) {
 	}
 	for _, dropped := range []string{"a-lost", "a-ghost"} {
 		var n int
-		if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_actions WHERE id=?`, dropped).Scan(&n); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM fb_actions WHERE id=?`), dropped).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		if n != 0 {
@@ -846,7 +846,7 @@ func TestStateV11UpgradesToV12AddsProjectFileColumns(t *testing.T) {
 	} {
 		var n int
 		if err := migrated.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, col.table, col.name).Scan(&n); err != nil {
+			dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`), col.table, col.name).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		if n != 1 {
@@ -909,7 +909,7 @@ func TestStateV19UpgradesToV20AddsProjectTypeColumns(t *testing.T) {
 	} {
 		var n int
 		if err := migrated.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, col.table, col.name).Scan(&n); err != nil {
+			dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`), col.table, col.name).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		if n != 1 {
@@ -917,13 +917,13 @@ func TestStateV19UpgradesToV20AddsProjectTypeColumns(t *testing.T) {
 		}
 	}
 	var projectType, sessionType string
-	if err := migrated.QueryRowContext(ctx, `SELECT project_type FROM fb_projects WHERE id=?`, p.ID).Scan(&projectType); err != nil {
+	if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT project_type FROM fb_projects WHERE id=?`), p.ID).Scan(&projectType); err != nil {
 		t.Fatal(err)
 	}
 	if projectType != ProjectTypeCoding {
 		t.Fatalf("a pre-existing project must read as coding, got %q", projectType)
 	}
-	if err := migrated.QueryRowContext(ctx, `SELECT project_type FROM fb_sessions WHERE id=?`, "old-session").Scan(&sessionType); err != nil {
+	if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT project_type FROM fb_sessions WHERE id=?`), "old-session").Scan(&sessionType); err != nil {
 		t.Fatal(err)
 	}
 	if sessionType != ProjectTypeCoding {
@@ -1850,7 +1850,7 @@ func TestStateV3UpgradesToV4WithSessionsIntact(t *testing.T) {
 		t.Fatal(err)
 	}
 	const sid = "s-v3"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`),
 		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
@@ -1865,7 +1865,7 @@ func TestStateV3UpgradesToV4WithSessionsIntact(t *testing.T) {
 	defer migrated.Close()
 	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
 	var source string
-	if err := migrated.QueryRowContext(ctx, `SELECT source FROM fb_sessions WHERE id=?`, sid).Scan(&source); err != nil {
+	if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT source FROM fb_sessions WHERE id=?`), sid).Scan(&source); err != nil {
 		t.Fatalf("read migrated row: %v", err)
 	}
 	if source != "" {
@@ -1921,11 +1921,11 @@ func TestStateV4UpgradesToV5WithRunsIntact(t *testing.T) {
 		t.Fatal(err)
 	}
 	const sid = "s-v4"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`),
 		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,?,?,?,?)`,
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,?,?,?,?)`),
 		"r-v4", sid, "orphaned running turn", "running", 1, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -1999,7 +1999,7 @@ func TestStateV5UpgradesToV6MarksFireSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sid := range []string{"s-plain", "cron-job-1-1790000000"} {
-		if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`),
 			sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 			t.Fatal(err)
 		}
@@ -2083,13 +2083,13 @@ func TestStateV6UpgradesToV7GivesDeniedToolRowsTheirDisplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	const sid = "s-v6"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`),
 		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
 	insert := func(content, parts string) {
 		t.Helper()
-		if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, content, parts, created_at) VALUES(?,?,?,?,1)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_messages(session_id, role, content, parts, created_at) VALUES(?,?,?,?,1)`),
 			sid, "tool", content, parts); err != nil {
 			t.Fatal(err)
 		}
@@ -2120,7 +2120,7 @@ func TestStateV6UpgradesToV7GivesDeniedToolRowsTheirDisplay(t *testing.T) {
 		t.Helper()
 		var partsJSON string
 		if err := migrated.QueryRowContext(ctx,
-			`SELECT parts FROM fb_messages WHERE session_id=? AND role='tool' ORDER BY id LIMIT 1 OFFSET ?`, sid, nth).
+			dbx.Rebind(dbx.DialectOf(migrated), `SELECT parts FROM fb_messages WHERE session_id=? AND role='tool' ORDER BY id LIMIT 1 OFFSET ?`), sid, nth).
 			Scan(&partsJSON); err != nil {
 			t.Fatal(err)
 		}
@@ -2156,7 +2156,7 @@ func TestStateV6UpgradesToV7GivesDeniedToolRowsTheirDisplay(t *testing.T) {
 	// exactly what it read before the migration.
 	var withReviewAfter string
 	if err := migrated.QueryRowContext(ctx,
-		`SELECT content FROM fb_messages WHERE session_id=? AND role='tool' ORDER BY id LIMIT 1`, sid).Scan(&withReviewAfter); err != nil {
+		dbx.Rebind(dbx.DialectOf(migrated), `SELECT content FROM fb_messages WHERE session_id=? AND role='tool' ORDER BY id LIMIT 1`), sid).Scan(&withReviewAfter); err != nil {
 		t.Fatal(err)
 	}
 	if withReviewAfter != withReview {
@@ -2186,7 +2186,7 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 		t.Fatal(err)
 	}
 	const sid = "s-v7"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`),
 		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
@@ -2194,7 +2194,7 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 	insertEvent := func(eventID, typ, payload string) {
 		t.Helper()
 		payloads[eventID] = payload
-		if _, err := db.Exec(`INSERT INTO fb_session_events(session_id, event_id, event_type, payload_json, occurred_at_ms) VALUES(?,?,?,?,1)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_session_events(session_id, event_id, event_type, payload_json, occurred_at_ms) VALUES(?,?,?,?,1)`),
 			sid, eventID, typ, payload); err != nil {
 			t.Fatal(err)
 		}
@@ -2225,7 +2225,7 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 	payloadAfter := func(eventID string) string {
 		t.Helper()
 		var payload string
-		if err := migrated.QueryRowContext(ctx, `SELECT payload_json FROM fb_session_events WHERE event_id=?`, eventID).Scan(&payload); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT payload_json FROM fb_session_events WHERE event_id=?`), eventID).Scan(&payload); err != nil {
 			t.Fatalf("read %s: %v", eventID, err)
 		}
 		return payload
@@ -2233,7 +2233,7 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 	parentOf := func(payload string) string {
 		t.Helper()
 		var parent any
-		if err := migrated.QueryRowContext(ctx, `SELECT json_extract(?, '$.parent_tool_call_id')`, payload).Scan(&parent); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT json_extract(?, '$.parent_tool_call_id')`), payload).Scan(&parent); err != nil {
 			t.Fatal(err)
 		}
 		if parent == nil {
@@ -2248,7 +2248,7 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 			t.Fatalf("%s parent_tool_call_id = %q, want call-send-1", eventID, got)
 		}
 		var stripped string
-		if err := migrated.QueryRowContext(ctx, `SELECT json_remove(?, '$.parent_tool_call_id')`, after).Scan(&stripped); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT json_remove(?, '$.parent_tool_call_id')`), after).Scan(&stripped); err != nil {
 			t.Fatal(err)
 		}
 		if stripped != payloads[eventID] {
@@ -2374,7 +2374,7 @@ INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_
 	projectOf := func(sid string) (project string, cwd string, hasProject bool) {
 		t.Helper()
 		var pid sql.NullString
-		if err := migrated.QueryRowContext(ctx, `SELECT project_id, cwd FROM fb_sessions WHERE id=?`, sid).Scan(&pid, &cwd); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT project_id, cwd FROM fb_sessions WHERE id=?`), sid).Scan(&pid, &cwd); err != nil {
 			t.Fatalf("session %s: %v", sid, err)
 		}
 		return pid.String, cwd, pid.Valid
@@ -2385,7 +2385,7 @@ INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_
 		t.Fatalf("A and B must share one project: A=%q B=%q", aProj, bProj)
 	}
 	var aRoot string
-	if err := migrated.QueryRowContext(ctx, `SELECT root FROM fb_projects WHERE id=?`, aProj).Scan(&aRoot); err != nil {
+	if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT root FROM fb_projects WHERE id=?`), aProj).Scan(&aRoot); err != nil {
 		t.Fatal(err)
 	}
 	if aCwd == "" || aCwd != aRoot || bCwd != aCwd || strings.HasSuffix(aCwd, "/") {
@@ -2437,14 +2437,14 @@ INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_
 
 	// Duplicate roots merged onto the earlier project.
 	var prjCount int
-	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects WHERE root=?`, dupRoot).Scan(&prjCount); err != nil {
+	if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM fb_projects WHERE root=?`), dupRoot).Scan(&prjCount); err != nil {
 		t.Fatal(err)
 	}
 	if prjCount != 1 {
 		t.Fatalf("duplicate roots did not merge: %d projects on one root", prjCount)
 	}
 	var keptID, p2sProject, jobProject string
-	if err := migrated.QueryRowContext(ctx, `SELECT id FROM fb_projects WHERE root=?`, dupRoot).Scan(&keptID); err != nil {
+	if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT id FROM fb_projects WHERE root=?`), dupRoot).Scan(&keptID); err != nil {
 		t.Fatal(err)
 	}
 	if keptID != "prj-p1" {
@@ -2663,7 +2663,7 @@ func TestMigrateAwayStoredStreamDeltas(t *testing.T) {
 		count := func(query string, args ...any) int {
 			t.Helper()
 			var n int
-			if err := migrated.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+			if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), query), args...).Scan(&n); err != nil {
 				t.Fatal(err)
 			}
 			return n
@@ -2735,11 +2735,11 @@ FROM fb_session_events WHERE run_id='E3'`).Scan(&e3Count, &e3Text); err != nil {
 		// where it does not, for the main agent and a subagent alike.
 		step := func(runID, stepID string) (deltas int, text string) {
 			t.Helper()
-			if err := migrated.QueryRowContext(ctx, `
+			if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `
 SELECT COUNT(*), COALESCE(MAX(json_extract(payload_json,'$.text')),'')
 FROM fb_session_events
 WHERE COALESCE(run_id,'')=? AND event_type='tool_output_delta'
-  AND COALESCE(json_extract(payload_json,'$.step_id'),'')=?`, runID, stepID).Scan(&deltas, &text); err != nil {
+  AND COALESCE(json_extract(payload_json,'$.step_id'),'')=?`), runID, stepID).Scan(&deltas, &text); err != nil {
 				t.Fatal(err)
 			}
 			return deltas, text
@@ -3004,7 +3004,7 @@ func TestStateV20UpgradesToV21AddsArtifacts(t *testing.T) {
 	// created_at — both indexes must come with the table.
 	for _, idx := range []string{"idx_fb_artifacts_session", "idx_fb_artifacts_run"} {
 		var count int
-		if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&count); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`), idx).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 1 {
@@ -3098,7 +3098,7 @@ func TestStateV21UpgradesToV22AddsTasks(t *testing.T) {
 
 	for _, idx := range []string{"idx_fb_tasks_project_updated", "idx_fb_tasks_external_ref"} {
 		var count int
-		if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&count); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`), idx).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 1 {
@@ -3472,7 +3472,7 @@ func TestStateV25UpgradesToV26RewritesStoredPresets(t *testing.T) {
 	}
 	for sessionID, preset := range want {
 		var got string
-		if err := migrated.QueryRowContext(ctx, `SELECT preset FROM fb_session_permission_state WHERE session_id=?`, sessionID).Scan(&got); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT preset FROM fb_session_permission_state WHERE session_id=?`), sessionID).Scan(&got); err != nil {
 			t.Fatalf("%s: %v", sessionID, err)
 		}
 		if got != preset {
@@ -3501,7 +3501,7 @@ func TestStateV25UpgradesToV26RewritesStoredPresets(t *testing.T) {
 	// default.
 	for _, sessionID := range []string{"read-only", "auto", "full-access", "unknown"} {
 		var gotSource string
-		if err := migrated.QueryRowContext(ctx, `SELECT source FROM fb_session_permission_state WHERE session_id=?`, sessionID).Scan(&gotSource); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT source FROM fb_session_permission_state WHERE session_id=?`), sessionID).Scan(&gotSource); err != nil {
 			t.Fatalf("%s source: %v", sessionID, err)
 		}
 		want := "picker"
@@ -3579,7 +3579,7 @@ func TestStateV26UpgradesToV27RetractsBatchMemories(t *testing.T) {
 
 	for _, sessionID := range []string{"batch-selected", "batch-plain"} {
 		var mode string
-		if err := migrated.QueryRowContext(ctx, `SELECT memory_mode FROM fb_sessions WHERE id=?`, sessionID).Scan(&mode); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT memory_mode FROM fb_sessions WHERE id=?`), sessionID).Scan(&mode); err != nil {
 			t.Fatalf("%s: %v", sessionID, err)
 		}
 		if mode != "disabled" {
@@ -3673,7 +3673,7 @@ func TestStateV27UpgradesToV28PrunesRetiredConfig(t *testing.T) {
 		"gateway.observed_origin": `{"origin":"https://work.example"}`, //nolint:gofmt
 	}
 	for section, value := range rows {
-		stmt := `INSERT INTO fb_config(section, value_json, updated_at_ms) VALUES(?,?,10)`
+		stmt := dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_config(section, value_json, updated_at_ms) VALUES(?,?,10)`)
 		if _, err := conn.ExecContext(ctx, stmt, section, value); err != nil {
 			_ = conn.Close()
 			t.Fatalf("insert %s: %v", section, err)
@@ -3802,7 +3802,7 @@ func TestStateV27UpgradesToV28PrunesRetiredConfig(t *testing.T) {
 		"gateway.observed_origin": `{"origin":"https://work.example"}`,
 	} {
 		var got string
-		if err := migrated.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section=?`, section).Scan(&got); err != nil {
+		if err := migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT value_json FROM fb_config WHERE section=?`), section).Scan(&got); err != nil {
 			t.Fatalf("%s: %v", section, err)
 		}
 		if got != want {

@@ -15,6 +15,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	toolpkg "github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -405,7 +406,8 @@ func TestImageRefusalRecorderIsIdempotent(t *testing.T) {
 	}
 	// The row is one, refreshed: (session_id, provider, model) is the key.
 	var rows int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_image_refusals WHERE session_id=?`, sid).Scan(&rows); err != nil {
+	if err := db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(db),
+		`SELECT COUNT(*) FROM fb_session_image_refusals WHERE session_id=?`), sid).Scan(&rows); err != nil {
 		t.Fatalf("count rows: %v", err)
 	}
 	if rows != 1 {

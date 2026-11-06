@@ -16,6 +16,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // composeEnvForTest builds the minimum Environment composeConfig needs: a
@@ -48,8 +49,8 @@ func composeEnvForTest(t *testing.T, yaml string) (*Environment, context.Context
 func storeSectionForTest(t *testing.T, env *Environment, ctx context.Context, section string, doc string) {
 	t.Helper()
 	if _, err := env.SQL.ExecContext(ctx,
-		`INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
-ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`,
+		dbx.Rebind(dbx.DialectOf(env.SQL), `INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES(?,?,0)
+ON CONFLICT(section) DO UPDATE SET value_json = excluded.value_json`),
 		section, doc); err != nil {
 		t.Fatalf("store section %s: %v", section, err)
 	}

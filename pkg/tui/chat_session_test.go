@@ -44,6 +44,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/session"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/testutil"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -2335,7 +2336,8 @@ func TestBindingANewConversationUsesTheProjectsType(t *testing.T) {
 	// The conversation is an id only: its row arrives with the first turn.
 	const sid = "new-cli-conversation"
 	var rows int
-	require.NoError(t, s.Env.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&rows))
+	require.NoError(t, s.Env.SQL.QueryRowContext(ctx,
+		dbx.Rebind(dbx.DialectOf(s.Env.SQL), `SELECT COUNT(*) FROM fb_sessions WHERE id=?`), sid).Scan(&rows))
 	require.Zero(t, rows, "the conversation has no row before its first turn")
 
 	require.NoError(t, s.BindConversationRuntime(ctx, sid))
@@ -6314,7 +6316,8 @@ func TestWithdrawSurfaceTurnLeavesNoTrace(t *testing.T) {
 	// record that the user sent one.
 	var audited int
 	if err := s.sessStore().DB().QueryRow(
-		`SELECT COUNT(*) FROM fb_messages WHERE session_id=? AND visibility='withdrawn'`,
+		dbx.Rebind(dbx.DialectOf(s.sessStore().DB()),
+			`SELECT COUNT(*) FROM fb_messages WHERE session_id=? AND visibility='withdrawn'`),
 		sessionID).Scan(&audited); err != nil {
 		t.Fatalf("audit read: %v", err)
 	}
@@ -10262,7 +10265,7 @@ func TestPlainCodeHighlightKeepsTokenClassesApart(t *testing.T) {
 	// The surfaces the user reads: a read_file card and a fenced block in a
 	// message. Both are painted on the terminal's own background.
 	surfaces := map[string]string{
-		"read_file":  formatHighlightedToolOutput(goBody, "render.go", DiffThemeDark),
+		"read_file":  formatHighlightedToolOutput(goBody, "render.go", DiffThemeDark, termWidthOrDefault()),
 		"code block": renderMarkdownCodeBlock("go", "// comment\nfunc main() {\n\treturn \"awaiting approval\"\n}", 60, DiffThemeDark),
 	}
 	for name, rendered := range surfaces {
@@ -10315,7 +10318,7 @@ func TestSyntaxColorsNeverEmitTrueColorToA256Terminal(t *testing.T) {
 	surfaces := map[string]string{
 		"diff":       RenderDiff(event.Parse(yamlDiffFixture), DiffThemeDark),
 		"code block": renderMarkdownCodeBlock("go", "// comment\nfunc main() {}", 60, DiffThemeDark),
-		"read_file":  formatHighlightedToolOutput("1|// comment\n2|func main() {}", "main.go", DiffThemeDark),
+		"read_file":  formatHighlightedToolOutput("1|// comment\n2|func main() {}", "main.go", DiffThemeDark, termWidthOrDefault()),
 	}
 	for name, rendered := range surfaces {
 		if strings.Contains(rendered, "\x1b[38;2;") || strings.Contains(rendered, "\x1b[48;2;") {
@@ -18033,7 +18036,7 @@ func TestCodeRowsCarryLineNumbersOnlyWhereTheyLocate(t *testing.T) {
 		rendered string
 	}{
 		{"diff block", RenderDiff(event.Parse(diffFixture.String()), DiffThemeDark)},
-		{"read_file output", formatHighlightedToolOutput(readFileBody.String(), "calc.go", DiffThemeDark)},
+		{"read_file output", formatHighlightedToolOutput(readFileBody.String(), "calc.go", DiffThemeDark, termWidthOrDefault())},
 	}
 	for _, tc := range numbered {
 		t.Run(tc.name, func(t *testing.T) {
@@ -19294,7 +19297,7 @@ func TestReadFileToolNoBlankLines(t *testing.T) {
 	}
 
 	// Step 1: wrapCardContent
-	wrapped := wrapCardContent(content, maxCardContentWidth()-2)
+	wrapped := wrapCardContent(content, maxCardContentWidth(termWidthOrDefault())-2)
 	t.Logf("after wrapCardContent: %q", wrapped)
 	wrappedLines := strings.Split(wrapped, "\n")
 	t.Logf("wrapCardContent produced %d lines:", len(wrappedLines))
@@ -19330,7 +19333,7 @@ func TestReadFileToolNoBlankLines(t *testing.T) {
 	}
 
 	// Full result
-	result := formatHighlightedToolOutput(wrapped, "Makefile", DiffThemeDark)
+	result := formatHighlightedToolOutput(wrapped, "Makefile", DiffThemeDark, termWidthOrDefault())
 	plain := stripANSI(result)
 	resultLines := strings.Split(plain, "\n")
 	t.Logf("final result: %d lines:", len(resultLines))
@@ -19341,7 +19344,7 @@ func TestReadFileToolNoBlankLines(t *testing.T) {
 
 func TestFormatHighlightedToolOutputSeparatesLineNumberGutter(t *testing.T) {
 	content := "41|func TruncateRunes() {\n42|\treturn\n50|}"
-	plain := stripANSI(formatHighlightedToolOutput(content, "truncate_runes.go", DiffThemeDark))
+	plain := stripANSI(formatHighlightedToolOutput(content, "truncate_runes.go", DiffThemeDark, termWidthOrDefault()))
 
 	for _, want := range []string{"41| func TruncateRunes() {", "42| \treturn", "50| }"} {
 		if !strings.Contains(plain, want) {
@@ -25476,7 +25479,7 @@ const sampleTurnDiff = "turn diff: `/repo/internal/foo/bar.go` (+2/-1)\n\n" +
 
 func TestRenderTurnDiffCard_Structure(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark)
+	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatal("expected render to succeed")
 	}
@@ -25507,7 +25510,7 @@ func TestRenderTurnDiffCard_Structure(t *testing.T) {
 
 func TestRenderTurnDiffCard_BandsAndHighlight(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark)
+	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatal("render failed")
 	}
@@ -25532,7 +25535,7 @@ func TestRenderTurnDiffCard_BandsAndHighlight(t *testing.T) {
 
 func TestRenderTurnDiffCard_NoColor(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark)
+	block, ok := renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatal("render failed")
 	}

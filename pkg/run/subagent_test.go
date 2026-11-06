@@ -22,6 +22,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	toolpkg "github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -217,7 +218,9 @@ func TestSubagentDispatchBirthsItsWorkerSession(t *testing.T) {
 		t.Fatalf("dispatchSubagent: %v", err)
 	}
 	var source, parent string
-	if err := db.QueryRow(`SELECT source, parent_session_id FROM fb_sessions WHERE id = ?`, prep.entry.WorkerSessionID).Scan(&source, &parent); err != nil {
+	if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db),
+		`SELECT source, parent_session_id FROM fb_sessions WHERE id = ?`), prep.entry.WorkerSessionID).
+		Scan(&source, &parent); err != nil {
 		t.Fatalf("worker session row: %v", err)
 	}
 	if source != state.SessionSourceSubagent || parent != "session-1" {
@@ -4212,8 +4215,9 @@ func (f *persistenceFixture) seedWorker(t *testing.T, conversationID, workerID s
 	if len(msgs) > 0 {
 		// The seed rows stand for a finished prior execution; the run they
 		// were bound to must exist, the way every persisted row's run does.
-		if _, err := f.store.DB().Exec(`INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, owner, created_at, updated_at)
-			VALUES('seed-run', ?, NULL, 'prior execution', 'done', '', 1, 1)`, conversationID); err != nil {
+		if _, err := f.store.DB().Exec(dbx.Rebind(dbx.DialectOf(f.store.DB()),
+			`INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, owner, created_at, updated_at)
+			VALUES('seed-run', ?, NULL, 'prior execution', 'done', '', 1, 1)`), conversationID); err != nil {
 			t.Fatal(err)
 		}
 		if err := f.store.AppendMessageSequenceForRun(ctx, workerID, "seed-run", msgs, "", ""); err != nil {
@@ -5555,7 +5559,8 @@ func seedChannelRecord(t *testing.T, fac Factory, entry agent.HistoryEntry) {
 func countConversationMessages(t *testing.T, store *state.SessionStore, sessionID string) int {
 	t.Helper()
 	var n int
-	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM fb_messages WHERE session_id=?`, sessionID).Scan(&n); err != nil {
+	if err := store.DB().QueryRow(dbx.Rebind(dbx.DialectOf(store.DB()),
+		`SELECT COUNT(*) FROM fb_messages WHERE session_id=?`), sessionID).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	return n

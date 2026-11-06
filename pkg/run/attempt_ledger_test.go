@@ -11,6 +11,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -196,8 +197,8 @@ func TestLLMAttemptLedgerFillsFromASupervisedRun(t *testing.T) {
 	// attempts, of which only the answer that landed billed anything (the
 	// 503 died before the provider reported usage).
 	var llmCalls, promptTokens, completionTokens int
-	if err := db.QueryRowContext(ctx,
-		`SELECT usage_llm_calls, usage_prompt_tokens, usage_completion_tokens FROM fb_runs WHERE id=?`, runID).
+	if err := db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(db),
+		`SELECT usage_llm_calls, usage_prompt_tokens, usage_completion_tokens FROM fb_runs WHERE id=?`), runID).
 		Scan(&llmCalls, &promptTokens, &completionTokens); err != nil {
 		t.Fatalf("read run usage: %v", err)
 	}

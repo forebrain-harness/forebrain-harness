@@ -186,12 +186,12 @@ func TestStateV9UpgradesToV10AddsRewindLedger(t *testing.T) {
 		}
 	}
 	const sid = "s-v9"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`),
 		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 200; i++ {
-		if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, content, created_at) VALUES(?,?,?,?)`,
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_messages(session_id, role, content, created_at) VALUES(?,?,?,?)`),
 			sid, "user", fmt.Sprintf("m-%d", i), 1); err != nil {
 			t.Fatal(err)
 		}
@@ -205,24 +205,24 @@ func TestStateV9UpgradesToV10AddsRewindLedger(t *testing.T) {
 	requireForeignKeysClean(ctx, t, migrated)
 
 	var n int
-	require.NoError(t, migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_messages WHERE session_id=?`, sid).Scan(&n))
+	require.NoError(t, migrated.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM fb_messages WHERE session_id=?`), sid).Scan(&n))
 	require.Equal(t, 200, n, "the rebuild copied every row")
 	for _, idx := range []string{"idx_fb_messages_session_visibility", "idx_fb_messages_run"} {
 		var c int
 		require.NoError(t, migrated.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&c))
+			dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`), idx).Scan(&c))
 		require.Equal(t, 1, c, "index %s recreated", idx)
 	}
 	var ddl string
 	require.NoError(t, migrated.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='fb_messages'`).Scan(&ddl))
 	require.Contains(t, ddl, "'rewound'")
 	// The new table accepts 'rewound'.
-	_, err = migrated.ExecContext(ctx, `UPDATE fb_messages SET visibility='rewound' WHERE session_id=? AND id=(SELECT MIN(id) FROM fb_messages WHERE session_id=?)`, sid, sid)
+	_, err = migrated.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(migrated), `UPDATE fb_messages SET visibility='rewound' WHERE session_id=? AND id=(SELECT MIN(id) FROM fb_messages WHERE session_id=?)`), sid, sid)
 	require.NoError(t, err)
 	for _, table := range []string{"fb_file_changes", "fb_rewinds"} {
 		var c int
 		require.NoError(t, migrated.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&c))
+			dbx.Rebind(dbx.DialectOf(migrated), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`), table).Scan(&c))
 		require.Equal(t, 1, c, "table %s created", table)
 	}
 	require.NoError(t, migrated.Close())

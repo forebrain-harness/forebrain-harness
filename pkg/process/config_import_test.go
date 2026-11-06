@@ -346,7 +346,7 @@ agents:
 	// The overlay rows carry the recovered pairs.
 	rowForTest := func(key, name string) string {
 		var value string
-		err := env.SQL.QueryRow(`SELECT value_json FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`, key, name).Scan(&value)
+		err := env.SQL.QueryRow(dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT value_json FROM fb_mcp_oauth WHERE project_key = ? AND server_name = ?`), key, name).Scan(&value)
 		if err != nil {
 			t.Fatalf("fb_mcp_oauth (%q, %q): %v", key, name, err)
 		}

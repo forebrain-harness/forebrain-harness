@@ -775,9 +775,9 @@ func writeRepairableLegacyHistory(t *testing.T, stateRoot string) string {
 		t.Fatalf("open the legacy history file: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	const insert = `INSERT INTO output_records (id, kind, command, session_id, original_output,
+	insert := dbx.Rebind(dbx.DialectOf(db), `INSERT INTO output_records (id, kind, command, session_id, original_output,
 		filtered_output, original_output_bytes, filtered_output_bytes, saved_tokens,
-		retrieve_count, created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+		retrieve_count, created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
 	for _, record := range []struct {
 		id      int64
 		command string

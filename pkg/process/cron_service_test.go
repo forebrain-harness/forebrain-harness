@@ -13,6 +13,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
@@ -174,7 +175,7 @@ func TestRetentionSweepSparesAFireWhoseConversationCameBackToLife(t *testing.T) 
 		t.Fatal(err)
 	}
 	quiet := time.Now().Add(-45 * 24 * time.Hour).Unix()
-	if _, err := env.SQL.Exec(`UPDATE fb_sessions SET updated_at=? WHERE id=?`, quiet, sid); err != nil {
+	if _, err := env.SQL.Exec(dbx.Rebind(dbx.DialectOf(env.SQL), `UPDATE fb_sessions SET updated_at=? WHERE id=?`), quiet, sid); err != nil {
 		t.Fatal(err)
 	}
 	store := &state.CronStore{DB: env.SQL}
@@ -202,13 +203,13 @@ func TestRetentionSweepSparesAFireWhoseConversationCameBackToLife(t *testing.T) 
 		t.Fatalf("sweep: %v", err)
 	}
 	var n int
-	if err := env.SQL.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&n); err != nil {
+	if err := env.SQL.QueryRow(dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT COUNT(*) FROM fb_sessions WHERE id=?`), sid).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Fatal("the sweep deleted a conversation a live run holds")
 	}
-	if err := env.SQL.QueryRow(`SELECT COUNT(*) FROM fb_cron_runs WHERE id=?`, recID).Scan(&n); err != nil {
+	if err := env.SQL.QueryRow(dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT COUNT(*) FROM fb_cron_runs WHERE id=?`), recID).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -223,13 +224,13 @@ func TestRetentionSweepSparesAFireWhoseConversationCameBackToLife(t *testing.T) 
 	if err := c.pruneExpiredFires(ctx, time.Now()); err != nil {
 		t.Fatalf("second sweep: %v", err)
 	}
-	if err := env.SQL.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&n); err != nil {
+	if err := env.SQL.QueryRow(dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT COUNT(*) FROM fb_sessions WHERE id=?`), sid).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
 		t.Fatal("the ended conversation was not swept on the second pass")
 	}
-	if err := env.SQL.QueryRow(`SELECT COUNT(*) FROM fb_cron_runs WHERE id=?`, recID).Scan(&n); err != nil {
+	if err := env.SQL.QueryRow(dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT COUNT(*) FROM fb_cron_runs WHERE id=?`), recID).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -293,8 +294,8 @@ func TestFireRunStateReadsTheRunsOwnFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := env.SQL.ExecContext(ctx,
-		`INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?)`, "act-park", "cron-park-1", "tool_approval", string(state.ActionPending), "{}", 1, 1); err != nil {
+		dbx.Rebind(dbx.DialectOf(env.SQL), `INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?)`), "act-park", "cron-park-1", "tool_approval", string(state.ActionPending), "{}", 1, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := driver.SetWaitingAction(ctx, parked.ID, state.Wait{ActionID: "act-park", ToolName: "shell", ToolInputJSON: "{}"}); err != nil {
@@ -530,7 +531,7 @@ func TestPruneExpiredFiresRemovesEverything(t *testing.T) {
 			state.SessionBirth{Source: state.SessionSourceCron}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`UPDATE fb_sessions SET created_at=?, updated_at=? WHERE id=?`, old, lastActive, sid); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_sessions SET created_at=?, updated_at=? WHERE id=?`), old, lastActive, sid); err != nil {
 			t.Fatal(err)
 		}
 		id, err := store.StartRun(ctx, state.CronRun{JobID: "job-" + agentID, AgentID: agentID, SessionID: sid, Trigger: "schedule"})
@@ -540,7 +541,7 @@ func TestPruneExpiredFiresRemovesEverything(t *testing.T) {
 		if _, err := store.FinishRun(ctx, id, state.CronStatusOK, "done", "", ""); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`, old, old, id); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`), old, old, id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -595,8 +596,8 @@ func TestPruneExpiredFiresRemovesEverything(t *testing.T) {
 			}
 		}
 		for _, p := range []string{spill, outside} {
-			if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, content, tool_meta_json, created_at)
-				VALUES(?, 'tool', 'done', ?, ?)`, oldSid,
+			if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_messages(session_id, role, content, tool_meta_json, created_at)
+				VALUES(?, 'tool', 'done', ?, ?)`), oldSid,
 				`{"full_path":`+strconv.Quote(filepath.ToSlash(p))+`}`, old); err != nil {
 				t.Fatal(err)
 			}
@@ -612,7 +613,7 @@ func TestPruneExpiredFiresRemovesEverything(t *testing.T) {
 		freshSid := "cron-" + agent.id + "-fresh"
 
 		var rows int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM fb_messages WHERE session_id=?`, oldSid).Scan(&rows); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM fb_messages WHERE session_id=?`), oldSid).Scan(&rows); err != nil {
 			t.Fatal(err)
 		}
 		if rows != 0 {
@@ -637,7 +638,7 @@ func TestPruneExpiredFiresRemovesEverything(t *testing.T) {
 			t.Fatalf("a recorded path outside tool-outputs was deleted: %v", err)
 		}
 		var fresh int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id=?`, freshSid).Scan(&fresh); err != nil {
+		if err := db.QueryRow(dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM fb_sessions WHERE id=?`), freshSid).Scan(&fresh); err != nil {
 			t.Fatal(err)
 		}
 		if fresh != 1 {
@@ -680,10 +681,10 @@ func TestMaintainSweepsAtMostOnceAnHour(t *testing.T) {
 		if _, err := store.FinishRun(ctx, id, state.CronStatusOK, "done", "", ""); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`UPDATE fb_sessions SET created_at=?, updated_at=? WHERE id=?`, old, at, sid); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_sessions SET created_at=?, updated_at=? WHERE id=?`), old, at, sid); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`, old, old, id); err != nil {
+		if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`), old, old, id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -742,10 +743,10 @@ func TestPruneReadsTheLiveRetentionConfig(t *testing.T) {
 	if _, err := store.FinishRun(ctx, id, state.CronStatusOK, "done", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE fb_sessions SET created_at=?, updated_at=? WHERE id='cron-live-cfg'`, old, old); err != nil {
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_sessions SET created_at=?, updated_at=? WHERE id='cron-live-cfg'`), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`, old, old, id); err != nil {
+	if _, err := db.Exec(dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_cron_runs SET started_at=?, finished_at=? WHERE id=?`), old, old, id); err != nil {
 		t.Fatal(err)
 	}
 

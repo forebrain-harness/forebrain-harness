@@ -1497,13 +1497,13 @@ func TestSessionIDWithLatestMessageMatchesRowScan(t *testing.T) {
 	byRowScan := func() string {
 		var sid sql.NullString
 		err := db.QueryRowContext(ctx,
-			`SELECT m.session_id FROM fb_messages m
+			dbx.Rebind(dbx.DialectOf(db), `SELECT m.session_id FROM fb_messages m
 			 JOIN fb_sessions s ON s.id = m.session_id AND s.agent_id = ?
 			 WHERE IFNULL(TRIM(m.session_id), '') != ''
 			   AND m.`+visible+` = ?
 			 GROUP BY m.session_id
 			 ORDER BY MAX(m.created_at) DESC
-			 LIMIT 1`, "main", equivalent).Scan(&sid)
+			 LIMIT 1`), "main", equivalent).Scan(&sid)
 		if err == sql.ErrNoRows {
 			return ""
 		}

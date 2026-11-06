@@ -16,6 +16,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // instructionCaptureLLM records the messages a wrapper hands down.
@@ -322,7 +323,9 @@ func TestWrapMemoryCitationLLM_UsageAccountingAcceptsOnlyCanonicalUUIDs(t *testi
 	const canonical = "550e8400-e29b-41d4-a716-446655440000"
 	message := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer<oai-mem-citation><rollout_ids>\nnot-a-uuid\n550E8400-E29B-41D4-A716-446655440000\n" + canonical + "\n</rollout_ids></oai-mem-citation>")})
 	ms := newCitationTestStore(t)
-	if _, err := ms.DB.ExecContext(context.Background(), `INSERT INTO fb_sessions(id,agent_id,title,updated_at,created_at,memory_mode) VALUES(?,?,?,?,?,?)`, canonical, "main", canonical, 1, 1, memory.ThreadMemoryEnabled); err != nil {
+	if _, err := ms.DB.ExecContext(context.Background(), dbx.Rebind(dbx.DialectOf(ms.DB),
+		`INSERT INTO fb_sessions(id,agent_id,title,updated_at,created_at,memory_mode) VALUES(?,?,?,?,?,?)`),
+		canonical, "main", canonical, 1, 1, memory.ThreadMemoryEnabled); err != nil {
 		t.Fatal(err)
 	}
 	if err := ms.UpsertStage1Output(context.Background(), memory.Stage1Output{ThreadID: canonical, ProjectKey: "-Test-project", SourceUpdatedAt: 1, RawMemory: "m"}); err != nil {
@@ -337,7 +340,8 @@ func TestWrapMemoryCitationLLM_UsageAccountingAcceptsOnlyCanonicalUUIDs(t *testi
 		t.Fatalf("citation metadata=%#v", citation)
 	}
 	var usage int
-	if err := ms.DB.QueryRowContext(context.Background(), `SELECT COALESCE(usage_count,0) FROM fb_memory_stage1_outputs WHERE thread_id=?`, canonical).Scan(&usage); err != nil {
+	if err := ms.DB.QueryRowContext(context.Background(), dbx.Rebind(dbx.DialectOf(ms.DB),
+		`SELECT COALESCE(usage_count,0) FROM fb_memory_stage1_outputs WHERE thread_id=?`), canonical).Scan(&usage); err != nil {
 		t.Fatal(err)
 	}
 	if usage != 1 {

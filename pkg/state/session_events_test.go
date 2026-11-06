@@ -25,7 +25,7 @@ func TestSessionEventsAreIdempotentOrderedAndPageAtFixedHighWater(t *testing.T) 
 	store := &RunStore{DB: db}
 	ensureSessionsForRuns(t, db, "session-1")
 	for _, runID := range []string{"run-parent", "run-child"} {
-		_, err = db.ExecContext(ctx, `INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,'session-1','',?,0,0)`, runID, string(RunStatusRunning))
+		_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,'session-1','',?,0,0)`), runID, string(RunStatusRunning))
 		require.NoError(t, err)
 	}
 
@@ -81,10 +81,10 @@ func TestSessionEventsPageCompletelyPastLegacyCutoffs(t *testing.T) {
 	require.NoError(t, err)
 
 	const total = 100001
-	_, err = db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `
 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
 INSERT INTO fb_session_events(session_id,event_id,run_id,event_type,payload_json,occurred_at_ms)
-SELECT 'large-session',printf('bulk-event-%05d',i),?,'assistant_delta','{}',i FROM n`, total, run.ID)
+SELECT 'large-session',printf('bulk-event-%05d',i),?,'assistant_delta','{}',i FROM n`), total, run.ID)
 	require.NoError(t, err)
 	highWater, err := store.SessionEventHighWater(ctx, "large-session")
 	require.NoError(t, err)
@@ -247,7 +247,7 @@ func TestClaimWaitResumeIsAtomicAndPreservesSourceMetadata(t *testing.T) {
 	_, wait, err := store.FindRunByAction(ctx, "action-claim")
 	require.NoError(t, err)
 	wait.ResumeClaimedAt = time.Now().Add(-WaitResumeLease - time.Second).UnixMilli()
-	_, err = db.ExecContext(ctx, `UPDATE fb_run_waits SET resume_claimed_at_ms=? WHERE run_id=? AND action_id=?`, wait.ResumeClaimedAt, run.ID, "action-claim")
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_run_waits SET resume_claimed_at_ms=? WHERE run_id=? AND action_id=?`), wait.ResumeClaimedAt, run.ID, "action-claim")
 	require.NoError(t, err)
 	claimed, err = store.ClaimWaitResume(ctx, run.ID, "action-claim", "process-B")
 	require.NoError(t, err)
@@ -288,7 +288,7 @@ func TestExecutionFencePreventsStaleApprovalReplay(t *testing.T) {
 	_, wait, err := runs.FindRunByAction(ctx, action.ID)
 	require.NoError(t, err)
 	wait.ResumeClaimedAt = time.Now().Add(-10 * WaitResumeLease).UnixMilli()
-	_, err = db.ExecContext(ctx, `UPDATE fb_run_waits SET resume_claimed_at_ms=? WHERE run_id=? AND action_id=?`, wait.ResumeClaimedAt, run.ID, action.ID)
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_run_waits SET resume_claimed_at_ms=? WHERE run_id=? AND action_id=?`), wait.ResumeClaimedAt, run.ID, action.ID)
 	require.NoError(t, err)
 	claimed, err = runs.ClaimWaitResume(ctx, run.ID, action.ID, "process-B")
 	require.NoError(t, err)
@@ -405,7 +405,7 @@ func expireWaitResumeLease(ctx context.Context, t *testing.T, db *sql.DB, runs *
 	_, wait, err := runs.FindRunByAction(ctx, actionID)
 	require.NoError(t, err)
 	wait.ResumeClaimedAt = time.Now().Add(-WaitResumeLease - time.Second).UnixMilli()
-	_, err = db.ExecContext(ctx, `UPDATE fb_run_waits SET resume_claimed_at_ms=? WHERE run_id=? AND action_id=?`, wait.ResumeClaimedAt, runID, actionID)
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_run_waits SET resume_claimed_at_ms=? WHERE run_id=? AND action_id=?`), wait.ResumeClaimedAt, runID, actionID)
 	require.NoError(t, err)
 }
 
@@ -417,20 +417,20 @@ func TestResolvedApprovalRecoveryScanHasNoImplicitFiveThousandRowCutoff(t *testi
 	runs := &RunStore{DB: db}
 	ensureSessionsForRuns(t, db, "bulk-conv")
 	const total = 5001
-	_, err = db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `
 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
 INSERT INTO fb_actions(id,session_id,kind,status,payload_json,answer_json,error,created_at,updated_at)
-SELECT printf('bulk-action-%05d',i),'bulk-conv','shell','approved','{}','','',i,i FROM n`, total)
+SELECT printf('bulk-action-%05d',i),'bulk-conv','shell','approved','{}','','',i,i FROM n`), total)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `
 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
 INSERT INTO fb_runs(id,session_id,input_text,status,created_at,updated_at)
-SELECT printf('bulk-run-%05d',i),'bulk-conv','bulk','done',i,i FROM n`, total)
+SELECT printf('bulk-run-%05d',i),'bulk-conv','bulk','done',i,i FROM n`), total)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `
 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
 INSERT INTO fb_run_waits(run_id,action_id,tool_name,tool_input_json,session_snapshot_json,created_at,updated_at)
-SELECT printf('bulk-run-%05d',i),printf('bulk-action-%05d',i),'shell','{}','',i,i FROM n`, total)
+SELECT printf('bulk-run-%05d',i),printf('bulk-action-%05d',i),'shell','{}','',i,i FROM n`), total)
 	require.NoError(t, err)
 
 	all, err := runs.ListResolvedWaitActionIDs(ctx, "", 0)
@@ -460,9 +460,9 @@ func TestRecoveryScanIsScopedToTheConversationThatOwnsIt(t *testing.T) {
 
 	park := func(sessionID, runID, actionID string) {
 		t.Helper()
-		_, err := db.ExecContext(ctx, `
+		_, err := db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `
 INSERT INTO fb_actions(id,session_id,kind,status,payload_json,answer_json,error,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?)`, actionID, sessionID, "shell", string(ActionPending), "{}", "", "", 1, 1)
+VALUES(?,?,?,?,?,?,?,?,?)`), actionID, sessionID, "shell", string(ActionPending), "{}", "", "", 1, 1)
 		require.NoError(t, err)
 		require.NoError(t, runs.SetWaitingAction(ctx, runID, Wait{
 			RunID: runID, ActionID: actionID, ToolName: "shell", ToolInputJSON: "{}",

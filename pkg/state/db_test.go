@@ -74,7 +74,7 @@ func TestCronSchemaIsScopedToAPrimaryAgent(t *testing.T) {
 
 	for _, table := range []string{"fb_cron_jobs", "fb_cron_runs", "fb_heartbeats"} {
 		var count int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name=?`, table).Scan(&count); err != nil {
+		if err := db.QueryRowContext(ctx, dbx.Rebind(dbx.DialectOf(db), `SELECT COUNT(*) FROM sqlite_master WHERE name=?`), table).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != 1 {

@@ -70,9 +70,9 @@ engine_arms=(
   "./pkg/migrate|Codex|Sessions|LSP"
   "./pkg/tool|ShellOutput|Artifact"
   "./pkg/turn|Session|Scheduler|Rewind|Events|Batch|Approval"
-  "./pkg/run|Subagent|Runner|Config|Skills|Compaction|Permissions|AttemptLedger|Transcript"
+  "./pkg/run|Subagent|Runner|Config|Skills|Compaction|Permissions|AttemptLedger|Transcript|ImageRefusal|MemoryCitation"
   "./pkg/hook|Transcript|ToolMiddleware|PermissionRequest"
-  "./pkg/tui|RecordedLikeTheGateway|PrimaryBudget|SurfaceToolApproval"
+  "./pkg/tui|RecordedLikeTheGateway|PrimaryBudget|SurfaceToolApproval|WithdrawSurface|BindingANewConversation"
   "./pkg/assembly|Compact|Resume|Checkpoint"
 )
 
