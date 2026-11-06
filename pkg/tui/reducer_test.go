@@ -5509,6 +5509,35 @@ func TestFooterSaysHowManyAgentsShareTheTree(t *testing.T) {
 	}
 }
 
+// A folded card rebuilds its head from statusMarker, so a peer send card must
+// answer there with the same glyph its expanded card draws: the collapsed head
+// is the same card. A call that has not gone out — running, parked at its gate,
+// refused, or abandoned — must never answer ↗.
+func TestPeerSendCardKeepsItsMarkerWhenFolded(t *testing.T) {
+	send := func(status string) Frame {
+		return Frame{
+			Kind: FrameTool, Title: "peer_send", Final: true,
+			ToolMeta: tool.ToolMeta{ToolName: "peer_send", Status: status,
+				Input: map[string]any{"to": "builder", "message": "hello"}},
+		}
+	}
+	cases := []struct{ status, want string }{
+		{"completed", "↗"},
+		{"failed", "✗"},
+		{"running", spinnerGlyphs[0]},
+		{"awaiting approval", "○"},
+		{"canceled", "○"},
+		{"denied", "●"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.status, func(t *testing.T) {
+			if got := statusMarker(send(tc.status), 0); got != tc.want {
+				t.Fatalf("folded marker for a %s send = %q, want %q", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
 // A count read off the loop paints the composer without disturbing anything
 // else, and any other message stays with the reducer.
 func TestPeerTreeCountNotificationPaintsTheFooter(t *testing.T) {

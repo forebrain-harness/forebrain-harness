@@ -28,6 +28,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -1994,6 +1995,13 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 
 	lineColor := color
 	markerGlyph := "●"
+	if m := strings.TrimSpace(f.Marker); m != "" {
+		// A card that names its own mark carries it in place of the kind's
+		// dot: a peer message's direction arrow is what the card is, so the
+		// dot in front of it would be a second icon saying nothing. State
+		// glyphs below are a tool card's business and never coexist with it.
+		markerGlyph = m
+	}
 	var actionColor string
 	if f.Kind == FrameTool {
 		lineColor = toolHeaderColor(f)
@@ -2014,10 +2022,24 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			markerGlyph = "✗"
 		case toolStatusRunning(f):
 			// Animate the running-tool marker with a Braille spinner that rotates
-			// on each repaint. Awaiting-approval tools never reach this case and
-			// keep their default marker. r.spinnerPhase is the live phase in
+			// on each repaint. r.spinnerPhase is the live phase in
 			// viewport mode (the scratch renderer in renderFrameLines inherits it).
 			markerGlyph = spinnerGlyphs[r.spinnerPhase%len(spinnerGlyphs)]
+		case toolStatusAwaitingApproval(f):
+			// A call parked at its gate is not running and not done: the open
+			// circle the folded header already draws, so one card reads the same
+			// either way.
+			markerGlyph = "○"
+		case lowerTitle == "peer_send" && toolStatusFailed(f):
+			// A failed send is a definite failure: the ✗ a failed skill load
+			// carries.
+			markerGlyph = "✗"
+		case lowerTitle == "peer_send" && peerSendWentOut(f):
+			// A message that went out points away from this transcript. A call
+			// still running, parked at its approval, refused at that approval,
+			// or abandoned keeps its own marker: ↗ there would say it had been
+			// sent.
+			markerGlyph = "↗"
 		}
 	}
 	bulletStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(lineColor)).Bold(true)
@@ -2312,6 +2334,23 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
+	// A peer message and its delivery note are Markdown another session
+	// authored, so their card is laid out by the assistant's own renderer at
+	// this repaint's width — the frame keeps the Markdown and is re-laid out
+	// with the terminal, so a resize reflows it (plan 246 §3.3).
+	if f.MarkdownBody {
+		contentWidth := maxCardContentWidth() - 2
+		if contentWidth < 20 {
+			contentWidth = 20
+		}
+		md := renderAssistantMarkdownWithWidth(content, contentWidth, r.diffTheme)
+		if md == "" {
+			md = content
+		}
+		_, _ = fmt.Fprintln(r.out, prefixLines(md, "  ", "  "))
+		_, _ = fmt.Fprintln(r.out)
+		return
+	}
 	content = wrapCardContent(content, maxCardContentWidth()-2)
 	_, _ = fmt.Fprintln(r.out, prefixLines(content, "  ", "  "))
 	_, _ = fmt.Fprintln(r.out)
@@ -2351,6 +2390,16 @@ func toolStatusDenied(f Frame) bool {
 // canceled before execution (e.g. the user dismissed the approval prompt).
 func toolStatusCanceled(f Frame) bool {
 	return f.Kind == FrameTool && f.ToolMeta.Status == "canceled"
+}
+
+// peerSendWentOut reports whether a peer_send card's message actually left:
+// the call ended, was not gated, and was neither refused nor abandoned. Its
+// final frames are sealed with Status "canceled" (renderer) and "denied"
+// (refused gate), so both are excluded by name — a ● beside "Canceled" is
+// right, a ↗ is not. Both the expanded card and the folded header read this one
+// answer, so the two never disagree about a card.
+func peerSendWentOut(f Frame) bool {
+	return f.Final && !toolStatusPending(f) && !toolStatusCanceled(f) && !toolStatusDenied(f)
 }
 
 // toolHeaderColor returns the semantic foreground shared by every segment of a
@@ -4275,7 +4324,7 @@ func formatComposerPendingInputPreview(p ComposerPendingInputPreview, termWidth 
 	if len(p.PendingSteers) > 0 {
 		appendPendingHeader()
 		for _, steer := range p.PendingSteers {
-			appendWrapped(steer, "  ↳ ", "    ", composerPendingInputPreviewLineLimit, false)
+			appendWrapped(peerQueuedLine(steer), "  ↳ ", "    ", composerPendingInputPreviewLineLimit, false)
 		}
 	}
 	// Rejected steers share this section instead of getting their own. They are
@@ -4288,7 +4337,7 @@ func formatComposerPendingInputPreview(p ComposerPendingInputPreview, termWidth 
 		appendBlankBetweenSections()
 		appendHeader("Queued follow-up inputs")
 		for _, message := range queued {
-			appendWrapped(message, "  ↳ ", "    ", composerPendingInputPreviewLineLimit, true)
+			appendWrapped(peerQueuedLine(message), "  ↳ ", "    ", composerPendingInputPreviewLineLimit, true)
 		}
 	}
 	// Indented to the section body rather than to a message row: the shortcuts
@@ -4300,6 +4349,18 @@ func formatComposerPendingInputPreview(p ComposerPendingInputPreview, termWidth 
 }
 
 const composerQueueShortcutSeparator = " · "
+
+// peerQueuedLine is a queued message as the preview rows show it: a peer
+// message waiting its turn is the sender's words, never the envelope the model
+// will read (plan 246 §3.5). The queue still hands the model the text it
+// received — only this display copy is unwrapped, and text that is not an
+// envelope is shown as it arrived.
+func peerQueuedLine(text string) string {
+	if _, body, ok := process.PeerEnvelopeDisplay(text); ok {
+		return body
+	}
+	return text
+}
 
 // composerQueueShortcutHints lists the queue actions reachable from the composer
 // while a run is working, so the queue is operable without the user having to

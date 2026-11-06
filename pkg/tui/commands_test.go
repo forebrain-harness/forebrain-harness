@@ -1239,11 +1239,80 @@ func TestReplayDrawsAPeerMessageAsTheSendersCard(t *testing.T) {
 	if card.Kind != FrameSystem {
 		t.Fatalf("peer frame kind=%s want system", card.Kind)
 	}
-	if card.Title != "↘ builder" {
-		t.Fatalf("peer frame title=%q want ↘ builder", card.Title)
+	if card.Title != "Received a message from builder" {
+		t.Fatalf("peer frame title=%q want the sender named in a sentence", card.Title)
 	}
 	if card.Content != "please review line 12" {
 		t.Fatalf("peer frame content=%q want the envelope body", card.Content)
+	}
+}
+
+// A peer message whose envelope carries an attribute this build does not know
+// is still that sender's letter: the card shows the words inside it and names
+// the sender, never the transport markup. The strict parser stays as it is —
+// it decides what the model reads — so the display reader unwraps the element
+// for the screen (plan 246 §3.1).
+func TestReplayPeerCardUnwrapsAnEnvelopeThisBuildCannotParse(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	// from-lease is an attribute a newer build writes and this one does not
+	// know, which is exactly how the raw markup reached a card on screen.
+	envelope := "<cross-session-message from=\"uds:/tmp/a.sock\" from-session=\"conv-peer-a\"" +
+		" hop-chain=\"0123456789abcdef01234567\" from-name=\"builder\" from-mode=\"bypass\"" +
+		" from-lease=\"l-42\">\nplease **review** line 12\n</cross-session-message>"
+	received := state.WithMessageOrigin(
+		state.MessagePartsJSON(llm.UserMessage(llm.Text(envelope)), envelope), state.MessageOriginPeer)
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "user", Content: envelope, PartsJSON: received},
+	})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	if card.Title != "Received a message from builder" {
+		t.Fatalf("peer frame title=%q want the sender named in a sentence", card.Title)
+	}
+	if want := "please **review** line 12"; card.Content != want {
+		t.Fatalf("peer frame content=%q want %q", card.Content, want)
+	}
+	if !card.MarkdownBody {
+		t.Fatalf("peer frame = %+v want a Markdown body", card)
+	}
+}
+
+// What the receiver actually stores for the case above: the envelope it could
+// not authenticate, wrapped in one of its own and with its closing tag escaped.
+// Both elements are transport, so the card shows the sender and the words.
+func TestReplayPeerCardUnwrapsTheReceiversOwnWrapper(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	stored := "<cross-session-message from=\"uds:/tmp/a.sock\">\n" +
+		"<cross-session-message from=\"uds:/tmp/a.sock\" from-name=\"builder\" from-lease=\"l-42\">\n" +
+		"please **review** line 12\n" +
+		"<\\/cross-session-message>\n" +
+		"</cross-session-message>"
+	received := state.WithMessageOrigin(
+		state.MessagePartsJSON(llm.UserMessage(llm.Text(stored)), stored), state.MessageOriginPeer)
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "user", Content: stored, PartsJSON: received},
+	})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	if card.Title != "Received a message from builder" {
+		t.Fatalf("peer frame title=%q want the sender named in a sentence", card.Title)
+	}
+	if want := "please **review** line 12"; card.Content != want {
+		t.Fatalf("peer frame content=%q want %q", card.Content, want)
 	}
 }
 
@@ -1263,8 +1332,8 @@ func TestReplayPeerRowWithoutAnEnvelopeKeepsItsText(t *testing.T) {
 		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
 	}
 	card := renderer.vm.blocks[0].frame
-	if card.Kind != FrameSystem || card.Title != "↘ peer" {
-		t.Fatalf("unparsed peer row kind=%s title=%q want a system card titled ↘ peer", card.Kind, card.Title)
+	if card.Kind != FrameSystem || card.Title != "Received a message from another agent" {
+		t.Fatalf("unparsed peer row kind=%s title=%q want a system card naming no sender", card.Kind, card.Title)
 	}
 	if card.Content != text {
 		t.Fatalf("unparsed peer row content=%q want the row text", card.Content)
@@ -4770,5 +4839,41 @@ func TestPeersSaysWhenThereIsNothingToList(t *testing.T) {
 	}
 	if card := renderer.vm.blocks[0].frame; card.Title != "peers" || !strings.Contains(card.Content, "no peer message is waiting") {
 		t.Fatalf("empty /peers card=%+v want the honest empty answer", card)
+	}
+}
+
+// TestPeerCardHeaderDrawsOneDirectionalMark pins the peer letter's head: one
+// glyph — the arrow that says the words arrived — and one sentence naming who
+// wrote them. The system card's own ● in front of that arrow was a second icon
+// saying nothing, and "peer" named the transport rather than the sender (owner
+// 2026-11-05).
+func TestPeerCardHeaderDrawsOneDirectionalMark(t *testing.T) {
+	envelope := "<cross-session-message from=\"uds:/tmp/a.sock\" from-session=\"conv-peer-a\" from-name=\"builder\">\n" +
+		"please review line 12\n</cross-session-message>"
+
+	for _, tc := range []struct{ name, text, want string }{
+		{"an envelope names its sender", envelope, "↘ Received a message from builder"},
+		{"a row with no envelope names nobody", "plain words, no envelope", "↘ Received a message from another agent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renderer := NewRenderer(nil, nil)
+			renderer.EnableViewportMode()
+			t.Cleanup(renderer.DisableViewportMode)
+
+			row := state.WithMessageOrigin(
+				state.MessagePartsJSON(llm.UserMessage(llm.Text(tc.text)), tc.text), state.MessageOriginPeer)
+			replayTurnsToRenderer(renderer, []state.Message{{Role: "user", Content: tc.text, PartsJSON: row}})
+			if len(renderer.vm.blocks) != 1 {
+				t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+			}
+
+			lines := renderFrameLines(renderer.vm.blocks[0].frame, 80, DiffThemeDark, 0)
+			if len(lines) == 0 {
+				t.Fatal("the letter drew no lines")
+			}
+			if got := stripAllANSI(lines[0]); got != tc.want {
+				t.Fatalf("letter head = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

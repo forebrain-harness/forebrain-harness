@@ -339,18 +339,26 @@ func peerOriginCard(origin, content string) (Message, bool) {
 	case state.MessageOriginPeer:
 		// ↘ points at the transcript the message arrived in: the reader is
 		// being spoken to by another session, not by the person at this
-		// terminal.
-		title := "↘ peer"
+		// terminal, so the arrow is the card's one mark. The head says the
+		// whole thing in a sentence — who wrote it and in which direction —
+		// rather than naming "peer", a word that belongs to the transport. The
+		// body is read through the display reader, so an envelope from a build
+		// with attributes this one does not know still draws its words and its
+		// sender instead of the transport markup (plan 246 §3.2); the model
+		// read the same text strictly.
+		title := "Received a message from another agent"
 		body := content
-		if name, parsedBody, ok := process.ParsePeerEnvelope(content); ok {
+		if name, displayBody, ok := process.PeerEnvelopeDisplay(content); ok {
 			if name != "" {
-				title = "↘ " + name
+				title = "Received a message from " + name
 			}
-			body = parsedBody
+			body = displayBody
 		}
-		return Message{Kind: MsgKindSystem, Title: title, Content: body}, true
+		// Both of this family's cards are another session's Markdown, and both
+		// are drawn as such (plan 246 §3.3).
+		return Message{Kind: MsgKindSystem, Title: title, Content: body, MarkdownBody: true, Marker: "↘"}, true
 	case state.MessageOriginPeerStatus:
-		return Message{Kind: MsgKindSystem, Title: "Delivery", Content: peerDeliveryBody(content)}, true
+		return Message{Kind: MsgKindSystem, Title: "Delivery", Content: peerDeliveryBody(content), MarkdownBody: true}, true
 	}
 	return Message{}, false
 }

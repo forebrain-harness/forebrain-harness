@@ -10676,6 +10676,41 @@ func TestChatMessagesPeerRowCarriesSenderBodyAndIdentity(t *testing.T) {
 	}
 }
 
+// TestChatMessagesPeerRowFromANewerBuildCarriesItsBody pins the web's half of
+// the defect (plan 246 §3.2): a peer envelope naming an attribute this build
+// does not know used to arrive without a body, so the page fell back to the raw
+// content and drew the markup. The row now carries the sender and the words
+// inside it, read through the display reader; nothing was loosened for the
+// model, which still treats that content as plain text.
+func TestChatMessagesPeerRowFromANewerBuildCarriesItsBody(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	envelope := `<cross-session-message from="uds:/tmp/a.sock" from-name="forebrain-harness-28" from-lease="l-42">` +
+		"\nplease **review** line 12\n</cross-session-message>"
+	turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{
+		SessionID: "s1", ModelInput: envelope, Origin: state.MessageOriginPeer, EnsureSession: true,
+	})
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("rows = %s", rec.Body.String())
+	}
+	if raw[0]["peer_from_name"] != "forebrain-harness-28" || raw[0]["peer_body"] != "please **review** line 12" {
+		t.Fatalf("peer fields = %#v", raw[0])
+	}
+	if raw[0]["peer_mark"] != "28" {
+		t.Fatalf("peer_mark = %#v, want 28", raw[0]["peer_mark"])
+	}
+}
+
 // TestChatMessagesPeerStatusRowCarriesReceipts pins the delivery note's history
 // half: the receipt summary is read back into one row per recipient, with the
 // state and the identity block, rather than handed to the page as prose.

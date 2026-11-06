@@ -1816,3 +1816,64 @@ func TestDispatchSurfaceTurnSkillCommandRefusedByTextOnlyModel(t *testing.T) {
 	require.Contains(t, rows[0].PartsJSON, state.PartTypeFileReference)
 	require.Contains(t, rows[0].PartsJSON, img)
 }
+
+// A peer message is meta for the model and a letter for the reader: nobody at
+// this terminal typed it, so the row carries the meta marker, and the live turn
+// draws it as the sender's card. A resume must draw that same card — a
+// transcript reader that skips every meta row drops the letter from the
+// replayed conversation, while the runtime rows the marker was meant to hide
+// (the environment context block) must stay hidden.
+func TestResumeDrawsThePeerLetterItsSenderWrote(t *testing.T) {
+	require := require.New(t)
+	s, closeStore := newSurfaceTestSession(t)
+	defer closeStore()
+	ctx := context.Background()
+	const sid = "peer-letter-resume"
+	require.NoError(s.sessStore().Ensure(ctx, sid, sid))
+
+	envelope := "<cross-session-message from=\"uds:/tmp/a.sock\" from-name=\"builder\">\n" +
+		"please review line 12\n</cross-session-message>"
+	// Written through the engine's own path, not by hand: the row a resume
+	// reads is the row the delivered turn left behind.
+	_, err := turn.PersistUserTurn(ctx, s.sessStore(), turn.UserTurn{
+		SessionID: sid, ModelInput: envelope, Origin: state.MessageOriginPeer,
+	})
+	require.NoError(err)
+
+	// A runtime row: meta too, and no surface ever drew it.
+	runtimeRow := llm.UserMessage(llm.Text("<forebrain_environment_context>\nproject_root: /tmp\n</forebrain_environment_context>"))
+	runtimeRow.IsMeta = true
+	_, err = s.sessStore().AppendStructuredMessageForRun(ctx, sid, "", "user",
+		runtimeRow.TextContent(), "", state.MessagePartsJSON(runtimeRow, runtimeRow.TextContent()),
+		"", "", "", "", state.MessageExecTiming{})
+	require.NoError(err)
+
+	rows, err := s.SurfaceTranscriptMessages(ctx, sid)
+	require.NoError(err)
+	var letters int
+	for _, row := range rows {
+		if state.MessageOrigin(row.PartsJSON) == state.MessageOriginPeer {
+			letters++
+		}
+		if strings.Contains(row.Content, "forebrain_environment_context") {
+			t.Fatalf("a runtime meta row reached the replay: %q", row.Content)
+		}
+	}
+	require.Equal(1, letters, "the peer letter must be among the rows a resume replays: %#v", rows)
+
+	// And what those rows draw: the same card the live turn drew, one glyph.
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	replayTurnsToRenderer(renderer, rows)
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("replayed blocks=%d want the letter alone", len(renderer.vm.blocks))
+	}
+	lines := renderFrameLines(renderer.vm.blocks[0].frame, 80, DiffThemeDark, 0)
+	if len(lines) == 0 {
+		t.Fatal("the replayed letter drew no lines")
+	}
+	if got := stripAllANSI(lines[0]); got != "↘ Received a message from builder" {
+		t.Fatalf("replayed letter head = %q, want the sender's card", got)
+	}
+}

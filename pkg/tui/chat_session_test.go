@@ -9882,8 +9882,8 @@ func TestRenderDeliveredSteerMessagesRendersDisplayTextNotModelText(t *testing.T
 // A peer message delivered into a running turn carries no composer submission —
 // nobody typed it — so draining the delivered list must skip it rather than
 // assert a Payload that is not there, and the reader must still see the letter:
-// the same `↘ <sender>` card a resume draws, never a "you" row. Plan 201 hit the
-// assert on a real machine and the TUI died.
+// the same `↘ Received a message from <sender>` card a resume draws, never a
+// "you" row. Plan 201 hit the assert on a real machine and the TUI died.
 func TestDeliveredPeerInputDrawsItsCardWithoutPanicking(t *testing.T) {
 	session := &fakeSession{}
 	st := &streamState{sessionID: "s1", session: session}
@@ -9936,8 +9936,8 @@ func TestDeliveredPeerInputDrawsItsCardWithoutPanicking(t *testing.T) {
 	for _, block := range renderer.vm.blocks {
 		titles = append(titles, block.frame.Title)
 	}
-	if !slices.Contains(titles, "↘ builder") {
-		t.Fatalf("peer message must render as its ↘ sender card, got %#v", titles)
+	if !slices.Contains(titles, "Received a message from builder") {
+		t.Fatalf("peer message must render as its sender's letter card, got %#v", titles)
 	}
 	if !slices.Contains(titles, "Delivery") {
 		t.Fatalf("delivery note must render as its Delivery card, got %#v", titles)

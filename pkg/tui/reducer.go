@@ -139,6 +139,16 @@ type Frame struct {
 	// RetainAsHistory keeps a completed attempt immutable when the logical tool
 	// call continues with an approval-gated retry using the same StepID.
 	RetainAsHistory bool
+	// MarkdownBody draws Content as Markdown, through the same renderer an
+	// assistant answer uses, instead of wrapping it as text. It is set only on
+	// a peer message's card and its delivery note — text another session
+	// authored — never on the other system cards, whose "*" and "_" are part of
+	// what they say (plan 246 §3.3).
+	MarkdownBody bool
+	// Marker replaces the one glyph the frame's kind draws in front of its
+	// title; empty leaves that kind's own mark. It says what a card is, never
+	// what state it is in — state stays the spinner, the ✗ and the ○.
+	Marker string
 }
 
 // TransportRetryStatus is the network retry an agent is waiting on, read by
@@ -2275,6 +2285,8 @@ func (r *Reducer) buildFrame(kind FrameKind, title string, msg Message) Frame {
 		Duration:        msg.Duration,
 		StreamingOutput: msg.ToolOutputDelta,
 		RetainAsHistory: msg.RetainAsHistory,
+		MarkdownBody:    msg.MarkdownBody,
+		Marker:          strings.TrimSpace(msg.Marker),
 		EventID:         strings.TrimSpace(msg.EventID),
 	}
 	return f
@@ -3363,6 +3375,21 @@ func statusMarker(f Frame, spinnerPhase int) string {
 		// renderer draws for the same frame.
 		if skillCardStatus(f) == "failed" {
 			return "✗"
+		}
+		// A peer send card keeps its direction glyph when folded: the collapsed
+		// header is the same card, and a ● there would contradict the ↗ (or ✗)
+		// the expanded card draws.
+		if lowerTitle == "peer_send" {
+			switch {
+			case toolStatusFailed(f):
+				return "✗"
+			case peerSendWentOut(f):
+				return "↗"
+			}
+		}
+		// A canceled call draws the same open circle the expanded card does.
+		if toolStatusCanceled(f) {
+			return toolRunning
 		}
 	}
 	// Tool, compact, and other blocks: running/suspended vs complete.

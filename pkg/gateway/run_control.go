@@ -33,10 +33,29 @@ import (
 
 func toPendingInputPreview(in run.QueuePreview) turn.PendingInputPreview {
 	return turn.PendingInputPreview{
-		PendingSteers:  in.Steers,
-		RejectedSteers: in.Rejected,
-		QueuedMessages: in.FollowUp,
+		PendingSteers:  peerQueuedLines(in.Steers),
+		RejectedSteers: peerQueuedLines(in.Rejected),
+		QueuedMessages: peerQueuedLines(in.FollowUp),
 	}
+}
+
+// peerQueuedLines is queued input as a preview row shows it: a peer message
+// waiting its turn is the sender's words, never the envelope the model will
+// read (plan 246 §3.5). Only the display copy is unwrapped — the queue still
+// hands the model the text it received.
+func peerQueuedLines(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		if _, body, ok := process.PeerEnvelopeDisplay(line); ok {
+			out[i] = body
+			continue
+		}
+		out[i] = line
+	}
+	return out
 }
 
 type runInputRequest struct {
@@ -334,13 +353,15 @@ func (s *Server) watchRunQueue(q *run.InputQueue, runID, sessionID string) {
 				MentionImages: in.MentionImages,
 			}
 			// A peer message delivered into a running turn is that session's
-			// letter, and the page draws it as one — which needs the sender and
-			// the identity block, not just the envelope (plan 200 §3).
+			// letter, and the page draws it as one — which needs the sender,
+			// the identity block and the words inside the envelope, not just
+			// the envelope itself (plan 200 §3, plan 246 §3.4).
 			if state.IsPeerOrigin(in.Origin) {
 				payload.Origin = in.Origin
-				if fromName, _, ok := process.ParsePeerEnvelope(in.Text); ok {
+				if fromName, body, ok := process.PeerEnvelopeDisplay(in.Text); ok {
 					payload.FromName = fromName
 					payload.PeerMark, payload.PeerTone = process.PeerMark(fromName, "")
+					payload.PeerBody = body
 				}
 			}
 			_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventInputDelivered, payload)

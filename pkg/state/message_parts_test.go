@@ -306,3 +306,30 @@ func TestMessagePartsRoundTripToolResultImage(t *testing.T) {
 		t.Fatalf("image part = %#v, want the original data and mime", img)
 	}
 }
+
+// TestMessageDrawnOnSurface pins the one rule both transcript readers ask
+// (plan 199/200): the meta marker hides a row from every surface, and the peer
+// family is the exception — meta for the model, a card for the reader. The
+// runtime rows the marker exists for must stay hidden, or a resume would show
+// the environment block as though the person had typed it.
+func TestMessageDrawnOnSurface(t *testing.T) {
+	runtimeRow := llm.UserMessage(llm.Text("<forebrain_environment_context/>"))
+	runtimeRow.IsMeta = true
+	cases := []struct {
+		name  string
+		parts string
+		want  bool
+	}{
+		{"a message the person typed", MessagePartsJSON(llm.UserMessage(llm.Text("hello")), "hello"), true},
+		{"a runtime meta row", MessagePartsJSON(runtimeRow, runtimeRow.TextContent()), false},
+		{"a peer letter", WithMessageOrigin(MessagePartsJSON(runtimeRow, runtimeRow.TextContent()), MessageOriginPeer), true},
+		{"a peer delivery note", WithMessageOrigin(MessagePartsJSON(runtimeRow, runtimeRow.TextContent()), MessageOriginPeerStatus), true},
+		{"a heartbeat stays hidden", WithMessageOrigin(MessagePartsJSON(runtimeRow, runtimeRow.TextContent()), MessageOriginHeartbeat), false},
+		{"empty parts", "", true},
+	}
+	for _, tc := range cases {
+		if got := MessageDrawnOnSurface(tc.parts); got != tc.want {
+			t.Fatalf("%s: MessageDrawnOnSurface=%v want %v (parts %s)", tc.name, got, tc.want, tc.parts)
+		}
+	}
+}

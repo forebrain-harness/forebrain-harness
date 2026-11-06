@@ -940,14 +940,16 @@ func (s *ChatSession) SurfaceTranscriptMessages(ctx context.Context, sessionID s
 	// PartsJSON; do not infer this from message text, because a user may
 	// legitimately type the same tags themselves. The marker is role-blind for
 	// the same reason it is text-blind: it means "no surface drew this row",
-	// whichever role carries it.
+	// whichever role carries it — and the row it does not name is the peer
+	// letter, meta for the model and a card for the reader (state keeps that
+	// one rule, so this replay and the web's history cannot disagree).
 	turns, err := s.sessStore().ListAllMessages(ctx, sid, 0)
 	if err != nil {
 		return nil, err
 	}
 	visible := make([]state.Message, 0, len(turns))
 	for _, turn := range turns {
-		if _, _, _, isMeta := state.ParseMessageParts(turn.PartsJSON, ""); isMeta {
+		if !state.MessageDrawnOnSurface(turn.PartsJSON) {
 			continue
 		}
 		visible = append(visible, turn)

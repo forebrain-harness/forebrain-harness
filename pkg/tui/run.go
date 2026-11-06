@@ -3114,17 +3114,21 @@ func (s *streamState) takeDeliveredSteersForDisplay() ([]ComposerSubmission, []r
 }
 
 // renderDeliveredInputCards draws the messages the model just received that
-// nobody typed at this terminal: a peer message as its `↘ <sender>` letter and a
-// delivery note as its `Delivery` card — the same cards a resume of the
-// conversation draws for the rows those inputs become, so a letter the model
-// answered is never on screen in one form live and another form after a reload.
+// nobody typed at this terminal: a peer message as its `↘ Received a message
+// from <sender>` letter and a delivery note as its `Delivery` card — the same
+// cards a resume of the conversation draws for the rows those inputs become, so
+// a letter the model answered is never on screen in one form live and another
+// form after a reload.
 func renderDeliveredInputCards(renderer *Renderer, inputs []run.Input) {
 	if renderer == nil {
 		return
 	}
 	for _, in := range inputs {
 		if card, ok := peerOriginCard(in.Origin, in.Text); ok {
-			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: card.Title, Content: card.Content, Final: true})
+			renderer.RenderFrame(Frame{
+				Kind: FrameSystem, Title: card.Title, Content: card.Content,
+				MarkdownBody: card.MarkdownBody, Marker: card.Marker, Final: true,
+			})
 		}
 	}
 }
@@ -4250,7 +4254,10 @@ func executePeerTurn(ctx context.Context, events <-chan inputEvent, notifyCh <-c
 	// it never show the same message two different ways.
 	frame := Frame{Kind: FrameUser, Title: "peer", Content: prompt.Text, Final: true, turn: foreground}
 	if card, ok := peerOriginCard(prompt.Origin, prompt.Text); ok {
-		frame = Frame{Kind: FrameSystem, Title: card.Title, Content: card.Content, Final: true}
+		frame = Frame{
+			Kind: FrameSystem, Title: card.Title, Content: card.Content,
+			MarkdownBody: card.MarkdownBody, Marker: card.Marker, Final: true,
+		}
 	} else if name := strings.TrimSpace(prompt.FromName); name != "" {
 		frame.Title = "peer · " + name
 	}

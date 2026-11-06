@@ -35,6 +35,23 @@ describe('ToolHeader', () => {
     expect(wrapper.get('.ttl .sfx').text()).toBe('lines 1-9')
   })
 
+  it('draws a peer send head with the recipient inside the sentence in Chinese', () => {
+    // Chinese puts the recipient before the verb (已向 X 发送消息), so the word
+    // is split around the target instead of trailing it.
+    const peer = { action: 'Sent a message to', target: 'builder' }
+    const zh = head({ parts: peer, lang: 'zh', status: 'done', statusLabel: 'done' })
+    const ttl = zh.get('.ttl')
+    const verbs = ttl.findAll('.verb').map((span) => span.text())
+    expect(verbs).toEqual(['已向', '发送消息'])
+    expect(ttl.get('.tgt').text()).toBe('builder')
+
+    // English keeps the engine's own word order and its single verb span.
+    const en = head({ parts: peer, lang: 'en', status: 'done', statusLabel: 'done' })
+    const enTtl = en.get('.ttl')
+    expect(enTtl.findAll('.verb').map((span) => span.text())).toEqual(['Sent a message to'])
+    expect(enTtl.get('.tgt').text()).toBe('builder')
+  })
+
   it('draws a head with no object as its action alone, in the title colour', () => {
     const wrapper = head({ parts: { action: 'Todo' }, lang: 'zh', status: 'done', statusLabel: 'done' })
     expect(wrapper.find('.ttl .solo').exists()).toBe(true)

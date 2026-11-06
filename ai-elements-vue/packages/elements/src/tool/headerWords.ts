@@ -87,9 +87,12 @@ export const HEADER_ACTION_ZH: Record<string, string> = {
   'Failed to ask user': '询问用户失败',
   'Skill': '技能',
   'Loading skill': '正在加载技能',
-  'Messaged': '已发消息',
-  'Messaging': '正在发消息',
-  'Failed to message': '发消息失败',
+  'Sent a message to': '已向 … 发送消息',
+  'Sending a message to': '正在向 … 发送消息',
+  'Could not send a message to': '向 … 发送消息失败',
+  'Sent a message': '已发送消息',
+  'Sending a message': '正在发送消息',
+  'Could not send a message': '未能发送消息',
   'Listed agents': '已列出代理',
   'Listing agents': '正在列出代理',
   'Failed to list agents': '列出代理失败',
@@ -105,6 +108,30 @@ export const HEADER_ACTION_ZH: Record<string, string> = {
 export function headerActionWord(action: string, lang: 'zh' | 'en'): string {
   if (lang === 'en') return action
   return HEADER_ACTION_ZH[action] ?? action
+}
+
+/**
+ * The slot a Chinese action leaves for its target, when the target reads
+ * before the verb ("已向 … 发送消息") — the order Chinese puts a recipient in.
+ * A full-width ellipsis, so the vocabulary test's "no ASCII letters" rule still
+ * holds and no engine action can carry it by accident.
+ */
+export const HEADER_TARGET_SLOT = '…'
+
+/**
+ * The worded action split around its target: what reads before the target and
+ * what reads after it. A word with no slot (every other action) and every
+ * English head return null, so the caller keeps drawing verb then target.
+ */
+export function headerTargetedWord(
+  action: string,
+  lang: 'zh' | 'en',
+): { before: string; after: string } | null {
+  if (lang === 'en') return null
+  const word = HEADER_ACTION_ZH[action] ?? ''
+  const at = word.indexOf(HEADER_TARGET_SLOT)
+  if (at < 0) return null
+  return { before: word.slice(0, at).trim(), after: word.slice(at + HEADER_TARGET_SLOT.length).trim() }
 }
 
 /**

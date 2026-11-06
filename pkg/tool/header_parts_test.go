@@ -76,8 +76,9 @@ func TestDisplayHeaderPartsKeepTheDurationApart(t *testing.T) {
 }
 
 // TestDisplayHeaderPartsPeerTools pins the two peer cards' heads (plan 199
-// §3.2): a send names its recipient, a listing has nobody to name, and each of
-// the three states says its own verb.
+// §3.2): a send names its recipient in a sentence, a listing has nobody to
+// name, and each state says its own verb — including the call that named no
+// recipient at all, whose head must not trail off after "to".
 func TestDisplayHeaderPartsPeerTools(t *testing.T) {
 	cwd := "/work/proj"
 	send := func(status string) DisplayFrame {
@@ -87,10 +88,19 @@ func TestDisplayHeaderPartsPeerTools(t *testing.T) {
 				Input: map[string]any{"to": "builder", "message": "hello"}},
 		}
 	}
-	require.Equal(t, HeaderParts{Action: "Messaged", Target: "builder"}, DisplayHeaderParts(send("completed"), cwd))
-	require.Equal(t, HeaderParts{Action: "Messaging", Target: "builder"}, DisplayHeaderParts(send("running"), cwd))
-	require.Equal(t, HeaderParts{Action: "Failed to message", Target: "builder"}, DisplayHeaderParts(send("failed"), cwd))
+	require.Equal(t, HeaderParts{Action: "Sent a message to", Target: "builder"}, DisplayHeaderParts(send("completed"), cwd))
+	require.Equal(t, HeaderParts{Action: "Sending a message to", Target: "builder"}, DisplayHeaderParts(send("running"), cwd))
+	require.Equal(t, HeaderParts{Action: "Sending a message to", Target: "builder"}, DisplayHeaderParts(send("awaiting approval"), cwd))
+	require.Equal(t, HeaderParts{Action: "Could not send a message to", Target: "builder"}, DisplayHeaderParts(send("failed"), cwd))
 	require.Equal(t, "Canceled", DisplayHeaderParts(send("canceled"), cwd).Action)
+
+	// A call that named nobody is a failure with nothing to point at: the head
+	// drops the preposition instead of ending on "to " with nothing after it.
+	nobody := DisplayFrame{
+		Title: "peer_send", Final: true,
+		Meta: ToolMeta{ToolName: "peer_send", Status: "failed", Input: map[string]any{"message": "hello"}},
+	}
+	require.Equal(t, HeaderParts{Action: "Could not send a message"}, DisplayHeaderParts(nobody, cwd))
 
 	list := func(status string) DisplayFrame {
 		return DisplayFrame{

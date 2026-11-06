@@ -67,8 +67,20 @@ type Message struct {
 	// RetainAsHistory prevents a completed execution attempt from being
 	// overwritten by a later lifecycle event with the same StepID.
 	RetainAsHistory bool
-	Duration        time.Duration
-	Timestamp       time.Time
+	// MarkdownBody marks Content as Markdown a card draws with the assistant's
+	// own renderer instead of wrapping it as text. Only a peer message and its
+	// delivery note set it: their content is somebody else's Markdown, while a
+	// status card's "*" is part of what it says (plan 246 §3.3).
+	MarkdownBody bool
+	Duration     time.Duration
+	Timestamp    time.Time
+
+	// Marker replaces the one glyph a card's kind draws in front of its title
+	// ("●" for a system card). Only a peer message sets it, with the arrow that
+	// says which way the words travelled; empty leaves the kind's own mark. It
+	// says what the card is, never what state it is in — state stays the
+	// spinner, the ✗ and the ○.
+	Marker string
 }
 
 type ApprovalSubmit struct {

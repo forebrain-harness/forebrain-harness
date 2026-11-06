@@ -361,15 +361,24 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 
 	// --- Peers ---
 	case lower == "peer_send":
-		// A message card names who it went to, the way a read card names the
-		// file: the recipient is the one thing a reader wants from the head.
-		// The message itself is the card's body.
-		if isFailed {
-			action = "Failed to message"
-		} else if isRunning || isPending {
-			action = "Messaging"
-		} else {
-			action = "Messaged"
+		// A message card reads as a sentence, so the recipient is what the verb
+		// needs. A call that named no recipient — the engine refuses it and the
+		// card is a failure — drops the prepositional tail instead of ending on
+		// "to " with nothing after it. The message itself is the card's body.
+		hasTo := strings.TrimSpace(InputString(meta, "to")) != ""
+		switch {
+		case isFailed && hasTo:
+			action = "Could not send a message to"
+		case isFailed:
+			action = "Could not send a message"
+		case (isRunning || isPending) && hasTo:
+			action = "Sending a message to"
+		case isRunning || isPending:
+			action = "Sending a message"
+		case hasTo:
+			action = "Sent a message to"
+		default:
+			action = "Sent a message"
 		}
 		target = InputString(meta, "to")
 
@@ -485,7 +494,8 @@ func HeaderActions() []string {
 		"Notes", "Saving notes", "Failed to save notes",
 		"Asked user", "Asking user", "Failed to ask user",
 		// Peers
-		"Messaged", "Messaging", "Failed to message",
+		"Sent a message to", "Sending a message to", "Could not send a message to",
+		"Sent a message", "Sending a message", "Could not send a message",
 		"Listed agents", "Listing agents", "Failed to list agents",
 		// Skill and MCP cards
 		"Loading skill", "Skill",

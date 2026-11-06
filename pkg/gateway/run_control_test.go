@@ -750,6 +750,62 @@ func TestRunQueuePublishesDeliveredSteerOnce(t *testing.T) {
 	require.Empty(t, q.TakeDelivered(), "the hook drains what it publishes")
 }
 
+// A peer message delivered into a running turn is that session's letter, so the
+// delivery carries the words inside the envelope as well as the sender: the page
+// draws Text nowhere, and Text is still the envelope the model reads (plan 246
+// §3.4). The envelope names an attribute this build does not know — the case
+// that used to reach the page as raw markup.
+func TestRunQueueDeliveredPeerCarriesTheLetterBody(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-delivered-peer"
+	q := trackedQueue(t, s, runID)
+	envelope := `<cross-session-message from="uds:/tmp/a.sock" from-name="forebrain-harness-28" from-lease="l-42">` +
+		"\nplease **review** line 12\n</cross-session-message>"
+	require.True(t, q.Steer(run.Input{Text: envelope, Origin: state.MessageOriginPeer}))
+
+	delivery := q.Runtime().BeginSteerDelivery(context.Background())
+	require.NotNil(t, delivery)
+	require.True(t, delivery.Commit())
+
+	events, err := s.RunRT.ListRunEvents(context.Background(), runID, 100)
+	require.NoError(t, err)
+	var delivered []event.InputDeliveredPayload
+	for _, evt := range events {
+		if evt.Type != event.RunEventInputDelivered {
+			continue
+		}
+		var p event.InputDeliveredPayload
+		require.NoError(t, json.Unmarshal(evt.Payload, &p))
+		delivered = append(delivered, p)
+	}
+	require.Len(t, delivered, 1)
+	require.Equal(t, state.MessageOriginPeer, delivered[0].Origin)
+	require.Equal(t, "forebrain-harness-28", delivered[0].FromName)
+	require.Equal(t, "please **review** line 12", delivered[0].PeerBody)
+	require.Contains(t, delivered[0].Text, "<cross-session-message", "the model's own copy is the envelope it read")
+}
+
+// A peer message still waiting its turn is shown by its words: the preview is a
+// display copy, while the queue keeps the envelope it will hand the model (plan
+// 246 §3.5).
+func TestPendingInputPreviewUnwrapsAPeerEnvelope(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-pending-peer"
+	q := trackedQueue(t, s, runID)
+	envelope := `<cross-session-message from="uds:/tmp/a.sock" from-name="forebrain-harness-28" from-lease="l-42">` +
+		"\nplease **review** line 12\n</cross-session-message>"
+	require.True(t, q.Steer(run.Input{Text: envelope, Origin: state.MessageOriginPeer}))
+	require.True(t, q.FollowUp(run.Input{Text: "a message the person typed"}))
+
+	steps := pendingInputSteps(t, s, runID)
+	require.NotEmpty(t, steps)
+	last := steps[len(steps)-1]
+	require.Equal(t, []string{"please **review** line 12"}, last.PendingSteers)
+	require.Equal(t, []string{"a message the person typed"}, last.QueuedMessages)
+	require.Contains(t, q.Preview().Steers[0], "<cross-session-message",
+		"the queue still holds what the model reads")
+}
+
 // The queue's change hook runs on whichever goroutine changed the queue: the
 // run's stream when a steer is committed, a request handler when the user
 // queues or recalls. A second invocation slipping in while the first is still

@@ -16,6 +16,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
@@ -1421,5 +1422,161 @@ func TestShellDiffFrameFoldsLikeAnEditCard(t *testing.T) {
 	}
 	if toolPreviewUsesRenderedBody(plainFrame) {
 		t.Fatal("toolPreviewUsesRenderedBody(shell without diff blocks) = true, want false")
+	}
+}
+
+// TestPeerCardBodyRendersMarkdown pins a peer message's card as Markdown
+// (plan 246 §3.3): another session's words are laid out by the assistant's own
+// renderer, and the flag is theirs alone — a status card's "*" is part of what
+// it says.
+func TestPeerCardBodyRendersMarkdown(t *testing.T) {
+	lines, _ := renderFrameLinesWithAgents(Frame{
+		Kind:         FrameSystem,
+		Title:        "↘ builder",
+		Content:      "please **review** line 12",
+		MarkdownBody: true,
+	}, 80, DiffThemeDark, 4)
+	painted := stripAllANSI(strings.Join(lines, "\n"))
+	if strings.Contains(painted, "**") {
+		t.Fatalf("peer card printed the Markdown markers:\n%s", painted)
+	}
+	if !strings.Contains(painted, "please review line 12") {
+		t.Fatalf("peer card lost the letter's words:\n%s", painted)
+	}
+
+	plain, _ := renderFrameLinesWithAgents(Frame{
+		Kind: FrameSystem, Title: "status", Content: "please **review** line 12",
+	}, 80, DiffThemeDark, 4)
+	if got := stripAllANSI(strings.Join(plain, "\n")); !strings.Contains(got, "**review**") {
+		t.Fatalf("a status card's text was rendered as Markdown:\n%s", got)
+	}
+}
+
+// TestPeerDeliveryCardRendersMarkdown pins the delivery note's card as Markdown
+// too (owner decision, plan 246 §3.3): its rows become list items, so a wrapped
+// row continues under its bullet instead of running back to the margin.
+func TestPeerDeliveryCardRendersMarkdown(t *testing.T) {
+	note := "<system-reminder>\nPeer message delivery update:\n" +
+		"- to builder: released after approval and delivered.\n" +
+		"- to docs-site: held for approval and waiting on the person at that terminal.\n" +
+		"</system-reminder>"
+	card, ok := peerOriginCard(state.MessageOriginPeerStatus, note)
+	if !ok {
+		t.Fatal("a delivery note drew no card")
+	}
+	if !card.MarkdownBody {
+		t.Fatalf("delivery card = %+v, want a Markdown body", card)
+	}
+
+	lines, _ := renderFrameLinesWithAgents(Frame{
+		Kind: FrameSystem, Title: card.Title, Content: card.Content, MarkdownBody: card.MarkdownBody,
+	}, 60, DiffThemeDark, 4)
+	painted := stripAllANSI(strings.Join(lines, "\n"))
+	if !strings.Contains(painted, "\n    person at that terminal.") {
+		t.Fatalf("a wrapped delivery row did not continue under its bullet:\n%s", painted)
+	}
+	if !strings.Contains(painted, "released after approval and delivered.") {
+		t.Fatalf("delivery card lost its rows:\n%s", painted)
+	}
+}
+
+// TestPeerSendCardHeaderPointsOut pins the sent-message card's head: an arrow
+// says the words left this transcript, a cross says they did not, and a card
+// that never went out keeps the mark its state gives it — ↗ on a call still
+// running, parked at its gate, refused or abandoned would claim a send that
+// never happened (owner 2026-11-05).
+func TestPeerSendCardHeaderPointsOut(t *testing.T) {
+	send := func(status string, input map[string]any) Frame {
+		return Frame{
+			Kind: FrameTool, Title: "peer_send", Final: true,
+			ToolMeta: tool.ToolMeta{ToolName: "peer_send", Status: status, Input: input},
+		}
+	}
+	to := map[string]any{"to": "builder", "message": "hello"}
+	cases := []struct {
+		name  string
+		frame Frame
+		want  string
+	}{
+		{"sent", send("completed", to), "↗ Sent a message to builder"},
+		{"sending", send("running", to), spinnerGlyphs[0] + " Sending a message to builder"},
+		{"at its gate", send("awaiting approval", to), "○ Sending a message to builder"},
+		{"failed", send("failed", to), "✗ Could not send a message to builder"},
+		{"canceled", send("canceled", to), "○ Canceled builder"},
+		{"denied", send("denied", to), "● Denied builder"},
+		{"no recipient", send("failed", map[string]any{"message": "hello"}), "✗ Could not send a message"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := renderFrameLines(tc.frame, 80, DiffThemeDark, 0)
+			if len(lines) == 0 {
+				t.Fatal("the card drew no lines")
+			}
+			if got := stripAllANSI(lines[0]); got != tc.want {
+				t.Fatalf("card head = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGatedCardsDrawTheOpenCircleBothWays pins the one glyph a parked and a
+// canceled card carry (owner 2026-11-05): the expanded head and the folded
+// header must agree, whatever the tool — a call not yet run is neither running
+// nor complete. The two controls beside them keep their own marks, so the new
+// branches are the only thing that changed.
+func TestGatedCardsDrawTheOpenCircleBothWays(t *testing.T) {
+	shell := func(status string) Frame {
+		return Frame{
+			Kind: FrameTool, Title: "shell", Final: true,
+			ToolMeta: tool.ToolMeta{ToolName: "shell", Status: status,
+				Input: map[string]any{"command": "ls"}},
+		}
+	}
+	peer := func(status string) Frame {
+		return Frame{
+			Kind: FrameTool, Title: "peer_send", Final: true,
+			ToolMeta: tool.ToolMeta{ToolName: "peer_send", Status: status,
+				Input: map[string]any{"to": "builder", "message": "hello"}},
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		frame Frame
+	}{{"shell at its gate", shell("awaiting approval")}, {"peer send at its gate", peer("awaiting approval")},
+		{"shell canceled", shell("canceled")}, {"peer send canceled", peer("canceled")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := renderFrameLines(tc.frame, 80, DiffThemeDark, 0)
+			if len(lines) == 0 {
+				t.Fatal("the card drew no lines")
+			}
+			if got := stripAllANSI(lines[0]); !strings.HasPrefix(got, "○ ") {
+				t.Fatalf("expanded head = %q, want the open circle", got)
+			}
+			if got := statusMarker(tc.frame, 0); got != "○" {
+				t.Fatalf("folded marker = %q, want the open circle", got)
+			}
+		})
+	}
+
+	// The controls: a completed call is still filled, a refused one still its
+	// dot. Only the parked and abandoned states moved.
+	for _, tc := range []struct {
+		name  string
+		frame Frame
+		want  string
+	}{{"completed shell", shell("completed"), "●"}, {"denied shell", shell("denied"), "●"},
+		{"denied peer send", peer("denied"), "●"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := statusMarker(tc.frame, 0); got != tc.want {
+				t.Fatalf("folded marker = %q, want %q", got, tc.want)
+			}
+			lines := renderFrameLines(tc.frame, 80, DiffThemeDark, 0)
+			if len(lines) == 0 {
+				t.Fatal("the card drew no lines")
+			}
+			if got := stripAllANSI(lines[0]); !strings.HasPrefix(got, tc.want+" ") {
+				t.Fatalf("expanded head = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -2214,15 +2214,13 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		// may legitimately type the same tags. The marker is role-blind: it
 		// means "no surface drew this row", whichever role carries it.
 		//
-		// A peer message is the one exception: it is meta for the model - it is
-		// context, not the person typing - and drawn for the person, because the
-		// terminal replays it as its own card (plan 199) and the web draws the
-		// same letter (plan 200). Hiding it here left the web with nothing to
-		// draw but the envelope the model was handed.
-		if _, _, _, isMeta := state.ParseMessageParts(turn.PartsJSON, ""); isMeta {
-			if !state.IsPeerOrigin(state.MessageOrigin(turn.PartsJSON)) {
-				continue
-			}
+		// A peer message is the one exception: it is meta for the model and a
+		// letter for the person, so it is drawn here and replayed by the
+		// terminal as its own card (plans 199, 200). That rule lives in state,
+		// beside the marker it qualifies, so the two surfaces cannot drift
+		// apart and lose the letter on one of them.
+		if !state.MessageDrawnOnSurface(turn.PartsJSON) {
+			continue
 		}
 		visibleIndexes = append(visibleIndexes, i)
 	}
@@ -2375,7 +2373,11 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			// shares.
 			switch m.Origin {
 			case state.MessageOriginPeer:
-				if fromName, body, ok := process.ParsePeerEnvelope(m.Content); ok {
+				// Read through the display reader: a peer message from a build
+				// with attributes this one does not know still reaches the page
+				// as its sender and body, never as the element it travelled in
+				// (plan 246 §3.2).
+				if fromName, body, ok := process.PeerEnvelopeDisplay(m.Content); ok {
 					m.PeerFromName = fromName
 					m.PeerBody = body
 					m.PeerMark, m.PeerTone = process.PeerMark(fromName, "")

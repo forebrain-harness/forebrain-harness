@@ -550,6 +550,12 @@ type InputDeliveredPayload struct {
 	FromName string `json:"from_name,omitempty"`
 	PeerMark string `json:"peer_mark,omitempty"`
 	PeerTone int    `json:"peer_tone,omitempty"`
+	// PeerBody is the words inside a peer envelope: what the letter shows.
+	// Text keeps the envelope the model read, so a page that drew Text would
+	// paint the transport's own markup at the reader (plan 246 §3.4). It is
+	// empty when the content was not one envelope, and the page then shows
+	// Text, which is the whole of what arrived.
+	PeerBody string `json:"peer_body,omitempty"`
 }
 
 // FirstTokenPayload reports how long one run waited for the model's first

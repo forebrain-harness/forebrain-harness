@@ -608,9 +608,12 @@ func (in *peerInbox) publish(ctx context.Context, sessionID, typ string, payload
 
 // peerEnvelopeBody is the message inside an envelope, or "" when the content
 // was not one. A banner quotes the words the person is being asked about, and
-// the envelope's own markup is not those words (plan 200 §3).
+// the envelope's own markup is not those words (plan 200 §3). It is read
+// through the display reader, so an envelope from a newer build — one naming
+// an attribute this build does not know — still yields its words rather than
+// the markup (plan 246 §3.2).
 func peerEnvelopeBody(envelope string) string {
-	if _, body, ok := ParsePeerEnvelope(envelope); ok {
+	if _, body, ok := PeerEnvelopeDisplay(envelope); ok {
 		return body
 	}
 	return ""
@@ -619,9 +622,14 @@ func peerEnvelopeBody(envelope string) string {
 // peerPreview is a message's opening, for a card that says what arrived. A peer
 // message is not this process's text, so its control characters are dropped on
 // the way out: an ESC in a body would let a sender move the cursor or redraw the
-// question a person is answering about it.
+// question a person is answering about it. The opening it quotes is the
+// letter's own words, not the element it travelled in (plan 246 §3.2).
 func peerPreview(envelope string) string {
-	runes := []rune(strings.TrimSpace(stripControlForDisplay(envelope)))
+	_, body, ok := PeerEnvelopeDisplay(envelope)
+	if !ok {
+		body = envelope
+	}
+	runes := []rune(strings.TrimSpace(stripControlForDisplay(body)))
 	if len(runes) <= peerHeldPreviewRunes {
 		return string(runes)
 	}

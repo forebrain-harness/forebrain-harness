@@ -151,6 +151,27 @@ func IsPeerOrigin(origin string) bool {
 	return false
 }
 
+// MessageDrawnOnSurface reports whether a stored row is one a surface draws.
+//
+// The meta marker means "no surface drew this row": runtime-authored context
+// such as the environment block, a plan-mode reminder, or the context-clear
+// anchor's copy of a gated assistant row. A replay skips those, because showing
+// them would put words on screen that nobody typed.
+//
+// A peer message is the exception. It is meta for the model — it is context,
+// not the person at this terminal typing — and it is drawn for the person, as
+// the letter card the delivering turn drew live (plans 199, 200). The marker
+// answers a model-facing question; whether a row has a card is a different
+// question, and this is where both are answered together. Every transcript
+// reader asks this one function, so the letter cannot go missing on one surface
+// only.
+func MessageDrawnOnSurface(partsJSON string) bool {
+	if _, _, _, isMeta := ParseMessageParts(partsJSON, ""); !isMeta {
+		return true
+	}
+	return IsPeerOrigin(MessageOrigin(partsJSON))
+}
+
 // WithMessageOrigin returns partsJSON with the origin part appended.
 func WithMessageOrigin(partsJSON, origin string) string {
 	var parts []map[string]any

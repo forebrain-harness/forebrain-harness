@@ -6,7 +6,7 @@ import { Badge } from '@repo/shadcn-vue/components/ui/badge'
 import { cn } from '@repo/shadcn-vue/lib/utils'
 import { ChevronDownIcon } from 'lucide-vue-next'
 import StatusBadge from './ToolStatusBadge.vue'
-import { headerActionWord, headerSuffixWords } from './headerWords'
+import { headerActionWord, headerSuffixWords, headerTargetedWord } from './headerWords'
 
 type ToolHeaderProps = {
   /**
@@ -47,6 +47,15 @@ const language = computed(() => props.lang ?? 'en')
 
 /** The action worded for the reader; the target is never translated. */
 const verb = computed(() => (props.parts ? headerActionWord(props.parts.action, language.value) : ''))
+/**
+ * The worded action when it puts its target inside the sentence — Chinese says
+ * 已向 X 发送消息, where a verb-then-target head would read backwards. Absent
+ * for every other action and for English, which keep the verb + target head.
+ */
+const woven = computed(() => {
+  if (!props.parts?.action || !props.parts.target) return null
+  return headerTargetedWord(props.parts.action, language.value)
+})
 const suffix = computed(() => (props.parts?.suffix ? headerSuffixWords(props.parts.suffix, language.value) : ''))
 const duration = computed(() => props.parts?.duration ?? '')
 
@@ -76,8 +85,17 @@ const exitLabel = computed(() => {
     <span class="ttl">
       <template v-if="props.parts">
         <template v-if="props.parts.target">
-          <span class="verb">{{ verb }}</span>
-          <span class="pv cmdt tgt">{{ props.parts.target }}</span>
+          <!-- A word that leaves a slot for its target draws the target inside
+               itself (已向 X 发送消息); every other one draws verb then target. -->
+          <template v-if="woven">
+            <span class="verb">{{ woven.before }}</span>
+            <span class="pv cmdt tgt">{{ props.parts.target }}</span>
+            <span class="verb">{{ woven.after }}</span>
+          </template>
+          <template v-else>
+            <span class="verb">{{ verb }}</span>
+            <span class="pv cmdt tgt">{{ props.parts.target }}</span>
+          </template>
           <span v-if="suffix" class="sfx">{{ suffix }}</span>
         </template>
         <!-- A head with no object is its action alone, in the title's colour. -->
