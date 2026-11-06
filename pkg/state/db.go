@@ -77,7 +77,15 @@ func OpenFromConfig(ctx context.Context, home string, databaseURL string, opts *
 	}
 	u, err := url.Parse(target)
 	if err != nil {
-		return nil, fmt.Errorf("parse database.url: %w", err)
+		// A *url.Error's message quotes the URL it was handed, and this URL is
+		// the one place the state database's password lives. Surface the reason
+		// alone (plan 236 made this error visible, so it must be safe to show).
+		reason := err
+		var uerr *url.Error
+		if errors.As(err, &uerr) && uerr.Err != nil {
+			reason = uerr.Err
+		}
+		return nil, fmt.Errorf("parse database.url: %w", reason)
 	}
 	switch u.Scheme {
 	case "mysql":

@@ -1076,7 +1076,7 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	// edit only reaches sessions born after it. A batch session is born with
 	// memory disabled: it never generates memories (owner 2026-10-26).
 	res, err := q.ExecContext(ctx, ensureSessionUpsertSQL.For(dbx.DialectOf(q)),
-		id, title, now, now,
+		id, dbx.ValidText(title), now, now,
 		parentID, birthProject, defaultProject, mode, source,
 		cwdParent, cwd,
 		branch, s.AgentID(), strings.TrimSpace(birth.Source), parentID,
@@ -1440,7 +1440,7 @@ func (s *SessionStore) SetTitle(ctx context.Context, id string, title string) er
 	if id == "" {
 		return nil
 	}
-	title = strings.TrimSpace(title)
+	title = dbx.ValidText(strings.TrimSpace(title))
 	if title == "" {
 		title = id
 	}
@@ -3030,7 +3030,14 @@ type messageRow struct {
 // insertMessage is the one INSERT onto fb_messages.
 func insertMessage(ctx context.Context, q dbtx, row messageRow) (int64, error) {
 	execStarted, execFinished, execDuration := row.Exec.columns()
-	args := []any{row.SessionID, nullIfEmpty(row.RunID), row.Role, row.Visibility, row.Content, row.PartsJSON, row.MessageID, row.Model, row.UsageJSON, row.ToolStepID, row.ToolMetaJSON,
+	// The store is the one place every writer passes through, so the repair
+	// lives here rather than in each caller (plan 228): content is prose from a
+	// tool or a person, and parts/tool_meta_json are JSON documents that can
+	// carry a NUL escape. Both are idempotent on clean input.
+	content := dbx.ValidText(row.Content)
+	partsJSON := string(dbx.ValidJSONText([]byte(row.PartsJSON)))
+	toolMetaJSON := string(dbx.ValidJSONText([]byte(row.ToolMetaJSON)))
+	args := []any{row.SessionID, nullIfEmpty(row.RunID), row.Role, row.Visibility, content, partsJSON, row.MessageID, row.Model, row.UsageJSON, row.ToolStepID, toolMetaJSON,
 		execStarted, execFinished, execDuration, row.CreatedAt}
 	if dbx.DialectOf(q) == dbx.Postgres {
 		// pgx's database/sql result carries no LastInsertId; the statement
@@ -3231,11 +3238,14 @@ func (s *SessionStore) UpdateMessageContentAndParts(ctx context.Context, q dbtx,
 	if partsJSON == "" {
 		partsJSON = "[]"
 	}
+	// Repaired before it is validated: the repair only removes what an engine
+	// refuses, so a document it can save is one that parses.
+	partsJSON = string(dbx.ValidJSONText([]byte(partsJSON)))
 	if !json.Valid([]byte(partsJSON)) {
 		return fmt.Errorf("invalid parts json")
 	}
 	res, err := q.ExecContext(ctx, updateMessageContentAndPartsSQL.For(dbx.DialectOf(q)),
-		strings.TrimSpace(content), partsJSON, rowID, s.AgentID())
+		dbx.ValidText(strings.TrimSpace(content)), partsJSON, rowID, s.AgentID())
 	if err != nil {
 		return err
 	}
@@ -3521,8 +3531,14 @@ func SessionTitleFromContent(content string) string {
 
 // generateSessionTitle creates a concise title from user input.
 // All sources use the same rule: first line, truncated to 50 runes.
+//
+// The text is repaired before the rule runs: a title is a text column, and the
+// truncation converts bytes to runes, which turns every invalid byte into its
+// own replacement character. Repairing first keeps the name the same text the
+// message row holds — one replacement per run — and keeps it storable on an
+// engine that refuses the raw bytes.
 func generateSessionTitle(content string) string {
-	content = strings.TrimSpace(content)
+	content = dbx.ValidText(strings.TrimSpace(content))
 	if content == "" {
 		return "New session"
 	}

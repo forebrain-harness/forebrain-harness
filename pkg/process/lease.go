@@ -168,6 +168,19 @@ func (s *leasedHandler) MountRoutes(add channel.RouteAdder, bus channel.Bus) {
 	}
 }
 
+// DeliverOutbound forwards the send capability to the delegate. The registry
+// asks the handler it holds — this wrapper — whether a channel can send, so
+// without the forwarding every reply on a leased kind answers ErrNotOutbound
+// and is dropped by the caller. The holder is not the only replica that
+// answers: a reply is produced by whichever replica runs the conversation.
+func (s *leasedHandler) DeliverOutbound(ctx context.Context, o channel.Outbound) error {
+	sender, ok := s.handler.(channel.OutboundSender)
+	if !ok {
+		return channel.ErrNotOutbound
+	}
+	return sender.DeliverOutbound(ctx, o)
+}
+
 func (s *leasedHandler) Start(ctx context.Context, add channel.RouteAdder, bus channel.Bus) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})

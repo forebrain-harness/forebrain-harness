@@ -3,6 +3,7 @@ package process
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -434,6 +435,97 @@ func TestLeasedChannelMountsRoutesOnEveryReplica(t *testing.T) {
 	}
 	if err := standby.Stop(context.Background()); err != nil {
 		t.Fatalf("stop the standby's handler: %v", err)
+	}
+}
+
+// TestLeasedChannelSendsOutbound pins the other half of what the wrapper must
+// not take away from its delegate: a lease-gated kind that can send must still
+// send, when the reply arrives the way every reply arrives — through the
+// registry. The registry asks the handler it holds, which is the wrapper and
+// not the adapter, whether the channel is an OutboundSender, so before the
+// forward every reply on one of those kinds was answered ErrNotOutbound and
+// dropped by the caller without a word.
+func TestLeasedChannelSendsOutbound(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leases := testLeases(t, "webchat-a")
+
+	adapter := &fakeOutboundChannel{}
+	guarded := leases.Guard("channel:acct", adapter)
+	reg := channel.NewRegistry()
+	if err := reg.Bind(ctx, "agent", []channel.Handler{guarded}, nil); err != nil {
+		t.Fatalf("bind the leased channel: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Stop(context.Background()) })
+
+	if err := reg.Deliver(ctx, channel.Outbound{ChannelID: "fake", Text: "hello"}); err != nil {
+		t.Fatalf("deliver through the lease wrapper = %v, want the reply sent", err)
+	}
+	if got := adapter.delivered(); len(got) != 1 || got[0] != "hello" {
+		t.Fatalf("the adapter was handed %q, want one %q", got, "hello")
+	}
+
+	// A delegate that cannot send keeps today's answer: the wrapper does not
+	// pretend the channel can send, and the registry still treats that as an
+	// ordinary outcome rather than a fault.
+	inboundOnly := &stubChannel{}
+	inboundReg := channel.NewRegistry()
+	if err := inboundReg.Bind(ctx, "agent", []channel.Handler{leases.Guard("channel:other", inboundOnly)}, nil); err != nil {
+		t.Fatalf("bind the inbound-only channel: %v", err)
+	}
+	t.Cleanup(func() { _ = inboundReg.Stop(context.Background()) })
+	err := inboundReg.Deliver(ctx, channel.Outbound{ChannelID: "stub", Text: "hello"})
+	if !errors.Is(err, channel.ErrNotOutbound) {
+		t.Fatalf("delivering through a wrapper whose delegate cannot send = %v, want %v", err, channel.ErrNotOutbound)
+	}
+}
+
+// allCapabilityChannel is a delegate that answers every optional capability the
+// channel package asks about, so the table below can tell a forward the wrapper
+// lost from a capability its delegate never had.
+type allCapabilityChannel struct{ *routeMountChannel }
+
+func (c *allCapabilityChannel) DeliverOutbound(context.Context, channel.Outbound) error { return nil }
+
+// TestLeasedChannelKeepsItsDelegateCapabilities is the structural guard: the
+// registry only ever sees the wrapper, so an optional interface that is asked
+// for by type assertion has to be answered by the wrapper whenever the adapter
+// answers it. A new optional interface gets a row in this table and a forward in
+// leasedHandler; without the row the test stays green while the capability is
+// lost silently — which is exactly how the send path broke for eleven kinds.
+//
+// The check is one-directional on purpose. The wrapper may answer a capability
+// its delegate does not have — MountRoutes on an adapter that mounts no route is
+// a no-op, and DeliverOutbound answers channel.ErrNotOutbound, the same answer an
+// unwrapped inbound-only adapter gives — but it must never subtract one the
+// delegate does have.
+func TestLeasedChannelKeepsItsDelegateCapabilities(t *testing.T) {
+	leases := testLeases(t, "webchat-a")
+	checks := map[string]func(channel.Handler) bool{
+		"RouteMounter":   func(h channel.Handler) bool { _, ok := h.(channel.RouteMounter); return ok },
+		"OutboundSender": func(h channel.Handler) bool { _, ok := h.(channel.OutboundSender); return ok },
+	}
+	full, plain := &allCapabilityChannel{routeMountChannel: &routeMountChannel{}}, &stubChannel{}
+	for name, check := range checks {
+		// The table has to be able to see both answers, or it would pass for the
+		// wrong reason.
+		if !check(full) {
+			t.Fatalf("%T answers no %s: the check itself is broken", full, name)
+		}
+		if check(plain) {
+			t.Fatalf("%T answers %s, so it cannot stand for an adapter without it", plain, name)
+		}
+	}
+	for _, delegate := range []channel.Handler{full, plain} {
+		wrapped, ok := leases.Guard("channel:acct", delegate).(*leasedHandler)
+		if !ok {
+			t.Fatalf("%T was not put behind a lease, so this wrapper is not covered", delegate)
+		}
+		for name, check := range checks {
+			if check(delegate) && !check(wrapped) {
+				t.Errorf("the lease wrapper of %T dropped %s: the registry asks the wrapper, so every optional capability needs a forward", delegate, name)
+			}
+		}
 	}
 }
 

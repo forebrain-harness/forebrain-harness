@@ -3,9 +3,13 @@ package channel
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -56,6 +60,16 @@ func (w *WhatsApp) MountRoutes(add RouteAdder, bus Bus) {
 	w.inboundAdd = add
 	w.bus = bus
 	if !w.cfg.Enabled {
+		return
+	}
+	// The route is exempt from control-plane auth because a webhook
+	// authenticates its caller itself (pkg/config/gateway.go). This adapter can
+	// only do that with a secret, so without one the route is not mounted at
+	// all: an unauthenticated endpoint here would let any caller name a
+	// conversation and put words in its user's mouth. The poll loop, which is
+	// this channel's real inbound path, is unaffected.
+	if strings.TrimSpace(w.cfg.Secret) == "" {
+		slog.Warn("whatsapp inbound webhook not mounted: no secret configured", "path", w.cfg.InboundPath)
 		return
 	}
 	if path := strings.TrimSpace(w.cfg.InboundPath); path != "" {
@@ -171,14 +185,40 @@ func (w *WhatsApp) pollLoop(ctx context.Context) {
 	}
 }
 
+// verifyWhatsAppSignature checks the bridge's HMAC of the raw body. The header
+// is Meta's own (`sha256=<hex>` over the body as sent), so a bridge that relays
+// a Meta callback can pass the header through unchanged.
+func verifyWhatsAppSignature(r *http.Request, body []byte, secret string) bool {
+	sig := strings.TrimSpace(r.Header.Get("X-Hub-Signature-256"))
+	if sig == "" || !strings.HasPrefix(sig, "sha256=") {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(secret)))
+	_, _ = mac.Write(body)
+	expect := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expect), []byte(sig))
+}
+
 func (w *WhatsApp) handleInbound(rw http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	defer r.Body.Close()
+	// The signature covers the bytes as received, so read them before anything
+	// touches the JSON.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(rw, "bad body", http.StatusBadRequest)
+		return
+	}
+	if secret := strings.TrimSpace(w.cfg.Secret); secret != "" && !verifyWhatsAppSignature(r, body, secret) {
+		slog.Debug("whatsapp inbound refused: signature", "remote", r.RemoteAddr)
+		http.Error(rw, "forbidden", http.StatusForbidden)
+		return
+	}
 	var payload map[string]any
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		http.Error(rw, "invalid json", http.StatusBadRequest)
 		return
 	}

@@ -5840,6 +5840,149 @@ describe('a subagent talked to from its own view', () => {
     }
   })
 
+  // The engine's two endings for an execution the user stopped: `cancelled`
+  // when they pressed stop, `interrupted` when its approval wait could not be
+  // resumed — and then the payload carries the sentence saying why. The word
+  // and the reason come from that payload, once, in the quiet line where the
+  // run stopped; never the red account a failure gets.
+  it('keeps an interrupted subagent’s word and reason on its quiet line', async () => {
+    const restore = installFakeSocket()
+    try {
+      const reason = 'approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried'
+      const stream = useChatStream()
+      const pending = stream.send('kick off')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      let seq = 0
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { id: `evt-${++seq}`, type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+      const row = () => {
+        const tasks = stream.subagentCallTasks.get('subagent-exec:exec-i')
+        const step = { stepId: 'subagent-exec:exec-i', toolName: '', status: 'running', subagentCall: { verb: 'run', tasks: [{ index: 0, title: 'probe', status: 'waiting' }] } }
+        return subagentCallView(step as never, tasks).rows[0]
+      }
+
+      runEvent('subagent_spawned', { agent_id: 'task-aborted', agent_type: 'explore', task_id: 'task-aborted', task: 'probe', execution_id: 'exec-i' })
+      runEvent('subagent_ended', { agent_id: 'task-aborted', agent_type: 'explore', task_id: 'task-aborted', execution_id: 'exec-i', status: 'interrupted', error: reason })
+
+      const entry = stream.subagents.value.find((each) => each.agentId === 'task-aborted')
+      expect(entry?.status).toBe('interrupted')
+      expect(entry?.blocks.find((block) => block.kind === 'stopped')).toMatchObject({
+        kind: 'stopped', id: 'stopped:exec-i', status: 'interrupted', reason,
+      })
+      // The reason lives on the quiet line, not as the row's red error.
+      expect(row()?.status).toBe('interrupted')
+      expect(row()?.error).toBeUndefined()
+
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+
+  it('keeps a cancelled subagent’s quiet line a stop, with no reason', async () => {
+    const restore = installFakeSocket()
+    try {
+      const stream = useChatStream()
+      const pending = stream.send('kick off')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      let seq = 0
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { id: `evt-${++seq}`, type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+      const row = () => {
+        const tasks = stream.subagentCallTasks.get('subagent-exec:exec-c')
+        const step = { stepId: 'subagent-exec:exec-c', toolName: '', status: 'running', subagentCall: { verb: 'run', tasks: [{ index: 0, title: 'probe', status: 'waiting' }] } }
+        return subagentCallView(step as never, tasks).rows[0]
+      }
+
+      runEvent('subagent_spawned', { agent_id: 'task-stopped', agent_type: 'explore', task_id: 'task-stopped', task: 'probe', execution_id: 'exec-c' })
+      runEvent('subagent_ended', { agent_id: 'task-stopped', agent_type: 'explore', task_id: 'task-stopped', execution_id: 'exec-c', status: 'cancelled', error: 'cancelled' })
+
+      const entry = stream.subagents.value.find((each) => each.agentId === 'task-stopped')
+      expect(entry?.status).toBe('cancelled')
+      const stopped = entry?.blocks.find((block) => block.kind === 'stopped')
+      expect(stopped).toMatchObject({ kind: 'stopped', id: 'stopped:exec-c', status: 'cancelled' })
+      expect(stopped && 'reason' in stopped ? stopped.reason : undefined).toBeUndefined()
+      expect(row()?.status).toBe('cancelled')
+      expect(row()?.error).toBeUndefined()
+
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+
+  // A reload reads the ledger's own ending. Collapsing `interrupted` to `done`
+  // made the tab claim the execution finished normally while its quiet stop
+  // line sat under that claim.
+  it('replays an interrupted record as interrupted, its reason on the quiet line', async () => {
+    const reason = 'approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried'
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 'session-int', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({
+      sessionId: 'session-int',
+      records: [{
+        agentId: 'task-aborted',
+        taskId: 'task-aborted',
+        task: 'probe',
+        status: 'interrupted',
+        error: reason,
+        executionId: 'exec-i',
+        startedAt: 1_760_000_000,
+        finishedAt: 1_760_000_030,
+      }],
+    } as never)
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 'session-int'
+      await stream.loadMessages('session-int')
+      const entry = stream.subagents.value.find((each) => each.agentId === 'task-aborted')
+      expect(entry?.status).toBe('interrupted')
+      expect(entry?.blocks.find((block) => block.kind === 'stopped')).toMatchObject({
+        kind: 'stopped', id: 'stopped:exec-i', status: 'interrupted', reason,
+      })
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
+  // An interrupted execution ran for a real duration. Its row settles its clock
+  // on that ending the way any other ending does — the tally still counts
+  // outcomes, and an interrupted execution is not one — so the row keeps saying
+  // how long it ran, exactly as a failed row of the same span does.
+  it('settles an interrupted row’s clock on the duration it ran', () => {
+    const at = 1_760_000_000
+    const stepOf = (ending: string): SubagentToolStep => ({
+      stepId: 'call-1',
+      toolName: 'subagent_fanout',
+      summary: 'run 1 task',
+      status: 'completed',
+      subagentCall: {
+        verb: 'run',
+        tasks: [{ index: 0, key: 'subagent-1', title: 'probe', status: ending, startedAt: at, finishedAt: at + 90 }],
+      },
+    })
+    const interrupted = subagentCallView(stepOf('interrupted')).rows[0]
+    const failed = subagentCallView(stepOf('failed')).rows[0]
+    expect(interrupted.clock?.kind).toBe('final')
+    expect(interrupted.clock?.label).toBe(failed.clock?.label)
+  })
+
   it('shows a plan-reviewer its own budget from its own event, not the conversation’s', async () => {
     const restore = installFakeSocket()
     try {
@@ -7003,11 +7146,15 @@ describe('held peer messages', () => {
         from_name: 'forebrain-harness-28',
         peer_mark: '28',
         peer_tone: 1,
+        // The words inside the envelope, read by the engine: the card draws
+        // this, never the markup `text` carries (plan 246 §3.4).
+        peer_body: 'are you still editing open.go?',
       })
       const letter = stream.messages.value.find((message) => message.origin === 'peer')
       expect(letter).toMatchObject({
         role: 'user',
         peerFromName: 'forebrain-harness-28',
+        peerBody: 'are you still editing open.go?',
         peerMark: '28',
         peerTone: 1,
       })

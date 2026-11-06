@@ -612,8 +612,12 @@ func (c *Compressor) CompressShellOutput(command, stdout, sessionID string) (str
 			// retrieval id, so the full original is unreachable for this command.
 			// A history nobody can retrieve is worth less than a start-up that
 			// never happens, but it is never worth nothing: say so.
+			logged := command
+			if RedactEnabled() {
+				logged = Redact(logged)
+			}
 			slog.Error("shell output history not saved; the output has no retrieval id",
-				"session_id", sessionID, "command", command, "err", err)
+				"session_id", sessionID, "command", logged, "command_bytes", len(command), "err", err)
 		}
 		if err == nil && id > 0 {
 			meta.RetrieveID = id

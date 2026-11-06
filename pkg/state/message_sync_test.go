@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -457,4 +458,338 @@ func TestPostgresToolPayloadWithANULStillListsTheToolCall(t *testing.T) {
 	if !strings.Contains(rows[0].DetailJSON, dbx.ReplacementText) {
 		t.Errorf("stored payload does not carry the replacement where the NUL was: %s", rows[0].DetailJSON)
 	}
+}
+
+// TestAppendMessageForRunRepairsContent is the regression for the main write
+// path: AppendMessageForRun hands the row's content and tool metadata to the
+// engine unrepaired, so MySQL refuses the row (error 1366) and PostgreSQL
+// refuses it too (SQLSTATE 22021). The composer's own turn goes through this
+// call, which makes a repaired store the difference between a stored message
+// and a lost one.
+func TestAppendMessageForRunRepairsContent(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDBForTest(t)
+	t.Logf("engine under test: %s", dbx.DialectOf(db))
+	store := NewSessionStore(db, "main")
+
+	// Two invalid bytes in a row, so the test also pins the collapse: the
+	// repair writes one replacement per run, not one per byte.
+	const bad = "a\xff\xffb"
+	// A JSON document can carry a NUL as the escape, which PostgreSQL's JSON
+	// lexer refuses to parse; the document itself is otherwise well-formed.
+	const toolMeta = `{"tool":"read_file","detail":"nul\u0000here"}`
+
+	if _, err := store.AppendMessageForRun(ctx, "repair-content", "", "user", bad, "", toolMeta, MessageExecTiming{}); err != nil {
+		t.Fatalf("a message whose content holds invalid bytes was refused instead of repaired: %v", err)
+	}
+
+	content, parts, storedMeta := storedRepairedRow(t, db, "repair-content", "user")
+	if want := "a" + dbx.ReplacementText + "b"; content != want {
+		t.Fatalf("stored content = %q, want %q", content, want)
+	}
+	if parts != "[]" {
+		t.Errorf("stored parts = %q, want the empty document the append path writes", parts)
+	}
+	if strings.Contains(storedMeta, `\u0000`) {
+		t.Errorf("stored tool metadata still carries the NUL escape: %s", storedMeta)
+	}
+	if !strings.Contains(storedMeta, `\uFFFD`) {
+		t.Errorf("stored tool metadata does not carry the replacement where the NUL was: %s", storedMeta)
+	}
+	if !json.Valid([]byte(storedMeta)) {
+		t.Errorf("repairing the tool metadata broke the document: %s", storedMeta)
+	}
+	// The name this first turn gives its session is the same prose, written by
+	// the naming statement rather than by insertMessage.
+	if title := storedSessionTitle(t, db, "repair-content"); title != content {
+		t.Errorf("the session named from that turn reads %q, want the repaired content %q", title, content)
+	}
+}
+
+// TestAppendStructuredMessageRepairsParts is the same promise on the path every
+// composer turn takes (pkg/turn/session.go): content and the parts document
+// holding the same text must agree after the repair — one text, one repair —
+// and the document must not carry the NUL escape PostgreSQL refuses to parse
+// out of a jsonb cast.
+func TestAppendStructuredMessageRepairsParts(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDBForTest(t)
+	t.Logf("engine under test: %s", dbx.DialectOf(db))
+	store := NewSessionStore(db, "main")
+
+	const bad = "sum\xff\xffmary\x00tail"
+	want := "sum" + dbx.ReplacementText + "mary" + dbx.ReplacementText + "tail"
+	msg := llm.UserMessage(llm.Text(bad))
+	if _, err := store.AppendStructuredMessageForRun(ctx, "repair-parts", "", "user", bad, "",
+		MessagePartsJSON(msg, bad), "", "", "", "", MessageExecTiming{}); err != nil {
+		t.Fatalf("a message whose content and parts hold bytes an engine refuses was refused instead of repaired: %v", err)
+	}
+	content, parts, _ := storedRepairedRow(t, db, "repair-parts", "user")
+	if content != want {
+		t.Fatalf("stored content = %q, want %q", content, want)
+	}
+	if got := storedPartsText(t, parts); got != content {
+		t.Fatalf("the row holds two texts: parts say %q, content says %q", got, content)
+	}
+	if strings.Contains(parts, `\u0000`) {
+		t.Errorf("stored parts still carry the NUL escape PostgreSQL refuses: %s", parts)
+	}
+
+	// A caller that hands over a document instead of a message list reaches the
+	// same choke point, so the escape is repaired there too.
+	const nulParts = `[{"type":"text","text":"nul\u0000here"}]`
+	if _, err := store.AppendStructuredMessageForRun(ctx, "repair-parts", "", "assistant", "nul\x00here", "",
+		nulParts, "", "", "", "", MessageExecTiming{}); err != nil {
+		t.Fatalf("a parts document carrying a NUL escape was refused instead of repaired: %v", err)
+	}
+	content, parts, _ = storedRepairedRow(t, db, "repair-parts", "assistant")
+	if strings.Contains(parts, `\u0000`) {
+		t.Errorf("the parts document handed over by the caller kept its NUL escape: %s", parts)
+	}
+	if got := storedPartsText(t, parts); got != content {
+		t.Errorf("the caller's document and the content disagree after repair: parts say %q, content says %q", got, content)
+	}
+}
+
+// TestMessageTextComparesRepairedRows pins what the repair changes for the
+// reconciler: a stored row is repaired and the run's canonical message is not,
+// so comparing the two on the raw text never matches — the reconciler then
+// drops the in-place completion it was asked for and appends the message a
+// second time. The comparison repairs both sides, so a row this store wrote
+// still aligns with the message that produced it.
+func TestMessageTextComparesRepairedRows(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDBForTest(t)
+	t.Logf("engine under test: %s", dbx.DialectOf(db))
+	store := NewSessionStore(db, "main")
+	const sessionID = "repair-sync"
+	const bad = "sum\xff\xffmary"
+
+	partial := []llm.Message{
+		llm.UserMessage(llm.Text("hello")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text(bad)}),
+	}
+	if err := store.AppendMessageSequenceForRun(ctx, sessionID, "", partial, "model", ""); err != nil {
+		t.Fatalf("append the partial capture: %v", err)
+	}
+	if got := countStoredRows(t, db, sessionID); got != 2 {
+		t.Fatalf("the first append stored %d rows, want the 2 of its message list", got)
+	}
+
+	finished := []llm.Message{
+		llm.UserMessage(llm.Text("hello")),
+		llm.AssistantMessage(
+			[]llm.ContentPart{llm.Text(bad)},
+			llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"a.txt"}`}},
+		),
+	}
+	if err := store.AppendMessageSequenceForRun(ctx, sessionID, "", finished, "model", ""); err != nil {
+		t.Fatalf("append the finished run: %v", err)
+	}
+	if got := countStoredRows(t, db, sessionID); got != 2 {
+		t.Fatalf("the reconciler appended the run's tail again: %d rows, want the 2 it already held", got)
+	}
+	content, parts, _ := storedRepairedRow(t, db, sessionID, "assistant")
+	if want := "sum" + dbx.ReplacementText + "mary"; content != want {
+		t.Fatalf("completed assistant content = %q, want %q", content, want)
+	}
+	if !strings.Contains(parts, "call-1") {
+		t.Fatalf("the in-place completion did not land the finished message's tool call: %s", parts)
+	}
+}
+
+// TestOutputHistoryRepairsCommand pins the third text column that carries a
+// tool's own words: the command line of a compressed output record. It is
+// repaired for the same reason its output already was — a record the engine
+// refuses is a record nobody can retrieve.
+func TestOutputHistoryRepairsCommand(t *testing.T) {
+	store := openOutputHistoryForTest(t)
+	t.Logf("engine under test: %s", store.dialect)
+
+	id, err := store.Save(Entry{Command: "grep \xff\xff pattern", OriginalOutput: "before\xffafter", FilteredOutput: "filtered"})
+	if err != nil {
+		t.Fatalf("a record whose command holds invalid bytes was refused instead of repaired: %v", err)
+	}
+	entry, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("read the saved record back: %v", err)
+	}
+	if want := "grep " + dbx.ReplacementText + " pattern"; entry.Command != want {
+		t.Fatalf("stored command = %q, want %q", entry.Command, want)
+	}
+	if want := "before" + dbx.ReplacementText + "after"; entry.OriginalOutput != want {
+		t.Fatalf("stored original output = %q, want %q", entry.OriginalOutput, want)
+	}
+}
+
+// TestOutputHistoryImportsARepairableLegacyRow pins the legacy import: one
+// record whose text an engine refuses used to roll back the whole batch, so a
+// single bad byte in an old history file kept every record in it out of the
+// database — and the file stayed behind to fail again on the next start.
+func TestOutputHistoryImportsARepairableLegacyRow(t *testing.T) {
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	writeRepairableLegacyHistory(t, stateRoot)
+	db := openStateDBForTest(t)
+	t.Logf("engine under test: %s", dbx.DialectOf(db))
+
+	store, err := OpenOutputHistory(ctx, db, stateRoot)
+	if err != nil {
+		t.Fatalf("open the output history: %v", err)
+	}
+	dirty, err := store.Get(1)
+	if err != nil {
+		t.Fatalf("the legacy record with a bad byte did not land: %v", err)
+	}
+	if want := "cat " + dbx.ReplacementText + ".txt"; dirty.Command != want {
+		t.Fatalf("imported command = %q, want %q", dirty.Command, want)
+	}
+	if want := "orig" + dbx.ReplacementText; dirty.OriginalOutput != want {
+		t.Fatalf("imported original output = %q, want %q", dirty.OriginalOutput, want)
+	}
+	// The clean record of the same batch has to land with it: the repair is per
+	// row, not a licence to drop the batch around a bad one.
+	clean, err := store.Get(2)
+	if err != nil {
+		t.Fatalf("the clean record of the same batch did not land: %v", err)
+	}
+	if clean.Command != "make all" || clean.OriginalOutput != "orig-clean" {
+		t.Fatalf("imported clean record = %+v, want the seeded command and output unchanged", clean)
+	}
+}
+
+// TestStoreRepairLeavesCleanTextUnchanged is the control every repair needs:
+// ordinary prose, tabs, newlines and non-ASCII text come back byte for byte, so
+// the store still writes a person's message exactly as they typed it.
+func TestStoreRepairLeavesCleanTextUnchanged(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDBForTest(t)
+	t.Logf("engine under test: %s", dbx.DialectOf(db))
+	store := NewSessionStore(db, "main")
+
+	const clean = "a\tb\nnaïve 汉字 🙂 — done"
+	partsJSON := MessagePartsJSON(llm.UserMessage(llm.Text(clean)), clean)
+	if _, err := store.AppendStructuredMessageForRun(ctx, "repair-clean", "", "user", clean, "",
+		partsJSON, "", "", "", "", MessageExecTiming{}); err != nil {
+		t.Fatalf("append a clean message: %v", err)
+	}
+	content, parts, toolMeta := storedRepairedRow(t, db, "repair-clean", "user")
+	if content != clean {
+		t.Fatalf("clean content came back changed: %q, want %q", content, clean)
+	}
+	if parts != partsJSON {
+		t.Fatalf("clean parts came back changed: %q, want %q", parts, partsJSON)
+	}
+	if toolMeta != "" {
+		t.Fatalf("clean row's tool metadata came back changed: %q, want empty", toolMeta)
+	}
+	if got := storedPartsText(t, parts); got != clean {
+		t.Fatalf("the parts document of a clean row reads back as %q, want %q", got, clean)
+	}
+}
+
+// storedRepairedRow reads one message row's text columns back as the engine
+// stored them.
+func storedRepairedRow(t *testing.T, db *sql.DB, sessionID, role string) (content, parts, toolMeta string) {
+	t.Helper()
+	dialect := dbx.DialectOf(db)
+	query := `SELECT content, parts, tool_meta_json FROM fb_messages WHERE session_id=` +
+		dbx.Placeholder(dialect, 1) + ` AND role=` + dbx.Placeholder(dialect, 2) + ` ORDER BY id ASC`
+	if err := db.QueryRowContext(context.Background(), query, sessionID, role).Scan(&content, &parts, &toolMeta); err != nil {
+		t.Fatalf("read the stored %s row of %s back: %v", role, sessionID, err)
+	}
+	return content, parts, toolMeta
+}
+
+// storedPartsText reads the text out of a stored parts document the way the
+// transcript projection does: the text blocks, in order, joined by a newline.
+func storedPartsText(t *testing.T, partsJSON string) string {
+	t.Helper()
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(partsJSON), &blocks); err != nil {
+		t.Fatalf("parse the stored parts document %q: %v", partsJSON, err)
+	}
+	var texts []string
+	for _, block := range blocks {
+		if block["type"] != "text" {
+			continue
+		}
+		text, _ := block["text"].(string)
+		texts = append(texts, text)
+	}
+	return strings.Join(texts, "\n")
+}
+
+// storedSessionTitle reads the name a session carries back from the engine.
+func storedSessionTitle(t *testing.T, db *sql.DB, sessionID string) string {
+	t.Helper()
+	query := `SELECT title FROM fb_sessions WHERE id=` + dbx.Placeholder(dbx.DialectOf(db), 1)
+	var title string
+	if err := db.QueryRowContext(context.Background(), query, sessionID).Scan(&title); err != nil {
+		t.Fatalf("read the stored title of %s back: %v", sessionID, err)
+	}
+	return title
+}
+
+// countStoredRows counts a conversation's transcript rows.
+func countStoredRows(t *testing.T, db *sql.DB, sessionID string) int {
+	t.Helper()
+	query := `SELECT COUNT(*) FROM fb_messages WHERE session_id=` + dbx.Placeholder(dbx.DialectOf(db), 1)
+	var n int
+	if err := db.QueryRowContext(context.Background(), query, sessionID).Scan(&n); err != nil {
+		t.Fatalf("count the stored rows of %s: %v", sessionID, err)
+	}
+	return n
+}
+
+// legacyRepairableTableShape is the pre-migration history file's table, without
+// the STRICT keyword: the file under test holds bytes SQLite will store and the
+// two server engines refuse, which is the point.
+const legacyRepairableTableShape = `
+CREATE TABLE output_records (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  command TEXT NOT NULL,
+  session_id TEXT NOT NULL DEFAULT '',
+  original_output TEXT NOT NULL,
+  filtered_output TEXT NOT NULL,
+  original_output_bytes INTEGER NOT NULL,
+  filtered_output_bytes INTEGER NOT NULL,
+  saved_tokens INTEGER NOT NULL,
+  capability_id TEXT NOT NULL DEFAULT '',
+  capability_version TEXT NOT NULL DEFAULT '',
+  retrieve_count INTEGER NOT NULL DEFAULT 0,
+  retrieve_reason TEXT NOT NULL DEFAULT '',
+  spool_path TEXT NOT NULL DEFAULT '',
+  spool_omitted_bytes INTEGER NOT NULL DEFAULT 0,
+  created_at_ms INTEGER NOT NULL
+);`
+
+// writeRepairableLegacyHistory seeds a history file holding one record whose
+// text an engine refuses, followed by a clean one.
+func writeRepairableLegacyHistory(t *testing.T, stateRoot string) string {
+	t.Helper()
+	path := writeLegacyHistoryFile(t, stateRoot, legacyRepairableTableShape)
+	db, err := sql.Open("sqlite3", path+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open the legacy history file: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	const insert = `INSERT INTO output_records (id, kind, command, session_id, original_output,
+		filtered_output, original_output_bytes, filtered_output_bytes, saved_tokens,
+		retrieve_count, created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+	for _, record := range []struct {
+		id      int64
+		command string
+		output  string
+	}{
+		{id: 1, command: "cat \xff.txt", output: "orig\xff"},
+		{id: 2, command: "make all", output: "orig-clean"},
+	} {
+		if _, err := db.Exec(insert, record.id, KindShell, record.command, "s-1", record.output,
+			"filtered", 10, 5, 1, 0, int64(1767323045000)); err != nil {
+			t.Fatalf("seed the legacy history file with record %d: %v", record.id, err)
+		}
+	}
+	return path
 }

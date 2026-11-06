@@ -197,4 +197,23 @@ describe('SubagentCallCard', () => {
     expect(row.find('[data-testid="subagent-row-clock"]').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  // An execution whose approval wait could not be resumed ended as a stop,
+  // not as a failure: its row takes the same muted ban a pressed stop does,
+  // and the reason it carries is said once, on the quiet line in the tab —
+  // never as the row's red error.
+  it('draws an interrupted task as the muted stop it is, not red', () => {
+    const step = stepOf({
+      status: 'failed',
+      subagentCall: { verb: 'run', tasks: [{ index: 0, key: 'subagent-8c5c', title: 'network probe', agentType: 'general-purpose', status: 'running' }] },
+    })
+    const reason = 'approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried'
+    const live = new Map([[0, { agentId: 'subagent-8c5c', status: 'interrupted', error: reason, finishedAtMs: Date.now() }]])
+    expect(subagentCallView(step, live, Date.now()).rows[0].status).toBe('interrupted')
+    const wrapper = mount(SubagentCallCard, { props: { step, live, now: Date.now() } })
+    const row = wrapper.get('[data-testid="subagent-task-row"]')
+    expect(row.find('svg').classes()).toContain('lucide-ban-icon')
+    expect(row.text()).not.toContain(reason)
+    expect(row.html()).not.toContain('forebrain-danger')
+  })
 })

@@ -33,7 +33,7 @@
       >
         <CheckCircle2 v-if="row.status === 'done'" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-success)]" aria-hidden="true" />
         <XCircle v-else-if="row.status === 'failed'" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-danger)]" aria-hidden="true" />
-        <Ban v-else-if="row.status === 'cancelled'" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-muted-text)]" aria-hidden="true" />
+        <Ban v-else-if="row.status === 'cancelled' || row.status === 'interrupted'" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-muted-text)]" aria-hidden="true" />
         <AlertTriangle v-else-if="row.status === 'skipped'" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-warning)]" aria-hidden="true" />
         <CirclePause v-else-if="row.status === 'running' && row.paused" class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-brand-1)]" aria-hidden="true" />
         <Loader2 v-else-if="row.status === 'running'" class="mt-0.5 size-4 shrink-0 animate-spin text-[var(--forebrain-brand-1)]" aria-hidden="true" />

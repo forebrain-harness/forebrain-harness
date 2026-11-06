@@ -532,6 +532,22 @@ func TestComposedStartupConfigErrorNamesTheFileNotTheCredentials(t *testing.T) {
 	}
 }
 
+// TestComposedStartupConfigNeverQuotesTheURL pins plan 243 on the operator's
+// path: the same malformed database.url, judged through the startup gate rather
+// than the open. Plan 236 made this failure visible — it fails the first-run
+// check and is written to the home's log — so the message has to be safe to
+// show, and database.url is where the password lives.
+func TestComposedStartupConfigNeverQuotesTheURL(t *testing.T) {
+	env, ctx := composeEnvForTest(t, "database:\n  url: mysql://user:pw%zz@127.0.0.1:3306/fbt\n")
+	_, ok, err := ComposedStartupConfig(ctx, env.Root)
+	if err == nil {
+		t.Fatalf("a malformed database.url = (ok=%v, err=nil), want an error", ok)
+	}
+	if strings.Contains(err.Error(), "pw%zz") {
+		t.Fatalf("the error quoted the credential: %v", err)
+	}
+}
+
 // TestComposedStartupConfigKeepsAFreshSQLiteHomeQuiet pins the one fallback that
 // is correct (plan 236): a SQLite home with no state file yet is "not
 // configured yet", not a failure. The state directory existing is the shape a

@@ -597,12 +597,26 @@ func TestPeerServiceRetriesAFailedStart(t *testing.T) {
 	if rec := ownRecord(t, env.dirs.fbDir); rec != nil {
 		t.Fatalf("record = %+v, want nothing registered while the directory is unusable", rec)
 	}
+	// The port is wired even though the first attempt failed: the loop will
+	// register this process on a later tick, and it must be reachable then.
+	if env.peerInboxState() == nil {
+		t.Fatal("the peer inbox is unwired after a failed first attempt")
+	}
+	if err := env.ReleasePeerMessage("no-such-message"); err == nil ||
+		strings.Contains(err.Error(), "no peer service is running") {
+		t.Fatalf("release reached no inbox: %v", err)
+	}
 
 	// Without a restart, the loop's next attempt registers the process.
 	if err := os.Remove(blocker); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the retried registration", func() bool { return ownRecord(t, env.dirs.fbDir) != nil })
+	// Registered and reachable are the same process here: the record says so and
+	// the port answers from the same service.
+	if env.peerInboxState() == nil {
+		t.Fatal("the peer inbox is unwired after the retried registration")
+	}
 	rec := ownRecord(t, env.dirs.fbDir)
 	if rec.SessionID != "cli-retry" {
 		t.Fatalf("sessionId = %q, want the retried registration to be the real one", rec.SessionID)

@@ -1564,7 +1564,7 @@ export type TimelineBlock =
    * line the card row and the drawer's own icon already use — never the red
    * account a failure gets, and never a second time anywhere else.
    */
-  | { kind: 'stopped'; id: string }
+  | { kind: 'stopped'; id: string; status: 'cancelled' | 'interrupted'; reason?: string }
   | {
       kind: 'approval'
       id: string
@@ -2472,7 +2472,7 @@ export interface SubagentCallTaskLive {
 
 /** One row of a subagent card, ready for the locale and the icons. */
 export interface SubagentCallRowView {
-  status: 'waiting' | 'running' | 'done' | 'failed' | 'cancelled' | 'skipped'
+  status: 'waiting' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted' | 'skipped'
   title: string
   agentId?: string
   clock?: { kind: 'running'; startedAtMs: number; label: string } | { kind: 'final'; label: string }
@@ -2512,8 +2512,9 @@ function subagentTaskTerminal(status: string): boolean {
 }
 
 /** The status a subagent's end settles its task with, mirroring the terminal's reducer. */
-function subagentEndStatus(status: string, error: string): 'done' | 'failed' | 'cancelled' {
+function subagentEndStatus(status: string, error: string): 'done' | 'failed' | 'cancelled' | 'interrupted' {
   if (status === 'cancelled') return 'cancelled'
+  if (status === 'interrupted') return 'interrupted'
   if (status === 'failed' || error) return 'failed'
   return 'done'
 }
@@ -2548,11 +2549,14 @@ export function subagentCallView(
     const startedAtMs = bound?.startedAtMs ?? (Number(facts.startedAt) > 0 ? Number(facts.startedAt) * 1000 : undefined)
     const finishedAtMs = bound?.finishedAtMs ?? (Number(facts.finishedAt) > 0 ? Number(facts.finishedAt) * 1000 : undefined)
     let clock: SubagentCallRowView['clock']
+    // The clock settles on any ending, including the one that is not a tally
+    // outcome: an interrupted execution ran for a real duration (plans/244).
+    const settledEnding = subagentTaskTerminal(status) || status === 'interrupted'
     if (startedAtMs != null && finishedAtMs == null && status === 'running') {
       // The walking clock every surface reads at `now`, in the terminal's
       // working-elapsed form.
       clock = { kind: 'running', startedAtMs, label: formatRuntimeDuration(Math.max(0, now - startedAtMs)) }
-    } else if (startedAtMs != null && finishedAtMs != null && finishedAtMs > startedAtMs && subagentTaskTerminal(status)) {
+    } else if (startedAtMs != null && finishedAtMs != null && finishedAtMs > startedAtMs && settledEnding) {
       clock = { kind: 'final', label: formatToolDuration(finishedAtMs - startedAtMs) }
     }
     rows.push({
@@ -2571,7 +2575,8 @@ export function subagentCallView(
           moreToolUses: (bound?.toolCount ?? 0) > 1 ? (bound?.toolCount ?? 0) - 1 : undefined,
           ...(status === 'running' && bound?.paused ? { paused: true } : {}),
         }),
-      ...(status !== 'waiting' && subagentTaskTerminal(status) && String(bound?.error ?? facts.error ?? '').trim()
+      ...(status !== 'waiting' && subagentTaskTerminal(status) && status !== 'cancelled' && status !== 'interrupted'
+        && String(bound?.error ?? facts.error ?? '').trim()
         ? { error: String(bound?.error ?? facts.error ?? '').trim() }
         : {}),
     })
@@ -2915,7 +2920,7 @@ export function useChatStream() {
   const subagentCallStepIds = new Set<string>()
   // How an execution ended, so a query row whose result arrives after the
   // end still settles the way the terminal's live order settles it.
-  const endedSubagentExecutions = new Map<string, { status: 'done' | 'failed' | 'cancelled'; finishedAtMs: number }>()
+  const endedSubagentExecutions = new Map<string, { status: 'done' | 'failed' | 'cancelled' | 'interrupted'; finishedAtMs: number }>()
   // The query-card rows that reported a still-running execution, settled
   // when that execution ends.
   const queryRowsByExecution = new Map<string, { stepId: string; index: number }[]>()
@@ -3017,7 +3022,7 @@ export function useChatStream() {
     }
   }
 
-  function settleLiveTask(stepId: string, index: number, status: 'done' | 'failed' | 'cancelled', finishedAtMs: number, error?: string) {
+  function settleLiveTask(stepId: string, index: number, status: 'done' | 'failed' | 'cancelled' | 'interrupted', finishedAtMs: number, error?: string) {
     const tasks = subagentCallTasks.get(stepId)
     const task = tasks?.get(index)
     if (!tasks || !task) return
@@ -5262,7 +5267,12 @@ export function useChatStream() {
 		  // cleared it on a continuation.
 		  const stopped = transcriptStatus === 'cancelled' || transcriptStatus === 'interrupted'
 		  if (stopped && !blocks.some((block) => block.kind === 'stopped' && block.id === `stopped:${executionId}`)) {
-			blocks = [...blocks, { kind: 'stopped' as const, id: `stopped:${executionId}` }]
+			blocks = [...blocks, {
+			  kind: 'stopped' as const,
+			  id: `stopped:${executionId}`,
+			  status: transcriptStatus,
+			  ...(transcriptStatus === 'interrupted' && errText ? { reason: errText } : {}),
+			}]
 		  }
 		  if (!stopped && errText && !blocks.some((block) => block.kind === 'error' && block.id === `error:${executionId}`)) {
 			blocks = [...blocks, { kind: 'error' as const, id: executionId ? `error:${executionId}` : undefined, text: errText }]
@@ -5511,6 +5521,10 @@ export function useChatStream() {
         const peerFromName = String(payload.fromName ?? payload.from_name ?? '').trim()
         const peerMark = String(payload.peerMark ?? payload.peer_mark ?? '').trim()
         const peerTone = Number(payload.peerTone ?? payload.peer_tone ?? 0) || 0
+        // The words inside a peer envelope: text stays the envelope the model
+        // read, and the card draws this instead of it (plan 246 §3.4). The page
+        // never parses an envelope — the engine reads it once, for both surfaces.
+        const peerBody = String(payload.peerBody ?? payload.peer_body ?? '').trim()
         const inserted: ChatMessage[] = [
           {
             id: userId,
@@ -5519,6 +5533,7 @@ export function useChatStream() {
             runId,
             ...(origin ? { origin } : {}),
             ...(peerFromName ? { peerFromName } : {}),
+            ...(peerBody ? { peerBody } : {}),
             ...(peerMark ? { peerMark } : {}),
             ...(peerFromName ? { peerTone } : {}),
           },
@@ -6694,14 +6709,15 @@ export function useChatStream() {
 			...entry,
 			agentType: 'subagent',
 			task: String(record.task ?? ''),
-			status: status === 'cancelled' ? 'cancelled' : status === 'failed' ? 'failed' : status === 'running' ? 'running' : 'done',
+			status: status === 'cancelled' ? 'cancelled' : status === 'interrupted' ? 'interrupted' : status === 'failed' ? 'failed' : status === 'running' ? 'running' : 'done',
 			blocks: [
 			  ...(record.task ? [{ kind: 'prompt' as const, text: String(record.task) }] : []),
 			  ...(record.output ? [{ kind: 'assistant' as const, text: String(record.output), open: false }] : []),
 			  // The record's own ending, drawn where the terminal draws it — a
 			  // stop as its quiet line, a failure as its reason.
 			  ...(status === 'cancelled' || status === 'interrupted'
-				? [{ kind: 'stopped' as const, id: `stopped:${executionId}` }]
+				? [{ kind: 'stopped' as const, id: `stopped:${executionId}`, status: status as 'cancelled' | 'interrupted',
+				     ...(status === 'interrupted' && String(record.error ?? '').trim() ? { reason: String(record.error).trim() } : {}) }]
 				: String(record.error ?? '').trim()
 				  ? [{ kind: 'error' as const, id: `error:${executionId}`, text: String(record.error).trim() }]
 				  : []),

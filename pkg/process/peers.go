@@ -310,11 +310,17 @@ func (env *Environment) StartPeers(ctx context.Context, s PeerSurface) (stop fun
 	if env == nil || !peer.Enabled() {
 		return stop
 	}
-	if err := svc.start(ctx); err != nil {
-		slog.Warn("peer service did not start; this process is invisible to other local peers", "err", err)
-		return stop
-	}
+	// The service is wired before the first registration attempt, not after it:
+	// start() launches the loop that retries a failed attempt, so a process that
+	// registers on a later tick must already be reachable through the port —
+	// held messages released, peer_list/peer_send live, the write ledger
+	// written. Wiring only a successful first attempt left exactly that process
+	// listening and holding messages nothing could release (plan 237's retry,
+	// plan 240's wiring).
 	env.setPeerService(svc)
+	if err := svc.start(ctx); err != nil {
+		slog.Warn("peer registration did not start; retrying every tick", "err", err)
+	}
 	return stop
 }
 

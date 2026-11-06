@@ -345,8 +345,13 @@ func messagesAlign(stored, message llm.Message) bool {
 	}
 }
 
+// messageText is a message's body text in the form the store persists, so a
+// stored row and the message that produced it are compared repaired-to-repaired:
+// the row carries the repaired text (the store repairs every column it writes),
+// the run's canonical message still carries the bytes a tool or a person handed
+// over, and comparing those two directly never matches.
 func messageText(msg llm.Message) string {
-	return strings.TrimSpace(llm.TextContent(msg.Parts...))
+	return dbx.ValidText(strings.TrimSpace(llm.TextContent(msg.Parts...)))
 }
 
 // canonicalMessageIndex finds a stored row's counterpart in a run's message

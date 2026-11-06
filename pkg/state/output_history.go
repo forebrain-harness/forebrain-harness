@@ -156,9 +156,10 @@ func OpenOutputHistory(ctx context.Context, db *sql.DB, stateRoot string) (*Stor
 
 // Save inserts a record and returns its retrieval id.
 //
-// The two text columns carry raw tool output, which is exactly where an engine
-// meets bytes it refuses (a program printing binary, `find -print0`), so both
-// are repaired on the way in: a record whose text cannot be stored is a record
+// The text columns carry raw tool output and the command line that produced it,
+// which is exactly where an engine meets bytes it refuses (a program printing
+// binary, `find -print0`, a filename in another encoding), so all of them are
+// repaired on the way in: a record whose text cannot be stored is a record
 // nobody can retrieve.
 func (s *Store) Save(e Entry) (int64, error) {
 	if s == nil || s.db == nil {
@@ -172,6 +173,7 @@ func (s *Store) Save(e Entry) (int64, error) {
 	if strings.TrimSpace(e.Kind) == "" {
 		e.Kind = KindShell
 	}
+	e.Command = dbx.ValidText(e.Command)
 	e.OriginalOutput = dbx.ValidText(e.OriginalOutput)
 	e.FilteredOutput = dbx.ValidText(e.FilteredOutput)
 	args := []any{
@@ -704,6 +706,11 @@ func legacyInt(v any) int64 {
 // and all. PostgreSQL's identity column does not move for an explicit id, so
 // its sequence is re-seated on the highest one afterwards — otherwise the next
 // record saved would collide with an imported row.
+//
+// Each record's text is repaired per row: a history file written by an older
+// release can hold a byte an engine refuses, and one such record must not roll
+// back the batch around it — the file would be kept, and every start would
+// retry the same failing import.
 func (s *Store) insertImportedRecords(ctx context.Context, entries []legacyEntry) error {
 	tx, err := dbx.BeginTx(ctx, s.db, nil)
 	if err != nil {
@@ -713,7 +720,8 @@ func (s *Store) insertImportedRecords(ctx context.Context, entries []legacyEntry
 	insert := outputRecordImportSQL.For(s.dialect)
 	for _, e := range entries {
 		if _, err := tx.ExecContext(ctx, insert,
-			e.ID, e.Kind, e.Command, e.SessionID, e.OriginalOutput, e.FilteredOutput,
+			e.ID, e.Kind, dbx.ValidText(e.Command), e.SessionID,
+			dbx.ValidText(e.OriginalOutput), dbx.ValidText(e.FilteredOutput),
 			e.OriginalBytes, e.FilteredBytes, e.SavedTokens,
 			e.CapabilityID, e.CapabilityVer, e.RetrieveCount, e.RetrieveReason,
 			e.SpoolPath, e.SpoolOmittedBytes, e.createdAtMs,

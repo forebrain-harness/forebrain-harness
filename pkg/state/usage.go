@@ -9,6 +9,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 const (
@@ -121,7 +122,7 @@ func contentBlocksJSON(parts []llm.ContentPart, fallbackText string) []map[strin
 			if strings.TrimSpace(part.Text) != "" {
 				blocks = append(blocks, map[string]any{
 					"type": "text",
-					"text": part.Text,
+					"text": dbx.ValidText(part.Text),
 				})
 			}
 		case llm.ContentTypeImageURL:

@@ -1705,8 +1705,9 @@ func TestBatchCacheEnv(t *testing.T) {
 }
 
 // TestBatchRealHomeConfigEnv pins which user-level configuration a batch task
-// keeps sight of, and the two reasons a pointer is withheld: the file is not
-// there, and the task's boundary cannot read it (plans/235).
+// keeps sight of, and the reasons a pointer is withheld: the file is not
+// there, the task's boundary cannot read it (plans/235), and the task is not
+// contained on the host at all (plans/241).
 func TestBatchRealHomeConfigEnv(t *testing.T) {
 	base := t.TempDir()
 	workspace := filepath.Join(base, "project", "tasks", "T", "1")
@@ -1737,7 +1738,7 @@ func TestBatchRealHomeConfigEnv(t *testing.T) {
 		"NPM_CONFIG_USERCONFIG": npmrc,
 		"GOENV":                 goenv,
 	}
-	env := batchRealHomeConfigEnv(userHome, configDir, boundary)
+	env := batchRealHomeConfigEnv(userHome, configDir, boundary, true)
 	if len(env) != len(want) {
 		t.Fatalf("env = %#v, want %d pointers (pip.conf does not exist here)", env, len(want))
 	}
@@ -1762,12 +1763,17 @@ func TestBatchRealHomeConfigEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(deniedHome, ".gitconfig"), []byte("[user]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := batchRealHomeConfigEnv(deniedHome, "", boundary); len(got) != 0 {
+	if got := batchRealHomeConfigEnv(deniedHome, "", boundary, true); len(got) != 0 {
 		t.Fatalf("a denied home produced pointers: %#v", got)
 	}
 	// No home to point at, no pointer.
-	if got := batchRealHomeConfigEnv("", "", boundary); len(got) != 0 {
+	if got := batchRealHomeConfigEnv("", "", boundary, true); len(got) != 0 {
 		t.Fatalf("an empty home produced pointers: %#v", got)
+	}
+	// An uncontained task runs on the host with full access, so the same
+	// pointers would be write paths into the operator's real home (plans/241).
+	if got := batchRealHomeConfigEnv(userHome, configDir, boundary, false); len(got) != 0 {
+		t.Fatalf("an uncontained task was handed configuration pointers: %v", got)
 	}
 }
 
@@ -1830,6 +1836,84 @@ func TestBatchShellRunsWithoutASandboxAndAsksNobody(t *testing.T) {
 	}
 	if body, _ := out.(string); !strings.Contains(body, "batch-ran") {
 		t.Fatalf("result = %q, want the command's own output", body)
+	}
+	if got := asks.Load(); got != 0 {
+		t.Fatalf("a batch command raised %d approval request(s)", got)
+	}
+}
+
+// TestBatchShellWithoutASandboxGetsNoConfigPointers pins where plans/235's
+// pointers stop (plans/241). An uncontained batch task runs on the host with
+// full access, so GIT_CONFIG_GLOBAL and its three siblings name files the task
+// can *write*: `git config --global`, `npm config set` and `go env -w` land in
+// the operator's real home, and `npm config get` can print a token out of the
+// file they name. A batch turn asks nobody anything, so it gets none of them —
+// and HOME still points at its own workspace, which plans/235 does not change.
+func TestBatchShellWithoutASandboxGetsNoConfigPointers(t *testing.T) {
+	restore := safety.SetSandboxAvailableForTest(false)
+	defer restore()
+	base := t.TempDir()
+	workspace := filepath.Join(base, "tasks", "T", "1")
+	userHome := filepath.Join(base, "user-home")
+	for _, dir := range []string{workspace, userHome, filepath.Join(base, "user-config")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Both files the pointers would name exist, so what withholds them is the
+	// missing containment, never a missing file.
+	for path, body := range map[string]string{
+		filepath.Join(userHome, ".gitconfig"): "[user]\n\tname = Batch\n",
+		filepath.Join(userHome, ".npmrc"):     "registry=https://registry.example\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", userHome)
+	// Empty, so the config directory is deterministic off macOS too.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "user-config"))
+
+	st := NewState(workspace)
+	var asks atomic.Int32
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		asks.Add(1)
+		return "", false, nil
+	})
+	shellTool, err := NewShellTool(st, &AgentToolRuntime{Cfg: &appcfg.Root{}})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithBatchBoundary(context.Background(), NewBatchBoundary(workspace, filepath.Dir(workspace), "", nil))
+	raw, _ := json.Marshal(map[string]any{
+		"command": `printf '%s|%s|%s|%s|%s' "${GIT_CONFIG_GLOBAL:-unset}" "${NPM_CONFIG_USERCONFIG:-unset}" "${PIP_CONFIG_FILE:-unset}" "${GOENV:-unset}" "$HOME"`,
+	})
+	out, handleErr := shellTool.Handle(ctx, string(raw))
+	if handleErr != nil {
+		t.Fatalf("a batch command without a sandbox must run: %v", handleErr)
+	}
+	body, _ := out.(string)
+	var parsed struct {
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if body != "" {
+		_ = json.Unmarshal([]byte(body), &parsed)
+	}
+	fields := strings.Split(parsed.Stdout, "|")
+	if len(fields) != 5 {
+		t.Fatalf("environment fields = %#v, want 5 (stdout %q, stderr %q, exit %d)",
+			fields, parsed.Stdout, parsed.Stderr, parsed.ExitCode)
+	}
+	for i, key := range []string{"GIT_CONFIG_GLOBAL", "NPM_CONFIG_USERCONFIG", "PIP_CONFIG_FILE", "GOENV"} {
+		if fields[i] != "unset" {
+			t.Fatalf("%s = %q, want it unset: an uncontained task was handed a path into the operator's configuration",
+				key, fields[i])
+		}
+	}
+	if resolvedWorkingDir(t, fields[4]) != resolvedWorkingDir(t, filepath.Join(workspace, ".work", "home")) {
+		t.Fatalf("HOME = %q, want the task's own workspace home", fields[4])
 	}
 	if got := asks.Load(); got != 0 {
 		t.Fatalf("a batch command raised %d approval request(s)", got)
@@ -2148,6 +2232,9 @@ func TestBatchShellIsConfinedToTheTaskWorkspace(t *testing.T) {
 func TestBatchShellKeepsTheUsersConfigurationReachable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs real sandboxed commands")
+	}
+	if !safety.SandboxAvailable() {
+		t.Skip("the pointers only exist for a contained task; this machine has no sandbox")
 	}
 	base := t.TempDir()
 	project := filepath.Join(base, "project")

@@ -558,7 +558,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		// installs.
 		userHome, _ := os.UserHomeDir()
 		userConfigDir, _ := os.UserConfigDir()
-		shellEnv = append(shellEnv, batchRealHomeConfigEnv(userHome, userConfigDir, boundary)...)
+		shellEnv = append(shellEnv, batchRealHomeConfigEnv(userHome, userConfigDir, boundary, batchSandboxed)...)
 		// A contained task's package managers write their caches into its own
 		// workspace as well: the real home is denied, so npm, pip, uv, go and
 		// yarn would otherwise fail on the cache write before the install
@@ -803,8 +803,15 @@ func batchCacheEnv(workspace string) []string {
 }
 
 // batchRealHomeConfigEnv keeps the user-level configuration of the package
-// managers reachable from a batch task, whose HOME lives in its own workspace
-// (batchCacheEnv redirects the caches for the same reason).
+// managers reachable from a *contained* batch task, whose HOME lives in its own
+// workspace.
+//
+// Only a contained task gets these: the sandbox is what turns each pointer into
+// a read of the operator's file. An uncontained task runs on the host with full
+// access, where the same four variables are a write path — `git config --global`,
+// `npm config set`, `go env -w` land in the operator's real home, and
+// `npm config get` can print a token out of the file it names. A batch turn asks
+// nobody anything, so it must not have that.
 //
 // Each of these variables names one file outright, so a task whose HOME was
 // moved still reads the operator's settings — the mirror in ~/.npmrc is what
@@ -814,7 +821,10 @@ func batchCacheEnv(workspace string) []string {
 // to a place with no explanation. Paths, never credentials: the values here
 // are where a tool should look, and the mirror configuration they lead to is
 // already on mirrorEnvAllow.
-func batchRealHomeConfigEnv(userHome, userConfigDir string, boundary BatchBoundary) []string {
+func batchRealHomeConfigEnv(userHome, userConfigDir string, boundary BatchBoundary, contained bool) []string {
+	if !contained {
+		return nil
+	}
 	paths := map[string]string{}
 	if home := strings.TrimSpace(userHome); home != "" {
 		paths["GIT_CONFIG_GLOBAL"] = filepath.Join(home, ".gitconfig")

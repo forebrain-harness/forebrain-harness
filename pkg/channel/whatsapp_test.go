@@ -2,11 +2,15 @@ package channel
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,7 +41,7 @@ func TestWhatsAppNewIDStartStopAndRegister(t *testing.T) {
 		whatsappAfter = oldAfter
 	})
 	whatsappNewTicker = func(time.Duration) *time.Ticker { return time.NewTicker(time.Hour) }
-	enabled := NewWhatsApp(WhatsAppConfig{Enabled: true, InboundPath: " /wa "})
+	enabled := NewWhatsApp(WhatsAppConfig{Enabled: true, InboundPath: " /wa ", Secret: "fixture-webhook-secret"})
 	enabled.MountRoutes(add, &whatsAppBus{})
 	if err := enabled.Start(context.Background(), add, &whatsAppBus{}); err != nil {
 		t.Fatalf("enabled Start error: %v", err)
@@ -168,6 +172,100 @@ func TestWhatsAppHandleInbound(t *testing.T) {
 	}
 	if len(bus.events) != 1 {
 		t.Fatalf("duplicate events=%+v", bus.events)
+	}
+}
+
+// signWhatsAppBody is the bridge's side of the contract: Meta's own
+// `sha256=<hex>` HMAC over the body exactly as sent.
+func signWhatsAppBody(body, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(body))
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func TestWhatsAppInboundSignature(t *testing.T) {
+	const secret = "fixture-webhook-secret"
+	body := `{"chatId":" chat1 ","body":" hi ","messageId":"m1"}`
+	tests := []struct {
+		name     string
+		body     string
+		sig      string
+		wantCode int
+		want     int
+	}{
+		{name: "valid", body: body, sig: signWhatsAppBody(body, secret), wantCode: http.StatusNoContent, want: 1},
+		{name: "wrong signature", body: body, sig: signWhatsAppBody(body, "other-fixture-secret"), wantCode: http.StatusForbidden},
+		{name: "missing header", body: body, wantCode: http.StatusForbidden},
+		{name: "wrong prefix", body: body, sig: "md5=deadbeef", wantCode: http.StatusForbidden},
+		// The signature covers the bytes as sent, not the decoded payload: an
+		// implementation that re-marshals the JSON before hashing lets this one
+		// through.
+		{name: "tampered", body: `{"chatId":" chat1 ","body":" evil ","messageId":"m1"}`, sig: signWhatsAppBody(body, secret), wantCode: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bus := &whatsAppBus{}
+			w := NewWhatsApp(WhatsAppConfig{Secret: secret})
+			w.bus = bus
+			req := httptest.NewRequest(http.MethodPost, "/wa", strings.NewReader(tt.body))
+			if tt.sig != "" {
+				req.Header.Set("X-Hub-Signature-256", tt.sig)
+			}
+			rr := httptest.NewRecorder()
+			w.handleInbound(rr, req)
+			if rr.Code != tt.wantCode {
+				t.Fatalf("code=%d body=%q events=%+v", rr.Code, rr.Body.String(), bus.events)
+			}
+			if len(bus.events) != tt.want {
+				t.Fatalf("events=%+v", bus.events)
+			}
+			if tt.want == 1 && (bus.events[0].SessionID != "chat1" || bus.events[0].Text != "hi") {
+				t.Fatalf("event=%+v", bus.events[0])
+			}
+		})
+	}
+}
+
+// An auth-exempt route (pkg/config/gateway.go) that cannot authenticate its
+// caller is not mounted at all; the poll loop is this channel's real inbound
+// path and must keep working without a webhook secret.
+func TestWhatsAppNoSecretMountsNoRouteAndStillPolls(t *testing.T) {
+	oldTicker := whatsappNewTicker
+	t.Cleanup(func() { whatsappNewTicker = oldTicker })
+	whatsappNewTicker = func(time.Duration) *time.Ticker { return time.NewTicker(time.Millisecond) }
+
+	routes := map[string]http.HandlerFunc{}
+	add := func(method, path string, hf http.HandlerFunc) {
+		routes[method+" "+path] = hf
+	}
+	polled := make(chan struct{})
+	var once sync.Once
+	srv := testutil.NewLocalServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/messages" {
+			once.Do(func() { close(polled) })
+		}
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bus := &whatsAppBus{}
+	w := NewWhatsApp(WhatsAppConfig{Enabled: true, InboundPath: " /wa ", OutboundURL: srv.URL, Token: "tok"})
+	w.MountRoutes(add, bus)
+	if routes["POST /wa"] != nil {
+		t.Fatalf("route mounted without a secret: %v", routes)
+	}
+	if err := w.Start(ctx, add, bus); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	select {
+	case <-polled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no-secret adapter did not poll the bridge")
+	}
+	if err := w.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop error: %v", err)
 	}
 }
 

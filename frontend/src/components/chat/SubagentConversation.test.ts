@@ -68,7 +68,7 @@ describe('SubagentConversation', () => {
           status: 'cancelled',
           blocks: [
             { kind: 'prompt', text: 'review the plan' },
-            { kind: 'stopped', id: 'stopped:exec-1' },
+            { kind: 'stopped', id: 'stopped:exec-1', status: 'cancelled' },
             { kind: 'worked', id: 'worked:exec-1', durationMs: 4000, finishedAt: new Date().toISOString() },
           ],
         }),
@@ -95,6 +95,33 @@ describe('SubagentConversation', () => {
     expect(failed.find('[data-testid="run-stopped-line"]').exists()).toBe(false)
     expect(failed.find('[data-slot="alert-title"]').exists()).toBe(false)
     expect(failed.text()).toContain('provider refused')
+  })
+
+  // An execution whose approval wait could not be resumed says so in its own
+  // words, in the same quiet line: the engine's payload word and reason, never
+  // the stop's "Cancelled" borrowed for a different ending.
+  it('says an interrupted run in its own word, with the reason it carries', () => {
+    const reason = 'approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried'
+    const wrapper = mount(SubagentConversation, {
+      props: {
+        record: record({
+          status: 'interrupted',
+          blocks: [
+            { kind: 'prompt', text: 'review the plan' },
+            { kind: 'stopped', id: 'stopped:exec-1', status: 'interrupted', reason },
+            { kind: 'worked', id: 'worked:exec-1', durationMs: 4000, finishedAt: new Date().toISOString() },
+          ],
+        }),
+      },
+    })
+    const line = wrapper.get('[data-testid="run-stopped-line"]')
+    expect(line.text()).toContain('Interrupted')
+    expect(line.text()).not.toContain('Cancelled')
+    expect(line.text()).toContain(reason)
+    expect(line.get(`[title="${reason}"]`).text()).toBe(reason)
+    // Still a stop: no red account anywhere.
+    expect(wrapper.find('[data-testid="run-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-slot="alert-title"]').exists()).toBe(false)
   })
 
   it('opens the task it was handed as a collapsed card and reports the fold', async () => {

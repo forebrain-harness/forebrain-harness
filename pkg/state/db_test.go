@@ -533,6 +533,22 @@ func TestOpenFromConfigRejectsAnUnsupportedScheme(t *testing.T) {
 	}
 }
 
+// TestOpenFromConfigNeverQuotesTheURL pins plan 243 step 2: a URL that fails to
+// parse is reported by its reason alone. The full message would repeat the
+// string it was handed, and database.url is where the password lives — a
+// password with an unescaped '%' turns that message into a leaked credential.
+func TestOpenFromConfigNeverQuotesTheURL(t *testing.T) {
+	// A password with a character that is invalid in a URL: parse fails, and
+	// the message must not repeat what it was given.
+	_, err := OpenFromConfig(context.Background(), "", "mysql://user:pw%zz@127.0.0.1:3306/fbt", nil)
+	if err == nil {
+		t.Fatal("a malformed database.url must be an error")
+	}
+	if strings.Contains(err.Error(), "pw%zz") {
+		t.Fatalf("the error quoted the credential: %v", err)
+	}
+}
+
 // TestOpenFromConfigOpensTheNamedServer opens a state database on the MySQL or
 // PostgreSQL server FOREBRAIN_TEST_DATABASE_URL names, proves it is at this
 // binary's version, and proves a second open finds it current instead of

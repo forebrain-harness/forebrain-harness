@@ -112,7 +112,7 @@
 
           <RunPausedLine v-else-if="run.item.kind === 'paused'" />
 
-          <RunStoppedLine v-else-if="run.item.kind === 'stopped'" />
+          <RunStoppedLine v-else-if="run.item.kind === 'stopped'" :status="run.item.status" :reason="run.item.reason" />
 
           <RunErrorBlock
             v-else-if="run.item.kind === 'error'"
