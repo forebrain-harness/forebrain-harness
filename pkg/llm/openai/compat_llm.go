@@ -838,6 +838,13 @@ func compatStreamIDSuffix() string {
 func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req openaiclient.ChatCompletionRequest) (*llm.Result, error) {
 	sink := llm.StreamSinkFrom(ctx)
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
+	// roundMsgs is what one round sends: the caller's messages, plus — from the
+	// second round on — the one assistant message carrying everything the earlier
+	// rounds produced. reasoningAcc and contentAcc already hold every round so
+	// far, so each round replaces that message rather than appending another: an
+	// appended copy per round sent round 1's output twice by round 3 and grew the
+	// prompt with the square of the rounds.
+	roundMsgs := baseMsgs
 	var reasoningAcc, contentAcc strings.Builder
 	var toolBuf []openaiclient.ToolCall
 	var role string
@@ -870,7 +877,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		// opencode-go sends it on every one). Snapshot inside the round and sum
 		// across rounds — adding each chunk up reported N x prompt.
 		roundIn, roundOut, roundCached := 0, 0, 0
-		req.Messages = baseMsgs
+		req.Messages = roundMsgs
 		ctx = llm.WithStreamingRequest(ctx)
 		stream, err := c.client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
@@ -1058,7 +1065,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		if len(toolBuf) > 0 {
 			asst.ToolCalls = append([]openaiclient.ToolCall(nil), toolBuf...)
 		}
-		baseMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), asst)
+		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), asst)
 	}
 
 	if sink != nil && sink.OnEnd != nil {
@@ -1266,6 +1273,8 @@ func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req op
 // when there was only one round.
 func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, req openaiclient.ChatCompletionRequest) (openaiclient.ChatCompletionMessage, openaiclient.FinishReason, *llm.Usage, *llm.Usage, error) {
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
+	// See executeChatCompletionStream: each round replaces the carried answer.
+	roundMsgs := baseMsgs
 	var reasoningAcc, contentAcc strings.Builder
 	var toolBuf []openaiclient.ToolCall
 	var role string
@@ -1281,7 +1290,7 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 	}
 
 	for round := 0; round < openAILengthContinueMax; round++ {
-		req.Messages = baseMsgs
+		req.Messages = roundMsgs
 		resp, err := c.client.CreateChatCompletion(ctx, req)
 		if err != nil {
 			// Earlier length-continue rounds were already billed; that
@@ -1330,7 +1339,7 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		if len(toolBuf) > 0 {
 			asst.ToolCalls = append([]openaiclient.ToolCall(nil), toolBuf...)
 		}
-		baseMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), asst)
+		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), asst)
 	}
 
 	if role == "" {

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -578,6 +579,102 @@ func promptOf(u *llm.Usage) int {
 		return 0
 	}
 	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+}
+
+// A length-continue round re-sends the caller's messages plus the answer the
+// earlier rounds produced. The accumulators already span every round, so one
+// carried assistant message, replaced each round, is the whole story: the loop
+// used to append a fresh copy per round, and by round 3 the request carried
+// round 1's output twice — the prompt grew with the square of the rounds and
+// the model read the same reasoning repeated.
+func TestLengthContinueCarriesOneAnswerPerRound(t *testing.T) {
+	t.Parallel()
+
+	type wireMsg struct {
+		Role             string `json:"role"`
+		ReasoningContent string `json:"reasoning_content"`
+	}
+	type wireReq struct {
+		Messages []wireMsg `json:"messages"`
+	}
+
+	for _, tc := range []struct {
+		name   string
+		params []byte
+		stream bool
+	}{
+		{name: "stream", params: []byte(`{"stream":true}`), stream: true},
+		// The merged request defaults to stream:true, so the unary loop is
+		// only reached by overriding it, the way every other unary test in
+		// this file does.
+		{name: "unary", params: []byte(`{"stream":false}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var mu sync.Mutex
+			var got []wireReq
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req wireReq
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				mu.Lock()
+				round := len(got) + 1
+				got = append(got, req)
+				mu.Unlock()
+				finish := "length"
+				if round == 3 {
+					finish = "stop"
+				}
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					var body bytes.Buffer
+					body.WriteString(fmt.Sprintf(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"R%d "},"finish_reason":null}]}`, round) + "\n\n")
+					body.WriteString(fmt.Sprintf(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":%q}],"usage":{"prompt_tokens":%d,"completion_tokens":10,"total_tokens":%d}}`, finish, 100*round, 100*round+10) + "\n\n")
+					body.WriteString("data: [DONE]\n\n")
+					_, _ = w.Write(body.Bytes())
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, `{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"R%d "},"finish_reason":%q}],"usage":{"prompt_tokens":%d,"completion_tokens":10,"total_tokens":%d}}`,
+					round, finish, 100*round, 100*round+10)
+			}))
+			t.Cleanup(server.Close)
+
+			client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "m", 0, 16, "", tc.params)
+			res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+			if err != nil {
+				t.Fatalf("Execute returned error: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(got) != 3 {
+				t.Fatalf("physical requests = %d, want 3 (two length rounds then a stop)", len(got))
+			}
+			if n := len(got[0].Messages); n != 1 {
+				t.Fatalf("request 1 carried %d messages, want 1", n)
+			}
+			for i := 1; i <= 2; i++ {
+				if n := len(got[i].Messages); n != 2 {
+					t.Fatalf("request %d carried %d messages, want 2 (the caller's message plus the one accumulated answer)", i+1, n)
+				}
+			}
+			if last := got[1].Messages[len(got[1].Messages)-1]; last.Role != "assistant" || last.ReasoningContent != "R1 " {
+				t.Fatalf("request 2's carried answer = %q (%s), want an assistant message with reasoning \"R1 \"", last.ReasoningContent, last.Role)
+			}
+			if last := got[2].Messages[len(got[2].Messages)-1]; last.Role != "assistant" || last.ReasoningContent != "R1 R2 " {
+				t.Fatalf("request 3's carried answer = %q (%s), want an assistant message with reasoning \"R1 R2 \"", last.ReasoningContent, last.Role)
+			}
+			if billed := res.Billed().OutputTokens; billed != 30 {
+				t.Fatalf("billed output = %d, want 30 (all three rounds were read and billed)", billed)
+			}
+		})
+	}
 }
 
 func TestOpenAICompatLLMStreamsThroughTelemetryBeforeServerCompletes(t *testing.T) {
