@@ -19,6 +19,7 @@ package tui
 import (
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -617,6 +618,165 @@ func (r *Renderer) repaintAfterDrawerToggleLocked(anchor planDrawerHistoryAnchor
 	r.paintViewportLocked()
 	if r.restoreHistoryAnchorLocked(anchor) {
 		r.paintViewportLocked()
+	}
+}
+
+// viewportHistoryWidth is the width the transcript is laid out at on a
+// terminal of width columns, beside the open drawer or without it. The painter
+// and the drawer warmer both read it, so the lines warmed for a toggle are the
+// lines the toggle paints.
+func viewportHistoryWidth(width int, drawerOpen bool) int {
+	rowWidth := width
+	if drawerOpen {
+		_, rowWidth = planDrawerWidth(width)
+	}
+	if rowWidth -= viewportRightPadding; rowWidth < 1 {
+		return 1
+	}
+	return rowWidth
+}
+
+const (
+	// drawerWarmSettle is how long the warmer lets a burst of paints (a
+	// stream, a scroll) go by after the last kick before it starts: it works
+	// in the gaps between paints, not in competition with them.
+	drawerWarmSettle = 50 * time.Millisecond
+	// drawerWarmSlice bounds how long one warming step holds the renderer's
+	// lock, and drawerWarmGap is the pause between steps, so a paint waiting
+	// on the lock waits at most about one slice.
+	drawerWarmSlice = 2 * time.Millisecond
+	drawerWarmGap   = 3 * time.Millisecond
+)
+
+// drawerToggleWidthLocked is the width the transcript would be laid out at if
+// the drawer toggled now, on the terminal the last paint used: beside the
+// drawer while it is closed and the view has a plan to open it for, the full
+// width while it is open. ok is false when there is no toggle to prepare.
+// Caller holds r.mu.
+func (r *Renderer) drawerToggleWidthLocked() (width int, ok bool) {
+	if r.vpTermWidth < 1 {
+		return 0, false
+	}
+	if _, ok := r.latestPlanFrameLocked(); !ok {
+		return 0, false
+	}
+	return viewportHistoryWidth(r.vpTermWidth, !r.vpDrawerOpen), true
+}
+
+// warmDrawerToggleLocked lays blocks of the view on screen out at the width a
+// drawer toggle would switch to, into their spare slots, newest first (the
+// rows a following screen shows), until budget is spent. It reports whether
+// blocks are left to warm. A toggle then swaps every block's slots instead of
+// rendering the whole transcript under the lock. Caller holds r.mu.
+func (r *Renderer) warmDrawerToggleLocked(budget time.Duration) bool {
+	if !r.viewportMode || r.paintSuppressed > 0 || r.composerSuppressed {
+		return false
+	}
+	width, ok := r.drawerToggleWidthLocked()
+	if !ok {
+		return false
+	}
+	vm := r.activeVMLocked()
+	cwd := strings.TrimSpace(r.cwd)
+	deadline := time.Now().Add(budget)
+	for i := len(vm.blocks) - 1; i >= 0; i-- {
+		b := vm.blocks[i]
+		if !warmSpareAt(b, viewportBlockWidth(b, width), r.diffTheme, vm.spinnerPhase, cwd) {
+			continue
+		}
+		if time.Now().After(deadline) {
+			return true
+		}
+	}
+	return false
+}
+
+// warmSpareAt renders the block and its fold into the spare slot at width and
+// reports whether it did. It leaves alone what a toggle would not reuse: a
+// block whose current lines are pending (its frame just changed), one already
+// at that width, and one that changes on its own — an animated card, a live
+// clock, a reply still streaming — which the toggle renders fresh anyway.
+func warmSpareAt(b *viewBlock, width int, theme DiffTheme, spinnerPhase int, cwd string) bool {
+	f := b.frame
+	if !b.cache.valid || b.cache.width == width || blockAnimated(f) || blockClockSec(f) != 0 ||
+		(streamingFrameKind(f.Kind) && !f.Final) {
+		return false
+	}
+	if b.spare.serves(width, cwd, 0, false, spinnerPhase) {
+		return false
+	}
+	b.spare = renderBlockLines(b, width, theme, spinnerPhase, cwd, 0)
+	b.spareFold = foldBlockAt(b, b.spare.lines, width, spinnerPhase, cwd, b.spare.gen)
+	return true
+}
+
+// kickDrawerWarmerLocked tells a running warmer the screen changed. It never
+// blocks: a kick already pending covers this one. Caller holds r.mu.
+func (r *Renderer) kickDrawerWarmerLocked() {
+	if r.drawerWarmKick == nil {
+		return
+	}
+	select {
+	case r.drawerWarmKick <- struct{}{}:
+	default:
+	}
+}
+
+// StartDrawerWarmer keeps the transcript laid out ahead of time for the todo
+// drawer's toggle, in the background, until the returned stop is called. In a
+// long session re-laying every block out at the new width is what made the
+// drawer take seconds to open; warmed, a toggle is a paint like any other.
+func (r *Renderer) StartDrawerWarmer() (stop func()) {
+	if r == nil {
+		return func() {}
+	}
+	kick := make(chan struct{}, 1)
+	done := make(chan struct{})
+	r.mu.Lock()
+	r.drawerWarmKick = kick
+	r.mu.Unlock()
+	go r.runDrawerWarmer(kick, done)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			if r.drawerWarmKick == kick {
+				r.drawerWarmKick = nil
+			}
+			r.mu.Unlock()
+			close(done)
+		})
+	}
+}
+
+func (r *Renderer) runDrawerWarmer(kick <-chan struct{}, done <-chan struct{}) {
+	pause := func(d time.Duration) bool {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-done:
+			return false
+		case <-t.C:
+			return true
+		}
+	}
+	for {
+		select {
+		case <-done:
+			return
+		case <-kick:
+		}
+		if !pause(drawerWarmSettle) {
+			return
+		}
+		for {
+			r.mu.Lock()
+			more := r.warmDrawerToggleLocked(drawerWarmSlice)
+			r.mu.Unlock()
+			if !more || !pause(drawerWarmGap) {
+				break
+			}
+		}
 	}
 }
 

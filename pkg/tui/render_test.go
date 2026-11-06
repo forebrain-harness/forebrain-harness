@@ -3,6 +3,9 @@ package tui
 import (
 	"bytes"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"os"
@@ -434,7 +437,7 @@ func TestStandaloneReviewLeavesTypeAheadForTheTUI(t *testing.T) {
 }
 
 func TestToolOutputBlockKeepsOneForegroundDespiteCommandColours(t *testing.T) {
-	out := formatToolOutputBlock("plain \x1b[0mafter reset\n\x1b[97mbright white\x1b[39m tail")
+	out := formatToolOutputBlock("plain \x1b[0mafter reset\n\x1b[97mbright white\x1b[39m tail", termWidthOrDefault())
 	for _, seq := range []string{"\x1b[0mafter", "\x1b[97m", "\x1b[39m"} {
 		if strings.Contains(out, seq) {
 			t.Fatalf("command colour %q survived into the output block: %q", seq, out)
@@ -459,7 +462,7 @@ func TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint(t *testing.T) {
 	if !strings.Contains(placeholder, "\x1b[2m") {
 		t.Fatalf("test setup: faint placeholder carries no faint code: %q", placeholder)
 	}
-	out := formatToolOutputBlock(placeholder)
+	out := formatToolOutputBlock(placeholder, termWidthOrDefault())
 	if !strings.Contains(out, placeholder) {
 		t.Fatalf("placeholder lost its faint style: %q", out)
 	}
@@ -467,7 +470,7 @@ func TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint(t *testing.T) {
 		t.Fatalf("placeholder not drawn as an output row: %q", out)
 	}
 	// Command output that merely contains the words keeps the one-colour rule.
-	cmd := formatToolOutputBlock("\x1b[31mfailed\x1b[0m (no output)")
+	cmd := formatToolOutputBlock("\x1b[31mfailed\x1b[0m (no output)", termWidthOrDefault())
 	if strings.Contains(cmd, "\x1b[31m") || strings.Contains(cmd, "\x1b[2m") {
 		t.Fatalf("command output kept or gained styling: %q", cmd)
 	}
@@ -542,7 +545,7 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 		"  error 12:6 missing return [gopls syntax]\n" +
 		"  warning 30:1 unused variable\n" +
 		"```"
-	block, ok := renderTurnDiffCard(withDiag, DiffThemeDark)
+	block, ok := renderTurnDiffCard(withDiag, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatal("expected render to succeed")
 	}
@@ -571,7 +574,7 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 		"internal/foo/bar.go\n" +
 		"  error 12:6 missing return [gopls syntax]\n" +
 		"```"
-	block, ok = renderTurnDiffCard(singular, DiffThemeDark)
+	block, ok = renderTurnDiffCard(singular, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatal("expected singular render to succeed")
 	}
@@ -585,7 +588,7 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 		"```text\n" +
 		"diagnostics for internal/foo/bar.go are still being computed and will follow\n" +
 		"```"
-	block, ok = renderTurnDiffCard(pending, DiffThemeDark)
+	block, ok = renderTurnDiffCard(pending, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatal("expected pending render to succeed")
 	}
@@ -594,7 +597,7 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 	}
 
 	// Without a section the card keeps its diff-only shape.
-	block, ok = renderTurnDiffCard(sampleTurnDiff, DiffThemeDark)
+	block, ok = renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatal("expected diff-only render to succeed")
 	}
@@ -624,7 +627,7 @@ func TestRenderTurnDiffCard_RendersAnEscalatedFence(t *testing.T) {
 	if !strings.Contains(body, "````diff") {
 		t.Fatalf("the formatter did not escalate the fence:\n%s", body)
 	}
-	block, ok := renderTurnDiffCard(body, DiffThemeDark)
+	block, ok := renderTurnDiffCard(body, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatalf("an escalated-fence turn diff must render as a diff card:\n%s", body)
 	}
@@ -668,7 +671,7 @@ func TestRenderTurnDiffCardIgnoresDiagnosticsTextInsideTheDiff(t *testing.T) {
 		Input:    map[string]any{"file_path": "/w/notes.md"},
 		Output:   map[string]any{"turn_diff": turnDiff},
 	}, tool.DefaultMaxFormattedBody)
-	block, ok := renderTurnDiffCard(body, DiffThemeDark)
+	block, ok := renderTurnDiffCard(body, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatalf("an escalated-fence turn diff must render as a diff card:\n%s", body)
 	}
@@ -699,7 +702,7 @@ func TestRenderTurnDiffCardIgnoresDiagnosticsTextInsideTheDiff(t *testing.T) {
 			},
 		},
 	}, tool.DefaultMaxFormattedBody)
-	block, ok = renderTurnDiffCard(body, DiffThemeDark)
+	block, ok = renderTurnDiffCard(body, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatalf("an escalated-fence turn diff must render as a diff card:\n%s", body)
 	}
@@ -787,7 +790,7 @@ func TestRenderTurnDiffCard_RejectsNonTurnDiffBody(t *testing.T) {
 		"turn diff: `/x` (+1/-0)\nno fence here",
 		"````diff\n+a\n````",
 	} {
-		if block, ok := renderTurnDiffCard(content, DiffThemeDark); ok {
+		if block, ok := renderTurnDiffCard(content, DiffThemeDark, termWidthOrDefault()); ok {
 			t.Fatalf("%q rendered as a turn-diff card:\n%s", content, block)
 		}
 	}
@@ -1310,7 +1313,7 @@ func TestShellDiffCardShowsOutputThenFiles(t *testing.T) {
 	if trunc {
 		t.Fatal("unexpected truncation")
 	}
-	block, ok := renderShellDiffCard(body, DiffThemeDark)
+	block, ok := renderShellDiffCard(body, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatalf("renderShellDiffCard rejected a body with diff blocks:\n%s", body)
 	}
@@ -1364,7 +1367,7 @@ func TestShellDiffCardWithoutStdoutStartsWithTheFirstFile(t *testing.T) {
 		},
 	}
 	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
-	block, ok := renderShellDiffCard(body, DiffThemeDark)
+	block, ok := renderShellDiffCard(body, DiffThemeDark, termWidthOrDefault())
 	if !ok {
 		t.Fatalf("renderShellDiffCard rejected an apply_patch body:\n%s", body)
 	}
@@ -1381,7 +1384,7 @@ func TestShellCardWithoutDiffBlocksIsUnchanged(t *testing.T) {
 		Output:   map[string]any{"stdout": "plain output\n", "exit_code": 0},
 	}
 	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
-	if _, ok := renderShellDiffCard(body, DiffThemeDark); ok {
+	if _, ok := renderShellDiffCard(body, DiffThemeDark, termWidthOrDefault()); ok {
 		t.Fatalf("renderShellDiffCard accepted an ordinary shell body:\n%s", body)
 	}
 }
@@ -1577,6 +1580,125 @@ func TestGatedCardsDrawTheOpenCircleBothWays(t *testing.T) {
 			if got := stripAllANSI(lines[0]); !strings.HasPrefix(got, tc.want+" ") {
 				t.Fatalf("expanded head = %q, want %q", got, tc.want)
 			}
+		})
+	}
+}
+
+// The viewport lays every block out at the width it asks for, and that width
+// travels with the scratch renderer — never through the process-wide terminal
+// size. It used to be passed by overwriting the forced terminal size for the
+// length of the render, so any goroutine asking for the terminal size meanwhile
+// (an overlay laying itself out, the resize watcher) was told the block's
+// width, or a height of 100000. Every kind of card here must fit the width it
+// was given on a terminal far wider than it, while a reader of the terminal
+// size sees only the terminal.
+func TestBlockLayoutWidthIsTheRenderersOwn(t *testing.T) {
+	const terminalWidth, width = 200, 60
+	forcedTermWidth, forcedTermHeight = terminalWidth, 50
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+
+	long := strings.Repeat("宽度来自参数而不是终端 the width comes from the argument ", 6)
+	shellBody, _ := tool.FormatToolStepResult(tool.StepEvent{
+		Kind: event.RunEventToolCompleted, ToolName: "shell",
+		Input:  map[string]any{"command": "echo long"},
+		Output: map[string]any{"stdout": long + "\n" + long, "exit_code": 0},
+	}, tool.DefaultMaxFormattedBody)
+	shellDiffBody, _ := tool.FormatToolStepResult(tool.StepEvent{
+		Kind: event.RunEventToolCompleted, ToolName: "shell",
+		Output: map[string]any{
+			"stdout": long, "exit_code": 0,
+			"shell_edit_diff": tool.ShellEditDiff{Files: []tool.ShellEditDiffFile{{
+				Path: "/repo/a.go", DisplayPath: "a.go", Status: "updated", Added: 1, Deleted: 1,
+				UnifiedDiff: "--- a:before\n+++ a:after\n@@ -1,2 +1,2 @@\n ctx\n-old " + long + "\n+new " + long + "\n",
+			}}},
+		},
+	}, tool.DefaultMaxFormattedBody)
+	completed := func(name string) tool.ToolMeta {
+		return tool.ToolMeta{ToolName: name, Status: "completed", Input: map[string]any{"command": "echo " + long, "path": "/repo/main.go"}}
+	}
+	frames := []Frame{
+		{Kind: FrameAssistant, Final: true, Content: "## 标题\n\n" + long + "\n\n- " + long + "\n\n```go\nfunc main() { _ = \"" + long + "\" }\n```"},
+		{Kind: FrameUser, Final: true, Content: long},
+		{Kind: FrameTool, Title: "shell", Final: true, Content: shellBody, ToolMeta: completed("shell")},
+		{Kind: FrameTool, Title: "shell", Final: true, Content: shellDiffBody, ToolMeta: completed("shell")},
+		{Kind: FrameTool, Title: "read_file", Final: true, Content: "1|" + long + "\n2|" + long, FilePath: "/repo/main.go", ToolMeta: completed("read_file")},
+		{Kind: FrameTool, Title: "edit_file", Final: true, Content: sampleTurnDiff, ToolMeta: completed("edit_file")},
+		{Kind: FrameTool, Title: "web_fetch", Final: true, Content: "# page\n\n" + long, ToolMeta: completed("web_fetch")},
+		{Kind: FrameStatus, Final: true, Content: long},
+		{Kind: FrameError, Final: true, Content: long},
+		{Kind: FrameSystem, Final: true, Title: "report", Content: long},
+		{Kind: FramePlan, Final: true, Title: "Updated Plan", Content: "▣ " + long + "\n□ " + long},
+	}
+
+	stop, odd := make(chan struct{}), make(chan int, 1)
+	go func() {
+		seen := 0
+		for {
+			select {
+			case <-stop:
+				odd <- seen
+				return
+			default:
+			}
+			if w := termWidthOrDefault(); w != terminalWidth {
+				seen = w
+			}
+		}
+	}()
+	for _, f := range frames {
+		lines, _ := renderFrameLinesWithAgents(f, width, DiffThemeDark, 0, "/repo")
+		if len(lines) == 0 {
+			t.Fatalf("%s %q rendered nothing", f.Kind, f.Title)
+		}
+		for _, line := range lines {
+			if got := displayLineWidth(line); got > width {
+				t.Fatalf("%s %q laid a %d-column line out for a %d-column block on a %d-column terminal: %q",
+					f.Kind, f.Title, got, width, terminalWidth, sgrPattern.ReplaceAllString(line, ""))
+			}
+		}
+	}
+	close(stop)
+	if w := <-odd; w != 0 {
+		t.Fatalf("while blocks were laid out, the terminal width read %d instead of %d", w, terminalWidth)
+	}
+}
+
+// Nothing in the package outside its tests may override the process-wide
+// terminal size: it is read from every goroutine, so a temporary override is
+// a lie told to all of them. A width that differs from the terminal's goes to
+// the renderer that needs it (Renderer.layoutWidth).
+func TestProductionCodeNeverOverridesTheTerminalSize(t *testing.T) {
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			var targets []ast.Expr
+			switch stmt := n.(type) {
+			case *ast.AssignStmt:
+				targets = stmt.Lhs
+			case *ast.IncDecStmt:
+				targets = []ast.Expr{stmt.X}
+			case *ast.UnaryExpr:
+				if stmt.Op == token.AND {
+					targets = []ast.Expr{stmt.X}
+				}
+			}
+			for _, target := range targets {
+				if id, ok := target.(*ast.Ident); ok && (id.Name == "forcedTermWidth" || id.Name == "forcedTermHeight") {
+					t.Errorf("%s writes %s; pass the width to the renderer instead", fset.Position(id.Pos()), id.Name)
+				}
+			}
+			return true
 		})
 	}
 }

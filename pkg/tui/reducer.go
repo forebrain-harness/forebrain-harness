@@ -2552,14 +2552,7 @@ func renderViewport(m *viewModel, width, height, scrollOffset int, theme DiffThe
 	// thread it through so running-tool markers animate.
 	spinnerPhase := m.spinnerPhase
 	for _, b := range m.blocks {
-		// User message cards (the "›"-prefixed shared block) are full-bleed:
-		// they span the true terminal width so the card background and its
-		// top/bottom rules reach the right edge. Other transcript content
-		// keeps viewportRightPadding so readable text stays off the edge.
-		blockWidth := width
-		if b.frame.Kind == FrameUser {
-			blockWidth = width + viewportRightPadding
-		}
+		blockWidth := viewportBlockWidth(b, width)
 		full := renderBlockFull(b, blockWidth, theme, spinnerPhase, cwd)
 		displayed, headerLocal := foldBlock(b, full, blockWidth, spinnerPhase, cwd)
 		if len(displayed) == 0 {
@@ -2608,6 +2601,18 @@ func renderViewport(m *viewModel, width, height, scrollOffset int, theme DiffThe
 		firstRow:   scrollOffset,
 		height:     height,
 	}
+}
+
+// viewportBlockWidth is the width block b is laid out at in a transcript of
+// width columns. User message cards (the "›"-prefixed shared block) are
+// full-bleed: they span the true terminal width so the card background and its
+// top/bottom rules reach the right edge. Other transcript content keeps
+// viewportRightPadding so readable text stays off the edge.
+func viewportBlockWidth(b *viewBlock, width int) int {
+	if b.frame.Kind == FrameUser {
+		return width + viewportRightPadding
+	}
+	return width
 }
 
 // blockAtRow maps a 0-based SCREEN row (row within the rendered viewport body)
@@ -2927,9 +2932,45 @@ func foldBlock(b *viewBlock, full []string, width int, spinnerPhase int, cwdOpt 
 		cwd = strings.TrimSpace(cwdOpt[0])
 	}
 	fc := &b.foldCache
-	if fc.valid && fc.width == width && fc.cwd == cwd && fc.expanded == b.expanded && fc.gen == b.cache.gen {
+	if fc.serves(width, cwd, b.expanded, b.cache.gen) {
 		return fc.lines, fc.headerLocal
 	}
+	// The fold at the other width travels with its lines: renderBlockFull
+	// just swapped them in from the spare slot.
+	if b.spareFold.serves(width, cwd, b.expanded, b.cache.gen) {
+		b.foldCache, b.spareFold = b.spareFold, b.foldCache
+		return fc.lines, fc.headerLocal
+	}
+	if fc.valid && fc.width != width {
+		b.spareFold = *fc
+	}
+	*fc = foldBlockAt(b, full, width, spinnerPhase, cwd, b.cache.gen)
+	return fc.lines, fc.headerLocal
+}
+
+// serves reports whether the slot holds the fold of the lines numbered gen
+// for these inputs.
+func (fc *foldLineCache) serves(width int, cwd string, expanded bool, gen int) bool {
+	return fc.valid && fc.width == width && fc.cwd == cwd && fc.expanded == expanded && fc.gen == gen
+}
+
+// foldBlockAt folds the block's full lines (the lines numbered gen) into a
+// fresh fold slot.
+func foldBlockAt(b *viewBlock, full []string, width int, spinnerPhase int, cwd string, gen int) foldLineCache {
+	lines, headerLocal := foldBlockLines(b, full, width, spinnerPhase, cwd)
+	return foldLineCache{
+		valid:       true,
+		width:       width,
+		cwd:         cwd,
+		expanded:    b.expanded,
+		gen:         gen,
+		lines:       lines,
+		headerLocal: headerLocal,
+	}
+}
+
+// foldBlockLines is foldBlock without the memo.
+func foldBlockLines(b *viewBlock, full []string, width int, spinnerPhase int, cwd string) (lines []string, headerLocal int) {
 	defer func() {
 		// The painter redraws any of these rows on its own, so every row must
 		// open the style it is drawn in and end in the default state — the
@@ -2937,13 +2978,6 @@ func foldBlock(b *viewBlock, full []string, width int, spinnerPhase int, cwdOpt 
 		// the row above. Normalising here caches the fixed rows, so this runs
 		// once per block per input change, not per frame.
 		lines = selfContainedRows(lines)
-		fc.valid = true
-		fc.width = width
-		fc.cwd = cwd
-		fc.expanded = b.expanded
-		fc.gen = b.cache.gen
-		fc.lines = lines
-		fc.headerLocal = headerLocal
 	}()
 	if !b.collapsible {
 		return full, -1
@@ -3192,42 +3226,82 @@ func readFileFoldPreview(body []string, maxLines int) (preview []string, groups 
 // computation is avoided - important when thousands of blocks are checked on
 // every repaint. gen increments on each regeneration so the fold cache can
 // detect that `full` changed.
+//
+// The block keeps a second slot (b.spare) for the other width the transcript
+// switches between, so a width that was left is served again without a
+// re-render when the screen returns to it.
 func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int, cwdOpt ...string) []string {
 	cwd := ""
 	if len(cwdOpt) > 0 {
 		cwd = strings.TrimSpace(cwdOpt[0])
 	}
 	c := &b.cache
-	animated := (toolStatusRunning(b.frame) && !toolStatusAwaitingApproval(b.frame)) ||
-		(b.frame.Kind == FrameMemoryCompact && !b.frame.Final) ||
-		(b.frame.Kind == FrameSkillInstall && !b.frame.Final) ||
-		(b.frame.Kind == FrameMigration && !b.frame.Final) ||
-		(b.frame.Kind == FrameFanout && !b.frame.Final)
-	// A subagent card's task clock depends on the second, not the spinner
-	// phase. A settled card can still hold one — a query card's snapshot of
-	// executions still running — and keying it on the tick would re-render
-	// the whole card ten times for one visible change.
-	clockSec := 0
-	if b.frame.Kind == FrameFanout && fanoutHasLiveClock(b.frame) {
-		clockSec = int(time.Now().Unix())
-	}
-	// Running tools, compact blocks and running subagent cards depend on the
-	// animation phase; all other blocks are phase-independent and reuse their
-	// cached lines.
-	if c.valid && c.width == width && c.cwd == cwd && c.clockSec == clockSec &&
-		(!animated || c.spinnerPhase == spinnerPhase) {
+	animated := blockAnimated(b.frame)
+	clockSec := blockClockSec(b.frame)
+	if c.serves(width, cwd, clockSec, animated, spinnerPhase) {
 		return c.lines
 	}
+	switch {
+	case !c.valid:
+		// The frame changed since either slot was drawn, so the spare is as
+		// stale as the cache: every mutation site invalidates cache only.
+		b.spare = blockLineCache{}
+	case b.spare.serves(width, cwd, clockSec, animated, spinnerPhase):
+		b.cache, b.spare = b.spare, b.cache
+		return c.lines
+	case c.width != width:
+		// Keep the width being left: the transcript returns to it when the
+		// drawer closes again.
+		b.spare = *c
+	}
+	*c = renderBlockLines(b, width, theme, spinnerPhase, cwd, clockSec)
+	return c.lines
+}
+
+// renderBlockLines renders the block at width into a fresh cache slot.
+func renderBlockLines(b *viewBlock, width int, theme DiffTheme, spinnerPhase int, cwd string, clockSec int) blockLineCache {
 	lines, lineAgents := renderFrameLinesWithAgents(b.displayFrame(), width, theme, spinnerPhase, cwd)
-	c.valid = true
-	c.width = width
-	c.cwd = cwd
-	c.spinnerPhase = spinnerPhase
-	c.clockSec = clockSec
-	c.gen++
-	c.lines = lines
-	c.lineAgents = lineAgents
-	return lines
+	b.renderGen++
+	return blockLineCache{
+		valid:        true,
+		width:        width,
+		cwd:          cwd,
+		spinnerPhase: spinnerPhase,
+		clockSec:     clockSec,
+		gen:          b.renderGen,
+		lines:        lines,
+		lineAgents:   lineAgents,
+	}
+}
+
+// serves reports whether the slot holds the block's lines for these inputs.
+// Running tools, compact blocks and running subagent cards depend on the
+// animation phase; all other blocks are phase-independent and reuse their
+// cached lines.
+func (c *blockLineCache) serves(width int, cwd string, clockSec int, animated bool, spinnerPhase int) bool {
+	return c.valid && c.width == width && c.cwd == cwd && c.clockSec == clockSec &&
+		(!animated || c.spinnerPhase == spinnerPhase)
+}
+
+// blockAnimated reports whether a frame's lines change with the spinner phase.
+func blockAnimated(f Frame) bool {
+	return (toolStatusRunning(f) && !toolStatusAwaitingApproval(f)) ||
+		(f.Kind == FrameMemoryCompact && !f.Final) ||
+		(f.Kind == FrameSkillInstall && !f.Final) ||
+		(f.Kind == FrameMigration && !f.Final) ||
+		(f.Kind == FrameFanout && !f.Final)
+}
+
+// blockClockSec is the second a subagent card's task clock is drawn at, or 0
+// for a frame without a running one. The clock depends on the second, not the
+// spinner phase. A settled card can still hold one — a query card's snapshot of
+// executions still running — and keying it on the tick would re-render the
+// whole card ten times for one visible change.
+func blockClockSec(f Frame) int {
+	if f.Kind == FrameFanout && fanoutHasLiveClock(f) {
+		return int(time.Now().Unix())
+	}
+	return 0
 }
 
 // fanoutHasLiveClock reports whether a subagent card holds a task row whose
@@ -3261,19 +3335,19 @@ func renderFrameLinesWithAgents(f Frame, width int, theme DiffTheme, spinnerPhas
 		return forebrainBannerLines(f.Title, f.Content, width), nil
 	}
 
-	prevW, prevH := forcedTermWidth, forcedTermHeight
-	forcedTermWidth, forcedTermHeight = width, 100000
-	defer func() { forcedTermWidth, forcedTermHeight = prevW, prevH }()
-
 	var buf bytes.Buffer
 	cwd := ""
 	if len(cwdOpt) > 0 {
 		cwd = strings.TrimSpace(cwdOpt[0])
 	}
-	sr := NewRenderer(&buf, &buf)
+	sr := newRendererAt(&buf, &buf, cwd)
+	// The block is laid out at the width it is given, carried by the scratch
+	// renderer itself. It used to be passed by overwriting the process-wide
+	// terminal size for the duration of the render, which any other goroutine
+	// asking for the terminal size meanwhile read as the real one.
+	sr.layoutWidth = width
 	sr.fullBodyMode = true
 	sr.diffTheme = theme
-	sr.cwd = cwd
 	// Inherit the live spinner phase so running-tool headers render the correct
 	// Braille spinner frame (renderCompactFrame reads r.spinnerPhase).
 	sr.spinnerPhase = spinnerPhase
@@ -4804,21 +4878,19 @@ func (r *Renderer) paintViewportLocked() {
 	// seam, so a physical row is leftWidth + drawerWidth = the terminal width.
 	drawerLayout, drawerOpen := r.planDrawerLayoutLocked(width, bodyHeight)
 	rowWidth := width
-	historyWidth := contentWidth
+	historyWidth := viewportHistoryWidth(width, false)
 	if drawerOpen {
 		// The layout clamps the offset it was given, so the state follows it:
 		// a resize that shrinks the drawer must not leave the list beyond its
 		// end.
 		r.planDrawer.scroll = drawerLayout.scroll
 		rowWidth = drawerLayout.leftWidth
-		historyWidth = rowWidth - viewportRightPadding
-		if historyWidth < 1 {
-			historyWidth = 1
-		}
+		historyWidth = viewportHistoryWidth(width, true)
 	}
 	r.vpDrawerLayout = drawerLayout
 	r.vpDrawerOpen = drawerOpen
 	r.vpRowWidth = rowWidth
+	r.vpTermWidth = width
 	activeVM := r.activeVMLocked()
 	// Stamp the current spinner phase so renderViewport can rotate the
 	// running-tool marker. paintViewportLocked runs every repaint (frame events
@@ -4827,6 +4899,7 @@ func (r *Renderer) paintViewportLocked() {
 	activeVM.spinnerPhase = r.spinnerPhase
 	vr := renderViewport(activeVM, historyWidth, bodyHeight, offset, r.diffTheme, r.cwd)
 	r.vpLastRender = vr
+	r.kickDrawerWarmerLocked()
 	r.vpScrollOffset = vr.firstRow
 	r.vpLastComposer = composer
 	r.publishComposerSelectionLocked()

@@ -446,6 +446,15 @@ type Renderer struct {
 	// Selection and hover padding, the jump control's layout and the seam
 	// between the two columns are all measured against it.
 	vpRowWidth int
+	// vpTermWidth is the terminal width the last paint laid the screen out
+	// for; the drawer warmer lays the transcript out for a toggle on it.
+	vpTermWidth int
+	// layoutWidth, when set, is the screen width this renderer lays its output
+	// out for in place of the terminal's (see layoutTermWidth).
+	layoutWidth int
+	// drawerWarmKick wakes the drawer warmer (StartDrawerWarmer) after a
+	// paint; nil while none runs.
+	drawerWarmKick chan struct{}
 	// vpProgressSpan is the screen cell the last paint drew the composer's
 	// ☑N/M plan-progress token on, or a span on no row.
 	vpProgressSpan screenSpan
@@ -609,13 +618,22 @@ func (m ComposerTokenStatsByView) set(view string, stats ComposerTokenStats) {
 }
 
 func NewRenderer(out io.Writer, err io.Writer) *Renderer {
+	cwd, _ := os.Getwd()
+	return newRendererAt(out, err, cwd)
+}
+
+// newRendererAt is NewRenderer for a caller that already knows the working
+// directory. The viewport renders every block through a scratch renderer, so a
+// width change builds one per block of the transcript under the lock; asking
+// the OS for the directory each time would be two stat calls per block for a
+// value the caller already has.
+func newRendererAt(out io.Writer, err io.Writer, cwd string) *Renderer {
 	if out == nil {
 		out = io.Discard
 	}
 	if err == nil {
 		err = out
 	}
-	cwd, _ := os.Getwd()
 	return &Renderer{out: out, err: err, cwd: cwd, vpHoverRow: -1, selectStartRow: -1, selectEndRow: -1, selectStartCol: -1, selectEndCol: -1, publishedComposerSelection: [2]int{-1, -1}, overlayFocusRow: -1}
 }
 
@@ -683,6 +701,18 @@ func (r *Renderer) WithDiffTheme(t DiffTheme) *Renderer {
 }
 
 // WithWorkingDir caches the TUI launch cwd for path-relative rendering.
+// layoutTermWidth is the screen width the renderer lays its output out for:
+// the width it was given (a scratch renderer laying one block out for the
+// viewport), or else the terminal's. Every render path reads its width here,
+// never from the process-wide terminal size, so laying a block out at a width
+// other than the terminal's changes nothing another goroutine can see.
+func (r *Renderer) layoutTermWidth() int {
+	if r != nil && r.layoutWidth > 0 {
+		return r.layoutWidth
+	}
+	return termWidthOrDefault()
+}
+
 func (r *Renderer) WithWorkingDir(cwd string) *Renderer {
 	if r == nil {
 		return nil
@@ -1092,7 +1122,7 @@ func (r *Renderer) finishTransientLocked(source string) {
 }
 
 func (r *Renderer) renderAssistant(f Frame) {
-	contentWidth := termWidthOrDefault() - lipgloss.Width("  ") - 1
+	contentWidth := r.layoutTermWidth() - lipgloss.Width("  ") - 1
 	if contentWidth < 1 {
 		contentWidth = 1
 	}
@@ -2074,7 +2104,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		// header foldBlock rebuilds always wraps under that gutter, so a running
 		// card that continued under bare spaces instead lost its rule, or grew
 		// one mid-run, depending on which of the two paths painted it.
-		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(line, "  │ ", r.layoutTermWidth()))
 	} else {
 		line := bulletStyle.Render(markerGlyph)
 		if title != "" {
@@ -2083,14 +2113,14 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		if summary != "" {
 			line += " " + summaryStyle.Render(summary)
 		}
-		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(line, "  │ ", r.layoutTermWidth()))
 	}
 
 	if f.Kind == FrameTool && strings.EqualFold(strings.TrimSpace(f.ToolMeta.PreviewKind), "image") {
 		// An image step has no text body: one marker line naming the file, its
 		// pixel and encoded sizes, and the key that opens it. It never falls
 		// through to a JSON dump — the facts are already the one line.
-		_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(imagePreviewFrameLine(f.ToolMeta)))
+		_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(imagePreviewFrameLine(f.ToolMeta), r.layoutTermWidth()))
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
@@ -2131,7 +2161,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		// letting it re-wrap the fragments broke long paths twice —
 		// "…/cont/ext-rest/ore/SKILL.md" chips on three lines.
 		body := shortenSkillLoadPaths(content, projectRoot)
-		_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(body))
+		_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(body, r.layoutTermWidth()))
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
@@ -2141,8 +2171,8 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			if !toolStatusPending(f) {
 				if strings.EqualFold(title, "exit_plan_mode") && toolStatusDenied(f) {
 					content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
-					content = wrapCardContent(content, maxCardContentWidth()-2)
-					_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
+					content = wrapCardContent(content, maxCardContentWidth(r.layoutTermWidth())-2)
+					_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content, r.layoutTermWidth()))
 					_, _ = fmt.Fprintln(r.out)
 					return
 				}
@@ -2163,8 +2193,8 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 				} else {
 					content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 				}
-				content = wrapCardContent(content, maxCardContentWidth()-2)
-				_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
+				content = wrapCardContent(content, maxCardContentWidth(r.layoutTermWidth())-2)
+				_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content, r.layoutTermWidth()))
 			}
 			_, _ = fmt.Fprintln(r.out)
 		}
@@ -2178,20 +2208,20 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			if content == "" {
 				content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 			}
-			content = wrapCardContent(content, maxCardContentWidth()-2)
-			_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
+			content = wrapCardContent(content, maxCardContentWidth(r.layoutTermWidth())-2)
+			_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content, r.layoutTermWidth()))
 			_, _ = fmt.Fprintln(r.out)
 			return
 		}
 		if isDiffTool(title) {
-			if block, ok := renderTurnDiffCard(f.Content, r.diffTheme); ok {
+			if block, ok := renderTurnDiffCard(f.Content, r.diffTheme, r.layoutTermWidth()); ok {
 				_, _ = fmt.Fprintln(r.out, block)
 				_, _ = fmt.Fprintln(r.out)
 				return
 			}
 		}
 		if strings.EqualFold(title, "shell") && !toolStatusFailed(f) {
-			if block, ok := renderShellDiffCard(f.Content, r.diffTheme); ok {
+			if block, ok := renderShellDiffCard(f.Content, r.diffTheme, r.layoutTermWidth()); ok {
 				_, _ = fmt.Fprintln(r.out, block)
 				_, _ = fmt.Fprintln(r.out)
 				return
@@ -2214,7 +2244,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			} else if textContent == "" {
 				textContent = strings.TrimSpace(f.Content)
 			}
-			contentWidth := maxCardContentWidth() - 2
+			contentWidth := maxCardContentWidth(r.layoutTermWidth()) - 2
 			if contentWidth < 20 {
 				contentWidth = 20
 			}
@@ -2248,7 +2278,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 		}
 		if toolStatusFailed(f) {
-			_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
+			_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content, r.layoutTermWidth()))
 			_, _ = fmt.Fprintln(r.out)
 			return
 		}
@@ -2262,7 +2292,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 				fp = filePathFromContent(content)
 			}
 			if fp != "" {
-				_, _ = fmt.Fprintln(r.out, formatHighlightedToolOutput(content, fp, r.diffTheme))
+				_, _ = fmt.Fprintln(r.out, formatHighlightedToolOutput(content, fp, r.diffTheme, r.layoutTermWidth()))
 				_, _ = fmt.Fprintln(r.out)
 				return
 			}
@@ -2276,7 +2306,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 				_, _ = fmt.Fprintln(r.out)
 				return
 			}
-			contentWidth := maxCardContentWidth() - 2
+			contentWidth := maxCardContentWidth(r.layoutTermWidth()) - 2
 			if contentWidth < 20 {
 				contentWidth = 20
 			}
@@ -2290,7 +2320,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		}
 		// Render web_fetch output as markdown.
 		if isMarkdownBodyTool(title) && content != "" {
-			contentWidth := maxCardContentWidth() - 2
+			contentWidth := maxCardContentWidth(r.layoutTermWidth()) - 2
 			if contentWidth < 20 {
 				contentWidth = 20
 			}
@@ -2314,7 +2344,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			// so the result reads as one cohesive output area.
 			var outLines []string
 			if bodyContent != "" {
-				bodyWidth := maxCardContentWidth() - 2
+				bodyWidth := maxCardContentWidth(r.layoutTermWidth()) - 2
 				if bodyWidth < 20 {
 					bodyWidth = 20
 				}
@@ -2330,7 +2360,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			_, _ = fmt.Fprintln(r.out)
 			return
 		}
-		_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
+		_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content, r.layoutTermWidth()))
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
@@ -2339,7 +2369,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 	// this repaint's width — the frame keeps the Markdown and is re-laid out
 	// with the terminal, so a resize reflows it (plan 246 §3.3).
 	if f.MarkdownBody {
-		contentWidth := maxCardContentWidth() - 2
+		contentWidth := maxCardContentWidth(r.layoutTermWidth()) - 2
 		if contentWidth < 20 {
 			contentWidth = 20
 		}
@@ -2351,7 +2381,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
-	content = wrapCardContent(content, maxCardContentWidth()-2)
+	content = wrapCardContent(content, maxCardContentWidth(r.layoutTermWidth())-2)
 	_, _ = fmt.Fprintln(r.out, prefixLines(content, "  ", "  "))
 	_, _ = fmt.Fprintln(r.out)
 }
@@ -2578,11 +2608,42 @@ func resolveReadFileLexer(filePath string, theme DiffTheme) chroma.Lexer {
 	if noColorActive() {
 		return nil
 	}
-	lexer := lexers.Match(filepath.Base(filePath))
+	return chroma.Coalesce(lexerForFileName(filepath.Base(filePath)))
+}
+
+// fileLexers memoizes lexerForFileName. lexers.Match tries every lexer's
+// filename globs in turn, tens of microseconds a call, and every read_file and
+// diff card asks again each time it is rendered — a width change (the todo
+// drawer, a resize) renders the whole transcript at once, and in a long session
+// the matching alone took a fifth of it. A session touches a bounded set of
+// file names, so the map stays small; past fileLexerCacheMax it starts over.
+var (
+	fileLexersMu sync.Mutex
+	fileLexers   = map[string]chroma.Lexer{}
+)
+
+const fileLexerCacheMax = 1024
+
+// lexerForFileName is lexers.Match for a file name, falling back to the plain
+// lexer when nothing matches.
+func lexerForFileName(name string) chroma.Lexer {
+	fileLexersMu.Lock()
+	lexer, ok := fileLexers[name]
+	fileLexersMu.Unlock()
+	if ok {
+		return lexer
+	}
+	lexer = lexers.Match(name)
 	if lexer == nil {
 		lexer = lexers.Fallback
 	}
-	return chroma.Coalesce(lexer)
+	fileLexersMu.Lock()
+	if len(fileLexers) >= fileLexerCacheMax {
+		fileLexers = map[string]chroma.Lexer{}
+	}
+	fileLexers[name] = lexer
+	fileLexersMu.Unlock()
+	return lexer
 }
 
 const (
@@ -2622,15 +2683,16 @@ func resolveCodeStyle(theme DiffTheme) *chroma.Style {
 	return styles.Get(codeStyleNameFor(theme))
 }
 
-// formatHighlightedToolOutput wraps and syntax-highlights tool output (e.g. read_file).
+// formatHighlightedToolOutput wraps and syntax-highlights tool output (e.g. read_file)
+// for a screen termWidth columns wide.
 // Unlike formatToolOutputBlock, it applies per-line chroma highlighting after wrapping,
 // so ANSI codes never interfere with width measurement.
-func formatHighlightedToolOutput(content, filePath string, theme DiffTheme) string {
+func formatHighlightedToolOutput(content, filePath string, theme DiffTheme, termWidth int) string {
 	content = strings.TrimRight(content, "\n")
 	if content == "" {
 		return ""
 	}
-	width := termWidthOrDefault() - contentRightMargin
+	width := termWidth - contentRightMargin
 	if width <= 0 {
 		width = 80
 	}
@@ -2858,14 +2920,14 @@ func extractAnyFencedBody(content string) string {
 const toolNoOutputText = "(no output)"
 
 // formatToolOutputBlock wraps tool output lines with the tree-drawing prefix
-// ("  └ " for the first line, "    " for continuation). Empty content renders
-// as nothing.
-func formatToolOutputBlock(content string) string {
+// ("  └ " for the first line, "    " for continuation) for a screen termWidth
+// columns wide. Empty content renders as nothing.
+func formatToolOutputBlock(content string, termWidth int) string {
 	content = strings.TrimRight(content, "\n")
 	if content == "" {
 		return ""
 	}
-	width := termWidthOrDefault() - contentRightMargin
+	width := termWidth - contentRightMargin
 	if width < 20 {
 		width = 80
 	}
@@ -3608,7 +3670,7 @@ func (r *Renderer) renderUserMessage(content string) {
 	if content == "" {
 		return
 	}
-	termWidth := termWidthOrDefault()
+	termWidth := r.layoutTermWidth()
 
 	content = wrapCardContent(content, termWidth-lipgloss.Width(composerPromptMarker)-1)
 	lines := strings.Split(content, "\n")
@@ -4548,8 +4610,11 @@ func (r *Renderer) writeSharedBlockContinuationLine(content string, termWidth in
 	}
 	_, _ = fmt.Fprint(r.out, renderSharedBlockContinuationLine(content, termWidth))
 }
-func maxCardContentWidth() int {
-	width := termWidthOrDefault() - cardHorizontalChromeWidth
+
+// maxCardContentWidth is the text width a card has on a screen termWidth
+// columns wide.
+func maxCardContentWidth(termWidth int) int {
+	width := termWidth - cardHorizontalChromeWidth
 	if width < 1 {
 		return 1
 	}
@@ -4895,7 +4960,7 @@ func (r *Renderer) renderFanout(f Frame) {
 				summary += " · " + ds
 			}
 		}
-		headerLine := wrapToolDisplayLine(fanoutHeaderLine(f, summary, r.spinnerPhase, r.diffTheme), "   ")
+		headerLine := wrapToolDisplayLineWidth(fanoutHeaderLine(f, summary, r.spinnerPhase, r.diffTheme), "   ", r.layoutTermWidth())
 		_, _ = fmt.Fprintln(r.out, headerLine)
 		owner(-1, strings.Count(headerLine, "\n")+1)
 	}
@@ -4926,7 +4991,7 @@ func (r *Renderer) renderFanout(f Frame) {
 	// with "  └ "; stat and activity lines are continuations indented with
 	// "    " to align under the task title text. The body is content text, so
 	// it carries the assistant body's brightness — never dimmed.
-	bodyWidth := termWidthOrDefault() - contentRightMargin
+	bodyWidth := r.layoutTermWidth() - contentRightMargin
 	if bodyWidth < 20 {
 		bodyWidth = 20
 	}
@@ -5075,7 +5140,7 @@ func (r *Renderer) renderStatus(f Frame) {
 		line = strings.TrimSpace(line + " " + content)
 	}
 	if strings.HasPrefix(title, "Worked for ") {
-		ruleWidth := termWidthOrDefault()
+		ruleWidth := r.layoutTermWidth()
 		// Viewport capture forces the width to the padded transcript width; the
 		// rule is full-bleed, so add the padding back to reach the true edge.
 		if r.fullBodyMode {
@@ -5086,7 +5151,7 @@ func (r *Renderer) renderStatus(f Frame) {
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
-	rendered := wrapToolDisplayLine(line, "  ")
+	rendered := wrapToolDisplayLineWidth(line, "  ", r.layoutTermWidth())
 	if f.MaxDisplayLines > 0 {
 		rendered = limitVisualLines(rendered, f.MaxDisplayLines)
 	}
@@ -5412,17 +5477,17 @@ func (r *Renderer) renderMemoryCompact(f Frame) {
 	if !f.Final {
 		// The bar has a line of its own under the header, so it can be wide
 		// enough to read at a glance and never competes with the text for room.
-		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(header, "   "))
-		_, _ = fmt.Fprintln(r.out, "  "+renderCompactProgressBar(f.Progress, r.spinnerPhase, compactProgressBarWidth(termWidthOrDefault())))
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(header, "   ", r.layoutTermWidth()))
+		_, _ = fmt.Fprintln(r.out, "  "+renderCompactProgressBar(f.Progress, r.spinnerPhase, compactProgressBarWidth(r.layoutTermWidth())))
 		return
 	}
-	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(header, "  │ "))
+	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(header, "  │ ", r.layoutTermWidth()))
 	content := strings.TrimSpace(f.Content)
 	if content == "" {
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
-	contentWidth := maxCardContentWidth() - 2
+	contentWidth := maxCardContentWidth(r.layoutTermWidth()) - 2
 	if contentWidth < 20 {
 		contentWidth = 20
 	}
@@ -5460,17 +5525,17 @@ const (
 func (r *Renderer) renderMigration(f Frame) {
 	header := migrationHeaderLine(f, r.spinnerPhase)
 	if !f.Final {
-		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(header, "   "))
-		_, _ = fmt.Fprintln(r.out, "  "+renderCompactProgressBar(f.Progress, r.spinnerPhase, compactProgressBarWidth(termWidthOrDefault())))
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(header, "   ", r.layoutTermWidth()))
+		_, _ = fmt.Fprintln(r.out, "  "+renderCompactProgressBar(f.Progress, r.spinnerPhase, compactProgressBarWidth(r.layoutTermWidth())))
 		return
 	}
-	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(header, "  │ "))
+	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(header, "  │ ", r.layoutTermWidth()))
 	content := strings.TrimSpace(f.Content)
 	if content == "" {
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
-	contentWidth := maxCardContentWidth() - 2
+	contentWidth := maxCardContentWidth(r.layoutTermWidth()) - 2
 	if contentWidth < 20 {
 		contentWidth = 20
 	}
@@ -5515,9 +5580,9 @@ func (r *Renderer) renderGoal(f Frame) {
 	if summary := strings.TrimSpace(f.Summary); summary != "" {
 		header += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" · " + summary)
 	}
-	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(header, "  "))
+	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(header, "  ", r.layoutTermWidth()))
 	if content := strings.TrimSpace(f.Content); content != "" {
-		body := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(wrapCardContent(content, max(maxCardContentWidth()-2, 20)))
+		body := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(wrapCardContent(content, max(maxCardContentWidth(r.layoutTermWidth())-2, 20)))
 		_, _ = fmt.Fprintln(r.out, prefixLines(body, "  └ ", "    "))
 	}
 	_, _ = fmt.Fprintln(r.out)
@@ -5646,15 +5711,15 @@ func (r *Renderer) renderSkillInstall(f Frame) {
 	}
 
 	if !f.Final {
-		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "   "))
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(line, "   ", r.layoutTermWidth()))
 		return
 	}
-	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
+	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(line, "  │ ", r.layoutTermWidth()))
 	if content == "" {
 		_, _ = fmt.Fprintln(r.out)
 		return
 	}
-	body := wrapCardContent(content, maxCardContentWidth()-2)
+	body := wrapCardContent(content, maxCardContentWidth(r.layoutTermWidth())-2)
 	_, _ = fmt.Fprintln(r.out, detailStyle.Render(prefixLines(body, "  └ ", "    ")))
 	_, _ = fmt.Fprintln(r.out)
 }
@@ -5783,7 +5848,7 @@ func noteToolMarkdownBody(title, content string, input map[string]any) string {
 // highlighting via the shared renderer in diffhighlight.go. Every changed
 // line is shown; a long diff scrolls.
 func RenderDiff(doc event.DiffDoc, theme DiffTheme) string {
-	return renderDiffCore(doc.Files, theme, maxCardContentWidth()-2)
+	return renderDiffCore(doc.Files, theme, maxCardContentWidth(termWidthOrDefault())-2)
 }
 
 // renderDiffCore renders parsed diff files into a themed ANSI string, every
@@ -6204,11 +6269,7 @@ func resolveDiffHighlight(path string, p diffPalette) (chroma.Lexer, *chroma.Sty
 	if p.noColor {
 		return nil, nil
 	}
-	lexer := lexers.Match(filepath.Base(path))
-	if lexer == nil {
-		lexer = lexers.Fallback
-	}
-	return chroma.Coalesce(lexer), styles.Get(p.chromaStyle)
+	return chroma.Coalesce(lexerForFileName(filepath.Base(path))), styles.Get(p.chromaStyle)
 }
 
 // highlightSegs tokenizes a single line of code with chroma and returns
@@ -6359,12 +6420,12 @@ func diffGutterWidthFor(hunks []event.Hunk) int {
 // reader half of the writer that built it, so the fence's backtick run length
 // (fenceFor escalates it past three when the diff quotes a code fence) needs no
 // guesswork here.
-func renderTurnDiffCard(content string, theme DiffTheme) (string, bool) {
+func renderTurnDiffCard(content string, theme DiffTheme, termWidth int) (string, bool) {
 	diff, ok := tool.ParseFileDiff(strings.TrimSpace(content))
 	if !ok || strings.TrimSpace(diff.UnifiedDiff) == "" {
 		return "", false
 	}
-	rows, f, ok := diffHunkRowsFor(diff.Path, diff.UnifiedDiff, theme)
+	rows, f, ok := diffHunkRowsFor(diff.Path, diff.UnifiedDiff, theme, termWidth)
 	if !ok {
 		return "", false
 	}
@@ -6373,21 +6434,21 @@ func renderTurnDiffCard(content string, theme DiffTheme) (string, bool) {
 	for _, row := range rows {
 		out = append(out, "    "+row)
 	}
-	out = append(out, lspDiagnosticsCardRows(diff.Rest)...)
+	out = append(out, lspDiagnosticsCardRows(diff.Rest, termWidth)...)
 	return strings.Join(out, "\n"), true
 }
 
 // diffHunkRows renders one file's unified diff as the unprefixed card rows the
 // turn-diff card and the shell diff blocks share: colour-highlighted hunk
 // lines joined by a faint ⋮ separator.
-func diffHunkRows(path, unifiedDiff string, theme DiffTheme) ([]string, bool) {
-	rows, _, ok := diffHunkRowsFor(path, unifiedDiff, theme)
+func diffHunkRows(path, unifiedDiff string, theme DiffTheme, termWidth int) ([]string, bool) {
+	rows, _, ok := diffHunkRowsFor(path, unifiedDiff, theme, termWidth)
 	return rows, ok
 }
 
 // diffHunkRowsFor is diffHunkRows with the parsed file stats, which the
 // turn-diff card's summary line is built from.
-func diffHunkRowsFor(path, unifiedDiff string, theme DiffTheme) ([]string, event.FileStat, bool) {
+func diffHunkRowsFor(path, unifiedDiff string, theme DiffTheme, termWidth int) ([]string, event.FileStat, bool) {
 	// event.Parse keys off a "diff --git" header; the difflib body only has
 	// "--- path:before" / "+++ path:after". Prepend a synthetic header so the
 	// existing hunk/line parsing applies.
@@ -6400,7 +6461,7 @@ func diffHunkRowsFor(path, unifiedDiff string, theme DiffTheme) ([]string, event
 	p := diffPaletteFor(theme)
 	lexer, style := resolveDiffHighlight(path, p)
 	gutterW := diffGutterWidthFor(f.Hunks)
-	bandW := termWidthOrDefault() - 4 // 4 = tool-card prefix width
+	bandW := termWidth - 4 // 4 = tool-card prefix width
 	if bandW < 20 {
 		bandW = 20
 	}
@@ -6435,7 +6496,7 @@ func shellDiffCardOutputText(content string) string {
 // its stdout/stderr text first, then one header plus hunk rows per file, then
 // the notes — all under the tool-card prefix. Returns false for ordinary
 // shell bodies so the generic shell renderer stays in charge.
-func renderShellDiffCard(content string, theme DiffTheme) (string, bool) {
+func renderShellDiffCard(content string, theme DiffTheme, termWidth int) (string, bool) {
 	blocks, ok := tool.ParseDiffBlocks(content)
 	if !ok {
 		return "", false
@@ -6443,7 +6504,7 @@ func renderShellDiffCard(content string, theme DiffTheme) (string, bool) {
 	text := shellDiffCardOutputText(content)
 	var rows []string
 	if text != "" {
-		rows = append(rows, strings.Split(formatToolOutputBlock(text), "\n")...)
+		rows = append(rows, strings.Split(formatToolOutputBlock(text, termWidth), "\n")...)
 	}
 	for _, f := range blocks.Files {
 		header := f.Verb + " " + f.Path + " " + lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("(+%d -%d)", f.Added, f.Deleted))
@@ -6456,7 +6517,7 @@ func renderShellDiffCard(content string, theme DiffTheme) (string, bool) {
 		if i := strings.LastIndex(path, " → "); i >= 0 {
 			path = path[i+len(" → "):]
 		}
-		if hunkRows, ok := diffHunkRows(path, f.UnifiedDiff, theme); ok {
+		if hunkRows, ok := diffHunkRows(path, f.UnifiedDiff, theme, termWidth); ok {
 			for _, row := range hunkRows {
 				rows = append(rows, "    "+row)
 			}
@@ -6488,7 +6549,7 @@ func renderShellDiffCard(content string, theme DiffTheme) (string, bool) {
 // Every row is wrapped at the content width here: the painter cuts a row at
 // the terminal edge (fitPaintRow), so a long compiler message emitted as one
 // row lost its tail.
-func lspDiagnosticsCardRows(rest string) []string {
+func lspDiagnosticsCardRows(rest string, termWidth int) []string {
 	lines := strings.Split(rest, "\n")
 	headerIdx := -1
 	for i, l := range lines {
@@ -6511,7 +6572,7 @@ func lspDiagnosticsCardRows(rest string) []string {
 			}
 		}
 	}
-	width := termWidthOrDefault() - contentRightMargin
+	width := termWidth - contentRightMargin
 	rows := lspDiagnosticsWrappedRows("  └ ", summary, width)
 	// The section's body is the fence that follows the header, read by the rule
 	// the writer used: three or more backticks open, only a run of that same

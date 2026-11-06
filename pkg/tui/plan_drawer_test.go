@@ -19,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -1265,4 +1267,292 @@ func TestPlanDrawerEscClosesItBeforeTheCancelPaths(t *testing.T) {
 			t.Fatal("Esc was spent on the drawer before the roster that has focus")
 		}
 	})
+}
+
+// fillPlanDrawerToggleTranscript is fillPlanDrawerTranscript plus a folded tool
+// card, so a toggle has both kinds of cached layout to carry across: the full
+// lines and the fold.
+func fillPlanDrawerToggleTranscript(r *Renderer) {
+	fillPlanDrawerTranscript(r)
+	out := make([]string, 20)
+	for i := range out {
+		out[i] = fmt.Sprintf("ok   github.com/forebrain-harness/forebrain-harness/pkg/tui/case%02d  0.%02ds", i, i)
+	}
+	r.RenderFrame(Frame{
+		Kind: FrameTool, StepID: "call-shell", Title: "shell", Final: true,
+		Content: strings.Join(out, "\n"), Summary: "go test ./pkg/tui/",
+		ToolMeta: tool.ToolMeta{ToolName: "shell", Status: "completed", Input: map[string]any{"command": "go test ./pkg/tui/"}},
+	})
+	r.RenderFrame(Frame{Kind: FrameAssistant, Final: true, Content: "测试全部通过，继续下一项。"})
+}
+
+// planDrawerRenderGens is how many times each block of the view on screen has
+// been laid out so far.
+func planDrawerRenderGens(r *Renderer) []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	vm := r.activeVMLocked()
+	gens := make([]int, len(vm.blocks))
+	for i, b := range vm.blocks {
+		gens[i] = b.renderGen
+	}
+	return gens
+}
+
+func planDrawerCloseForTest(t *testing.T, r *Renderer) {
+	t.Helper()
+	if !r.ClosePlanDrawer() {
+		t.Fatal("the drawer did not close")
+	}
+}
+
+// warmPlanDrawerForTest runs the background warmer's steps to completion.
+func warmPlanDrawerForTest(r *Renderer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for r.warmDrawerToggleLocked(time.Hour) {
+	}
+}
+
+// The reported freeze: in a long session the drawer took seconds to open while
+// a reply streamed, because a toggle re-laid every block of the transcript out
+// at the new width under the renderer's lock. A block keeps the width it left,
+// so after one open, closing and reopening render nothing — and show exactly
+// what they showed before.
+func TestPlanDrawerToggleKeepsTheWidthItLeft(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerToggleTranscript(r)
+	closedLines := append([]string(nil), r.vpLastRender.allLines...)
+
+	planDrawerOpenForTest(t, r)
+	openLines := append([]string(nil), r.vpLastRender.allLines...)
+	gens := planDrawerRenderGens(r)
+
+	planDrawerCloseForTest(t, r)
+	if got := strings.Join(r.vpLastRender.allLines, "\n"); got != strings.Join(closedLines, "\n") {
+		t.Fatalf("closing the drawer did not restore the full-width transcript:\nbefore:\n%s\nafter:\n%s", strings.Join(closedLines, "\n"), got)
+	}
+	planDrawerOpenForTest(t, r)
+	if got := strings.Join(r.vpLastRender.allLines, "\n"); got != strings.Join(openLines, "\n") {
+		t.Fatalf("reopening the drawer laid the transcript out differently:\nfirst:\n%s\nagain:\n%s", strings.Join(openLines, "\n"), got)
+	}
+	if after := planDrawerRenderGens(r); fmt.Sprint(after) != fmt.Sprint(gens) {
+		t.Fatalf("closing and reopening re-rendered blocks: render counts %v became %v", gens, after)
+	}
+}
+
+// The warmer lays the transcript out for the toggle ahead of the click, so even
+// the first open renders no block — and paints what a cold open paints.
+func TestPlanDrawerWarmedOpenRendersNothing(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerToggleTranscript(r)
+	warmPlanDrawerForTest(r)
+	gens := planDrawerRenderGens(r)
+
+	planDrawerOpenForTest(t, r)
+	if after := planDrawerRenderGens(r); fmt.Sprint(after) != fmt.Sprint(gens) {
+		t.Fatalf("a warmed open still rendered blocks: render counts %v became %v", gens, after)
+	}
+	warmed := strings.Join(r.vpPainted, "\n")
+
+	cold := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerToggleTranscript(cold)
+	planDrawerOpenForTest(t, cold)
+	if got := strings.Join(cold.vpPainted, "\n"); got != warmed {
+		t.Fatalf("the warmed open painted a different screen than a cold one:\nwarmed:\n%s\ncold:\n%s", warmed, got)
+	}
+}
+
+// While the drawer is open the warmer prepares the close: a block that arrived
+// beside the drawer is laid out at the full width too, so closing renders
+// nothing either.
+func TestPlanDrawerWarmerPreparesTheClose(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerToggleTranscript(r)
+	planDrawerOpenForTest(t, r)
+	r.RenderFrame(Frame{Kind: FrameAssistant, Final: true, Content: "抽屉打开期间到达的新回复，关闭抽屉时不应重新排版整段历史。"})
+	warmPlanDrawerForTest(r)
+	gens := planDrawerRenderGens(r)
+
+	planDrawerCloseForTest(t, r)
+	if after := planDrawerRenderGens(r); fmt.Sprint(after) != fmt.Sprint(gens) {
+		t.Fatalf("closing a warmed drawer rendered blocks: render counts %v became %v", gens, after)
+	}
+	if !strings.Contains(sgrPattern.ReplaceAllString(strings.Join(r.vpLastRender.allLines, "\n"), ""), "抽屉打开期间到达的新回复") {
+		t.Fatal("the reply that arrived beside the drawer is missing after it closed")
+	}
+}
+
+// A card folded open beside the drawer is still open after it closes: the
+// fold kept for the other width is keyed on the fold state too.
+func TestPlanDrawerToggleFollowsAFoldChange(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerToggleTranscript(r)
+	planDrawerOpenForTest(t, r)
+	planDrawerCloseForTest(t, r)
+	var card *viewBlock
+	for _, b := range r.vm.blocks {
+		if b.frame.Kind == FrameTool {
+			card = b
+		}
+	}
+	if card == nil || !card.collapsible {
+		t.Fatal("the transcript has no folded tool card")
+	}
+	folded := len(r.vpLastRender.allLines)
+
+	planDrawerOpenForTest(t, r)
+	r.mu.Lock()
+	card.expanded = true
+	r.paintViewportLocked()
+	r.mu.Unlock()
+	planDrawerCloseForTest(t, r)
+	if got := len(r.vpLastRender.allLines); got <= folded {
+		t.Fatalf("the card expanded beside the drawer is folded again after it closed: %d rows, folded was %d", got, folded)
+	}
+	text := sgrPattern.ReplaceAllString(strings.Join(r.vpLastRender.allLines, "\n"), "")
+	if !strings.Contains(text, "case19") {
+		t.Fatalf("the expanded card does not show its last row after the drawer closed:\n%s", text)
+	}
+}
+
+// A frame that changed since the other width was laid out is never served from
+// it: the change invalidates the current lines, and that drops the spare too.
+func TestBlockSpareWidthDroppedWhenTheFrameChanges(t *testing.T) {
+	vm := viewModel{}
+	b := vm.append(Frame{Kind: FrameAssistant, Final: true, Content: "alpha"})
+	renderBlockFull(b, 80, DiffThemeDark, 0)
+	renderBlockFull(b, 60, DiffThemeDark, 0)
+	if !b.spare.valid || b.spare.width != 80 {
+		t.Fatalf("the width left was not kept: spare %+v", b.spare)
+	}
+	b.frame.Content = "omega"
+	b.cache.valid = false
+	got := strings.Join(renderBlockFull(b, 80, DiffThemeDark, 0), "\n")
+	if !strings.Contains(got, "omega") || strings.Contains(got, "alpha") {
+		t.Fatalf("a changed frame was served from the stale spare: %q", got)
+	}
+}
+
+// The warmer leaves alone what a toggle could not reuse: a reply still
+// streaming changes with every delta, so laying it out ahead is wasted work.
+func TestPlanDrawerWarmerSkipsAStreamingReply(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerToggleTranscript(r)
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "still streaming"})
+	warmPlanDrawerForTest(r)
+	last := r.vm.blocks[len(r.vm.blocks)-1]
+	if last.frame.Final || last.frame.Kind != FrameAssistant {
+		t.Fatalf("the last block is not the streaming reply: %+v", last.frame)
+	}
+	if last.spare.valid {
+		t.Fatal("the warmer laid out a reply that is still streaming")
+	}
+	if first := r.vm.blocks[0]; !first.spare.valid {
+		t.Fatal("the warmer did not lay out a settled block")
+	}
+}
+
+// Without a plan there is no drawer to open, and nothing to warm.
+func TestPlanDrawerWarmerIdleWithoutAPlan(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	r.RenderFrame(Frame{Kind: FrameAssistant, Final: true, Content: "no plan here"})
+	warmPlanDrawerForTest(r)
+	for _, b := range r.vm.blocks {
+		if b.spare.valid {
+			t.Fatalf("a %s block was warmed for a drawer that cannot open", b.frame.Kind)
+		}
+	}
+}
+
+// The warmer goroutine does the same work in the background after a paint,
+// and stops when asked.
+func TestPlanDrawerWarmerRunsInTheBackground(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	stop := r.StartDrawerWarmer()
+	defer stop()
+	fillPlanDrawerToggleTranscript(r)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.mu.Lock()
+		warm := r.vm.blocks[0].spare.valid
+		r.mu.Unlock()
+		if warm {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the background warmer did not lay the transcript out for the toggle")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	gens := planDrawerRenderGens(r)
+	stop()
+	planDrawerOpenForTest(t, r)
+	if after := planDrawerRenderGens(r); fmt.Sprint(after) != fmt.Sprint(gens) {
+		t.Fatalf("an open after background warming rendered blocks: %v became %v", gens, after)
+	}
+}
+
+// The painter and the warmer agree on the width a toggle lays the history out
+// at, with the drawer and without it.
+func TestViewportHistoryWidthIsThePaintedWidth(t *testing.T) {
+	for _, width := range []int{120, 80, 61} {
+		r := newPlanDrawerScreen(t, width, 30)
+		fillPlanDrawerToggleTranscript(r)
+		assistant := r.vm.blocks[0]
+		if got, want := assistant.cache.width, viewportHistoryWidth(width, false); got != want {
+			t.Fatalf("width %d: history laid out at %d, viewportHistoryWidth says %d", width, got, want)
+		}
+		planDrawerOpenForTest(t, r)
+		if got, want := assistant.cache.width, viewportHistoryWidth(width, true); got != want {
+			t.Fatalf("width %d with the drawer: history laid out at %d, viewportHistoryWidth says %d", width, got, want)
+		}
+	}
+}
+
+func TestLexerForFileNameMatchesChroma(t *testing.T) {
+	for _, name := range []string{"main.go", "reducer.go", "README.md", "Makefile", "no-such-kind.zzz"} {
+		want := lexers.Match(name)
+		if want == nil {
+			want = lexers.Fallback
+		}
+		for i := 0; i < 2; i++ {
+			if got := lexerForFileName(name); got != want {
+				t.Fatalf("lexerForFileName(%q) = %v, want %v", name, got.Config().Name, want.Config().Name)
+			}
+		}
+	}
+}
+
+// The subagent view has a drawer of its own, and its toggle is warmed the same
+// way: the warmer works on the view on screen, whichever it is.
+func TestPlanDrawerWarmedOpenInASubagentView(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerTranscript(r)
+	for i := 0; i < 6; i++ {
+		r.RenderFrame(Frame{Kind: FrameAssistant, Final: true, AgentID: "sub-1", Content: fmt.Sprintf(
+			"子代理的第 %d 条回复，足够长，以便在抽屉打开之后必须按更窄的宽度重新换行：the quick brown fox jumps over the lazy dog", i)})
+	}
+	r.RenderFrame(planFrameFor(event.PlanUpdatedPayload{
+		AgentID: "sub-1",
+		Items:   []event.PlanUpdateItem{planTodoItem("子代理事项", "in_progress")},
+	}))
+	r.SetActiveView("sub-1")
+	warmPlanDrawerForTest(r)
+	gens := planDrawerRenderGens(r)
+	if len(gens) < 7 {
+		t.Fatalf("the subagent view holds %d blocks, want its replies and its plan", len(gens))
+	}
+
+	planDrawerOpenForTest(t, r)
+	if after := planDrawerRenderGens(r); fmt.Sprint(after) != fmt.Sprint(gens) {
+		t.Fatalf("a warmed open in the subagent view rendered blocks: %v became %v", gens, after)
+	}
+	if !strings.Contains(sgrPattern.ReplaceAllString(r.vpPainted[1], ""), "子代理事项") {
+		t.Fatalf("the subagent view's drawer does not list its own plan: %q", r.vpPainted[1])
+	}
+	planDrawerCloseForTest(t, r)
+	if after := planDrawerRenderGens(r); fmt.Sprint(after) != fmt.Sprint(gens) {
+		t.Fatalf("closing the subagent view's drawer rendered blocks: %v became %v", gens, after)
+	}
 }

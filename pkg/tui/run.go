@@ -664,6 +664,7 @@ func Run(ctx context.Context, opts Options) error {
 		// otherwise show the hardware caret for a frame.
 		renderer.EnableSoftwareCursor()
 		renderer.EnableViewportMode()
+		defer renderer.StartDrawerWarmer()()
 		clipProbe, _ := opts.Clipboard.(ClipboardImageProbe)
 		if opts.Clipboard == nil {
 			clipProbe = systemClipboardImageReader{projectRoot: strings.TrimSpace(opts.WorkingDirectory)}

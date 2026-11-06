@@ -1019,6 +1019,19 @@ type viewBlock struct {
 	// block on every repaint (which, for thousands of blocks, re-runs a
 	// per-line ANSI-strip regex and rebuilds every header each frame).
 	foldCache foldLineCache
+	// spare and spareFold hold the same block laid out at the other width the
+	// transcript switches between: the full width and the narrower one beside
+	// the todo drawer. Opening or closing the drawer re-lays the whole
+	// transcript out, which in a long session is every block's markdown,
+	// highlighting and fold at once — seconds under the renderer's lock. With
+	// the other width kept (and warmed ahead of time, see
+	// warmDrawerToggleLocked) a toggle swaps slots instead. A frame mutation
+	// invalidates cache, and an invalid cache discards the spare with it.
+	spare     blockLineCache
+	spareFold foldLineCache
+	// renderGen numbers every regeneration of this block's lines, in either
+	// slot, so a fold is only ever matched to the very lines it folded.
+	renderGen int
 	// runStart is when the block was first drawn as an executing tool. Frames
 	// are replaced wholesale on every update, so the running clock lives here.
 	runStart time.Time
