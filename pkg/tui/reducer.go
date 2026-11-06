@@ -7477,7 +7477,7 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 		return viewportClick{}
 	}
 	go func() {
-		clipErr := writeTextToClipboard(context.Background(), text)
+		clipErr := clipboardWriteText(context.Background(), text)
 		if clipErr != nil {
 			r.mu.Lock()
 			r.writeClipboardOSC52Locked(text)

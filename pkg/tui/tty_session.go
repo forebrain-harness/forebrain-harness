@@ -677,6 +677,12 @@ func runClipboardImageTool(cmd *exec.Cmd) error {
 	return err
 }
 
+// clipboardWriteText puts text on the system clipboard. It is a variable for
+// the same reason clipboardWritePNG is: the package's tests drive selections
+// that copy on release, and with the real helper every such test would
+// overwrite the clipboard of whoever runs `go test`.
+var clipboardWriteText = writeTextToClipboard
+
 func writeTextToClipboard(ctx context.Context, text string) error {
 	switch runtime.GOOS {
 	case "darwin":

@@ -11805,6 +11805,9 @@ func createTempLog(t *testing.T) *os.File {
 }
 
 func TestMain(m *testing.M) {
+	// A selection released in a test copies like a real one; keep it off the
+	// system clipboard of the machine running the suite.
+	clipboardWriteText = func(context.Context, string) error { return nil }
 	if data, err := llm.RepoModelsJSONForTest(); err == nil {
 		if cat, err := llm.Parse(data); err == nil {
 			llm.SetGlobalCatalogForTest(cat)
