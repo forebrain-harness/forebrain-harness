@@ -3,11 +3,13 @@ package run
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	toolpkg "github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -542,5 +544,55 @@ func TestTypedSubagentSessionModelWinsBelowTypedWrapper(t *testing.T) {
 	}
 	if got := res.Message.TextContent(); got != "session" {
 		t.Fatalf("answer came from %q, want session", got)
+	}
+}
+
+// TestPlanReviewWriteScopeIsCodingOnly checks who gets a review write scope:
+// a coding conversation's reviewer gets one, with a fresh scratch directory and
+// its brief naming it; office and batch reviewers get none and stay read-only.
+// The scope is also what offers the writing tools to the reviewer.
+func TestPlanReviewWriteScopeIsCodingOnly(t *testing.T) {
+	project := t.TempDir()
+	ctx := toolpkg.WithProjectRoot(context.Background(), project)
+	for _, projectType := range []string{state.ProjectTypeOffice, state.ProjectTypeBatch} {
+		r := &Runner{Deps: &Deps{ProjectType: projectType}}
+		if scope := r.planReviewWriteScope(ctx); scope != nil {
+			t.Errorf("%s review got a write scope", projectType)
+		}
+	}
+	r := &Runner{Deps: &Deps{ProjectType: state.ProjectTypeCoding}}
+	scope := r.planReviewWriteScope(ctx)
+	if scope == nil {
+		t.Fatal("a coding review got no write scope")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scope.Scratch()) })
+	if info, err := os.Stat(scope.Scratch()); err != nil || !info.IsDir() {
+		t.Fatalf("scratch directory %q: %v", scope.Scratch(), err)
+	}
+	if strings.HasPrefix(scope.Scratch(), project) {
+		t.Errorf("scratch %q lives inside the project", scope.Scratch())
+	}
+	brief := planReviewWorkspaceBrief(scope)
+	if !strings.Contains(brief, "Scratch directory: "+scope.Scratch()) {
+		t.Errorf("brief does not name the scratch directory: %q", brief)
+	}
+	if !strings.Contains(brief, "not a git repository") {
+		t.Errorf("a project outside git was offered a worktree: %q", brief)
+	}
+
+	reviewer := toolpkg.WithSubagentType(ctx, PlanReviewSubagentType)
+	tools := []*llm.Tool{testTool(t, "read_file"), testTool(t, "write_file"), testTool(t, "edit_file")}
+	names := func(ctx context.Context) string {
+		var out []string
+		for _, candidate := range filterToolsForSubagentSubtype(ctx, PlanReviewSubagentType, tools) {
+			out = append(out, candidate.Name())
+		}
+		return strings.Join(out, ",")
+	}
+	if got := names(reviewer); got != "read_file" {
+		t.Errorf("unscoped reviewer tools = %q, want read_file only", got)
+	}
+	if got := names(toolpkg.WithReviewWriteScope(reviewer, scope)); got != "read_file,write_file,edit_file" {
+		t.Errorf("scoped reviewer tools = %q, want the writing tools too", got)
 	}
 }

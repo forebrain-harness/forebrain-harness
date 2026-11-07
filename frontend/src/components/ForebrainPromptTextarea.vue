@@ -294,6 +294,60 @@ watch(slashQuery, () => {
   slashHighlightIndex.value = 0
 })
 
+// The command a draft of exactly "/name " names. While nothing follows it, its
+// argument hint — the variants a skill such as /audit takes — shows dimmed
+// after it, as in the terminal composer, and goes once an argument is typed.
+const hintCommand = ref<SlashCommandRecord | null>(null)
+const hintOverlayRef = ref<HTMLDivElement | null>(null)
+let hintRequestSeq = 0
+
+function lockedCommandName(text: string): string {
+  const match = /^\/([^\s/]+) +$/.exec(text)
+  return match ? match[1].toLowerCase() : ''
+}
+
+function namesCommand(cmd: SlashCommandRecord, name: string): boolean {
+  return cmd.name.toLowerCase() === name || (cmd.canonicalName || '').toLowerCase() === name
+}
+
+const argumentHint = computed(() => {
+  const cmd = hintCommand.value
+  const name = lockedCommandName(textInput.value)
+  if (!cmd || !name || !namesCommand(cmd, name)) return ''
+  return (cmd.argumentHint || '').trim()
+})
+
+watch(() => textInput.value, async (text) => {
+  const name = lockedCommandName(text)
+  if (!name) {
+    hintCommand.value = null
+    return
+  }
+  if (hintCommand.value && namesCommand(hintCommand.value, name)) return
+  const req = ++hintRequestSeq
+  try {
+    const res = await forebrainApi.slashCommands('webchat', name, {
+      duringRun: props.duringRun === true,
+      sideConversation: props.sideConversation === true,
+      subagentView: props.subagentView === true,
+    })
+    if (req !== hintRequestSeq) return
+    const records = Array.isArray(res.records) ? res.records : []
+    hintCommand.value = records.find((record) => namesCommand(record, name)) ?? null
+  } catch {
+    if (req === hintRequestSeq) hintCommand.value = null
+  }
+})
+
+// A hint longer than the composer's width wraps; the textarea grows to show
+// it whole while it is there.
+watch(argumentHint, async (hint) => {
+  await nextTick()
+  const area = textareaRef.value
+  if (!area) return
+  area.style.minHeight = hint && hintOverlayRef.value ? `${hintOverlayRef.value.scrollHeight}px` : ''
+})
+
 watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversation, () => props.subagentView, slashAtStart], async ([open, query]) => {
   if (!open) {
     slashCommands.value = []
@@ -515,6 +569,8 @@ function applySlashCommand(cmd: SlashCommandRecord) {
   // message or in the middle of it: the text after the cursor is the message
   // it was typed into, and stays.
   const accepted = acceptSlash(el.value, parsed.start, cursor, cmd.canonicalName || cmd.name)
+  // The chosen record already carries its hint; no lookup is needed for it.
+  hintCommand.value = cmd
   setTextInput(accepted.text)
   slashOpen.value = false
   const pos = accepted.cursor
@@ -760,6 +816,7 @@ function onRootRowClick(e: MouseEvent) {
         </button>
       </li>
     </ul>
+    <div class="relative">
     <textarea ref="textareaRef" v-model="modelValue" data-slot="input-group-control" name="message"
       :placeholder="placeholder" :disabled="disabled" :class="cn(
         'max-h-48 min-h-11 w-full min-w-0 flex-1 resize-none overflow-y-auto rounded-none border-0 bg-transparent px-3 py-3 align-top text-base leading-normal shadow-none !outline-none focus:!outline-none focus-visible:!outline-none focus:!ring-0 focus-visible:!ring-0 dark:bg-transparent md:text-sm placeholder:text-muted-foreground [field-sizing:fixed]',
@@ -768,6 +825,11 @@ function onRootRowClick(e: MouseEvent) {
         " @keydown="handleKeyDown" @input="onInput" @keyup="syncMentionState" @click="syncMentionState"
       @select="syncMentionState" @paste="handlePaste" @compositionstart="setComposing(true)"
       @compositionend="onCompositionEnd" />
+    <div v-if="argumentHint" ref="hintOverlayRef" aria-hidden="true" data-testid="composer-argument-hint"
+      class="pointer-events-none absolute inset-x-0 top-0 overflow-hidden whitespace-pre-wrap break-words px-3 py-3 text-base leading-normal md:text-sm">
+      <span class="invisible">{{ textInput.trimEnd() }}</span><span class="text-muted-foreground"> {{ argumentHint }}</span>
+    </div>
+    </div>
     <div
       v-if="slashOpen"
       class="absolute bottom-full left-0 z-[210] mb-1 min-w-[260px] max-w-[min(100vw-2rem,360px)] overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-lg"

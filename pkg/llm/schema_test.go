@@ -1337,3 +1337,47 @@ func TestEnsureStrictJSONSchema_PropertiesRecursiveError(t *testing.T) {
 func ensureStrictJSONSchema(schema map[string]any) (map[string]any, error) {
 	return normalizeJSONSchema(schema, true)
 }
+
+// TestToolSchemaDropsWhatTheModelNeverNeeds pins what a tool schema costs per
+// request: once every $ref is inlined, the root $defs would be a second copy of
+// the properties and $id/$schema say nothing to a model, so none is sent; a
+// definition a cyclic $ref still needs stays.
+func TestToolSchemaDropsWhatTheModelNeverNeeds(t *testing.T) {
+	inlined, err := ensureToolJSONSchema(map[string]any{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"$id":     "https://example.com/tool-input",
+		"$defs": map[string]any{
+			"Leaf": map[string]any{"type": "object", "properties": map[string]any{"v": map[string]any{"type": "string"}}},
+		},
+		"type":       "object",
+		"properties": map[string]any{"leaf": map[string]any{"$ref": "#/$defs/Leaf"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"$schema", "$id", "$defs"} {
+		if _, ok := inlined[key]; ok {
+			t.Errorf("tool schema still carries %s", key)
+		}
+	}
+	leaf := inlined["properties"].(map[string]any)["leaf"].(map[string]any)
+	if leaf["type"] != "object" {
+		t.Fatalf("the inlined property lost its definition: %v", leaf)
+	}
+
+	cyclic, err := ensureToolJSONSchema(map[string]any{
+		"$defs": map[string]any{
+			"Node": map[string]any{"type": "object", "properties": map[string]any{
+				"children": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/Node"}},
+			}},
+		},
+		"type":       "object",
+		"properties": map[string]any{"root": map[string]any{"$ref": "#/$defs/Node"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cyclic["$defs"]; !ok {
+		t.Fatal("a cyclic schema lost the definition its $ref still points at")
+	}
+}

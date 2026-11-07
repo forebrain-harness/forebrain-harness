@@ -59,8 +59,9 @@ func writeNote(t *testing.T, root Root, filename, body string, modified time.Tim
 // The instruction describes the memory layout with absolute paths while the
 // dedicated tools address files relative to the memory root, so when those
 // tools are exposed the instruction has to say how to address them — otherwise
-// a model copies an absolute layout path into memories_read, or reads a note
-// back by the bare filename it wrote with, and is told the path was not found.
+// a model copies an absolute layout path into memories_read and is told the
+// path was not found. Reading a written note back by its returned path is the
+// memories_add_ad_hoc_note description's rule, pinned in pkg/tool.
 func TestRecallInstructionExplainsToolPathsWhenToolsAreExposed(t *testing.T) {
 	roots, projectKey := newInstructionRoots(t)
 	root := roots.Scope(Scope{Kind: ScopeProject, Key: projectKey})
@@ -73,8 +74,7 @@ func TestRecallInstructionExplainsToolPathsWhenToolsAreExposed(t *testing.T) {
 	for _, want := range []string{
 		"memories_read",
 		"relative to the\n  project memory base path above",
-		AdHocNotesDir + "/",
-		"pass that path to",
+		"prefix `global/` for the global scope",
 	} {
 		if !strings.Contains(withTools, want) {
 			t.Fatalf("instruction missing %q:\n%s", want, withTools)

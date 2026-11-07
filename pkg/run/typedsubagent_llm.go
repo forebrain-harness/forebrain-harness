@@ -168,7 +168,7 @@ func filterToolsForSubagentSubtype(ctx context.Context, subtype string, tools []
 			}
 		}
 	} else {
-		visible = tool.VisibleToolsForSubagentSubtype(normalized, inputNames)
+		visible = tool.VisibleToolsForSubagentRun(ctx, normalized, inputNames)
 	}
 	out := make([]*llm.Tool, 0, len(tools))
 	for _, name := range visible {

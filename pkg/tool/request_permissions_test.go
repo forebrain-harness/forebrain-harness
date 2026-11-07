@@ -990,11 +990,22 @@ func TestIntermediateToolAppendRequiresContent(t *testing.T) {
 
 func TestIntermediateToolDescriptionMentionsReadBack(t *testing.T) {
 	desc := IntermediateToolDescription()
-	if !strings.Contains(desc, "Use this tool frequently") {
+	if !strings.Contains(desc, "Use it often") {
 		t.Fatalf("description missing high-frequency guidance: %q", desc)
 	}
 	if !strings.Contains(desc, "Before responding to the user") {
 		t.Fatalf("description missing read-back guidance: %q", desc)
+	}
+}
+
+// A note written with memories_add_ad_hoc_note lives one directory below the
+// memories root, so reading it back by its bare filename fails; the tool that
+// returns the path is where that rule has to be.
+func TestAdHocNoteDescriptionSaysToReadBackByReturnedPath(t *testing.T) {
+	for _, want := range []string{memory.AdHocNotesDir + "/", "pass the returned path", "verbatim to memories_read"} {
+		if !strings.Contains(memoriesAddAdHocNoteDescription, want) {
+			t.Errorf("memories_add_ad_hoc_note description is missing %q: %q", want, memoriesAddAdHocNoteDescription)
+		}
 	}
 }
 

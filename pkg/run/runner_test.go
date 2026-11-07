@@ -24,18 +24,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
-func TestAgentIntermediateToolPromptSuffixMentionsHighFrequencyAndReadBack(t *testing.T) {
-	if !strings.Contains(agentIntermediateToolPromptSuffix, "high-frequency") {
-		t.Fatalf("suffix missing high-frequency guidance: %q", agentIntermediateToolPromptSuffix)
-	}
-	if !strings.Contains(agentIntermediateToolPromptSuffix, "Before replying to the user") {
-		t.Fatalf("suffix missing read-back guidance: %q", agentIntermediateToolPromptSuffix)
-	}
-	if !strings.Contains(agentIntermediateToolPromptSuffix, "intermediate_tool") {
-		t.Fatalf("suffix missing tool name: %q", agentIntermediateToolPromptSuffix)
-	}
-}
-
 func TestNormalizeMCPDelegatingInputSchemaPreservesRemoteSchema(t *testing.T) {
 	raw := map[string]any{
 		"type": "object",
@@ -2764,31 +2752,31 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 		return r
 	}
 	coding := newRunner(state.ProjectTypeCoding).MainAgentDescription()
-	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agent.BugRootCausePrompt + agent.SubagentUserRulingPrompt + agent.AdvisorWorkflowPrompt + agent.PlanHandoffQualityPrompt + agentIntermediateToolPromptSuffix
+	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agent.NonFunctionalRequirementsPrompt + agent.BugRootCausePrompt + agent.SubagentUserRulingPrompt + agent.PlanHandoffQualityPrompt
 	if coding != wantCoding {
 		t.Errorf("coding system prompt changed:\n got: %q\nwant: %q", coding, wantCoding)
 	}
 	office := newRunner(state.ProjectTypeOffice).MainAgentDescription()
-	wantOffice := "Forebrain Harness agent" + agent.OfficeWorkPrompt + agent.SubagentUserRulingPrompt + agent.AdvisorWorkflowPrompt + agent.PlanHandoffQualityPrompt + agent.OfficeNotesPromptSuffix
+	wantOffice := "Forebrain Harness agent" + agent.OfficeWorkPrompt + agent.SubagentUserRulingPrompt + agent.PlanHandoffQualityPrompt + agent.OfficeNotesPromptSuffix
 	if office != wantOffice {
 		t.Errorf("office system prompt:\n got: %q\nwant: %q", office, wantOffice)
 	}
 	batch := newRunner(state.ProjectTypeBatch).MainAgentDescription()
-	wantBatch := "Forebrain Harness agent" + agent.BatchTaskPrompt + agent.AdvisorWorkflowPrompt + agent.PlanHandoffQualityPrompt + agent.OfficeNotesPromptSuffix
+	wantBatch := "Forebrain Harness agent" + agent.BatchTaskPrompt + agent.PlanHandoffQualityPrompt + agent.OfficeNotesPromptSuffix
 	if batch != wantBatch {
 		t.Errorf("batch system prompt:\n got: %q\nwant: %q", batch, wantBatch)
 	}
 	if strings.Contains(office, "# Scope discipline") || strings.Contains(batch, "# Scope discipline") {
 		t.Error("office or batch system prompt still contains the coding scope discipline")
 	}
-	if strings.Contains(office, agentIntermediateToolPromptSuffix) || strings.Contains(batch, agentIntermediateToolPromptSuffix) {
-		t.Error("office or batch system prompt still contains the coding working-notes suffix")
-	}
 	if strings.Contains(office, agent.BugRootCausePrompt) || strings.Contains(batch, agent.BugRootCausePrompt) {
 		t.Error("the bug-reproduction rule is coding-only and must not reach office or batch")
 	}
 	if !strings.Contains(coding, agent.BugRootCausePrompt) {
 		t.Error("a coding conversation must carry the bug-reproduction rule")
+	}
+	if strings.Contains(office, agent.NonFunctionalRequirementsPrompt) || strings.Contains(batch, agent.NonFunctionalRequirementsPrompt) {
+		t.Error("the non-functional design rule is coding-only and must not reach office or batch")
 	}
 	// The user-may-address-a-subagent rule is for the interactive types only:
 	// batch is unattended, so nobody can address its subagents directly.

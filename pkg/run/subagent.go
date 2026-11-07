@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -4219,6 +4220,11 @@ func (r *Runner) RunPlanReviewSubagent(
 	// context below (the prepared execution's, the reviewer's calls) derives
 	// from this one, so the pinning reaches the whole run.
 	ctx = WithSubagentModelOverride(ctx, override)
+	if scope := r.planReviewWriteScope(ctx); scope != nil {
+		ctx = tool.WithReviewWriteScope(ctx, scope)
+		task += planReviewWorkspaceBrief(scope)
+		defer scope.Release()
+	}
 	// agents.defaults.enable_subagent governs the subagents the model may
 	// spawn; the reviewer is dispatched only because the user asked for it
 	// from the approval overlay, so that switch does not apply here.
@@ -4238,6 +4244,41 @@ func (r *Runner) RunPlanReviewSubagent(
 		return "", err
 	}
 	return output, nil
+}
+
+// planReviewWriteScope prepares the write scope a coding conversation's plan
+// reviewer reproduces problems with: new test files in the project, its own
+// scratch directory, and a git worktree inside it. Office and batch reviews
+// get none and stay read-only. A scope that cannot be prepared is logged and
+// the review runs read-only rather than not at all.
+func (r *Runner) planReviewWriteScope(ctx context.Context) *tool.ReviewWriteScope {
+	if r.ProjectType() != state.ProjectTypeCoding {
+		return nil
+	}
+	root, err := tool.WorkingDir(ctx)
+	if err == nil {
+		var scope *tool.ReviewWriteScope
+		if scope, err = tool.PrepareReviewWriteScope(ctx, root); err == nil {
+			return scope
+		}
+	}
+	slog.Warn("plan review runs read-only: write scope unavailable", "error", err)
+	return nil
+}
+
+// planReviewWorkspaceBrief names the paths of one review's write scope. The
+// rules for using them are in the coding reviewer's system prompt; only the
+// paths change from review to review.
+func planReviewWorkspaceBrief(scope *tool.ReviewWriteScope) string {
+	var b strings.Builder
+	b.WriteString("\n\n## Your reproduction workspace\n\nScratch directory: ")
+	b.WriteString(scope.Scratch())
+	if scope.GitWorktrees() != "" {
+		fmt.Fprintf(&b, "\nThe project is a git repository. To change any file freely, create a worktree inside the scratch directory: git worktree add --detach %s HEAD", filepath.Join(scope.Scratch(), "worktree"))
+	} else {
+		b.WriteString("\nThe project is not a git repository, so no worktree is available.")
+	}
+	return b.String()
 }
 
 // runGoalCheck dispatches a goal's check as a subagent of the turn working

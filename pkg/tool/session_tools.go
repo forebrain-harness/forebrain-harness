@@ -142,8 +142,8 @@ func (it *sessionTodoItem) UnmarshalJSON(b []byte) error {
 // `omitempty` so the reflected schema says so too — a required `items` pushes
 // the model into sending a placeholder array on a read.
 type sessionTodoInput struct {
-	Action string            `json:"action,omitempty" jsonschema:"enum=set,enum=clear,enum=list" jsonschema_description:"set to write the checklist (items becomes the whole list, replacing whatever was stored), clear to empty it, list to read it back. Omit when sending rows; any call that carries rows writes the list."`
-	Items  []sessionTodoItem `json:"items,omitempty" jsonschema_description:"The complete checklist after this update: rows with id, content, status (pending|in_progress|completed|cancelled). This array replaces the stored list, so resend every row that still applies; a row you leave out is deleted, which is how a superseded or obsolete item is dropped."`
+	Action string            `json:"action,omitempty" jsonschema:"enum=set,enum=clear,enum=list" jsonschema_description:"set writes the list (implied when rows are sent), clear empties it, list reads it back."`
+	Items  []sessionTodoItem `json:"items,omitempty" jsonschema_description:"The whole checklist after this update: rows with id, content and status (pending|in_progress|completed|cancelled). A row left out is deleted."`
 }
 
 func normalizeSessionTodoItems(in sessionTodoInput) []sessionTodoItem {
@@ -173,7 +173,7 @@ func normalizeSessionTodoItems(in sessionTodoInput) []sessionTodoItem {
 func newSessionTodoTool(st *State, stateRoot string) (*llm.Tool, error) {
 	return llm.NewTool(
 		"session_todo",
-		"Use when tracking step-by-step execution progress: a structured checklist of items with per-item status (pending/in_progress/completed/cancelled) that drives the progress UI. Each write carries the entire checklist and replaces the stored one, so send every row that still applies and leave out the rows that no longer do — rewriting the plan means sending the new list, not adding to the old one. Exactly one row should be in_progress at a time. For the prose strategy document, write/edit the plan file directly with write_file/edit_file. Session is fixed by the runtime; do not try to access other sessions.",
+		"Track step-by-step progress as a checklist that drives the progress UI. Every write replaces the whole list: send every row that still applies and leave out the rest. Keep exactly one row in_progress. The plan's prose belongs in the plan file, not here.",
 		func(ctx context.Context, in *sessionTodoInput) (string, error) {
 			if st == nil {
 				return "", fmt.Errorf("nil state")
@@ -332,85 +332,26 @@ type enterPlanModeInput struct {
 	Reason string `json:"reason,omitempty" jsonschema:"description=Optional one-line rationale for entering plan mode (logged in approval audit trail)."`
 }
 
-const enterPlanModeDescription = `Use this tool proactively when you're about to start a non-trivial implementation task. Getting user sign-off on your approach before writing code prevents wasted effort and ensures alignment. This tool transitions you into plan mode where you can explore the codebase and design an implementation approach for user approval.
+// memoriesAddAdHocNoteDescription carries where a note lands: the tool
+// returns that path, and reading the note back by the bare filename it was
+// written with fails, so the read-back rule lives here with the tool.
+const memoriesAddAdHocNoteDescription = "Save one append-only memory note when the user asks to remember, forget or update something, or states a durable rule or preference for future sessions. It is stored under " + memory.AdHocNotesDir + "/ in the chosen scope; pass the returned path, relative to the memories root, verbatim to memories_read."
 
-## When to Use This Tool
+const enterPlanModeDescription = `Use proactively before a non-trivial implementation: plan mode lets you explore and get the user's sign-off on an approach before writing code, which prevents wasted effort. Entering it requires the user's consent.
 
-**Prefer using EnterPlanMode** for implementation tasks unless they're simple. Use it when ANY of these conditions apply:
+Use it when any of these holds:
+- new functionality, or a change to existing behavior or structure;
+- several valid approaches, or an architectural choice between patterns or technologies;
+- likely more than 2-3 files;
+- requirements you must explore before you understand the scope;
+- a choice the user would care about - plan instead of asking with user_interaction.
+When unsure, plan.
 
-1. **New Feature Implementation**: Adding meaningful new functionality
-   - Example: "Add a logout button" - where should it go? What should happen on click?
-   - Example: "Add form validation" - what rules? What error messages?
+Skip it only for few-line fixes, a single function with clear requirements, tasks the user specified in detail, and pure research (use subagent_run with subtype=explore).
 
-2. **Multiple Valid Approaches**: The task can be solved in several different ways
-   - Example: "Add caching to the API" - could use Redis, in-memory, file-based, etc.
-   - Example: "Improve performance" - many optimization strategies possible
+In plan mode, explore the code and its existing patterns (explore subagents for parallel research), design the approach, ask the user only what they must decide, write the plan to the session plan file - the only file you may edit - and call exit_plan_mode when ready to implement.`
 
-3. **Code Modifications**: Changes that affect existing behavior or structure
-   - Example: "Update the login flow" - what exactly should change?
-   - Example: "Refactor this component" - what's the target architecture?
-
-4. **Architectural Decisions**: The task requires choosing between patterns or technologies
-   - Example: "Add real-time updates" - WebSockets vs SSE vs polling
-   - Example: "Implement state management" - Redux vs Context vs custom solution
-
-5. **Multi-File Changes**: The task will likely touch more than 2-3 files
-   - Example: "Refactor the authentication system"
-   - Example: "Add a new API endpoint with tests"
-
-6. **Unclear Requirements**: You need to explore before understanding the full scope
-   - Example: "Make the app faster" - need to profile and identify bottlenecks
-   - Example: "Fix the bug in checkout" - need to investigate root cause
-
-7. **User Preferences Matter**: The implementation could reasonably go multiple ways
-   - If you would use user_interaction to clarify the approach, use EnterPlanMode instead
-   - Plan mode lets you explore first, then present options with context
-
-## When NOT to Use This Tool
-
-Only skip EnterPlanMode for simple tasks:
-- Single-line or few-line fixes (typos, obvious bugs, small tweaks)
-- Adding a single function with clear requirements
-- Tasks where the user has given very specific, detailed instructions
-- Pure research/exploration tasks (use subagent_run with subtype=explore instead)
-
-## What Happens in Plan Mode
-
-In plan mode, you'll:
-1. Thoroughly explore the codebase using code_search, read_file, and shell when needed
-2. Use subagent_run with subtype=explore (or subagent_fanout) for parallel research
-3. Understand existing patterns and architecture
-4. Design an implementation approach
-5. Present your plan to the user for approval via user_interaction when you need to clarify approaches
-6. Write the plan to the session plan file (the only file you may edit in plan mode)
-7. Exit plan mode with exit_plan_mode when ready to implement
-
-## Important Notes
-
-- This tool REQUIRES user approval - they must consent to entering plan mode
-- If unsure whether to use it, err on the side of planning - it's better to get alignment upfront than to redo work
-- Users appreciate being consulted before significant changes are made to their codebase
-- Once in plan mode, write/edit attempts on non-plan files are blocked. Only the session plan file is writable.`
-
-const exitPlanModeDescription = `Use this tool when you are in plan mode and have finished writing your plan to the session plan file and are ready for user approval.
-
-## How This Tool Works
-
-- You should have already written your plan to the session plan file (the path is returned by enter_plan_mode and surfaced in the per-turn plan-mode system reminder)
-- This tool does NOT take the plan content as a parameter - it will use the plan you already wrote
-- This tool signals that you're done planning and ready for the user to review and approve
-
-## When to Use This Tool
-
-IMPORTANT: Only use this tool when the task requires planning the implementation steps of a task that requires writing code. For research tasks where you're gathering information, searching files, reading files or in general trying to understand the codebase - do NOT use this tool.
-
-## Before Using This Tool
-
-Ensure your plan is complete and unambiguous:
-- If you have unresolved questions about requirements or approach, use user_interaction first (in earlier phases)
-- Once your plan is finalized, use THIS tool to request approval
-
-**Important:** Do NOT use user_interaction to ask "Is this plan okay?" or "Should I proceed?" - that's exactly what THIS tool does. exit_plan_mode inherently requests user approval of your plan.`
+const exitPlanModeDescription = `Ask the user to approve the plan you have written to the session plan file (its path is in the plan-mode reminder); this tool takes no plan content. Use it only when planning an implementation that writes code, not after research. Resolve open questions with user_interaction first, and never ask there whether the plan is okay - calling this tool is that question.`
 
 // NewPlanModeTools returns the enter/exit plan-mode tools as a pair. Exposed
 // for cross-package wiring and integration tests; production registration
@@ -764,7 +705,7 @@ func newExitPlanModeToolFor(st *State, stateRoot, projectKey string, rt *AgentTo
 type memoriesAddAdHocNoteInput struct {
 	Filename string  `json:"filename" jsonschema:"minLength=24,maxLength=128,pattern=^\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-[a-z0-9][a-z0-9-]{0\\,79}\\.md$,description=Name of the note file to create in YYYY-MM-DDTHH-MM-SS-<slug>.md format."`
 	Note     string  `json:"note" jsonschema:"minLength=1,description=Verbatim Markdown note to append to the ad-hoc memory notes."`
-	Scope    *string `json:"scope,omitempty" jsonschema:"enum=project,enum=global" jsonschema_description:"Which memory this note belongs to. 'project' (default) is specific to the current project and is what almost every note should use. Use 'global' only for a preference that should apply in every project (tone, collaboration style) — never for project facts, repo conventions, or commands."`
+	Scope    *string `json:"scope,omitempty" jsonschema:"enum=project,enum=global" jsonschema_description:"project (default) for this project; global only for the user's own preferences that apply in every project."`
 }
 
 // The optional fields below carry `json:",omitempty"` so the reflected schema
@@ -803,7 +744,7 @@ func newDedicatedMemoryTools(_ *State, runtime *AgentToolRuntime) ([]*llm.Tool, 
 	if err != nil {
 		return nil, err
 	}
-	add, err := llm.NewTool("memories_add_ad_hoc_note", "Create one append-only ad-hoc memory note: either when the user explicitly asks Forebrain Harness to remember, forget, or update something, or when their message states a durable rule, constraint, or preference that should still apply in future sessions. The note is stored under "+memory.AdHocNotesDir+"/ (under the project or global scope named by scope) and the response returns its path relative to the memories root; pass that path verbatim to memories_read, not the bare filename.", func(ctx context.Context, input *memoriesAddAdHocNoteInput) (addAdHocNoteResponse, error) {
+	add, err := llm.NewTool("memories_add_ad_hoc_note", memoriesAddAdHocNoteDescription, func(ctx context.Context, input *memoriesAddAdHocNoteInput) (addAdHocNoteResponse, error) {
 		if input == nil {
 			return addAdHocNoteResponse{}, fmt.Errorf("input is required")
 		}
@@ -873,7 +814,7 @@ func newDedicatedMemoryTools(_ *State, runtime *AgentToolRuntime) ([]*llm.Tool, 
 		return nil, err
 	}
 	read.Use(strictMemoryArguments[memoriesReadInput]())
-	search, err := llm.NewTool("memories_search", "Search Forebrain Harness memories by meaning-bearing words: each query is split into words, a memory is recalled when it shares one, and the most relevant few come back. Write queries as the words you expect the memory to contain, not as an exact phrase to match character for character. Weak matches are dropped rather than listed, so an empty result means memory holds nothing on the subject, not that the page was too short. Every hit comes back with three lines of the file on each side of the matching line; when you need more of a memory than that window holds, read the memory file itself with memories_read.", func(ctx context.Context, input *memoriesSearchInput) (memory.SearchResponse, error) {
+	search, err := llm.NewTool("memories_search", "Search memories by the words a memory would contain, not an exact phrase: any shared word recalls it, the most relevant few return and weak matches are dropped, so an empty result means nothing is stored on the subject. Each hit shows three lines around the match; read the file with memories_read for more.", func(ctx context.Context, input *memoriesSearchInput) (memory.SearchResponse, error) {
 		if input == nil {
 			return memory.SearchResponse{}, fmt.Errorf("input is required")
 		}

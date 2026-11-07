@@ -36,7 +36,57 @@ var emptySchema = map[string]any{
 // array/object parse failures. All other normalization (additionalProperties,
 // $ref inlining, anyOf/oneOf handling, nil defaults) is shared with strict.
 func ensureToolJSONSchema(schema map[string]any) (map[string]any, error) {
-	return normalizeJSONSchema(schema, false)
+	out, err := normalizeJSONSchema(schema, false)
+	if err != nil {
+		return nil, err
+	}
+	// The schema is sent with every request. Once every $ref is inlined the
+	// root definitions are a second copy of what the properties already spell
+	// out, and $id/$schema tell the model nothing, so none of them is sent. A
+	// definition that a cyclic $ref still points at stays.
+	delete(out, "$id")
+	delete(out, "$schema")
+	if !schemaRefersOutsideDefs(out) {
+		delete(out, "$defs")
+		delete(out, "definitions")
+	}
+	return out, nil
+}
+
+// schemaRefersOutsideDefs reports whether any $ref remains in the schema apart
+// from its root definitions, which is the only way those definitions can still
+// be reached.
+func schemaRefersOutsideDefs(schema map[string]any) bool {
+	var walk func(node any) bool
+	walk = func(node any) bool {
+		switch v := node.(type) {
+		case map[string]any:
+			if _, ok := v["$ref"]; ok {
+				return true
+			}
+			for _, child := range v {
+				if walk(child) {
+					return true
+				}
+			}
+		case []any:
+			for _, child := range v {
+				if walk(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for key, child := range schema {
+		if key == "$defs" || key == "definitions" {
+			continue
+		}
+		if key == "$ref" || walk(child) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeJSONSchema(schema map[string]any, forceRequired bool) (map[string]any, error) {

@@ -22153,6 +22153,36 @@ func TestUpdateFromDraft_SpaceLocksExactMatch(t *testing.T) {
 	}
 }
 
+// A skill command locks like a built-in once its name is typed or chosen, and
+// the dim hint it then shows is the skill's own argument-hint — the variants
+// /audit takes — not a generic placeholder.
+func TestUpdateFromDraft_SkillCommandShowsItsVariants(t *testing.T) {
+	turn.ResetDynamic()
+	t.Cleanup(turn.ResetDynamic)
+	audit := turn.DynamicCommand{
+		Command: turn.Command{
+			Name: "audit", Description: "audit", Category: turn.SkillCategory,
+			AllowedSurfaces: []turn.Surface{turn.SurfaceTUI}, Visibility: turn.VisibilityPublic,
+			SupportsInlineArgs: true, ArgumentHint: "[quick|deep|branch]",
+		},
+		Handler: func(turn.Context, string, []string) turn.Result { return turn.Result{Handled: true} },
+	}
+	if err := turn.ReplaceDynamicSource("test", []turn.DynamicCommand{audit}); err != nil {
+		t.Fatal(err)
+	}
+	o := newSlashOverlay()
+	o.UpdateFromDraft("/audit ", 7, nil)
+	if o.HintCommand == nil || o.HintCommand.Name != "audit" {
+		t.Fatalf("HintCommand = %#v, want the audit skill", o.HintCommand)
+	}
+	if !showArgumentHint("/audit ", o.HintCommand) || o.HintCommand.ArgumentHint != "[quick|deep|branch]" {
+		t.Fatalf("hint = %q shown=%v, want the skill's variants", o.HintCommand.ArgumentHint, showArgumentHint("/audit ", o.HintCommand))
+	}
+	if showArgumentHint("/audit quick", o.HintCommand) {
+		t.Fatal("the hint must disappear once a variant is typed")
+	}
+}
+
 func TestUpdateFromDraft_AmbiguousSpaceStaysActive(t *testing.T) {
 	t.Parallel()
 	o := newSlashOverlay()

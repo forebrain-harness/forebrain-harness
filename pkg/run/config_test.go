@@ -1965,8 +1965,10 @@ func TestCodingPlanReminderUnchanged(t *testing.T) {
 	if !strings.Contains(got, agent.SinglePlanModePrompt) {
 		t.Fatal("coding full main plan reminder is missing the single-plan workflow")
 	}
-	if !strings.Contains(got, agent.BugRootCausePrompt) {
-		t.Fatal("coding plan mode must require a reproduction before the plan")
+	// The bug rule is already in the coding system prompt, which plan mode
+	// keeps; repeating it here would pay for the same text twice.
+	if strings.Contains(got, agent.BugRootCausePrompt) {
+		t.Fatal("coding plan reminder repeats the bug rule the system prompt already carries")
 	}
 	// A decision that belongs to the user is asked for, not taken - including
 	// whatever a plan review came back with.

@@ -80,7 +80,7 @@ type ShellInput struct {
 	PrefixRule            []string                         `json:"prefix_rule,omitempty" jsonschema_description:"Reusable approval prefix for the command; only with sandbox_permissions require_escalated. Omit when not needed."`
 }
 
-const shellToolDescription = "Use when running a command — builds, tests, formatters, git, etc. — not for file edits (prefer edit_file/write_file). apply_patch is the only supported shell exception and must be the only command in that shell call: use a heredoc such as apply_patch <<'PATCH' ... PATCH, with its terminator as the final nonblank line. Never append &&, ;, tests, formatters, or other shell commands; run them in separate shell calls. Pass a description; timeout_ms defaults to 10000."
+const shellToolDescription = "Run a command - builds, tests, formatters, git - not file edits (use edit_file/write_file). The one exception is apply_patch, the only command in that shell call: a heredoc (apply_patch <<'PATCH' ... PATCH) with its terminator as the final nonblank line; run anything else in separate shell calls. Pass a description; timeout_ms defaults to 10000."
 
 const defaultShellCommandTimeout = 10 * time.Second
 
@@ -353,6 +353,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		seenBind[req.cwd] = struct{}{}
 	}
 	writablePaths := runtimeCfg.Filesystem.AllowWrite
+	var reviewRoots []string
 	if req.profile == safety.ProfileReadOnly {
 		writablePaths = nil
 		for _, grant := range snap.FileSystemGrants {
@@ -362,6 +363,11 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 				}
 			}
 		}
+		// A coding plan review keeps the project read-only and may write only
+		// its scratch directory and the worktrees registry `git worktree add`
+		// needs.
+		reviewRoots = ReviewWriteScopeFromContext(ctx).shellWritableRoots()
+		writablePaths = append(writablePaths, reviewRoots...)
 	}
 	for _, r := range writablePaths {
 		ra, raErr := filepath.Abs(strings.TrimSpace(r))
@@ -399,6 +405,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	for _, root := range loadedSkillRoots {
 		allowRead = MergeAllowedRootPaths(allowRead, []string{root})
 	}
+	allowRead = MergeAllowedRootPaths(allowRead, reviewRoots)
 	denyRead := make([]string, 0, len(runtimeCfg.Filesystem.DenyRead))
 	for _, r := range runtimeCfg.Filesystem.DenyRead {
 		ra, raErr := filepath.Abs(strings.TrimSpace(r))
@@ -521,6 +528,18 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	// would otherwise carry cold, Forebrain-owned caches onto the host.
 	shellEnv := append(planModeShellEnv(ctx, rt), agentRuntimeEnv(rt)...)
 	includePlatformDefaults := runtimeCfg.Filesystem.IncludePlatformDefaults
+	if len(reviewRoots) > 0 {
+		// A plan review's shell may write only its scratch directory, so that
+		// is where every runtime's temporary files go as well, the way a batch
+		// task's go to its own workspace.
+		tmpDir := filepath.Join(ReviewWriteScopeFromContext(ctx).Scratch(), "tmp")
+		if mkErr := os.MkdirAll(tmpDir, 0o755); mkErr != nil {
+			return "", mkErr
+		}
+		for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+			shellEnv = append(shellEnv, key+"="+tmpDir)
+		}
+	}
 	if batch {
 		// The task's scratch space lives in its own workspace: the OS temp
 		// directory is exactly the shared space a batch task must not have, and
@@ -1720,7 +1739,10 @@ func shellSandboxProfile(ctx context.Context) (safety.Profile, bool) {
 	subtype := strings.ToLower(strings.TrimSpace(SubagentTypeFromContext(ctx)))
 	readOnlyWorker := false
 	switch subtype {
-	case "explore", "plan", "cavecrew-investigator", "cavecrew-reviewer":
+	case "explore", "plan", "plan-reviewer", "cavecrew-investigator", "cavecrew-reviewer":
+		// plan-reviewer included: a coding review writes its tests with the
+		// file tools and everything else in its scratch directory, which
+		// runSandboxedShellCommand adds as the shell's only write exception.
 		readOnlyWorker = true
 	}
 	// A custom subagent's tool policy is configuration rather than a type name,

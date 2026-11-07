@@ -61,19 +61,11 @@ func (o InstructionOptions) Empty() bool { return !o.Recall && !o.Capture }
 // describe the layout with the dedicated tools, which address files relative to
 // the project memory root, with the global scope reachable under a "global/"
 // prefix (see NewScoped). Without it a model copies an absolute
-// path out of the layout above and memories_read rejects it, and it has no way
-// to know that a note it just wrote by bare filename lives one directory down.
-const readPathToolGuidance = `Reading and writing memory with the memories_* tools:
-
-- ` + "`memories_read`" + `, ` + "`memories_list`" + `, and ` + "`memories_search`" + ` take a path relative to the
-  project memory base path above (for example ` + "`MEMORY.md`" + `, ` + "`rollout_summaries/<file>.md`" + `,
-  ` + "`skills/<skill-name>/SKILL.md`" + `). Prefix the path with ` + "`global/`" + ` to reach the global
-  scope instead (for example ` + "`global/MEMORY.md`" + `). An absolute path inside either
-  base path also resolves, but these tools report the relative form back.
-- ` + "`memories_add_ad_hoc_note`" + ` takes a bare filename and an optional ` + "`scope`" + ` ("project",
-  the default, or "global") and stores the note under ` + "`" + AdHocNotesDir + "/`" + ` in that
-  scope. It returns the stored path; pass that path to ` + "`memories_read`" + ` to read the
-  note back, not the bare filename.
+// path out of the layout above and memories_read rejects it. Where a note it
+// writes lands is the memories_add_ad_hoc_note description's to say, since
+// that tool returns the path.
+const readPathToolGuidance = `Reading memory with the memories_* tools: ` + "`memories_read`" + `, ` + "`memories_list`" + ` and ` + "`memories_search`" + ` take a path relative to the
+  project memory base path above (` + "`MEMORY.md`" + `, ` + "`rollout_summaries/<file>.md`" + `, ` + "`skills/<skill-name>/SKILL.md`" + `); prefix ` + "`global/`" + ` for the global scope. An absolute path inside either base path also resolves.
 `
 
 // noteWriteGuidanceWithTools and noteWriteGuidanceWithFiles say how to write a
@@ -82,8 +74,7 @@ const readPathToolGuidance = `Reading and writing memory with the memories_* too
 // only location Phase 2 consolidates from.
 const noteWriteGuidanceWithTools = "Write the note with `memories_add_ad_hoc_note`: `filename` is\n" +
 	"`<YYYY-MM-DDTHH-MM-SS>-<slug>.md` — a UTC timestamp followed by a\n" +
-	"lowercase-hyphen slug naming the lesson — `note` is the Markdown body, and\n" +
-	"`scope` picks project (the default) or global.\n"
+	"lowercase-hyphen slug naming the lesson — and `note` is the Markdown body.\n"
 
 const noteWriteGuidanceWithFiles = "Write the note as a new file under\n" +
 	"`{{ base_path }}/" + AdHocNotesDir + "/<YYYY-MM-DDTHH-MM-SS>-<slug>.md`\n" +

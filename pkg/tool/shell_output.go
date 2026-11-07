@@ -279,11 +279,11 @@ type RetrieveOutputInput struct {
 	ID     int64  `json:"id" jsonschema:"description=The retrieval id cited in a compression marker."`
 	Query  string `json:"query,omitempty" jsonschema:"description=Optional BM25 search inside the cached original instead of printing all of it."`
 	Lines  string `json:"lines,omitempty" jsonschema_description:"Optional 1-indexed inclusive line range, e.g. 10-40 or 25."`
-	Reason string `json:"reason,omitempty" jsonschema:"description=Short note on why the original output was needed (recorded for filter-quality learning)."`
+	Reason string `json:"reason,omitempty" jsonschema:"description=Short note on why the original was needed."`
 	Top    int    `json:"top,omitempty" jsonschema_description:"Max --query results (0 = all, default 20)."`
 }
 
-const retrieveOutputToolDescription = "Recover the full original output behind a compressed shell or MCP result. When a result contains a marker like [forebrain compressed ~NN% ... retrieve_output tool (id N)], call this tool with that id: query BM25-searches the cached original, lines fetches a range — both instead of re-running the command or tool."
+const retrieveOutputToolDescription = "Recover the full original behind a compressed shell or MCP result: pass the id from its [forebrain compressed ... retrieve_output tool (id N)] marker, with query to search it (BM25) or lines to fetch a range, instead of rerunning the command."
 
 // NewRetrieveOutputTool builds the retrieve_output tool bound to the runtime's
 // state root (same store the shell compressor writes to).

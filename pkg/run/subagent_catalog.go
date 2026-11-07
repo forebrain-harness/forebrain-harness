@@ -133,18 +133,17 @@ func (c SubagentCatalog) ResolvePublic(name string) (agent.Definition, error) {
 }
 
 // Prompt is the system prompt a typed run of name uses: a custom subagent's
-// own, this agent's rewrite of a built-in, else the built-in's. An office or
-// batch conversation reads the built-in under its project-type wording.
+// own, this agent's rewrite of a built-in, else the built-in's. A built-in
+// with a project-type wording (office and batch workers, the coding plan
+// reviewer) reads that wording.
 func (c SubagentCatalog) Prompt(name string) (string, bool) {
 	if entry, ok := c.entries[subagentKey(name)]; ok {
 		if prompt := strings.TrimSpace(entry.SystemPrompt); prompt != "" {
 			return prompt, true
 		}
 	}
-	if c.office() {
-		if prompt, ok := agent.ProjectTypeSubagentPrompt(name, c.projectType); ok {
-			return prompt, true
-		}
+	if prompt, ok := agent.ProjectTypeSubagentPrompt(name, state.NormalizeProjectType(c.projectType)); ok {
+		return prompt, true
 	}
 	return agent.SystemPromptForSubtype(name)
 }

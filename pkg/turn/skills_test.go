@@ -42,6 +42,32 @@ func TestSkillCommandSubmitsTrustedSelectionOnly(t *testing.T) {
 	}
 }
 
+// A skill's argument-hint is what its slash command shows dimmed after the
+// command in both surfaces; a skill without one takes a free-form request.
+func TestSkillCommandShowsTheSkillsArgumentHint(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, front string) string {
+		t.Helper()
+		path := filepath.Join(dir, name, "SKILL.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		data := "---\nname: " + name + "\ndescription: d\n" + front + "---\nbody\n"
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	declared, ok := skillCommand(write("audit", "argument-hint: \"[quick|deep]\"\n"))
+	if !ok || declared.Command.ArgumentHint != "[quick|deep]" {
+		t.Fatalf("declared hint = %q, %v; want [quick|deep]", declared.Command.ArgumentHint, ok)
+	}
+	plain, ok := skillCommand(write("plain", ""))
+	if !ok || plain.Command.ArgumentHint != "[request]" {
+		t.Fatalf("default hint = %q, %v; want [request]", plain.Command.ArgumentHint, ok)
+	}
+}
+
 // /skill-generator is not a builtin command: it is the slash command the
 // skill-generator system skill derives from its own name. That is what makes
 // the two surfaces consistent for free — the TUI and the web both build their

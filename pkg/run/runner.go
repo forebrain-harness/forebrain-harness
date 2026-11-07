@@ -1208,11 +1208,13 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if desc == "" {
 		desc = "Forebrain Harness agent"
 	}
-	// Each project type keeps its own base prompt; the shared plan-workflow
-	// contract is appended identically for all three, followed by that type's
-	// working-notes suffix. The user-may-address-a-subagent rule joins the two
+	// Each project type keeps its own base prompt; the shared handoff quality
+	// bar is appended identically for all three, followed by the office and
+	// batch working-notes suffix (coding has none: the notes tool's own
+	// description says how to use it). The audit workflows are the built-in "audit" skill,
+	// loaded on demand rather than carried by every request. The user-may-address-a-subagent rule joins the two
 	// interactive types' base prompts — batch is unattended and never sees it.
-	notesSuffix := agentIntermediateToolPromptSuffix
+	notesSuffix := ""
 	switch r.ProjectType() {
 	case state.ProjectTypeOffice:
 		desc += agent.OfficeWorkPrompt
@@ -1223,10 +1225,10 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		notesSuffix = agent.OfficeNotesPromptSuffix
 	default:
 		desc += agent.ScopeDisciplinePrompt
+		desc += agent.NonFunctionalRequirementsPrompt
 		desc += agent.BugRootCausePrompt
 		desc += agent.SubagentUserRulingPrompt
 	}
-	desc += agent.AdvisorWorkflowPrompt
 	desc += agent.PlanHandoffQualityPrompt
 	desc += notesSuffix
 	//desc += agentCollaborationPromptSuffix
@@ -1390,8 +1392,6 @@ func tokenEstimateOptions(home string, root *appcfg.Root) llm.TokenEstimateOptio
 // already warned about in this process: a gateway loads many Runners and a
 // config reload loads them again, and one warning per key is enough.
 var deprecatedTokenEstimateWarned sync.Map
-
-const agentIntermediateToolPromptSuffix = "\n\nUse intermediate_tool as a high-frequency working-notes tool while you inspect source code, perform code review, gather evidence, compare alternatives, or develop a fix. Record new findings, important details, hypotheses, review issues, design ideas, and your own reasoning as soon as you discover them. Before replying to the user or wrapping up the task, read the saved intermediate notes back and use them to verify that your final answer and implementation reflect the important findings."
 
 const agentCollaborationPromptSuffix = "\n\nPrefer subagent-based execution when the task benefits from parallel research, bounded implementation ownership, or independent verification. Use direct main-thread execution for small tightly coupled work. Prefer subagent_fanout for independent read-only investigation, subagent_run for bounded one-shot execution, and subagent_continue when an existing worker already owns the relevant context."
 

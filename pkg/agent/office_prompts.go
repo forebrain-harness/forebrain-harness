@@ -106,12 +106,18 @@ const batchGeneralPurposePrompt = "You are a general-purpose subagent completing
 const batchExplorePrompt = "You are an explore subagent doing read-only investigation for an unattended batch task. You must not modify, create or delete files, or spawn agents. Search the task workspace and the assigned document and data sources, then read what matters. Report findings with exact sources (file, page, section, sheet or cell), the coverage you achieved, and anything left unable to verify. Do not ask questions."
 
 // ProjectTypeSubagentPrompt is the project-type wording of a built-in
-// subagent's prompt, ok false for a type this project type does not dispatch.
-// Office and batch intentionally carry separate filesystem and interaction
-// contracts; the batch wording is never used at an office project root.
+// subagent's prompt, ok false when the built-in definition's own prompt
+// applies. Office and batch intentionally carry separate filesystem and
+// interaction contracts; the batch wording is never used at an office project
+// root. Coding has one: its plan reviewer also carries the coding design and
+// bug-work rules.
 func ProjectTypeSubagentPrompt(name, projectType string) (string, bool) {
 	key := strings.ToLower(strings.TrimSpace(name))
 	switch strings.ToLower(strings.TrimSpace(projectType)) {
+	case "coding":
+		if key == "plan-reviewer" {
+			return codingPlanReviewerPrompt, true
+		}
 	case "office":
 		switch key {
 		case "general-purpose":

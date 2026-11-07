@@ -170,6 +170,7 @@ const (
 	ctxKeySubagentType         ctxKey = "forebrain_subagent_type"
 	ctxKeySubagentPolicy       ctxKey = "forebrain_subagent_tool_policy"
 	ctxKeySubagentDefSrc       ctxKey = "forebrain_subagent_definition_source"
+	ctxKeyReviewWriteScope     ctxKey = "forebrain_review_write_scope"
 	ctxKeyProjectRoot          ctxKey = "forebrain_project_root"
 	ctxKeyProjectType          ctxKey = "forebrain_project_type"
 	ctxKeyTaskWorkspace        ctxKey = "forebrain_task_workspace"
@@ -1063,6 +1064,13 @@ func (s *State) GuardWrite(ctx context.Context, absPath string) error {
 	mode := strings.ToLower(strings.TrimSpace(ModeFromContext(ctx)))
 	if mode == "plan" && !planTarget {
 		return fmt.Errorf("plan mode: write blocked (only the plan directory is writable); call exit_plan_mode first")
+	}
+	// A coding plan review may write only what reproduces the plan's claims:
+	// new test files, its scratch directory, and a worktree inside it.
+	if scope := ReviewWriteScopeFromContext(ctx); scope != nil {
+		if err := scope.admitWrite(absPath); err != nil {
+			return err
+		}
 	}
 	// A batch task's write set is the directory it was given, and nobody is
 	// there to approve an exception (plans/150). The symlink resolution in

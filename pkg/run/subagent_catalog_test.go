@@ -6,6 +6,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 func subagentCatalogTestBool(v bool) *bool { return &v }
@@ -276,6 +277,30 @@ func TestProjectTypeCatalogUsesDistinctSubagentPromptsUnlessConfigured(t *testin
 		prompt, ok := base.ForProjectType(projectType).Prompt("explore")
 		if !ok || prompt != "Search only what the task names." {
 			t.Errorf("Prompt(explore, %q) = %q, want the configured rewrite", projectType, prompt)
+		}
+	}
+}
+
+// TestCodingPlanReviewerCarriesTheBugRule checks the reviewer a typed run
+// actually reaches: in a coding conversation, including a catalog never
+// narrowed to a type, it re-diagnoses bug plans; office and batch keep the
+// source-neutral reviewer.
+func TestCodingPlanReviewerCarriesTheBugRule(t *testing.T) {
+	base := SubagentCatalogFor(catalogTestConfig(), "main")
+	coding, _ := agent.ProjectTypeSubagentPrompt(PlanReviewSubagentType, state.ProjectTypeCoding)
+	for _, projectType := range []string{"", "coding"} {
+		prompt, ok := base.ForProjectType(projectType).Prompt(PlanReviewSubagentType)
+		if !ok || prompt != coding || !strings.Contains(prompt, agent.NonFunctionalRequirementsPrompt) {
+			t.Errorf("Prompt(plan-reviewer, %q) is not the coding reviewer: %q", projectType, prompt)
+		}
+	}
+	if prompt, ok := base.Prompt(PlanReviewSubagentType); !ok || prompt != coding {
+		t.Errorf("an un-narrowed catalog's plan reviewer is not the coding reviewer: %q", prompt)
+	}
+	for _, projectType := range []string{"office", "batch"} {
+		prompt, ok := base.ForProjectType(projectType).Prompt(PlanReviewSubagentType)
+		if !ok || prompt == coding || strings.Contains(prompt, agent.NonFunctionalRequirementsPrompt) {
+			t.Errorf("Prompt(plan-reviewer, %q) = %q, want the source-neutral reviewer", projectType, prompt)
 		}
 	}
 }

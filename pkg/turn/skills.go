@@ -61,11 +61,17 @@ func skillCommand(path string) (DynamicCommand, bool) {
 	// Every discovered skill has a description — a skill without one is not
 	// loaded at all — so this is the skill's own words, never a placeholder.
 	desc := strings.TrimSpace(activation.Description)
+	// A skill that declares what it takes is shown with that; any other takes
+	// a free-form request.
+	hint := activation.ArgumentHint
+	if hint == "" {
+		hint = "[request]"
+	}
 	return DynamicCommand{
 		Command: Command{
 			Name: name, Description: desc, Category: SkillCategory,
 			AllowedSurfaces:    []Surface{SurfaceWebChat, SurfaceTUI},
-			SupportsInlineArgs: true, ArgumentHint: "[request]", Visibility: VisibilityPublic,
+			SupportsInlineArgs: true, ArgumentHint: hint, Visibility: VisibilityPublic,
 		},
 		SkillPath: path,
 		// The handler submits only the trusted selection. The file is read by

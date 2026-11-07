@@ -203,6 +203,51 @@ describe('ForebrainPromptTextarea', () => {
     }
   })
 
+  // After a command is chosen or typed, its argument hint — the variants a
+  // skill such as /audit takes — shows dimmed after it, as in the terminal,
+  // and goes as soon as an argument follows.
+  it('shows a chosen or typed command\'s argument hint until an argument is typed', async () => {
+    const audit = {
+      canonicalName: 'audit', name: 'audit', description: 'audit a project', category: 'skill',
+      argumentHint: '[quick|deep|branch]', actionKind: 'local', allowedModes: [], supportsInlineArgs: true,
+      availableDuringRun: true, availableInSideConversation: true, visibility: 'public',
+    } as SlashCommandRecord
+    const list = vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({
+      records: [audit],
+    } as Awaited<ReturnType<typeof forebrainApi.slashCommands>>)
+    try {
+      const { composer, context } = mountComposer()
+      const textarea = composer.find('textarea')
+      const area = textarea.element as HTMLTextAreaElement
+      const hint = () => composer.find('[data-testid="composer-argument-hint"]')
+
+      // Chosen from the menu.
+      area.value = '/au'
+      area.setSelectionRange(3, 3)
+      await textarea.trigger('input')
+      await vi.waitFor(() => expect(composer.findAll('[role="menuitem"]')).toHaveLength(1))
+      await textarea.trigger('keydown', { key: 'Enter' })
+      await nextTick()
+      expect(context().textInput.value).toBe('/audit ')
+      await vi.waitFor(() => expect(hint().exists()).toBe(true))
+      expect(hint().text()).toContain('[quick|deep|branch]')
+
+      // An argument hides it.
+      context().textInput.value = '/audit quick'
+      await nextTick()
+      expect(hint().exists()).toBe(false)
+
+      // Typed by hand, the command is looked up and its hint shown.
+      context().textInput.value = ''
+      await nextTick()
+      context().textInput.value = '/audit '
+      await vi.waitFor(() => expect(hint().exists()).toBe(true))
+      expect(list).toHaveBeenLastCalledWith('webchat', 'audit', expect.anything())
+    } finally {
+      list.mockRestore()
+    }
+  })
+
   // A command typed in front of a message already in the composer completes in
   // place: the message stays, as the command's arguments.
   it('keeps the message a leading command was typed in front of', async () => {

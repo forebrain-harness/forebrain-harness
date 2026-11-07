@@ -187,7 +187,7 @@ type SkillToolInput struct {
 // SkillToolInput has no enum: this text is part of the cached prefix, and a
 // description that grew or shrank with the installed skill set would invalidate
 // it. It tells the model where the names are without repeating them.
-const skillToolDescription = "Load one skill's complete instructions. The Skills section of this conversation lists every skill available here by name and description; when the user names a skill, or a skill's description matches the work, call this with that exact name before starting the work and then follow what it returns. The result is the skill's whole SKILL.md plus the paths of the reference, script and asset files bundled with it."
+const skillToolDescription = "Load a skill's complete instructions by its exact name from the Skills list: its SKILL.md and the paths of its bundled files."
 
 // RegisterSkillTool gives the model the one way it can act on the skills
 // catalog. The catalog describes what exists; this loads it.

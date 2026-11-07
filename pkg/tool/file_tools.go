@@ -49,9 +49,9 @@ var blockedReadDevicePaths = map[string]struct{}{
 // could not correct in one step.
 type FileReadInput struct {
 	FilePath string `json:"file_path" jsonschema:"description=Absolute or workspace-relative file path."`
-	Offset   int    `json:"offset,omitempty" jsonschema:"minimum=0" jsonschema_description:"Text reads: start line offset (0-based); omit to start at the first line. An offset past the end of file returns no content and names the file's line count."`
-	Limit    int    `json:"limit,omitempty" jsonschema:"minimum=1" jsonschema_description:"Text reads: max lines to return (capped at 200; a window extending past the end of file returns through the last line). Ignored for PDFs — use pages."`
-	Pages    string `json:"pages,omitempty" jsonschema_description:"PDF only: 1-based page or range to render (\"7\" or \"9-11\"), at most 5 pages per call; a range longer than 5 pages returns the first 5. An end past the last page returns through the last page (asking to 500 on a 490-page document returns through page 490, the last page); a start past the last page returns no pages and names the document's page count. Ignored for text files. Omit to read the first 5 pages."`
+	Offset   int    `json:"offset,omitempty" jsonschema:"minimum=0" jsonschema_description:"Text: 0-based start line; omit for the first line. Past the end returns no content and names the file's line count."`
+	Limit    int    `json:"limit,omitempty" jsonschema:"minimum=1" jsonschema_description:"Text: max lines, at most 200; a window past the end returns through the last line. Ignored for PDFs - use pages."`
+	Pages    string `json:"pages,omitempty" jsonschema_description:"PDF only: 1-based page or range (\"7\", \"9-11\"), at most 5 pages per call; an end past the last page returns through the last page, a start past it returns no pages and names the document's page count. Omit for the first 5 pages."`
 }
 
 func NewFileReadTool(st *State) (*llm.Tool, error) {

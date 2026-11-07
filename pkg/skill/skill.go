@@ -58,7 +58,12 @@ type Skill struct {
 	// which is what every ordinary skill wants. Meta-skills that are reached
 	// through a builtin command instead set it to false so the command palette
 	// does not offer two entry points for one capability.
-	SlashCommand *bool  `yaml:"slash-command,omitempty"`
+	SlashCommand *bool `yaml:"slash-command,omitempty"`
+	// ArgumentHint is what the skill's slash command takes, the frontmatter
+	// key Claude Code uses for the same thing. Surfaces show it dimmed after
+	// the command while its argument is still empty; empty means the generic
+	// "[request]".
+	ArgumentHint string `yaml:"argument-hint,omitempty"`
 	Body         string `yaml:"-"`
 }
 

@@ -37,6 +37,8 @@ type Activation struct {
 	// SlashCommand reports whether this skill wants its own auto-derived
 	// slash command. False only when SKILL.md sets `slash-command: false`.
 	SlashCommand bool
+	// ArgumentHint is the skill's declared argument-hint, "" when it has none.
+	ArgumentHint string
 }
 
 type skillActivationContext struct {
@@ -88,6 +90,7 @@ func LoadActivation(skillFile string) (Activation, error) {
 		Description:  strings.TrimSpace(sk.Description),
 		Content:      renderSkillActivation(entry),
 		SlashCommand: slashCommand,
+		ArgumentHint: strings.TrimSpace(sk.ArgumentHint),
 	}, nil
 }
 

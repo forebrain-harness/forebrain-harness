@@ -7,11 +7,13 @@ import (
 
 func TestScopeDisciplinePromptIsProviderNeutralAndCoversTheFullContract(t *testing.T) {
 	// Every stage of the discipline must survive an edit to the prose: locking
-	// the contract, the smallest sufficient change, risk-proportionate proof,
-	// resisting review-driven expansion, and the stop rule.
+	// the contract, reusing what exists, the smallest sufficient change,
+	// risk-proportionate proof, resisting review-driven expansion, and the stop
+	// rule.
 	for _, want := range []string{
 		"Scope discipline",
 		"Lock the contract before editing",
+		"Reuse what the project already has",
 		"Choose the smallest sufficient change",
 		"Verify in proportion to risk",
 		"Resist review-driven expansion",
@@ -35,6 +37,30 @@ func TestScopeDisciplinePromptIsProviderNeutralAndCoversTheFullContract(t *testi
 	for _, banned := range []string{"GPT", "Claude", "Anthropic", "OpenAI", "DeepSeek", "Kimi", "Qwen", "intermediate_tool", "subagent_"} {
 		if strings.Contains(ScopeDisciplinePrompt, banned) {
 			t.Fatalf("prompt is provider-specific: contains %q", banned)
+		}
+	}
+}
+
+// TestScopeDisciplineReusesBeforeInventing keeps the reuse rule's load-bearing
+// facts: the search comes before design, feature and bug work alike, it looks
+// by behavior and along the whole path rather than by the new thing's name,
+// anything new must say what it passed over, and the project keeps one meaning,
+// one implementation and one layer per concern.
+func TestScopeDisciplineReusesBeforeInventing(t *testing.T) {
+	for name, sentence := range map[string]string{
+		"all three kinds of work":  "Before you design a change, build a feature, or locate and fix a bug",
+		"whole-project search":     "search the whole project for what already covers the same ground",
+		"search by behavior":       "Search by behavior and symptom as well as by name",
+		"surrounding layers":       "including the layers around it that retry, recover, translate errors or report",
+		"build on it":              "Build on what exists",
+		"new needs a reason":       "Add something new only when nothing existing can serve, and say what you found and why it does not fit",
+		"plans name what they saw": "a plan that proposes new machinery names the existing pieces it weighed",
+		"one of each":              "Keep one meaning per concept, one implementation per behavior, one layer per responsibility",
+		"no overlapping layer":     "never add a near-duplicate concept, state, error, message, logic path or overlapping layer",
+		"existing duplicates":      "otherwise reported in one line",
+	} {
+		if !strings.Contains(ScopeDisciplinePrompt, sentence) {
+			t.Errorf("ScopeDisciplinePrompt is missing its %s rule: %q", name, sentence)
 		}
 	}
 }

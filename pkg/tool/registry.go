@@ -518,6 +518,27 @@ func VisibleToolsForSubagentSubtype(subtype string, toolNames []string) []string
 	return out
 }
 
+// VisibleToolsForSubagentRun is VisibleToolsForSubagentSubtype for one run:
+// the static table, plus the file-writing tools a coding plan review's write
+// scope admits.
+func VisibleToolsForSubagentRun(ctx context.Context, subtype string, toolNames []string) []string {
+	visible := VisibleToolsForSubagentSubtype(subtype, toolNames)
+	if ReviewWriteScopeFromContext(ctx) == nil {
+		return visible
+	}
+	out := make([]string, 0, len(toolNames))
+	for _, name := range toolNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if ToolVisibleForSubagentSubtype(subtype, name) || reviewScopeAdmitsTool(ctx, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 func ToolVisibleForSubagentSubtype(subtype, toolName string) bool {
 	name := strings.TrimSpace(toolName)
 	normalized := strings.ToLower(strings.TrimSpace(subtype))

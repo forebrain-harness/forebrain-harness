@@ -177,22 +177,12 @@ func (s *State) InProgressToolIDs() []string {
 
 const intermediateToolName = "intermediate_tool"
 
-// The description stays lean on usage policy: the system prompt carries the
-// "high-frequency working notes" guidance (agentIntermediateToolPromptSuffix
-// in pkg/run), so repeating full sentences here would re-bill those bytes in
-// the tool table on every cold cache generation for no added guidance. What
-// must live here is only what the system prompt does not say: the note
-// format, the read-back habit's consequence, and the action semantics.
+// The description is where the usage policy lives: every agent that has the
+// tool reads it, subagents included, which no system-prompt text reaches. The
+// coding system prompt therefore says nothing more about notes; office and
+// batch add only their document-flavoured suffix.
 func IntermediateToolDescription() string {
-	return strings.TrimSpace(`Use this tool frequently while understanding code, reviewing changes, investigating bugs, or gathering evidence: save newly discovered facts, important snippets, hypotheses, review findings, design ideas, and your own reasoning as soon as you learn them.
-
-Write notes as Markdown - headings, bullet/numbered lists, fenced code blocks, bold, tables. Prefer short, specific notes over long prose; they append to a per-session notes file readable back later.
-
-Before responding to the user or closing out a task, read the saved notes back so you do not miss key findings or decisions.
-
-- action=append (default): save the Markdown content to the session notes.
-- action=read: return all saved notes for this state.
-- action=clear: clear the saved notes for this state.`)
+	return strings.TrimSpace(`Session working notes. Use it often while reading code, reviewing, investigating or gathering evidence: append short, specific Markdown notes (headings, lists, fenced code, tables) of facts, snippets, hypotheses, findings and reasoning as you learn them. Before responding to the user or finishing, read them back so nothing is missed. action=append (default) saves content, read returns all notes, clear empties them.`)
 }
 
 func intermediateToolSchema() map[string]any {
@@ -206,7 +196,7 @@ func intermediateToolSchema() map[string]any {
 			},
 			"content": map[string]any{
 				"type":        "string",
-				"description": "Markdown content to save. Required for action=append. Use Markdown formatting (headings, bullets, fenced code blocks, etc.).",
+				"description": "Markdown to save; required for append.",
 			},
 		},
 	}

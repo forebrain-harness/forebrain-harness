@@ -1185,7 +1185,7 @@ Phase 5 - Exit: call exit_plan_mode when the plan is complete and ready for user
 - Do use user_interaction for a decision that is the user's to make, including every open question a plan review returned: one call, all of them, each with your recommendation. A question only the user can answer is never yours to settle silently.
 - When ready, call exit_plan_mode to request user approval.`,
 		planDir, exists, reentrySection,
-	) + agent.SinglePlanModePrompt + agent.BugRootCausePrompt
+	) + agent.SinglePlanModePrompt
 }
 
 // The office plan-mode and sparse implementation reminders, worded for

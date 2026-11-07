@@ -319,6 +319,7 @@ func TestInstall_AllSkillDirsExtracted(t *testing.T) {
 
 	// Top-level skills (SKILL.md directly under .system/<name>/).
 	topLevelDirs := []string{
+		"audit",
 		"review",
 		"context-save",
 		"context-restore",

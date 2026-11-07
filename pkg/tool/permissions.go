@@ -278,6 +278,11 @@ func resolveFileToolPath(ctx context.Context, st *State, requestedPath string, a
 		return "", fmt.Errorf("%w: denied by request_permissions grant: %s", ErrPathNotAllowed, absCandidate)
 	}
 	resolutionRoots := MergeAllowedRootPaths(st.AllowedRoots(), st.PermissionRoots(access))
+	// A plan review's scratch directory — and the worktree inside it — is part
+	// of that run's workspace, for reads and writes alike.
+	if scope := ReviewWriteScopeFromContext(ctx); scope != nil {
+		resolutionRoots = MergeAllowedRootPaths(resolutionRoots, []string{scope.Scratch()})
+	}
 	// Resolve the path the turn already anchored (absCandidate), not the raw
 	// spelling: ResolveWithinRoots calls filepath.Abs, which for a relative
 	// path would read the process directory rather than the session's project
@@ -794,7 +799,9 @@ var typedSubagentDisallowedTools = map[string]map[string]struct{}{
 	// plan-mode tools are the one difference — the reviewer runs while an
 	// exit_plan_mode approval is pending on the very plan it is reviewing, so
 	// letting it enter or leave plan mode would let a reviewer decide the
-	// question it was called to advise on.
+	// question it was called to advise on. A coding review's ReviewWriteScope
+	// lifts the two file-writing refusals for that run only, confined to new
+	// test files and the review's scratch directory.
 	"plan-reviewer": {
 		"write_file": {}, "edit_file": {},
 		"enter_plan_mode": {}, "exit_plan_mode": {},
@@ -891,7 +898,7 @@ func (s *State) GuardTool(ctx context.Context, toolName string) error {
 		}
 	} else if st != "" {
 		if blockedByType, ok := typedSubagentDisallowedTools[st]; ok {
-			if _, deny := blockedByType[name]; deny {
+			if _, deny := blockedByType[name]; deny && !reviewScopeAdmitsTool(ctx, name) {
 				return fmt.Errorf("subagent_type %q: tool %q blocked by policy", st, name)
 			}
 		}
