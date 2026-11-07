@@ -277,7 +277,10 @@ func wrapBlankOutputRetryLLM(inner llm.LLM, ledger *llmAttemptLedger) llm.LLM {
 	if err != nil {
 		return inner
 	}
-	return llm.Use(inner, retryMW)
+	// The blank-result check sits directly under the resend, so a response
+	// that settled empty after billing output is re-sent like the Responses
+	// "completed without output" error always was (plans/273).
+	return llm.Use(inner, retryMW, llm.NewBlankResultAsError())
 }
 
 // streamProgressIsNothing reports whether the request recorded for ctx had
@@ -495,9 +498,14 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 	return nil, lastErr
 }
 
+// blankOutputMessage is what a turn ends with when the model delivered nothing
+// usable: after the blank-output resends ran out, and at the engine's own
+// empty-answer check. One sentence for both, so the user meets one wording.
+const blankOutputMessage = "model returned a blank output; this turn was stopped. Please retry or switch to another model."
+
 func blankOutputError(err error) error {
 	return llm.WithUsageError(
-		errors.New("model returned a blank output; this turn was stopped. Please retry or switch to another model."),
+		errors.New(blankOutputMessage),
 		llm.UsageFromError(err),
 	)
 }

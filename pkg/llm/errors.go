@@ -436,6 +436,9 @@ func APIErrorIsBlankModelOutput(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, ErrBlankModelOutput) {
+		return true
+	}
 	s := strings.ToLower(strings.TrimSpace(err.Error()))
 	if s == "" {
 		return false

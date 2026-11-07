@@ -450,6 +450,108 @@ func TestBlankOutputRetryHonoursTheResendGuard(t *testing.T) {
 	}
 }
 
+// resultSeqLLM answers by call count, stackedRetryLLM's shape with results:
+// call i gets results[i], and calls past the end repeat the last one.
+type resultSeqLLM struct {
+	calls   int
+	results []*llm.Result
+}
+
+func (m *resultSeqLLM) Execute(_ context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	i := m.calls
+	if i >= len(m.results) {
+		i = len(m.results) - 1
+	}
+	m.calls++
+	return m.results[i], nil
+}
+
+// blankBilledResult is the incident shape of plans/273: a response that
+// settled empty although the provider billed output tokens for it.
+func blankBilledResult(stopReason string) *llm.Result {
+	msg := llm.AssistantMessage(nil)
+	return &llm.Result{Message: &msg, StopReason: stopReason, Usage: &llm.Usage{InputTokens: 120, OutputTokens: 688}}
+}
+
+// A settled response that billed output yet delivered nothing is re-sent by
+// the blank-output layer like the "completed without output" error always
+// was; the second attempt's answer is the turn's answer.
+func TestBlankBilledResultIsResentThenAnswered(t *testing.T) {
+	answerMsg := llm.AssistantMessage([]llm.ContentPart{llm.Text("the answer")})
+	inner := &resultSeqLLM{results: []*llm.Result{
+		blankBilledResult("stop"),
+		{Message: &answerMsg},
+	}}
+	wrapped := wrapBlankOutputRetryLLM(inner, nil)
+
+	res, err := wrapped.Execute(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want the resent attempt's answer", err)
+	}
+	if text := res.Message.TextContent(); text != "the answer" {
+		t.Fatalf("answer = %q, want the second attempt's", text)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("inner calls = %d, want 2 (the blank first attempt re-sent once)", inner.calls)
+	}
+}
+
+// When every attempt settles blank, the turn ends with the shared blank-output
+// sentence after exactly blankOutputRetryAttempts calls — more would mean an
+// outer layer (network retry, stream retry) re-sends blank outputs too.
+func TestBlankBilledResultStopsWithTheBlankOutputMessage(t *testing.T) {
+	inner := &resultSeqLLM{results: []*llm.Result{blankBilledResult("stop")}}
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{TryCompact: func(context.Context, []llm.Message, []*llm.Tool, bool, int) ([]llm.Message, bool, error) {
+		return nil, false, nil
+	}}, 3, 0)
+
+	_, err := recoverable.Execute(context.Background(), nil, nil)
+	if err == nil || err.Error() != blankOutputMessage {
+		t.Fatalf("Execute error = %v, want the blank-output sentence", err)
+	}
+	if inner.calls != blankOutputRetryAttempts {
+		t.Fatalf("inner calls = %d, want exactly %d (the blank-output resends and nothing more)", inner.calls, blankOutputRetryAttempts)
+	}
+}
+
+// An empty response that billed nothing is a success as far as this layer is
+// concerned: it is passed through untouched for the engine to judge.
+func TestBlankUnbilledResultIsNotResent(t *testing.T) {
+	msg := llm.AssistantMessage(nil)
+	blank := &llm.Result{Message: &msg, Usage: &llm.Usage{}}
+	inner := &resultSeqLLM{results: []*llm.Result{blank}}
+	wrapped := wrapBlankOutputRetryLLM(inner, nil)
+
+	res, err := wrapped.Execute(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want nil", err)
+	}
+	if res != blank {
+		t.Fatalf("result = %p, want the empty result returned as is (%p)", res, blank)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1 (nothing was billed; the engine judges it)", inner.calls)
+	}
+}
+
+// A response cut by the output budget is plans/272's continuation, not a blank
+// output: it must pass through here whatever it billed.
+func TestOutputLimitResultIsNotResent(t *testing.T) {
+	inner := &resultSeqLLM{results: []*llm.Result{blankBilledResult(llm.StopReasonOutputLimit)}}
+	wrapped := wrapBlankOutputRetryLLM(inner, nil)
+
+	res, err := wrapped.Execute(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want nil", err)
+	}
+	if res.StopReason != llm.StopReasonOutputLimit {
+		t.Fatalf("StopReason = %q, want it preserved for plans/272's engine branch", res.StopReason)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1 (output-limit recovery owns it)", inner.calls)
+	}
+}
+
 // A partial response is already a decision about how this response ends: the
 // compaction and 529 resends of the recoverable layer must not re-ask the
 // question, not even when the wrapped error looks like theirs.

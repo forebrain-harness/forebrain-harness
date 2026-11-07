@@ -509,9 +509,16 @@ func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, 
 				Usage:      billed,
 			}, candidate.FinishReason, nil
 		}
-		// An empty turn is a refusal to answer (safety, recitation, a filtered
-		// prompt). Returning it as a silent empty message would look like a
-		// successful turn that said nothing.
+		// A STOP that billed output tokens yet delivered nothing is a blank
+		// output to re-send (plans/273), not a refusal: STOP is the model's
+		// own "done", so the provider charged for an answer it never handed
+		// over.
+		if billed != nil && billed.OutputTokens > 0 && strings.EqualFold(candidate.FinishReason, "STOP") {
+			return nil, candidate.FinishReason, llm.NewExecuteError(fmt.Errorf("google: response was empty (finish reason %q): %w", candidate.FinishReason, llm.ErrBlankModelOutput), billed)
+		}
+		// An empty turn from any other finish reason is a refusal to answer
+		// (safety, recitation, a filtered prompt). Returning it as a silent
+		// empty message would look like a successful turn that said nothing.
 		return nil, candidate.FinishReason, llm.NewExecuteError(fmt.Errorf("google: response was empty (finish reason %q)", candidate.FinishReason), billed)
 	}
 	result := &llm.Result{Message: msg}

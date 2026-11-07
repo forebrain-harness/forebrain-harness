@@ -280,7 +280,20 @@ func requestLevelDecision(err error, snap StreamProgressSnapshot, c streamRetryC
 	status := statusOf(err)
 	// DNS and certificate failures are request-level facts the same way a
 	// status is: the request as sent can never be answered.
-	if status < 400 && !isNXDOMAIN(err) && !isCertificateFailure(err) {
+	nxdomain := isNXDOMAIN(err)
+	certFailed := isCertificateFailure(err)
+	// A blank-output error is already owned by the blank-output retry layer
+	// directly under this one (plans/273): it re-sent the request itself, and
+	// this exhausted error is its verdict. Falling through to the unknown-
+	// cause path would re-send the whole inner chain once more without
+	// streaming — doubling every blank turn's physical requests for a
+	// failure that streaming cannot fix. DNS and certificate failures are
+	// excluded before the match: their text is never read here, and a bare
+	// x509.HostnameError's Error() dereferences a nil certificate.
+	if !nxdomain && !certFailed && APIErrorIsBlankModelOutput(err) {
+		return streamDecision{}, true, true
+	}
+	if status < 400 && !nxdomain && !certFailed {
 		return streamDecision{}, false, false
 	}
 	switch {

@@ -6492,7 +6492,10 @@ func TestToolOrchestrationRejectsEmptyFinalAssistantAfterToolUse(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected empty-final-response error, got nil result=%#v", res)
 	}
-	if !strings.Contains(err.Error(), "empty assistant response") {
+	// The fake LLM settles with Usage{} — nothing billed — so plans/273's
+	// blank-output resend does not take it: it reaches the engine's own
+	// empty-answer check and ends the turn with the shared sentence.
+	if err.Error() != blankOutputMessage {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -356,3 +356,32 @@ func TestGoogleStreamingMaxTokensContinues(t *testing.T) {
 		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
 	}
 }
+
+// A STOP that billed output tokens (here the thinking) yet delivered nothing
+// is a blank output to re-send (plans/273), not a refusal: the error carries
+// the sentinel under the same "response was empty" wording.
+func TestGoogleStreamingStopEmptyIsBlankOutput(t *testing.T) {
+	_, err, _ := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveSSE(w, `{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0,"thoughtsTokenCount":688}}`)
+	}))
+	if !errors.Is(err, llm.ErrBlankModelOutput) {
+		t.Fatalf("error = %v, want the blank-output sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "response was empty") {
+		t.Fatalf("error = %v, want the empty-response wording kept", err)
+	}
+}
+
+// An empty SAFETY turn stays a plain refusal error even when it billed output:
+// re-sending the same request would only be refused again.
+func TestGoogleStreamingSafetyEmptyIsNotBlankOutput(t *testing.T) {
+	_, err, _ := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveSSE(w, `{"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0,"thoughtsTokenCount":688}}`)
+	}))
+	if err == nil {
+		t.Fatal("an empty SAFETY response must stay an error")
+	}
+	if errors.Is(err, llm.ErrBlankModelOutput) {
+		t.Fatalf("error = %v, a refusal must not read as a blank output", err)
+	}
+}

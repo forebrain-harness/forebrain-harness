@@ -103,6 +103,13 @@ func (c *agentLLM) executeStreaming(ctx context.Context, raw []byte) (*llm.Resul
 				Usage:      st.usage,
 			}, nil
 		}
+		// A STOP that billed output tokens yet delivered nothing is a blank
+		// output to re-send (plans/273), not a refusal: STOP is the model's
+		// own "done", so the provider charged for an answer it never handed
+		// over (typically the thinking spent the tokens).
+		if st.usage != nil && st.usage.OutputTokens > 0 && strings.EqualFold(st.finish, "STOP") {
+			return nil, llm.NewExecuteError(fmt.Errorf("google: response was empty (finish reason %q): %w", st.finish, llm.ErrBlankModelOutput), st.usage)
+		}
 		return nil, llm.NewExecuteError(fmt.Errorf("google: response was empty (finish reason %q)", st.finish), st.usage)
 	}
 	return &llm.Result{

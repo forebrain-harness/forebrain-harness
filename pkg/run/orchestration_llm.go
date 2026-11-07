@@ -857,9 +857,11 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				}
 			}
 			if sessionHasToolExecution(session) && isEmptyAssistantResult(res) {
-				// A capped response is handled above; reaching here means the model
-				// really said nothing.
-				return nil, fmt.Errorf("empty assistant response after tool execution")
+				// A blank response that billed output was already re-sent below
+				// (plans/273) and arrives here as an error, not a result. What
+				// reaches this check is a response that billed nothing or was a
+				// refusal; it ends the turn with the same sentence.
+				return nil, errors.New(blankOutputMessage)
 			}
 			// A steer enqueued during the model's final (tool-call-free) response
 			// would otherwise be lost: the drain only runs in the tool path

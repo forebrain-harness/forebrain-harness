@@ -690,3 +690,34 @@ func TestGoogleSafetyEmptyStillErrors(t *testing.T) {
 		t.Fatalf("requests = %d, want exactly 1", requests)
 	}
 }
+
+// The non-streaming switch follows plans/273: a STOP that billed output yet
+// delivered nothing carries the blank-output sentinel, so the resend layer
+// above re-sends it; the continuation loop does not adopt a STOP.
+func TestGoogleStopEmptyIsBlankOutput(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0,"thoughtsTokenCount":688}}`))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil).(*agentLLM)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	_, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if !errors.Is(err, llm.ErrBlankModelOutput) {
+		t.Fatalf("error = %v, want the blank-output sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "response was empty") {
+		t.Fatalf("error = %v, want the empty-response wording kept", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("requests = %d, want exactly 1", requests)
+	}
+}

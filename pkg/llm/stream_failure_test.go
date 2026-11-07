@@ -206,6 +206,8 @@ func TestRequestLevelDecision(t *testing.T) {
 		want   streamDecision
 	}{
 		{name: "529 passes to the overload layer", err: &APIError{StatusCode: 529}, snap: nothing, pass: true, ok: true},
+		{name: "blank-output exhaustion passes to the blank layer", err: &MaxAttemptsExceededError{Attempts: 4, Err: WithUsageError(ErrBlankModelOutput, &Usage{OutputTokens: 688})}, snap: nothing, pass: true, ok: true},
+		{name: "unknown error without a status still falls to the stream table", err: errors.New("something else entirely"), snap: nothing, ok: false},
 		{name: "408 retries", err: &APIError{StatusCode: http.StatusRequestTimeout}, snap: nothing, ok: true, want: streamDecision{DecideRetry, streamRetryCounts{retries: 1}}},
 		{name: "409 retries", err: &APIError{StatusCode: http.StatusConflict}, snap: nothing, ok: true, want: streamDecision{DecideRetry, streamRetryCounts{retries: 1}}},
 		{name: "503 retries", err: &APIError{StatusCode: http.StatusServiceUnavailable}, snap: nothing, ok: true, want: streamDecision{DecideRetry, streamRetryCounts{retries: 1}}},
