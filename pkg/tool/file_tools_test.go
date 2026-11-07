@@ -2945,3 +2945,132 @@ func TestWriteFileAfterResumeRestoresReadBaseline(t *testing.T) {
 		t.Fatalf("file after the refused write = %q, want the external content kept", kept)
 	}
 }
+
+// writeOverBudgetFile writes a text file whose lines are long enough that a
+// 200-line window lands beyond ReadFileMaxResultTokens, and returns its path.
+func writeOverBudgetFile(t *testing.T, tmp string) string {
+	t.Helper()
+	var b strings.Builder
+	for i := 0; i < 1700; i++ {
+		fmt.Fprintf(&b, "line %04d %s\n", i, strings.Repeat("x", 590))
+	}
+	p := filepath.Join(tmp, "big.txt")
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write big file: %v", err)
+	}
+	return p
+}
+
+func TestReadFileWindowOverBudgetErrors(t *testing.T) {
+	tmp := t.TempDir()
+	p := writeOverBudgetFile(t, tmp)
+	st := NewState(tmp)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	result, err := readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(p)+`","offset":0,"limit":200}`)
+	if err == nil {
+		t.Fatalf("expected over-budget window to error, got result %.80q", result)
+	}
+	msg := err.Error()
+	for _, want := range []string{"tokens", "25000", "offset", "limit"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "xxxx") {
+		t.Fatalf("error must not carry file content: %q", msg)
+	}
+}
+
+func TestReadFileNarrowWindowFits(t *testing.T) {
+	tmp := t.TempDir()
+	p := writeOverBudgetFile(t, tmp)
+	st := NewState(tmp)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	result, err := readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(p)+`","offset":0,"limit":20}`)
+	if err != nil {
+		t.Fatalf("narrow window must fit: %v", err)
+	}
+	out, ok := result.(string)
+	if !ok {
+		t.Fatalf("result type %T, want string", result)
+	}
+	if strings.Count(out, "\n")+1 != 20 {
+		t.Fatalf("got %d lines, want 20: %.120q", strings.Count(out, "\n")+1, out)
+	}
+	if !strings.HasPrefix(out, "1|line 0000 ") {
+		t.Fatalf("expected line-number prefix on first line: %.80q", out)
+	}
+}
+
+func TestReadFileTruncatesOneLongLine(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "one-line.txt")
+	if err := os.WriteFile(p, []byte(strings.Repeat("y", 50000)), 0o644); err != nil {
+		t.Fatalf("write one-line file: %v", err)
+	}
+	st := NewState(tmp)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	result, err := readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(p)+`"}`)
+	if err != nil {
+		t.Fatalf("a single long line must still be readable: %v", err)
+	}
+	out, ok := result.(string)
+	if !ok {
+		t.Fatalf("result type %T, want string", result)
+	}
+	if !strings.Contains(out, "48000 chars omitted from this line") {
+		t.Fatalf("expected the omitted marker naming 48000 chars: %.120q", out)
+	}
+	if !strings.HasPrefix(out, "1|"+strings.Repeat("y", 2000)) {
+		t.Fatalf("expected the first 2000 chars of the line kept: %.120q", out)
+	}
+	if strings.Contains(out, strings.Repeat("y", 2100)) {
+		t.Fatalf("line must be cut at ReadFileMaxLineChars: %d bytes", len(out))
+	}
+}
+
+func TestReadFileResultIsNotSpilled(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "paged.txt")
+	var b strings.Builder
+	for i := 0; i < 60000; i++ {
+		b.WriteString("rows\n")
+	}
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write paged file: %v", err)
+	}
+	st := NewState(tmp)
+	spillDir := t.TempDir()
+	st.SetToolResultDir(spillDir)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	for _, args := range []string{
+		`{"file_path":"` + escapeJSONPath(p) + `","offset":0}`,
+		`{"file_path":"` + escapeJSONPath(p) + `","offset":200}`,
+	} {
+		if _, err := readTool.Handle(context.Background(), args); err != nil {
+			t.Fatalf("paged read %s: %v", args, err)
+		}
+	}
+	entries, err := os.ReadDir(spillDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return // the directory itself never came to be: nothing was spilled
+		}
+		t.Fatalf("read spill dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("read_file must not spill files, found %d: %v", len(entries), entries)
+	}
+}

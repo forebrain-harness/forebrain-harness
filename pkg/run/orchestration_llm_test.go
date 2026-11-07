@@ -8023,10 +8023,14 @@ func TestToolOrchestrationTruncatesLargeToolResultBeforeContextReplay(t *testing
 	}
 }
 
-func TestToolOrchestrationTruncatesLargeReadFileResultBeforeContextReplay(t *testing.T) {
+func TestToolOrchestrationLeavesReadFileResultAlone(t *testing.T) {
 	st := toolpkg.NewState(t.TempDir())
 	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
 
+	// ~80.4 KB, all ASCII: ~20.1k tokens by the rune/4 heuristic, inside the
+	// 25k read_file budget, so the result must pass through whole — the tool
+	// here hands the text back directly, bypassing the real read_file's own
+	// budget error.
 	largeFile := "1|package main\n" + strings.Repeat("2|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n", 1200)
 	readTool, err := llm.NewTool("read_file", "read file", func(context.Context, *struct{}) (string, error) {
 		return largeFile, nil
@@ -8057,17 +8061,14 @@ func TestToolOrchestrationTruncatesLargeReadFileResultBeforeContextReplay(t *tes
 	if toolText == "" {
 		t.Fatal("expected tool result message in replay session")
 	}
-	if len(toolText) > toolpkg.SpillThresholdBytes+512 {
-		t.Fatalf("tool result still too large for context: %d bytes", len(toolText))
+	if toolText != largeFile {
+		t.Fatalf("read_file result must reach the replay session verbatim: got %d bytes, want %d bytes", len(toolText), len(largeFile))
 	}
-	if !strings.Contains(toolText, "[tool output truncated for context:") {
-		t.Fatalf("expected truncation marker, got %q", toolText)
+	if strings.Contains(toolText, "[tool output truncated for context:") {
+		t.Fatalf("read_file result must not be truncated for context: %q", toolText)
 	}
-	if !strings.Contains(toolText, "full output available via read_file:") {
-		t.Fatalf("expected persisted output path hint, got %q", toolText)
-	}
-	if !strings.Contains(toolText, "1|package main") {
-		t.Fatalf("expected file header preserved, got %q", toolText)
+	if strings.Contains(toolText, "full output available via read_file:") {
+		t.Fatalf("read_file result must not be re-spilled: %q", toolText)
 	}
 }
 

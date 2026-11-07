@@ -41,6 +41,18 @@ var blockedReadDevicePaths = map[string]struct{}{
 	"/dev/fd/2":    {},
 }
 
+const (
+	// ReadFileMaxResultTokens is the ceiling on one read_file result. It is a
+	// token budget rather than a byte one because what it protects is the
+	// model's context, and 4 bytes of English and 1.5 bytes of Chinese cost
+	// the same there. Claude Code's Read uses the same number.
+	ReadFileMaxResultTokens = 25000
+	// ReadFileMaxLineChars caps one line inside a result. Without it a
+	// minified JSON or a bundle on a single line can never fit any window,
+	// and "use offset/limit to read less" would be advice that cannot work.
+	ReadFileMaxLineChars = 2000
+)
+
 // Offset and Limit are optional: resolveReadFileRange treats zero as "not
 // given" (start of file / DefaultPageLimit). Tagging them `omitempty` keeps the
 // schema honest about that instead of forcing the model to invent a page window
@@ -209,6 +221,21 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 				if err != nil {
 					return "", err
 				}
+			}
+			// The window the model asked for is what it gets, whole. Budget it
+			// here — after the per-line truncation inside the slicer, so one
+			// oversized line cannot make every window unsatisfiable — and
+			// refuse with instructions rather than silently cutting lines the
+			// model deliberately chose. The generic spill path is disabled
+			// for read_file (pkg/run/orchestration_llm.go), so this check is
+			// the only guard on a read's size.
+			tokens := llm.EstimateText(out)
+			if tokens > ReadFileMaxResultTokens {
+				return "", fmt.Errorf(
+					"file content (%d tokens) exceeds the maximum of %d tokens for one read: "+
+						"use offset and limit to read a smaller window, or search for the part you need "+
+						"(the file has %d lines)",
+					tokens, ReadFileMaxResultTokens, totalLines)
 			}
 			if note := skillPathRepairNote(resolution); note != "" {
 				out = note + "\n\n" + out
@@ -773,7 +800,7 @@ func sliceWithLineNumbersFromReader(ctx context.Context, r io.Reader, offset, li
 		if limit > 0 && wrote >= limit {
 			continue
 		}
-		fmt.Fprintf(&b, "%d|%s\n", line, sc.Text())
+		fmt.Fprintf(&b, "%d|%s\n", line, truncateReadFileLine(sc.Text()))
 		wrote++
 	}
 	if err := sc.Err(); err != nil {
@@ -791,6 +818,22 @@ func sliceWithLineNumbersFromReader(ctx context.Context, r io.Reader, offset, li
 		return "", totalLines, nil
 	}
 	return strings.TrimRight(s, "\n"), totalLines, nil
+}
+
+// truncateReadFileLine caps one line of a read_file result. A line never
+// contains a newline (the scanner strips it), so cutting by rune keeps every
+// character whole and the marker names exactly how much of the line is gone —
+// the model can still tell what it is looking at and narrow its next read.
+func truncateReadFileLine(line string) string {
+	if len(line) <= ReadFileMaxLineChars {
+		return line
+	}
+	runes := []rune(line)
+	if len(runes) <= ReadFileMaxLineChars {
+		return line
+	}
+	return string(runes[:ReadFileMaxLineChars]) +
+		fmt.Sprintf("[… %d chars omitted from this line]", len(runes)-ReadFileMaxLineChars)
 }
 
 // codeIntelOf returns the language-server runtime a tool should report edits

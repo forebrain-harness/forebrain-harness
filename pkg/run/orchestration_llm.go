@@ -2427,6 +2427,13 @@ func governToolResultDetails(st *tool.State, call llm.ToolCall, parts []llm.Cont
 	case "subagent_run", "subagent_fanout":
 		return nil
 	}
+	// read_file already fits its own result to a token budget and reports an
+	// error when the window does not fit (pkg/tool/file_tools.go): truncating
+	// it here would cut the lines the model just chose, and spilling it would
+	// answer a read with a new file to read.
+	if strings.TrimSpace(call.Function.Name) == "read_file" {
+		return nil
+	}
 	governor := newToolOutputGovernor(st)
 	if governor == nil {
 		return nil
