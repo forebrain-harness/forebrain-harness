@@ -275,6 +275,7 @@ func lifecycleToolInputSchema(cat SubagentCatalog, name string, t reflect.Type) 
 
 type FanoutResult struct {
 	Index        int    `json:"index"`
+	Title        string `json:"title,omitempty"`
 	Task         string `json:"task"`
 	SubagentType string `json:"subagent_type,omitempty"`
 	Output       string `json:"output,omitempty"`
@@ -389,7 +390,11 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 				}
 				return "", err
 			}
-			governed := governSubagentOutput(fac, "subagent_run", taskID, execRes.Output)
+			// One cut, here: the record keeps the raw report, the model gets
+			// the budgeted inline text. The outer tool-result governor
+			// exempts subagent_run, so without this a several-hundred-KB
+			// report would enter the context whole.
+			inline, _ := budgetSubagentReport(fac, taskID, execRes.Output, subagentReportInlineChars)
 			agentKind := "fork"
 			agentType := "fork"
 			runtimeKind := "fork_subagent"
@@ -416,7 +421,7 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 				"session_id":        execRes.SessionID,
 				"query_source":      subagentQuerySource(agentKind, agentType, defSource),
 				"status":            agent.StatusOK,
-				"output":            governed.Text,
+				"output":            inline,
 				"finished_at":       time.Now().Unix(),
 				"agent_type":        agentType,
 				"agent_kind":        agentKind,
@@ -1945,12 +1950,11 @@ func runAcrossApprovals(
 
 func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, subagentType string) (subagentExecResult, error) {
 	prep, output, err := dispatchSubagent(ctx, fac, subagentDispatch{
-		taskID:     taskID,
-		title:      title,
-		task:       task,
-		subtype:    subagentType,
-		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
-		governTool: "subagent_run",
+		taskID:  taskID,
+		title:   title,
+		task:    task,
+		subtype: subagentType,
+		resolve: SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			// A gate this child hits is answered in place, while its run and its
 			// dispatcher stay alive. Without the hook the error travels on
@@ -2030,12 +2034,11 @@ func asyncSubagentContext(ctx context.Context) context.Context {
 
 func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, subagentType string) (agent.HistoryEntry, error) {
 	d := subagentDispatch{
-		taskID:     taskID,
-		title:      title,
-		task:       task,
-		subtype:    subagentType,
-		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
-		governTool: "subagent_run",
+		taskID:  taskID,
+		title:   title,
+		task:    task,
+		subtype: subagentType,
+		resolve: SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
 	}
 	// The execution outlives the call that starts it, so it runs on the
 	// background context built here rather than on the dispatching one: this is
@@ -3067,17 +3070,25 @@ func continueForkSubagent(ctx context.Context, fac Factory, record agent.History
 	return outcome.Result.TextContent(), nil
 }
 
+// mergeContinuationOutput keeps the previous result and appends this
+// execution's own, reserving room for the new text: truncating after the
+// concatenation would drop the very output this continuation produced
+// whenever the earlier report was long.
 func mergeContinuationOutput(previous, next string) string {
-	prev := strings.TrimSpace(previous)
-	cur := strings.TrimSpace(next)
+	prev, cur := strings.TrimSpace(previous), strings.TrimSpace(next)
+	// 24000 is the record's ceiling either way.
+	const limit = 24000
 	switch {
 	case prev == "":
-		return truncatePreviewText(cur, 24000)
+		return truncatePreviewText(cur, limit)
 	case cur == "":
-		return truncatePreviewText(prev, 24000)
-	default:
-		return truncatePreviewText(prev+"\n\nContinuation result:\n"+cur, 24000)
+		return truncatePreviewText(prev, limit)
 	}
+	room := limit - len(cur) - len("\n\nContinuation result:\n")
+	if room < 1000 { // 新结果已占满：保留新结果，旧报告只留开头
+		return "Continuation result:\n" + truncatePreviewText(cur, limit)
+	}
+	return truncatePreviewText(prev, room) + "\n\nContinuation result:\n" + cur
 }
 
 func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error {
@@ -3124,14 +3135,14 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 				subType := strings.TrimSpace(item.SubagentType)
 				title := strings.TrimSpace(item.Title)
 				if task == "" {
-					results[i] = FanoutResult{Index: i, Task: task, SubagentType: subType, Error: "skipped: empty prompt", OK: false}
+					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Error: "skipped: empty prompt", OK: false}
 					continue
 				}
 
 				select {
 				case sem <- struct{}{}:
 				case <-fanoutCtx.Done():
-					results[i] = FanoutResult{Index: i, Task: task, SubagentType: subType, Error: "skipped due to fail_fast", OK: false}
+					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Error: "skipped due to fail_fast", OK: false}
 					continue
 				}
 
@@ -3139,7 +3150,7 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 				if in.FailFast && firstErr != nil {
 					mu.Unlock()
 					<-sem
-					results[i] = FanoutResult{Index: i, Task: task, SubagentType: subType, Error: "skipped due to fail_fast", OK: false}
+					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Error: "skipped due to fail_fast", OK: false}
 					continue
 				}
 				mu.Unlock()
@@ -3155,7 +3166,7 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 					var stopped *subagentStopped
 					if errors.As(err, &stopped) {
 						results[i] = FanoutResult{
-							Index: i, Task: task, SubagentType: subType, OK: false,
+							Index: i, Title: title, Task: task, SubagentType: subType, OK: false,
 							Status: string(agent.StatusCancelled),
 							Error:  stopped.record.Error,
 							TaskID: stopped.record.TaskID,
@@ -3184,7 +3195,7 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 						var failed *subagentFailure
 						if errors.As(err, &failed) {
 							results[i] = FanoutResult{
-								Index: i, Task: task, SubagentType: subType, OK: false,
+								Index: i, Title: title, Task: task, SubagentType: subType, OK: false,
 								Error:    failed.reason(),
 								TaskID:   failed.record.TaskID,
 								RanFor:   tool.FormatDuration(failed.elapsed),
@@ -3193,15 +3204,21 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 							}
 							return
 						}
-						results[i] = FanoutResult{Index: i, Task: task, SubagentType: subType, Error: err.Error(), OK: false}
+						results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Error: err.Error(), OK: false}
 						return
 					}
+					taskStart := time.Now()
 					results[i] = FanoutResult{
 						Index:        i,
+						Title:        title,
 						Task:         task,
 						SubagentType: subType,
-						Output:       governSubagentOutput(fac, "subagent_fanout", taskID, execRes.Output).Text,
-						OK:           true,
+						TaskID:       taskID,
+						RanFor:       tool.FormatDuration(time.Since(taskStart)),
+						// The raw report: budgeting happens once, where the fanout
+						// text is rendered (renderFanoutReport), never here.
+						Output: execRes.Output,
+						OK:     true,
 					}
 				}(i, task, subType, title, taskIDs[i])
 			}
@@ -3213,14 +3230,27 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 				// a gate raised by subagent_run does.
 				return "", suspended
 			}
+			finish := func() string {
+				report := renderFanoutReport(fac, results)
+				// The card rows settle from this sidecar, not by parsing the
+				// plain-text report the model reads: the facts ride the step
+				// event, the report string stays the model's alone.
+				tool.CaptureToolCompletion(ctx, tool.ToolCompletionPayload{
+					Output: map[string]any{
+						"output":  report,
+						"results": fanoutCardFacts(results),
+					},
+				})
+				return report
+			}
 			if in.FailFast && firstErr != nil {
 				var failed *subagentFailure
 				if errors.As(firstErr, &failed) {
-					return buildFanoutSummary(results), errors.New(subagentFailureForModel(failed))
+					return finish(), errors.New(subagentFailureForModel(failed))
 				}
-				return buildFanoutSummary(results), firstErr
+				return finish(), firstErr
 			}
-			return buildFanoutSummary(results), nil
+			return finish(), nil
 		},
 	)
 	if err != nil {
@@ -3504,35 +3534,6 @@ func lookupSubagentRecord(workspaceRoot string, ctx context.Context, in *Subagen
 	return agent.GetMerged(workspaceRoot, query)
 }
 
-func buildFanoutSummary(results []FanoutResult) string {
-	ok, failed, cancelled := 0, 0, 0
-	for _, r := range results {
-		switch {
-		case r.OK:
-			ok++
-		case r.Status == string(agent.StatusCancelled):
-			cancelled++
-		default:
-			failed++
-		}
-	}
-	summary := map[string]any{
-		"total":    len(results),
-		"succeed":  ok,
-		"failed":   failed,
-		"finished": time.Now().Unix(),
-	}
-	if cancelled > 0 {
-		summary["cancelled"] = cancelled
-	}
-	resp := map[string]any{
-		"summary": summary,
-		"results": results,
-	}
-	b, _ := json.Marshal(resp)
-	return string(b)
-}
-
 func truncatePreviewText(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -3540,11 +3541,11 @@ func truncatePreviewText(s string, n int) string {
 	return llm.TruncateBytes(s, n, "…")
 }
 
-// subagentDispatch describes one subagent run: which definitions it may adopt,
-// how its executor is invoked, and how its output is bounded. That is the whole of
-// what differs between the three ways a subagent starts — the tool's blocking
-// run, the tool's background spawn, and plan review — so everything else
-// happens once, in startSubagent and finishSubagent.
+// subagentDispatch describes one subagent run: which definitions it may adopt
+// and how its executor is invoked. That is the whole of what differs between
+// the ways a subagent starts — the tool's blocking run, the tool's background
+// spawn, and plan review — so everything else happens once, in startSubagent
+// and finishSubagent.
 type subagentDispatch struct {
 	taskID string
 	// title is the short name the dispatching agent gave this task: what the
@@ -3562,9 +3563,6 @@ type subagentDispatch struct {
 	// runtime snapshot from it); a background run must build from prep.ctx
 	// instead, which outlives the call that started it.
 	run func(ctx context.Context, fac Factory, prep preparedSubagent) (string, error)
-	// governTool names the tool whose output budget bounds the stored result.
-	// Empty stores the output as produced.
-	governTool string
 }
 
 // startSubagent prepares a subagent and announces it: history entry, live
@@ -3762,10 +3760,11 @@ func finishSubagent(
 	switch {
 	case runErr == nil:
 		final.Status = agent.StatusOK
+		// The raw report, ungoverned: subagent_status, continuation prompts
+		// and the end event all read this record, and each of those surfaces
+		// budgets the text where it hands it to the model — the subagent_run
+		// and subagent_fanout tools here, through budgetSubagentReport.
 		final.Output = output
-		if tool := strings.TrimSpace(d.governTool); tool != "" {
-			final.Output = governSubagentOutput(fac, tool, prep.entry.TaskID, output).Text
-		}
 	case errors.Is(runErr, context.Canceled) || errors.Is(context.Cause(prep.ctx), context.Canceled):
 		final.Status = agent.StatusCancelled
 		final.Error = "cancelled"
@@ -4030,14 +4029,6 @@ func ConfiguredModelClientWithEffort(cfg *appcfg.Root, agentType, provider, mode
 			subagentModelDisplay(SubagentModelOverride{Provider: provider, Model: model}))
 	}
 	return NewLLMFromYAML(chain[0])
-}
-
-func governSubagentOutput(fac Factory, toolName, callID, output string) tool.GovernedOutput {
-	governor := newToolOutputGovernor(factoryToolsState(fac))
-	if governor == nil {
-		return tool.GovernedOutput{Text: output}
-	}
-	return governor.GovernDetailed(strings.TrimSpace(toolName), strings.TrimSpace(callID), output)
 }
 
 // cancelPendingAction withdraws the approval request behind err. A fanout can

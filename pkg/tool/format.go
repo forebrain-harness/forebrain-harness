@@ -2957,6 +2957,22 @@ func subagentTaskStatus(status string) string {
 	}
 }
 
+// resultsListFromOutput normalizes a fanout's sidecar facts list: the live
+// capture carries []map[string]any, a serialized and replayed event []any.
+func resultsListFromOutput(v any) ([]any, bool) {
+	switch list := v.(type) {
+	case []any:
+		return list, true
+	case []map[string]any:
+		out := make([]any, len(list))
+		for i, m := range list {
+			out[i] = m
+		}
+		return out, true
+	}
+	return nil, false
+}
+
 // SubagentCallFromStep derives the card facts of a subagent_* call from its
 // input and, once it has settled, from the result the model received. ok is
 // false for any other tool. The facts never carry a prompt or a subagent's
@@ -2975,6 +2991,15 @@ func SubagentCallFromStep(evt StepEvent) (*event.SubagentCall, bool) {
 			call.Tasks[i].Error = ""
 		}
 		return call, true
+	}
+	if rawResults, ok := resultsListFromOutput(evt.Output["results"]); ok {
+		// A subagent_fanout call reports its card facts as a sidecar beside
+		// the plain-text report the model reads: settle from it directly
+		// instead of parsing display text. The legacy path below still
+		// settles stored sessions whose output was the JSON summary.
+		if subagentCallApplyResult(call, strings.TrimSpace(evt.ToolName), map[string]any{"results": rawResults}) {
+			return call, true
+		}
 	}
 	if resultText := strings.TrimSpace(stringFromAny(evt.Output["output"])); resultText != "" {
 		var result map[string]any

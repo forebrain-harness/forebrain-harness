@@ -2420,6 +2420,13 @@ func governToolResultDetails(st *tool.State, call llm.ToolCall, parts []llm.Cont
 	if len(parts) == 0 {
 		return nil
 	}
+	// A subagent's report is budgeted where it is produced (pkg/run/subagent.go,
+	// renderFanoutReport): re-governing it here would spill a second, truncated
+	// copy over the real full text and hand the model a path that is itself cut.
+	switch strings.TrimSpace(call.Function.Name) {
+	case "subagent_run", "subagent_fanout":
+		return nil
+	}
 	governor := newToolOutputGovernor(st)
 	if governor == nil {
 		return nil

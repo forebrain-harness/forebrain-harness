@@ -1923,26 +1923,42 @@ func TestAwaitedSubagentStoppedByTheUserIsAnsweredAsStopped(t *testing.T) {
 	fanTool, _ := aToolByName(a, "subagent_fanout")
 	fanArgs := `{"tasks":[{"title":"Stopped","prompt":"a","subagent_type":"general-purpose"},{"title":"Kept","prompt":"b","subagent_type":"general-purpose"}],"max_parallel":1,"fail_fast":true}`
 	exec.stopNext(1)
-	out, err = fanTool.Handle(callCtx, fanArgs)
+	fanCtx := toolpkg.WithToolCompletionCapture(callCtx)
+	out, err = fanTool.Handle(fanCtx, fanArgs)
 	if err != nil {
 		t.Fatalf("subagent_fanout = %v", err)
 	}
-	var summary struct {
-		Summary map[string]any `json:"summary"`
-		Results []FanoutResult `json:"results"`
+	report := out.(string)
+	for _, want := range []string{
+		"2 tasks",
+		"1 cancelled",
+		"## [1/2] Stopped · cancelled",
+		"next: " + subagentStoppedAdvice,
+		"## [2/2] Kept · ok",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("fanout report missing %q:\n%s", want, report)
+		}
 	}
-	if err := json.Unmarshal([]byte(out.(string)), &summary); err != nil {
+	// The card settles from the sidecar the tool captured beside the report,
+	// the same Output the engine puts on the step event.
+	captured, ok := toolpkg.ToolCompletionFromContext(fanCtx)
+	if !ok {
+		t.Fatal("subagent_fanout captured no tool completion")
+	}
+	fanInput := map[string]any{}
+	if err := json.Unmarshal([]byte(fanArgs), &fanInput); err != nil {
 		t.Fatal(err)
 	}
-	if len(summary.Results) != 2 || summary.Results[0].Status != string(agent.StatusCancelled) ||
-		summary.Results[0].Next != subagentStoppedAdvice || !summary.Results[1].OK {
-		t.Fatalf("fanout results = %+v, want the first stopped and the second done", summary.Results)
+	facts, ok := toolpkg.SubagentCallFromStep(toolpkg.StepEvent{
+		Kind: toolpkg.StepKindToolCompleted, ToolName: "subagent_fanout",
+		Input: fanInput, Output: captured.Output,
+	})
+	if !ok {
+		t.Fatal("subagent_fanout card facts")
 	}
-	if summary.Summary["failed"] != float64(0) || summary.Summary["cancelled"] != float64(1) {
-		t.Fatalf("fanout summary = %v, want 0 failed and 1 cancelled", summary.Summary)
-	}
-	if tasks := cardTasks("subagent_fanout", fanArgs, out.(string)); len(tasks) != 2 || tasks[0].Status != "cancelled" || tasks[1].Status != "done" {
-		t.Fatalf("fanout card tasks = %+v, want cancelled then done", tasks)
+	if len(facts.Tasks) != 2 || facts.Tasks[0].Status != "cancelled" || facts.Tasks[1].Status != "done" {
+		t.Fatalf("fanout card tasks = %+v, want cancelled then done", facts.Tasks)
 	}
 }
 
@@ -2049,20 +2065,18 @@ func TestFanoutTellsTheDispatcherHowEachSubagentFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("subagent_fanout: %v", err)
 	}
-	var summary struct {
-		Results []FanoutResult `json:"results"`
-	}
-	if err := json.Unmarshal([]byte(out.(string)), &summary); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(summary.Results) != 1 {
-		t.Fatalf("results = %+v", summary.Results)
-	}
-	got := summary.Results[0]
-	if got.OK || got.Error != strings.Join(strings.Fields(llm.ExplainError(limit)), " ") ||
-		!strings.HasPrefix(got.TaskID, "subagent-") || got.RanFor == "" ||
-		got.ResetsAt != "2026-10-31T22:09:05Z" || got.Next != subagentContinueAdvice+" "+subagentResetAdvice {
-		t.Fatalf("failed task result = %+v", got)
+	report := out.(string)
+	for _, want := range []string{
+		"## [1/1] Probe · failed",
+		"error: " + strings.Join(strings.Fields(llm.ExplainError(limit)), " "),
+		"resets_at: 2026-10-31T22:09:05Z",
+		"next: " + subagentContinueAdvice + " " + subagentResetAdvice,
+		"task_id=subagent-",
+		"ran_for=",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("failed task account missing %q:\n%s", want, report)
+		}
 	}
 
 	exec.failNext(limit)
@@ -2917,11 +2931,18 @@ func TestSubagentRunGovernedOutputUsesUnifiedContextTruncation(t *testing.T) {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
 	output, _ := payload["output"].(string)
-	if !strings.Contains(output, "[tool output truncated for context:") {
-		t.Fatalf("expected governed output marker, got %q", output)
+	// One cut, the report's own: the fixed sentence naming the path, and no
+	// governor marker anywhere — the outer governor exempts subagent_run.
+	// (The governor's suffix is "read_file:" with a colon; the report's own
+	// sentence says "read_file," — the colon is what must never appear.)
+	if !strings.Contains(output, "[report cut from ") {
+		t.Fatalf("expected the report cut sentence, got %q", truncatePreviewText(output, 400))
 	}
-	if !strings.Contains(output, "full output available via read_file:") {
-		t.Fatalf("expected spill path hint, got %q", output)
+	if !strings.Contains(output, "the whole report is at ") {
+		t.Fatalf("expected the full report's path, got %q", truncatePreviewText(output, 400))
+	}
+	if strings.Contains(output, "[tool output truncated for context:") || strings.Contains(output, "read_file:") {
+		t.Fatalf("report was governed a second time: %q", truncatePreviewText(output, 400))
 	}
 }
 
@@ -2951,21 +2972,20 @@ func TestSubagentFanoutGovernedOutputUsesUnifiedContextTruncation(t *testing.T) 
 	if !ok {
 		t.Fatalf("expected string payload, got %T", got)
 	}
-	var payload struct {
-		Results []FanoutResult `json:"results"`
+	report := payloadText
+	// The three pieces of a cut report: its section header, the one cut
+	// sentence, the one path — and none of the old governor's markers.
+	if !strings.Contains(report, "## [1/1] inspect · ok") {
+		t.Fatalf("expected the task's section header, got %q", truncatePreviewText(report, 400))
 	}
-	if err := json.Unmarshal([]byte(payloadText), &payload); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
+	if strings.Count(report, "[report cut from ") != 1 {
+		t.Fatalf("expected exactly one report cut sentence, got %q", truncatePreviewText(report, 400))
 	}
-	if len(payload.Results) != 1 {
-		t.Fatalf("results len=%d", len(payload.Results))
+	if strings.Count(report, "the whole report is at ") != 1 {
+		t.Fatalf("expected exactly one full report path, got %q", truncatePreviewText(report, 400))
 	}
-	output := payload.Results[0].Output
-	if !strings.Contains(output, "[tool output truncated for context:") {
-		t.Fatalf("expected governed output marker, got %q", output)
-	}
-	if !strings.Contains(output, "full output available via read_file:") {
-		t.Fatalf("expected spill path hint, got %q", output)
+	if strings.Contains(report, "[tool output truncated for context:") || strings.Contains(report, "read_file:") {
+		t.Fatalf("report was governed a second time: %q", truncatePreviewText(report, 400))
 	}
 }
 
@@ -3832,22 +3852,22 @@ func TestSubagentFanoutResolvesChildApprovalsInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tool.Handle: %v", err)
 	}
-	var payload struct {
-		Results []FanoutResult `json:"results"`
+	report, ok := got.(string)
+	if !ok {
+		t.Fatalf("expected string payload, got %T", got)
 	}
-	if err := json.Unmarshal([]byte(got.(string)), &payload); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	if len(payload.Results) != 2 {
-		t.Fatalf("results len=%d, want 2", len(payload.Results))
-	}
-	for _, res := range payload.Results {
-		if !res.OK {
-			t.Fatalf("task %q reported failed: %q", res.Task, res.Error)
+	for _, want := range []string{
+		"## [1/2] one · ok",
+		"## [2/2] two · ok",
+		"done:one",
+		"done:two",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("fanout report missing %q:\n%s", want, report)
 		}
-		if !strings.HasPrefix(res.Output, "done:") {
-			t.Fatalf("task %q output = %q, want the resumed run's output", res.Task, res.Output)
-		}
+	}
+	if strings.Contains(report, "error: ") {
+		t.Fatalf("both tasks resumed, no task should be failed:\n%s", report)
 	}
 	mu.Lock()
 	askedCount := len(asked)

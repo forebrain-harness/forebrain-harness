@@ -2212,6 +2212,39 @@ func TestSubagentCallFromStep(t *testing.T) {
 			}},
 		},
 		{
+			name: "fanout settled from the results sidecar beside plain text",
+			evt: StepEvent{Kind: completed, ToolName: "subagent_fanout", Input: fanoutInput,
+				Output: map[string]any{
+					"output": "3 tasks · 1 ok · 2 failed · 9s\n\n## [1/3] First · ok · task_id=subagent-a\n…\n\n## [2/3] untitled prompt first line · cancelled · task_id=subagent-b\nerror: stopped\n\n## [3/3] Third · failed · task_id=subagent-c\nerror: provider refused",
+					"results": []map[string]any{
+						{"index": 0, "ok": true, "status": "", "error": ""},
+						{"index": 1, "ok": false, "status": "cancelled", "error": "stopped"},
+						{"index": 2, "ok": false, "status": "", "error": "provider refused"},
+					},
+				}},
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{
+				{Index: 0, Title: "First", AgentType: "explore", Status: "done"},
+				{Index: 1, Title: "untitled prompt first line", AgentType: "general-purpose", Status: "cancelled", Error: "stopped"},
+				{Index: 2, Title: "Third", AgentType: "fork", Status: "failed", Error: "provider refused"},
+			}},
+		},
+		{
+			name: "fanout sidecar after a serialization round-trip still settles",
+			evt: StepEvent{Kind: completed, ToolName: "subagent_fanout", Input: fanoutInput,
+				Output: map[string]any{
+					"output": "2 tasks · 1 ok · 1 failed · 4s",
+					"results": []any{
+						map[string]any{"index": 0, "ok": true, "status": "", "error": ""},
+						map[string]any{"index": 1, "ok": false, "status": "", "error": "skipped due to fail_fast"},
+					},
+				}},
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{
+				{Index: 0, Title: "First", AgentType: "explore", Status: "done"},
+				{Index: 1, Title: "untitled prompt first line", AgentType: "general-purpose", Status: "skipped", Error: "skipped due to fail_fast"},
+				{Index: 2, Title: "Third", AgentType: "fork", Status: "waiting"},
+			}},
+		},
+		{
 			name: "send started",
 			evt:  toolCall(started, "subagent_send", sendInput, ""),
 			want: &event.SubagentCall{Verb: "send", Tasks: []event.SubagentCallTask{{
