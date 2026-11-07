@@ -3874,6 +3874,9 @@ func (r *Renderer) buildReadOnlyComposerBlock(cs ComposerRenderState, statusText
 
 func (r *Renderer) composerFooterText(termWidth int) string {
 	left, right := r.composerFooterSidesLocked()
+	if r.ctrlCExitHint {
+		left = ctrlCExitHintText
+	}
 	if left == "" {
 		left = " "
 	}
@@ -6840,6 +6843,11 @@ func (r *Renderer) OverlaySelection() (startLine, startCol, endLine, endCol int,
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.overlaySelectionLocked()
+}
+
+// overlaySelectionLocked is OverlaySelection for a caller holding r.mu.
+func (r *Renderer) overlaySelectionLocked() (startLine, startCol, endLine, endCol int, ok bool) {
 	if !r.viewportMode || !r.overlayActive || !r.selectDidDrag {
 		return 0, 0, 0, 0, false
 	}
@@ -7157,6 +7165,9 @@ func (r *Renderer) viewportPressLocked(col, row int, at time.Time) {
 		return
 	}
 	r.selectDragging = true
+	// Every press starts a new selection (a word or a line for a double or
+	// triple click), which its release has not copied yet.
+	r.selectCopied = ""
 	now := at
 	if now.IsZero() {
 		now = time.Now()
@@ -7389,7 +7400,8 @@ func (r *Renderer) ViewportSelectEnd(col, row int) bool {
 // reports where in the overlay it landed, so the modal can place its own caret
 // there. A click whose press was made in a view since left does nothing, and a
 // release with no press on record is taken at its own cell on the screen shown
-// at `at`. A drag copies the selection.
+// at `at`. A drag copies the selection, unless an edit would take it (see
+// selectionIsEditTargetLocked).
 func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 	if r == nil {
 		return viewportClick{}
@@ -7457,6 +7469,14 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 		return click
 	}
 	text := r.extractSelectedTextLocked()
+	if r.selectionIsEditTargetLocked() {
+		// Text selected in a field is the target of the edit that follows —
+		// Delete, a typed key or a paste replaces it — so, as in a native text
+		// field, selecting it leaves the clipboard alone: copying here would put
+		// the selection where the user's own copy was, and the paste that
+		// follows the Delete would bring the deleted text back.
+		text = ""
+	}
 	// Persist the selection: keep the anchors so the highlight stays after the
 	// text is captured - matching a native terminal where a double/triple-click
 	// or drag selection remains highlighted until the user clicks elsewhere. The
@@ -7467,15 +7487,76 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 	// the caret; that is no longer needed now that cursor-hide keys off
 	// selectDragging instead of the selection anchors.
 	r.vpHoverRow = -1
+	r.selectCopied = text
 	if text != "" {
-		r.setClipNotification(fmt.Sprintf("Copied %d chars to clipboard", len([]rune(text))))
+		r.setCopiedNotificationLocked(text)
 	}
 	r.paintViewportLocked()
 	r.mu.Unlock()
 
-	if text == "" {
-		return viewportClick{}
+	if text != "" {
+		r.writeClipboard(text)
 	}
+	return viewportClick{}
+}
+
+// HasSelection reports whether text is selected in the viewport: a drag, or a
+// double- or triple-click, left anchors that stay highlighted until a click, a
+// scroll or a reset drops them.
+func (r *Renderer) HasSelection() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.hasSelectionLocked()
+}
+
+// hasSelectionLocked is HasSelection for a caller holding r.mu.
+func (r *Renderer) hasSelectionLocked() bool {
+	return r.viewportMode && r.selectDidDrag && r.selectStartRow >= 0 && r.selectEndRow >= 0
+}
+
+// CopySelectionForCtrlC is Ctrl+C with text selected, which copies instead of
+// cancelling, as in Claude Code: a selection its release already copied is
+// dropped and its copy announced again; any other — one in a field, which the
+// release left off the clipboard — is copied and then dropped. It reports
+// whether there was a selection, in which case Ctrl+C does nothing else.
+func (r *Renderer) CopySelectionForCtrlC() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	if !r.hasSelectionLocked() {
+		r.mu.Unlock()
+		return false
+	}
+	copied := r.selectCopied
+	text := ""
+	if copied == "" {
+		text = r.extractSelectedTextLocked()
+	}
+	r.selectClearLocked()
+	r.vpHoverRow = -1
+	switch {
+	case copied != "":
+		r.setCopiedNotificationLocked(copied)
+	case text != "":
+		r.setCopiedNotificationLocked(text)
+	}
+	r.paintViewportLocked()
+	r.mu.Unlock()
+
+	if text != "" {
+		r.writeClipboard(text)
+	}
+	return true
+}
+
+// writeClipboard puts text on the system clipboard, falling back to OSC 52 when
+// no clipboard tool is available. It runs in the background: the helper is a
+// process, and a key or a mouse release must not wait for it.
+func (r *Renderer) writeClipboard(text string) {
 	go func() {
 		clipErr := clipboardWriteText(context.Background(), text)
 		if clipErr != nil {
@@ -7484,7 +7565,22 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 			r.mu.Unlock()
 		}
 	}()
-	return viewportClick{}
+}
+
+// setCopiedNotificationLocked announces that text went to the clipboard.
+// Caller holds r.mu.
+func (r *Renderer) setCopiedNotificationLocked(text string) {
+	r.setClipNotification(copiedNotice(text))
+}
+
+// copiedNotice is the notice for text that went to the clipboard.
+func copiedNotice(text string) string {
+	n := len([]rune(text))
+	unit := "chars"
+	if n == 1 {
+		unit = "char"
+	}
+	return fmt.Sprintf("Copied %d %s to clipboard", n, unit)
 }
 
 func (r *Renderer) ViewportSelectClear() {
@@ -7499,6 +7595,7 @@ func (r *Renderer) ViewportSelectClear() {
 func (r *Renderer) selectClearLocked() {
 	r.selectDidDrag = false
 	r.selectDragging = false
+	r.selectCopied = ""
 	r.selectStartRow = -1
 	r.selectEndRow = -1
 	r.selectStartCol = -1
@@ -7538,6 +7635,37 @@ func (r *Renderer) composerSelectionRunesLocked() (start, end int, ok bool) {
 		blockRow(r.selectStartRow), r.selectStartCol,
 		blockRow(r.selectEndRow), r.selectEndCol,
 	)
+}
+
+// selectionIsEditTargetLocked reports whether the selection covers text an edit
+// key would take: part of the composer's draft, or of the field of the modal
+// that owns the overlay. Caller holds r.mu.
+func (r *Renderer) selectionIsEditTargetLocked() bool {
+	if r.overlayActive {
+		if r.overlayFieldTakes == nil {
+			return false
+		}
+		startLine, startCol, endLine, endCol, ok := r.overlaySelectionLocked()
+		return ok && r.overlayFieldTakes(startLine, startCol, endLine, endCol)
+	}
+	_, _, ok := r.composerSelectionRunesLocked()
+	return ok
+}
+
+// SwapOverlayFieldProbe installs takes as the open modal's field probe and
+// returns the one it replaces, which the modal puts back when it closes:
+// modals nest. takes reports whether an edit key would take part of a selection
+// over the overlay cells OverlaySelection reports. It is called with r.mu held,
+// so it may read only the modal's own state, never the renderer's.
+func (r *Renderer) SwapOverlayFieldProbe(takes func(startLine, startCol, endLine, endCol int) bool) func(startLine, startCol, endLine, endCol int) bool {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	previous := r.overlayFieldTakes
+	r.overlayFieldTakes = takes
+	return previous
 }
 
 // publishComposerSelectionLocked hands the composer's current selection to the
@@ -7871,6 +7999,31 @@ func (r *Renderer) setClipNotification(text string) {
 		r.clipNotification = ""
 		r.paintViewportLocked()
 	})
+}
+
+// ctrlCExitHintText replaces the footer's left side while a Ctrl+C that had
+// nothing to interrupt or clear waits for the second press, which exits.
+const ctrlCExitHintText = "Press Ctrl-C again to exit"
+
+// ShowCtrlCExitHint shows ctrlCExitHintText in the footer for d, the time a
+// second Ctrl+C has to exit, and takes it down when d is up.
+func (r *Renderer) ShowCtrlCExitHint(d time.Duration) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ctrlCExitHint = true
+	if r.ctrlCExitTimer != nil {
+		r.ctrlCExitTimer.Stop()
+	}
+	r.ctrlCExitTimer = time.AfterFunc(d, func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.ctrlCExitHint = false
+		r.paintViewportLocked()
+	})
+	r.paintViewportLocked()
 }
 
 // clipboardImageHintText is the composer hint shown while the clipboard holds

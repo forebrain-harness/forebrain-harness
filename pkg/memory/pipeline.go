@@ -363,6 +363,12 @@ func serializeTranscriptForMemories(messages []llm.Message) (string, error) {
 				continue
 			}
 		}
+		// The reasoning a message carries back to its model (encrypted items
+		// included) is not part of the conversation the memory agent reads.
+		if strings.HasPrefix(message.Name, llm.Prefix) {
+			message.Name = ""
+		}
+		message.ReasoningModel = ""
 		message.IsMeta = false
 		message.Ephemeral = false
 		message.ToolExecutionTiming = nil

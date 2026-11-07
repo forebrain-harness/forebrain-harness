@@ -122,6 +122,11 @@ DRIP_DELAY = float(sys.argv[4]) if len(sys.argv) > 4 else 0.6
 # in it.
 REPLY_DELAY = float(os.environ.get("FAKE_REPLY_DELAY") or 0)
 
+# FAKE_TOOL_ONLY=1 sends a scripted mode's tool call with no text beside it —
+# the shape GLM answers most tool-loop steps with. Without it the call carries
+# a "calling <name>" body, which starts the response on its own.
+TOOL_ONLY = os.environ.get("FAKE_TOOL_ONLY") == "1"
+
 # The tool calls a scripted mode hands out, in order. Each request past the end
 # of its list is answered in plain text, so a cancelled gate leaves the run
 # stopped rather than looping.
@@ -1001,7 +1006,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.write_raw(b"")
             return
         name, arguments = TOOL_SCRIPT[nth]
-        self.write_event(chunk(delta={
+        delta = {
             "role": "assistant",
             "content": "calling %s" % name,
             "tool_calls": [{
@@ -1010,7 +1015,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "type": "function",
                 "function": {"name": name, "arguments": arguments},
             }],
-        }))
+        }
+        if TOOL_ONLY:
+            del delta["content"]
+        self.write_event(chunk(delta=delta))
         self.write_event(chunk(finish="tool_calls"))
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")

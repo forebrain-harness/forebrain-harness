@@ -56,7 +56,7 @@ func (s *SessionStore) AppendMessageSequenceForRun(ctx context.Context, sessionI
 	plan := planTranscriptAppend(storedTranscriptMessages(rows), canonical)
 	for _, completion := range plan.completions {
 		text := storedContent(completion.message)
-		if err := s.UpdateMessageContentAndParts(ctx, tx, completion.rowID, text, MessagePartsJSON(completion.message, text)); err != nil {
+		if err := s.UpdateMessageContentAndParts(ctx, tx, completion.rowID, text, MessagePartsJSON(withReasoningModel(completion.message, model), text)); err != nil {
 			return err
 		}
 	}
@@ -146,7 +146,7 @@ func (s *SessionStore) appendMessage(ctx context.Context, q dbtx, sessionID, run
 			Role:       role,
 			Visibility: messageVisible,
 			Content:    content,
-			PartsJSON:  MessagePartsJSON(msg, content),
+			PartsJSON:  MessagePartsJSON(withReasoningModel(msg, model), content),
 			Model:      strings.TrimSpace(model),
 			UsageJSON:  strings.TrimSpace(usageJSON),
 			ToolStepID: toolStepID,
@@ -155,6 +155,16 @@ func (s *SessionStore) appendMessage(ctx context.Context, q dbtx, sessionID, run
 		},
 	)
 	return err
+}
+
+// withReasoningModel stamps the row's model on reasoning a message carries
+// without naming the model that wrote it, so a later turn sends it back to that
+// model only.
+func withReasoningModel(msg llm.Message, model string) llm.Message {
+	if strings.HasPrefix(msg.Name, llm.Prefix) && strings.TrimSpace(msg.ReasoningModel) == "" {
+		msg.ReasoningModel = strings.TrimSpace(model)
+	}
+	return msg
 }
 
 // toolMessageExecutionTiming reads a tool result's own execution window into
@@ -282,6 +292,12 @@ func assistantRowNeedsCompletion(stored, finished llm.Message) bool {
 		return true
 	}
 	if sameToolCallIDs(stored.ToolCalls, finished.ToolCalls) && messageText(stored) != messageText(finished) {
+		return true
+	}
+	// A row written when the response's first call started holds the calls
+	// and the text, but not the reasoning, which the finished message alone
+	// carries for the model.
+	if strings.HasPrefix(finished.Name, llm.Prefix) && stored.Name != dbx.ValidText(finished.Name) {
 		return true
 	}
 	return false

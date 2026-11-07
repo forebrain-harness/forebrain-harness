@@ -32,6 +32,16 @@ const (
 	// (ParseMessage returns false for the role), so this part only lets a
 	// replay draw "Thought for Ns" the way the live surface did.
 	PartTypeReasoningTiming = "reasoning_timing"
+	// PartTypeReasoningCarry keeps the reasoning an assistant message carries
+	// for the model (llm.Message.Name's carry, and the model that wrote it),
+	// so the next turn's history sends the model its own thinking back
+	// exactly as the turn that produced it did. Without it every turn
+	// rebuilt the history with that thinking stripped: a model that keeps
+	// its reasoning across turns read a conversation in which it had never
+	// thought and stopped thinking, and the prefix the provider had cached
+	// forked at the first reasoning message of the previous turn. It never
+	// reaches a surface.
+	PartTypeReasoningCarry = "reasoning_carry"
 )
 
 func stringField(m map[string]any, key string) string {
@@ -85,9 +95,21 @@ type attachmentParsePart struct {
 // (OpenAI/DeepSeek reasoning summaries).  Anthropic thinking blocks are
 // converted to fenced text parts upstream and appear as normal text content
 // rather than a separate field.
+//
+// Only the current turn is read — the assistant messages after the last user
+// message — because the history before it carries every earlier turn's
+// reasoning back to the model too (PartTypeReasoningCarry), and that is not
+// this turn's thinking.
 func ExtractReasoningText(messages []llm.Message) string {
+	start := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if strings.TrimSpace(messages[i].Role) == llm.RoleUser && !messages[i].IsMeta {
+			start = i + 1
+			break
+		}
+	}
 	var chunks []string
-	for _, msg := range messages {
+	for _, msg := range messages[start:] {
 		if strings.TrimSpace(msg.Role) != llm.RoleAssistant {
 			continue
 		}
@@ -299,6 +321,13 @@ func MessagePartsJSON(msg llm.Message, fallbackText string) string {
 	}
 	switch strings.TrimSpace(msg.Role) {
 	case llm.RoleAssistant:
+		if strings.HasPrefix(msg.Name, llm.Prefix) {
+			carry := map[string]any{"type": PartTypeReasoningCarry, "carry": msg.Name}
+			if model := strings.TrimSpace(msg.ReasoningModel); model != "" {
+				carry["model"] = model
+			}
+			parts = append(parts, carry)
+		}
 		if citation := msg.MemoryCitation; citation != nil && (len(citation.Entries) > 0 || len(citation.RolloutIDs) > 0) {
 			parts = append(parts, map[string]any{
 				"type":        PartTypeMemoryCitation,
@@ -378,6 +407,7 @@ func ParseMessage(role string, content string, partsJSON string) (llm.Message, b
 		if citation, found := ParseMemoryCitationPart(partsJSON); found {
 			msg.MemoryCitation = citation
 		}
+		msg.Name, msg.ReasoningModel = parseReasoningCarryPart(partsJSON)
 		return msg, true
 	case llm.RoleTool:
 		toolCallID = strings.TrimSpace(toolCallID)
@@ -423,6 +453,35 @@ func ParseMemoryCitationPart(partsJSON string) (*llm.MemoryCitation, bool) {
 		return &llm.MemoryCitation{Entries: stored.Entries, RolloutIDs: stored.RolloutIDs}, true
 	}
 	return nil, false
+}
+
+// parseReasoningCarryPart returns the reasoning carry an assistant row keeps
+// for the model and the model that wrote it; both empty when the row keeps
+// none (every row stored before the part existed).
+func parseReasoningCarryPart(partsJSON string) (carry, model string) {
+	raw := strings.TrimSpace(partsJSON)
+	if raw == "" || raw == "[]" || !strings.Contains(raw, PartTypeReasoningCarry) {
+		return "", ""
+	}
+	var parts []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &parts); err != nil {
+		return "", ""
+	}
+	for _, part := range parts {
+		var stored struct {
+			Type  string `json:"type"`
+			Carry string `json:"carry"`
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(part, &stored); err != nil || strings.TrimSpace(stored.Type) != PartTypeReasoningCarry {
+			continue
+		}
+		if !strings.HasPrefix(stored.Carry, llm.Prefix) {
+			return "", ""
+		}
+		return stored.Carry, strings.TrimSpace(stored.Model)
+	}
+	return "", ""
 }
 
 // ParseToolDisplayPart extracts the provider-invisible live rendering payload

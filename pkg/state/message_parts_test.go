@@ -191,6 +191,59 @@ func TestMessagePartsRoundTripPreservesMemoryCitation(t *testing.T) {
 	}
 }
 
+// The reasoning an assistant message carries back to its model round-trips with
+// the model that wrote it, and stays out of what the message says: the text and
+// the calls read back exactly as they were. A Name that is not a carry is a
+// participant name, which the store never kept and still does not.
+func TestMessagePartsRoundTripPreservesReasoningCarry(t *testing.T) {
+	original := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")}, llm.ToolCall{ID: "call-1", Type: "function", Function: llm.FunctionCall{Name: "shell", Arguments: "{}"}})
+	original.Name = llm.Prefix + " leading space kept\nsecond line "
+	original.ReasoningModel = "glm-5.3-flash"
+	partsJSON := MessagePartsJSON(original, original.TextContent())
+	parsed, ok := ParseMessage(original.Role, original.TextContent(), partsJSON)
+	if !ok || parsed.Name != original.Name || parsed.ReasoningModel != "glm-5.3-flash" {
+		t.Fatalf("carry after round trip: name=%q model=%q parts=%s", parsed.Name, parsed.ReasoningModel, partsJSON)
+	}
+	if parsed.TextContent() != "answer" || len(parsed.Parts) != 1 || len(parsed.ToolCalls) != 1 {
+		t.Fatalf("carry leaked into the message body: %+v", parsed)
+	}
+
+	named := llm.AssistantMessage([]llm.ContentPart{llm.Text("hi")})
+	named.Name = "helper"
+	partsJSON = MessagePartsJSON(named, named.TextContent())
+	if strings.Contains(partsJSON, PartTypeReasoningCarry) {
+		t.Fatalf("a participant name was stored as reasoning: %s", partsJSON)
+	}
+	if parsed, _ := ParseMessage(named.Role, named.TextContent(), partsJSON); parsed.Name != "" {
+		t.Fatalf("parsed name = %q, want none", parsed.Name)
+	}
+}
+
+// The reasoning a turn falls back to reading is that turn's alone: the history
+// before its user message carries every earlier turn's reasoning to the model
+// too, and that is not what this turn thought.
+func TestExtractReasoningTextReadsTheCurrentTurnOnly(t *testing.T) {
+	carry := func(text string) llm.Message {
+		m := llm.AssistantMessage([]llm.ContentPart{llm.Text("…")})
+		m.Name = llm.Prefix + text
+		return m
+	}
+	meta := llm.UserMessage(llm.Text("reminder"))
+	meta.IsMeta = true
+	messages := []llm.Message{
+		llm.UserMessage(llm.Text("first")),
+		carry("earlier turn"),
+		llm.UserMessage(llm.Text("second")),
+		carry("one"),
+		llm.ToolResultMessage("call-1", llm.Text("ok")),
+		meta,
+		carry("two"),
+	}
+	if got := ExtractReasoningText(messages); got != "one\ntwo" {
+		t.Fatalf("reasoning = %q, want this turn's one and two", got)
+	}
+}
+
 func findImageBase64Part(parts []llm.ContentPart) (llm.ContentPart, bool) {
 	for _, p := range parts {
 		if p.Type == llm.ContentTypeImageBase64 {

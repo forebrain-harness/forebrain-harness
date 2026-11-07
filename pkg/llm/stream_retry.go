@@ -127,9 +127,17 @@ func (r *streamRetryLLM) Execute(ctx context.Context, messages []Message, tools 
 	if r.cfg.notify != nil {
 		// Every return path ends the retry in flight, if one is.
 		defer clearPending()
-		// The retry is over the moment the retried request produces anything.
+		// The retry is over the moment the retried request produces anything,
+		// a tool call included: a reply made only of calls fires the response
+		// start without any delta.
 		if sink := StreamSinkFrom(ctx); sink != nil {
 			wrapped := *sink
+			if down := wrapped.OnResponseStarted; down != nil {
+				wrapped.OnResponseStarted = func() {
+					clearPending()
+					down()
+				}
+			}
 			if down := wrapped.OnDelta; down != nil {
 				wrapped.OnDelta = func(text string) {
 					if text != "" {

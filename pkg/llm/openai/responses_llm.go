@@ -734,7 +734,7 @@ func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []l
 					}
 					input = append(input, responses.ResponseInputItemParamOfFunctionCall(llm.SanitizeToolCallArguments(tc.Function.Arguments), tc.ID, tc.Function.Name))
 				}
-			} else if items := responseReasoningInputItemsFromMessage(msg); len(items) > 0 {
+			} else if items := responseReasoningInputItemsFromMessage(msg, c.model); len(items) > 0 {
 				input = append(input, items...)
 			} else if content := msg.TextContent(); content != "" {
 				input = append(input, responses.ResponseInputItemParamOfMessage(content, responses.EasyInputMessageRoleAssistant))
@@ -1227,6 +1227,7 @@ func (c *openAIResponsesLLM) executeSyncDetail(ctx context.Context, params respo
 	}
 	if carry := llm.Encode(reasoningItems); carry != "" {
 		msg.Name = carry
+		msg.ReasoningModel = c.model
 	}
 	result := &llm.Result{Message: &msg}
 	result.Usage = openAIUsage(
@@ -1383,6 +1384,9 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 				continue
 			}
 			if added.Item.Type == "function_call" {
+				// A call is model output like a word is: a response that
+				// answers with calls alone has started at its first call.
+				llm.NotifyResponseStarted(sink, &responseStarted)
 				tc := llm.ToolCall{
 					ID:   added.Item.CallID,
 					Type: "function",
@@ -1576,6 +1580,7 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 	}
 	if carry := llm.Encode(reasoningItems); carry != "" {
 		msg.Name = carry
+		msg.ReasoningModel = c.model
 	}
 	return &llm.Result{Message: &msg, Usage: usage}, nil
 }
@@ -1661,7 +1666,13 @@ func ensureReasoningEncryptedContentIncluded(params *responses.ResponseNewParams
 	params.Include = append(params.Include, responses.ResponseIncludableReasoningEncryptedContent)
 }
 
-func responseReasoningInputItemsFromMessage(msg llm.Message) []responses.ResponseInputItemUnionParam {
+// responseReasoningInputItemsFromMessage replays the reasoning items msg
+// carries, to the model that produced them only: encrypted items are bound to
+// it, and another model refuses them.
+func responseReasoningInputItemsFromMessage(msg llm.Message, model string) []responses.ResponseInputItemUnionParam {
+	if !llm.ReplaysReasoningTo(msg, model) {
+		return nil
+	}
 	payload, ok := llm.Decode(msg.Name)
 	if !ok {
 		return nil

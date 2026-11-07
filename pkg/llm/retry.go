@@ -196,12 +196,20 @@ func (r *retryLLM) Execute(ctx context.Context, messages []Message, tools []*Too
 		// covers success, a rejected error, exhaustion and cancellation.
 		defer clearPending()
 		// The retry is over the moment the retried request produces anything:
-		// the first non-empty delta clears the pending notice early, so a
-		// surface waiting on it recovers at the first token, not at the
-		// response's end. Only callbacks that were non-nil are wrapped — a
-		// muted context holds nil OnDelta/OnReasoningDelta and keeps them.
+		// the first non-empty delta — or the response start, which a reply
+		// made only of tool calls fires without any delta — clears the pending
+		// notice early, so a surface waiting on it recovers at the first
+		// token, not at the response's end. Only callbacks that were non-nil
+		// are wrapped — a muted context holds nil OnDelta/OnReasoningDelta and
+		// keeps them.
 		if sink := StreamSinkFrom(ctx); sink != nil {
 			wrapped := *sink
+			if down := wrapped.OnResponseStarted; down != nil {
+				wrapped.OnResponseStarted = func() {
+					clearPending()
+					down()
+				}
+			}
 			if down := wrapped.OnDelta; down != nil {
 				wrapped.OnDelta = func(text string) {
 					if text != "" {
@@ -353,6 +361,19 @@ func Decode(name string) (Payload, bool) {
 		return Payload{}, false
 	}
 	return payload, true
+}
+
+// ReplaysReasoningTo reports whether the reasoning m carries may be sent back
+// to model: m carries some, and either the model that produced it is the one
+// being asked or it was recorded without a model. The rule depends on the
+// message and the request's model alone, so a conversation renders the same
+// bytes on every request to one model and its cached prefix holds.
+func ReplaysReasoningTo(m Message, model string) bool {
+	if !strings.HasPrefix(m.Name, Prefix) {
+		return false
+	}
+	producer := strings.TrimSpace(m.ReasoningModel)
+	return producer == "" || strings.EqualFold(producer, strings.TrimSpace(model))
 }
 
 func ExtractSummary(name string) string {

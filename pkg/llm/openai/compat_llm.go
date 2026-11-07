@@ -931,8 +931,11 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				return nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn+roundIn), int64(tokOut+roundOut), int64(tokCached+roundCached)), refusedRoundUsage(roundIn, roundOut, roundCached))
 			}
 			if len(resp.Choices) > 0 {
+				// A tool-call fragment is model output like a word is: a
+				// response that answers with calls alone has started the
+				// moment its first fragment arrives.
 				delta := resp.Choices[0].Delta
-				if delta.ReasoningContent != "" || delta.Content != "" {
+				if delta.ReasoningContent != "" || delta.Content != "" || len(delta.ToolCalls) > 0 {
 					llm.NotifyResponseStarted(sink, &responseStarted)
 				}
 			}
@@ -1106,7 +1109,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	if len(toolBuf) > 0 {
 		openMsg.ToolCalls = toolBuf
 	}
-	msg := compatMessageFromOpenAI(openMsg)
+	msg := compatMessageFromOpenAI(openMsg, c.model)
 	out := &llm.Result{Message: &msg}
 	// Occupancy is the settled round's prompt; the output is every round's,
 	// because the model really did produce it and this Result's answer carries
@@ -1127,7 +1130,7 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 	// that comes back can be attributed: fork (our prefix changed) vs
 	// anomaly (provider-side miss). See pkg/llm/prefix_fingerprint.go.
 	prefix := llm.BeginPrefixObservation(ctx, c.model, tools, messages)
-	msgs := compatMessagesToOpenAI(messages)
+	msgs := compatMessagesToOpenAI(messages, c.model)
 	var otools []openaiclient.Tool
 	if len(tools) > 0 {
 		otools = compatOpenAITools(tools)
@@ -1155,7 +1158,7 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 			prefix.Finish(nil)
 			return result, err
 		}
-		msg := compatMessageFromOpenAI(openMsg)
+		msg := compatMessageFromOpenAI(openMsg, c.model)
 		result := &llm.Result{Message: &msg, Usage: usage, BilledUsage: billed}
 		result = finishUsage(result, finish)
 		prefix.Finish(resultBilledUsage(result))
@@ -1243,7 +1246,7 @@ func (c *openAICompatLLM) ExecuteStructured(ctx context.Context, messages []llm.
 	}
 	ctx, finish := llm.WithRawCacheUsage(ctx)
 	prefix := llm.BeginPrefixObservation(ctx, c.model, nil, messages)
-	req, err := openAIChatCompletionRequestMerged(c.model, c.temperature, c.maxTokens, c.paramsJSON, compatMessagesToOpenAI(messages), nil)
+	req, err := openAIChatCompletionRequestMerged(c.model, c.temperature, c.maxTokens, c.paramsJSON, compatMessagesToOpenAI(messages, c.model), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1279,7 +1282,7 @@ func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req op
 	if err != nil {
 		return nil, err
 	}
-	msg := compatMessageFromOpenAI(openMsg)
+	msg := compatMessageFromOpenAI(openMsg, c.model)
 	return &llm.Result{Message: &msg, Usage: usage, BilledUsage: billed}, nil
 }
 
@@ -1394,22 +1397,29 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 // earlier message and re-bills every token after it, on every step of every
 // tool loop. A selection like "carry the reasoning of the last assistant
 // message that has any" is exactly such a rule: each new reasoning block
-// silently rewrites the previous holder.
-func compatMessagesToOpenAI(messages []llm.Message) []openaiclient.ChatCompletionMessage {
+// silently rewrites the previous holder. The request's model is the one other
+// input, and it is the same for every message of a request.
+func compatMessagesToOpenAI(messages []llm.Message, model string) []openaiclient.ChatCompletionMessage {
 	out := make([]openaiclient.ChatCompletionMessage, 0, len(messages))
 	for _, m := range messages {
-		out = append(out, compatMessageToOpenAI(m))
+		out = append(out, compatMessageToOpenAI(m, model))
 	}
 	return out
 }
 
-func compatMessageToOpenAI(m llm.Message) openaiclient.ChatCompletionMessage {
+func compatMessageToOpenAI(m llm.Message, model string) openaiclient.ChatCompletionMessage {
 	msg := openaiclient.ChatCompletionMessage{
 		Role:       compatRoleToOpenAI(m.Role),
 		ToolCallID: m.ToolCallID,
 	}
 	if strings.HasPrefix(m.Name, openAIReasoningCarryPrefix) {
-		msg.ReasoningContent = strings.TrimPrefix(m.Name, openAIReasoningCarryPrefix)
+		// The carry is reasoning, never a participant name. It goes back as
+		// reasoning_content only to the model that wrote it, and only when it
+		// is plain text: a Responses payload is another protocol's encrypted
+		// items, not something this model ever said.
+		if _, isPayload := llm.Decode(m.Name); !isPayload && llm.ReplaysReasoningTo(m, model) {
+			msg.ReasoningContent = strings.TrimPrefix(m.Name, openAIReasoningCarryPrefix)
+		}
 		msg.Name = ""
 	} else {
 		msg.Name = m.Name
@@ -1474,7 +1484,9 @@ func compatRoleToOpenAI(role string) string {
 	return role
 }
 
-func compatMessageFromOpenAI(m openaiclient.ChatCompletionMessage) llm.Message {
+// compatMessageFromOpenAI converts model's answer. Reasoning it carries is
+// stamped with model, the only model it is ever sent back to.
+func compatMessageFromOpenAI(m openaiclient.ChatCompletionMessage, model string) llm.Message {
 	msg := llm.Message{
 		Role:       m.Role,
 		ToolCallID: m.ToolCallID,
@@ -1526,6 +1538,9 @@ func compatMessageFromOpenAI(m openaiclient.ChatCompletionMessage) llm.Message {
 	if len(msg.Parts) == 0 && len(msg.ToolCalls) == 0 && hasReasoning {
 		msg.Parts = []llm.ContentPart{llm.Text("```thinking\n" + reasoning + "\n```")}
 		msg.Name = ""
+	}
+	if strings.HasPrefix(msg.Name, openAIReasoningCarryPrefix) {
+		msg.ReasoningModel = model
 	}
 	return msg
 }

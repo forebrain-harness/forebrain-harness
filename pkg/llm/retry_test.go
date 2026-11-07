@@ -400,6 +400,54 @@ func TestNewRetry_ClearedOnFirstDeltaAfterRetry(t *testing.T) {
 	}
 }
 
+// A retried request that answers with a tool call alone streams no delta: its
+// response start is what ends the retry, so the cleared notice fires there —
+// before the downstream start — not when the response returns.
+func TestNewRetry_ClearedOnToolOnlyReplyAfterRetry(t *testing.T) {
+	var seq []string
+	boom := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("i/o timeout")}
+	calls := 0
+	inner := &stubLLM{fn: func(ctx context.Context, _ []Message, _ []*Tool) (*Result, error) {
+		calls++
+		if calls == 1 {
+			return nil, boom
+		}
+		call := ToolCall{ID: "call_1", Type: ToolTypeFunction, Function: FunctionCall{Name: "shell", Arguments: "{}"}}
+		if sink := StreamSinkFrom(ctx); sink != nil {
+			sink.OnResponseStarted()
+			sink.OnToolCallReady(call)
+		}
+		seq = append(seq, "returned")
+		msg := AssistantMessage(nil, call)
+		return &Result{Message: &msg}, nil
+	}}
+
+	mw, err := NewRetry(3,
+		WithInitialBackoff(0),
+		WithShouldRetry(IsRetryableNetworkError),
+		WithRetryNotify(func(_ context.Context, tr TransportRetry) {
+			if tr.Cleared {
+				seq = append(seq, "cleared")
+				return
+			}
+			seq = append(seq, "retry 1")
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewRetry: %v", err)
+	}
+	sink := &StreamSink{
+		OnResponseStarted: func() { seq = append(seq, "started") },
+		OnToolCallReady:   func(ToolCall) { seq = append(seq, "ready") },
+	}
+	if _, err := Use(inner, mw).Execute(WithStreamSink(context.Background(), sink), nil, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := strings.Join(seq, "|"); got != "retry 1|cleared|started|ready|returned" {
+		t.Fatalf("sequence = %q, want retry 1, cleared, started, ready, returned and nothing after", got)
+	}
+}
+
 // The streaming shape of exhaustion: every attempt streams one delta before
 // dying, so each retry's Cleared fires at the retried attempt's first token
 // and the final attempt's own death is announced by nothing else — the

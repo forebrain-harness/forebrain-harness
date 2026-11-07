@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -2584,5 +2585,130 @@ func TestOverlayAcceptKeepsComposerAttachmentThroughSeedEcho(t *testing.T) {
 	state.syncAttachmentsWithDraft("")
 	if got := len(state.composer.Attachments); got != 0 {
 		t.Fatalf("an empty draft clears attachments, got %d left", got)
+	}
+}
+
+// TestReadRawInputEventsReadsCmdCFromAKeyReport: Cmd+C never arrives as a byte
+// — Terminal.app keeps it and other terminals report it only as a CSI-u key
+// report — so the report is what a macOS copy has to be read from. With a
+// selection it copies; with none it does nothing at all, never Ctrl+C's clear.
+func TestReadRawInputEventsReadsCmdCFromAKeyReport(t *testing.T) {
+	var selected atomic.Bool
+	probe := selected.Load
+	viewportSelectionProbe.Store(&probe)
+	t.Cleanup(func() { viewportSelectionProbe.Store(nil) })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe error: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+	events := readRawInputEvents(context.Background(), r, io.Discard, stubRawInputController{}, nil)
+	const draft = "hello"
+	if _, err := w.Write([]byte(draft)); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+
+	selected.Store(true)
+	if _, err := w.Write([]byte("\x1b[99;9u")); err != nil {
+		t.Fatalf("write cmd+c: %v", err)
+	}
+	if ev := nextNonDraftEvent(t, events); ev.kind != inputEventHotkey || ev.hotkey != hotkeyCopySelection {
+		t.Fatalf("cmd+c with text selected should copy it, got %#v", ev)
+	}
+
+	// Nothing selected: the key is spent, not turned into Ctrl+C's clear.
+	selected.Store(false)
+	if _, err := w.Write([]byte("\x1b[99;9u")); err != nil {
+		t.Fatalf("write cmd+c: %v", err)
+	}
+	if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatalf("write x: %v", err)
+	}
+	select {
+	case ev := <-events:
+		if ev.kind == inputEventHotkey {
+			t.Fatalf("cmd+c with nothing selected must do nothing, got %#v", ev)
+		}
+		if ev.kind == inputEventDraft && ev.draft != draft+"x" {
+			t.Fatalf("cmd+c with nothing selected must leave the draft alone, got %q", ev.draft)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("typing after cmd+c produced nothing")
+	}
+}
+
+// TestReadRawInputEventsCtrlCAsAKeyReport: a terminal on the kitty keyboard
+// protocol reports Ctrl+C as a key report too, and it must keep Ctrl+C's
+// meaning — with a selection it copies, without one it clears the draft.
+func TestReadRawInputEventsCtrlCAsAKeyReport(t *testing.T) {
+	var selected atomic.Bool
+	probe := selected.Load
+	viewportSelectionProbe.Store(&probe)
+	t.Cleanup(func() { viewportSelectionProbe.Store(nil) })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe error: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+	events := readRawInputEvents(context.Background(), r, io.Discard, stubRawInputController{}, nil)
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+
+	selected.Store(true)
+	if _, err := w.Write([]byte("\x1b[99;5u")); err != nil {
+		t.Fatalf("write ctrl+c report: %v", err)
+	}
+	if ev := nextNonDraftEvent(t, events); ev.kind != inputEventHotkey || ev.hotkey != hotkeyCopySelection {
+		t.Fatalf("ctrl+c with text selected should copy it, got %#v", ev)
+	}
+
+	selected.Store(false)
+	if _, err := w.Write([]byte("\x1b[99;5u")); err != nil {
+		t.Fatalf("write ctrl+c report: %v", err)
+	}
+	if ev := nextNonDraftEvent(t, events); ev.kind != inputEventHotkey || ev.hotkey != hotkeyClearInput {
+		t.Fatalf("ctrl+c with nothing selected should clear the draft, got %#v", ev)
+	}
+}
+
+// TestReadRawInputEventsCtrlCCopiesASelection is the reader's half of Ctrl+C
+// over selected text: it becomes the copy and leaves the draft it would
+// otherwise have cleared, and with nothing selected it is Ctrl+C again.
+func TestReadRawInputEventsCtrlCCopiesASelection(t *testing.T) {
+	var selected atomic.Bool
+	selected.Store(true)
+	probe := selected.Load
+	viewportSelectionProbe.Store(&probe)
+	t.Cleanup(func() { viewportSelectionProbe.Store(nil) })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe error: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+	events := readRawInputEvents(context.Background(), r, io.Discard, stubRawInputController{}, nil)
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+	if _, err := w.Write([]byte{0x03}); err != nil {
+		t.Fatalf("write ctrl+c: %v", err)
+	}
+	if ev := nextNonDraftEvent(t, events); ev.kind != inputEventHotkey || ev.hotkey != hotkeyCopySelection {
+		t.Fatalf("ctrl+c with text selected should copy it, got %#v", ev)
+	}
+
+	selected.Store(false)
+	if _, err := w.Write([]byte{0x03}); err != nil {
+		t.Fatalf("write ctrl+c: %v", err)
+	}
+	// The draft the copy left is still there for this Ctrl+C to clear.
+	if ev := nextNonDraftEvent(t, events); ev.kind != inputEventHotkey || ev.hotkey != hotkeyClearInput {
+		t.Fatalf("ctrl+c with nothing selected should clear the draft, got %#v", ev)
 	}
 }

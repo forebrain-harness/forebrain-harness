@@ -1467,6 +1467,19 @@ func TestOpenAIResponsesLLMReplaysReasoningCarryAsReasoningInputItems(t *testing
 	}
 }
 
+// Encrypted reasoning items are bound to the model that produced them: they
+// replay to it, and another model is never sent them.
+func TestOpenAIResponsesReasoningCarryReplaysOnlyToItsOwnModel(t *testing.T) {
+	msg := llm.Message{Role: llm.RoleAssistant, Name: llm.Encode([]llm.Item{{ID: "rs_prev", EncryptedContent: "enc_prev"}})}
+	msg.ReasoningModel = "gpt-test"
+	if items := responseReasoningInputItemsFromMessage(msg, "gpt-test"); len(items) != 1 {
+		t.Fatalf("own model got %d reasoning items, want 1", len(items))
+	}
+	if items := responseReasoningInputItemsFromMessage(msg, "gpt-other"); len(items) != 0 {
+		t.Fatalf("another model got %d reasoning items, want none", len(items))
+	}
+}
+
 func TestOpenAIResponsesParamsOverlayDoesNotTranslateLegacyReasoningEffort(t *testing.T) {
 	overlay := normalizeOpenAIResponsesParamsOverlay(map[string]any{
 		"reasoning_effort": "high",
@@ -1936,6 +1949,38 @@ func TestOpenAIResponsesStreamToolReadyFallsBackToItemDone(t *testing.T) {
 	}
 	if ready[0].ID != "call_9" || ready[0].Function.Name != "noop" || ready[0].Function.Arguments != "{}" {
 		t.Fatalf("ready call = %+v", ready[0])
+	}
+}
+
+// A reply made only of a function call has started when that call's item is
+// added: the response start fires there, once, before the call is ready.
+func TestOpenAIResponsesStreamToolOnlyReplyStartsAtItsCall(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"id":"fc_9","type":"function_call","status":"in_progress","arguments":"","call_id":"call_9","name":"noop"},"output_index":0}`,
+		"",
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_9","output_index":0,"delta":"{}"}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"id":"fc_9","type":"function_call","status":"completed","arguments":"{}","call_id":"call_9","name":"noop"},"output_index":0}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		"",
+	}, "\n")
+	testLLM := newTestOpenAIResponsesLLM(t, func(req *http.Request) (*http.Response, error) {
+		return sseResponse(body), nil
+	})
+
+	var order []string
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnResponseStarted: func() { order = append(order, "started") },
+		OnToolCallReady:   func(call llm.ToolCall) { order = append(order, "ready:"+call.Function.Name) },
+		OnMessageStop:     func() { order = append(order, "message_stop") },
+	})
+	if _, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("test"))}, nil); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	want := []string{"started", "ready:noop", "message_stop"}
+	if !slices.Equal(order, want) {
+		t.Fatalf("callback order = %v\nwant             %v", order, want)
 	}
 }
 

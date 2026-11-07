@@ -156,6 +156,13 @@ type Message struct {
 	ToolCallID string
 	// Name is an optional participant name, used by some providers.
 	Name string
+	// ReasoningModel is the model that produced the reasoning an assistant
+	// message carries in Name (the Prefix carry). An adapter replays that
+	// reasoning only to the same model: another model never wrote it, and a
+	// provider that does not accept the field refuses the whole request.
+	// Empty is a carry recorded before this field existed, replayed as it
+	// always was.
+	ReasoningModel string `json:"reasoning_model,omitempty"`
 	// Origin names who wrote this message on the person's behalf — a heartbeat,
 	// a scheduled task, a peer session (state.MessageOrigin*). It is
 	// persistence metadata only: the turn's user row keeps it so a surface can

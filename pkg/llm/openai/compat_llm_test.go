@@ -51,7 +51,7 @@ func TestCompatMessageToOpenAIExcludesInternalToolTiming(t *testing.T) {
 	msg := llm.ToolResultMessage("call-1", llm.Text("done"))
 	msg.ToolExecutionTiming = &timing
 
-	projected := compatMessageToOpenAI(msg)
+	projected := compatMessageToOpenAI(msg, "test")
 	raw, err := json.Marshal(projected)
 	if err != nil {
 		t.Fatalf("marshal projected message: %v", err)
@@ -61,6 +61,41 @@ func TestCompatMessageToOpenAIExcludesInternalToolTiming(t *testing.T) {
 	}
 	if projected.ToolCallID != "call-1" {
 		t.Fatalf("tool_call_id=%q want call-1", projected.ToolCallID)
+	}
+}
+
+// Reasoning goes back as reasoning_content to the model that wrote it — the
+// answer it produced carries that model — and to nobody else: another model
+// never thought it, and a provider that does not accept the field refuses the
+// request. A carry recorded without a model replays as it always did; a
+// Responses payload is never compat reasoning.
+func TestCompatReasoningReplaysOnlyToItsOwnModel(t *testing.T) {
+	answer := compatMessageFromOpenAI(openaiclient.ChatCompletionMessage{
+		Role:             openaiclient.ChatMessageRoleAssistant,
+		ReasoningContent: "check the list first",
+		ToolCalls:        []openaiclient.ToolCall{{ID: "call-1", Type: "function", Function: openaiclient.FunctionCall{Name: "shell", Arguments: "{}"}}},
+	}, "glm-5.3-flash")
+	if answer.ReasoningModel != "glm-5.3-flash" {
+		t.Fatalf("answer reasoning model = %q, want glm-5.3-flash", answer.ReasoningModel)
+	}
+	if got := compatMessageToOpenAI(answer, "glm-5.3-flash").ReasoningContent; got != "check the list first" {
+		t.Fatalf("own model got reasoning %q", got)
+	}
+	other := compatMessageToOpenAI(answer, "deepseek-v4.1-flash")
+	if other.ReasoningContent != "" || other.Name != "" {
+		t.Fatalf("another model got reasoning %q name %q", other.ReasoningContent, other.Name)
+	}
+
+	legacy := answer
+	legacy.ReasoningModel = ""
+	if got := compatMessageToOpenAI(legacy, "deepseek-v4.1-flash").ReasoningContent; got != "check the list first" {
+		t.Fatalf("unstamped carry got reasoning %q, want it replayed as before", got)
+	}
+
+	payload := llm.AssistantMessage([]llm.ContentPart{llm.Text("hi")})
+	payload.Name = llm.Encode([]llm.Item{{ID: "rs_1", EncryptedContent: "opaque"}})
+	if got := compatMessageToOpenAI(payload, "test"); got.ReasoningContent != "" || got.Name != "" {
+		t.Fatalf("a Responses payload was projected: reasoning %q name %q", got.ReasoningContent, got.Name)
 	}
 }
 
@@ -1186,7 +1221,7 @@ func TestCompatMessageProjectionDoesNotDependOnLaterMessages(t *testing.T) {
 		llm.UserMessage(llm.Text("go on")),
 	}
 
-	projected := compatMessagesToOpenAI(messages)
+	projected := compatMessagesToOpenAI(messages, "test")
 	if len(projected) != len(messages) {
 		t.Fatalf("projected %d messages, want %d", len(projected), len(messages))
 	}
@@ -1202,7 +1237,7 @@ func TestCompatMessageProjectionDoesNotDependOnLaterMessages(t *testing.T) {
 
 	// Growing the conversation must leave every earlier message byte-identical.
 	grown := append(append([]llm.Message{}, messages...), carry("thinking three"))
-	after := compatMessagesToOpenAI(grown)
+	after := compatMessagesToOpenAI(grown, "test")
 	for i := range projected {
 		before, err := json.Marshal(projected[i])
 		if err != nil {
@@ -1616,6 +1651,33 @@ func TestCompatStreamToolCallReadyFollowsIndexBoundaries(t *testing.T) {
 	if ready[1].Function.Name != "get_time" || ready[1].Function.Arguments != "{}" {
 		t.Fatalf("ready[1] = %+v", ready[1])
 	}
+}
+
+// A reply made only of a tool call — the shape GLM sends on most steps of a
+// tool loop: no thinking, no text, the whole call in one chunk — has started
+// at that chunk. The response start fires there, once, before the call is
+// reported ready; without it the turn's first-token wait ran on until some
+// later response's first word (6m55s for a turn whose model answered in 20s).
+func TestCompatStreamToolOnlyReplyStartsAtItsCall(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		var body bytes.Buffer
+		body.WriteString(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","index":0,"type":"function","function":{"name":"shell","arguments":"{\"command\":\"ls\"}"}}]}}]}` + "\n\n")
+		body.WriteString(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant","content":""}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}` + "\n\n")
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = rec.Write(body.Bytes())
+		return rec.response(), nil
+	})
+
+	trace := newReplayTraceSink()
+	ctx := llm.WithStreamSink(context.Background(), trace.sink())
+	if _, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("list"))}, nil); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	trace.assertTrace(t, []string{"started", "ready:shell", "stop:tool_calls", "message-stop"})
 }
 
 func TestCompatStreamToolCallReadySynthesizesStableID(t *testing.T) {

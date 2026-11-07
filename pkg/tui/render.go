@@ -403,6 +403,10 @@ type Renderer struct {
 	// every paint; nil while a modal's own lines own the area. Its scroll is
 	// overlayScrollOffset, counted in body rows.
 	overlayPanel *slashPanel
+	// overlayFieldTakes is the field probe of the modal that owns the overlay
+	// (SwapOverlayFieldProbe); nil while no modal with an editable field is
+	// open. A drag over cells it claims is not copied on release.
+	overlayFieldTakes func(startLine, startCol, endLine, endCol int) bool
 	// overlayFocusRow is the overlay panel's focus line (-1 for none) and
 	// overlayFocusPending that it moved since the last paint: the paint then
 	// scrolls it into view once, the way a modal's cursor row is kept visible.
@@ -510,6 +514,11 @@ type Renderer struct {
 	// background while the composer cursor stays visible, matching a native
 	// terminal. Reset to false on release and in selectClearLocked.
 	selectDragging bool
+	// selectCopied is the text the release of the current selection copied, ""
+	// when it copied nothing (a selection an edit would take, or no text). Ctrl+C
+	// then only drops a selection already on the clipboard. Reset with the
+	// anchors: by a new press and in selectClearLocked.
+	selectCopied string
 	// publishedComposerSelection is the rune range of the composer buffer this
 	// renderer last handed to the raw input reader (-1,-1 for none). The reader
 	// owns that buffer, so a change of selection is the only news it gets; this
@@ -551,6 +560,12 @@ type Renderer struct {
 	// Clipboard notification shown in the footer right side.
 	clipNotification string
 	clipNotifyTimer  *time.Timer
+
+	// ctrlCExitHint is true while "Press Ctrl-C again to exit" stands in for
+	// the footer's left side: from a Ctrl+C with nothing left to interrupt or
+	// clear until ctrlCExitTimer takes it down (ShowCtrlCExitHint).
+	ctrlCExitHint  bool
+	ctrlCExitTimer *time.Timer
 
 	// clipboardImage is true while the system clipboard holds an image, which
 	// the composer advertises with a right-aligned hint above its top rule.

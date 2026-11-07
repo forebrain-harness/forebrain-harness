@@ -173,6 +173,56 @@ func TestStreamFailureWithOnlyTextIsResent(t *testing.T) {
 	}
 }
 
+// The resend answers with a tool call alone, so no delta ever arrives: the
+// retry is over at that call's response start, while the response is still
+// streaming — not when it returns.
+func TestStreamRetryResendThatAnswersWithACallClearsAtTheCall(t *testing.T) {
+	rec := &streamRetryRecorder{}
+	clearedAtCall := -1
+	sink := &StreamSink{
+		OnDelta:          func(string) {},
+		OnToolCallReady:  func(ToolCall) {},
+		OnMessageStop:    func() {},
+		OnTransportRetry: func(tr TransportRetry) { rec.retries = append(rec.retries, tr) },
+	}
+	ctx, _ := WithStreamProgress(WithStreamSink(context.Background(), sink))
+	inner := &scriptedStreamLLM{attempts: []func(ctx context.Context) (*Result, error){
+		func(ctx context.Context) (*Result, error) {
+			streamFire(ctx, func(sink *StreamSink) { sink.OnDelta("partial an") })
+			return nil, connDropped()
+		},
+		func(ctx context.Context) (*Result, error) {
+			call := ToolCall{ID: "call_1", Type: ToolTypeFunction, Function: FunctionCall{Name: "shell", Arguments: "{}"}}
+			streamFire(ctx, func(sink *StreamSink) {
+				sink.OnResponseStarted()
+				clearedAtCall = rec.cleared()
+				sink.OnToolCallReady(call)
+				sink.OnMessageStop()
+			})
+			msg := AssistantMessage(nil, call)
+			return &Result{Message: &msg}, nil
+		},
+	}}
+	mw := NewStreamRetry(10, WithRetryNotify(func(ctx context.Context, tr TransportRetry) {
+		if s := StreamSinkFrom(ctx); s != nil && s.OnTransportRetry != nil {
+			s.OnTransportRetry(tr)
+		}
+	}))
+	_, err := Use(inner, mw).Execute(ctx, []Message{UserMessage(Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want success on the second attempt", err)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("inner calls = %d, want 2", inner.calls)
+	}
+	if clearedAtCall != 1 {
+		t.Fatalf("Cleared notices when the resend's call started = %d, want 1", clearedAtCall)
+	}
+	if rec.cleared() != 1 {
+		t.Fatalf("notices = %+v, want exactly one Cleared", rec.retries)
+	}
+}
+
 // Only thinking finished, every time: two silent resends withdraw the
 // finished thinking; past them the budget pays for announced retries, 1/2 and
 // 2/2, each withdrawing it too; only then does the turn finish from nothing.

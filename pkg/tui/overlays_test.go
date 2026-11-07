@@ -2342,6 +2342,130 @@ func TestSelectorFilterSelectionIsReplacedByTyping(t *testing.T) {
 	finishPicker(t, pw, done)
 }
 
+// waitForDragRelease waits until the modal's goroutine has handed a drag's
+// release to the renderer, so a test can check what the release did.
+func waitForDragRelease(t *testing.T, r *Renderer) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		released := r.selectDidDrag && !r.selectDragging
+		r.mu.Unlock()
+		if released {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the drag's release never reached the renderer")
+}
+
+// TestSelectorFilterSelectionLeavesTheClipboardAlone is the composer's
+// clipboard bug in a picker: a drag over the filter's text is the next edit's
+// target and is not copied over what the user copied elsewhere, while a drag
+// over the list below it is still copied.
+func TestSelectorFilterSelectionLeavesTheClipboardAlone(t *testing.T) {
+	r, pw, done := startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row := overlayCellOf(t, r, "abcd", 1)
+	endCol, _ := overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	waitForDragRelease(t, r)
+	if notice := copyNotice(r); notice != "" {
+		t.Fatalf("a drag over the filter must leave the clipboard alone, got %q", notice)
+	}
+
+	startCol, row = overlayCellOf(t, r, "No matches", 0)
+	endCol, _ = overlayCellOf(t, r, "No matches", 10)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	deadline := time.Now().Add(3 * time.Second)
+	for copyNotice(r) == "" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if notice := copyNotice(r); !strings.HasPrefix(notice, "Copied ") {
+		t.Fatalf("a drag over the list should still copy it, got notice %q", notice)
+	}
+
+	finishPicker(t, pw, done)
+}
+
+// TestSelectorCtrlCCopiesTheSelection: in a modal, Ctrl+C with text selected
+// copies it and does nothing else — the picker stays open and its filter keeps
+// its text.
+func TestSelectorCtrlCCopiesTheSelection(t *testing.T) {
+	r, pw, done := startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row := overlayCellOf(t, r, "abcd", 1)
+	endCol, _ := overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	waitForDragRelease(t, r)
+	if _, err := pw.Write([]byte{0x03}); err != nil {
+		t.Fatalf("write ctrl+c: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for copyNotice(r) == "" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if notice := copyNotice(r); notice != "Copied 2 chars to clipboard" {
+		t.Fatalf("Ctrl+C should copy the selected \"bc\", got notice %q", notice)
+	}
+	select {
+	case <-done:
+		t.Fatal("Ctrl+C over a selection must not dismiss the picker")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if r.HasSelection() {
+		t.Fatal("the copy should drop the selection")
+	}
+	if _, plain := overlayRowContaining(t, r, panelFilterGlyph); !strings.Contains(plain, "abcd") {
+		t.Fatalf("Ctrl+C must leave the filter as it was, row is %q", plain)
+	}
+
+	finishPicker(t, pw, done)
+}
+
+// TestSelectorCmdCCopiesTheSelection: a Cmd+C key report — what a terminal
+// that reports it, or a Terminal.app key binding, delivers — copies the
+// selection in a modal and, with nothing selected, does nothing at all.
+func TestSelectorCmdCCopiesTheSelection(t *testing.T) {
+	r, pw, done := startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	if _, err := pw.Write([]byte("\x1b[99;9u")); err != nil {
+		t.Fatalf("write cmd+c: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if notice := copyNotice(r); notice != "" {
+		t.Fatalf("cmd+c with nothing selected must do nothing, got notice %q", notice)
+	}
+	select {
+	case <-done:
+		t.Fatal("cmd+c with nothing selected must not dismiss the picker")
+	default:
+	}
+
+	startCol, row := overlayCellOf(t, r, "abcd", 1)
+	endCol, _ := overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	waitForDragRelease(t, r)
+	if _, err := pw.Write([]byte("\x1b[99;9u")); err != nil {
+		t.Fatalf("write cmd+c: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for copyNotice(r) == "" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if notice := copyNotice(r); notice != "Copied 2 chars to clipboard" {
+		t.Fatalf("cmd+c should copy the selected \"bc\", got notice %q", notice)
+	}
+	if _, plain := overlayRowContaining(t, r, panelFilterGlyph); !strings.Contains(plain, "abcd") {
+		t.Fatalf("cmd+c must leave the filter as it was, row is %q", plain)
+	}
+
+	finishPicker(t, pw, done)
+}
+
 // TestSelectorFilterSelectionIsConsumedOnce proves the range is handed over
 // once: the second Delete removes one character, not the span again.
 func TestSelectorFilterSelectionIsConsumedOnce(t *testing.T) {
@@ -2404,7 +2528,10 @@ func TestSelectorInputSelectionIsDeleted(t *testing.T) {
 	startCol, row := overlayCellOf(t, r, "hello", 1)
 	endCol, _ := overlayCellOf(t, r, "hello", 3)
 	writeMouseDrag(t, pw, startCol, row, endCol, row)
-	time.Sleep(50 * time.Millisecond)
+	waitForDragRelease(t, r)
+	if notice := copyNotice(r); notice != "" {
+		t.Fatalf("a drag over the field must leave the clipboard alone, got %q", notice)
+	}
 
 	if _, err := pw.Write([]byte{0x7f, '\r'}); err != nil {
 		t.Fatalf("write backspace and Enter: %v", err)
@@ -2473,7 +2600,10 @@ func TestQuestionOtherSelectionIsDeleted(t *testing.T) {
 	startCol, row := overlayCellOf(t, r, "abcdef", 2)
 	endCol, _ := overlayCellOf(t, r, "abcdef", 4)
 	writeMouseDrag(t, pw, startCol, row, endCol, row)
-	time.Sleep(50 * time.Millisecond)
+	waitForDragRelease(t, r)
+	if notice := copyNotice(r); notice != "" {
+		t.Fatalf("a drag over the Other answer must leave the clipboard alone, got %q", notice)
+	}
 
 	if _, err := pw.Write([]byte{0x7f, '\r'}); err != nil {
 		t.Fatalf("write backspace and Enter: %v", err)
@@ -2572,12 +2702,16 @@ func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
 	o.feedbackCursor = len(o.feedbackBuf)
 	o.keepOptionsInView = true
 	o.renderViewport()
+	defer o.rs.withFieldProbe(o.feedbackTakes)()
 
 	startCol, row := overlayCellOf(t, r, "please fix the plan", 7)
 	endCol, _ := overlayCellOf(t, r, "please fix the plan", 10)
 	r.ViewportSelectStart(startCol, row)
 	r.ViewportSelectDrag(endCol, row)
 	r.ViewportSelectEnd(endCol, row)
+	if notice := copyNotice(r); notice != "" {
+		t.Fatalf("a drag over the feedback must leave the clipboard alone, got %q", notice)
+	}
 
 	o.handleFeedbackKey(parsedKey{kind: rawKeyBackspace})
 	if got := string(o.feedbackBuf); got != "please  the plan" {

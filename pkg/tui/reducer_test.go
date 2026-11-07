@@ -5018,6 +5018,140 @@ func TestComposerSelectionRunesCoverTheDraggedCells(t *testing.T) {
 	}
 }
 
+// copyNotice is the notice a released drag left: set exactly when the release
+// starts copying the selection, empty when it copied nothing.
+func copyNotice(r *Renderer) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.clipNotification
+}
+
+// TestComposerDragSelectionLeavesTheClipboardAlone is the reported bug: with
+// text copied elsewhere, a drag over the draft, Delete, then a paste brought
+// back the deleted text instead, because releasing the drag had copied it over
+// the user's own copy. A selection in the draft is the next edit's target, as in
+// a native text field, so it is not copied; one in the conversation still is.
+func TestComposerDragSelectionLeavesTheClipboardAlone(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: "transcript line", Final: true})
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "hello world foo", Cursor: &cursor})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix+6, row, prefix+11, row)
+	if got := publishedSelection(); got != [2]int{6, 11} {
+		t.Fatalf("the drag should still hand \"world\" to the next edit, got %v", got)
+	}
+	if notice := copyNotice(r); notice != "" {
+		t.Fatalf("a drag over the draft must leave the clipboard alone, got %q", notice)
+	}
+
+	// A drag from the conversation into the draft reaches text Delete would
+	// take, so it is not copied either.
+	transcriptRow := -1
+	for i, line := range r.vpLastRender.lines {
+		if strings.Contains(stripANSI(line), "transcript line") {
+			transcriptRow = i
+		}
+	}
+	if transcriptRow < 0 {
+		t.Fatalf("no transcript row painted:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+	}
+	dragComposer(r, 0, transcriptRow, prefix+5, row)
+	if notice := copyNotice(r); notice != "" {
+		t.Fatalf("a drag reaching into the draft must leave the clipboard alone, got %q", notice)
+	}
+
+	dragComposer(r, 0, transcriptRow, 20, transcriptRow)
+	if notice := copyNotice(r); !strings.HasPrefix(notice, "Copied ") {
+		t.Fatalf("a drag over the conversation should still copy it, got notice %q", notice)
+	}
+}
+
+// TestCtrlCCopiesTheSelection pins Claude Code's rule for Ctrl+C with text
+// selected: it copies instead of cancelling. A selection in the draft, which
+// its release left off the clipboard, is copied; one its release already
+// copied is only dropped, its copy announced again. Either way the selection is
+// gone afterwards, so the next Ctrl+C is an ordinary one.
+func TestCtrlCCopiesTheSelection(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: "transcript line", Final: true})
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "hello world foo", Cursor: &cursor})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	if r.CopySelectionForCtrlC() {
+		t.Fatal("with nothing selected Ctrl+C must stay Ctrl+C")
+	}
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix+6, row, prefix+11, row)
+	if !r.HasSelection() {
+		t.Fatal("the drag should leave \"world\" selected")
+	}
+	if !r.CopySelectionForCtrlC() {
+		t.Fatal("Ctrl+C over a selection in the draft should copy it")
+	}
+	if notice := copyNotice(r); notice != "Copied 5 chars to clipboard" {
+		t.Fatalf("Ctrl+C should copy \"world\", got notice %q", notice)
+	}
+	if r.HasSelection() {
+		t.Fatal("the copy should drop the selection")
+	}
+	if got := publishedSelection(); got != [2]int{-1, -1} {
+		t.Fatalf("a copied selection is no longer the next edit's target, got %v", got)
+	}
+	if r.CopySelectionForCtrlC() {
+		t.Fatal("the next Ctrl+C has nothing selected and must stay Ctrl+C")
+	}
+
+	transcriptRow := -1
+	for i, line := range r.vpLastRender.lines {
+		if strings.Contains(stripANSI(line), "transcript line") {
+			transcriptRow = i
+		}
+	}
+	if transcriptRow < 0 {
+		t.Fatalf("no transcript row painted:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+	}
+	dragComposer(r, 0, transcriptRow, 20, transcriptRow)
+	r.mu.Lock()
+	copied := r.selectCopied
+	r.clipNotification = "" // the release's own notice; what follows is Ctrl+C's
+	r.mu.Unlock()
+	if copied == "" {
+		t.Fatal("the release should have copied the conversation's text")
+	}
+	if !r.CopySelectionForCtrlC() {
+		t.Fatal("Ctrl+C over a copied selection should still be the copy")
+	}
+	if want := copiedNotice(copied); copyNotice(r) != want {
+		t.Fatalf("Ctrl+C should announce the release's copy again: got %q, want %q", copyNotice(r), want)
+	}
+	if r.HasSelection() {
+		t.Fatal("Ctrl+C should drop the copied selection")
+	}
+}
+
+// TestCopiedNoticeCountsCharacters: the notice counts characters, not bytes,
+// and says "char" for one.
+func TestCopiedNoticeCountsCharacters(t *testing.T) {
+	for text, want := range map[string]string{
+		"a":     "Copied 1 char to clipboard",
+		"原":     "Copied 1 char to clipboard",
+		"ab":    "Copied 2 chars to clipboard",
+		"原始数据":  "Copied 4 chars to clipboard",
+		"hello": "Copied 5 chars to clipboard",
+	} {
+		if got := copiedNotice(text); got != want {
+			t.Errorf("copiedNotice(%q) = %q, want %q", text, got, want)
+		}
+	}
+}
+
 // TestComposerSelectionRunesOnWideRunes guards the CJK case: a wide rune covers
 // two cells, so both cells of a character resolve to its own boundary.
 func TestComposerSelectionRunesOnWideRunes(t *testing.T) {

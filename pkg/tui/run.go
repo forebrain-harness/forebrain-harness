@@ -664,6 +664,7 @@ func Run(ctx context.Context, opts Options) error {
 		// otherwise show the hardware caret for a frame.
 		renderer.EnableSoftwareCursor()
 		renderer.EnableViewportMode()
+		defer installViewportSelectionProbe(renderer)()
 		defer renderer.StartDrawerWarmer()()
 		clipProbe, _ := opts.Clipboard.(ClipboardImageProbe)
 		if opts.Clipboard == nil {
@@ -813,6 +814,9 @@ func Run(ctx context.Context, opts Options) error {
 				continue
 			}
 			if state.updateTerminalFocus(ev) {
+				continue
+			}
+			if copySelectionOnHotkey(renderer, ev) {
 				continue
 			}
 			if isMouseInputEvent(ev) && ev.kind != inputEventMouseWheel {
@@ -1504,6 +1508,9 @@ func handleBlockingSlashInput(session Session, renderer *Renderer, state *stream
 	if state.updateTerminalFocus(ev) {
 		return false
 	}
+	if copySelectionOnHotkey(renderer, ev) {
+		return false
+	}
 	switch ev.kind {
 	case inputEventMouseClick, inputEventMousePress, inputEventMouseDrag,
 		inputEventMouseRelease, inputEventMouseMove, inputEventMouseWheel:
@@ -1773,12 +1780,18 @@ type streamState struct {
 	startupInfo             StartupInfo
 	// titleAnimator drives the animated terminal window/tab title while a
 	// turn is in flight; nil in tests that construct streamState directly.
-	titleAnimator                *terminalTitleAnimator
-	activeRunCtrlCArmed          bool
+	titleAnimator       *terminalTitleAnimator
+	activeRunCtrlCArmed bool
+	// activeRunCtrlCExitArmed is set once a Ctrl+C has asked the run to
+	// cancel: a further Ctrl+C has nothing left to interrupt and goes to the
+	// exit confirmation (confirmCtrlCExit).
 	activeRunCtrlCExitArmed      bool
 	activeRunCtrlCCancelNoReplay bool
-	agentControlPrefixArmed      bool
-	agentRoster                  AgentRosterSnapshot
+	// ctrlCExitAt is when a Ctrl+C with nothing to interrupt or clear last
+	// asked for the second press that exits; zero when none is pending.
+	ctrlCExitAt             time.Time
+	agentControlPrefixArmed bool
+	agentRoster             AgentRosterSnapshot
 	// agentRosterFocused is true once the user has moved keyboard focus onto
 	// the roster panel via Down. While false the keyboard is in the composer:
 	// arrows control input history as usual, the roster marks no row and shows
@@ -2369,6 +2382,24 @@ func (s *streamState) isActiveRunCtrlCArmed() bool {
 
 func (s *streamState) isActiveRunCtrlCExitArmed() bool {
 	return s != nil && s.activeRunCtrlCExitArmed
+}
+
+// ctrlCExitWindow is how long a Ctrl+C with nothing left to interrupt or
+// clear waits for the second press that exits — Claude Code's 800ms.
+const ctrlCExitWindow = 800 * time.Millisecond
+
+// confirmCtrlCExit is a Ctrl+C with nothing left to interrupt or clear, as in
+// Claude Code: the first press only says "Press Ctrl-C again to exit", and a
+// second within ctrlCExitWindow exits.
+func (s *streamState) confirmCtrlCExit(renderer *Renderer) {
+	now := time.Now()
+	if !s.ctrlCExitAt.IsZero() && now.Sub(s.ctrlCExitAt) <= ctrlCExitWindow {
+		s.ctrlCExitAt = time.Time{}
+		s.quitRequested = true
+		return
+	}
+	s.ctrlCExitAt = now
+	renderer.ShowCtrlCExitHint(ctrlCExitWindow)
 }
 
 func (s *streamState) markActiveRunCtrlCCancelNoReplay() {
@@ -4798,6 +4829,9 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	if state.updateTerminalFocus(ev) {
 		return
 	}
+	if copySelectionOnHotkey(renderer, ev) {
+		return
+	}
 	// A slash panel opened during the run is the key target exactly as it is
 	// between runs: keys drive the panel — Esc and Ctrl+C close it rather than
 	// interrupt the run — while the run keeps streaming above it. Mouse events
@@ -5056,20 +5090,18 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			// In a subagent's view Ctrl+C is that subagent's and never the
 			// conversation's: cancelling the run here stopped the dispatching
 			// agent and, with it, the subagent the user was talking to. With
-			// nothing in the view to act on the key only moves the exit
-			// sequence on, as a second press after a cancel does in the
+			// nothing in the view to act on the key goes to the exit
+			// confirmation, as a press after a cancel does in the
 			// conversation's view.
 			if view := subagentViewOnScreen(renderer); view != "" {
 				if handleSubagentViewCtrlC(session, state, view) {
 					state.resetActiveRunCtrlCSequence()
 					return
 				}
-				if state.isActiveRunCtrlCExitArmed() {
+				state.confirmCtrlCExit(renderer)
+				if state.quitRequested {
 					state.resetActiveRunCtrlCSequence()
-					state.quitRequested = true
-					return
 				}
-				state.armActiveRunCtrlCExit()
 				return
 			}
 			if state.isActiveRunCtrlCArmed() {
@@ -5081,8 +5113,19 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				return
 			}
 			if state.isActiveRunCtrlCExitArmed() {
-				state.resetActiveRunCtrlCSequence()
-				state.quitRequested = true
+				// The run's cancel is already asked for, so this press goes to
+				// the exit confirmation. The arm outlives the turn it was set
+				// on: a turn chained after the cancelled one has not been
+				// cancelled yet, and is, the way a Ctrl+C interrupts any run;
+				// the run already cancelling ignores a second cancel.
+				if session.CancelActiveRun() {
+					state.markActiveRunCtrlCCancelNoReplay()
+					renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+				}
+				state.confirmCtrlCExit(renderer)
+				if state.quitRequested {
+					state.resetActiveRunCtrlCSequence()
+				}
 				return
 			}
 			state.armActiveRunCtrlCExit()
@@ -5377,6 +5420,18 @@ func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *R
 	return true, false, ComposerSubmission{}, outcome.ExitRequested
 }
 
+// copySelectionOnHotkey makes the copy a Ctrl+C over selected text asked for
+// and reports whether ev was that key. Every loop asks it first: the key is a
+// copy and nothing else, so no panel, menu, roster or run may take it as its
+// own Ctrl+C.
+func copySelectionOnHotkey(renderer *Renderer, ev inputEvent) bool {
+	if ev.kind != inputEventHotkey || ev.hotkey != hotkeyCopySelection {
+		return false
+	}
+	renderer.CopySelectionForCtrlC()
+	return true
+}
+
 // closePlanDrawerOnEsc closes the todo drawer if it is open and reports whether
 // the key is spent. The drawer is the lowest-priority surface on screen: the
 // slash/@ menus, the roster, the bottom panels and the approval/question modals
@@ -5475,7 +5530,7 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 			if state.clearComposer() || handleSubagentViewCtrlC(session, state, view) {
 				return true
 			}
-			state.quitRequested = true
+			state.confirmCtrlCExit(renderer)
 			return true
 		}
 		if session.CancelActiveRun() {
@@ -5485,7 +5540,7 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		if state.clearComposer() {
 			return true
 		}
-		state.quitRequested = true
+		state.confirmCtrlCExit(renderer)
 		return true
 	case hotkeyAgentControlPrefix:
 		state.agentControlPrefixArmed = true

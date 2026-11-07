@@ -322,6 +322,10 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 				if event.ContentBlock.Thinking != "" && sink != nil && sink.OnReasoningDelta != nil {
 					sink.OnReasoningDelta(event.ContentBlock.Thinking)
 				}
+			case "tool_use":
+				// A call is model output like a word is: a response that
+				// answers with calls alone has started at its first call.
+				llm.NotifyResponseStarted(sink, &responseStarted)
 			}
 		case "content_block_delta":
 			switch event.Delta.Type {

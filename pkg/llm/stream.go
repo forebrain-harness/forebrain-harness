@@ -17,7 +17,10 @@ type StreamSink struct {
 	// current provider response is forwarded to the other callbacks. It is the
 	// acknowledgement boundary for input provisionally attached to that request:
 	// once model output has begun, the model has received the input even if the
-	// stream later fails or is cancelled. Lifecycle-only events do not fire it.
+	// stream later fails or is cancelled. Thinking, answer text and a tool
+	// call's first fragment are all output: a response that answers with calls
+	// alone starts at its first call, not at the next response's first word.
+	// Lifecycle-only events do not fire it.
 	OnResponseStarted func()
 	// OnWebSearch reports server-executed Responses web search activity. The
 	// callback is deliberately separate from function-tool callbacks: provider

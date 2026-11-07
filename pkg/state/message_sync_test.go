@@ -206,6 +206,59 @@ func TestAppendMessageSequenceCompletesAssistantRowWithSameCallsAndGrownText(t *
 	}
 }
 
+// The reasoning an assistant message carries back to its model outlives the
+// turn: the row written when the response's first call started has none of it,
+// the finished message has it, and the next turn's history — read back from
+// the store — must carry it exactly as the turn that produced it sent it.
+// Before the carry was stored, every turn rebuilt a history in which the model
+// had never thought.
+func TestAssistantReasoningCarrySurvivesTheTurn(t *testing.T) {
+	ctx := context.Background()
+	s := NewSessionStore(openSessionDB(t), "main")
+	_, _ = s.Append(ctx, "s", "user", "hello")
+	provisional := []llm.Message{
+		llm.UserMessage(llm.Text("hello")),
+		assistantCall("checking", "call-1", "shell"),
+	}
+	if err := s.AppendMessageSequence(ctx, "s", provisional, "glm-5.3-flash", ""); err != nil {
+		t.Fatal(err)
+	}
+	carried := assistantCall("checking", "call-1", "shell")
+	carried.Name = llm.Prefix + "the file list first, then grep"
+	carried.ReasoningModel = "glm-5.3-flash"
+	unstamped := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+	unstamped.Name = llm.Prefix + "summing up"
+	finished := []llm.Message{
+		llm.SystemMessage("instructions"),
+		llm.UserMessage(llm.Text("hello")),
+		carried,
+		llm.ToolResultMessage("call-1", llm.Text("ok")),
+		unstamped,
+	}
+	for range 2 { // a second reconciliation of the same run changes nothing
+		if err := s.AppendMessageSequence(ctx, "s", finished, "glm-5.3-flash", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListTranscriptMessages(ctx, "s", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("want the turn stored once, got %d messages: %+v", len(got), got)
+	}
+	if got[1].Name != carried.Name || got[1].ReasoningModel != "glm-5.3-flash" {
+		t.Fatalf("provisional row kept no reasoning: name=%q model=%q", got[1].Name, got[1].ReasoningModel)
+	}
+	if got[1].TextContent() != "checking" || len(got[1].ToolCalls) != 1 {
+		t.Fatalf("completing the reasoning changed the message: %+v", got[1])
+	}
+	// A carry that arrived without its model is filed under the row's model.
+	if got[3].Name != unstamped.Name || got[3].ReasoningModel != "glm-5.3-flash" {
+		t.Fatalf("unstamped carry: name=%q model=%q", got[3].Name, got[3].ReasoningModel)
+	}
+}
+
 func TestAppendMessageSequenceKeepsAlignmentAcrossOutOfBandRow(t *testing.T) {
 	ctx := context.Background()
 	s := NewSessionStore(openSessionDB(t), "main")

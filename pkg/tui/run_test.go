@@ -2139,9 +2139,15 @@ func TestActiveRunInputCtrlCProgressionClearThenCancelThenExit(t *testing.T) {
 		t.Fatalf("expected one cancel call on second ctrl+c, got %d", cancelCalls)
 	}
 
+	// The run's cancel is asked for, so nothing is left to interrupt: the
+	// third press only asks for a second, which exits within the window.
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventHotkey, hotkey: hotkeyInterrupt}, nil)
+	if state.quitRequested {
+		t.Fatal("the third ctrl+c should ask for a second press before quitting")
+	}
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventHotkey, hotkey: hotkeyInterrupt}, nil)
 	if !state.quitRequested {
-		t.Fatal("expected third ctrl+c to request quit")
+		t.Fatal("a fourth ctrl+c within the window should quit")
 	}
 
 	q := session.SurfaceInputQueue("s1")
@@ -3093,6 +3099,35 @@ func TestActiveRunSlashNativePickerDoesNotQueueTurn(t *testing.T) {
 	}
 }
 
+// TestCopySelectionHotkeyIsNoCtrlC: Ctrl+C over selected text is a copy and
+// nothing else, so neither a run nor a blocking command takes it as Ctrl+C —
+// the draft stays, nothing is cancelled and the exit sequence does not move.
+func TestCopySelectionHotkeyIsNoCtrlC(t *testing.T) {
+	session := &fakeSession{cancelActive: true, steerAccepted: true, cancelled: make(chan struct{})}
+	state := &streamState{sessionID: "s1", session: session}
+	state.composer.Text = "draft"
+	state.composer.DraftText = "draft"
+	renderer := NewRenderer(io.Discard, io.Discard)
+	copyKey := inputEvent{kind: inputEventHotkey, hotkey: hotkeyCopySelection}
+
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, copyKey, nil)
+	if handleBlockingSlashInput(session, renderer, state, copyKey) {
+		t.Fatal("the copy must not cancel a blocking command")
+	}
+	if state.composer.DraftText != "draft" {
+		t.Fatalf("the copy must leave the draft alone, got %q", state.composer.DraftText)
+	}
+	if state.isActiveRunCtrlCArmed() || state.isActiveRunCtrlCExitArmed() || state.quitRequested {
+		t.Fatal("the copy must not move the Ctrl+C sequence")
+	}
+	session.mu.Lock()
+	cancelCalls := session.cancelCalls
+	session.mu.Unlock()
+	if cancelCalls != 0 {
+		t.Fatalf("the copy must not cancel the run, got %d cancel calls", cancelCalls)
+	}
+}
+
 func TestReadRawInputEventsRecognizesCtrlCAsClearWhenComposerHasContent(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -3200,11 +3235,13 @@ func TestHandleIdleHotkeyInterruptQuitsWithAlreadyFinishingController(t *testing
 	state := &streamState{sessionID: "s1"}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
-	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyInterrupt) {
-		t.Fatal("expected ctrl+c handled")
+	for press := 1; press <= 2; press++ {
+		if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyInterrupt) {
+			t.Fatalf("expected ctrl+c %d handled", press)
+		}
 	}
 	if !state.quitRequested {
-		t.Fatal("empty idle composer should request quit when no new cancellation work starts")
+		t.Fatal("empty idle composer should quit on a second ctrl+c when no new cancellation work starts")
 	}
 	if strings.Contains(out.String(), "cancelling run") {
 		t.Fatalf("stale controller must not render another cancelling status: %q", out.String())
@@ -3591,8 +3628,9 @@ func TestRunTurnCtrlCCancelDoesNotReplayPendingSteers(t *testing.T) {
 // never reach "quit" as long as chained turns kept arriving faster than a
 // second keypress. This test starts a turn the way an automatic continuation
 // does (preserveComposer true) with the exit-arm already set from a prior
-// turn, and asserts a single Ctrl+C finishes the escalation (quits directly)
-// instead of restarting it (cancelling again).
+// turn, and asserts the escalation carries on instead of restarting: the press
+// cancels the chained turn, which nothing had cancelled yet, and asks for the
+// exit confirmation, and a second press within the window quits.
 func TestExecuteComposerSubmissionPreservesCtrlCEscalationAcrossAutoContinuation(t *testing.T) {
 	dispatchStarted := make(chan struct{})
 	dispatchWait := make(chan struct{})
@@ -3607,7 +3645,7 @@ func TestExecuteComposerSubmissionPreservesCtrlCEscalationAcrossAutoContinuation
 	}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
-	events := make(chan inputEvent, 1)
+	events := make(chan inputEvent, 2)
 	sigCh := make(chan os.Signal, 1)
 	done := make(chan runTurnDisposition, 1)
 
@@ -3626,6 +3664,7 @@ func TestExecuteComposerSubmissionPreservesCtrlCEscalationAcrossAutoContinuation
 	// run loop's per-iteration input drain (which always runs before it can
 	// observe errCh) is guaranteed to process it first.
 	events <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyInterrupt}
+	events <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyInterrupt}
 	close(dispatchWait)
 
 	// <-done is the only safe synchronization point for reading state/session
@@ -3635,13 +3674,13 @@ func TestExecuteComposerSubmissionPreservesCtrlCEscalationAcrossAutoContinuation
 		t.Fatalf("expected runTurnCancelled once ctrl+c finishes the already-armed escalation, got %q", got)
 	}
 	if !state.quitRequested {
-		t.Fatal("expected the carried-over exit-arm to have set quitRequested")
+		t.Fatal("expected the second ctrl+c after the carried-over exit-arm to quit")
 	}
 	session.mu.Lock()
 	cancelCalls := session.cancelCalls
 	session.mu.Unlock()
-	if cancelCalls != 0 {
-		t.Fatalf("expected no new cancel call: exit was already armed from the prior chained turn, so one ctrl+c should quit directly, got %d cancel call(s)", cancelCalls)
+	if cancelCalls == 0 {
+		t.Fatal("expected the chained turn, which nothing had cancelled, to be cancelled")
 	}
 }
 
@@ -3712,7 +3751,7 @@ func TestRunTurnCancelWaitsForCancelledTurnPersistence(t *testing.T) {
 		},
 		{
 			name:            "ctrl-c then quit",
-			hotkeys:         []inputHotkey{hotkeyInterrupt, hotkeyInterrupt},
+			hotkeys:         []inputHotkey{hotkeyInterrupt, hotkeyInterrupt, hotkeyInterrupt},
 			wantDisposition: runTurnCancelled,
 			wantQuit:        true,
 		},
@@ -6781,13 +6820,14 @@ func TestIdleCtrlCInASubagentViewPausesTheSubagentInsteadOfQuitting(t *testing.T
 }
 
 // With nothing of the subagent's in flight there is nothing in its view to act
-// on: Ctrl+C still leaves the conversation's run alone, and only moves the exit
-// sequence on — the second press quits, as it does after a cancel in the
-// conversation's view.
+// on: Ctrl+C still leaves the conversation's run alone, and only goes to the
+// exit confirmation — a second press within the window quits, as it does
+// after a cancel in the conversation's view.
 func TestCtrlCInAnIdleSubagentViewNeverCancelsTheRun(t *testing.T) {
 	session := &fakeSession{cancelActive: true, subagentRunning: map[string]bool{"task-b": false}}
 	renderer := NewRenderer(nil, nil)
 	renderer.viewportMode = true
+	leaveViewportOnCleanup(t, renderer)
 	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
 	renderer.SetActiveView("task-b")
 	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
@@ -6808,6 +6848,116 @@ func TestCtrlCInAnIdleSubagentViewNeverCancelsTheRun(t *testing.T) {
 	}
 	if session.cancelCalls != 0 {
 		t.Fatalf("CancelActiveRun called %d times from a subagent's view, want 0", session.cancelCalls)
+	}
+}
+
+// leaveViewportOnCleanup takes a hand-built viewport renderer out of viewport
+// mode when the test ends, so a footer timer still pending — the exit hint's —
+// finds nothing to paint rather than reading the next test's terminal size.
+func leaveViewportOnCleanup(t *testing.T, r *Renderer) {
+	t.Cleanup(func() {
+		r.mu.Lock()
+		r.viewportMode = false
+		r.mu.Unlock()
+	})
+}
+
+// TestIdleCtrlCInAnIdleSubagentViewConfirmsTheExit: with nothing of the
+// subagent's to act on, Ctrl+C in its view goes to the exit confirmation as it
+// does in the conversation's view — the first press only asks, a second within
+// the window quits — and never touches the conversation's run.
+func TestIdleCtrlCInAnIdleSubagentViewConfirmsTheExit(t *testing.T) {
+	session := &fakeSession{cancelActive: true, subagentRunning: map[string]bool{"task-b": false}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	leaveViewportOnCleanup(t, renderer)
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	press := func() {
+		if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyInterrupt) {
+			t.Fatal("Ctrl+C not handled")
+		}
+	}
+
+	press()
+	if state.quitRequested {
+		t.Fatal("the first press quit")
+	}
+	press()
+	if !state.quitRequested {
+		t.Fatal("a second press within the window did not quit")
+	}
+	if session.cancelCalls != 0 || len(session.pauseSubagentCalls) != 0 || session.cancelSubagentCalls != 0 {
+		t.Fatalf("cancel=%d pause=%v stop=%d, want nothing acted on", session.cancelCalls, session.pauseSubagentCalls, session.cancelSubagentCalls)
+	}
+}
+
+// footerShows reports whether the composer's painted rows carry text.
+func footerShows(r *Renderer, text string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, line := range r.vpLastComposer.lines {
+		if strings.Contains(stripANSI(line), text) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCtrlCExitWaitsForASecondPressWithinTheWindow is Claude Code's exit
+// confirmation: a Ctrl+C with nothing to interrupt or clear only says "Press
+// Ctrl-C again to exit" in the footer, and quits on a second press within
+// 800ms; a press after the window is a first press again.
+func TestCtrlCExitWaitsForASecondPressWithinTheWindow(t *testing.T) {
+	session := &fakeSession{}
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Cursor: &cursor})
+	state := &streamState{sessionID: "s1", session: session}
+	press := func() {
+		if !handleIdleHotkey(context.Background(), session, r, state, nil, nil, hotkeyInterrupt) {
+			t.Fatal("Ctrl+C not handled")
+		}
+	}
+
+	press()
+	if state.quitRequested {
+		t.Fatal("the first press with nothing to interrupt or clear must not quit")
+	}
+	if !footerShows(r, ctrlCExitHintText) {
+		t.Fatalf("the first press should say %q in the footer", ctrlCExitHintText)
+	}
+
+	state.ctrlCExitAt = time.Now().Add(-2 * ctrlCExitWindow) // the window ran out
+	press()
+	if state.quitRequested {
+		t.Fatal("a press after the window is a first press again")
+	}
+
+	press()
+	if !state.quitRequested {
+		t.Fatal("a second press within the window should quit")
+	}
+}
+
+// TestCtrlCExitHintLeavesWhenTheWindowIsUp: the hint stands only as long as a
+// second press would exit.
+func TestCtrlCExitHintLeavesWhenTheWindowIsUp(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Cursor: &cursor})
+
+	r.ShowCtrlCExitHint(30 * time.Millisecond)
+	if !footerShows(r, ctrlCExitHintText) {
+		t.Fatalf("the footer should say %q", ctrlCExitHintText)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for footerShows(r, ctrlCExitHintText) {
+		if time.Now().After(deadline) {
+			t.Fatal("the hint outlived its window")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

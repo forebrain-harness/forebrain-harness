@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,9 @@ const (
 	hotkeyRosterStop         inputHotkey = "roster_stop"
 	hotkeyJumpToBottom       inputHotkey = "jump_to_bottom"
 	hotkeyRedraw             inputHotkey = "redraw"
+	// hotkeyCopySelection is Ctrl+C pressed while text is selected: it copies
+	// the selection instead of clearing the draft or interrupting.
+	hotkeyCopySelection inputHotkey = "copy_selection"
 )
 
 // slashOverlayActive gates whether arrow keys route to slash-overlay nav
@@ -117,6 +121,27 @@ var composerContentWidth atomic.Int32
 // the selected text: the renderer publishes the range whenever the selection
 // changes, and the reader consumes it (storing nil) exactly once.
 var composerSelectionRange atomic.Pointer[[2]int]
+
+// viewportSelectionProbe tells the raw input reader whether the viewport has
+// text selected. Ctrl+C then copies the selection instead of clearing the
+// draft or interrupting, and the reader — which owns the draft that Ctrl+C
+// would clear — has to tell the two apart on the byte. The TUI installs its
+// renderer's HasSelection for as long as it runs (installViewportSelectionProbe);
+// with none installed nothing is ever selected.
+var viewportSelectionProbe atomic.Pointer[func() bool]
+
+// installViewportSelectionProbe points the reader's Ctrl+C at r's selection
+// and returns the func that takes it away again.
+func installViewportSelectionProbe(r *Renderer) func() {
+	probe := r.HasSelection
+	viewportSelectionProbe.Store(&probe)
+	return func() { viewportSelectionProbe.CompareAndSwap(&probe, nil) }
+}
+
+func viewportHasSelection() bool {
+	probe := viewportSelectionProbe.Load()
+	return probe != nil && (*probe)()
+}
 
 type inputEvent struct {
 	kind       inputEventKind
@@ -357,7 +382,68 @@ func escapeSequenceComplete(buf []byte) bool {
 		return false
 	}
 	last := buf[len(buf)-1]
-	return (last >= 'A' && last <= 'Z') || last == '~'
+	// 'u' is the final byte of a CSI-u key report (see keyReportCopyKey): the
+	// kitty keyboard protocol's encoding of a key with modifiers, which is how
+	// Cmd+C reaches a program at all.
+	return (last >= 'A' && last <= 'Z') || last == '~' || last == 'u'
+}
+
+// copyKeyKind is which copy shortcut a CSI-u key report carries.
+type copyKeyKind int
+
+const (
+	notCopyKey  copyKeyKind = iota
+	copyKeyCmd              // Cmd+C, macOS's native copy shortcut
+	copyKeyCtrl             // Ctrl+C
+)
+
+// CSI-u modifier bits, less the report's own +1.
+const (
+	keyReportCtrl  = 1 << 2
+	keyReportSuper = 1 << 3
+)
+
+// parseKeyReport decodes a complete CSI-u key report — ESC [ <code> [; <mods>] u
+// — into the key's code and its modifier bits (shift 1, alt 2, ctrl 4,
+// super/cmd 8).
+func parseKeyReport(seq []byte) (code int, mods int, ok bool) {
+	if len(seq) < 5 || seq[0] != 0x1b || seq[1] != '[' || seq[len(seq)-1] != 'u' {
+		return 0, 0, false
+	}
+	body := string(seq[2 : len(seq)-1])
+	codeStr, modsStr, hasMods := strings.Cut(body, ";")
+	code, err := strconv.Atoi(codeStr)
+	if err != nil || code <= 0 {
+		return 0, 0, false
+	}
+	if !hasMods {
+		return code, 0, true
+	}
+	m, err := strconv.Atoi(modsStr)
+	if err != nil || m < 1 {
+		return 0, 0, false
+	}
+	return code, m - 1, true
+}
+
+// keyReportCopyKey reports whether a completed escape sequence is Cmd+C or
+// Ctrl+C. No terminal sends Cmd+C by itself: Terminal.app keeps it for its own
+// Copy, and elsewhere it arrives only under the kitty keyboard protocol or from
+// a key binding that sends this report.
+func keyReportCopyKey(seq []byte) copyKeyKind {
+	code, mods, ok := parseKeyReport(seq)
+	if !ok || code != 'c' {
+		return notCopyKey
+	}
+	switch {
+	case mods&keyReportSuper != 0:
+		// Cmd+C, with or without Ctrl held too: on macOS this is the copy
+		// shortcut, and Ctrl+C keeps its own meaning there.
+		return copyKeyCmd
+	case mods&keyReportCtrl != 0:
+		return copyKeyCtrl
+	}
+	return notCopyKey
 }
 
 func isShiftArrowLeftSequence(seq []byte) bool {
@@ -1011,6 +1097,35 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 			cursor = start
 			return true
 		}
+		// ctrlCPressed is Ctrl+C: with text selected it copies the selection and
+		// does nothing else; otherwise it clears the draft, and with nothing to
+		// clear it interrupts.
+		ctrlCPressed := func() {
+			if pasted := pasteBurst.flushBeforeModifiedInput(); pasted != "" {
+				previous := cloneRunes(line)
+				previousCursor := cursor
+				line, cursor = insertRunesAtCursor(line, cursor, []rune(pasted))
+				if out != nil {
+					redrawRawInputBuffer(out, previous, previousCursor, line, cursor)
+				}
+			}
+			hasPendingInput := len(line) > 0 || len(pendingUTF8) > 0
+			pasteBurst.clear()
+			if hasPendingInput {
+				line = line[:0]
+				cursor = 0
+				// The buffer is gone, so the published range with it.
+				composerSelectionRange.Store(nil)
+				pendingUTF8 = pendingUTF8[:0]
+				historyIndex = -1
+				historyDraft = nil
+				clearRawInputLine(out)
+				ch <- inputEvent{kind: inputEventDraft, draft: "", cursor: 0}
+				ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyClearInput}
+				return
+			}
+			ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyInterrupt}
+		}
 		flushBurst := func(now time.Time) {
 			switch flush := pasteBurst.flushIfDue(now); flush.kind {
 			case pasteBurstResultPaste:
@@ -1272,6 +1387,20 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 									redrawRawInputBuffer(out, previous, previousCursor, line, cursor)
 								}
 							}
+							if kind := keyReportCopyKey(pendingEscape); kind != notCopyKey {
+								// Cmd+C copies a selection and is nothing else; Ctrl+C
+								// is Ctrl+C — unless a selection is what it would copy.
+								pendingEscape = pendingEscape[:0]
+								if viewportHasSelection() {
+									flushBeforeHotkey()
+									ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyCopySelection}
+									continue
+								}
+								if kind == copyKeyCtrl {
+									ctrlCPressed()
+								}
+								continue
+							}
 							if bytes.Equal(pendingEscape, []byte{0x1b, '[', 'Z'}) {
 								pendingEscape = pendingEscape[:0]
 								ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyCycleMode}
@@ -1458,30 +1587,16 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 					}
 					switch b {
 					case 0x03:
-						if pasted := pasteBurst.flushBeforeModifiedInput(); pasted != "" {
-							previous := cloneRunes(line)
-							previousCursor := cursor
-							line, cursor = insertRunesAtCursor(line, cursor, []rune(pasted))
-							if out != nil {
-								redrawRawInputBuffer(out, previous, previousCursor, line, cursor)
-							}
-						}
-						hasPendingInput := len(line) > 0 || len(pendingUTF8) > 0
-						pasteBurst.clear()
-						if hasPendingInput {
-							line = line[:0]
-							cursor = 0
-							// The buffer is gone, so the published range with it.
-							composerSelectionRange.Store(nil)
-							pendingUTF8 = pendingUTF8[:0]
-							historyIndex = -1
-							historyDraft = nil
-							clearRawInputLine(out)
-							ch <- inputEvent{kind: inputEventDraft, draft: "", cursor: 0}
-							ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyClearInput}
+						if viewportHasSelection() {
+							// With text selected Ctrl+C copies it, and does
+							// nothing else: the draft stays and nothing is
+							// interrupted. The renderer owns the selection, so
+							// the main loop does the copy.
+							flushBeforeHotkey()
+							ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyCopySelection}
 							continue
 						}
-						ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyInterrupt}
+						ctrlCPressed()
 					case 0x1b:
 						if pasted := pasteBurst.flushBeforeModifiedInput(); pasted != "" {
 							previous := cloneRunes(line)

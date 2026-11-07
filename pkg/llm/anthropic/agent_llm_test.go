@@ -370,6 +370,37 @@ func TestAnthropicStreamBlockSignals(t *testing.T) {
 	}
 }
 
+// A reply made only of a tool call has started at its tool_use block: the
+// response start fires there, once, before the call's arguments stream — not
+// at some later response's first word, which is what the turn's first-token
+// wait and a provisional steer's delivery are measured against.
+func TestAnthropicStreamToolOnlyReplyStartsAtItsCall(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writeAnthropicSSEEvent(t, w, "message_start", `{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_only","name":"weather","input":{}}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Oslo\"}"}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
+		writeAnthropicSSEEvent(t, w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":12}}`)
+		writeAnthropicSSEEvent(t, w, "message_stop", `{"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 128_000)
+	trace := newAnthropicReplayTrace()
+	ctx := llm.WithStreamSink(context.Background(), trace.sink())
+	if _, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	want := []string{"started", "ready:weather", "stop:tool_use", "message-stop"}
+	if !reflect.DeepEqual(trace.trace, want) {
+		t.Fatalf("sink trace = %v\nwant           %v", trace.trace, want)
+	}
+}
+
 func TestAnthropicStreamStopReasonWithoutMessageStop(t *testing.T) {
 	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
 

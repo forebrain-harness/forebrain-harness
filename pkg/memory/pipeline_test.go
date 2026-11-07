@@ -69,6 +69,24 @@ func testRoots(t *testing.T) Roots {
 	return roots
 }
 
+// The reasoning a stored answer carries back to its model — encrypted items
+// included — is not part of the conversation the memory agent reads.
+func TestSerializeTranscriptForMemoriesLeavesOutReasoningCarry(t *testing.T) {
+	answer := llm.AssistantMessage([]llm.ContentPart{llm.Text("the answer")})
+	answer.Name = llm.Prefix + "private chain of thought"
+	answer.ReasoningModel = "glm-5.3-flash"
+	out, err := serializeTranscriptForMemories([]llm.Message{llm.UserMessage(llm.Text("question")), answer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "private chain of thought") || strings.Contains(out, llm.Prefix) || strings.Contains(out, "glm-5.3-flash") {
+		t.Fatalf("reasoning carry reached the memory transcript: %s", out)
+	}
+	if !strings.Contains(out, "the answer") {
+		t.Fatalf("the answer itself is missing: %s", out)
+	}
+}
+
 func TestParseStage1IsStrict(t *testing.T) {
 	valid := `{"raw_memory":"raw","rollout_summary":"summary","rollout_slug":null}`
 	if _, err := parseStage1(valid); err != nil {

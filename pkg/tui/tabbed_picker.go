@@ -364,6 +364,7 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 			s.showPanel(p.panel(label))
 		}
 	})()
+	defer s.withPanelFieldProbe(func() slashPanel { return p.panel(label) }, func() []rune { return p.filter.runes() })()
 
 	for {
 		key, err := s.readKey()

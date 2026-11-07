@@ -400,6 +400,7 @@ func (o *approvalOverlay) Run() (turn.ToolApprovalDecision, error) {
 	o.rs.resetOverlayViewportState()
 	o.renderViewport()
 	defer o.rs.withCaretPlacer(o.placeFeedbackCaret)()
+	defer o.rs.withFieldProbe(o.feedbackTakes)()
 	for {
 		key, err := o.rs.readKeyWithMode(o.feedback != feedbackClosed)
 		if err != nil {
@@ -1049,15 +1050,14 @@ func (o *approvalOverlay) insertEditText(text string) {
 // composer, so its layout's own row table (feedbackLayout.rows) resolves both
 // anchors, exactly as placeFeedbackCaret resolves a click.
 func (o *approvalOverlay) cutFeedbackSelection() bool {
-	if o.feedback == feedbackClosed || o.rs == nil || !o.rs.inViewportOverlay() {
+	if o.rs == nil || !o.rs.inViewportOverlay() {
 		return false
 	}
 	startLine, startCol, endLine, endCol, ok := o.rs.renderer.OverlaySelection()
 	if !ok {
 		return false
 	}
-	area := composerTextArea{runes: o.feedbackBuf, firstLine: o.feedbackFirstRow, rows: o.feedbackLayout.rows}
-	start, end, ok := area.selectionRunes(startLine, startCol, endLine, endCol)
+	start, end, ok := o.feedbackRange(startLine, startCol, endLine, endCol)
 	if !ok {
 		return false
 	}
@@ -1065,6 +1065,23 @@ func (o *approvalOverlay) cutFeedbackSelection() bool {
 	o.feedbackCursor = start
 	o.rs.clearViewportSelection() // taken, not kept (see fieldSelection)
 	return true
+}
+
+// feedbackRange is the part of the open feedback an overlay selection covers;
+// ok is false when the feedback is closed or the selection covers none of it.
+func (o *approvalOverlay) feedbackRange(startLine, startCol, endLine, endCol int) (start, end int, ok bool) {
+	if o.feedback == feedbackClosed {
+		return 0, 0, false
+	}
+	area := composerTextArea{runes: o.feedbackBuf, firstLine: o.feedbackFirstRow, rows: o.feedbackLayout.rows}
+	return area.selectionRunes(startLine, startCol, endLine, endCol)
+}
+
+// feedbackTakes is the overlay's field probe (withFieldProbe): whether an edit
+// would take part of a selection over these cells.
+func (o *approvalOverlay) feedbackTakes(startLine, startCol, endLine, endCol int) bool {
+	_, _, ok := o.feedbackRange(startLine, startCol, endLine, endCol)
+	return ok
 }
 
 // approvalFeedbackPrompt precedes the feedback text on its first row;
@@ -2261,6 +2278,7 @@ func (o *questionOverlay) Run() (turn.ToolApprovalDecision, error) {
 	o.syncOtherEditMode()
 	o.render()
 	defer o.rs.withCaretPlacer(o.placeOtherCaret)()
+	defer o.rs.withFieldProbe(o.otherTakes)()
 	for {
 		key, err := o.rs.readKey()
 		if err != nil {
@@ -2591,23 +2609,40 @@ func (o *questionOverlay) cutOtherSelection() bool {
 		return false
 	}
 	startLine, startCol, endLine, endCol, ok := o.rs.renderer.OverlaySelection()
-	if !ok || o.otherRow < 0 || startLine > o.otherRow || endLine < o.otherRow {
+	if !ok {
 		return false
 	}
-	start, end := 0, len(o.otherBuf)
-	if startLine == o.otherRow {
-		start = caretIndexAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, startCol)
-	}
-	if endLine == o.otherRow {
-		end = selectionEndAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, endCol)
-	}
-	if end <= start {
+	start, end, ok := o.otherRange(startLine, startCol, endLine, endCol)
+	if !ok {
 		return false
 	}
 	o.otherBuf = deleteRuneRange(o.otherBuf, start, end)
 	o.otherCursor = start
 	o.rs.clearViewportSelection() // taken, not kept (see fieldSelection)
 	return true
+}
+
+// otherRange is the part of the Other answer being edited an overlay selection
+// covers; ok is false when no edit session is open or it covers none of it.
+func (o *questionOverlay) otherRange(startLine, startCol, endLine, endCol int) (start, end int, ok bool) {
+	if o.otherRow < 0 || startLine > o.otherRow || endLine < o.otherRow {
+		return 0, 0, false
+	}
+	start, end = 0, len(o.otherBuf)
+	if startLine == o.otherRow {
+		start = caretIndexAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, startCol)
+	}
+	if endLine == o.otherRow {
+		end = selectionEndAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, endCol)
+	}
+	return start, end, end > start
+}
+
+// otherTakes is the overlay's field probe (withFieldProbe): whether an edit
+// would take part of a selection over these cells.
+func (o *questionOverlay) otherTakes(startLine, startCol, endLine, endCol int) bool {
+	_, _, ok := o.otherRange(startLine, startCol, endLine, endCol)
+	return ok
 }
 
 // insertOther puts text into the Other answer, replacing a selection first the
@@ -3593,9 +3628,10 @@ func (s *rawSelector) dispatchMouse(mev sgrMouseEvent) {
 	// Stamped before the renderer's lock is taken: a paint in progress on the
 	// main loop must not decide which screen this report is resolved against.
 	ev.at = time.Now()
-	// A release that ended a drag copied a selection; only a plain click moves
-	// the caret, which is what the modal's placeCaret does with the
-	// overlay-relative position of the cell that was clicked.
+	// A release that ended a drag copied a selection, unless the modal's field
+	// takes it (withFieldProbe); only a plain click moves the caret, which is
+	// what the modal's placeCaret does with the overlay-relative position of
+	// the cell that was clicked.
 	if click := s.renderer.HandleMouse(ev); click.overlay && s.placeCaret != nil {
 		s.placeCaret(click.overlayLine, click.overlayCol)
 	}
@@ -3889,6 +3925,11 @@ func (s *rawSelector) readKeyWithMode(multiline bool) (parsedKey, error) {
 
 	switch b {
 	case 0x03:
+		if s.inViewportOverlay() && s.renderer.CopySelectionForCtrlC() {
+			// With text selected Ctrl+C copies it and does nothing else: the
+			// modal is not dismissed and sees no key at all.
+			return parsedKey{kind: rawKeyNone}, nil
+		}
 		return parsedKey{kind: rawKeyCtrlC}, nil
 	case 0x05:
 		return parsedKey{kind: rawKeyCtrlE}, nil
@@ -4000,9 +4041,22 @@ func (s *rawSelector) readEscapeTail(seq []byte) (parsedKey, error) {
 		// Terminator may already be present (caller pre-read bytes).
 		if n := len(seq); n > 0 {
 			c := seq[n-1]
-			if (c >= 'A' && c <= 'Z') || c == '~' {
+			// 'u' ends a CSI-u key report: Cmd+C arrives this way (see
+			// keyReportCopyKey), and nowhere else in a modal does it mean a key.
+			if (c >= 'A' && c <= 'Z') || c == '~' || c == 'u' {
 				if string(seq) == "[200~" {
 					return s.readBracketedPaste()
+				}
+				if kind := keyReportCopyKey(append([]byte{0x1b}, seq...)); kind != notCopyKey {
+					// Cmd+C copies a selection and is nothing else; Ctrl+C is
+					// Ctrl+C unless a selection is what it would copy.
+					if s.inViewportOverlay() && s.renderer.CopySelectionForCtrlC() {
+						return parsedKey{kind: rawKeyNone}, nil
+					}
+					if kind == copyKeyCtrl {
+						return parsedKey{kind: rawKeyCtrlC}, nil
+					}
+					return parsedKey{kind: rawKeyNone}, nil
 				}
 				return mapEscapeSeq(seq), nil
 			}
@@ -4168,15 +4222,8 @@ func (s *rawSelector) fieldSelection(k rawKey, p slashPanel, runes []rune) *[2]i
 	if first < 0 || startLine > last || endLine < first {
 		return nil
 	}
-	textCol := p.field.textCol()
-	start, end := 0, len(runes)
-	if startLine >= first {
-		start = caretIndexForClick(runes, textCol, startCol)
-	}
-	if endLine <= last {
-		end = selectionEndIndexForClick(runes, textCol, endCol)
-	}
-	if end <= start {
+	start, end, ok := s.fieldRange(p, runes, startLine, startCol, endLine, endCol)
+	if !ok {
 		// A selection that covers no rune (a drag inside one wide rune, say) is
 		// still this key's: drop the anchors, so the next edit cannot remap them
 		// onto text this one changed.
@@ -4188,6 +4235,49 @@ func (s *rawSelector) fieldSelection(k rawKey, p slashPanel, runes []rune) *[2]i
 	// them onto the text this edit is about to shorten.
 	s.clearViewportSelection()
 	return &[2]int{start, end}
+}
+
+// fieldRange is the part of a panel field's runes an overlay selection covers;
+// ok is false when it covers none of them.
+func (s *rawSelector) fieldRange(p slashPanel, runes []rune, startLine, startCol, endLine, endCol int) (start, end int, ok bool) {
+	if p.field == nil {
+		return 0, 0, false
+	}
+	first, last := p.fieldBar(s.panelWidth(), s.panelRows())
+	if first < 0 || startLine > last || endLine < first {
+		return 0, 0, false
+	}
+	textCol := p.field.textCol()
+	start, end = 0, len(runes)
+	if startLine >= first {
+		start = caretIndexForClick(runes, textCol, startCol)
+	}
+	if endLine <= last {
+		end = selectionEndIndexForClick(runes, textCol, endCol)
+	}
+	return start, end, end > start
+}
+
+// withFieldProbe tells the renderer, for the duration of one modal, which
+// selections the modal's field would take, so a drag over the field is left
+// off the clipboard (selectionIsEditTargetLocked). It returns the restore for
+// the modal's defer; nested modals stack. The renderer calls takes with its
+// lock held, so takes reads only the modal's state.
+func (s *rawSelector) withFieldProbe(takes func(startLine, startCol, endLine, endCol int) bool) func() {
+	if !s.inViewportOverlay() {
+		return func() {}
+	}
+	previous := s.renderer.SwapOverlayFieldProbe(takes)
+	return func() { s.renderer.SwapOverlayFieldProbe(previous) }
+}
+
+// withPanelFieldProbe is withFieldProbe for a panel's field: panel and runes
+// give the panel as it is drawn and the field's text when the selection ends.
+func (s *rawSelector) withPanelFieldProbe(panel func() slashPanel, runes func() []rune) func() {
+	return s.withFieldProbe(func(startLine, startCol, endLine, endCol int) bool {
+		_, _, ok := s.fieldRange(panel(), runes(), startLine, startCol, endLine, endCol)
+		return ok
+	})
 }
 
 // clearViewportSelection drops the app-level text selection a modal is done
@@ -4509,6 +4599,7 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 			s.renderSelect(st)
 		}
 	})()
+	defer s.withPanelFieldProbe(func() slashPanel { return st.panel() }, func() []rune { return st.filter.runes() })()
 
 	for {
 		key, err := s.readKey()
@@ -4857,6 +4948,7 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 			s.renderSelect(st)
 		}
 	})()
+	defer s.withPanelFieldProbe(func() slashPanel { return st.panel() }, func() []rune { return st.filter.runes() })()
 
 	for {
 		key, err := s.readKey()
@@ -4986,6 +5078,7 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 		cursor = caretIndexForClick(value, p.field.textCol(), col)
 		s.showPanel(panel())
 	})()
+	defer s.withPanelFieldProbe(panel, func() []rune { return value })()
 
 	for {
 		key, err := s.readKey()
@@ -5433,6 +5526,7 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 			s.renderRichPicker(p, label)
 		}
 	})()
+	defer s.withPanelFieldProbe(func() slashPanel { return p.panel(label) }, func() []rune { return p.filter.runes() })()
 
 	for {
 		key, err := s.readKey()
