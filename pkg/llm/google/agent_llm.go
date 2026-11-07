@@ -67,56 +67,133 @@ func NewAgentLLM(apiKey, baseURL, model string, maxTokens int64, transport http.
 // Execute runs one streamGenerateContent call, streaming the answer to the
 // stream sink in ctx as it arrives — unless ctx carries the non-streaming
 // switch, in which case it runs one bounded generateContent call and replays
-// the whole answer through the sink.
+// the whole answer through the sink. A round cut by the output budget
+// (MAX_TOKENS) is re-asked up to OutputLimitContinuations times, each round
+// carrying the accumulated answer and a resume instruction.
 func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	if c.model == "" {
 		return nil, errors.New("google: no model configured")
 	}
-	body, err := buildRequest(messages, tools, c.maxTokens)
-	if err != nil {
-		return nil, err
+	// The sink's end fires once per Execute, not once per request: a
+	// continuation round is the same answer still being produced, and ending
+	// between rounds made the UI treat the fragment as a finished reply.
+	endSink := llm.StreamSinkFrom(ctx)
+	if endSink != nil && endSink.OnEnd != nil {
+		defer endSink.OnEnd()
 	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("google: encode request: %w", err)
-	}
-	if llm.NonStreamingRequestFrom(ctx) {
-		// The request context switched this call to one non-streaming
-		// attempt: run it under the non-streaming deadline and replay the
-		// whole answer to the sink in stream order.
-		ctx, cancel := llm.WithNonStreamingDeadline(ctx)
-		defer cancel()
-		sink := llm.StreamSinkFrom(ctx)
-		if sink != nil && sink.OnEnd != nil {
-			defer sink.OnEnd()
-		}
-		result, finishReason, err := c.executeUnary(ctx, raw)
+	nonStreaming := llm.NonStreamingRequestFrom(ctx)
+	// conversation is what the next round sends: the caller's messages plus,
+	// from the second round on, the recovery's resume pair. It is rebuilt
+	// from the original slice each round — the accumulated answer replaces,
+	// never stacks on, the previous round's fragment. buildRequest renders
+	// the assistant fragment as role "model" and the prompt as role "user".
+	conversation := messages
+	var recovery llm.OutputLimitRecovery
+	var rounds int
+	var lastResult *llm.Result
+	var answer strings.Builder
+	var lastToolCalls []llm.ToolCall
+	var stopReason string
+	var usage *llm.Usage
+	var billedIn, billedOut int
+	var settledIn int
+	for {
+		body, err := buildRequest(conversation, tools, c.maxTokens)
 		if err != nil {
-			return nil, llm.NonStreamingError(ctx, err)
+			return nil, err
 		}
-		if sink != nil && result.Usage != nil &&
-			(result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
-			if sink.OnUsage != nil {
-				sink.OnUsage(result.Usage.InputTokens, result.Usage.OutputTokens)
-			}
-			if sink.OnUsageSnapshot != nil {
-				sink.OnUsageSnapshot(result.Usage.InputTokens, result.Usage.OutputTokens)
-			}
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("google: encode request: %w", err)
 		}
-		var texts []string
-		for _, p := range result.Message.Parts {
-			if p.Type == llm.ContentTypeText {
-				texts = append(texts, p.Text)
-			}
+		var res *llm.Result
+		if nonStreaming {
+			res, err = c.executeUnaryRound(ctx, raw)
+		} else {
+			res, err = c.executeStreaming(ctx, raw)
 		}
-		llm.ReplayToSink(sink, llm.ReplayedResponse{
-			Text:       texts,
-			ToolCalls:  result.Message.ToolCalls,
-			StopReason: finishReason,
-		})
-		return result, nil
+		if err != nil {
+			return nil, err
+		}
+		rounds++
+		lastResult = res
+		// Occupancy is the settled round's prompt; the output is every
+		// round's, because the model really did produce it and this Result's
+		// answer carries it. The billing view sums both across rounds.
+		if res.Usage != nil {
+			billedIn += res.Usage.InputTokens
+			billedOut += res.Usage.OutputTokens
+			settledIn = res.Usage.InputTokens
+			usage = &llm.Usage{InputTokens: settledIn, OutputTokens: billedOut}
+		}
+		if res.Message != nil {
+			answer.WriteString(res.Message.TextContent())
+			lastToolCalls = res.Message.ToolCalls
+		}
+		stopReason = res.StopReason
+		if !recovery.ShouldContinue(stopReason, answer.Len(), len(lastToolCalls)) {
+			break
+		}
+		conversation = append(append([]llm.Message(nil), messages...), recovery.Resume(answer.String())...)
 	}
-	return c.executeStreaming(ctx, raw)
+	if rounds == 1 {
+		// No continuation ran: the settled round's own result is this call's.
+		return lastResult, nil
+	}
+	// One assistant message carries the whole answer: each round was its own
+	// request, but this call is one reply.
+	parts := []llm.ContentPart{}
+	if answer.Len() > 0 {
+		parts = append(parts, llm.Text(answer.String()))
+	}
+	out := &llm.Result{
+		Message:    &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: lastToolCalls},
+		StopReason: stopReason,
+		Usage:      usage,
+	}
+	if billedIn != settledIn {
+		out.BilledUsage = &llm.Usage{InputTokens: billedIn, OutputTokens: billedOut}
+	}
+	return out, nil
+}
+
+// executeUnaryRound runs one non-streaming round under the non-streaming
+// deadline, reports its usage to the sink and replays the whole answer in
+// stream order, so every consumer sees it as it would a streamed one. The
+// sink's OnEnd is Execute's to fire, once per call.
+func (c *agentLLM) executeUnaryRound(ctx context.Context, raw []byte) (*llm.Result, error) {
+	// The request context switched this call to one non-streaming attempt:
+	// run it under the non-streaming deadline (scoped to this round, so a
+	// later round gets its own) and replay the whole answer to the sink in
+	// stream order.
+	ctx, cancel := llm.WithNonStreamingDeadline(ctx)
+	defer cancel()
+	sink := llm.StreamSinkFrom(ctx)
+	result, finishReason, err := c.executeUnary(ctx, raw)
+	if err != nil {
+		return nil, llm.NonStreamingError(ctx, err)
+	}
+	if sink != nil && result.Usage != nil &&
+		(result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
+		if sink.OnUsage != nil {
+			sink.OnUsage(result.Usage.InputTokens, result.Usage.OutputTokens)
+		}
+		if sink.OnUsageSnapshot != nil {
+			sink.OnUsageSnapshot(result.Usage.InputTokens, result.Usage.OutputTokens)
+		}
+	}
+	var texts []string
+	for _, p := range result.Message.Parts {
+		if p.Type == llm.ContentTypeText {
+			texts = append(texts, p.Text)
+		}
+	}
+	llm.ReplayToSink(sink, llm.ReplayedResponse{
+		Text:       texts,
+		ToolCalls:  result.Message.ToolCalls,
+		StopReason: finishReason,
+	})
+	return result, nil
 }
 
 // executeUnary runs the same request in its non-streaming form: one
@@ -419,12 +496,28 @@ func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, 
 		}
 	}
 	if len(msg.Parts) == 0 && len(msg.ToolCalls) == 0 {
+		if llm.OutputLimitReached(candidate.FinishReason) {
+			// MAX_TOKENS before any content is a cut, not a refusal: the
+			// round produced an output-limit fragment (here an empty one),
+			// and Execute's recovery loop decides whether to re-ask. An
+			// empty turn from any other finish reason (safety, recitation, a
+			// filtered prompt) really is a refusal to answer, and stays an
+			// error.
+			return &llm.Result{
+				Message:    msg,
+				StopReason: llm.StopReasonOutputLimit,
+				Usage:      billed,
+			}, candidate.FinishReason, nil
+		}
 		// An empty turn is a refusal to answer (safety, recitation, a filtered
 		// prompt). Returning it as a silent empty message would look like a
 		// successful turn that said nothing.
 		return nil, candidate.FinishReason, llm.NewExecuteError(fmt.Errorf("google: response was empty (finish reason %q)", candidate.FinishReason), billed)
 	}
 	result := &llm.Result{Message: msg}
+	// Why the candidate stopped, normalized: MAX_TOKENS maps onto the
+	// output-limit reason the engine reads.
+	result.StopReason = llm.NormalizeStopReason(candidate.FinishReason)
 	result.Usage = billed
 	return result, candidate.FinishReason, nil
 }

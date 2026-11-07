@@ -412,10 +412,7 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 		if _, err := openai.Load(authPath); err != nil {
 			return nil, fmt.Errorf("ChatGPT login required; put a Codex auth.json at %s (or set credentials.chatgpt in forebrain.yaml), or run /connect: %w", authPath, err)
 		}
-		maxTokens := openai.DefaultMaxCompletionTokens
-		if hit, ok := llm.Lookup("openai", model); ok && hit.DefaultMaxTokens > 0 {
-			maxTokens = int(hit.DefaultMaxTokens)
-		}
+		maxTokens := llm.OutputTokenCap("openai", model, 0) // TODO(plan 263): pass cfg.MaxOutputTokens
 		transport := &openai.Transport{Path: authPath}
 		return wrapUsageAccountingLLM(openai.NewResponsesLLMWithWebSearch(
 			"oauth", openai.CodexBaseURL, model, maxTokens, cfg.Params.Bytes(), "live", transport,
@@ -430,10 +427,7 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("llm base_url is required for provider %s", prov)
 	}
-	maxTokens := openai.DefaultMaxCompletionTokens
-	if hit, ok := llm.Lookup(prov, model); ok && hit.DefaultMaxTokens > 0 {
-		maxTokens = int(hit.DefaultMaxTokens)
-	}
+	maxTokens := llm.OutputTokenCap(prov, model, 0) // TODO(plan 263): pass cfg.MaxOutputTokens
 	switch prov {
 	case "anthropic", "minimax":
 		return wrapUsageAccountingLLM(anthropic.NewAgentLLM(apiKey, baseURL, model, int64(maxTokens), requestReasoningEffort(cfg.Params))), nil
@@ -582,12 +576,11 @@ func newOpenCodeLLM(prov, model, apiKey, baseURL string, cfg *LLMProviderYAML) (
 		inferenceRoot = opencode.ProviderBaseURL(prov)
 	}
 	clientBase := opencode.ClientBaseURL(protocol, goSubscription, inferenceRoot)
-	// The output cap is the default rather than a catalog lookup: the OpenCode
-	// model table documents context windows, not per-model output limits, and
-	// llm.Lookup reads <FOREBRAIN_HOME>/models.json, which is installed once
-	// and never overwritten — on an existing machine its copy predates every
-	// model listed here.
-	maxTokens := openai.DefaultMaxCompletionTokens
+	// The cap comes from the same resolver every other provider uses. The old
+	// note here said OpenCode's table carried windows but no output limits;
+	// that stopped being true once the shipped catalog (assets/models.json,
+	// refreshed with each build) carried limit.output for these ids.
+	maxTokens := llm.OutputTokenCap(prov, model, 0) // TODO(plan 263): pass cfg.MaxOutputTokens
 	transport := &openCodeAuthTransport{inner: auth}
 
 	switch protocol {

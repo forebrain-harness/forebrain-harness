@@ -11609,3 +11609,96 @@ func TestStoppedToolCallCompletesOnAnUncancelledContext(t *testing.T) {
 		t.Fatalf("the stopped call completed on a canceled context (%v): a recording hook drops it", completed[0])
 	}
 }
+
+type outputLimitEmptyAfterToolLLM struct{ calls int }
+
+func (m *outputLimitEmptyAfterToolLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	if m.calls == 1 {
+		msg := llm.AssistantMessage(nil,
+			llm.ToolCall{ID: "call-probe", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "probe", Arguments: `{}`}},
+		)
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	msg := llm.AssistantMessage(nil)
+	return &llm.Result{Message: &msg, StopReason: llm.StopReasonOutputLimit, Usage: &llm.Usage{}}, nil
+}
+
+// An empty final answer whose stop reason says the output budget ran out names
+// that cause, not the symptom "empty assistant response after tool
+// execution" that used to throw a whole turn away.
+func TestEmptyAssistantAfterOutputLimitNamesTheCause(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe", ReadOnly: true, ConcurrencySafe: true})
+	tool, err := llm.NewTool("probe", "probe", func(context.Context, *struct{}) (string, error) {
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	res, err := wrapToolOrchestrationLLM(&outputLimitEmptyAfterToolLLM{}, st).Execute(
+		context.Background(),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		[]*llm.Tool{tool},
+	)
+	if err == nil {
+		t.Fatalf("expected the output-limit error, got nil result=%#v", res)
+	}
+	if err.Error() != llm.OutputLimitEmptyAnswerError {
+		t.Fatalf("error = %q, want %q", err.Error(), llm.OutputLimitEmptyAnswerError)
+	}
+	if strings.Contains(err.Error(), "empty assistant response") {
+		t.Fatalf("error = %q; the old symptom wording must not be used here", err.Error())
+	}
+}
+
+type outputLimitFragmentAfterToolLLM struct{ calls int }
+
+func (m *outputLimitFragmentAfterToolLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	if m.calls == 1 {
+		msg := llm.AssistantMessage(nil,
+			llm.ToolCall{ID: "call-probe", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "probe", Arguments: `{}`}},
+		)
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("Half an answer.")})
+	return &llm.Result{Message: &msg, StopReason: llm.StopReasonOutputLimit, Usage: &llm.Usage{}}, nil
+}
+
+// A cut-off answer with real text ends the turn as that fragment, with a
+// notice saying it is a prefix — not as an error.
+func TestFragmentAfterOutputLimitEndsTurnWithNotice(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe", ReadOnly: true, ConcurrencySafe: true})
+	tool, err := llm.NewTool("probe", "probe", func(context.Context, *struct{}) (string, error) {
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	var notices []llm.ResponseNotice
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnResponseNotice: func(n llm.ResponseNotice) { notices = append(notices, n) },
+	})
+	res, err := wrapToolOrchestrationLLM(&outputLimitFragmentAfterToolLLM{}, st).Execute(
+		ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		[]*llm.Tool{tool},
+	)
+	if err != nil {
+		t.Fatalf("a fragment after the output limit must end the turn, got error: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "Half an answer." {
+		t.Fatalf("result = %#v, want the fragment as the turn's answer", res)
+	}
+	found := false
+	for _, n := range notices {
+		if n.Kind == llm.ResponseNoticeIncomplete && n.Text == llm.OutputLimitExhaustedNotice {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("notices = %#v, want the output-limit exhausted notice", notices)
+	}
+}

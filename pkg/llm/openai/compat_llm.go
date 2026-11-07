@@ -22,33 +22,12 @@ import (
 const (
 	defaultOpenAIChatModel           = "gpt-4o-mini"
 	DefaultMaxCompletionTokens       = 8192
-	openAILengthContinueMax          = 16
 	defaultOpenAIChatCompletionsPath = "/chat/completions"
 	openAIReasoningCarryPrefix       = "!!FOREBRAIN_RCv1!!"
 	providerErrorBodyLimit           = 1 << 20
 )
 
 var errOpenAINoChoices = errors.New("openai: response contained no choices")
-
-func isOpenAILengthTruncatedFinish(fr openaiclient.FinishReason) bool {
-	s := strings.ToLower(strings.TrimSpace(string(fr)))
-	switch s {
-	case string(openaiclient.FinishReasonLength), "max_tokens":
-		return true
-	default:
-		return false
-	}
-}
-
-func openAIReasoningLengthShouldContinue(fr openaiclient.FinishReason, reasoningLen, contentLen, toolCalls int) bool {
-	if toolCalls > 0 {
-		return false
-	}
-	if !isOpenAILengthTruncatedFinish(fr) {
-		return false
-	}
-	return reasoningLen > 0 || contentLen > 0
-}
 
 type openAICompatLLM struct {
 	client      *openaiclient.Client
@@ -838,12 +817,13 @@ func compatStreamIDSuffix() string {
 func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req openaiclient.ChatCompletionRequest) (*llm.Result, error) {
 	sink := llm.StreamSinkFrom(ctx)
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
-	// roundMsgs is what one round sends: the caller's messages, plus — from the
-	// second round on — the one assistant message carrying everything the earlier
-	// rounds produced. reasoningAcc and contentAcc already hold every round so
-	// far, so each round replaces that message rather than appending another: an
-	// appended copy per round sent round 1's output twice by round 3 and grew the
-	// prompt with the square of the rounds.
+	// roundMsgs is what one round sends: the caller's messages, plus — from
+	// the second round on — the recovery's resume pair (the accumulated
+	// answer as an assistant turn, the resume instruction as a user turn).
+	// contentAcc already holds every round so far, so each round replaces
+	// that pair rather than appending another: an appended copy per round
+	// sent round 1's output twice by round 3 and grew the prompt with the
+	// square of the rounds.
 	roundMsgs := baseMsgs
 	var reasoningAcc, contentAcc strings.Builder
 	var toolBuf []openaiclient.ToolCall
@@ -883,8 +863,14 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	}
 	var reportedIn, reportedOut int
 	responseStarted := false
-
-	for round := 0; round < openAILengthContinueMax; round++ {
+	// The output-limit recovery: at most OutputLimitContinuations re-asks,
+	// each carrying the one accumulated answer plus the resume instruction.
+	// The fragment is contentAcc — raw answer text, never the
+	// compatMessageFromOpenAI rendering, which wraps thinking-only output in
+	// a ```thinking fence and would send the reasoning back as answer text.
+	var recovery llm.OutputLimitRecovery
+	round := 0
+	for {
 		// Each round is its own request, and Chat Completions reports usage as
 		// that request's running total rather than as a per-chunk increment:
 		// the same object can arrive on more than one chunk (stepfun /
@@ -1071,18 +1057,11 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		// cover (a provider that ends [DONE] with zero output) is ready now.
 		emitCompatToolReady(sink, &toolBuf, &readyCount, len(toolBuf))
 
-		if !openAIReasoningLengthShouldContinue(lastFinish, reasoningAcc.Len(), contentAcc.Len(), len(toolBuf)) {
+		if !recovery.ShouldContinue(llm.NormalizeStopReason(string(lastFinish)), contentAcc.Len(), len(toolBuf)) {
 			break
 		}
-		asst := openaiclient.ChatCompletionMessage{
-			Role:             openaiclient.ChatMessageRoleAssistant,
-			ReasoningContent: reasoningAcc.String(),
-			Content:          contentAcc.String(),
-		}
-		if len(toolBuf) > 0 {
-			asst.ToolCalls = append([]openaiclient.ToolCall(nil), toolBuf...)
-		}
-		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), asst)
+		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), compatMessagesToOpenAI(recovery.Resume(contentAcc.String()), c.model)...)
+		round++
 	}
 
 	if sink != nil && sink.OnEnd != nil {
@@ -1110,7 +1089,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		openMsg.ToolCalls = toolBuf
 	}
 	msg := compatMessageFromOpenAI(openMsg, c.model)
-	out := &llm.Result{Message: &msg}
+	out := &llm.Result{Message: &msg, StopReason: llm.NormalizeStopReason(string(lastFinish))}
 	// Occupancy is the settled round's prompt; the output is every round's,
 	// because the model really did produce it and this Result's answer carries
 	// it.
@@ -1151,7 +1130,7 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 		if sink != nil && sink.OnEnd != nil {
 			defer sink.OnEnd()
 		}
-		openMsg, finishReason, usage, billed, err := c.executeChatCompletionUnaryParts(ctx, req)
+		openMsg, finishReason, usage, billed, err := c.executeChatCompletionUnaryParts(ctx, req, true)
 		if err != nil {
 			err = llm.NonStreamingError(ctx, err)
 			result := finish(nil)
@@ -1159,7 +1138,7 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 			return result, err
 		}
 		msg := compatMessageFromOpenAI(openMsg, c.model)
-		result := &llm.Result{Message: &msg, Usage: usage, BilledUsage: billed}
+		result := &llm.Result{Message: &msg, StopReason: llm.NormalizeStopReason(string(finishReason)), Usage: usage, BilledUsage: billed}
 		result = finishUsage(result, finish)
 		prefix.Finish(resultBilledUsage(result))
 		if sink != nil && result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
@@ -1188,7 +1167,7 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 		prefix.Finish(resultBilledUsage(result))
 		return result, err
 	}
-	result, err := c.executeChatCompletionUnary(ctx, req)
+	result, err := c.executeChatCompletionUnary(ctx, req, true)
 	result = finishUsage(result, finish)
 	prefix.Finish(resultBilledUsage(result))
 	return result, err
@@ -1265,7 +1244,11 @@ func (c *openAICompatLLM) ExecuteStructured(ctx context.Context, messages []llm.
 			Strict:      true,
 		},
 	}
-	result, err := c.executeChatCompletionUnary(ctx, req)
+	// Structured output runs exactly one round even when the finish reason
+	// says the budget ran out: a JSON document can only be continued by
+	// re-sending the same document, so the StopReason is recorded for the
+	// caller instead of being recovered here.
+	result, err := c.executeChatCompletionUnary(ctx, req, false)
 	result = finishUsage(result, finish)
 	prefix.Finish(resultBilledUsage(result))
 	return result, err
@@ -1277,13 +1260,13 @@ func (s rawJSONSchema) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any(s))
 }
 
-func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req openaiclient.ChatCompletionRequest) (*llm.Result, error) {
-	openMsg, _, usage, billed, err := c.executeChatCompletionUnaryParts(ctx, req)
+func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req openaiclient.ChatCompletionRequest, continueOnLimit bool) (*llm.Result, error) {
+	openMsg, finishReason, usage, billed, err := c.executeChatCompletionUnaryParts(ctx, req, continueOnLimit)
 	if err != nil {
 		return nil, err
 	}
 	msg := compatMessageFromOpenAI(openMsg, c.model)
-	return &llm.Result{Message: &msg, Usage: usage, BilledUsage: billed}, nil
+	return &llm.Result{Message: &msg, StopReason: llm.NormalizeStopReason(string(finishReason)), Usage: usage, BilledUsage: billed}, nil
 }
 
 // executeChatCompletionUnaryParts runs the length-continue loop of one
@@ -1291,8 +1274,10 @@ func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req op
 // last finish reason and the usage — the pieces a sink replay of the whole
 // answer needs on top of the Result. usage is the settled round (what
 // occupancy reads), billed every round (what the call was billed for) and nil
-// when there was only one round.
-func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, req openaiclient.ChatCompletionRequest) (openaiclient.ChatCompletionMessage, openaiclient.FinishReason, *llm.Usage, *llm.Usage, error) {
+// when there was only one round. continueOnLimit is false on the structured
+// output path, which must not continue: JSON can only be continued by
+// re-sending the same document, not by a resume instruction that restarts it.
+func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, req openaiclient.ChatCompletionRequest, continueOnLimit bool) (openaiclient.ChatCompletionMessage, openaiclient.FinishReason, *llm.Usage, *llm.Usage, error) {
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
 	// See executeChatCompletionStream: each round replaces the carried answer.
 	roundMsgs := baseMsgs
@@ -1315,7 +1300,8 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		return openAIUsage(int64(settledIn+settledOut), 0, int64(settledCached))
 	}
 
-	for round := 0; round < openAILengthContinueMax; round++ {
+	var recovery llm.OutputLimitRecovery
+	for {
 		req.Messages = roundMsgs
 		resp, err := c.client.CreateChatCompletion(ctx, req)
 		if err != nil {
@@ -1354,18 +1340,13 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		tokOut += resp.Usage.CompletionTokens
 		tokCached += settledCached
 
-		if !openAIReasoningLengthShouldContinue(lastFinish, reasoningAcc.Len(), contentAcc.Len(), len(toolBuf)) {
+		if !continueOnLimit || !recovery.ShouldContinue(llm.NormalizeStopReason(string(lastFinish)), contentAcc.Len(), len(toolBuf)) {
 			break
 		}
-		asst := openaiclient.ChatCompletionMessage{
-			Role:             openaiclient.ChatMessageRoleAssistant,
-			ReasoningContent: reasoningAcc.String(),
-			Content:          contentAcc.String(),
-		}
-		if len(toolBuf) > 0 {
-			asst.ToolCalls = append([]openaiclient.ToolCall(nil), toolBuf...)
-		}
-		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), asst)
+		// The same resume pair the streaming loop sends: the accumulated
+		// answer as an assistant turn, the resume instruction as a user turn.
+		// Reasoning is never sent back.
+		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), compatMessagesToOpenAI(recovery.Resume(contentAcc.String()), c.model)...)
 	}
 
 	if role == "" {

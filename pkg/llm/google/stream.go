@@ -31,9 +31,8 @@ func (c *agentLLM) executeStreaming(ctx context.Context, raw []byte) (*llm.Resul
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	sink := llm.StreamSinkFrom(ctx)
-	if sink != nil && sink.OnEnd != nil {
-		defer sink.OnEnd()
-	}
+	// The sink's OnEnd is not fired here: Execute owns it for the whole
+	// continuation loop, so it fires once per call however many rounds ran.
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("google: send request: %w", err)
@@ -92,11 +91,26 @@ func (c *agentLLM) executeStreaming(ctx context.Context, raw []byte) (*llm.Resul
 			// finished as an empty answer.
 			return nil, llm.NewExecuteError(fmt.Errorf("google: %w", llm.ErrStreamNoEvents), st.usage)
 		}
+		if llm.OutputLimitReached(st.finish) {
+			// MAX_TOKENS before any content is a cut, not a refusal: the
+			// round produced an output-limit fragment (here an empty one —
+			// the thinking spent the budget), and Execute's recovery loop
+			// decides whether to re-ask. Every other finish reason really
+			// did end the answer with nothing said.
+			return &llm.Result{
+				Message:    &llm.Message{Role: llm.RoleAssistant},
+				StopReason: llm.StopReasonOutputLimit,
+				Usage:      st.usage,
+			}, nil
+		}
 		return nil, llm.NewExecuteError(fmt.Errorf("google: response was empty (finish reason %q)", st.finish), st.usage)
 	}
 	return &llm.Result{
 		Message: &llm.Message{Role: llm.RoleAssistant, Parts: st.parts, ToolCalls: st.calls},
-		Usage:   st.usage,
+		// Why the stream stopped, normalized: MAX_TOKENS maps onto the
+		// output-limit reason the engine reads.
+		StopReason: llm.NormalizeStopReason(st.finish),
+		Usage:      st.usage,
 	}, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -55,7 +56,10 @@ func runStream(t *testing.T, handler http.HandlerFunc) (*llm.Result, error, *rec
 	rec := newRecordingSink()
 	ctx := llm.WithStreamSink(context.Background(), rec.sink())
 	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil).(*agentLLM)
-	result, err := client.executeStreaming(ctx, []byte(`{}`))
+	// Execute, not executeStreaming: the sink's OnEnd contract belongs to
+	// Execute now (once per call, over the whole continuation loop), so the
+	// recorded behavior is the public one.
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
 	return result, err, rec
 }
 
@@ -280,4 +284,75 @@ func TestStreamSetsStreamedAndEnds(t *testing.T) {
 	}
 	t.Run("success", success)
 	t.Run("failure", failure)
+}
+
+// A streaming round that ends MAX_TOKENS with no parts is a cut before any
+// answer (the thinking spent the budget), not an empty-response error: it is
+// re-asked with the thinking-only prompt, and once the recovery budget is
+// spent the accumulated fragment comes back with the output-limit reason.
+func TestGoogleStreamingMaxTokensContinues(t *testing.T) {
+	type wireContent struct {
+		Role  string `json:"role"`
+		Parts []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	}
+	type wireReq struct {
+		Contents []wireContent `json:"contents"`
+	}
+	var mu sync.Mutex
+	var bodies []wireReq
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req wireReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		round := len(bodies) + 1
+		bodies = append(bodies, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		switch round {
+		case 1:
+			serveSSE(w, `{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0,"thoughtsTokenCount":64}}`)
+		case 2:
+			serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"part2 "}]},"finishReason":"MAX_TOKENS"}]}`, `{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":5,"thoughtsTokenCount":0}}`)
+		case 3:
+			serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"part3 "}]},"finishReason":"MAX_TOKENS"}]}`, `{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":30,"candidatesTokenCount":5,"thoughtsTokenCount":0}}`)
+		default:
+			serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"part4 "}]},"finishReason":"MAX_TOKENS"}]}`, `{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":5,"thoughtsTokenCount":0}}`)
+		}
+	}))
+	defer server.Close()
+
+	rec := newRecordingSink()
+	ctx := llm.WithStreamSink(context.Background(), rec.sink())
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil).(*agentLLM)
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 1+llm.OutputLimitContinuations {
+		t.Fatalf("requests = %d, want %d (first round plus three continuations)", len(bodies), 1+llm.OutputLimitContinuations)
+	}
+	// The first round produced no text, so the second request carries only
+	// the caller's turn and the thinking-only resume prompt — no model turn.
+	if n := len(bodies[1].Contents); n != 2 {
+		t.Fatalf("second request carried %d contents, want 2 (caller, thinking-only prompt)", n)
+	}
+	for i, c := range bodies[1].Contents {
+		if c.Role == "model" {
+			t.Fatalf("second request content %d is a model turn; the thinking-only resume carries none", i)
+		}
+	}
+	if text := res.Message.TextContent(); text != "part2 part3 part4 " {
+		t.Fatalf("fragment = %q", text)
+	}
+	if res.StopReason != llm.StopReasonOutputLimit {
+		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
+	}
 }

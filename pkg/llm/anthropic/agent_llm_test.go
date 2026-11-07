@@ -627,3 +627,264 @@ func TestAnthropicAgentLLMNonStreamingTimeoutIsRetryable(t *testing.T) {
 		t.Fatalf("IsRetryableNetworkError(%v) = false, want true", err)
 	}
 }
+
+// anthropicLimitScriptServer serves the given SSE scripts in request order,
+// recording every request body. Each script is the raw event payloads of one
+// streaming response, written as message events.
+func anthropicLimitScriptServer(t *testing.T, scripts []string, bodies *[]map[string]any) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	next := 0
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		i := next
+		next++
+		*bodies = append(*bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if i >= len(scripts) {
+			writeAnthropicSSEEvent(t, w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":1,"output_tokens":1}}`)
+			writeAnthropicSSEEvent(t, w, "message_stop", `{"type":"message_stop"}`)
+			return
+		}
+		for _, line := range strings.Split(scripts[i], "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "|", 2)
+			writeAnthropicSSEEvent(t, w, parts[0], parts[1])
+		}
+	}))
+}
+
+// anthropicRoundScript is one SSE response whose text deltas join into text
+// and whose terminal stop reason is reason. input/output are the round's own
+// usage on message_delta (message_start seeds output_tokens with 1).
+func anthropicRoundScript(text, reason string, input, output int) string {
+	var b strings.Builder
+	start := `message_start|{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":` + fmt.Sprint(input) + `,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`
+	b.WriteString(start + "\n")
+	blockStart := `content_block_start|{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
+	b.WriteString(blockStart + "\n")
+	for _, piece := range strings.SplitAfter(text, " ") {
+		if piece == "" {
+			continue
+		}
+		delta := fmt.Sprintf(`content_block_delta|{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, piece)
+		b.WriteString(delta + "\n")
+	}
+	blockStop := `content_block_stop|{"type":"content_block_stop","index":0}`
+	b.WriteString(blockStop + "\n")
+	msgDelta := fmt.Sprintf(`message_delta|{"type":"message_delta","delta":{"stop_reason":%q,"stop_sequence":null},"usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":%d}}`, reason, input, output)
+	b.WriteString(msgDelta + "\n")
+	b.WriteString(`message_stop|{"type":"message_stop"}`)
+	return b.String()
+}
+
+// A response cut by the output budget is re-asked once with the fragment as
+// the assistant's own turn and the resume instruction as a user turn — no
+// assistant prefill tail — and the two rounds' text is returned as one answer.
+func TestAnthropicContinuesAfterOutputLimit(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	var bodies []map[string]any
+	server := anthropicLimitScriptServer(t, []string{
+		anthropicRoundScript("Half of a sentence.", "max_tokens", 10, 50),
+		anthropicRoundScript("The rest.", "end_turn", 25, 7),
+	}, &bodies)
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	ended := 0
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{OnEnd: func() { ended++ }})
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	msgs, _ := bodies[1]["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("second request carries %d messages, want 3 (user, assistant fragment, resume prompt)", len(msgs))
+	}
+	fragment, _ := msgs[1].(map[string]any)
+	if fragment["role"] != "assistant" {
+		t.Fatalf("second request's middle message role = %v, want assistant", fragment["role"])
+	}
+	if got := anthropicMessageText(t, fragment); got != "Half of a sentence." {
+		t.Fatalf("assistant fragment = %q, want the first round's text", got)
+	}
+	prompt, _ := msgs[2].(map[string]any)
+	if prompt["role"] != "user" || !strings.Contains(anthropicMessageText(t, prompt), "Resume directly") {
+		t.Fatalf("last message must be the user resume prompt, got %#v", prompt)
+	}
+	if text := res.Message.TextContent(); text != "Half of a sentence.The rest." {
+		t.Fatalf("joined text = %q", text)
+	}
+	if res.Usage == nil || res.Usage.InputTokens != 25 || res.Usage.OutputTokens != 57 {
+		t.Fatalf("usage = %#v, want the settled round's input (25) and both rounds' output (57)", res.Usage)
+	}
+	billed := res.Billed()
+	if billed.InputTokens != 35 || billed.OutputTokens != 57 {
+		t.Fatalf("billed = %#v, want both rounds summed (35/57)", billed)
+	}
+	if ended != 1 {
+		t.Fatalf("OnEnd fired %d times, want exactly 1 over both rounds", ended)
+	}
+	if res.StopReason != "end_turn" {
+		t.Fatalf("StopReason = %q, want end_turn", res.StopReason)
+	}
+}
+
+// A cut that happened while only thinking had been produced sends the
+// thinking-only resume prompt as the sole extra message: there is no fragment
+// to continue from, and an empty assistant turn is rejected by the protocol.
+func TestAnthropicThinkingOnlyLimitContinues(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	thinkingOnly := `message_start|{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}
+content_block_start|{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+content_block_delta|{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Long reasoning that never turned into text"}}
+content_block_stop|{"type":"content_block_stop","index":0}
+message_delta|{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":64}}
+message_stop|{"type":"message_stop"}`
+	var bodies []map[string]any
+	server := anthropicLimitScriptServer(t, []string{
+		thinkingOnly,
+		anthropicRoundScript("Brief answer.", "end_turn", 30, 5),
+	}, &bodies)
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	msgs, _ := bodies[1]["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("second request carries %d messages, want 2 (the caller's user message and the prompt)", len(msgs))
+	}
+	for i, m := range msgs {
+		msg, _ := m.(map[string]any)
+		if msg["role"] == "assistant" {
+			t.Fatalf("message %d of the second request is an assistant message; the thinking-only resume must carry none", i)
+		}
+	}
+	last, _ := msgs[len(msgs)-1].(map[string]any)
+	if !strings.Contains(anthropicMessageText(t, last), "reason much more briefly") {
+		t.Fatalf("resume prompt = %.80q, want the thinking-only wording", anthropicMessageText(t, last))
+	}
+	if text := res.Message.TextContent(); text != "Brief answer." {
+		t.Fatalf("answer = %q, want only the second round's text", text)
+	}
+}
+
+// Three continuations, then the fragment is handed back with the output-limit
+// stop reason. Every round's request carries exactly one assistant message —
+// the accumulated answer, replaced per round, never stacked.
+func TestAnthropicGivesUpAfterThree(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	scripts := []string{
+		anthropicRoundScript("Part one.", "max_tokens", 10, 50),
+		anthropicRoundScript("Part two.", "max_tokens", 20, 50),
+		anthropicRoundScript("Part three.", "max_tokens", 30, 50),
+		anthropicRoundScript("Part four.", "max_tokens", 40, 50),
+	}
+	var bodies []map[string]any
+	server := anthropicLimitScriptServer(t, scripts, &bodies)
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(bodies) != 4 {
+		t.Fatalf("requests = %d, want 4 (first round plus three continuations)", len(bodies))
+	}
+	if res.StopReason != llm.StopReasonOutputLimit {
+		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
+	}
+	msgs, _ := bodies[3]["messages"].([]any)
+	assistant := 0
+	for _, m := range msgs {
+		msg, _ := m.(map[string]any)
+		if msg["role"] == "assistant" {
+			assistant++
+		}
+	}
+	if assistant != 1 {
+		t.Fatalf("fourth request carries %d assistant messages, want exactly 1 (the accumulated answer)", assistant)
+	}
+	if text := res.Message.TextContent(); text != "Part one.Part two.Part three.Part four." {
+		t.Fatalf("joined text = %q", text)
+	}
+}
+
+// The continuation loop wraps the non-streaming switch too: executeUnary is a
+// round of it like executeStreaming.
+func TestAnthropicNonStreamingContinues(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	responses := []string{
+		`{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"Half "}],"stop_reason":"max_tokens","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`,
+		`{"id":"msg_2","type":"message","role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"there."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":20,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`,
+	}
+	var bodies []map[string]any
+	var mu sync.Mutex
+	next := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		i := next
+		next++
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(responses[i]))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	if text := res.Message.TextContent(); text != "Half there." {
+		t.Fatalf("joined text = %q", text)
+	}
+}
+
+// anthropicMessageText joins the text blocks of one Messages-API message body.
+func anthropicMessageText(t *testing.T, msg map[string]any) string {
+	t.Helper()
+	blocks, _ := msg["content"].([]any)
+	var b strings.Builder
+	for _, blk := range blocks {
+		block, _ := blk.(map[string]any)
+		if block["type"] == "text" {
+			text, _ := block["text"].(string)
+			b.WriteString(text)
+		}
+	}
+	return b.String()
+}

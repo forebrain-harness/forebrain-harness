@@ -616,17 +616,18 @@ func promptOf(u *llm.Usage) int {
 	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 }
 
-// A length-continue round re-sends the caller's messages plus the answer the
-// earlier rounds produced. The accumulators already span every round, so one
-// carried assistant message, replaced each round, is the whole story: the loop
-// used to append a fresh copy per round, and by round 3 the request carried
-// round 1's output twice — the prompt grew with the square of the rounds and
-// the model read the same reasoning repeated.
+// A length-continue round re-sends the caller's messages plus the resume pair:
+// the accumulated answer as the assistant's own turn and the resume
+// instruction as a user turn. The accumulators already span every round, so
+// the pair is replaced each round, never stacked — the loop used to append a
+// fresh prefill copy per round, and by round 3 the request carried round 1's
+// output twice. The carried answer is content only: reasoning never goes back.
 func TestLengthContinueCarriesOneAnswerPerRound(t *testing.T) {
 	t.Parallel()
 
 	type wireMsg struct {
 		Role             string `json:"role"`
+		Content          string `json:"content"`
 		ReasoningContent string `json:"reasoning_content"`
 	}
 	type wireReq struct {
@@ -667,7 +668,7 @@ func TestLengthContinueCarriesOneAnswerPerRound(t *testing.T) {
 					w.Header().Set("Content-Type", "text/event-stream")
 					w.WriteHeader(http.StatusOK)
 					var body bytes.Buffer
-					body.WriteString(fmt.Sprintf(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"R%d "},"finish_reason":null}]}`, round) + "\n\n")
+					body.WriteString(fmt.Sprintf(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"R%d ","content":"A%d "},"finish_reason":null}]}`, round, round) + "\n\n")
 					body.WriteString(fmt.Sprintf(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":%q}],"usage":{"prompt_tokens":%d,"completion_tokens":10,"total_tokens":%d}}`, finish, 100*round, 100*round+10) + "\n\n")
 					body.WriteString("data: [DONE]\n\n")
 					_, _ = w.Write(body.Bytes())
@@ -675,8 +676,8 @@ func TestLengthContinueCarriesOneAnswerPerRound(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, `{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"R%d "},"finish_reason":%q}],"usage":{"prompt_tokens":%d,"completion_tokens":10,"total_tokens":%d}}`,
-					round, finish, 100*round, 100*round+10)
+				_, _ = fmt.Fprintf(w, `{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"R%d ","content":"A%d "},"finish_reason":%q}],"usage":{"prompt_tokens":%d,"completion_tokens":10,"total_tokens":%d}}`,
+					round, round, finish, 100*round, 100*round+10)
 			}))
 			t.Cleanup(server.Close)
 
@@ -695,20 +696,130 @@ func TestLengthContinueCarriesOneAnswerPerRound(t *testing.T) {
 				t.Fatalf("request 1 carried %d messages, want 1", n)
 			}
 			for i := 1; i <= 2; i++ {
-				if n := len(got[i].Messages); n != 2 {
-					t.Fatalf("request %d carried %d messages, want 2 (the caller's message plus the one accumulated answer)", i+1, n)
+				if n := len(got[i].Messages); n != 3 {
+					t.Fatalf("request %d carried %d messages, want 3 (the caller's message, the accumulated answer, the resume prompt)", i+1, n)
 				}
 			}
-			if last := got[1].Messages[len(got[1].Messages)-1]; last.Role != "assistant" || last.ReasoningContent != "R1 " {
-				t.Fatalf("request 2's carried answer = %q (%s), want an assistant message with reasoning \"R1 \"", last.ReasoningContent, last.Role)
-			}
-			if last := got[2].Messages[len(got[2].Messages)-1]; last.Role != "assistant" || last.ReasoningContent != "R1 R2 " {
-				t.Fatalf("request 3's carried answer = %q (%s), want an assistant message with reasoning \"R1 R2 \"", last.ReasoningContent, last.Role)
+			for i, want := range []string{"A1 ", "A1 A2 "} {
+				carried := got[i+1].Messages[len(got[i+1].Messages)-2]
+				if carried.Role != "assistant" || carried.Content != want {
+					t.Fatalf("request %d's carried answer = %q (%s), want an assistant message with content %q", i+2, carried.Content, carried.Role, want)
+				}
+				if carried.ReasoningContent != "" {
+					t.Fatalf("request %d's carried answer carries reasoning %q; reasoning is never sent back", i+2, carried.ReasoningContent)
+				}
+				prompt := got[i+1].Messages[len(got[i+1].Messages)-1]
+				if prompt.Role != "user" || !strings.Contains(prompt.Content, "Resume directly") {
+					t.Fatalf("request %d's last message = %#v, want the user resume prompt", i+2, prompt)
+				}
 			}
 			if billed := res.Billed().OutputTokens; billed != 30 {
 				t.Fatalf("billed output = %d, want 30 (all three rounds were read and billed)", billed)
 			}
 		})
+	}
+}
+
+// The recovery asks at most OutputLimitContinuations times: a provider that
+// keeps answering "length" gets one request plus three continuations, then the
+// fragment comes back with the output-limit stop reason.
+func TestCompatLengthContinueUsesThreeRounds(t *testing.T) {
+	t.Parallel()
+
+	type wireMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type wireReq struct {
+		Messages []wireMsg `json:"messages"`
+	}
+	var mu sync.Mutex
+	var got []wireReq
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req wireReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		round := len(got) + 1
+		got = append(got, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		var body bytes.Buffer
+		body.WriteString(fmt.Sprintf(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"part%d "},"finish_reason":null}]}`, round) + "\n\n")
+		body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n")
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = w.Write(body.Bytes())
+	}))
+	t.Cleanup(server.Close)
+
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "m", 0, 16, "", []byte(`{"stream":true}`))
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1+llm.OutputLimitContinuations {
+		t.Fatalf("physical requests = %d, want %d (the first round plus three continuations)", len(got), 1+llm.OutputLimitContinuations)
+	}
+	for i := 1; i < len(got); i++ {
+		msgs := got[i].Messages
+		if n := len(msgs); n != 3 {
+			t.Fatalf("request %d carried %d messages, want 3 (caller, accumulated answer, resume prompt)", i+1, n)
+		}
+		if last := msgs[len(msgs)-1]; last.Role != "user" {
+			t.Fatalf("request %d ends with a %s message; the resume prompt must be last, no prefill tail", i+1, last.Role)
+		}
+		if carried := msgs[len(msgs)-2]; carried.Role != "assistant" {
+			t.Fatalf("request %d's carried answer role = %s, want assistant", i+1, carried.Role)
+		}
+	}
+	if res.StopReason != llm.StopReasonOutputLimit {
+		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
+	}
+	if text := res.Message.TextContent(); text != "part1 part2 part3 part4 " {
+		t.Fatalf("joined text = %q", text)
+	}
+}
+
+// Structured output never continues: a JSON document can only be continued by
+// re-sending the same document, so a length finish is recorded as the stop
+// reason for the caller instead of being recovered here. (This is a behavior
+// change: the old prefill loop used to continue these calls too.)
+func TestCompatStructuredDoesNotContinue(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"{\"half\":"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "m", 0, 16, "", nil).(*openAICompatLLM)
+	res, err := client.ExecuteStructured(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, llm.StructuredOutputSpec{
+		Name:   "answer",
+		Schema: map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string"}}},
+		Strict: true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStructured returned error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("physical requests = %d, want exactly 1 (structured output does not continue)", requests)
+	}
+	if res == nil || res.StopReason != llm.StopReasonOutputLimit {
+		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
 	}
 }
 

@@ -617,3 +617,76 @@ func TestExecuteNonStreamingTimeoutIsRetryable(t *testing.T) {
 		t.Fatalf("IsRetryableNetworkError(%v) = false, want true", err)
 	}
 }
+
+// The non-streaming switch follows the same recovery: MAX_TOKENS empty rounds
+// are re-asked, and the exhausted budget hands back the fragment.
+func TestGoogleMaxTokensContinues(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		round := requests
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch round {
+		case 1:
+			_, _ = w.Write([]byte(`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0,"thoughtsTokenCount":64}}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"part2 "}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":5,"thoughtsTokenCount":0}}`))
+		case 3:
+			_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"part3 "}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":30,"candidatesTokenCount":5,"thoughtsTokenCount":0}}`))
+		default:
+			_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"part4 "}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":5,"thoughtsTokenCount":0}}`))
+		}
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil).(*agentLLM)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1+llm.OutputLimitContinuations {
+		t.Fatalf("requests = %d, want %d", requests, 1+llm.OutputLimitContinuations)
+	}
+	if text := res.Message.TextContent(); text != "part2 part3 part4 " {
+		t.Fatalf("fragment = %q", text)
+	}
+	if res.StopReason != llm.StopReasonOutputLimit {
+		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
+	}
+}
+
+// An empty turn from any finish reason other than MAX_TOKENS is still a
+// refusal to answer, and stays an error after exactly one request.
+func TestGoogleSafetyEmptyStillErrors(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0,"thoughtsTokenCount":0}}`))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil).(*agentLLM)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	_, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err == nil {
+		t.Fatal("an empty SAFETY response must stay an error")
+	}
+	if !strings.Contains(err.Error(), `google: response was empty (finish reason "SAFETY")`) {
+		t.Fatalf("error = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("requests = %d, want exactly 1", requests)
+	}
+}

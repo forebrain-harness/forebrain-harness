@@ -2105,3 +2105,129 @@ func TestOpenAIResponsesLLMNonStreamingTimeoutIsRetryable(t *testing.T) {
 		t.Fatalf("IsRetryableNetworkError(%v) = false, want true", err)
 	}
 }
+
+// A streaming response that ends on response.incomplete with
+// max_output_tokens is re-asked once; the two rounds' text is one answer and
+// the usage keeps the settled round's prompt with every round's output.
+func TestResponsesStreamingIncompleteContinues(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	requests := 0
+	cut := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Half of \"}\n\n" +
+		"data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":50}}}\n\n"
+	settled := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"the rest.\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":20,\"output_tokens\":7}}}\n\n"
+	testLLM := newTestOpenAIResponsesLLM(t, func(*http.Request) (*http.Response, error) {
+		mu.Lock()
+		requests++
+		round := requests
+		mu.Unlock()
+		if round == 1 {
+			return sseResponse(cut), nil
+		}
+		return sseResponse(settled), nil
+	})
+
+	res, err := testLLM.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 2 {
+		t.Fatalf("physical requests = %d, want 2", requests)
+	}
+	if text := res.Message.TextContent(); text != "Half of the rest." {
+		t.Fatalf("joined text = %q", text)
+	}
+	if res.Usage == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if res.Usage.InputTokens != 20 || res.Usage.OutputTokens != 57 {
+		t.Fatalf("usage = %#v, want the settled round's input (20) and both rounds' output (57)", res.Usage)
+	}
+	if billed := res.Billed(); billed.InputTokens != 30 || billed.OutputTokens != 57 {
+		t.Fatalf("billed = %#v, want both rounds summed (30/57)", billed)
+	}
+	if res.StopReason != "completed" {
+		t.Fatalf("StopReason = %q, want completed", res.StopReason)
+	}
+}
+
+// The same continuation under the non-streaming switch: the replay round is a
+// loop round like the streaming one.
+func TestResponsesSyncIncompleteContinues(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	requests := 0
+	cut := `{"id":"resp_1","object":"response","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"model":"gpt-test","output":[{"type":"message","id":"msg_1","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"Half "}]}],"usage":{"input_tokens":10,"output_tokens":5}}`
+	settled := `{"id":"resp_2","object":"response","status":"completed","model":"gpt-test","output":[{"type":"message","id":"msg_2","role":"assistant","status":"completed","content":[{"type":"output_text","text":"there."}]}],"usage":{"input_tokens":20,"output_tokens":3}}`
+	testLLM := newTestOpenAIResponsesLLMWithStream(t, true, func(*http.Request) (*http.Response, error) {
+		mu.Lock()
+		requests++
+		round := requests
+		mu.Unlock()
+		if round == 1 {
+			return jsonResponseBody(cut), nil
+		}
+		return jsonResponseBody(settled), nil
+	})
+
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	res, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 2 {
+		t.Fatalf("physical requests = %d, want 2", requests)
+	}
+	if text := res.Message.TextContent(); text != "Half there." {
+		t.Fatalf("joined text = %q", text)
+	}
+}
+
+// A response cut by the content filter is also incomplete, but re-asking it
+// is wrong: exactly one request, and the filter is the recorded reason.
+func TestResponsesContentFilterDoesNotContinue(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	requests := 0
+	filtered := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Filtered\"}\n\n" +
+		"data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"},\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n"
+	testLLM := newTestOpenAIResponsesLLM(t, func(*http.Request) (*http.Response, error) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		return sseResponse(filtered), nil
+	})
+
+	res, err := testLLM.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("physical requests = %d, want exactly 1", requests)
+	}
+	if res.StopReason != "content_filter" {
+		t.Fatalf("StopReason = %q, want content_filter", res.StopReason)
+	}
+	if text := res.Message.TextContent(); text != "Filtered" {
+		t.Fatalf("text = %q, want the single round's text", text)
+	}
+}
+
+func jsonResponseBody(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     http.StatusText(http.StatusOK),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}

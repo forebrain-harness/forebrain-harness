@@ -309,6 +309,12 @@ type Usage struct {
 // Result represents the output of an LLM execution, including the assistant message and any tool calls.
 type Result struct {
 	Message *Message
+	// StopReason is why the provider stopped this response, normalized:
+	// StopReasonOutputLimit when the output budget ran out (the response may
+	// then be a fragment), otherwise the provider's own finish reason, "" when
+	// it named none. Adapters set it so the engine can tell "the model chose
+	// to say nothing" apart from "the model was cut off".
+	StopReason string
 	// Usage holds token counts for the settled attempt of this call: the
 	// request the conversation is now standing at. May be nil when the
 	// provider does not return usage information. The billing view that

@@ -613,52 +613,159 @@ func (c *openAIResponsesLLM) Execute(ctx context.Context, messages []llm.Message
 	// return, so a path added later cannot leak a raw SDK error to Layer 0.
 	defer func() { outErr = normalizeError(outErr) }()
 	ctx, finish := llm.WithRawCacheUsage(ctx)
-	params := c.newResponseParams(ctx, messages, tools, false)
-	if c.stream && !llm.NonStreamingRequestFrom(ctx) {
-		result, err := c.executeStreaming(ctx, params)
-		return finish(result), err
+	// The sink's end fires once per Execute, not once per request: a
+	// continuation round is the same answer still being produced, and ending
+	// between rounds made the UI treat the fragment as a finished reply.
+	endSink := llm.StreamSinkFrom(ctx)
+	if endSink != nil && endSink.OnEnd != nil {
+		defer endSink.OnEnd()
 	}
-	if c.stream {
-		// Streaming was switched off for this one attempt by the
-		// non-streaming request switch: run it under the non-streaming
-		// deadline and replay the whole answer to the sink in stream order.
-		// A client configured non-streaming keeps its original behavior.
-		ctx, cancel := llm.WithNonStreamingDeadline(ctx)
-		defer cancel()
-		sink := llm.StreamSinkFrom(ctx)
-		if sink != nil && sink.OnEnd != nil {
-			defer sink.OnEnd()
+	// The branch is stable across rounds: streaming unless the client is
+	// configured non-streaming or this attempt carries the non-streaming
+	// switch (whose round replays the whole answer to the sink in stream
+	// order; a client configured non-streaming keeps its original behavior).
+	nonStreamingSwitch := llm.NonStreamingRequestFrom(ctx)
+	streaming := c.stream && !nonStreamingSwitch
+	syncReplay := c.stream && nonStreamingSwitch
+	// conversation is what the next round sends: the caller's messages plus,
+	// from the second round on, the recovery's resume pair. It is rebuilt
+	// from the original slice each round — the accumulated answer replaces,
+	// never stacks on, the previous round's fragment.
+	conversation := messages
+	var recovery llm.OutputLimitRecovery
+	var rounds int
+	var lastResult *llm.Result
+	var answer strings.Builder
+	var lastToolCalls []llm.ToolCall
+	var carry, reasoningModel, stopReason string
+	var usage *llm.Usage
+	var billedIn, billedOut, billedCacheRead int
+	var settledIn, settledCacheRead int
+	for {
+		rounds++
+		params := c.newResponseParams(ctx, conversation, tools, false)
+		var res *llm.Result
+		var err error
+		if streaming {
+			res, err = c.executeStreaming(ctx, params)
+		} else if syncReplay {
+			res, err = c.executeSyncReplayRound(ctx, params)
+		} else {
+			res, err = c.executeSync(ctx, params)
 		}
-		result, content, reasoningItems, status, err := c.executeSyncDetail(ctx, params)
 		if err != nil {
-			err = llm.NonStreamingError(ctx, err)
 			return finish(nil), err
 		}
-		result = finish(result)
-		if sink != nil && result != nil && result.Usage != nil &&
-			(result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
-			totalInput := result.Usage.InputTokens + result.Usage.CacheReadInputTokens
-			if sink.OnUsage != nil {
-				sink.OnUsage(totalInput, result.Usage.OutputTokens)
-			}
-			if sink.OnUsageSnapshot != nil {
-				sink.OnUsageSnapshot(totalInput, result.Usage.OutputTokens)
+		lastResult = res
+		// Occupancy is the settled round's prompt side; the output is every
+		// round's, because the model really did produce it and this Result's
+		// answer carries it. The billing view sums every field across rounds.
+		if res.Usage != nil {
+			billedIn += res.Usage.InputTokens
+			billedOut += res.Usage.OutputTokens
+			billedCacheRead += res.Usage.CacheReadInputTokens
+			settledIn = res.Usage.InputTokens
+			settledCacheRead = res.Usage.CacheReadInputTokens
+			usage = &llm.Usage{
+				InputTokens:          settledIn,
+				OutputTokens:         billedOut,
+				CacheReadInputTokens: settledCacheRead,
 			}
 		}
-		var texts []string
-		if content != "" {
-			texts = []string{content}
+		if res.Message != nil {
+			answer.WriteString(responsesAnswerText(res.Message))
+			lastToolCalls = res.Message.ToolCalls
+			carry = res.Message.Name
+			reasoningModel = res.Message.ReasoningModel
 		}
-		llm.ReplayToSink(sink, llm.ReplayedResponse{
-			Reasoning:  llm.SummaryText(reasoningItems),
-			Text:       texts,
-			ToolCalls:  result.Message.ToolCalls,
-			StopReason: string(status),
-		})
-		return result, nil
+		stopReason = res.StopReason
+		if !recovery.ShouldContinue(stopReason, answer.Len(), len(lastToolCalls)) {
+			break
+		}
+		conversation = append(append([]llm.Message(nil), messages...), recovery.Resume(answer.String())...)
 	}
-	result, err := c.executeSync(ctx, params)
-	return finish(result), err
+	if rounds == 1 {
+		// No continuation ran: the settled round's own result is this call's,
+		// byte-identical to the pre-recovery shape (thinking fences included).
+		return finishUsage(lastResult, finish), nil
+	}
+	// One assistant message carries the whole answer: each round was its own
+	// request, but this call is one reply. Reasoning stays in the carry, not
+	// the text — the recovery prompt already told the model its earlier
+	// reasoning was not kept.
+	parts := []llm.ContentPart{}
+	if answer.Len() > 0 {
+		parts = append(parts, llm.Text(answer.String()))
+	}
+	msg := &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: lastToolCalls, Name: carry}
+	if carry != "" {
+		msg.ReasoningModel = reasoningModel
+	}
+	out := &llm.Result{Message: msg, StopReason: stopReason, Usage: usage}
+	if billedIn != settledIn || billedCacheRead != settledCacheRead {
+		out.BilledUsage = &llm.Usage{
+			InputTokens:          billedIn,
+			OutputTokens:         billedOut,
+			CacheReadInputTokens: billedCacheRead,
+		}
+	}
+	return finishUsage(out, finish), nil
+}
+
+// executeSyncReplayRound runs one non-streaming round under the non-streaming
+// deadline and replays the whole answer to the sink in stream order. Usage
+// folding belongs to Execute, which owns the whole continuation loop.
+func (c *openAIResponsesLLM) executeSyncReplayRound(ctx context.Context, params responses.ResponseNewParams) (*llm.Result, error) {
+	ctx, cancel := llm.WithNonStreamingDeadline(ctx)
+	defer cancel()
+	sink := llm.StreamSinkFrom(ctx)
+	result, content, reasoningItems, status, err := c.executeSyncDetail(ctx, params)
+	if err != nil {
+		return nil, llm.NonStreamingError(ctx, err)
+	}
+	if sink != nil && result != nil && result.Usage != nil &&
+		(result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
+		totalInput := result.Usage.InputTokens + result.Usage.CacheReadInputTokens
+		if sink.OnUsage != nil {
+			sink.OnUsage(totalInput, result.Usage.OutputTokens)
+		}
+		if sink.OnUsageSnapshot != nil {
+			sink.OnUsageSnapshot(totalInput, result.Usage.OutputTokens)
+		}
+	}
+	var texts []string
+	if content != "" {
+		texts = []string{content}
+	}
+	llm.ReplayToSink(sink, llm.ReplayedResponse{
+		Reasoning:  llm.SummaryText(reasoningItems),
+		Text:       texts,
+		ToolCalls:  result.Message.ToolCalls,
+		StopReason: string(status),
+	})
+	return result, nil
+}
+
+// responsesAnswerText returns the answer text of a Responses result: every
+// text part except the ```thinking fence a reasoning-only response
+// synthesizes for display. That fence is not an answer — sending it back as
+// the recovery fragment would re-deliver the reasoning as answer text and
+// pick the thinking-only resume prompt's opposite.
+func responsesAnswerText(m *llm.Message) string {
+	if m == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range m.Parts {
+		if p.Type != llm.ContentTypeText {
+			continue
+		}
+		if strings.HasPrefix(p.Text, "```thinking\n") && strings.HasSuffix(p.Text, "\n```") {
+			continue
+		}
+		b.WriteString(p.Text)
+	}
+	return b.String()
 }
 
 func (c *openAIResponsesLLM) ExecuteStructured(ctx context.Context, messages []llm.Message, spec llm.StructuredOutputSpec) (outResult *llm.Result, outErr error) {
@@ -1230,6 +1337,15 @@ func (c *openAIResponsesLLM) executeSyncDetail(ctx context.Context, params respo
 		msg.ReasoningModel = c.model
 	}
 	result := &llm.Result{Message: &msg}
+	// Why the response stopped: an incomplete one names its cause in
+	// IncompleteDetails (max_output_tokens / content_filter); any other
+	// status is itself the reason. Normalized so the output-limit reason is
+	// protocol-neutral.
+	if resp.Status == responses.ResponseStatusIncomplete {
+		result.StopReason = llm.NormalizeStopReason(resp.IncompleteDetails.Reason)
+	} else {
+		result.StopReason = llm.NormalizeStopReason(string(resp.Status))
+	}
 	result.Usage = openAIUsage(
 		resp.Usage.InputTokens,
 		resp.Usage.OutputTokens,
@@ -1317,15 +1433,17 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 	// as an empty answer.
 	sawOutputItem := false
 	sawCompleted := false
+	// stopReason is what the terminal frame named, normalized for
+	// Result.StopReason: "completed", or an incomplete response's
+	// IncompleteDetails.Reason ("max_output_tokens" is a cut-off, which
+	// NormalizeStopReason maps onto the output-limit reason).
+	stopReason := ""
 
 	if sink != nil && sink.Streamed != nil {
 		*sink.Streamed = true
 	}
-	defer func() {
-		if sink != nil && sink.OnEnd != nil {
-			sink.OnEnd()
-		}
-	}()
+	// The sink's OnEnd is not fired here: Execute owns it for the whole
+	// continuation loop, so it fires once per call however many rounds ran.
 
 	for stream.Next() {
 		evt := stream.Current()
@@ -1480,6 +1598,7 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			return nil, llm.NewExecuteError(newOpenAIResponsesStreamError(evt.Type, string(failed.Response.Error.Code), failed.Response.Error.Message), failedUsage)
 		case "response.completed":
 			sawCompleted = true
+			stopReason = "completed"
 			if evt.Response.Usage.InputTokens > 0 || evt.Response.Usage.OutputTokens > 0 {
 				usage = openAIUsage(
 					evt.Response.Usage.InputTokens,
@@ -1543,6 +1662,79 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			if sink != nil && sink.OnMessageStop != nil {
 				sink.OnMessageStop()
 			}
+		case "response.incomplete":
+			// An incomplete response is a terminal frame too: the output budget
+			// ran out ("max_output_tokens") or the content filter cut it. The
+			// usage, output and calls it did produce are final, so they are
+			// collected exactly as response.completed does — with the reason
+			// taken from IncompleteDetails rather than the status, which says
+			// only "incomplete" for both causes.
+			incomplete := evt.AsResponseIncomplete()
+			sawCompleted = true
+			stopReason = incomplete.Response.IncompleteDetails.Reason
+			if incomplete.Response.Usage.InputTokens > 0 || incomplete.Response.Usage.OutputTokens > 0 {
+				usage = openAIUsage(
+					incomplete.Response.Usage.InputTokens,
+					incomplete.Response.Usage.OutputTokens,
+					incomplete.Response.Usage.InputTokensDetails.CachedTokens,
+				)
+				if sink != nil && sink.OnUsage != nil {
+					totalInput := usage.InputTokens + usage.CacheReadInputTokens
+					deltaIn := totalInput - reportedIn
+					deltaOut := usage.OutputTokens - reportedOut
+					if deltaIn > 0 || deltaOut > 0 {
+						sink.OnUsage(deltaIn, deltaOut)
+						reportedIn = totalInput
+						reportedOut = usage.OutputTokens
+					}
+				}
+				if sink != nil && sink.OnUsageSnapshot != nil {
+					totalInput := usage.InputTokens + usage.CacheReadInputTokens
+					sink.OnUsageSnapshot(totalInput, usage.OutputTokens)
+				}
+			}
+			// Extract final output if text buffer is empty
+			if textBuf.Len() == 0 {
+				for _, item := range incomplete.Response.Output {
+					if content := extractTextFromOutputItem(item); content != "" {
+						llm.NotifyResponseStarted(sink, &responseStarted)
+						textBuf.WriteString(content)
+						if sink != nil && sink.OnDelta != nil {
+							sink.OnDelta(content)
+						}
+						break
+					}
+				}
+			}
+			for _, item := range incomplete.Response.Output {
+				if reasoningItem, ok := extractReasoningCarryItem(item); ok {
+					reasoningItems = appendOrReplaceReasoningItem(reasoningItems, reasoningItem)
+					mergeReasoningSummaryState(streamedReasoningByItem, reasoningItem)
+				}
+			}
+			// Collect final function calls from response
+			for _, item := range incomplete.Response.Output {
+				if item.Type == "function_call" {
+					if _, exists := toolCallsMap[item.CallID]; !exists {
+						toolCallsMap[item.CallID] = &llm.ToolCall{
+							ID:   item.CallID,
+							Type: "function",
+							Function: llm.FunctionCall{
+								Name:      item.Name,
+								Arguments: item.Arguments,
+							},
+						}
+						toolCallOrder = append(toolCallOrder, item.CallID)
+					}
+				}
+			}
+			// response.incomplete terminates the stream like completed does.
+			if sink != nil && sink.OnStopReason != nil {
+				sink.OnStopReason(stopReason)
+			}
+			if sink != nil && sink.OnMessageStop != nil {
+				sink.OnMessageStop()
+			}
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -1582,7 +1774,7 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 		msg.Name = carry
 		msg.ReasoningModel = c.model
 	}
-	return &llm.Result{Message: &msg, Usage: usage}, nil
+	return &llm.Result{Message: &msg, StopReason: llm.NormalizeStopReason(stopReason), Usage: usage}, nil
 }
 
 func webSearchActionDetail(raw string) string {

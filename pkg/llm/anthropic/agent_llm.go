@@ -156,40 +156,122 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	// Every error leaving this package is normalized here rather than at each
 	// return, so a path added later cannot leak a raw SDK error to Layer 0.
 	defer func() { outErr = normalizeError(outErr) }()
-	system, anthropicMessages, err := agentAnthropicMessagesToAPI(messages)
-	if err != nil {
-		return nil, err
+	// The sink's end fires once per Execute, not once per request: a
+	// continuation round is the same answer still being produced, and ending
+	// between rounds made the UI treat the fragment as a finished reply.
+	endSink := llm.StreamSinkFrom(ctx)
+	if endSink != nil && endSink.OnEnd != nil {
+		defer endSink.OnEnd()
 	}
-	params := anthropicapi.MessageNewParams{
-		Model:     anthropicapi.Model(strings.TrimSpace(c.model)),
-		MaxTokens: c.maxTokens,
-		Messages:  anthropicMessages,
-		System:    system,
+	nonStreaming := llm.NonStreamingRequestFrom(ctx)
+	// conversation is what the next round sends: the caller's messages plus,
+	// from the second round on, the recovery's resume pair. It is rebuilt from
+	// the original slice each round — the accumulated answer replaces, never
+	// stacks on, the previous round's fragment, so the request grows by a
+	// constant, not by the round count.
+	conversation := messages
+	var recovery llm.OutputLimitRecovery
+	var answer strings.Builder
+	var lastToolCalls []llm.ToolCall
+	var stopReason string
+	var usage *llm.Usage
+	var billedIn, billedOut, billedCacheWrite, billedCacheRead int
+	var settledIn, settledCacheWrite, settledCacheRead int
+	rounds := 0
+	for {
+		system, anthropicMessages, err := agentAnthropicMessagesToAPI(conversation)
+		if err != nil {
+			return nil, err
+		}
+		params := anthropicapi.MessageNewParams{
+			Model:     anthropicapi.Model(strings.TrimSpace(c.model)),
+			MaxTokens: c.maxTokens,
+			Messages:  anthropicMessages,
+			System:    system,
+		}
+		if c.effort != "" {
+			params.OutputConfig.Effort = c.effort
+		}
+		if llm.Fast(ctx) {
+			params.ServiceTier = anthropicapi.MessageNewParamsServiceTierAuto
+		}
+		if len(tools) > 0 {
+			params.Tools = agentAnthropicTools(tools)
+		}
+		// Must run after Tools is populated: the breakpoint on the system block
+		// caches the tool definitions with it, so the tools have to be part of the
+		// request the markers describe.
+		ApplyPromptCache(params.System, params.Messages)
+		var res *llm.Result
+		if nonStreaming {
+			res, err = c.executeUnary(ctx, params)
+		} else {
+			res, err = c.executeStream(ctx, params)
+		}
+		if err != nil {
+			return nil, err
+		}
+		rounds++
+		// Occupancy is the settled round's prompt side; the output is every
+		// round's, because the model really did produce it and this Result's
+		// answer carries it. The billing view sums every field across rounds.
+		if res.Usage != nil {
+			billedIn += res.Usage.InputTokens
+			billedOut += res.Usage.OutputTokens
+			billedCacheWrite += res.Usage.CacheCreationInputTokens
+			billedCacheRead += res.Usage.CacheReadInputTokens
+			settledIn = res.Usage.InputTokens
+			settledCacheWrite = res.Usage.CacheCreationInputTokens
+			settledCacheRead = res.Usage.CacheReadInputTokens
+			usage = &llm.Usage{
+				InputTokens:              settledIn,
+				OutputTokens:             billedOut,
+				CacheCreationInputTokens: settledCacheWrite,
+				CacheReadInputTokens:     settledCacheRead,
+			}
+		}
+		if res.Message != nil {
+			answer.WriteString(res.Message.TextContent())
+			lastToolCalls = res.Message.ToolCalls
+		}
+		stopReason = res.StopReason
+		if !recovery.ShouldContinue(stopReason, answer.Len(), len(lastToolCalls)) {
+			break
+		}
+		conversation = append(append([]llm.Message(nil), messages...), recovery.Resume(answer.String())...)
 	}
-	if c.effort != "" {
-		params.OutputConfig.Effort = c.effort
+	// One assistant message carries the whole answer: each round was its own
+	// request, but this call is one reply. Thinking never enters it — the
+	// recovery prompt already tells the model its reasoning was not kept.
+	parts := make([]llm.ContentPart, 0)
+	if answer.Len() > 0 {
+		parts = append(parts, llm.Text(answer.String()))
 	}
-	if llm.Fast(ctx) {
-		params.ServiceTier = anthropicapi.MessageNewParamsServiceTierAuto
+	out := &llm.Result{
+		Message:    &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: lastToolCalls},
+		StopReason: stopReason,
+		Usage:      usage,
 	}
-	if len(tools) > 0 {
-		params.Tools = agentAnthropicTools(tools)
+	if billedIn != settledIn || billedCacheWrite != settledCacheWrite || billedCacheRead != settledCacheRead {
+		out.BilledUsage = &llm.Usage{
+			InputTokens:              billedIn,
+			OutputTokens:             billedOut,
+			CacheCreationInputTokens: billedCacheWrite,
+			CacheReadInputTokens:     billedCacheRead,
+		}
 	}
-	// Must run after Tools is populated: the breakpoint on the system block
-	// caches the tool definitions with it, so the tools have to be part of the
-	// request the markers describe.
-	ApplyPromptCache(params.System, params.Messages)
-	if llm.NonStreamingRequestFrom(ctx) {
-		return c.executeUnary(ctx, params)
-	}
+	return out, nil
+}
+
+// executeStream runs one streaming Messages request and returns its result;
+// thinking blocks reach only the sink, never the message. It is one round of
+// Execute's output-limit loop.
+func (c *anthropicAgentLLM) executeStream(ctx context.Context, params anthropicapi.MessageNewParams) (*llm.Result, error) {
 	ctx = llm.WithStreamingRequest(ctx)
 	stream := c.client.Messages.NewStreaming(ctx, params)
 	defer func() { _ = stream.Close() }()
 
 	sink := llm.StreamSinkFrom(ctx)
-	if sink != nil && sink.OnEnd != nil {
-		defer sink.OnEnd()
-	}
 	if err := stream.Err(); err != nil {
 		return nil, err
 	}
@@ -200,6 +282,9 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	var res anthropicapi.Message
 	thinkingBlocks := make(map[int64]bool)
 	var reportedInput, reportedOutput int64
+	// The stop reason the stream named, kept for Result.StopReason: the engine
+	// reads it to tell "the model said nothing" from "the budget cut it off".
+	stopReason := ""
 	// A stream that ends without a single content block and without a stop
 	// reason produced nothing at all: it is re-sent without streaming, not
 	// finished as an empty answer.
@@ -300,8 +385,9 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 			)
 			if event.Delta.StopReason != "" {
 				sawStopReason = true
+				stopReason = string(event.Delta.StopReason)
 				if sink != nil && sink.OnStopReason != nil {
-					sink.OnStopReason(string(event.Delta.StopReason))
+					sink.OnStopReason(stopReason)
 				}
 			}
 		case "content_block_start":
@@ -391,7 +477,8 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 		return nil, err
 	}
 	return &llm.Result{
-		Message: msg,
+		Message:    msg,
+		StopReason: llm.NormalizeStopReason(stopReason),
 		Usage: &llm.Usage{
 			InputTokens:              int(latestUsage.InputTokens),
 			OutputTokens:             int(latestUsage.OutputTokens),
@@ -404,13 +491,12 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 // executeUnary runs the same request as one non-streaming Messages call under
 // the non-streaming deadline and replays the whole response to the stream
 // sink in stream order, so every consumer sees it as it would a streamed one.
+// The sink's OnEnd is not fired here: Execute owns it for the whole
+// continuation loop.
 func (c *anthropicAgentLLM) executeUnary(ctx context.Context, params anthropicapi.MessageNewParams) (*llm.Result, error) {
 	ctx, cancel := llm.WithNonStreamingDeadline(ctx)
 	defer cancel()
 	sink := llm.StreamSinkFrom(ctx)
-	if sink != nil && sink.OnEnd != nil {
-		defer sink.OnEnd()
-	}
 	// The SDK refuses non-streaming calls whose maxTokens imply more than
 	// ten minutes of work unless the caller states a request timeout;
 	// NonStreamingTimeout is the same bound WithNonStreamingDeadline already
@@ -426,6 +512,9 @@ func (c *anthropicAgentLLM) executeUnary(ctx context.Context, params anthropicap
 	}
 	result := &llm.Result{
 		Message: message,
+		// Why the provider stopped: normalized so the engine can tell a
+		// cut-off response (StopReasonOutputLimit) from a chosen one.
+		StopReason: llm.NormalizeStopReason(string(msg.StopReason)),
 		// The same accounting the streaming path keeps from the raw events:
 		// input plus both cache buckets, output as reported.
 		Usage: &llm.Usage{
