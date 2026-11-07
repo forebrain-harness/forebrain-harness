@@ -183,6 +183,29 @@ func TestWriteThroughputIsNotFsyncBound(t *testing.T) {
 	}
 }
 
+func TestWriteSectionWholeDoesNotBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "debug.log")
+	file, err := Open(path, Options{Perm: 0o600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	text := strings.Repeat("w", DefaultRecordBytes*2)
+	if err := file.WriteSectionWhole("section", text); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), text) {
+		t.Fatalf("WriteSectionWhole dropped part of a %d-byte block: file is %d bytes", len(text), len(body))
+	}
+	if strings.Contains(string(body), "log bytes omitted") {
+		t.Fatal("WriteSectionWhole bounded the block")
+	}
+}
+
 func TestLevelLoggerOwnsInfoAndDebugFiles(t *testing.T) {
 	dir := t.TempDir()
 	infoPath := filepath.Join(dir, "info.log")

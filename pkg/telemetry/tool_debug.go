@@ -21,8 +21,10 @@ func NewToolDebugFileLogMiddleware() llm.ToolMiddleware {
 			var b strings.Builder
 			fmt.Fprintf(&b, "tool_call ts=%s\n", ts)
 			fmt.Fprintf(&b, "tool_name=%s\n", name)
-			fmt.Fprintf(&b, "arguments_raw:\n%s\n", BoundText(arguments, DefaultRecordBytes))
-			writeDebugFileLog("tool_call", b.String())
+			// arguments_raw is the model's own output and is written in full; the
+			// tool result below is not model output and stays bounded.
+			fmt.Fprintf(&b, "arguments_raw:\n%s\n", arguments)
+			writeDebugFileLogWhole("tool_call", b.String())
 			out, err := next(ctx, arguments)
 			var rb strings.Builder
 			fmt.Fprintf(&rb, "tool_result ts=%s\n", time.Now().Format(time.RFC3339Nano))
@@ -37,7 +39,7 @@ func NewToolDebugFileLogMiddleware() llm.ToolMiddleware {
 					rb.WriteByte('\n')
 				}
 			}
-			writeDebugFileLog("tool_result", rb.String())
+			writeDebugFileLogWhole("tool_result", rb.String())
 			return out, err
 		}
 	}

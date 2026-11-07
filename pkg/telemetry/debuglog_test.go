@@ -182,6 +182,35 @@ func TestEmitRootLookupFailure(t *testing.T) {
 	writeDebugFileLog("broken", "msg")
 }
 
+func TestToolDebugKeepsWholeArguments(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "logs"), 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	t.Setenv("FOREBRAIN_HOME", tmp)
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "1")
+	resetEmitForTest(t)
+
+	h := NewToolDebugFileLogMiddleware()(nil, func(context.Context, string) (any, error) {
+		return "ok", nil
+	})
+	arguments := strings.Repeat("a", 300*1024) + "UNIQUE_ARGUMENT_TAIL_MARKER"
+	if _, err := h(context.Background(), arguments); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(tmp, "logs", "debug.log"))
+	if err != nil {
+		t.Fatalf("read debug log: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "UNIQUE_ARGUMENT_TAIL_MARKER") {
+		t.Fatalf("debug log missing the arguments tail marker: %q", text[max(0, len(text)-200):])
+	}
+	if strings.Contains(text, "log bytes omitted") {
+		t.Fatalf("model-written tool arguments truncated in debug log: %q", text[max(0, len(text)-200):])
+	}
+}
+
 func resetEmitForTest(t *testing.T) {
 	t.Helper()
 	debugFileLogMu.Lock()

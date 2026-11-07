@@ -161,6 +161,15 @@ func (f *File) WriteSection(section, text string) error {
 	return err
 }
 
+// WriteSectionWhole writes one diagnostic block as given. The caller has
+// already bounded whatever part of text needed bounding — or, for a model's
+// output, deliberately bounded nothing. writeLocked's whole-file guard still
+// applies to a record larger than the file itself.
+func (f *File) WriteSectionWhole(section, text string) error {
+	_, err := fmt.Fprintf(f, "%s\n==== %s ====\n", text, section)
+	return err
+}
+
 func (f *File) Sync() error {
 	if f == nil || f.raw == nil {
 		return nil

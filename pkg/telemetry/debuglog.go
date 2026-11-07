@@ -24,7 +24,10 @@ func debugFileLogEnabled() bool {
 	return true
 }
 
-func writeDebugFileLog(section, msg string) {
+// withDebugFileLog opens debug.log lazily once, then runs write under the
+// process-wide debug log lock. It is the shared body of writeDebugFileLog and
+// writeDebugFileLogWhole so the open path cannot drift between them.
+func withDebugFileLog(write func(*File)) {
 	if !debugFileLogEnabled() {
 		return
 	}
@@ -42,8 +45,23 @@ func writeDebugFileLog(section, msg string) {
 	debugFileLogMu.Lock()
 	defer debugFileLogMu.Unlock()
 	if debugFileLogFile != nil {
-		_ = debugFileLogFile.WriteSection(section, msg)
+		write(debugFileLogFile)
 	}
+}
+
+func writeDebugFileLog(section, msg string) {
+	withDebugFileLog(func(f *File) {
+		_ = f.WriteSection(section, msg)
+	})
+}
+
+// writeDebugFileLogWhole writes the block as given: the caller has already
+// bounded whatever needed bounding, or deliberately bounded nothing (a
+// model's output, which debug.log must record in full).
+func writeDebugFileLogWhole(section, msg string) {
+	withDebugFileLog(func(f *File) {
+		_ = f.WriteSectionWhole(section, msg)
+	})
 }
 
 // LogProviderDebug records one provider debug line under topic. It replaces a

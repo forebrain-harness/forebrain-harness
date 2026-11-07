@@ -8,9 +8,11 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -93,7 +95,7 @@ func (t *httpTraceRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 			// observer so outer transports can safely normalize the response.
 			statusCode := resp.StatusCode
 			respHeaders := formatRedactedHeaderLines(resp.Header)
-			resp.Body = newObservingReadCloser(resp.Body, func(body []byte, readErr error) {
+			resp.Body = newObservingReadCloser(resp.Body, DefaultRecordBytes, func(body []byte, readErr error) {
 				errText := ""
 				if readErr != nil && readErr != io.EOF {
 					errText = readErr.Error()
@@ -131,7 +133,14 @@ type httpDebugFileLogRoundTripper struct {
 	next http.RoundTripper
 }
 
+// httpDebugSeq numbers each debug round trip within this process. debug.log is
+// shared by every session, subagent, and forebrain process via O_APPEND, so a
+// request block and its response block need a shared id to be paired up;
+// the pid prefix keeps ids from separate processes apart.
+var httpDebugSeq atomic.Uint64
+
 func (t *httpDebugFileLogRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	id := fmt.Sprintf("%d-%d", os.Getpid(), httpDebugSeq.Add(1))
 	var reqBody []byte
 	if req != nil && req.Body != nil {
 		b, err := io.ReadAll(req.Body)
@@ -142,34 +151,34 @@ func (t *httpDebugFileLogRoundTripper) RoundTrip(req *http.Request) (*http.Respo
 		reqBody = b
 		req.Body = io.NopCloser(bytes.NewReader(reqBody))
 	}
-	writeDebugFileLog("llm_http", formatHTTPRequestBlock(req, reqBody))
+	writeDebugFileLogWhole("llm_http", formatHTTPRequestBlock(req, reqBody, id))
 	resp, err := t.next.RoundTrip(req)
 	if err != nil {
-		writeDebugFileLog("llm_http", fmt.Sprintf("llm_http response_error method=%s url=%s err=%v", req.Method, redactURL(req.URL), err))
+		writeDebugFileLogWhole("llm_http", fmt.Sprintf("llm_http response_error id=%s method=%s url=%s err=%v", id, req.Method, redactURL(req.URL), err))
 		return nil, err
 	}
 	var respBody []byte
 	if resp.Body != nil {
 		if isEventStreamResponse(resp) {
 			respSnapshot := snapshotHTTPResponseMetadata(resp)
-			resp.Body = newObservingReadCloser(resp.Body, func(body []byte, readErr error) {
+			resp.Body = newObservingReadCloser(resp.Body, 0, func(body []byte, readErr error) {
 				if readErr != nil && readErr != io.EOF {
-					writeDebugFileLog("llm_http", fmt.Sprintf("llm_http response_read_body_error status=%d err=%v", respSnapshot.StatusCode, readErr))
+					writeDebugFileLogWhole("llm_http", fmt.Sprintf("llm_http response_read_body_error id=%s status=%d err=%v", id, respSnapshot.StatusCode, readErr))
 				}
-				writeDebugFileLog("llm_http", formatHTTPResponseBlock(respSnapshot, body))
+				writeDebugFileLogWhole("llm_http", formatHTTPResponseBlock(respSnapshot, body, id))
 			})
 			return resp, nil
 		}
 		b, rerr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if rerr != nil {
-			writeDebugFileLog("llm_http", fmt.Sprintf("llm_http response_read_body_error status=%d err=%v", resp.StatusCode, rerr))
+			writeDebugFileLogWhole("llm_http", fmt.Sprintf("llm_http response_read_body_error id=%s status=%d err=%v", id, resp.StatusCode, rerr))
 			return nil, rerr
 		}
 		respBody = b
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
-	writeDebugFileLog("llm_http", formatHTTPResponseBlock(resp, respBody))
+	writeDebugFileLogWhole("llm_http", formatHTTPResponseBlock(resp, respBody, id))
 	return resp, nil
 }
 
@@ -187,21 +196,32 @@ func snapshotHTTPResponseMetadata(resp *http.Response) *http.Response {
 
 type observingReadCloser struct {
 	body     io.ReadCloser
-	buf      boundedObservationBuffer
+	buf      observationBuffer
 	finalize func([]byte, error)
 	once     sync.Once
 }
 
-// boundedObservationBuffer keeps HTTP telemetry observational: an arbitrarily
-// long event stream must not become an arbitrarily large in-process buffer.
-// The wire response is never altered; only the diagnostic snapshot is capped.
-type boundedObservationBuffer struct {
+// observationBuffer snapshots a response body for diagnostics; the wire
+// response is never altered. limit > 0 caps the snapshot (the OTel span: its
+// attributes go to external exporters); limit <= 0 keeps every byte (debug.log:
+// it is the only record of what the provider actually sent, and the end of an
+// event stream — finish reason, usage — is exactly the part a cap drops).
+// The known cost of limit <= 0: debug logging is on by default, so every
+// in-flight stream holds one full copy of the raw bytes in memory until the
+// stream ends and is written out — the same order of magnitude the client
+// itself accumulates.
+type observationBuffer struct {
 	buf     bytes.Buffer
 	omitted int64
+	limit   int
 }
 
-func (b *boundedObservationBuffer) Write(p []byte) {
-	remaining := DefaultRecordBytes - b.buf.Len()
+func (b *observationBuffer) Write(p []byte) {
+	if b.limit <= 0 {
+		_, _ = b.buf.Write(p)
+		return
+	}
+	remaining := b.limit - b.buf.Len()
 	if remaining > 0 {
 		keep := len(p)
 		if keep > remaining {
@@ -213,7 +233,7 @@ func (b *boundedObservationBuffer) Write(p []byte) {
 	b.omitted += int64(len(p))
 }
 
-func (b *boundedObservationBuffer) Bytes() []byte {
+func (b *observationBuffer) Bytes() []byte {
 	result := append([]byte(nil), b.buf.Bytes()...)
 	if b.omitted > 0 {
 		result = append(result, []byte(fmt.Sprintf("\n[telemetry omitted %d bytes]\n", b.omitted))...)
@@ -221,8 +241,8 @@ func (b *boundedObservationBuffer) Bytes() []byte {
 	return result
 }
 
-func newObservingReadCloser(body io.ReadCloser, finalize func([]byte, error)) io.ReadCloser {
-	return &observingReadCloser{body: body, finalize: finalize}
+func newObservingReadCloser(body io.ReadCloser, limit int, finalize func([]byte, error)) io.ReadCloser {
+	return &observingReadCloser{body: body, buf: observationBuffer{limit: limit}, finalize: finalize}
 }
 
 func (r *observingReadCloser) Read(p []byte) (int, error) {
@@ -262,10 +282,10 @@ func isEventStreamResponse(resp *http.Response) bool {
 	return strings.EqualFold(mediaType, "text/event-stream")
 }
 
-func formatHTTPRequestBlock(req *http.Request, body []byte) string {
+func formatHTTPRequestBlock(req *http.Request, body []byte, id string) string {
 	var b strings.Builder
 	ts := time.Now().Format(time.RFC3339Nano)
-	fmt.Fprintf(&b, "llm_http request ts=%s\n", ts)
+	fmt.Fprintf(&b, "llm_http request ts=%s id=%s\n", ts, id)
 	reqLine := ""
 	if req.URL != nil {
 		reqLine = redactURL(req.URL)
@@ -277,6 +297,9 @@ func formatHTTPRequestBlock(req *http.Request, body []byte) string {
 	}
 	b.WriteString(formatHeaders(req.Header))
 	b.WriteString("body:\n")
+	// The request body replays the whole conversation history on every call and
+	// already lives in the state store, so it is bounded exactly once here; the
+	// response body below is a model's output and is never bounded.
 	b.WriteString(BoundText(RedactLogLine(string(body)), DefaultRecordBytes))
 	if len(body) > 0 && body[len(body)-1] != '\n' {
 		b.WriteByte('\n')
@@ -284,10 +307,10 @@ func formatHTTPRequestBlock(req *http.Request, body []byte) string {
 	return b.String()
 }
 
-func formatHTTPResponseBlock(resp *http.Response, body []byte) string {
+func formatHTTPResponseBlock(resp *http.Response, body []byte, id string) string {
 	var b strings.Builder
 	ts := time.Now().Format(time.RFC3339Nano)
-	fmt.Fprintf(&b, "llm_http response ts=%s\n", ts)
+	fmt.Fprintf(&b, "llm_http response ts=%s id=%s\n", ts, id)
 	if resp.Request != nil {
 		fmt.Fprintf(&b, "for_request: %s %s\n", resp.Request.Method, redactURL(resp.Request.URL))
 	}
@@ -295,7 +318,7 @@ func formatHTTPResponseBlock(resp *http.Response, body []byte) string {
 	fmt.Fprintf(&b, "status_line: %s\n", resp.Status)
 	b.WriteString(formatHeaders(resp.Header))
 	b.WriteString("body:\n")
-	b.WriteString(BoundText(RedactLogLine(string(body)), DefaultRecordBytes))
+	b.WriteString(RedactLogLine(string(body)))
 	if len(body) > 0 && body[len(body)-1] != '\n' {
 		b.WriteByte('\n')
 	}
